@@ -55,8 +55,8 @@
       <article>
         <h3>Desktop app</h3>
         <p>For Windows, macOS (Apple silicon and Intel) and Linux (.deb, .rpm and AppImage). It shows the search page in its own window and opens results in your usual browser.</p>
-        <p><a class="button primary" href="https://github.com/SueHeir/plumb-search/releases">Download from GitHub</a></p>
-        <p class="small">These are early builds and aren't code-signed yet, so your computer will warn you the first time. <a href="https://github.com/SueHeir/plumb-search/blob/main/docs/desktop.md#install">How to open them</a>.</p>
+        <p><a class="button primary" href="https://github.com/SueHeir/plumb-search/releases">Releases on GitHub</a></p>
+        <p class="small">No release is out yet; the installers arrive with the first one. They won't be code-signed at first, so your computer will warn you the first time you open the app.</p>
       </article>
       <article>
         <h3>Server or homelab</h3>
@@ -65,10 +65,24 @@
   --restart unless-stopped \
   -p 8080:8080 -v plumb-data:/data \
   ghcr.io/sueheir/plumb-search:latest</code></pre>
-        <p class="small"><a href="https://github.com/SueHeir/plumb-search/blob/main/docs/docker.md">Docker guide</a>: settings, updates and backups.</p>
+        <p class="small">The image is published with the first release. Until then, you can <a href="https://github.com/SueHeir/plumb-search#readme">build Plumb from source</a>.</p>
       </article>
     </div>
     <p class="tip"><strong>Make it your browser's search engine.</strong> Open your Plumb page in Firefox, right-click the address bar and choose “Add Plumb Search”. Other browsers can add it by hand with the search address <code>http://127.0.0.1:7586/search?q=%s</code> for the desktop app, or your server's address followed by <code>/search?q=%s</code>.</p>
+  </section>
+
+  <section id="site-owners" class="owners">
+    <h2>For site owners</h2>
+    <p>Plumb visits homepages to fill in each site's title and to find new sites through its links. Its crawler:</p>
+    <ul>
+      <li>identifies itself as <code>PlumbSearch/&lt;version&gt; (+https://github.com/SueHeir/plumb-search)</code>,</li>
+      <li>obeys robots.txt, including <code>Crawl-delay</code>,</li>
+      <li>fetches one page per site: the homepage.</li>
+    </ul>
+    <p>Every copy of Plumb does its own crawling, so visits can come from many addresses, all following the same rules. To keep Plumb out, add this to your robots.txt:</p>
+<pre><code>User-agent: PlumbSearch
+Disallow: /</code></pre>
+    <p class="small">Questions or problems? <a href="https://github.com/SueHeir/plumb-search/issues">Open an issue on GitHub</a>.</p>
   </section>
 
   <section class="roadmap">

@@ -70,8 +70,8 @@ pre code { background: none; padding: 0; overflow-wrap: normal; }
 .features h2 { font-size: 1.15rem; margin: 0 0 0.5rem; }
 .features p { margin: 0; color: var(--muted); }
 
-.get, .roadmap { padding: 2.5rem 0; border-top: 1px solid var(--line); }
-.get > h2, .roadmap > h2 { font-size: 1.7rem; margin: 0 0 1.25rem; }
+.get, .owners, .roadmap { padding: 2.5rem 0; border-top: 1px solid var(--line); }
+.get > h2, .owners > h2, .roadmap > h2 { font-size: 1.7rem; margin: 0 0 1.25rem; }
 .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1.5rem; }
 .cards article { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 1.5rem; min-width: 0; }
 .cards h3 { margin: 0 0 0.5rem; font-size: 1.2rem; }
@@ -79,7 +79,8 @@ pre code { background: none; padding: 0; overflow-wrap: normal; }
 .tip { margin: 1.75rem 0 0; color: var(--muted); }
 .tip strong { color: var(--text); }
 
-.roadmap > p { max-width: 680px; color: var(--muted); }
+.roadmap > p, .owners > p, .owners ul { max-width: 680px; color: var(--muted); }
+.owners pre { max-width: 680px; }
 .roadmap ol { padding-left: 1.4rem; max-width: 680px; }
 .roadmap li { margin: 0.4rem 0; }
 .roadmap li.done::marker { color: var(--accent); font-weight: 700; }
