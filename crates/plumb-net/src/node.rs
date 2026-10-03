@@ -91,6 +91,10 @@ pub const MAX_RELAYS: usize = 2;
 pub const CATCH_UP_EPOCHS: u64 = 3;
 /// A node dials more nodes it knows of while it has fewer connections.
 pub const TARGET_PEERS: usize = 8;
+/// Minutes between tries at the bootstrap nodes while a node has other
+/// connections but none to them, as after a bootstrap node restarts: they
+/// are the relays that let nodes behind NAT be reached.
+pub const BOOTSTRAP_REDIAL_MINUTES: u64 = 5;
 /// As a relay: circuits one node or IP address may open at once, before
 /// it is held to one every [`CIRCUIT_REFILL`].
 const CIRCUIT_BURST: NonZeroU32 = NonZeroU32::new(600).unwrap();
@@ -1401,7 +1405,11 @@ impl Task {
         self.relay_keys
             .retain(|_, (keys, fetched)| *fetched + RELAY_KEY_CACHE > now && keys.expires > now);
         let connected = self.swarm.connected_peers().count();
-        if connected == 0 {
+        let bootstrap_connected = self
+            .bootstrap_peers
+            .iter()
+            .any(|peer| self.swarm.is_connected(peer));
+        if redial_bootstrap(connected, bootstrap_connected, ticks) {
             for addr in self.config.bootstrap.clone() {
                 self.dial(addr);
             }
@@ -2765,9 +2773,31 @@ fn without_p2p(addr: Multiaddr) -> Multiaddr {
         .collect()
 }
 
+/// Whether to dial the bootstrap nodes at maintenance tick `ticks`: every
+/// tick while the node has no connections at all, and every
+/// [`BOOTSTRAP_REDIAL_MINUTES`] while it has some but none to a bootstrap
+/// node. Without that, a node behind NAT that lost its relay while other
+/// nodes kept it company was never reachable again.
+fn redial_bootstrap(connected: usize, bootstrap_connected: bool, ticks: u64) -> bool {
+    connected == 0 || (!bootstrap_connected && ticks.is_multiple_of(BOOTSTRAP_REDIAL_MINUTES))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_node_goes_back_to_its_bootstrap_nodes_after_losing_them() {
+        // Alone: every minute.
+        assert!(redial_bootstrap(0, false, 1));
+        // Connected to a bootstrap node: never.
+        assert!(!(0..=BOOTSTRAP_REDIAL_MINUTES).any(|t| redial_bootstrap(3, true, t)));
+        // Other nodes only: every few minutes.
+        let tries = (1..=3 * BOOTSTRAP_REDIAL_MINUTES)
+            .filter(|&t| redial_bootstrap(3, false, t))
+            .count();
+        assert_eq!(tries, 3);
+    }
 
     #[test]
     fn a_record_with_an_icon_takes_two_lines_of_a_batch() {
