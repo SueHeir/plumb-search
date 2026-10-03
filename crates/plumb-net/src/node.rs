@@ -101,6 +101,9 @@ const MAX_FETCHES: usize = 16;
 /// Network searches run at once by one node ([`NetHandle::search`]).
 pub const MAX_SEARCHES: usize = 4;
 
+/// Batches waiting to be fetched, at most.
+const MAX_WANTED: usize = 50_000;
+
 /// Refused batch ids remembered; the set is emptied when it reaches this.
 const MAX_REFUSED: usize = 100_000;
 /// Bucket requests answered at once for free; more are turned away as
@@ -1793,7 +1796,10 @@ impl Task {
     }
 
     fn want(&mut self, id: Hash, sources: Vec<PeerId>) {
-        if self.refused.contains(&id)
+        // A full queue drops the newcomer: a real batch is heard of again
+        // (gossip, catch-up), and fresh keys can't grow the queue forever.
+        if self.wanted.len() >= MAX_WANTED
+            || self.refused.contains(&id)
             || self.lock_store().contains(&id)
             || !self.wanted_ids.insert(id)
         {
