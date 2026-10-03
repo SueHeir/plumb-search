@@ -7,6 +7,7 @@ use std::time::Duration;
 use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 
 use crate::country::HomeCountry;
+use crate::websearch::{parse_web_search, WebSearch};
 
 /// Plumb Search: a self-hostable search engine.
 ///
@@ -91,6 +92,12 @@ pub struct RunArgs {
     /// A search can pick another with `country=` in its address.
     #[arg(long, value_name = "CODE", default_value = "auto", value_parser = HomeCountry::parse)]
     pub country: HomeCountry,
+    /// Show "Search the web with ..." above the results, a link that hands
+    /// the query to this engine: duckduckgo, google, bing, brave or
+    /// startpage, or `off` for none. Plumb never fetches its results.
+    /// Bangs such as `!g` work either way.
+    #[arg(long, value_name = "ENGINE", default_value = "off", value_parser = parse_web_search)]
+    pub web_search: WebSearch,
     /// Crawl homepages through the proxy in HTTP_PROXY, HTTPS_PROXY or
     /// ALL_PROXY (except hosts in NO_PROXY), for machines that reach the
     /// internet only through one. Without it, homepages are fetched directly
@@ -189,6 +196,11 @@ pub struct IngestArgs {
     /// --wikidata.
     #[arg(long, value_name = "PATH", requires = "wikidata")]
     pub wikidata_facts: Option<PathBuf>,
+    /// Wikidata official websites of banks, credit unions, airlines and other
+    /// kinds of organizations, whatever their sitelinks (the
+    /// wikidata-kind-sites.tsv that fetch-data writes); needs --wikidata.
+    #[arg(long, value_name = "PATH", requires = "wikidata")]
+    pub wikidata_kinds: Option<PathBuf>,
     /// Records files from an earlier ingest or crawl to merge in (list several,
     /// or repeat the flag), each with the journal an interrupted crawl may
     /// have left next to it (PATH.journal). Seed files given with them
@@ -313,6 +325,12 @@ pub struct ServeArgs {
     /// A search can pick another with `country=` in its address.
     #[arg(long, value_name = "CODE", default_value = "auto", value_parser = HomeCountry::parse)]
     pub country: HomeCountry,
+    /// Show "Search the web with ..." above the results, a link that hands
+    /// the query to this engine: duckduckgo, google, bing, brave or
+    /// startpage, or `off` for none. Plumb never fetches its results.
+    /// Bangs such as `!g` work either way.
+    #[arg(long, value_name = "ENGINE", default_value = "off", value_parser = parse_web_search)]
+    pub web_search: WebSearch,
 }
 
 #[derive(Debug, Args)]
