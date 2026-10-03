@@ -30,9 +30,8 @@ services:
     build: ${PLUMB_SOURCE:-https://github.com/SueHeir/plumb-search.git#main}
     # The image's default command plus private search (/private) and search
     # by meaning: the node downloads a small embedding model into /data/model
-    # and embeds sites in the background, best-ranked first. It also crawls
-    # 20,000 homepages every 12 hours (the server default is 5,000 a day), so
-    # the top 100,000 sites get text to search by meaning within a few days.
+    # and embeds sites in the background, best-ranked first. It crawls at the
+    # server default, 5,000 homepages every hour.
     # It is in the Plumb network on port 4002 (plumb-relay on this machine has
     # 4001), so private searches can be relayed to other nodes and the
     # visitor's address stays hidden from them. It joins through plumb-relay,
@@ -46,10 +45,6 @@ services:
       - 0.0.0.0:8080
       - --private-search
       - --search-by-meaning
-      - --refresh-hours
-      - "12"
-      - --crawl-per-refresh
-      - "20000"
       - --network
       - --p2p-port
       - "4002"
@@ -65,13 +60,17 @@ services:
       - --no-local-discovery
       # Crawls from Liz's own nodes count as soon as they're signed, without
       # waiting for a second crawler: plumb-relay on this machine, her
-      # MacBook, and elizabeth-hpc.
+      # MacBook, elizabeth-hpc, and the rented LA and New York servers.
       - --trust-peer
       - 12D3KooWJ2UWUBsxmPfXTfHa8cBBmzifa6kj5pFZKfJXYNQyJ69a
       - --trust-peer
       - 12D3KooWAM8qy5A1q71QZTbdav8PHZ2KetvAc98VRxnB9wqLrLXt
       - --trust-peer
       - 12D3KooWDHxYtCdqrfk6QM21uNnSYcg38K18rDE4hPv71HKQGUxT
+      - --trust-peer
+      - 12D3KooWNhgFVypWynFp9M88SLwQ1dhWWWrRhm6XvhyVnrEZ9pEV
+      - --trust-peer
+      - 12D3KooWCYcc2SRFfexFAzaGAA6bQero99ZRXLEraPU2V4PtSE7R
     extra_hosts:
       - "host.docker.internal:host-gateway"
     # The web port is only reachable from this machine; Caddy serves it to
