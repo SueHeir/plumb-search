@@ -6,6 +6,7 @@
 //!   (the page runs no script),
 //! - `POST /app/settings` saves the settings form,
 //! - `POST /app/refresh` starts a refresh now,
+//! - `POST /app/network/retry` tries the network's bootstrap nodes again,
 //! - `GET /add-to-firefox` says how to add Plumb to Firefox as a search
 //!   engine. It is meant to be opened in Firefox (the desktop app opens it
 //!   there), which offers to add the engine of a page that links to an
@@ -190,6 +191,9 @@ pub(super) struct FeaturesForm {
     search_by_meaning: Option<String>,
     private_search: Option<String>,
     share_popularity: Option<String>,
+    /// Find nodes through the Plumb network's own bootstrap nodes.
+    plumb_bootstrap: Option<String>,
+    /// Further bootstrap nodes, one per line.
     bootstrap: String,
     /// Set by the form that shows the trust choices, so that a form without
     /// them leaves trust as it was.
@@ -251,11 +255,10 @@ pub(super) fn apply_features_form(
     } else {
         features.network = form.network.is_some();
         features.share_popularity = form.share_popularity.is_some();
-        features.bootstrap = form
-            .bootstrap
-            .split_whitespace()
-            .map(str::to_owned)
-            .collect();
+        features.set_bootstrap(
+            form.plumb_bootstrap.is_some(),
+            form.bootstrap.split_whitespace(),
+        );
         if form.trust_shown.is_some() {
             features.no_default_trust = form.default_trust.is_none();
             features.trusted = form.trusted.split_whitespace().map(str::to_owned).collect();
@@ -555,6 +558,19 @@ pub(super) async fn refresh(State(state): State<AppState>, request: Request) -> 
     Redirect::to("/app").into_response()
 }
 
+pub(super) async fn retry_network(State(state): State<AppState>, request: Request) -> Response {
+    let Some(node) = &state.node else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    if let Some(why) = refusal(&request) {
+        return forbidden(why);
+    }
+    if let Err(err) = node.reconnect_network() {
+        return panel_error(StatusCode::CONFLICT, &err.to_string());
+    }
+    Redirect::to("/app?section=network&saved=retry").into_response()
+}
+
 /// Why a change is refused: it does not come from this computer, or a page
 /// of another site sent it. `None` when it may go ahead.
 pub(super) fn refusal(request: &Request) -> Option<&'static str> {
@@ -734,6 +750,8 @@ pub(super) fn render_panel(view: &PanelView<'_>) -> String {
         body.push_str(
             "<p class=\"notice\" role=\"status\">Resource settings saved and applied.</p>",
         );
+    } else if query.saved == "retry" {
+        body.push_str("<p class=\"notice\" role=\"status\">Trying the bootstrap nodes again. Refresh the status in a few seconds.</p>");
     } else if query.saved == "features" {
         body.push_str("<p class=\"notice\" role=\"status\">Feature settings saved. No restart is needed because they match the running node.</p>");
     }
@@ -750,10 +768,10 @@ pub(super) fn render_panel(view: &PanelView<'_>) -> String {
                 body.push_str("<fieldset disabled>");
             }
             render_crawl_card(&mut body, status, now, base);
+            render_network_card(&mut body, status, active, now, base);
             if !writable {
                 body.push_str("</fieldset>");
             }
-            render_network_card(&mut body, status, active);
             body.push_str("</section>");
             if setting_up(status) {
                 render_steps(&mut body, status, now);
@@ -823,7 +841,14 @@ pub(super) fn render_panel(view: &PanelView<'_>) -> String {
         }
         "network" => {
             body.push_str("<p class=\"intro\">Connect to other nodes, check shared crawling, and choose optional search features.</p><section class=\"cards\">");
-            render_network_card(&mut body, status, active);
+            if !writable {
+                body.push_str("<fieldset disabled>");
+            }
+            render_network_card(&mut body, status, active, now, base);
+            if !writable {
+                body.push_str("</fieldset>");
+            }
+            render_peers(&mut body, status);
             render_network_details(&mut body, status);
             body.push_str("</section>");
             if !writable {
@@ -863,7 +888,7 @@ pub(super) fn render_panel(view: &PanelView<'_>) -> String {
 }
 
 pub(super) const LAYOUT_STYLE: &str = "
-.node-switch{display:flex;flex-wrap:wrap;gap:.4rem;margin-bottom:1rem}.node-switch a{padding:.4rem .8rem;border:1px solid var(--line);border-radius:999px;text-decoration:none;font-size:.9rem;color:var(--fg)}.node-switch a[aria-current]{border-color:var(--accent);color:var(--accent);font-weight:600}.node-panel .cards{grid-template-columns:repeat(2,minmax(0,1fr))}.wrap.node-panel{max-width:64rem;padding:2rem 2rem 4rem}.node-heading,.section-heading{display:flex;align-items:center;justify-content:space-between;gap:1rem}.node-heading h1{font-size:1.8rem}.eyebrow{font-size:.7rem;letter-spacing:.13em;color:var(--muted);margin:0 0 .3rem}.node-nav{display:flex;flex-wrap:wrap;gap:.4rem;border-bottom:1px solid var(--line);padding:1.5rem 0 1rem;margin-bottom:1.5rem}.node-panel a{color:var(--accent)}.node-panel a.btn:not(.alt){color:var(--bg)}.node-nav a{padding:.55rem .85rem;text-decoration:none;border-radius:.5rem;color:var(--muted)}.node-nav a[aria-current]{background:var(--accent);color:var(--bg);font-weight:600}.section-heading h2{margin:0;font-size:1.4rem}.section-heading>a{font-size:.85rem}.intro{color:var(--muted);max-width:45rem}.notice{padding:.85rem 1rem;border-left:3px solid var(--accent);background:color-mix(in srgb,var(--accent) 8%,var(--bg));border-radius:.3rem}.node-panel form{max-width:46rem}.node-panel fieldset{border:0;margin:0;padding:0;min-width:0}.node-panel fieldset:disabled{opacity:.65}.node-panel textarea{display:block;width:100%;min-height:6rem;font:inherit;background:var(--bg);color:var(--fg);padding:.75rem;border:1px solid var(--line);border-radius:.5rem}.node-panel .feature{padding:.8rem 0;border-bottom:1px solid var(--line)}.node-panel .feature label{margin:0}.node-panel .feature p{margin:.35rem 0 0 1.65rem}.node-panel .state{font-size:.8rem;color:var(--muted)}.node-panel :focus-visible{outline:3px solid var(--accent);outline-offset:3px}.node-panel dl{grid-template-columns:minmax(6rem,auto) minmax(0,1fr)}@media(max-width:600px){.wrap.node-panel{padding:1rem 1rem 3rem}.node-heading{align-items:flex-start}.node-heading h1{font-size:1.5rem}.node-nav{gap:.2rem}.node-nav a{padding:.5rem .6rem;font-size:.9rem}.node-panel .cards{grid-template-columns:minmax(0,1fr)}.node-panel label{flex-wrap:wrap}.section-heading{align-items:flex-start}.section-heading>a{white-space:nowrap}}";
+.node-switch{display:flex;flex-wrap:wrap;gap:.4rem;margin-bottom:1rem}.node-switch a{padding:.4rem .8rem;border:1px solid var(--line);border-radius:999px;text-decoration:none;font-size:.9rem;color:var(--fg)}.node-switch a[aria-current]{border-color:var(--accent);color:var(--accent);font-weight:600}.node-panel .cards{grid-template-columns:repeat(2,minmax(0,1fr))}.wrap.node-panel{max-width:64rem;padding:2rem 2rem 4rem}.node-heading,.section-heading{display:flex;align-items:center;justify-content:space-between;gap:1rem}.node-heading h1{font-size:1.8rem}.eyebrow{font-size:.7rem;letter-spacing:.13em;color:var(--muted);margin:0 0 .3rem}.node-nav{display:flex;flex-wrap:wrap;gap:.4rem;border-bottom:1px solid var(--line);padding:1.5rem 0 1rem;margin-bottom:1.5rem}.node-panel a{color:var(--accent)}.node-panel a.btn:not(.alt){color:var(--bg)}.node-nav a{padding:.55rem .85rem;text-decoration:none;border-radius:.5rem;color:var(--muted)}.node-nav a[aria-current]{background:var(--accent);color:var(--bg);font-weight:600}.section-heading h2{margin:0;font-size:1.4rem}.section-heading>a{font-size:.85rem}.intro{color:var(--muted);max-width:45rem}.notice{padding:.85rem 1rem;border-left:3px solid var(--accent);background:color-mix(in srgb,var(--accent) 8%,var(--bg));border-radius:.3rem}.node-panel form{max-width:46rem}.node-panel fieldset{border:0;margin:0;padding:0;min-width:0}.cards>fieldset{display:contents}.node-panel details{margin-top:1rem}.node-panel summary{cursor:pointer;color:var(--accent)}.node-panel fieldset:disabled{opacity:.65}.node-panel textarea{display:block;width:100%;min-height:6rem;font:inherit;background:var(--bg);color:var(--fg);padding:.75rem;border:1px solid var(--line);border-radius:.5rem}.node-panel .feature{padding:.8rem 0;border-bottom:1px solid var(--line)}.node-panel .feature label{margin:0}.node-panel .feature p{margin:.35rem 0 0 1.65rem}.node-panel .state{font-size:.8rem;color:var(--muted)}.node-panel :focus-visible{outline:3px solid var(--accent);outline-offset:3px}.node-panel dl{grid-template-columns:minmax(6rem,auto) minmax(0,1fr)}@media(max-width:600px){.wrap.node-panel{padding:1rem 1rem 3rem}.node-heading{align-items:flex-start}.node-heading h1{font-size:1.5rem}.node-nav{gap:.2rem}.node-nav a{padding:.5rem .6rem;font-size:.9rem}.node-panel .cards{grid-template-columns:minmax(0,1fr)}.node-panel label{flex-wrap:wrap}.section-heading{align-items:flex-start}.section-heading>a{white-space:nowrap}}";
 
 /// A card: its class, title, headline and the HTML under them.
 fn card(body: &mut String, class: &str, title: &str, big: &str, rest: &str) {
@@ -1065,13 +1090,155 @@ fn render_crawl_card(body: &mut String, status: &Status, now: u64, base: &str) {
     card(body, "", "Crawling", &big, &rest);
 }
 
-fn render_network_card(body: &mut String, status: &Status, active: &FeatureSettings) {
-    let (headline, rest) = match &status.network {
-        Some(net) => (if net.connected_peers > 0 { "Connected" } else { "Looking for peers" }, format!("<p>{} nodes connected · {} relay peers.</p><p class=\"hint\">Shared crawl batches: {} received, {} published.</p>", net.connected_peers, net.relaying_peers, net.batches_received, net.batches_published)),
-        None if active.network => ("Starting", "<p>The Plumb network is enabled and is starting.</p>".into()),
-        None => ("Not connected", "<p>Network sharing is off. This node searches its own index.</p>".into()),
+fn render_network_card(
+    body: &mut String,
+    status: &Status,
+    active: &FeatureSettings,
+    now: u64,
+    base: &str,
+) {
+    let retry = format!(
+        "<form method=\"post\" action=\"{base}/network/retry\">\
+         <button type=\"submit\" class=\"alt\">Try again now</button></form>"
+    );
+    let no_bootstrap = if active.bootstrap.is_empty() {
+        "<p class=\"hint\">No bootstrap nodes are set, so only Plumb nodes on this \
+         network can be found. Turn on \u{201c}Find nodes through plumbsearch.org\u{201d} \
+         under Network &amp; privacy.</p>"
+    } else {
+        ""
     };
-    card(body, "", "Plumb network", headline, &rest);
+    let (class, headline, rest) = match &status.network {
+        Some(net) if net.connected_peers > 0 => {
+            let n = net.connected_peers;
+            let relayed = net
+                .peers
+                .iter()
+                .filter(|p| p.route == plumb_net::Route::Relayed)
+                .count();
+            let direct = n.saturating_sub(net.nearby_peers + relayed);
+            let mut parts = Vec::new();
+            for (count, words) in [
+                (net.nearby_peers, "on this network"),
+                (direct, "over the internet"),
+                (relayed, "through a relay"),
+            ] {
+                if count > 0 {
+                    parts.push(format!("{count} {words}"));
+                }
+            }
+            let reach = if net.nat == "public" {
+                "Other nodes can reach this one directly."
+            } else if !net.relays.is_empty() {
+                "Other nodes reach this one through a relay, so no port needs opening."
+            } else {
+                "Other nodes cannot reach this one yet; it still searches and shares through \
+                 the connections it opens."
+            };
+            (
+                "ready",
+                format!("{n} {}", if n == 1 { "node" } else { "nodes" }),
+                format!(
+                    "<p>Connected: {}.</p><p class=\"hint\">{reach} Shared crawl batches: {} \
+                     received, {} published.</p>",
+                    parts.join(", "),
+                    net.batches_received,
+                    net.batches_published
+                ),
+            )
+        }
+        Some(net) => match &net.problem {
+            Some(problem) => (
+                "warn",
+                "Can\u{2019}t connect".to_owned(),
+                format!(
+                    "<p>{}</p><p class=\"hint\">Last tried {}. Nodes on this network are \
+                     still found without it.</p>{no_bootstrap}{retry}",
+                    escape_html(&problem.message),
+                    time_ago(problem.at, now)
+                ),
+            ),
+            None => {
+                let since = net
+                    .alone_since
+                    .map(|at| format!(" Looking since {}.", time_ago(at, now)))
+                    .unwrap_or_default();
+                (
+                    "limited",
+                    "Looking for nodes".to_owned(),
+                    format!(
+                        "<p>Asking the bootstrap nodes for other Plumb nodes, and looking on \
+                         this network.{since}</p>{no_bootstrap}{retry}"
+                    ),
+                )
+            }
+        },
+        None if active.network => (
+            "",
+            "Starting".to_owned(),
+            "<p>The Plumb network is enabled and is starting.</p>".to_owned(),
+        ),
+        None => (
+            "",
+            "Off".to_owned(),
+            "<p>This node searches its own index. Turn on \u{201c}Join the Plumb \
+             network\u{201d} under Network &amp; privacy to share crawls with others.</p>"
+                .to_owned(),
+        ),
+    };
+    card(body, class, "Plumb network", &headline, &rest);
+}
+
+/// The nodes this node is connected to, and how it reaches each.
+fn render_peers(body: &mut String, status: &Status) {
+    let Some(net) = &status.network else {
+        return;
+    };
+    if net.peers.is_empty() {
+        return;
+    }
+    let mut rows = String::new();
+    for peer in &net.peers {
+        let id = &peer.peer_id;
+        // The end of a peer id tells nodes apart; the start is the same
+        // for every Ed25519 key.
+        let short = id.get(id.len().saturating_sub(8)..).unwrap_or(id);
+        let route = match peer.route {
+            plumb_net::Route::Nearby => "On this network",
+            plumb_net::Route::Direct => "Over the internet",
+            plumb_net::Route::Relayed => "Through a relay",
+        };
+        let mut roles = Vec::new();
+        if peer.bootstrap {
+            roles.push("bootstrap node");
+        }
+        if peer.relay {
+            roles.push("relays for this node");
+        }
+        let roles = if roles.is_empty() {
+            String::new()
+        } else {
+            format!(" · {}", roles.join(" · "))
+        };
+        rows.push_str(&format!(
+            "<dt title=\"{}\"><code>\u{2026}{}</code></dt><dd>{route}{roles}</dd>",
+            escape_html(id),
+            escape_html(short)
+        ));
+    }
+    let more = net.connected_peers.saturating_sub(net.peers.len());
+    let more = if more > 0 {
+        format!("<p class=\"hint\">And {more} more.</p>")
+    } else {
+        String::new()
+    };
+    card(
+        body,
+        "search",
+        "Connected nodes",
+        &format!("{} connected", net.connected_peers),
+        &format!("<dl>{rows}</dl>{more}"),
+    );
 }
 
 fn render_network_details(body: &mut String, status: &Status) {
@@ -1125,9 +1292,36 @@ fn render_features(
         body.push_str(&format!("<div class=\"feature\"><label><input type=\"checkbox\" name=\"{name}\" value=\"1\"{}><span>{label} <span class=\"state\">· currently {}</span></span></label><p class=\"hint\">{hint}</p></div>", if value { " checked" } else { "" }, if running { "on" } else { "off" }));
     }
     if section == "network" {
-        body.push_str(&format!("<label for=\"bootstrap\">Bootstrap nodes</label><p class=\"hint\" id=\"bootstrap-help\">One multiaddress per line. Leave empty to discover nearby nodes only; remote peers need a reachable bootstrap node.</p><textarea id=\"bootstrap\" name=\"bootstrap\" aria-describedby=\"bootstrap-help\" spellcheck=\"false\">{}</textarea>", escape_html(&saved.bootstrap.join("\n"))));
+        let extra: Vec<&str> = saved.extra_bootstrap().collect();
+        body.push_str(&format!(
+            "<div class=\"feature\"><label><input type=\"checkbox\" name=\"plumb_bootstrap\" \
+             value=\"1\"{}><span>Find nodes through plumbsearch.org</span></label>\
+             <p class=\"hint\">The Plumb network\u{2019}s own node introduces this one to the \
+             others. Plumb nodes on this network are found without it.</p></div>",
+            // On by default for a node not yet in the network.
+            if saved.uses_default_bootstrap() || (!saved.network && saved.bootstrap.is_empty()) {
+                " checked"
+            } else {
+                ""
+            }
+        ));
         body.push_str(&format!("<input type=\"hidden\" name=\"trust_shown\" value=\"1\"><div class=\"feature\"><label><input type=\"checkbox\" name=\"default_trust\" value=\"1\"{}><span>Trust plumbsearch.org's crawler</span></label><p class=\"hint\">Take in crawls from the plumbsearch.org node at once, so a new node fills up while the network is small. Turn off to keep only crawls a second crawler confirms.</p></div>", if saved.no_default_trust { "" } else { " checked" }));
-        body.push_str(&format!("<label for=\"trusted\">Trusted nodes</label><p class=\"hint\" id=\"trusted-help\">Other node ids whose crawls are taken in at once, one per line. Only add nodes you run or know.</p><textarea id=\"trusted\" name=\"trusted\" aria-describedby=\"trusted-help\" spellcheck=\"false\">{}</textarea>", escape_html(&saved.trusted.join("\n"))));
+        body.push_str(&format!(
+            "<details{}><summary>Advanced: more bootstrap and trusted nodes</summary>\
+             <label for=\"bootstrap\">Bootstrap nodes</label><p class=\"hint\" \
+             id=\"bootstrap-help\">Most people never need these. One multiaddress per line, \
+             such as a friend\u{2019}s node or your own server: \
+             <code>/dns4/example.org/tcp/4001/p2p/12D3Koo\u{2026}</code></p>\
+             <textarea id=\"bootstrap\" name=\"bootstrap\" aria-describedby=\"bootstrap-help\" \
+             spellcheck=\"false\">{}</textarea>",
+            if extra.is_empty() && saved.trusted.is_empty() {
+                ""
+            } else {
+                " open"
+            },
+            escape_html(&extra.join("\n"))
+        ));
+        body.push_str(&format!("<label for=\"trusted\">Trusted nodes</label><p class=\"hint\" id=\"trusted-help\">Other node ids whose crawls are taken in at once, one per line. Only add nodes you run or know.</p><textarea id=\"trusted\" name=\"trusted\" aria-describedby=\"trusted-help\" spellcheck=\"false\">{}</textarea></details>", escape_html(&saved.trusted.join("\n"))));
     }
     body.push_str("<button type=\"submit\">Save feature settings</button></form>");
 }
@@ -1516,10 +1710,7 @@ mod tests {
             body.contains("3,456 homepages visited since setup."),
             "{body}"
         );
-        assert!(
-            body.contains("<p class=\"big\">Not connected</p>"),
-            "{body}"
-        );
+        assert!(body.contains("<p class=\"big\">Off</p>"), "{body}");
         assert!(
             body.contains("name=\"download_limit_mb_per_day\" min=\"0\" step=\"1\" value=\"500\""),
             "{body}"
@@ -1805,7 +1996,7 @@ mod tests {
         assert!(!search.contains("name=\"network\""));
         assert!(search.contains("class=\"wrap node-panel\""));
         let body = get_section(router, "network").await;
-        assert!(body.contains("3 nodes connected · 2 relay peers"));
+        assert!(body.contains("Connected: 3 over the internet."), "{body}");
         assert!(body.contains("&lt;untrusted-peer&gt;"));
         assert!(!body.contains("<untrusted-peer>"));
     }
@@ -1891,6 +2082,128 @@ mod tests {
         let body = body_text(router.oneshot(request).await.unwrap()).await;
         assert!(body.contains("Settings are read-only"));
         assert!(body.contains("<fieldset disabled>"));
+    }
+
+    #[tokio::test]
+    async fn the_network_card_explains_why_a_node_is_not_connected() {
+        let mut status = status(Phase::Ready, Step::Idle);
+        status.network = Some(plumb_net::NetStatus {
+            alone_since: Some(now_unix() - 300),
+            problem: Some(plumb_net::JoinProblem::new(
+                "The bootstrap node at plumbsearch.org did not answer. <A firewall>",
+                "timed out",
+                now_unix() - 20,
+            )),
+            ..Default::default()
+        });
+        let (router, _) = app(status);
+        let overview = get_section(router.clone(), "overview").await;
+        assert!(overview.contains("Can\u{2019}t connect"), "{overview}");
+        assert!(overview.contains("did not answer. &lt;A firewall&gt;"));
+        assert!(overview.contains("action=\"/app/network/retry\""));
+        // No bootstrap nodes saved: only nearby nodes can be found.
+        assert!(overview.contains("only Plumb nodes on this network"));
+        // The fake node has no network to retry.
+        let response = post(
+            router.clone(),
+            "/app/network/retry",
+            "",
+            "127.0.0.1:50000",
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            post(router, "/app/network/retry", "", "192.168.1.20:50000", None)
+                .await
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    #[tokio::test]
+    async fn the_network_section_lists_connected_nodes_and_one_bootstrap_switch() {
+        let mut status = status(Phase::Ready, Step::Idle);
+        let peer = |id: &str, route, relay, bootstrap| plumb_net::PeerView {
+            peer_id: id.into(),
+            route,
+            relay,
+            bootstrap,
+        };
+        status.network = Some(plumb_net::NetStatus {
+            connected_peers: 4,
+            nearby_peers: 1,
+            nat: "private".into(),
+            relays: vec!["relay".into()],
+            peers: vec![
+                peer(
+                    "12D3KooWrelayAAAA11111111",
+                    plumb_net::Route::Direct,
+                    true,
+                    true,
+                ),
+                peer(
+                    "12D3KooWhomeBBBB22222222",
+                    plumb_net::Route::Nearby,
+                    false,
+                    false,
+                ),
+                peer(
+                    "12D3KooWfarCCCC<33333333>",
+                    plumb_net::Route::Relayed,
+                    false,
+                    false,
+                ),
+            ],
+            ..Default::default()
+        });
+        let (router, node) = app(status);
+        let body = get_section(router.clone(), "network").await;
+        assert!(
+            body.contains("Connected: 1 on this network, 2 over the internet, 1 through a relay."),
+            "{body}"
+        );
+        assert!(body.contains("reach this one through a relay"));
+        assert!(body.contains("11111111</code></dt><dd>Over the internet · bootstrap node · relays for this node</dd>"));
+        assert!(body.contains("<dd>On this network</dd>"));
+        assert!(body.contains("&lt;33333333&gt;"));
+        assert!(body.contains("And 1 more."));
+        // A node not yet in the network finds others through plumbsearch.org
+        // unless its owner says otherwise.
+        assert!(body.contains("name=\"plumb_bootstrap\" value=\"1\" checked"));
+        assert!(!body.contains("<details open>"));
+
+        let response = post(
+            router.clone(),
+            "/app/features",
+            "network=1&plumb_bootstrap=1&bootstrap=%2Fip4%2F10.0.0.2%2Ftcp%2F4001",
+            "127.0.0.1:50000",
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let saved = node.features.lock().unwrap().clone();
+        assert!(saved.uses_default_bootstrap());
+        assert_eq!(
+            saved.extra_bootstrap().collect::<Vec<_>>(),
+            ["/ip4/10.0.0.2/tcp/4001"]
+        );
+        let body = get_section(router.clone(), "network").await;
+        assert!(body.contains("<details open>"));
+        assert!(body.contains(">/ip4/10.0.0.2/tcp/4001</textarea>"));
+
+        post(
+            router.clone(),
+            "/app/features",
+            "network=1",
+            "127.0.0.1:50000",
+            None,
+        )
+        .await;
+        let saved = node.features.lock().unwrap().clone();
+        assert!(saved.bootstrap.is_empty());
+        let body = get_section(router, "network").await;
+        assert!(!body.contains("name=\"plumb_bootstrap\" value=\"1\" checked"));
     }
 
     #[tokio::test]

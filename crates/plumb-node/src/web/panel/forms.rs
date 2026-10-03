@@ -82,11 +82,16 @@ pub(in crate::web) fn features_error(
             form.network.is_some(),
         ));
         fields.push_str(&checkbox(
+            "plumb_bootstrap",
+            "Find nodes through plumbsearch.org",
+            form.plumb_bootstrap.is_some(),
+        ));
+        fields.push_str(&checkbox(
             "share_popularity",
             "Share anonymous popularity (requires the Plumb network)",
             form.share_popularity.is_some(),
         ));
-        fields.push_str(&format!("<label for=\"bootstrap\">Bootstrap nodes</label><p id=\"bootstrap-help\" class=\"hint\">One multiaddress per line. Leave empty to use nearby-node discovery.</p><textarea id=\"bootstrap\" name=\"bootstrap\" spellcheck=\"false\" aria-describedby=\"bootstrap-help\">{}</textarea>", escape_html(&form.bootstrap)));
+        fields.push_str(&format!("<label for=\"bootstrap\">Bootstrap nodes</label><p id=\"bootstrap-help\" class=\"hint\">Additional bootstrap nodes, one multiaddress per line.</p><textarea id=\"bootstrap\" name=\"bootstrap\" spellcheck=\"false\" aria-describedby=\"bootstrap-help\">{}</textarea>", escape_html(&form.bootstrap)));
         if form.trust_shown.is_some() {
             fields.push_str("<input type=\"hidden\" name=\"trust_shown\" value=\"1\">");
             fields.push_str(&checkbox(
@@ -219,6 +224,7 @@ mod tests {
                 section: "network".into(),
                 trust_shown: Some("1".into()),
                 default_trust: enabled.then(|| "1".into()),
+                plumb_bootstrap: enabled.then(|| "1".into()),
                 trusted: "bad-node\n<script>\n".into(),
                 ..Default::default()
             };
@@ -232,6 +238,10 @@ mod tests {
             assert!(body.contains("name=\"trust_shown\" value=\"1\""));
             assert_eq!(
                 body.contains("name=\"default_trust\" value=\"1\" checked"),
+                enabled
+            );
+            assert_eq!(
+                body.contains("name=\"plumb_bootstrap\" value=\"1\" checked"),
                 enabled
             );
             assert!(body.contains(">bad-node\n&lt;script&gt;\n</textarea>"));

@@ -63,13 +63,6 @@ const PANEL_PATH: &str = "app";
 /// `http://127.0.0.1:7586/search?q=%s`. 7586 spells PLUM on a phone keypad.
 const PORT: u16 = 7586;
 
-/// The Plumb network's first nodes, which the app connects to and learns
-/// the others from: the relay on plumbsearch.org, by name and by address.
-const BOOTSTRAP: [&str; 2] = [
-    "/dns4/plumbsearch.org/tcp/4001/p2p/12D3KooWJ2UWUBsxmPfXTfHa8cBBmzifa6kj5pFZKfJXYNQyJ69a",
-    "/ip4/198.211.114.63/tcp/4001/p2p/12D3KooWJ2UWUBsxmPfXTfHa8cBBmzifa6kj5pFZKfJXYNQyJ69a",
-];
-
 /// How long the node gets to stop when the app quits, before the app exits
 /// anyway. Stopping finishes an index build already under way, which takes
 /// about a minute for a million sites. Exiting sooner is safe too: the node
@@ -294,10 +287,9 @@ fn network_config() -> plumb_net::NetConfig {
     .iter()
     .map(|addr| addr.parse().expect("a valid multiaddr"))
     .collect();
-    net.bootstrap = BOOTSTRAP
-        .iter()
-        .map(|addr| addr.parse().expect("a valid multiaddr"))
-        .collect();
+    // The Plumb network's first nodes, which the app connects to and learns
+    // the others from: the relay on plumbsearch.org, by name and by address.
+    net.bootstrap = plumb_net::default_bootstrap();
     net
 }
 
