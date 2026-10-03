@@ -15,8 +15,9 @@
 //!
 //! A long-running node (`plumb run`, see [`crate::node`]) serves the same
 //! pages through [`node_router`], plus `GET /api/status`, which returns the
-//! node's [`Status`] as JSON. Until its first index is ready, `/` and
-//! `/search` show the setup step, its progress and the last error instead,
+//! node's [`Status`] as JSON, and the node's panel at `/app` (see
+//! [`panel`]), which the desktop app shows in its window. Until its first
+//! index is ready, `/` and `/search` show the setup step, its progress and the last error instead,
 //! reloading every few seconds with a `<meta http-equiv="refresh">` (no
 //! script), and `/api/search` answers 503.
 //!
@@ -41,7 +42,7 @@ use anyhow::{Context, Result};
 use axum::extract::{Query, State};
 use axum::http::{header, HeaderMap, HeaderName, StatusCode, Uri};
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use plumb_core::SiteRecord;
 use plumb_core::{collapse_whitespace, now_unix, truncate_chars};
@@ -55,8 +56,12 @@ use url::Url;
 
 use crate::cli::ServeArgs;
 use crate::country::{country_name, HomeCountry, COUNTRY_CHOICES};
-use crate::node::{Phase, Status, Step};
+use crate::node::{NodeSettings, Phase, Status, Step};
+
+mod panel;
+
 use crate::{block_on, rank_config};
+pub use panel::ADD_TO_FIREFOX_PATH;
 
 /// Results returned when a request does not say how many.
 pub const DEFAULT_LIMIT: usize = 10;
@@ -140,7 +145,8 @@ impl SearchBackend for IndexBackend {
     }
 }
 
-/// What a long-running node tells its web pages about itself.
+/// What a long-running node tells its web pages about itself, and what its
+/// panel (`/app`) can change.
 pub trait StatusSource: Send + Sync {
     /// The node's status, as `GET /api/status` returns it.
     fn status(&self) -> Status;
@@ -151,6 +157,24 @@ pub trait StatusSource: Send + Sync {
     /// How the node ranks, which it also uses for what other nodes send.
     fn rank(&self) -> RankConfig {
         RankConfig::default()
+    }
+
+    /// The node's settings; `None` when it has none.
+    fn settings(&self) -> Option<NodeSettings> {
+        None
+    }
+
+    /// Saves new settings and puts them in force.
+    fn change_settings(&self, _settings: NodeSettings) -> Result<()> {
+        anyhow::bail!("this node has no settings")
+    }
+
+    /// Starts a refresh now.
+    fn refresh_now(&self) {}
+
+    /// Where the node keeps its data, to show on the panel.
+    fn data_dir(&self) -> Option<std::path::PathBuf> {
+        None
     }
 }
 
@@ -220,7 +244,11 @@ fn app(state: AppState) -> Router {
         router = router
             .route("/api/status", get(api_status))
             .route("/network", get(network_page))
-            .route("/api/network/search", get(api_network_search));
+            .route("/api/network/search", get(api_network_search))
+            .route("/app", get(panel::panel))
+            .route("/app/settings", post(panel::save_settings))
+            .route("/app/refresh", post(panel::refresh))
+            .route(panel::ADD_TO_FIREFOX_PATH, get(panel::add_to_firefox));
     }
     router.with_state(state)
 }
@@ -635,7 +663,7 @@ fn render_opensearch(origin: &str) -> String {
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
          <OpenSearchDescription xmlns=\"http://a9.com/-/spec/opensearch/1.1/\">\n\
          <ShortName>Plumb Search</ShortName>\n\
-         <Description>Find a site by its name.</Description>\n\
+         <Description>Plumb Search</Description>\n\
          <InputEncoding>UTF-8</InputEncoding>\n\
          <Image width=\"32\" height=\"32\" type=\"image/png\">\
          data:image/png;base64,{ICON_PNG_BASE64}</Image>\n\
@@ -863,7 +891,7 @@ fn render_home(docs: u64, status: Option<&Status>, now: u64) -> String {
         .map(|note| format!("\n<p class=\"s\">{}</p>", escape_html(&note)))
         .unwrap_or_default();
     let body = format!(
-        "<main class=\"wrap home\">\n<h1>Plumb</h1>\n<p class=\"tag\">Find a site by its name.</p>\n\
+        "<main class=\"wrap home\">\n<h1>Plumb</h1>\n\
          {}\n<p class=\"s\">{} sites indexed{note}</p>{wikidata}\n</main>",
         search_form("", true),
         group_thousands(docs)
@@ -893,10 +921,21 @@ fn wikidata_note(status: &Status, now: u64) -> Option<String> {
     if !status.wikidata_missing {
         return None;
     }
+    let Some(err) = &status.wikidata_error else {
+        // Right after the quick first setup, Wikidata is next.
+        if status.phase == Phase::SettingUp {
+            return None;
+        }
+        return Some(
+            "Plumb is still downloading Wikidata's list of official websites and more \
+             rankings. Search works now, and results get better once those are in."
+                .to_string(),
+        );
+    };
     let mut note = "Wikidata's list of official websites could not be downloaded yet, so the \
                     index does without it for now: official sites get no boost over look-alikes."
         .to_string();
-    if let Some(retry_at) = status.wikidata_error.as_ref().and_then(|err| err.retry_at) {
+    if let Some(retry_at) = err.retry_at {
         let _ = write!(note, " Plumb will try again {}.", time_until(retry_at, now));
     }
     Some(note)
@@ -950,9 +989,9 @@ fn render_setup(status: &Status, now: u64) -> String {
     }
     let _ = write!(
         body,
-        "<p class=\"s\">On its first start, Plumb downloads public lists of popular websites \
-         and builds its search index from them, which takes a few minutes. This page reloads \
-         every {SETUP_RELOAD_SECONDS} seconds.</p>\n</main>"
+        "<p class=\"s\">On its first start, Plumb downloads a public list of popular websites \
+         and builds a first search index from it, which takes a minute or two. It adds more \
+         lists while you search. This page reloads every {SETUP_RELOAD_SECONDS} seconds.</p>\n</main>"
     );
     let head = format!("<meta http-equiv=\"refresh\" content=\"{SETUP_RELOAD_SECONDS}\">\n");
     page_with_head("Setting up - Plumb Search", &head, &body)
@@ -1530,6 +1569,13 @@ mod tests {
             next_refresh: None,
             version: "0.1.0".to_string(),
             network: None,
+            crawl_left: 0,
+            background_updates: true,
+            paused: None,
+            disk_used: 0,
+            downloaded_today: 0,
+            downloaded_total: 0,
+            homepages_visited: 0,
         }
     }
 
@@ -1729,6 +1775,19 @@ mod tests {
             "{body}"
         );
 
+        // Before Wikidata is first tried, it is still to come.
+        status.wikidata_error = None;
+        assert!(!render_setup(&status, now).contains("Wikidata"));
+        status.phase = Phase::Ready;
+        assert!(
+            render_home(12, Some(&status), now).contains(
+                "Plumb is still downloading Wikidata&#39;s list of official websites and more \
+                 rankings. Search works now, and results get better once those are in."
+            ),
+            "{}",
+            render_home(12, Some(&status), now)
+        );
+
         // Once Wikidata is in, nothing is said.
         status.wikidata_missing = false;
         status.wikidata_error = None;
@@ -1886,7 +1945,7 @@ mod tests {
         );
         for expected in [
             "\n<ShortName>Plumb Search</ShortName>\n",
-            "\n<Description>Find a site by its name.</Description>\n",
+            "\n<Description>Plumb Search</Description>\n",
             "\n<InputEncoding>UTF-8</InputEncoding>\n",
             // A PNG starts with these bytes, in base64.
             "\n<Image width=\"32\" height=\"32\" type=\"image/png\">\

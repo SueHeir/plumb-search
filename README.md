@@ -1,6 +1,6 @@
 # Plumb Search
 
-Plumb Search is a free, open-source search engine for finding websites by name, built to run on your own machine. Type "us bank" and usbank.com comes first.
+Plumb Search is a free, open-source search engine built to run on your own machine. Type "us bank" and usbank.com comes first.
 
 It indexes names, not pages. For each site it keeps the homepage title and description, the words other sites use when they link to it, and a few aliases. That is about 1 KB per site, so a million sites fit in roughly a gigabyte on a homelab server or a desktop.
 
@@ -27,7 +27,7 @@ plumb serve --index data/index        # then open http://127.0.0.1:8080
 
 ## Run a node
 
-`plumb run` does the work of the next section by itself, apart from the optional WAT files, and keeps going. It serves the search page at once, downloads the seed data and builds a first index, then crawls homepages and builds the index again, and from then on crawls more homepages and rebuilds the index on a schedule.
+`plumb run` does the work of the next section by itself, apart from the optional WAT files, and keeps going. It serves the search page at once, downloads the Tranco list and builds a quick first index of it (searchable within a minute or two), then adds Wikidata's official websites and the other seed data, which take longer to download, then crawls homepages and builds the index again, and from then on crawls more homepages and rebuilds the index on a schedule.
 
 ```sh
 cargo build --release -p plumb-node

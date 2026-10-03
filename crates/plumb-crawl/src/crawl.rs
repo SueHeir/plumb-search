@@ -3,6 +3,7 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -426,7 +427,7 @@ impl<'a> Visit<'a> {
                 }
             }
             if status.is_success() {
-                return match read_body(response, ROBOTS_MAX_BYTES).await {
+                return match read_body(response, ROBOTS_MAX_BYTES, &self.cfg.downloaded).await {
                     Ok(body) => parse_robots(body).await,
                     Err(err) => Robots::DoNotCrawl(Failure::request(Some("robots.txt"), err)),
                 };
@@ -479,7 +480,7 @@ impl<'a> Visit<'a> {
                 return CrawlOutcome::NotHtml { content_type };
             }
         }
-        let body = match read_body(response, self.cfg.max_bytes).await {
+        let body = match read_body(response, self.cfg.max_bytes, &self.cfg.downloaded).await {
             Ok(body) => body,
             Err(err) => return Failure::request(None, err).into(),
         };
@@ -637,13 +638,19 @@ fn is_html(content_type: &str) -> bool {
 
 /// Reads the body chunk by chunk, keeping at most `max_bytes`. Stops
 /// reading once the limit is reached and drops the rest. With gzip the
-/// limit applies to the decompressed bytes.
-async fn read_body(mut response: Response, max_bytes: usize) -> reqwest::Result<Vec<u8>> {
+/// limit applies to the decompressed bytes. Every byte read is added to
+/// `downloaded`.
+async fn read_body(
+    mut response: Response,
+    max_bytes: usize,
+    downloaded: &AtomicU64,
+) -> reqwest::Result<Vec<u8>> {
     let mut body = Vec::new();
     while body.len() < max_bytes {
         let Some(chunk) = response.chunk().await? else {
             break;
         };
+        downloaded.fetch_add(chunk.len() as u64, Ordering::Relaxed);
         let take = chunk.len().min(max_bytes - body.len());
         body.extend_from_slice(&chunk[..take]);
     }
@@ -1658,8 +1665,15 @@ mod tests {
         let url = format!("http://127.0.0.1:{port}/big");
         for (limit, expected) in [(0, 0), (1000, 1000), (200_000, 200_000), (1 << 20, 200_000)] {
             let response = client.get(&url).send().await.unwrap();
-            let body = read_body(response, limit).await.unwrap();
+            let downloaded = AtomicU64::new(0);
+            let body = read_body(response, limit, &downloaded).await.unwrap();
             assert_eq!(body.len(), expected, "limit {limit}");
+            // What was read, which can be a chunk more than what was kept.
+            let read = downloaded.load(Ordering::Relaxed);
+            assert!(
+                read >= expected as u64 && read <= 200_000,
+                "limit {limit}: {read}"
+            );
             assert!(body.iter().all(|&byte| byte == b'y'));
         }
     }

@@ -1,13 +1,15 @@
-//! Plumb Search for the desktop: one window around a Plumb Search node that
-//! runs inside the app.
+//! Plumb Search for the desktop: a Plumb Search node that runs inside the
+//! app, and one window with its panel.
 //!
 //! The window opens on a bundled "Starting..." page while the node starts on
-//! Tauri's async runtime, then shows the node's own page, which walks through
-//! first-time setup and then becomes the search page. The window only shows
-//! the bundled page and the node's pages; links anywhere else, and to the
-//! node's JSON API, open in the default browser. No page can call into the
-//! app: the app defines no commands and grants no capabilities, so Tauri's
-//! IPC refuses everything.
+//! Tauri's async runtime, then shows the node's panel (`/app`): what works
+//! now ("Limited search is ready"), storage and downloads against their
+//! limits, crawling, the Plumb network, setup progress, the settings and how
+//! to search from the browser. The app is no browser: searching happens
+//! in the default browser, and so does every link out of the panel,
+//! including the node's search page. No page can call into the app: the app
+//! defines no commands and grants no capabilities, so Tauri's IPC refuses
+//! everything.
 
 // Release builds on Windows are GUI programs, without a console window.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
@@ -30,6 +32,9 @@ use tracing::{debug, error, info, warn};
 
 /// Label of the app's one window.
 const MAIN_WINDOW: &str = "main";
+
+/// The node's panel, which the window shows; its forms post under it.
+const PANEL_PATH: &str = "app";
 
 /// The port the node listens on, so that its address stays the same from
 /// one launch to the next, and with it a browser search engine set up as
@@ -132,7 +137,7 @@ fn setup(app: &AppHandle) -> Result<()> {
     let mut window =
         WebviewWindowBuilder::new(app, MAIN_WINDOW, WebviewUrl::App("index.html".into()))
             .title("Plumb Search")
-            .inner_size(1100.0, 800.0)
+            .inner_size(960.0, 900.0)
             .min_inner_size(400.0, 300.0)
             .resizable(true)
             .center()
@@ -152,7 +157,10 @@ fn setup(app: &AppHandle) -> Result<()> {
             })
             // Ctrl-click, middle-click and `target="_blank"` links.
             .on_new_window(move |url, _features| {
-                if is_web_page(&url) {
+                let node = opening.state::<Node>();
+                if is_add_to_firefox(&url, node.url.get()) {
+                    open_in_firefox(&opening, &url);
+                } else if is_web_page(&url) {
                     open_in_browser(&opening, &url);
                 }
                 NewWindowResponse::Deny
@@ -246,12 +254,13 @@ fn report_other_port(app: &AppHandle, port: u16) {
 
 fn show_node_page(app: &AppHandle, node: &NodeHandle) -> Result<()> {
     let url: Url = node.url().parse().context("reading the node's address")?;
-    // Let the window go to the node's origin before sending it there.
+    // Let the window go to the node's panel before sending it there.
     let _ = app.state::<Node>().url.set(url.clone());
     let window = app
         .get_webview_window(MAIN_WINDOW)
         .context("the window is closed")?;
-    window.navigate(url).context("opening the node's page")
+    let panel = url.join(PANEL_PATH).context("finding the node's panel")?;
+    window.navigate(panel).context("opening the node's panel")
 }
 
 /// Shows an error dialog, and quits when it is closed.
@@ -411,6 +420,30 @@ fn hide_main_window(app: &AppHandle) {
     }
 }
 
+/// The name the system knows Firefox by, to open a page in it.
+const FIREFOX: &str = if cfg!(target_os = "macos") {
+    "Firefox"
+} else {
+    "firefox"
+};
+
+/// Whether `url` is the node's page with the steps to add Plumb to Firefox,
+/// which only Firefox can follow: the panel's "Add to Firefox" button.
+fn is_add_to_firefox(url: &Url, node: Option<&Url>) -> bool {
+    node.is_some_and(|node| node.origin() == url.origin())
+        && url.path() == plumb_node::web::ADD_TO_FIREFOX_PATH
+}
+
+/// Opens `url` in Firefox, or in the default browser when Firefox cannot be
+/// started (most likely, it is not installed).
+fn open_in_firefox(app: &AppHandle, url: &Url) {
+    debug!("opening {url} in Firefox");
+    if let Err(err) = app.opener().open_url(url.as_str(), Some(FIREFOX)) {
+        warn!("could not open {url} in Firefox, so in the default browser: {err}");
+        open_in_browser(app, url);
+    }
+}
+
 fn open_in_browser(app: &AppHandle, url: &Url) {
     debug!("opening {url} in the default browser");
     if let Err(err) = app.opener().open_url(url.as_str(), None::<&str>) {
@@ -434,12 +467,14 @@ enum Destination {
 fn destination(url: &Url, node: Option<&Url>, dev_server: Option<&Url>) -> Destination {
     let same_origin = |page: &Url| page.origin() == url.origin();
     if node.is_some_and(same_origin) {
-        // The node's JSON API (the results page links to it) would be a dead
-        // end in the window, which has no back button.
-        if url.path().starts_with("/api/") {
-            Destination::Browser
-        } else {
+        // Only the panel: the search pages and the JSON API belong in the
+        // browser, and the window has no back button.
+        let panel = format!("/{PANEL_PATH}");
+        let path = url.path();
+        if path == panel || path.starts_with(&format!("{panel}/")) {
             Destination::Window
+        } else {
+            Destination::Browser
         }
     } else if is_bundled_page(url) || dev_server.is_some_and(same_origin) {
         Destination::Window
@@ -475,11 +510,12 @@ mod tests {
     const NODE: &str = "http://127.0.0.1:41234/";
 
     #[test]
-    fn the_nodes_pages_stay_in_the_window() {
+    fn the_nodes_panel_stays_in_the_window() {
         let node = url(NODE);
         for page in [
-            "http://127.0.0.1:41234/",
-            "http://127.0.0.1:41234/search?q=us+bank",
+            "http://127.0.0.1:41234/app",
+            "http://127.0.0.1:41234/app/settings",
+            "http://127.0.0.1:41234/app/refresh",
         ] {
             assert_eq!(
                 destination(&url(page), Some(&node), None),
@@ -487,12 +523,19 @@ mod tests {
                 "{page}"
             );
         }
+        assert_eq!(
+            url(NODE).join(PANEL_PATH).unwrap().as_str(),
+            "http://127.0.0.1:41234/app"
+        );
     }
 
     #[test]
-    fn the_nodes_json_api_opens_in_the_browser() {
+    fn the_nodes_search_pages_and_json_api_open_in_the_browser() {
         let node = url(NODE);
         for page in [
+            "http://127.0.0.1:41234/",
+            "http://127.0.0.1:41234/search?q=us+bank",
+            "http://127.0.0.1:41234/apps",
             "http://127.0.0.1:41234/api/search?q=us+bank",
             "http://127.0.0.1:41234/api/status",
         ] {
@@ -523,6 +566,26 @@ mod tests {
         }
         // Until the node listens, no local page is its own.
         assert_eq!(destination(&url(NODE), None, None), Destination::Browser);
+    }
+
+    #[test]
+    fn the_add_to_firefox_page_is_the_nodes_own() {
+        let node = url(NODE);
+        assert!(is_add_to_firefox(
+            &url("http://127.0.0.1:41234/add-to-firefox"),
+            Some(&node)
+        ));
+        assert!(!is_add_to_firefox(
+            &url("http://127.0.0.1:41234/add-to-firefox"),
+            None
+        ));
+        for other in [
+            "http://127.0.0.1:41234/",
+            "http://127.0.0.1:8080/add-to-firefox",
+            "https://evil.example/add-to-firefox",
+        ] {
+            assert!(!is_add_to_firefox(&url(other), Some(&node)), "{other}");
+        }
     }
 
     #[test]
