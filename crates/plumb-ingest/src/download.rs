@@ -10,7 +10,9 @@ use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{anyhow, bail, Context, Result};
 use flate2::write::MultiGzDecoder;
-use reqwest::header::{HeaderMap, ACCEPT, CONTENT_TYPE, RETRY_AFTER};
+use reqwest::header::{
+    HeaderMap, ACCEPT, ACCEPT_ENCODING, CONTENT_ENCODING, CONTENT_TYPE, RETRY_AFTER,
+};
 use reqwest::StatusCode;
 use serde::Deserialize;
 use serde_json::error::Category;
@@ -547,9 +549,12 @@ impl Write for LinePrefix {
 /// Wikidata's public query service stops every query after 60 seconds, and
 /// listing all these items takes longer than that. So they are asked for in
 /// bands of sitelink counts ([`wikidata_sitelink_bands`]), one query after
-/// another, and a band that Wikidata still stops at its time limit is asked
-/// for again in halves; see [`download_wikidata_official_sites_paced`]. The
-/// rows of every band go into the one file.
+/// another. Each band takes 20 to 50 seconds even when small, since most of
+/// the work is the same scan of every item with an official website, so
+/// whether it ends within the limit depends on how busy the service is: a
+/// band that is stopped is asked for again after a wait. See
+/// [`download_wikidata_official_sites_paced`]. Each band is saved as it comes
+/// in, so a later call asks only for the bands still missing.
 pub async fn download_wikidata_official_sites(
     client: &reqwest::Client,
     dir: &Path,
@@ -579,28 +584,69 @@ pub async fn download_wikidata_official_sites_from(
 /// How [`download_wikidata_official_sites_paced`] spaces out its queries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WikidataPacing {
-    /// The wait before each query but the first. Wikidata's query service
-    /// limits the query time each client uses per minute, and answers HTTP
-    /// 429 to clients over the limit.
+    /// The wait before each band's query but the first. Wikidata's query
+    /// service limits the query time each client uses per minute, and
+    /// answers HTTP 429 to clients over the limit.
     pub pause: Duration,
-    /// The wait before trying a query again after HTTP 429 or 5xx without a
-    /// `Retry-After`, or after a failed connection. It doubles with each try
-    /// of the same query.
+    /// The first wait before asking for a band again, after Wikidata was too
+    /// busy to answer it whole (or answered HTTP 429 or 5xx without a
+    /// `Retry-After`, or could not be reached). It doubles with each try of
+    /// the same band, up to 10 times this. All the waits of one download
+    /// together may come to 40 times this ([`WikidataPacing::budget`]).
     pub retry_wait: Duration,
 }
 
 impl Default for WikidataPacing {
-    /// 5 seconds between two queries; 5, 10, then 20 seconds before tries again.
+    /// 5 seconds between two bands; 30, 60, 120, 240 and 300 seconds before
+    /// asking for a band again; 20 minutes of such waits in all.
     fn default() -> Self {
         WikidataPacing {
             pause: Duration::from_secs(5),
-            retry_wait: Duration::from_secs(5),
+            retry_wait: Duration::from_secs(30),
         }
     }
 }
 
-/// Tries of one query that gets HTTP 429 or 5xx, or cannot connect.
-const WIKIDATA_TRIES: u32 = 4;
+impl WikidataPacing {
+    /// The wait before try `tries + 1` of a band: `retry_wait`, doubled for
+    /// each try after the first, and at most 10 times `retry_wait`.
+    pub fn wait_after(&self, tries: u32) -> Duration {
+        let doubled = 1u32
+            .checked_shl(tries.saturating_sub(1))
+            .unwrap_or(u32::MAX)
+            .min(MAX_WAIT_FACTOR);
+        self.retry_wait.saturating_mul(doubled)
+    }
+
+    /// The shortest wait after HTTP 429 without a `Retry-After`: twice
+    /// `retry_wait`, 60 seconds by default.
+    pub fn rate_limit_wait(&self) -> Duration {
+        self.retry_wait.saturating_mul(2)
+    }
+
+    /// How long one download may wait, in all, before asking for bands
+    /// again: 40 times `retry_wait`. A download that would wait longer
+    /// stops; what it has is saved for the next.
+    pub fn budget(&self) -> Duration {
+        self.retry_wait.saturating_mul(WAIT_BUDGET_FACTOR)
+    }
+}
+
+/// The longest wait before asking for a band again, as a multiple of
+/// [`WikidataPacing::retry_wait`].
+const MAX_WAIT_FACTOR: u32 = 10;
+
+/// All the waits of one download, as a multiple of
+/// [`WikidataPacing::retry_wait`].
+const WAIT_BUDGET_FACTOR: u32 = 40;
+
+/// Tries of one band before it is split, or the download given up.
+const WIKIDATA_TRIES: u32 = 6;
+
+/// How many times a band of [`wikidata_sitelink_bands`] may be halved: a
+/// band becomes at most 4 queries. Halving barely speeds a query up, so it
+/// is only done when a band failed all its tries.
+const MAX_SPLITS: u32 = 2;
 
 /// The longest `Retry-After` a download waits for; an answer that asks for
 /// more fails the download, to be tried again much later.
@@ -608,7 +654,14 @@ const MAX_RETRY_AFTER: Duration = Duration::from_secs(10 * 60);
 
 /// A query without a whole answer after this long is treated like one that
 /// Wikidata stopped at its 60-second limit.
-const WIKIDATA_QUERY_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+const WIKIDATA_QUERY_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// Bands saved by an earlier download longer ago than this are asked for again.
+const SAVED_BAND_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+
+/// The folder next to the TSV where each band is saved as it comes in,
+/// until the TSV is written.
+pub const WIKIDATA_BANDS_DIR_NAME: &str = "wikidata-official-sites.bands";
 
 /// What Wikidata's query service (Blazegraph) writes when it stops a query
 /// at its time limit: after the results sent so far when the answer had
@@ -621,22 +674,33 @@ const TIMEOUT_MARKERS: [&str; 2] = [
 /// [`download_wikidata_official_sites_from`] with the waits of `pacing`.
 ///
 /// The bands of [`wikidata_sitelink_bands`] are asked for one at a time,
-/// lowest first, waiting `pacing.pause` before each query but the first,
-/// and each answer is logged. An answer must be whole: when Wikidata stops a
-/// query at its time limit, the answer still comes as HTTP 200, but its JSON
-/// breaks off and the query service's Java exception follows. A band whose
-/// answer breaks off, or ends in that exception (also as HTTP 500), or that
-/// has no whole answer within 5 minutes, is asked for again in two halves
-/// ([`SitelinkBand::halves`]), and so on down to a single count of
-/// sitelinks. A single count that is still cut short fails the download.
+/// lowest first, waiting `pacing.pause` before each but the first, and each
+/// answer is logged. Every band that comes in whole is saved at once in
+/// `dir/wikidata-official-sites.bands/`; a download finds the bands an
+/// earlier one saved there (in the last week, for the same or a lower
+/// minimum) and asks only for the rest. Once every band is in, their rows go
+/// into the TSV, through a `.part` file renamed when complete, and the saved
+/// bands are removed.
 ///
-/// HTTP 429 and 5xx, and failed connections, are tried again up to 4 times
-/// per query, after the wait the answer's `Retry-After` asks for (at most 10
-/// minutes; an answer that asks for more fails the download) or else
-/// `pacing.retry_wait`, doubling. Other failures, such as HTTP 4xx or an
-/// answer that is not SPARQL JSON, fail the download at once. The file is
-/// written only once every band is in, through a `.part` file renamed when
-/// complete.
+/// An answer must be whole: when Wikidata stops a query at its time limit,
+/// the answer still comes as HTTP 200, but its JSON breaks off and the query
+/// service's Java exception follows. Such an answer, one that ends in that
+/// exception (also as HTTP 500), HTTP 503 or 504, and no whole answer within
+/// 3 minutes all mean that Wikidata was too busy: the band is asked for
+/// again after a wait, up to 6 tries ([`WikidataPacing::wait_after`]). Only
+/// a band still too busy after that is asked for in two halves
+/// ([`SitelinkBand::halves`]), and a band of the defaults is halved at most
+/// twice; then the download fails.
+///
+/// HTTP 429 and other 5xx, and failed connections, are tried again the same
+/// way, but not halved; after HTTP 429 the wait is at least
+/// [`WikidataPacing::rate_limit_wait`]. A `Retry-After` is waited for
+/// instead (at most 10 minutes; an answer that asks for more fails the
+/// download). The waits of
+/// one download come to at most [`WikidataPacing::budget`]; past that, it
+/// fails. Other failures, such as HTTP 4xx or an answer that is not SPARQL
+/// JSON, fail the download at once. A download that fails keeps the bands it
+/// saved for the next.
 pub async fn download_wikidata_official_sites_paced(
     client: &reqwest::Client,
     endpoint: &str,
@@ -644,60 +708,85 @@ pub async fn download_wikidata_official_sites_paced(
     min_sitelinks: u32,
     pacing: WikidataPacing,
 ) -> Result<PathBuf> {
-    let bands = wikidata_sitelink_bands(min_sitelinks);
-    info!(
-        "asking Wikidata for official websites of items with at least {min_sitelinks} sitelinks, \
-         in {} queries by number of sitelinks",
-        bands.len()
-    );
+    let bands_dir = dir.join(WIKIDATA_BANDS_DIR_NAME);
+    let mut done = saved_bands(&bands_dir, min_sitelinks)?;
+    let missing = missing_bands(&wikidata_sitelink_bands(min_sitelinks), &done);
+    if done.is_empty() {
+        info!(
+            "asking Wikidata for official websites of items with at least {min_sitelinks} \
+             sitelinks, in {} queries by number of sitelinks",
+            missing.len()
+        );
+    } else {
+        info!(
+            "asking Wikidata for official websites of items with at least {min_sitelinks} \
+             sitelinks: {} bands of sitelink counts were saved by an earlier try, {} to go",
+            done.len(),
+            missing.len()
+        );
+    }
     let started = Instant::now();
-    // The bands still to ask for, the next one last.
-    let mut todo: Vec<SitelinkBand> = bands.into_iter().rev().collect();
-    let mut tsv = OfficialSitesTsv::new();
+    let mut budget = pacing.budget();
+    // The bands still to ask for, the next one last, with how many times
+    // each was halved.
+    let mut todo: Vec<(SitelinkBand, u32)> = missing.into_iter().rev().map(|b| (b, 0)).collect();
     let mut queries = 0u32;
-    while let Some(band) = todo.pop() {
+    while let Some((band, splits)) = todo.pop() {
         if queries > 0 {
             tokio::time::sleep(pacing.pause).await;
         }
-        queries += 1;
         let asked = Instant::now();
-        let answer = query_band(client, endpoint, band, pacing)
-            .await
-            .with_context(|| format!("asking Wikidata for items with {band}"))?;
+        let answer = query_band(client, endpoint, band, pacing, &mut budget, &mut queries).await;
         match answer {
-            Answer::Rows(rows) => {
+            Ok(rows) => {
                 let got = rows.len();
-                let repeated = got - tsv.add(rows);
-                let repeated = match repeated {
-                    0 => String::new(),
-                    n => format!(" ({n} of them already in)"),
-                };
+                save_band(&bands_dir, band, rows).await?;
+                done.push(band);
                 info!(
-                    "Wikidata: {got} official websites of items with {band} in {:.1} s{repeated}; \
-                     {} in all, {} queries to go",
+                    "Wikidata: {got} official websites of items with {band} in {:.1} s; \
+                     {} bands to go",
                     asked.elapsed().as_secs_f64(),
-                    tsv.rows(),
                     todo.len()
                 );
             }
-            Answer::Cut(why) => {
-                let Some((lower, upper)) = band.halves() else {
+            Err(BandFailure::Busy(why)) => {
+                let halves = band.halves().filter(|_| splits < MAX_SPLITS);
+                let Some((lower, upper)) = halves else {
                     bail!(
-                        "Wikidata stopped the query for items with {band} at its time limit \
-                         ({why}), and that cannot be split any further; try again later, or ask \
-                         for items with more sitelinks"
+                        "Wikidata was too busy to answer the query for items with {band} \
+                         ({why}); {}{}",
+                        match splits {
+                            0 => "it cannot be split; ".to_string(),
+                            n => format!("it is already split {n} times; "),
+                        },
+                        try_later(&done)
                     );
                 };
                 warn!(
-                    "Wikidata stopped the query for items with {band} at its time limit ({why}); \
+                    "Wikidata was too busy to answer the query for items with {band} ({why}); \
                      asking for items with {lower} and with {upper} separately"
                 );
-                todo.push(upper);
-                todo.push(lower);
+                todo.push((upper, splits + 1));
+                todo.push((lower, splits + 1));
+            }
+            Err(BandFailure::Fatal(err)) => {
+                return Err(err.context(format!(
+                    "asking Wikidata for items with {band} ({})",
+                    try_later(&done)
+                )));
             }
         }
     }
 
+    done.sort_by_key(|band| band.min);
+    let mut tsv = OfficialSitesTsv::new();
+    for &band in &done {
+        let path = bands_dir.join(band.file_name());
+        let text = tokio::fs::read_to_string(&path)
+            .await
+            .with_context(|| format!("reading {}", path.display()))?;
+        tsv.add(saved_rows(&text));
+    }
     tokio::fs::create_dir_all(dir)
         .await
         .with_context(|| format!("creating {}", dir.display()))?;
@@ -709,6 +798,11 @@ pub async fn download_wikidata_official_sites_paced(
     tokio::fs::rename(&part, &dest)
         .await
         .with_context(|| format!("renaming {} to {}", part.display(), dest.display()))?;
+    if let Err(err) = tokio::fs::remove_dir_all(&bands_dir).await {
+        if err.kind() != io::ErrorKind::NotFound {
+            warn!("could not remove {}: {err}", bands_dir.display());
+        }
+    }
     info!(
         "wrote {} official websites to {} after {queries} queries in {:.0} s",
         tsv.rows(),
@@ -716,6 +810,133 @@ pub async fn download_wikidata_official_sites_paced(
         started.elapsed().as_secs_f64()
     );
     Ok(dest)
+}
+
+/// What a failed download says about trying again, given the bands saved.
+fn try_later(done: &[SitelinkBand]) -> String {
+    match done.len() {
+        0 => "try again later".to_string(),
+        1 => "try again later; the 1 band already in is saved".to_string(),
+        n => format!("try again later; the {n} bands already in are saved"),
+    }
+}
+
+/// The bands that an earlier download saved in `bands_dir` and that this
+/// one can use, lowest first: saved in the last week, with at least
+/// `min_sitelinks` sitelinks, and not overlapping one another. Others found
+/// there are removed. None when `bands_dir` does not exist.
+fn saved_bands(bands_dir: &Path, min_sitelinks: u32) -> Result<Vec<SitelinkBand>> {
+    let entries = match std::fs::read_dir(bands_dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(err).with_context(|| format!("reading {}", bands_dir.display())),
+    };
+    let mut found = Vec::new();
+    for entry in entries {
+        let entry = entry.with_context(|| format!("reading {}", bands_dir.display()))?;
+        let band = entry
+            .file_name()
+            .to_str()
+            .and_then(SitelinkBand::from_file_name);
+        let recent = entry
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .is_ok_and(|modified| {
+                SystemTime::now()
+                    .duration_since(modified)
+                    .map_or(true, |age| age < SAVED_BAND_MAX_AGE)
+            });
+        match band {
+            Some(band) if recent && band.min >= min_sitelinks => found.push(band),
+            _ => {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+    found.sort_by_key(|band| band.min);
+    let mut usable: Vec<SitelinkBand> = Vec::new();
+    for band in found {
+        let overlaps = usable
+            .last()
+            .is_some_and(|last| last.max.is_none_or(|max| band.min <= max));
+        if overlaps {
+            let _ = std::fs::remove_file(bands_dir.join(band.file_name()));
+        } else {
+            usable.push(band);
+        }
+    }
+    Ok(usable)
+}
+
+/// The parts of `wanted` (lowest first, not overlapping) that no band of
+/// `saved` (the same) covers, lowest first. A band of `wanted` that is
+/// partly covered leaves its uncovered stretches.
+fn missing_bands(wanted: &[SitelinkBand], saved: &[SitelinkBand]) -> Vec<SitelinkBand> {
+    let mut missing = Vec::new();
+    for &band in wanted {
+        // The lowest count of the band not yet seen to be covered; `None`
+        // once all of it is.
+        let mut from = Some(band.min);
+        for s in saved {
+            let Some(start) = from else { break };
+            if s.max.is_some_and(|max| max < start) {
+                continue;
+            }
+            if band.max.is_some_and(|max| s.min > max) {
+                break;
+            }
+            if s.min > start {
+                missing.push(SitelinkBand {
+                    min: start,
+                    max: Some(s.min - 1),
+                });
+            }
+            from = s
+                .max
+                .and_then(|max| max.checked_add(1))
+                .filter(|&next| band.max.is_none_or(|max| next <= max));
+        }
+        if let Some(start) = from {
+            missing.push(SitelinkBand {
+                min: start,
+                max: band.max,
+            });
+        }
+    }
+    missing
+}
+
+/// Saves the rows of `band` in `bands_dir`, through a `.part` file.
+async fn save_band(bands_dir: &Path, band: SitelinkBand, rows: Vec<WikidataRow>) -> Result<()> {
+    tokio::fs::create_dir_all(bands_dir)
+        .await
+        .with_context(|| format!("creating {}", bands_dir.display()))?;
+    let mut tsv = OfficialSitesTsv::new();
+    tsv.add(rows);
+    let dest = bands_dir.join(band.file_name());
+    let part = part_path(&dest);
+    tokio::fs::write(&part, tsv.text.as_bytes())
+        .await
+        .with_context(|| format!("writing {}", part.display()))?;
+    tokio::fs::rename(&part, &dest)
+        .await
+        .with_context(|| format!("renaming {} to {}", part.display(), dest.display()))
+}
+
+/// The rows of a band that [`save_band`] saved.
+fn saved_rows(text: &str) -> Vec<WikidataRow> {
+    text.lines()
+        .skip(1)
+        .filter_map(|line| {
+            let mut fields = line.split('\t');
+            let (item, label, website) = (fields.next()?, fields.next()?, fields.next()?);
+            Some(WikidataRow {
+                item: item.to_string(),
+                label: label.to_string(),
+                website: website.to_string(),
+            })
+        })
+        .collect()
 }
 
 /// A range of sitelink counts that one Wikidata query asks for: `min` to
@@ -727,7 +948,7 @@ pub struct SitelinkBand {
 }
 
 /// Where the bands of [`wikidata_sitelink_bands`] start from 25 sitelinks up.
-const WIKIDATA_BAND_STARTS: [u32; 8] = [25, 27, 30, 34, 40, 50, 70, 100];
+const WIKIDATA_BAND_STARTS: [u32; 7] = [25, 30, 36, 45, 60, 85, 130];
 
 /// An open band, `min` sitelinks or more, is not split once `min` is this
 /// high: no Wikidata item has nearly that many sitelinks.
@@ -736,15 +957,12 @@ const OPEN_BAND_SPLIT_LIMIT: u32 = 1_000;
 /// The bands of sitelink counts that [`download_wikidata_official_sites`]
 /// asks for, lowest first. Together they cover every count from
 /// `min_sitelinks` up, each once: below 25 each count is a band of its own,
-/// then come 25-26, 27-29, 30-33, 34-39, 40-49, 50-69, 70-99 and 100 or more.
+/// then come 25-29, 30-35, 36-44, 45-59, 60-84, 85-129 and 130 or more.
 ///
 /// From 25 up there were 131,386 rows in October 2026, too many for one
-/// query to list within Wikidata's 60-second limit. Most items have few
-/// sitelinks, so the bands widen as the counts grow, to hold similar shares:
-/// if the rows with at least n sitelinks thin out like n^-1.3 to n^-2 (only
-/// the total is known), each band holds 8,000 to 22,000 of them, and each
-/// count from 15 to 24 holds 9,000 to 33,000. A band that turns out too big
-/// all the same is split while downloading.
+/// query to list within Wikidata's 60-second limit. These bands came in
+/// whole then, holding 27,397, 28,773, 38,990, 24,556, 6,942, 3,314 and
+/// 1,414 rows, in 21 to 47 seconds each.
 pub fn wikidata_sitelink_bands(min_sitelinks: u32) -> Vec<SitelinkBand> {
     let starts: Vec<u32> = std::iter::once(min_sitelinks)
         .chain(min_sitelinks.saturating_add(1)..WIKIDATA_BAND_STARTS[0])
@@ -769,18 +987,18 @@ impl SitelinkBand {
     /// [`wikidata_sparql_query`] is for those from a minimum up.
     pub fn sparql_query(&self) -> String {
         let filter = match self.max {
-            Some(max) => format!("?sitelinks >= {} && ?sitelinks <= {max}", self.min),
-            None => format!("?sitelinks >= {}", self.min),
+            Some(max) => format!("?s >= {} && ?s < {}", self.min, u64::from(max) + 1),
+            None => format!("?s >= {}", self.min),
         };
         format!(
-            "SELECT ?item ?itemLabel ?website WHERE {{ ?item wdt:P856 ?website ; wikibase:sitelinks ?sitelinks . FILTER({filter}) SERVICE wikibase:label {{ bd:serviceParam wikibase:language \"en,mul\". }} }}"
+            "SELECT ?item ?itemLabel ?website WHERE {{ ?item wdt:P856 ?website ; wikibase:sitelinks ?s . FILTER({filter}) SERVICE wikibase:label {{ bd:serviceParam wikibase:language \"en,mul\". }} }}"
         )
     }
 
-    /// The band in two, lower half first, to ask for once Wikidata stopped
-    /// the band's query at its time limit; `None` when it cannot be split. A
-    /// band with an upper end is cut in the middle, down to single counts.
-    /// One without, `min` and up, is cut into `min` to `2 * min - 1` and
+    /// The band in two, lower half first, to ask for once Wikidata was too
+    /// busy for the band's query; `None` when it cannot be split. A band
+    /// with an upper end is cut in the middle, down to single counts. One
+    /// without, `min` and up, is cut into `min` to `2 * min - 1` and
     /// `2 * min` and up, since items with more sitelinks are much rarer,
     /// unless `min` is 1,000 or more.
     pub fn halves(&self) -> Option<(SitelinkBand, SitelinkBand)> {
@@ -798,10 +1016,31 @@ impl SitelinkBand {
             }
         }
     }
+
+    /// The name of the file the band is saved in: `25-29.tsv`, or
+    /// `130-up.tsv` for 130 or more sitelinks.
+    fn file_name(&self) -> String {
+        match self.max {
+            Some(max) => format!("{}-{max}.tsv", self.min),
+            None => format!("{}-up.tsv", self.min),
+        }
+    }
+
+    /// The band saved in a file named `name` by [`SitelinkBand::file_name`].
+    fn from_file_name(name: &str) -> Option<SitelinkBand> {
+        let (min, max) = name.strip_suffix(".tsv")?.split_once('-')?;
+        let min = min.parse().ok()?;
+        let max = match max {
+            "up" => None,
+            max => Some(max.parse().ok()?),
+        };
+        max.is_none_or(|max| min <= max)
+            .then_some(SitelinkBand { min, max })
+    }
 }
 
 impl fmt::Display for SitelinkBand {
-    /// `exactly 25 sitelinks`, `25 to 26 sitelinks` or `100 or more sitelinks`.
+    /// `exactly 25 sitelinks`, `25 to 29 sitelinks` or `130 or more sitelinks`.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.max {
             Some(1) if self.min == 1 => f.write_str("exactly 1 sitelink"),
@@ -823,74 +1062,118 @@ pub fn wikidata_sparql_query(min_sitelinks: u32) -> String {
     .sparql_query()
 }
 
-/// What the query for one band came to.
+/// Why the query for one band has no rows.
 #[derive(Debug)]
-enum Answer {
-    /// The whole answer.
-    Rows(Vec<WikidataRow>),
-    /// Stopped at the time limit, or cut short some other way: ask for
-    /// less. Says what was seen.
-    Cut(String),
+enum BandFailure {
+    /// Wikidata stayed too busy to answer it whole through every try: ask
+    /// for less. Says what was seen last.
+    Busy(String),
+    /// Not worth asking again in this download.
+    Fatal(anyhow::Error),
 }
 
-/// Why one try of a query has no [`Answer`].
+/// Why one try of a query has no rows.
 #[derive(Debug)]
 enum Failed {
-    /// Worth another try: after `after`, when the server says how long to wait.
+    /// Worth another try: after `after`, when the server says how long to
+    /// wait. `busy` when Wikidata was too busy to answer it whole, so that
+    /// a narrower query may do once tries run out; `rate_limited` after
+    /// HTTP 429, which calls for a longer wait.
     Again {
         why: String,
         after: Option<Duration>,
+        busy: bool,
+        rate_limited: bool,
     },
     /// Not worth another try.
     Fatal(anyhow::Error),
 }
 
-/// Asks for one band, trying again after HTTP 429 or 5xx (other than the
-/// query service's timeout error, which is an [`Answer::Cut`]) and after a
-/// failed connection; see [`download_wikidata_official_sites_paced`].
+impl Failed {
+    fn busy(why: String) -> Self {
+        Failed::Again {
+            why,
+            after: None,
+            busy: true,
+            rate_limited: false,
+        }
+    }
+}
+
+/// Asks for one band, again after a wait while Wikidata is too busy or
+/// answers HTTP 429 or 5xx, or cannot be reached; see
+/// [`download_wikidata_official_sites_paced`]. `budget` is what is left of
+/// the download's waits, and `queries` counts every query sent.
 async fn query_band(
     client: &reqwest::Client,
     endpoint: &str,
     band: SitelinkBand,
     pacing: WikidataPacing,
-) -> Result<Answer> {
+    budget: &mut Duration,
+    queries: &mut u32,
+) -> Result<Vec<WikidataRow>, BandFailure> {
     let form = url::form_urlencoded::Serializer::new(String::new())
         .append_pair("query", &band.sparql_query())
         .finish();
-    let mut backoff = pacing.retry_wait;
     let mut tries = 0;
     loop {
         tries += 1;
-        let (why, after) = match try_query(client, endpoint, &form).await {
-            Ok(answer) => return Ok(answer),
-            Err(Failed::Fatal(err)) => return Err(err),
-            Err(Failed::Again { why, after }) => (why, after),
+        *queries += 1;
+        let (why, after, busy, rate_limited) = match try_query(client, endpoint, &form).await {
+            Ok(rows) => return Ok(rows),
+            Err(Failed::Fatal(err)) => return Err(BandFailure::Fatal(err)),
+            Err(Failed::Again {
+                why,
+                after,
+                busy,
+                rate_limited,
+            }) => (why, after, busy, rate_limited),
         };
         if tries >= WIKIDATA_TRIES {
-            bail!("{why} (tried {tries} times)");
+            let why = format!("{why} (tried {tries} times)");
+            return Err(if busy {
+                BandFailure::Busy(why)
+            } else {
+                BandFailure::Fatal(anyhow!(why))
+            });
         }
         let wait = match after {
-            Some(after) if after > MAX_RETRY_AFTER => bail!(
-                "{why}; the answer asks to wait {} seconds before the next query",
-                after.as_secs()
-            ),
+            Some(after) if after > MAX_RETRY_AFTER => {
+                return Err(BandFailure::Fatal(anyhow!(
+                    "{why}; the answer asks to wait {} seconds before the next query",
+                    after.as_secs()
+                )))
+            }
             Some(after) => after,
-            None => backoff,
+            None if rate_limited => pacing.wait_after(tries).max(pacing.rate_limit_wait()),
+            None => pacing.wait_after(tries),
         };
+        if wait > *budget {
+            return Err(BandFailure::Fatal(anyhow!(
+                "{why} (tried {tries} times); waiting {wait:?} more would pass the {:?} this \
+                 download may wait in all",
+                pacing.budget()
+            )));
+        }
+        *budget -= wait;
         warn!(
             "Wikidata query for items with {band}: {why}; trying again in {:.1} s",
             wait.as_secs_f64()
         );
         tokio::time::sleep(wait).await;
-        backoff = backoff.saturating_mul(2);
     }
 }
 
 /// Sends a query once and reads its answer.
-async fn try_query(client: &reqwest::Client, endpoint: &str, form: &str) -> Result<Answer, Failed> {
+async fn try_query(
+    client: &reqwest::Client,
+    endpoint: &str,
+    form: &str,
+) -> Result<Vec<WikidataRow>, Failed> {
     let sent = client
         .post(endpoint)
         .header(ACCEPT, "application/sparql-results+json")
+        .header(ACCEPT_ENCODING, "gzip")
         .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
         .timeout(WIKIDATA_QUERY_TIMEOUT)
         .body(form.to_string())
@@ -899,7 +1182,7 @@ async fn try_query(client: &reqwest::Client, endpoint: &str, form: &str) -> Resu
     let response = match sent {
         Ok(response) => response,
         Err(err) if err.is_timeout() && !err.is_connect() => {
-            return Ok(Answer::Cut(no_answer_in_time()));
+            return Err(Failed::busy(no_answer_in_time()));
         }
         Err(err) if err.is_builder() => {
             let err = anyhow::Error::new(err).context(format!("querying {endpoint}"));
@@ -909,19 +1192,25 @@ async fn try_query(client: &reqwest::Client, endpoint: &str, form: &str) -> Resu
             return Err(Failed::Again {
                 why: format!("{:#}", anyhow::Error::new(err)),
                 after: None,
+                busy: false,
+                rate_limited: false,
             });
         }
     };
     let status = response.status();
+    let gzipped = response
+        .headers()
+        .get(CONTENT_ENCODING)
+        .is_some_and(|value| value.as_bytes().eq_ignore_ascii_case(b"gzip"));
     if status.is_success() {
         return match response.bytes().await {
-            Ok(body) => match parse_sparql_rows(&body) {
-                Ok(rows) => Ok(Answer::Rows(rows)),
-                Err(BadAnswer::Cut(why)) => Ok(Answer::Cut(why)),
+            Ok(body) => match parse_sparql_rows(&decoded(&body, gzipped)) {
+                Ok(rows) => Ok(rows),
+                Err(BadAnswer::Cut(why)) => Err(Failed::busy(why)),
                 Err(BadAnswer::Invalid(err)) => Err(Failed::Fatal(err)),
             },
-            Err(err) if err.is_timeout() => Ok(Answer::Cut(no_answer_in_time())),
-            Err(err) => Ok(Answer::Cut(format!(
+            Err(err) if err.is_timeout() => Err(Failed::busy(no_answer_in_time())),
+            Err(err) => Err(Failed::busy(format!(
                 "the answer broke off: {:#}",
                 anyhow::Error::new(err)
             ))),
@@ -929,8 +1218,9 @@ async fn try_query(client: &reqwest::Client, endpoint: &str, form: &str) -> Resu
     }
     let after = retry_after(response.headers());
     let body = response.bytes().await.unwrap_or_default();
+    let body = decoded(&body, gzipped);
     if status.is_server_error() && has_timeout_marker(&body) {
-        return Ok(Answer::Cut(format!(
+        return Err(Failed::busy(format!(
             "HTTP {status} with the query service's timeout error"
         )));
     }
@@ -938,11 +1228,29 @@ async fn try_query(client: &reqwest::Client, endpoint: &str, form: &str) -> Resu
         "HTTP {status}: {}",
         plumb_core::truncate_chars(String::from_utf8_lossy(&body).trim(), 500)
     );
-    if status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
-        Err(Failed::Again { why, after })
+    let busy = status == StatusCode::GATEWAY_TIMEOUT || status == StatusCode::SERVICE_UNAVAILABLE;
+    let rate_limited = status == StatusCode::TOO_MANY_REQUESTS;
+    if busy || rate_limited || status.is_server_error() {
+        Err(Failed::Again {
+            why,
+            after,
+            busy,
+            rate_limited,
+        })
     } else {
         Err(Failed::Fatal(anyhow!("Wikidata query failed: {why}")))
     }
+}
+
+/// `body` gunzipped when `gzipped`, as far as it goes: an answer cut off in
+/// the middle gives what came before the cut.
+fn decoded(body: &[u8], gzipped: bool) -> Vec<u8> {
+    if !gzipped {
+        return body.to_vec();
+    }
+    let mut out = Vec::new();
+    let _ = io::Read::read_to_end(&mut flate2::read::MultiGzDecoder::new(body), &mut out);
+    out
 }
 
 fn no_answer_in_time() -> String {
@@ -1156,7 +1464,7 @@ mod tests {
     fn sparql_query_text() {
         assert_eq!(
             wikidata_sparql_query(20),
-            "SELECT ?item ?itemLabel ?website WHERE { ?item wdt:P856 ?website ; wikibase:sitelinks ?sitelinks . FILTER(?sitelinks >= 20) SERVICE wikibase:label { bd:serviceParam wikibase:language \"en,mul\". } }"
+            "SELECT ?item ?itemLabel ?website WHERE { ?item wdt:P856 ?website ; wikibase:sitelinks ?s . FILTER(?s >= 20) SERVICE wikibase:label { bd:serviceParam wikibase:language \"en,mul\". } }"
         );
     }
 
@@ -1710,26 +2018,28 @@ mod tests {
         assert_eq!(
             wikidata_sitelink_bands(25),
             [
-                band(25, Some(26)),
-                band(27, Some(29)),
-                band(30, Some(33)),
-                band(34, Some(39)),
-                band(40, Some(49)),
-                band(50, Some(69)),
-                band(70, Some(99)),
-                band(100, None),
+                band(25, Some(29)),
+                band(30, Some(35)),
+                band(36, Some(44)),
+                band(45, Some(59)),
+                band(60, Some(84)),
+                band(85, Some(129)),
+                band(130, None),
             ]
         );
         assert_eq!(
             wikidata_sitelink_bands(45),
             [
-                band(45, Some(49)),
-                band(50, Some(69)),
-                band(70, Some(99)),
-                band(100, None)
+                band(45, Some(59)),
+                band(60, Some(84)),
+                band(85, Some(129)),
+                band(130, None)
             ]
         );
-        assert_eq!(wikidata_sitelink_bands(100), [band(100, None)]);
+        assert_eq!(
+            wikidata_sitelink_bands(100),
+            [band(100, Some(129)), band(130, None)]
+        );
         assert_eq!(wikidata_sitelink_bands(250), [band(250, None)]);
         // Below 25, every count is a band of its own.
         assert_eq!(
@@ -1738,10 +2048,10 @@ mod tests {
                 band(22, Some(22)),
                 band(23, Some(23)),
                 band(24, Some(24)),
-                band(25, Some(26))
+                band(25, Some(29))
             ]
         );
-        assert_eq!(wikidata_sitelink_bands(0).len(), 25 + 8);
+        assert_eq!(wikidata_sitelink_bands(0).len(), 25 + 7);
         for min in [0, 1, 10, 24, 25, 26, 27, 33, 99, 100, 101, 999, u32::MAX] {
             let bands = wikidata_sitelink_bands(min);
             assert_eq!(bands[0].min, min, "{min}");
@@ -1827,9 +2137,16 @@ mod tests {
     #[test]
     fn band_queries_and_names() {
         assert_eq!(
-            band(25, Some(26)).sparql_query(),
-            "SELECT ?item ?itemLabel ?website WHERE { ?item wdt:P856 ?website ; wikibase:sitelinks ?sitelinks . FILTER(?sitelinks >= 25 && ?sitelinks <= 26) SERVICE wikibase:label { bd:serviceParam wikibase:language \"en,mul\". } }"
+            band(25, Some(29)).sparql_query(),
+            "SELECT ?item ?itemLabel ?website WHERE { ?item wdt:P856 ?website ; wikibase:sitelinks ?s . FILTER(?s >= 25 && ?s < 30) SERVICE wikibase:label { bd:serviceParam wikibase:language \"en,mul\". } }"
         );
+        assert_eq!(
+            band(130, None).sparql_query(),
+            "SELECT ?item ?itemLabel ?website WHERE { ?item wdt:P856 ?website ; wikibase:sitelinks ?s . FILTER(?s >= 130) SERVICE wikibase:label { bd:serviceParam wikibase:language \"en,mul\". } }"
+        );
+        assert!(band(0, Some(u32::MAX))
+            .sparql_query()
+            .contains("FILTER(?s >= 0 && ?s < 4294967296)"));
         assert_eq!(band(100, None).sparql_query(), wikidata_sparql_query(100));
         let names: Vec<String> = [
             band(25, Some(25)),
@@ -2049,22 +2366,45 @@ mod tests {
         let filter = query.split_once("FILTER(")?.1.split_once(')')?.0;
         let (mut min, mut max) = (None, None);
         for part in filter.split("&&").map(str::trim) {
-            if let Some(n) = part.strip_prefix("?sitelinks >= ") {
+            if let Some(n) = part.strip_prefix("?s >= ") {
                 min = Some(n.parse().ok()?);
             } else {
-                let n = part.strip_prefix("?sitelinks <= ")?;
-                max = Some(n.parse().ok()?);
+                let n: u64 = part.strip_prefix("?s < ")?.parse().ok()?;
+                max = Some(u32::try_from(n - 1).ok()?);
             }
         }
         Some(band(min?, max))
     }
 
-    /// The bands a stand-in endpoint was asked for, in order.
-    type Asked = Arc<Mutex<Vec<SitelinkBand>>>;
+    /// The bands a stand-in endpoint was asked for, in order, with the head
+    /// of each request, lowercased.
+    #[derive(Debug, Default, Clone)]
+    struct Asked(Arc<Mutex<Vec<(SitelinkBand, String)>>>);
+
+    impl Asked {
+        fn bands(&self) -> Vec<SitelinkBand> {
+            self.0
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(band, _)| *band)
+                .collect()
+        }
+
+        fn heads(&self) -> Vec<String> {
+            self.0
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(_, head)| head.clone())
+                .collect()
+        }
+    }
 
     /// A stand-in for Wikidata's SPARQL endpoint on a loopback port; no
     /// outside network. It reads the band out of each form-encoded query and
-    /// answers `respond(band, n)`, where `n` counts the queries before it.
+    /// answers `respond(band, n)`, where `n` counts the earlier queries for
+    /// that same band.
     async fn sparql_endpoint<F>(respond: F) -> (String, Asked)
     where
         F: Fn(SitelinkBand, usize) -> Vec<u8> + Send + 'static,
@@ -2073,7 +2413,7 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}/sparql", listener.local_addr().unwrap());
         let asked = Asked::default();
-        let log = Arc::clone(&asked);
+        let log = asked.clone();
         tokio::spawn(async move {
             while let Ok((mut socket, _)) = listener.accept().await {
                 let mut request = Vec::new();
@@ -2108,9 +2448,10 @@ mod tests {
                     .unwrap_or_default();
                 let band = band_of_query(&query).expect("a query for a band of sitelinks");
                 let n = {
-                    let mut log = log.lock().unwrap();
-                    log.push(band);
-                    log.len() - 1
+                    let mut log = log.0.lock().unwrap();
+                    let n = log.iter().filter(|(b, _)| *b == band).count();
+                    log.push((band, head));
+                    n
                 };
                 let _ = socket.write_all(&respond(band, n)).await;
                 let _ = socket.shutdown().await;
@@ -2155,99 +2496,358 @@ mod tests {
             .collect()
     }
 
-    #[tokio::test]
-    async fn downloads_in_bands_and_halves_the_ones_wikidata_stops() {
-        // The stand-in lists at most 200 rows within its "time limit". Past
-        // that, it stops a band with an upper end as Wikidata does (JSON
-        // broken off, then the exception) and cuts off the open band's JSON
-        // with nothing after it.
-        const LIMIT: usize = 200;
-        let data = Arc::new(made_up_wikidata());
-        let served = Arc::clone(&data);
-        let (url, asked) = sparql_endpoint(move |band, _| {
-            let rows = rows_in(&served, band);
-            let answer = sparql_answer(rows.iter().copied());
-            let body = if rows.len() <= LIMIT {
-                answer
-            } else if band.max.is_some() {
-                stopped_at_time_limit(&answer, &band.sparql_query())
-            } else {
-                answer[..answer.len() / 2].to_string()
-            };
-            http_response("200 OK", &[], body.as_bytes())
-        })
-        .await;
-
-        let dir = tempfile::tempdir().unwrap();
-        let path = download_wikidata_official_sites_paced(
-            &loopback_client(),
-            &url,
-            &dir.path().join("seed"),
-            25,
-            quick(),
+    /// The answer of the made-up Wikidata for `band`, gzipped as Wikidata
+    /// sends it, whole or, when `stopped`, stopped at the time limit.
+    fn made_up_answer(
+        data: &[(u32, String, String, String)],
+        band: SitelinkBand,
+        stopped: bool,
+    ) -> Vec<u8> {
+        let answer = sparql_answer(rows_in(data, band));
+        let body = match stopped {
+            true => stopped_at_time_limit(&answer, &band.sparql_query()),
+            false => answer,
+        };
+        http_response(
+            "200 OK",
+            &[("Content-Encoding", "gzip")],
+            &gzip(body.as_bytes()),
         )
-        .await
-        .unwrap();
-        assert_eq!(path, dir.path().join("seed").join(WIKIDATA_FILE_NAME));
-        assert!(!part_path(&path).exists());
+    }
 
-        // Every row from 25 sitelinks up, once.
-        let text = std::fs::read_to_string(&path).unwrap();
+    /// Checks that `path` holds every made-up row from `min` sitelinks up, once.
+    fn assert_has_every_row(path: &Path, data: &[(u32, String, String, String)], min: u32) {
+        let text = std::fs::read_to_string(path).unwrap();
         let mut lines = text.lines();
         assert_eq!(lines.next(), Some("item\tlabel\twebsite"));
         let got: Vec<&str> = lines.collect();
-        let expected: HashSet<String> = rows_in(&data, band(25, None))
+        let expected: HashSet<String> = rows_in(data, band(min, None))
             .into_iter()
             .map(|(item, label, website)| format!("{item}\t{label}\t{website}"))
             .collect();
         assert_eq!(got.len(), expected.len(), "a row came twice");
         let got: HashSet<String> = got.into_iter().map(str::to_string).collect();
         assert_eq!(got, expected);
-        let sites = crate::load_wikidata_official_sites(&path).unwrap();
+        let sites = crate::load_wikidata_official_sites(path).unwrap();
         assert_eq!(sites.len(), expected.len());
         assert!(sites
             .iter()
             .any(|site| site.item == "Q2" && site.domain == "moved.org"));
+    }
 
-        // The default bands came first, lowest first. One too big for the
-        // time limit was asked for again in halves, right away, and those
-        // until they fit: the open band too.
-        let asked = asked.lock().unwrap().clone();
-        assert_eq!(
-            asked[..4],
-            [
-                band(25, Some(26)),
-                band(27, Some(29)),
-                band(27, Some(28)),
-                band(29, Some(29))
-            ]
-        );
-        for (i, &b) in asked.iter().enumerate() {
-            if rows_in(&data, b).len() > LIMIT {
-                let (lower, upper) = b.halves().unwrap();
-                assert_eq!(asked[i + 1], lower, "{b:?}");
-                assert!(asked[i + 1..].contains(&upper), "{b:?}");
+    /// The names in `dir`, sorted.
+    fn names_in(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[tokio::test]
+    async fn asks_again_for_bands_wikidata_stops_and_halves_them_last() {
+        // Wikidata stops the first query of every band at its time limit,
+        // and every query for 36 to 44 sitelinks.
+        let data = Arc::new(made_up_wikidata());
+        let served = Arc::clone(&data);
+        let (url, asked) = sparql_endpoint(move |asked_for, n| {
+            let stopped = n == 0 || asked_for == band(36, Some(44));
+            made_up_answer(&served, asked_for, stopped)
+        })
+        .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let seed = dir.path().join("seed");
+        let path =
+            download_wikidata_official_sites_paced(&loopback_client(), &url, &seed, 25, quick())
+                .await
+                .unwrap();
+        assert_eq!(path, seed.join(WIKIDATA_FILE_NAME));
+        assert_has_every_row(&path, &data, 25);
+        // The saved bands are gone with the `.part` file.
+        assert_eq!(names_in(&seed), [WIKIDATA_FILE_NAME]);
+
+        // Each band was asked for again after it was stopped; the one that
+        // was stopped every time was split once its tries ran out.
+        let mut expected = Vec::new();
+        for b in wikidata_sitelink_bands(25) {
+            if b == band(36, Some(44)) {
+                expected.extend([b; WIKIDATA_TRIES as usize]);
+                expected.extend([band(36, Some(40)); 2]);
+                expected.extend([band(41, Some(44)); 2]);
+            } else {
+                expected.extend([b; 2]);
             }
         }
-        assert!(asked.contains(&band(100, None)));
-        assert!(asked.contains(&band(200, None)));
-        // The answers that were whole cover every count from 25 up once.
-        let mut whole: Vec<SitelinkBand> = asked
-            .iter()
-            .copied()
-            .filter(|&b| rows_in(&data, b).len() <= LIMIT)
-            .collect();
-        whole.sort_by_key(|b| b.min);
-        assert_eq!(whole[0].min, 25);
-        assert_eq!(whole.last().unwrap().max, None);
-        for pair in whole.windows(2) {
-            assert_eq!(
-                pair[0].max.map(|max| max + 1),
-                Some(pair[1].min),
-                "{pair:?}"
+        assert_eq!(asked.bands(), expected);
+        for head in asked.heads() {
+            assert!(head.starts_with("post /sparql "), "{head}");
+            assert!(
+                head.contains("\r\naccept: application/sparql-results+json\r\n"),
+                "{head}"
             );
+            assert!(head.contains("\r\naccept-encoding: gzip\r\n"), "{head}");
+            assert!(
+                head.contains("\r\ncontent-type: application/x-www-form-urlencoded\r\n"),
+                "{head}"
+            );
+            assert!(head.contains("\r\nuser-agent: plumbsearch/"), "{head}");
         }
-        assert!(asked.len() > whole.len());
+    }
+
+    #[tokio::test]
+    async fn resumes_with_the_bands_an_earlier_try_saved() {
+        // The first try: 30 to 35 sitelinks is always stopped, and once it
+        // is split, the upper half is refused.
+        let data = Arc::new(made_up_wikidata());
+        let served = Arc::clone(&data);
+        let (url, asked) = sparql_endpoint(move |asked_for, _| {
+            if asked_for == band(33, Some(35)) {
+                return http_response("403 Forbidden", &[], b"blocked");
+            }
+            made_up_answer(&served, asked_for, asked_for == band(30, Some(35)))
+        })
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let err = download_wikidata_official_sites_paced(
+            &loopback_client(),
+            &url,
+            dir.path(),
+            25,
+            quick(),
+        )
+        .await
+        .unwrap_err();
+        let err = format!("{err:#}");
+        assert!(
+            err.starts_with(
+                "asking Wikidata for items with 33 to 35 sitelinks (try again later; the 2 bands \
+                 already in are saved): Wikidata query failed: HTTP 403 Forbidden: blocked"
+            ),
+            "{err}"
+        );
+        let mut expected = vec![band(25, Some(29))];
+        expected.extend([band(30, Some(35)); WIKIDATA_TRIES as usize]);
+        expected.extend([band(30, Some(32)), band(33, Some(35))]);
+        assert_eq!(asked.bands(), expected);
+        let bands_dir = dir.path().join(WIKIDATA_BANDS_DIR_NAME);
+        assert_eq!(names_in(dir.path()), [WIKIDATA_BANDS_DIR_NAME]);
+        assert_eq!(names_in(&bands_dir), ["25-29.tsv", "30-32.tsv"]);
+
+        // The next try asks only for what is missing.
+        let served = Arc::clone(&data);
+        let (url, asked) =
+            sparql_endpoint(move |band, _| made_up_answer(&served, band, false)).await;
+        let path = download_wikidata_official_sites_paced(
+            &loopback_client(),
+            &url,
+            dir.path(),
+            25,
+            quick(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            asked.bands(),
+            [
+                band(33, Some(35)),
+                band(36, Some(44)),
+                band(45, Some(59)),
+                band(60, Some(84)),
+                band(85, Some(129)),
+                band(130, None),
+            ]
+        );
+        assert_has_every_row(&path, &data, 25);
+        assert_eq!(names_in(dir.path()), [WIKIDATA_FILE_NAME]);
+
+        // A try with nothing saved asks for every band.
+        let (url, asked) = sparql_endpoint(move |band, _| made_up_answer(&data, band, false)).await;
+        download_wikidata_official_sites_paced(&loopback_client(), &url, dir.path(), 25, quick())
+            .await
+            .unwrap();
+        assert_eq!(asked.bands(), wikidata_sitelink_bands(25));
+    }
+
+    #[test]
+    fn saved_bands_are_found_and_the_missing_ones_asked_for() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(saved_bands(&dir.path().join("none"), 25)
+            .unwrap()
+            .is_empty());
+        for name in [
+            "20-24.tsv",
+            "25-29.tsv",
+            "28-31.tsv",
+            "36-40.tsv",
+            "130-up.tsv",
+            "30-32.tsv.part",
+            "41-40.tsv",
+            "notes.txt",
+        ] {
+            std::fs::write(dir.path().join(name), "item\tlabel\twebsite\n").unwrap();
+        }
+        // Below the minimum, overlapping a lower band, or not a band: removed.
+        assert_eq!(
+            saved_bands(dir.path(), 25).unwrap(),
+            [band(25, Some(29)), band(36, Some(40)), band(130, None)]
+        );
+        assert_eq!(
+            names_in(dir.path()),
+            ["130-up.tsv", "25-29.tsv", "36-40.tsv"]
+        );
+
+        let wanted = wikidata_sitelink_bands(25);
+        assert_eq!(missing_bands(&wanted, &[]), wanted);
+        assert_eq!(
+            missing_bands(
+                &wanted,
+                &[band(25, Some(29)), band(36, Some(40)), band(130, None)]
+            ),
+            [
+                band(30, Some(35)),
+                band(41, Some(44)),
+                band(45, Some(59)),
+                band(60, Some(84)),
+                band(85, Some(129)),
+            ]
+        );
+        // Saved bands that do not line up with the wanted ones.
+        assert_eq!(
+            missing_bands(
+                &wanted,
+                &[
+                    band(27, Some(32)),
+                    band(38, Some(39)),
+                    band(41, Some(44)),
+                    band(200, None)
+                ]
+            ),
+            [
+                band(25, Some(26)),
+                band(33, Some(35)),
+                band(36, Some(37)),
+                band(40, Some(40)),
+                band(45, Some(59)),
+                band(60, Some(84)),
+                band(85, Some(129)),
+                band(130, Some(199)),
+            ]
+        );
+        assert!(missing_bands(&wanted, &[band(25, None)]).is_empty());
+        assert_eq!(
+            missing_bands(&[band(0, Some(u32::MAX))], &[band(5, Some(u32::MAX))]),
+            [band(0, Some(4))]
+        );
+
+        for b in [band(25, Some(29)), band(7, Some(7)), band(130, None)] {
+            assert_eq!(SitelinkBand::from_file_name(&b.file_name()), Some(b));
+        }
+    }
+
+    #[tokio::test]
+    async fn halving_stops_at_the_cap() {
+        // Wikidata never answers whole. No waits, so the waits allowed in all
+        // never run out.
+        let no_waits = WikidataPacing {
+            pause: Duration::ZERO,
+            retry_wait: Duration::ZERO,
+        };
+        let (url, asked) = sparql_endpoint(|band, _| {
+            let body = stopped_at_time_limit(&answer_for(band), &band.sparql_query());
+            http_response("200 OK", &[], body.as_bytes())
+        })
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let err = download_wikidata_official_sites_paced(
+            &loopback_client(),
+            &url,
+            dir.path(),
+            130,
+            no_waits,
+        )
+        .await
+        .unwrap_err();
+        let err = format!("{err:#}");
+        assert!(
+            err.starts_with(
+                "Wikidata was too busy to answer the query for items with 130 to 194 sitelinks \
+                 (the answer breaks off after"
+            ),
+            "{err}"
+        );
+        assert!(
+            err.ends_with("(tried 6 times)); it is already split 2 times; try again later"),
+            "{err}"
+        );
+        let tries = WIKIDATA_TRIES as usize;
+        let mut expected = vec![band(130, None); tries];
+        expected.extend(vec![band(130, Some(259)); tries]);
+        expected.extend(vec![band(130, Some(194)); tries]);
+        assert_eq!(asked.bands(), expected);
+        assert!(std::fs::read_dir(dir.path()).unwrap().next().is_none());
+
+        // A single count cannot be split at all.
+        let (url, asked) = sparql_endpoint(|_, _| {
+            http_response("504 Gateway Timeout", &[], b"upstream timed out")
+        })
+        .await;
+        let err = download_wikidata_official_sites_paced(
+            &loopback_client(),
+            &url,
+            dir.path(),
+            24,
+            no_waits,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            format!("{err:#}"),
+            "Wikidata was too busy to answer the query for items with exactly 24 sitelinks \
+             (HTTP 504 Gateway Timeout: upstream timed out (tried 6 times)); it cannot be \
+             split; try again later"
+        );
+        assert_eq!(asked.bands(), vec![band(24, Some(24)); tries]);
+    }
+
+    #[tokio::test]
+    async fn waits_stop_at_the_budget() {
+        let (url, asked) =
+            sparql_endpoint(|_, _| http_response("503 Service Unavailable", &[], b"busy")).await;
+        let dir = tempfile::tempdir().unwrap();
+        let pacing = quick();
+        assert_eq!(pacing.budget(), Duration::from_millis(40));
+        let err = download_wikidata_official_sites_paced(
+            &loopback_client(),
+            &url,
+            dir.path(),
+            130,
+            pacing,
+        )
+        .await
+        .unwrap_err();
+        // 1 + 2 + 4 + 8 + 10 ms for the open band, then 1 + 2 + 4 + 8 ms for
+        // its lower half; 10 ms more is too much.
+        assert_eq!(
+            format!("{err:#}"),
+            "asking Wikidata for items with 130 to 259 sitelinks (try again later): HTTP 503 \
+             Service Unavailable: busy (tried 5 times); waiting 10ms more would pass the 40ms \
+             this download may wait in all"
+        );
+        let mut expected = vec![band(130, None); WIKIDATA_TRIES as usize];
+        expected.extend([band(130, Some(259)); 5]);
+        assert_eq!(asked.bands(), expected);
+    }
+
+    #[test]
+    fn waits_double_up_to_ten_times_the_first() {
+        let pacing = WikidataPacing::default();
+        let waits: Vec<u64> = (1..=7).map(|t| pacing.wait_after(t).as_secs()).collect();
+        assert_eq!(waits, [30, 60, 120, 240, 300, 300, 300]);
+        assert_eq!(pacing.budget(), Duration::from_secs(20 * 60));
+        assert_eq!(pacing.rate_limit_wait(), Duration::from_secs(60));
+        assert_eq!(pacing.wait_after(u32::MAX), Duration::from_secs(300));
     }
 
     /// The made-up rows of [`retries_rate_limits_and_server_errors`].
@@ -2266,46 +2866,44 @@ mod tests {
     #[tokio::test]
     async fn retries_rate_limits_and_server_errors() {
         let (url, asked) = sparql_endpoint(|band, n| match n {
-            0 => http_response(
-                "429 Too Many Requests",
-                &[("Retry-After", "1")],
-                b"slow down",
-            ),
-            1 => http_response("503 Service Unavailable", &[], b"try later"),
+            // Without Retry-After: at least twice the first wait.
+            0 => http_response("429 Too Many Requests", &[], b"slow down"),
+            1 => http_response("504 Gateway Timeout", &[], b"upstream timed out"),
             // Stopped at the time limit before the answer started.
             2 => http_response(
                 "500 Internal Server Error",
                 &[],
                 stopped_at_time_limit("", &band.sparql_query()).as_bytes(),
             ),
+            3 => http_response("502 Bad Gateway", &[], b"bad gateway"),
+            4 => http_response(
+                "429 Too Many Requests",
+                &[("Retry-After", "1")],
+                b"slow down",
+            ),
             _ => http_response("200 OK", &[], answer_for(band).as_bytes()),
         })
         .await;
         let dir = tempfile::tempdir().unwrap();
         let started = Instant::now();
+        let pacing = WikidataPacing {
+            pause: Duration::ZERO,
+            retry_wait: Duration::from_millis(50),
+        };
         let path = download_wikidata_official_sites_paced(
             &loopback_client(),
             &url,
             dir.path(),
-            100,
-            quick(),
+            130,
+            pacing,
         )
         .await
         .unwrap();
         assert!(
-            started.elapsed() >= Duration::from_secs(1),
-            "waited as long as Retry-After asked"
+            started.elapsed() >= Duration::from_millis(1800),
+            "waited 100 (not 50), 100, 200 and 400 ms, then as long as Retry-After asked"
         );
-        assert_eq!(
-            *asked.lock().unwrap(),
-            [
-                band(100, None),
-                band(100, None),
-                band(100, None),
-                band(100, Some(199)),
-                band(200, None)
-            ]
-        );
+        assert_eq!(asked.bands(), [band(130, None); 6]);
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
             "item\tlabel\twebsite\n\
@@ -2315,7 +2913,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_answer_the_connection_cuts_short_is_split() {
+    async fn an_answer_the_connection_cuts_short_is_asked_for_again() {
         let (url, asked) = sparql_endpoint(|band, n| {
             let answer = answer_for(band);
             if n > 0 {
@@ -2336,65 +2934,13 @@ mod tests {
             &loopback_client(),
             &url,
             dir.path(),
-            100,
+            130,
             quick(),
         )
         .await
         .unwrap();
-        assert_eq!(
-            *asked.lock().unwrap(),
-            [band(100, None), band(100, Some(199)), band(200, None)]
-        );
+        assert_eq!(asked.bands(), [band(130, None); 2]);
         assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 3);
-    }
-
-    #[tokio::test]
-    async fn a_single_count_wikidata_still_stops_fails_the_download() {
-        let (url, asked) = sparql_endpoint(|band, _| {
-            let body = stopped_at_time_limit(&answer_for(band), &band.sparql_query());
-            http_response("200 OK", &[], body.as_bytes())
-        })
-        .await;
-        let dir = tempfile::tempdir().unwrap();
-        let err = download_wikidata_official_sites_paced(
-            &loopback_client(),
-            &url,
-            dir.path(),
-            100,
-            quick(),
-        )
-        .await
-        .unwrap_err();
-        let err = format!("{err:#}");
-        assert!(
-            err.starts_with(
-                "Wikidata stopped the query for items with exactly 100 sitelinks at its time limit"
-            ),
-            "{err}"
-        );
-        assert!(err.contains("cannot be split any further"), "{err}");
-        assert!(!err.contains("JSON") && !err.contains("expected"), "{err}");
-        let asked: Vec<String> = asked
-            .lock()
-            .unwrap()
-            .iter()
-            .map(ToString::to_string)
-            .collect();
-        assert_eq!(
-            asked,
-            [
-                "100 or more sitelinks",
-                "100 to 199 sitelinks",
-                "100 to 149 sitelinks",
-                "100 to 124 sitelinks",
-                "100 to 112 sitelinks",
-                "100 to 106 sitelinks",
-                "100 to 103 sitelinks",
-                "100 to 101 sitelinks",
-                "exactly 100 sitelinks",
-            ]
-        );
-        assert!(std::fs::read_dir(dir.path()).unwrap().next().is_none());
     }
 
     #[tokio::test]
@@ -2406,9 +2952,9 @@ mod tests {
                 "Wikidata query failed: HTTP 400 Bad Request: bad query",
             ),
             (
-                http_response("503 Service Unavailable", &[], b"down"),
+                http_response("502 Bad Gateway", &[], b"down"),
                 WIKIDATA_TRIES as usize,
-                "HTTP 503 Service Unavailable: down (tried 4 times)",
+                "HTTP 502 Bad Gateway: down (tried 6 times)",
             ),
             (
                 http_response("429 Too Many Requests", &[("Retry-After", "3600")], b""),
@@ -2428,18 +2974,20 @@ mod tests {
                 &loopback_client(),
                 &url,
                 dir.path(),
-                100,
+                130,
                 quick(),
             )
             .await
             .unwrap_err();
             let err = format!("{err:#}");
             assert!(
-                err.starts_with("asking Wikidata for items with 100 or more sitelinks: "),
+                err.starts_with(
+                    "asking Wikidata for items with 130 or more sitelinks (try again later): "
+                ),
                 "{err}"
             );
             assert!(err.contains(expected), "{err}");
-            assert_eq!(asked.lock().unwrap().len(), requests, "{err}");
+            assert_eq!(asked.bands().len(), requests, "{err}");
             assert!(std::fs::read_dir(dir.path()).unwrap().next().is_none());
         }
     }
