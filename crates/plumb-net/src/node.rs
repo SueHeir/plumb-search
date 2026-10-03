@@ -98,6 +98,9 @@ const CIRCUIT_REFILL: Duration = Duration::from_millis(100);
 /// Batch fetches in flight at once.
 const MAX_FETCHES: usize = 16;
 
+/// Network searches run at once by one node ([`NetHandle::search`]).
+pub const MAX_SEARCHES: usize = 4;
+
 /// Refused batch ids remembered; the set is emptied when it reaches this.
 const MAX_REFUSED: usize = 100_000;
 /// Bucket requests answered at once for free; more are turned away as
@@ -272,6 +275,10 @@ pub struct NetHandle {
     tokens_spent: Arc<std::sync::atomic::AtomicU64>,
     /// Buckets this node's own searches fetched (see [`crate::cache`]).
     cache: crate::cache::BucketCache,
+    /// Searches under way, at most [`MAX_SEARCHES`]: each one sends many
+    /// requests and may spend tokens, and a public node's search page is
+    /// open to anyone.
+    searches: Arc<tokio::sync::Semaphore>,
     task: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -371,7 +378,14 @@ impl NetHandle {
     /// that match, checked but unranked (see [`crate::search`]). Buckets
     /// this node fetched lately are used again instead of asked for (see
     /// [`crate::cache`]).
+    ///
+    /// At most [`MAX_SEARCHES`] run at once; a search that can't start
+    /// within `wait` fails as busy.
     pub async fn search(&self, query: &str, wait: Duration) -> Result<NetSearch> {
+        let _turn = tokio::time::timeout(wait, self.searches.acquire())
+            .await
+            .map_err(|_| anyhow::anyhow!("too many network searches at once; try again"))?
+            .context("the network is shutting down")?;
         let (reply, peers) = oneshot::channel();
         self.send(Command::Peers(Serving::Buckets, reply))?;
         let peers = peers.await.context("the network task stopped")?;
@@ -810,6 +824,7 @@ pub async fn start(
             wallet,
             tokens_spent,
             cache: crate::cache::BucketCache::open(&config.dir.join("bucket-cache"), now_unix()),
+            searches: Arc::new(tokio::sync::Semaphore::new(MAX_SEARCHES)),
             task: Mutex::new(Some(handle)),
         },
         records_rx,
