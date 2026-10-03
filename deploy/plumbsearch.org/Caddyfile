@@ -1,0 +1,43 @@
+# plumbsearch.org: the project's static website, from site/ at the top of
+# the repository (mounted at /srv by compose.yml).
+#
+# Caddy gets and renews the HTTPS certificates for both names by itself and
+# redirects plain HTTP to HTTPS. No email address is set; the certificate
+# authority does not need one.
+#
+# There is no `log` directive, on purpose: without one Caddy keeps no access
+# log, so visits are not recorded.
+
+(security_headers) {
+	header {
+		# HTTPS only, for one year. No preload and no includeSubDomains, so
+		# the promise covers just these two names.
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+		# Only the site's own stylesheet and images. default-src 'none' rules
+		# out scripts and everything else not listed, and frame-ancestors
+		# 'none' stops other sites from framing these pages.
+		Content-Security-Policy "default-src 'none'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+	}
+}
+
+plumbsearch.org {
+	import security_headers
+	root * /srv
+	encode zstd gzip
+	file_server
+
+	# Pages are checked again on every visit, so a change shows up at once.
+	# Stylesheets and images keep for a day: their names carry no version,
+	# so a longer time would keep old copies around after an update.
+	@pages path / *.html
+	header @pages Cache-Control "no-cache"
+	@assets path *.css *.svg *.png *.jpg *.webp *.ico
+	header @assets Cache-Control "public, max-age=86400"
+}
+
+www.plumbsearch.org {
+	import security_headers
+	redir https://plumbsearch.org{uri} permanent
+}

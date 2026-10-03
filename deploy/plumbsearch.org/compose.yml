@@ -1,0 +1,21 @@
+# Serves https://plumbsearch.org with Caddy. See README.md in this folder.
+services:
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443/tcp"
+      - "443:443/udp" # HTTP/3
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ../../site:/srv:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  # Certificates and their keys. Keep this volume: without it Caddy has to
+  # ask for new certificates, and the certificate authority limits how often
+  # it issues them.
+  caddy_data:
+  caddy_config:
