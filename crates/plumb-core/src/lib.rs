@@ -390,6 +390,11 @@ impl RecordSet {
         self.map.values()
     }
 
+    /// Keeps only the records for which `keep` is true.
+    pub fn retain(&mut self, mut keep: impl FnMut(&SiteRecord) -> bool) {
+        self.map.retain(|_, record| keep(record));
+    }
+
     /// All records, best [`link_score`] first, ties broken by domain.
     pub fn into_sorted_vec(self) -> Vec<SiteRecord> {
         let mut records: Vec<SiteRecord> = self.map.into_values().collect();
