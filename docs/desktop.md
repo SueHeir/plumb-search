@@ -13,9 +13,7 @@ The panel has these sections:
 - **Remote control:** let the app on another computer control this node.
 - **About:** version, data location, diagnostics, and source code.
 
-Optional features are off until enabled. Save feature choices, then use **Quit
-Plumb Search** in the tray/menu bar and reopen the app. Closing the window
-keeps the node running and does not apply restart settings. A banner shows
+The desktop joins the network by default. Save feature choices, then use **Restart to apply** when offered. Otherwise use **Quit Plumb Search** in the tray/menu bar and reopen the app, or restart the Docker container. Closing the window keeps the node running. A banner shows
 when saved choices differ from the running node. Resource and feature forms
 never refresh automatically while you edit them.
 

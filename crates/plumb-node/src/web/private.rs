@@ -88,12 +88,15 @@ async fn private_page(
 ) -> Response {
     // A query in the address (`/private?q=`) is not read: private searches
     // come from the fragment.
-    let country = SearchParams {
+    let auto_country = SearchParams::default()
+        .options(&state.settings.home, &headers)
+        .country;
+    let country_mode = params.country.clone().unwrap_or_else(|| "auto".into());
+    let options = SearchParams {
         q: String::new(),
         ..params
     }
-    .options(&state.settings.home, &headers)
-    .country;
+    .options(&state.settings.home, &headers);
     let available = state.private_search();
     let status = if available {
         StatusCode::OK
@@ -108,14 +111,29 @@ async fn private_page(
             (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
             (header::CACHE_CONTROL, "no-cache"),
         ],
-        axum::response::Html(render_private(available, country.as_deref())),
+        axum::response::Html(render_private_options(
+            available,
+            auto_country.as_deref(),
+            options.only_country,
+            &country_mode,
+        )),
     )
         .into_response()
 }
 
 /// The private search page. `available` says whether its script can run
 /// here; `country` is the home country the ranking favors.
+#[cfg(test)]
 fn render_private(available: bool, country: Option<&str>) -> String {
+    render_private_options(available, country, false, country.unwrap_or("auto"))
+}
+
+fn render_private_options(
+    available: bool,
+    country: Option<&str>,
+    only: bool,
+    country_mode: &str,
+) -> String {
     let head = if available {
         format!(
             "<script type=\"module\" src=\"/private/{}/boot.js\"></script>\n",
@@ -131,21 +149,53 @@ fn render_private(available: bool, country: Option<&str>) -> String {
         "<p class=\"err\">This site does not offer private search right now. \
          <a href=\"/\">Search normally</a> instead.</p>"
     };
+    let mut choices = format!(
+        "<option value=\"auto\"{}>Automatic</option><option value=\"any\"{}>Any country</option>",
+        if country_mode == "auto" {
+            " selected"
+        } else {
+            ""
+        },
+        if country_mode == "any" {
+            " selected"
+        } else {
+            ""
+        }
+    );
+    for (code, name) in crate::country::COUNTRY_CHOICES {
+        choices.push_str(&format!(
+            "<option value=\"{code}\"{}>{name}</option>",
+            if country_mode.eq_ignore_ascii_case(code) {
+                " selected"
+            } else {
+                ""
+            }
+        ));
+    }
+    let controls = format!("<details class=\"gear\"><summary aria-label=\"Settings\">&#9881;</summary><div class=\"panel\"><label>Country <select id=\"pq-country\">{choices}</select></label><label><input id=\"pq-only\" type=\"checkbox\"{}> Only this country</label><button type=\"submit\">Apply</button></div></details>", if only { " checked" } else { "" });
+    let disabled = if available { "" } else { " disabled" };
     let body = format!(
         "<main class=\"wrap\" id=\"pq\" data-country=\"{}\">\n\
-         <header><a class=\"logo\" href=\"/\">Plumb</a>\
+         <header><a id=\"pq-home\" class=\"logo\" href=\"/\">Plumb Search</a>\
          <form id=\"pq-form\" action=\"/private\" method=\"get\" role=\"search\">\
-         <input type=\"search\" id=\"pq-q\" placeholder=\"A site's name, e.g. us bank\" \
-         aria-label=\"Search privately\" autocomplete=\"off\" autofocus>\
-         <button type=\"submit\" id=\"pq-go\" disabled>Search</button></form></header>\n\
-         <p class=\"src\"><strong>Private search.</strong> Your browser looks up the results \
+         <fieldset style=\"display:contents;border:0;padding:0;margin:0\"{disabled}><input type=\"search\" id=\"pq-q\" placeholder=\"Site name\" \
+         aria-label=\"Search privately\" autocomplete=\"off\">{controls}\
+         <button type=\"submit\" id=\"pq-go\" disabled>Search</button></fieldset></form></header>\n\
+         <h1 class=\"visually-hidden\">Private search</h1><p class=\"src\"><strong>Private search.</strong> Your browser looks up the results \
          itself: it fetches a few groups of sites from this server, padded with random ones, \
          and picks the matches. This server never sees what you search for. \
-         <a href=\"/\">Normal search</a></p>\n{note}\n\
+         <a id=\"pq-normal\" href=\"/\">Normal search</a></p>\n{note}\n\
          <p class=\"s\" id=\"pq-status\" role=\"status\"></p>\n<ol id=\"pq-results\"></ol>\n\
          </main>",
         escape_html(country.unwrap_or(""))
     );
+    let mut params = url::form_urlencoded::Serializer::new(String::new());
+    params.append_pair("country", country_mode);
+    if only {
+        params.append_pair("only", "1");
+    }
+    let normal = super::escape_html(&format!("/?{}", params.finish()));
+    let body = body.replace("href=\"/\"", &format!("href=\"{normal}\""));
     page_with_head("Private search - Plumb Search", &head, &body)
 }
 
