@@ -38,6 +38,19 @@ impl Node {
         listen: bool,
     ) -> Node {
         let dir = tempfile::tempdir().unwrap();
+        Self::start_config(dir, relay, bootstrap, local, listen, |_| {}).await
+    }
+
+    /// [`Node::start_with`] in `dir`, with `tweak` applied to the config
+    /// last.
+    async fn start_config(
+        dir: TempDir,
+        relay: bool,
+        bootstrap: Vec<Multiaddr>,
+        local: Vec<SiteRecord>,
+        listen: bool,
+        tweak: impl FnOnce(&mut NetConfig),
+    ) -> Node {
         let mut config = NetConfig::new(dir.path().to_path_buf());
         config.listen = if listen {
             vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()]
@@ -48,6 +61,7 @@ impl Node {
         config.local_discovery = false;
         config.relay_server = relay;
         config.bootstrap = bootstrap;
+        tweak(&mut config);
         let source = table(dir.path(), &local);
         let (handle, records) = plumb_net::start(config, source).await.unwrap();
         Node {
@@ -497,4 +511,74 @@ async fn confirmed_crawls_earn_credits_that_buy_tokens() {
     // B never crawled: R has nothing for it, and A's credits are A's.
     let refused = b.handle.collect_tokens(r.handle.peer_id(), 1).await;
     assert!(refused.is_err(), "{refused:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_busy_node_answers_searches_that_spend_its_tokens() {
+    use plumb_net::agree::MIN_JUDGED;
+
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("plumb_net=debug")
+        .with_test_writer()
+        .try_init();
+
+    // Keys first, to pick sites both are assigned.
+    let (a_dir, r_dir) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let key = |dir: &TempDir| {
+        plumb_net::load_or_create_key(&dir.path().join("node.key"))
+            .unwrap()
+            .public()
+            .to_peer_id()
+    };
+    let peers = [key(&a_dir), key(&r_dir)];
+    let sites: Vec<SiteRecord> = (0..MIN_JUDGED)
+        .map(|i| crawled_for(&peers, &format!("busy{i}x")))
+        .collect();
+
+    // R holds those sites and is always busy: it answers nothing for free.
+    let r = Node::start_config(r_dir, true, vec![], sites.clone(), true, |c| {
+        c.max_answering = 0;
+    })
+    .await;
+    let r_addr = r.addr().await;
+    let a = Node::start_config(a_dir, false, vec![r_addr], vec![], true, |_| {}).await;
+    wait_for(|| (a.handle.status().connected_peers >= 1).then_some(())).await;
+    let r = &r.handle;
+
+    // A and R crawl the same sites, so R counts credits for A.
+    a.handle.publish(sites.clone()).await.unwrap().unwrap();
+    let n = sites.len();
+    wait_for(|| (r.status().agreement.pending_sites == n).then_some(())).await;
+    r.publish(sites.clone()).await.unwrap().unwrap();
+    let mut credits = 0;
+    for _ in 0..100 {
+        credits = a.handle.credits_at(r.peer_id()).await.unwrap().credits;
+        if credits > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(credits > 0);
+
+    // Without tokens, R turns every request away.
+    let wait = Duration::from_secs(10);
+    let free = a.handle.search("busy0x", wait).await.unwrap();
+    assert!(free.busy > 0, "{free:?}");
+    assert_eq!(free.priority, 0);
+    assert_eq!(free.answered, 0, "{free:?}");
+
+    // With tokens, R answers them, spending one each.
+    let got = a.handle.collect_tokens(r.peer_id(), 8).await.unwrap();
+    assert_eq!(got, 8);
+    let paid = a.handle.search("busy0x", wait).await.unwrap();
+    assert!(paid.priority > 0, "{paid:?}");
+    assert_eq!(paid.priority, paid.answered, "{paid:?}");
+    assert!(paid
+        .found
+        .iter()
+        .any(|s| s.record.domain == sites[0].domain));
+    let spent = paid.priority;
+    assert_eq!(a.handle.tokens_held(&r.peer_id()), 8 - spent);
+    wait_for(|| (a.handle.status().credits.tokens_spent == spent as u64).then_some(())).await;
+    wait_for(|| (r.status().credits.priority_answered == spent as u64).then_some(())).await;
 }
