@@ -6,6 +6,8 @@ use std::time::Duration;
 
 use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 
+use crate::country::HomeCountry;
+
 /// Plumb Search: a self-hostable search engine that finds sites by name.
 ///
 /// The easy way: `plumb run --data DIR` sets everything up and keeps the
@@ -82,6 +84,13 @@ pub struct RunArgs {
     /// [default: the index's default].
     #[arg(long, value_name = "A", value_parser = parse_alpha)]
     pub alpha: Option<f32>,
+    /// Home country, whose sites rank a little higher and other countries'
+    /// a little lower: a two-letter code such as US or DE, `any` for none,
+    /// or `auto` to take it from each browser's language setting
+    /// (`en-US` -> US), falling back to this computer's region settings.
+    /// A search can pick another with `country=` in its address.
+    #[arg(long, value_name = "CODE", default_value = "auto", value_parser = HomeCountry::parse)]
+    pub country: HomeCountry,
     /// Crawl homepages through the proxy in HTTP_PROXY, HTTPS_PROXY or
     /// ALL_PROXY (except hosts in NO_PROXY), for machines that reach the
     /// internet only through one. Without it, homepages are fetched directly
@@ -172,6 +181,11 @@ pub struct IngestArgs {
     /// Wikidata official websites (the TSV that fetch-data writes).
     #[arg(long, value_name = "PATH")]
     pub wikidata: Option<PathBuf>,
+    /// Countries and kinds of the organizations behind Wikidata's official
+    /// websites (the wikidata-site-facts.tsv that fetch-data writes); needs
+    /// --wikidata.
+    #[arg(long, value_name = "PATH", requires = "wikidata")]
+    pub wikidata_facts: Option<PathBuf>,
     /// Records files from an earlier ingest or crawl to merge in (list several,
     /// or repeat the flag), each with the journal an interrupted crawl may
     /// have left next to it (PATH.journal). Seed files given with them
@@ -265,6 +279,13 @@ pub struct SearchArgs {
     /// Print the hits as JSON.
     #[arg(long)]
     pub json: bool,
+    /// Home country, a two-letter code such as US or DE: its sites rank a
+    /// little higher, other countries' a little lower [default: none].
+    #[arg(long, value_name = "CODE", value_parser = parse_country)]
+    pub country: Option<String>,
+    /// Leave out other countries' sites (needs --country).
+    #[arg(long, requires = "country")]
+    pub only_country: bool,
     /// What to search for, e.g. `us bank`.
     #[arg(required = true, value_name = "QUERY")]
     pub query: Vec<String>,
@@ -282,6 +303,13 @@ pub struct ServeArgs {
     /// [default: the index's default].
     #[arg(long, value_name = "A", value_parser = parse_alpha)]
     pub alpha: Option<f32>,
+    /// Home country, whose sites rank a little higher and other countries'
+    /// a little lower: a two-letter code such as US or DE, `any` for none,
+    /// or `auto` to take it from each browser's language setting
+    /// (`en-US` -> US), falling back to this computer's region settings.
+    /// A search can pick another with `country=` in its address.
+    #[arg(long, value_name = "CODE", default_value = "auto", value_parser = HomeCountry::parse)]
+    pub country: HomeCountry,
 }
 
 #[derive(Debug, Args)]
@@ -304,6 +332,10 @@ pub struct EvalArgs {
     /// below this fraction, e.g. 0.9.
     #[arg(long, value_name = "F", value_parser = parse_fraction)]
     pub min_top1: Option<f64>,
+    /// Home country of the searches, a two-letter code such as US
+    /// [default: none].
+    #[arg(long, value_name = "CODE", value_parser = parse_country)]
+    pub country: Option<String>,
 }
 
 fn parse_positive(s: &str) -> Result<usize, String> {
@@ -311,6 +343,11 @@ fn parse_positive(s: &str) -> Result<usize, String> {
         Ok(n) if n > 0 => Ok(n),
         _ => Err(format!("expected a whole number above 0, got `{s}`")),
     }
+}
+
+fn parse_country(text: &str) -> Result<String, String> {
+    plumb_core::normalize_country(text)
+        .ok_or_else(|| format!("expected a two-letter country code such as US or DE, got {text:?}"))
 }
 
 fn parse_alpha(s: &str) -> Result<f32, String> {

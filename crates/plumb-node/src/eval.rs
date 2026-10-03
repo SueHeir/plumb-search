@@ -10,7 +10,7 @@ use std::fmt::Write as _;
 
 use anyhow::{bail, Context, Result};
 use plumb_core::registrable_domain;
-use plumb_index::Searcher;
+use plumb_index::{SearchOptions, Searcher};
 use tracing::info;
 
 use crate::cli::EvalArgs;
@@ -154,9 +154,14 @@ pub fn run(args: EvalArgs) -> Result<()> {
 
     let mut ranks = Vec::with_capacity(queries.len());
     for q in &queries {
+        let options = SearchOptions {
+            country: args.country.clone(),
+            only_country: false,
+        };
         let hits = searcher
-            .search_with(&q.query, args.limit, &cfg)
-            .with_context(|| format!("searching for {:?}", q.query))?;
+            .search_full(&q.query, args.limit, &cfg, &options)
+            .with_context(|| format!("searching for {:?}", q.query))?
+            .hits;
         let domains: Vec<&str> = hits.iter().map(|h| h.domain.as_str()).collect();
         let rank = rank_of(&domains, &q.expected);
         if rank != Some(1) {

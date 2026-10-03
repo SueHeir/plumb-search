@@ -6,7 +6,7 @@
 //! match so "us bank" finds the label `usbank`) with the site's popularity
 //! prior, [`plumb_core::link_score`]:
 //!
-//! `score = alpha * link_score + trust * ((1 - alpha) * text_score + name_bonus)`
+//! `score = alpha * link_score + trust * ((1 - alpha) * text_score + name_bonus) + country`
 //!
 //! - `text_score` is the BM25 score normalized to `0..=1` within the
 //!   candidates of each query.
@@ -17,7 +17,20 @@
 //!   [`RankConfig::exact_alias_bonus`]. So in "irs refund" irs.gov gets half
 //!   the label bonus. A query that is a hostname or URL (`usbank.com`,
 //!   `https://www.usbank.com/`) counts as a whole-query label match for
-//!   that domain.
+//!   that domain. An official website's Wikidata names count as labels,
+//!   with or without a leading "The", so "wall street journal" names
+//!   wsj.com as strongly as wall.org names itself.
+//!   A site named by the whole query (by its label, an official name or a
+//!   typed hostname) also gets a full text match, so popularity decides
+//!   among the sites a query names: aa.com, officially "American Airlines",
+//!   beats americanairlines.com.
+//! - A query that is a kind of thing ("banks", "airlines") gives every site
+//!   of that kind ([`SiteRecord::kinds`]) a full text match and
+//!   [`RankConfig::kind_bonus`], so they are listed by popularity.
+//! - `country` is [`RankConfig::country_boost`] for a site of the searcher's
+//!   home country ([`SearchOptions::country`]), minus that for a site of
+//!   another country, and 0 for global sites. [`SearchOptions::only_country`]
+//!   drops other countries' sites instead.
 //! - `trust` guards brand-plus-intent queries ("us bank login") against
 //!   look-alikes such as usbank-login-help.com, which stuff every query word
 //!   into their titles and domains but have no popularity to show for it.
@@ -45,7 +58,8 @@ use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 use plumb_core::{
-    canonical_domain, registrable_domain, truncate_chars, SiteRecord, MAX_TEXT_CHARS,
+    canonical_domain, kind_key, normalize_country, registrable_domain, search_link,
+    search_template_for, truncate_chars, SiteRecord, MAX_TEXT_CHARS,
 };
 use serde::{Deserialize, Serialize};
 use tantivy::collector::{DocSetCollector, TopDocs};
@@ -111,6 +125,15 @@ pub struct RankConfig {
     /// score of 0 keeps in that case. It grows linearly to all of it at
     /// [`RankConfig::trusted_link_score`].
     pub untrusted_share: f32,
+    /// Added when the whole query names what kind of thing a site is
+    /// ("banks" for a site whose Wikidata kind is "bank"), whose text match
+    /// then counts as full, so the sites of that kind come first, most
+    /// popular first.
+    pub kind_bonus: f32,
+    /// With a home country ([`SearchOptions::country`]), added for sites of
+    /// that country and taken off sites of any other country. Sites that
+    /// belong to no country (most `.com`s) are left alone.
+    pub country_boost: f32,
 }
 
 impl Default for RankConfig {
@@ -122,6 +145,8 @@ impl Default for RankConfig {
             exact_alias_bonus: 0.1,
             trusted_link_score: 0.2,
             untrusted_share: 0.5,
+            kind_bonus: 0.25,
+            country_boost: 0.06,
         }
     }
 }
@@ -157,6 +182,42 @@ pub struct Hit {
     pub text_score: f32,
     /// [`plumb_core::link_score`] of the site.
     pub link_score: f32,
+    /// The country the site belongs to ([`plumb_core::site_country`]),
+    /// `None` for global sites.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub country: Option<String>,
+}
+
+/// Per-search choices of the person searching.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SearchOptions {
+    /// Home country, an ISO 3166-1 alpha-2 code (`US`): its sites get
+    /// [`RankConfig::country_boost`] and other countries' sites lose it.
+    pub country: Option<String>,
+    /// Leave out sites of countries other than [`SearchOptions::country`].
+    /// Global sites stay. Does nothing without a country.
+    pub only_country: bool,
+}
+
+/// A link into a site's own search for the words after its name:
+/// "github plumb search" -> search github.com for "plumb search".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SiteSearch {
+    pub domain: String,
+    /// The words searched for, as typed.
+    pub terms: String,
+    /// The site's search address for them.
+    pub url: String,
+}
+
+/// What [`Searcher::search_full`] finds.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SearchResults {
+    pub hits: Vec<Hit>,
+    /// Offered when the query starts with a site's name and goes on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub site_search: Option<SiteSearch>,
 }
 
 /// Builds a fresh index of `records` in `dir`, replacing any index already
@@ -336,24 +397,40 @@ impl Searcher {
         self.search_with(query, limit, &RankConfig::default())
     }
 
-    /// Best `limit` hits for `query`, best first. A query with no letters or
-    /// digits returns no hits.
+    /// Best `limit` hits for `query`, best first, with no home country. See
+    /// [`Searcher::search_full`].
+    pub fn search_with(&self, query: &str, limit: usize, cfg: &RankConfig) -> Result<Vec<Hit>> {
+        Ok(self
+            .search_full(query, limit, cfg, &SearchOptions::default())?
+            .hits)
+    }
+
+    /// Best `limit` hits for `query`, best first, and a link into a named
+    /// site's own search when the query goes on after the site's name. A
+    /// query with no letters or digits finds nothing.
     ///
     /// The top `max(cfg.candidates, limit)` documents by BM25, plus every
-    /// site whose name the query starts with, are re-ranked by the blended
-    /// score (see the [crate docs](crate)); ties go to the higher link
-    /// score, then to the alphabetically first domain.
-    pub fn search_with(&self, query: &str, limit: usize, cfg: &RankConfig) -> Result<Vec<Hit>> {
+    /// site whose name the query starts with and every site of the kind
+    /// the query names, are re-ranked by the blended score (see the
+    /// [crate docs](crate)); ties go to the higher link score, then to the
+    /// alphabetically first domain.
+    pub fn search_full(
+        &self,
+        query_text: &str,
+        limit: usize,
+        cfg: &RankConfig,
+        options: &SearchOptions,
+    ) -> Result<SearchResults> {
         if limit == 0 {
-            return Ok(Vec::new());
+            return Ok(SearchResults::default());
         }
-        let Some(query) = ParsedQuery::new(query, &self.words, &self.joined) else {
-            return Ok(Vec::new());
+        let Some(query) = ParsedQuery::new(query_text, &self.words, &self.joined) else {
+            return Ok(SearchResults::default());
         };
         let searcher = self.reader.searcher();
         let num_docs = usize::try_from(searcher.num_docs()).unwrap_or(usize::MAX);
         if num_docs == 0 {
-            return Ok(Vec::new());
+            return Ok(SearchResults::default());
         }
 
         let text_query = query.text_query(&self.fields);
@@ -363,13 +440,28 @@ impl Searcher {
             &TopDocs::with_limit(num_candidates).order_by_score(),
         )?;
         // A site the query names is ranked even if BM25 put others first:
-        // it is what the look-alikes are measured against.
+        // it is what the look-alikes are measured against. So is every site
+        // of the kind the query names.
         let names = self.name_matches(&searcher, &query)?;
+        let kinds = match &query.kind {
+            Some(key) => matching_docs(
+                &searcher,
+                vec![Term::from_field_text(self.fields.kind_key, key)],
+            )?,
+            None => HashSet::new(),
+        };
         let known: HashSet<DocAddress> = candidates.iter().map(|&(_, addr)| addr).collect();
-        let unranked = names.keys().filter(|addr| !known.contains(addr)).copied();
-        candidates.extend(bm25_of(&searcher, &text_query, unranked.collect())?);
+        let mut unranked: Vec<DocAddress> = names
+            .keys()
+            .chain(kinds.iter())
+            .filter(|addr| !known.contains(addr))
+            .copied()
+            .collect();
+        unranked.sort_unstable();
+        unranked.dedup();
+        candidates.extend(bm25_of(&searcher, &text_query, unranked)?);
         if candidates.is_empty() {
-            return Ok(Vec::new());
+            return Ok(SearchResults::default());
         }
 
         let columns = searcher
@@ -377,17 +469,25 @@ impl Searcher {
             .iter()
             .map(|segment| {
                 let fast = segment.fast_fields();
-                Ok((fast.f64(schema::LINK_SCORE)?, fast.str(schema::DOMAIN)?))
+                Ok(Columns {
+                    link_scores: fast.f64(schema::LINK_SCORE)?,
+                    domains: fast.str(schema::DOMAIN)?,
+                    countries: fast.str(schema::COUNTRY)?,
+                })
             })
             .collect::<tantivy::Result<Vec<_>>>()?;
         let link_score_of = |addr: DocAddress| {
-            let (link_scores, _) = &columns[addr.segment_ord as usize];
-            link_scores.first(addr.doc_id).unwrap_or(0.0) as f32
+            columns[addr.segment_ord as usize]
+                .link_scores
+                .first(addr.doc_id)
+                .unwrap_or(0.0) as f32
         };
 
         let default = RankConfig::default();
         let alpha = unit_or(cfg.alpha, default.alpha);
         let untrusted_share = unit_or(cfg.untrusted_share, default.untrusted_share);
+        let country_boost = unit_or(cfg.country_boost, default.country_boost);
+        let home = options.country.as_deref().and_then(normalize_country);
         // The evidence a site needs for its text to count in full: none
         // unless the query is a site's name plus more words, and never more
         // than that site has. A query that is just the name needs no guard:
@@ -402,64 +502,125 @@ impl Searcher {
         let query_words = query.len as f32;
 
         let max_bm25 = candidates.iter().map(|&(bm25, _)| bm25).fold(0.0, f32::max);
-        let mut ranked: Vec<Ranked> = candidates
-            .into_iter()
-            .map(|(bm25, addr)| {
-                let link_score = link_score_of(addr);
-                let text_score = if max_bm25 > 0.0 {
-                    (bm25 / max_bm25).clamp(0.0, 1.0)
-                } else {
-                    0.0
-                };
-                let name = names.get(&addr).copied().unwrap_or_default();
-                let name_bonus = (cfg.exact_label_bonus * name.label as f32 / query_words)
-                    .max(cfg.exact_alias_bonus * name.alias as f32 / query_words);
-                let trust = if name.typed || trusted_link_score <= 0.0 {
-                    1.0
-                } else {
-                    let evidence = (link_score / trusted_link_score).min(1.0);
-                    untrusted_share + (1.0 - untrusted_share) * evidence
-                };
-                // Within a segment, term ordinals sort like the domains themselves.
-                let (_, domains) = &columns[addr.segment_ord as usize];
-                let domain_ord = domains
-                    .as_ref()
-                    .and_then(|column| column.term_ords(addr.doc_id).next())
-                    .unwrap_or(u64::MAX);
-                Ranked {
-                    addr,
-                    score: alpha * link_score + trust * ((1.0 - alpha) * text_score + name_bonus),
-                    text_score,
-                    link_score,
-                    tie_break: (addr.segment_ord, domain_ord),
-                }
-            })
-            .collect();
+        let mut ranked: Vec<Ranked> = Vec::with_capacity(candidates.len());
+        for (bm25, addr) in candidates {
+            let column = &columns[addr.segment_ord as usize];
+            let country = column.country(addr.doc_id);
+            let country_bonus = match (&home, &country) {
+                (Some(home), Some(country)) if home == country => country_boost,
+                (Some(_), Some(_)) if options.only_country => continue,
+                (Some(_), Some(_)) => -country_boost,
+                _ => 0.0,
+            };
+            let link_score = link_score_of(addr);
+            let is_kind = kinds.contains(&addr);
+            let name = names.get(&addr).copied().unwrap_or_default();
+            let text_score = if is_kind || name.label >= query.len {
+                // Being what the query names, or being named by all of it,
+                // is a full match, however little of the site's own text
+                // says so: among sites the query names in full, popularity
+                // decides, so aa.com wins "american airlines" over
+                // americanairlines.com.
+                1.0
+            } else if max_bm25 > 0.0 {
+                (bm25 / max_bm25).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let mut name_bonus = (cfg.exact_label_bonus * name.label as f32 / query_words)
+                .max(cfg.exact_alias_bonus * name.alias as f32 / query_words);
+            if is_kind {
+                name_bonus = name_bonus.max(cfg.kind_bonus);
+            }
+            let trust = if name.typed || trusted_link_score <= 0.0 {
+                1.0
+            } else {
+                let evidence = (link_score / trusted_link_score).min(1.0);
+                untrusted_share + (1.0 - untrusted_share) * evidence
+            };
+            // Within a segment, term ordinals sort like the domains themselves.
+            let domain_ord = column
+                .domains
+                .as_ref()
+                .and_then(|domains| domains.term_ords(addr.doc_id).next())
+                .unwrap_or(u64::MAX);
+            ranked.push(Ranked {
+                addr,
+                score: alpha * link_score
+                    + trust * ((1.0 - alpha) * text_score + name_bonus)
+                    + country_bonus,
+                text_score,
+                link_score,
+                country,
+                tie_break: (addr.segment_ord, domain_ord),
+            });
+        }
         ranked.sort_by(|a, b| {
             b.score
                 .total_cmp(&a.score)
                 .then_with(|| b.link_score.total_cmp(&a.link_score))
                 .then_with(|| a.tie_break.cmp(&b.tie_break))
         });
-        ranked.truncate(limit);
 
-        ranked
+        // The best-ranked site named by the query's first words, with words
+        // left over to search it for.
+        let named_site = ranked.iter().find_map(|r| {
+            let words = names.get(&r.addr)?.words();
+            (words > 0 && words < query.len).then_some((r.addr, words))
+        });
+        let site_search = match named_site {
+            Some((addr, words)) => self.site_search(&searcher, addr, query_text, words)?,
+            None => None,
+        };
+
+        ranked.truncate(limit);
+        let hits = ranked
             .into_iter()
-            .map(|ranked| self.hit(&searcher, &ranked))
-            .collect()
+            .map(|ranked| self.hit(&searcher, ranked))
+            .collect::<Result<_>>()?;
+        Ok(SearchResults { hits, site_search })
+    }
+
+    /// A link into the search of the site at `addr` for the words of `query`
+    /// after its first `words`, if the site has a search address (its own,
+    /// or one Plumb knows for big sites).
+    fn site_search(
+        &self,
+        searcher: &tantivy::Searcher,
+        addr: DocAddress,
+        query: &str,
+        words: usize,
+    ) -> Result<Option<SiteSearch>> {
+        let Some(terms) = words_after(&self.words, query, words) else {
+            return Ok(None);
+        };
+        let doc: TantivyDocument = searcher.doc(addr)?;
+        let text = |field| {
+            doc.get_first(field)
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+        };
+        let Some(domain) = text(self.fields.domain) else {
+            return Ok(None);
+        };
+        let link = text(self.fields.search_url)
+            .and_then(|template| search_link(&template, &domain, &terms))
+            .or_else(|| search_link(search_template_for(&domain)?, &domain, &terms));
+        Ok(link.map(|url| SiteSearch { domain, terms, url }))
     }
 
     /// The sites whose domain label or an alias equals the query's first
     /// words, with how many words each covers, plus the site of a typed
-    /// hostname (covering the whole query).
+    /// hostname (covering the whole query). An official site's Wikidata
+    /// names count as labels (see [`schema`]).
     fn name_matches(
         &self,
         searcher: &tantivy::Searcher,
         query: &ParsedQuery,
     ) -> Result<HashMap<DocAddress, NameMatch>> {
         let mut names: HashMap<DocAddress, NameMatch> = HashMap::new();
-        for (i, key) in query.leading.iter().enumerate() {
-            let words = i + 1;
+        for (key, words) in &query.leading {
+            let words = *words;
             let label = Term::from_field_text(self.fields.label_key, key);
             for addr in matching_docs(searcher, vec![label])? {
                 let name = names.entry(addr).or_default();
@@ -483,7 +644,7 @@ impl Searcher {
     }
 
     /// Reads the stored fields of a ranked document.
-    fn hit(&self, searcher: &tantivy::Searcher, ranked: &Ranked) -> Result<Hit> {
+    fn hit(&self, searcher: &tantivy::Searcher, ranked: Ranked) -> Result<Hit> {
         let doc: TantivyDocument = searcher.doc(ranked.addr)?;
         let text = |field| {
             doc.get_first(field)
@@ -500,6 +661,7 @@ impl Searcher {
             score: ranked.score,
             text_score: ranked.text_score,
             link_score: ranked.link_score,
+            country: ranked.country,
         })
     }
 }
@@ -510,7 +672,45 @@ struct Ranked {
     score: f32,
     text_score: f32,
     link_score: f32,
+    country: Option<String>,
     tie_break: (u32, u64),
+}
+
+/// The fast columns of one segment.
+struct Columns {
+    link_scores: tantivy::columnar::Column<f64>,
+    domains: Option<tantivy::columnar::StrColumn>,
+    countries: Option<tantivy::columnar::StrColumn>,
+}
+
+impl Columns {
+    fn country(&self, doc: tantivy::DocId) -> Option<String> {
+        let countries = self.countries.as_ref()?;
+        let ord = countries.term_ords(doc).next()?;
+        let mut country = String::new();
+        countries.ord_to_str(ord, &mut country).ok()?;
+        (!country.is_empty()).then_some(country)
+    }
+}
+
+/// The words of `query` after the first `words` of its analyzed words, as
+/// typed: "github sueheir/plumb-search" after 1 -> "sueheir/plumb-search".
+/// `None` when nothing is left, or when the typed words do not line up
+/// with the analyzed ones.
+fn words_after(analyzer: &TextAnalyzer, query: &str, words: usize) -> Option<String> {
+    let typed: Vec<&str> = query.split_whitespace().collect();
+    let mut seen = 0;
+    for (i, word) in typed.iter().enumerate() {
+        if seen == words {
+            let rest = typed[i..].join(" ");
+            return (!rest.is_empty()).then_some(rest);
+        }
+        seen += analysis::tokens(analyzer, word).len();
+        if seen > words {
+            return None;
+        }
+    }
+    None
 }
 
 /// How many of the query's words, from the first on, a site's names cover.
@@ -599,9 +799,13 @@ struct ParsedQuery {
     /// The whole query as one joined token: `U.S. Bank` -> `usbank`.
     joined: Option<String>,
     /// The first word, the first two joined, and so on (at most
-    /// [`MAX_QUERY_WORDS`]): `us bank login` -> `us`, `usbank`,
-    /// `usbanklogin`. The names a site can have to be named by the query.
-    leading: Vec<String>,
+    /// [`MAX_QUERY_WORDS`]), each with the number of query words it covers:
+    /// `us bank login` -> `us` (1), `usbank` (2), `usbanklogin` (3). The
+    /// names a site can have to be named by the query. A leading "the" may
+    /// be left out: `the new york times` also gives `newyorktimes` (4).
+    leading: Vec<(String, usize)>,
+    /// The whole query as a kind ([`plumb_core::kind_key`]): `banks` -> `bank`.
+    kind: Option<String>,
     /// Number of words in the query, repeats included.
     len: usize,
     /// The registrable domain, when the query is a hostname or URL.
@@ -623,18 +827,30 @@ impl ParsedQuery {
             }
         }
         distinct.truncate(MAX_QUERY_WORDS);
-        let leading = tokens
-            .iter()
-            .take(MAX_QUERY_WORDS)
-            .scan(String::new(), |key, word| {
-                key.push_str(word);
-                Some(key.clone())
-            })
-            .collect();
+        let prefixes = |skip: usize| {
+            tokens
+                .iter()
+                .skip(skip)
+                .take(MAX_QUERY_WORDS)
+                .scan(String::new(), move |key, word| {
+                    key.push_str(word);
+                    Some(key.clone())
+                })
+                .enumerate()
+                .map(move |(i, key)| (key, skip + i + 1))
+        };
+        let mut leading: Vec<(String, usize)> = prefixes(0).collect();
+        if tokens.len() > 1 && tokens[0] == "the" {
+            leading.extend(prefixes(1));
+        }
+        let kind = analysis::tokens(joined, &kind_key(&query))
+            .into_iter()
+            .next();
         Some(ParsedQuery {
             words: distinct,
             joined: analysis::tokens(joined, &query).into_iter().next(),
             leading,
+            kind,
             len: tokens.len(),
             domain: typed_domain(&query),
         })
@@ -923,6 +1139,320 @@ mod tests {
         let hits = searcher.search(query, 10).unwrap();
         assert!(!hits.is_empty(), "no hits for {query:?}");
         hits[0].domain.clone()
+    }
+
+    fn ranked(tranco_rank: u32, linking_domains: u32) -> Signals {
+        Signals {
+            official_site: false,
+            ..popular(tranco_rank, linking_domains)
+        }
+    }
+
+    fn with_facts(mut record: SiteRecord, country: Option<&str>, kinds: &[&str]) -> SiteRecord {
+        record.country = country.map(str::to_string);
+        for kind in kinds {
+            record.add_kind(kind);
+        }
+        record
+    }
+
+    /// Short official domains and the spelled-out or one-word domains that
+    /// beat them before Wikidata names counted as labels.
+    fn short_names_corpus() -> Vec<SiteRecord> {
+        vec![
+            site(
+                "wsj.com",
+                None,
+                None,
+                &["The Wall Street Journal"],
+                &[],
+                popular(300, 40_000),
+            ),
+            site("wall.org", None, None, &[], &[], ranked(20_000, 900)),
+            site("wallstreet.com", None, None, &[], &[], ranked(90_000, 200)),
+            site(
+                "nytimes.com",
+                None,
+                None,
+                &["The New York Times"],
+                &[],
+                popular(80, 90_000),
+            ),
+            // Look-alikes spell the whole name out in their domain and
+            // title, so they match the words better than the real site.
+            site(
+                "newyorktimes.com",
+                Some("New York Times | New York Times News"),
+                Some("New York Times news from New York."),
+                &[],
+                &[],
+                ranked(197_000, 40),
+            ),
+            site(
+                "aa.com",
+                None,
+                None,
+                &["American Airlines"],
+                &[],
+                popular(900, 12_000),
+            ),
+            site(
+                "americanairlines.com",
+                Some("American Airlines | American Airlines flights"),
+                None,
+                &[],
+                &[],
+                ranked(506_000, 20),
+            ),
+            site(
+                "americanairlines.fr",
+                None,
+                None,
+                &[],
+                &[],
+                ranked(60_000, 300),
+            ),
+        ]
+    }
+
+    #[test]
+    fn short_official_names_beat_spelled_out_domains() {
+        let (_dir, searcher) = build(&short_names_corpus());
+        for (query, expected) in [
+            ("wall street journal", "wsj.com"),
+            ("the wall street journal", "wsj.com"),
+            ("wsj", "wsj.com"),
+            ("new york times", "nytimes.com"),
+            ("The New York Times", "nytimes.com"),
+            ("american airlines", "aa.com"),
+            ("wall", "wall.org"),
+        ] {
+            assert_eq!(top(&searcher, query), expected, "{query}");
+        }
+    }
+
+    #[test]
+    fn unofficial_aliases_stay_weaker_than_labels() {
+        // Anyone can call their site anything in og:site_name.
+        let records = vec![
+            site(
+                "usbank.com",
+                None,
+                None,
+                &["U.S. Bank"],
+                &[],
+                popular(1_500, 9_000),
+            ),
+            site(
+                "cheap-loans.biz",
+                None,
+                None,
+                &["US Bank"],
+                &[],
+                ranked(800_000, 3),
+            ),
+        ];
+        let (_dir, searcher) = build(&records);
+        assert_eq!(top(&searcher, "us bank"), "usbank.com");
+    }
+
+    fn bank_corpus() -> Vec<SiteRecord> {
+        let bank = |domain: &str, alias: &str, country: &str, rank: u32| {
+            with_facts(
+                site(domain, None, None, &[alias], &[], popular(rank, 5_000)),
+                Some(country),
+                &["bank", "public company"],
+            )
+        };
+        vec![
+            bank("chase.com", "Chase Bank", "US", 150),
+            bank("wellsfargo.com", "Wells Fargo", "US", 250),
+            bank("usbank.com", "U.S. Bank", "US", 1_500),
+            bank("db.com", "Deutsche Bank", "DE", 2_000),
+            bank("commerzbank.de", "Commerzbank", "DE", 3_000),
+            bank("sparkasse.de", "Sparkasse", "DE", 1_800),
+            with_facts(
+                site(
+                    "airbus.com",
+                    None,
+                    None,
+                    &["Airbus"],
+                    &[],
+                    popular(2_500, 4_000),
+                ),
+                None,
+                &["aircraft manufacturer"],
+            ),
+            site(
+                "bankrate.com",
+                Some("Bankrate: banks, mortgage rates and savings accounts"),
+                None,
+                &[],
+                &[("banks", 50)],
+                ranked(2_000, 6_000),
+            ),
+        ]
+    }
+
+    fn options(country: &str, only_country: bool) -> SearchOptions {
+        SearchOptions {
+            country: Some(country.to_string()),
+            only_country,
+        }
+    }
+
+    fn search_in(searcher: &Searcher, query: &str, options: &SearchOptions) -> Vec<String> {
+        searcher
+            .search_full(query, 10, &RankConfig::default(), options)
+            .unwrap()
+            .hits
+            .into_iter()
+            .map(|hit| hit.domain)
+            .collect()
+    }
+
+    #[test]
+    fn kinds_list_the_banks_of_your_country_first() {
+        let (_dir, searcher) = build(&bank_corpus());
+        let us = search_in(&searcher, "banks", &options("US", false));
+        assert_eq!(
+            us[..3],
+            ["chase.com", "wellsfargo.com", "usbank.com"],
+            "{us:?}"
+        );
+        let de = search_in(&searcher, "banks", &options("de", false));
+        assert_eq!(
+            de[..3],
+            ["sparkasse.de", "db.com", "commerzbank.de"],
+            "{de:?}"
+        );
+        // Singular works too, and every bank is listed even without text matches.
+        let bank = search_in(&searcher, "bank", &options("US", false));
+        for domain in ["chase.com", "db.com", "commerzbank.de", "sparkasse.de"] {
+            assert!(bank.contains(&domain.to_string()), "{bank:?}");
+        }
+        assert!(!bank.contains(&"airbus.com".to_string()));
+        // Generic kinds are not kept, so they find nothing by kind.
+        assert!(search_in(&searcher, "public companies", &options("US", false)).is_empty());
+    }
+
+    #[test]
+    fn strict_country_filter_keeps_global_sites() {
+        let (_dir, searcher) = build(&bank_corpus());
+        let only_us = search_in(&searcher, "banks", &options("US", true));
+        assert!(
+            only_us.iter().all(|d| !d.ends_with(".de") && d != "db.com"),
+            "{only_us:?}"
+        );
+        assert!(only_us.contains(&"bankrate.com".to_string()));
+        let hits = searcher
+            .search_full(
+                "deutsche bank",
+                10,
+                &RankConfig::default(),
+                &options("US", true),
+            )
+            .unwrap()
+            .hits;
+        assert!(hits.iter().all(|hit| hit.country.as_deref() != Some("DE")));
+        // Without a home country there is nothing to filter by.
+        let hits = searcher
+            .search_full(
+                "deutsche bank",
+                10,
+                &RankConfig::default(),
+                &SearchOptions {
+                    country: None,
+                    only_country: true,
+                },
+            )
+            .unwrap()
+            .hits;
+        assert_eq!(hits[0].domain, "db.com");
+        assert_eq!(hits[0].country.as_deref(), Some("DE"));
+    }
+
+    #[test]
+    fn home_country_nudges_names_without_overruling_them() {
+        let mut records = short_names_corpus();
+        records.push(site(
+            "bbc.co.uk",
+            None,
+            None,
+            &["BBC"],
+            &[],
+            popular(100, 50_000),
+        ));
+        records.push(site(
+            "bbc.com",
+            None,
+            None,
+            &["BBC"],
+            &[],
+            popular(90, 50_000),
+        ));
+        let (_dir, searcher) = build(&records);
+        let us = options("US", false);
+        assert_eq!(search_in(&searcher, "american airlines", &us)[0], "aa.com");
+        assert_eq!(
+            search_in(&searcher, "bbc", &options("GB", false))[0],
+            "bbc.co.uk"
+        );
+        assert_eq!(search_in(&searcher, "bbc", &us)[0], "bbc.com");
+        // A French user asking for the French site by its name still gets it.
+        let fr = search_in(&searcher, "americanairlines fr", &options("FR", false));
+        assert_eq!(fr[0], "americanairlines.fr");
+    }
+
+    #[test]
+    fn site_search_links_hand_off_the_rest_of_the_query() {
+        let mut records = corpus();
+        records.push(site(
+            "github.com",
+            Some("GitHub"),
+            None,
+            &["GitHub"],
+            &[],
+            popular(30, 100_000),
+        ));
+        let mut shop = site(
+            "acme-shop.com",
+            Some("Acme Shop"),
+            None,
+            &[],
+            &[],
+            ranked(5_000, 100),
+        );
+        shop.search_url = Some("https://www.acme-shop.com/find?q={searchTerms}".into());
+        records.push(shop);
+        let mut liar = site("liar.com", Some("Liar"), None, &[], &[], ranked(5_000, 100));
+        liar.search_url = Some("https://evil.example/?q={searchTerms}".into());
+        records.push(liar);
+        let (_dir, searcher) = build(&records);
+        let full = |q: &str| {
+            searcher
+                .search_full(q, 10, &RankConfig::default(), &SearchOptions::default())
+                .unwrap()
+        };
+
+        let github = full("github SueHeir/plumb-search");
+        assert_eq!(github.hits[0].domain, "github.com");
+        assert_eq!(
+            github.site_search,
+            Some(SiteSearch {
+                domain: "github.com".into(),
+                terms: "SueHeir/plumb-search".into(),
+                url: "https://github.com/search?q=SueHeir%2Fplumb-search".into(),
+            })
+        );
+        let shop = full("acme shop  red  boots").site_search.unwrap();
+        assert_eq!(shop.terms, "red boots");
+        assert_eq!(shop.url, "https://www.acme-shop.com/find?q=red%20boots");
+        // Just the name, a site without a search address, and a search
+        // address on another site offer nothing.
+        assert_eq!(full("github").site_search, None);
+        assert_eq!(full("us bank login").site_search, None);
+        assert_eq!(full("liar stuff").site_search, None);
     }
 
     #[test]
@@ -1724,20 +2254,34 @@ mod tests {
             ParsedQuery {
                 words: vec!["us".into(), "bank".into()],
                 joined: Some("usbank".into()),
-                leading: vec!["us".into(), "usbank".into()],
+                leading: vec![("us".into(), 1), ("usbank".into(), 2)],
+                kind: Some("usbank".into()),
                 len: 2,
                 domain: None,
             }
         );
+        let keys = |parsed: ParsedQuery| -> Vec<String> {
+            parsed.leading.into_iter().map(|(key, _)| key).collect()
+        };
         let parsed = parse("bank bank BANK").unwrap();
         assert_eq!(parsed.words, ["bank"]);
         assert_eq!(parsed.joined.as_deref(), Some("bankbankbank"));
-        assert_eq!(parsed.leading, ["bank", "bankbank", "bankbankbank"]);
         assert_eq!(parsed.len, 3);
+        assert_eq!(keys(parsed), ["bank", "bankbank", "bankbankbank"]);
         // Names are compared as indexed: folded, lowercased, punctuation gone.
         assert_eq!(
-            parse("Nestlé S.A. login").unwrap().leading,
+            keys(parse("Nestlé S.A. login").unwrap()),
             ["nestle", "nestlesa", "nestlesalogin"]
+        );
+        // A leading "the" may be left out; the words it covers still count it.
+        assert_eq!(
+            parse("The New York Times").unwrap().leading.last(),
+            Some(&("newyorktimes".to_string(), 4))
+        );
+        assert_eq!(parse("Banks").unwrap().kind.as_deref(), Some("bank"));
+        assert_eq!(
+            parse("credit unions").unwrap().kind.as_deref(),
+            Some("creditunion")
         );
         assert_eq!(
             parse("https://www.usbank.com/").unwrap().domain.as_deref(),

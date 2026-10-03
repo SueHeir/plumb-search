@@ -20,6 +20,7 @@ plumb-net = { version = "0.1.0", path = "../plumb-net" }
 plumb-ingest = { version = "0.1.0", path = "../plumb-ingest" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+sys-locale = "0.3.2"
 tempfile = "3.27.0"
 tokio = { version = "1.53.1", features = ["full"] }
 tracing = "0.1.44"

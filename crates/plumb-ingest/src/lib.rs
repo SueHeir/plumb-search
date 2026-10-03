@@ -5,7 +5,8 @@
 //! - Tranco top-1M list ([`tranco`])
 //! - Common Crawl domain-level web graph ranks ([`ccranks`])
 //! - Common Crawl WAT files: homepage titles, descriptions and inbound link text ([`wat`])
-//! - Wikidata "official website" (P856) statements ([`wikidata`])
+//! - Wikidata "official website" (P856) statements ([`wikidata`]), and the
+//!   country and kind of the organizations behind them ([`facts`])
 
 use std::borrow::Cow;
 use std::fs::File;
@@ -18,12 +19,14 @@ use flate2::read::MultiGzDecoder;
 pub mod builder;
 pub mod ccranks;
 pub mod download;
+pub mod facts;
 pub mod tranco;
 pub mod wat;
 pub mod wikidata;
 
 pub use builder::Builder;
 pub use ccranks::{load_cc_domain_ranks, CcRank, DEFAULT_CC_RANKS_LIMIT};
+pub use facts::{attach_facts, load_site_facts, FactsByItem, SiteFacts};
 pub use tranco::{load_tranco, TrancoEntry};
 pub use wat::{
     parse_wat, HomepageMeta, WarcReader, WarcRecord, WatExtract, WatPage, WatStats, WatWriter,

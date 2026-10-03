@@ -695,9 +695,10 @@ async fn sets_up_from_the_seed_data_and_retries_after_a_failure() {
     // the time out.
     let counts = host.counts();
     assert_eq!(counts["GET /tranco.csv"], 2, "{counts:?}");
+    // Then twice for the countries and kinds of the official websites.
     assert_eq!(
         counts["POST /sparql"],
-        download::wikidata_sitelink_bands(25).len() + 1,
+        download::wikidata_sitelink_bands(25).len() + 1 + 1,
         "{counts:?}"
     );
     assert_eq!(counts["GET /graph/x-domain-ranks.txt.gz"], 1, "{counts:?}");
@@ -709,6 +710,7 @@ async fn sets_up_from_the_seed_data_and_retries_after_a_failure() {
         [
             "tranco-top-1m.csv.zip",
             "wikidata-official-sites.tsv",
+            "wikidata-site-facts.tsv",
             "x-domain-ranks-top50.txt"
         ]
     );
@@ -976,7 +978,18 @@ async fn a_node_in_the_network_takes_in_other_nodes_crawls_and_searches_them() {
     assert_eq!(code, 200);
     assert!(body.contains("Lighthouse Keepers Guild"), "{body}");
     let (_, _, body) = get(addr, "/search?q=us+bank").await;
-    assert!(body.contains("href=\"/network?q=us+bank\""), "{body}");
+    assert!(body.contains("name=\"net\" value=\"1\">"), "{body}");
+    assert!(body.contains("href=\"/search?q=us+bank"), "{body}");
+    // With the network setting on, the peer's site joins this node's, tinted.
+    let (code, _, body) = get(addr, "/search?q=lighthouse&net=1").await;
+    assert_eq!(code, 200);
+    assert!(body.contains("name=\"net\" value=\"1\" checked>"), "{body}");
+    assert!(
+        body.contains("From this site's index and the Plumb network"),
+        "{body}"
+    );
+    assert!(body.contains("<li class=\"net\">"), "{body}");
+    assert!(body.contains("Lighthouse Keepers Guild"), "{body}");
 
     // And the other way round: the node serves the buckets of its index.
     assert!(dir

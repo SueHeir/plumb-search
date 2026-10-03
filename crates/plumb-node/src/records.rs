@@ -37,6 +37,8 @@ pub(crate) const MIN_COMPACT_BYTES: u64 = 64 << 20;
 /// JSON object per line, tagged by `op`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
+// Most changes are merges, so boxing the record would only add allocations.
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum Change {
     /// Merges a record into the set, as [`RecordSet::upsert`] does.
     Merge { record: SiteRecord },
