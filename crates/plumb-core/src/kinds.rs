@@ -43,6 +43,44 @@ pub fn is_generic_kind(kind: &str) -> bool {
     key.is_empty() || GENERIC_KINDS.iter().any(|generic| kind_key(generic) == key)
 }
 
+/// Words whose singular is not the word less its `s`.
+const SAME_IN_BOTH: &[&str] = &["news", "series", "species", "means", "sports", "always"];
+
+/// The same word in the other number, singular for plural and plural for
+/// singular, so a query for "videos" finds "video" and the other way
+/// round: `videos` -> `video`, `video` -> `videos`, `company` ->
+/// `companies`, `church` -> `churches`. `None` for short words, words that
+/// are not plain ASCII letters, and words like "news" with no other number.
+pub fn other_number(word: &str) -> Option<String> {
+    if word.len() <= 3 || !word.bytes().all(|b| b.is_ascii_lowercase()) {
+        return None;
+    }
+    if SAME_IN_BOTH.contains(&word) {
+        return None;
+    }
+    let one = singular(word);
+    if one != word {
+        return (one.len() > 2).then_some(one);
+    }
+    if word.ends_with("ss") || word.ends_with("us") || word.ends_with("is") {
+        return None;
+    }
+    let len = word.len();
+    let before_y = word.as_bytes()[len - 2];
+    let plural = if word.ends_with('y') && !b"aeiou".contains(&before_y) {
+        format!("{}ies", &word[..len - 1])
+    } else if ["s", "x", "z", "ch", "sh"]
+        .iter()
+        .any(|end| word.ends_with(end))
+    {
+        format!("{word}es")
+    } else {
+        format!("{word}s")
+    };
+    // Only a form that comes back to the word is safe to search for.
+    (singular(&plural) == word).then_some(plural)
+}
+
 /// A rough English singular, the same on both sides of a match:
 /// `banks` -> `bank`, `companies` -> `company`, `churches` -> `church`,
 /// `glasses` -> `glass`. Words ending in `ss`, `us` or `is`, and short
@@ -75,6 +113,21 @@ fn singular(word: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn words_have_another_number() {
+        let other = |word: &str| other_number(word);
+        assert_eq!(other("videos").as_deref(), Some("video"));
+        assert_eq!(other("video").as_deref(), Some("videos"));
+        assert_eq!(other("company").as_deref(), Some("companies"));
+        assert_eq!(other("companies").as_deref(), Some("company"));
+        assert_eq!(other("church").as_deref(), Some("churches"));
+        assert_eq!(other("games").as_deref(), Some("game"));
+        assert_eq!(other("journey").as_deref(), Some("journeys"));
+        for word in ["news", "campus", "glass", "bus", "car", "café", "mp3s"] {
+            assert_eq!(other(word), None, "{word}");
+        }
+    }
 
     #[test]
     fn plurals_match_singulars() {

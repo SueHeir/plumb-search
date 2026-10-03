@@ -19,7 +19,7 @@ pub mod oblivious;
 mod site_search;
 
 pub use country::{normalize_country, site_country, tld_country};
-pub use kinds::{is_generic_kind, kind_key, MAX_KINDS};
+pub use kinds::{is_generic_kind, kind_key, other_number, MAX_KINDS};
 pub use site_search::{search_link, search_template_for, SEARCH_TERMS};
 
 use anyhow::{Context, Result};

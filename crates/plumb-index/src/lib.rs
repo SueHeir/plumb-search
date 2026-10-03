@@ -64,7 +64,7 @@ use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 use plumb_core::{
-    canonical_domain, kind_key, normalize_country, registrable_domain, search_link,
+    canonical_domain, kind_key, normalize_country, other_number, registrable_domain, search_link,
     search_template_for, truncate_chars, SiteRecord, MAX_TEXT_CHARS,
 };
 use serde::{Deserialize, Serialize};
@@ -74,7 +74,7 @@ use tantivy::query::{BooleanQuery, BoostQuery, EnableScoring, Occur, Query, Scor
 use tantivy::schema::{Field, IndexRecordOption, Value};
 use tantivy::tokenizer::TextAnalyzer;
 use tantivy::{
-    DocAddress, DocSet, Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument, Term,
+    DocAddress, DocSet, Index, IndexReader, IndexWriter, Order, ReloadPolicy, TantivyDocument, Term,
 };
 
 use crate::replace::Staging;
@@ -103,6 +103,14 @@ const HEADINGS_BOOST: f32 = 0.5;
 const WHOLE_QUERY_BOOST: f32 = 6.0;
 /// BM25 boost of a query that is the hostname or URL of an indexed domain.
 const DOMAIN_BOOST: f32 = 10.0;
+/// The share of a word's boost its other number gets ("video" for
+/// "videos").
+const OTHER_NUMBER_SHARE: f32 = 0.8;
+/// The most popular sites matching any query word that are ranked even if
+/// BM25 put them below [`RankConfig::candidates`] others: a query that
+/// describes a big site ("watch videos online") matches many small ones
+/// that repeat its words.
+const POPULAR_CANDIDATES: usize = 50;
 /// Most distinct query words used; the rest are ignored.
 const MAX_QUERY_WORDS: usize = 16;
 /// The least link score of a well-known site (roughly the top 30,000).
@@ -654,12 +662,21 @@ impl Searcher {
             return Ok(Default::default());
         }
 
-        let text_query = query.text_query(&self.fields);
+        let text_query = query.text_query(&searcher, &self.fields)?;
         let num_candidates = cfg.candidates.max(limit).min(num_docs);
         let mut candidates = searcher.search(
             &text_query,
             &TopDocs::with_limit(num_candidates).order_by_score(),
         )?;
+        let popular: Vec<DocAddress> = searcher
+            .search(
+                &text_query,
+                &TopDocs::with_limit(POPULAR_CANDIDATES.min(num_docs))
+                    .order_by_fast_field::<f64>(schema::LINK_SCORE, Order::Desc),
+            )?
+            .into_iter()
+            .map(|(_, addr)| addr)
+            .collect();
         // A site the query names is ranked even if BM25 put others first:
         // it is what the look-alikes are measured against. So is every site
         // of the kind the query names.
@@ -706,6 +723,7 @@ impl Searcher {
             .keys()
             .chain(kinds.iter())
             .chain(nearest.iter())
+            .chain(popular.iter())
             .filter(|addr| !known.contains(addr))
             .copied()
             .collect();
@@ -1162,6 +1180,9 @@ fn matching_docs(searcher: &tantivy::Searcher, terms: Vec<Term>) -> Result<HashS
 struct ParsedQuery {
     /// Distinct words, in query order: `U.S. Bank` -> `us`, `bank`.
     words: Vec<String>,
+    /// Each word in its other number ([`plumb_core::other_number`]), if it
+    /// has one: `videos` -> `video`.
+    others: Vec<Option<String>>,
     /// The whole query as one joined token: `U.S. Bank` -> `usbank`.
     joined: Option<String>,
     /// The first word, the first two joined, and so on (at most
@@ -1193,6 +1214,7 @@ impl ParsedQuery {
             }
         }
         distinct.truncate(MAX_QUERY_WORDS);
+        let others = distinct.iter().map(|word| other_number(word)).collect();
         let prefixes = |skip: usize| {
             tokens
                 .iter()
@@ -1214,6 +1236,7 @@ impl ParsedQuery {
             .next();
         Some(ParsedQuery {
             words: distinct,
+            others,
             joined: analysis::tokens(joined, &query).into_iter().next(),
             leading,
             kind,
@@ -1244,6 +1267,48 @@ impl ParsedQuery {
         ]
     }
 
+    /// The clauses for the `i`th query word: the word in every field, and
+    /// its other number in the fields of free text, a little weaker, so
+    /// "videos" finds a site about "video" but names stay exact.
+    ///
+    /// The other number never counts for more than the word as typed: when
+    /// "videos" is common and "video" rare, BM25 would make the rare form
+    /// outweigh every site that has the query's own words, so its boost is
+    /// scaled down to the typed word's rarity.
+    fn word_clauses(
+        &self,
+        i: usize,
+        searcher: &tantivy::Searcher,
+        f: &Fields,
+        clauses: &mut Clauses,
+    ) -> Result<()> {
+        let word = &self.words[i];
+        for (field, boost) in self.per_word(f) {
+            clauses.add(Term::from_field_text(field, word), boost);
+        }
+        let Some(other) = &self.others[i] else {
+            return Ok(());
+        };
+        let docs = searcher.num_docs() as f32;
+        let rarity = |term: &Term| -> Result<f32> {
+            let found = searcher.doc_freq(term)? as f32;
+            Ok((1.0 + (docs - found + 0.5) / (found + 0.5)).ln())
+        };
+        for (field, boost) in self.per_word(f) {
+            if field == f.label || field == f.joined {
+                continue;
+            }
+            let other = Term::from_field_text(field, other);
+            let other_rarity = rarity(&other)?;
+            if other_rarity <= 0.0 {
+                continue;
+            }
+            let share = (rarity(&Term::from_field_text(field, word))? / other_rarity).min(1.0);
+            clauses.add(other, boost * OTHER_NUMBER_SHARE * share);
+        }
+        Ok(())
+    }
+
     /// The share of the query's words each of `docs` has in its text, in
     /// the order given: 1 for a site whose name is the whole query joined.
     fn coverage(
@@ -1257,11 +1322,9 @@ impl ParsedQuery {
             return Ok(covered);
         }
         let share = 1.0 / self.words.len() as f32;
-        for word in &self.words {
+        for i in 0..self.words.len() {
             let mut clauses = Clauses::default();
-            for (field, boost) in self.per_word(f) {
-                clauses.add(Term::from_field_text(field, word), boost);
-            }
+            self.word_clauses(i, searcher, f, &mut clauses)?;
             for (bm25, addr) in bm25_of(searcher, &clauses.into_query(), docs.to_vec())? {
                 if bm25 > 0.0 {
                     *covered.entry(addr).or_default() += share;
@@ -1284,12 +1347,10 @@ impl ParsedQuery {
         Ok(covered)
     }
 
-    fn text_query(&self, f: &Fields) -> BooleanQuery {
+    fn text_query(&self, searcher: &tantivy::Searcher, f: &Fields) -> Result<BooleanQuery> {
         let mut clauses = Clauses::default();
-        for word in &self.words {
-            for (field, boost) in self.per_word(f) {
-                clauses.add(Term::from_field_text(field, word), boost);
-            }
+        for i in 0..self.words.len() {
+            self.word_clauses(i, searcher, f, &mut clauses)?;
         }
         if let Some(joined) = &self.joined {
             clauses.add(Term::from_field_text(f.joined, joined), WHOLE_QUERY_BOOST);
@@ -1298,7 +1359,7 @@ impl ParsedQuery {
         if let Some(domain) = &self.domain {
             clauses.add(Term::from_field_text(f.domain, domain), DOMAIN_BOOST);
         }
-        clauses.into_query()
+        Ok(clauses.into_query())
     }
 }
 
@@ -2959,6 +3020,7 @@ mod tests {
             parse("U.S. Bank").unwrap(),
             ParsedQuery {
                 words: vec!["us".into(), "bank".into()],
+                others: vec![None, Some("banks".into())],
                 joined: Some("usbank".into()),
                 leading: vec![("us".into(), 1), ("usbank".into(), 2)],
                 kind: Some("usbank".into()),
@@ -3416,5 +3478,77 @@ mod tests {
             .unwrap();
         assert_eq!(results.spelling, None);
         assert!(!domains(&results.hits).contains(&"amazon.com"));
+    }
+    #[test]
+    fn plurals_find_singulars_but_never_outweigh_the_words_typed() {
+        let mut records = vec![
+            site(
+                "vimeo.com",
+                Some("Vimeo"),
+                Some("The all-in-one video platform"),
+                &[],
+                &[],
+                ranked(150, 40_000),
+            ),
+            site(
+                "clips.example",
+                Some("Clips"),
+                Some("Short videos"),
+                &[],
+                &[],
+                ranked(150, 40_000),
+            ),
+        ];
+        // Many sites have "videos", so "video" is the rarer word.
+        for i in 0..30 {
+            records.push(site(
+                &format!("v{i}.example"),
+                Some("Free videos"),
+                Some("Free videos to watch"),
+                &[],
+                &[],
+                obscure(5_000_000 + i, 2),
+            ));
+        }
+        let (_dir, searcher) = build(&records);
+        let hits = searcher.search("videos", 40).unwrap();
+        let rank = |domain: &str| domains(&hits).iter().position(|d| *d == domain);
+        let (Some(vimeo), Some(clips)) = (rank("vimeo.com"), rank("clips.example")) else {
+            panic!("{hits:?}");
+        };
+        assert!(clips < vimeo, "{hits:?}");
+    }
+
+    #[test]
+    fn the_most_popular_matches_are_ranked_past_the_bm25_cutoff() {
+        let mut youtube = site(
+            "youtube.com",
+            Some("YouTube"),
+            Some("Enjoy the videos and music you love, and share it all with the world"),
+            &[],
+            &[],
+            popular(2, 2_000_000),
+        );
+        youtube.about = Some("American online video sharing platform".into());
+        let mut records = vec![youtube];
+        for i in 0..30 {
+            records.push(site(
+                &format!("watch{i}.example"),
+                Some("Watch videos online"),
+                Some("Watch free videos online"),
+                &[],
+                &[],
+                obscure(5_000_000 + i, 2),
+            ));
+        }
+        let (_dir, searcher) = build(&records);
+        let cfg = RankConfig {
+            candidates: 10,
+            ..RankConfig::default()
+        };
+        let hits = searcher
+            .search_with("watch videos online", 10, &cfg)
+            .unwrap();
+        assert!(domains(&hits).contains(&"youtube.com"), "{hits:?}");
     }
 }
