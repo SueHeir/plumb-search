@@ -1,0 +1,29 @@
+# The image is built from the workspace manifests, Cargo.lock, the crates'
+# sources and the license files. Everything else stays out, so the context
+# is small and editing docs or tests does not invalidate the build cache.
+
+# Build output and local data (an index or a seed download can be gigabytes).
+**/target/
+**/node_modules/
+data/
+
+# Version control, CI and editor files.
+.git
+.github/
+.idea/
+.vscode/
+**/.DS_Store
+**/*.swp
+
+# Local secrets.
+**/.env
+**/.env.*
+
+# Docs, test data and packaging files that the build does not read.
+*.md
+docs/
+eval/
+fixtures/
+.dockerignore
+Dockerfile
+docker-compose.yml

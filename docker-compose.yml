@@ -1,0 +1,28 @@
+# Plumb Search node. Start it with `docker compose up -d`, then open
+# http://<this server>:8080. docs/docker.md covers settings, updates and data.
+services:
+  plumb:
+    image: ghcr.io/sueheir/plumb-search:latest
+    # Fallback: when the image cannot be pulled, Compose builds it from this
+    # checkout instead (`docker compose build` forces that).
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      # Mount the volume at /data itself, not at an index directory or a file
+      # inside it: the node replaces those by renaming, and a mount point
+      # cannot be renamed.
+      - plumb-data:/data
+    # Settings are flags of `plumb run` (see docs/docker.md). To change them,
+    # uncomment this line and add flags, keeping --data and --bind as they are:
+    # command: ["run", "--data", "/data", "--bind", "0.0.0.0:8080", "--sites", "250000"]
+    init: true
+    restart: unless-stopped
+    # A stopping node first finishes an index build that is under way: up to
+    # about a minute for a million sites on a 4-core machine, several times
+    # that on a small one.
+    stop_grace_period: 5m
+
+volumes:
+  plumb-data:
+    name: plumb-data
