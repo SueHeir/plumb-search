@@ -2441,6 +2441,8 @@ mod tests {
             buckets: 4,
             asked: 8,
             answered: 6,
+            relayed: 6,
+            direct: 0,
             rejected: 0,
             hits: hits.into_iter().map(from_network).collect(),
         })
