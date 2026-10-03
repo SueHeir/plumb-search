@@ -41,6 +41,20 @@ pub(in crate::web) fn settings_error(
         // A number input silently discards invalid text, hiding what needs fixing.
         fields.push_str(&format!("<label for=\"{name}\">{label}</label><input id=\"{name}\" name=\"{name}\" type=\"text\" inputmode=\"numeric\" value=\"{}\" aria-describedby=\"{name}-help\"{invalid}><p id=\"{name}-help\" class=\"hint\">{hint}</p>", escape_html(value)));
     }
+    // The workload and crawl hours go back as they were chosen.
+    for (name, value) in [
+        ("workload", Some(&form.workload)),
+        ("crawl_hours", form.crawl_hours.as_ref()),
+        ("crawl_from", Some(&form.crawl_from)),
+        ("crawl_to", Some(&form.crawl_to)),
+    ] {
+        if let Some(value) = value.filter(|v| !v.is_empty()) {
+            fields.push_str(&format!(
+                "<input type=\"hidden\" name=\"{name}\" value=\"{}\">",
+                escape_html(value)
+            ));
+        }
+    }
     retry_page(
         status,
         base,
@@ -166,6 +180,10 @@ mod tests {
                 background_updates: Some("1".into()),
                 download_limit_mb_per_day: "250".into(),
                 storage_limit_mb: "\"><script>alert(1)</script>".into(),
+                workload: "light".into(),
+                crawl_hours: Some("1".into()),
+                crawl_from: "22".into(),
+                crawl_to: "7".into(),
             };
             let body = text(settings_error(
                 StatusCode::BAD_REQUEST,
@@ -176,6 +194,8 @@ mod tests {
             .await;
             assert!(body.contains("name=\"background_updates\" value=\"1\" checked"));
             assert!(body.contains("value=\"250\""));
+            assert!(body.contains("name=\"workload\" value=\"light\""));
+            assert!(body.contains("name=\"crawl_from\" value=\"22\""));
             assert!(body.contains("&quot;&gt;&lt;script&gt;alert(1)&lt;/script&gt;"));
             assert!(body.contains("aria-invalid=\"true\""));
             assert!(body.contains(&format!("action=\"{base}/settings\"")));

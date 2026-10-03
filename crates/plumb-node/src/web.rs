@@ -257,6 +257,32 @@ pub trait StatusSource: Send + Sync {
     /// Starts a refresh now.
     fn refresh_now(&self) {}
 
+    /// Restarts the node, to apply saved feature changes; only a node whose
+    /// [`Status::can_restart`] says so can.
+    fn restart(&self) -> Result<()> {
+        anyhow::bail!("This node cannot restart itself. Restart it where it runs.")
+    }
+
+    /// What the node did lately, newest first.
+    fn activity_log(&self) -> Vec<crate::node::LogEntry> {
+        Vec::new()
+    }
+
+    /// Tries failed work again now.
+    fn retry(&self, _what: crate::node::Retry) -> Result<()> {
+        anyhow::bail!("This node cannot retry work from the panel.")
+    }
+
+    /// Saves a backup in the data folder's `backups/`.
+    fn make_backup(&self) -> Result<crate::node::backup::BackupInfo> {
+        anyhow::bail!("This node has no data folder to back up.")
+    }
+
+    /// Restores `backup` into the data folder, then restarts if it can.
+    fn restore_backup(&self, _backup: &crate::node::backup::Backup) -> Result<()> {
+        anyhow::bail!("This node has no data folder to restore into.")
+    }
+
     /// Tries the network's bootstrap nodes again now.
     fn reconnect_network(&self) -> Result<()> {
         match self.network() {
@@ -362,6 +388,13 @@ fn app(state: AppState) -> Router {
             .route("/app/features", post(panel::save_features))
             .route("/app/refresh", post(panel::refresh))
             .route("/app/network/retry", post(panel::retry_network))
+            .route("/app/pause", post(panel::pause))
+            .route("/app/retry", post(panel::retry))
+            .route("/app/backup", post(panel::backup))
+            .route("/app/backups/restore", post(panel::restore_saved))
+            .route("/app/restore", post(panel::restore_upload))
+            .route("/app/backups/{name}", get(panel::download_backup))
+            .route("/app/restart", post(panel::restart))
             .route("/app/remote-control", post(panel::save_remote_control))
             .route(panel::ADD_TO_FIREFOX_PATH, get(panel::add_to_firefox));
         router = private::routes(router);
@@ -2129,6 +2162,9 @@ mod tests {
             downloaded_total: 0,
             homepages_visited: 0,
             meaning_sites: None,
+            meaning_work: None,
+            can_restart: false,
+            paused_until: None,
         }
     }
 

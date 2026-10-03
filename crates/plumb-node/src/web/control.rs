@@ -8,7 +8,9 @@
 //!   next start,
 //! - `POST /api/control/refresh` starts a refresh now,
 //! - `POST /api/control/reconnect` tries the network's bootstrap nodes
-//!   again now.
+//!   again now,
+//! - `POST /api/control/retry` tries failed work again now (a JSON
+//!   [`Retry`]).
 //!
 //! Each request needs remote control turned on (otherwise 404, as if the API
 //! were not there) and its token as `Authorization: Bearer <token>`. Unless
@@ -32,7 +34,7 @@ use tracing::{info, warn};
 use super::AppState;
 use crate::node::control;
 use crate::node::features::FeatureSettings;
-use crate::node::{NodeSettings, Status};
+use crate::node::{LogEntry, NodeSettings, Retry, Status};
 
 /// What `GET /api/control` returns: all the panel needs to show a node.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,6 +50,9 @@ pub struct ControlView {
     pub private_search_ready: bool,
     #[serde(default)]
     pub data_dir: Option<String>,
+    /// The activity log, newest first.
+    #[serde(default)]
+    pub activity: Vec<LogEntry>,
 }
 
 /// An error answer: `{"error": "..."}`.
@@ -63,6 +68,7 @@ pub(super) fn routes(router: Router<AppState>) -> Router<AppState> {
         .route("/api/control/features", post(change_features))
         .route("/api/control/refresh", post(refresh))
         .route("/api/control/reconnect", post(reconnect))
+        .route("/api/control/retry", post(retry))
 }
 
 fn error(status: StatusCode, message: &str) -> Response {
@@ -173,6 +179,7 @@ async fn view(State(state): State<AppState>, request: Request) -> Response {
         saved_features,
         private_search_ready: state.private_search(),
         data_dir: node.data_dir().map(|dir| dir.display().to_string()),
+        activity: node.activity_log(),
     };
     ([(header::CACHE_CONTROL, "no-store")], Json(view)).into_response()
 }
@@ -248,6 +255,20 @@ async fn refresh(State(state): State<AppState>, request: Request) -> Response {
     };
     node.refresh_now();
     StatusCode::NO_CONTENT.into_response()
+}
+
+async fn retry(State(state): State<AppState>, request: Request) -> Response {
+    let what: Retry = match authorized_body(&state, request).await {
+        Ok(what) => what,
+        Err(response) => return response,
+    };
+    let Some(node) = &state.node else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    match node.retry(what) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(err) => error(StatusCode::CONFLICT, &err.to_string()),
+    }
 }
 
 async fn reconnect(State(state): State<AppState>, request: Request) -> Response {

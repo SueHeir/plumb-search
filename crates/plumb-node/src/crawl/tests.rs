@@ -642,6 +642,77 @@ fn an_offline_batch_is_not_saved() {
 }
 
 #[test]
+fn an_offline_batch_is_fetched_again_after_each_wait() {
+    let dir = tempfile::tempdir().unwrap();
+    let (path, mut set, mut store) = records_file(dir.path(), &sites(60));
+    let targets = select_targets(set.iter(), 60, now_unix(), WINDOW);
+    let waits = [Duration::from_millis(1); 2];
+    let mut tries: Vec<String> = Vec::new();
+    let mut fetcher = Batches {
+        crawl: |batch: Vec<CrawlTarget>| {
+            tries.push(batch[0].domain.clone());
+            // The router is swamped for the first two tries of batch 1.
+            if tries.len() <= 2 {
+                Some(batch.iter().map(|t| failed(&t.domain)).collect())
+            } else {
+                all_fetched(batch)
+            }
+        },
+        queued: Vec::new(),
+    };
+    let totals = crawl_rolling(
+        &mut set,
+        &targets,
+        30,
+        &mut store,
+        &waits,
+        &mut fetcher,
+        |_| Ok(()),
+    )
+    .unwrap();
+    assert_eq!(totals.end, RunEnd::Finished);
+    assert_eq!(
+        tries,
+        [&targets[0], &targets[0], &targets[0], &targets[30]].map(|t| t.domain.clone())
+    );
+    assert_eq!((totals.attempted, totals.outcomes.fetched), (60, 60));
+    let saved = load_records(&path).unwrap();
+    assert!(targets
+        .iter()
+        .all(|t| saved.get(&t.domain).unwrap().crawl_failures == 0));
+
+    // Each batch gets every wait anew, and the run ends when they run out.
+    let dir = tempfile::tempdir().unwrap();
+    let (path, mut set, mut store) = records_file(dir.path(), &sites(60));
+    let mut tries = 0;
+    let mut fetcher = Batches {
+        crawl: |batch: Vec<CrawlTarget>| {
+            tries += 1;
+            Some(batch.iter().map(|t| failed(&t.domain)).collect())
+        },
+        queued: Vec::new(),
+    };
+    let totals = crawl_rolling(
+        &mut set,
+        &targets,
+        30,
+        &mut store,
+        &waits,
+        &mut fetcher,
+        |_| Ok(()),
+    )
+    .unwrap();
+    drop(fetcher);
+    assert_eq!(tries, 3);
+    assert!(matches!(totals.end, RunEnd::Offline(_)));
+    let saved = load_records(&path).unwrap();
+    assert!(targets.iter().all(|t| {
+        let r = saved.get(&t.domain).unwrap();
+        (r.crawl_attempted_at, r.crawl_failures) == (None, 0)
+    }));
+}
+
+#[test]
 fn only_sites_that_should_answer_can_make_a_batch_look_offline() {
     let mark = |i: usize, failures: u32| Mark {
         domain: format!("site{i}.com"),
@@ -731,6 +802,7 @@ fn crawl_args(records: &Path, out: Option<&Path>, top: usize) -> CrawlArgs {
         top,
         skip_crawled_within_days: 30,
         concurrency: 16,
+        dns_lookups: 32,
         out: out.map(Path::to_path_buf),
         use_system_proxy: false,
     }
@@ -929,10 +1001,18 @@ fn slow_sites_do_not_hold_up_the_batches_after_them() {
         stop_at: None,
     };
     let mut reports = Vec::new();
-    let totals = crawl_rolling(&mut set, &targets, 2, &mut store, &mut fetcher, |totals| {
-        reports.push(totals.attempted);
-        Ok(())
-    })
+    let totals = crawl_rolling(
+        &mut set,
+        &targets,
+        2,
+        &mut store,
+        &[],
+        &mut fetcher,
+        |totals| {
+            reports.push(totals.attempted);
+            Ok(())
+        },
+    )
     .unwrap();
     assert_eq!(totals.end, RunEnd::Finished);
     assert_eq!((totals.attempted, totals.outcomes.fetched), (7, 7));
@@ -959,8 +1039,10 @@ fn a_stopped_rolling_crawl_gives_every_unfinished_site_its_old_marks_back() {
         seen: Vec::new(),
         stop_at: Some(2),
     };
-    let totals =
-        crawl_rolling(&mut set, &targets, 2, &mut store, &mut fetcher, |_| Ok(())).unwrap();
+    let totals = crawl_rolling(&mut set, &targets, 2, &mut store, &[], &mut fetcher, |_| {
+        Ok(())
+    })
+    .unwrap();
     assert_eq!(totals.end, RunEnd::Stopped);
     assert_eq!(totals.attempted, 2);
     // site01 and site02 finished; the rest were started or never begun.

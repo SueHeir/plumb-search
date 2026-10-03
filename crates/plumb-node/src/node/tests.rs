@@ -257,7 +257,13 @@ async fn serves_a_records_file_put_there_by_hand() {
     assert!(TcpStream::connect(addr).await.is_err(), "still listening");
     assert_eq!(
         names(dir.path()),
-        ["indexes", "node.lock", "records.jsonl", "state.json"]
+        [
+            "activity.jsonl",
+            "indexes",
+            "node.lock",
+            "records.jsonl",
+            "state.json"
+        ]
     );
     assert_eq!(names(&dir.path().join("indexes")), ["000001"]);
     let saved = store::load_state(&store::Paths::new(dir.path())).unwrap();
@@ -1479,5 +1485,118 @@ async fn search_by_meaning_embeds_sites_in_the_background() {
         assert!(std::time::Instant::now() < deadline, "vectors not saved");
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    node.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pause_for_an_hour_holds_the_crawl_and_resume_lifts_it() {
+    let dir = recently_crawled_dir();
+    let paths = store::Paths::new(dir.path());
+    store::save_state(
+        &paths,
+        &SavedState {
+            crawl_left: 700,
+            index_stale: true,
+            ..SavedState::default()
+        },
+    )
+    .unwrap();
+    let until = now_unix() + 3600;
+    let mut config = test_config(dir.path());
+    config.settings.paused_until = Some(until);
+    let node = start(config).await.unwrap();
+    let status = wait_for(node.addr(), "the first index", ready_and_idle).await;
+    assert_eq!(status.paused.as_deref(), Some("Paused by you"));
+    assert_eq!(status.paused_until, Some(until));
+    assert_eq!(status.crawl_left, 700);
+    // Nobody listens for a restart yet, so the panel offers none.
+    assert!(!status.can_restart);
+    let signal = node.restart_signal();
+    assert!(node.status().can_restart);
+    let restart = tokio::spawn(async move { signal.requested().await });
+    StatusSource::restart(node.inner.as_ref()).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), restart)
+        .await
+        .expect("the restart request arrives")
+        .unwrap();
+
+    node.inner
+        .change_settings(NodeSettings {
+            paused_until: None,
+            ..node.inner.settings()
+        })
+        .unwrap();
+    let status = wait_for(node.addr(), "the end of the round", |s| {
+        ready_and_idle(s) && s.crawl_left == 0
+    })
+    .await;
+    assert_eq!(status.paused, None);
+    node.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_activity_log_and_backups_cover_a_node_s_life() {
+    let dir = recently_crawled_dir();
+    let mut config = test_config(dir.path());
+    config.refresh_every = None;
+    let node = start(config.clone()).await.unwrap();
+    let addr = node.addr();
+    wait_for(addr, "the first index", ready_and_idle).await;
+    let inner = node.inner.as_ref();
+    inner
+        .change_settings(NodeSettings {
+            workload: Workload::Light,
+            ..inner.settings()
+        })
+        .unwrap();
+    let log = StatusSource::activity_log(inner);
+    assert!(
+        log.last().unwrap().message.starts_with("Plumb Search "),
+        "{log:?}"
+    );
+    assert_eq!(log[0].message, "Settings changed: workload light");
+
+    // A backup, then a change, then the backup restored: the change is undone.
+    std::fs::create_dir_all(dir.path().join("net")).unwrap();
+    std::fs::write(dir.path().join("net/node.key"), b"key one").unwrap();
+    let made = StatusSource::make_backup(inner).unwrap();
+    inner
+        .change_settings(NodeSettings {
+            workload: Workload::Full,
+            ..inner.settings()
+        })
+        .unwrap();
+    std::fs::write(dir.path().join("net/node.key"), b"key two").unwrap();
+    let saved = backup::path_of(dir.path(), &made.name).unwrap();
+    let restored = backup::Backup::parse(&std::fs::read(saved).unwrap()).unwrap();
+    StatusSource::restore_backup(inner, &restored).unwrap();
+    assert_eq!(inner.settings().workload, Workload::Light);
+    assert_eq!(
+        std::fs::read(dir.path().join("net/node.key")).unwrap(),
+        b"key one"
+    );
+    // What it replaced was backed up first.
+    let backups = backup::list(dir.path());
+    assert_eq!(backups.len(), 2);
+    assert!(backups.iter().any(|b| b.name.contains("before-restore")));
+    let (code, _, body) = get(addr, "/app?section=backup").await;
+    assert_eq!(code, 200);
+    assert!(body.contains(&made.name), "{body}");
+    let (code, head, body) = get(addr, &format!("/app/backups/{}", made.name)).await;
+    assert_eq!(code, 200);
+    assert!(head.contains("content-disposition: attachment"), "{head}");
+    assert!(body.contains("plumb-backup/1"));
+    let (code, _, _) = get(addr, "/app/backups/..%2Fsettings.json").await;
+    assert_eq!(code, 404);
+    let (code, _, body) = get(addr, "/app?section=activity").await;
+    assert_eq!(code, 200);
+    assert!(body.contains("restored"), "{body}");
+
+    node.shutdown().await.unwrap();
+    // The log outlives the node.
+    let node = start(config).await.unwrap();
+    let log = StatusSource::activity_log(node.inner.as_ref());
+    assert!(log.iter().any(|e| e.message == "Stopped"));
+    assert!(log.iter().any(|e| e.message.starts_with("Backup made")));
     node.shutdown().await.unwrap();
 }

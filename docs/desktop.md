@@ -185,6 +185,35 @@ while the data folder is over its limit, crawling pauses. Setup's own
 downloads count toward the day but are never held back, and search keeps
 working either way.
 
+The Resources page also has one Workload choice, which sets the pace and
+both limits at once: Light (4 homepages at a time, 100 MB a day, 1 GB of
+disk), Balanced (the defaults: 16 at a time, 500 MB, 2 GB), Full (32 at a
+time, no limits) or Custom (the limits as typed). "Only crawl between"
+keeps crawling to some hours of the computer's clock, such as 22:00 to
+07:00. The Crawling card has "Pause for an hour" and "Pause until tomorrow"
+(06:00), and "Resume now" while paused.
+
+Feature changes (the network, search by meaning, private search) apply when
+the node starts. In the app the panel then offers "Restart to apply", which
+stops the node and starts it again without quitting the app; a Docker node
+needs its container restarted. While search by meaning downloads its model
+or makes site vectors, the panel shows how far it has come.
+
+The Activity section is the node's log in plain sentences: starts and
+stops, crawl rounds and what they found, index rebuilds, settings changes,
+and every failure, newest first (the last few hundred entries, kept in
+`activity.jsonl` in the data folder). Failures on the panel come with "Try
+again now": the failed update, Wikidata's official websites and search by
+meaning each have one, and the network card has its own.
+
+The Backup section saves what cannot be downloaded again: the settings,
+the node's network identity and crawl credits, and the remote control
+files. Sites and the index are left out, since a node rebuilds them.
+Backups are kept in `backups/` in the data folder (the last 10), can be
+downloaded, and restore from that list or from a file. Restoring first
+saves the current files as a backup marked `before-restore`, then restarts
+the node. Backups hold the node's keys, so keep them private.
+
 If a download fails, for example without internet access or behind a
 firewall that blocks those sites, the error appears on the panel.
 

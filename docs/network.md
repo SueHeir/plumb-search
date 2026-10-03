@@ -154,13 +154,15 @@ Tested on one machine (`cargo test -p plumb-net credits`): confirmed crawls earn
 ## Running it
 
 ```sh
-# A node at home: dials out only.
-plumb run --data plumb-data --network \
-  --bootstrap /dns4/plumbsearch.org/tcp/4001/p2p/<the server's node id>
+# A node at home: dials out only, and starts from plumbsearch.org.
+plumb run --data plumb-data --network
 
 # Also share which result is opened, anonymously (off by default).
-plumb run --data plumb-data --network --share-popularity \
-  --bootstrap /dns4/plumbsearch.org/tcp/4001/p2p/<the server's node id>
+plumb run --data plumb-data --network --share-popularity
+
+# A test network kept apart from the real one.
+plumb run --data test-data --network --no-default-bootstrap --no-default-trust \
+  --bootstrap /ip4/192.168.1.20/tcp/4001/p2p/<that node's id>
 
 # A reachable server that relays for others (open TCP and UDP 4001).
 plumb run --data /data --network --relay \
@@ -172,7 +174,7 @@ plumb run --data /data --network --relay \
 * The node id is printed at start ("joined the Plumb network as 12D3Koo...") and shown in `GET /api/status` under `network.peer_id`, with the addresses it listens on, its NAT status, its relays, and counts of batches held, published and received.
 * The node key is `DIR/net/node.key`. Keep it to keep the same id; a server's id is part of the bootstrap address others use.
 * The Docker image exposes 4001; publish it with `-p 4001:4001/tcp -p 4001:4001/udp` on a server that relays.
-* The desktop app joins the network when it starts, through the relay on plumbsearch.org (`/dns4/plumbsearch.org/tcp/4001/p2p/12D3KooWJ2UWUBsxmPfXTfHa8cBBmzifa6kj5pFZKfJXYNQyJ69a`). `plumb run` still joins only with `--network`, and takes its `--bootstrap` nodes by hand.
+* Every node starts from the relay on plumbsearch.org (`/dns4/plumbsearch.org/tcp/4001/p2p/12D3KooWJ2UWUBsxmPfXTfHa8cBBmzifa6kj5pFZKfJXYNQyJ69a`, `plumb_net::DEFAULT_BOOTSTRAP`) as well as any `--bootstrap` nodes, unless given `--no-default-bootstrap`. The desktop app joins the network when it starts; `plumb run` joins with `--network`, which the Docker image and `docker-compose.yml` pass (docs/docker.md).
 
 ## What the prototype proves, and what it does not
 
@@ -194,5 +196,5 @@ Roughly in order; the first two are what the roadmap's Phase 2 gate ("two nodes 
 3. **Abuse limits.** Connection limits, per-node rate limits on requests, peer scoring in gossipsub, and banning keys whose batches fail checks.
 4. **An unpredictable epoch seed** from a public randomness beacon (drand), so keys cannot be made in advance for a target site.
 5. **Desktop app**: a switch for joining the network, crawling only when idle and on power, with a bandwidth cap.
-6. **plumbsearch.org as the first bootstrap and relay node**, then on by default.
+6. **plumbsearch.org as the first bootstrap and relay node: built.** Every node starts from it, and the Docker image joins the network by default.
 7. Phase 3 and 4 pieces from the white paper: homepage fetch receipts, and tokens any node can check to pay for popularity reports (crawl credits and tokens good at their issuer are in, see above). Popularity reports themselves are in (see above); next for them is a randomness server run by a group of nodes, so picks cannot be guessed.

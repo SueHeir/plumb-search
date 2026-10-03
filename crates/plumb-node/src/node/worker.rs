@@ -85,7 +85,7 @@ pub(super) async fn run(inner: Arc<Inner>) {
             Ok(Next::IdleUntil(until)) => {
                 let detail = inner
                     .pause_reason()
-                    .unwrap_or_else(|| idle_detail(&inner.config));
+                    .unwrap_or_else(|| idle_detail(&inner.config).to_owned());
                 inner.set_step(Step::Idle, detail);
                 wait(&inner, Deadline::Wall(until)).await;
             }
@@ -153,13 +153,14 @@ async fn step(inner: &Arc<Inner>) -> Result<Next> {
         complete_seed(inner).await?;
         return Ok(Next::Aside);
     }
-    // Crawls and refreshes wait while background updates are off or a
-    // limit is reached; a day's download limit ends with the day.
-    if inner.pause_reason().is_some() {
+    // Crawls and refreshes wait while background updates are off, paused
+    // or outside the crawl hours, or a limit is reached; a day's download
+    // limit ends with the day, a pause when it says.
+    if let Some(pause) = inner.pause() {
         inner.refresh_requested.store(false, Ordering::SeqCst);
-        let tomorrow = store::next_day(now_unix());
+        let until = pause.until.unwrap_or_else(|| store::next_day(now_unix()));
         return Ok(Next::IdleUntil(Some(
-            wikidata_due.map_or(tomorrow, |due| due.min(tomorrow)),
+            wikidata_due.map_or(until, |due| due.min(until)),
         )));
     }
     if saved.crawl_left > 0 {
@@ -594,6 +595,15 @@ async fn rebuild(inner: &Arc<Inner>) -> Result<()> {
 /// One that was asked for rebuilds the index even when nothing is crawled.
 fn start_round(inner: &Inner, requested: bool) -> Result<()> {
     let homepages = inner.config.crawl_per_refresh;
+    inner.journal.info(format!(
+        "{} a crawl round of {} homepages",
+        if requested {
+            "Started, as asked,"
+        } else {
+            "Started"
+        },
+        group_thousands(homepages as u64)
+    ));
     info!(
         "{}: crawling {homepages} homepages",
         if requested {
@@ -721,6 +731,7 @@ fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Option<ServingIndex
         inner.set_progress(0, targets.len(), "homepages");
         let cfg = CrawlConfig {
             use_system_proxy: inner.config.use_system_proxy,
+            concurrency: inner.settings().workload.concurrency(),
             ..CrawlConfig::default()
         };
         // Homepages counted in the saved state so far.
@@ -739,6 +750,7 @@ fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Option<ServingIndex
             &targets,
             CRAWL_BATCH_SIZE,
             &mut store,
+            &[],
             &mut fetcher,
             |totals| {
                 inner.set_progress(totals.attempted, targets.len(), "homepages");
@@ -761,11 +773,15 @@ fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Option<ServingIndex
             RunEnd::Stopped => {
                 // Paused by the settings or a limit: index what was crawled
                 // so far, and go on from there later.
+                let reason = inner.pause_reason().unwrap_or_else(|| "Paused".to_owned());
                 info!(
-                    "{}: pausing the crawl after {} homepages",
-                    inner.pause_reason().unwrap_or("paused"),
+                    "{reason}: pausing the crawl after {} homepages",
                     totals.attempted
                 );
+                inner.journal.info(format!(
+                    "{reason}: the crawl stopped after {} homepages and goes on later",
+                    group_thousands(totals.attempted as u64)
+                ));
                 if totals.attempted == 0 {
                     return Ok(None);
                 }
@@ -783,6 +799,15 @@ fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Option<ServingIndex
         }
         inner.check_stop()?;
         let o = &totals.outcomes;
+        inner.journal.info(format!(
+            "Visited {} homepages: {} fetched, {} turned Plumb away (robots.txt), {} \
+             failed, {} new sites found",
+            group_thousands(totals.attempted as u64),
+            group_thousands(o.fetched as u64),
+            group_thousands(o.robots_disallowed as u64),
+            group_thousands(o.errors() as u64),
+            group_thousands(totals.discovered as u64)
+        ));
         info!(
             "crawled {} homepages: {} fetched, {} blocked by robots.txt, {} errors; \
              {} new domains",
@@ -816,9 +841,16 @@ fn build(inner: &Inner, records: Vec<SiteRecord>) -> Result<ServingIndex> {
             group_thousands(records.len() as u64)
         ),
     );
+    let buckets = network::wants_buckets(inner);
+    let steps = if buckets { 2 } else { 1 };
+    inner.set_progress(0, steps, "steps");
     let started = Instant::now();
     let stats = build_index(&dir, &records)
         .with_context(|| format!("building the index in {}", dir.display()))?;
+    if buckets {
+        inner.set_step(Step::Indexing, "Writing the buckets other nodes search");
+        inner.set_progress(1, steps, "steps");
+    }
     network::build_buckets(inner, &dir, &records);
     drop(records);
     let index = match ServingIndex::open(id, &dir, inner.rank) {
@@ -828,6 +860,11 @@ fn build(inner: &Inner, records: Vec<SiteRecord>) -> Result<ServingIndex> {
             return Err(err.context(format!("opening the new index in {}", dir.display())));
         }
     };
+    inner.journal.info(format!(
+        "Search index rebuilt: {} sites in {}",
+        group_thousands(stats.docs),
+        duration_words(started.elapsed().as_secs().max(1))
+    ));
     info!(
         "built the index in {} ({} sites) in {:.1} s",
         dir.display(),

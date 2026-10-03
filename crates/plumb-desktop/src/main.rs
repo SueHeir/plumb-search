@@ -229,6 +229,13 @@ async fn start_node(app: AppHandle) -> Option<NodeHandle> {
     match started {
         Ok(node) => {
             info!("node listening on {}", node.url());
+            // The panel's "Restart to apply".
+            let signal = node.restart_signal();
+            let restarting = app.clone();
+            async_runtime::spawn(async move {
+                signal.requested().await;
+                restart_node(&restarting);
+            });
             if let Err(err) = show_node_page(&app, &node) {
                 error!("could not show the node's page: {err:#}");
             }
@@ -243,6 +250,27 @@ async fn start_node(app: AppHandle) -> Option<NodeHandle> {
             None
         }
     }
+}
+
+/// Stops the node and starts it again, which applies the feature settings
+/// saved on the panel. The window shows the panel again once the node is
+/// back.
+fn restart_node(app: &AppHandle) {
+    let node = app.state::<Node>();
+    let mut phase = node.phase();
+    // Quitting meanwhile wins.
+    let Phase::Started(_) = &*phase else {
+        return;
+    };
+    let Phase::Started(task) = std::mem::replace(&mut *phase, Phase::NotStarted) else {
+        unreachable!("matched above");
+    };
+    info!("restarting the node");
+    let app = app.clone();
+    *phase = Phase::Started(async_runtime::spawn(async move {
+        stop_node(task).await;
+        start_node(app).await
+    }));
 }
 
 async fn launch_node(app: AppHandle) -> Result<NodeHandle> {
