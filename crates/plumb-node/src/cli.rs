@@ -114,7 +114,7 @@ pub struct RunArgs {
     #[arg(long, value_name = "ADDR", default_value = "127.0.0.1:8080")]
     pub bind: SocketAddr,
     /// Defaults to start from. server: 1,000,000 sites, 10,000 homepages
-    /// crawled at first and 5,000 more every 24 hours. desktop: 250,000
+    /// crawled at first and 5,000 more every hour. desktop: 250,000
     /// sites, 2,000 homepages at first and 1,000 more every 12 hours.
     #[arg(long, value_enum, default_value_t = Profile::Server)]
     pub profile: Profile,
