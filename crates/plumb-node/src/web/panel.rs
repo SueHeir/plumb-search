@@ -65,6 +65,7 @@ color:var(--bg);text-decoration:none}\
 .panel label{display:flex;gap:.6rem;align-items:center;margin-top:.75rem}\
 .panel label input[type=checkbox]{flex:none}\
 .panel input[type=number]{flex:none;width:7rem}\
+.panel label.stack{flex-direction:column;align-items:stretch;gap:.3rem}.panel textarea{font:.85rem ui-monospace,monospace;padding:.45rem .6rem;border:1px solid var(--line);border-radius:.5rem;background:var(--bg);color:var(--fg);resize:vertical}\
 .panel form button{margin-top:.9rem}\
 .hint{margin:.2rem 0 0;font-size:.85rem;color:var(--muted)}\
 .howto{list-style:decimal;padding-left:1.5rem}.howto li{border:0;padding:.3rem 0}\
@@ -87,6 +88,25 @@ pub(super) struct SettingsForm {
     /// Only on the form of a node that can join the network.
     #[serde(default)]
     join_network: Option<String>,
+    /// Node ids, one per line; only with `join_network`.
+    #[serde(default)]
+    trusted_nodes: String,
+}
+
+/// The node ids typed into the form, split on lines, spaces and commas;
+/// `None` when one is not a node id.
+fn parse_trusted_nodes(text: &str) -> Option<Vec<String>> {
+    let mut nodes: Vec<String> = Vec::new();
+    for node in text.split(|c: char| c.is_whitespace() || c == ',') {
+        if node.is_empty() {
+            continue;
+        }
+        node.parse::<plumb_net::PeerId>().ok()?;
+        if !nodes.iter().any(|known| known == node) {
+            nodes.push(node.to_string());
+        }
+    }
+    Some(nodes)
 }
 
 /// A limit typed into the form, in megabytes: empty or 0 for none.
@@ -223,17 +243,26 @@ pub(super) async fn save_settings(State(state): State<AppState>, request: Reques
             "Limits are whole numbers of megabytes, or empty for none. Nothing was changed.",
         );
     };
-    let join_network = if node.can_join_network() {
-        form.join_network.is_some()
+    let current = node.settings().unwrap_or_default();
+    let (join_network, trusted_nodes) = if node.can_join_network() {
+        let Some(trusted) = parse_trusted_nodes(&form.trusted_nodes) else {
+            return panel_error(
+                StatusCode::BAD_REQUEST,
+                "Trusted nodes are node ids such as 12D3KooW..., one per line. Nothing was \
+                 changed.",
+            );
+        };
+        (form.join_network.is_some(), trusted)
     } else {
-        // Not on the form; keep what it was.
-        node.settings().unwrap_or_default().join_network
+        // Not on the form; keep what they were.
+        (current.join_network, current.trusted_nodes)
     };
     let settings = NodeSettings {
         background_updates: form.background_updates.is_some(),
         download_limit_mb_per_day: download,
         storage_limit_mb: storage,
         join_network,
+        trusted_nodes,
     };
     if let Err(err) = node.change_settings(settings) {
         warn!("could not save the settings: {err:#}");
@@ -744,7 +773,13 @@ fn render_settings(body: &mut String, settings: &NodeSettings, can_join_network:
              <span>Join the Plumb network</span></label>\n\
              <p class=\"hint\">Shares crawling with other Plumb nodes and answers their \
              searches, without learning what anyone searches for. No port forwarding is \
-             needed.</p>\n"
+             needed.</p>\n\
+             <label class=\"stack\">Trusted nodes\
+             <textarea name=\"trusted_nodes\" rows=\"2\" spellcheck=\"false\" \
+             placeholder=\"none\">{}</textarea></label>\n\
+             <p class=\"hint\">Node ids, one per line, whose crawls this node takes in \
+             at once. Other crawls wait until a second node agrees.</p>\n",
+            escape_html(&settings.trusted_nodes.join("\n"))
         )
     } else {
         String::new()
@@ -1129,6 +1164,7 @@ mod tests {
                 download_limit_mb_per_day: 250,
                 storage_limit_mb: 0,
                 join_network: true,
+                trusted_nodes: Vec::new(),
             }
         );
 
@@ -1361,5 +1397,39 @@ mod tests {
             "{body}"
         );
         assert!(body.contains("12 searches answered"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn trusted_nodes_are_node_ids() {
+        const ID: &str = "12D3KooWEDPBv4sacn42shoToAwu62CreVC89QFiAA31HrWv3xrg";
+        let (router, node) = node_app(status(Phase::Ready, Step::Idle), true);
+        let form = format!("join_network=1&trusted_nodes=+{ID}%0D%0A{ID}%0D%0A");
+        let response = post(
+            router.clone(),
+            "/app/settings",
+            &form,
+            "127.0.0.1:50000",
+            Some("http://127.0.0.1:7586"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(node.settings.lock().unwrap().trusted_nodes, vec![ID]);
+        let body = get_panel(router.clone()).await;
+        assert!(
+            body.contains(&format!("placeholder=\"none\">{ID}</textarea>")),
+            "{body}"
+        );
+
+        let response = post(
+            router,
+            "/app/settings",
+            "join_network=1&trusted_nodes=plumbsearch.org",
+            "127.0.0.1:50000",
+            Some("http://127.0.0.1:7586"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(body_text(response).await.contains("Back to the panel"));
+        assert_eq!(node.settings.lock().unwrap().trusted_nodes, vec![ID]);
     }
 }

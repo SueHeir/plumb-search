@@ -1482,5 +1482,17 @@ async fn turning_the_network_setting_off_and_on_leaves_and_rejoins() {
     let status = wait_for(addr, "the node to rejoin", |s| s.network.is_some()).await;
     assert_eq!(status.network.unwrap().peer_id, peer_id, "same node key");
 
+    // A new trusted node: the network side starts again, trusting it.
+    let trusted = "12D3KooWEDPBv4sacn42shoToAwu62CreVC89QFiAA31HrWv3xrg".to_string();
+    let mut settings = node.inner.settings();
+    settings.trusted_nodes = vec![trusted.clone()];
+    node.inner.change_settings(settings).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while *node.inner.net_trusted.lock().unwrap() != [trusted.clone()] {
+        assert!(Instant::now() < deadline, "the node did not rejoin");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    wait_for(addr, "the node to be back", |s| s.network.is_some()).await;
+
     node.shutdown().await.unwrap();
 }

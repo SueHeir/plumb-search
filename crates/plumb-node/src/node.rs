@@ -316,6 +316,10 @@ pub struct NodeSettings {
     /// Be part of the Plumb network, for a node set up to join it
     /// ([`NodeConfig::network`]); off leaves it, on joins it again.
     pub join_network: bool,
+    /// Node ids whose crawls this node takes in without waiting for a
+    /// second crawler to agree, on top of [`NodeConfig::network`]'s own;
+    /// a change rejoins the network.
+    pub trusted_nodes: Vec<String>,
 }
 
 impl Default for NodeSettings {
@@ -325,6 +329,7 @@ impl Default for NodeSettings {
             download_limit_mb_per_day: 0,
             storage_limit_mb: 0,
             join_network: true,
+            trusted_nodes: Vec::new(),
         }
     }
 }
@@ -708,6 +713,8 @@ struct Inner {
     net: RwLock<Option<Arc<plumb_net::NetHandle>>>,
     /// Wakes the task that joins or leaves the network as the settings say.
     net_change: Notify,
+    /// The trusted nodes the network side was started with.
+    net_trusted: Mutex<Vec<String>>,
     /// Records in the network inbox not yet folded in.
     inbox_records: std::sync::atomic::AtomicU64,
     /// Held while the inbox is appended to or moved aside.
@@ -771,6 +778,7 @@ impl Inner {
             }),
             net: RwLock::new(None),
             net_change: Notify::new(),
+            net_trusted: Mutex::new(Vec::new()),
             inbox_records: std::sync::atomic::AtomicU64::new(0),
             inbox_lock: Mutex::new(()),
             buckets_rebuilt: AtomicBool::new(false),

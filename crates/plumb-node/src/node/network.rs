@@ -146,10 +146,22 @@ pub(super) async fn follow_settings(inner: &Arc<Inner>) {
     });
 }
 
-/// Joins or leaves the network, as the settings now say.
+/// Joins or leaves the network, as the settings now say; rejoins when the
+/// trusted nodes changed.
 async fn apply_settings(inner: &Arc<Inner>) {
-    let wanted = inner.settings().join_network;
-    let joined = handle(inner).is_some();
+    let settings = inner.settings();
+    let wanted = settings.join_network;
+    let mut joined = handle(inner).is_some();
+    let trusted_now = inner
+        .net_trusted
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone();
+    if wanted && joined && trusted_now != settings.trusted_nodes {
+        info!("rejoining the Plumb network with the new trusted nodes");
+        stop(inner).await;
+        joined = false;
+    }
     if wanted && !joined {
         if let Err(err) = start(inner).await {
             // The node still searches and crawls on its own.
@@ -168,6 +180,18 @@ pub(super) async fn start(inner: &Arc<Inner>) -> Result<()> {
         return Ok(());
     };
     config.dir = inner.paths.net.clone();
+    let trusted = inner.settings().trusted_nodes;
+    for node in &trusted {
+        match node.parse::<plumb_net::PeerId>() {
+            Ok(peer) if !config.trusted_peers.contains(&peer) => config.trusted_peers.push(peer),
+            Ok(_) => {}
+            Err(err) => warn!("ignoring the trusted node {node:?}: {err}"),
+        }
+    }
+    *inner
+        .net_trusted
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner) = trusted;
     let (handle, mut records) = plumb_net::start(config, Arc::new(ServedIndex(inner.clone())))
         .await
         .context("joining the Plumb network")?;

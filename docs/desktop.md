@@ -24,7 +24,9 @@ plumbsearch.org, finds other nodes through it, shares crawling with them and
 answers their searches, without learning what anyone searches for. It needs
 no open port or router setup. **Join the Plumb network** in the panel's
 settings turns this off (the node then searches only its own index) and on
-again, at once.
+again, at once. **Trusted nodes** lists node ids whose crawls the app takes
+in at once; crawls from other nodes wait until a second node agrees. It is
+empty unless you add one.
 
 Test builds are not code-signed yet, so each system warns you before it opens
 them the first time. The [install](#install) steps say how to get past that.
