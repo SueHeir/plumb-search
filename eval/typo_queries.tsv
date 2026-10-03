@@ -1,0 +1,145 @@
+# Misspelled versions of eval/brand_queries.tsv, for typo correction.
+# Hand-made: dropped, doubled, swapped and neighbouring-key letters, plus
+# common misspellings ("craiglist", "marriot", "world health organisation").
+# Each typo's expected sites are the brand query's.
+#
+#   plumb eval --index data/index --queries eval/typo_queries.tsv
+#
+# Format: query<TAB>expected_domain[,another_ok_domain].
+
+bank of amercia	bankofamerica.com
+bnak of america	bankofamerica.com
+chsae	chase.com
+wells fargp	wellsfargo.com
+wels fargo	wellsfargo.com
+citbank	citi.com,citibank.com
+capitol one	capitalone.com
+american expres	americanexpress.com
+amercian express	americanexpress.com
+truits	truist.com
+goldman sachss	goldmansachs.com
+goldmen sachs	goldmansachs.com
+charles schwabb	schwab.com
+charles shwab	schwab.com
+fidelty investments	fidelity.com
+vangaurd	vanguard.com
+paypall	paypal.com
+pyapal	paypal.com
+venmoo	venmo.com
+navy federal credit unoin	navyfederal.org
+dicsover card	discover.com
+mastercrad	mastercard.com,mastercard.us
+amazom	amazon.com
+amzon	amazon.com
+amazn	amazon.com
+wallmart	walmart.com
+walamrt	walmart.com
+targte	target.com
+cotsco	costco.com
+costoc	costco.com
+home deopt	homedepot.com
+best buyy	bestbuy.com
+ebya	ebay.com
+ettsy	etsy.com
+walgreen	walgreens.com
+walgreesn	walgreens.com
+kroeger	kroger.com
+wayfiar	wayfair.com
+starbuck	starbucks.com
+starbukcs	starbucks.com
+mcdonlads	mcdonalds.com
+chipolte	chipotle.com
+chiptole	chipotle.com
+taco bel	tacobell.com
+delta air line	delta.com
+united airlnes	united.com
+american airlins	aa.com
+southwest airlnies	southwest.com
+jetbleu	jetblue.com
+alaska airlnes	alaskaair.com
+british airwyas	britishairways.com
+lufthanza	lufthansa.com
+luftansa	lufthansa.com
+air canda	aircanada.com
+emirtes	emirates.com
+expeida	expedia.com
+airbnn	airbnb.com
+aribnb	airbnb.com
+marriot	marriott.com
+hiltn	hilton.com
+amtrack	amtrak.com
+social security adminstration	ssa.gov
+medicaer	medicare.gov
+national weather servce	weather.gov
+smithsonain	si.edu
+world health organisation	who.int
+united natons	un.org
+new york tims	nytimes.com
+washingon post	washingtonpost.com
+wall street journel	wsj.com
+reuter	reuters.com
+ruters	reuters.com
+associated pres	apnews.com,ap.org
+the gaurdian	theguardian.com
+bloomburg	bloomberg.com
+blomberg	bloomberg.com
+forbs	forbes.com
+the wether channel	weather.com
+national geographc	nationalgeographic.com
+financial tims	ft.com
+gogle	google.com
+googel	google.com
+gooogle	google.com
+youtueb	youtube.com
+yotube	youtube.com
+youtub	youtube.com
+facebok	facebook.com
+faceboook	facebook.com
+instagarm	instagram.com
+instgram	instagram.com
+twiter	x.com,twitter.com
+linkdin	linkedin.com
+linkedn	linkedin.com
+redit	reddit.com
+reddti	reddit.com
+wikipeida	wikipedia.org
+wikpedia	wikipedia.org
+microsft	microsoft.com
+mircosoft	microsoft.com
+netflx	netflix.com
+netlfix	netflix.com
+spotfy	spotify.com
+spotiy	spotify.com
+githb	github.com
+guthub	github.com
+stack overflw	stackoverflow.com
+stackoverflwo	stackoverflow.com
+dropbx	dropbox.com
+adobee	adobe.com
+nvidea	nvidia.com
+samsng	samsung.com
+samsumg	samsung.com
+yahooo	yahoo.com
+duckduckgoo	duckduckgo.com
+duck duck go	duckduckgo.com
+mozila	mozilla.org
+opneai	openai.com
+pyhton	python.org
+harvrd	harvard.edu
+stanfrod	stanford.edu
+princton	princeton.edu
+carnegie melon	cmu.edu
+university of michgan	umich.edu
+university of oxfrod	ox.ac.uk
+fedx	fedex.com
+verizn	verizon.com
+veriozn	verizon.com
+t-moble	t-mobile.com
+geicoo	geico.com
+state farn	statefarm.com
+toyta	toyota.com
+tesal	tesla.com
+mayo clinc	mayoclinic.org
+american red corss	redcross.org
+craiglist	craigslist.org
+craigslsit	craigslist.org

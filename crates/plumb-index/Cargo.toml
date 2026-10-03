@@ -8,9 +8,11 @@ repository.workspace = true
 [dependencies]
 anyhow = "1.0.104"
 idna = "1.1.0"
+levenshtein_automata = "0.2.1"
 plumb-core = { version = "0.1.0", path = "../plumb-core" }
 serde = { version = "1.0.229", features = ["derive"] }
 tantivy = "0.26.2"
+tantivy-fst = "0.5.0"
 
 [dev-dependencies]
 tempfile = "3.27.0"
