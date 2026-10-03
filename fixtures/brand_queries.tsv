@@ -6,7 +6,8 @@
 # name matching with popularity should get them all. Some names are only
 # findable through link text or aliases (bofa, amex, nyt, citibank), and some
 # real sites share a name (chase / chase center, delta / delta faucet,
-# ford / ford foundation, amazon / amazon jobs).
+# ford / ford foundation, amazon / amazon jobs). The queries at the end are
+# harder: a brand plus what the user wants to do there.
 us bank	usbank.com
 U.S. Bank	usbank.com
 bank of america	bankofamerica.com
@@ -60,3 +61,30 @@ stanford university	stanford.edu
 AT&T	att.com
 ford	ford.com
 ford foundation	fordfoundation.org
+#
+# Brand plus intent: the official site, not the look-alike built for the
+# query. A look-alike's title (and for some, link text from one spam page)
+# holds every query word, so it matches the text better than the official
+# site does, but it has no rank.
+irs refund	irs.gov
+irs refund status	irs.gov
+us bank login	usbank.com
+chase login	chase.com
+facebook login	facebook.com
+facebook account recovery	facebook.com
+usps tracking	usps.com
+usps redelivery	usps.com
+amazon refund	amazon.com
+paypal login	paypal.com
+wells fargo sign on	wellsfargo.com
+microsoft support	microsoft.com
+# Look-alike domains that spell out the whole query.
+amazon prime refund	amazon.com
+usps package redelivery	usps.com
+# A longer name beats the brand it starts with.
+chase center tickets	chasecenter.com
+delta faucet parts	deltafaucet.com
+# Little-known sites: github.com has no rank or Wikidata entry here (it is
+# only a link target), and no ranked site has its name.
+github	github.com
+github login	github.com

@@ -17,6 +17,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 mod crawl;
+mod dns;
 mod extract;
 mod records;
 
@@ -48,6 +49,26 @@ pub struct CrawlConfig {
     pub max_bytes: usize,
     /// Redirects followed per request.
     pub max_redirects: usize,
+    /// Also connect to host names that resolve to addresses off the public
+    /// internet: loopback, private, link-local, CGNAT and other special
+    /// ranges. Off by default, so a hostile domain whose DNS points at, say,
+    /// 192.168.1.1 cannot make the crawler fetch pages on the operator's own
+    /// network; such a target fails instead. Turn it on only to crawl an
+    /// intranet on purpose. The check covers the names the crawler looks up
+    /// itself, so neither hosts written as IP addresses nor targets reached
+    /// through a proxy ([`CrawlConfig::use_system_proxy`]).
+    pub allow_private_addresses: bool,
+    /// Send requests through the system proxy, for machines that reach the
+    /// internet only through one: the proxy named by the `HTTP_PROXY`,
+    /// `HTTPS_PROXY` or `ALL_PROXY` environment variable, except for hosts
+    /// listed in `NO_PROXY`. Off by default: the crawler then ignores those
+    /// variables and connects to every site directly. With it on, the proxy
+    /// looks up target host names itself, so the crawler never sees their
+    /// addresses and [`CrawlConfig::allow_private_addresses`] cannot keep a
+    /// hostile domain off the networks the proxy can reach. The proxy's own
+    /// host name is still checked, so give a proxy on a private network as an
+    /// IP address.
+    pub use_system_proxy: bool,
 }
 
 impl Default for CrawlConfig {
@@ -59,6 +80,8 @@ impl Default for CrawlConfig {
             timeout: Duration::from_secs(15),
             max_bytes: 512 * 1024,
             max_redirects: 5,
+            allow_private_addresses: false,
+            use_system_proxy: false,
         }
     }
 }

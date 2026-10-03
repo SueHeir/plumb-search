@@ -67,10 +67,15 @@ The crawler identifies itself as `PlumbSearch/<version> (+https://github.com/Sue
 Every query is normalized the same way as the indexed text (lowercase, punctuation removed, "U.S." becomes "us"). Candidates come from BM25 over the domain name, aliases, title, link text and description, plus a "joined" match so that "us bank" finds the domain `usbank` and "bankofamerica" finds "Bank of America". Each candidate then gets
 
 ```
-score = α · link_score + (1 − α) · text_score
+score = α · link_score + trust · ((1 − α) · text_score + name_bonus)
 ```
 
-where `text_score` is the BM25 match scaled to 0–1 within the query's candidates, and `link_score` is a 0–1 popularity prior from the site's best rank (Tranco or Common Crawl), how many other domains link to it, and whether Wikidata lists it as an official website. An exact match between the query and the domain name adds a bonus. `α` defaults to 0.35 and can be changed with `--alpha`.
+- `text_score` is the BM25 match scaled to 0–1 within the query's candidates.
+- `link_score` is a 0–1 popularity prior from the site's best rank (Tranco or Common Crawl), how many other domains link to it, and whether Wikidata lists it as an official website.
+- `name_bonus` rewards a site whose domain name (or, with a smaller bonus, one of its aliases) is the query, or the first words of it: `usbank.com` for "us bank", and half the bonus for "us bank login".
+- `trust` protects official sites from keyword-stuffed look-alikes. When a query starts with a known site's name and adds more words ("irs refund", "us bank login"), sites with almost no popularity evidence keep only part of their text match, down to half for a site with none. Otherwise `trust` is 1, so little-known sites still rank normally when no well-known site matches.
+
+`α` defaults to 0.35 and can be changed with `--alpha`. The crate docs in `crates/plumb-index` describe the details and tuning knobs.
 
 ## Code layout
 

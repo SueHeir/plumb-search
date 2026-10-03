@@ -12,7 +12,7 @@ use tracing::{debug, info, warn};
 use url::Url;
 
 use crate::{
-    extract_page_meta, CrawlConfig, CrawlOutcome, CrawlResult, CrawlTarget, CrawledPage,
+    dns, extract_page_meta, CrawlConfig, CrawlOutcome, CrawlResult, CrawlTarget, CrawledPage,
     ROBOTS_TOKEN,
 };
 
@@ -60,6 +60,15 @@ const ACCEPT_HTML: &str = "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8";
 /// and `www.usbank.com`. Nothing is ever requested from another site, whose
 /// robots.txt has not been checked.
 ///
+/// Unless `cfg.allow_private_addresses` is set, host names are only
+/// connected to on globally routable addresses: a target whose name
+/// resolves only to loopback, private, link-local or other special
+/// addresses fails with [`CrawlOutcome::Failed`] (at its robots.txt
+/// request) without anything being sent, so a hostile domain cannot point
+/// the crawler at the operator's own network. That relies on connecting to
+/// each site directly, which the crawler does unless `cfg.use_system_proxy`
+/// is set: a proxy looks up target names itself.
+///
 /// Errors never stop the batch; each becomes that target's
 /// [`CrawlOutcome::Failed`]. Must run inside a Tokio runtime.
 pub async fn crawl_homepages(targets: Vec<CrawlTarget>, cfg: &CrawlConfig) -> Vec<CrawlResult> {
@@ -99,12 +108,22 @@ pub async fn crawl_homepages(targets: Vec<CrawlTarget>, cfg: &CrawlConfig) -> Ve
 
 /// One client for the whole batch, so connections are reused.
 fn build_client(cfg: &CrawlConfig) -> reqwest::Result<Client> {
-    Client::builder()
+    let builder = Client::builder()
         .user_agent(cfg.user_agent.as_str())
         .timeout(cfg.timeout)
         .gzip(true)
         .redirect(redirect_policy(cfg.max_redirects))
-        .build()
+        .dns_resolver(dns::Resolver {
+            allow_private: cfg.allow_private_addresses,
+        });
+    // reqwest uses the system proxy unless told not to; behind a proxy the
+    // resolver above would see only the proxy's name, not the targets'.
+    let builder = if cfg.use_system_proxy {
+        builder
+    } else {
+        builder.no_proxy()
+    };
+    builder.build()
 }
 
 /// [`redirect::Policy::limited`], except that no request follows a redirect
@@ -499,6 +518,15 @@ mod tests {
         }
     }
 
+    /// [`config`] for tests that reach the local server by the name
+    /// `localhost`, which resolves to a loopback address.
+    fn config_for_localhost() -> CrawlConfig {
+        CrawlConfig {
+            allow_private_addresses: true,
+            ..config()
+        }
+    }
+
     fn target(port: u16, path: &str) -> CrawlTarget {
         CrawlTarget {
             domain: "example.test".into(),
@@ -684,6 +712,131 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn private_addresses_are_refused_unless_allowed() {
+        // Unlike the IP address 127.0.0.1 the other tests use, the name
+        // "localhost" is looked up, and it resolves to loopback.
+        let (port, hits) = serve(|_| home()).await;
+        let by_name = CrawlTarget {
+            domain: "example.test".into(),
+            url: format!("http://localhost:{port}/"),
+        };
+
+        assert!(!CrawlConfig::default().allow_private_addresses);
+        let error = expect_failed(crawl_one(by_name.clone(), &config()).await);
+        assert!(error.starts_with("robots.txt"), "{error}");
+        assert!(
+            error.contains("localhost resolves only to non-public addresses"),
+            "{error}"
+        );
+        assert!(hits.paths().is_empty(), "{:?}", hits.paths());
+
+        let page = expect_fetched(crawl_one(by_name, &config_for_localhost()).await);
+        assert_eq!(page.final_url, format!("http://localhost:{port}/"));
+        assert_eq!(hits.paths(), ["/robots.txt", "/"]);
+    }
+
+    #[tokio::test]
+    async fn system_proxy_is_used_only_when_asked() {
+        let (port, hits) = serve(|_| home()).await;
+        let (proxy_port, proxy_hits) = serve(|_| home()).await;
+        let url = format!("http://localhost:{port}/");
+
+        // HTTP_PROXY is ignored by default, so the crawler looks up
+        // "localhost" itself and refuses it.
+        assert!(!CrawlConfig::default().use_system_proxy);
+        let error = expect_failed(crawl_behind_proxy(&url, proxy_port, false).await);
+        assert!(
+            error.contains("localhost resolves only to non-public addresses"),
+            "{error}"
+        );
+        assert!(proxy_hits.paths().is_empty(), "{:?}", proxy_hits.paths());
+
+        // With the system proxy on, every request goes to the proxy, which
+        // looks the name up itself: the private-address check never sees it.
+        let page = expect_fetched(crawl_behind_proxy(&url, proxy_port, true).await);
+        assert_eq!(page.final_url, url);
+        assert_eq!(proxy_hits.paths(), ["/robots.txt", "/"]);
+        assert!(hits.paths().is_empty(), "{:?}", hits.paths());
+    }
+
+    /// Holds the job of [`crawl_in_child_process`].
+    const CHILD_JOB: &str = "PLUMB_CRAWL_TEST_CHILD_JOB";
+    /// Precedes the outcome [`crawl_in_child_process`] prints.
+    const CHILD_OUTCOME: &str = "child outcome: ";
+
+    /// Crawls `url` with [`config`] and `use_system_proxy` in a child process
+    /// whose `HTTP_PROXY` is 127.0.0.1:`proxy_port`. reqwest reads proxy
+    /// settings from the environment, which a test must not change in its
+    /// own process while other threads may be reading it.
+    async fn crawl_behind_proxy(
+        url: &str,
+        proxy_port: u16,
+        use_system_proxy: bool,
+    ) -> CrawlOutcome {
+        let mut child = tokio::process::Command::new(std::env::current_exe().unwrap());
+        child.args([
+            "--exact",
+            "crawl::tests::crawl_in_child_process",
+            "--nocapture",
+        ]);
+        for name in [
+            "http_proxy",
+            "HTTPS_PROXY",
+            "https_proxy",
+            "ALL_PROXY",
+            "all_proxy",
+            "NO_PROXY",
+            "no_proxy",
+            "REQUEST_METHOD",
+        ] {
+            child.env_remove(name);
+        }
+        child
+            .env("HTTP_PROXY", format!("http://127.0.0.1:{proxy_port}"))
+            .env(
+                CHILD_JOB,
+                serde_json::to_string(&(url, use_system_proxy)).unwrap(),
+            );
+
+        let output = child.output().await.unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let outcome = stdout
+            .lines()
+            .find_map(|line| line.split_once(CHILD_OUTCOME).map(|(_, json)| json));
+        match outcome {
+            Some(json) if output.status.success() => serde_json::from_str(json).unwrap(),
+            _ => panic!(
+                "child process failed ({}):\n{stdout}{}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            ),
+        }
+    }
+
+    /// The child process of [`crawl_behind_proxy`]; does nothing in a normal
+    /// test run.
+    #[tokio::test]
+    async fn crawl_in_child_process() {
+        let Ok(job) = std::env::var(CHILD_JOB) else {
+            return;
+        };
+        let (url, use_system_proxy): (String, bool) = serde_json::from_str(&job).unwrap();
+        let cfg = CrawlConfig {
+            use_system_proxy,
+            ..config()
+        };
+        let target = CrawlTarget {
+            domain: "example.test".into(),
+            url,
+        };
+        let outcome = crawl_one(target, &cfg).await;
+        println!(
+            "{CHILD_OUTCOME}{}",
+            serde_json::to_string(&outcome).unwrap()
+        );
+    }
+
+    #[tokio::test]
     async fn bad_target_urls_fail_without_fetching() {
         for url in [
             "not a url",
@@ -741,8 +894,10 @@ mod tests {
     #[tokio::test]
     async fn offsite_redirects_are_reported_not_followed() {
         // "localhost" is another host than "127.0.0.1" with no registrable
-        // domain, so it counts as another site, yet it would reach this
-        // server: a request for /new would show up in the hits.
+        // domain, so it counts as another site, yet with private addresses
+        // allowed it would reach this server: a request for /new would show
+        // up in the hits.
+        let cfg = config_for_localhost();
         let moved = |port: u16| {
             Router::new()
                 .route(
@@ -768,7 +923,7 @@ mod tests {
         };
 
         let (port, hits) = serve(moved).await;
-        let outcome = crawl_one(target(port, "/old"), &config()).await;
+        let outcome = crawl_one(target(port, "/old"), &cfg).await;
         assert_eq!(
             outcome,
             CrawlOutcome::OffsiteRedirect {
@@ -779,7 +934,7 @@ mod tests {
 
         // Same-site hops are followed up to the one that leaves the site.
         let (port, hits) = serve(moved).await;
-        let outcome = crawl_one(target(port, "/chain"), &config()).await;
+        let outcome = crawl_one(target(port, "/chain"), &cfg).await;
         assert_eq!(
             outcome,
             CrawlOutcome::OffsiteRedirect {
@@ -808,7 +963,8 @@ mod tests {
         assert_eq!(outcome, CrawlOutcome::RobotsDisallowed);
         assert_eq!(hits.paths(), ["/robots.txt", "/robots-v2.txt"]);
 
-        // Another site: not followed, so there are no rules.
+        // Another site: not followed (though allowed to reach this server),
+        // so there are no rules.
         let (port, hits) = serve(|port| {
             home()
                 .route(
@@ -824,7 +980,7 @@ mod tests {
                 )
         })
         .await;
-        expect_fetched(crawl_one(target(port, "/"), &config()).await);
+        expect_fetched(crawl_one(target(port, "/"), &config_for_localhost()).await);
         assert_eq!(hits.paths(), ["/robots.txt", "/"]);
 
         // A redirect loop: more than max_redirects also means no rules.

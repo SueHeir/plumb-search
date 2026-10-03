@@ -5,14 +5,30 @@
 //! domain label, aliases, title, link text and description, plus a "joined"
 //! match so "us bank" finds the label `usbank`) with the site's popularity
 //! prior, [`plumb_core::link_score`]:
-//! `score = alpha * link_score + (1 - alpha) * text_score`, where the text
-//! score is normalized to `0..=1` within the candidates of each query.
 //!
-//! On top of the blend, a site whose domain label is the query
-//! ([`RankConfig::exact_label_bonus`]), or one of whose aliases is
-//! ([`RankConfig::exact_alias_bonus`]), gets a bonus. A query that is a
-//! hostname or URL (`usbank.com`, `https://www.usbank.com/`) counts as an
-//! exact label match for that domain.
+//! `score = alpha * link_score + trust * ((1 - alpha) * text_score + name_bonus)`
+//!
+//! - `text_score` is the BM25 score normalized to `0..=1` within the
+//!   candidates of each query.
+//! - `name_bonus` rewards a site whose name the query starts with. A domain
+//!   label equal to the first `k` of the query's `n` words gets `k / n` of
+//!   [`RankConfig::exact_label_bonus`] (all of it when it is the whole
+//!   query, `us bank` -> usbank.com); an alias likewise gets `k / n` of
+//!   [`RankConfig::exact_alias_bonus`]. So in "irs refund" irs.gov gets half
+//!   the label bonus. A query that is a hostname or URL (`usbank.com`,
+//!   `https://www.usbank.com/`) counts as a whole-query label match for
+//!   that domain.
+//! - `trust` guards brand-plus-intent queries ("us bank login") against
+//!   look-alikes such as usbank-login-help.com, which stuff every query word
+//!   into their titles and domains but have no popularity to show for it.
+//!   When the query is a site's name followed by more words, every site
+//!   needs a link score of [`RankConfig::trusted_link_score`] (or the best
+//!   such named site's, if lower) for its text match and name bonus to
+//!   count in full; with less, `trust` falls linearly to
+//!   [`RankConfig::untrusted_share`] at a link score of 0. Otherwise `trust`
+//!   is 1: a query that is just a name ("us bank") is won by the named site
+//!   anyway, and when no site is named a little-known site still comes
+//!   first. A typed hostname always has full trust.
 //!
 //! All text, at index and at query time, goes through
 //! [`plumb_core::normalize_text`] and is then ASCII-folded, so `U.S. Bank`,
@@ -22,7 +38,7 @@ mod analysis;
 mod replace;
 mod schema;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
@@ -30,10 +46,12 @@ use plumb_core::{registrable_domain, truncate_chars, SiteRecord, MAX_TEXT_CHARS}
 use serde::{Deserialize, Serialize};
 use tantivy::collector::{DocSetCollector, TopDocs};
 use tantivy::merge_policy::NoMergePolicy;
-use tantivy::query::{BooleanQuery, BoostQuery, Occur, Query, TermQuery};
+use tantivy::query::{BooleanQuery, BoostQuery, EnableScoring, Occur, Query, Scorer, TermQuery};
 use tantivy::schema::{IndexRecordOption, Value};
 use tantivy::tokenizer::TextAnalyzer;
-use tantivy::{DocAddress, Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument, Term};
+use tantivy::{
+    DocAddress, DocSet, Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument, Term,
+};
 
 use crate::replace::Staging;
 use crate::schema::Fields;
@@ -67,14 +85,28 @@ const WRITER_HEAP_BYTES: usize = 200_000_000;
 pub struct RankConfig {
     /// Weight of the popularity prior; the text match gets `1 - alpha`.
     pub alpha: f32,
-    /// How many BM25 candidates are re-ranked per query.
+    /// How many BM25 candidates are re-ranked per query. Sites whose name
+    /// the query starts with are re-ranked too.
     pub candidates: usize,
-    /// Added when the query, joined, equals the domain label (`us bank` -> `usbank`).
+    /// Added when the query, joined, equals the domain label (`us bank` ->
+    /// `usbank`). A label equal to the first `k` of the query's `n` words
+    /// gets `k / n` of it (`irs` in "irs refund": half).
     pub exact_label_bonus: f32,
     /// Added instead when the query, joined, equals one of the site's
-    /// aliases but not its label (`ally bank` for ally.com). Smaller than the
-    /// label bonus because sites can pick their own aliases (`og:site_name`).
+    /// aliases (`ally bank` for ally.com), and `k / n` of it for an alias
+    /// equal to the first `k` words. Smaller than the label bonus because
+    /// sites can pick their own aliases (`og:site_name`).
     pub exact_alias_bonus: f32,
+    /// When the query is a site's name (its domain label or an alias)
+    /// followed by more words, `irs` + `refund`, every site needs this link
+    /// score, or the named site's if that is lower, for its text match and
+    /// name bonus to count in full. Keeps look-alikes that stuff every query
+    /// word into their titles below the site they imitate. 0 turns this off.
+    pub trusted_link_score: f32,
+    /// The share of its text match and name bonus that a site with a link
+    /// score of 0 keeps in that case. It grows linearly to all of it at
+    /// [`RankConfig::trusted_link_score`].
+    pub untrusted_share: f32,
 }
 
 impl Default for RankConfig {
@@ -84,6 +116,8 @@ impl Default for RankConfig {
             candidates: 200,
             exact_label_bonus: 0.25,
             exact_alias_bonus: 0.1,
+            trusted_link_score: 0.2,
+            untrusted_share: 0.5,
         }
     }
 }
@@ -105,7 +139,7 @@ pub struct Hit {
     pub description: Option<String>,
     /// Final blended score.
     pub score: f32,
-    /// Normalized text match in `0..=1` (before the exact-label or alias bonus).
+    /// Normalized text match in `0..=1`, before the name bonus and trust.
     pub text_score: f32,
     /// [`plumb_core::link_score`] of the site.
     pub link_score: f32,
@@ -268,9 +302,10 @@ impl Searcher {
     /// Best `limit` hits for `query`, best first. A query with no letters or
     /// digits returns no hits.
     ///
-    /// The top `max(cfg.candidates, limit)` documents by BM25 are re-ranked
-    /// by the blended score; ties go to the higher link score, then to the
-    /// alphabetically first domain.
+    /// The top `max(cfg.candidates, limit)` documents by BM25, plus every
+    /// site whose name the query starts with, are re-ranked by the blended
+    /// score (see the [crate docs](crate)); ties go to the higher link
+    /// score, then to the alphabetically first domain.
     pub fn search_with(&self, query: &str, limit: usize, cfg: &RankConfig) -> Result<Vec<Hit>> {
         if limit == 0 {
             return Ok(Vec::new());
@@ -284,26 +319,21 @@ impl Searcher {
             return Ok(Vec::new());
         }
 
+        let text_query = query.text_query(&self.fields);
         let num_candidates = cfg.candidates.max(limit).min(num_docs);
-        let candidates = searcher.search(
-            &query.text_query(&self.fields),
+        let mut candidates = searcher.search(
+            &text_query,
             &TopDocs::with_limit(num_candidates).order_by_score(),
         )?;
+        // A site the query names is ranked even if BM25 put others first:
+        // it is what the look-alikes are measured against.
+        let names = self.name_matches(&searcher, &query)?;
+        let known: HashSet<DocAddress> = candidates.iter().map(|&(_, addr)| addr).collect();
+        let unranked = names.keys().filter(|addr| !known.contains(addr)).copied();
+        candidates.extend(bm25_of(&searcher, &text_query, unranked.collect())?);
         if candidates.is_empty() {
             return Ok(Vec::new());
         }
-
-        let mut label_terms = Vec::new();
-        let mut alias_terms = Vec::new();
-        if let Some(joined) = &query.joined {
-            label_terms.push(Term::from_field_text(self.fields.label_key, joined));
-            alias_terms.push(Term::from_field_text(self.fields.alias_key, joined));
-        }
-        if let Some(domain) = &query.domain {
-            label_terms.push(Term::from_field_text(self.fields.domain, domain));
-        }
-        let label_matches = matching_docs(&searcher, label_terms)?;
-        let alias_matches = matching_docs(&searcher, alias_terms)?;
 
         let columns = searcher
             .segment_readers()
@@ -313,38 +343,55 @@ impl Searcher {
                 Ok((fast.f64(schema::LINK_SCORE)?, fast.str(schema::DOMAIN)?))
             })
             .collect::<tantivy::Result<Vec<_>>>()?;
-
-        let alpha = if cfg.alpha.is_finite() {
-            cfg.alpha.clamp(0.0, 1.0)
-        } else {
-            RankConfig::default().alpha
+        let link_score_of = |addr: DocAddress| {
+            let (link_scores, _) = &columns[addr.segment_ord as usize];
+            link_scores.first(addr.doc_id).unwrap_or(0.0) as f32
         };
+
+        let default = RankConfig::default();
+        let alpha = unit_or(cfg.alpha, default.alpha);
+        let untrusted_share = unit_or(cfg.untrusted_share, default.untrusted_share);
+        // The evidence a site needs for its text to count in full: none
+        // unless the query is a site's name plus more words, and never more
+        // than that site has. A query that is just the name needs no guard:
+        // the named site wins it on its own.
+        let named_link_score = names
+            .iter()
+            .filter(|(_, name)| name.words() < query.len)
+            .map(|(&addr, _)| link_score_of(addr))
+            .fold(0.0, f32::max);
+        let trusted_link_score =
+            unit_or(cfg.trusted_link_score, default.trusted_link_score).min(named_link_score);
+        let query_words = query.len as f32;
+
         let max_bm25 = candidates.iter().map(|&(bm25, _)| bm25).fold(0.0, f32::max);
         let mut ranked: Vec<Ranked> = candidates
             .into_iter()
             .map(|(bm25, addr)| {
-                let (link_scores, domains) = &columns[addr.segment_ord as usize];
-                let link_score = link_scores.first(addr.doc_id).unwrap_or(0.0) as f32;
+                let link_score = link_score_of(addr);
                 let text_score = if max_bm25 > 0.0 {
                     (bm25 / max_bm25).clamp(0.0, 1.0)
                 } else {
                     0.0
                 };
-                let mut bonus: f32 = 0.0;
-                if label_matches.contains(&addr) {
-                    bonus = bonus.max(cfg.exact_label_bonus);
-                }
-                if alias_matches.contains(&addr) {
-                    bonus = bonus.max(cfg.exact_alias_bonus);
-                }
+                let name = names.get(&addr).copied().unwrap_or_default();
+                let name_bonus = (cfg.exact_label_bonus * name.label as f32 / query_words)
+                    .max(cfg.exact_alias_bonus * name.alias as f32 / query_words);
+                let trust = if name.typed || trusted_link_score <= 0.0 {
+                    1.0
+                } else {
+                    let evidence = (link_score / trusted_link_score).min(1.0);
+                    untrusted_share + (1.0 - untrusted_share) * evidence
+                };
                 // Within a segment, term ordinals sort like the domains themselves.
+                let (_, domains) = &columns[addr.segment_ord as usize];
                 let domain_ord = domains
                     .as_ref()
                     .and_then(|column| column.term_ords(addr.doc_id).next())
                     .unwrap_or(u64::MAX);
                 Ranked {
                     addr,
-                    score: alpha * link_score + (1.0 - alpha) * text_score + bonus,
+                    score: alpha * link_score + trust * ((1.0 - alpha) * text_score + name_bonus),
                     text_score,
                     link_score,
                     tie_break: (addr.segment_ord, domain_ord),
@@ -363,6 +410,39 @@ impl Searcher {
             .into_iter()
             .map(|ranked| self.hit(&searcher, &ranked))
             .collect()
+    }
+
+    /// The sites whose domain label or an alias equals the query's first
+    /// words, with how many words each covers, plus the site of a typed
+    /// hostname (covering the whole query).
+    fn name_matches(
+        &self,
+        searcher: &tantivy::Searcher,
+        query: &ParsedQuery,
+    ) -> Result<HashMap<DocAddress, NameMatch>> {
+        let mut names: HashMap<DocAddress, NameMatch> = HashMap::new();
+        for (i, key) in query.leading.iter().enumerate() {
+            let words = i + 1;
+            let label = Term::from_field_text(self.fields.label_key, key);
+            for addr in matching_docs(searcher, vec![label])? {
+                let name = names.entry(addr).or_default();
+                name.label = name.label.max(words);
+            }
+            let alias = Term::from_field_text(self.fields.alias_key, key);
+            for addr in matching_docs(searcher, vec![alias])? {
+                let name = names.entry(addr).or_default();
+                name.alias = name.alias.max(words);
+            }
+        }
+        if let Some(domain) = &query.domain {
+            let domain = Term::from_field_text(self.fields.domain, domain);
+            for addr in matching_docs(searcher, vec![domain])? {
+                let name = names.entry(addr).or_default();
+                name.label = query.len;
+                name.typed = true;
+            }
+        }
+        Ok(names)
     }
 
     /// Reads the stored fields of a ranked document.
@@ -396,6 +476,69 @@ struct Ranked {
     tie_break: (u32, u64),
 }
 
+/// How many of the query's words, from the first on, a site's names cover.
+#[derive(Debug, Clone, Copy, Default)]
+struct NameMatch {
+    /// Words covered by the domain label: 2 for usbank.com in "us bank login".
+    label: usize,
+    /// Words covered by an alias.
+    alias: usize,
+    /// The query is this site's hostname or URL.
+    typed: bool,
+}
+
+impl NameMatch {
+    /// Words covered by the site's best name.
+    fn words(&self) -> usize {
+        self.label.max(self.alias)
+    }
+}
+
+/// `value` clamped to `0..=1`, or `default` when it is not a number.
+fn unit_or(value: f32, default: f32) -> f32 {
+    if value.is_finite() {
+        value.clamp(0.0, 1.0)
+    } else {
+        default
+    }
+}
+
+/// The BM25 score of each of `docs` for `query`, 0 where it does not match.
+fn bm25_of(
+    searcher: &tantivy::Searcher,
+    query: &dyn Query,
+    mut docs: Vec<DocAddress>,
+) -> Result<Vec<(f32, DocAddress)>> {
+    if docs.is_empty() {
+        return Ok(Vec::new());
+    }
+    docs.sort_unstable();
+    let weight = query.weight(EnableScoring::enabled_from_searcher(searcher))?;
+    let mut scored = Vec::with_capacity(docs.len());
+    let mut scorer: Option<(u32, Box<dyn Scorer>)> = None;
+    for addr in docs {
+        let scorer = match &mut scorer {
+            Some((segment_ord, scorer)) if *segment_ord == addr.segment_ord => scorer,
+            _ => {
+                let reader = searcher.segment_reader(addr.segment_ord);
+                let segment_scorer = weight.scorer(reader, 1.0)?;
+                &mut scorer.insert((addr.segment_ord, segment_scorer)).1
+            }
+        };
+        // Documents come in order, so the scorer only moves forward.
+        if scorer.doc() < addr.doc_id {
+            scorer.seek(addr.doc_id);
+        }
+        let bm25 = if scorer.doc() == addr.doc_id {
+            scorer.score()
+        } else {
+            0.0
+        };
+        scored.push((bm25, addr));
+    }
+    Ok(scored)
+}
+
 /// The documents containing any of `terms`.
 fn matching_docs(searcher: &tantivy::Searcher, terms: Vec<Term>) -> Result<HashSet<DocAddress>> {
     if terms.is_empty() {
@@ -418,6 +561,12 @@ struct ParsedQuery {
     words: Vec<String>,
     /// The whole query as one joined token: `U.S. Bank` -> `usbank`.
     joined: Option<String>,
+    /// The first word, the first two joined, and so on (at most
+    /// [`MAX_QUERY_WORDS`]): `us bank login` -> `us`, `usbank`,
+    /// `usbanklogin`. The names a site can have to be named by the query.
+    leading: Vec<String>,
+    /// Number of words in the query, repeats included.
+    len: usize,
     /// The registrable domain, when the query is a hostname or URL.
     domain: Option<String>,
 }
@@ -426,19 +575,30 @@ impl ParsedQuery {
     /// `None` when the query has no letters or digits.
     fn new(query: &str, words: &TextAnalyzer, joined: &TextAnalyzer) -> Option<ParsedQuery> {
         let query = truncate_chars(query, MAX_TEXT_CHARS);
-        let mut distinct = Vec::new();
-        for word in analysis::tokens(words, &query) {
-            if !distinct.contains(&word) {
-                distinct.push(word);
-            }
-        }
-        if distinct.is_empty() {
+        let tokens = analysis::tokens(words, &query);
+        if tokens.is_empty() {
             return None;
         }
+        let mut distinct = Vec::new();
+        for word in &tokens {
+            if !distinct.contains(word) {
+                distinct.push(word.clone());
+            }
+        }
         distinct.truncate(MAX_QUERY_WORDS);
+        let leading = tokens
+            .iter()
+            .take(MAX_QUERY_WORDS)
+            .scan(String::new(), |key, word| {
+                key.push_str(word);
+                Some(key.clone())
+            })
+            .collect();
         Some(ParsedQuery {
             words: distinct,
             joined: analysis::tokens(joined, &query).into_iter().next(),
+            leading,
+            len: tokens.len(),
             domain: typed_domain(&query),
         })
     }
@@ -877,25 +1037,239 @@ mod tests {
     fn scores_blend_text_and_popularity() {
         let (_dir, searcher) = build(&corpus());
         let cfg = RankConfig::default();
+        let check = |hits: &[Hit], expected: &dyn Fn(&Hit) -> f32| {
+            assert!(hits.iter().any(|hit| hit.text_score == 1.0));
+            for pair in hits.windows(2) {
+                assert!(pair[0].score >= pair[1].score);
+            }
+            for hit in hits {
+                assert!((0.0..=1.0).contains(&hit.text_score), "{hit:?}");
+                assert!((0.0..=1.0).contains(&hit.link_score), "{hit:?}");
+                assert!((hit.score - expected(hit)).abs() < 1e-5, "{hit:?}");
+            }
+        };
+
+        // No site is named "online" or "online banking": a plain blend.
+        let hits = searcher.search("online banking", 10).unwrap();
+        check(&hits, &|hit| {
+            cfg.alpha * hit.link_score + (1.0 - cfg.alpha) * hit.text_score
+        });
+
+        // "us bank" is usbank.com's whole name: the label bonus, full trust.
         let hits = searcher.search("us bank", 10).unwrap();
-        assert!(hits.iter().any(|hit| hit.text_score == 1.0));
-        for pair in hits.windows(2) {
-            assert!(pair[0].score >= pair[1].score);
-        }
-        for hit in &hits {
-            assert!((0.0..=1.0).contains(&hit.text_score), "{hit:?}");
-            assert!((0.0..=1.0).contains(&hit.link_score), "{hit:?}");
-            let bonus = if hit.domain == "usbank.com" {
-                cfg.exact_label_bonus
-            } else {
-                0.0
-            };
-            let expected = cfg.alpha * hit.link_score + (1.0 - cfg.alpha) * hit.text_score + bonus;
-            assert!((hit.score - expected).abs() < 1e-5, "{hit:?}");
-        }
         let usbank = &hits[0];
+        assert_eq!(usbank.domain, "usbank.com");
         let record_score = corpus()[0].link_score();
         assert!((usbank.link_score - record_score).abs() < 1e-6);
+        let label_bonus = |hit: &Hit, share: f32| {
+            if hit.domain == "usbank.com" {
+                cfg.exact_label_bonus * share
+            } else {
+                0.0
+            }
+        };
+        check(&hits, &|hit| {
+            cfg.alpha * hit.link_score + (1.0 - cfg.alpha) * hit.text_score + label_bonus(hit, 1.0)
+        });
+
+        // "us bank login" goes on past the name: usbank.com gets 2/3 of the
+        // bonus, and sites below the trusted link score lose some of theirs.
+        let hits = searcher.search("us bank login", 10).unwrap();
+        assert_eq!(hits[0].domain, "usbank.com");
+        let trusted = cfg.trusted_link_score.min(usbank.link_score);
+        assert!(hits.iter().any(|hit| hit.link_score < trusted));
+        check(&hits, &|hit| {
+            let evidence = (hit.link_score / trusted).min(1.0);
+            let trust = cfg.untrusted_share + (1.0 - cfg.untrusted_share) * evidence;
+            cfg.alpha * hit.link_score
+                + trust * ((1.0 - cfg.alpha) * hit.text_score + label_bonus(hit, 2.0 / 3.0))
+        });
+    }
+
+    /// Official sites and the look-alikes built for their brand-plus-intent
+    /// queries, modeled on `fixtures/`: keyword-stuffed titles, a link from
+    /// one spam page, no rank.
+    fn lookalike_corpus() -> Vec<SiteRecord> {
+        let spam_linked = || Signals {
+            linking_domains: 1,
+            ..Signals::default()
+        };
+        vec![
+            site(
+                "irs.gov",
+                Some("Internal Revenue Service (IRS) | An official website of the United States government"),
+                Some("Find tax forms, check your refund status, make a payment and get answers to your tax questions."),
+                &["IRS", "Internal Revenue Service"],
+                &[("IRS", 2)],
+                popular(410, 3),
+            ),
+            site(
+                "irs-tax-refund-help.com",
+                Some("IRS Tax Refund Help | Check IRS Refund Status | IRS Online"),
+                Some("IRS refund status, IRS tax refund help and IRS online account support."),
+                &[],
+                &[("IRS Refund", 1)],
+                spam_linked(),
+            ),
+            site(
+                "usbank.com",
+                Some("Personal and Business Banking | U.S. Bank"),
+                None,
+                &["U.S. Bank", "U.S. Bancorp"],
+                &[("us bank", 2)],
+                popular(503, 3),
+            ),
+            site(
+                "usbank-login-help.com",
+                Some("US Bank Login Help | US Bank Online Banking Sign In"),
+                Some("US Bank login help: sign in to US Bank online banking."),
+                &["US Bank Login Help"],
+                &[("US Bank Login", 1)],
+                spam_linked(),
+            ),
+            site(
+                "amazon.com",
+                Some("Amazon.com. Spend less. Smile more."),
+                None,
+                &["Amazon"],
+                &[("Amazon", 2)],
+                popular(5, 3),
+            ),
+            site(
+                "amazon-prime-refund.com",
+                Some("Amazon Prime Refund | Amazon Account Locked | Amazon Support"),
+                Some("Your Amazon Prime refund is ready. Claim your Amazon refund."),
+                &[],
+                &[],
+                Signals::default(),
+            ),
+            site(
+                "chase.com",
+                Some("Chase Bank - Credit Cards, Mortgages, Commercial Banking, Auto Loans"),
+                None,
+                &["Chase", "Chase Bank"],
+                &[("Chase", 3)],
+                popular(112, 4),
+            ),
+            site(
+                "chasecenter.com",
+                Some("Chase Center | San Francisco's Home of the Golden State Warriors"),
+                None,
+                &["Chase Center"],
+                &[("Chase Center", 2)],
+                popular(44_016, 2),
+            ),
+            // Little-known sites: only a link target, or nothing at all.
+            site("github.com", None, None, &[], &[], spam_linked()),
+            site(
+                "maplestreetbakery.com",
+                Some("Maple Street Bakery – Fresh Bread Daily"),
+                None,
+                &[],
+                &[],
+                Signals::default(),
+            ),
+            site(
+                "panerabread.com",
+                Some("Panera Bread | Bakery-Cafe | Order Online"),
+                None,
+                &["Panera Bread"],
+                &[("Panera", 2)],
+                popular(2_000, 50),
+            ),
+        ]
+    }
+
+    #[test]
+    fn brand_plus_intent_queries_find_the_official_site() {
+        let (_dir, searcher) = build(&lookalike_corpus());
+        for (query, official, lookalike) in [
+            ("irs refund", "irs.gov", "irs-tax-refund-help.com"),
+            ("irs refund status", "irs.gov", "irs-tax-refund-help.com"),
+            (
+                "internal revenue service refund",
+                "irs.gov",
+                "irs-tax-refund-help.com",
+            ),
+            ("us bank login", "usbank.com", "usbank-login-help.com"),
+            ("U.S. Bank login", "usbank.com", "usbank-login-help.com"),
+            ("amazon refund", "amazon.com", "amazon-prime-refund.com"),
+            // Even a domain that spells out the whole query.
+            (
+                "amazon prime refund",
+                "amazon.com",
+                "amazon-prime-refund.com",
+            ),
+            ("us bank login help", "usbank.com", "usbank-login-help.com"),
+        ] {
+            let hits = searcher.search(query, 10).unwrap();
+            assert_eq!(hits[0].domain, official, "{query:?}: {hits:#?}");
+            // The look-alike is still found, below the site it imitates.
+            assert!(domains(&hits).contains(&lookalike), "{query:?}");
+        }
+        // Typing its hostname still goes to the look-alike.
+        assert_eq!(
+            top(&searcher, "usbank-login-help.com"),
+            "usbank-login-help.com"
+        );
+        assert_eq!(
+            top(&searcher, "amazon-prime-refund.com"),
+            "amazon-prime-refund.com"
+        );
+
+        // Without the trust rule the stuffed titles win, which is what it is for.
+        let untrusting = RankConfig {
+            trusted_link_score: 0.0,
+            ..RankConfig::default()
+        };
+        let hits = searcher
+            .search_with("us bank login", 1, &untrusting)
+            .unwrap();
+        assert_eq!(hits[0].domain, "usbank-login-help.com");
+    }
+
+    #[test]
+    fn little_known_sites_win_when_no_named_site_competes() {
+        let (_dir, searcher) = build(&lookalike_corpus());
+        // No rank either way: github.com is named by "github", and the
+        // look-alikes stuffing "login" have no more evidence than it has.
+        assert_eq!(top(&searcher, "github login"), "github.com");
+        // No site is named "maple" or "maple street", so the popular bakery
+        // does not discount the unranked one.
+        let hits = searcher.search("maple street bakery", 10).unwrap();
+        assert_eq!(
+            domains(&hits)[..2],
+            ["maplestreetbakery.com", "panerabread.com"]
+        );
+        assert_eq!(hits[0].link_score, 0.0);
+    }
+
+    #[test]
+    fn longer_leading_names_win() {
+        let (_dir, searcher) = build(&lookalike_corpus());
+        // chasecenter.com covers "chase center", chase.com only "chase".
+        let hits = searcher.search("chase center tickets", 10).unwrap();
+        assert_eq!(domains(&hits)[..2], ["chasecenter.com", "chase.com"]);
+        assert_eq!(top(&searcher, "chase login"), "chase.com");
+    }
+
+    #[test]
+    fn named_sites_are_ranked_outside_the_bm25_candidates() {
+        let (_dir, searcher) = build(&lookalike_corpus());
+        let cfg = RankConfig::default();
+        let full = searcher.search_with("us bank login", 10, &cfg).unwrap();
+        // With one BM25 candidate, the stuffed look-alike, usbank.com still
+        // gets scored because the query names it.
+        let narrow = RankConfig {
+            candidates: 1,
+            ..RankConfig::default()
+        };
+        let hits = searcher.search_with("us bank login", 1, &narrow).unwrap();
+        assert_eq!(domains(&hits), ["usbank.com"]);
+        assert_eq!(full[0].domain, "usbank.com");
+        // Scored one by one rather than in a batch, so equal up to rounding.
+        assert!((hits[0].text_score - full[0].text_score).abs() < 1e-5);
+        assert!((hits[0].score - full[0].score).abs() < 1e-5);
     }
 
     #[test]
@@ -1146,12 +1520,21 @@ mod tests {
             ParsedQuery {
                 words: vec!["us".into(), "bank".into()],
                 joined: Some("usbank".into()),
+                leading: vec!["us".into(), "usbank".into()],
+                len: 2,
                 domain: None,
             }
         );
         let parsed = parse("bank bank BANK").unwrap();
         assert_eq!(parsed.words, ["bank"]);
         assert_eq!(parsed.joined.as_deref(), Some("bankbankbank"));
+        assert_eq!(parsed.leading, ["bank", "bankbank", "bankbankbank"]);
+        assert_eq!(parsed.len, 3);
+        // Names are compared as indexed: folded, lowercased, punctuation gone.
+        assert_eq!(
+            parse("Nestlé S.A. login").unwrap().leading,
+            ["nestle", "nestlesa", "nestlesalogin"]
+        );
         assert_eq!(
             parse("https://www.usbank.com/").unwrap().domain.as_deref(),
             Some("usbank.com")
@@ -1162,17 +1545,51 @@ mod tests {
             .map(|i| format!("w{i}"))
             .collect::<Vec<_>>()
             .join(" ");
-        assert_eq!(parse(&many).unwrap().words.len(), MAX_QUERY_WORDS);
+        let many = parse(&many).unwrap();
+        assert_eq!(many.words.len(), MAX_QUERY_WORDS);
+        assert_eq!(many.leading.len(), MAX_QUERY_WORDS);
+        assert_eq!(many.len, 40);
     }
 
     #[test]
     fn partial_configs_deserialize_with_defaults() {
         let cfg: RankConfig = serde_json_like("alpha", 0.5);
         assert_eq!(cfg.alpha, 0.5);
-        assert_eq!(cfg.candidates, RankConfig::default().candidates);
         assert_eq!(
-            cfg.exact_alias_bonus,
-            RankConfig::default().exact_alias_bonus
+            cfg,
+            RankConfig {
+                alpha: 0.5,
+                ..RankConfig::default()
+            }
+        );
+        let cfg: RankConfig = serde_json_like("trusted_link_score", 0.3);
+        assert_eq!(cfg.trusted_link_score, 0.3);
+        assert_eq!(cfg.untrusted_share, RankConfig::default().untrusted_share);
+    }
+
+    #[test]
+    fn out_of_range_trust_settings_are_tamed() {
+        let (_dir, searcher) = build(&lookalike_corpus());
+        let expected = searcher.search("us bank login", 10).unwrap();
+        for (trusted_link_score, untrusted_share) in [(f32::NAN, f32::NAN), (5.0, 0.5)] {
+            let cfg = RankConfig {
+                trusted_link_score,
+                untrusted_share,
+                ..RankConfig::default()
+            };
+            let hits = searcher.search_with("us bank login", 10, &cfg).unwrap();
+            assert_eq!(domains(&hits)[0], "usbank.com");
+            assert!(hits.iter().all(|hit| hit.score.is_finite()));
+        }
+        // NaN falls back to the defaults.
+        let nan = RankConfig {
+            trusted_link_score: f32::NAN,
+            untrusted_share: f32::NAN,
+            ..RankConfig::default()
+        };
+        assert_eq!(
+            searcher.search_with("us bank login", 10, &nan).unwrap(),
+            expected
         );
     }
 
