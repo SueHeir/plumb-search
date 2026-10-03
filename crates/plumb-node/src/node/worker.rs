@@ -85,7 +85,7 @@ pub(super) async fn run(inner: Arc<Inner>) {
             Ok(Next::IdleUntil(until)) => {
                 let detail = inner
                     .pause_reason()
-                    .unwrap_or_else(|| idle_detail(&inner.config));
+                    .unwrap_or_else(|| idle_detail(&inner.config).to_owned());
                 inner.set_step(Step::Idle, detail);
                 wait(&inner, Deadline::Wall(until)).await;
             }
@@ -153,13 +153,14 @@ async fn step(inner: &Arc<Inner>) -> Result<Next> {
         complete_seed(inner).await?;
         return Ok(Next::Aside);
     }
-    // Crawls and refreshes wait while background updates are off or a
-    // limit is reached; a day's download limit ends with the day.
-    if inner.pause_reason().is_some() {
+    // Crawls and refreshes wait while background updates are off, paused
+    // or outside the crawl hours, or a limit is reached; a day's download
+    // limit ends with the day, a pause when it says.
+    if let Some(pause) = inner.pause() {
         inner.refresh_requested.store(false, Ordering::SeqCst);
-        let tomorrow = store::next_day(now_unix());
+        let until = pause.until.unwrap_or_else(|| store::next_day(now_unix()));
         return Ok(Next::IdleUntil(Some(
-            wikidata_due.map_or(tomorrow, |due| due.min(tomorrow)),
+            wikidata_due.map_or(until, |due| due.min(until)),
         )));
     }
     if saved.crawl_left > 0 {
@@ -721,6 +722,7 @@ fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Option<ServingIndex
         inner.set_progress(0, targets.len(), "homepages");
         let cfg = CrawlConfig {
             use_system_proxy: inner.config.use_system_proxy,
+            concurrency: inner.settings().workload.concurrency(),
             ..CrawlConfig::default()
         };
         // Homepages counted in the saved state so far.
@@ -764,7 +766,7 @@ fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Option<ServingIndex
                 // so far, and go on from there later.
                 info!(
                     "{}: pausing the crawl after {} homepages",
-                    inner.pause_reason().unwrap_or("paused"),
+                    inner.pause_reason().as_deref().unwrap_or("paused"),
                     totals.attempted
                 );
                 if totals.attempted == 0 {
@@ -817,9 +819,16 @@ fn build(inner: &Inner, records: Vec<SiteRecord>) -> Result<ServingIndex> {
             group_thousands(records.len() as u64)
         ),
     );
+    let buckets = network::wants_buckets(inner);
+    let steps = if buckets { 2 } else { 1 };
+    inner.set_progress(0, steps, "steps");
     let started = Instant::now();
     let stats = build_index(&dir, &records)
         .with_context(|| format!("building the index in {}", dir.display()))?;
+    if buckets {
+        inner.set_step(Step::Indexing, "Writing the buckets other nodes search");
+        inner.set_progress(1, steps, "steps");
+    }
     network::build_buckets(inner, &dir, &records);
     drop(records);
     let index = match ServingIndex::open(id, &dir, inner.rank) {
