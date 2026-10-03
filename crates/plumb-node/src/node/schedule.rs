@@ -22,6 +22,15 @@ pub enum Workload {
 impl Workload {
     pub const PRESETS: [Workload; 3] = [Workload::Light, Workload::Balanced, Workload::Full];
 
+    /// Homepages fetched at once; `custom` is what the custom workload
+    /// uses, [`Workload::Custom`]'s own when `None`.
+    pub fn concurrency_or(self, custom: Option<usize>) -> usize {
+        match (self, custom) {
+            (Workload::Custom, Some(n)) => n.max(1),
+            _ => self.concurrency(),
+        }
+    }
+
     /// Homepages fetched at once.
     pub fn concurrency(self) -> usize {
         match self {
@@ -133,6 +142,10 @@ mod tests {
         assert_eq!(Workload::Full.limits(), Some((0, 0)));
         assert_eq!(Workload::Custom.limits(), None);
         assert!(Workload::Light.concurrency() < Workload::Full.concurrency());
+        // A concurrency given for the node applies to the custom workload.
+        assert_eq!(Workload::Custom.concurrency_or(Some(256)), 256);
+        assert_eq!(Workload::Custom.concurrency_or(None), 16);
+        assert_eq!(Workload::Light.concurrency_or(Some(256)), 4);
         for w in Workload::PRESETS {
             assert_eq!(Workload::from_name(w.name()), Some(w));
         }

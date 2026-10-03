@@ -133,6 +133,10 @@ pub struct RunArgs {
     /// Homepages crawled per refresh [default: from --profile].
     #[arg(long, value_name = "N", value_parser = parse_positive)]
     pub crawl_per_refresh: Option<usize>,
+    /// Homepages fetched at once while crawling [default: 16]. The panel's
+    /// workload presets (light, balanced, full) set their own.
+    #[arg(long, value_name = "N", value_parser = parse_positive)]
+    pub crawl_concurrency: Option<usize>,
     /// Never refresh: keep the index as the initial crawl leaves it.
     #[arg(long, conflicts_with_all = ["refresh_hours", "crawl_per_refresh"])]
     pub no_refresh: bool,
@@ -233,6 +237,12 @@ pub struct RunArgs {
     /// many nodes report the same pick.
     #[arg(long, requires = "network")]
     pub share_popularity: bool,
+    /// Also share the homepages crawled into this records file, such as one
+    /// `plumb crawl` is filling (its journal included), and add them to this
+    /// node's own records: every half hour, those crawled since the last
+    /// time and within the last 6 days.
+    #[arg(long, value_name = "PATH", requires = "network")]
+    pub publish_records: Option<PathBuf>,
 }
 
 /// Starting points for `plumb run`.

@@ -64,6 +64,9 @@ fn node_config(args: RunArgs) -> NodeConfig {
     if let Some(homepages) = args.crawl_per_refresh {
         config.crawl_per_refresh = homepages;
     }
+    if args.crawl_concurrency.is_some() {
+        config.crawl_concurrency = args.crawl_concurrency;
+    }
     if args.cc_release.is_some() {
         config.cc_release = args.cc_release;
     }
@@ -107,6 +110,7 @@ fn node_config(args: RunArgs) -> NodeConfig {
         net.trusted_peers.extend(args.trust_peer);
         config.network = Some(net);
         config.share_popularity = args.share_popularity;
+        config.publish_records = args.publish_records;
     }
     config
 }

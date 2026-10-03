@@ -132,6 +132,13 @@ pub struct NodeConfig {
     pub refresh_every: Option<Duration>,
     /// Homepages crawled per refresh.
     pub crawl_per_refresh: usize,
+    /// Homepages fetched at once under the custom workload (the panel's
+    /// presets set their own); `None` for the crawler's usual 16.
+    pub crawl_concurrency: Option<usize>,
+    /// During a long crawl, put an index of what was crawled so far in
+    /// service this often, so new sites show up in searches (and get
+    /// vectors) while the crawl goes on. The crawl then carries on.
+    pub index_during_crawl_every: Duration,
     /// Fetch homepages through the system proxy (`HTTP_PROXY`, `HTTPS_PROXY`
     /// or `ALL_PROXY`, except hosts in `NO_PROXY`), for machines that reach
     /// the internet only through one. Off by default: homepages are fetched
@@ -169,6 +176,11 @@ pub struct NodeConfig {
     /// Each index build also writes its buckets, which take about as much
     /// disk as the records file. Off by default.
     pub private_search: bool,
+    /// Also share the homepages crawled into this records file (with its
+    /// journal), such as one a `plumb crawl` is filling, and fold them into
+    /// this node's records: every half hour, those crawled since the last
+    /// time and within the last 6 days. Needs `network`.
+    pub publish_records: Option<PathBuf>,
     /// Share which result people open for a search, anonymously, so the
     /// network learns what is popular (see [`network`]). Needs `network`.
     /// Off by default.
@@ -194,6 +206,8 @@ impl NodeConfig {
             initial_crawl: 10_000,
             refresh_every: Some(Duration::from_secs(24 * 60 * 60)),
             crawl_per_refresh: 5_000,
+            crawl_concurrency: None,
+            index_during_crawl_every: Duration::from_secs(15 * 60),
             use_system_proxy: false,
             cc_release: None,
             alpha: None,
@@ -206,6 +220,7 @@ impl NodeConfig {
             network: None,
             private_search: false,
             share_popularity: false,
+            publish_records: None,
             settings: NodeSettings::default(),
             manage_other_nodes: false,
         }
@@ -242,6 +257,9 @@ impl NodeConfig {
         }
         if self.share_popularity && self.network.is_none() {
             bail!("sharing popularity needs the network");
+        }
+        if self.publish_records.is_some() && self.network.is_none() {
+            bail!("publishing a records file needs the network");
         }
         if let Some(alpha) = self.alpha {
             if !(0.0..=1.0).contains(&alpha) {

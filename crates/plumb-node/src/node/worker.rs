@@ -632,6 +632,13 @@ struct NodeFetcher<'a> {
     inner: &'a Inner,
     net: Option<&'a plumb_net::NetHandle>,
     icons: &'a IconStore,
+    /// When this part of the crawl started.
+    started: Instant,
+    /// Batches finished in this part.
+    batches: usize,
+    /// Stopped to put an index of the crawl so far in service
+    /// ([`NodeConfig::index_during_crawl_every`](super::NodeConfig)).
+    checkpoint: bool,
 }
 
 impl Fetcher for NodeFetcher<'_> {
@@ -649,6 +656,14 @@ impl Fetcher for NodeFetcher<'_> {
         if self.inner.pause_reason().is_some() {
             return None;
         }
+        // Time to index what was crawled so far; the homepages in flight
+        // are tried again when the crawl goes on.
+        if self.batches > 0 && self.started.elapsed() >= self.inner.config.index_during_crawl_every
+        {
+            self.checkpoint = true;
+            return None;
+        }
+        self.batches += 1;
         let crawler = &mut self.rolling.crawler;
         let (inner, net, icons) = (self.inner, self.net, self.icons);
         self.rolling.runtime.block_on(async move {
@@ -744,7 +759,10 @@ fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Option<ServingIndex
         inner.set_progress(0, targets.len(), "homepages");
         let cfg = CrawlConfig {
             use_system_proxy: inner.config.use_system_proxy,
-            concurrency: inner.settings().workload.concurrency(),
+            concurrency: inner
+                .settings()
+                .workload
+                .concurrency_or(inner.config.crawl_concurrency),
             ..CrawlConfig::default()
         };
         // Homepages counted in the saved state so far.
@@ -758,6 +776,9 @@ fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Option<ServingIndex
             inner,
             net: net.as_deref(),
             icons: &icons,
+            started: Instant::now(),
+            batches: 0,
+            checkpoint: false,
         };
         let totals = crawl_rolling(
             &mut set,
@@ -784,6 +805,15 @@ fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Option<ServingIndex
         match totals.end {
             RunEnd::Finished => {}
             RunEnd::Stopped if inner.stopping() => return Err(Stopped.into()),
+            RunEnd::Stopped if fetcher.checkpoint => {
+                // Index what was crawled so far; the next turn goes on.
+                info!(
+                    "indexing the {} homepages crawled so far; {} left in this round",
+                    totals.attempted,
+                    inner.saved().crawl_left
+                );
+                return build(inner, set.into_sorted_vec()).map(Some);
+            }
             RunEnd::Stopped => {
                 // Paused by the settings or a limit: index what was crawled
                 // so far, and go on from there later.
