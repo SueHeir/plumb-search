@@ -224,7 +224,35 @@ async fn nodes_share_batches_search_each_other_and_reach_through_a_relay() {
     }
     assert!(reached_e, "the relay's search reaches E through itself");
 
-    for node in [a, b, c, d, e, relay_got] {
+    // F is behind NAT too. Two such nodes find each other through the
+    // network (they only know the relay) and meet over a relayed
+    // connection, so F's searches reach E.
+    let f = Node::start_with(false, vec![relay_addr.clone()], vec![], false).await;
+    let e_id = e.handle.peer_id();
+    wait_for(|| (!f.handle.status().relays.is_empty()).then_some(())).await;
+    let served_before = e.handle.status().buckets_served;
+    let mut f_reached_e = false;
+    let mut last = None;
+    for _ in 0..100 {
+        last = Some(
+            f.handle
+                .search("harbor", Duration::from_secs(5))
+                .await
+                .unwrap(),
+        );
+        if e.handle.status().buckets_served > served_before {
+            f_reached_e = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    assert!(
+        f_reached_e,
+        "F finds E ({e_id}) and searches it: {:?} {last:?}",
+        f.handle.status()
+    );
+
+    for node in [a, b, c, d, e, f, relay_got] {
         node.handle.shutdown().await;
     }
 }

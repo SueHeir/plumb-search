@@ -338,6 +338,7 @@ pub async fn start(
         relays: HashMap::new(),
         remote_addrs: HashMap::new(),
         reserved: HashSet::new(),
+        nearby: HashSet::new(),
         wanted: VecDeque::new(),
         wanted_ids: HashSet::new(),
         fetching: HashMap::new(),
@@ -489,6 +490,9 @@ struct Task {
     remote_addrs: HashMap<PeerId, Multiaddr>,
     /// Nodes that hold a reservation with us (when we are a relay).
     reserved: HashSet<PeerId>,
+    /// Nodes we reached over a home-network or loopback address (directly
+    /// or through a relay there), which may use the same kind.
+    nearby: HashSet<PeerId>,
     /// Batches to fetch, and from whom.
     wanted: VecDeque<(Hash, Vec<PeerId>)>,
     wanted_ids: HashSet<Hash>,
@@ -720,6 +724,9 @@ impl Task {
                     ConnectedPoint::Listener { send_back_addr, .. } => send_back_addr.clone(),
                 };
                 debug!("connected to {peer_id} at {addr}");
+                if !is_global(&addr) {
+                    self.nearby.insert(peer_id);
+                }
                 if !addr.iter().any(|p| p == Protocol::P2pCircuit) {
                     self.remote_addrs.insert(peer_id, addr);
                 }
@@ -734,6 +741,7 @@ impl Task {
                     self.batch_peers.remove(&peer_id);
                     self.remote_addrs.remove(&peer_id);
                     self.reserved.remove(&peer_id);
+                    self.nearby.remove(&peer_id);
                     if self.relays.remove(&peer_id).is_some() {
                         info!("lost the relay {peer_id}");
                     }
@@ -788,6 +796,9 @@ impl Task {
             }) => {
                 if !renewal {
                     info!("reachable through the relay {relay_peer_id}");
+                    // Now that others can reach us, ask around for nodes,
+                    // which also puts us in their routing tables.
+                    let _ = self.swarm.behaviour_mut().kad.bootstrap();
                 }
                 self.relays.insert(relay_peer_id, true);
             }
@@ -796,6 +807,22 @@ impl Task {
             }
             BehaviourEvent::Relay(relay::Event::ReservationTimedOut { src_peer_id }) => {
                 self.reserved.remove(&src_peer_id);
+            }
+            BehaviourEvent::Kad(kad::Event::RoutingUpdated {
+                peer, addresses, ..
+            }) => {
+                debug!(
+                    "routing: {peer} at {:?}",
+                    addresses.iter().collect::<Vec<_>>()
+                );
+                // A node heard of through the network, such as one behind
+                // NAT that only a relay can reach: meet it while we have
+                // room, rather than at the next maintenance round.
+                if !self.swarm.is_connected(&peer)
+                    && self.swarm.connected_peers().count() < TARGET_PEERS
+                {
+                    let _ = self.swarm.dial(peer);
+                }
             }
             BehaviourEvent::Dcutr(dcutr::Event {
                 remote_peer_id,
@@ -813,6 +840,9 @@ impl Task {
                 info!("NAT status: {nat}");
                 self.with_status(|s| s.nat = nat.into());
             }
+            BehaviourEvent::Kad(kad::Event::ModeChanged { new_mode }) => {
+                debug!("routing mode: {new_mode}");
+            }
             BehaviourEvent::Upnp(upnp::Event::NewExternalAddr { external_addr, .. }) => {
                 info!("the router forwards {external_addr} to this node");
             }
@@ -827,11 +857,13 @@ impl Task {
             return;
         }
         // Home network addresses only help nodes on the same network.
-        let nearby = self.remote_addrs.get(&peer).is_some_and(|a| !is_global(a));
+        let nearby = self.nearby.contains(&peer);
         let usable = |addr: &Multiaddr| is_specific(addr) && (nearby || is_global(addr));
+        // Relayed addresses go in too: for a node behind NAT they are the
+        // only way others can find it.
         if supports(KAD_PROTOCOL) {
             for addr in &info.listen_addrs {
-                if usable(addr) && !addr.iter().any(|p| p == Protocol::P2pCircuit) {
+                if usable(addr) {
                     self.swarm
                         .behaviour_mut()
                         .kad
