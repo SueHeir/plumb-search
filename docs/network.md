@@ -106,7 +106,7 @@ plumb run --data /data --network --relay \
 
 Tested on one machine (`cargo test -p plumb-net`, `cargo test -p plumb-node a_node_in_the_network`):
 
-* Five nodes and a relay: a batch published by one reaches all the others, and its site counts only once a second crawler publishes a matching crawl; a node that joins later catches up; a network search fetches buckets under throwaway identities and returns a verified site with its crawler named; a bucket is fetched through the relay alone; a node behind the relay is reached through it, and hole punching then opens a direct connection.
+* Four nodes and a relay: a batch published by one reaches all the others, and its site counts only once a second crawler (the relay) publishes a matching crawl; a node that joins later catches up; a network search fetches buckets under throwaway identities and returns a verified site with its crawler named; a bucket is fetched through the relay alone; a node behind the relay is reached through it, and hole punching then opens a direct connection.
 * A whole `plumb run` node in the network writes a bucket table with each index, serves it to other nodes, searches the network through `/api/network/search` and `/network`, holds another node's crawl until a second node's crawl agrees, then takes it in and searches it from its own index after a rebuild.
 * Unit tests: Merkle proofs for every tree size up to 33, tampered records, re-dated headers, swapped keys, unassigned homepages, injected link text, forged proofs in search answers, and links that point away from the site they name.
 
