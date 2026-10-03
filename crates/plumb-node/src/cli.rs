@@ -41,6 +41,37 @@ pub enum Command {
     Serve(ServeArgs),
     /// Check how often the official site ranks first for a list of queries.
     Eval(EvalArgs),
+    /// Make a vector of each site's text with a small embedding model
+    /// (downloaded on first use), so searches can find sites by meaning.
+    Embed(EmbedArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct EmbedArgs {
+    /// Records file whose sites to embed.
+    #[arg(long, value_name = "FILE")]
+    pub records: PathBuf,
+    /// Directory of the model's files, downloaded when missing.
+    #[arg(long, value_name = "DIR")]
+    pub model: PathBuf,
+    /// Vectors file, created or brought up to date: only sites whose text
+    /// changed are embedded again.
+    #[arg(long, value_name = "FILE")]
+    pub vectors: PathBuf,
+    /// Texts embedded at once [default: one per CPU].
+    #[arg(long, value_name = "N", value_parser = parse_positive)]
+    pub threads: Option<usize>,
+}
+
+/// Search by meaning too, for queries that name no site.
+#[derive(Debug, Clone, Default, Args)]
+pub struct MeaningArgs {
+    /// Vectors file made by `plumb embed`.
+    #[arg(long, value_name = "FILE", requires = "model")]
+    pub vectors: Option<PathBuf>,
+    /// Directory of the model that made the vectors.
+    #[arg(long, value_name = "DIR", requires = "vectors")]
+    pub model: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -98,6 +129,12 @@ pub struct RunArgs {
     /// Bangs such as `!g` work either way.
     #[arg(long, value_name = "ENGINE", default_value = "off", value_parser = parse_web_search)]
     pub web_search: WebSearch,
+    /// Also find sites by meaning for searches that name no site ("electric
+    /// car maker"). Downloads a small embedding model (about 130 MB) into
+    /// DIR/model and embeds each site's text in the background after every
+    /// index build, best-ranked sites first, into DIR/vectors.bin.
+    #[arg(long)]
+    pub search_by_meaning: bool,
     /// Crawl homepages through the proxy in HTTP_PROXY, HTTPS_PROXY or
     /// ALL_PROXY (except hosts in NO_PROXY), for machines that reach the
     /// internet only through one. Without it, homepages are fetched directly
@@ -301,6 +338,8 @@ pub struct SearchArgs {
     /// Leave out other countries' sites (needs --country).
     #[arg(long, requires = "country")]
     pub only_country: bool,
+    #[command(flatten)]
+    pub meaning: MeaningArgs,
     /// What to search for, e.g. `us bank`.
     #[arg(required = true, value_name = "QUERY")]
     pub query: Vec<String>,
@@ -331,6 +370,8 @@ pub struct ServeArgs {
     /// Bangs such as `!g` work either way.
     #[arg(long, value_name = "ENGINE", default_value = "off", value_parser = parse_web_search)]
     pub web_search: WebSearch,
+    #[command(flatten)]
+    pub meaning: MeaningArgs,
 }
 
 #[derive(Debug, Args)]
@@ -357,6 +398,8 @@ pub struct EvalArgs {
     /// [default: none].
     #[arg(long, value_name = "CODE", value_parser = parse_country)]
     pub country: Option<String>,
+    #[command(flatten)]
+    pub meaning: MeaningArgs,
 }
 
 fn parse_positive(s: &str) -> Result<usize, String> {
