@@ -24,7 +24,8 @@
     <p class="lede">Plumb is a free, open-source search engine for finding websites. Use it here, or run it on your own computer so your searches stay with you.</p>
     <form class="try" action="/search" method="get" role="search">
       <label for="q" class="visually-hidden">Search for a website</label>
-      <input id="q" name="q" type="search" placeholder="Try “irs” or “bank of america”" autocomplete="off" required>
+      <input id="q" name="q" type="search" placeholder="Site name" autocomplete="off">
+      <details class="gear"><summary aria-label="Settings" title="Settings">⚙</summary><div class="search-settings"><label>Country <select name="country"><option value="auto">Automatic</option><option value="any">Any country</option><option value="AR">Argentina</option><option value="AU">Australia</option><option value="AT">Austria</option><option value="BE">Belgium</option><option value="BR">Brazil</option><option value="CA">Canada</option><option value="CL">Chile</option><option value="CN">China</option><option value="CO">Colombia</option><option value="CZ">Czechia</option><option value="DK">Denmark</option><option value="EG">Egypt</option><option value="FI">Finland</option><option value="FR">France</option><option value="DE">Germany</option><option value="GR">Greece</option><option value="HK">Hong Kong</option><option value="HU">Hungary</option><option value="IN">India</option><option value="ID">Indonesia</option><option value="IE">Ireland</option><option value="IL">Israel</option><option value="IT">Italy</option><option value="JP">Japan</option><option value="KE">Kenya</option><option value="MY">Malaysia</option><option value="MX">Mexico</option><option value="NL">Netherlands</option><option value="NZ">New Zealand</option><option value="NG">Nigeria</option><option value="NO">Norway</option><option value="PK">Pakistan</option><option value="PE">Peru</option><option value="PH">Philippines</option><option value="PL">Poland</option><option value="PT">Portugal</option><option value="RO">Romania</option><option value="SA">Saudi Arabia</option><option value="SG">Singapore</option><option value="ZA">South Africa</option><option value="KR">South Korea</option><option value="ES">Spain</option><option value="SE">Sweden</option><option value="CH">Switzerland</option><option value="TW">Taiwan</option><option value="TH">Thailand</option><option value="TR">Turkey</option><option value="UA">Ukraine</option><option value="AE">United Arab Emirates</option><option value="GB">United Kingdom</option><option value="US">United States</option><option value="VN">Vietnam</option></select></label><label><input type="checkbox" name="only" value="1"> Only this country</label><label><input type="checkbox" name="net" value="1"> Use the Plumb network for search</label><label><input type="checkbox" name="exact" value="1"> Search exactly as typed</label><p><a href="/private">Search privately</a></p><button type="submit">Apply</button></div></details>
       <button type="submit">Search</button>
     </form>
     <p class="note">This box searches the Plumb node on this server.</p>
@@ -44,20 +45,15 @@
       <p>For each site Plumb keeps its name, homepage title and description, and what other sites call it, plus its country and kind from Wikidata. So “banks” lists real banks, and you can pick your country.</p>
     </article>
     <article>
-      <h2>Coming: a shared network</h2>
-      <p>Next, copies of Plumb will share the work of checking sites and search each other without revealing what you looked for. This is still being tested.</p>
+      <h2>Search across the Plumb network</h2>
+      <p>Plumb nodes share crawls and can ask each other for results. Desktop and Docker join the network by default. Use the search settings to include network results.</p>
     </article>
+    <article><h2>Private and meaning search</h2><p>Search privately in your browser so your query stays on your device, or find sites by topic with meaning search. Private search uses WebAssembly in your browser; ordinary search works without JavaScript.</p><p><a href="/private">Try private search</a></p></article>
   </section>
 
   <section id="get" class="get">
     <h2>Get Plumb</h2>
     <div class="cards">
-      <article>
-        <h3>Desktop app</h3>
-        <p>For Windows, macOS (Apple silicon and Intel) and Linux (.deb, .rpm and AppImage). It shows the search page in its own window and opens results in your usual browser.</p>
-        <p><a class="button primary" href="https://github.com/SueHeir/plumb-search/releases">Releases on GitHub</a></p>
-        <p class="small">No release is out yet; the installers arrive with the first one. They won't be code-signed at first, so your computer will warn you the first time you open the app.</p>
-      </article>
       <article>
         <h3>Server or homelab</h3>
         <p>One container for Linux on x86 or ARM, including a 64-bit Raspberry Pi. The search page is on port 8080.</p>
@@ -66,6 +62,12 @@
   -p 8080:8080 -v plumb-data:/data \
   ghcr.io/sueheir/plumb-search:latest</code></pre>
         <p class="small"><a href="https://github.com/SueHeir/plumb-search/blob/main/docs/docker.md">Docker guide</a>: settings, updates and backups.</p>
+      </article>
+      <article>
+        <h3>Desktop app</h3>
+        <p>For Windows, macOS (Apple silicon and Intel) and Linux (.deb, .rpm and AppImage). Its window controls your node; searches and results open in your usual browser.</p>
+        <p><a class="button" href="https://github.com/SueHeir/plumb-search/blob/main/docs/desktop.md">Build the desktop app</a></p>
+        <p class="small">Installers are not published yet. <a href="https://github.com/SueHeir/plumb-search/releases">Check future releases</a>, or use Docker today.</p>
       </article>
     </div>
     <p class="tip"><strong>Make it your browser's search engine.</strong> Open your Plumb page in Firefox, right-click the address bar and choose “Add Plumb Search”. Other browsers can add it by hand with the search address <code>http://127.0.0.1:7586/search?q=%s</code> for the desktop app, or your server's address followed by <code>/search?q=%s</code>.</p>
@@ -87,12 +89,12 @@ Disallow: /</code></pre>
 
   <section class="roadmap">
     <h2>Where it's going</h2>
-    <p>Today Plumb is a working prototype: each copy builds and searches its own index. Next, copies will share their index with each other, take turns checking sites in the background, and agree on what's popular without revealing who searched for what. No accounts and no ads.</p>
+    <p>Plumb is a working prototype with local and network search, shared crawling, private browser search, and optional anonymous popularity sharing. Work continues on reliability, coverage, and easier installation. No accounts and no ads.</p>
     <ol>
       <li class="done"><strong>One machine.</strong> Build an index from public data and put the official site first.</li>
-      <li><strong>Shared index.</strong> Copies stay in sync with each other, with no central server needed.</li>
-      <li><strong>Community crawling.</strong> Copies take turns checking sites, so the index stays fresh on its own.</li>
-      <li><strong>Private popularity.</strong> Count what people pick without tracking anyone, and keep bots from gaming it.</li>
+      <li class="done"><strong>Network search.</strong> Nodes share crawls and ask one another for results.</li>
+      <li class="done"><strong>Community crawling.</strong> Copies take turns checking sites, so the index stays fresh on its own.</li>
+      <li class="done"><strong>Private popularity.</strong> Count what people pick without tracking anyone, and keep bots from gaming it.</li>
     </ol>
   </section>
 </main>

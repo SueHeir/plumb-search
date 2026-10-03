@@ -90,7 +90,7 @@ A node key costs nothing to make, so one person could run many keys and agree wi
 
 The query never leaves the asking node, and the nodes asked cannot tell which node is asking (Liz's choice, 2026-10-03), nor see its IP address.
 
-* `GET /network?q=` on a node's web page (linked from every results page as "Ask other Plumb nodes too"), and `GET /api/network/search?q=` as JSON.
+* `GET /network?q=` on a node's web page (for network-only results; ordinary results offer “Use the Plumb network too” (`/search?net=1`), also available in the settings gear), and `GET /api/network/search?q=` as JSON.
 * **Buckets, not queries.** Every node that answers searches keeps a bucket table next to each index it builds (`indexes/<n>/buckets/`). Each site is filed under its keys: its words and joined names from the domain label, title, aliases and top link texts. A key goes to one of 16,384 buckets by hash, and each key keeps its best 32 sites by link score.
 * **Asking.** The asker turns the query into keys the same way, takes the buckets of up to 4 of them, pads that to exactly 4 with random buckets and shuffles them. It asks for each bucket over `/plumb/bucket/1` from up to 2 connected nodes. The node asked sees only bucket numbers, and many unrelated names share each bucket, so it cannot recover the query or tell which buckets were the padding.
 * **A throwaway identity for every request.** Each bucket fetch uses a fresh node key and its own short-lived connection, dialed straight to the node or through its relay. The node asked cannot link the request to the asker's network identity, or the 4 bucket requests of one search to each other. 

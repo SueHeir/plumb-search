@@ -830,7 +830,7 @@ async fn stops_promptly_in_the_middle_of_a_download() {
     assert_eq!(code, 200);
     assert!(body.contains("Downloading the Tranco list"), "{body}");
     assert!(
-        body.contains("<progress value=\"0\" max=\"1\"></progress>"),
+        body.contains("<progress aria-label=\"Setup progress\" value=\"0\" max=\"1\"></progress>"),
         "{body}"
     );
     assert!(body.contains("0 of 1 files"), "{body}");

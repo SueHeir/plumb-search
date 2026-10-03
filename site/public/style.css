@@ -66,13 +66,13 @@ pre code { background: none; padding: 0; overflow-wrap: normal; }
 .note { color: var(--muted); font-size: 0.85rem; margin: 0.5rem 0 2rem; }
 .actions { display: flex; flex-wrap: wrap; gap: 0.75rem; }
 
-.features { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 1.5rem; padding: 2.5rem 0; border-top: 1px solid var(--line); }
+.features { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr)); gap: 1.5rem; padding: 2.5rem 0; border-top: 1px solid var(--line); }
 .features h2 { font-size: 1.15rem; margin: 0 0 0.5rem; }
 .features p { margin: 0; color: var(--muted); }
 
 .get, .owners, .roadmap { padding: 2.5rem 0; border-top: 1px solid var(--line); }
 .get > h2, .owners > h2, .roadmap > h2 { font-size: 1.7rem; margin: 0 0 1.25rem; }
-.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1.5rem; }
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr)); gap: 1.5rem; }
 .cards article { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 1.5rem; min-width: 0; }
 .cards h3 { margin: 0 0 0.5rem; font-size: 1.2rem; }
 .small { font-size: 0.88rem; color: var(--muted); }
@@ -96,3 +96,14 @@ footer { padding-top: 2rem; padding-bottom: 3rem; border-top: 1px solid var(--li
   .top nav { gap: 0.9rem; }
   .try { flex-direction: column; }
 }
+
+:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+.try { position: relative; }
+.gear > summary { cursor: pointer; padding: .7em; border: 1px solid var(--line); border-radius: 10px; list-style: none; }
+.gear > summary::-webkit-details-marker { display: none; }
+.search-settings { position: absolute; right: 0; top: calc(100% + .4rem); z-index: 2; width: min(22rem, calc(100vw - 2rem)); display: grid; gap: .7rem; padding: 1rem; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 6px 20px #0003; }
+.search-settings label { display: flex; align-items: center; gap: .5rem; }
+.search-settings input { flex: none; }
+.search-settings select { font: inherit; max-width: 100%; background: var(--surface); color: var(--text); }
+.search-settings:has(option[value=any]:checked) label:has(input[name=only]) { display: none; }
+@media (max-width: 480px) { .top { flex-wrap: wrap; } .try { flex-direction: row; flex-wrap: wrap; } .try > input { flex-basis: 100%; } }

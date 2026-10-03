@@ -112,8 +112,12 @@ async fn try_show() -> Result<(), JsValue> {
     set_status("Looking it up in your browser\u{2026}")?;
 
     let page = element(&document, "pq")?;
-    let options = Options {
-        country: page
+    let country_select: web_sys::HtmlSelectElement =
+        element(&document, "pq-country")?.dyn_into()?;
+    let selected = country_select.value();
+    let country = match selected.as_str() {
+        "any" => None,
+        "auto" => page
             .get_attribute("data-country")
             .filter(|c| !c.is_empty())
             .or_else(|| {
@@ -122,8 +126,23 @@ async fn try_show() -> Result<(), JsValue> {
                     .language()
                     .and_then(|tag| language_country(&tag))
             }),
-        only_country: false,
+        _ => Some(selected.clone()),
     };
+    let only: HtmlInputElement = element(&document, "pq-only")?.dyn_into()?;
+    let options = Options {
+        only_country: only.checked() && country.is_some(),
+        country,
+    };
+
+    let mut normal = url::form_urlencoded::Serializer::new(String::new());
+    normal.append_pair("country", &selected);
+    if options.only_country {
+        normal.append_pair("only", "1");
+    }
+    let href = format!("/?{}", normal.finish());
+    for id in ["pq-home", "pq-normal"] {
+        element(&document, id)?.set_attribute("href", &href)?;
+    }
 
     let info: TableInfo = serde_json::from_str(&fetch_text(&window, "/api/buckets").await?)
         .map_err(|_| JsValue::from_str("This site's private search is not ready yet."))?;
