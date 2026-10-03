@@ -240,11 +240,22 @@ impl Batch {
 
     /// The proof that record `index` is in this batch.
     pub fn proof(&self, index: usize) -> RecordProof {
+        self.proof_with(index, &self.leaves())
+    }
+
+    /// [`Batch::proof`] given the batch's leaf hashes ([`Batch::leaf_hashes`]),
+    /// so proving many of its records hashes them once.
+    pub fn proof_with(&self, index: usize, leaves: &[Hash]) -> RecordProof {
         RecordProof {
             header: self.header.clone(),
             record: self.records[index].clone(),
-            path: MerkleProof::new(&self.leaves(), index),
+            path: MerkleProof::new(leaves, index),
         }
+    }
+
+    /// The hashes of the records, in order.
+    pub fn leaf_hashes(&self) -> Vec<Hash> {
+        self.leaves()
     }
 }
 
