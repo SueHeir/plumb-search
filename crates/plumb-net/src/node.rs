@@ -83,7 +83,7 @@ use crate::popularity::{report_epoch, PopularityTable, Report};
 use crate::proto::*;
 use crate::reports::ReportStore;
 use crate::search::{BucketPeer, NetSearch};
-use crate::store::BatchStore;
+use crate::store::{BatchStore, CrawlerView};
 
 /// Relays a node behind NAT takes reservations on.
 pub const MAX_RELAYS: usize = 2;
@@ -243,6 +243,10 @@ pub struct NetStatus {
     /// [`crate::credits`]).
     #[serde(default)]
     pub credits: CreditStatus,
+    /// What each crawler sent, this node included, from the batches held;
+    /// updated every minute.
+    #[serde(default)]
+    pub crawlers: Vec<CrawlerView>,
 }
 
 /// How many connected nodes [`NetStatus::peers`] lists.
@@ -702,6 +706,7 @@ pub async fn start(
         reports_held: reports.len(),
         popular_picks: table.picks.len(),
         agreement: agreement.status(),
+        crawlers: crawler_views(&store, peer_id, &config.trusted_peers, now_unix()),
         ..NetStatus::default()
     }));
     let popularity = Arc::new(RwLock::new(Arc::new(table)));
@@ -1327,6 +1332,13 @@ impl Task {
     /// announcements and fetches, prune old batches.
     fn maintain(&mut self, ticks: u64) {
         let now = now_unix();
+        let crawlers = crawler_views(
+            &self.lock_store(),
+            *self.swarm.local_peer_id(),
+            &self.config.trusted_peers,
+            now,
+        );
+        self.with_status(|s| s.crawlers = crawlers);
         if let Err(err) = self.gateway.rotate(&self.key, now) {
             warn!("cannot make a new key for sealed requests: {err:#}");
         }
@@ -2521,6 +2533,18 @@ fn lookup(source: &dyn BucketSource, store: &Mutex<BatchStore>, bucket: u32) -> 
 
 /// Rebuilds the agreement step from the batches held, oldest first, so it
 /// needs no file of its own. What it confirms was passed on before.
+/// [`BatchStore::crawlers`], with this node and its trusted nodes marked.
+fn crawler_views(store: &BatchStore, me: PeerId, trusted: &[PeerId], now: u64) -> Vec<CrawlerView> {
+    let me = me.to_string();
+    let trusted: Vec<String> = trusted.iter().map(ToString::to_string).collect();
+    let mut crawlers = store.crawlers(now);
+    for view in &mut crawlers {
+        view.me = view.peer_id == me;
+        view.trusted = trusted.contains(&view.peer_id);
+    }
+    crawlers
+}
+
 fn replay_agreement(store: &BatchStore, me: PeerId, trusted: &[PeerId]) -> Agreement {
     let now = now_unix();
     let mut agreement = Agreement::new(me, trusted.iter().copied());

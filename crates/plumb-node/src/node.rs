@@ -201,14 +201,17 @@ pub struct NodeConfig {
 
 impl NodeConfig {
     /// Defaults for a server or homelab: 1,000,000 sites, 10,000 homepages
-    /// crawled at first and 5,000 more every 24 hours, on 127.0.0.1:8080.
+    /// crawled at first and 5,000 more every hour, on 127.0.0.1:8080. An
+    /// always-on machine crawls most of the day: 120,000 homepages, about
+    /// the eighth of the sites a node is assigned in the network each day
+    /// (plumb_net::assign), and a site is due again after 30 days anyway.
     pub fn server(data_dir: PathBuf) -> Self {
         NodeConfig {
             data_dir,
             bind: SocketAddr::from(([127, 0, 0, 1], 8080)),
             sites: 1_000_000,
             initial_crawl: 10_000,
-            refresh_every: Some(Duration::from_secs(24 * 60 * 60)),
+            refresh_every: Some(Duration::from_secs(60 * 60)),
             crawl_per_refresh: 5_000,
             crawl_concurrency: None,
             index_during_crawl_every: Duration::from_secs(15 * 60),

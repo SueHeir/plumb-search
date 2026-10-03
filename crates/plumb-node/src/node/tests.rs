@@ -150,7 +150,7 @@ fn profiles() {
         (server.sites, server.initial_crawl, server.crawl_per_refresh),
         (1_000_000, 10_000, 5_000)
     );
-    assert_eq!(server.refresh_every, Some(Duration::from_secs(24 * 3600)));
+    assert_eq!(server.refresh_every, Some(Duration::from_secs(3600)));
     assert_eq!((server.cc_release.as_deref(), server.alpha), (None, None));
     assert!(!server.use_system_proxy);
     assert_eq!(server.sources, SeedSources::default());

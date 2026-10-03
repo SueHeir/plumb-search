@@ -43,3 +43,4 @@ pub use libp2p::{Multiaddr, PeerId};
 pub use node::{load_or_create_key, start, CreditsAt, NetConfig, NetHandle, NetStatus};
 pub use popularity::{PickLog, PopularityTable, Report};
 pub use search::{FoundSite, NetSearch};
+pub use store::CrawlerView;
