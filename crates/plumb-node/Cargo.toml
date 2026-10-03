@@ -15,6 +15,7 @@ axum = "0.8.9"
 clap = { version = "4.6.7", features = ["derive"] }
 plumb-core = { version = "0.1.0", path = "../plumb-core" }
 plumb-crawl = { version = "0.1.0", path = "../plumb-crawl" }
+plumb-embed = { version = "0.1.0", path = "../plumb-embed" }
 plumb-index = { version = "0.1.0", path = "../plumb-index" }
 plumb-ingest = { version = "0.1.0", path = "../plumb-ingest" }
 serde = { version = "1.0.229", features = ["derive"] }

@@ -28,6 +28,7 @@ use tracing_subscriber::EnvFilter;
 pub mod cli;
 pub mod country;
 pub mod eval;
+pub mod meaning;
 pub mod node;
 pub mod web;
 pub mod websearch;
@@ -77,6 +78,7 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::Search(args) => search::run_search(args),
         Command::Serve(args) => web::run(args),
         Command::Eval(args) => eval::run(args),
+        Command::Embed(args) => meaning::run_embed(args),
     }
 }
 

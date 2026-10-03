@@ -44,6 +44,7 @@ use url::Url;
 
 use crate::cli::ServeArgs;
 use crate::country::{country_name, HomeCountry, COUNTRY_CHOICES};
+use crate::meaning::MeaningIndex;
 use crate::node::{NodeSettings, Phase, Status, Step};
 use crate::websearch::{bang_url, Engine, WebSettings};
 
@@ -104,11 +105,22 @@ pub trait SearchBackend: Send + Sync {
 pub struct IndexBackend {
     searcher: Searcher,
     rank: RankConfig,
+    meaning: Option<Arc<MeaningIndex>>,
 }
 
 impl IndexBackend {
     pub fn new(searcher: Searcher, rank: RankConfig) -> Self {
-        IndexBackend { searcher, rank }
+        IndexBackend {
+            searcher,
+            rank,
+            meaning: None,
+        }
+    }
+
+    /// Also ranks by meaning, for queries that name no site.
+    pub fn with_meaning(mut self, meaning: Option<Arc<MeaningIndex>>) -> Self {
+        self.meaning = meaning;
+        self
     }
 }
 
@@ -123,7 +135,19 @@ impl SearchBackend for IndexBackend {
         limit: usize,
         options: &SearchOptions,
     ) -> Result<SearchResults> {
-        self.searcher.search_full(query, limit, &self.rank, options)
+        let query_meaning = self
+            .meaning
+            .as_ref()
+            .and_then(|meaning| meaning.query(query));
+        self.searcher.search_meaning(
+            query,
+            limit,
+            &self.rank,
+            options,
+            query_meaning
+                .as_ref()
+                .map(|m| m as &dyn plumb_index::Meaning),
+        )
     }
 
     fn num_docs(&self) -> u64 {
@@ -230,8 +254,9 @@ pub fn run(args: ServeArgs) -> Result<()> {
     let searcher = Searcher::open(&args.index)
         .with_context(|| format!("opening the index in {}", args.index.display()))?;
     let docs = searcher.num_docs();
+    let meaning = MeaningIndex::from_args(&args.meaning)?.map(Arc::new);
     let app = router_with(
-        Arc::new(IndexBackend::new(searcher, rank_config(args.alpha))),
+        Arc::new(IndexBackend::new(searcher, rank_config(args.alpha)).with_meaning(meaning)),
         WebSettings {
             home: args.country.clone(),
             web_search: args.web_search.0,
