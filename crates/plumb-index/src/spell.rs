@@ -16,7 +16,8 @@
 //!   [`MIN_FIX_DOCS`]).
 //!
 //! A word that the index knows is never changed, so "pizza" stays "pizza"
-//! even though piazza is one letter away. The search then runs again with
+//! even though piazza is one letter away, except as part of a name of
+//! several words that a well-known site has ("capitol one"). The search then runs again with
 //! the corrected query, and [`crate::Searcher::search_meaning`] decides
 //! whether to show its results or only suggest it.
 
@@ -31,7 +32,7 @@ use tantivy::{DocAddress, Term};
 use tantivy_fst::Automaton;
 
 use crate::schema::Fields;
-use crate::{analysis, matching_docs, MAX_QUERY_WORDS};
+use crate::{analysis, matching_docs, MAX_QUERY_WORDS, WELL_KNOWN_LINK_SCORE};
 
 /// The least link score a site needs to be what a typo is corrected to:
 /// roughly a site in the top million with some sites linking to it.
@@ -166,8 +167,8 @@ impl Speller<'_> {
             if edits == 0 {
                 continue;
             }
-            // (edits, -link score) -> the name, best first.
-            let mut found: Vec<(u8, f32, String)> = Vec::new();
+            // (edits, first letter changed, link score, name).
+            let mut found: Vec<(u8, bool, f32, String)> = Vec::new();
             for field in [self.fields.label_key, self.fields.alias_key] {
                 for (name, distance) in near_terms(self.searcher, field, &key, edits)? {
                     let docs = matching_docs(
@@ -182,30 +183,40 @@ impl Speller<'_> {
                     .collect();
                     let score = link_score(&docs);
                     if score >= MIN_FIX_LINK_SCORE {
-                        found.push((distance, score, name));
+                        let first_changed = name.chars().next() != key.chars().next();
+                        found.push((distance, first_changed, score, name));
                     }
                 }
             }
+            // Fewest edits first; then a name with the same first letter,
+            // since typos rarely start a word ("fedx" is fedex, not edx);
+            // then the most popular.
             found.sort_by(|a, b| {
                 a.0.cmp(&b.0)
-                    .then_with(|| b.1.total_cmp(&a.1))
-                    .then_with(|| a.2.cmp(&b.2))
+                    .then_with(|| a.1.cmp(&b.1))
+                    .then_with(|| b.2.total_cmp(&a.2))
+                    .then_with(|| a.3.cmp(&b.3))
             });
-            for (_, score, name) in found {
+            for (_, _, score, name) in found {
                 // Each word may only be misspelled as much as its length
-                // allows: "americanairlines fr" is not a typo of
-                // "americanairlines", and "of" is never changed.
+                // allows, and none may vanish: "americanairlines fr" is not
+                // a typo of "americanairlines".
                 let Some(fixed) = align(words, &name) else {
                     continue;
                 };
+                // A known word is what was meant, not a typo: "pizza" is
+                // not "piazza". In a name of several words that a
+                // well-known site has, it may be: "capitol one", "wels
+                // fargo".
+                let known_words_ok = covers > 1 && score >= WELL_KNOWN_LINK_SCORE;
                 let mut plausible = true;
                 for (word, fixed) in words.iter().zip(&fixed) {
                     if word == fixed {
                         continue;
                     }
-                    // A known word is what was meant, not a typo: "pizza"
-                    // is not "piazza".
-                    if !within_edits(word, fixed) || self.docs_with(word)? >= KNOWN_WORD_DOCS {
+                    if !within_edits(word, fixed)
+                        || (!known_words_ok && self.docs_with(word)? >= KNOWN_WORD_DOCS)
+                    {
                         plausible = false;
                         break;
                     }
@@ -292,9 +303,16 @@ fn near_terms(
     Ok(near.into_iter().collect())
 }
 
-/// Whether `fixed` is within [`max_edits`] of `word`.
+/// Whether `fixed` is close enough to `word`, one word of a corrected
+/// name: within [`max_edits`], or one edit for a word of two or three
+/// letters ("taco bel").
 fn within_edits(word: &str, fixed: &str) -> bool {
-    match max_edits(word.chars().count()) {
+    let edits = match word.chars().count() {
+        0 | 1 => 0,
+        2 | 3 => 1,
+        chars => max_edits(chars),
+    };
+    match edits {
         0 => word == fixed,
         edits => matches!(
             builder(edits).build_dfa(word).eval(fixed),
