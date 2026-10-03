@@ -129,6 +129,12 @@ pub struct RunArgs {
     /// Bangs such as `!g` work either way.
     #[arg(long, value_name = "ENGINE", default_value = "off", value_parser = parse_web_search)]
     pub web_search: WebSearch,
+    /// Also find sites by meaning for searches that name no site ("electric
+    /// car maker"). Downloads a small embedding model (about 130 MB) into
+    /// DIR/model and embeds each site's text in the background after every
+    /// index build, best-ranked sites first, into DIR/vectors.bin.
+    #[arg(long)]
+    pub search_by_meaning: bool,
     /// Crawl homepages through the proxy in HTTP_PROXY, HTTPS_PROXY or
     /// ALL_PROXY (except hosts in NO_PROXY), for machines that reach the
     /// internet only through one. Without it, homepages are fetched directly

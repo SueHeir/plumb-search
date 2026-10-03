@@ -124,7 +124,7 @@ plumb embed --records data/records.jsonl --model data/model --vectors data/vecto
 plumb search --index data/index --model data/model --vectors data/vectors.bin electric car maker
 ```
 
-`search`, `serve` and `eval` take `--model` and `--vectors`. With them, queries that a site is named by in full, or that name a kind of site ("banks"), rank as before; for the rest, the 50 sites nearest in meaning join the candidates and 70% of `text_score` becomes how close each site is in meaning. Embedding a million sites takes several hours on a desktop CPU; run it again after a crawl and only sites whose text changed are embedded again. The crate docs in `crates/plumb-index` describe the details and tuning knobs.
+A node does this on its own with `plumb run --search-by-meaning`: it downloads the model into `DIR/model`, embeds sites in the background after each index build (best-ranked first, saving every 10,000), and uses the vectors as they come. For a million sites that takes about 750 MB of memory. `search`, `serve` and `eval` take `--model` and `--vectors`. With them, queries that a site is named by in full, or that name a kind of site ("banks"), rank as before; for the rest, the 50 sites nearest in meaning join the candidates and 70% of `text_score` becomes how close each site is in meaning. Embedding a million sites takes several hours on a desktop CPU; run it again after a crawl and only sites whose text changed are embedded again. The crate docs in `crates/plumb-index` describe the details and tuning knobs.
 
 ## Code layout
 

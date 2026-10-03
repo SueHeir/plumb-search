@@ -1067,3 +1067,35 @@ fn downloads_are_counted_per_day() {
     assert_eq!(state.downloaded_total, 13);
     assert_eq!(store::next_day(10 * day + 7), 11 * day);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn search_by_meaning_embeds_sites_in_the_background() {
+    let dir = seeded_dir();
+    // The model is in place, so nothing is downloaded.
+    plumb_embed::write_test_model(&dir.path().join(embedding::MODEL_DIR)).unwrap();
+    let mut config = test_config(dir.path());
+    config.search_by_meaning = true;
+    let node = start(config).await.unwrap();
+    let addr = node.addr();
+    wait_for(addr, "the first index", ready_and_idle).await;
+
+    let vectors_path = dir.path().join(plumb_embed::VECTORS_FILE_NAME);
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    while node.inner.meaning.get().is_none_or(|m| m.is_empty()) {
+        assert!(std::time::Instant::now() < deadline, "no vectors made");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    // Names still win.
+    assert_eq!(search(addr, "us+bank").await[0].domain, "usbank.com");
+    // Every site with text gets a vector, saved for the next start.
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    let with_text = fixture_records()
+        .iter()
+        .filter(|r| !plumb_embed::site_text(r).is_empty())
+        .count();
+    while plumb_embed::Vectors::load(&vectors_path).map_or(0, |v| v.len()) < with_text {
+        assert!(std::time::Instant::now() < deadline, "vectors not saved");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    node.shutdown().await.unwrap();
+}

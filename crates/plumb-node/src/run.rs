@@ -64,6 +64,7 @@ fn node_config(args: RunArgs) -> NodeConfig {
     }
     config.country = args.country;
     config.web_search = args.web_search.0;
+    config.search_by_meaning = args.search_by_meaning;
     if args.use_system_proxy {
         config.use_system_proxy = true;
     }

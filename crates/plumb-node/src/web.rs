@@ -44,7 +44,7 @@ use url::Url;
 
 use crate::cli::ServeArgs;
 use crate::country::{country_name, HomeCountry, COUNTRY_CHOICES};
-use crate::meaning::MeaningIndex;
+use crate::meaning::{MeaningIndex, SharedMeaning};
 use crate::node::{NodeSettings, Phase, Status, Step};
 use crate::websearch::{bang_url, Engine, WebSettings};
 
@@ -105,7 +105,7 @@ pub trait SearchBackend: Send + Sync {
 pub struct IndexBackend {
     searcher: Searcher,
     rank: RankConfig,
-    meaning: Option<Arc<MeaningIndex>>,
+    meaning: SharedMeaning,
 }
 
 impl IndexBackend {
@@ -113,14 +113,35 @@ impl IndexBackend {
         IndexBackend {
             searcher,
             rank,
-            meaning: None,
+            meaning: SharedMeaning::default(),
         }
     }
 
-    /// Also ranks by meaning, for queries that name no site.
-    pub fn with_meaning(mut self, meaning: Option<Arc<MeaningIndex>>) -> Self {
+    /// Also ranks by meaning, for queries that name no site, once
+    /// `meaning` holds a model and vectors.
+    pub fn with_meaning(mut self, meaning: SharedMeaning) -> Self {
         self.meaning = meaning;
         self
+    }
+
+    /// [`SearchBackend::search_full`], ranking by `meaning` too when given.
+    pub fn search_full_with(
+        &self,
+        query: &str,
+        limit: usize,
+        options: &SearchOptions,
+        meaning: Option<&MeaningIndex>,
+    ) -> Result<SearchResults> {
+        let query_meaning = meaning.and_then(|meaning| meaning.query(query));
+        self.searcher.search_meaning(
+            query,
+            limit,
+            &self.rank,
+            options,
+            query_meaning
+                .as_ref()
+                .map(|m| m as &dyn plumb_index::Meaning),
+        )
     }
 }
 
@@ -135,19 +156,8 @@ impl SearchBackend for IndexBackend {
         limit: usize,
         options: &SearchOptions,
     ) -> Result<SearchResults> {
-        let query_meaning = self
-            .meaning
-            .as_ref()
-            .and_then(|meaning| meaning.query(query));
-        self.searcher.search_meaning(
-            query,
-            limit,
-            &self.rank,
-            options,
-            query_meaning
-                .as_ref()
-                .map(|m| m as &dyn plumb_index::Meaning),
-        )
+        let meaning = self.meaning.get();
+        self.search_full_with(query, limit, options, meaning.as_deref())
     }
 
     fn num_docs(&self) -> u64 {
@@ -254,7 +264,7 @@ pub fn run(args: ServeArgs) -> Result<()> {
     let searcher = Searcher::open(&args.index)
         .with_context(|| format!("opening the index in {}", args.index.display()))?;
     let docs = searcher.num_docs();
-    let meaning = MeaningIndex::from_args(&args.meaning)?.map(Arc::new);
+    let meaning = SharedMeaning::new(MeaningIndex::from_args(&args.meaning)?);
     let app = router_with(
         Arc::new(IndexBackend::new(searcher, rank_config(args.alpha)).with_meaning(meaning)),
         WebSettings {

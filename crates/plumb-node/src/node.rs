@@ -86,9 +86,11 @@ use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
 use crate::country::HomeCountry;
+use crate::meaning::SharedMeaning;
 use crate::web::{self, IndexBackend, SearchBackend, StatusSource};
 use crate::websearch::{Engine, WebSettings};
 
+mod embedding;
 mod store;
 mod worker;
 
@@ -136,6 +138,11 @@ pub struct NodeConfig {
     pub country: HomeCountry,
     /// The web search engine the results page links to; `None` for no link.
     pub web_search: Option<Engine>,
+    /// Rank by meaning too, for searches that name no site: the node
+    /// downloads a small embedding model into `DIR/model` (about 130 MB)
+    /// and keeps a vector of each site's text in `DIR/vectors.bin`, made in
+    /// the background after each index build, best-ranked sites first.
+    pub search_by_meaning: bool,
     /// Where the seed data is downloaded from on first start.
     pub sources: SeedSources,
     /// How long to wait before trying failed work again. The wait doubles
@@ -164,6 +171,7 @@ impl NodeConfig {
             alpha: None,
             country: HomeCountry::Auto,
             web_search: None,
+            search_by_meaning: false,
             sources: SeedSources::default(),
             retry_wait: Duration::from_secs(10 * 60),
             max_retry_wait: Duration::from_secs(6 * 60 * 60),
@@ -424,6 +432,7 @@ pub struct NodeHandle {
     stop: watch::Sender<bool>,
     server: JoinHandle<std::io::Result<()>>,
     worker: JoinHandle<()>,
+    embedding: Option<JoinHandle<()>>,
 }
 
 impl NodeHandle {
@@ -465,6 +474,7 @@ impl NodeHandle {
             stop,
             mut server,
             worker,
+            embedding,
             ..
         } = self;
         info!("stopping the node in {}", inner.paths.data.display());
@@ -484,6 +494,11 @@ impl NodeHandle {
             }
         };
         let worked = worker.await.context("the background work failed");
+        if let Some(embedding) = embedding {
+            if let Err(err) = embedding.await {
+                warn!("search by meaning failed: {err}");
+            }
+        }
         // Only now may another node take over the data directory.
         drop(
             inner
@@ -542,6 +557,10 @@ pub async fn start(config: NodeConfig) -> Result<NodeHandle> {
         .await
     });
     let worker = tokio::spawn(worker::run(inner.clone()));
+    let embedding = inner.config.search_by_meaning.then(|| {
+        let inner = inner.clone();
+        tokio::task::spawn_blocking(move || embedding::run(inner))
+    });
     info!(
         "serving http://{addr}/ with data in {}",
         inner.paths.data.display()
@@ -552,6 +571,7 @@ pub async fn start(config: NodeConfig) -> Result<NodeHandle> {
         stop,
         server,
         worker,
+        embedding,
     })
 }
 
@@ -654,6 +674,8 @@ struct Inner {
     settings: Mutex<NodeSettings>,
     /// The last count of the data folder's size, and when it was made.
     disk: Mutex<Option<(std::time::Instant, u64)>>,
+    /// The model and vectors of search by meaning, once loaded.
+    meaning: SharedMeaning,
 }
 
 /// The failures to download Wikidata's official websites, which have their
@@ -704,6 +726,7 @@ impl Inner {
             }),
             settings: Mutex::new(opened.settings),
             disk: Mutex::new(None),
+            meaning: SharedMeaning::default(),
         }
     }
 
@@ -1040,7 +1063,10 @@ impl SearchBackend for Inner {
         let Some(index) = self.current() else {
             bail!("the search index is not ready yet");
         };
-        index.backend().search_full(query, limit, options)
+        let meaning = self.meaning.get();
+        index
+            .backend()
+            .search_full_with(query, limit, options, meaning.as_deref())
     }
 
     fn num_docs(&self) -> u64 {

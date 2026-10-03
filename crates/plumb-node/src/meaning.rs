@@ -1,12 +1,15 @@
-//! Search by meaning: `plumb embed`, and the embeddings `search`, `serve`
-//! and `eval` use with `--vectors` and `--model`.
+//! Search by meaning: `plumb embed`, the embeddings `search`, `serve` and
+//! `eval` use with `--vectors` and `--model`, and the ones a node keeps with
+//! `plumb run --search-by-meaning`.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard};
 use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
+use plumb_core::SiteRecord;
 use plumb_embed::{
     site_text, text_hash, Embedder, Vectors, MODEL_BASE_URL, MODEL_FILES, MODEL_NAME,
 };
@@ -21,29 +24,36 @@ use crate::records::load_records;
 const NEAREST: usize = 50;
 /// Vectors made between saves of the vectors file, so a stopped run keeps
 /// most of its work.
-const SAVE_EVERY: usize = 10_000;
+pub(crate) const SAVE_EVERY: usize = 10_000;
 
-/// A model and the vectors it made, for ranking by meaning.
+/// A model and the vectors it made, for ranking by meaning. The vectors can
+/// grow while searches use them.
 pub struct MeaningIndex {
     embedder: Embedder,
-    vectors: Vectors,
+    vectors: RwLock<Vectors>,
 }
 
 impl MeaningIndex {
     /// Loads the model in `model_dir` and the vectors in `vectors`, which
     /// must have been made by that model.
     pub fn open(model_dir: &Path, vectors: &Path) -> Result<Self> {
-        let embedder = Embedder::load(model_dir)
-            .with_context(|| format!("loading the model in {}", model_dir.display()))?;
+        let embedder = load_embedder(model_dir)?;
         let vectors = Vectors::load(vectors)?;
-        if vectors.model() != embedder.id() || vectors.dim() != embedder.dim() {
+        if !made_by(&vectors, &embedder) {
             bail!(
                 "the vectors were made by another model than the one in {}; run plumb embed again",
                 model_dir.display()
             );
         }
         info!("loaded {} site vectors", vectors.len());
-        Ok(MeaningIndex { embedder, vectors })
+        Ok(Self::new(embedder, vectors))
+    }
+
+    pub(crate) fn new(embedder: Embedder, vectors: Vectors) -> Self {
+        MeaningIndex {
+            embedder,
+            vectors: RwLock::new(vectors),
+        }
     }
 
     /// Opens the model and vectors `args` name, if it names them.
@@ -54,12 +64,33 @@ impl MeaningIndex {
         }
     }
 
+    pub(crate) fn embedder(&self) -> &Embedder {
+        &self.embedder
+    }
+
+    pub(crate) fn vectors(&self) -> &RwLock<Vectors> {
+        &self.vectors
+    }
+
+    /// Number of sites with a vector.
+    pub fn len(&self) -> usize {
+        self.read().len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    fn read(&self) -> RwLockReadGuard<'_, Vectors> {
+        self.vectors.read().unwrap_or_else(PoisonError::into_inner)
+    }
+
     /// How close `query` is in meaning to each site; `None` when the query
     /// cannot be embedded.
     pub fn query(&self, query: &str) -> Option<QueryMeaning<'_>> {
         match self.embedder.embed(query) {
             Ok(vector) => Some(QueryMeaning {
-                vectors: &self.vectors,
+                vectors: self.read(),
                 vector,
             }),
             Err(err) => {
@@ -70,9 +101,31 @@ impl MeaningIndex {
     }
 }
 
+/// The [`MeaningIndex`] searches use, if any, which a node sets once its
+/// model is loaded.
+#[derive(Clone, Default)]
+pub struct SharedMeaning(Arc<RwLock<Option<Arc<MeaningIndex>>>>);
+
+impl SharedMeaning {
+    pub fn new(meaning: Option<MeaningIndex>) -> Self {
+        SharedMeaning(Arc::new(RwLock::new(meaning.map(Arc::new))))
+    }
+
+    pub fn get(&self) -> Option<Arc<MeaningIndex>> {
+        self.0
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    pub fn set(&self, meaning: Arc<MeaningIndex>) {
+        *self.0.write().unwrap_or_else(PoisonError::into_inner) = Some(meaning);
+    }
+}
+
 /// A query's vector, against the sites' vectors.
 pub struct QueryMeaning<'a> {
-    vectors: &'a Vectors,
+    vectors: RwLockReadGuard<'a, Vectors>,
     vector: Vec<i8>,
 }
 
@@ -90,76 +143,93 @@ impl Meaning for QueryMeaning<'_> {
     }
 }
 
-/// `plumb embed`: downloads the model when missing, then makes a vector
-/// for every site in the records file whose text changed since the last
-/// run, and drops the vectors of sites no longer there.
-pub fn run_embed(args: EmbedArgs) -> Result<()> {
-    if MODEL_FILES
-        .iter()
-        .any(|name| !args.model.join(name).is_file())
-    {
-        block_on(download_model(&args.model))??;
-    }
-    let embedder = Embedder::load(&args.model)
-        .with_context(|| format!("loading the model in {}", args.model.display()))?;
-    let records = load_records(&args.records)
-        .with_context(|| format!("loading records {}", args.records.display()))?
-        .into_sorted_vec();
+/// Loads the model in `dir`.
+pub(crate) fn load_embedder(dir: &Path) -> Result<Embedder> {
+    Embedder::load(dir).with_context(|| format!("loading the model in {}", dir.display()))
+}
 
-    let mut vectors = match Vectors::load(&args.vectors) {
-        Ok(vectors) if vectors.model() == embedder.id() && vectors.dim() == embedder.dim() => {
-            vectors
-        }
+fn made_by(vectors: &Vectors, embedder: &Embedder) -> bool {
+    vectors.model() == embedder.id() && vectors.dim() == embedder.dim()
+}
+
+/// The vectors saved in `path` when `embedder` made them, else none.
+pub(crate) fn load_vectors_for(path: &Path, embedder: &Embedder) -> Result<Vectors> {
+    match Vectors::load(path) {
+        Ok(vectors) if made_by(&vectors, embedder) => Ok(vectors),
         Ok(_) => {
             info!("the saved vectors are from another model; making them all again");
-            Vectors::new(embedder.id(), embedder.dim())
+            Ok(Vectors::new(embedder.id(), embedder.dim()))
         }
-        Err(_) if !args.vectors.exists() => Vectors::new(embedder.id(), embedder.dim()),
-        Err(err) => return Err(err),
-    };
-    let domains: std::collections::HashSet<&str> =
-        records.iter().map(|r| r.domain.as_str()).collect();
-    vectors.retain(|domain| domains.contains(domain));
+        Err(_) if !path.exists() => Ok(Vectors::new(embedder.id(), embedder.dim())),
+        Err(err) => Err(err),
+    }
+}
+
+/// What [`embed_records`] did.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Embedded {
+    /// Sites embedded.
+    pub done: usize,
+    /// Sites whose text could not be embedded.
+    pub failed: usize,
+}
+
+/// Makes a vector for each of `records` (best first, as given) whose text
+/// changed since its vector was made, on `threads` threads, and drops the
+/// vectors of sites not in `records`. Calls `save` after every
+/// [`SAVE_EVERY`] sites and at the end. Stops early, after a save, once
+/// `stop` says so.
+pub(crate) fn embed_records(
+    embedder: &Embedder,
+    vectors: &RwLock<Vectors>,
+    records: &[SiteRecord],
+    threads: usize,
+    stop: &(dyn Fn() -> bool + Sync),
+    save: &mut dyn FnMut(&Vectors) -> Result<()>,
+) -> Result<Embedded> {
+    let write = || vectors.write().unwrap_or_else(PoisonError::into_inner);
+    let domains: HashSet<&str> = records.iter().map(|r| r.domain.as_str()).collect();
+    write().retain(|domain| domains.contains(domain));
 
     let mut todo = Vec::new();
-    for record in &records {
-        let text = site_text(record);
-        if text.is_empty() {
-            continue;
+    {
+        let vectors = vectors.read().unwrap_or_else(PoisonError::into_inner);
+        for record in records {
+            let text = site_text(record);
+            if text.is_empty() {
+                continue;
+            }
+            let hash = text_hash(&text);
+            if vectors.get(&record.domain).map(|(saved, _)| saved) != Some(&hash) {
+                todo.push((record.domain.as_str(), hash, text));
+            }
         }
-        let hash = text_hash(&text);
-        if vectors.get(&record.domain).map(|(saved, _)| saved) != Some(&hash) {
-            todo.push((record.domain.as_str(), hash, text));
-        }
+        info!(
+            "{} of {} sites need a vector ({} have one)",
+            todo.len(),
+            records.len(),
+            vectors.len()
+        );
     }
-    info!(
-        "{} of {} sites need a vector ({} already have one)",
-        todo.len(),
-        records.len(),
-        vectors.len()
-    );
 
     let started = Instant::now();
-    let threads = args
-        .threads
-        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()));
-    let vectors = Mutex::new(vectors);
     let done = AtomicUsize::new(0);
     let failed = AtomicUsize::new(0);
     for chunk in todo.chunks(SAVE_EVERY) {
         let next = AtomicUsize::new(0);
         std::thread::scope(|scope| {
-            for _ in 0..threads {
+            for _ in 0..threads.max(1) {
                 scope.spawn(|| loop {
+                    if stop() {
+                        break;
+                    }
                     let i = next.fetch_add(1, Ordering::Relaxed);
                     let Some((domain, hash, text)) = chunk.get(i) else {
                         break;
                     };
                     match embedder.embed(text) {
-                        Ok(vector) => {
-                            // The vector has the model's length.
-                            let _ = vectors.lock().unwrap().insert(domain, *hash, &vector);
-                        }
+                        // The vector has the model's length.
+                        Ok(vector) => drop(write().insert(domain, *hash, &vector)),
                         Err(err) => {
                             warn!("could not embed the text of {domain}: {err:#}");
                             failed.fetch_add(1, Ordering::Relaxed);
@@ -169,28 +239,62 @@ pub fn run_embed(args: EmbedArgs) -> Result<()> {
                 });
             }
         });
-        vectors.lock().unwrap().save(&args.vectors)?;
+        save(&vectors.read().unwrap_or_else(PoisonError::into_inner))?;
         let done = done.load(Ordering::Relaxed);
-        let seconds = started.elapsed().as_secs_f64();
         info!(
-            "embedded {done} of {} sites ({:.0} a second)",
+            "embedded {done} of {} sites ({:.1} a second)",
             todo.len(),
-            done as f64 / seconds.max(0.001)
+            done as f64 / started.elapsed().as_secs_f64().max(0.001)
         );
+        if stop() {
+            break;
+        }
     }
-    let vectors = vectors.into_inner().unwrap();
-    vectors.save(&args.vectors)?;
+    if todo.is_empty() {
+        save(&vectors.read().unwrap_or_else(PoisonError::into_inner))?;
+    }
+    Ok(Embedded {
+        done: done.into_inner(),
+        failed: failed.into_inner(),
+    })
+}
+
+/// `plumb embed`: downloads the model when missing, then makes a vector
+/// for every site in the records file whose text changed since the last
+/// run, and drops the vectors of sites no longer there.
+pub fn run_embed(args: EmbedArgs) -> Result<()> {
+    block_on(ensure_model(&args.model))??;
+    let embedder = load_embedder(&args.model)?;
+    let records = load_records(&args.records)
+        .with_context(|| format!("loading records {}", args.records.display()))?
+        .into_sorted_vec();
+    let vectors = RwLock::new(load_vectors_for(&args.vectors, &embedder)?);
+    let threads = args
+        .threads
+        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()));
+    let embedded = embed_records(
+        &embedder,
+        &vectors,
+        &records,
+        threads,
+        &|| false,
+        &mut |vectors| vectors.save(&args.vectors),
+    )?;
     println!(
-        "{} site vectors in {} ({} failed)",
-        vectors.len(),
+        "{} site vectors in {} ({} embedded now, {} failed)",
+        vectors.read().unwrap_or_else(PoisonError::into_inner).len(),
         args.vectors.display(),
-        failed.load(Ordering::Relaxed)
+        embedded.done,
+        embedded.failed
     );
     Ok(())
 }
 
-/// Downloads the model's files into `dir`.
-async fn download_model(dir: &Path) -> Result<()> {
+/// Downloads the model's files into `dir`, those not there yet.
+pub(crate) async fn ensure_model(dir: &Path) -> Result<()> {
+    if MODEL_FILES.iter().all(|name| dir.join(name).is_file()) {
+        return Ok(());
+    }
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     let client = plumb_ingest::download::http_client()?;
     info!("downloading the embedding model {MODEL_NAME}");
