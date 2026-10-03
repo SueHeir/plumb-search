@@ -4,8 +4,10 @@ The Docker image runs a Plumb Search node on a server or homelab machine.
 `plumb run` serves the search page and a JSON API on port 8080. On first start
 it downloads seed data and builds its index (searchable within a minute or
 two, from the Tranco list, while the rest of the seed data downloads), and from then on it keeps
-crawling homepages and rebuilding the index. Everything it keeps is in one
-volume mounted at `/data`.
+crawling homepages and rebuilding the index. It also joins the Plumb network
+(see [Join the Plumb network](#join-the-plumb-network)), so its crawls help
+every other node and theirs help it. Everything it keeps is in one volume
+mounted at `/data`.
 
 Images for `linux/amd64` and `linux/arm64` (including 64-bit Raspberry Pi OS)
 are published as `ghcr.io/sueheir/plumb-search`.
@@ -37,7 +39,8 @@ Without Compose:
 
 ```sh
 docker run -d --name plumb --init --restart unless-stopped --stop-timeout 300 \
-  -p 8080:8080 -v plumb-data:/data ghcr.io/sueheir/plumb-search:latest
+  -p 8080:8080 -p 4001:4001/tcp -p 4001:4001/udp \
+  -v plumb-data:/data ghcr.io/sueheir/plumb-search:latest
 ```
 
 `--stop-timeout 300` gives the node time to finish an index build when it is
@@ -51,6 +54,36 @@ to the machine itself, for example behind a reverse proxy, publish it as
 
 `http://<server>:8080/api/status` reports what the node is doing as JSON
 (`phase` is `setting_up` or `ready`), which suits uptime monitors.
+
+## Join the Plumb network
+
+The node joins the Plumb network when it starts: it connects to the
+network's first nodes on plumbsearch.org, finds other nodes through them
+(and any on your own network by itself), crawls the share of sites the
+network assigns it each day, and shares those crawls, signed, with the
+others. Nothing needs to be forwarded on the router: the node dials out, and
+other nodes reach it through a relay when they cannot reach it directly.
+Forwarding port 4001, TCP and UDP, to this machine lets them connect
+directly instead, which is faster and spares the relay.
+
+Within a minute of starting, the log says `joined the Plumb network as
+12D3Koo...`, and `http://<server>:8080/api/status` shows the node under
+`network`: `peer_id`, its `peers`, and the batches of crawls it has published
+and received. If it cannot reach any node, `network.problem` says why.
+
+What the node gives and gets:
+
+* It takes in the crawls of the plumbsearch.org node at once, and other
+  nodes' crawls once a second crawler agrees with them.
+* Other nodes take in its crawls once they agree with their own crawls of
+  the same sites, which starts within a day or two: a new node's crawls count
+  on another node after they have matched that node's own crawls of 3 sites.
+* Confirmed crawls earn it crawl credits, which buy it priority on busy
+  nodes (docs/network.md, "Crawl credits").
+
+To keep a node to itself, run it without `--network` (see
+[Settings](#settings)). Other network flags, such as `--bootstrap` for
+another node to start from, are in docs/network.md.
 
 ## Use Plumb as your browser's search engine
 
@@ -114,6 +147,70 @@ everything in it.
 
 ## Settings
 
+Open `/app` for the same organized node panel used by the desktop app:
+Overview, Search & browser, Resources, Network & privacy, and About.
+Network statistics reflect the live node, including peers, crawl agreement,
+popularity reports, and relay activity. Forms do not reload while being edited.
+
+The panel keeps the existing local-only write policy: remote connections
+see disabled controls and an explanation. Docker bridge networking can make
+even a host-local browser appear remote to the container. For those deployments,
+configure the node on the host with the startup flags below, or place
+`features.json` in the mounted data directory while the node is stopped:
+
+```json
+{
+  "network": true,
+  "search_by_meaning": false,
+  "private_search": true,
+  "share_popularity": false,
+  "bootstrap": [
+    "/dns4/plumbsearch.org/tcp/4001/p2p/12D3KooWJ2UWUBsxmPfXTfHa8cBBmzifa6kj5pFZKfJXYNQyJ69a",
+    "/ip4/198.211.114.63/tcp/4001/p2p/12D3KooWJ2UWUBsxmPfXTfHa8cBBmzifa6kj5pFZKfJXYNQyJ69a"
+  ]
+}
+```
+
+Feature choices in this file override startup feature flags and take effect
+on the next start (`docker compose restart`). Network transport, public
+addresses, relay, UPnP, and discovery flags are preserved. The two bootstrap
+addresses above are the network's own first nodes on plumbsearch.org; with no
+bootstrap addresses at all, the node finds only nodes on its own local
+network. Remove `features.json` while stopped to
+use only startup flags again. Resource limits stay in `settings.json` and
+apply immediately when saved through a local panel.
+
+### Control it from the desktop app
+
+The desktop app can show and change this node's settings from another
+computer. Remote control is off until you turn it on, on the node's host:
+
+```sh
+docker exec plumb plumb remote-control on
+```
+
+It prints a token, once. In the desktop app, choose **+ Connect to a node**
+above the panel and enter the node's address (such as
+`http://192.168.1.20:8080`) and the token. The app then shows the node next
+to **This computer**, with the same Overview, Search & browser, Resources and
+Network & privacy sections, and its forms change the node: resource limits at
+once, features after `docker compose restart`.
+
+The token can read the node's status and change its settings, features and
+refreshes, nothing else. The node keeps only its SHA-256 hash, in
+`/data/remote-control.json`. It is taken only from the host itself, local
+networks (including Docker's bridge and Tailscale) and requests straight to
+the node: requests from public addresses or through a reverse proxy (with a
+`Forwarded` or `X-Forwarded-For` header) are refused. So putting the node
+behind a proxy on the internet does not expose remote control.
+`remote-control on --allow-public` lifts that limit; only use it with HTTPS
+in front of the node, since the token is sent with every request.
+
+`plumb remote-control on` again makes a new token and stops the old one
+working; `plumb remote-control off` turns remote control off, and
+`plumb remote-control status` says which it is. Both take effect at once.
+
+
 Settings are flags of `plumb run`. The image's default command is
 `run --data /data --bind 0.0.0.0:8080`, and a command you set replaces all of
 it, so keep those two flags. In `docker-compose.yml`:
@@ -141,6 +238,7 @@ docker run -d --name plumb --init --restart unless-stopped --stop-timeout 300 \
 | `--refresh-hours H` | 24 | Hours between refreshes, which crawl more homepages and rebuild the index, e.g. `24` or `0.5`. |
 | `--crawl-per-refresh N` | 5,000 | Homepages crawled per refresh. |
 | `--no-refresh` | | Never refresh: keep the index as the initial crawl leaves it. |
+| `--reseed` | | Fold the seed files already in `DIR/seed` into the records again before starting (only files over a week old are downloaded again). For records made before a change to how seed data is read; use it once. |
 | `--profile desktop` | `server` | Smaller defaults: 250,000 sites, 2,000 homepages at first and 1,000 more every 12 hours. The flags above still override it. |
 | `--alpha A` | the index's default | Weight of the popularity prior in the ranking, from 0 to 1. |
 | `--use-system-proxy` | off | Crawl homepages through the proxy in `HTTPS_PROXY`, `HTTP_PROXY` or `ALL_PROXY`; see [Behind a proxy](#behind-a-proxy). |

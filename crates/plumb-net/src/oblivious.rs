@@ -62,6 +62,9 @@ pub const RELAY_KEY_CACHE: u64 = 10 * 60;
 /// the relay cannot tell one pick from another by its size, nor a report
 /// from a bucket request ([`REQUEST_SIZE`]) by anything but its size.
 pub const REPORT_REQUEST_SIZE: usize = 4 * 1024;
+/// Every sealed bucket request that spends a token has this size, whatever
+/// the bucket. The relay can tell it from a free one, not which bucket.
+pub const PRIORITY_REQUEST_SIZE: usize = 256;
 
 /// A sealed request, opened.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -158,7 +161,7 @@ impl Gateway {
             .map_err(|err| anyhow::anyhow!("opening a sealed request: {err}"))?;
         let body = unpad(&plain)?;
         let opened = match plain.len() {
-            REQUEST_SIZE => Opened::Bucket(
+            REQUEST_SIZE | PRIORITY_REQUEST_SIZE => Opened::Bucket(
                 cbor4ii::serde::from_slice(body).context("a sealed request that is not one")?,
             ),
             REPORT_REQUEST_SIZE => Opened::Report(
@@ -229,11 +232,11 @@ mod tests {
         let node = Keypair::generate_ed25519();
         let target = node.public().to_peer_id();
         let gateway = Gateway::new(&node, NOW).unwrap();
-        let request = BucketRequest { bucket: 1234 };
+        let request = BucketRequest::new(1234);
         let (sealed, opener) = seal_request(&gateway.keys(), &target, NOW, &request).unwrap();
         // Every request is the same size, whatever the bucket.
         let (other, _) =
-            seal_request(&gateway.keys(), &target, NOW, &BucketRequest { bucket: 7 }).unwrap();
+            seal_request(&gateway.keys(), &target, NOW, &BucketRequest::new(7)).unwrap();
         assert_eq!(sealed.len(), other.len());
         assert!(!sealed.windows(4).any(|w| w == 1234u32.to_be_bytes()));
 
@@ -245,6 +248,7 @@ mod tests {
                 proof: None,
                 also: Vec::new(),
             }]),
+            busy: false,
         };
         let answer = seal_response(sealer, &response).unwrap();
         assert!(answer.len() >= MIN_RESPONSE_SIZE);
@@ -272,12 +276,40 @@ mod tests {
     }
 
     #[test]
+    fn a_request_spending_a_token_opens_at_its_own_size() {
+        use crate::credits::{Issuer, Pending};
+        let node = Keypair::generate_ed25519();
+        let target = node.public().to_peer_id();
+        let gateway = Gateway::new(&node, NOW).unwrap();
+        let issuer = Issuer::in_memory().unwrap();
+        let pending = Pending::new(1).unwrap();
+        let issued = issuer.issue(&pending.blinded).unwrap();
+        let token = pending.finish(&issued).unwrap().remove(0);
+        let request = BucketRequest {
+            bucket: 9,
+            token: Some(token),
+        };
+        let (sealed, _) = seal_request_sized(
+            &gateway.keys(),
+            &target,
+            NOW,
+            &request,
+            PRIORITY_REQUEST_SIZE,
+        )
+        .unwrap();
+        let (free, _) =
+            seal_request(&gateway.keys(), &target, NOW, &BucketRequest::new(9)).unwrap();
+        assert!(sealed.len() > free.len());
+        assert_eq!(gateway.open(&sealed).unwrap().0, Opened::Bucket(request));
+    }
+
+    #[test]
     fn the_old_key_is_accepted_until_it_expires() {
         let node = Keypair::generate_ed25519();
         let target = node.public().to_peer_id();
         let mut gateway = Gateway::new(&node, NOW).unwrap();
         let old = gateway.keys();
-        let request = BucketRequest { bucket: 3 };
+        let request = BucketRequest::new(3);
         let (sealed, _) = seal_request(&old, &target, NOW, &request).unwrap();
 
         gateway.rotate(&node, NOW + KEY_LIFETIME).unwrap();

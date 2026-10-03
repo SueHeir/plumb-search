@@ -1,13 +1,34 @@
 # The Plumb Search desktop app
 
-The desktop app runs a Plumb Search node on your computer. You search in your
-own web browser, at `http://127.0.0.1:7586`. The app's window is a panel, not
-a browser but a dashboard of the node: what works now ("Limited search is
-ready" or "Search is ready"), the disk space and downloads it uses against
-their limits, how crawling is going, the Plumb network (not connected in this
-version) and how far setup has come. It holds the settings and has buttons that
-open search in your browser or add Plumb to Firefox. The same app builds for Windows, macOS and Linux
-with [Tauri](https://v2.tauri.app).
+The desktop app runs a Plumb Search node on your computer. Search opens in
+your browser at `http://127.0.0.1:7586`; the app window manages the node.
+It shares its panel and feature settings with Docker, from this repository.
+
+The panel has these sections:
+
+- **Overview:** search readiness, crawl progress, storage, downloads, and live peer status.
+- **Search & browser:** browser setup, search by meaning, and private browser search.
+- **Resources:** background crawling and daily download/storage limits; changes apply immediately.
+- **Network & privacy:** joining the network, bootstrap nodes, trusted nodes (plumbsearch.org's crawler by default), anonymous popularity sharing, crawl agreement, and relay activity.
+- **Remote control:** let the app on another computer control this node.
+- **About:** version, data location, diagnostics, and source code.
+
+Optional features are off until enabled. Save feature choices, then use **Quit
+Plumb Search** in the tray/menu bar and reopen the app. Closing the window
+keeps the node running and does not apply restart settings. A banner shows
+when saved choices differ from the running node. Resource and feature forms
+never refresh automatically while you edit them.
+
+Meaning search downloads a model and builds vectors in the background.
+Private browser search needs the bundled WebAssembly module and an index
+with buckets; the panel distinguishes disabled, preparing, and unavailable
+states. Desktop installers build and include that module.
+
+Feature choices are stored in `features.json` in the data folder and take
+precedence over startup feature defaults. Delete that file while stopped to
+return to defaults. Server transport/relay flags are preserved. For an isolated
+development or test node, set `PLUMB_DESKTOP_DATA_DIR` to a separate folder
+before launching the desktop executable.
 
 Every link out of the panel opens in your default browser. Closing the window
 keeps the app running, so searches from your browser keep working: it stays
@@ -21,6 +42,30 @@ clicking its Dock icon on macOS.
 
 Test builds are not code-signed yet, so each system warns you before it opens
 them the first time. The [install](#install) steps say how to get past that.
+
+## Control your other nodes
+
+Above the panel, **This computer** is the app's own node. **+ Connect to a
+node** adds another one, such as a Docker container or homelab server, so the
+app becomes the control center for all of them:
+
+1. Turn on remote control on that node. In its own panel (opened on its
+   computer), go to **Remote control** and click **Turn on and make a token**.
+   For Docker, run `docker exec <container> plumb remote-control on` on its
+   host. Either way you get a token, shown once.
+2. In the app, click **+ Connect to a node** and enter the node's address
+   (such as `http://192.168.1.20:8080`) and the token.
+
+The node then has its own tab with the same sections. Its forms change that
+node; if it cannot be reached, or its token was replaced, the tab says why
+and offers to connect again or forget it. Tokens are kept in
+`remote-nodes.json` in the app's data folder, readable only by you, and the
+app's own node sends them; the window never sees them. A node takes remote
+control only from its own computer and local networks unless its owner
+allows more (see [Docker](docker.md#control-it-from-the-desktop-app)).
+
+The app's own node listens only on this computer, so other computers cannot
+control it.
 
 ## Get a test build
 
@@ -139,6 +184,20 @@ day's downloads reach the limit, crawling pauses until the next day (UTC);
 while the data folder is over its limit, crawling pauses. Setup's own
 downloads count toward the day but are never held back, and search keeps
 working either way.
+
+The Resources page also has one Workload choice, which sets the pace and
+both limits at once: Light (4 homepages at a time, 100 MB a day, 1 GB of
+disk), Balanced (the defaults: 16 at a time, 500 MB, 2 GB), Full (32 at a
+time, no limits) or Custom (the limits as typed). "Only crawl between"
+keeps crawling to some hours of the computer's clock, such as 22:00 to
+07:00. The Crawling card has "Pause for an hour" and "Pause until tomorrow"
+(06:00), and "Resume now" while paused.
+
+Feature changes (the network, search by meaning, private search) apply when
+the node starts. In the app the panel then offers "Restart to apply", which
+stops the node and starts it again without quitting the app; a Docker node
+needs its container restarted. While search by meaning downloads its model
+or makes site vectors, the panel shows how far it has come.
 
 If a download fails, for example without internet access or behind a
 firewall that blocks those sites, the error appears on the panel.

@@ -61,9 +61,14 @@ fn index_top(
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("index");
     build_index(&path, records).unwrap();
+    // The browser does not correct typos.
+    let options = SearchOptions {
+        exact: true,
+        ..options.clone()
+    };
     Searcher::open(&path)
         .unwrap()
-        .search_full(query, n, &RankConfig::default(), options)
+        .search_full(query, n, &RankConfig::default(), &options)
         .unwrap()
         .hits
         .into_iter()
@@ -120,6 +125,7 @@ fn kinds_and_countries_rank_as_in_the_index() {
             &SearchOptions {
                 country: Some(country.into()),
                 only_country: true,
+                exact: false,
             },
             3,
         );

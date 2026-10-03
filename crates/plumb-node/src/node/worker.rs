@@ -31,7 +31,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{bail, Context, Result};
 use plumb_core::{now_unix, SiteRecord};
-use plumb_crawl::{crawl_homepages, CrawlConfig, CrawlOutcome, CrawlResult, CrawlTarget};
+use plumb_crawl::{CrawlConfig, CrawlOutcome, CrawlResult, CrawlTarget, HomepageCrawler};
 use plumb_index::build_index;
 use plumb_ingest::{
     attach_facts, download, facts, kind_sites, load_cc_domain_ranks, load_site_facts, load_tranco,
@@ -44,7 +44,8 @@ use super::network::{self, REBUILD_AFTER_RECORDS};
 use super::store::{self, SavedState};
 use super::{Inner, NodeConfig, ServingIndex, Step, Stopped};
 use crate::crawl::{
-    crawl_in_batches, select_targets_with, target_for, RunEnd, CRAWL_BATCH_SIZE, SECONDS_PER_DAY,
+    crawl_rolling, select_targets_with, target_for, Fetcher, Rolling, RunEnd, CRAWL_BATCH_SIZE,
+    SECONDS_PER_DAY,
 };
 use crate::icons::IconStore;
 use crate::records::{load_records, replace_records, RecordStore};
@@ -85,7 +86,7 @@ pub(super) async fn run(inner: Arc<Inner>) {
             Ok(Next::IdleUntil(until)) => {
                 let detail = inner
                     .pause_reason()
-                    .unwrap_or_else(|| idle_detail(&inner.config));
+                    .unwrap_or_else(|| idle_detail(&inner.config).to_owned());
                 inner.set_step(Step::Idle, detail);
                 wait(&inner, Deadline::Wall(until)).await;
             }
@@ -153,13 +154,14 @@ async fn step(inner: &Arc<Inner>) -> Result<Next> {
         complete_seed(inner).await?;
         return Ok(Next::Aside);
     }
-    // Crawls and refreshes wait while background updates are off or a
-    // limit is reached; a day's download limit ends with the day.
-    if inner.pause_reason().is_some() {
+    // Crawls and refreshes wait while background updates are off, paused
+    // or outside the crawl hours, or a limit is reached; a day's download
+    // limit ends with the day, a pause when it says.
+    if let Some(pause) = inner.pause() {
         inner.refresh_requested.store(false, Ordering::SeqCst);
-        let tomorrow = store::next_day(now_unix());
+        let until = pause.until.unwrap_or_else(|| store::next_day(now_unix()));
         return Ok(Next::IdleUntil(Some(
-            wikidata_due.map_or(tomorrow, |due| due.min(tomorrow)),
+            wikidata_due.map_or(until, |due| due.min(until)),
         )));
     }
     if saved.crawl_left > 0 {
@@ -613,6 +615,53 @@ fn start_round(inner: &Inner, requested: bool) -> Result<()> {
     })
 }
 
+/// Fetches homepages for a node's crawl: keeps them in flight across
+/// batches, stops on shutdown or when background updates are paused, keeps
+/// the sites' icons, and shares each batch's results with the network.
+struct NodeFetcher<'a> {
+    rolling: Rolling<'a>,
+    inner: &'a Inner,
+    net: Option<&'a plumb_net::NetHandle>,
+    icons: &'a IconStore,
+}
+
+impl Fetcher for NodeFetcher<'_> {
+    fn ahead(&self) -> usize {
+        self.rolling.ahead()
+    }
+
+    fn start(&mut self, targets: Vec<CrawlTarget>) {
+        self.rolling.start(targets);
+    }
+
+    fn finished(&mut self, n: usize) -> Option<(Vec<String>, Vec<CrawlResult>)> {
+        // Background updates turned off or a limit reached: pause; the
+        // homepages in flight are tried again later.
+        if self.inner.pause_reason().is_some() {
+            return None;
+        }
+        let crawler = &mut self.rolling.crawler;
+        let (inner, net, icons) = (self.inner, self.net, self.icons);
+        self.rolling.runtime.block_on(async move {
+            let results = tokio::select! {
+                results = Rolling::next_results(crawler, n) => results,
+                () = inner.stopped() => return None,
+            };
+            save_icons(icons, &results);
+            if let Some(net) = net {
+                // Shared before it is saved here: a batch the offline
+                // check throws away holds few records anyway.
+                let records = plumb_crawl::to_records(&results);
+                if let Err(err) = net.publish(records).await {
+                    warn!("cannot publish crawl results to the network: {err:#}");
+                }
+            }
+            let done = results.iter().map(|result| result.domain.clone()).collect();
+            Some((done, results))
+        })
+    }
+}
+
 /// Crawls the rest of the round under way, then puts an index of the result
 /// in service.
 async fn crawl(inner: &Arc<Inner>) -> Result<()> {
@@ -686,38 +735,28 @@ fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Option<ServingIndex
         inner.set_progress(0, targets.len(), "homepages");
         let cfg = CrawlConfig {
             use_system_proxy: inner.config.use_system_proxy,
+            concurrency: inner.settings().workload.concurrency(),
             ..CrawlConfig::default()
         };
         // Homepages counted in the saved state so far.
         let counted = std::cell::Cell::new(0);
-        let totals = crawl_in_batches(
+        let mut fetcher = NodeFetcher {
+            rolling: Rolling {
+                concurrency: cfg.concurrency,
+                crawler: HomepageCrawler::new(cfg.clone()),
+                runtime: handle,
+            },
+            inner,
+            net: net.as_deref(),
+            icons: &icons,
+        };
+        let totals = crawl_rolling(
             &mut set,
             &targets,
             CRAWL_BATCH_SIZE,
             &mut store,
-            |batch| {
-                // Background updates turned off or a limit reached: pause
-                // between batches.
-                if inner.pause_reason().is_some() {
-                    return None;
-                }
-                handle.block_on(async {
-                    let results = tokio::select! {
-                        results = crawl_homepages(batch, &cfg) => results,
-                        () = inner.stopped() => return None,
-                    };
-                    save_icons(&icons, &results);
-                    if let Some(net) = &net {
-                        // Shared before it is saved here: a batch the
-                        // offline check throws away holds few records anyway.
-                        let records = plumb_crawl::to_records(&results);
-                        if let Err(err) = net.publish(records).await {
-                            warn!("cannot publish crawl results to the network: {err:#}");
-                        }
-                    }
-                    Some(results)
-                })
-            },
+            &[],
+            &mut fetcher,
             |totals| {
                 inner.set_progress(totals.attempted, targets.len(), "homepages");
                 let visited = totals.attempted - counted.replace(totals.attempted);
@@ -741,7 +780,7 @@ fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Option<ServingIndex
                 // so far, and go on from there later.
                 info!(
                     "{}: pausing the crawl after {} homepages",
-                    inner.pause_reason().unwrap_or("paused"),
+                    inner.pause_reason().as_deref().unwrap_or("paused"),
                     totals.attempted
                 );
                 if totals.attempted == 0 {
@@ -814,9 +853,16 @@ fn build(inner: &Inner, records: Vec<SiteRecord>) -> Result<ServingIndex> {
             group_thousands(records.len() as u64)
         ),
     );
+    let buckets = network::wants_buckets(inner);
+    let steps = if buckets { 2 } else { 1 };
+    inner.set_progress(0, steps, "steps");
     let started = Instant::now();
     let stats = build_index(&dir, &records)
         .with_context(|| format!("building the index in {}", dir.display()))?;
+    if buckets {
+        inner.set_step(Step::Indexing, "Writing the buckets other nodes search");
+        inner.set_progress(1, steps, "steps");
+    }
     network::build_buckets(inner, &dir, &records);
     drop(records);
     let index = match ServingIndex::open(id, &dir, inner.rank) {

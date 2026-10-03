@@ -909,6 +909,35 @@ async fn sets_up_without_wikidata_and_adds_it_later() {
         usbank.aliases
     );
     assert_eq!(names(&dir.path().join("indexes")).len(), 1);
+
+    // Records made before a change to how seed data is read are folded
+    // again on request, from the seed files on disk, without downloading.
+    let mut records: Vec<SiteRecord> = read_jsonl(&dir.path().join("records.jsonl")).unwrap();
+    for record in &mut records {
+        record.signals.official_site = false;
+        record.aliases.clear();
+    }
+    write_jsonl(&dir.path().join("records.jsonl"), &records).unwrap();
+    assert!(request_reseed(dir.path()).unwrap());
+    assert!(store::load_state(&paths).unwrap().wikidata_missing);
+    let offline = SeedHost::start(|_, _| http("500 Internal Server Error", b"offline")).await;
+    let mut config = test_config(dir.path());
+    config.sources = offline.sources();
+    config.sites = 50;
+    let node = start(config).await.unwrap();
+    wait_for(node.addr(), "the seed folded again", |s| {
+        ready_and_idle(s) && !s.wikidata_missing
+    })
+    .await;
+    node.shutdown().await.unwrap();
+    assert_eq!(offline.requests.lock().unwrap().len(), 0);
+    let records: Vec<SiteRecord> = read_jsonl(&dir.path().join("records.jsonl")).unwrap();
+    let usbank = records.iter().find(|r| r.domain == "usbank.com").unwrap();
+    assert!(usbank.signals.official_site);
+    assert!(usbank.aliases.iter().any(|alias| alias == "U.S. Bancorp"));
+
+    // Nothing to fold in a directory with no node yet.
+    assert!(!request_reseed(tempfile::tempdir().unwrap().path()).unwrap());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1450,5 +1479,51 @@ async fn search_by_meaning_embeds_sites_in_the_background() {
         assert!(std::time::Instant::now() < deadline, "vectors not saved");
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    node.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pause_for_an_hour_holds_the_crawl_and_resume_lifts_it() {
+    let dir = recently_crawled_dir();
+    let paths = store::Paths::new(dir.path());
+    store::save_state(
+        &paths,
+        &SavedState {
+            crawl_left: 700,
+            index_stale: true,
+            ..SavedState::default()
+        },
+    )
+    .unwrap();
+    let until = now_unix() + 3600;
+    let mut config = test_config(dir.path());
+    config.settings.paused_until = Some(until);
+    let node = start(config).await.unwrap();
+    let status = wait_for(node.addr(), "the first index", ready_and_idle).await;
+    assert_eq!(status.paused.as_deref(), Some("Paused by you"));
+    assert_eq!(status.paused_until, Some(until));
+    assert_eq!(status.crawl_left, 700);
+    // Nobody listens for a restart yet, so the panel offers none.
+    assert!(!status.can_restart);
+    let signal = node.restart_signal();
+    assert!(node.status().can_restart);
+    let restart = tokio::spawn(async move { signal.requested().await });
+    StatusSource::restart(node.inner.as_ref()).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), restart)
+        .await
+        .expect("the restart request arrives")
+        .unwrap();
+
+    node.inner
+        .change_settings(NodeSettings {
+            paused_until: None,
+            ..node.inner.settings()
+        })
+        .unwrap();
+    let status = wait_for(node.addr(), "the end of the round", |s| {
+        ready_and_idle(s) && s.crawl_left == 0
+    })
+    .await;
+    assert_eq!(status.paused, None);
     node.shutdown().await.unwrap();
 }

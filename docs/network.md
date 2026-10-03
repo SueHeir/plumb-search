@@ -63,6 +63,8 @@ Batches older than 7 days or dated in the future are refused. A node keeps the b
 * **How soon a site is confirmed.** Assignment stays independent per node (a site is crawled by about one node in eight each day), so with N nodes a site gets about N/8 crawls a day. Over the 14-day window a site is assigned to two nodes with about 72% odds in a network of 2 nodes, 94% with 3, and almost surely with 5 or more. In a network of one, nothing from the network is ever taken in, which is the point.
 * **Own crawls judge straight away.** A crawl made within 2 days of one of the node's own crawls of the same site is scored against it at once, confirmed or not.
 
+* **Trusted nodes.** While the network is a handful of nodes, waiting for two crawlers mostly keeps good crawls out. So a node keeps a list of nodes it trusts (Liz, 2026-10-03): `plumb run --network --trust-peer 12D3Koo...` (repeatable). Every node trusts the plumbsearch.org node (`12D3KooWEDPBv4sacn42shoToAwu62CreVC89QFiAA31HrWv3xrg`) by default (Liz, 2026-10-03), so a new node takes in crawls from the start; `--no-default-trust` turns that off. A crawl signed by a trusted node is taken in at once, like the node's own, and counts towards any quorum; every other crawler goes through the rules in this section. Being trusted earns a crawler nothing else: it is scored like any other, and matching its crawls vouches for no one. `GET /api/status` shows `network.agreement.trusted_peers`.
+
 ### One person, many keys
 
 A node key costs nothing to make, so one person could run many keys and agree with themselves. Batches travel by gossip, so a node usually cannot see which IP address a crawler crawls from, and grouping keys by address would not work. Instead each node checks crawlers against fetches it made itself:
@@ -124,20 +126,43 @@ The query never leaves the asking node, and the nodes asked cannot tell which no
 * Raw queries never leave the node, and the local log forgets them after a week.
 * **Guessable picks.** This is STARLite: a report's randomness comes from the pick itself, so anyone can guess a pick ("us bank, usbank.com"), compute its tag and see whether it was reported. They learn that somebody reported it, not who. Full STAR fixes this with a randomness server (an oblivious PRF, `ppoprf`) whose key is rotated weekly; run by a group of nodes, that is a later step. The query filters above keep reportable picks short and navigational, which is what makes this tolerable for now.
 * **IP addresses.** The node a report is handed to sees only the relay's IP address; the relay sees the sender's but not the report. Only a relay and a receiving node working together could link the two, and the sender picks a new pair for every report.
-* **Bots.** Nothing yet stops one machine from sending many reports of one pick under many throwaway identities, and so pushing a site up for a query. The per-node cap only binds honest nodes. Limits now: the bonus is small and bounded, a pick only counts for sites the asking node's own search returns, and stuffed reports cost the attacker 10 identities per pick per week. The real fix is anonymous crawl tokens (Privacy Pass style): a report must spend a token earned by verified crawling, planned with credits after index snapshots.
+* **Bots.** Nothing yet stops one machine from sending many reports of one pick under many throwaway identities, and so pushing a site up for a query. The per-node cap only binds honest nodes. Limits now: the bonus is small and bounded, a pick only counts for sites the asking node's own search returns, and stuffed reports cost the attacker 10 identities per pick per week. The real fix is anonymous crawl tokens (Privacy Pass style): a report must spend a token earned by verified crawling. Tokens exist now (see "Crawl credits"), but a report reaches every node, so it needs a token any node can check, which these are not yet.
 
 Tested on one machine (`cargo test -p plumb-net popularity`, `cargo test -p plumb-node popularity`): reports below the threshold stay unreadable, other picks and other weeks do not help, copies count once, forged shares and junk do not break counting, low-threshold shares are refused; across three nodes a report handed in under a throwaway identity, sealed through a relay, reaches the others, a pick becomes readable at the tenth report, and a node that joins later catches up and counts the same; a whole `plumb run` node notes a pick through `/go`, sends its report to another node, and after nine more reports of the same pick ranks that site higher by the bonus.
+
+## Crawl credits
+
+`plumb_net::credits`, on for every network node. Crawling for the network earns credits, and a node turns them into anonymous one-time tokens it can spend at the node that issued them. This follows the credits design Liz approved on 2026-10-03: credits cannot be given away or sold, early adopters get a head start, and people who only search on a website never see any of it.
+
+**Earning.** Each node keeps its own ledger of every crawler it hears from (`DIR/net/credits/ledger.json`). A crawler earns 1 credit for each homepage crawl that a crawler the node trusts strictly also made: the node itself, or one vouched for by matching the node's own crawls of 3 sites. A crawl that counted on its own, or that only fresh keys agree with, earns nothing, whatever agreement's quorum rules are. Crawls earn 2 for crawls made before 2027-10-01, the network's first year. A crawl made close in time to one two such crawlers made that does not match it costs 5, so making pages up loses more than honest crawling earns. Nothing else earns credits yet. Every node sees the same signed batches, so ledgers come out much the same, but each node goes only by its own. Credits counted while rebuilding agreement at start are not counted twice.
+
+**Tokens.** A node asks another node, the issuer, for tokens over `/plumb/credits/1`, under its own node id, since its balance pays. The issuer gives tokens only to a crawler whose crawls count there (vouched for by matching its own crawls of 3 sites, whatever agreement's quorum rules, and judged at least 10 times; a node that crawls nothing itself issues none), at most as many as its balance pays for, 1 credit each and at most 64 a request. Tokens are signed blind with a VOPRF over ristretto255 (the [`voprf`](https://crates.io/crates/voprf) crate, as in Privacy Pass, RFC 9578): the issuer never sees the token it signs. Handed back later under a throwaway identity, a token shows the issuer it is one of its own and not yet spent, but not which node it went to. Each issuer proves every batch was signed with the same key, and the wallet (`DIR/net/credits/wallet.json`) keeps the first key it sees for each issuer and refuses tokens under another, so an issuer cannot give one node a key of its own to recognize it by. The issuer's key is `DIR/net/credits/token.key`, and the tokens handed back to it are in `DIR/net/credits/spent`.
+
+**What tokens buy: priority when busy** (Liz's pick, 2026-10-03). A node answers 8 bucket requests at once for free (`NetConfig::max_answering`) and turns more away as busy (`busy` in the answer). A request that carries one of its tokens still gets in, up to 8 more at once, and the token is spent. A searching node asks again with a token only after a node said it was busy, so tokens go only where they help, and a free search of a busy node simply comes back without that node's answer. Sealed requests that carry a token are padded to 256 bytes rather than 64: the relay can tell a paid request from a free one, but not the bucket. A node keeps at least 4 tokens from each node it searches, asking for 16 more at most every 30 minutes (`NetConfig::collect_tokens`, on by default); a node whose ledger has nothing for it says no. Nodes that predate tokens ignore them. Nobody who searches on a website ever deals with tokens: the site's own node spends them.
+
+**Limits now.**
+
+* A token is good only at its issuer, so a node's credits at one issuer are what that issuer counted for it, and a node can spend its balance once at every issuer. That is fine while tokens buy only extra work from the node that issued them.
+* The issuer sees a node ask it for tokens and, later, paid requests arrive. A node buys tokens ahead of time and in batches, so this links little, but it is not nothing.
+* An issuer that hands a node a key of its own from the very first token would go unnoticed; the wallet only catches a key that changes. Checking keys through a relay, as sealed requests already do, would close that.
+* Credits follow agreement's rules on who counts, so its limits on one person running many keys apply here too.
+
+`GET /api/status` shows `network.credits`: this node's own balance as it counts it, its confirmed and mismatched crawls, the accounts it keeps, and the tokens it issued, had handed back and holds.
+
+Tested on one machine (`cargo test -p plumb-net credits`): confirmed crawls earn and mismatches cost, early crawls earn double, tokens go only to crawlers that count and can pay, the ledger, the issuing key and spent tokens survive a restart, a token is spent once, forged and other issuers' tokens are refused, a proof for other tokens does not check out, and the wallet refuses a changed key; a sealed request carrying a token opens at its own size; across two nodes, a node that answers nothing for free turns a search away and then answers it for tokens, one spent per request; across three nodes, two crawlers that agree on 10 sites each earn 20 credits in both ledgers, one buys 8 tokens and then what is left, and a node that never crawled gets none.
 
 ## Running it
 
 ```sh
-# A node at home: dials out only.
-plumb run --data plumb-data --network \
-  --bootstrap /dns4/plumbsearch.org/tcp/4001/p2p/<the server's node id>
+# A node at home: dials out only, and starts from plumbsearch.org.
+plumb run --data plumb-data --network
 
 # Also share which result is opened, anonymously (off by default).
-plumb run --data plumb-data --network --share-popularity \
-  --bootstrap /dns4/plumbsearch.org/tcp/4001/p2p/<the server's node id>
+plumb run --data plumb-data --network --share-popularity
+
+# A test network kept apart from the real one.
+plumb run --data test-data --network --no-default-bootstrap --no-default-trust \
+  --bootstrap /ip4/192.168.1.20/tcp/4001/p2p/<that node's id>
 
 # A reachable server that relays for others (open TCP and UDP 4001).
 plumb run --data /data --network --relay \
@@ -149,7 +174,7 @@ plumb run --data /data --network --relay \
 * The node id is printed at start ("joined the Plumb network as 12D3Koo...") and shown in `GET /api/status` under `network.peer_id`, with the addresses it listens on, its NAT status, its relays, and counts of batches held, published and received.
 * The node key is `DIR/net/node.key`. Keep it to keep the same id; a server's id is part of the bootstrap address others use.
 * The Docker image exposes 4001; publish it with `-p 4001:4001/tcp -p 4001:4001/udp` on a server that relays.
-* No bootstrap node runs yet, so for now nodes are joined by hand with `--bootstrap`. Once plumbsearch.org runs a relay node, its address becomes the default and `--network` the default too.
+* Every node starts from the relay on plumbsearch.org (`/dns4/plumbsearch.org/tcp/4001/p2p/12D3KooWJ2UWUBsxmPfXTfHa8cBBmzifa6kj5pFZKfJXYNQyJ69a`, `plumb_net::DEFAULT_BOOTSTRAP`) as well as any `--bootstrap` nodes, unless given `--no-default-bootstrap`. The desktop app joins the network when it starts; `plumb run` joins with `--network`, which the Docker image and `docker-compose.yml` pass (docs/docker.md).
 
 ## What the prototype proves, and what it does not
 
@@ -171,5 +196,5 @@ Roughly in order; the first two are what the roadmap's Phase 2 gate ("two nodes 
 3. **Abuse limits.** Connection limits, per-node rate limits on requests, peer scoring in gossipsub, and banning keys whose batches fail checks.
 4. **An unpredictable epoch seed** from a public randomness beacon (drand), so keys cannot be made in advance for a target site.
 5. **Desktop app**: a switch for joining the network, crawling only when idle and on power, with a bandwidth cap.
-6. **plumbsearch.org as the first bootstrap and relay node**, then on by default.
-7. Phase 3 and 4 pieces from the white paper: homepage fetch receipts, and crawl tokens to pay for popularity reports. Popularity reports themselves are in (see above); next for them is a randomness server run by a group of nodes, so picks cannot be guessed.
+6. **plumbsearch.org as the first bootstrap and relay node: built.** Every node starts from it, and the Docker image joins the network by default.
+7. Phase 3 and 4 pieces from the white paper: homepage fetch receipts, and tokens any node can check to pay for popularity reports (crawl credits and tokens good at their issuer are in, see above). Popularity reports themselves are in (see above); next for them is a randomness server run by a group of nodes, so picks cannot be guessed.

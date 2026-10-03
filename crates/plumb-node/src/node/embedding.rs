@@ -8,12 +8,16 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use tracing::{info, warn};
 
-use super::Inner;
+use plumb_core::now_unix;
+
+use super::{Inner, LastError, MeaningWork};
 use crate::meaning::{embed_records, ensure_model, load_embedder, load_vectors_for, MeaningIndex};
 use crate::records::load_records;
 
 /// Directory of the model's files in the data directory.
 pub(super) const MODEL_DIR: &str = "model";
+/// About how big the model's files are, for the panel's progress.
+pub(super) const MODEL_MB: u64 = 130;
 /// Wait after a failure (no network for the model download, a bad file).
 const RETRY_WAIT: Duration = Duration::from_secs(30 * 60);
 /// How often the job looks for a new index.
@@ -34,6 +38,12 @@ pub(super) fn run(inner: Arc<Inner>) {
             "search by meaning: {err:#}; trying again in {} minutes",
             RETRY_WAIT.as_secs() / 60
         );
+        let now = now_unix();
+        inner.set_meaning_work(Some(MeaningWork::Failed(LastError {
+            message: format!("{err:#}"),
+            at: now,
+            retry_at: Some(now + RETRY_WAIT.as_secs()),
+        })));
         nap(&inner, RETRY_WAIT);
     }
 }
@@ -44,9 +54,11 @@ fn work(inner: &Arc<Inner>) -> Result<()> {
     let meaning = match inner.meaning.get() {
         Some(meaning) => meaning,
         None => {
+            inner.set_meaning_work(Some(MeaningWork::Downloading));
             tokio::runtime::Handle::current()
                 .block_on(ensure_model(&model_dir))
                 .context("downloading the embedding model")?;
+            inner.set_meaning_work(Some(MeaningWork::Loading));
             let embedder = load_embedder(&model_dir)?;
             let vectors = load_vectors_for(&vectors_path, &embedder)?;
             info!("search by meaning: {} site vectors loaded", vectors.len());
@@ -64,6 +76,7 @@ fn work(inner: &Arc<Inner>) -> Result<()> {
             continue;
         };
         if embedded_for == Some(index) {
+            inner.set_meaning_work(None);
             nap(inner, LOOK_EVERY);
             continue;
         }
@@ -78,7 +91,14 @@ fn work(inner: &Arc<Inner>) -> Result<()> {
             threads,
             &|| inner.stopping(),
             &mut |vectors| vectors.save(&vectors_path),
+            &mut |done, total| {
+                inner.set_meaning_work((done < total).then_some(MeaningWork::Embedding {
+                    done: done as u64,
+                    total: total as u64,
+                }));
+            },
         )?;
+        inner.set_meaning_work(None);
         drop(records);
         if inner.stopping() {
             break;
