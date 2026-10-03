@@ -217,6 +217,7 @@ mod tests {
             records: Some(vec![BucketRecord {
                 record: "{\"domain\":\"usbank.com\"}".into(),
                 proof: None,
+                also: Vec::new(),
             }]),
         };
         let answer = seal_response(sealer, &response).unwrap();
