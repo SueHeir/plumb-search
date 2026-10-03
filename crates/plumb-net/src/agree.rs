@@ -340,9 +340,15 @@ impl Agreement {
         }
     }
 
-    fn observe_homepage(&mut self, crawler: PeerId, record: SiteRecord) -> Option<SiteRecord> {
+    fn observe_homepage(&mut self, crawler: PeerId, mut record: SiteRecord) -> Option<SiteRecord> {
         let crawled_at = record.crawled_at?;
         let domain = record.domain.clone();
+        // Only the homepage facts are compared ([`agree`]); the page text
+        // a trusted or own crawl carries (a few hundred words a site) is
+        // passed on with it, not held for two weeks.
+        let headings = std::mem::take(&mut record.headings);
+        let body_text = record.body_text.take();
+        let search_url = record.search_url.take();
         let held = self.homepages.entry(domain.clone()).or_default();
         let mut observation = Observation {
             crawler,
@@ -371,8 +377,11 @@ impl Agreement {
         self.judge_against_own(&domain);
         if self.trusted.contains(&crawler) {
             let held = &self.homepages[&domain];
-            let record = held.iter().find(|o| o.crawler == crawler)?.record.clone();
+            let mut record = held.iter().find(|o| o.crawler == crawler)?.record.clone();
             self.confirmed.insert(domain, record.clone());
+            record.headings = headings;
+            record.body_text = body_text;
+            record.search_url = search_url;
             return Some(record);
         }
         let held = &self.homepages[&domain];
@@ -1011,6 +1020,15 @@ mod tests {
         assert_eq!(out[0].title.as_deref(), Some("U.S. Bank"));
         assert_eq!(out[0].aliases, vec!["US Bank".to_string()]);
         assert_eq!(agreement.status().trusted_peers, 1);
+        // Page text is passed on, though only the facts are held.
+        let mut texty = crawl("library.org", "Library", NOW);
+        texty.headings = vec!["Find a book".into()];
+        texty.body_text = Some("Borrow books and films".into());
+        let out = agreement.observe(trusted, vec![texty], NOW);
+        assert_eq!(out[0].headings, ["Find a book"]);
+        assert_eq!(out[0].body_text.as_deref(), Some("Borrow books and films"));
+        let held = &agreement.homepages["library.org"][0].record;
+        assert!(held.headings.is_empty() && held.body_text.is_none());
         let mut named = SiteRecord::new("newbank.com");
         named.add_link_text_linkers("New Bank", 0b01);
         let out = agreement.observe(trusted, vec![named], NOW);
