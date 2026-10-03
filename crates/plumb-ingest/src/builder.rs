@@ -171,6 +171,8 @@ impl Builder {
             official += 1;
             let record = self.records.entry(domain);
             record.signals.official_site = true;
+            let sitelinks = claims.iter().map(|site| site.sitelinks).max().unwrap_or(0);
+            record.signals.sitelinks = record.signals.sitelinks.max(sitelinks);
             for site in claims {
                 let label = site.label.trim();
                 if label != site.item {
@@ -431,6 +433,7 @@ mod tests {
                 tranco_rank: Some(3),
                 linking_domains: 2,
                 official_site: true,
+                sitelinks: 0,
             }
         );
         assert_eq!(usbank.crawled_at, None);
@@ -696,6 +699,7 @@ mod tests {
             kinds: Vec::new(),
             names: Vec::new(),
             about: None,
+            sitelinks: 0,
         };
         builder.add_official_sites(&[
             junk("mailto:a@b.com", "a@b.com"),

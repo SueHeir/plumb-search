@@ -189,6 +189,11 @@ pub struct Signals {
     /// Listed as an official website in Wikidata.
     #[serde(default, skip_serializing_if = "is_false")]
     pub official_site: bool,
+    /// For an official website, the most Wikipedia language editions (and
+    /// other Wikimedia sites) with an article on an organization claiming
+    /// it: how widely known the organization is.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub sitelinks: u32,
 }
 
 fn is_zero(n: &u32) -> bool {
@@ -326,6 +331,7 @@ impl SiteRecord {
         s.tranco_rank = min_some(s.tranco_rank, o.tranco_rank);
         s.linking_domains = s.linking_domains.max(o.linking_domains);
         s.official_site |= o.official_site;
+        s.sitelinks = s.sitelinks.max(o.sitelinks);
         match other.crawl_attempted_at.cmp(&self.crawl_attempted_at) {
             std::cmp::Ordering::Greater => self.crawl_failures = other.crawl_failures,
             std::cmp::Ordering::Equal => {
@@ -441,13 +447,22 @@ pub fn sort_by_link_score(records: &mut [SiteRecord]) {
     });
 }
 
+/// How widely known an organization with `sitelinks` Wikipedia articles is,
+/// from 0 to 1 on a log scale: 1 article 0.13, 25 articles 0.61, 200 or
+/// more 1.
+fn known_share(sitelinks: u32) -> f64 {
+    const FULLY_KNOWN: f64 = 200.0;
+    ((1.0 + f64::from(sitelinks)).ln() / (1.0 + FULLY_KNOWN).ln()).min(1.0)
+}
+
 /// A popularity prior in `0.0..=1.0` built from the site's signals.
 ///
 /// Ranks map onto a log scale shared by every ranking (rank 1 is 1.0, rank
 /// 1,000 about 0.63, rank 1,000,000 about 0.25, rank 100,000,000 is 0), and the best
 /// of them counts for 75%. The number of linking domains, also on a log
 /// scale, counts for the other 25%. An official website listed in Wikidata
-/// gets a 0.15 bonus. The result is capped at 1.0.
+/// gets a 0.15 bonus, plus up to 0.05 more the more widely known its
+/// organization is ([`Signals::sitelinks`]). The result is capped at 1.0.
 pub fn link_score(signals: &Signals) -> f32 {
     const RANK_SCALE: f64 = 1e8;
     const LINKS_SCALE: f64 = 1e5;
@@ -469,7 +484,7 @@ pub fn link_score(signals: &Signals) -> f32 {
     let links = ((1.0 + signals.linking_domains as f64).ln() / (1.0 + LINKS_SCALE).ln()).min(1.0);
     let mut score = 0.75 * best_rank + 0.25 * links;
     if signals.official_site {
-        score += 0.15;
+        score += 0.15 + 0.05 * known_share(signals.sitelinks);
     }
     score.min(1.0) as f32
 }
@@ -902,6 +917,29 @@ mod tests {
         }
         assert_eq!(joined("U.S. Bank"), "usbank");
         assert_eq!(joined("Bank of America"), "bankofamerica");
+    }
+
+    #[test]
+    fn widely_known_official_sites_score_a_little_higher() {
+        let official = |sitelinks| Signals {
+            tranco_rank: Some(50_000),
+            official_site: true,
+            sitelinks,
+            ..Signals::default()
+        };
+        let plain = link_score(&Signals {
+            tranco_rank: Some(50_000),
+            ..Signals::default()
+        });
+        let (unknown, few, many, most) = (
+            link_score(&official(0)),
+            link_score(&official(3)),
+            link_score(&official(150)),
+            link_score(&official(10_000)),
+        );
+        assert!((unknown - plain - 0.15).abs() < 1e-6);
+        assert!(unknown < few && few < many && many < most);
+        assert!((most - plain - 0.20).abs() < 1e-6);
     }
 
     #[test]

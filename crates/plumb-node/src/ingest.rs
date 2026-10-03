@@ -236,6 +236,7 @@ impl FreshSeeds {
         }
         if self.wikidata && signals.official_site {
             signals.official_site = false;
+            signals.sitelinks = 0;
             record.aliases.clear();
         }
         if self.wikidata {
