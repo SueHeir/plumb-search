@@ -42,6 +42,7 @@
 //!   meeting a node, it asks for the reports of this week and last week.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::Duration;
@@ -637,19 +638,35 @@ fn build_swarm(key: &Keypair, config: &NetConfig) -> Result<Swarm<Behaviour>> {
                 kad.set_mode(Some(kad::Mode::Server));
             }
             let relay = relay_server.then(|| {
-                relay::Behaviour::new(
-                    peer_id,
-                    relay::Config {
-                        max_reservations: 1024,
-                        max_circuits: 256,
-                        // Circuits to or from one node. A node behind NAT
-                        // gets every network search through its relay, each
-                        // bucket on its own throwaway connection, so the
-                        // default of 4 turns searches away.
-                        max_circuits_per_peer: 64,
-                        ..relay::Config::default()
+                let mut config = relay::Config {
+                    max_reservations: 1024,
+                    max_circuits: 256,
+                    // Circuits to or from one node. A node behind NAT
+                    // gets every network search through its relay, each
+                    // bucket on its own throwaway connection, so the
+                    // default of 4 turns searches away.
+                    max_circuits_per_peer: 64,
+                    circuit_src_rate_limiters: Vec::new(),
+                    ..relay::Config::default()
+                }
+                .circuit_src_per_peer(NonZeroU32::new(30).unwrap(), Duration::from_secs(120));
+                // The default of 60 circuits a minute from one address,
+                // except from this machine: the relay reaches the nodes
+                // relaying through it over loopback, one throwaway
+                // connection per bucket, and past 60 its own searches and
+                // the sealed requests it passes on were turned away.
+                let mut per_ip = relay::Config {
+                    circuit_src_rate_limiters: Vec::new(),
+                    ..relay::Config::default()
+                }
+                .circuit_src_per_ip(NonZeroU32::new(60).unwrap(), Duration::from_secs(60))
+                .circuit_src_rate_limiters;
+                config.circuit_src_rate_limiters.push(Box::new(
+                    move |peer, addr: &Multiaddr, now| {
+                        is_loopback(addr) || per_ip.iter_mut().all(|l| l.try_next(peer, addr, now))
                     },
-                )
+                ));
+                relay::Behaviour::new(peer_id, config)
             });
             let request_config =
                 request_response::Config::default().with_request_timeout(Duration::from_secs(20));
