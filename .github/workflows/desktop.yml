@@ -80,6 +80,13 @@ jobs:
         if: steps.tauri-cli.outputs.cache-hit != 'true'
         run: cargo install tauri-cli --version "${{ env.TAURI_CLI_VERSION }}" --locked
 
+      - name: Build private browser search
+        run: |
+          rustup target add wasm32-unknown-unknown
+          cargo install wasm-bindgen-cli --version 0.2.108 --locked
+          cargo build --locked -p plumb-private --target wasm32-unknown-unknown --profile wasm
+          wasm-bindgen --target web --no-typescript --out-dir target/private target/wasm32-unknown-unknown/wasm/plumb_private.wasm
+
       - name: Build the installers
         working-directory: crates/plumb-desktop
         env:

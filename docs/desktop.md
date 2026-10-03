@@ -1,13 +1,33 @@
 # The Plumb Search desktop app
 
-The desktop app runs a Plumb Search node on your computer. You search in your
-own web browser, at `http://127.0.0.1:7586`. The app's window is a panel, not
-a browser but a dashboard of the node: what works now ("Limited search is
-ready" or "Search is ready"), the disk space and downloads it uses against
-their limits, how crawling is going, the Plumb network (not connected in this
-version) and how far setup has come. It holds the settings and has buttons that
-open search in your browser or add Plumb to Firefox. The same app builds for Windows, macOS and Linux
-with [Tauri](https://v2.tauri.app).
+The desktop app runs a Plumb Search node on your computer. Search opens in
+your browser at `http://127.0.0.1:7586`; the app window manages the node.
+It shares its panel and feature settings with Docker, from this repository.
+
+The panel has five sections:
+
+- **Overview:** search readiness, crawl progress, storage, downloads, and live peer status.
+- **Search & browser:** browser setup, search by meaning, and private browser search.
+- **Resources:** background crawling and daily download/storage limits; changes apply immediately.
+- **Network & privacy:** joining the network, bootstrap nodes, anonymous popularity sharing, crawl agreement, and relay activity.
+- **About:** version, data location, diagnostics, and source code.
+
+Optional features are off until enabled. Save feature choices, then use **Quit
+Plumb Search** in the tray/menu bar and reopen the app. Closing the window
+keeps the node running and does not apply restart settings. A banner shows
+when saved choices differ from the running node. Resource and feature forms
+never refresh automatically while you edit them.
+
+Meaning search downloads a model and builds vectors in the background.
+Private browser search needs the bundled WebAssembly module and an index
+with buckets; the panel distinguishes disabled, preparing, and unavailable
+states. Desktop installers build and include that module.
+
+Feature choices are stored in `features.json` in the data folder and take
+precedence over startup feature defaults. Delete that file while stopped to
+return to defaults. Server transport/relay flags are preserved. For an isolated
+development or test node, set `PLUMB_DESKTOP_DATA_DIR` to a separate folder
+before launching the desktop executable.
 
 Every link out of the panel opens in your default browser. Closing the window
 keeps the app running, so searches from your browser keep working: it stays

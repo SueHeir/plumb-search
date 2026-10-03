@@ -91,6 +91,7 @@ use crate::web::{self, IndexBackend, SearchBackend, StatusSource};
 use crate::websearch::{Engine, WebSettings};
 
 mod embedding;
+pub mod features;
 mod network;
 mod store;
 mod worker;
@@ -549,7 +550,10 @@ impl NodeHandle {
 /// it, when the address cannot be bound, or when the configuration cannot
 /// work (such as an alpha above 1). A multi-threaded runtime is best: crawls
 /// and index builds run on its blocking threads.
-pub async fn start(config: NodeConfig) -> Result<NodeHandle> {
+pub async fn start(mut config: NodeConfig) -> Result<NodeHandle> {
+    if let Some(features) = features::FeatureSettings::load(&config.data_dir)? {
+        features.apply(&mut config)?;
+    }
     config.check()?;
     let rank = crate::rank_config(config.alpha);
     let opened = {
@@ -1171,6 +1175,18 @@ impl StatusSource for Inner {
 
     fn record_pick(&self, query: &str, domain: &str) {
         network::record_pick(self, query, domain);
+    }
+
+    fn features(&self) -> features::FeatureSettings {
+        features::FeatureSettings::from_config(&self.config)
+    }
+
+    fn saved_features(&self) -> Result<features::FeatureSettings> {
+        Ok(features::FeatureSettings::load(&self.paths.data)?.unwrap_or_else(|| self.features()))
+    }
+
+    fn change_features(&self, features: features::FeatureSettings) -> Result<()> {
+        features.save(&self.paths.data)
     }
 
     fn settings(&self) -> Option<NodeSettings> {

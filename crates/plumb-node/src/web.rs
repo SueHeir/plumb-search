@@ -230,6 +230,17 @@ pub trait StatusSource: Send + Sync {
         let _ = (query, domain);
     }
 
+    /// Active and next-start feature choices, shared by desktop and Docker.
+    fn features(&self) -> crate::node::features::FeatureSettings {
+        Default::default()
+    }
+    fn saved_features(&self) -> Result<crate::node::features::FeatureSettings> {
+        Ok(self.features())
+    }
+    fn change_features(&self, _features: crate::node::features::FeatureSettings) -> Result<()> {
+        anyhow::bail!("this node has no feature settings")
+    }
+
     /// The node's settings; `None` when it has none.
     fn settings(&self) -> Option<NodeSettings> {
         None
@@ -325,6 +336,7 @@ fn app(state: AppState) -> Router {
             .route("/api/network/search", get(api_network_search))
             .route("/app", get(panel::panel))
             .route("/app/settings", post(panel::save_settings))
+            .route("/app/features", post(panel::save_features))
             .route("/app/refresh", post(panel::refresh))
             .route(panel::ADD_TO_FIREFOX_PATH, get(panel::add_to_firefox));
         router = private::routes(router);
@@ -1874,7 +1886,11 @@ mod tests {
     #[tokio::test]
     async fn search_page_lists_hits() {
         let fake = backend(bank_hits());
-        let (status, _, body) = get(Arc::clone(&fake), "/search?q=us+bank").await;
+        let (status, _, body) = send(
+            router_with(fake.clone(), HomeCountry::Off),
+            "/search?q=us+bank",
+        )
+        .await;
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains(
             "<a class=\"t\" href=\"https://www.usbank.com/\" rel=\"noreferrer\">\

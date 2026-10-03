@@ -114,6 +114,36 @@ everything in it.
 
 ## Settings
 
+Open `/app` for the same organized node panel used by the desktop app:
+Overview, Search & browser, Resources, Network & privacy, and About.
+Network statistics reflect the live node, including peers, crawl agreement,
+popularity reports, and relay activity. Forms do not reload while being edited.
+
+The panel keeps the existing local-only write policy: remote connections
+see disabled controls and an explanation. Docker bridge networking can make
+even a host-local browser appear remote to the container. For those deployments,
+configure the node on the host with the startup flags below, or place
+`features.json` in the mounted data directory while the node is stopped:
+
+```json
+{
+  "network": true,
+  "search_by_meaning": false,
+  "private_search": true,
+  "share_popularity": false,
+  "bootstrap": []
+}
+```
+
+Feature choices in this file override startup feature flags and take effect
+on the next start (`docker compose restart`). Network transport, public
+addresses, relay, UPnP, and discovery flags are preserved. With no bootstrap
+addresses, a newly enabled network relies on local discovery; add a reachable
+node's multiaddress for remote peers. Remove `features.json` while stopped to
+use only startup flags again. Resource limits stay in `settings.json` and
+apply immediately when saved through a local panel.
+
+
 Settings are flags of `plumb run`. The image's default command is
 `run --data /data --bind 0.0.0.0:8080`, and a command you set replaces all of
 it, so keep those two flags. In `docker-compose.yml`:

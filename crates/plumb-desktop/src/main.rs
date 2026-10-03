@@ -240,10 +240,13 @@ async fn start_node(app: AppHandle) -> Option<NodeHandle> {
 }
 
 async fn launch_node(app: AppHandle) -> Result<NodeHandle> {
-    let data_dir = app
-        .path()
-        .app_data_dir()
-        .context("finding the app data folder")?;
+    let data_dir = match std::env::var_os("PLUMB_DESKTOP_DATA_DIR") {
+        Some(dir) => std::path::PathBuf::from(dir),
+        None => app
+            .path()
+            .app_data_dir()
+            .context("finding the app data folder")?,
+    };
     std::fs::create_dir_all(&data_dir)
         .with_context(|| format!("creating the data folder {}", data_dir.display()))?;
     info!("data folder: {}", data_dir.display());
@@ -696,6 +699,8 @@ mod tests {
         for page in [
             "http://127.0.0.1:41234/app",
             "http://127.0.0.1:41234/app/settings",
+            "http://127.0.0.1:41234/app?section=network",
+            "http://127.0.0.1:41234/app/features",
             "http://127.0.0.1:41234/app/refresh",
         ] {
             assert_eq!(
