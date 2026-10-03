@@ -97,6 +97,9 @@ const CIRCUIT_BURST: NonZeroU32 = NonZeroU32::new(600).unwrap();
 const CIRCUIT_REFILL: Duration = Duration::from_millis(100);
 /// Batch fetches in flight at once.
 const MAX_FETCHES: usize = 16;
+
+/// Refused batch ids remembered; the set is emptied when it reaches this.
+const MAX_REFUSED: usize = 100_000;
 /// Bucket requests answered at once for free; more are turned away as
 /// busy unless they spend a token (see [`crate::credits`]).
 pub const MAX_ANSWERING: usize = 8;
@@ -747,6 +750,7 @@ pub async fn start(
         nearby: HashSet::new(),
         wanted: VecDeque::new(),
         wanted_ids: HashSet::new(),
+        refused: HashSet::new(),
         fetching: HashMap::new(),
         listing: HashSet::new(),
         unannounced: Vec::new(),
@@ -1033,6 +1037,8 @@ struct Task {
     /// Batches to fetch, and from whom.
     wanted: VecDeque<(Hash, Vec<PeerId>)>,
     wanted_ids: HashSet<Hash>,
+    /// Batches fetched and found useless or bad, so not fetched again.
+    refused: HashSet<Hash>,
     fetching: HashMap<OutboundRequestId, (Hash, Vec<PeerId>)>,
     /// Nodes asked for their batch headers this session.
     listing: HashSet<PeerId>,
@@ -1730,8 +1736,19 @@ impl Task {
         gossipsub::MessageAcceptance::Accept
     }
 
+    /// Remembers not to fetch batch `id` again.
+    fn refuse(&mut self, id: Hash) {
+        if self.refused.len() >= MAX_REFUSED {
+            self.refused.clear();
+        }
+        self.refused.insert(id);
+    }
+
     fn want(&mut self, id: Hash, sources: Vec<PeerId>) {
-        if self.lock_store().contains(&id) || !self.wanted_ids.insert(id) {
+        if self.refused.contains(&id)
+            || self.lock_store().contains(&id)
+            || !self.wanted_ids.insert(id)
+        {
             return;
         }
         self.wanted.push_back((id, sources));
@@ -2085,9 +2102,23 @@ impl Task {
             Ok(crawler) => crawler,
             Err(err) => {
                 warn!("rejected batch {id} from {from}: {err:#}");
+                self.refuse(id);
                 return;
             }
         };
+        let trusted = self.config.trusted_peers.contains(&crawler);
+        let accepted = if trusted {
+            accept_trusted_batch(&batch, &crawler, now)
+        } else {
+            accept_batch(&batch, &crawler, now)
+        };
+        // A batch none of whose records count here is not kept: anyone can
+        // make keys and sign batches, and they would otherwise fill the disk.
+        if accepted.is_empty() && !trusted {
+            debug!("batch {id} from {from} has no record this node keeps; not holding it");
+            self.refuse(id);
+            return;
+        }
         let held = {
             let mut store = self.lock_store();
             if let Err(err) = store.insert(&batch) {
@@ -2095,11 +2126,6 @@ impl Task {
                 return;
             }
             store.len()
-        };
-        let accepted = if self.config.trusted_peers.contains(&crawler) {
-            accept_trusted_batch(&batch, &crawler, now)
-        } else {
-            accept_batch(&batch, &crawler, now)
         };
         let kept = accepted.len();
         let confirmed = self
