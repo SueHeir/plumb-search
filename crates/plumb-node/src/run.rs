@@ -5,6 +5,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 
 use anyhow::Result;
+use plumb_net::NetConfig;
 use tracing::warn;
 
 use crate::cli::{Profile, RunArgs};
@@ -67,6 +68,25 @@ fn node_config(args: RunArgs) -> NodeConfig {
     config.search_by_meaning = args.search_by_meaning;
     if args.use_system_proxy {
         config.use_system_proxy = true;
+    }
+    if args.network {
+        let mut net = NetConfig::new(config.data_dir.join("net"));
+        let port = args.p2p_port;
+        net.listen = [
+            format!("/ip4/0.0.0.0/tcp/{port}"),
+            format!("/ip4/0.0.0.0/udp/{port}/quic-v1"),
+            format!("/ip6/::/tcp/{port}"),
+            format!("/ip6/::/udp/{port}/quic-v1"),
+        ]
+        .iter()
+        .map(|addr| addr.parse().expect("a valid multiaddr"))
+        .collect();
+        net.bootstrap = args.bootstrap;
+        net.external = args.public_addr;
+        net.relay_server = args.relay;
+        net.upnp = !args.no_upnp;
+        net.local_discovery = !args.no_local_discovery;
+        config.network = Some(net);
     }
     config
 }
@@ -153,6 +173,34 @@ mod tests {
         assert_eq!(off.crawl_per_refresh, 5_000);
         assert!(!off.use_system_proxy);
         assert!(config(&["--data", "d", "--use-system-proxy"]).use_system_proxy);
+        assert_eq!(off.network, None);
+    }
+
+    #[test]
+    fn network_flags() {
+        let node = config(&[
+            "--data",
+            "d",
+            "--network",
+            "--p2p-port",
+            "4100",
+            "--bootstrap",
+            "/dns4/plumbsearch.org/tcp/4001/p2p/12D3KooWEwYB7PYxRNgvSWiwkLXvwYajSmYn4yoPqmkN7NbNqJjg",
+            "--public-addr",
+            "/ip4/203.0.113.7/tcp/4100",
+            "--relay",
+        ]);
+        let net = node.network.unwrap();
+        assert_eq!(net.listen[0].to_string(), "/ip4/0.0.0.0/tcp/4100");
+        assert_eq!(net.bootstrap.len(), 1);
+        assert_eq!(net.external.len(), 1);
+        assert!(net.relay_server && net.upnp);
+        let parse = |args: &[&str]| Cli::try_parse_from(["plumb", "run"].iter().chain(args));
+        assert!(
+            parse(&["--data", "d", "--relay"]).is_err(),
+            "--relay needs --public-addr"
+        );
+        assert!(parse(&["--data", "d", "--bootstrap", "/ip4/1.2.3.4/tcp/1"]).is_err());
     }
 
     #[test]

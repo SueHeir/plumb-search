@@ -23,6 +23,8 @@ const RECORDS_FILE: &str = "records.jsonl";
 const SEED_DIR: &str = "seed";
 /// One numbered directory per index build.
 const INDEXES_DIR: &str = "indexes";
+/// The network side's files (see [`super::network`]).
+const NET_DIR: &str = "net";
 
 /// The files and directories of a data directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,6 +35,11 @@ pub(super) struct Paths {
     pub(super) settings: PathBuf,
     pub(super) seed: PathBuf,
     pub(super) indexes: PathBuf,
+    pub(super) net: PathBuf,
+    /// Records from other nodes, not yet folded in.
+    pub(super) inbox: PathBuf,
+    /// The inbox while it is being folded in.
+    pub(super) absorbing: PathBuf,
 }
 
 impl Paths {
@@ -44,6 +51,9 @@ impl Paths {
             settings: data.join(SETTINGS_FILE),
             seed: data.join(SEED_DIR),
             indexes: data.join(INDEXES_DIR),
+            net: data.join(NET_DIR),
+            inbox: data.join(NET_DIR).join("inbox.jsonl"),
+            absorbing: data.join(NET_DIR).join("inbox.absorbing"),
         }
     }
 
@@ -204,6 +214,9 @@ pub(super) struct SavedState {
     /// Setup went ahead without Wikidata's official websites, which could
     /// not be downloaded; the node adds them once it can.
     pub(super) wikidata_missing: bool,
+    /// Records from other nodes folded into the records file since the
+    /// index was last built.
+    pub(super) network_pending: u64,
     /// The records are a quick start from the Tranco list alone, put in
     /// service while the rest of the seed data downloads. The full seed
     /// replaces them, keeping only what crawls added.
@@ -255,6 +268,7 @@ impl SavedState {
             index_stale: true,
             last_refresh: None,
             wikidata_missing: false,
+            network_pending: 0,
             quick_start: false,
             download_day: 0,
             downloaded_on_day: 0,
@@ -441,6 +455,7 @@ mod tests {
             index_stale: true,
             last_refresh: Some(1_700_000_000),
             wikidata_missing: true,
+            network_pending: 0,
             quick_start: true,
             download_day: 20_000,
             downloaded_on_day: 1_234,

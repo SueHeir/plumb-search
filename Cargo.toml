@@ -6,6 +6,7 @@ members = [
     "crates/plumb-crawl",
     "crates/plumb-index",
     "crates/plumb-embed",
+    "crates/plumb-net",
     "crates/plumb-node",
     "crates/plumb-desktop",
 ]
@@ -17,6 +18,7 @@ default-members = [
     "crates/plumb-crawl",
     "crates/plumb-index",
     "crates/plumb-embed",
+    "crates/plumb-net",
     "crates/plumb-node",
 ]
 

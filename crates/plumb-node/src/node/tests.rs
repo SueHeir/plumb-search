@@ -368,6 +368,7 @@ async fn falls_back_to_the_newest_index_that_opens_and_clears_leftovers() {
         index_stale: false,
         last_refresh: Some(now_unix()),
         wikidata_missing: false,
+        network_pending: 0,
         quick_start: false,
         ..SavedState::default()
     };
@@ -460,6 +461,7 @@ async fn picks_up_a_round_left_unfinished() {
             index_stale: true,
             last_refresh: None,
             wikidata_missing: false,
+            network_pending: 0,
             quick_start: false,
             ..SavedState::default()
         },
@@ -482,6 +484,7 @@ async fn picks_up_a_round_left_unfinished() {
             index_stale: false,
             last_refresh: Some(last),
             wikidata_missing: false,
+            network_pending: 0,
             quick_start: false,
             ..SavedState::default()
         }
@@ -514,6 +517,7 @@ async fn refreshes_when_due() {
             index_stale: false,
             last_refresh: Some(long_ago),
             wikidata_missing: false,
+            network_pending: 0,
             quick_start: false,
             ..SavedState::default()
         },
@@ -905,6 +909,150 @@ async fn sets_up_without_wikidata_and_adds_it_later() {
         usbank.aliases
     );
     assert_eq!(names(&dir.path().join("indexes")).len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_node_in_the_network_takes_in_other_nodes_crawls_and_searches_them() {
+    let dir = seeded_dir();
+    let mut config = test_config(dir.path());
+    let mut net = plumb_net::NetConfig::new(PathBuf::new());
+    net.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+    net.upnp = false;
+    net.local_discovery = false;
+    config.network = Some(net);
+    let node = start(config).await.unwrap();
+    let addr = node.addr();
+    let status = wait_for(addr, "the first index", ready_and_idle).await;
+    let net_status = status.network.expect("the node joined the network");
+    let node_addr: plumb_net::Multiaddr = net_status.listening[0].parse().unwrap();
+    let node_addr = node_addr
+        .with_p2p(net_status.peer_id.parse().unwrap())
+        .unwrap();
+    assert!(dir.path().join("net/node.key").is_file());
+
+    // Another node crawled a site this one has never heard of.
+    let peer_dir = tempfile::tempdir().unwrap();
+    let key = plumb_net::load_or_create_key(&peer_dir.path().join("node.key")).unwrap();
+    let peer_id = key.public().to_peer_id();
+    let now = now_unix();
+    let domain = (0..)
+        .map(|i| format!("lighthouse-keepers-{i}.org"))
+        .find(|d| {
+            plumb_net::assign::is_assigned(
+                plumb_net::assign::epoch_of(now),
+                &peer_id,
+                d,
+                plumb_net::assign::MAX_SHARE_PPM,
+            )
+        })
+        .unwrap();
+    let mut crawled = SiteRecord::new(domain.as_str());
+    crawled.url = Some(format!("https://{domain}/"));
+    crawled.title = Some("Lighthouse Keepers Guild".to_string());
+    crawled.crawled_at = Some(now);
+    let mut peer_config = plumb_net::NetConfig::new(peer_dir.path().to_path_buf());
+    peer_config.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+    peer_config.upnp = false;
+    peer_config.local_discovery = false;
+    peer_config.bootstrap = vec![node_addr];
+    let table = plumb_net::BucketTable::build(&peer_dir.path().join("buckets"), &[crawled.clone()])
+        .unwrap();
+    let (peer, _records) = plumb_net::start(peer_config, Arc::new(table))
+        .await
+        .unwrap();
+    wait_for(addr, "the peer to connect", |s| {
+        s.network.as_ref().is_some_and(|n| n.connected_peers >= 1)
+    })
+    .await;
+
+    // The node asks the peer.
+    let mut found = None;
+    for _ in 0..100 {
+        let (code, _, body) = get(addr, "/api/network/search?q=lighthouse").await;
+        assert_eq!(code, 200, "{body}");
+        let result: serde_json::Value = serde_json::from_str(&body).unwrap();
+        if !result["hits"].as_array().unwrap().is_empty() {
+            found = Some(result);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let found = found.expect("the peer answers");
+    assert_eq!(found["hits"][0]["domain"], domain.as_str());
+    assert_eq!(found["buckets"], plumb_net::bucket::BUCKETS_PER_SEARCH);
+    assert_eq!(
+        found["hits"][0]["verified"], false,
+        "the peer has not published yet"
+    );
+    let (code, _, body) = get(addr, "/network?q=lighthouse").await;
+    assert_eq!(code, 200);
+    assert!(body.contains("Lighthouse Keepers Guild"), "{body}");
+    let (_, _, body) = get(addr, "/search?q=us+bank").await;
+    assert!(body.contains("name=\"net\" value=\"1\">"), "{body}");
+    assert!(body.contains("href=\"/search?q=us+bank"), "{body}");
+    // With the network setting on, the peer's site joins this node's, tinted.
+    let (code, _, body) = get(addr, "/search?q=lighthouse&net=1").await;
+    assert_eq!(code, 200);
+    assert!(body.contains("name=\"net\" value=\"1\" checked>"), "{body}");
+    assert!(
+        body.contains("From this site's index and the Plumb network"),
+        "{body}"
+    );
+    assert!(body.contains("<li class=\"net\">"), "{body}");
+    assert!(body.contains("Lighthouse Keepers Guild"), "{body}");
+
+    // And the other way round: the node serves the buckets of its index.
+    assert!(dir
+        .path()
+        .join("indexes/000001/buckets/buckets.idx")
+        .is_file());
+    let from_node = peer
+        .search("us bank", Duration::from_secs(5))
+        .await
+        .unwrap();
+    // With one node to ask, every bucket goes to it.
+    assert_eq!(
+        from_node.asked,
+        plumb_net::BUCKETS_PER_SEARCH,
+        "{from_node:?}"
+    );
+    assert_eq!(from_node.answered, from_node.asked, "{from_node:?}");
+    assert!(
+        from_node
+            .found
+            .iter()
+            .any(|f| f.record.domain == "usbank.com"),
+        "{from_node:?}"
+    );
+
+    // The peer publishes its crawl; the node keeps it and, at its next
+    // refresh, searches it from its own index.
+    let mut published = None;
+    for _ in 0..100 {
+        published = peer.publish(vec![crawled.clone()]).await.unwrap();
+        if dir.path().join("net/inbox.jsonl").exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(published.is_some());
+    assert!(
+        dir.path().join("net/inbox.jsonl").exists(),
+        "the batch arrived"
+    );
+    assert!(search(addr, "lighthouse").await.is_empty());
+    node.refresh_now();
+    wait_for(addr, "a new index", |s| {
+        ready_and_idle(s) && s.index.as_deref() != Some("000001")
+    })
+    .await;
+    let hits = search(addr, "lighthouse").await;
+    assert_eq!(hits[0].domain, domain);
+    assert_eq!(hits[0].title.as_deref(), Some("Lighthouse Keepers Guild"));
+    assert!(!dir.path().join("net/inbox.jsonl").exists());
+
+    peer.shutdown().await;
+    node.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
