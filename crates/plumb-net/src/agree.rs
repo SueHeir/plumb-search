@@ -83,6 +83,18 @@ impl Score {
     }
 }
 
+/// One crawl scored for or against its crawler, for counting credits
+/// (see [`crate::credits`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Verdict {
+    pub crawler: PeerId,
+    /// When the crawl was made.
+    pub crawled_at: u64,
+    /// It agreed with the confirmed crawl; otherwise it was close in time
+    /// and did not match.
+    pub agreed: bool,
+}
+
 /// What the agreement step holds, for the status page.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgreementStatus {
@@ -120,6 +132,8 @@ pub struct Agreement {
     confirmed: HashSet<String>,
     mentions: HashMap<String, Vec<Mention>>,
     scores: HashMap<PeerId, Score>,
+    /// Scored since the last [`Agreement::take_verdicts`].
+    verdicts: Vec<Verdict>,
 }
 
 impl Agreement {
@@ -131,6 +145,7 @@ impl Agreement {
             confirmed: HashSet::new(),
             mentions: HashMap::new(),
             scores: HashMap::new(),
+            verdicts: Vec::new(),
         }
     }
 
@@ -186,6 +201,11 @@ impl Agreement {
     /// How often `crawler` agreed with the others.
     pub fn score(&self, crawler: &PeerId) -> Score {
         self.scores.get(crawler).copied().unwrap_or_default()
+    }
+
+    /// The crawls scored since the last call, oldest first.
+    pub fn take_verdicts(&mut self) -> Vec<Verdict> {
+        std::mem::take(&mut self.verdicts)
     }
 
     pub fn status(&self) -> AgreementStatus {
@@ -278,6 +298,11 @@ impl Agreement {
         for (i, agreed) in verdicts {
             held[i].judged = true;
             let score = self.scores.entry(held[i].crawler).or_default();
+            self.verdicts.push(Verdict {
+                crawler: held[i].crawler,
+                crawled_at: held[i].crawled_at,
+                agreed,
+            });
             if agreed {
                 score.agreed += 1;
             } else {

@@ -418,3 +418,75 @@ async fn popularity_reports_spread_and_are_read_once_enough_are_sent() {
     wait_for(|| (c.handle.status().reports_held > held).then_some(())).await;
     assert_eq!(c.handle.recount().await.unwrap().picks, table.picks);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn confirmed_crawls_earn_credits_that_buy_tokens() {
+    use plumb_net::agree::MIN_JUDGED;
+    use plumb_net::credits::credits_for;
+
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("plumb_net=debug")
+        .with_test_writer()
+        .try_init();
+
+    let r = Node::start(true, vec![], vec![]).await;
+    let r_addr = r.addr().await;
+    let a = Node::start(false, vec![r_addr.clone()], vec![]).await;
+    let b = Node::start(false, vec![r_addr], vec![]).await;
+    for node in [&a, &b] {
+        wait_for(|| (node.handle.status().connected_peers >= 1).then_some(())).await;
+    }
+    let peers = [a.handle.peer_id(), r.handle.peer_id()];
+
+    // Before crawling anything, A's crawls do not count at R: no tokens.
+    let at_r = a.handle.credits_at(r.handle.peer_id()).await.unwrap();
+    assert_eq!((at_r.credits, at_r.counts), (0, false));
+    assert!(a
+        .handle
+        .collect_tokens(r.handle.peer_id(), 4)
+        .await
+        .is_err());
+
+    // A and R crawl the same sites and agree on every one.
+    let sites: Vec<SiteRecord> = (0..MIN_JUDGED)
+        .map(|i| crawled_for(&peers, &format!("credit{i}x")))
+        .collect();
+    a.handle.publish(sites.clone()).await.unwrap().unwrap();
+    let n = sites.len();
+    wait_for(|| (r.handle.status().agreement.pending_sites == n).then_some(())).await;
+    r.handle.publish(sites.clone()).await.unwrap().unwrap();
+    let earned = i64::from(MIN_JUDGED) * credits_for(now_unix());
+    wait_for(|| (a.handle.status().credits.balance == earned).then_some(())).await;
+    assert_eq!(
+        a.handle.status().credits.confirmed_crawls,
+        u64::from(MIN_JUDGED)
+    );
+    assert_eq!(r.handle.status().credits.balance, earned);
+
+    // R counts the same for A, and sells it tokens for them.
+    let at_r = a.handle.credits_at(r.handle.peer_id()).await.unwrap();
+    assert_eq!((at_r.credits, at_r.counts), (earned, true));
+    let got = a
+        .handle
+        .collect_tokens(r.handle.peer_id(), 8)
+        .await
+        .unwrap();
+    assert_eq!(got, 8);
+    assert_eq!(a.handle.tokens_held(&r.handle.peer_id()), 8);
+    let at_r = a.handle.credits_at(r.handle.peer_id()).await.unwrap();
+    assert_eq!(at_r.credits, earned - 8);
+    wait_for(|| (r.handle.status().credits.tokens_issued == 8).then_some(())).await;
+    wait_for(|| (a.handle.status().credits.tokens_held == 8).then_some(())).await;
+    // Asking for more than is left gets what is left.
+    let rest = usize::try_from(earned - 8).unwrap();
+    let got = a
+        .handle
+        .collect_tokens(r.handle.peer_id(), 64)
+        .await
+        .unwrap();
+    assert_eq!(got, rest);
+
+    // B never crawled: R has nothing for it, and A's credits are A's.
+    let refused = b.handle.collect_tokens(r.handle.peer_id(), 1).await;
+    assert!(refused.is_err(), "{refused:?}");
+}
