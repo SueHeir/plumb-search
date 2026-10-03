@@ -21,6 +21,13 @@
 //!   also notes which result its web page's users open ([`record_pick`])
 //!   and sends a few reports of those picks a day, at random times
 //!   ([`report_picks`]).
+//! * A node started with
+//!   [`NodeConfig::publish_records`](super::NodeConfig::publish_records)
+//!   also shares the homepages crawled into another records file, such as
+//!   one a `plumb crawl` is filling ([`publish_records`]): every
+//!   [`PUBLISH_RECORDS_EVERY`] it publishes those crawled since last time
+//!   (within the last [`PUBLISH_MAX_AGE_DAYS`] days, as other nodes take no
+//!   older batches) and folds them into its own records too.
 //!
 //! ```text
 //! DIR/net/
@@ -31,11 +38,12 @@
 //!   reports/           popularity reports of this week and last week
 //!   popularity.json    what they say, as last counted
 //!   picks.json         results opened here this week (sharing nodes only)
+//!   published.json     how far publish_records got in its file
 //! ```
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
@@ -71,6 +79,30 @@ const REPORT_GAP_MINUTES: std::ops::Range<u64> = 20..100;
 const REPORT_WAIT: Duration = Duration::from_secs(20);
 
 const PICKS_FILE: &str = "picks.json";
+
+/// How often [`publish_records`] looks for newly crawled homepages.
+pub(super) const PUBLISH_RECORDS_EVERY: Duration = Duration::from_secs(30 * 60);
+
+/// Crawls older than this many days are not published: other nodes only
+/// take batches of the last week.
+pub(super) const PUBLISH_MAX_AGE_DAYS: u64 = 6;
+
+/// Homepages per batch [`publish_records`] publishes.
+const PUBLISH_CHUNK: usize = 1_000;
+
+/// Pause between two of those batches, so peers can keep up.
+const PUBLISH_PAUSE: Duration = Duration::from_millis(500);
+
+/// Where [`publish_records`] notes how far it got.
+const PUBLISHED_FILE: &str = "published.json";
+
+/// How far [`publish_records`] got in a file.
+#[derive(Debug, Default, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct Published {
+    file: PathBuf,
+    /// The latest crawl time published from it.
+    up_to: u64,
+}
 
 /// Answers other nodes' bucket requests from the index this node serves.
 struct ServedIndex(Arc<Inner>);
@@ -150,6 +182,9 @@ pub(super) async fn start(inner: &Arc<Inner>) -> Result<()> {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(picks);
         info!("sharing popularity: results opened here are reported anonymously");
         tokio::spawn(report_picks(inner.clone()));
+    }
+    if let Some(path) = inner.config.publish_records.clone() {
+        tokio::spawn(publish_records(inner.clone(), path));
     }
     let receiver = inner.clone();
     tokio::spawn(async move {
@@ -283,6 +318,103 @@ pub(super) async fn report_one(inner: &Inner) -> Result<bool> {
         picks.sent(&query, &domain, now)?;
     }
     Ok(true)
+}
+
+/// Publishes the homepages crawled into the records file at `path`, as
+/// the module docs describe, until the node stops.
+async fn publish_records(inner: Arc<Inner>, path: PathBuf) {
+    loop {
+        match publish_new_records(&inner, &path).await {
+            Ok(0) => debug!("no new homepages to publish in {}", path.display()),
+            Ok(n) => info!("published {n} homepages crawled into {}", path.display()),
+            Err(err) => warn!(
+                "cannot publish the homepages in {}: {err:#}",
+                path.display()
+            ),
+        }
+        tokio::select! {
+            () = inner.stopped() => return,
+            () = tokio::time::sleep(PUBLISH_RECORDS_EVERY) => {}
+        }
+    }
+}
+
+/// One pass of [`publish_records`]: returns how many homepages it published.
+pub(super) async fn publish_new_records(inner: &Arc<Inner>, path: &Path) -> Result<usize> {
+    let Some(net) = handle(inner).cloned() else {
+        return Ok(0);
+    };
+    let marker = inner.paths.net.join(PUBLISHED_FILE);
+    let since = {
+        let path = path.to_path_buf();
+        let marker = marker.clone();
+        tokio::task::spawn_blocking(move || {
+            let published: Published = fs::read(&marker)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+                .unwrap_or_default();
+            let oldest = now_unix().saturating_sub(PUBLISH_MAX_AGE_DAYS * 24 * 60 * 60);
+            let after = if published.file == path {
+                published.up_to
+            } else {
+                0
+            };
+            let set = load_records(&path)?;
+            let mut crawled: Vec<SiteRecord> = set
+                .iter()
+                .filter(|r| r.crawled_at.is_some_and(|at| at > after && at >= oldest))
+                .map(crawl_facts)
+                .collect();
+            crawled.sort_by_key(|r| r.crawled_at);
+            anyhow::Ok(crawled)
+        })
+        .await
+        .context("the publishing task failed")??
+    };
+    let mut published = 0;
+    for chunk in since.chunks(PUBLISH_CHUNK) {
+        if inner.stopping() {
+            break;
+        }
+        net.publish(chunk.to_vec()).await?;
+        let up_to = chunk.last().and_then(|r| r.crawled_at).unwrap_or(0);
+        let n = chunk.len();
+        let (inner2, chunk, marker, file) = (
+            inner.clone(),
+            chunk.to_vec(),
+            marker.clone(),
+            path.to_path_buf(),
+        );
+        tokio::task::spawn_blocking(move || {
+            append_inbox(&inner2, &chunk)?;
+            let n = chunk.len() as u64;
+            let total = inner2.inbox_records.fetch_add(n, Ordering::SeqCst) + n;
+            if total >= REBUILD_AFTER_RECORDS {
+                inner2.wake.notify_one();
+            }
+            let json = serde_json::to_vec(&Published { file, up_to })?;
+            super::store::write_atomically(&marker, &json)
+        })
+        .await
+        .context("the publishing task failed")??;
+        published += n;
+        tokio::time::sleep(PUBLISH_PAUSE).await;
+    }
+    Ok(published)
+}
+
+/// What a crawl saw of a site's homepage, without the ranks, seed data and
+/// bookkeeping of the file it came from.
+fn crawl_facts(record: &SiteRecord) -> SiteRecord {
+    let mut facts = SiteRecord::new(record.domain.clone());
+    facts.url = record.url.clone();
+    facts.title = record.title.clone();
+    facts.description = record.description.clone();
+    facts.aliases = record.aliases.clone();
+    facts.headings = record.headings.clone();
+    facts.body_text = record.body_text.clone();
+    facts.crawled_at = record.crawled_at;
+    facts
 }
 
 fn append_inbox(inner: &Inner, records: &[SiteRecord]) -> Result<()> {

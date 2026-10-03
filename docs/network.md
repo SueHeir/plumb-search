@@ -63,7 +63,7 @@ Batches older than 7 days or dated in the future are refused. A node keeps the b
 * **How soon a site is confirmed.** Assignment stays independent per node (a site is crawled by about one node in eight each day), so with N nodes a site gets about N/8 crawls a day. Over the 14-day window a site is assigned to two nodes with about 72% odds in a network of 2 nodes, 94% with 3, and almost surely with 5 or more. In a network of one, nothing from the network is ever taken in, which is the point.
 * **Own crawls judge straight away.** A crawl made within 2 days of one of the node's own crawls of the same site is scored against it at once, confirmed or not.
 
-* **Trusted nodes.** While the network is a handful of nodes, waiting for two crawlers mostly keeps good crawls out. So a node keeps a list of nodes it trusts (Liz, 2026-10-03): `plumb run --network --trust-peer 12D3Koo...` (repeatable). Every node trusts the plumbsearch.org node (`12D3KooWEDPBv4sacn42shoToAwu62CreVC89QFiAA31HrWv3xrg`) by default (Liz, 2026-10-03), so a new node takes in crawls from the start; `--no-default-trust` turns that off. A crawl signed by a trusted node is taken in at once, like the node's own, and counts towards any quorum; every other crawler goes through the rules in this section. Being trusted earns a crawler nothing else: it is scored like any other, and matching its crawls vouches for no one. `GET /api/status` shows `network.agreement.trusted_peers`.
+* **Trusted nodes.** While the network is a handful of nodes, waiting for two crawlers mostly keeps good crawls out. So a node keeps a list of nodes it trusts (Liz, 2026-10-03): `plumb run --network --trust-peer 12D3Koo...` (repeatable). Every node trusts the plumbsearch.org node (`12D3KooWEDPBv4sacn42shoToAwu62CreVC89QFiAA31HrWv3xrg`) by default (Liz, 2026-10-03), so a new node takes in crawls from the start; `--no-default-trust` turns that off. A crawl signed by a trusted node is taken in at once, like the node's own, and counts towards any quorum. Like the node's own, it is not held to the daily assignment (Liz, 2026-10-03), so one of a person's machines can crawl far more than its share for their other nodes, and its homepages' headings and text are kept too, for search by meaning; every other crawler goes through the rules in this section. Being trusted earns a crawler nothing else: it is scored like any other, and matching its crawls vouches for no one. `GET /api/status` shows `network.agreement.trusted_peers`.
 
 ### One person, many keys
 
@@ -159,6 +159,11 @@ plumb run --data plumb-data --network
 
 # Also share which result is opened, anonymously (off by default).
 plumb run --data plumb-data --network --share-popularity
+
+# Also share what a separate `plumb crawl` is filling in (every half hour,
+# crawls from the last 6 days), and crawl 128 homepages at once.
+plumb run --data plumb-data --network --crawl-concurrency 128 \
+  --publish-records /path/to/crawl/records.jsonl
 
 # A test network kept apart from the real one.
 plumb run --data test-data --network --no-default-bootstrap --no-default-trust \

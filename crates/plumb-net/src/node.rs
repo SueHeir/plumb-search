@@ -41,7 +41,7 @@
 //!   [`NetHandle::popularity`] returns (see [`crate::popularity`]). On
 //!   meeting a node, it asks for the reports of this week and last week.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
@@ -67,7 +67,10 @@ use tracing::{debug, info, warn};
 
 use crate::agree::{Agreement, AgreementStatus, MIN_JUDGED};
 use crate::assign::{epoch_of, is_assigned, MAX_SHARE_PPM};
-use crate::batch::{accept_batch, accept_own_batch, Batch, SignedHeader};
+use crate::batch::{
+    accept_batch, accept_own_batch, accept_trusted_batch, Batch, SignedHeader,
+    MAX_BATCH_AGE_EPOCHS, MAX_BATCH_RECORDS,
+};
 use crate::bucket::{BucketSource, BUCKETS};
 use crate::credits::{CreditStatus, Issuer, Ledger, Pending, Wallet, MAX_ISSUE};
 use crate::hash::Hash;
@@ -1193,10 +1196,31 @@ impl Task {
         }
     }
 
+    /// Signs and announces `records` as batches of this node's crawls: one
+    /// per epoch the homepages were crawled in (records not crawled go with
+    /// the current one), at most [`MAX_BATCH_RECORDS`] each. Crawls too old
+    /// for other nodes to take are left out. Returns the last batch's id.
     fn publish(&mut self, records: Vec<SiteRecord>) -> Result<Option<Hash>> {
         let now = now_unix();
+        let mut last = None;
+        for (epoch, records) in by_crawl_epoch(records, now) {
+            for chunk in records.chunks(MAX_BATCH_RECORDS) {
+                if let Some(id) = self.publish_batch(chunk, epoch, now)? {
+                    last = Some(id);
+                }
+            }
+        }
+        Ok(last)
+    }
+
+    fn publish_batch(
+        &mut self,
+        records: &[SiteRecord],
+        epoch: u64,
+        now: u64,
+    ) -> Result<Option<Hash>> {
         let share = self.config.share_ppm.min(MAX_SHARE_PPM);
-        let Some(batch) = Batch::sign(&self.key, &records, epoch_of(now), share, now)? else {
+        let Some(batch) = Batch::sign(&self.key, records, epoch, share, now)? else {
             return Ok(None);
         };
         let id = batch.id();
@@ -2043,7 +2067,11 @@ impl Task {
             }
             store.len()
         };
-        let accepted = accept_batch(&batch, &crawler, now);
+        let accepted = if self.config.trusted_peers.contains(&crawler) {
+            accept_trusted_batch(&batch, &crawler, now)
+        } else {
+            accept_batch(&batch, &crawler, now)
+        };
         let kept = accepted.len();
         let confirmed = self
             .agreement
@@ -2495,6 +2523,8 @@ fn replay_agreement(store: &BatchStore, me: PeerId, trusted: &[PeerId]) -> Agree
         };
         let records = if crawler == me {
             accept_own_batch(&batch, &crawler, made)
+        } else if trusted.contains(&crawler) {
+            accept_trusted_batch(&batch, &crawler, made)
         } else {
             accept_batch(&batch, &crawler, made)
         };
@@ -2504,6 +2534,21 @@ fn replay_agreement(store: &BatchStore, me: PeerId, trusted: &[PeerId]) -> Agree
     // These were credited when the batches first came in.
     agreement.take_verdicts();
     agreement
+}
+
+/// `records` by the epoch their homepage was crawled in (records not
+/// crawled, such as linked sites, in the current one), leaving out crawls
+/// too old for other nodes to take and ones from the future.
+fn by_crawl_epoch(records: Vec<SiteRecord>, now: u64) -> BTreeMap<u64, Vec<SiteRecord>> {
+    let current = epoch_of(now);
+    let mut by_epoch: BTreeMap<u64, Vec<SiteRecord>> = BTreeMap::new();
+    for record in records {
+        let epoch = record.crawled_at.map_or(current, epoch_of);
+        if epoch + MAX_BATCH_AGE_EPOCHS > current && epoch <= current {
+            by_epoch.entry(epoch).or_default().push(record);
+        }
+    }
+    by_epoch
 }
 
 /// Not an unspecified (`0.0.0.0`, `::`) address.
@@ -2573,6 +2618,37 @@ fn without_p2p(addr: Multiaddr) -> Multiaddr {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn crawls_are_published_in_the_epoch_they_were_made() {
+        let now = 1_790_000_000;
+        let day = crate::assign::EPOCH_SECS;
+        let at = |domain: &str, crawled_at: Option<u64>| {
+            let mut r = SiteRecord::new(domain);
+            r.crawled_at = crawled_at;
+            r
+        };
+        let records = vec![
+            at("today.com", Some(now)),
+            at("linked.com", None),
+            at("yesterday.com", Some(now - day)),
+            at("lastweek.com", Some(now - MAX_BATCH_AGE_EPOCHS * day)),
+            at("tomorrow.com", Some(now + 2 * day)),
+        ];
+        let grouped = by_crawl_epoch(records, now);
+        let domains: Vec<(u64, Vec<&str>)> = grouped
+            .iter()
+            .map(|(epoch, rs)| (*epoch, rs.iter().map(|r| r.domain.as_str()).collect()))
+            .collect();
+        let today = epoch_of(now);
+        assert_eq!(
+            domains,
+            vec![
+                (today - 1, vec!["yesterday.com"]),
+                (today, vec!["today.com", "linked.com"]),
+            ]
+        );
+    }
 
     #[test]
     fn home_network_addresses_are_not_global() {
