@@ -10,14 +10,15 @@
 //! The text match is simpler: each query word scores the boost of every
 //! field it appears in (label, joined names, aliases, title, link text,
 //! description, the same boosts as the index), without BM25's word
-//! frequencies, and is normalized to `0..=1` over the candidates. Text is
+//! frequencies, and is normalized to `0..=1` over the candidates. A word
+//! also matches its other number in free text ("videos", "video"). Text is
 //! not ASCII-folded, so `nestle` does not find `Nestlé` here.
 
 use std::collections::{HashMap, HashSet};
 
 use plumb_core::{
-    domain_label, joined, kind_key, normalize_country, normalize_text, registrable_domain,
-    site_country, truncate_chars, SiteRecord, MAX_ALIASES, MAX_TEXT_CHARS,
+    domain_label, joined, kind_key, normalize_country, normalize_text, other_number,
+    registrable_domain, site_country, truncate_chars, SiteRecord, MAX_ALIASES, MAX_TEXT_CHARS,
 };
 use serde::Serialize;
 
@@ -45,6 +46,9 @@ const ANCHORS_BOOST: f32 = 1.5;
 const DESCRIPTION_BOOST: f32 = 0.5;
 const WHOLE_QUERY_BOOST: f32 = 6.0;
 const DOMAIN_BOOST: f32 = 10.0;
+/// Share of a word's boost its other number gets, as in the index (which
+/// also never lets it count for more than the word as typed).
+const OTHER_NUMBER_SHARE: f32 = 0.8;
 const MAX_QUERY_WORDS: usize = 16;
 /// Link texts and title parts that get a joined form, as in the index.
 const JOINED_LINK_TEXTS: usize = 8;
@@ -257,6 +261,8 @@ impl Doc {
 struct Query {
     /// Distinct words, in query order.
     words: Vec<String>,
+    /// Each word in its other number, if it has one ("videos" -> "video").
+    others: Vec<Option<String>>,
     /// The whole query joined.
     joined: Option<String>,
     /// The first word, the first two joined and so on, with the words each
@@ -304,8 +310,10 @@ impl Query {
         let domain = (trimmed.contains('.') && !trimmed.contains(char::is_whitespace))
             .then(|| registrable_domain(trimmed))
             .flatten();
+        let others = distinct.iter().map(|word| other_number(word)).collect();
         Some(Query {
             words: distinct,
+            others,
             joined: Some(joined(&query)).filter(|j| !j.is_empty()),
             leading,
             kind: Some(kind_key(&query)).filter(|k| !k.is_empty()),
@@ -336,6 +344,17 @@ impl Query {
             add(&mut clauses, Field::Title, word, TITLE_BOOST);
             add(&mut clauses, Field::Anchors, word, ANCHORS_BOOST);
             add(&mut clauses, Field::Description, word, DESCRIPTION_BOOST);
+        }
+        // The other number of each word, in the fields of free text only.
+        for other in self.others.iter().flatten() {
+            for (field, boost) in [
+                (Field::Aliases, ALIASES_BOOST),
+                (Field::Title, TITLE_BOOST),
+                (Field::Anchors, ANCHORS_BOOST),
+                (Field::Description, DESCRIPTION_BOOST),
+            ] {
+                add(&mut clauses, field, other, boost * OTHER_NUMBER_SHARE);
+            }
         }
         if let Some(joined) = &self.joined {
             add(&mut clauses, Field::Joined, joined, WHOLE_QUERY_BOOST);

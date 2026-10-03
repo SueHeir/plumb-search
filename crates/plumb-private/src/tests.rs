@@ -149,7 +149,8 @@ fn kinds_and_countries_rank_as_in_the_index() {
         },
         3,
     );
-    assert_eq!(de, vec!["dkb.de"]);
+    // Sites of no country that say "bank" come after it.
+    assert_eq!(de[0], "dkb.de");
 }
 
 #[test]
