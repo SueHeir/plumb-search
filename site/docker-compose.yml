@@ -35,6 +35,11 @@ services:
       - "127.0.0.1:8080:8080"
     volumes:
       - plumb-data:/data
+    # Search by meaning: the node downloads a small embedding model into
+    # /data/model and embeds sites in the background, best-ranked first.
+    command: ["run", "--data", "/data", "--bind", "0.0.0.0:8080", "--search-by-meaning"]
+    # Leaves some CPU for Caddy and the relay while sites are being embedded.
+    cpus: 1.5
     init: true
     restart: unless-stopped
     stop_grace_period: 5m
