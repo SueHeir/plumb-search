@@ -271,6 +271,10 @@ pub struct EvalArgs {
     /// below this fraction, e.g. 0.9.
     #[arg(long, value_name = "F", value_parser = parse_fraction)]
     pub min_top1: Option<f64>,
+    /// Home country of the searches, a two-letter code such as US
+    /// [default: none].
+    #[arg(long, value_name = "CODE", value_parser = parse_country)]
+    pub country: Option<String>,
 }
 
 fn parse_positive(s: &str) -> Result<usize, String> {
