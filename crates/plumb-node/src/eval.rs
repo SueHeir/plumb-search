@@ -30,6 +30,8 @@ pub struct EvalQuery {
 /// Parses a queries file. Expected domains are reduced to registrable
 /// domains (`www.usbank.com` -> `usbank.com`) to match how hits are keyed.
 pub fn parse_queries(text: &str) -> Result<Vec<EvalQuery>> {
+    // Editors such as Notepad start the file with a byte-order mark.
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut queries = Vec::new();
     for (i, raw) in text.lines().enumerate() {
         let line = i + 1;
@@ -243,6 +245,14 @@ mod tests {
 
     fn close(a: f64, b: f64) -> bool {
         (a - b).abs() < 1e-9
+    }
+
+    #[test]
+    fn a_byte_order_mark_is_skipped() {
+        let queries = parse_queries("\u{feff}# saved by Notepad\nus bank\tusbank.com\n").unwrap();
+        assert_eq!(queries.len(), 1);
+        let queries = parse_queries("\u{feff}us bank\tusbank.com\n").unwrap();
+        assert_eq!(queries[0].query, "us bank");
     }
 
     #[test]
