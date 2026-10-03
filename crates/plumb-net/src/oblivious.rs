@@ -27,8 +27,11 @@
 //!
 //! The target's keys are made in memory and never written down, replaced
 //! every [`KEY_LIFETIME`] seconds, the old one accepted until it expires.
-//! What is sealed is a CBOR [`BucketRequest`] or [`BucketResponse`] (the
-//! same messages as `/plumb/bucket/1`), not Binary HTTP: the encapsulation
+//! What is sealed is a CBOR [`BucketRequest`] or
+//! [`crate::proto::BucketResponse`] (the same messages as
+//! `/plumb/bucket/1`), or a popularity [`Report`] padded to
+//! [`REPORT_REQUEST_SIZE`] and its [`crate::proto::ReportResponse`], not
+//! Binary HTTP: the encapsulation
 //! is RFC 9458's, so the same code serves a browser going through an HTTP
 //! relay, but the message inside is Plumb's own.
 //!
@@ -42,18 +45,32 @@ use libp2p::PeerId;
 use ohttp::hpke::{Aead, Kdf, Kem};
 use ohttp::{KeyConfig, Server, ServerResponse, SymmetricSuite};
 pub use plumb_core::oblivious::{
-    open_response, pad, padded_len, seal_request, unpad, ClientResponse, SignedKeys, KEY_LIFETIME,
-    MAX_MESSAGE, MIN_RESPONSE_SIZE, REQUEST_SIZE,
+    open_response, pad, padded_len, seal_request, seal_request_sized, unpad, ClientResponse,
+    SignedKeys, KEY_LIFETIME, MAX_MESSAGE, MIN_RESPONSE_SIZE, REQUEST_SIZE,
 };
 use rand_core::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
 
-use crate::proto::{BucketRequest, BucketResponse};
+use crate::popularity::Report;
+use crate::proto::BucketRequest;
 
 pub const OBLIVIOUS_PROTOCOL: &str = "/plumb/oblivious/1";
 /// Seconds a relay hands out a target's key before fetching it again.
 pub const RELAY_KEY_CACHE: u64 = 10 * 60;
+/// Every sealed popularity [`Report`] has this size before encryption, so
+/// the relay cannot tell one pick from another by its size, nor a report
+/// from a bucket request ([`REQUEST_SIZE`]) by anything but its size.
+pub const REPORT_REQUEST_SIZE: usize = 4 * 1024;
+
+/// A sealed request, opened.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Opened {
+    Bucket(BucketRequest),
+    /// A popularity report to keep and pass on; answered with a sealed
+    /// [`crate::proto::ReportResponse`].
+    Report(Report),
+}
 
 /// What goes over `/plumb/oblivious/1`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -125,8 +142,9 @@ impl Gateway {
         self.keys[0].signed.clone()
     }
 
-    /// Opens a sealed request. Returns it, and what seals the answer.
-    pub fn open(&self, message: &[u8]) -> Result<(BucketRequest, ServerResponse)> {
+    /// Opens a sealed request. Returns it, and what seals the answer. Its
+    /// size says which kind it is.
+    pub fn open(&self, message: &[u8]) -> Result<(Opened, ServerResponse)> {
         ensure!(message.len() <= MAX_MESSAGE, "a sealed request too large");
         let key_id = *message.first().context("an empty sealed request")?;
         let key = self
@@ -139,9 +157,16 @@ impl Gateway {
             .decapsulate(message)
             .map_err(|err| anyhow::anyhow!("opening a sealed request: {err}"))?;
         let body = unpad(&plain)?;
-        let request: BucketRequest =
-            cbor4ii::serde::from_slice(body).context("a sealed request that is not one")?;
-        Ok((request, opener))
+        let opened = match plain.len() {
+            REQUEST_SIZE => Opened::Bucket(
+                cbor4ii::serde::from_slice(body).context("a sealed request that is not one")?,
+            ),
+            REPORT_REQUEST_SIZE => Opened::Report(
+                cbor4ii::serde::from_slice(body).context("a sealed report that is not one")?,
+            ),
+            len => anyhow::bail!("a sealed request of {len} bytes"),
+        };
+        Ok((opened, opener))
     }
 }
 
@@ -179,7 +204,7 @@ impl GatewayKey {
 }
 
 /// Seals the answer to an opened request.
-pub fn seal_response(opener: ServerResponse, response: &BucketResponse) -> Result<Vec<u8>> {
+pub fn seal_response<T: Serialize>(opener: ServerResponse, response: &T) -> Result<Vec<u8>> {
     let body = cbor4ii::serde::to_vec(Vec::new(), response).context("encoding an answer")?;
     let plain = pad(&body, MIN_RESPONSE_SIZE);
     ensure!(
@@ -194,7 +219,8 @@ pub fn seal_response(opener: ServerResponse, response: &BucketResponse) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proto::BucketRecord;
+    use crate::popularity::report_epoch;
+    use crate::proto::{BucketRecord, BucketResponse, ReportResponse};
 
     const NOW: u64 = 1_790_000_000;
 
@@ -212,11 +238,12 @@ mod tests {
         assert!(!sealed.windows(4).any(|w| w == 1234u32.to_be_bytes()));
 
         let (opened, sealer) = gateway.open(&sealed).unwrap();
-        assert_eq!(opened, request);
+        assert_eq!(opened, Opened::Bucket(request));
         let response = BucketResponse {
             records: Some(vec![BucketRecord {
                 record: "{\"domain\":\"usbank.com\"}".into(),
                 proof: None,
+                also: Vec::new(),
             }]),
         };
         let answer = seal_response(sealer, &response).unwrap();
@@ -255,9 +282,32 @@ mod tests {
 
         gateway.rotate(&node, NOW + KEY_LIFETIME).unwrap();
         assert_ne!(gateway.keys(), old);
-        assert_eq!(gateway.open(&sealed).unwrap().0, request);
+        assert_eq!(gateway.open(&sealed).unwrap().0, Opened::Bucket(request));
 
         gateway.rotate(&node, NOW + 2 * KEY_LIFETIME).unwrap();
         assert!(gateway.open(&sealed).is_err());
+    }
+
+    #[test]
+    fn a_report_goes_through_sealed_and_all_reports_are_one_size() {
+        let node = Keypair::generate_ed25519();
+        let target = node.public().to_peer_id();
+        let gateway = Gateway::new(&node, NOW).unwrap();
+        let epoch = report_epoch(NOW);
+        let report = Report::new(epoch, "us bank", "usbank.com").unwrap();
+        let seal = |report: &Report| {
+            seal_request_sized(&gateway.keys(), &target, NOW, report, REPORT_REQUEST_SIZE).unwrap()
+        };
+        let (sealed, opener) = seal(&report);
+        let longer = Report::new(epoch, "the national weather service", "weather.gov").unwrap();
+        assert_eq!(sealed.len(), seal(&longer).0.len());
+
+        let (opened, sealer) = gateway.open(&sealed).unwrap();
+        assert_eq!(opened, Opened::Report(report));
+        let answer = seal_response(sealer, &ReportResponse::Taken(true)).unwrap();
+        assert_eq!(
+            open_response::<ReportResponse>(opener, &answer).unwrap(),
+            ReportResponse::Taken(true)
+        );
     }
 }

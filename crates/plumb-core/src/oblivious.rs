@@ -83,10 +83,22 @@ pub fn seal_request<T: Serialize>(
     now: u64,
     request: &T,
 ) -> Result<(Vec<u8>, ClientResponse)> {
+    seal_request_sized(keys, target, now, request, REQUEST_SIZE)
+}
+
+/// [`seal_request`], padded to `size` rather than [`REQUEST_SIZE`], for
+/// requests of another kind; every request of one kind has one size.
+pub fn seal_request_sized<T: Serialize>(
+    keys: &SignedKeys,
+    target: &PeerId,
+    now: u64,
+    request: &T,
+    size: usize,
+) -> Result<(Vec<u8>, ClientResponse)> {
     keys.verify(target, now)?;
     let body = cbor4ii::serde::to_vec(Vec::new(), request).context("encoding a request")?;
-    let plain = pad(&body, REQUEST_SIZE);
-    ensure!(plain.len() == REQUEST_SIZE, "a request too large");
+    let plain = pad(&body, size);
+    ensure!(plain.len() == size, "a request too large");
     ClientRequest::from_encoded_config(&keys.config)
         .and_then(|client| client.encapsulate(&plain))
         .map_err(|err| anyhow::anyhow!("sealing a request: {err}"))

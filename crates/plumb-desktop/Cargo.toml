@@ -10,7 +10,7 @@ publish = false
 [dependencies]
 anyhow = "1.0.104"
 plumb-node = { version = "0.1.0", path = "../plumb-node" }
-tauri = { version = "2.12.1", features = [] }
+tauri = { version = "2.12.1", features = ["tray-icon"] }
 tauri-plugin-dialog = "2.8.1"
 tauri-plugin-opener = "2.7.0"
 tauri-plugin-single-instance = "2.5.2"

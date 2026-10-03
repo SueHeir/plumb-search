@@ -183,6 +183,9 @@ async fn nodes_share_batches_search_each_other_and_reach_through_a_relay() {
         relay_got.handle.peer_id().to_string(),
     ];
     assert!(crawlers.iter().any(|c| hit.crawler.as_deref() == Some(c)));
+    // C holds both crawls and answers with both proofs.
+    assert!(hit.confirmed, "{hit:?}");
+    assert_eq!(hit.crawlers.len(), 2);
     assert_eq!(result.rejected, 0);
     // With other nodes to relay, every request went through one.
     assert_eq!(result.direct, 0, "{result:?}");
@@ -376,8 +379,12 @@ async fn popularity_reports_spread_and_are_read_once_enough_are_sent() {
     for node in [&a, &b] {
         wait_for(|| (node.handle.status().connected_peers >= 1).then_some(())).await;
     }
+    // A needs to know both others can relay to send through one to the
+    // other.
+    wait_for(|| (a.handle.status().relaying_peers >= 2).then_some(())).await;
 
-    // A hands in reports of one pick, each under a throwaway identity.
+    // A hands in reports of one pick, each under a throwaway identity
+    // and through a relay.
     let epoch = report_epoch(now_unix());
     let wait = Duration::from_secs(10);
     let send = |n: u32| {
@@ -401,6 +408,10 @@ async fn popularity_reports_spread_and_are_read_once_enough_are_sent() {
     assert_eq!(table.picks[0].domain, "usbank.com");
     assert!(table.bonus("US Bank", "usbank.com") > 0.0);
     assert_eq!(a.handle.status().reports_sent, u64::from(REPORT_THRESHOLD));
+    // Each went sealed through the other node, so the one it was handed to
+    // never saw A's address.
+    let relayed = relay.handle.status().requests_relayed + b.handle.status().requests_relayed;
+    assert_eq!(relayed, u64::from(REPORT_THRESHOLD));
 
     // A node that joins later catches up on the week's reports.
     let c = Node::start(false, vec![relay_addr], vec![]).await;
