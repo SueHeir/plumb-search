@@ -130,7 +130,7 @@ async fn forward(State(state): State<AppState>, Path(peer): Path<String>, body: 
 #[cfg(test)]
 mod tests {
     use plumb_core::{now_unix, SiteRecord};
-    use plumb_net::oblivious::{seal_response, Gateway};
+    use plumb_net::oblivious::{seal_response, Gateway, Opened};
     use plumb_net::proto::{BucketRecord, BucketResponse};
     use plumb_private::sealed::{self, Target};
 
@@ -155,7 +155,7 @@ mod tests {
 
         let (request, opener) = sealed::seal(&listed.targets[0], 1234, now).unwrap();
         let (asked, reply) = gateway.open(&request).unwrap();
-        assert_eq!(asked.bucket, 1234);
+        assert!(matches!(asked, Opened::Bucket(asked) if asked.bucket == 1234));
 
         let mut usbank = SiteRecord::new("usbank.com");
         usbank.url = Some("https://www.usbank.com/".into());
@@ -166,14 +166,17 @@ mod tests {
                 BucketRecord {
                     record: serde_json::to_string(&usbank).unwrap(),
                     proof: None,
+                    also: Vec::new(),
                 },
                 BucketRecord {
                     record: serde_json::to_string(&lying).unwrap(),
                     proof: None,
+                    also: Vec::new(),
                 },
                 BucketRecord {
                     record: "not json".into(),
                     proof: None,
+                    also: Vec::new(),
                 },
             ]),
         };
