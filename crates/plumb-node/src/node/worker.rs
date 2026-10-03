@@ -24,6 +24,7 @@
 //! fetches of a crawl are simply dropped. Crawls pick homepages and save
 //! their results as `plumb crawl` does ([`crate::crawl`]).
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -55,6 +56,10 @@ use crate::web::{duration_words, group_thousands};
 /// with `plumb crawl --skip-crawled-within-days 30`. Sites that could not
 /// be reached are retried sooner (see [`crate::crawl`]).
 const RECRAWL_AFTER_DAYS: u64 = 30;
+
+/// Nodes keep site icons from crawls since about this time (Unix seconds,
+/// 2026-10-02). A site crawled before it is due again for its icon.
+const ICONS_KEPT_SINCE: u64 = 1_791_000_000;
 
 /// Disputed sites (see `plumb_net::agree`) a crawl round fetches at most,
 /// first, out of the round's homepages.
@@ -748,7 +753,7 @@ fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Option<ServingIndex
         left.saturating_sub(rechecks.len()),
         now,
         window,
-        |record| last_crawl_answered(record) && !noted.contains(&record.domain),
+        |record| due_for_icon(record, &noted),
     );
     drop(noted);
     let mut targets = rechecks;
@@ -880,6 +885,16 @@ fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Option<ServingIndex
 }
 
 /// Whether the last try at `record`'s homepage fetched it.
+/// Whether a site last crawled before nodes kept icons is due again for
+/// its icon. A newer crawl without an icon here came from the network
+/// (icons aren't shared yet); fetching it again would undo the point of
+/// sharing crawls, so its icon waits for its next regular crawl.
+fn due_for_icon(record: &SiteRecord, noted: &HashSet<String>) -> bool {
+    last_crawl_answered(record)
+        && record.crawled_at.is_some_and(|at| at < ICONS_KEPT_SINCE)
+        && !noted.contains(&record.domain)
+}
+
 fn last_crawl_answered(record: &SiteRecord) -> bool {
     record
         .crawled_at
@@ -1118,6 +1133,25 @@ mod tests {
         let noted = icons.noted();
         assert!(noted.contains("a.com") && noted.contains("b.com"));
         assert!(!noted.contains("c.com"));
+    }
+
+    #[test]
+    fn only_sites_crawled_before_icons_are_due_for_one() {
+        let crawled = |domain: &str, at: u64| {
+            let mut record = SiteRecord::new(domain);
+            record.crawled_at = Some(at);
+            record
+        };
+        let noted: HashSet<String> = ["noted.com".to_string()].into();
+        let old = ICONS_KEPT_SINCE - 1;
+        assert!(due_for_icon(&crawled("old.com", old), &noted));
+        assert!(!due_for_icon(&crawled("noted.com", old), &noted));
+        // Crawled since, by another node: waits for its regular recrawl.
+        assert!(!due_for_icon(
+            &crawled("network.com", ICONS_KEPT_SINCE + 60),
+            &noted
+        ));
+        assert!(!due_for_icon(&SiteRecord::new("never.com"), &noted));
     }
 
     #[test]
