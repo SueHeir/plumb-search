@@ -28,8 +28,8 @@
 //! never stops a node: it is shown on the setup page and in `/api/status`,
 //! and the work is tried again after [`NodeConfig::retry_wait`] (10 minutes),
 //! doubling after each failure in a row up to [`NodeConfig::max_retry_wait`]
-//! (6 hours). A batch of homepages that nearly all fail to connect counts as
-//! such a failure (the network is down, or a proxy is needed; see
+//! (6 hours). A batch of homepages that nearly all fail counts as such a
+//! failure (the network is down, or a proxy is needed; see
 //! [`NodeConfig::use_system_proxy`]) and is not saved. After a restart a node
 //! picks up where it left off: setup is not repeated, a crawl that was cut
 //! short goes on, and the next refresh falls due on schedule.

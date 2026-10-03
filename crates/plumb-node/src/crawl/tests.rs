@@ -73,6 +73,17 @@ fn failed(domain: &str) -> CrawlResult {
     }
 }
 
+/// A failure that is the site's answer, not a lack of one.
+fn failed_there(domain: &str) -> CrawlResult {
+    CrawlResult {
+        domain: domain.to_string(),
+        outcome: CrawlOutcome::Failed {
+            error: "robots.txt: HTTP 503".into(),
+            network: false,
+        },
+    }
+}
+
 fn refused(domain: &str) -> CrawlResult {
     CrawlResult {
         domain: domain.to_string(),
@@ -143,11 +154,30 @@ fn picks_the_best_sites_that_are_due() {
     // Two never tried, one due again, best first.
     let targets = select_targets(records.iter(), 3, now, window);
     assert_eq!(domains(&targets), ["b.com", "c.com", "d.com"]);
-    assert_eq!(targets[0], CrawlTarget::homepage("b.com"));
+    assert_eq!(targets[0], CrawlTarget::new("b.com"));
 
     let all = select_targets(records.iter(), 100, now, window);
     assert_eq!(domains(&all), ["b.com", "h.com", "c.com", "d.com", "e.com"]);
     assert!(select_targets(records.iter(), 0, now, window).is_empty());
+}
+
+#[test]
+fn targets_fall_back_to_where_a_site_was_last_reached() {
+    let mut moved = record("moved.com", 1, None, None);
+    moved.url = Some("https://www.moved.com/en/".into());
+    let records = [moved, record("plain.com", 2, None, None)];
+    let targets = select_targets(records.iter(), 2, 1_000, WINDOW);
+    assert_eq!(
+        targets,
+        [
+            CrawlTarget {
+                domain: "moved.com".into(),
+                url: "https://moved.com/".into(),
+                known_url: Some("https://www.moved.com/en/".into()),
+            },
+            CrawlTarget::new("plain.com"),
+        ]
+    );
 }
 
 #[test]
@@ -220,6 +250,7 @@ fn a_batch_marks_every_target_by_outcome() {
             record("a.com", 10, None, None),
             record("b.com", 20, Some(100), Some(100)),
             record("c.com", 30, None, None),
+            record("d.com", 35, None, None),
             record("idle.com", 40, None, None),
         ],
     );
@@ -228,9 +259,9 @@ fn a_batch_marks_every_target_by_outcome() {
     commit(&mut set, &mut store, vec![Change::Merge { record: flaky }]).unwrap();
 
     let started = now_unix();
-    let targets: Vec<CrawlTarget> = ["a.com", "b.com", "c.com", "flaky.com"]
+    let targets: Vec<CrawlTarget> = ["a.com", "b.com", "c.com", "d.com", "flaky.com"]
         .into_iter()
-        .map(CrawlTarget::homepage)
+        .map(CrawlTarget::new)
         .collect();
     let totals = crawl_in_batches(
         &mut set,
@@ -242,13 +273,14 @@ fn a_batch_marks_every_target_by_outcome() {
                 fetched("a.com", started, &["new.com"]),
                 failed("b.com"),
                 refused("c.com"),
+                failed_there("d.com"),
                 fetched("flaky.com", started, &[]),
             ])
         },
         |_| Ok(()),
     )
     .unwrap();
-    assert_eq!((totals.attempted, totals.discovered), (4, 1));
+    assert_eq!((totals.attempted, totals.discovered), (5, 1));
     assert_eq!(totals.end, RunEnd::Finished);
 
     // What is in memory is what is saved.
@@ -275,6 +307,13 @@ fn a_batch_marks_every_target_by_outcome() {
         (Some(tried_at), 0)
     );
     assert_eq!(due_at(c, WINDOW), Some(tried_at + WINDOW));
+    // So is a failure on the site's side, like a robots.txt server error.
+    let d = saved.get("d.com").unwrap();
+    assert_eq!(
+        (d.crawled_at, d.crawl_attempted_at, d.crawl_failures),
+        (None, Some(tried_at), 0)
+    );
+    assert_eq!(due_at(d, WINDOW), Some(tried_at + WINDOW));
     // An answer ends a run of failures.
     assert_eq!(saved.get("flaky.com").unwrap().crawl_failures, 0);
     let idle = saved.get("idle.com").unwrap();
@@ -380,6 +419,7 @@ fn every_batch_is_saved_before_and_after_it_is_fetched() {
     let outcomes = CrawlSummary {
         fetched: 4,
         failed: 1,
+        unreachable: 1,
         ..CrawlSummary::default()
     };
     assert_eq!(
@@ -486,10 +526,7 @@ fn a_stopped_batch_gets_its_old_marks_back() {
     before[3].crawl_attempted_at = Some(77);
     before[3].crawl_failures = 1;
     let (path, mut set, mut store) = records_file(dir.path(), &before);
-    let targets: Vec<CrawlTarget> = before
-        .iter()
-        .map(|r| CrawlTarget::homepage(&r.domain))
-        .collect();
+    let targets: Vec<CrawlTarget> = before.iter().map(|r| CrawlTarget::new(&r.domain)).collect();
     let mut batches = 0;
     let totals = crawl_in_batches(
         &mut set,
@@ -639,8 +676,21 @@ fn only_sites_that_should_answer_can_make_a_batch_look_offline() {
         outcome: CrawlOutcome::HttpStatus { status: 503 },
     };
     assert_eq!(judge(&fresh, &results), None, "any answer counts");
-    // A missing result counts as a failure.
+    // A missing result counts as a failure, and so does a failure of any
+    // kind: one that nearly every site gives, such as an HTTP client that
+    // cannot be built, is this side's.
     assert!(judge(&fresh, &[]).is_some());
+    let no_client: Vec<CrawlResult> = fresh
+        .iter()
+        .map(|m| CrawlResult {
+            domain: m.domain.clone(),
+            outcome: CrawlOutcome::Failed {
+                error: "building the HTTP client: no TLS".into(),
+                network: false,
+            },
+        })
+        .collect();
+    assert!(judge(&fresh, &no_client).is_some());
     // Sites that failed last time are left out of the count.
     let mixed: Vec<Mark> = (0..40).map(|i| mark(i, u32::from(i >= 15))).collect();
     let none_answered: Vec<CrawlResult> = mixed.iter().map(|m| failed(&m.domain)).collect();
@@ -737,7 +787,7 @@ fn plumb_crawl_stops_when_the_network_is_down() {
     assert!(
         err.starts_with(
             "stopped crawling: 30 of 30 homepages that should have answered could not be \
-             reached"
+             fetched"
         ),
         "{err}"
     );
@@ -755,6 +805,16 @@ fn plumb_crawl_stops_when_the_network_is_down() {
     .unwrap_err()
     .to_string();
     assert!(!err.contains("--use-system-proxy"), "{err}");
+}
+
+#[test]
+fn only_getting_no_answer_is_a_connection_failure() {
+    assert!(is_connection_failure(&failed("a.com").outcome));
+    assert!(!is_connection_failure(&failed_there("a.com").outcome));
+    assert!(!is_connection_failure(&refused("a.com").outcome));
+    assert!(!is_connection_failure(&CrawlOutcome::HttpStatus {
+        status: 503
+    }));
 }
 
 #[test]
@@ -800,6 +860,7 @@ fn counts_outcomes() {
                 network: true,
             },
         ),
+        failed_there("i.com"),
     ];
     let summary = CrawlSummary::of(&results);
     assert_eq!(
@@ -810,14 +871,12 @@ fn counts_outcomes() {
             http_status: 1,
             not_html: 1,
             offsite_redirect: 1,
-            failed: 2,
+            failed: 3,
+            unreachable: 2,
         }
     );
-    assert_eq!(summary.errors(), 5);
-    assert!(results[5..]
-        .iter()
-        .all(|r| is_connection_failure(&r.outcome)));
-    assert!(!results[..5]
-        .iter()
-        .any(|r| is_connection_failure(&r.outcome)));
+    assert_eq!(summary.errors(), 6);
+    let mut twice = summary;
+    twice.add(&summary);
+    assert_eq!((twice.failed, twice.unreachable), (6, 4));
 }

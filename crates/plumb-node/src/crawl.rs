@@ -12,12 +12,17 @@
 //! while it refreshes the best ones, instead of re-crawling its best few
 //! hundred thousand sites forever.
 //!
-//! A site is due again `window` after its homepage was fetched or answered
-//! (30 days by default; a robots.txt refusal or an HTTP error is an answer).
-//! A site that could not be reached at all ([`is_connection_failure`]) is
-//! retried sooner: after 1 day, then 2, 4, 8... days for each further
-//! failure in a row, never longer than `window`. A dropped uplink costs the
-//! sites it hit a day, not a month.
+//! A site is due again `window` after its last try (30 days by default)
+//! when that try got an answer: a page, a robots.txt refusal, an HTTP error,
+//! or a failure on the site's side such as a robots.txt server error or a
+//! redirect loop. A site that could not be reached at all
+//! ([`is_connection_failure`]) is retried sooner: after 1 day, then 2, 4,
+//! 8... days for each further failure in a row, never longer than `window`.
+//! A dropped uplink costs the sites it hit a day, not a month.
+//!
+//! Each homepage is fetched at `https://<domain>/` first. When that gets no
+//! answer, the crawler tries the URL the site was last reached at (the
+//! record's `url`), then the `www.` host and plain http.
 //!
 //! # Saving
 //!
@@ -35,11 +40,12 @@
 //! # Offline
 //!
 //! A batch in which [`OFFLINE_FAILED_PERCENT`]% or more of the homepages that
-//! should answer (ones never tried, or that answered last time; at least
-//! [`OFFLINE_MIN_EXPECTED`] of them) failed to connect means that the
-//! network is down, or that a firewall or proxy is in the way, rather than
-//! the sites. That batch is not saved: `plumb crawl` stops with an error,
-//! and a node tries again later.
+//! should answer (ones never tried, or reached on their last try; at least
+//! [`OFFLINE_MIN_EXPECTED`] of them) could not be fetched, for whatever
+//! reason, means that the network is down, or that a firewall, a proxy or
+//! a setting on this side is in the way (an HTTP client that cannot be
+//! built fails every site), rather than the sites. That batch is not saved:
+//! `plumb crawl` stops with an error, and a node tries again later.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -71,7 +77,7 @@ pub(crate) const FIRST_RETRY_AFTER: u64 = SECONDS_PER_DAY;
 pub(crate) const OFFLINE_MIN_EXPECTED: usize = 20;
 
 /// A batch is offline when at least this share, in percent, of its
-/// homepages that should answer failed to connect.
+/// homepages that should answer could not be fetched.
 pub(crate) const OFFLINE_FAILED_PERCENT: usize = 90;
 
 pub fn run(args: CrawlArgs) -> Result<()> {
@@ -129,8 +135,9 @@ fn crawl_file(
     );
     if o.errors() > 0 {
         println!(
-            "  errors: {} HTTP status, {} not HTML, {} redirected off-site, {} failed to connect or read",
-            o.http_status, o.not_html, o.offsite_redirect, o.failed
+            "  errors: {} HTTP status, {} not HTML, {} redirected off-site, {} failed \
+             ({} could not be reached)",
+            o.http_status, o.not_html, o.offsite_redirect, o.failed, o.unreachable
         );
     }
     println!("discovered {} new domains", totals.discovered);
@@ -153,24 +160,25 @@ fn crawl_file(
 /// never tried and half from sites due again ([`due_at`]), best link score
 /// first within each half; a half with too few candidates leaves the rest of
 /// its share to the other, and an odd budget gives the extra one to sites
-/// never tried. The picks come best link score first, ties by domain.
+/// never tried. The picks come best link score first, ties by domain, as
+/// targets made by [`target_for`].
 pub(crate) fn select_targets<'a>(
     records: impl Iterator<Item = &'a SiteRecord>,
     budget: usize,
     now: u64,
     window: u64,
 ) -> Vec<CrawlTarget> {
-    let mut never: Vec<(f32, &str)> = Vec::new();
-    let mut again: Vec<(f32, &str)> = Vec::new();
+    let mut never: Vec<(f32, &SiteRecord)> = Vec::new();
+    let mut again: Vec<(f32, &SiteRecord)> = Vec::new();
     for record in records {
-        let scored = (record.link_score(), record.domain.as_str());
+        let scored = (record.link_score(), record);
         match due_at(record, window) {
             None => never.push(scored),
             Some(due) if due <= now => again.push(scored),
             Some(_) => {}
         }
     }
-    let best = |mut sites: Vec<(f32, &'a str)>| {
+    let best = |mut sites: Vec<(f32, &'a SiteRecord)>| {
         if sites.len() > budget {
             sites.select_nth_unstable_by(budget, by_score);
             sites.truncate(budget);
@@ -184,7 +192,7 @@ pub(crate) fn select_targets<'a>(
         .len()
         .min(never_share.max(budget.saturating_sub(again.len())));
     let take_again = again.len().min(budget - take_never);
-    let mut picked: Vec<(f32, &str)> = never[..take_never]
+    let mut picked: Vec<(f32, &SiteRecord)> = never[..take_never]
         .iter()
         .chain(&again[..take_again])
         .copied()
@@ -192,13 +200,24 @@ pub(crate) fn select_targets<'a>(
     picked.sort_by(by_score);
     picked
         .into_iter()
-        .map(|(_, domain)| CrawlTarget::homepage(domain))
+        .map(|(_, record)| target_for(record))
         .collect()
 }
 
 /// Best link score first, ties by domain.
-fn by_score(a: &(f32, &str), b: &(f32, &str)) -> std::cmp::Ordering {
-    b.0.total_cmp(&a.0).then_with(|| a.1.cmp(b.1))
+fn by_score(a: &(f32, &SiteRecord), b: &(f32, &SiteRecord)) -> std::cmp::Ordering {
+    b.0.total_cmp(&a.0)
+        .then_with(|| a.1.domain.cmp(&b.1.domain))
+}
+
+/// The homepage of `record` to fetch: `https://<domain>/`, falling back to
+/// the record's `url` (where the homepage was last reached, after
+/// redirects) when that gets no answer.
+fn target_for(record: &SiteRecord) -> CrawlTarget {
+    CrawlTarget {
+        known_url: record.url.clone(),
+        ..CrawlTarget::new(&record.domain)
+    }
 }
 
 /// When a site's homepage is due for another try, in Unix seconds: `window`
@@ -222,12 +241,12 @@ pub(crate) fn retry_after(failures: u32, window: u64) -> u64 {
     FIRST_RETRY_AFTER.saturating_mul(factor).min(window)
 }
 
-/// Whether an outcome means the site could not be reached at all: no
-/// connection, or no answer. These get the short retry wait and are what
-/// makes a batch look offline. For now every [`CrawlOutcome::Failed`]
-/// counts, robots.txt server errors included.
+/// Whether an outcome means the site could not be reached at all, at any of
+/// the URLs the crawler tried: no connection, or no answer (the crawler's
+/// `network` flag). These get the short retry wait; other failures, such as
+/// a robots.txt server error, are the site's answer.
 pub(crate) fn is_connection_failure(outcome: &CrawlOutcome) -> bool {
-    matches!(outcome, CrawlOutcome::Failed { .. })
+    matches!(outcome, CrawlOutcome::Failed { network: true, .. })
 }
 
 /// What a whole crawl run did, over all its batches.
@@ -253,13 +272,14 @@ pub(crate) enum RunEnd {
     Offline(OfflineBatch),
 }
 
-/// A batch in which nearly every homepage that should answer failed to connect.
+/// A batch in which nearly every homepage that should answer could not be
+/// fetched.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct OfflineBatch {
-    /// Homepages that should have answered but could not be reached.
+    /// Homepages that should have answered but could not be fetched.
     pub(crate) failed: usize,
-    /// Homepages in the batch that should answer: never tried, or answered
-    /// last time.
+    /// Homepages in the batch that should answer: never tried, or reached
+    /// on their last try.
     pub(crate) expected: usize,
 }
 
@@ -267,7 +287,7 @@ impl fmt::Display for OfflineBatch {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{} of {} homepages that should have answered could not be reached, so the \
+            "{} of {} homepages that should have answered could not be fetched, so the \
              network seems to be down or blocked; that batch of homepages was not saved",
             self.failed, self.expected
         )
@@ -417,10 +437,11 @@ impl Mark {
 }
 
 /// The batch as an [`OfflineBatch`] when it looks offline: it holds at least
-/// [`OFFLINE_MIN_EXPECTED`] sites that should answer (never tried, or that
-/// answered last time), and [`OFFLINE_FAILED_PERCENT`]% or more of those
-/// could not be reached. Sites that failed last time are left out: they
-/// often fail again.
+/// [`OFFLINE_MIN_EXPECTED`] sites that should answer (never tried, or reached
+/// on their last try), and [`OFFLINE_FAILED_PERCENT`]% or more of those
+/// could not be fetched: no result, or a [`CrawlOutcome::Failed`] of any
+/// kind, since failing for nearly every site points at this side. Sites
+/// that could not be reached last time are left out: they often fail again.
 fn offline_batch(before: &[Mark], outcomes: &HashMap<&str, &CrawlOutcome>) -> Option<OfflineBatch> {
     let expected: Vec<&Mark> = before.iter().filter(|mark| mark.failures == 0).collect();
     if expected.len() < OFFLINE_MIN_EXPECTED {
@@ -431,7 +452,7 @@ fn offline_batch(before: &[Mark], outcomes: &HashMap<&str, &CrawlOutcome>) -> Op
         .filter(|mark| {
             outcomes
                 .get(mark.domain.as_str())
-                .is_none_or(|outcome| is_connection_failure(outcome))
+                .is_none_or(|outcome| matches!(outcome, CrawlOutcome::Failed { .. }))
         })
         .count();
     (failed * 100 >= expected.len() * OFFLINE_FAILED_PERCENT).then_some(OfflineBatch {
@@ -492,6 +513,9 @@ pub(crate) struct CrawlSummary {
     pub(crate) not_html: usize,
     pub(crate) offsite_redirect: usize,
     pub(crate) failed: usize,
+    /// Of `failed`, the homepages that could not be reached at all
+    /// ([`is_connection_failure`]).
+    pub(crate) unreachable: usize,
 }
 
 impl CrawlSummary {
@@ -504,7 +528,10 @@ impl CrawlSummary {
                 CrawlOutcome::HttpStatus { .. } => s.http_status += 1,
                 CrawlOutcome::NotHtml { .. } => s.not_html += 1,
                 CrawlOutcome::OffsiteRedirect { .. } => s.offsite_redirect += 1,
-                CrawlOutcome::Failed { .. } => s.failed += 1,
+                CrawlOutcome::Failed { .. } => {
+                    s.failed += 1;
+                    s.unreachable += usize::from(is_connection_failure(&result.outcome));
+                }
             }
         }
         s
@@ -517,6 +544,7 @@ impl CrawlSummary {
         self.not_html += other.not_html;
         self.offsite_redirect += other.offsite_redirect;
         self.failed += other.failed;
+        self.unreachable += other.unreachable;
     }
 
     /// Everything that was neither fetched nor blocked by robots.txt.
