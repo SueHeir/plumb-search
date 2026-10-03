@@ -38,11 +38,15 @@ mod analysis;
 mod replace;
 mod schema;
 
+use std::borrow::Cow;
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
-use plumb_core::{registrable_domain, truncate_chars, SiteRecord, MAX_TEXT_CHARS};
+use plumb_core::{
+    canonical_domain, registrable_domain, truncate_chars, SiteRecord, MAX_TEXT_CHARS,
+};
 use serde::{Deserialize, Serialize};
 use tantivy::collector::{DocSetCollector, TopDocs};
 use tantivy::merge_policy::NoMergePolicy;
@@ -122,11 +126,21 @@ impl Default for RankConfig {
     }
 }
 
-/// What [`build_index`] built.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// What [`build_index`] built. Every record is a document, merged into
+/// another one, or skipped: `docs + merged + skipped` is the number of
+/// records.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IndexStats {
-    /// Documents in the index: one per record with a non-empty domain.
+    /// Documents in the index, one per domain.
     pub docs: u64,
+    /// Records merged into an earlier record for the same domain.
+    #[serde(default)]
+    pub merged: u64,
+    /// Records skipped because their domain is not a valid registrable
+    /// domain ([`plumb_core::canonical_domain`] rejects it), empty ones
+    /// included.
+    #[serde(default)]
+    pub skipped: u64,
 }
 
 /// One search result.
@@ -145,8 +159,16 @@ pub struct Hit {
     pub link_score: f32,
 }
 
-/// Builds a fresh index in `dir`, replacing any index already there. Records
-/// with the same domain must already be merged (one document per domain).
+/// Builds a fresh index of `records` in `dir`, replacing any index already
+/// there.
+///
+/// Each record's domain is made canonical with
+/// [`plumb_core::canonical_domain`] (`Example.com` -> `example.com`,
+/// `münchen.de` -> `xn--mnchen-3ya.de`, `www.example.com` ->
+/// `example.com`), and records that end up with the same domain are merged
+/// into one document with [`SiteRecord::merge`], as
+/// [`plumb_core::RecordSet`] would. Records whose domain is not a valid
+/// registrable domain are skipped. The returned [`IndexStats`] counts both.
 ///
 /// The index is built in a hidden directory next to `dir` and swapped in
 /// only once it is complete, so a failed build leaves the previous index in
@@ -154,22 +176,65 @@ pub struct Hit {
 /// serving the previous index (on Unix; elsewhere the swap may fail while
 /// it is open).
 ///
-/// Domains are trimmed and lowercased; records with an empty domain are
-/// skipped, and a domain that appears twice is an error. To protect other
-/// data, a non-empty `dir` that does not hold an index is refused. If `dir`
-/// is a symlink, the directory it points to is replaced. Its parent must be
-/// writable, and `dir` itself cannot be a mount point (mount the parent).
+/// Replacing deletes everything in `dir`, so to protect other data `dir`
+/// must be missing, empty or an index: every index built here holds a
+/// marker file, `.plumb-index`, and a directory without one is replaced
+/// only when it holds a Tantivy index and nothing else (as indexes built
+/// before the marker do). Anything else is refused with an error naming
+/// `dir`. If `dir` is a symlink, the directory it points to is replaced.
+/// Its parent must be writable, and `dir` itself cannot be a mount point
+/// (mount the parent).
 pub fn build_index(dir: &Path, records: &[SiteRecord]) -> Result<IndexStats> {
-    let domains = clean_domains(records)?;
+    let (sites, stats) = merge_by_domain(records);
     let staging = Staging::new(dir)?;
-    let docs = write_index(staging.path(), records, &domains)?;
+    write_index(staging.path(), &sites)?;
     staging.install()?;
-    Ok(IndexStats { docs })
+    Ok(stats)
 }
 
-/// Writes a complete index of `records` into the empty directory `dir`:
-/// one commit, then a merge into a single segment.
-fn write_index(dir: &Path, records: &[SiteRecord], domains: &[Option<String>]) -> Result<u64> {
+/// One record per canonical domain ([`canonical_domain`]), in the order the
+/// domains first appear: records for the same domain are merged
+/// ([`SiteRecord::merge`]) and records without a valid domain are skipped.
+/// Records that are already canonical and unique are not copied.
+fn merge_by_domain(records: &[SiteRecord]) -> (Vec<Cow<'_, SiteRecord>>, IndexStats) {
+    let mut sites: Vec<Cow<SiteRecord>> = Vec::with_capacity(records.len());
+    let mut positions: HashMap<String, usize> = HashMap::with_capacity(records.len());
+    let mut stats = IndexStats::default();
+    for record in records {
+        let Some(domain) = canonical_domain(&record.domain) else {
+            stats.skipped += 1;
+            continue;
+        };
+        let with_domain = |domain: &String| {
+            let mut record = record.clone();
+            record.domain.clone_from(domain);
+            record
+        };
+        match positions.entry(domain) {
+            Entry::Occupied(entry) => {
+                let other = with_domain(entry.key());
+                sites[*entry.get()].to_mut().merge(other);
+                stats.merged += 1;
+            }
+            Entry::Vacant(entry) => {
+                let site = if record.domain == *entry.key() {
+                    Cow::Borrowed(record)
+                } else {
+                    Cow::Owned(with_domain(entry.key()))
+                };
+                entry.insert(sites.len());
+                sites.push(site);
+            }
+        }
+    }
+    stats.docs = sites.len() as u64;
+    (sites, stats)
+}
+
+/// Writes a complete index of `sites`, whose domains are canonical and
+/// unique, into the empty directory `dir`: one commit, then a merge into a
+/// single segment.
+fn write_index(dir: &Path, sites: &[Cow<SiteRecord>]) -> Result<()> {
     let schema = schema::schema();
     let fields = Fields::new(&schema)?;
     let index = Index::create_in_dir(dir, schema)
@@ -181,11 +246,8 @@ fn write_index(dir: &Path, records: &[SiteRecord], domains: &[Option<String>]) -
         .context("opening index writer")?;
     // Merge once at the end instead of while indexing.
     writer.set_merge_policy(Box::new(NoMergePolicy));
-    let mut docs = 0;
-    for (record, domain) in records.iter().zip(domains) {
-        let Some(domain) = domain else { continue };
-        writer.add_document(schema::document(&fields, record, domain))?;
-        docs += 1;
+    for site in sites {
+        writer.add_document(schema::document(&fields, site))?;
     }
     writer.commit().context("committing index")?;
     fail_point("after_commit")?;
@@ -201,7 +263,7 @@ fn write_index(dir: &Path, records: &[SiteRecord], domains: &[Option<String>]) -
     writer
         .wait_merging_threads()
         .context("finishing index merges")?;
-    Ok(docs)
+    Ok(())
 }
 
 #[cfg(test)]
@@ -223,31 +285,6 @@ fn fail_point(step: &str) -> Result<()> {
 #[cfg(not(test))]
 fn fail_point(_step: &str) -> Result<()> {
     Ok(())
-}
-
-/// The cleaned-up domain of each record, `None` for an empty one.
-fn clean_domains(records: &[SiteRecord]) -> Result<Vec<Option<String>>> {
-    let mut seen = HashSet::with_capacity(records.len());
-    records
-        .iter()
-        .map(|record| {
-            let domain = record
-                .domain
-                .trim()
-                .trim_end_matches('.')
-                .to_ascii_lowercase();
-            if domain.is_empty() {
-                return Ok(None);
-            }
-            if !seen.insert(domain.clone()) {
-                bail!(
-                    "domain {domain} appears in more than one record; \
-                     merge records per domain (plumb_core::RecordSet) before indexing"
-                );
-            }
-            Ok(Some(domain))
-        })
-        .collect()
 }
 
 /// A read-only handle on an index built by [`build_index`]. Cheap to share
@@ -1388,6 +1425,7 @@ mod tests {
         assert!(new.search("us bank", 10).unwrap().is_empty());
         assert_eq!(top(&new, "example"), "example.com");
         assert_eq!(entries(root.path()), ["index"]);
+        assert!(entries(&dir).iter().any(|name| name == replace::MARKER));
         // An already open searcher keeps serving the index it opened (on Unix,
         // where deleted files stay readable while open).
         if cfg!(unix) {
@@ -1401,10 +1439,6 @@ mod tests {
         let dir = root.path().join("index");
         build_index(&dir, &corpus()).unwrap();
 
-        // Rejected before anything is written.
-        let twice = [SiteRecord::new("a.com"), SiteRecord::new("A.com ")];
-        let err = build_index(&dir, &twice).unwrap_err();
-        assert!(err.to_string().contains("a.com"), "{err:#}");
         // Fails after the new index was committed in its staging directory.
         let failing = FailAt::step("after_commit");
         let err = build_index(&dir, &[example_site()]).unwrap_err();
@@ -1448,13 +1482,183 @@ mod tests {
         assert_eq!(entries(root.path()), ["a", "data", "empty"]);
     }
 
+    /// The reported case: `plumb index --index myproject` deleted a project
+    /// folder because it held a file named `meta.json`.
     #[test]
-    fn records_without_a_domain_are_skipped() {
-        let dir = TempDir::new().unwrap();
-        let records = [SiteRecord::new("  "), SiteRecord::new("Example.COM")];
-        assert_eq!(build_index(dir.path(), &records).unwrap().docs, 1);
-        let searcher = Searcher::open(dir.path()).unwrap();
+    fn keeps_a_project_folder_that_holds_a_meta_json() {
+        let root = TempDir::new().unwrap();
+        // Even a `meta.json` copied from a real index does not make one.
+        build_index(&root.path().join("real"), &[example_site()]).unwrap();
+        let tantivy_meta = fs::read_to_string(root.path().join("real/meta.json")).unwrap();
+        fs::remove_dir_all(root.path().join("real")).unwrap();
+
+        for meta in [
+            "{}",
+            r#"{"name": "myproject", "version": "1.0.0"}"#,
+            &tantivy_meta,
+        ] {
+            let project = root.path().join("myproject");
+            fs::create_dir_all(project.join("src")).unwrap();
+            fs::write(project.join("meta.json"), meta).unwrap();
+            fs::write(project.join("notes.txt"), "my notes").unwrap();
+            fs::write(project.join("src/main.rs"), "fn main() {}").unwrap();
+
+            let err = format!("{:#}", build_index(&project, &corpus()).unwrap_err());
+            assert!(err.contains("refusing to replace"), "{err}");
+            assert!(err.contains("myproject"), "{err}");
+            assert_eq!(entries(&project), ["meta.json", "notes.txt", "src"]);
+            assert_eq!(fs::read_to_string(project.join("meta.json")).unwrap(), meta);
+            assert_eq!(
+                fs::read_to_string(project.join("notes.txt")).unwrap(),
+                "my notes"
+            );
+            assert_eq!(
+                fs::read_to_string(project.join("src/main.rs")).unwrap(),
+                "fn main() {}"
+            );
+            assert_eq!(entries(root.path()), ["myproject"]);
+            fs::remove_dir_all(&project).unwrap();
+        }
+    }
+
+    #[test]
+    fn indexes_built_before_the_marker_are_replaced() {
+        let root = TempDir::new().unwrap();
+        let dir = root.path().join("index");
+        build_index(&dir, &corpus()).unwrap();
+        fs::remove_file(dir.join(replace::MARKER)).unwrap();
+
+        build_index(&dir, &[example_site()]).unwrap();
+        let searcher = Searcher::open(&dir).unwrap();
         assert_eq!(top(&searcher, "example"), "example.com");
+        assert!(entries(&dir).iter().any(|name| name == replace::MARKER));
+
+        // Not when it holds anything besides the index.
+        fs::remove_file(dir.join(replace::MARKER)).unwrap();
+        fs::write(dir.join("notes.txt"), "keep me").unwrap();
+        let err = format!("{:#}", build_index(&dir, &corpus()).unwrap_err());
+        assert!(err.contains("it holds notes.txt"), "{err}");
+        assert_eq!(Searcher::open(&dir).unwrap().num_docs(), 1);
+        assert_eq!(
+            fs::read_to_string(dir.join("notes.txt")).unwrap(),
+            "keep me"
+        );
+        assert_eq!(entries(root.path()), ["index"]);
+    }
+
+    #[test]
+    fn records_without_a_valid_domain_are_skipped() {
+        let dir = TempDir::new().unwrap();
+        let records = [
+            SiteRecord::new("  "),
+            SiteRecord::new("not a domain"),
+            SiteRecord::new("localhost"),
+            SiteRecord::new("192.168.1.1"),
+            SiteRecord::new("co.uk"),
+            SiteRecord::new("Example.COM"),
+        ];
+        let stats = build_index(dir.path(), &records).unwrap();
+        let expected = IndexStats {
+            docs: 1,
+            merged: 0,
+            skipped: 5,
+        };
+        assert_eq!(stats, expected);
+        let searcher = Searcher::open(dir.path()).unwrap();
+        assert_eq!(searcher.num_docs(), 1);
+        assert_eq!(top(&searcher, "example"), "example.com");
+    }
+
+    #[test]
+    fn records_for_the_same_domain_are_merged() {
+        let mut upper = site(
+            "Example.com",
+            Some("Example Domain"),
+            None,
+            &["Example"],
+            &[("example", 5)],
+            obscure(50_000, 10),
+        );
+        upper.crawled_at = Some(100);
+        let mut lower = site(
+            "www.example.com.",
+            Some("Old Example Title"),
+            Some("For use in illustrative examples."),
+            &["Example Inc"],
+            &[("example", 3), ("illustrative examples", 2)],
+            popular(900, 20),
+        );
+        lower.url = Some("https://example.com/".into());
+        let unicode = site(
+            "münchen.de",
+            Some("Landeshauptstadt München"),
+            None,
+            &[],
+            &[],
+            obscure(80_000, 30),
+        );
+        let punycode = site(
+            "xn--mnchen-3ya.de",
+            None,
+            Some("Das offizielle Stadtportal"),
+            &[],
+            &[("stadtportal", 4)],
+            Signals::default(),
+        );
+        let records = [upper.clone(), unicode, lower.clone(), punycode];
+        let dir = TempDir::new().unwrap();
+        let stats = build_index(dir.path(), &records).unwrap();
+        let expected = IndexStats {
+            docs: 2,
+            merged: 2,
+            skipped: 0,
+        };
+        assert_eq!(stats, expected);
+
+        let searcher = Searcher::open(dir.path()).unwrap();
+        assert_eq!(searcher.num_docs(), 2);
+        let hits = searcher.search("example", 10).unwrap();
+        assert_eq!(domains(&hits), ["example.com"]);
+        // Merged as `SiteRecord::merge` does: the crawled record's page
+        // fields first, the rest filled in, the best signals of both.
+        let mut merged = upper;
+        merged.domain = "example.com".into();
+        lower.domain = "example.com".into();
+        merged.merge(lower);
+        assert_eq!(hits[0].title.as_deref(), Some("Example Domain"));
+        assert_eq!(
+            hits[0].description.as_deref(),
+            Some("For use in illustrative examples.")
+        );
+        assert_eq!(hits[0].url, "https://example.com/");
+        assert_eq!(hits[0].link_score, merged.link_score());
+        assert_eq!(top(&searcher, "illustrative examples"), "example.com");
+        assert_eq!(top(&searcher, "example inc"), "example.com");
+
+        // The Unicode and punycode spellings are one site.
+        for query in ["münchen", "munchen", "stadtportal", "münchen.de"] {
+            let hits = searcher.search(query, 10).unwrap();
+            assert_eq!(domains(&hits), ["xn--mnchen-3ya.de"], "query {query:?}");
+            assert_eq!(hits[0].title.as_deref(), Some("Landeshauptstadt München"));
+            assert_eq!(
+                hits[0].description.as_deref(),
+                Some("Das offizielle Stadtportal")
+            );
+        }
+    }
+
+    #[test]
+    fn dotted_capital_i_is_found_by_plain_i() {
+        // Lowercasing `İ` gives `i` plus a combining dot.
+        let mut airport = SiteRecord::new("istairport.com");
+        airport.add_link_text("İstanbul Havalimanı", "havaist.com");
+        airport.add_link_text("İstanbul Havalimanı", "turkishairlines.com");
+        let mut records = corpus();
+        records.push(airport);
+        let (_dir, searcher) = build(&records);
+        for query in ["istanbul", "İstanbul", "ISTANBUL", "istanbul havalimanı"] {
+            assert_eq!(top(&searcher, query), "istairport.com", "query {query:?}");
+        }
     }
 
     #[test]

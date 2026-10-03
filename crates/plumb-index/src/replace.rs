@@ -2,9 +2,16 @@
 //!
 //! A new index is written to a hidden staging directory next to the target
 //! (same parent, so renames stay on one file system). Once it is complete,
-//! the old directory is renamed aside, the new one renamed into place and
-//! the old one deleted. A failed build or swap deletes the staging directory
-//! and leaves the old index where it was.
+//! it gets a marker file ([`MARKER`]), the old directory is renamed aside,
+//! the new one renamed into place and the old one deleted. A failed build or
+//! swap deletes the staging directory and leaves the old index where it was.
+//!
+//! Replacing deletes the old directory with everything in it, so only a
+//! directory that is missing, empty or holds an index is replaced: one with
+//! the marker, or one that opens as a Tantivy index and holds nothing but
+//! Tantivy's own files, as indexes built before the marker do. Anything
+//! else, such as a project folder that happens to contain a `meta.json`, is
+//! refused.
 //!
 //! The swap is two renames, so a crash between them leaves both copies on
 //! disk under their hidden names and nothing at the target. Renaming also
@@ -12,11 +19,29 @@
 
 use std::ffi::{OsStr, OsString};
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{bail, Context, Result};
+use tantivy::directory::{INDEX_WRITER_LOCK, META_LOCK};
+use tantivy::Index;
+
+/// The file that marks a directory as an index built by Plumb. Every
+/// directory [`Staging::install`] puts in place has one.
+pub(crate) const MARKER: &str = ".plumb-index";
+
+/// The marker's first line, which identifies it. Later versions may add
+/// lines after it but must keep it.
+const MARKER_SIGNATURE: &str = "plumb-index";
+/// The marker's contents: the signature, then a note for people who come
+/// across the file.
+const MARKER_TEXT: &str = "plumb-index\n\
+    This directory holds a Plumb Search index. Rebuilding the index replaces\n\
+    the whole directory, so do not keep other files in it.\n";
+
+/// How many unexpected entries an error message names.
+const STRAYS_SHOWN: usize = 3;
 
 /// A directory being built next to the directory it will replace. It is
 /// deleted when dropped, unless [`Staging::install`] moved it into place.
@@ -32,8 +57,9 @@ impl Staging {
     /// Checks that `dir` may be replaced, then creates an empty staging
     /// directory next to it (creating `dir`'s parents if needed).
     ///
-    /// `dir` may be replaced when it is missing, empty or holds an index; a
-    /// symlink is followed, so the directory it points to gets replaced.
+    /// `dir` may be replaced when it is missing, empty or holds an index
+    /// (see the module docs); a symlink is followed, so the directory it
+    /// points to gets replaced.
     pub(crate) fn new(dir: &Path) -> Result<Staging> {
         let target = resolve(dir)?;
         dir_name(&target)?;
@@ -63,8 +89,10 @@ impl Staging {
         &self.path
     }
 
-    /// Moves the staging directory into place, replacing what was there.
+    /// Marks the staging directory as an index ([`MARKER`]) and moves it
+    /// into place, replacing what was there.
     pub(crate) fn install(mut self) -> Result<()> {
+        write_marker(&self.path)?;
         swap(&self.path, &self.target)?;
         self.installed = true;
         Ok(())
@@ -141,21 +169,83 @@ fn resolve(dir: &Path) -> Result<PathBuf> {
     }
 }
 
-/// Fails unless `dir` is missing, empty or holds an index.
+/// Fails, naming `dir`, unless `dir` is missing, empty or holds an index:
+/// it has the [`MARKER`], or it is a bare Tantivy index ([`strays`]).
 fn check_replaceable(dir: &Path) -> Result<()> {
     match fs::read_dir(dir) {
         Ok(mut entries) => {
-            if entries.next().is_some() && !dir.join("meta.json").is_file() {
-                bail!(
-                    "refusing to replace {}: it is not empty and does not hold a search index",
-                    dir.display()
-                );
+            if entries.next().is_none() || has_marker(dir) {
+                return Ok(());
             }
-            Ok(())
         }
-        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(err) => Err(err).with_context(|| format!("reading {}", dir.display())),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err).with_context(|| format!("reading {}", dir.display())),
     }
+    let Some(strays) = strays(dir)? else {
+        bail!(
+            "refusing to replace {}: it is not empty and does not hold a Plumb search index; \
+             choose a new or empty directory",
+            dir.display()
+        );
+    };
+    if !strays.is_empty() {
+        let mut named = strays[..strays.len().min(STRAYS_SHOWN)].join(", ");
+        if strays.len() > STRAYS_SHOWN {
+            named += &format!(" and {} more", strays.len() - STRAYS_SHOWN);
+        }
+        bail!(
+            "refusing to replace {}: besides a search index it holds {named}, which \
+             rebuilding would delete; move other files out or choose another directory",
+            dir.display()
+        );
+    }
+    Ok(())
+}
+
+/// Whether `dir` holds a [`MARKER`] file.
+fn has_marker(dir: &Path) -> bool {
+    fs::read_to_string(dir.join(MARKER))
+        .is_ok_and(|text| text.lines().next() == Some(MARKER_SIGNATURE))
+}
+
+/// Writes the [`MARKER`] file into `dir`, synced to disk like the index
+/// files themselves.
+fn write_marker(dir: &Path) -> Result<()> {
+    let path = dir.join(MARKER);
+    let mut file =
+        fs::File::create(&path).with_context(|| format!("creating {}", path.display()))?;
+    file.write_all(MARKER_TEXT.as_bytes())
+        .and_then(|()| file.sync_all())
+        .with_context(|| format!("writing {}", path.display()))
+}
+
+/// The entries of `dir` that are not part of a Tantivy index, sorted, or
+/// `None` when `dir` does not open as one. Part of an index are regular
+/// files named `meta.json`, `.managed.json`, a Tantivy lock file or a file
+/// that `.managed.json` lists.
+fn strays(dir: &Path) -> Result<Option<Vec<String>>> {
+    let Ok(index) = Index::open_in_dir(dir) else {
+        return Ok(None);
+    };
+    let managed = index.directory().list_managed_files();
+    let is_index_file = |name: &Path| {
+        name == Path::new("meta.json")
+            || name == Path::new(".managed.json")
+            || name == INDEX_WRITER_LOCK.filepath.as_path()
+            || name == META_LOCK.filepath.as_path()
+            || managed.contains(name)
+    };
+    let mut strays = Vec::new();
+    for entry in fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
+        let entry = entry.with_context(|| format!("reading {}", dir.display()))?;
+        let name = entry.file_name();
+        let is_file = entry.file_type().is_ok_and(|kind| kind.is_file());
+        if !is_file || !is_index_file(Path::new(&name)) {
+            strays.push(name.to_string_lossy().into_owned());
+        }
+    }
+    strays.sort();
+    Ok(Some(strays))
 }
 
 fn dir_name(dir: &Path) -> Result<&OsStr> {
@@ -198,6 +288,7 @@ fn unused_sibling(dir: &Path, tag: &str) -> Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    use plumb_core::SiteRecord;
     use tempfile::TempDir;
 
     use super::*;
@@ -212,11 +303,19 @@ mod tests {
         names
     }
 
-    /// A directory that looks like an index, holding `file`.
+    /// A directory marked as an index, holding `file`.
     fn fake_index(dir: &Path, file: &str) {
         fs::create_dir_all(dir).unwrap();
-        fs::write(dir.join("meta.json"), "{}").unwrap();
+        write_marker(dir).unwrap();
         fs::write(dir.join(file), file).unwrap();
+    }
+
+    /// The error `Staging::new(dir)` fails with, as text.
+    fn refusal(dir: &Path) -> String {
+        match Staging::new(dir) {
+            Ok(_) => panic!("{} was accepted", dir.display()),
+            Err(err) => format!("{err:#}"),
+        }
     }
 
     #[test]
@@ -225,21 +324,22 @@ mod tests {
         let dir = root.path().join("index");
         fake_index(&dir, "old");
         let staging = Staging::new(&dir).unwrap();
-        fake_index(staging.path(), "new");
+        fs::write(staging.path().join("new"), "new").unwrap();
         assert_eq!(entries(root.path()).len(), 2);
         staging.install().unwrap();
-        assert_eq!(entries(&dir), ["meta.json", "new"]);
+        assert_eq!(entries(&dir), [MARKER, "new"]);
         assert_eq!(entries(root.path()), ["index"]);
     }
 
     #[test]
-    fn install_creates_missing_directories() {
+    fn install_creates_missing_directories_and_marks_the_index() {
         let root = TempDir::new().unwrap();
         let dir = root.path().join("a/b/index");
         let staging = Staging::new(&dir).unwrap();
-        fake_index(staging.path(), "new");
+        fs::write(staging.path().join("new"), "new").unwrap();
         staging.install().unwrap();
-        assert_eq!(entries(&dir), ["meta.json", "new"]);
+        assert_eq!(entries(&dir), [MARKER, "new"]);
+        assert!(has_marker(&dir));
         assert_eq!(entries(&root.path().join("a/b")), ["index"]);
     }
 
@@ -252,7 +352,7 @@ mod tests {
         fake_index(staging.path(), "half-built");
         drop(staging);
         assert_eq!(entries(root.path()), ["index"]);
-        assert_eq!(entries(&dir), ["meta.json", "old"]);
+        assert_eq!(entries(&dir), [MARKER, "old"]);
     }
 
     #[test]
@@ -265,7 +365,7 @@ mod tests {
             format!("{err:#}").contains("moving the new index"),
             "{err:#}"
         );
-        assert_eq!(entries(&dir), ["meta.json", "old"]);
+        assert_eq!(entries(&dir), [MARKER, "old"]);
         assert_eq!(entries(root.path()), ["index"]);
     }
 
@@ -275,13 +375,50 @@ mod tests {
         let data = root.path().join("data");
         fs::create_dir(&data).unwrap();
         fs::write(data.join("notes.txt"), "keep me").unwrap();
-        assert!(Staging::new(&data).is_err());
+        let err = refusal(&data);
+        assert!(err.contains("refusing to replace"), "{err}");
+        assert!(err.contains("data: it is not empty"), "{err}");
+        // A `meta.json` alone does not make an index.
+        fs::write(data.join("meta.json"), "{}").unwrap();
+        assert!(refusal(&data).contains("refusing to replace"));
+        // Nor does a file named like the marker that is not one.
+        fs::write(data.join(MARKER), "my own notes").unwrap();
+        assert!(refusal(&data).contains("refusing to replace"));
+
         let file = root.path().join("file");
         fs::write(&file, "keep me too").unwrap();
         assert!(Staging::new(&file).is_err());
         assert!(Staging::new(Path::new("/")).is_err());
         assert_eq!(entries(root.path()), ["data", "file"]);
-        assert_eq!(entries(&data), ["notes.txt"]);
+        assert_eq!(entries(&data), [MARKER, "meta.json", "notes.txt"]);
+        assert_eq!(
+            fs::read_to_string(data.join("notes.txt")).unwrap(),
+            "keep me"
+        );
+    }
+
+    #[test]
+    fn unmarked_indexes_must_hold_only_tantivy_files() {
+        let root = TempDir::new().unwrap();
+        let dir = root.path().join("index");
+        crate::build_index(&dir, &[SiteRecord::new("example.com")]).unwrap();
+        // Like an index built before the marker: Tantivy's files only, its
+        // segment files among them (listed in `.managed.json`).
+        fs::remove_file(dir.join(MARKER)).unwrap();
+        let files = entries(&dir);
+        assert!(files.iter().any(|name| name.ends_with(".idx")), "{files:?}");
+        check_replaceable(&dir).unwrap();
+
+        fs::write(dir.join("notes.txt"), "keep me").unwrap();
+        fs::create_dir(dir.join("src")).unwrap();
+        let err = format!("{:#}", check_replaceable(&dir).unwrap_err());
+        assert!(err.contains("refusing to replace"), "{err}");
+        assert!(err.contains("it holds notes.txt, src, which"), "{err}");
+        for name in ["a", "b", "c"] {
+            fs::write(dir.join(name), name).unwrap();
+        }
+        let err = format!("{:#}", check_replaceable(&dir).unwrap_err());
+        assert!(err.contains("it holds a, b, c and 2 more, which"), "{err}");
     }
 
     #[cfg(unix)]
@@ -293,13 +430,13 @@ mod tests {
         fake_index(&real, "old");
         std::os::unix::fs::symlink(&real, &link).unwrap();
         let staging = Staging::new(&link).unwrap();
-        fake_index(staging.path(), "new");
+        fs::write(staging.path().join("new"), "new").unwrap();
         staging.install().unwrap();
         assert!(fs::symlink_metadata(&link)
             .unwrap()
             .file_type()
             .is_symlink());
-        assert_eq!(entries(&real), ["meta.json", "new"]);
+        assert_eq!(entries(&real), [MARKER, "new"]);
         assert_eq!(entries(root.path()), ["link", "real"]);
     }
 }

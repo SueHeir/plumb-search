@@ -11,7 +11,7 @@ use plumb_core::registrable_domain;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
-use crate::{open_maybe_gz, read_up_to, snippet, LineReader};
+use crate::{open_maybe_gz, read_up_to, snippet, too_long_note, Line, LineReader};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrancoEntry {
@@ -30,8 +30,9 @@ pub struct TrancoEntry {
 /// same domain only the better rank is kept. Stops after `limit` entries.
 ///
 /// The format is detected from the first bytes of the file, not its name.
-/// Malformed rows are skipped with a warning, but a file with no usable row
-/// at all is an error. Entries come back sorted by rank.
+/// Malformed rows (including lines over 1 MiB) are skipped with a warning,
+/// but a file with no usable row at all is an error. Entries come back
+/// sorted by rank.
 pub fn load_tranco(path: &Path, limit: Option<usize>) -> Result<Vec<TrancoEntry>> {
     let parsed = if is_zip(path)? {
         let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
@@ -86,10 +87,19 @@ fn read_tranco(reader: impl BufRead, limit: Option<usize>) -> Result<Parsed> {
         let Some((line_no, line)) = lines.next_line()? else {
             break;
         };
-        if line.trim().is_empty() {
-            continue;
-        }
         let first_data_line = !seen_data;
+        let line = match line {
+            Line::Text(line) if line.trim().is_empty() => continue,
+            Line::Text(line) => line,
+            Line::TooLong => {
+                seen_data = true;
+                parsed.bad_rows += 1;
+                parsed
+                    .first_bad
+                    .get_or_insert_with(|| (line_no, too_long_note()));
+                continue;
+            }
+        };
         seen_data = true;
         let Some((rank, raw_domain)) = parse_row(&line) else {
             // The first line may be a header such as `rank,domain`.
@@ -157,6 +167,7 @@ mod tests {
     use std::io::Write;
 
     use super::*;
+    use crate::MAX_LINE_BYTES;
 
     const LIST: &str = "1,google.com\r\n2,www.Facebook.com\r\n3,usbank.com\r\n4,co.uk\r\n5,news.bbc.co.uk\r\n6,FACEBOOK.com\r\n";
 
@@ -288,5 +299,28 @@ mod tests {
         std::fs::write(&empty, "").unwrap();
         assert_eq!(load_tranco(&empty, None).unwrap(), vec![]);
         assert!(load_tranco(&dir.path().join("missing.csv"), None).is_err());
+    }
+
+    #[test]
+    fn malformed_domains_and_over_long_lines_are_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("malformed.csv");
+        let data = format!(
+            "1,a..b.com\n2,{}.com\n3,{}\n4,mailto:a@b.com\n5,user@example.org\n6,good.com\n",
+            "a".repeat(64),
+            "d".repeat(MAX_LINE_BYTES),
+        );
+        std::fs::write(&path, data).unwrap();
+        assert_eq!(
+            load_tranco(&path, None).unwrap(),
+            vec![entry(6, "good.com")]
+        );
+
+        // A file that is one endless line has no usable row.
+        let path = dir.path().join("one-line.csv");
+        std::fs::write(&path, "9".repeat(2 * MAX_LINE_BYTES)).unwrap();
+        let err = format!("{:#}", load_tranco(&path, None).unwrap_err());
+        assert!(err.contains("no `rank,domain` rows"), "{err}");
+        assert!(err.contains("over 1048576 bytes"), "{err}");
     }
 }

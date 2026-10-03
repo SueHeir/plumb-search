@@ -127,8 +127,10 @@ fn keys(record: IndexRecordOption) -> TextOptions {
     )
 }
 
-/// The document for `record`, whose domain has been cleaned up to `domain`.
-pub(crate) fn document(f: &Fields, record: &SiteRecord, domain: &str) -> TantivyDocument {
+/// The document for `record`, whose domain is canonical
+/// ([`plumb_core::canonical_domain`]).
+pub(crate) fn document(f: &Fields, record: &SiteRecord) -> TantivyDocument {
+    let domain = record.domain.as_str();
     let mut doc = TantivyDocument::default();
     doc.add_text(f.domain, domain);
     if let Some(url) = non_empty(&record.url) {

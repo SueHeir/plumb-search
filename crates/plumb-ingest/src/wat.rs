@@ -219,7 +219,8 @@ impl WatExtract {
 
 /// Reads every record of a WAT file (gzipped or plain, see
 /// [`crate::open_maybe_gz`]) into `out`, returning counters for this file.
-/// A record with unparsable JSON is counted in `bad_records` and skipped; a
+/// A record with unparsable JSON, or with a body over
+/// [`MAX_WARC_BODY_BYTES`], is counted in `bad_records` and skipped; a
 /// truncated or malformed WARC framing is an error.
 ///
 /// Only `metadata` records with a JSON body (or no `Content-Type`) are
@@ -233,6 +234,15 @@ pub fn parse_wat(path: &Path, out: &mut WatExtract) -> Result<WatStats> {
     {
         stats.records += 1;
         if !is_json_metadata(&record) {
+            continue;
+        }
+        if record.oversized {
+            stats.bad_records += 1;
+            debug!(
+                "{}: skipping record {} with a body over {MAX_WARC_BODY_BYTES} bytes",
+                path.display(),
+                stats.records
+            );
             continue;
         }
         match serde_json::from_slice::<Value>(&record.body) {
@@ -318,6 +328,16 @@ fn meta_content(metas: &[Value], matches: impl Fn(&Value) -> bool) -> Option<Str
 /// Longest WARC header line accepted, in bytes; longer means the framing is off.
 const MAX_WARC_LINE: usize = 64 * 1024;
 
+/// Longest WARC record header accepted, all its lines together, in bytes;
+/// longer means the framing is off.
+const MAX_WARC_HEADER_BYTES: usize = 1 << 20;
+
+/// Largest WARC record body [`WarcReader`] keeps, in bytes. A WAT metadata
+/// record is a few kilobytes; a longer body is read past without being kept
+/// (see [`WarcRecord::oversized`]), so a bogus `Content-Length` cannot make
+/// the reader buffer gigabytes.
+pub const MAX_WARC_BODY_BYTES: u64 = 16 << 20;
+
 /// One WARC record, as [`WarcReader`] returns it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WarcRecord {
@@ -325,8 +345,12 @@ pub struct WarcRecord {
     pub version: String,
     /// Header fields in file order: names as written, values trimmed.
     pub headers: Vec<(String, String)>,
-    /// The record block: exactly `Content-Length` bytes.
+    /// The record block: exactly `Content-Length` bytes, or nothing when
+    /// the record is [`oversized`](WarcRecord::oversized).
     pub body: Vec<u8>,
+    /// The block was over [`MAX_WARC_BODY_BYTES`]: the reader skipped it
+    /// without keeping it, and `body` is empty.
+    pub oversized: bool,
 }
 
 impl WarcRecord {
@@ -345,8 +369,10 @@ impl WarcRecord {
 /// Header lines may end in `\r\n` or `\n`, folded header lines are joined,
 /// and the body is exactly `Content-Length` bytes. The blank lines after a
 /// body are optional before the end of input. Truncated input, a missing or
-/// invalid `Content-Length`, or anything other than blank lines between a
-/// body and the next `WARC/` line is an error.
+/// invalid `Content-Length`, a header line over 64 KiB or a header over
+/// 1 MiB, or anything other than blank lines between a body and the next
+/// `WARC/` line is an error. A body over [`MAX_WARC_BODY_BYTES`] is skipped
+/// rather than kept, so memory stays bounded whatever the file claims.
 pub struct WarcReader<R> {
     reader: R,
     /// Bytes consumed so far, for error messages.
@@ -387,12 +413,20 @@ impl<R: BufRead> WarcReader<R> {
         }
 
         let mut headers: Vec<(String, String)> = Vec::new();
+        let mut header_bytes = 0;
         loop {
             let Some((line, true)) = self.read_line()? else {
                 bail!("{}: input ends inside the record header (truncated?)", at());
             };
             if line.trim().is_empty() {
                 break;
+            }
+            header_bytes += line.len();
+            if header_bytes > MAX_WARC_HEADER_BYTES {
+                bail!(
+                    "{}: the record header is over {MAX_WARC_HEADER_BYTES} bytes; not WARC framing",
+                    at()
+                );
             }
             if line.starts_with([' ', '\t']) {
                 let Some((_, value)) = headers.last_mut() else {
@@ -416,13 +450,18 @@ impl<R: BufRead> WarcReader<R> {
         let length: u64 = length
             .parse()
             .with_context(|| format!("{}: invalid Content-Length {}", at(), snippet(length)))?;
-        let mut body = Vec::with_capacity(length.min(1 << 20) as usize);
-        let read = (&mut self.reader)
-            .take(length)
-            .read_to_end(&mut body)
-            .with_context(|| format!("{}: reading the body", at()))?;
-        self.offset += read as u64;
-        if (read as u64) < length {
+        let oversized = length > MAX_WARC_BODY_BYTES;
+        let mut body = Vec::new();
+        let mut block = (&mut self.reader).take(length);
+        let read = if oversized {
+            io::copy(&mut block, &mut io::sink())
+        } else {
+            body.reserve(length.min(1 << 20) as usize);
+            block.read_to_end(&mut body).map(|n| n as u64)
+        }
+        .with_context(|| format!("{}: reading the body", at()))?;
+        self.offset += read;
+        if read < length {
             bail!(
                 "{}: truncated body, Content-Length is {length} but only {read} bytes remain",
                 at()
@@ -433,6 +472,7 @@ impl<R: BufRead> WarcReader<R> {
             version,
             headers,
             body,
+            oversized,
         }))
     }
 
@@ -1296,5 +1336,117 @@ mod tests {
         // a.com links twice (from a.com and www.a.com) but counts once.
         assert_eq!(anchors(&out, "usbank.com"), pairs(&[("us bank", 3)]));
         assert_eq!(linkers(&out, "usbank.com"), ["a.com", "b.com", "c.com"]);
+    }
+
+    /// A WARC record's version line and header, claiming `length` body bytes.
+    fn record_head(headers: &[(&str, &str)], length: u64) -> Vec<u8> {
+        let mut out = b"WARC/1.0\r\n".to_vec();
+        for (name, value) in headers {
+            out.extend_from_slice(format!("{name}: {value}\r\n").as_bytes());
+        }
+        out.extend_from_slice(format!("Content-Length: {length}\r\n\r\n").as_bytes());
+        out
+    }
+
+    const JSON_METADATA: [(&str, &str); 2] = [
+        ("WARC-Type", "metadata"),
+        ("Content-Type", "application/json"),
+    ];
+
+    #[test]
+    fn warc_reader_skips_oversized_bodies_without_keeping_them() {
+        // A body four times the cap, streamed rather than built in memory.
+        let length = 4 * MAX_WARC_BODY_BYTES;
+        let data = io::Cursor::new(record_head(&JSON_METADATA, length))
+            .chain(io::repeat(b'x').take(length))
+            .chain(io::Cursor::new(record(&JSON_METADATA, b"{}")));
+        let mut reader = WarcReader::new(io::BufReader::new(data));
+        let big = reader.next_record().unwrap().unwrap();
+        assert!(big.oversized);
+        assert_eq!(big.body.capacity(), 0);
+        assert_eq!(
+            big.header("Content-Length"),
+            Some(length.to_string().as_str())
+        );
+        let next = reader.next_record().unwrap().unwrap();
+        assert!(!next.oversized);
+        assert_eq!(next.body, b"{}");
+        assert!(reader.next_record().unwrap().is_none());
+
+        // A body right at the cap is kept.
+        let at_cap = io::Cursor::new(record_head(&JSON_METADATA, MAX_WARC_BODY_BYTES))
+            .chain(io::repeat(b'y').take(MAX_WARC_BODY_BYTES));
+        let kept = WarcReader::new(io::BufReader::new(at_cap))
+            .next_record()
+            .unwrap()
+            .unwrap();
+        assert!(!kept.oversized);
+        assert_eq!(kept.body.len() as u64, MAX_WARC_BODY_BYTES);
+
+        // A skipped body that runs out early is still a truncated file.
+        let short = io::Cursor::new(record_head(&JSON_METADATA, length))
+            .chain(io::repeat(b'z').take(length / 2));
+        let err = WarcReader::new(io::BufReader::new(short))
+            .next_record()
+            .unwrap_err();
+        let err = format!("{err:#}");
+        assert!(err.contains("truncated body"), "{err}");
+    }
+
+    #[test]
+    fn warc_reader_caps_the_whole_header() {
+        // Every line is short, but together they never end.
+        let line = format!("X-Filler: {}\r\n", "a".repeat(1000));
+        let data = [b"WARC/1.0\r\n".to_vec(), line.repeat(1100).into_bytes()].concat();
+        let err = error_of(&data);
+        assert!(err.contains("record header is over"), "{err}");
+    }
+
+    #[test]
+    fn parse_wat_counts_oversized_records_as_bad() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("oversized.wat");
+        let mut file = BufWriter::new(File::create(&path).unwrap());
+        let length = MAX_WARC_BODY_BYTES + 1;
+        file.write_all(&record_head(&JSON_METADATA, length))
+            .unwrap();
+        io::copy(&mut io::repeat(b' ').take(length), &mut file).unwrap();
+        file.write_all(b"\r\n\r\n").unwrap();
+        file.write_all(&wat_bytes(false, &[titled("https://a.com/", "A")]))
+            .unwrap();
+        file.flush().unwrap();
+        drop(file);
+
+        let mut out = WatExtract::new();
+        let stats = parse_wat(&path, &mut out).unwrap();
+        assert_eq!(stats.records, 4);
+        assert_eq!(stats.bad_records, 1);
+        assert_eq!(out.homepages["a.com"].title.as_deref(), Some("A"));
+    }
+
+    #[test]
+    fn links_to_malformed_hosts_are_dropped() {
+        let huge = format!("https://{}.com/", "a".repeat(70_000));
+        let long_label = format!("https://{}.com/", "b".repeat(64));
+        let (out, stats) = extract(&[
+            linking(
+                "https://a.com/",
+                &[
+                    (huge.as_str(), "Huge"),
+                    (long_label.as_str(), "Long"),
+                    ("https://x..com/", "Empty label"),
+                    ("mailto:someone@good.com", "Mail"),
+                    ("https://good.com/", "Good"),
+                ],
+            ),
+            linking(&long_label, &[("https://good.com/", "Good")]),
+        ]);
+        assert_eq!(stats.links, 1);
+        assert_eq!(linkers(&out, "good.com"), ["a.com"]);
+        assert_eq!(out.linking_domains.len(), 1);
+        assert_eq!(anchors(&out, "good.com"), pairs(&[("good", 1)]));
+        assert_eq!(out.anchors.len(), 1);
+        // The page on the long-label host is not a homepage either.
+        assert_eq!(out.homepages.keys().collect::<Vec<_>>(), ["a.com"]);
     }
 }
