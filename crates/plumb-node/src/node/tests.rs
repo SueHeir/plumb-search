@@ -1407,6 +1407,53 @@ async fn the_full_seed_replaces_a_quick_start_but_keeps_what_crawls_added() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_quick_start_crawls_before_asking_wikidata() {
+    let dir = recently_crawled_dir();
+    let paths = store::Paths::new(dir.path());
+    store::save_state(
+        &paths,
+        &SavedState {
+            crawl_left: 700,
+            index_stale: true,
+            last_refresh: None,
+            wikidata_missing: true,
+            quick_start: true,
+            ..SavedState::default()
+        },
+    )
+    .unwrap();
+    // What was left of the first crawl when Wikidata was first asked.
+    let left_when_asked = Arc::new(Mutex::new(None));
+    let asked = Arc::clone(&left_when_asked);
+    let state_paths = paths.clone();
+    let tranco = std::fs::read(fixture("tranco.csv")).unwrap();
+    let sparql = sparql_json(&fixture("wikidata-official-sites.tsv"));
+    let host = SeedHost::start(move |request, _| match request {
+        "GET /tranco.csv" => http("200 OK", &tranco),
+        "POST /sparql" => {
+            let mut asked = asked.lock().unwrap();
+            if asked.is_none() {
+                *asked = store::load_state(&state_paths).map(|s| s.crawl_left);
+            }
+            http("200 OK", &sparql)
+        }
+        _ => http("404 Not Found", b"no such file"),
+    })
+    .await;
+
+    let mut config = test_config(dir.path());
+    config.sources = host.sources();
+    config.sites = 50;
+    let node = start(config).await.unwrap();
+    wait_for(node.addr(), "the full seed", |s| {
+        ready_and_idle(s) && !s.wikidata_missing
+    })
+    .await;
+    node.shutdown().await.unwrap();
+    assert_eq!(*left_when_asked.lock().unwrap(), Some(0));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn background_updates_wait_while_off_and_resume_from_the_panel() {
     let dir = recently_crawled_dir();
     let paths = store::Paths::new(dir.path());

@@ -150,14 +150,19 @@ async fn step(inner: &Arc<Inner>) -> Result<Next> {
         return Ok(Next::Continue);
     }
     let wikidata_due = saved.wikidata_missing.then(|| inner.wikidata_retry_at());
-    if wikidata_due.is_some_and(|due| due <= now_unix()) {
-        complete_seed(inner).await?;
-        return Ok(Next::Aside);
-    }
     // Crawls and refreshes wait while background updates are off, paused
     // or outside the crawl hours, or a limit is reached; a day's download
     // limit ends with the day, a pause when it says.
-    if let Some(pause) = inner.pause() {
+    let pause = inner.pause();
+    // After a quick start, the first crawl goes ahead of the rest of the
+    // seed data: Wikidata takes half an hour or more, and until a node has
+    // crawled, it has nothing to share with the network.
+    let first_crawl = saved.quick_start && saved.crawl_left > 0 && pause.is_none();
+    if wikidata_due.is_some_and(|due| due <= now_unix()) && !first_crawl {
+        complete_seed(inner).await?;
+        return Ok(Next::Aside);
+    }
+    if let Some(pause) = pause {
         inner.refresh_requested.store(false, Ordering::SeqCst);
         let until = pause.until.unwrap_or_else(|| store::next_day(now_unix()));
         return Ok(Next::IdleUntil(Some(

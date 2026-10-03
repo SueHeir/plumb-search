@@ -3,7 +3,7 @@
 The Docker image runs a Plumb Search node on a server or homelab machine.
 `plumb run` serves the search page and a JSON API on port 8080. On first start
 it downloads seed data and builds its index (searchable within a minute or
-two, from the Tranco list, while the rest of the seed data downloads), and from then on it keeps
+two, from the Tranco list; the rest of the seed data follows its first crawl), and from then on it keeps
 crawling homepages and rebuilding the index. It also joins the Plumb network
 (see [Join the Plumb network](#join-the-plumb-network)), so its crawls help
 every other node and theirs help it. Everything it keeps is in one volume
