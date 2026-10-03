@@ -262,6 +262,20 @@ impl RecordProof {
     /// homepage crawl of a site the crawler was assigned. Returns the
     /// record as [`accept_batch`] would keep it, and the crawler.
     pub fn verify(&self, now: u64) -> Result<(SiteRecord, PeerId)> {
+        let crawler = self.check_signed(now)?;
+        let h = &self.header.header;
+        let record = parse_record(&self.record)?;
+        let Some(record) = accept_crawled(record, &crawler, h, now, Source::Other) else {
+            bail!("the record is not a homepage crawl the crawler was assigned");
+        };
+        Ok((record, crawler))
+    }
+
+    /// Checks only that the crawler signed the record, in a batch recent
+    /// enough: a proof that passes this but not [`RecordProof::verify`] is
+    /// a real crawl the asker's rules do not count (one the crawler was not
+    /// assigned, say), not a forgery. Returns the crawler.
+    pub fn check_signed(&self, now: u64) -> Result<PeerId> {
         let crawler = self.header.check(now)?;
         let h = &self.header.header;
         ensure!(
@@ -269,11 +283,7 @@ impl RecordProof {
                 .verify(leaf_hash(self.record.as_bytes()), h.count, &h.root),
             "the record is not in the signed batch"
         );
-        let record = parse_record(&self.record)?;
-        let Some(record) = accept_crawled(record, &crawler, h, now, Source::Other) else {
-            bail!("the record is not a homepage crawl the crawler was assigned");
-        };
-        Ok((record, crawler))
+        Ok(crawler)
     }
 }
 
@@ -397,11 +407,7 @@ fn accept_crawled(
     source: Source,
 ) -> Option<SiteRecord> {
     let crawled_at = record.crawled_at?;
-    let epoch_start = header.epoch * EPOCH_SECS;
-    // A crawl assigned in an epoch may run on a little past its end.
-    let in_epoch = crawled_at >= epoch_start
-        && crawled_at < epoch_start + 2 * EPOCH_SECS
-        && crawled_at <= now + EPOCH_SECS / 24;
+    let in_epoch = in_crawl_window(crawled_at, header.epoch) && crawled_at <= now + EPOCH_SECS / 24;
     let assigned = || is_assigned(header.epoch, crawler, &record.domain, header.share_ppm);
     if !in_epoch || (source == Source::Other && !assigned()) {
         return None;
@@ -422,6 +428,13 @@ fn accept_crawled(
     }
     kept.crawled_at = Some(crawled_at);
     Some(kept)
+}
+
+/// Whether a crawl at `crawled_at` belongs in a batch of `epoch`: a crawl
+/// assigned in an epoch may run on a little past its end.
+pub(crate) fn in_crawl_window(crawled_at: u64, epoch: u64) -> bool {
+    let epoch_start = epoch * EPOCH_SECS;
+    crawled_at >= epoch_start && crawled_at < epoch_start + 2 * EPOCH_SECS
 }
 
 fn keep_links(

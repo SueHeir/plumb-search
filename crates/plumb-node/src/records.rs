@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use plumb_core::{RecordSet, SiteRecord};
 use serde::{Deserialize, Serialize};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::{sync_parent_dir, write_records_atomically};
 
@@ -177,8 +177,10 @@ fn replay_journal(path: &Path, set: &mut RecordSet) -> Result<()> {
             path.display()
         );
     }
-    info!(
-        "replayed {applied} changes from {}, left by a crawl that was interrupted",
+    // The journal is replayed on every read until it is folded in, so this
+    // is routine, not a sign of an interrupted crawl.
+    debug!(
+        "replayed {applied} changes from {} not yet folded into the records file",
         path.display()
     );
     Ok(())
