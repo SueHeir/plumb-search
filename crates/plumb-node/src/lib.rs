@@ -15,12 +15,13 @@
 //! modules are public so their handlers and metrics can be tested directly,
 //! and [`node`] so that the desktop app can embed a node.
 
+use std::fs::File;
 use std::future::Future;
-use std::io::IsTerminal;
+use std::io::{BufWriter, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use plumb_core::{write_jsonl, SiteRecord};
+use plumb_core::SiteRecord;
 use plumb_index::RankConfig;
 use tracing_subscriber::EnvFilter;
 
@@ -32,6 +33,7 @@ pub mod web;
 mod crawl;
 mod fetch;
 mod ingest;
+mod records;
 mod run;
 mod search;
 
@@ -99,27 +101,93 @@ pub(crate) fn rank_config(alpha: Option<f32>) -> RankConfig {
     cfg
 }
 
-/// Writes records as JSON lines to a temporary file next to `path`, then
-/// renames it over `path`, so an interrupted run never leaves a half-written
-/// records file behind (`crawl` overwrites its input by default, after
-/// every batch).
+/// Writes records as JSON lines to a temporary file next to `path`, flushes
+/// it to disk, renames it over `path` and flushes the directory too (on
+/// Unix), so an interrupted run, a crash or a power cut leaves the old file
+/// or the new one, never a half-written or empty one. Creates the parent
+/// directory when missing.
 pub(crate) fn write_records_atomically<'a, I>(path: &Path, records: I) -> Result<usize>
 where
     I: IntoIterator<Item = &'a SiteRecord>,
 {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating {}", parent.display()))?;
+        }
+    }
     let tmp = temp_path_for(path);
-    let written = match write_jsonl(&tmp, records) {
+    let written = match write_lines_durably(&tmp, records) {
         Ok(n) => n,
         Err(err) => {
             let _ = std::fs::remove_file(&tmp);
-            return Err(err);
+            return Err(err.context(format!("writing {}", tmp.display())));
         }
     };
     if let Err(err) = std::fs::rename(&tmp, path) {
         let _ = std::fs::remove_file(&tmp);
         return Err(err).with_context(|| format!("moving {} to {}", tmp.display(), path.display()));
     }
+    sync_parent_dir(path);
     Ok(written)
+}
+
+/// Writes one JSON line per record to a new file at `path` and flushes it to
+/// disk. Returns the number of records written.
+fn write_lines_durably<'a, I>(path: &Path, records: I) -> Result<usize>
+where
+    I: IntoIterator<Item = &'a SiteRecord>,
+{
+    let mut writer = BufWriter::with_capacity(1 << 20, File::create(path)?);
+    let mut written = 0;
+    for record in records {
+        serde_json::to_writer(&mut writer, record)?;
+        writer.write_all(b"\n")?;
+        written += 1;
+    }
+    let file = writer.into_inner().map_err(|err| err.into_error())?;
+    file.sync_all()?;
+    Ok(written)
+}
+
+/// Flushes the directory holding `path` to disk, so that a file just
+/// created, renamed or deleted there stays that way after a power cut.
+/// Best effort, and only on Unix: other systems cannot open a directory
+/// as a file, and some file systems refuse to flush one.
+pub(crate) fn sync_parent_dir(path: &Path) {
+    #[cfg(unix)]
+    {
+        let dir = match path.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => parent,
+            _ => Path::new("."),
+        };
+        if let Err(err) = File::open(dir).and_then(|dir| dir.sync_all()) {
+            tracing::debug!("cannot flush the directory {}: {err}", dir.display());
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+}
+
+/// Hands memory that big jobs (loading records, building an index) freed
+/// back to the system. glibc keeps freed memory in its arenas for reuse, so
+/// a long-running node would otherwise sit on it between refreshes: idle
+/// after indexing 300,000 sites, a node held about 390 MB without this and
+/// 60 to 90 MB with it. Does nothing on other systems.
+pub(crate) fn release_freed_memory() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        extern "C" {
+            fn malloc_trim(pad: usize) -> std::os::raw::c_int;
+        }
+        // SAFETY: malloc_trim only gives free memory back to the system, and
+        // glibc lets any thread call it at any time.
+        unsafe {
+            malloc_trim(0);
+        }
+    }
 }
 
 /// `dir/records.jsonl` -> `dir/.records.jsonl.<pid>.tmp`.

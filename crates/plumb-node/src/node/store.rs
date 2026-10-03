@@ -234,8 +234,8 @@ pub(super) fn save_state(paths: &Paths, state: &SavedState) -> Result<()> {
 }
 
 /// Writes `bytes` to a temporary file next to `path`, flushes it to disk,
-/// then renames it over `path`: readers see the old file or the new one,
-/// never a mix.
+/// renames it over `path` and flushes the directory (on Unix): readers see
+/// the old file or the new one, never a mix, even after a power cut.
 pub(super) fn write_atomically(path: &Path, bytes: &[u8]) -> Result<()> {
     let tmp = crate::temp_path_for(path);
     let written = File::create(&tmp).and_then(|mut file| {
@@ -250,6 +250,7 @@ pub(super) fn write_atomically(path: &Path, bytes: &[u8]) -> Result<()> {
         let _ = fs::remove_file(&tmp);
         return Err(err).with_context(|| format!("moving {} to {}", tmp.display(), path.display()));
     }
+    crate::sync_parent_dir(path);
     Ok(())
 }
 

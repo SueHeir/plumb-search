@@ -141,6 +141,7 @@ fn profiles() {
     );
     assert_eq!(server.refresh_every, Some(Duration::from_secs(24 * 3600)));
     assert_eq!((server.cc_release.as_deref(), server.alpha), (None, None));
+    assert!(!server.use_system_proxy);
     assert_eq!(server.sources, SeedSources::default());
     assert_eq!(server.sources.tranco_url, download::TRANCO_LATEST_URL);
     assert_eq!(server.retry_wait, Duration::from_secs(600));
@@ -158,6 +159,7 @@ fn profiles() {
         (250_000, 2_000, 1_000)
     );
     assert_eq!(desktop.refresh_every, Some(Duration::from_secs(12 * 3600)));
+    assert!(!desktop.use_system_proxy);
     desktop.check().unwrap();
 }
 
@@ -262,6 +264,30 @@ async fn serves_a_records_file_put_there_by_hand() {
     assert_eq!(search(node.addr(), "us+bank").await[0].domain, "usbank.com");
     node.shutdown().await.unwrap();
     assert_eq!(names(&dir.path().join("indexes")), ["000001"]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn indexes_what_an_interrupted_crawl_saved() {
+    let dir = seeded_dir();
+    let records = dir.path().join("records.jsonl");
+    // A crawl that stopped before folding its journal into the records.
+    let mut found = SiteRecord::new("plumbline-example.com");
+    found.title = Some("Plumbline Example Widgets".into());
+    found.crawled_at = Some(now_unix());
+    let mut store = crate::records::RecordStore::open(&records);
+    store
+        .save(&[crate::records::Change::Merge { record: found }])
+        .unwrap();
+    drop(store);
+
+    let node = start(test_config(dir.path())).await.unwrap();
+    let status = wait_for(node.addr(), "the first index", ready_and_idle).await;
+    assert_eq!(status.sites, fixture_records().len() as u64 + 1);
+    let hits = search(node.addr(), "plumbline+example+widgets").await;
+    assert_eq!(hits[0].domain, "plumbline-example.com");
+    node.shutdown().await.unwrap();
+    // Every read replays it; the next crawl folds it in once it is big.
+    assert!(dir.path().join("records.jsonl.journal").exists());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

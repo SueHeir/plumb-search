@@ -51,6 +51,13 @@ pub struct SiteRecord {
     /// sites that keep failing are not retried on every crawl.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crawl_attempted_at: Option<u64>,
+    /// Homepage fetch attempts in a row, up to the one at
+    /// `crawl_attempted_at`, that could not reach the site at all (no
+    /// connection or no answer); 0 once an attempt gets an answer. Crawlers
+    /// retry such sites sooner than ones that answered, waiting longer after
+    /// each failure.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub crawl_failures: u32,
 }
 
 /// Inbound link text and the sites that link with it.
@@ -214,7 +221,9 @@ impl SiteRecord {
     /// counts once), aliases are unioned, ranks keep the best
     /// (lowest) value, `linking_domains` keeps the larger count (sources often
     /// overlap, so adding would double count), `official_site` is OR-ed, and
-    /// `crawl_attempted_at` keeps the later time.
+    /// `crawl_attempted_at` keeps the later time, with the `crawl_failures`
+    /// counted at that attempt (the larger count when both tried at the same
+    /// time).
     pub fn merge(&mut self, other: SiteRecord) {
         debug_assert_eq!(self.domain, other.domain);
         let other_is_fresher = other.crawled_at.is_some() && other.crawled_at >= self.crawled_at;
@@ -251,6 +260,13 @@ impl SiteRecord {
         s.tranco_rank = min_some(s.tranco_rank, o.tranco_rank);
         s.linking_domains = s.linking_domains.max(o.linking_domains);
         s.official_site |= o.official_site;
+        match other.crawl_attempted_at.cmp(&self.crawl_attempted_at) {
+            std::cmp::Ordering::Greater => self.crawl_failures = other.crawl_failures,
+            std::cmp::Ordering::Equal => {
+                self.crawl_failures = self.crawl_failures.max(other.crawl_failures);
+            }
+            std::cmp::Ordering::Less => {}
+        }
         self.crawl_attempted_at = self.crawl_attempted_at.max(other.crawl_attempted_at);
     }
 
@@ -867,6 +883,61 @@ mod tests {
             }]
         );
         assert_eq!(a.aliases, vec!["U.S. Bancorp".to_string()]);
+    }
+
+    #[test]
+    fn merge_keeps_the_failure_count_of_the_later_attempt() {
+        let tried = |attempted_at: Option<u64>, failures: u32| {
+            let mut r = SiteRecord::new("flaky.com");
+            r.crawl_attempted_at = attempted_at;
+            r.crawl_failures = failures;
+            r
+        };
+        let merged = |a: SiteRecord, b: SiteRecord| {
+            let mut a = a;
+            a.merge(b);
+            (a.crawl_attempted_at, a.crawl_failures)
+        };
+        // A later answer clears earlier failures, and a later failure counts.
+        assert_eq!(
+            merged(tried(Some(10), 3), tried(Some(20), 0)),
+            (Some(20), 0)
+        );
+        assert_eq!(
+            merged(tried(Some(20), 0), tried(Some(10), 3)),
+            (Some(20), 0)
+        );
+        assert_eq!(
+            merged(tried(Some(10), 0), tried(Some(20), 2)),
+            (Some(20), 2)
+        );
+        assert_eq!(merged(tried(None, 0), tried(Some(20), 2)), (Some(20), 2));
+        assert_eq!(merged(tried(Some(20), 2), tried(None, 0)), (Some(20), 2));
+        // The same attempt seen twice keeps the larger count.
+        assert_eq!(
+            merged(tried(Some(20), 1), tried(Some(20), 2)),
+            (Some(20), 2)
+        );
+        assert_eq!(
+            merged(tried(Some(20), 2), tried(Some(20), 1)),
+            (Some(20), 2)
+        );
+    }
+
+    #[test]
+    fn crawl_failures_are_left_out_of_json_until_there_are_some() {
+        let mut r = SiteRecord::new("example.com");
+        assert_eq!(
+            serde_json::to_string(&r).unwrap(),
+            r#"{"domain":"example.com","signals":{}}"#
+        );
+        r.crawl_failures = 2;
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(json.contains(r#""crawl_failures":2"#), "{json}");
+        assert_eq!(serde_json::from_str::<SiteRecord>(&json).unwrap(), r);
+        let old: SiteRecord =
+            serde_json::from_str(r#"{"domain":"example.com","crawl_attempted_at":5}"#).unwrap();
+        assert_eq!((old.crawl_attempted_at, old.crawl_failures), (Some(5), 0));
     }
 
     #[test]

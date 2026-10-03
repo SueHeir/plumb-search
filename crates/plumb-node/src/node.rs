@@ -13,9 +13,11 @@
 //! 2. It then crawls [`NodeConfig::initial_crawl`] homepages, rebuilds the
 //!    index and swaps the new one in.
 //! 3. Every [`NodeConfig::refresh_every`] it crawls
-//!    [`NodeConfig::crawl_per_refresh`] more homepages (the best-ranked ones
-//!    not visited for 30 days, as `plumb crawl` picks them), rebuilds and
-//!    swaps again.
+//!    [`NodeConfig::crawl_per_refresh`] more homepages, rebuilds and swaps
+//!    again. As with `plumb crawl`, half of each round goes to sites never
+//!    crawled and half to sites due again (30 days after their last visit,
+//!    sooner for sites that could not be reached), best-ranked first, so the
+//!    node keeps reaching new sites while it refreshes the best ones.
 //!
 //! Until the first index is ready, `/` and `/search` show the setup step,
 //! its progress and the last error, reloading every 5 seconds;
@@ -26,27 +28,34 @@
 //! never stops a node: it is shown on the setup page and in `/api/status`,
 //! and the work is tried again after [`NodeConfig::retry_wait`] (10 minutes),
 //! doubling after each failure in a row up to [`NodeConfig::max_retry_wait`]
-//! (6 hours). After a restart a node picks up where it left off: setup is
-//! not repeated, a crawl that was cut short goes on, and the next refresh
-//! falls due on schedule.
+//! (6 hours). A batch of homepages that nearly all fail to connect counts as
+//! such a failure (the network is down, or a proxy is needed; see
+//! [`NodeConfig::use_system_proxy`]) and is not saved. After a restart a node
+//! picks up where it left off: setup is not repeated, a crawl that was cut
+//! short goes on, and the next refresh falls due on schedule.
 //!
 //! # Data directory
 //!
 //! ```text
 //! DIR/
-//!   node.lock         locked while a node runs, so two never share DIR
-//!   state.json        progress that survives restarts
-//!   records.jsonl     every known site, one JSON line each
-//!   seed/             first-start downloads; may be deleted once
-//!                     records.jsonl exists
-//!   indexes/000001/   a complete search index
-//!   indexes/000002/   ...the newest one that opens is searched
+//!   node.lock                locked while a node runs, so two never share DIR
+//!   state.json               progress that survives restarts
+//!   records.jsonl            every known site, one JSON line each
+//!   records.jsonl.journal    crawl results not yet folded into records.jsonl
+//!   seed/                    first-start downloads; may be deleted once
+//!                            records.jsonl exists
+//!   indexes/000001/          a complete search index
+//!   indexes/000002/          ...the newest one that opens is searched
 //! ```
 //!
 //! The node owns the directory. The records and state files are replaced
-//! atomically (written to a temporary file, then renamed), so a crash or a
-//! power cut leaves the previous version, never a half-written one, and
-//! downloads only take their final name once complete. Each index build goes
+//! atomically (written to a temporary file and flushed to disk, then
+//! renamed), so a crash or a power cut leaves the previous version, never a
+//! half-written one, and downloads only take their final name once complete.
+//! Crawls append each batch to the journal instead of rewriting the records
+//! file, and fold it in once it reaches a quarter of the file's size (see
+//! [`crate::records`]); the journal is replayed whenever the records are
+//! read. Each index build goes
 //! into a new numbered directory, by way of a hidden staging directory, and
 //! is never renamed or changed after that; older indexes are deleted once no
 //! search has them open (Windows refuses to delete open files), and a failed
@@ -99,6 +108,13 @@ pub struct NodeConfig {
     pub refresh_every: Option<Duration>,
     /// Homepages crawled per refresh.
     pub crawl_per_refresh: usize,
+    /// Fetch homepages through the system proxy (`HTTP_PROXY`, `HTTPS_PROXY`
+    /// or `ALL_PROXY`, except hosts in `NO_PROXY`), for machines that reach
+    /// the internet only through one. Off by default: homepages are fetched
+    /// directly, which lets the crawler refuse sites whose names lead to
+    /// private networks, something it cannot check through a proxy. Seed
+    /// downloads always use these variables.
+    pub use_system_proxy: bool,
     /// Common Crawl web graph release to take domain ranks from, such as
     /// `cc-main-2025-26-nov-dec-jan`; only the rows needed are downloaded.
     pub cc_release: Option<String>,
@@ -124,6 +140,7 @@ impl NodeConfig {
             initial_crawl: 10_000,
             refresh_every: Some(Duration::from_secs(24 * 60 * 60)),
             crawl_per_refresh: 5_000,
+            use_system_proxy: false,
             cc_release: None,
             alpha: None,
             sources: SeedSources::default(),

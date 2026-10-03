@@ -13,7 +13,8 @@
 //!
 //! Slow work runs on Tokio's blocking threads and checks for shutdown only
 //! where stopping leaves nothing half-done; downloads and the homepage
-//! fetches of a crawl are simply dropped.
+//! fetches of a crawl are simply dropped. Crawls pick homepages and save
+//! their results as `plumb crawl` does ([`crate::crawl`]).
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
@@ -21,8 +22,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{bail, Context, Result};
-use plumb_core::{now_unix, read_jsonl, RecordSet, SiteRecord};
-use plumb_crawl::{crawl_homepages, CrawlConfig, CrawlOutcome, CrawlResult};
+use plumb_core::{now_unix, SiteRecord};
+use plumb_crawl::{crawl_homepages, CrawlConfig};
 use plumb_index::build_index;
 use plumb_ingest::{
     download, load_cc_domain_ranks, load_tranco, load_wikidata_official_sites, Builder,
@@ -30,14 +31,15 @@ use plumb_ingest::{
 use tokio::runtime::Handle;
 use tracing::{info, warn};
 
-use super::store::{self, Paths, SavedState};
+use super::store::{self, SavedState};
 use super::{Inner, NodeConfig, ServingIndex, Step, Stopped};
-use crate::crawl::{crawl_in_batches, select_targets, CRAWL_BATCH_SIZE, SECONDS_PER_DAY};
+use crate::crawl::{crawl_in_batches, select_targets, RunEnd, CRAWL_BATCH_SIZE, SECONDS_PER_DAY};
+use crate::records::{load_records, replace_records, RecordStore};
 use crate::web::{duration_words, group_thousands};
-use crate::write_records_atomically;
 
-/// A homepage fetched or tried this recently is not due for a crawl, as
-/// with `plumb crawl --skip-crawled-within-days 30`.
+/// A homepage fetched or answered this recently is not due for a crawl, as
+/// with `plumb crawl --skip-crawled-within-days 30`. Sites that could not
+/// be reached are retried sooner (see [`crate::crawl`]).
 const RECRAWL_AFTER_DAYS: u64 = 30;
 
 /// Seed downloads younger than this are reused when setup is tried again.
@@ -45,10 +47,6 @@ const SEED_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 /// How often a wait looks at the clock and at old indexes to delete.
 const TICK: Duration = Duration::from_secs(60);
-
-/// A batch of at least this many homepages of which not one answered means
-/// the network is down (or blocked), not the sites.
-const OFFLINE_MIN_BATCH: usize = 20;
 
 /// Does the node's background work until it stops.
 pub(super) async fn run(inner: Arc<Inner>) {
@@ -284,7 +282,7 @@ fn ingest(inner: &Inner, files: &SeedFiles) -> Result<Vec<SiteRecord>> {
             group_thousands(records.len() as u64)
         ),
     );
-    write_records_atomically(&inner.paths.records, &records)?;
+    replace_records(&inner.paths.records, &records)?;
     info!(
         "kept the best {} of {found} sites from the seed data in {}",
         records.len(),
@@ -297,7 +295,7 @@ fn ingest(inner: &Inner, files: &SeedFiles) -> Result<Vec<SiteRecord>> {
 async fn rebuild(inner: &Arc<Inner>) -> Result<()> {
     let built = blocking(inner, |inner| {
         inner.set_step(Step::Indexing, "Reading the site records");
-        let records = read_records(&inner.paths)?.into_sorted_vec();
+        let records = load_records(&inner.paths.records)?.into_sorted_vec();
         inner.check_stop()?;
         build(inner, records)
     })
@@ -339,46 +337,43 @@ async fn crawl(inner: &Arc<Inner>) -> Result<()> {
     }
 }
 
-/// Crawls the homepages left in the round, saving the records file and the
-/// state after every batch, then builds an index. `None` when there turned
+/// Crawls the homepages left in the round, saving each batch as it goes
+/// (see [`crate::crawl`]), then builds an index. `None` when there turned
 /// out to be nothing to crawl and nothing new to index.
 fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Option<ServingIndex>> {
     let left = inner.saved().crawl_left;
     inner.set_step(Step::Crawling, "Reading the site records");
-    let mut set = read_records(&inner.paths)?;
+    let mut set = load_records(&inner.paths.records)?;
+    let mut store = RecordStore::open(&inner.paths.records);
     inner.check_stop()?;
 
-    let cutoff = now_unix().saturating_sub(RECRAWL_AFTER_DAYS * SECONDS_PER_DAY);
-    let targets = select_targets(set.iter(), left, cutoff);
+    let window = RECRAWL_AFTER_DAYS * SECONDS_PER_DAY;
+    let targets = select_targets(set.iter(), left, now_unix(), window);
     if targets.is_empty() {
         info!("no homepage is due for a crawl");
     } else {
         info!(
-            "crawling {} homepages, {CRAWL_BATCH_SIZE} between saves",
+            "crawling {} homepages, {CRAWL_BATCH_SIZE} at a time",
             targets.len()
         );
         inner.set_step(Step::Crawling, "Crawling homepages");
         inner.set_progress(0, targets.len(), "homepages");
-        let cfg = CrawlConfig::default();
-        let mut offline = false;
+        let cfg = CrawlConfig {
+            use_system_proxy: inner.config.use_system_proxy,
+            ..CrawlConfig::default()
+        };
         let totals = crawl_in_batches(
             &mut set,
             &targets,
             CRAWL_BATCH_SIZE,
-            &inner.paths.records,
+            &mut store,
             |batch| {
-                let size = batch.len();
-                let results = handle.block_on(async {
+                handle.block_on(async {
                     tokio::select! {
                         results = crawl_homepages(batch, &cfg) => Some(results),
                         () = inner.stopped() => None,
                     }
-                })?;
-                if seems_offline(size, &results) {
-                    offline = true;
-                    return None;
-                }
-                Some(results)
+                })
             },
             |totals| {
                 inner.set_progress(totals.attempted, targets.len(), "homepages");
@@ -388,12 +383,18 @@ fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Option<ServingIndex
                 })
             },
         )?;
-        if offline {
-            bail!(
-                "no homepage in a batch of {} answered, so the network seems to be down \
-                 (that batch was not saved)",
-                CRAWL_BATCH_SIZE.min(targets.len() - totals.attempted)
-            );
+        match totals.end {
+            RunEnd::Finished => {}
+            RunEnd::Stopped => return Err(Stopped.into()),
+            RunEnd::Offline(offline) => {
+                let proxy = if inner.config.use_system_proxy {
+                    ""
+                } else {
+                    ". If this machine reaches the internet only through a proxy, turn on \
+                     use_system_proxy (plumb run --use-system-proxy)"
+                };
+                bail!("{offline}{proxy}");
+            }
         }
         inner.check_stop()?;
         let o = &totals.outcomes;
@@ -417,17 +418,6 @@ fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Option<ServingIndex
     }
     inner.check_stop()?;
     build(inner, set.into_sorted_vec()).map(Some)
-}
-
-/// True when a whole batch failed before any server answered: no page, no
-/// status code, not even robots.txt rules. With enough homepages in the
-/// batch, that is the network (or a firewall), not the sites, so the batch
-/// is not saved: saving would mark every one of them as tried for 30 days.
-fn seems_offline(batch: usize, results: &[CrawlResult]) -> bool {
-    batch >= OFFLINE_MIN_BATCH
-        && results
-            .iter()
-            .all(|result| matches!(result.outcome, CrawlOutcome::Failed { .. }))
 }
 
 /// Builds an index of `records` in a new numbered directory and opens it.
@@ -480,26 +470,24 @@ async fn put_in_service(inner: &Arc<Inner>, built: ServingIndex) -> Result<()> {
     Ok(())
 }
 
-/// Reads the records file into a set, merging records for the same domain
-/// (a file put there by hand may have some).
-fn read_records(paths: &Paths) -> Result<RecordSet> {
-    let records: Vec<SiteRecord> = read_jsonl(&paths.records)
-        .with_context(|| format!("loading records {}", paths.records.display()))?;
-    Ok(records.into_iter().collect())
-}
-
 /// Runs `work` on a blocking thread and waits for it to end, even when the
 /// node is stopping: the work checks for that itself, between steps where
-/// stopping leaves nothing half-done. A panic becomes an error.
+/// stopping leaves nothing half-done. A panic becomes an error. The memory
+/// the work freed (records, index buffers) is then handed back to the
+/// system.
 async fn blocking<T, F>(inner: &Arc<Inner>, work: F) -> Result<T>
 where
     T: Send + 'static,
     F: FnOnce(&Inner) -> Result<T> + Send + 'static,
 {
     let inner = Arc::clone(inner);
-    tokio::task::spawn_blocking(move || work(&inner))
+    let done = tokio::task::spawn_blocking(move || work(&inner))
         .await
-        .context("background work crashed")?
+        .context("background work crashed");
+    // Not on an async thread: handing back a few hundred megabytes takes
+    // tens of milliseconds.
+    let _ = tokio::task::spawn_blocking(crate::release_freed_memory).await;
+    done?
 }
 
 /// Deletes the directories of replaced indexes that no search has open any
@@ -589,8 +577,6 @@ impl Backoff {
 
 #[cfg(test)]
 mod tests {
-    use plumb_crawl::{CrawledPage, PageMeta};
-
     use super::*;
 
     #[test]
@@ -607,45 +593,6 @@ mod tests {
         let mut odd = Backoff::new(minutes(10), minutes(1));
         assert_eq!(odd.next_delay(), minutes(10));
         assert_eq!(odd.next_delay(), minutes(10));
-    }
-
-    fn result(domain: &str, outcome: CrawlOutcome) -> CrawlResult {
-        CrawlResult {
-            domain: domain.to_string(),
-            outcome,
-        }
-    }
-
-    #[test]
-    fn a_batch_with_no_answer_at_all_means_offline() {
-        let failed = |i: usize| {
-            result(
-                &format!("site{i}.com"),
-                CrawlOutcome::Failed {
-                    error: "dns error".into(),
-                },
-            )
-        };
-        let all_failed: Vec<CrawlResult> = (0..OFFLINE_MIN_BATCH).map(failed).collect();
-        assert!(seems_offline(all_failed.len(), &all_failed));
-        // Small batches can fail whole: a few dead sites are not an outage.
-        assert!(!seems_offline(3, &all_failed[..3]));
-        // One answer, of any kind, shows the network works.
-        for answer in [
-            CrawlOutcome::RobotsDisallowed,
-            CrawlOutcome::HttpStatus { status: 503 },
-            CrawlOutcome::Fetched(CrawledPage {
-                domain: "up.com".into(),
-                final_url: "https://up.com/".into(),
-                status: 200,
-                fetched_at: 1,
-                meta: PageMeta::default(),
-            }),
-        ] {
-            let mut results = all_failed.clone();
-            results.push(result("up.com", answer));
-            assert!(!seems_offline(results.len(), &results));
-        }
     }
 
     #[test]
