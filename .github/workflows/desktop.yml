@@ -1,0 +1,129 @@
+name: Desktop
+
+# Builds the desktop app's installers. Each run uploads them as artifacts
+# (plumb-search-linux-x86_64, plumb-search-windows-x64 and
+# plumb-search-macos-universal); a v* tag also attaches them to a draft
+# release. The builds are not code-signed yet; docs/desktop.md explains how to
+# open them anyway.
+
+on:
+  pull_request:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+# A newer run for the same branch, pull request or tag replaces one in progress.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # Keep in step with the tauri crate in crates/plumb-desktop/Cargo.toml.
+  TAURI_CLI_VERSION: "2.12.1"
+
+jobs:
+  build:
+    name: Build (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The oldest supported Ubuntu, so the AppImage runs on older distros too.
+          - name: linux
+            runner: ubuntu-22.04
+            args: --bundles deb,rpm,appimage
+            artifact: plumb-search-linux-x86_64
+            files: target/release/bundle/deb/*.deb target/release/bundle/rpm/*.rpm target/release/bundle/appimage/*.AppImage
+          - name: windows
+            runner: windows-latest
+            args: --bundles nsis,msi
+            artifact: plumb-search-windows-x64
+            files: target/release/bundle/nsis/*.exe target/release/bundle/msi/*.msi
+          # One app for both Apple silicon and Intel Macs.
+          - name: macos
+            runner: macos-latest
+            args: --target universal-apple-darwin --bundles app,dmg
+            artifact: plumb-search-macos-universal
+            files: target/universal-apple-darwin/release/bundle/dmg/*.dmg
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ runner.os == 'macOS' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: desktop-${{ matrix.name }}
+
+      - name: Cache tauri-cli
+        id: tauri-cli
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/cargo-tauri
+            ~/.cargo/bin/cargo-tauri.exe
+          key: tauri-cli-${{ env.TAURI_CLI_VERSION }}-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Install tauri-cli
+        if: steps.tauri-cli.outputs.cache-hit != 'true'
+        run: cargo install tauri-cli --version "${{ env.TAURI_CLI_VERSION }}" --locked
+
+      - name: Build the installers
+        working-directory: crates/plumb-desktop
+        env:
+          # aws-lc-sys, the crypto behind rustls, assembles its Windows code
+          # with NASM; where NASM is missing, use the objects it ships instead.
+          AWS_LC_SYS_PREBUILT_NASM: "1"
+        run: cargo tauri build ${{ matrix.args }}
+
+      # Tauri names the installers after the product ("Plumb Search_0.1.0_...");
+      # without the space they are easier to type, and release assets keep
+      # their names. A pattern that matches nothing fails the step.
+      - name: Collect the installers
+        shell: bash
+        run: |
+          mkdir -p dist
+          for file in ${{ matrix.files }}; do
+            name=$(basename "$file")
+            cp "$file" "dist/${name/Plumb Search/plumb-search}"
+          done
+          ls -l dist
+
+      - name: Upload the installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/
+          if-no-files-found: error
+
+  release:
+    name: Draft release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: plumb-search-*
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: dist/*

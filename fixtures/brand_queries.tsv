@@ -1,0 +1,90 @@
+# Brand-name test for the synthetic fixtures in this folder (see README.md).
+# Format: query<TAB>expected_domain[,another_ok_domain]
+#
+# Each expected site matches the query at least as well as any look-alike
+# and has far stronger popularity signals, so any sensible ranker that blends
+# name matching with popularity should get them all. Some names are only
+# findable through link text or aliases (bofa, amex, nyt, citibank), and some
+# real sites share a name (chase / chase center, delta / delta faucet,
+# ford / ford foundation, amazon / amazon jobs). The queries at the end are
+# harder: a brand plus what the user wants to do there.
+us bank	usbank.com
+U.S. Bank	usbank.com
+bank of america	bankofamerica.com
+bofa	bankofamerica.com
+chase	chase.com
+chase bank	chase.com
+chase center	chasecenter.com
+wells fargo	wellsfargo.com
+citibank	citi.com
+capital one	capitalone.com
+american express	americanexpress.com
+amex	americanexpress.com
+paypal	paypal.com
+irs	irs.gov
+internal revenue service	irs.gov
+social security	ssa.gov
+usps	usps.com
+medicare	medicare.gov
+nasa	nasa.gov
+cdc	cdc.gov
+veterans affairs	va.gov
+amazon	amazon.com
+amazon jobs	amazon.jobs
+walmart	walmart.com
+target	target.com
+home depot	homedepot.com
+best buy	bestbuy.com
+ikea	ikea.com
+McDonald's	mcdonalds.com
+delta	delta.com
+delta faucet	deltafaucet.com
+united airlines	united.com
+american airlines	aa.com
+southwest airlines	southwest.com
+new york times	nytimes.com
+nyt	nytimes.com
+bbc	bbc.co.uk,bbc.com
+cnn	cnn.com
+espn	espn.com
+google	google.com
+facebook	facebook.com
+youtube	youtube.com
+microsoft	microsoft.com
+apple	apple.com
+netflix	netflix.com
+wikipedia	wikipedia.org
+reddit	reddit.com
+mit	mit.edu
+harvard	harvard.edu
+stanford university	stanford.edu
+AT&T	att.com
+ford	ford.com
+ford foundation	fordfoundation.org
+#
+# Brand plus intent: the official site, not the look-alike built for the
+# query. A look-alike's title (and for some, link text from one spam page)
+# holds every query word, so it matches the text better than the official
+# site does, but it has no rank.
+irs refund	irs.gov
+irs refund status	irs.gov
+us bank login	usbank.com
+chase login	chase.com
+facebook login	facebook.com
+facebook account recovery	facebook.com
+usps tracking	usps.com
+usps redelivery	usps.com
+amazon refund	amazon.com
+paypal login	paypal.com
+wells fargo sign on	wellsfargo.com
+microsoft support	microsoft.com
+# Look-alike domains that spell out the whole query.
+amazon prime refund	amazon.com
+usps package redelivery	usps.com
+# A longer name beats the brand it starts with.
+chase center tickets	chasecenter.com
+delta faucet parts	deltafaucet.com
+# Little-known sites: github.com has no rank or Wikidata entry here (it is
+# only a link target), and no ranked site has its name.
+github	github.com
+github login	github.com

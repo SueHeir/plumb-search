@@ -1,0 +1,3 @@
+# sample.wat is a WARC file: its record lengths count the CRLF line endings,
+# so git must never convert them.
+sample.wat -text

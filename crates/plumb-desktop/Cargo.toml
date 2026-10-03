@@ -1,0 +1,26 @@
+[package]
+name = "plumb-desktop"
+description = "Plumb Search desktop app: a window around a node running in-process"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+anyhow = "1.0.104"
+plumb-node = { version = "0.1.0", path = "../plumb-node" }
+tauri = { version = "2.12.1", features = [] }
+tauri-plugin-dialog = "2.8.1"
+tauri-plugin-opener = "2.7.0"
+tauri-plugin-single-instance = "2.5.2"
+tokio = { version = "1.53.1", features = ["macros", "signal", "time"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+[build-dependencies]
+tauri-build = { version = "2.7.1", features = [] }
+
+[dev-dependencies]
+# Only examples/render_icon.rs uses it; the icon has no text or raster images.
+resvg = { version = "0.48.1", default-features = false }
