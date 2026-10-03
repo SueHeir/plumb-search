@@ -19,19 +19,26 @@
 //!   throwaway identity, or asks a node for the reports of a week it holds.
 //! * Gossip topic `plumb/reports/1`: every popularity report a node is
 //!   handed, as JSON, passed on by the node it was handed to.
+//! * `/plumb/credits/1`: asks a node for anonymous tokens paid with the
+//!   credits it counts for the asker, or how many credits that is (see
+//!   [`crate::credits`]). Asked over the asker's own identity, since its
+//!   balance pays.
 //! * `/plumb/kad/1.0.0`: Kademlia, to find more nodes.
 //!
 //! Requests and responses are CBOR.
 
 use serde::{Deserialize, Serialize};
+use serde_bytes::ByteBuf;
 
 use crate::batch::{Batch, RecordProof, SignedHeader};
+use crate::credits::Issued;
 use crate::hash::Hash;
 use crate::popularity::Report;
 
 pub const BUCKET_PROTOCOL: &str = "/plumb/bucket/1";
 pub const BATCH_PROTOCOL: &str = "/plumb/batch/1";
 pub const REPORT_PROTOCOL: &str = "/plumb/report/1";
+pub const CREDIT_PROTOCOL: &str = "/plumb/credits/1";
 pub const KAD_PROTOCOL: &str = "/plumb/kad/1.0.0";
 pub const IDENTIFY_PROTOCOL: &str = "/plumb/id/1.0.0";
 pub const BATCH_TOPIC: &str = "plumb/batches/1";
@@ -99,4 +106,24 @@ pub enum BatchRequest {
 pub enum BatchResponse {
     Batch(Option<Batch>),
     Headers(Vec<SignedHeader>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CreditRequest {
+    /// Sign these blinded tokens, at most [`crate::credits::MAX_ISSUE`],
+    /// paid from the asker's credits.
+    Issue { blinded: Vec<ByteBuf> },
+    /// The asker's credits, as the node asked counts them.
+    Balance,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CreditResponse {
+    /// As many of the tokens signed as the asker's credits pay for.
+    Issued(Issued),
+    /// The asker's balance, and whether its crawls count yet (a crawler
+    /// gets tokens only once they do).
+    Balance { credits: i64, counts: bool },
+    /// No tokens, and why.
+    Refused(String),
 }
