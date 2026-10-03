@@ -470,7 +470,7 @@ pub(super) fn absorb_inbox(inner: &Inner) -> Result<u64> {
         let line = line.with_context(|| format!("reading {}", paths.absorbing.display()))?;
         // A crash can cut the last line short.
         if let Ok(record) = serde_json::from_str::<SiteRecord>(&line) {
-            changes.push(Change::Merge { record });
+            changes.push(Change::MergeShared { record });
         }
     }
     let n = changes.len() as u64;

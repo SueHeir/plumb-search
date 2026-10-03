@@ -42,6 +42,9 @@ pub(crate) const MIN_COMPACT_BYTES: u64 = 64 << 20;
 pub(crate) enum Change {
     /// Merges a record into the set, as [`RecordSet::upsert`] does.
     Merge { record: SiteRecord },
+    /// Merges a crawl another node shared, as [`RecordSet::upsert_shared`]
+    /// does: what it leaves out (search box, page text) is kept, not cleared.
+    MergeShared { record: SiteRecord },
     /// Sets when a site's homepage was last tried and how many tries in a
     /// row failed to reach it ([`SiteRecord::crawl_failures`]).
     Mark {
@@ -58,6 +61,9 @@ impl Change {
         match self {
             Change::Merge { record } => {
                 set.upsert(record);
+            }
+            Change::MergeShared { record } => {
+                set.upsert_shared(record);
             }
             Change::Mark {
                 domain,
