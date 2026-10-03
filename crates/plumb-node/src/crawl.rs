@@ -1,7 +1,7 @@
 //! `plumb crawl`: fetches homepages and merges what they say into the
 //! records, including links that discover new domains. A long-running node
 //! ([`crate::node`]) crawls through the same [`select_targets`] and
-//! [`crawl_in_batches`].
+//! [`crawl_rolling`].
 //!
 //! # Which homepages
 //!
@@ -26,13 +26,16 @@
 //!
 //! # Saving
 //!
-//! Homepages are fetched [`CRAWL_BATCH_SIZE`] at a time. Before a batch is
-//! fetched, its sites are saved as tried and failed, so that if the crawler
+//! Homepages are started [`CRAWL_BATCH_SIZE`] at a time, with more kept in
+//! flight while the slowest of a batch finish, and saved in batches of that
+//! size in the order they finish. Before a batch is started, its sites are
+//! saved as tried and failed, so that if the crawler
 //! dies on a hostile page (an out-of-memory abort cannot be caught), the
 //! next run does not start with the same sites again: they come back after
-//! the failure wait above, which grows if it happens again. After the batch,
-//! its results and each site's real outcome are saved. A batch that is cut
-//! short (on shutdown) or looks offline gets its old marks back instead.
+//! the failure wait above, which grows if it happens again. As each batch
+//! finishes, its results and each site's real outcome are saved. When the
+//! crawl is cut short (on shutdown) or a batch looks offline, every site
+//! started and not saved gets its old marks back instead.
 //! Everything goes to the records file's journal ([`crate::records`]),
 //! flushed to disk at once and folded into the file now and then, and when
 //! `plumb crawl` ends.
@@ -53,7 +56,7 @@ use std::fmt;
 use anyhow::{bail, Result};
 use plumb_core::{now_unix, RecordSet, SiteRecord};
 use plumb_crawl::{
-    crawl_homepages, to_records, CrawlConfig, CrawlOutcome, CrawlResult, CrawlTarget,
+    to_records, CrawlConfig, CrawlOutcome, CrawlResult, CrawlTarget, HomepageCrawler,
 };
 use tracing::{info, warn};
 
@@ -87,16 +90,29 @@ pub fn run(args: CrawlArgs) -> Result<()> {
         use_system_proxy: args.use_system_proxy,
         ..CrawlConfig::default()
     };
-    crawl_file(&args, |batch| {
-        runtime.block_on(crawl_homepages(batch, &cfg))
-    })
+    let mut fetcher = Rolling {
+        crawler: HomepageCrawler::new(cfg),
+        concurrency: args.concurrency,
+        runtime: runtime.handle(),
+    };
+    crawl_file_with(&args, &mut fetcher)
 }
 
-/// `plumb crawl`, with homepages fetched by `fetch`.
+/// `plumb crawl`, with homepages fetched by `fetch` a batch at a time.
+#[cfg(test)]
 fn crawl_file(
     args: &CrawlArgs,
     mut fetch: impl FnMut(Vec<CrawlTarget>) -> Vec<CrawlResult>,
 ) -> Result<()> {
+    let mut fetcher = Batches {
+        crawl: |batch| Some(fetch(batch)),
+        queued: Vec::new(),
+    };
+    crawl_file_with(args, &mut fetcher)
+}
+
+/// `plumb crawl`, with homepages fetched by `fetcher`.
+fn crawl_file_with(args: &CrawlArgs, fetcher: &mut impl Fetcher) -> Result<()> {
     let mut set = load_records(&args.records)?;
     let out = args.out.as_deref().unwrap_or(&args.records);
     let mut store = RecordStore::open(out);
@@ -115,12 +131,12 @@ fn crawl_file(
         set.len(),
         args.concurrency
     );
-    let totals = crawl_in_batches(
+    let totals = crawl_rolling(
         &mut set,
         &targets,
         CRAWL_BATCH_SIZE,
         &mut store,
-        |batch| Some(fetch(batch)),
+        fetcher,
         |_| Ok(()),
     )?;
     let written = store.compact(&set)?;
@@ -294,6 +310,43 @@ impl fmt::Display for OfflineBatch {
     }
 }
 
+/// Fetches homepages for [`crawl_rolling`]: it starts the targets it is
+/// given and says when they are done.
+pub(crate) trait Fetcher {
+    /// Targets [`crawl_rolling`] keeps started beyond the `batch_size` it
+    /// waits for, so fetches go on while a batch's slowest sites finish.
+    fn ahead(&self) -> usize {
+        0
+    }
+    /// Starts fetching `targets`, after those started before.
+    fn start(&mut self, targets: Vec<CrawlTarget>);
+    /// Waits until `n` started targets are done (fewer when fewer are left)
+    /// and returns the domains done with their results; a domain done
+    /// without a result counts as not reached. `None` stops the run.
+    fn finished(&mut self, n: usize) -> Option<(Vec<String>, Vec<CrawlResult>)>;
+}
+
+/// A [`Fetcher`] that fetches each batch whole with a closure, and starts
+/// nothing ahead.
+#[cfg(test)]
+struct Batches<F> {
+    crawl: F,
+    queued: Vec<CrawlTarget>,
+}
+
+#[cfg(test)]
+impl<F: FnMut(Vec<CrawlTarget>) -> Option<Vec<CrawlResult>>> Fetcher for Batches<F> {
+    fn start(&mut self, targets: Vec<CrawlTarget>) {
+        self.queued.extend(targets);
+    }
+
+    fn finished(&mut self, _n: usize) -> Option<(Vec<String>, Vec<CrawlResult>)> {
+        let batch = std::mem::take(&mut self.queued);
+        let done = batch.iter().map(|target| target.domain.clone()).collect();
+        Some((done, (self.crawl)(batch)?))
+    }
+}
+
 /// Fetches `targets` with `crawl`, `batch_size` at a time, saving to `store`
 /// as the module docs describe, and calls `saved` with the totals so far
 /// after each batch; an error from `saved` ends the run.
@@ -301,33 +354,70 @@ impl fmt::Display for OfflineBatch {
 /// `crawl` returns `None` to stop early, say on shutdown. The run also ends
 /// at a batch that looks offline. Either way, that batch's sites get their
 /// old marks back, and [`RunTotals::end`] says why the run ended.
+#[cfg(test)]
 pub(crate) fn crawl_in_batches(
     set: &mut RecordSet,
     targets: &[CrawlTarget],
     batch_size: usize,
     store: &mut RecordStore,
-    mut crawl: impl FnMut(Vec<CrawlTarget>) -> Option<Vec<CrawlResult>>,
+    crawl: impl FnMut(Vec<CrawlTarget>) -> Option<Vec<CrawlResult>>,
+    saved: impl FnMut(&RunTotals) -> Result<()>,
+) -> Result<RunTotals> {
+    let mut fetcher = Batches {
+        crawl,
+        queued: Vec::new(),
+    };
+    crawl_rolling(set, targets, batch_size, store, &mut fetcher, saved)
+}
+
+/// [`crawl_in_batches`] with any [`Fetcher`]. Targets are started
+/// `batch_size` at a time, each batch saved as tried and failed first, and
+/// whenever `batch_size` of them are done, in whatever order they finish,
+/// their results are saved and judged for being offline. On a stop or an
+/// offline batch, every site started and not done gets its old marks back.
+pub(crate) fn crawl_rolling(
+    set: &mut RecordSet,
+    targets: &[CrawlTarget],
+    batch_size: usize,
+    store: &mut RecordStore,
+    fetcher: &mut impl Fetcher,
     mut saved: impl FnMut(&RunTotals) -> Result<()>,
 ) -> Result<RunTotals> {
     let batch_size = batch_size.max(1);
     let batches = targets.len().div_ceil(batch_size);
     let mut merger = BatchMerger::default();
     let mut totals = RunTotals::default();
-    for (i, batch) in targets.chunks(batch_size).enumerate() {
-        let attempted_at = now_unix();
-        let before: Vec<Mark> = batch
-            .iter()
-            .map(|target| Mark::of(set, &target.domain))
-            .collect();
-        // Until the batch is done, its sites count as tried and failed.
-        let pending = before
-            .iter()
-            .map(|mark| mark.failed(attempted_at))
-            .collect();
-        commit(set, store, pending)?;
+    let mut chunks = targets.chunks(batch_size);
+    // Sites started and not done, with their marks from before.
+    let mut started: HashMap<String, Mark> = HashMap::new();
+    let mut batch = 0;
+    loop {
+        while started.len() < batch_size + fetcher.ahead() {
+            let Some(chunk) = chunks.next() else {
+                break;
+            };
+            let attempted_at = now_unix();
+            let before: Vec<Mark> = chunk
+                .iter()
+                .map(|target| Mark::of(set, &target.domain))
+                .collect();
+            // Until a site is done, it counts as tried and failed.
+            let pending = before
+                .iter()
+                .map(|mark| mark.failed(attempted_at))
+                .collect();
+            commit(set, store, pending)?;
+            for mark in before {
+                started.insert(mark.domain.clone(), mark);
+            }
+            fetcher.start(chunk.to_vec());
+        }
+        if started.is_empty() {
+            return Ok(totals);
+        }
 
-        let Some(results) = crawl(batch.to_vec()) else {
-            commit(set, store, before.iter().map(Mark::change).collect())?;
+        let Some((done, results)) = fetcher.finished(batch_size.min(started.len())) else {
+            commit(set, store, started.values().map(Mark::change).collect())?;
             info!(
                 "crawl stopped after {} of {} homepages",
                 totals.attempted,
@@ -336,12 +426,24 @@ pub(crate) fn crawl_in_batches(
             totals.end = RunEnd::Stopped;
             return Ok(totals);
         };
+        let before: Vec<Mark> = done
+            .iter()
+            .filter_map(|domain| started.remove(domain))
+            .collect();
+        if before.is_empty() {
+            bail!(
+                "the crawler finished no homepage of the {} started",
+                started.len()
+            );
+        }
+        let attempted_at = now_unix();
         let outcomes: HashMap<&str, &CrawlOutcome> = results
             .iter()
             .map(|result| (result.domain.as_str(), &result.outcome))
             .collect();
         if let Some(offline) = offline_batch(&before, &outcomes) {
-            commit(set, store, before.iter().map(Mark::change).collect())?;
+            let restore = before.iter().chain(started.values());
+            commit(set, store, restore.map(Mark::change).collect())?;
             warn!("{offline}");
             totals.end = RunEnd::Offline(offline);
             return Ok(totals);
@@ -356,7 +458,7 @@ pub(crate) fn crawl_in_batches(
         );
         commit(set, store, changes)?;
         let counted = CrawlSummary::of(&results);
-        totals.attempted += batch.len();
+        totals.attempted += before.len();
         totals.outcomes.add(&counted);
         totals.discovered += set.len().saturating_sub(known);
         if store.wants_compaction() {
@@ -366,15 +468,55 @@ pub(crate) fn crawl_in_batches(
                 store.path().display()
             );
         }
+        batch += 1;
         info!(
-            "batch {}/{batches}: fetched {} of {} homepages",
-            i + 1,
+            "batch {batch}/{batches}: fetched {} of {} homepages",
             counted.fetched,
-            batch.len()
+            before.len()
         );
         saved(&totals)?;
     }
-    Ok(totals)
+}
+
+/// A [`Fetcher`] that keeps `cfg.concurrency` homepages in flight with a
+/// [`HomepageCrawler`], driven on `runtime`.
+pub(crate) struct Rolling<'a> {
+    pub(crate) crawler: HomepageCrawler,
+    pub(crate) concurrency: usize,
+    pub(crate) runtime: &'a tokio::runtime::Handle,
+}
+
+impl Rolling<'_> {
+    /// The next `n` results, or fewer when fewer are pending.
+    pub(crate) async fn next_results(crawler: &mut HomepageCrawler, n: usize) -> Vec<CrawlResult> {
+        let mut results = Vec::with_capacity(n);
+        while results.len() < n {
+            match crawler.next().await {
+                Some(result) => results.push(result),
+                None => break,
+            }
+        }
+        plumb_crawl::log_summary(&results);
+        results
+    }
+}
+
+impl Fetcher for Rolling<'_> {
+    fn ahead(&self) -> usize {
+        self.concurrency.max(1)
+    }
+
+    fn start(&mut self, targets: Vec<CrawlTarget>) {
+        self.crawler.push(targets);
+    }
+
+    fn finished(&mut self, n: usize) -> Option<(Vec<String>, Vec<CrawlResult>)> {
+        let results = self
+            .runtime
+            .block_on(Self::next_results(&mut self.crawler, n));
+        let done = results.iter().map(|result| result.domain.clone()).collect();
+        Some((done, results))
+    }
 }
 
 /// Saves `changes`, then makes them to `set`.
