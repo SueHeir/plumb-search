@@ -14,14 +14,17 @@
 //! refused.
 //!
 //! The swap is two renames, so a crash between them leaves both copies on
-//! disk under their hidden names and nothing at the target. Renaming also
-//! means the target cannot be a mount point; mount its parent instead.
+//! disk under their hidden names and nothing at the target. The next build
+//! puts the old copy back first, and deletes what other crashed builds left
+//! behind ([`tidy`]). Renaming also means the target cannot be a mount
+//! point; mount its parent instead.
 
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use tantivy::directory::{INDEX_WRITER_LOCK, META_LOCK};
@@ -63,6 +66,7 @@ impl Staging {
     pub(crate) fn new(dir: &Path) -> Result<Staging> {
         let target = resolve(dir)?;
         dir_name(&target)?;
+        tidy(&target)?;
         check_replaceable(&target)?;
         let parent = parent_of(&target);
         fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
@@ -158,6 +162,78 @@ fn swap(new: &Path, dir: &Path) -> Result<()> {
         })?;
     }
     Ok(())
+}
+
+/// How old a leftover of another process must be before it is deleted,
+/// where it cannot be told whether that process still runs.
+const LEFTOVER_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Cleans up after builds of `dir` that crashed: puts an old index back
+/// when a crash between [`swap`]'s renames left nothing at `dir`, then
+/// deletes staging and old directories that no running build still uses.
+fn tidy(dir: &Path) -> Result<()> {
+    let mut leftovers = Vec::new();
+    match fs::read_dir(parent_of(dir)) {
+        Ok(entries) => {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if let Some(tag) = leftover(dir, &entry.file_name()) {
+                    leftovers.push((tag, path));
+                }
+            }
+        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err).with_context(|| format!("reading {}", dir.display())),
+    }
+    if matches!(fs::symlink_metadata(dir), Err(err) if err.kind() == io::ErrorKind::NotFound) {
+        let old = leftovers
+            .iter()
+            .filter(|(tag, path)| tag == "old" && holds_index(path))
+            .max_by_key(|(_, path)| fs::metadata(path).and_then(|m| m.modified()).ok());
+        if let Some((_, old)) = old {
+            fs::rename(old, dir)
+                .with_context(|| format!("moving the old index back from {}", old.display()))?;
+        }
+    }
+    for (_, path) in leftovers {
+        if fs::symlink_metadata(&path).is_ok() {
+            // Best effort, like dropping a [`Staging`].
+            let _ = fs::remove_dir_all(&path);
+        }
+    }
+    Ok(())
+}
+
+/// The tag (`new` or `old`) of `name` when it is a [`sibling`] of `dir`
+/// that no running process uses: one made by another process that has
+/// exited, or, where that cannot be told, one untouched for
+/// [`LEFTOVER_AGE`].
+fn leftover(dir: &Path, name: &OsStr) -> Option<String> {
+    let name = name.to_str()?;
+    let rest = name
+        .strip_prefix('.')?
+        .strip_prefix(dir_name(dir).ok()?.to_str()?)?
+        .strip_prefix('.')?;
+    let (tag, ids) = rest.split_once('-')?;
+    let (pid, n) = ids.split_once('-')?;
+    let pid: u32 = pid.parse().ok()?;
+    if !matches!(tag, "new" | "old") || n.parse::<u64>().is_err() || pid == std::process::id() {
+        return None;
+    }
+    let gone = if cfg!(target_os = "linux") {
+        !Path::new("/proc").join(pid.to_string()).exists()
+    } else {
+        let path = parent_of(dir).join(name);
+        fs::metadata(path)
+            .and_then(|meta| meta.modified())
+            .is_ok_and(|time| time.elapsed().is_ok_and(|age| age > LEFTOVER_AGE))
+    };
+    gone.then(|| tag.to_string())
+}
+
+/// Whether `dir` holds a complete index: marked, or a bare Tantivy index.
+fn holds_index(dir: &Path) -> bool {
+    has_marker(dir) || strays(dir).is_ok_and(|strays| strays.is_some_and(|s| s.is_empty()))
 }
 
 /// `dir` with symlinks resolved when it exists.
@@ -419,6 +495,57 @@ mod tests {
         }
         let err = format!("{:#}", check_replaceable(&dir).unwrap_err());
         assert!(err.contains("it holds a, b, c and 2 more, which"), "{err}");
+    }
+
+    /// A process id that is not running, for leftovers of a crashed build.
+    fn dead_pid() -> u32 {
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        pid
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn leftovers_of_crashed_builds_are_cleaned_up() {
+        let root = TempDir::new().unwrap();
+        let dir = root.path().join("index");
+        fake_index(&dir, "current");
+        let dead = dead_pid();
+        // A build killed mid-way, and one killed while deleting the old copy.
+        fake_index(&root.path().join(format!(".index.new-{dead}-0")), "half");
+        fake_index(&root.path().join(format!(".index.old-{dead}-1")), "older");
+        // A running build's, and things that only look alike, are kept.
+        let running = format!(".index.new-{}-0", std::process::id());
+        fs::create_dir(root.path().join(&running)).unwrap();
+        for name in [".index.new-x-0", ".other.new-1-0", "index.new-1-0"] {
+            fs::create_dir(root.path().join(name)).unwrap();
+        }
+        let staging = Staging::new(&dir).unwrap();
+        let mut left = entries(root.path());
+        left.retain(|name| !name.starts_with(&running) || *name == running);
+        let staged = staging.path().file_name().unwrap().to_str().unwrap();
+        let mut expected = vec![".index.new-x-0", ".other.new-1-0", "index", "index.new-1-0"];
+        expected.push(staged);
+        expected.push(&running);
+        expected.sort();
+        assert_eq!(left, expected);
+        assert_eq!(entries(&dir), [MARKER, "current"]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_crash_mid_swap_gets_the_old_index_back() {
+        let root = TempDir::new().unwrap();
+        let dir = root.path().join("index");
+        let dead = dead_pid();
+        // The old index was moved aside and the new one never moved in.
+        fake_index(&root.path().join(format!(".index.old-{dead}-0")), "old");
+        fake_index(&root.path().join(format!(".index.new-{dead}-1")), "new");
+        let staging = Staging::new(&dir).unwrap();
+        assert_eq!(entries(&dir), [MARKER, "old"]);
+        drop(staging);
+        assert_eq!(entries(root.path()), ["index"]);
     }
 
     #[cfg(unix)]
