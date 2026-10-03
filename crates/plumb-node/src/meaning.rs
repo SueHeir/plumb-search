@@ -25,6 +25,8 @@ const NEAREST: usize = 50;
 /// Vectors made between saves of the vectors file, so a stopped run keeps
 /// most of its work.
 pub(crate) const SAVE_EVERY: usize = 10_000;
+/// Vectors made between progress reports.
+const REPORT_EVERY: usize = 1_000;
 
 /// A model and the vectors it made, for ranking by meaning. The vectors can
 /// grow while searches use them.
@@ -89,10 +91,7 @@ impl MeaningIndex {
     /// cannot be embedded.
     pub fn query(&self, query: &str) -> Option<QueryMeaning<'_>> {
         match self.embedder.embed(query) {
-            Ok(vector) => Some(QueryMeaning {
-                vectors: self.read(),
-                vector,
-            }),
+            Ok(vector) => Some(QueryMeaning::new(self.read(), vector)),
             Err(err) => {
                 warn!("could not embed {query:?}, searching by words only: {err:#}");
                 None
@@ -124,22 +123,55 @@ impl SharedMeaning {
 }
 
 /// A query's vector, against the sites' vectors.
+///
+/// The model's cosines bunch up (unrelated texts score around 0.5, close
+/// ones 0.8), which would leave popularity to decide among them. So
+/// closeness is spread over the [`NEAREST`] sites: the nearest gets 1, the
+/// last of them 0, and sites farther away 0 too.
 pub struct QueryMeaning<'a> {
     vectors: RwLockReadGuard<'a, Vectors>,
     vector: Vec<i8>,
+    nearest: Vec<String>,
+    /// Cosines of the nearest and of the last of the nearest sites.
+    best: f32,
+    floor: f32,
+}
+
+impl<'a> QueryMeaning<'a> {
+    fn new(vectors: RwLockReadGuard<'a, Vectors>, vector: Vec<i8>) -> Self {
+        let found = vectors.nearest(&vector, NEAREST);
+        let best = found.first().map_or(0.0, |&(_, cosine)| cosine);
+        let floor = match found.last() {
+            // Too few sites to spread: keep the cosines as they are.
+            Some(&(_, cosine)) if found.len() == NEAREST => cosine,
+            _ => 0.0,
+        };
+        let nearest = found
+            .into_iter()
+            .map(|(domain, _)| domain.to_string())
+            .collect();
+        QueryMeaning {
+            vectors,
+            vector,
+            nearest,
+            best,
+            floor,
+        }
+    }
 }
 
 impl Meaning for QueryMeaning<'_> {
     fn nearest(&self) -> Vec<String> {
-        self.vectors
-            .nearest(&self.vector, NEAREST)
-            .into_iter()
-            .map(|(domain, _)| domain.to_string())
-            .collect()
+        self.nearest.clone()
     }
 
     fn closeness(&self, domain: &str) -> Option<f32> {
-        self.vectors.closeness(&self.vector, domain)
+        let cosine = self.vectors.closeness(&self.vector, domain)?;
+        if self.best > self.floor {
+            Some(((cosine - self.floor) / (self.best - self.floor)).clamp(0.0, 1.0))
+        } else {
+            Some(cosine.clamp(0.0, 1.0))
+        }
     }
 }
 
@@ -177,7 +209,8 @@ pub(crate) struct Embedded {
 /// Makes a vector for each of `records` (best first, as given) whose text
 /// changed since its vector was made, on `threads` threads, and drops the
 /// vectors of sites not in `records`. Calls `save` after every
-/// [`SAVE_EVERY`] sites and at the end. Stops early, after a save, once
+/// [`SAVE_EVERY`] sites and at the end, and logs progress every
+/// [`REPORT_EVERY`]. Stops early, after a save, once
 /// `stop` says so.
 pub(crate) fn embed_records(
     embedder: &Embedder,
@@ -215,7 +248,8 @@ pub(crate) fn embed_records(
     let started = Instant::now();
     let done = AtomicUsize::new(0);
     let failed = AtomicUsize::new(0);
-    for chunk in todo.chunks(SAVE_EVERY) {
+    let chunks = todo.len().div_ceil(REPORT_EVERY);
+    for (n, chunk) in todo.chunks(REPORT_EVERY).enumerate() {
         let next = AtomicUsize::new(0);
         std::thread::scope(|scope| {
             for _ in 0..threads.max(1) {
@@ -239,7 +273,10 @@ pub(crate) fn embed_records(
                 });
             }
         });
-        save(&vectors.read().unwrap_or_else(PoisonError::into_inner))?;
+        let last = n + 1 == chunks || stop();
+        if last || (n + 1) % (SAVE_EVERY / REPORT_EVERY) == 0 {
+            save(&vectors.read().unwrap_or_else(PoisonError::into_inner))?;
+        }
         let done = done.load(Ordering::Relaxed);
         info!(
             "embedded {done} of {} sites ({:.1} a second)",

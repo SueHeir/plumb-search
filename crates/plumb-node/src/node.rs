@@ -392,6 +392,10 @@ pub struct Status {
     pub downloaded_total: u64,
     /// Homepages visited since the node was set up.
     pub homepages_visited: u64,
+    /// Sites with a vector for search by meaning, when it is on and its
+    /// model is loaded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meaning_sites: Option<u64>,
 }
 
 /// Whether a node can search yet.
@@ -800,6 +804,7 @@ impl Inner {
             version: env!("CARGO_PKG_VERSION").to_string(),
             network: network::handle(self).map(|net| net.status()),
             crawl_left: saved.crawl_left as u64,
+            meaning_sites: self.meaning.get().map(|meaning| meaning.len() as u64),
             background_updates: self.settings().background_updates,
             paused: self.pause_reason().map(String::from),
             disk_used: self.disk_used(),

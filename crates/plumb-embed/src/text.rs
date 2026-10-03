@@ -8,24 +8,34 @@ use unicode_normalization::UnicodeNormalization;
 
 /// Most words of a site's text that are embedded.
 pub const MAX_TEXT_WORDS: usize = 100;
+/// Most link texts (other sites' words for the site, most used first) in a
+/// site's text.
+pub const MAX_LINK_TEXTS: usize = 5;
 
 /// SHA-256 of a site's text ([`text_hash`]).
 pub type TextHash = [u8; 32];
 
 /// The text of `record` to embed: its names, homepage title and
-/// description, what Wikidata says the organization is, its homepage
+/// description, what Wikidata says the organization is, the
+/// [`MAX_LINK_TEXTS`] words other sites link to it with most, its homepage
 /// headings and the start of its homepage text, in that order, joined by ". " and cut at [`MAX_TEXT_WORDS`]
 /// words. Each part is put in Unicode NFC and its whitespace collapsed, and
 /// a part equal to an earlier one (ignoring case) is left out. The same
 /// record always gives the same text; a record with none of these gives an
 /// empty one.
 pub fn site_text(record: &SiteRecord) -> String {
+    let link_texts = record
+        .link_texts
+        .iter()
+        .take(MAX_LINK_TEXTS)
+        .map(|link| &link.text);
     let parts = record
         .aliases
         .iter()
         .chain(&record.title)
         .chain(&record.description)
         .chain(&record.about)
+        .chain(link_texts)
         .chain(&record.headings)
         .chain(&record.body_text);
     let mut seen = HashSet::new();
@@ -81,5 +91,13 @@ mod tests {
             MAX_TEXT_WORDS
         );
         assert_eq!(site_text(&SiteRecord::new("empty.com")), "");
+
+        // Other sites' words for a site give it text before any crawl.
+        let mut linked = SiteRecord::new("chicagotribune.com");
+        linked.link_texts = ["Chicago Tribune", "chicago news", "a", "b", "c", "d"]
+            .iter()
+            .map(|text| plumb_core::LinkText::from_linkers(*text, 1))
+            .collect();
+        assert_eq!(site_text(&linked), "Chicago Tribune. chicago news. a. b. c");
     }
 }
