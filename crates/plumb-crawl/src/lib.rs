@@ -20,6 +20,8 @@ mod crawl;
 mod dns;
 mod extract;
 mod records;
+#[cfg(test)]
+mod test_alloc;
 
 pub use crawl::crawl_homepages;
 pub use extract::{extract_page_meta, MAX_OUT_LINKS};
@@ -41,7 +43,8 @@ pub struct CrawlConfig {
     pub user_agent: String,
     /// Fetches in flight at once across all hosts.
     pub concurrency: usize,
-    /// Pause between two requests to the same host (robots.txt, then the page).
+    /// Pause between a host's answer and the next request to that host
+    /// (robots.txt, then the page, then any redirects).
     pub per_host_delay: Duration,
     /// Timeout for each request, including reading the body.
     pub timeout: Duration,
@@ -86,22 +89,37 @@ impl Default for CrawlConfig {
     }
 }
 
-/// A homepage to fetch.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// A homepage to fetch. [`CrawlTarget::new`] makes one for a domain; set
+/// [`known_url`](CrawlTarget::known_url) when the site is known to answer
+/// at some URL.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CrawlTarget {
     /// Registrable domain the results are filed under.
     pub domain: String,
-    /// Starting URL; robots.txt is fetched from the same origin.
+    /// The URL to start at. Empty means `https://<domain>/`.
+    #[serde(default)]
     pub url: String,
+    /// A URL the site was reached at before (a record's `url`), tried when
+    /// `url` cannot be reached at all; see [`crawl_homepages`]. Ignored
+    /// unless it is on the same site as `url`: the same host, or one with
+    /// the same registrable domain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub known_url: Option<String>,
 }
 
 impl CrawlTarget {
-    /// `https://<domain>/`.
-    pub fn homepage(domain: &str) -> Self {
+    /// Starts at `https://<domain>/`, with no known URL.
+    pub fn new(domain: &str) -> Self {
         CrawlTarget {
             domain: domain.to_string(),
             url: format!("https://{domain}/"),
+            known_url: None,
         }
+    }
+
+    /// The same as [`CrawlTarget::new`].
+    pub fn homepage(domain: &str) -> Self {
+        Self::new(domain)
     }
 }
 
@@ -148,8 +166,9 @@ pub struct CrawledPage {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CrawlOutcome {
     Fetched(CrawledPage),
-    /// robots.txt does not allow fetching the homepage (or the same-site
-    /// page it redirects to).
+    /// The robots.txt of the homepage's origin, or of a same-site URL the
+    /// homepage redirects to, does not allow fetching it. Nothing robots.txt
+    /// disallows is ever requested.
     RobotsDisallowed,
     /// The homepage redirects to another registrable domain (`fb.com` ->
     /// `facebook.com`). `final_url` is where that redirect points (resolved,
@@ -166,12 +185,27 @@ pub enum CrawlOutcome {
     NotHtml {
         content_type: String,
     },
-    /// DNS, connection, TLS, timeout or similar. Also used when robots.txt
-    /// answers 5xx or 429, cannot be fetched, or cannot be parsed: RFC 9309
-    /// says not to crawl then, and the error message starts with
-    /// `robots.txt`. Worth retrying later.
+    /// Not crawled because of an error. The message says what went wrong,
+    /// and starts with `robots.txt` when that is where it went wrong.
+    ///
+    /// `network` is true when no usable answer came back at all: the host
+    /// name does not resolve (or resolves only to non-public addresses, see
+    /// [`CrawlConfig::allow_private_addresses`]), connecting or the TLS
+    /// handshake failed, the request timed out, the connection broke off
+    /// before the response was complete, or what came back was not HTTP.
+    /// That says little about the site and is often temporary, so it is
+    /// worth retrying sooner than other failures. Every fallback URL has
+    /// been tried by then (see [`crawl_homepages`]).
+    ///
+    /// Otherwise `network` is false: robots.txt answered 5xx or 429 (RFC
+    /// 9309 says not to crawl then), could not be parsed, or has rules that
+    /// would take too much memory; there were more than `max_redirects`
+    /// redirects; the target URL is not a usable http(s) URL; the body could
+    /// not be decoded; or the HTTP client could not be built.
     Failed {
         error: String,
+        #[serde(default)]
+        network: bool,
     },
 }
 

@@ -1,15 +1,19 @@
-//! Fetching homepages: robots.txt, politeness delays, redirects and size limits.
+//! Fetching homepages: robots.txt for every origin, politeness delays,
+//! redirects followed hop by hop, fallback URLs, and size limits.
 
 use std::borrow::Cow;
+use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use futures::stream::{self, StreamExt};
 use plumb_core::{now_unix, registrable_domain};
 use reqwest::header::{ACCEPT, CONTENT_TYPE, LOCATION};
-use reqwest::{redirect, Client, Response, StatusCode};
+use reqwest::{redirect, Client, ClientBuilder, RequestBuilder, Response, StatusCode};
 use texting_robots::Robot;
+use tokio::time::Instant;
 use tracing::{debug, info, warn};
-use url::Url;
+use url::{Origin, Url};
 
 use crate::{
     dns, extract_page_meta, CrawlConfig, CrawlOutcome, CrawlResult, CrawlTarget, CrawledPage,
@@ -19,55 +23,70 @@ use crate::{
 const ROBOTS_PATH: &str = "/robots.txt";
 /// robots.txt is parsed up to this size; RFC 9309 asks for at least 500 KiB.
 const ROBOTS_MAX_BYTES: usize = 500 * 1024;
+/// A robots.txt whose rules would take more memory than this, by the
+/// estimate of [`regex_cost`], is not parsed. Every rule with a `$` needs a
+/// compiled regular expression, so 500 KiB of them can take a quarter of a
+/// gigabyte. This allows about a thousand short ones; real files have a
+/// handful.
+const MAX_ROBOTS_REGEX_BYTES: usize = 16 << 20;
 /// Longest robots.txt `Crawl-delay` honoured; longer ones are cut to this.
 const MAX_CRAWL_DELAY: Duration = Duration::from_secs(30);
 /// `Accept` header for page requests.
 const ACCEPT_HTML: &str = "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8";
 
-/// Fetches each target's homepage, at most `cfg.concurrency` at a time,
-/// returning one result per target (in any order). robots.txt rules:
-/// a 2xx robots.txt is obeyed for [`ROBOTS_TOKEN`]; a 4xx means no rules;
-/// a 5xx or an unreachable robots.txt means do not crawl (RFC 9309).
+/// Fetches each target's homepage, at most `cfg.concurrency` targets at a
+/// time, returning one result per target (in any order).
 ///
-/// For each target:
+/// For each target the crawler starts at `target.url` (by default
+/// `https://<domain>/`) and follows redirects itself, one hop at a time:
 ///
-/// 1. `robots.txt` is fetched from the start URL's origin:
-///    - 2xx: the first 500 KiB are parsed and obeyed. A disallowed start URL
-///      gives [`CrawlOutcome::RobotsDisallowed`]; a file that cannot be
-///      parsed gives [`CrawlOutcome::Failed`].
+/// 1. Before requesting a URL it checks the robots.txt of the URL's origin
+///    (scheme, host and port: RFC 9309 scopes the file to one origin),
+///    fetching it on first use. So a redirect into a disallowed path, or to
+///    a host whose own robots.txt disallows the page, is never followed:
+///    [`CrawlOutcome::RobotsDisallowed`]. robots.txt answers:
+///    - 2xx: the first 500 KiB are parsed and obeyed for [`ROBOTS_TOKEN`].
+///      A file that cannot be parsed gives [`CrawlOutcome::Failed`], and
+///      so does one whose rules would take more than 16 MiB: each rule with
+///      a `$` needs a compiled regular expression, so that allows about a
+///      thousand of them.
 ///    - 4xx other than 429: no rules, everything is allowed.
-///    - 5xx or 429: not crawled, [`CrawlOutcome::Failed`].
-///    - Network error or timeout: not crawled, [`CrawlOutcome::Failed`].
+///    - 5xx or 429, or no answer: not crawled, [`CrawlOutcome::Failed`].
 ///    - A redirect to another site, or more than `cfg.max_redirects`
 ///      redirects: no rules, as RFC 9309 allows for redirects it cannot
 ///      follow.
 ///
 ///    Failed messages about robots.txt start with `robots.txt`.
-/// 2. Waits `cfg.per_host_delay`, or the robots.txt `Crawl-delay` when that
-///    is longer (capped at 30 seconds).
-/// 3. Fetches the start URL. A redirect to another registrable domain gives
-///    [`CrawlOutcome::OffsiteRedirect`] with the URL it points to. Ending on
-///    a path robots.txt disallows gives [`CrawlOutcome::RobotsDisallowed`],
-///    a non-2xx status gives [`CrawlOutcome::HttpStatus`], and a
-///    `Content-Type` that is present and not HTML gives
-///    [`CrawlOutcome::NotHtml`]. Otherwise at most `cfg.max_bytes` of the
-///    body are read and parsed with [`extract_page_meta`] into
-///    [`CrawlOutcome::Fetched`].
+/// 2. A request to a host waits until `cfg.per_host_delay` has passed since
+///    that host last answered, or the `Crawl-delay` in the robots.txt of the
+///    URL's origin when that is longer (capped at 30 seconds).
+/// 3. Redirects are followed, up to `cfg.max_redirects`, while they stay on
+///    the site the chain started on: the same host, or a host with the same
+///    registrable domain, like `usbank.com` and `www.usbank.com`. A redirect
+///    to another site gives [`CrawlOutcome::OffsiteRedirect`] with the URL
+///    it points to, which is not requested; one redirect too many gives
+///    [`CrawlOutcome::Failed`].
+/// 4. The final response must be a 2xx ([`CrawlOutcome::HttpStatus`]
+///    otherwise) and HTML or of no stated type ([`CrawlOutcome::NotHtml`]
+///    otherwise). At most `cfg.max_bytes` of its body are read and parsed
+///    with [`extract_page_meta`] into [`CrawlOutcome::Fetched`].
 ///
-/// Redirects, for robots.txt and pages alike, are followed (up to
-/// `cfg.max_redirects`) only while they stay on the start URL's site: the
-/// same host, or a host with the same registrable domain, like `usbank.com`
-/// and `www.usbank.com`. Nothing is ever requested from another site, whose
-/// robots.txt has not been checked.
+/// When the start URL gets no answer at all (a failure with `network` set,
+/// such as a name that does not resolve or a certificate that does not
+/// cover it), the crawler tries `target.known_url` (when it is on the
+/// start URL's site), then, for a start URL on the domain itself, the same
+/// URL on the `www.` host and over plain http (for the default start URL:
+/// `https://www.<domain>/`, then `http://<domain>/`). Any other outcome,
+/// an HTTP error status included, is final. When none of them answers, the
+/// result is the start URL's failure.
 ///
 /// Unless `cfg.allow_private_addresses` is set, host names are only
-/// connected to on globally routable addresses: a target whose name
-/// resolves only to loopback, private, link-local or other special
-/// addresses fails with [`CrawlOutcome::Failed`] (at its robots.txt
-/// request) without anything being sent, so a hostile domain cannot point
-/// the crawler at the operator's own network. That relies on connecting to
-/// each site directly, which the crawler does unless `cfg.use_system_proxy`
-/// is set: a proxy looks up target names itself.
+/// connected to on globally routable addresses: a host whose name resolves
+/// only to loopback, private, link-local or other special addresses is
+/// never contacted, as a target or as a redirect hop, so a hostile domain
+/// cannot point the crawler at the operator's own network. That relies on
+/// connecting to each site directly, which the crawler does unless
+/// `cfg.use_system_proxy` is set: a proxy looks up target names itself.
 ///
 /// Errors never stop the batch; each becomes that target's
 /// [`CrawlOutcome::Failed`]. Must run inside a Tokio runtime.
@@ -75,22 +94,28 @@ pub async fn crawl_homepages(targets: Vec<CrawlTarget>, cfg: &CrawlConfig) -> Ve
     if targets.is_empty() {
         return Vec::new();
     }
-    let client = match build_client(cfg) {
-        Ok(client) => client,
+    match build_client(cfg) {
+        Ok(client) => crawl_with(&client, targets, cfg).await,
         Err(err) => {
             let error = format!("building the HTTP client: {}", error_text(err));
             warn!("cannot crawl {} homepages: {error}", targets.len());
-            return targets
+            targets
                 .into_iter()
                 .map(|target| CrawlResult {
                     domain: target.domain,
-                    outcome: CrawlOutcome::Failed {
-                        error: error.clone(),
-                    },
+                    outcome: Failure::other(error.clone()).into(),
                 })
-                .collect();
+                .collect()
         }
-    };
+    }
+}
+
+/// [`crawl_homepages`] with the client built.
+async fn crawl_with(
+    client: &Client,
+    targets: Vec<CrawlTarget>,
+    cfg: &CrawlConfig,
+) -> Vec<CrawlResult> {
     // buffer_unordered(0) would never start anything.
     let concurrency = cfg.concurrency.max(1);
     info!(
@@ -98,7 +123,7 @@ pub async fn crawl_homepages(targets: Vec<CrawlTarget>, cfg: &CrawlConfig) -> Ve
         targets.len()
     );
     let results: Vec<CrawlResult> = stream::iter(targets)
-        .map(|target| crawl_target(&client, cfg, target))
+        .map(|target| crawl_target(client, cfg, target))
         .buffer_unordered(concurrency)
         .collect()
         .await;
@@ -108,42 +133,27 @@ pub async fn crawl_homepages(targets: Vec<CrawlTarget>, cfg: &CrawlConfig) -> Ve
 
 /// One client for the whole batch, so connections are reused.
 fn build_client(cfg: &CrawlConfig) -> reqwest::Result<Client> {
+    client_builder(cfg).build()
+}
+
+/// The client's settings. It follows no redirects: [`Visit`] follows them
+/// itself, checking robots.txt before each hop.
+fn client_builder(cfg: &CrawlConfig) -> ClientBuilder {
     let builder = Client::builder()
         .user_agent(cfg.user_agent.as_str())
         .timeout(cfg.timeout)
         .gzip(true)
-        .redirect(redirect_policy(cfg.max_redirects))
+        .redirect(redirect::Policy::none())
         .dns_resolver(dns::Resolver {
             allow_private: cfg.allow_private_addresses,
         });
     // reqwest uses the system proxy unless told not to; behind a proxy the
     // resolver above would see only the proxy's name, not the targets'.
-    let builder = if cfg.use_system_proxy {
+    if cfg.use_system_proxy {
         builder
     } else {
         builder.no_proxy()
-    };
-    builder.build()
-}
-
-/// [`redirect::Policy::limited`], except that no request follows a redirect
-/// to another site (see [`same_site`]): the 3xx comes back as the response,
-/// and nothing is sent to that site. [`redirect_target`] reads where it
-/// pointed.
-fn redirect_policy(max_redirects: usize) -> redirect::Policy {
-    let limited = redirect::Policy::limited(max_redirects);
-    redirect::Policy::custom(move |attempt| {
-        // The first URL of the chain is the one the request was made for.
-        let leaves_site = attempt
-            .previous()
-            .first()
-            .is_some_and(|first| !same_site(first, attempt.url()));
-        if leaves_site {
-            attempt.stop()
-        } else {
-            limited.redirect(attempt)
-        }
-    })
+    }
 }
 
 async fn crawl_target(client: &Client, cfg: &CrawlConfig, target: CrawlTarget) -> CrawlResult {
@@ -156,26 +166,50 @@ async fn crawl_target(client: &Client, cfg: &CrawlConfig, target: CrawlTarget) -
 }
 
 async fn crawl_outcome(client: &Client, cfg: &CrawlConfig, target: &CrawlTarget) -> CrawlOutcome {
-    let start = match start_url(&target.url) {
+    let start = match start_url(target) {
         Ok(url) => url,
-        Err(error) => return CrawlOutcome::Failed { error },
+        Err(error) => return Failure::other(error).into(),
     };
-    let robot = match fetch_robots(client, &start).await {
-        Robots::Rules(robot) if !robot.allowed(start.as_str()) => {
-            return CrawlOutcome::RobotsDisallowed
+    let mut visit = Visit::new(client, cfg);
+    let mut first_failure = None;
+    let mut also_tried = Vec::new();
+    for url in candidate_urls(&start, target) {
+        match visit.fetch_homepage(&target.domain, &url).await {
+            CrawlOutcome::Failed {
+                error,
+                network: true,
+            } => {
+                debug!("{}: no answer at {url}: {error}", target.domain);
+                if first_failure.is_none() {
+                    first_failure = Some(error);
+                } else {
+                    also_tried.push(url.to_string());
+                }
+            }
+            outcome => return outcome,
         }
-        Robots::Rules(robot) => Some(robot),
-        Robots::NoRules => None,
-        Robots::DoNotCrawl(error) => return CrawlOutcome::Failed { error },
-    };
-    let delay = page_delay(cfg.per_host_delay, robot.as_ref().and_then(|r| r.delay));
-    if !delay.is_zero() {
-        tokio::time::sleep(delay).await;
     }
-    fetch_page(client, cfg, target, &start, robot.as_ref()).await
+    let mut error = first_failure.unwrap_or_default();
+    if !also_tried.is_empty() {
+        error = format!("{error} (no answer at {} either)", also_tried.join(", "));
+    }
+    CrawlOutcome::Failed {
+        error,
+        network: true,
+    }
 }
 
-fn start_url(raw: &str) -> Result<Url, String> {
+/// The target's start URL: `target.url`, or `https://<domain>/` when that
+/// is empty.
+fn start_url(target: &CrawlTarget) -> Result<Url, String> {
+    match target.url.trim() {
+        "" => http_url(&format!("https://{}/", target.domain.trim())),
+        url => http_url(url),
+    }
+}
+
+/// `raw` as an absolute http(s) URL with a host.
+fn http_url(raw: &str) -> Result<Url, String> {
     let url = Url::parse(raw.trim()).map_err(|err| format!("invalid URL {raw:?}: {err}"))?;
     if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
         return Err(format!("not an http(s) URL: {raw:?}"));
@@ -183,48 +217,349 @@ fn start_url(raw: &str) -> Result<Url, String> {
     Ok(url)
 }
 
-/// What robots.txt says about crawling a host.
+/// The URLs to try for a target, in order and without repeats: the start
+/// URL; then, for when that gets no answer, the known URL if it is on the
+/// start URL's site and, for a start URL on the domain itself, the same URL
+/// on the `www.` host and over plain http.
+fn candidate_urls(start: &Url, target: &CrawlTarget) -> Vec<Url> {
+    let mut urls = vec![start.clone()];
+    if let Some(known) = target.known_url.as_deref() {
+        match http_url(known) {
+            // Another site, or an IP address, which the private-address
+            // check would not see: not this target's homepage.
+            Ok(url) if !same_site(start, &url) => {
+                debug!(
+                    "{}: ignoring the known URL {url}: another site",
+                    target.domain
+                );
+            }
+            Ok(url) => push_new(&mut urls, url),
+            Err(error) => debug!("{}: ignoring the known URL: {error}", target.domain),
+        }
+    }
+    // The domain spelled as a URL host: lowercase, IDNA as ASCII.
+    let Ok(home) = http_url(&format!("https://{}/", target.domain.trim())) else {
+        return urls;
+    };
+    let Some(host) = home
+        .host_str()
+        .filter(|&host| start.host_str() == Some(host))
+    else {
+        return urls;
+    };
+    if !host.starts_with("www.") {
+        let mut www = start.clone();
+        if www.set_host(Some(&format!("www.{host}"))).is_ok() {
+            push_new(&mut urls, www);
+        }
+    }
+    if start.scheme() == "https" {
+        let mut http = start.clone();
+        if http.set_scheme("http").is_ok() {
+            push_new(&mut urls, http);
+        }
+    }
+    urls
+}
+
+fn push_new(urls: &mut Vec<Url>, url: Url) {
+    if !urls.contains(&url) {
+        urls.push(url);
+    }
+}
+
+/// A failure, to report as [`CrawlOutcome::Failed`].
+#[derive(Debug, Clone)]
+struct Failure {
+    error: String,
+    network: bool,
+}
+
+impl Failure {
+    /// A request that failed; `what` (like `robots.txt`) starts the message.
+    fn request(what: Option<&str>, err: reqwest::Error) -> Self {
+        let network = is_network_error(&err);
+        let error = match what {
+            Some(what) => format!("{what}: {}", error_text(err)),
+            None => error_text(err),
+        };
+        Failure { error, network }
+    }
+
+    /// A failure that is not about the network.
+    fn other(error: String) -> Self {
+        Failure {
+            error,
+            network: false,
+        }
+    }
+}
+
+impl From<Failure> for CrawlOutcome {
+    fn from(failure: Failure) -> Self {
+        CrawlOutcome::Failed {
+            error: failure.error,
+            network: failure.network,
+        }
+    }
+}
+
+/// Whether `err` means that no usable answer came back: the host name did
+/// not resolve (or was refused by the resolver), connecting or the TLS
+/// handshake failed, the request timed out, the connection broke off
+/// before the response was complete, or the answer was not HTTP. Errors
+/// building the request or decoding the body are not network errors.
+fn is_network_error(err: &reqwest::Error) -> bool {
+    err.is_connect() || err.is_timeout() || err.is_request() || err.is_body()
+}
+
+/// What robots.txt says about crawling an origin.
+#[derive(Clone)]
 enum Robots {
     /// A robots.txt was fetched and parsed; obey it.
-    Rules(Robot),
+    Rules(Arc<Robot>),
     /// There is no usable robots.txt (4xx, or a redirect we do not
     /// follow), so there are no restrictions.
     NoRules,
     /// Do not crawl: robots.txt answered 5xx or 429, could not be fetched,
     /// or could not be parsed. The message says which.
-    DoNotCrawl(String),
+    DoNotCrawl(Failure),
 }
 
-async fn fetch_robots(client: &Client, start: &Url) -> Robots {
-    let url = robots_url(start);
-    let response = match client.get(url.clone()).send().await {
-        Ok(response) => response,
-        // Too many redirects: RFC 9309 lets us treat robots.txt as unavailable.
-        Err(err) if err.is_redirect() => return Robots::NoRules,
-        Err(err) => return Robots::DoNotCrawl(format!("robots.txt: {}", error_text(err))),
-    };
-    let status = response.status();
-    if status.is_success() {
-        let body = match read_body(response, ROBOTS_MAX_BYTES).await {
+/// One target's crawl: the robots.txt of each origin it visits, and when
+/// each host it asked last answered.
+struct Visit<'a> {
+    client: &'a Client,
+    cfg: &'a CrawlConfig,
+    robots: HashMap<Origin, Robots>,
+    last_answer: HashMap<String, Instant>,
+}
+
+impl<'a> Visit<'a> {
+    fn new(client: &'a Client, cfg: &'a CrawlConfig) -> Self {
+        Visit {
+            client,
+            cfg,
+            robots: HashMap::new(),
+            last_answer: HashMap::new(),
+        }
+    }
+
+    /// Fetches the page at `start`, following redirects that stay on its
+    /// site and checking every URL against the robots.txt of its origin
+    /// before requesting it.
+    async fn fetch_homepage(&mut self, domain: &str, start: &Url) -> CrawlOutcome {
+        let mut url = start.clone();
+        let mut redirects = 0;
+        loop {
+            let crawl_delay = match self.robots(&url).await {
+                Robots::DoNotCrawl(failure) => return failure.into(),
+                Robots::NoRules => None,
+                Robots::Rules(robot) => {
+                    if !allowed(&robot, &url).await {
+                        return CrawlOutcome::RobotsDisallowed;
+                    }
+                    robot.delay
+                }
+            };
+            let delay = page_delay(self.cfg.per_host_delay, crawl_delay);
+            let request = self.client.get(url.clone()).header(ACCEPT, ACCEPT_HTML);
+            let response = match self.send(&url, delay, request).await {
+                Ok(response) => response,
+                Err(err) => return Failure::request(None, err).into(),
+            };
+            let Some(next) = redirect_target(&response) else {
+                return self.read_page(domain, response).await;
+            };
+            if !same_site(start, &next) {
+                return CrawlOutcome::OffsiteRedirect {
+                    final_url: next.into(),
+                };
+            }
+            if redirects == self.cfg.max_redirects {
+                let error = format!(
+                    "more than {} redirects, starting at {start}",
+                    self.cfg.max_redirects
+                );
+                return Failure::other(error).into();
+            }
+            redirects += 1;
+            debug!("{url} redirects to {next}");
+            url = next;
+        }
+    }
+
+    /// The robots.txt rules for `url`'s origin, fetched on first use.
+    async fn robots(&mut self, url: &Url) -> Robots {
+        let origin = url.origin();
+        if let Some(robots) = self.robots.get(&origin) {
+            return robots.clone();
+        }
+        let robots = self.fetch_robots(url).await;
+        self.robots.insert(origin, robots.clone());
+        robots
+    }
+
+    /// Fetches and parses the robots.txt of `url`'s origin, following
+    /// redirects that stay on the site.
+    async fn fetch_robots(&mut self, url: &Url) -> Robots {
+        let first = robots_url(url);
+        let mut robots = first.clone();
+        for _ in 0..=self.cfg.max_redirects {
+            let request = self.client.get(robots.clone());
+            let response = match self.send(&robots, self.cfg.per_host_delay, request).await {
+                Ok(response) => response,
+                Err(err) => return Robots::DoNotCrawl(Failure::request(Some("robots.txt"), err)),
+            };
+            let status = response.status();
+            if status.is_redirection() {
+                match redirect_target(&response) {
+                    Some(next) if same_site(&first, &next) => {
+                        robots = next;
+                        continue;
+                    }
+                    to => {
+                        let to = to.map(String::from);
+                        debug!("{robots}: redirects to {to:?}, not followed; no rules apply");
+                        return Robots::NoRules;
+                    }
+                }
+            }
+            if status.is_success() {
+                return match read_body(response, ROBOTS_MAX_BYTES).await {
+                    Ok(body) => parse_robots(body).await,
+                    Err(err) => Robots::DoNotCrawl(Failure::request(Some("robots.txt"), err)),
+                };
+            }
+            if status.is_client_error() && status != StatusCode::TOO_MANY_REQUESTS {
+                return Robots::NoRules;
+            }
+            return Robots::DoNotCrawl(Failure::other(format!("robots.txt: HTTP {status}")));
+        }
+        debug!(
+            "{first}: more than {} redirects; no rules apply",
+            self.cfg.max_redirects
+        );
+        Robots::NoRules
+    }
+
+    /// Sends `request` to `url` once `delay` has passed since `url`'s host
+    /// last answered (or failed to), and notes when this request is done.
+    /// Counting from the answer rather than the request keeps slow hosts
+    /// from being asked again right away.
+    async fn send(
+        &mut self,
+        url: &Url,
+        delay: Duration,
+        request: RequestBuilder,
+    ) -> reqwest::Result<Response> {
+        let host = url.host_str().unwrap_or_default().to_string();
+        if let Some(last) = self.last_answer.get(&host) {
+            let wait = delay.saturating_sub(last.elapsed());
+            if !wait.is_zero() {
+                tokio::time::sleep(wait).await;
+            }
+        }
+        let response = request.send().await;
+        self.last_answer.insert(host, Instant::now());
+        response
+    }
+
+    /// The outcome for the response that ends the redirect chain.
+    async fn read_page(&self, domain: &str, response: Response) -> CrawlOutcome {
+        let final_url = response.url().clone();
+        let status = response.status();
+        if !status.is_success() {
+            return CrawlOutcome::HttpStatus {
+                status: status.as_u16(),
+            };
+        }
+        if let Some(content_type) = content_type(&response) {
+            if !is_html(&content_type) {
+                return CrawlOutcome::NotHtml { content_type };
+            }
+        }
+        let body = match read_body(response, self.cfg.max_bytes).await {
             Ok(body) => body,
-            Err(err) => return Robots::DoNotCrawl(format!("robots.txt: {}", error_text(err))),
+            Err(err) => return Failure::request(None, err).into(),
         };
-        return match Robot::new(ROBOTS_TOKEN, &body) {
-            Ok(robot) => Robots::Rules(robot),
-            Err(err) => Robots::DoNotCrawl(format!("robots.txt: cannot parse it: {err:#}")),
-        };
+        let fetched_at = now_unix();
+        // Parsing is CPU work; keep it off the threads driving the other fetches.
+        let base_url = final_url.clone();
+        let parsed =
+            tokio::task::spawn_blocking(move || extract_page_meta(&base_url, &decode_html(&body)))
+                .await;
+        match parsed {
+            Ok(meta) => CrawlOutcome::Fetched(CrawledPage {
+                domain: domain.to_string(),
+                final_url: final_url.into(),
+                status: status.as_u16(),
+                fetched_at,
+                meta,
+            }),
+            Err(err) => Failure::other(format!("parsing the page: {err}")).into(),
+        }
     }
-    if status.is_redirection() {
-        // The redirect policy stopped at a hop to another site, or the
-        // redirect had no usable Location.
-        let to = redirect_target(&response).map(String::from);
-        debug!("{url}: robots.txt redirects to {to:?}, not followed; no rules apply");
-        return Robots::NoRules;
+}
+
+/// Parses a robots.txt body, away from the threads driving the fetches.
+async fn parse_robots(body: Vec<u8>) -> Robots {
+    match tokio::task::spawn_blocking(move || robots_rules(&body)).await {
+        Ok(Ok(robot)) => Robots::Rules(Arc::new(robot)),
+        Ok(Err(error)) => Robots::DoNotCrawl(Failure::other(error)),
+        Err(err) => {
+            Robots::DoNotCrawl(Failure::other(format!("robots.txt: parsing failed: {err}")))
+        }
     }
-    if status.is_client_error() && status != StatusCode::TOO_MANY_REQUESTS {
-        return Robots::NoRules;
+}
+
+/// The rules of a robots.txt for [`ROBOTS_TOKEN`], unless they would take
+/// more than [`MAX_ROBOTS_REGEX_BYTES`] or cannot be parsed.
+fn robots_rules(body: &[u8]) -> Result<Robot, String> {
+    let cost = regex_cost(body);
+    if cost > MAX_ROBOTS_REGEX_BYTES {
+        return Err(format!(
+            "robots.txt: its rules with `$` would take about {} MiB, more than the {} MiB \
+             this crawler allows",
+            cost.div_ceil(1 << 20),
+            MAX_ROBOTS_REGEX_BYTES >> 20
+        ));
     }
-    Robots::DoNotCrawl(format!("robots.txt: HTTP {status}"))
+    Robot::new(ROBOTS_TOKEN, body).map_err(|err| format!("robots.txt: cannot parse it: {err:#}"))
+}
+
+/// An estimate, on the high side, of the memory texting_robots needs for
+/// the rules in `body` that hold a `$`, each of which it compiles into a
+/// regular expression: 6 KiB per rule, 2 KiB per run of `*` and 64 bytes
+/// per byte of the pattern, three for a non-ASCII byte since it gets
+/// percent-encoded. (Measured with texting_robots 0.2 and regex 1: about
+/// 5.8 KB, 1.8 KB and 51 bytes.) Other rules cost little more than their
+/// text. Every line with a `$` before any `#` counts, whatever its group.
+fn regex_cost(body: &[u8]) -> usize {
+    // Split as texting_robots does: at line ends, then at the first `#`.
+    body.split(|&byte| matches!(byte, b'\n' | b'\r'))
+        .map(|line| line.split(|&byte| byte == b'#').next().unwrap_or_default())
+        .filter(|rule| rule.contains(&b'$'))
+        .map(|rule| {
+            let stars = rule.iter().filter(|&&byte| byte == b'*').count();
+            let runs = stars - rule.windows(2).filter(|pair| pair == b"**").count();
+            let bytes: usize = rule
+                .iter()
+                .map(|byte| if byte.is_ascii() { 1 } else { 3 })
+                .sum();
+            6 * 1024 + runs * 2 * 1024 + bytes * 64
+        })
+        .sum()
+}
+
+/// Whether `robot` allows `url`. A big robots.txt has many rules to try, so
+/// the matching runs away from the threads driving the fetches; if it
+/// fails, the URL counts as disallowed.
+async fn allowed(robot: &Arc<Robot>, url: &Url) -> bool {
+    let (robot, url) = (Arc::clone(robot), url.to_string());
+    tokio::task::spawn_blocking(move || robot.allowed(&url))
+        .await
+        .unwrap_or(false)
 }
 
 /// `/robots.txt` on the URL's origin, without credentials.
@@ -239,9 +574,9 @@ fn robots_url(url: &Url) -> Url {
     robots
 }
 
-/// How long to wait between the robots.txt request and the page request:
-/// `per_host_delay`, or the robots.txt `Crawl-delay` (seconds, capped at
-/// [`MAX_CRAWL_DELAY`]) when that is longer.
+/// How long to wait before a page request after the last request to the
+/// same host: `per_host_delay`, or the robots.txt `Crawl-delay` (seconds,
+/// capped at [`MAX_CRAWL_DELAY`]) when that is longer.
 fn page_delay(per_host_delay: Duration, crawl_delay: Option<f32>) -> Duration {
     let robots_delay = match crawl_delay {
         Some(secs) if secs > 0.0 => {
@@ -253,92 +588,24 @@ fn page_delay(per_host_delay: Duration, crawl_delay: Option<f32>) -> Duration {
     per_host_delay.max(robots_delay)
 }
 
-async fn fetch_page(
-    client: &Client,
-    cfg: &CrawlConfig,
-    target: &CrawlTarget,
-    start: &Url,
-    robot: Option<&Robot>,
-) -> CrawlOutcome {
-    let response = match client
-        .get(start.clone())
-        .header(ACCEPT, ACCEPT_HTML)
-        .send()
-        .await
-    {
-        Ok(response) => response,
-        Err(err) => {
-            return CrawlOutcome::Failed {
-                error: error_text(err),
-            }
-        }
-    };
-    // The redirect policy hands back a redirect to another site unfollowed.
-    if let Some(to) = redirect_target(&response).filter(|to| !same_site(start, to)) {
-        return CrawlOutcome::OffsiteRedirect {
-            final_url: to.into(),
-        };
-    }
-    let final_url = response.url().clone();
-    // Only reachable if the redirect policy changes: every hop it follows
-    // stays on the site.
-    if !same_site(start, &final_url) {
-        return CrawlOutcome::OffsiteRedirect {
-            final_url: final_url.into(),
-        };
-    }
-    if final_url != *start && robot.is_some_and(|robot| !robot.allowed(final_url.as_str())) {
-        return CrawlOutcome::RobotsDisallowed;
-    }
-    let status = response.status();
-    if !status.is_success() {
-        return CrawlOutcome::HttpStatus {
-            status: status.as_u16(),
-        };
-    }
-    if let Some(content_type) = content_type(&response) {
-        if !is_html(&content_type) {
-            return CrawlOutcome::NotHtml { content_type };
-        }
-    }
-    let body = match read_body(response, cfg.max_bytes).await {
-        Ok(body) => body,
-        Err(err) => {
-            return CrawlOutcome::Failed {
-                error: error_text(err),
-            }
-        }
-    };
-    let fetched_at = now_unix();
-    // Parsing is CPU work; keep it off the threads driving the other fetches.
-    let base_url = final_url.clone();
-    let parsed =
-        tokio::task::spawn_blocking(move || extract_page_meta(&base_url, &decode_html(&body)))
-            .await;
-    match parsed {
-        Ok(meta) => CrawlOutcome::Fetched(CrawledPage {
-            domain: target.domain.clone(),
-            final_url: final_url.into(),
-            status: status.as_u16(),
-            fetched_at,
-            meta,
-        }),
-        Err(err) => CrawlOutcome::Failed {
-            error: format!("parsing the page: {err}"),
-        },
-    }
-}
-
-/// Where a 3xx response points: its `Location`, resolved against the
-/// response's URL the way the redirect machinery resolves it. `None` for
-/// other statuses or a missing or unusable `Location`.
+/// Where a redirect points: its `Location`, resolved against the response's
+/// URL, without credentials or fragment. `None` unless the status is 301,
+/// 302, 303, 307 or 308 and the `Location` makes an http(s) URL.
 fn redirect_target(response: &Response) -> Option<Url> {
-    if !response.status().is_redirection() {
+    if !matches!(response.status().as_u16(), 301 | 302 | 303 | 307 | 308) {
         return None;
     }
     let location = response.headers().get(LOCATION)?;
     let location = String::from_utf8_lossy(location.as_bytes());
-    response.url().join(&location).ok()
+    let mut url = response.url().join(&location).ok()?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        return None;
+    }
+    url.set_fragment(None);
+    // Only fails for URLs that cannot have credentials, which have none to strip.
+    let _ = url.set_username("");
+    let _ = url.set_password(None);
+    Some(url)
 }
 
 /// Same host, or two hosts with the same registrable domain
@@ -412,13 +679,17 @@ fn describe(outcome: &CrawlOutcome) -> String {
         }
         CrawlOutcome::HttpStatus { status } => format!("HTTP {status}"),
         CrawlOutcome::NotHtml { content_type } => format!("not HTML ({content_type})"),
-        CrawlOutcome::Failed { error } => format!("failed: {error}"),
+        CrawlOutcome::Failed {
+            error,
+            network: true,
+        } => format!("no answer: {error}"),
+        CrawlOutcome::Failed { error, .. } => format!("failed: {error}"),
     }
 }
 
 fn log_summary(results: &[CrawlResult]) {
-    let (mut fetched, mut disallowed, mut offsite, mut http, mut not_html, mut failed) =
-        (0, 0, 0, 0, 0, 0);
+    let (mut fetched, mut disallowed, mut offsite, mut http, mut not_html) = (0, 0, 0, 0, 0);
+    let (mut failed, mut no_answer) = (0, 0);
     for result in results {
         match result.outcome {
             CrawlOutcome::Fetched(_) => fetched += 1,
@@ -426,19 +697,23 @@ fn log_summary(results: &[CrawlResult]) {
             CrawlOutcome::OffsiteRedirect { .. } => offsite += 1,
             CrawlOutcome::HttpStatus { .. } => http += 1,
             CrawlOutcome::NotHtml { .. } => not_html += 1,
-            CrawlOutcome::Failed { .. } => failed += 1,
+            CrawlOutcome::Failed { network, .. } => {
+                failed += 1;
+                no_answer += usize::from(network);
+            }
         }
     }
     info!(
         "crawled {} homepages: {fetched} fetched, {disallowed} disallowed by robots.txt, \
          {offsite} redirected to other sites, {http} HTTP errors, {not_html} not HTML, \
-         {failed} failed",
+         {failed} failed ({no_answer} with no answer)",
         results.len()
     );
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Instant;
 
@@ -451,6 +726,7 @@ mod tests {
     use plumb_core::SiteRecord;
 
     use super::*;
+    use crate::test_alloc::peak_bytes;
     use crate::{to_records, OutLink, USER_AGENT};
 
     /// A record's link texts as (text, number of linking sites).
@@ -540,6 +816,7 @@ mod tests {
         CrawlTarget {
             domain: "example.test".into(),
             url: format!("http://127.0.0.1:{port}{path}"),
+            known_url: None,
         }
     }
 
@@ -551,6 +828,39 @@ mod tests {
         result.outcome
     }
 
+    /// Crawls `target` with a client that sends each `(host, port)` host
+    /// name to 127.0.0.1 at that port (when the URL names no port), so tests
+    /// can use real-looking host names without DNS.
+    async fn crawl_with_hosts(
+        target: CrawlTarget,
+        cfg: &CrawlConfig,
+        hosts: &[(&str, u16)],
+    ) -> CrawlOutcome {
+        let mut client = client_builder(cfg);
+        for &(host, port) in hosts {
+            client = client.resolve(host, ([127, 0, 0, 1], port).into());
+        }
+        let mut results = crawl_with(&client.build().unwrap(), vec![target], cfg).await;
+        assert_eq!(results.len(), 1);
+        results.pop().unwrap().outcome
+    }
+
+    /// A server that accepts connections and closes them without a word,
+    /// counting them: a host that does not answer.
+    async fn silent_server() -> (u16, Arc<AtomicUsize>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let connections = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&connections);
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                counter.fetch_add(1, Ordering::SeqCst);
+                drop(stream);
+            }
+        });
+        (port, connections)
+    }
+
     fn expect_fetched(outcome: CrawlOutcome) -> CrawledPage {
         match outcome {
             CrawlOutcome::Fetched(page) => page,
@@ -559,8 +869,13 @@ mod tests {
     }
 
     fn expect_failed(outcome: CrawlOutcome) -> String {
+        expect_failure(outcome).0
+    }
+
+    /// The error message and whether the failure is a network one.
+    fn expect_failure(outcome: CrawlOutcome) -> (String, bool) {
         match outcome {
-            CrawlOutcome::Failed { error } => error,
+            CrawlOutcome::Failed { error, network } => (error, network),
             other => panic!("expected a failure, got {other:?}"),
         }
     }
@@ -680,18 +995,68 @@ mod tests {
                 )
             })
             .await;
-            let error = expect_failed(crawl_one(target(port, "/"), &config()).await);
+            let (error, network) = expect_failure(crawl_one(target(port, "/"), &config()).await);
             assert!(error.starts_with("robots.txt"), "{error}");
             assert!(error.contains(status.as_str()), "{error}");
+            // The site answered: not a network failure.
+            assert!(!network);
             assert_eq!(hits.paths(), ["/robots.txt"]);
         }
+    }
+
+    /// A robots.txt that starts with `rules` (after `User-agent: *`) and is
+    /// padded with comment lines to at least `bytes`.
+    fn robots_txt(rules: &str, bytes: usize) -> String {
+        let mut txt = format!("User-agent: *\n{rules}");
+        while txt.len() < bytes {
+            txt.push_str("# padding padding padding padding padding\n");
+        }
+        txt
+    }
+
+    #[tokio::test]
+    async fn robots_txt_is_read_up_to_500_kib() {
+        // A group that starts within the first 500 KiB is obeyed...
+        let padded = robots_txt("", ROBOTS_MAX_BYTES - 1024) + "User-agent: *\nDisallow: /\n";
+        let (port, _) = serve(move |_| home().route("/robots.txt", get(|| async { padded }))).await;
+        let outcome = crawl_one(target(port, "/"), &config()).await;
+        assert_eq!(outcome, CrawlOutcome::RobotsDisallowed);
+
+        // ...and what comes after them is not read.
+        let padded = robots_txt("", ROBOTS_MAX_BYTES) + "User-agent: *\nDisallow: /\n";
+        let (port, hits) =
+            serve(move |_| home().route("/robots.txt", get(|| async { padded }))).await;
+        expect_fetched(crawl_one(target(port, "/"), &config()).await);
+        assert_eq!(hits.paths(), ["/robots.txt", "/"]);
+    }
+
+    #[tokio::test]
+    async fn robots_txt_too_costly_to_parse_means_no_crawl() {
+        let txt = robots_txt(&rules(2000, "*a*b*c$"), 0);
+        let (port, hits) = serve(move |_| home().route("/robots.txt", get(|| async { txt }))).await;
+        let (error, network) = expect_failure(crawl_one(target(port, "/"), &config()).await);
+        assert_eq!(
+            error,
+            "robots.txt: its rules with `$` would take about 27 MiB, more than the 16 MiB \
+             this crawler allows"
+        );
+        assert!(!network);
+        assert_eq!(hits.paths(), ["/robots.txt"]);
     }
 
     #[tokio::test]
     async fn unreachable_host_is_not_crawled() {
         // Nothing can listen on port 0, so connecting fails right away.
-        let error = expect_failed(crawl_one(target(0, "/"), &config()).await);
+        let (error, network) = expect_failure(crawl_one(target(0, "/"), &config()).await);
         assert!(error.starts_with("robots.txt"), "{error}");
+        assert!(network, "{error}");
+
+        // Nor can a host that hangs up without answering be.
+        let (port, connections) = silent_server().await;
+        let (error, network) = expect_failure(crawl_one(target(port, "/"), &config()).await);
+        assert!(error.starts_with("robots.txt"), "{error}");
+        assert!(network, "{error}");
+        assert_eq!(connections.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -705,8 +1070,9 @@ mod tests {
         let results = crawl_homepages(vec![target(0, "/"), other], &cfg).await;
         assert_eq!(results.len(), 2);
         for result in results {
-            let error = expect_failed(result.outcome);
+            let (error, network) = expect_failure(result.outcome);
             assert!(error.starts_with("building the HTTP client"), "{error}");
+            assert!(!network);
         }
     }
 
@@ -728,10 +1094,12 @@ mod tests {
         let by_name = CrawlTarget {
             domain: "example.test".into(),
             url: format!("http://localhost:{port}/"),
+            known_url: None,
         };
 
         assert!(!CrawlConfig::default().allow_private_addresses);
-        let error = expect_failed(crawl_one(by_name.clone(), &config()).await);
+        let (error, network) = expect_failure(crawl_one(by_name.clone(), &config()).await);
+        assert!(network, "{error}");
         assert!(error.starts_with("robots.txt"), "{error}");
         assert!(
             error.contains("localhost resolves only to non-public addresses"),
@@ -837,6 +1205,7 @@ mod tests {
         let target = CrawlTarget {
             domain: "example.test".into(),
             url,
+            known_url: None,
         };
         let outcome = crawl_one(target, &cfg).await;
         println!(
@@ -856,10 +1225,27 @@ mod tests {
             let bad = CrawlTarget {
                 domain: "example.com".into(),
                 url: url.into(),
+                known_url: None,
             };
-            let error = expect_failed(crawl_one(bad, &config()).await);
+            let (error, network) = expect_failure(crawl_one(bad, &config()).await);
             assert!(error.contains(url), "{error}");
+            assert!(!network);
         }
+    }
+
+    #[tokio::test]
+    async fn empty_url_means_the_domain_homepage() {
+        assert_eq!(
+            start_url(&CrawlTarget {
+                domain: "example.com".into(),
+                ..CrawlTarget::default()
+            }),
+            Url::parse("https://example.com/").map_err(|err| err.to_string())
+        );
+        assert_eq!(
+            CrawlTarget::homepage("example.com"),
+            CrawlTarget::new("example.com")
+        );
     }
 
     #[tokio::test]
@@ -882,8 +1268,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn redirect_to_a_disallowed_path_is_not_used() {
-        let (port, _) = serve(|_| {
+    async fn too_many_redirects_fail() {
+        let (port, hits) = serve(|_| {
+            Router::new().route(
+                "/",
+                get(|| async { (StatusCode::FOUND, [(header::LOCATION, "/")]) }),
+            )
+        })
+        .await;
+        let cfg = CrawlConfig {
+            max_redirects: 2,
+            ..config()
+        };
+        let (error, network) = expect_failure(crawl_one(target(port, "/"), &cfg).await);
+        assert!(error.starts_with("more than 2 redirects"), "{error}");
+        assert!(!network);
+        assert_eq!(hits.paths(), ["/robots.txt", "/", "/", "/"]);
+    }
+
+    #[tokio::test]
+    async fn redirects_into_disallowed_paths_are_never_requested() {
+        let (port, hits) = serve(|_| {
             Router::new()
                 .route(
                     "/robots.txt",
@@ -898,6 +1303,131 @@ mod tests {
         .await;
         let outcome = crawl_one(target(port, "/"), &config()).await;
         assert_eq!(outcome, CrawlOutcome::RobotsDisallowed);
+        assert_eq!(hits.paths(), ["/robots.txt", "/"]);
+    }
+
+    /// Answers `/` with a redirect to `http://www.site.test/`.
+    fn moved_to_www(_port: u16) -> Router {
+        Router::new().route(
+            "/",
+            get(|| async {
+                let to = "http://www.site.test/";
+                (StatusCode::MOVED_PERMANENTLY, [(header::LOCATION, to)])
+            }),
+        )
+    }
+
+    #[tokio::test]
+    async fn each_origin_is_checked_against_its_own_robots_txt() {
+        // site.test has no robots.txt and sends visitors to www.site.test,
+        // whose own robots.txt disallows everything.
+        let (bare_port, bare_hits) = serve(moved_to_www).await;
+        let (www_port, www_hits) = serve(|_| {
+            home().route(
+                "/robots.txt",
+                get(|| async { "User-agent: *\nDisallow: /\n" }),
+            )
+        })
+        .await;
+        let start = CrawlTarget {
+            domain: "site.test".into(),
+            url: "http://site.test/".into(),
+            known_url: None,
+        };
+        let hosts = [("site.test", bare_port), ("www.site.test", www_port)];
+        let outcome = crawl_with_hosts(start.clone(), &config(), &hosts).await;
+        assert_eq!(outcome, CrawlOutcome::RobotsDisallowed);
+        assert_eq!(bare_hits.paths(), ["/robots.txt", "/"]);
+        assert_eq!(www_hits.paths(), ["/robots.txt"]);
+
+        // When www allows it, the page is fetched after www's Crawl-delay.
+        let (bare_port, _) = serve(moved_to_www).await;
+        let (www_port, www_hits) = serve(|_| {
+            home().route(
+                "/robots.txt",
+                get(|| async { "User-agent: *\nCrawl-delay: 0.3\n" }),
+            )
+        })
+        .await;
+        let hosts = [("site.test", bare_port), ("www.site.test", www_port)];
+        let page = expect_fetched(crawl_with_hosts(start, &config(), &hosts).await);
+        assert_eq!(page.final_url, "http://www.site.test/");
+        assert_eq!(www_hits.paths(), ["/robots.txt", "/"]);
+        let gap = www_hits
+            .get("/")
+            .at
+            .duration_since(www_hits.get("/robots.txt").at);
+        assert!(gap >= Duration::from_millis(300), "{gap:?}");
+    }
+
+    #[tokio::test]
+    async fn start_urls_that_get_no_answer_fall_back() {
+        let (silent, silent_connections) = silent_server().await;
+        let connections = || silent_connections.load(Ordering::SeqCst);
+
+        // A www-only site: the bare name does not answer.
+        let (port, hits) = serve(|_| home()).await;
+        let www_only = CrawlTarget {
+            domain: "www-only.test".into(),
+            url: "http://www-only.test/".into(),
+            known_url: None,
+        };
+        let hosts = [("www-only.test", silent), ("www.www-only.test", port)];
+        let page = expect_fetched(crawl_with_hosts(www_only, &config(), &hosts).await);
+        assert_eq!(page.final_url, "http://www.www-only.test/");
+        assert_eq!(hits.paths(), ["/robots.txt", "/"]);
+
+        // No TLS anywhere: https fails on both names, plain http works.
+        let (port, hits) = serve(|_| home()).await;
+        let hosts = [("http-only.test", port), ("www.http-only.test", silent)];
+        let target = CrawlTarget::new("http-only.test");
+        let page = expect_fetched(crawl_with_hosts(target, &config(), &hosts).await);
+        assert_eq!(page.final_url, "http://http-only.test/");
+        assert_eq!(hits.paths(), ["/robots.txt", "/"]);
+
+        // The known URL comes before www and http.
+        let (port, hits) = serve(|_| home().route("/home", get(|| async { Html(HOME) }))).await;
+        let before = connections();
+        let known = CrawlTarget {
+            known_url: Some("http://known.test/home".into()),
+            ..CrawlTarget::new("known.test")
+        };
+        let hosts = [("known.test", port), ("www.known.test", silent)];
+        let page = expect_fetched(crawl_with_hosts(known, &config(), &hosts).await);
+        assert_eq!(page.final_url, "http://known.test/home");
+        assert_eq!(hits.paths(), ["/robots.txt", "/home"]);
+        assert_eq!(connections(), before, "www was tried");
+
+        // An HTTP error is an answer: nothing else is tried.
+        let (port, _) =
+            serve(|_| Router::new().route("/", get(|| async { StatusCode::SERVICE_UNAVAILABLE })))
+                .await;
+        let before = connections();
+        let status = CrawlTarget {
+            domain: "status.test".into(),
+            url: "http://status.test/".into(),
+            known_url: None,
+        };
+        let hosts = [("status.test", port), ("www.status.test", silent)];
+        let outcome = crawl_with_hosts(status, &config(), &hosts).await;
+        assert_eq!(outcome, CrawlOutcome::HttpStatus { status: 503 });
+        assert_eq!(connections(), before, "www was tried");
+
+        // Nothing answers: the start URL's failure, naming the others.
+        let before = connections();
+        let hosts = [("down.test", silent), ("www.down.test", silent)];
+        let target = CrawlTarget::new("down.test");
+        let (error, network) = expect_failure(crawl_with_hosts(target, &config(), &hosts).await);
+        assert!(network, "{error}");
+        assert!(
+            error.starts_with("robots.txt: error sending request for url (https://down.test/"),
+            "{error}"
+        );
+        assert!(
+            error.ends_with("(no answer at https://www.down.test/, http://down.test/ either)"),
+            "{error}"
+        );
+        assert_eq!(connections(), before + 3);
     }
 
     #[tokio::test]
@@ -1196,14 +1726,17 @@ mod tests {
             CrawlTarget {
                 domain: "example.org".into(),
                 url: format!("http://127.0.0.1:{port}/alpha"),
+                known_url: None,
             },
             CrawlTarget {
                 domain: "example.com".into(),
                 url: format!("http://127.0.0.1:{port}/beta"),
+                known_url: None,
             },
             CrawlTarget {
                 domain: "gone.example".into(),
                 url: format!("http://127.0.0.1:{port}/gone"),
+                known_url: None,
             },
         ];
         let cfg = CrawlConfig {
@@ -1309,6 +1842,165 @@ mod tests {
             robots_url(&url).as_str(),
             "https://www.example.com:8443/robots.txt"
         );
+    }
+
+    /// `lines` lines of `Disallow: /<i><pattern>`.
+    fn rules(lines: usize, pattern: &str) -> String {
+        (0..lines)
+            .map(|i| format!("Disallow: /{i}{pattern}\n"))
+            .collect()
+    }
+
+    #[test]
+    fn robots_txt_parsing_is_bounded() {
+        let check = |txt: String| {
+            let started = Instant::now();
+            let (parsed, peak) = peak_bytes(|| robots_rules(txt.as_bytes()));
+            (parsed, peak, started.elapsed())
+        };
+
+        // Each of these would take 30 to 250 MB, and up to 1.3 s in a
+        // release build. They are refused instead.
+        let mut bomb = String::new();
+        let mut count = 0;
+        while bomb.len() < ROBOTS_MAX_BYTES - 40 {
+            bomb.push_str(&format!("Disallow: /*a{count}*b*c$\n"));
+            count += 1;
+        }
+        let costly = [
+            // 500 KiB of rules that need a regular expression.
+            bomb,
+            // Fewer rules with more wildcards, or long ones.
+            rules(1000, &format!("{}$", "x*".repeat(38))),
+            rules(1000, &format!("{}$", "y".repeat(480))),
+            rules(1000, &format!("{}$", "é".repeat(80))),
+        ];
+        for rules in costly {
+            let (parsed, peak, took) = check(robots_txt(&rules, 0));
+            let error = parsed.expect_err("parsed");
+            assert!(
+                error.ends_with("more than the 16 MiB this crawler allows"),
+                "{error}"
+            );
+            assert!(peak < 1 << 20, "{peak} bytes at peak");
+            assert!(took < Duration::from_secs(1), "took {took:?}");
+        }
+
+        // Close to the limit, then wildcard rules (which need no regular
+        // expression) up to 500 KiB.
+        let mut big = rules(1150, "*a*b*c$");
+        assert!(regex_cost(big.as_bytes()) > MAX_ROBOTS_REGEX_BYTES * 9 / 10);
+        let mut i = 0;
+        while big.len() < ROBOTS_MAX_BYTES - 40 {
+            big.push_str(&format!("Disallow: /*d{i}*e*f\n"));
+            i += 1;
+        }
+        let (parsed, peak, took) = check(robots_txt(&big, 0));
+        let robot = parsed.unwrap();
+        // 16.6 MB, of which about 3 MB for the wildcard rules.
+        assert!(
+            peak < MAX_ROBOTS_REGEX_BYTES + (4 << 20),
+            "{peak} bytes at peak"
+        );
+        // About 1 s in a debug build.
+        assert!(took < Duration::from_secs(20), "took {took:?}");
+        assert!(robot.allowed("https://example.com/"));
+        assert!(!robot.allowed("https://example.com/999abc"));
+        assert!(!robot.allowed("https://example.com/xd5ef"));
+    }
+
+    #[test]
+    fn regex_cost_counts_rules_with_a_dollar() {
+        let rule = |bytes: usize, runs: usize| 6 * 1024 + runs * 2 * 1024 + bytes * 64;
+        let txt = "Disallow: /a$\r\nAllow: /b # $ in a comment\n# $\n\n\
+                   Disallow: /*.pdf$ # pdf\nDisallow: /**x*$\nDisallow: /*y\nAllow: /é$\n";
+        assert_eq!(
+            regex_cost(txt.as_bytes()),
+            rule(13, 0) + rule(18, 1) + rule(16, 2) + rule(15, 0)
+        );
+        assert_eq!(regex_cost(b""), 0);
+    }
+
+    #[test]
+    fn fallback_urls_follow_the_start_url() {
+        let urls = |target: &CrawlTarget| -> Vec<String> {
+            let start = start_url(target).unwrap();
+            candidate_urls(&start, target)
+                .iter()
+                .map(Url::to_string)
+                .collect()
+        };
+        let mut target = CrawlTarget::new("example.com");
+        assert_eq!(
+            urls(&target),
+            [
+                "https://example.com/",
+                "https://www.example.com/",
+                "http://example.com/"
+            ]
+        );
+
+        // The known URL comes next; URLs are not repeated.
+        target.known_url = Some("https://www.example.com/en/".into());
+        assert_eq!(
+            urls(&target),
+            [
+                "https://example.com/",
+                "https://www.example.com/en/",
+                "https://www.example.com/",
+                "http://example.com/"
+            ]
+        );
+        target.known_url = Some("https://www.example.com/".into());
+        assert_eq!(urls(&target).len(), 3);
+        // One on another site, or not an http(s) URL, is skipped.
+        for elsewhere in [
+            "https://example.org/",
+            "http://10.0.0.1/",
+            "mailto:info@example.com",
+        ] {
+            target.known_url = Some(elsewhere.into());
+            assert_eq!(urls(&target).len(), 3, "{elsewhere}");
+        }
+
+        // The start URL's path, port and scheme are kept.
+        let target = CrawlTarget {
+            domain: "example.com".into(),
+            url: "http://example.com:8080/home?lang=en".into(),
+            known_url: None,
+        };
+        assert_eq!(
+            urls(&target),
+            [
+                "http://example.com:8080/home?lang=en",
+                "http://www.example.com:8080/home?lang=en"
+            ]
+        );
+
+        // Domains are compared as URL hosts.
+        let target = CrawlTarget::new("MÜNCHEN.de");
+        assert_eq!(
+            urls(&target),
+            [
+                "https://xn--mnchen-3ya.de/",
+                "https://www.xn--mnchen-3ya.de/",
+                "http://xn--mnchen-3ya.de/"
+            ]
+        );
+
+        // A start URL on another host, or on www already, has no variants.
+        let other_host = CrawlTarget {
+            domain: "example.com".into(),
+            url: "http://shop.example.com/".into(),
+            known_url: None,
+        };
+        assert_eq!(urls(&other_host), ["http://shop.example.com/"]);
+        let www = CrawlTarget {
+            domain: "www.example.com".into(),
+            url: "http://www.example.com/".into(),
+            known_url: None,
+        };
+        assert_eq!(urls(&www), ["http://www.example.com/"]);
     }
 
     #[test]
