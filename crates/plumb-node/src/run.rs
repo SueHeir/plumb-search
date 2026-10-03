@@ -82,6 +82,7 @@ fn node_config(args: RunArgs) -> NodeConfig {
         net.external = args.public_addr;
         net.relay_server = args.relay;
         net.upnp = !args.no_upnp;
+        net.local_discovery = !args.no_local_discovery;
         config.network = Some(net);
     }
     config

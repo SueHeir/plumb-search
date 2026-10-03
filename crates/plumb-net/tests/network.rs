@@ -44,6 +44,7 @@ impl Node {
             vec![]
         };
         config.upnp = false;
+        config.local_discovery = false;
         config.relay_server = relay;
         config.bootstrap = bootstrap;
         let source = table(dir.path(), &local);

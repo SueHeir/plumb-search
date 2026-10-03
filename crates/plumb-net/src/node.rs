@@ -47,8 +47,8 @@ use libp2p::request_response::{self, OutboundRequestId, ProtocolSupport, Respons
 use libp2p::swarm::behaviour::toggle::Toggle;
 use libp2p::swarm::{NetworkBehaviour, SwarmEvent};
 use libp2p::{
-    autonat, dcutr, gossipsub, identify, kad, noise, ping, relay, tcp, upnp, yamux, Multiaddr,
-    PeerId, StreamProtocol, Swarm,
+    autonat, dcutr, gossipsub, identify, kad, mdns, noise, ping, relay, tcp, upnp, yamux,
+    Multiaddr, PeerId, StreamProtocol, Swarm,
 };
 use plumb_core::{now_unix, SiteRecord};
 use serde::{Deserialize, Serialize};
@@ -93,6 +93,10 @@ pub struct NetConfig {
     pub relay_server: bool,
     /// Ask the home router to forward a port (UPnP).
     pub upnp: bool,
+    /// Find other nodes on the same home network (mDNS), which a relay
+    /// cannot always join: many routers do not let two machines behind
+    /// them reach each other through the router's public address.
+    pub local_discovery: bool,
     /// Share of all sites this node takes on each epoch, in parts per
     /// million, at most [`MAX_SHARE_PPM`].
     pub share_ppm: u32,
@@ -118,6 +122,7 @@ impl NetConfig {
             bootstrap: Vec::new(),
             relay_server: false,
             upnp: true,
+            local_discovery: true,
             share_ppm: MAX_SHARE_PPM,
             answer_searches: true,
         }
@@ -275,6 +280,7 @@ struct Behaviour {
     dcutr: dcutr::Behaviour,
     autonat: autonat::Behaviour,
     upnp: Toggle<upnp::tokio::Behaviour>,
+    mdns: Toggle<mdns::tokio::Behaviour>,
     identify: identify::Behaviour,
     ping: ping::Behaviour,
     kad: kad::Behaviour<kad::store::MemoryStore>,
@@ -366,6 +372,7 @@ fn build_swarm(key: &Keypair, config: &NetConfig) -> Result<Swarm<Behaviour>> {
     let peer_id = key.public().to_peer_id();
     let relay_server = config.relay_server;
     let upnp = config.upnp;
+    let local_discovery = config.local_discovery;
     // Buckets are only ever asked for by throwaway swarms (crate::search),
     // so this one only answers, and only when it serves buckets at all.
     let bucket_protocols: Vec<(StreamProtocol, ProtocolSupport)> = config
@@ -432,6 +439,18 @@ fn build_swarm(key: &Keypair, config: &NetConfig) -> Result<Swarm<Behaviour>> {
                 dcutr: dcutr::Behaviour::new(peer_id),
                 autonat: autonat::Behaviour::new(peer_id, autonat::Config::default()),
                 upnp: upnp.then(upnp::tokio::Behaviour::default).into(),
+                mdns: if local_discovery {
+                    match mdns::tokio::Behaviour::new(mdns::Config::default(), peer_id) {
+                        Ok(mdns) => Some(mdns),
+                        Err(err) => {
+                            warn!("no local discovery: {err}");
+                            None
+                        }
+                    }
+                } else {
+                    None
+                }
+                .into(),
                 identify: identify::Behaviour::new(
                     identify::Config::new(IDENTIFY_PROTOCOL.into(), key.public())
                         .with_agent_version(format!("plumb/{}", env!("CARGO_PKG_VERSION")))
@@ -842,6 +861,30 @@ impl Task {
             }
             BehaviourEvent::Kad(kad::Event::ModeChanged { new_mode }) => {
                 debug!("routing mode: {new_mode}");
+            }
+            BehaviourEvent::Mdns(mdns::Event::Discovered(found)) => {
+                for (peer, addr) in found {
+                    if peer == *self.swarm.local_peer_id() {
+                        continue;
+                    }
+                    debug!("found {peer} on this network at {addr}");
+                    self.nearby.insert(peer);
+                    self.swarm
+                        .behaviour_mut()
+                        .kad
+                        .add_address(&peer, addr.clone());
+                    // Prefer the direct route, even when already connected
+                    // through a relay.
+                    let direct = self.remote_addrs.get(&peer).is_some_and(|a| !is_global(a));
+                    if !direct {
+                        let _ = self.swarm.dial(
+                            libp2p::swarm::dial_opts::DialOpts::peer_id(peer)
+                                .addresses(vec![addr])
+                                .condition(libp2p::swarm::dial_opts::PeerCondition::Always)
+                                .build(),
+                        );
+                    }
+                }
             }
             BehaviourEvent::Upnp(upnp::Event::NewExternalAddr { external_addr, .. }) => {
                 info!("the router forwards {external_addr} to this node");
