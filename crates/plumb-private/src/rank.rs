@@ -13,7 +13,7 @@
 //! frequencies, and is normalized to `0..=1` over the candidates. Text is
 //! not ASCII-folded, so `nestle` does not find `Nestlé` here.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 
 use plumb_core::{
     domain_label, joined, kind_key, normalize_country, normalize_text, registrable_domain,
@@ -428,12 +428,39 @@ fn label_text(domain: &str) -> String {
     label
 }
 
-/// One copy of each site, the first: a site can come in more than one
-/// bucket.
-pub fn dedupe(sites: Vec<SiteRecord>) -> Vec<SiteRecord> {
-    let mut seen = BTreeSet::new();
-    sites
-        .into_iter()
-        .filter(|site| seen.insert(site.domain.clone()))
-        .collect()
+/// One copy of each site: a site can come in more than one bucket, or from
+/// more than one node. The first copy's text is kept, and each popularity
+/// signal keeps the less favorable value of all copies, as nodes do with
+/// each other's answers, so one node alone cannot make a site look more
+/// popular.
+pub fn merge_copies(sites: Vec<SiteRecord>) -> Vec<SiteRecord> {
+    let mut order: Vec<SiteRecord> = Vec::new();
+    let mut at: HashMap<String, usize> = HashMap::new();
+    for site in sites {
+        match at.get(&site.domain) {
+            Some(&i) => {
+                let kept = &mut order[i].signals;
+                let other = &site.signals;
+                kept.harmonic_rank = worse_rank(kept.harmonic_rank, other.harmonic_rank);
+                kept.pagerank_rank = worse_rank(kept.pagerank_rank, other.pagerank_rank);
+                kept.tranco_rank = worse_rank(kept.tranco_rank, other.tranco_rank);
+                kept.linking_domains = kept.linking_domains.min(other.linking_domains);
+                kept.official_site &= other.official_site;
+                kept.sitelinks = kept.sitelinks.min(other.sitelinks);
+            }
+            None => {
+                at.insert(site.domain.clone(), order.len());
+                order.push(site);
+            }
+        }
+    }
+    order
+}
+
+/// The larger rank (worse), counting a missing one as the worst.
+fn worse_rank<T: Ord>(a: Option<T>, b: Option<T>) -> Option<T> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        _ => None,
+    }
 }

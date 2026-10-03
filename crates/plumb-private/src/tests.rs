@@ -232,3 +232,16 @@ fn padding_repeats_for_a_query_in_one_browser_only() {
         pick_buckets("chase", padding(b"one", "chase")).0
     );
 }
+
+#[test]
+fn copies_keep_the_less_favorable_popularity() {
+    let mut boosted = site("phish.example", "US Bank", Some(1), 90_000);
+    boosted.signals.official_site = true;
+    let honest = site("phish.example", "Other text", Some(800_000), 2);
+    let merged = rank::merge_copies(vec![boosted, honest]);
+    assert_eq!(merged.len(), 1);
+    assert_eq!(merged[0].title.as_deref(), Some("US Bank"));
+    assert_eq!(merged[0].signals.tranco_rank, Some(800_000));
+    assert_eq!(merged[0].signals.linking_domains, 2);
+    assert!(!merged[0].signals.official_site);
+}

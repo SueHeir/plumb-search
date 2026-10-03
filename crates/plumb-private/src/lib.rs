@@ -14,6 +14,7 @@
 //! plain Rust, tested natively.
 
 pub mod rank;
+pub mod sealed;
 
 #[cfg(target_arch = "wasm32")]
 mod browser;
@@ -29,8 +30,8 @@ pub const LIMIT: usize = 10;
 /// Largest bucket answer accepted, in bytes.
 pub const MAX_BUCKET_BYTES: usize = 16 << 20;
 
-/// The sites of `answers` (one list of records per bucket fetched) that
-/// match `keys`, each once, ranked for `query`.
+/// The sites of `answers` (one list of records per bucket answer) that
+/// match `keys`, each once ([`rank::merge_copies`]), ranked for `query`.
 pub fn search(
     query: &str,
     keys: &[String],
@@ -43,7 +44,7 @@ pub fn search(
         .flatten()
         .filter(|site| matches(site, keys))
         .collect();
-    rank(query, &rank::dedupe(found), options, limit)
+    rank(query, &rank::merge_copies(found), options, limit)
 }
 
 /// Reads one bucket answer: a JSON list of site records. Records that do
