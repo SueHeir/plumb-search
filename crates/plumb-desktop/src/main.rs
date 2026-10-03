@@ -7,9 +7,15 @@
 //! limits, crawling, the Plumb network, setup progress, the settings and how
 //! to search from the browser. The app is no browser: searching happens
 //! in the default browser, and so does every link out of the panel,
-//! including the node's search page. No page can call into the app: the app
-//! defines no commands and grants no capabilities, so Tauri's IPC refuses
-//! everything.
+//! including the node's search page.
+//!
+//! Closing the window keeps the node running, so that searches from the
+//! browser keep working: the app stays in the menu bar (macOS) or the
+//! notification area (Windows, Linux), whose menu opens the window again or
+//! quits.
+//!
+//! No page can call into the app: the app defines no commands and grants no
+//! capabilities, so Tauri's IPC refuses everything.
 
 // Release builds on Windows are GUI programs, without a console window.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
@@ -18,14 +24,19 @@ mod logging;
 
 use std::net::{SocketAddr, TcpListener};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use plumb_node::node::{self, NodeConfig, NodeHandle};
 use tauri::async_runtime::{self, JoinHandle};
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+use tauri::tray::{MouseButton, TrayIconBuilder, TrayIconEvent};
 use tauri::webview::NewWindowResponse;
-use tauri::{AppHandle, Manager, RunEvent, Url, WebviewUrl, WebviewWindowBuilder};
+use tauri::{
+    AppHandle, Manager, RunEvent, Url, WebviewUrl, WebviewWindowBuilder, Window, WindowEvent,
+};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_opener::OpenerExt;
 use tracing::{debug, error, info, warn};
@@ -68,6 +79,7 @@ fn main() {
         )
         .plugin(tauri_plugin_dialog::init())
         .manage(Node::default())
+        .on_window_event(on_window_event)
         .setup(|app| {
             setup(app.handle())?;
             Ok(())
@@ -88,6 +100,9 @@ struct Node {
     /// The node's page, `http://127.0.0.1:<port>/`, once it listens.
     url: OnceLock<Url>,
     phase: Mutex<Phase>,
+    /// Whether the menu bar or notification area icon is up, so that closing
+    /// the window can leave the app running there.
+    in_tray: AtomicBool,
 }
 
 impl Node {
@@ -171,6 +186,11 @@ fn setup(app: &AppHandle) -> Result<()> {
         window = window.data_directory(cache.join("webview"));
     }
     window.build().context("opening the window")?;
+    match add_tray_icon(app) {
+        Ok(()) => app.state::<Node>().in_tray.store(true, Ordering::Relaxed),
+        // Closing the window then quits, as it would without the icon.
+        Err(err) => warn!("cannot add the menu bar icon: {err:#}"),
+    }
 
     let task = async_runtime::spawn(start_node(app.clone()));
     *app.state::<Node>().phase() = Phase::Started(task);
@@ -302,7 +322,8 @@ fn start_failure_message(err: &anyhow::Error, folder: &str, log: Option<&Path>) 
 
 /// Stops the node before the app exits.
 ///
-/// Closing the window, a stop signal or a failed start asks the app to exit:
+/// Quitting from the menu bar icon, closing the window when there is no
+/// icon, a stop signal or a failed start asks the app to exit:
 /// that first request is held back while the node stops in the background,
 /// then the app exits with the same code. Quitting from the macOS menu skips
 /// the request and only ends the event loop, so the node is stopped there.
@@ -330,6 +351,16 @@ fn on_run_event(app: &AppHandle, event: RunEvent) {
                     *phase = Phase::Stopping(stopping);
                 }
                 other @ (Phase::NotStarted | Phase::Stopped) => *phase = other,
+            }
+        }
+        // Clicking the Dock icon while the window is closed.
+        #[cfg(target_os = "macos")]
+        RunEvent::Reopen {
+            has_visible_windows: false,
+            ..
+        } => {
+            if matches!(*app.state::<Node>().phase(), Phase::Started(_)) {
+                show_main_window(app);
             }
         }
         RunEvent::Exit => {
@@ -403,6 +434,97 @@ async fn stop_signal() -> std::io::Result<()> {
     {
         tokio::signal::ctrl_c().await
     }
+}
+
+/// Menu item ids of the menu bar or notification area icon.
+const MENU_OPEN: &str = "open";
+const MENU_QUIT: &str = "quit";
+
+/// Adds the icon in the menu bar (macOS) or notification area (Windows,
+/// Linux), whose menu opens the window or quits the app. Double-clicking it
+/// opens the window too, where the system reports clicks (not on Linux).
+fn add_tray_icon(app: &AppHandle) -> Result<()> {
+    let menu = Menu::with_items(
+        app,
+        &[
+            &MenuItem::with_id(app, MENU_OPEN, "Open Plumb Search", true, None::<&str>)?,
+            &PredefinedMenuItem::separator(app)?,
+            &MenuItem::with_id(app, MENU_QUIT, "Quit Plumb Search", true, None::<&str>)?,
+        ],
+    )?;
+    let icon = app
+        .default_window_icon()
+        .context("the app has no icon")?
+        .clone();
+    TrayIconBuilder::with_id("main")
+        .icon(icon)
+        .tooltip("Plumb Search")
+        .menu(&menu)
+        .on_menu_event(|app, event| match event.id.as_ref() {
+            MENU_OPEN => show_main_window(app),
+            MENU_QUIT => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::DoubleClick {
+                button: MouseButton::Left,
+                ..
+            } = event
+            {
+                show_main_window(tray.app_handle());
+            }
+        })
+        .build(app)?;
+    Ok(())
+}
+
+/// Closing the window hides it while the app stays in the menu bar or
+/// notification area, so the node keeps answering the browser's searches.
+/// The first time, a message says where the app went.
+fn on_window_event(window: &Window, event: &WindowEvent) {
+    let WindowEvent::CloseRequested { api, .. } = event else {
+        return;
+    };
+    let app = window.app_handle();
+    if window.label() != MAIN_WINDOW || !app.state::<Node>().in_tray.load(Ordering::Relaxed) {
+        return;
+    }
+    api.prevent_close();
+    let _ = window.hide();
+    if first_time_closed(app) {
+        app.dialog()
+            .message(KEEPS_RUNNING)
+            .title("Plumb Search")
+            .kind(MessageDialogKind::Info)
+            .buttons(MessageDialogButtons::Ok)
+            .show(|_| {});
+    }
+}
+
+/// What the first close of the window says.
+const KEEPS_RUNNING: &str = if cfg!(target_os = "macos") {
+    "Plumb Search is still running in the menu bar, so searches from your browser keep \
+     working.\n\nTo open it again or quit, click its icon in the menu bar."
+} else {
+    "Plumb Search is still running in the notification area, so searches from your \
+     browser keep working.\n\nTo open it again or quit, click its icon there."
+};
+
+/// Whether the window is being closed for the first time, which is noted in
+/// the app's config folder.
+fn first_time_closed(app: &AppHandle) -> bool {
+    let Ok(dir) = app.path().app_config_dir() else {
+        return false;
+    };
+    let marker = dir.join("closed-once");
+    if marker.exists() {
+        return false;
+    }
+    if let Err(err) = std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(&marker, b"")) {
+        // Saying it again next time beats never saying it.
+        warn!("cannot note that the window was closed: {err}");
+    }
+    true
 }
 
 /// Brings the window to the front, when the app is launched again.
