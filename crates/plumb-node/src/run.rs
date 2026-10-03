@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use plumb_net::NetConfig;
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::cli::{Profile, RunArgs};
 use crate::node::{self, NodeConfig};
@@ -16,6 +16,13 @@ use crate::web::shutdown_signal;
 const RUNTIME_STOP_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub fn run(args: RunArgs) -> Result<()> {
+    if args.reseed {
+        if node::request_reseed(&args.data)? {
+            info!("folding the seed data into the records again once the node is up");
+        } else {
+            warn!("--reseed: no records yet, so the node sets up from the seed data anyway");
+        }
+    }
     let config = node_config(args);
     let runtime = crate::runtime()?;
     let result = runtime.block_on(async move {
