@@ -62,6 +62,7 @@ fn node_config(args: RunArgs) -> NodeConfig {
     if args.alpha.is_some() {
         config.alpha = args.alpha;
     }
+    config.country = args.country;
     if args.use_system_proxy {
         config.use_system_proxy = true;
     }

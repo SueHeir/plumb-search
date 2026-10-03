@@ -2,7 +2,13 @@
 //!
 //! - `GET /` shows a search box,
 //! - `GET /search?q=` shows results as server-rendered HTML,
-//! - `GET /api/search?q=&limit=` returns a JSON list of [`Hit`]s,
+//! - `GET /api/search?q=&limit=` returns a JSON list of [`Hit`]s, or with
+//!   `full=1` a [`SearchResults`] object that also holds the site search link,
+//!
+//! Both searches take `country=XX` (a two-letter code, or `any` for none)
+//! and `only=1` (leave out other countries' sites). Without `country`, the
+//! server's [`HomeCountry`] setting decides, by default from the browser's
+//! `Accept-Language` and then this computer's region settings.
 //! - `GET /opensearch.xml` describes the search engine to browsers
 //!   (OpenSearch 1.1), so that they can offer to add it; every page links to
 //!   it.
@@ -30,12 +36,13 @@ use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use plumb_core::{collapse_whitespace, now_unix, truncate_chars};
-use plumb_index::{Hit, RankConfig, Searcher};
+use plumb_index::{Hit, RankConfig, SearchOptions, SearchResults, Searcher, SiteSearch};
 use serde::Deserialize;
 use tracing::{debug, error, info};
 use url::Url;
 
 use crate::cli::ServeArgs;
+use crate::country::{country_name, HomeCountry, COUNTRY_CHOICES};
 use crate::node::{Phase, Status, Step};
 use crate::{block_on, rank_config};
 
@@ -69,6 +76,20 @@ const OPENSEARCH_LINK: &str = "<link rel=\"search\" \
 pub trait SearchBackend: Send + Sync {
     /// Best `limit` hits for `query`, best first.
     fn search(&self, query: &str, limit: usize) -> Result<Vec<Hit>>;
+    /// [`SearchBackend::search`] with the searcher's choices, plus a site
+    /// search link. By default the choices are ignored and there is no link.
+    fn search_full(
+        &self,
+        query: &str,
+        limit: usize,
+        options: &SearchOptions,
+    ) -> Result<SearchResults> {
+        let _ = options;
+        Ok(SearchResults {
+            hits: self.search(query, limit)?,
+            site_search: None,
+        })
+    }
     /// Number of sites that can be found.
     fn num_docs(&self) -> u64;
 }
@@ -90,6 +111,15 @@ impl SearchBackend for IndexBackend {
         self.searcher.search_with(query, limit, &self.rank)
     }
 
+    fn search_full(
+        &self,
+        query: &str,
+        limit: usize,
+        options: &SearchOptions,
+    ) -> Result<SearchResults> {
+        self.searcher.search_full(query, limit, &self.rank, options)
+    }
+
     fn num_docs(&self) -> u64 {
         self.searcher.num_docs()
     }
@@ -106,6 +136,8 @@ struct AppState {
     backend: Arc<dyn SearchBackend>,
     /// Set for a long-running node, `None` for `plumb serve`.
     node: Option<Arc<dyn StatusSource>>,
+    /// The home country of searches that do not name one.
+    home: HomeCountry,
 }
 
 impl AppState {
@@ -119,9 +151,15 @@ impl AppState {
 
 /// The web app: `/`, `/search` and `/api/search`.
 pub fn router(backend: Arc<dyn SearchBackend>) -> Router {
+    router_with(backend, HomeCountry::Auto)
+}
+
+/// [`router`] with a [`HomeCountry`] setting.
+pub fn router_with(backend: Arc<dyn SearchBackend>, home: HomeCountry) -> Router {
     app(AppState {
         backend,
         node: None,
+        home,
     })
 }
 
@@ -129,9 +167,19 @@ pub fn router(backend: Arc<dyn SearchBackend>) -> Router {
 /// `GET /api/status`. Until `status` reports [`Phase::Ready`], `/` and
 /// `/search` show the setup page and `/api/search` answers 503.
 pub fn node_router(backend: Arc<dyn SearchBackend>, status: Arc<dyn StatusSource>) -> Router {
+    node_router_with(backend, status, HomeCountry::Auto)
+}
+
+/// [`node_router`] with a [`HomeCountry`] setting.
+pub fn node_router_with(
+    backend: Arc<dyn SearchBackend>,
+    status: Arc<dyn StatusSource>,
+    home: HomeCountry,
+) -> Router {
     app(AppState {
         backend,
         node: Some(status),
+        home,
     })
 }
 
@@ -152,10 +200,10 @@ pub fn run(args: ServeArgs) -> Result<()> {
     let searcher = Searcher::open(&args.index)
         .with_context(|| format!("opening the index in {}", args.index.display()))?;
     let docs = searcher.num_docs();
-    let app = router(Arc::new(IndexBackend::new(
-        searcher,
-        rank_config(args.alpha),
-    )));
+    let app = router_with(
+        Arc::new(IndexBackend::new(searcher, rank_config(args.alpha))),
+        args.country.clone(),
+    );
     block_on(async move {
         let listener = tokio::net::TcpListener::bind(args.bind)
             .await
@@ -200,6 +248,22 @@ struct SearchParams {
     #[serde(default)]
     q: String,
     limit: Option<usize>,
+    /// A two-letter code, `any` for no home country, or empty for the default.
+    country: Option<String>,
+    /// `1` (or `on`, `true`): only the home country's sites and global ones.
+    only: Option<String>,
+    /// `1`: `/api/search` answers with a [`SearchResults`] object.
+    full: Option<String>,
+}
+
+/// Whether a flag parameter is set: `1`, `on`, `true` or `yes`.
+fn flag(value: &Option<String>) -> bool {
+    value.as_deref().is_some_and(|v| {
+        matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "1" | "on" | "true" | "yes"
+        )
+    })
 }
 
 impl SearchParams {
@@ -210,6 +274,27 @@ impl SearchParams {
 
     fn limit(&self) -> usize {
         self.limit.unwrap_or(DEFAULT_LIMIT).min(MAX_LIMIT)
+    }
+
+    /// The searcher's choices: the `country` parameter when it is valid,
+    /// else the server's setting for a request with these headers.
+    fn options(&self, home: &HomeCountry, headers: &HeaderMap) -> SearchOptions {
+        let asked = self
+            .country
+            .as_deref()
+            .filter(|c| !c.trim().is_empty())
+            .and_then(|c| HomeCountry::parse(c).ok());
+        let accept_language = headers
+            .get(header::ACCEPT_LANGUAGE)
+            .and_then(|value| value.to_str().ok());
+        let country = match asked {
+            Some(HomeCountry::Auto) | None => home.resolve(accept_language),
+            Some(asked) => asked.resolve(accept_language),
+        };
+        SearchOptions {
+            only_country: flag(&self.only) && country.is_some(),
+            country,
+        }
     }
 }
 
@@ -242,6 +327,7 @@ fn setup_response(status: &Status, now: u64) -> Response {
 
 async fn search_page(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(params): Query<SearchParams>,
 ) -> Response {
     if let Some(status) = state.setting_up() {
@@ -252,8 +338,9 @@ async fn search_page(
     if query.is_empty() {
         return home_or_setup(&state);
     }
-    match run_search(&state, &query, params.limit()).await {
-        Ok(hits) => html_response(StatusCode::OK, render_results(&query, &hits)),
+    let options = params.options(&state.home, &headers);
+    match run_search(&state, &query, params.limit(), &options).await {
+        Ok(results) => html_response(StatusCode::OK, render_results(&query, &results, &options)),
         Err(err) => {
             error!("search for {query:?} failed: {err:#}");
             html_response(StatusCode::INTERNAL_SERVER_ERROR, render_error(&query))
@@ -261,7 +348,11 @@ async fn search_page(
     }
 }
 
-async fn api_search(State(state): State<AppState>, Query(params): Query<SearchParams>) -> Response {
+async fn api_search(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(params): Query<SearchParams>,
+) -> Response {
     if let Some(status) = state.setting_up() {
         let body = serde_json::json!({
             "error": "the search index is not ready yet",
@@ -278,11 +369,23 @@ async fn api_search(State(state): State<AppState>, Query(params): Query<SearchPa
             .into_response();
     }
     let query = params.query();
+    let full = flag(&params.full);
     if query.is_empty() {
-        return (StatusCode::OK, security_headers(), Json(Vec::<Hit>::new())).into_response();
+        return if full {
+            (
+                StatusCode::OK,
+                security_headers(),
+                Json(SearchResults::default()),
+            )
+                .into_response()
+        } else {
+            (StatusCode::OK, security_headers(), Json(Vec::<Hit>::new())).into_response()
+        };
     }
-    match run_search(&state, &query, params.limit()).await {
-        Ok(hits) => (StatusCode::OK, security_headers(), Json(hits)).into_response(),
+    let options = params.options(&state.home, &headers);
+    match run_search(&state, &query, params.limit(), &options).await {
+        Ok(results) if full => (StatusCode::OK, security_headers(), Json(results)).into_response(),
+        Ok(results) => (StatusCode::OK, security_headers(), Json(results.hits)).into_response(),
         Err(err) => {
             error!("search for {query:?} failed: {err:#}");
             let body = serde_json::json!({ "error": "search failed" });
@@ -393,17 +496,25 @@ XfzKXf6+YH0J0VddQVcMXd/cXrP5ClXYj1Hh35T//C3z83jv3KNw9yCF4mP91vcYNadv9VISrAAAAABJ
 
 /// Runs a search on the blocking thread pool, since searching is CPU and
 /// disk work. A panicking backend becomes an error, not a dropped connection.
-async fn run_search(state: &AppState, query: &str, limit: usize) -> Result<Vec<Hit>> {
+async fn run_search(
+    state: &AppState,
+    query: &str,
+    limit: usize,
+    options: &SearchOptions,
+) -> Result<SearchResults> {
     if limit == 0 {
-        return Ok(Vec::new());
+        return Ok(SearchResults::default());
     }
     let backend = Arc::clone(&state.backend);
     let owned_query = query.to_string();
-    let hits = tokio::task::spawn_blocking(move || backend.search(&owned_query, limit))
-        .await
-        .context("the search task failed")??;
-    debug!("{query:?}: {} hits", hits.len());
-    Ok(hits)
+    let owned_options = options.clone();
+    let results = tokio::task::spawn_blocking(move || {
+        backend.search_full(&owned_query, limit, &owned_options)
+    })
+    .await
+    .context("the search task failed")??;
+    debug!("{query:?}: {} hits", results.hits.len());
+    Ok(results)
 }
 
 fn security_headers() -> [(HeaderName, &'static str); 3] {
@@ -529,6 +640,14 @@ a.t:hover{text-decoration:underline}\
 .m{margin-top:.25rem}\
 .s{margin-top:1.5rem}\
 .none{margin:1.5rem 0}\
+header form{flex-wrap:wrap}\
+.f{flex-basis:100%;display:flex;flex-wrap:wrap;gap:.5rem 1rem;align-items:center;\
+font-size:.85rem;color:var(--muted)}\
+.f input{flex:none}\
+select{font:inherit;padding:.15rem .3rem;border:1px solid var(--line);border-radius:.35rem;\
+background:var(--bg);color:var(--fg)}\
+.ss{margin:1rem 0 .25rem;padding:.6rem .8rem;border:1px solid var(--line);border-radius:.5rem}\
+.ss a{color:var(--link)}\
 .setup{max-width:36rem}\
 .step{margin:2rem 0 .5rem;font-size:1.1rem}\
 progress{width:100%;height:.75rem;accent-color:var(--accent)}\
@@ -677,8 +796,56 @@ fn results_header(query: &str) -> String {
     )
 }
 
-fn render_results(query: &str, hits: &[Hit]) -> String {
-    let mut body = format!("<div class=\"wrap\">\n{}\n<main>\n", results_header(query));
+/// The results page's search form, which also picks the home country and
+/// whether to leave out other countries' sites.
+fn results_form(query: &str, options: &SearchOptions) -> String {
+    let current = options.country.as_deref();
+    let mut choices = format!(
+        "<option value=\"any\"{}>Any country</option>",
+        if current.is_none() { " selected" } else { "" }
+    );
+    let listed = current.is_some_and(|c| COUNTRY_CHOICES.iter().any(|(code, _)| *code == c));
+    if let (Some(code), false) = (current, listed) {
+        let _ = write!(
+            choices,
+            "<option value=\"{0}\" selected>{0}</option>",
+            escape_html(code)
+        );
+    }
+    for (code, name) in COUNTRY_CHOICES {
+        let selected = if current == Some(*code) {
+            " selected"
+        } else {
+            ""
+        };
+        let _ = write!(
+            choices,
+            "<option value=\"{code}\"{selected}>{name}</option>"
+        );
+    }
+    format!(
+        "<header><a class=\"logo\" href=\"/\">Plumb</a>\
+         <form action=\"/search\" method=\"get\" role=\"search\">\
+         <input type=\"search\" name=\"q\" value=\"{}\" placeholder=\"A site's name, e.g. us bank\" \
+         aria-label=\"Search\" autocomplete=\"off\">\
+         <button type=\"submit\">Search</button>\
+         <div class=\"f\"><label>Country <select name=\"country\">{choices}</select></label> \
+         <label><input type=\"checkbox\" name=\"only\" value=\"1\"{}> Only this country</label></div>\
+         </form></header>",
+        escape_html(query),
+        if options.only_country { " checked" } else { "" }
+    )
+}
+
+fn render_results(query: &str, results: &SearchResults, options: &SearchOptions) -> String {
+    let hits = &results.hits;
+    let mut body = format!(
+        "<div class=\"wrap\">\n{}\n<main>\n",
+        results_form(query, options)
+    );
+    if let Some(site_search) = &results.site_search {
+        render_site_search(&mut body, site_search);
+    }
     if hits.is_empty() {
         let _ = writeln!(
             body,
@@ -692,13 +859,34 @@ fn render_results(query: &str, hits: &[Hit]) -> String {
         }
         body.push_str("</ol>\n");
     }
-    let api: String = url::form_urlencoded::byte_serialize(query.as_bytes()).collect();
-    let api = escape_html(&format!("/api/search?q={api}"));
+    let mut api = url::form_urlencoded::Serializer::new(String::new());
+    api.append_pair("q", query);
+    if let Some(country) = &options.country {
+        api.append_pair("country", country);
+    }
+    if options.only_country {
+        api.append_pair("only", "1");
+    }
+    let api = escape_html(&format!("/api/search?{}", api.finish()));
     let _ = write!(
         body,
         "<p class=\"s\">As JSON: <a href=\"{api}\">{api}</a></p>\n</main>\n</div>"
     );
     page(&format!("{query} - Plumb Search"), &body)
+}
+
+/// "Search github.com for sueheir plumb-search", above the results.
+fn render_site_search(out: &mut String, site_search: &SiteSearch) {
+    let Some(href) = http_url(&site_search.url) else {
+        return;
+    };
+    let _ = writeln!(
+        out,
+        "<p class=\"ss\"><a href=\"{}\" rel=\"noreferrer\">Search {} for <strong>{}</strong></a></p>",
+        escape_html(&href),
+        escape_html(&site_search.domain),
+        escape_html(&truncate_chars(&site_search.terms, 150))
+    );
 }
 
 fn render_hit(out: &mut String, hit: &Hit) {
@@ -730,9 +918,14 @@ fn render_hit(out: &mut String, hit: &Hit) {
     if let Some(description) = hit.description.as_deref().filter(|d| !d.trim().is_empty()) {
         let _ = write!(out, "<p class=\"d\">{}</p>", escape_html(description));
     }
+    let country = hit
+        .country
+        .as_deref()
+        .map(|code| format!(" &middot; {}", escape_html(country_name(code))))
+        .unwrap_or_default();
     let _ = writeln!(
         out,
-        "<div class=\"m\">{} &middot; score {:.3} (text {:.3}, link {:.3})</div></li>",
+        "<div class=\"m\">{}{country} &middot; score {:.3} (text {:.3}, link {:.3})</div></li>",
         escape_html(&hit.domain),
         hit.score,
         hit.text_score,
@@ -795,6 +988,7 @@ mod tests {
             score: 0.9,
             text_score: 0.8,
             link_score: 0.7,
+            country: None,
         }
     }
 
@@ -1490,11 +1684,130 @@ mod tests {
         );
     }
 
+    /// Answers with one hit and a site search link, and remembers the options.
+    #[derive(Default)]
+    struct OptionsBackend {
+        link: String,
+        options: Mutex<Vec<SearchOptions>>,
+    }
+
+    impl SearchBackend for OptionsBackend {
+        fn search(&self, _query: &str, _limit: usize) -> Result<Vec<Hit>> {
+            unreachable!("pages search with options")
+        }
+
+        fn search_full(
+            &self,
+            query: &str,
+            _limit: usize,
+            options: &SearchOptions,
+        ) -> Result<SearchResults> {
+            self.options.lock().unwrap().push(options.clone());
+            let mut github = hit("github.com", "https://github.com/", Some("GitHub"), None);
+            github.country = Some("US".into());
+            Ok(SearchResults {
+                hits: vec![github],
+                site_search: Some(SiteSearch {
+                    domain: "github.com".into(),
+                    terms: query.trim_start_matches("github ").into(),
+                    url: self.link.clone(),
+                }),
+            })
+        }
+
+        fn num_docs(&self) -> u64 {
+            1
+        }
+    }
+
+    fn options_backend(link: &str) -> Arc<OptionsBackend> {
+        Arc::new(OptionsBackend {
+            link: link.into(),
+            ..OptionsBackend::default()
+        })
+    }
+
+    #[tokio::test]
+    async fn pages_pick_the_country_and_link_to_site_search() {
+        let fake = options_backend("https://github.com/search?q=plumb%20%3Cb%3E");
+        let app = || router_with(fake.clone(), HomeCountry::Fixed("US".into()));
+        let (code, _, body) =
+            send(app(), "/search?q=github+plumb+%3Cb%3E&country=de&only=on").await;
+        assert_eq!(code, StatusCode::OK);
+        assert!(
+            body.contains(
+                "<p class=\"ss\"><a href=\"https://github.com/search?q=plumb%20%3Cb%3E\" \
+             rel=\"noreferrer\">Search github.com for <strong>plumb &lt;b&gt;</strong></a></p>"
+            ),
+            "{body}"
+        );
+        assert!(body.contains("<option value=\"DE\" selected>Germany</option>"));
+        assert!(body.contains("name=\"only\" value=\"1\" checked"));
+        assert!(body.contains("github.com &middot; United States &middot; score"));
+        assert!(body.contains("country=DE&amp;only=1"), "{body}");
+
+        // No country asked for: the server's setting, then the browser's.
+        send(app(), "/search?q=github").await;
+        let auto = router_with(fake.clone(), HomeCountry::Auto);
+        send_with_headers(
+            auto,
+            "/search?q=github",
+            &[("accept-language", "en-GB,en;q=0.8")],
+        )
+        .await;
+        // `any` turns the home country off, and `only` needs one.
+        send(app(), "/search?q=github&country=any&only=1").await;
+        // A bad code falls back to the setting.
+        send(app(), "/search?q=github&country=zz").await;
+        let seen: Vec<(Option<String>, bool)> = fake
+            .options
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|o| (o.country.clone(), o.only_country))
+            .collect();
+        let code = |c: &str| Some(c.to_string());
+        assert_eq!(
+            seen,
+            [
+                (code("DE"), true),
+                (code("US"), false),
+                (code("GB"), false),
+                (None, false),
+                (code("US"), false),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn site_search_links_must_be_web_addresses() {
+        let fake = options_backend("javascript:alert(1)");
+        let (_, _, body) = send(router(fake), "/search?q=github+x").await;
+        assert!(!body.contains("class=\"ss\""), "{body}");
+        assert!(!body.contains("javascript:"));
+    }
+
+    #[tokio::test]
+    async fn full_api_answers_include_the_site_search() {
+        let fake = options_backend("https://github.com/search?q=x");
+        let (_, _, body) = send(router(fake.clone()), "/api/search?q=github+x&full=1").await;
+        let results: SearchResults = serde_json::from_str(&body).unwrap();
+        assert_eq!(results.hits[0].domain, "github.com");
+        assert_eq!(
+            results.site_search.unwrap().url,
+            "https://github.com/search?q=x"
+        );
+        // Without `full`, the plain list as before.
+        let (_, _, body) = send(router(fake), "/api/search?q=github+x").await;
+        let hits: Vec<Hit> = serde_json::from_str(&body).unwrap();
+        assert_eq!(hits.len(), 1);
+    }
+
     #[test]
     fn long_queries_are_cut() {
         let params = SearchParams {
             q: format!("  us \n bank {}", "x".repeat(500)),
-            limit: None,
+            ..SearchParams::default()
         };
         let query = params.query();
         assert!(query.starts_with("us bank x"));

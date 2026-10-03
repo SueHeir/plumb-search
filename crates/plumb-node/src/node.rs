@@ -76,13 +76,14 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use plumb_core::now_unix;
-use plumb_index::{Hit, RankConfig, Searcher};
+use plumb_index::{Hit, RankConfig, SearchOptions, SearchResults, Searcher};
 use plumb_ingest::download;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{watch, Notify};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
+use crate::country::HomeCountry;
 use crate::web::{self, IndexBackend, SearchBackend, StatusSource};
 
 mod store;
@@ -125,6 +126,8 @@ pub struct NodeConfig {
     pub cc_release: Option<String>,
     /// Weight of the popularity prior in the ranking; `None` uses the index default.
     pub alpha: Option<f32>,
+    /// The home country of searches that do not name one.
+    pub country: HomeCountry,
     /// Where the seed data is downloaded from on first start.
     pub sources: SeedSources,
     /// How long to wait before trying failed work again. The wait doubles
@@ -148,6 +151,7 @@ impl NodeConfig {
             use_system_proxy: false,
             cc_release: None,
             alpha: None,
+            country: HomeCountry::Auto,
             sources: SeedSources::default(),
             retry_wait: Duration::from_secs(10 * 60),
             max_retry_wait: Duration::from_secs(6 * 60 * 60),
@@ -447,7 +451,7 @@ pub async fn start(config: NodeConfig) -> Result<NodeHandle> {
 
     let (stop, stopped) = watch::channel(false);
     let inner = Arc::new(Inner::new(config, rank, opened, stopped.clone()));
-    let app = web::node_router(inner.clone(), inner.clone());
+    let app = web::node_router_with(inner.clone(), inner.clone(), inner.config.country.clone());
     let server = tokio::spawn(async move {
         let mut stopped = stopped;
         axum::serve(listener, app)
@@ -861,6 +865,18 @@ impl SearchBackend for Inner {
             bail!("the search index is not ready yet");
         };
         index.backend().search(query, limit)
+    }
+
+    fn search_full(
+        &self,
+        query: &str,
+        limit: usize,
+        options: &SearchOptions,
+    ) -> Result<SearchResults> {
+        let Some(index) = self.current() else {
+            bail!("the search index is not ready yet");
+        };
+        index.backend().search_full(query, limit, options)
     }
 
     fn num_docs(&self) -> u64 {

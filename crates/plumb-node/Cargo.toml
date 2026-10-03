@@ -19,6 +19,7 @@ plumb-index = { version = "0.1.0", path = "../plumb-index" }
 plumb-ingest = { version = "0.1.0", path = "../plumb-ingest" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+sys-locale = "0.3.2"
 tokio = { version = "1.53.1", features = ["full"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
