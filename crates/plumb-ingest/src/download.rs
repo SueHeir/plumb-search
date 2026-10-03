@@ -643,6 +643,12 @@ const WAIT_BUDGET_FACTOR: u32 = 40;
 /// Tries of one band before it is split, or the download given up.
 const WIKIDATA_TRIES: u32 = 6;
 
+/// Answers of one band saying Wikidata is too busy before it is halved: a
+/// narrower query is more likely to finish than more waiting (on
+/// 2026-10-03 the 25 to 29 sitelinks band timed out five times in a row
+/// while 25-26 and 27-29 had come in that morning).
+const BUSY_TRIES: u32 = 3;
+
 /// How many times a band of [`wikidata_sitelink_bands`] may be halved: a
 /// band becomes at most 4 queries. Halving barely speeds a query up, so it
 /// is only done when a band failed all its tries.
@@ -687,10 +693,14 @@ const TIMEOUT_MARKERS: [&str; 2] = [
 /// service's Java exception follows. Such an answer, one that ends in that
 /// exception (also as HTTP 500), HTTP 503 or 504, and no whole answer within
 /// 3 minutes all mean that Wikidata was too busy: the band is asked for
-/// again after a wait, up to 6 tries ([`WikidataPacing::wait_after`]). Only
-/// a band still too busy after that is asked for in two halves
+/// again after a wait ([`WikidataPacing::wait_after`]). A band too busy 3
+/// times is asked for in two halves
 /// ([`SitelinkBand::halves`]), and a band of the defaults is halved at most
 /// twice; then the download fails.
+///
+/// A band still too busy when the waits run out is halved too, each half
+/// getting at least one try, so a long wait on one band does not end the
+/// download while narrower queries might get through.
 ///
 /// HTTP 429 and other 5xx, and failed connections, are tried again the same
 /// way, but not halved; after HTTP 429 the wait is at least
@@ -1116,6 +1126,7 @@ async fn query_band(
         .append_pair("query", &band.sparql_query())
         .finish();
     let mut tries = 0;
+    let mut busy_tries = 0;
     loop {
         tries += 1;
         *queries += 1;
@@ -1129,6 +1140,10 @@ async fn query_band(
                 rate_limited,
             }) => (why, after, busy, rate_limited),
         };
+        busy_tries += u32::from(busy);
+        if busy && busy_tries >= BUSY_TRIES {
+            return Err(BandFailure::Busy(format!("{why} (tried {tries} times)")));
+        }
         if tries >= WIKIDATA_TRIES {
             let why = format!("{why} (tried {tries} times)");
             return Err(if busy {
@@ -1148,6 +1163,12 @@ async fn query_band(
             None if rate_limited => pacing.wait_after(tries).max(pacing.rate_limit_wait()),
             None => pacing.wait_after(tries),
         };
+        if wait > *budget && busy {
+            // Out of waiting time: a smaller query is the better bet.
+            return Err(BandFailure::Busy(format!(
+                "{why} (tried {tries} times, with no waiting time left)"
+            )));
+        }
         if wait > *budget {
             return Err(BandFailure::Fatal(anyhow!(
                 "{why} (tried {tries} times); waiting {wait:?} more would pass the {:?} this \
@@ -2573,7 +2594,7 @@ mod tests {
         let mut expected = Vec::new();
         for b in wikidata_sitelink_bands(25) {
             if b == band(36, Some(44)) {
-                expected.extend([b; WIKIDATA_TRIES as usize]);
+                expected.extend([b; BUSY_TRIES as usize]);
                 expected.extend([band(36, Some(40)); 2]);
                 expected.extend([band(41, Some(44)); 2]);
             } else {
@@ -2628,7 +2649,7 @@ mod tests {
             "{err}"
         );
         let mut expected = vec![band(25, Some(29))];
-        expected.extend([band(30, Some(35)); WIKIDATA_TRIES as usize]);
+        expected.extend([band(30, Some(35)); BUSY_TRIES as usize]);
         expected.extend([band(30, Some(32)), band(33, Some(35))]);
         assert_eq!(asked.bands(), expected);
         let bands_dir = dir.path().join(WIKIDATA_BANDS_DIR_NAME);
@@ -2778,10 +2799,10 @@ mod tests {
             "{err}"
         );
         assert!(
-            err.ends_with("(tried 6 times)); it is already split 2 times; try again later"),
+            err.ends_with("(tried 3 times)); it is already split 2 times; try again later"),
             "{err}"
         );
-        let tries = WIKIDATA_TRIES as usize;
+        let tries = BUSY_TRIES as usize;
         let mut expected = vec![band(130, None); tries];
         expected.extend(vec![band(130, Some(259)); tries]);
         expected.extend(vec![band(130, Some(194)); tries]);
@@ -2805,7 +2826,7 @@ mod tests {
         assert_eq!(
             format!("{err:#}"),
             "Wikidata was too busy to answer the query for items with exactly 24 sitelinks \
-             (HTTP 504 Gateway Timeout: upstream timed out (tried 6 times)); it cannot be \
+             (HTTP 504 Gateway Timeout: upstream timed out (tried 3 times)); it cannot be \
              split; try again later"
         );
         assert_eq!(asked.bands(), vec![band(24, Some(24)); tries]);
@@ -2827,17 +2848,40 @@ mod tests {
         )
         .await
         .unwrap_err();
-        // 1 + 2 + 4 + 8 + 10 ms for the open band, then 1 + 2 + 4 + 8 ms for
-        // its lower half; 10 ms more is too much.
+        // 1 + 2 ms for the open band, 1 + 2 for its lower half and 1 + 2
+        // for that one's lower half, then the halving stops.
         assert_eq!(
             format!("{err:#}"),
-            "asking Wikidata for items with 130 to 259 sitelinks (try again later): HTTP 503 \
-             Service Unavailable: busy (tried 5 times); waiting 10ms more would pass the 40ms \
-             this download may wait in all"
+            "Wikidata was too busy to answer the query for items with 130 to 194 sitelinks \
+             (HTTP 503 Service Unavailable: busy (tried 3 times)); it is already split 2 times; \
+             try again later"
         );
-        let mut expected = vec![band(130, None); WIKIDATA_TRIES as usize];
-        expected.extend([band(130, Some(259)); 5]);
+        let mut expected = vec![band(130, None); 3];
+        expected.extend([band(130, Some(259)); 3]);
+        expected.extend([band(130, Some(194)); 3]);
         assert_eq!(asked.bands(), expected);
+
+        // Out of waiting time, a busy band is handed back to be halved
+        // rather than failing the download.
+        let (url, asked) =
+            sparql_endpoint(|_, _| http_response("503 Service Unavailable", &[], b"busy")).await;
+        let mut budget = Duration::ZERO;
+        let mut queries = 0;
+        let failure = query_band(
+            &loopback_client(),
+            &url,
+            band(130, None),
+            quick(),
+            &mut budget,
+            &mut queries,
+        )
+        .await
+        .unwrap_err();
+        match failure {
+            BandFailure::Busy(why) => assert!(why.contains("no waiting time left"), "{why}"),
+            BandFailure::Fatal(err) => panic!("not busy: {err:#}"),
+        }
+        assert_eq!(asked.bands(), [band(130, None)]);
     }
 
     #[test]
