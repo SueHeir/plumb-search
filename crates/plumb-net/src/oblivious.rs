@@ -31,12 +31,20 @@
 //! same messages as `/plumb/bucket/1`), not Binary HTTP: the encapsulation
 //! is RFC 9458's, so the same code serves a browser going through an HTTP
 //! relay, but the message inside is Plumb's own.
+//!
+//! The asker's half (checking keys, sealing, opening, padding) is
+//! [`plumb_core::oblivious`], re-exported here, so the browser's WASM client
+//! shares it without libp2p's networking.
 
-use anyhow::{bail, ensure, Context, Result};
-use libp2p::identity::{Keypair, PublicKey};
+use anyhow::{ensure, Context, Result};
+use libp2p::identity::Keypair;
 use libp2p::PeerId;
 use ohttp::hpke::{Aead, Kdf, Kem};
-use ohttp::{ClientRequest, ClientResponse, KeyConfig, Server, ServerResponse, SymmetricSuite};
+use ohttp::{KeyConfig, Server, ServerResponse, SymmetricSuite};
+pub use plumb_core::oblivious::{
+    open_response, pad, padded_len, seal_request, unpad, ClientResponse, SignedKeys, KEY_LIFETIME,
+    MAX_MESSAGE, MIN_RESPONSE_SIZE, REQUEST_SIZE,
+};
 use rand_core::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
@@ -44,19 +52,8 @@ use serde_bytes::ByteBuf;
 use crate::proto::{BucketRequest, BucketResponse};
 
 pub const OBLIVIOUS_PROTOCOL: &str = "/plumb/oblivious/1";
-/// Seconds a target's key is used for new requests; it is still accepted
-/// for as long again.
-pub const KEY_LIFETIME: u64 = 24 * 60 * 60;
 /// Seconds a relay hands out a target's key before fetching it again.
 pub const RELAY_KEY_CACHE: u64 = 10 * 60;
-/// Every sealed bucket request has this size before encryption.
-pub const REQUEST_SIZE: usize = 64;
-/// The smallest sealed answer, before encryption.
-pub const MIN_RESPONSE_SIZE: usize = 4 * 1024;
-/// The largest sealed message a node takes, either way.
-pub const MAX_MESSAGE: usize = 48 * 1024 * 1024;
-
-const SIGNING_CONTEXT: &[u8] = b"plumb-oblivious-keys-v1\0";
 
 /// What goes over `/plumb/oblivious/1`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -81,47 +78,6 @@ pub enum ObliviousResponse {
     /// The sealed answer, or `None` when the request could not be passed
     /// on or answered.
     Sealed(Option<ByteBuf>),
-}
-
-/// A target's key config (RFC 9458 section 3), signed with its node key.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SignedKeys {
-    /// The target's node key, protobuf-encoded.
-    pub node_key: ByteBuf,
-    /// The key config, as in `application/ohttp-keys`.
-    pub config: ByteBuf,
-    /// Unix time after which the key is not accepted.
-    pub expires: u64,
-    pub signature: ByteBuf,
-}
-
-impl SignedKeys {
-    fn signing_bytes(config: &[u8], expires: u64) -> Vec<u8> {
-        let mut bytes = SIGNING_CONTEXT.to_vec();
-        bytes.extend_from_slice(&expires.to_be_bytes());
-        bytes.extend_from_slice(config);
-        bytes
-    }
-
-    /// Checks that these are `target`'s keys, signed by it, and not
-    /// expired at `now`.
-    pub fn verify(&self, target: &PeerId, now: u64) -> Result<()> {
-        let key = PublicKey::try_decode_protobuf(&self.node_key).context("not a node key")?;
-        ensure!(key.to_peer_id() == *target, "the keys of another node");
-        ensure!(
-            key.verify(
-                &Self::signing_bytes(&self.config, self.expires),
-                &self.signature
-            ),
-            "a bad signature"
-        );
-        ensure!(self.expires > now, "expired keys");
-        ensure!(
-            self.expires <= now + 2 * KEY_LIFETIME + 3600,
-            "keys that last too long"
-        );
-        Ok(())
-    }
 }
 
 fn suites() -> Vec<SymmetricSuite> {
@@ -235,68 +191,6 @@ pub fn seal_response(opener: ServerResponse, response: &BucketResponse) -> Resul
         .map_err(|err| anyhow::anyhow!("sealing an answer: {err}"))
 }
 
-/// Seals a request for `bucket` to `target`'s `keys`, after checking them.
-/// Returns the sealed request, and what opens the answer.
-pub fn seal_request(
-    keys: &SignedKeys,
-    target: &PeerId,
-    now: u64,
-    request: &BucketRequest,
-) -> Result<(Vec<u8>, ClientResponse)> {
-    keys.verify(target, now)?;
-    let body = cbor4ii::serde::to_vec(Vec::new(), request).context("encoding a request")?;
-    let plain = pad(&body, REQUEST_SIZE);
-    ensure!(plain.len() == REQUEST_SIZE, "a request too large");
-    ClientRequest::from_encoded_config(&keys.config)
-        .and_then(|client| client.encapsulate(&plain))
-        .map_err(|err| anyhow::anyhow!("sealing a request: {err}"))
-}
-
-/// Opens a sealed answer.
-pub fn open_response(opener: ClientResponse, message: &[u8]) -> Result<BucketResponse> {
-    ensure!(message.len() <= MAX_MESSAGE, "a sealed answer too large");
-    let plain = opener
-        .decapsulate(message)
-        .map_err(|err| anyhow::anyhow!("opening a sealed answer: {err}"))?;
-    cbor4ii::serde::from_slice(unpad(&plain)?).context("a sealed answer that is not one")
-}
-
-/// The size `len` bytes are padded to: at least `min`, and otherwise the
-/// next of 2^k and 1.5 * 2^k, so a message grows by at most half and its
-/// size says little about what is in it.
-pub fn padded_len(len: usize, min: usize) -> usize {
-    if len <= min {
-        return min;
-    }
-    let mut size = min.next_power_of_two();
-    loop {
-        if size >= len {
-            return size;
-        }
-        if size + size / 2 >= len {
-            return size + size / 2;
-        }
-        size *= 2;
-    }
-}
-
-/// `body` with its length in front, padded with zeros.
-fn pad(body: &[u8], min: usize) -> Vec<u8> {
-    let mut out = Vec::with_capacity(padded_len(body.len() + 4, min));
-    out.extend_from_slice(&(body.len() as u32).to_be_bytes());
-    out.extend_from_slice(body);
-    out.resize(padded_len(body.len() + 4, min), 0);
-    out
-}
-
-fn unpad(plain: &[u8]) -> Result<&[u8]> {
-    let Some((len, rest)) = plain.split_first_chunk::<4>() else {
-        bail!("a sealed message too short");
-    };
-    let len = u32::from_be_bytes(*len) as usize;
-    rest.get(..len).context("a sealed message cut short")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -327,7 +221,10 @@ mod tests {
         };
         let answer = seal_response(sealer, &response).unwrap();
         assert!(answer.len() >= MIN_RESPONSE_SIZE);
-        assert_eq!(open_response(opener, &answer).unwrap(), response);
+        assert_eq!(
+            open_response::<BucketResponse>(opener, &answer).unwrap(),
+            response
+        );
     }
 
     #[test]
@@ -362,24 +259,5 @@ mod tests {
 
         gateway.rotate(&node, NOW + 2 * KEY_LIFETIME).unwrap();
         assert!(gateway.open(&sealed).is_err());
-    }
-
-    #[test]
-    fn padding_grows_by_at_most_half() {
-        assert_eq!(padded_len(10, 64), 64);
-        assert_eq!(padded_len(4096, 4096), 4096);
-        assert_eq!(padded_len(4097, 4096), 6144);
-        assert_eq!(padded_len(6145, 4096), 8192);
-        assert_eq!(padded_len(100_000, 4096), 131_072);
-        for len in [5000, 70_000, 1_000_000] {
-            let padded = padded_len(len, 4096);
-            assert!(
-                padded >= len && padded <= len + len / 2 + 1,
-                "{len} {padded}"
-            );
-        }
-        let body = b"hello";
-        assert_eq!(unpad(&pad(body, 64)).unwrap(), body);
-        assert!(unpad(&[0, 0, 0, 9, 1]).is_err());
     }
 }

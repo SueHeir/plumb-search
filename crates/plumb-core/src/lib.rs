@@ -13,6 +13,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 mod country;
 mod kinds;
+#[cfg(feature = "oblivious")]
+pub mod oblivious;
 mod site_search;
 
 pub use country::{normalize_country, site_country, tld_country};

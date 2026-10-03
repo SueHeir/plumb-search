@@ -4930,8 +4930,12 @@ name = "plumb-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "cbor4ii",
+ "libp2p-identity",
+ "ohttp",
  "psl",
  "serde",
+ "serde_bytes",
  "serde_json",
  "url",
 ]
