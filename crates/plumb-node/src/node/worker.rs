@@ -720,10 +720,22 @@ fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Option<ServingIndex
     let window = RECRAWL_AFTER_DAYS * SECONDS_PER_DAY;
     let net = network::handle(inner).cloned();
     let now = now_unix();
-    // In the network, only the sites assigned to this node today.
-    let candidates = set.iter().filter(|record| {
-        net.as_ref()
-            .is_none_or(|net| net.is_assigned(&record.domain, now))
+    // In the network, only the sites assigned to this node today, or,
+    // crawling any site, this node's slice among its trusted crawlers.
+    let group = match &net {
+        Some(net) if inner.config.crawl_any_site => Some(net.crawl_group(&inner.config.crawl_with)),
+        _ => None,
+    };
+    if let Some(group) = &group {
+        info!(
+            "crawling this node's slice of the sites, shared with {} other crawlers",
+            group.len() - 1
+        );
+    }
+    let candidates = set.iter().filter(|record| match (&net, &group) {
+        (None, _) => true,
+        (Some(net), Some(group)) => net.owns_slice(group, &record.domain),
+        (Some(net), None) => net.is_assigned(&record.domain, now),
     });
     // Sites whose crawlers disagree are fetched whether assigned or not:
     // this node's own crawl settles the dispute (see plumb_net::agree).
