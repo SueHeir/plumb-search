@@ -12,7 +12,10 @@ with [Tauri](https://v2.tauri.app).
 Every link out of the panel opens in your default browser. Closing the window
 keeps the app running, so searches from your browser keep working: it stays
 in the menu bar on macOS and in the notification area on Windows and Linux.
-Its icon there has **Open Plumb Search** and **Quit Plumb Search**. Starting
+Its icon there has **Open Plumb Search**, **Start at login** and **Quit
+Plumb Search**. With **Start at login** checked, the app starts in the
+background when you log in, without opening its window, so your browser's
+searches work from the start. Starting
 the app again while it is running brings its window back too, and so does
 clicking its Dock icon on macOS.
 
