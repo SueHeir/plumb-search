@@ -12,7 +12,10 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 mod country;
+pub mod keys;
 mod kinds;
+#[cfg(feature = "oblivious")]
+pub mod oblivious;
 mod site_search;
 
 pub use country::{normalize_country, site_country, tld_country};

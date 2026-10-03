@@ -1091,6 +1091,175 @@ async fn a_node_in_the_network_takes_in_other_nodes_crawls_and_searches_them() {
     node.shutdown().await.unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_node_sharing_popularity_reports_picks_and_ranks_with_the_networks() {
+    use plumb_net::popularity::{report_epoch, MAX_POPULARITY_BONUS, REPORT_THRESHOLD};
+
+    let dir = seeded_dir();
+    let mut config = test_config(dir.path());
+    let mut net = plumb_net::NetConfig::new(PathBuf::new());
+    net.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+    net.upnp = false;
+    net.local_discovery = false;
+    config.network = Some(net);
+    config.share_popularity = true;
+    let node = start(config).await.unwrap();
+    let addr = node.addr();
+    let status = wait_for(addr, "the first index", ready_and_idle).await;
+    let net_status = status.network.expect("the node joined the network");
+    let node_addr: plumb_net::Multiaddr = net_status.listening[0].parse().unwrap();
+    let node_addr = node_addr
+        .with_p2p(net_status.peer_id.parse().unwrap())
+        .unwrap();
+
+    let before = search(addr, "us+bank").await;
+    assert!(before.len() >= 2, "{before:?}");
+    let runner_up = before[1].clone();
+
+    // A result opened from the page is noted.
+    let (_, _, body) = get(addr, "/search?q=us+bank").await;
+    let go = format!("/go?q=us+bank&amp;d={}", runner_up.domain);
+    assert!(body.contains(&go), "{body}");
+    let (code, head, _) = get(addr, &go.replace("&amp;", "&")).await;
+    assert_eq!(code, 303);
+    assert!(
+        head.contains(&format!("location: {}", runner_up.url)),
+        "{head}"
+    );
+    assert!(dir.path().join("net/picks.json").is_file());
+
+    // Another node to hand the report to.
+    let peer_dir = tempfile::tempdir().unwrap();
+    let mut peer_config = plumb_net::NetConfig::new(peer_dir.path().to_path_buf());
+    peer_config.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+    peer_config.upnp = false;
+    peer_config.local_discovery = false;
+    peer_config.bootstrap = vec![node_addr];
+    let source =
+        plumb_net::BucketTable::build(&peer_dir.path().join("buckets"), &fixture_records())
+            .unwrap();
+    let (peer, _records) = plumb_net::start(peer_config, Arc::new(source))
+        .await
+        .unwrap();
+    wait_for(addr, "the peer to connect", |s| {
+        s.network.as_ref().is_some_and(|n| n.connected_peers >= 1)
+    })
+    .await;
+
+    let mut sent = false;
+    for _ in 0..50 {
+        if network::report_one(&node.inner).await.unwrap_or(false) {
+            sent = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(sent, "the node sent its report");
+    // Sent once: the pick is not due again this week.
+    assert!(!network::report_one(&node.inner).await.unwrap());
+    for _ in 0..100 {
+        if peer.status().reports_held >= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(peer.status().reports_held, 1);
+
+    // Once enough others report the same pick, the node ranks with it.
+    let epoch = report_epoch(now_unix());
+    for _ in 1..REPORT_THRESHOLD {
+        let report = plumb_net::Report::new(epoch, "us bank", &runner_up.domain).unwrap();
+        peer.send_report(&report, Duration::from_secs(10))
+            .await
+            .unwrap();
+    }
+    let net = node.inner.net.get().unwrap().clone();
+    let mut table = net.recount().await.unwrap();
+    for _ in 0..100 {
+        if !table.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        table = net.recount().await.unwrap();
+    }
+    assert_eq!(table.picks.len(), 1, "{table:?}");
+    let after = search(addr, "us+bank").await;
+    let boosted = after.iter().find(|h| h.domain == runner_up.domain).unwrap();
+    assert!(
+        (boosted.score - (runner_up.score + MAX_POPULARITY_BONUS)).abs() < 1e-4,
+        "{before:?} {after:?}"
+    );
+
+    peer.shutdown().await;
+    node.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn private_search_serves_buckets_a_browser_can_search() {
+    let dir = seeded_dir();
+    // Without private search: no buckets, and nothing private on offer.
+    let node = start(test_config(dir.path())).await.unwrap();
+    let addr = node.addr();
+    wait_for(addr, "the first index", ready_and_idle).await;
+    assert_eq!(get(addr, "/api/buckets").await.0, 503);
+    assert_eq!(get(addr, "/private").await.0, 503);
+    assert!(!get(addr, "/").await.2.contains("href=\"/private\""));
+    node.shutdown().await.unwrap();
+
+    // Turned on, the index built before it is rebuilt with its buckets.
+    let mut config = test_config(dir.path());
+    config.private_search = true;
+    let node = start(config).await.unwrap();
+    let addr = node.addr();
+    let status = wait_for(addr, "an index with buckets", |s| {
+        ready_and_idle(s) && s.index.as_deref() == Some("000002")
+    })
+    .await;
+    assert_eq!(status.last_error, None);
+    let (code, head, body) = get(addr, "/api/buckets").await;
+    assert_eq!(code, 200, "{body}");
+    assert!(head.contains("cache-control: no-store"), "{head}");
+    let info: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let table = info["table"].as_str().unwrap().to_string();
+    assert!(table.starts_with("2-"), "{table}");
+    assert_eq!(info["buckets"], plumb_core::keys::BUCKETS);
+
+    // What the page's script does, with fixed padding.
+    let query = "us bank";
+    let mut n = 0u64;
+    let (buckets, keys) = plumb_core::keys::pick_buckets(query, || {
+        n += 1;
+        n * 7_777
+    });
+    let mut answers = Vec::new();
+    for bucket in &buckets {
+        let (code, head, body) = get(addr, &format!("/api/buckets/{table}/{bucket}")).await;
+        assert_eq!(code, 200, "{body}");
+        assert!(head.contains("immutable"), "{head}");
+        answers.push(plumb_private::read_bucket(&body).unwrap());
+    }
+    let hits = plumb_private::search(query, &keys, answers, &Default::default(), 10);
+    assert_eq!(hits[0].domain, "usbank.com", "{hits:?}");
+
+    // Another table's buckets, or no such bucket, are not served.
+    assert_eq!(get(addr, "/api/buckets/1-0000/5").await.0, 404);
+    let past_end = format!("/api/buckets/{table}/{}", plumb_core::keys::BUCKETS);
+    assert_eq!(get(addr, &past_end).await.0, 404);
+
+    let (code, head, body) = get(addr, "/private").await;
+    if crate::web::private::in_build() {
+        assert_eq!(code, 200, "{body}");
+        assert!(
+            head.contains("script-src 'self' 'wasm-unsafe-eval'"),
+            "{head}"
+        );
+        assert!(get(addr, "/").await.2.contains("href=\"/private\""));
+    } else {
+        assert_eq!(code, 503, "{body}");
+    }
+    node.shutdown().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_full_seed_replaces_a_quick_start_but_keeps_what_crawls_added() {
     let tranco = std::fs::read(fixture("tranco.csv")).unwrap();

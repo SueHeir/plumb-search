@@ -4,13 +4,21 @@
 //! * `/plumb/bucket/1`: one bucket of sites ([`BucketRequest`]); the query
 //!   itself never leaves the asking node (see [`crate::bucket`]). Each site
 //!   comes with a [`RecordProof`] when the answering node holds a signed
-//!   crawl of it. Asked under a throwaway identity, over a connection of
+//!   crawl of it, and with proofs from other crawlers that agree with it
+//!   when it holds those. Asked under a throwaway identity, over a connection of
 //!   its own.
+//! * `/plumb/oblivious/1`: the same bucket requests, sealed to the answering
+//!   node's key and passed on by a relay, so the node answering never sees
+//!   the asker's IP address (see [`crate::oblivious`]).
 //! * `/plumb/batch/1`: a batch by id, or the headers of the batches a node
 //!   holds since an epoch, so a node that was away can catch up.
 //! * Gossip topic `plumb/batches/1`: the [`SignedHeader`] of every new
 //!   batch, as JSON. Nodes that want the batch fetch it with
 //!   `/plumb/batch/1` from the node that passed the header on.
+//! * `/plumb/report/1`: hands a popularity [`Report`] to a node, under a
+//!   throwaway identity, or asks a node for the reports of a week it holds.
+//! * Gossip topic `plumb/reports/1`: every popularity report a node is
+//!   handed, as JSON, passed on by the node it was handed to.
 //! * `/plumb/kad/1.0.0`: Kademlia, to find more nodes.
 //!
 //! Requests and responses are CBOR.
@@ -19,15 +27,36 @@ use serde::{Deserialize, Serialize};
 
 use crate::batch::{Batch, RecordProof, SignedHeader};
 use crate::hash::Hash;
+use crate::popularity::Report;
 
 pub const BUCKET_PROTOCOL: &str = "/plumb/bucket/1";
 pub const BATCH_PROTOCOL: &str = "/plumb/batch/1";
+pub const REPORT_PROTOCOL: &str = "/plumb/report/1";
 pub const KAD_PROTOCOL: &str = "/plumb/kad/1.0.0";
 pub const IDENTIFY_PROTOCOL: &str = "/plumb/id/1.0.0";
 pub const BATCH_TOPIC: &str = "plumb/batches/1";
+pub const REPORT_TOPIC: &str = "plumb/reports/1";
 
 /// Most batch headers returned for one [`BatchRequest::List`].
 pub const MAX_LISTED_BATCHES: usize = 10_000;
+/// Most reports returned for one [`ReportRequest::List`].
+pub const MAX_LISTED_REPORTS: usize = 50_000;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReportRequest {
+    /// Keep this report and pass it on.
+    Submit(Report),
+    /// The reports held of this report epoch.
+    List { epoch: u64 },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReportResponse {
+    /// Whether a submitted report was taken (`false` for one already held
+    /// or not valid).
+    Taken(bool),
+    Reports(Vec<Report>),
+}
 
 /// Asks for one bucket (see [`crate::bucket`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -48,7 +77,15 @@ pub struct BucketRecord {
     /// The site's record, as JSON.
     pub record: String,
     pub proof: Option<RecordProof>,
+    /// Proofs of other crawlers' crawls of the same site that agree with
+    /// `proof` (see [`crate::agree`]), at most [`MAX_EXTRA_PROOFS`]. Nodes
+    /// that predate them send none and ignore them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub also: Vec<RecordProof>,
 }
+
+/// Most proofs from other crawlers sent with one site of a bucket.
+pub const MAX_EXTRA_PROOFS: usize = crate::agree::QUORUM - 1;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BatchRequest {

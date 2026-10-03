@@ -1,5 +1,6 @@
 //! Buckets: how a node searches other nodes without telling them what it
-//! is looking for.
+//! is looking for. The keys and bucket numbers are in [`plumb_core::keys`],
+//! shared with private search in the browser.
 //!
 //! Every name a site goes by (its domain label, homepage title, aliases and
 //! top link texts) gives a few **keys**: each word, and each whole name with
@@ -15,133 +16,25 @@
 //! a few hundred keys and so by thousands of possible searches. The asking
 //! node then keeps the sites that match its keys and ranks them itself.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, ensure, Context, Result};
-use plumb_core::{domain_label, joined, normalize_text, SiteRecord};
+pub use plumb_core::keys::{
+    bucket_of, matches, query_keys, record_keys, BUCKETS, BUCKETS_PER_SEARCH, KEY_CAP,
+};
+use plumb_core::SiteRecord;
 use rand_core::RngCore;
 
 use crate::hash::Hash;
 
-/// Buckets keys are spread over.
-pub const BUCKETS: u32 = 16_384;
-/// Best sites kept per key, by link score.
-pub const KEY_CAP: usize = 32;
-/// Buckets fetched for every search, real ones padded with random ones.
-pub const BUCKETS_PER_SEARCH: usize = 4;
-/// Link texts, most used first, whose keys count.
-const KEY_LINK_TEXTS: usize = 8;
-/// Keys shorter than this are skipped: one- and two-letter words would put
-/// a few huge buckets in every search.
-const MIN_KEY_CHARS: usize = 2;
-/// Characters that separate the parts of a homepage title, as in the index.
-const TITLE_SEPARATORS: [char; 10] = ['|', '·', '•', ':', '–', '—', '»', '«', '/', '\\'];
-
-/// The bucket of `key`. The same on every node and in every version of the
-/// protocol, which is why it has its own hash rather than Rust's.
-pub fn bucket_of(key: &str) -> u32 {
-    (Hash::of(&[b"plumb-bucket-v1\0", key.as_bytes()]).prefix_u64() % u64::from(BUCKETS)) as u32
-}
-
-/// The keys of the names in `text`: its words and the whole text joined.
-fn add_keys(keys: &mut BTreeSet<String>, text: &str) {
-    let normalized = normalize_text(text);
-    for word in normalized.split(' ') {
-        if word.chars().count() >= MIN_KEY_CHARS {
-            keys.insert(word.to_string());
-        }
-    }
-    let whole = joined(text);
-    if whole.chars().count() >= MIN_KEY_CHARS {
-        keys.insert(whole);
-    }
-}
-
-/// Every key a site can be found by.
-pub fn record_keys(record: &SiteRecord) -> BTreeSet<String> {
-    let mut keys = BTreeSet::new();
-    let label = domain_label(&record.domain);
-    add_keys(&mut keys, &label);
-    for part in label.split('-') {
-        add_keys(&mut keys, part);
-    }
-    if let Some(title) = &record.title {
-        add_keys(&mut keys, title);
-        for part in title.split(TITLE_SEPARATORS).flat_map(|p| p.split(" - ")) {
-            add_keys(&mut keys, part);
-        }
-    }
-    for alias in &record.aliases {
-        add_keys(&mut keys, alias);
-    }
-    let mut texts: Vec<_> = record.link_texts.iter().collect();
-    texts.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.text.cmp(&b.text)));
-    for lt in texts.into_iter().take(KEY_LINK_TEXTS) {
-        add_keys(&mut keys, &lt.text);
-    }
-    keys
-}
-
-/// The keys of a query, the whole query joined first, then its words,
-/// longest first (they pick out the fewest sites).
-pub fn query_keys(query: &str) -> Vec<String> {
-    let mut keys = Vec::new();
-    let whole = joined(query);
-    if whole.chars().count() >= MIN_KEY_CHARS {
-        keys.push(whole);
-    }
-    let normalized = normalize_text(query);
-    let mut words: Vec<&str> = normalized
-        .split(' ')
-        .filter(|w| w.chars().count() >= MIN_KEY_CHARS)
-        .collect();
-    words.sort_by(|a, b| b.len().cmp(&a.len()).then(a.cmp(b)));
-    for word in words {
-        if !keys.iter().any(|k| k == word) {
-            keys.push(word.to_string());
-        }
-    }
-    keys
-}
-
-/// The buckets to fetch for `query`: those of its first keys, and random
-/// ones to make up [`BUCKETS_PER_SEARCH`], in random order. Also returns
-/// the keys searched for.
+/// The buckets to fetch for `query`, padded with random ones (see
+/// [`plumb_core::keys::pick_buckets`]). Also returns the keys searched for.
 pub fn search_buckets(query: &str) -> (Vec<u32>, Vec<String>) {
-    let mut keys = query_keys(query);
-    let mut buckets: Vec<u32> = Vec::new();
-    let mut used = Vec::new();
-    for key in keys.drain(..) {
-        if buckets.len() == BUCKETS_PER_SEARCH {
-            break;
-        }
-        let bucket = bucket_of(&key);
-        if !buckets.contains(&bucket) {
-            buckets.push(bucket);
-        }
-        used.push(key);
-    }
     let mut rng = rand_core::OsRng;
-    while buckets.len() < BUCKETS_PER_SEARCH {
-        let bucket = (rng.next_u64() % u64::from(BUCKETS)) as u32;
-        if !buckets.contains(&bucket) {
-            buckets.push(bucket);
-        }
-    }
-    for i in (1..buckets.len()).rev() {
-        let j = (rng.next_u64() % (i as u64 + 1)) as usize;
-        buckets.swap(i, j);
-    }
-    (buckets, used)
-}
-
-/// Whether a site can be found by any of `keys`.
-pub fn matches(record: &SiteRecord, keys: &[String]) -> bool {
-    let mine = record_keys(record);
-    keys.iter().any(|k| mine.contains(k))
+    plumb_core::keys::pick_buckets(query, || rng.next_u64())
 }
 
 /// Answers bucket requests from other nodes.

@@ -14,6 +14,12 @@ ARG RUST_VERSION=1
 # it runs with.
 FROM rust:${RUST_VERSION}-slim-bookworm AS build
 ARG TARGETPLATFORM
+# The private search page's WebAssembly (crates/plumb-private) needs the
+# wasm32 target and the wasm-bindgen command of the same version as the
+# crate (docs/private-search.md). In a layer of its own, so it is built once.
+RUN rustup target add wasm32-unknown-unknown \
+ && cargo install wasm-bindgen-cli --version 0.2.108 --locked \
+ && rm -rf /usr/local/cargo/registry
 WORKDIR /src
 # The whole workspace (minus what .dockerignore leaves out): `--locked` checks
 # Cargo.lock against every member's manifest, including the desktop app,
@@ -25,7 +31,10 @@ COPY . .
 RUN --mount=type=cache,id=plumb-cargo-registry,target=/usr/local/cargo/registry \
     --mount=type=cache,id=plumb-cargo-git,target=/usr/local/cargo/git/db \
     --mount=type=cache,id=plumb-target-${TARGETPLATFORM},target=/src/target,sharing=locked \
-    cargo build --release --locked -p plumb-node \
+    cargo build --locked -p plumb-private --target wasm32-unknown-unknown --profile wasm \
+ && wasm-bindgen --target web --no-typescript --out-dir target/private \
+        target/wasm32-unknown-unknown/wasm/plumb_private.wasm \
+ && PLUMB_PRIVATE_DIR=/src/target/private cargo build --release --locked -p plumb-node \
  && install -D -m 0755 target/release/plumb /out/plumb
 
 
