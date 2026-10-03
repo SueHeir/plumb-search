@@ -29,7 +29,7 @@ This follows the plan agreed on 2026-10-03.
 * Nobody picks their own sites, the assignment changes every day, and any node can check a crawler's claim from the batch header alone.
 * A key can write at most an eighth of the sites per day, and with dozens of nodes most sites have several crawlers a day.
 * A node in the network chooses its crawl targets as before (half never-crawled, half due again, best-ranked first), but only among the sites assigned to it today.
-* **Known weakness:** the epoch is public, so someone after one particular site can make keys until one is assigned to it (with a share of one eighth, any key gets a given site about every 8 days anyway). Assignment spreads the work and caps how much one key writes; it does not stop a targeted attack by itself. Agreement between crawlers (below) means one such key is not enough; an attacker needs two keys assigned to the same site whose crawls match, which the drand seed in "Next steps" makes much harder.
+* **Known weakness:** the epoch is public, so someone after one particular site can make keys until one is assigned to it (with a share of one eighth, any key gets a given site about every 8 days anyway). Assignment spreads the work and caps how much one key writes; it does not stop a targeted attack by itself. Agreement between crawlers (below) means one such key is not enough, and a fresh key does not count at all until its crawls have matched the checking node's own (see "One person, many keys"), so grinding keys gains little. The drand seed in "Next steps" would close the rest.
 
 ## Crawl batches
 
@@ -61,7 +61,19 @@ Batches older than 7 days or dated in the future are refused. A node keeps the b
 * **Scoring crawlers.** Each confirmation gives every crawler in the agreeing group an agreement, and every other crawler whose crawl of that site was made within 2 days but did not match a disagreement (further apart, the site may simply have changed). A crawler judged at least 10 times that agrees less than half the time is distrusted: its crawls are still held and scored, but no longer count towards agreement. The node's own crawls always count.
 * **State.** Nothing new on disk: the node rebuilds it at start from the batches it holds, oldest first. Crawls older than 14 days are dropped, so a distrusted crawler can earn its way back. `GET /api/status` shows `network.agreement`: sites pending, sites confirmed, crawlers distrusted.
 * **How soon a site is confirmed.** Assignment stays independent per node (a site is crawled by about one node in eight each day), so with N nodes a site gets about N/8 crawls a day. Over the 14-day window a site is assigned to two nodes with about 72% odds in a network of 2 nodes, 94% with 3, and almost surely with 5 or more. In a network of one, nothing from the network is ever taken in, which is the point.
-* **Known gaps.** Two keys run by one person count as two crawlers; that needs the unpredictable epoch seed and, later, crawl tokens.
+* **Own crawls judge straight away.** A crawl made within 2 days of one of the node's own crawls of the same site is scored against it at once, confirmed or not.
+
+### One person, many keys
+
+A node key costs nothing to make, so one person could run many keys and agree with themselves. Batches travel by gossip, so a node usually cannot see which IP address a crawler crawls from, and grouping keys by address would not work. Instead each node checks crawlers against fetches it made itself:
+
+* **A key earns its vote.** Once a node holds any crawl of its own, another crawler counts towards agreement only after its crawls matched the node's own crawls of 3 different sites (`VOUCHES_NEEDED`), and while it is not distrusted. Sending the same crawl again does not count twice. A crowd of fresh keys counts for nothing, and the only way to get a vote is to crawl honestly first. A crawl that matches the node's own crawl of that very site needs no vouching, since that match is the check.
+* **Disputes are settled by fetching the site.** A quorum without the node's own crawl is held, not released, when another counting crawler saw something else within 2 days, when the node's own crawl saw something else, or when it contradicts the record last confirmed for the site. The site goes on a recheck list (at most 1,000), and the node's next crawl round fetches up to 100 of them first, whether or not it is assigned them that day. Its own crawl then decides: the side it matches is released, and the other side's crawlers each get a disagreement. Those fetches are published like other crawls, but other nodes ignore crawls of sites the crawler was not assigned, and they are never used as proofs in search answers. So keys that earned their votes and then turn on a site lose them, and the site is not changed meanwhile.
+* **Network search.** "Two nodes agree" on a network result now means two crawlers the asking node counts, so two fresh keys signing the same crawl only get "signed crawl, checked".
+* **Nodes that do not crawl** cannot check anyone, so they count every crawler that is not distrusted, and in a dispute the side with more counting crawlers wins.
+* `GET /api/status` shows `network.agreement.vouched_crawlers` and `disputed_sites`.
+* **Cost to normal nodes:** none for searching. A new honest node's crawls start counting on other nodes after a few of its crawls overlap theirs, which in a small network happens within days. The rechecks are at most 100 homepage fetches per round, and only when crawlers disagree.
+* **Known gaps.** Someone who runs several keys that crawl honestly for a while can still agree on a site no node with a crawl of its own has checked, and that was never confirmed before; random spot checks of confirmed sites would catch that. The epoch is still public (drand seed below), and crawl tokens would put a price on each key.
 
 ## Spreading batches
 
@@ -122,7 +134,7 @@ Tested on one machine (`cargo test -p plumb-net popularity`, `cargo test -p plum
 
 **Earning.** Each node keeps its own ledger of every crawler it hears from (`DIR/net/credits/ledger.json`). A crawler earns 1 credit for each homepage crawl that another crawler's crawl confirmed (see "Agreement between crawlers"), never for one that counted on its own, and 2 for crawls made before 2027-10-01, the network's first year. A crawl made close in time to one two crawlers confirmed that does not match it costs 5, so making pages up loses more than honest crawling earns. Nothing else earns credits yet. Every node sees the same signed batches, so ledgers come out much the same, but each node goes only by its own. Credits counted while rebuilding agreement at start are not counted twice.
 
-**Tokens.** A node asks another node, the issuer, for tokens over `/plumb/credits/1`, under its own node id, since its balance pays. The issuer gives tokens only to a crawler whose crawls count there (judged at least 10 times, and not distrusted), at most as many as its balance pays for, 1 credit each and at most 64 a request. Tokens are signed blind with a VOPRF over ristretto255 (the [`voprf`](https://crates.io/crates/voprf) crate, as in Privacy Pass, RFC 9578): the issuer never sees the token it signs. Handed back later under a throwaway identity, a token shows the issuer it is one of its own and not yet spent, but not which node it went to. Each issuer proves every batch was signed with the same key, and the wallet (`DIR/net/credits/wallet.json`) keeps the first key it sees for each issuer and refuses tokens under another, so an issuer cannot give one node a key of its own to recognize it by. The issuer's key is `DIR/net/credits/token.key`, and the tokens handed back to it are in `DIR/net/credits/spent`.
+**Tokens.** A node asks another node, the issuer, for tokens over `/plumb/credits/1`, under its own node id, since its balance pays. The issuer gives tokens only to a crawler whose crawls count there (they count towards agreement, so vouched for by matching its own crawls once it crawls, and they were judged at least 10 times), at most as many as its balance pays for, 1 credit each and at most 64 a request. Tokens are signed blind with a VOPRF over ristretto255 (the [`voprf`](https://crates.io/crates/voprf) crate, as in Privacy Pass, RFC 9578): the issuer never sees the token it signs. Handed back later under a throwaway identity, a token shows the issuer it is one of its own and not yet spent, but not which node it went to. Each issuer proves every batch was signed with the same key, and the wallet (`DIR/net/credits/wallet.json`) keeps the first key it sees for each issuer and refuses tokens under another, so an issuer cannot give one node a key of its own to recognize it by. The issuer's key is `DIR/net/credits/token.key`, and the tokens handed back to it are in `DIR/net/credits/spent`.
 
 **What tokens buy.** Nothing yet: the first perk is Liz's pick.
 
@@ -130,7 +142,7 @@ Tested on one machine (`cargo test -p plumb-net popularity`, `cargo test -p plum
 
 * A token is good only at its issuer, so a node's credits at one issuer are what that issuer counted for it, and a node can spend its balance once at every issuer. That is fine while tokens buy only extra work from the node that issued them.
 * An issuer that hands a node a key of its own from the very first token would go unnoticed; the wallet only catches a key that changes. Checking keys through a relay, as sealed requests already do, would close that.
-* Two keys run by one person count as two crawlers here too, until crawler identity is tied down (see "Known gaps" under agreement).
+* Credits follow agreement's rules on who counts, so its limits on one person running many keys apply here too.
 
 `GET /api/status` shows `network.credits`: this node's own balance as it counts it, its confirmed and mismatched crawls, the accounts it keeps, and the tokens it issued, had handed back and holds.
 
@@ -175,7 +187,7 @@ Tested across machines on 2026-10-03: a relay node on plumbsearch.org (in Docker
 Roughly in order; the first two are what the roadmap's Phase 2 gate ("two nodes stay identical using daily changes alone") needs.
 
 1. **Index snapshots.** A Merkle-rooted snapshot of the shared site list, so a new node downloads it from any node instead of each node building its own from seed data, and two nodes can check they agree. Daily changes are then the batches since the snapshot.
-2. **Agreement between crawlers: built** (see above). Network search answers carry proofs from two agreeing crawlers. Still to do: spot-check re-fetches of a site whose crawlers disagree, and a check in snapshots that each record was confirmed.
+2. **Agreement between crawlers: built** (see above). Network search answers carry proofs from two agreeing crawlers. Fresh keys must earn a vote and disputed sites are re-fetched (see "One person, many keys"). Still to do: random spot checks of confirmed sites, and a check in snapshots that each record was confirmed.
 3. **Abuse limits.** Connection limits, per-node rate limits on requests, peer scoring in gossipsub, and banning keys whose batches fail checks.
 4. **An unpredictable epoch seed** from a public randomness beacon (drand), so keys cannot be made in advance for a target site.
 5. **Desktop app**: a switch for joining the network, crawling only when idle and on power, with a bandwidth cap.

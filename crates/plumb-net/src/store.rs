@@ -20,7 +20,7 @@ use plumb_core::SiteRecord;
 use tracing::{debug, warn};
 
 use crate::agree::agree;
-use crate::assign::epoch_of;
+use crate::assign::{epoch_of, is_assigned};
 use crate::batch::{Batch, RecordProof, SignedHeader};
 use crate::hash::Hash;
 
@@ -228,12 +228,21 @@ impl BatchStore {
 
     fn note(&mut self, batch: &Batch) {
         let id = batch.id();
-        let created_at = batch.header.header.created_at;
+        let h = &batch.header.header;
+        let created_at = h.created_at;
+        let crawler = libp2p::identity::PublicKey::try_decode_protobuf(&h.crawler)
+            .map(|key| key.to_peer_id())
+            .ok();
         for (index, line) in batch.records.iter().enumerate() {
             let Ok(record) = serde_json::from_str::<SiteRecord>(line) else {
                 continue;
             };
-            if record.crawled_at.is_none() {
+            // Only crawls others can check: a node's own fetches of sites
+            // it was not assigned (to settle a dispute) prove nothing to
+            // anyone else.
+            let assigned =
+                crawler.is_some_and(|c| is_assigned(h.epoch, &c, &record.domain, h.share_ppm));
+            if record.crawled_at.is_none() || !assigned {
                 continue;
             }
             let holding = Holding {
@@ -303,6 +312,27 @@ mod tests {
         assert!(store.is_empty());
         assert!(store.proof(&domain).unwrap().is_none());
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn a_crawl_of_a_site_not_assigned_is_never_a_proof() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = 1_790_000_000;
+        let key = Keypair::generate_ed25519();
+        let peer = key.public().to_peer_id();
+        let domain = (0..)
+            .map(|i| format!("s{i}.com"))
+            .find(|d| !is_assigned(epoch_of(now), &peer, d, MAX_SHARE_PPM))
+            .unwrap();
+        let mut record = SiteRecord::new(domain.as_str());
+        record.crawled_at = Some(now - 5);
+        let batch = Batch::sign(&key, &[record], epoch_of(now), MAX_SHARE_PPM, now)
+            .unwrap()
+            .unwrap();
+        let mut store = BatchStore::open(dir.path()).unwrap();
+        store.insert(&batch).unwrap();
+        assert!(store.contains(&batch.id()));
+        assert!(store.proof(&domain).unwrap().is_none());
     }
 
     #[test]

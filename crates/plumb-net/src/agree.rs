@@ -23,17 +23,43 @@
 //! Every confirmation also scores the crawlers: each one in the agreeing
 //! group gets an agreement, and each other crawler whose crawl of that site
 //! was close in time ([`JUDGE_WINDOW_SECS`]) but did not match gets a
-//! disagreement. A crawler judged at least [`MIN_JUDGED`] times that agrees
-//! less than [`MIN_AGREEMENT`] of the time is distrusted: its crawls are
-//! still held and still scored, but no longer count towards a quorum. The
-//! node's own crawls are never distrusted.
+//! disagreement. A crawl close in time to one of the node's own crawls is
+//! scored against it straight away, confirmed or not. A crawler judged at
+//! least [`MIN_JUDGED`] times that agrees less than [`MIN_AGREEMENT`] of the
+//! time is distrusted: its crawls are still held and still scored, but no
+//! longer count towards a quorum. The node's own crawls are never
+//! distrusted.
+//!
+//! # One person, many keys
+//!
+//! Making a node key costs nothing, so counting keys alone would let one
+//! person agree with themselves. Two rules make that hard:
+//!
+//! * **A key earns its vote by agreeing with this node.** Once the node
+//!   has crawled anything itself, another crawler counts towards a quorum
+//!   only after its crawls have matched the node's own crawls of
+//!   [`VOUCHES_NEEDED`] sites (and it is not distrusted). Each node checks
+//!   for itself, against fetches it made itself, so a crowd of fresh keys
+//!   counts for nothing, and a key only gets a vote by crawling honestly
+//!   first. A node that has not crawled anything cannot check anyone, and
+//!   counts every crawler that is not distrusted.
+//! * **Disputes are settled by fetching the site.** A quorum that would
+//!   overturn what the node already has is held instead of released when
+//!   another counting crawler saw something else around the same time, when
+//!   the node's own crawl saw something else, or when it contradicts the
+//!   last record confirmed for the site. The site goes on the node's
+//!   [`rechecks`](Agreement::rechecks) list, the node fetches it itself
+//!   (outside its daily assignment), and its own crawl then decides: it
+//!   releases the side it matches and counts against the other side's
+//!   crawlers. So a group of keys that turns on one site after earning
+//!   their votes loses them, and the site is not changed in the meantime.
 //!
 //! The state is rebuilt from the batches held on disk at start (see
 //! [`crate::store`]), so it needs no file of its own, and observations older
 //! than [`WINDOW_EPOCHS`] are dropped, which also lets a distrusted crawler
 //! earn its way back.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use libp2p::PeerId;
 use plumb_core::{normalize_text, registrable_domain, LinkText, SiteRecord};
@@ -63,11 +89,26 @@ pub const MIN_AGREEMENT: f64 = 0.5;
 /// Two texts match when this share of their words is shared (Jaccard).
 pub const TEXT_MATCH: f64 = 0.75;
 
+/// Sites on which a crawler's crawl must have matched this node's own
+/// before it counts towards a quorum.
+pub const VOUCHES_NEEDED: u32 = 3;
+
+/// Sites vouching for a crawler are remembered up to this many.
+pub const MAX_VOUCHES: u32 = 16;
+
+/// The most sites waiting to be fetched again to settle a dispute. Past
+/// that, a disputed site just stays unconfirmed until it is pruned.
+pub const MAX_RECHECKS: usize = 1_000;
+
 /// How often a crawler agreed with the others.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Score {
     pub agreed: u32,
     pub disagreed: u32,
+    /// Distinct sites on which a crawl of it matched one this node made
+    /// itself, counted up to [`MAX_VOUCHES`].
+    #[serde(default)]
+    pub vouched: u32,
 }
 
 impl Score {
@@ -107,6 +148,13 @@ pub struct AgreementStatus {
     pub confirmed_sites: usize,
     /// Crawlers that no longer count towards a quorum.
     pub distrusted_crawlers: usize,
+    /// Other crawlers whose crawls matched this node's own often enough
+    /// to count.
+    #[serde(default)]
+    pub vouched_crawlers: usize,
+    /// Sites held back by a dispute, waiting for this node to fetch them.
+    #[serde(default)]
+    pub disputed_sites: usize,
 }
 
 /// One crawler's latest crawl of a homepage.
@@ -132,9 +180,16 @@ struct Mention {
 pub struct Agreement {
     me: PeerId,
     homepages: HashMap<String, Vec<Observation>>,
-    confirmed: HashSet<String>,
+    /// The record last released for each confirmed site.
+    confirmed: HashMap<String, SiteRecord>,
     mentions: HashMap<String, Vec<Mention>>,
     scores: HashMap<PeerId, Score>,
+    /// The sites behind each crawler's [`Score::vouched`].
+    vouches: HashMap<PeerId, Vec<String>>,
+    /// Sites this node holds a crawl of its own for.
+    own: usize,
+    /// Disputed sites this node should fetch itself.
+    rechecks: BTreeSet<String>,
     /// Scored since the last [`Agreement::take_verdicts`].
     verdicts: Vec<Verdict>,
 }
@@ -145,9 +200,12 @@ impl Agreement {
         Agreement {
             me,
             homepages: HashMap::new(),
-            confirmed: HashSet::new(),
+            confirmed: HashMap::new(),
             mentions: HashMap::new(),
             scores: HashMap::new(),
+            vouches: HashMap::new(),
+            own: 0,
+            rechecks: BTreeSet::new(),
             verdicts: Vec::new(),
         }
     }
@@ -188,13 +246,18 @@ impl Agreement {
     /// Drops observations older than [`WINDOW_EPOCHS`] before `now`.
     pub fn prune(&mut self, now: u64) {
         let oldest = now.saturating_sub(WINDOW_EPOCHS * EPOCH_SECS);
+        let me = self.me;
+        let mut own = 0;
         self.homepages.retain(|domain, held| {
             held.retain(|o| o.crawled_at >= oldest);
             if held.is_empty() {
                 self.confirmed.remove(domain);
+                self.rechecks.remove(domain);
             }
+            own += usize::from(held.iter().any(|o| o.crawler == me));
             !held.is_empty()
         });
+        self.own = own;
         self.mentions.retain(|_, held| {
             held.retain(|m| m.seen_at >= oldest);
             !held.is_empty()
@@ -211,52 +274,82 @@ impl Agreement {
         std::mem::take(&mut self.verdicts)
     }
 
+    /// Whether `crawler`'s crawls count towards a quorum here: this node's
+    /// own always do; another crawler's when it is not distrusted and, once
+    /// this node has crawled anything itself, has been vouched for by
+    /// matching this node's own crawls of [`VOUCHES_NEEDED`] sites.
+    pub fn counts(&self, crawler: &PeerId) -> bool {
+        if *crawler == self.me {
+            return true;
+        }
+        let score = self.score(crawler);
+        !score.distrusted() && (self.own == 0 || score.vouched >= VOUCHES_NEEDED)
+    }
+
+    /// Up to `limit` disputed sites this node should fetch itself to settle
+    /// them. A site stays on the list until this node's crawl of it comes
+    /// in (see [`Agreement::observe`]) or its crawls are pruned.
+    pub fn rechecks(&self, limit: usize) -> Vec<String> {
+        self.rechecks.iter().take(limit).cloned().collect()
+    }
+
     pub fn status(&self) -> AgreementStatus {
+        let others = || self.scores.iter().filter(|(peer, _)| **peer != self.me);
         AgreementStatus {
             pending_sites: self.homepages.len() - self.confirmed.len(),
             confirmed_sites: self.confirmed.len(),
-            distrusted_crawlers: self
-                .scores
-                .iter()
-                .filter(|(peer, score)| **peer != self.me && score.distrusted())
+            distrusted_crawlers: others().filter(|(_, score)| score.distrusted()).count(),
+            vouched_crawlers: others()
+                .filter(|(_, score)| !score.distrusted() && score.vouched >= VOUCHES_NEEDED)
                 .count(),
+            disputed_sites: self.rechecks.len(),
         }
-    }
-
-    fn counts(&self, crawler: &PeerId) -> bool {
-        *crawler == self.me || !self.score(crawler).distrusted()
     }
 
     fn observe_homepage(&mut self, crawler: PeerId, record: SiteRecord) -> Option<SiteRecord> {
         let crawled_at = record.crawled_at?;
         let domain = record.domain.clone();
         let held = self.homepages.entry(domain.clone()).or_default();
+        let mut observation = Observation {
+            crawler,
+            record,
+            crawled_at,
+            judged: false,
+        };
         match held.iter_mut().find(|o| o.crawler == crawler) {
             Some(old) if old.crawled_at > crawled_at => return None,
             Some(old) => {
-                *old = Observation {
-                    crawler,
-                    record,
-                    crawled_at,
-                    judged: false,
+                // Sending the same crawl again does not earn a second
+                // verdict.
+                observation.judged = old.judged && agree(&old.record, &observation.record);
+                *old = observation;
+            }
+            None => {
+                held.push(observation);
+                if crawler == self.me {
+                    self.own += 1;
                 }
             }
-            None => held.push(Observation {
-                crawler,
-                record,
-                crawled_at,
-                judged: false,
-            }),
         }
+        if crawler == self.me {
+            self.rechecks.remove(&domain);
+        }
+        self.judge_against_own(&domain);
         let held = &self.homepages[&domain];
         let new = held.iter().position(|o| o.crawler == crawler)?;
         // The crawls that match this one, from crawlers that count.
         let group: Vec<usize> = (0..held.len())
             .filter(|&i| agree(&held[i].record, &held[new].record))
             .collect();
+        // A crawl that matches this node's own needs no vouching: that
+        // match is the check.
+        let ours = group.iter().any(|&i| held[i].crawler == self.me);
         let counting = group
             .iter()
-            .filter(|&&i| self.counts(&held[i].crawler))
+            .filter(|&&i| {
+                let crawler = &held[i].crawler;
+                self.counts(crawler) || (ours && !self.score(crawler).distrusted())
+            })
             .count();
         if counting < QUORUM {
             return None;
@@ -265,6 +358,12 @@ impl Agreement {
             .iter()
             .max_by_key(|&&i| held[i].crawled_at)
             .expect("the group holds the new crawl");
+        if let Some(settled) = self.disputed(&domain, &group, newest) {
+            if !settled && self.rechecks.len() < MAX_RECHECKS {
+                self.rechecks.insert(domain);
+            }
+            return None;
+        }
         let mut confirmed = held[newest].record.clone();
         confirmed.aliases.clear();
         for alias in &held[newest].record.aliases {
@@ -297,24 +396,106 @@ impl Agreement {
                 verdicts.push((i, false));
             }
         }
-        let held = self.homepages.get_mut(&domain).expect("held");
         for (i, agreed) in verdicts {
-            held[i].judged = true;
-            let score = self.scores.entry(held[i].crawler).or_default();
-            self.verdicts.push(Verdict {
-                crawler: held[i].crawler,
-                crawled_at: held[i].crawled_at,
-                agreed,
-                agreeing: counting,
-            });
-            if agreed {
-                score.agreed += 1;
-            } else {
-                score.disagreed += 1;
-            }
+            self.judge(&domain, i, agreed, ours, counting);
         }
-        self.confirmed.insert(domain);
+        self.confirmed.insert(domain, confirmed.clone());
         Some(confirmed)
+    }
+
+    /// Whether the quorum `group` (indexes into the crawls of `domain`,
+    /// `newest` the newest of them) is disputed: `None` when it is not and
+    /// may be released, `Some(false)` when the node should fetch the site
+    /// to settle it, and `Some(true)` when there is nothing to fetch: the
+    /// node's own crawl, newer than the group's or at most
+    /// [`JUDGE_WINDOW_SECS`] older, already says otherwise, or the node does not crawl and the other side is at
+    /// least as large.
+    fn disputed(&self, domain: &str, group: &[usize], newest: usize) -> Option<bool> {
+        let held = &self.homepages[domain];
+        if group.iter().any(|&i| held[i].crawler == self.me) {
+            return None;
+        }
+        let near = |o: &Observation| {
+            group
+                .iter()
+                .any(|&i| held[i].crawled_at.abs_diff(o.crawled_at) <= JUDGE_WINDOW_SECS)
+        };
+        let rivals = held
+            .iter()
+            .enumerate()
+            .filter(|(i, o)| {
+                !group.contains(i) && (o.crawler == self.me || (self.counts(&o.crawler) && near(o)))
+            })
+            .count();
+        if self.own == 0 {
+            // A node that does not crawl cannot settle a dispute itself,
+            // so the larger side wins.
+            let counting = group
+                .iter()
+                .filter(|&&i| self.counts(&held[i].crawler))
+                .count();
+            return (rivals >= counting).then_some(true);
+        }
+        let overturns = self
+            .confirmed
+            .get(domain)
+            .is_some_and(|last| !agree(last, &held[newest].record));
+        if rivals == 0 && !overturns {
+            return None;
+        }
+        let own = held.iter().find(|o| o.crawler == self.me);
+        Some(own.is_some_and(|o| o.crawled_at + JUDGE_WINDOW_SECS >= held[newest].crawled_at))
+    }
+
+    /// Scores every crawl of `domain` not judged yet that was made close in
+    /// time to this node's own crawl of it, against that crawl.
+    fn judge_against_own(&mut self, domain: &str) {
+        let held = &self.homepages[domain];
+        let Some(own) = held.iter().find(|o| o.crawler == self.me) else {
+            return;
+        };
+        let verdicts: Vec<(usize, bool)> = held
+            .iter()
+            .enumerate()
+            .filter(|(_, o)| {
+                o.crawler != self.me
+                    && !o.judged
+                    && o.crawled_at.abs_diff(own.crawled_at) <= JUDGE_WINDOW_SECS
+            })
+            .map(|(i, o)| (i, agree(&o.record, &own.record)))
+            .collect();
+        for (i, agreed) in verdicts {
+            // Compared with this node's own crawl: two crawlers.
+            self.judge(domain, i, agreed, true, 2);
+        }
+    }
+
+    /// Scores crawl `i` of `domain` for or against its crawler; `ours` when
+    /// the crawl it was compared with includes this node's own, which
+    /// `agreeing` crawlers that count made.
+    fn judge(&mut self, domain: &str, i: usize, agreed: bool, ours: bool, agreeing: usize) {
+        let o = &mut self.homepages.get_mut(domain).expect("held")[i];
+        o.judged = true;
+        let crawler = o.crawler;
+        self.verdicts.push(Verdict {
+            crawler,
+            crawled_at: o.crawled_at,
+            agreed,
+            agreeing,
+        });
+        let score = self.scores.entry(crawler).or_default();
+        if agreed {
+            score.agreed += 1;
+            if ours && crawler != self.me {
+                let sites = self.vouches.entry(crawler).or_default();
+                if sites.len() < MAX_VOUCHES as usize && !sites.iter().any(|d| d == domain) {
+                    sites.push(domain.to_string());
+                    score.vouched = sites.len() as u32;
+                }
+            }
+        } else {
+            score.disagreed += 1;
+        }
     }
 
     fn observe_mention(
@@ -477,7 +658,8 @@ mod tests {
             agreement.score(&bad),
             Score {
                 agreed: 0,
-                disagreed: 1
+                disagreed: 1,
+                vouched: 0,
             }
         );
     }
@@ -504,7 +686,7 @@ mod tests {
         assert!(agreement
             .observe(a, vec![crawl("new.com", "New", NOW)], NOW)
             .is_empty());
-        // Our own crawl always counts.
+        // Our own crawl always counts, and so does a crawl matching it.
         let out = agreement.observe(me, vec![crawl("new.com", "New", NOW)], NOW);
         assert_eq!(out.len(), 1);
     }
@@ -573,5 +755,146 @@ mod tests {
         assert!(agreement
             .observe(b, vec![crawl("usbank.com", "U.S. Bank", later)], later)
             .is_empty());
+    }
+
+    /// Makes `peers` match this node's own crawls of enough sites to count.
+    fn vouch_for(agreement: &mut Agreement, me: PeerId, peers: &[PeerId], at: u64) {
+        for i in 0..VOUCHES_NEEDED {
+            let d = format!("vouch{i}.com");
+            agreement.observe(me, vec![crawl(&d, "Vouch", at)], at);
+            for &peer in peers {
+                agreement.observe(peer, vec![crawl(&d, "Vouch", at)], at);
+            }
+        }
+    }
+
+    #[test]
+    fn fresh_keys_do_not_count_once_this_node_crawls_until_they_match_its_crawls() {
+        let (x, y, me) = (PeerId::random(), PeerId::random(), PeerId::random());
+        let mut agreement = Agreement::new(me);
+        agreement.observe(me, vec![crawl("mine.com", "Mine", NOW)], NOW);
+        // Two keys of one person agreeing with each other are not enough.
+        agreement.observe(x, vec![crawl("usbank.com", "Free crypto", NOW)], NOW);
+        let out = agreement.observe(y, vec![crawl("usbank.com", "Free crypto", NOW)], NOW);
+        assert!(out.is_empty());
+        assert!(!agreement.counts(&x) && !agreement.counts(&y));
+        // Once their crawls matched ours on enough sites, they count.
+        vouch_for(&mut agreement, me, &[x, y], NOW);
+        assert!(agreement.counts(&x) && agreement.counts(&y));
+        assert_eq!(agreement.status().vouched_crawlers, 2);
+        let out = agreement.observe(x, vec![crawl("shop.com", "Shop", NOW)], NOW);
+        assert!(out.is_empty());
+        let out = agreement.observe(y, vec![crawl("shop.com", "Shop", NOW)], NOW);
+        assert_eq!(out.len(), 1);
+    }
+
+    #[test]
+    fn the_same_crawl_sent_again_vouches_once() {
+        let (x, me) = (PeerId::random(), PeerId::random());
+        let mut agreement = Agreement::new(me);
+        agreement.observe(me, vec![crawl("mine.com", "Mine", NOW)], NOW);
+        for i in 0..5 {
+            agreement.observe(x, vec![crawl("mine.com", "Mine", NOW + i)], NOW + i);
+        }
+        assert_eq!(
+            agreement.score(&x),
+            Score {
+                agreed: 1,
+                disagreed: 0,
+                vouched: 1
+            }
+        );
+        assert!(!agreement.counts(&x));
+    }
+
+    #[test]
+    fn a_dispute_is_held_until_this_node_fetches_the_site_itself() {
+        let (a, b, x, y, me) = (
+            PeerId::random(),
+            PeerId::random(),
+            PeerId::random(),
+            PeerId::random(),
+            PeerId::random(),
+        );
+        let mut agreement = Agreement::new(me);
+        vouch_for(&mut agreement, me, &[a, b, x, y], NOW);
+        agreement.observe(a, vec![crawl("usbank.com", "U.S. Bank", NOW)], NOW);
+        let out = agreement.observe(b, vec![crawl("usbank.com", "U.S. Bank", NOW)], NOW);
+        assert_eq!(out[0].title.as_deref(), Some("U.S. Bank"));
+
+        // Two keys that earned their votes turn on one site a week later.
+        let later = NOW + 7 * EPOCH_SECS;
+        agreement.observe(x, vec![crawl("usbank.com", "Free crypto", later)], later);
+        let out = agreement.observe(y, vec![crawl("usbank.com", "Free crypto", later)], later);
+        assert!(out.is_empty(), "overturning a confirmed site is held");
+        assert_eq!(agreement.rechecks(10), vec!["usbank.com".to_string()]);
+        assert_eq!(agreement.status().disputed_sites, 1);
+
+        // This node fetches it: its crawl decides and counts against them.
+        let out = agreement.observe(
+            me,
+            vec![crawl("usbank.com", "U.S. Bank", later + 60)],
+            later,
+        );
+        // It matches A's and B's crawls, so theirs stays the record.
+        assert_eq!(out[0].title.as_deref(), Some("U.S. Bank"));
+        assert!(agreement.rechecks(10).is_empty());
+        assert_eq!(agreement.score(&x).disagreed, 1);
+        assert_eq!(agreement.score(&y).disagreed, 1);
+        // Their lie is not released later either.
+        let out = agreement.observe(
+            y,
+            vec![crawl("usbank.com", "Free crypto", later + 90)],
+            later,
+        );
+        assert!(out.is_empty());
+        assert!(
+            agreement.rechecks(10).is_empty(),
+            "our recent crawl settles it"
+        );
+        // An honest crawler matching our crawl releases it again.
+        let out = agreement.observe(
+            a,
+            vec![crawl("usbank.com", "U.S. Bank", later + 120)],
+            later,
+        );
+        assert_eq!(out[0].title.as_deref(), Some("U.S. Bank"));
+    }
+
+    #[test]
+    fn a_rival_crawl_near_in_time_holds_a_quorum_for_a_recheck() {
+        let (a, x, y, me) = (
+            PeerId::random(),
+            PeerId::random(),
+            PeerId::random(),
+            PeerId::random(),
+        );
+        let mut agreement = Agreement::new(me);
+        vouch_for(&mut agreement, me, &[a, x, y], NOW);
+        agreement.observe(a, vec![crawl("new.com", "New Bank", NOW)], NOW);
+        agreement.observe(x, vec![crawl("new.com", "Free crypto", NOW)], NOW);
+        let out = agreement.observe(y, vec![crawl("new.com", "Free crypto", NOW)], NOW);
+        assert!(out.is_empty());
+        assert_eq!(agreement.rechecks(10), vec!["new.com".to_string()]);
+        // Our crawl sides with A and releases its crawl.
+        let out = agreement.observe(me, vec![crawl("new.com", "New Bank", NOW + 60)], NOW);
+        assert_eq!(out[0].title.as_deref(), Some("New Bank"));
+        assert_eq!(agreement.score(&x).disagreed, 1);
+    }
+
+    #[test]
+    fn a_node_that_does_not_crawl_takes_the_larger_side() {
+        let (a, b, x, me) = (
+            PeerId::random(),
+            PeerId::random(),
+            PeerId::random(),
+            PeerId::random(),
+        );
+        let mut agreement = Agreement::new(me);
+        agreement.observe(x, vec![crawl("new.com", "Free crypto", NOW)], NOW);
+        agreement.observe(a, vec![crawl("new.com", "New Bank", NOW)], NOW);
+        let out = agreement.observe(b, vec![crawl("new.com", "New Bank", NOW)], NOW);
+        assert_eq!(out[0].title.as_deref(), Some("New Bank"));
+        assert!(agreement.rechecks(10).is_empty());
     }
 }
