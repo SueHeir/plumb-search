@@ -2,13 +2,15 @@
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::time::Duration;
 
-use clap::{ArgGroup, Args, Parser, Subcommand};
+use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 
 /// Plumb Search: a self-hostable search engine that finds sites by name.
 ///
-/// Typical first run: fetch-data, ingest, crawl (optional), index, then
-/// search, serve or eval.
+/// The easy way: `plumb run --data DIR` sets everything up and keeps the
+/// index fresh. Step by step: fetch-data, ingest, crawl (optional), index,
+/// then search, serve or eval.
 #[derive(Debug, Parser)]
 #[command(name = "plumb", version)]
 pub struct Cli {
@@ -18,6 +20,9 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Run a node: set up an index from public seed data on first start,
+    /// serve the search page, and keep crawling homepages to refresh the index.
+    Run(RunArgs),
     /// Download the seed datasets: Tranco, Common Crawl domain ranks and
     /// Wikidata official websites.
     FetchData(FetchDataArgs),
@@ -33,6 +38,59 @@ pub enum Command {
     Serve(ServeArgs),
     /// Check how often the official site ranks first for a list of queries.
     Eval(EvalArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct RunArgs {
+    /// Data directory for the downloads, the records file and the search
+    /// indexes (created if missing). One node per directory.
+    #[arg(long, value_name = "DIR")]
+    pub data: PathBuf,
+    /// Address to listen on; 0.0.0.0:8080 serves other machines too.
+    #[arg(long, value_name = "ADDR", default_value = "127.0.0.1:8080")]
+    pub bind: SocketAddr,
+    /// Defaults to start from. server: 1,000,000 sites, 10,000 homepages
+    /// crawled at first and 5,000 more every 24 hours. desktop: 250,000
+    /// sites, 2,000 homepages at first and 1,000 more every 12 hours.
+    #[arg(long, value_enum, default_value_t = Profile::Server)]
+    pub profile: Profile,
+    /// How many of the best-ranked sites to keep from the seed data, on
+    /// first start [default: from --profile].
+    #[arg(long, value_name = "N", value_parser = parse_positive)]
+    pub sites: Option<usize>,
+    /// Homepages to crawl once the first index is built, 0 for none
+    /// [default: from --profile].
+    #[arg(long, value_name = "N")]
+    pub initial_crawl: Option<usize>,
+    /// Hours between refreshes, which crawl more homepages and rebuild the
+    /// index, e.g. 24 or 0.5 [default: from --profile].
+    #[arg(long, value_name = "H", value_parser = parse_hours)]
+    pub refresh_hours: Option<Duration>,
+    /// Homepages crawled per refresh [default: from --profile].
+    #[arg(long, value_name = "N", value_parser = parse_positive)]
+    pub crawl_per_refresh: Option<usize>,
+    /// Never refresh: keep the index as the initial crawl leaves it.
+    #[arg(long, conflicts_with_all = ["refresh_hours", "crawl_per_refresh"])]
+    pub no_refresh: bool,
+    /// Common Crawl web graph release to add domain ranks from on first
+    /// start, such as cc-main-2025-26-nov-dec-jan (release names are listed
+    /// on https://commoncrawl.org/web-graphs). Only the top rows are
+    /// downloaded. Without it, Common Crawl is skipped.
+    #[arg(long, value_name = "NAME", value_parser = parse_release)]
+    pub cc_release: Option<String>,
+    /// Weight of the popularity prior in the ranking, from 0 to 1
+    /// [default: the index's default].
+    #[arg(long, value_name = "A", value_parser = parse_alpha)]
+    pub alpha: Option<f32>,
+}
+
+/// Starting points for `plumb run`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum Profile {
+    /// A server or homelab: more sites and more crawling.
+    Server,
+    /// A desktop or laptop: a smaller index and lighter crawling.
+    Desktop,
 }
 
 #[derive(Debug, Args)]
@@ -201,6 +259,25 @@ fn parse_alpha(s: &str) -> Result<f32, String> {
     }
 }
 
+/// Hours, possibly fractional, as a duration of at least one second.
+fn parse_hours(s: &str) -> Result<Duration, String> {
+    let hours = s
+        .trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|h| h.is_finite() && *h > 0.0);
+    hours
+        .and_then(|h| Duration::try_from_secs_f64(h * 3600.0).ok())
+        .filter(|d| d.as_secs() >= 1)
+        .ok_or_else(|| format!("expected a number of hours above 0, such as 24 or 0.5, got `{s}`"))
+}
+
+fn parse_release(s: &str) -> Result<String, String> {
+    crate::node::check_release_name(s)
+        .map(|()| s.trim().to_string())
+        .map_err(|err| err.to_string())
+}
+
 fn parse_fraction(s: &str) -> Result<f64, String> {
     match s.trim().parse::<f64>() {
         Ok(f) if (0.0..=1.0).contains(&f) => Ok(f),
@@ -309,6 +386,99 @@ mod tests {
             panic!("not serve");
         };
         assert_eq!(args.bind, "127.0.0.1:8080".parse().unwrap());
+    }
+
+    #[test]
+    fn run_defaults_and_overrides() {
+        let cli = parse(&["run", "--data", "/data"]).unwrap();
+        let Command::Run(args) = cli.command else {
+            panic!("not run");
+        };
+        assert_eq!(args.data, PathBuf::from("/data"));
+        assert_eq!(args.bind, "127.0.0.1:8080".parse().unwrap());
+        assert_eq!(args.profile, Profile::Server);
+        assert_eq!(
+            (args.sites, args.initial_crawl, args.refresh_hours),
+            (None, None, None)
+        );
+        assert!(!args.no_refresh);
+        assert!(parse(&["run"]).is_err());
+
+        let cli = parse(&[
+            "run",
+            "--data",
+            "d",
+            "--bind",
+            "0.0.0.0:8080",
+            "--profile",
+            "desktop",
+            "--sites",
+            "1000",
+            "--initial-crawl",
+            "0",
+            "--refresh-hours",
+            "0.5",
+            "--crawl-per-refresh",
+            "10",
+            "--cc-release",
+            "cc-main-2025-26-nov-dec-jan",
+            "--alpha",
+            "0.5",
+        ])
+        .unwrap();
+        let Command::Run(args) = cli.command else {
+            panic!("not run");
+        };
+        assert_eq!(args.bind, "0.0.0.0:8080".parse().unwrap());
+        assert_eq!(args.profile, Profile::Desktop);
+        assert_eq!(args.sites, Some(1000));
+        assert_eq!(args.initial_crawl, Some(0));
+        assert_eq!(args.refresh_hours, Some(Duration::from_secs(1800)));
+        assert_eq!(args.crawl_per_refresh, Some(10));
+        assert_eq!(
+            args.cc_release.as_deref(),
+            Some("cc-main-2025-26-nov-dec-jan")
+        );
+        assert_eq!(args.alpha, Some(0.5));
+    }
+
+    #[test]
+    fn run_rejects_bad_values() {
+        let run = |extra: &[&str]| {
+            let mut args = vec!["run", "--data", "d"];
+            args.extend_from_slice(extra);
+            parse(&args)
+        };
+        for bad in [
+            &["--sites", "0"][..],
+            &["--refresh-hours", "0"],
+            &["--refresh-hours", "-1"],
+            &["--refresh-hours", "soon"],
+            &["--refresh-hours", "inf"],
+            &["--crawl-per-refresh", "0"],
+            &["--cc-release", "https://data.commoncrawl.org/x"],
+            &["--cc-release", "../etc"],
+            &["--alpha", "2"],
+            &["--profile", "laptop"],
+            &["--bind", "localhost"],
+        ] {
+            assert!(run(bad).is_err(), "{bad:?}");
+        }
+        for conflict in [
+            &["--no-refresh", "--refresh-hours", "2"][..],
+            &["--no-refresh", "--crawl-per-refresh", "2"],
+        ] {
+            let err = run(conflict).unwrap_err();
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::ArgumentConflict,
+                "{conflict:?}"
+            );
+        }
+        let Command::Run(args) = run(&["--no-refresh"]).unwrap().command else {
+            panic!("not run");
+        };
+        assert!(args.no_refresh);
     }
 
     #[test]

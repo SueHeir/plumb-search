@@ -8,8 +8,12 @@
 //! 4. `index` builds the local search index,
 //! 5. `search`, `serve` and `eval` query it.
 //!
+//! `run` does all of that as one long-running node: it sets up the index on
+//! first start, serves it, and keeps crawling and rebuilding ([`node`]).
+//!
 //! The binary is a thin wrapper around [`run`]. The [`web`] and [`eval`]
-//! modules are public so their handlers and metrics can be tested directly.
+//! modules are public so their handlers and metrics can be tested directly,
+//! and [`node`] so that the desktop app can embed a node.
 
 use std::future::Future;
 use std::io::IsTerminal;
@@ -22,11 +26,13 @@ use tracing_subscriber::EnvFilter;
 
 pub mod cli;
 pub mod eval;
+pub mod node;
 pub mod web;
 
 mod crawl;
 mod fetch;
 mod ingest;
+mod run;
 mod search;
 
 use cli::{Cli, Command};
@@ -59,6 +65,7 @@ pub fn init_logging() {
 /// Runs one `plumb` subcommand.
 pub fn run(cli: Cli) -> Result<()> {
     match cli.command {
+        Command::Run(args) => run::run(args),
         Command::FetchData(args) => fetch::run(args),
         Command::Ingest(args) => ingest::run(args),
         Command::Crawl(args) => crawl::run(args),

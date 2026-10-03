@@ -6,6 +6,9 @@
 //! Every homepage tried gets `crawl_attempted_at`, whatever the outcome, so
 //! sites that keep failing wait out the same window as fetched ones instead
 //! of taking the top of every run.
+//!
+//! A long-running node ([`crate::node`]) crawls through the same
+//! [`select_targets`] and [`crawl_in_batches`].
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -20,10 +23,10 @@ use tracing::info;
 use crate::cli::CrawlArgs;
 use crate::{runtime, write_records_atomically};
 
-const SECONDS_PER_DAY: u64 = 24 * 60 * 60;
+pub(crate) const SECONDS_PER_DAY: u64 = 24 * 60 * 60;
 
 /// Homepages fetched between two saves of the records file.
-const CRAWL_BATCH_SIZE: usize = 500;
+pub(crate) const CRAWL_BATCH_SIZE: usize = 500;
 
 pub fn run(args: CrawlArgs) -> Result<()> {
     let records: Vec<SiteRecord> = read_jsonl(&args.records)
@@ -48,9 +51,14 @@ pub fn run(args: CrawlArgs) -> Result<()> {
         concurrency: args.concurrency,
         ..CrawlConfig::default()
     };
-    let totals = crawl_in_batches(&mut set, &targets, CRAWL_BATCH_SIZE, out, |batch| {
-        runtime.block_on(crawl_homepages(batch, &cfg))
-    })?;
+    let totals = crawl_in_batches(
+        &mut set,
+        &targets,
+        CRAWL_BATCH_SIZE,
+        out,
+        |batch| Some(runtime.block_on(crawl_homepages(batch, &cfg))),
+        |_| Ok(()),
+    )?;
 
     let o = &totals.outcomes;
     println!(
@@ -74,7 +82,7 @@ pub fn run(args: CrawlArgs) -> Result<()> {
 /// The homepages to fetch: records whose homepage was neither fetched nor
 /// tried since `cutoff` (Unix seconds), best link score first (ties by
 /// domain), at most `top`.
-fn select_targets<'a>(
+pub(crate) fn select_targets<'a>(
     records: impl Iterator<Item = &'a SiteRecord>,
     top: usize,
     cutoff: u64,
@@ -97,25 +105,31 @@ fn last_visit(record: &SiteRecord) -> Option<u64> {
 
 /// What a whole crawl run did, over all its batches.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-struct RunTotals {
+pub(crate) struct RunTotals {
     /// Homepages tried.
-    attempted: usize,
-    outcomes: CrawlSummary,
+    pub(crate) attempted: usize,
+    pub(crate) outcomes: CrawlSummary,
     /// Domains that were not in the records file before the run.
-    discovered: usize,
+    pub(crate) discovered: usize,
     /// Records in the file at the last save.
-    written: usize,
+    pub(crate) written: usize,
 }
 
 /// Fetches `targets` with `crawl`, `batch_size` at a time. After each batch
-/// the results are merged into `set` and every record is saved to `out`,
-/// best link score first. With no targets, `set` is saved once as it is.
-fn crawl_in_batches(
+/// the results are merged into `set`, every record is saved to `out` (best
+/// link score first), and `saved` gets the totals so far; an error from
+/// `saved` ends the run. With no targets, `set` is saved once as it is.
+///
+/// `crawl` returns `None` to end the run early, say on shutdown: that batch
+/// is neither merged nor saved, and the totals cover the batches before it.
+/// Whatever was saved is complete, since `out` is replaced atomically.
+pub(crate) fn crawl_in_batches(
     set: &mut RecordSet,
     targets: &[CrawlTarget],
     batch_size: usize,
     out: &Path,
-    mut crawl: impl FnMut(Vec<CrawlTarget>) -> Vec<CrawlResult>,
+    mut crawl: impl FnMut(Vec<CrawlTarget>) -> Option<Vec<CrawlResult>>,
+    mut saved: impl FnMut(&RunTotals) -> Result<()>,
 ) -> Result<RunTotals> {
     let batch_size = batch_size.max(1);
     let batches = targets.len().div_ceil(batch_size);
@@ -123,7 +137,14 @@ fn crawl_in_batches(
     let mut totals = RunTotals::default();
     for (i, batch) in targets.chunks(batch_size).enumerate() {
         let attempted_at = now_unix();
-        let results = crawl(batch.to_vec());
+        let Some(results) = crawl(batch.to_vec()) else {
+            info!(
+                "crawl stopped after {} of {} homepages",
+                totals.attempted,
+                targets.len()
+            );
+            return Ok(totals);
+        };
         let outcomes = CrawlSummary::of(&results);
         totals.attempted += batch.len();
         totals.outcomes.add(&outcomes);
@@ -137,6 +158,7 @@ fn crawl_in_batches(
             totals.written,
             out.display()
         );
+        saved(&totals)?;
     }
     if targets.is_empty() {
         totals.written = write_records_atomically(out, sorted_by_link_score(set))?;
@@ -222,17 +244,17 @@ fn sorted_by_link_score(set: &RecordSet) -> Vec<&SiteRecord> {
 
 /// Crawl outcomes counted by kind.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-struct CrawlSummary {
-    fetched: usize,
-    robots_disallowed: usize,
-    http_status: usize,
-    not_html: usize,
-    offsite_redirect: usize,
-    failed: usize,
+pub(crate) struct CrawlSummary {
+    pub(crate) fetched: usize,
+    pub(crate) robots_disallowed: usize,
+    pub(crate) http_status: usize,
+    pub(crate) not_html: usize,
+    pub(crate) offsite_redirect: usize,
+    pub(crate) failed: usize,
 }
 
 impl CrawlSummary {
-    fn of(results: &[CrawlResult]) -> Self {
+    pub(crate) fn of(results: &[CrawlResult]) -> Self {
         let mut s = CrawlSummary::default();
         for result in results {
             match &result.outcome {
@@ -257,7 +279,7 @@ impl CrawlSummary {
     }
 
     /// Everything that was neither fetched nor blocked by robots.txt.
-    fn errors(&self) -> usize {
+    pub(crate) fn errors(&self) -> usize {
         self.http_status + self.not_html + self.offsite_redirect + self.failed
     }
 }
@@ -423,28 +445,42 @@ mod tests {
         let started = now_unix();
 
         let mut batch_sizes: Vec<usize> = Vec::new();
-        let totals = crawl_in_batches(&mut set, &targets, 2, &out, |batch| {
-            // Whatever earlier batches tried is already on disk.
-            if !batch_sizes.is_empty() {
-                let saved: Vec<SiteRecord> = read_jsonl(&out).unwrap();
-                let tried = saved
-                    .iter()
-                    .filter(|r| r.crawl_attempted_at.is_some())
-                    .count();
-                assert_eq!(tried, batch_sizes.iter().sum::<usize>());
-            }
-            batch_sizes.push(batch.len());
-            batch
-                .iter()
-                .map(|t| match t.domain.as_str() {
-                    "b.com" => failed("b.com"),
-                    domain => fetched(domain, started, &["linked.com"]),
-                })
-                .collect()
-        })
+        let mut reports: Vec<usize> = Vec::new();
+        let totals = crawl_in_batches(
+            &mut set,
+            &targets,
+            2,
+            &out,
+            |batch| {
+                // Whatever earlier batches tried is already on disk.
+                if !batch_sizes.is_empty() {
+                    let saved: Vec<SiteRecord> = read_jsonl(&out).unwrap();
+                    let tried = saved
+                        .iter()
+                        .filter(|r| r.crawl_attempted_at.is_some())
+                        .count();
+                    assert_eq!(tried, batch_sizes.iter().sum::<usize>());
+                }
+                batch_sizes.push(batch.len());
+                Some(
+                    batch
+                        .iter()
+                        .map(|t| match t.domain.as_str() {
+                            "b.com" => failed("b.com"),
+                            domain => fetched(domain, started, &["linked.com"]),
+                        })
+                        .collect(),
+                )
+            },
+            |totals| {
+                reports.push(totals.attempted);
+                Ok(())
+            },
+        )
         .unwrap();
 
         assert_eq!(batch_sizes, [2, 2, 1]);
+        assert_eq!(reports, [2, 4, 5]);
         // Totals cover all three batches, and linked.com is new only once.
         let outcomes = CrawlSummary {
             fetched: 4,
@@ -480,9 +516,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("copy.jsonl");
         let mut set: RecordSet = [record("a.com", 10, Some(5), None)].into_iter().collect();
-        let totals = crawl_in_batches(&mut set, &[], 500, &out, |_| {
-            panic!("nothing should be crawled")
-        })
+        let totals = crawl_in_batches(
+            &mut set,
+            &[],
+            500,
+            &out,
+            |_| panic!("nothing should be crawled"),
+            |_| panic!("no batch to report"),
+        )
         .unwrap();
         assert_eq!(
             totals,
@@ -493,6 +534,61 @@ mod tests {
         );
         let saved: Vec<SiteRecord> = read_jsonl(&out).unwrap();
         assert_eq!(saved, vec![record("a.com", 10, Some(5), None)]);
+    }
+
+    #[test]
+    fn a_stopped_run_keeps_the_batches_before_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("records.jsonl");
+        let mut set: RecordSet = ["a.com", "b.com", "c.com", "d.com", "e.com"]
+            .iter()
+            .zip([10, 20, 30, 40, 50])
+            .map(|(domain, tranco)| record(domain, tranco, None, None))
+            .collect();
+        let targets = select_targets(set.iter(), 10, 0);
+        let mut batches = 0;
+        let totals = crawl_in_batches(
+            &mut set,
+            &targets,
+            2,
+            &out,
+            |batch| {
+                batches += 1;
+                // The second batch is cut off, as on shutdown.
+                (batches < 2).then(|| batch.iter().map(|t| fetched(&t.domain, 1, &[])).collect())
+            },
+            |_| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(batches, 2);
+        assert_eq!((totals.attempted, totals.outcomes.fetched), (2, 2));
+        let saved: Vec<SiteRecord> = read_jsonl(&out).unwrap();
+        let tried: Vec<&str> = saved
+            .iter()
+            .filter(|r| r.crawl_attempted_at.is_some())
+            .map(|r| r.domain.as_str())
+            .collect();
+        assert_eq!(tried, ["a.com", "b.com"]);
+
+        // An error from the report ends the run after that batch was saved.
+        let err = crawl_in_batches(
+            &mut set,
+            &targets[2..],
+            2,
+            &out,
+            |batch| Some(batch.iter().map(|t| failed(&t.domain)).collect()),
+            |_| anyhow::bail!("disk full"),
+        )
+        .unwrap_err();
+        assert_eq!(err.to_string(), "disk full");
+        let saved: Vec<SiteRecord> = read_jsonl(&out).unwrap();
+        assert_eq!(
+            saved
+                .iter()
+                .filter(|r| r.crawl_attempted_at.is_some())
+                .count(),
+            4
+        );
     }
 
     #[test]

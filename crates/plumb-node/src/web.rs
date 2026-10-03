@@ -4,6 +4,13 @@
 //! - `GET /search?q=` shows results as server-rendered HTML,
 //! - `GET /api/search?q=&limit=` returns a JSON list of [`Hit`]s.
 //!
+//! A long-running node (`plumb run`, see [`crate::node`]) serves the same
+//! pages through [`node_router`], plus `GET /api/status`, which returns the
+//! node's [`Status`] as JSON. Until its first index is ready, `/` and
+//! `/search` show the setup step, its progress and the last error instead,
+//! reloading every few seconds with a `<meta http-equiv="refresh">` (no
+//! script), and `/api/search` answers 503.
+//!
 //! Titles, descriptions and URLs in the index come from the open web, so
 //! every piece of record text is HTML-escaped, only `http`/`https` URLs
 //! become links, and pages are served with a Content-Security-Policy that
@@ -19,13 +26,14 @@ use axum::http::{header, HeaderName, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
-use plumb_core::{collapse_whitespace, truncate_chars};
+use plumb_core::{collapse_whitespace, now_unix, truncate_chars};
 use plumb_index::{Hit, RankConfig, Searcher};
 use serde::Deserialize;
 use tracing::{debug, error, info};
 use url::Url;
 
 use crate::cli::ServeArgs;
+use crate::node::{Phase, Status, Step};
 use crate::{block_on, rank_config};
 
 /// Results returned when a request does not say how many.
@@ -39,6 +47,10 @@ pub const MAX_QUERY_CHARS: usize = 200;
 /// styles are allowed for the page's own `<style>` element.
 const CONTENT_SECURITY_POLICY: &str = "default-src 'none'; style-src 'unsafe-inline'; \
      form-action 'self'; base-uri 'none'; frame-ancestors 'none'";
+
+/// Seconds between two reloads of the setup page, and the `Retry-After` of
+/// a search asked for before the index is ready.
+const SETUP_RELOAD_SECONDS: u32 = 5;
 
 /// Answers queries for the web handlers. [`IndexBackend`] is the real one;
 /// tests can plug in their own.
@@ -71,18 +83,55 @@ impl SearchBackend for IndexBackend {
     }
 }
 
+/// What a long-running node tells its web pages about itself.
+pub trait StatusSource: Send + Sync {
+    /// The node's status, as `GET /api/status` returns it.
+    fn status(&self) -> Status;
+}
+
 #[derive(Clone)]
 struct AppState {
     backend: Arc<dyn SearchBackend>,
+    /// Set for a long-running node, `None` for `plumb serve`.
+    node: Option<Arc<dyn StatusSource>>,
+}
+
+impl AppState {
+    /// The node's status while it is still setting up; `None` once it is
+    /// ready, and always for `plumb serve`.
+    fn setting_up(&self) -> Option<Status> {
+        let status = self.node.as_ref()?.status();
+        (status.phase != Phase::Ready).then_some(status)
+    }
 }
 
 /// The web app: `/`, `/search` and `/api/search`.
 pub fn router(backend: Arc<dyn SearchBackend>) -> Router {
-    Router::new()
+    app(AppState {
+        backend,
+        node: None,
+    })
+}
+
+/// The web app of a long-running node: what [`router`] serves, plus
+/// `GET /api/status`. Until `status` reports [`Phase::Ready`], `/` and
+/// `/search` show the setup page and `/api/search` answers 503.
+pub fn node_router(backend: Arc<dyn SearchBackend>, status: Arc<dyn StatusSource>) -> Router {
+    app(AppState {
+        backend,
+        node: Some(status),
+    })
+}
+
+fn app(state: AppState) -> Router {
+    let mut router = Router::new()
         .route("/", get(home))
         .route("/search", get(search_page))
-        .route("/api/search", get(api_search))
-        .with_state(AppState { backend })
+        .route("/api/search", get(api_search));
+    if state.node.is_some() {
+        router = router.route("/api/status", get(api_status));
+    }
+    router.with_state(state)
 }
 
 /// Opens the index and serves it until Ctrl-C or SIGTERM.
@@ -108,7 +157,7 @@ pub fn run(args: ServeArgs) -> Result<()> {
 }
 
 /// Resolves on Ctrl-C, or on SIGTERM (which `docker stop` and systemd send).
-async fn shutdown_signal() {
+pub(crate) async fn shutdown_signal() {
     let ctrl_c = async {
         if tokio::signal::ctrl_c().await.is_err() {
             std::future::pending::<()>().await;
@@ -152,16 +201,43 @@ impl SearchParams {
 }
 
 async fn home(State(state): State<AppState>) -> Response {
-    html_response(StatusCode::OK, render_home(state.backend.num_docs()))
+    home_or_setup(&state)
+}
+
+/// The home page, or the setup page while a node is still setting up.
+fn home_or_setup(state: &AppState) -> Response {
+    let status = state.node.as_ref().map(|node| node.status());
+    let now = now_unix();
+    match &status {
+        Some(status) if status.phase != Phase::Ready => setup_response(status, now),
+        _ => html_response(
+            StatusCode::OK,
+            render_home(state.backend.num_docs(), status.as_ref(), now),
+        ),
+    }
+}
+
+fn setup_response(status: &Status, now: u64) -> Response {
+    (
+        StatusCode::OK,
+        security_headers(),
+        [(header::CACHE_CONTROL, "no-store")],
+        Html(render_setup(status, now)),
+    )
+        .into_response()
 }
 
 async fn search_page(
     State(state): State<AppState>,
     Query(params): Query<SearchParams>,
 ) -> Response {
+    if let Some(status) = state.setting_up() {
+        // Reloading keeps the query, so the results show up once the index is ready.
+        return setup_response(&status, now_unix());
+    }
     let query = params.query();
     if query.is_empty() {
-        return html_response(StatusCode::OK, render_home(state.backend.num_docs()));
+        return home_or_setup(&state);
     }
     match run_search(&state, &query, params.limit()).await {
         Ok(hits) => html_response(StatusCode::OK, render_results(&query, &hits)),
@@ -173,6 +249,21 @@ async fn search_page(
 }
 
 async fn api_search(State(state): State<AppState>, Query(params): Query<SearchParams>) -> Response {
+    if let Some(status) = state.setting_up() {
+        let body = serde_json::json!({
+            "error": "the search index is not ready yet",
+            "phase": status.phase,
+            "step": status.step,
+        });
+        let retry_after = SETUP_RELOAD_SECONDS.to_string();
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            security_headers(),
+            [(header::RETRY_AFTER, retry_after)],
+            Json(body),
+        )
+            .into_response();
+    }
     let query = params.query();
     if query.is_empty() {
         return (StatusCode::OK, security_headers(), Json(Vec::<Hit>::new())).into_response();
@@ -190,6 +281,20 @@ async fn api_search(State(state): State<AppState>, Query(params): Query<SearchPa
                 .into_response()
         }
     }
+}
+
+/// `GET /api/status`, routed for nodes only.
+async fn api_status(State(state): State<AppState>) -> Response {
+    let Some(node) = &state.node else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    (
+        StatusCode::OK,
+        security_headers(),
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(node.status()),
+    )
+        .into_response()
 }
 
 /// Runs a search on the blocking thread pool, since searching is CPU and
@@ -256,7 +361,7 @@ fn homepage_url(domain: &str) -> Option<String> {
 }
 
 /// `12345` -> `12,345`.
-fn group_thousands(n: u64) -> String {
+pub(crate) fn group_thousands(n: u64) -> String {
     let digits = n.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
     for (i, c) in digits.chars().enumerate() {
@@ -268,11 +373,42 @@ fn group_thousands(n: u64) -> String {
     out
 }
 
+/// A rough length of time in words: `90` -> `1 minute`, `7200` -> `2 hours`.
+pub(crate) fn duration_words(seconds: u64) -> String {
+    let (n, unit) = match seconds {
+        0..=59 => (seconds, "second"),
+        60..=3_599 => (seconds / 60, "minute"),
+        3_600..=86_399 => (seconds / 3_600, "hour"),
+        _ => (seconds / 86_400, "day"),
+    };
+    if n == 1 {
+        format!("1 {unit}")
+    } else {
+        format!("{n} {unit}s")
+    }
+}
+
+/// `at` (Unix seconds) seen from `now`: `just now`, `5 minutes ago`.
+fn time_ago(at: u64, now: u64) -> String {
+    match now.saturating_sub(at) {
+        0..=9 => "just now".to_string(),
+        age => format!("{} ago", duration_words(age)),
+    }
+}
+
+/// `at` (Unix seconds) seen from `now`: `in 10 minutes`, `any moment now`.
+fn time_until(at: u64, now: u64) -> String {
+    match at.saturating_sub(now) {
+        0 => "any moment now".to_string(),
+        wait => format!("in {}", duration_words(wait)),
+    }
+}
+
 const STYLE: &str = "\
 :root{color-scheme:light dark;--bg:#fff;--fg:#202124;--muted:#5f6368;--link:#1a0dab;\
---url:#0d652d;--line:#dadce0;--accent:#1a73e8}\
+--url:#0d652d;--line:#dadce0;--accent:#1a73e8;--err:#b3261e}\
 @media (prefers-color-scheme:dark){:root{--bg:#1f1f1f;--fg:#e8eaed;--muted:#9aa0a6;\
---link:#8ab4f8;--url:#81c995;--line:#3c4043;--accent:#8ab4f8}}\
+--link:#8ab4f8;--url:#81c995;--line:#3c4043;--accent:#8ab4f8;--err:#f2b8b5}}\
 *{box-sizing:border-box}\
 body{margin:0;background:var(--bg);color:var(--fg);\
 font:16px/1.5 system-ui,-apple-system,\"Segoe UI\",Roboto,sans-serif}\
@@ -298,14 +434,26 @@ a.t:hover{text-decoration:underline}\
 .m,.s{font-size:.8rem}\
 .m{margin-top:.25rem}\
 .s{margin-top:1.5rem}\
-.none{margin:1.5rem 0}";
+.none{margin:1.5rem 0}\
+.setup{max-width:36rem}\
+.step{margin:2rem 0 .5rem;font-size:1.1rem}\
+progress{width:100%;height:.75rem;accent-color:var(--accent)}\
+.err{margin-top:1.5rem;padding:.25rem 1rem;border:1px solid var(--err);border-radius:.5rem;\
+text-align:left}\
+.err strong{color:var(--err)}\
+.msg{white-space:pre-wrap;overflow-wrap:anywhere;font:.85rem/1.4 ui-monospace,monospace}";
 
 /// A whole HTML document; `body` must already be escaped.
 fn page(title: &str, body: &str) -> String {
+    page_with_head(title, "", body)
+}
+
+/// [`page`] with more elements in its `<head>`, which must be safe HTML.
+fn page_with_head(title: &str, head: &str, body: &str) -> String {
     format!(
         "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
-         <meta name=\"referrer\" content=\"no-referrer\">\n\
+         <meta name=\"referrer\" content=\"no-referrer\">\n{head}\
          <title>{}</title>\n<style>{STYLE}</style>\n</head>\n<body>\n{body}\n</body>\n</html>\n",
         escape_html(title)
     )
@@ -322,14 +470,86 @@ fn search_form(query: &str, autofocus: bool) -> String {
     )
 }
 
-fn render_home(docs: u64) -> String {
+/// The home page; a node's `status` adds what it is doing to the count of sites.
+fn render_home(docs: u64, status: Option<&Status>, now: u64) -> String {
+    let note = status
+        .and_then(|status| node_note(status, now))
+        .map(|note| format!(" &middot; {}", escape_html(&note)))
+        .unwrap_or_default();
     let body = format!(
         "<main class=\"wrap home\">\n<h1>Plumb</h1>\n<p class=\"tag\">Find a site by its name.</p>\n\
-         {}\n<p class=\"s\">{} sites indexed</p>\n</main>",
+         {}\n<p class=\"s\">{} sites indexed{note}</p>\n</main>",
         search_form("", true),
         group_thousands(docs)
     );
     page("Plumb Search", &body)
+}
+
+/// What a ready node is up to, in a few words for the home page.
+fn node_note(status: &Status, now: u64) -> Option<String> {
+    let note = match (status.step, &status.progress) {
+        (Step::Crawling, Some(p)) => format!(
+            "crawling homepages, {} of {}",
+            group_thousands(p.done),
+            group_thousands(p.total)
+        ),
+        (Step::Indexing, _) => "rebuilding the index".to_string(),
+        _ if status.last_error.is_some() => {
+            "the last update failed and will be tried again (see /api/status)".to_string()
+        }
+        _ => format!("updated {}", time_ago(status.last_refresh?, now)),
+    };
+    Some(note)
+}
+
+/// The page shown while a node sets up: the step, its progress and the last
+/// error. It reloads itself, since the page allows no script.
+fn render_setup(status: &Status, now: u64) -> String {
+    let mut body = String::from(
+        "<main class=\"wrap home setup\">\n<h1>Plumb</h1>\n\
+         <p class=\"tag\">Setting up your search engine</p>\n",
+    );
+    let _ = writeln!(
+        body,
+        "<p class=\"step\">{}</p>",
+        escape_html(&status.detail)
+    );
+    if let Some(progress) = &status.progress {
+        let max = progress.total.max(progress.done).max(1);
+        let _ = writeln!(
+            body,
+            "<progress value=\"{}\" max=\"{max}\"></progress>\n<p>{} of {} {}</p>",
+            progress.done,
+            group_thousands(progress.done),
+            group_thousands(progress.total),
+            escape_html(&progress.unit)
+        );
+    }
+    if let Some(err) = &status.last_error {
+        let _ = write!(
+            body,
+            "<div class=\"err\" role=\"alert\">\n<p><strong>Something went wrong</strong> \
+             {}:</p>\n<p class=\"msg\">{}</p>\n",
+            time_ago(err.at, now),
+            escape_html(&err.message)
+        );
+        if let Some(retry_at) = err.retry_at {
+            let _ = writeln!(
+                body,
+                "<p>Plumb will try again {}.</p>",
+                time_until(retry_at, now)
+            );
+        }
+        body.push_str("</div>\n");
+    }
+    let _ = write!(
+        body,
+        "<p class=\"s\">On its first start, Plumb downloads public lists of popular websites \
+         and builds its search index from them, which takes a few minutes. This page reloads \
+         every {SETUP_RELOAD_SECONDS} seconds.</p>\n</main>"
+    );
+    let head = format!("<meta http-equiv=\"refresh\" content=\"{SETUP_RELOAD_SECONDS}\">\n");
+    page_with_head("Setting up - Plumb Search", &head, &body)
 }
 
 fn results_header(query: &str) -> String {
@@ -420,6 +640,7 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
+    use crate::node::{LastError, Progress};
 
     /// Returns canned hits and remembers what it was asked.
     #[derive(Default)]
@@ -477,7 +698,10 @@ mod tests {
     }
 
     async fn get(backend: Arc<FakeBackend>, uri: &str) -> (StatusCode, HeaderMap, String) {
-        let app = router(backend);
+        send(router(backend), uri).await
+    }
+
+    async fn send(app: Router, uri: &str) -> (StatusCode, HeaderMap, String) {
         let request = Request::builder().uri(uri).body(Body::empty()).unwrap();
         let response = app.oneshot(request).await.unwrap();
         let status = response.status();
@@ -665,6 +889,275 @@ mod tests {
         });
         let (status, _, _) = get(panicking, "/search?q=x").await;
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    /// A node that reports a set status.
+    struct FakeNode(Status);
+
+    impl StatusSource for FakeNode {
+        fn status(&self) -> Status {
+            self.0.clone()
+        }
+    }
+
+    fn node(status: Status) -> Arc<FakeNode> {
+        Arc::new(FakeNode(status))
+    }
+
+    fn node_status(phase: Phase, step: Step) -> Status {
+        Status {
+            phase,
+            step,
+            detail: "Downloading the Tranco list of popular sites".to_string(),
+            progress: None,
+            last_error: None,
+            sites: 0,
+            index: None,
+            last_refresh: None,
+            next_refresh: None,
+            version: "0.1.0".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_node_reports_its_status_as_json() {
+        let mut status = node_status(Phase::SettingUp, Step::Downloading);
+        status.progress = Some(Progress {
+            done: 1,
+            total: 3,
+            unit: "files".into(),
+        });
+        status.last_error = Some(LastError {
+            message: "no network".into(),
+            at: 1_700_000_000,
+            retry_at: Some(1_700_000_600),
+        });
+        let app = node_router(backend(Vec::new()), node(status.clone()));
+        let (code, headers, body) = send(app, "/api/status").await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(headers[header::CONTENT_TYPE], "application/json");
+        assert_eq!(headers[header::CACHE_CONTROL], "no-store");
+        assert_eq!(serde_json::from_str::<Status>(&body).unwrap(), status);
+        // The names are an interface: the desktop app and scripts read them.
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["phase"], "setting_up");
+        assert_eq!(json["step"], "downloading");
+        assert_eq!(
+            json["progress"],
+            serde_json::json!({"done": 1, "total": 3, "unit": "files"})
+        );
+        assert_eq!(
+            json["last_error"],
+            serde_json::json!({"message": "no network", "at": 1_700_000_000u64,
+                               "retry_at": 1_700_000_600u64})
+        );
+        for null in ["index", "last_refresh", "next_refresh"] {
+            assert!(json[null].is_null(), "{null}");
+        }
+        assert_eq!(json["sites"], 0);
+
+        // `plumb serve` has no status to report.
+        let (code, _, _) = get(backend(Vec::new()), "/api/status").await;
+        assert_eq!(code, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn a_node_setting_up_shows_its_progress_instead_of_searching() {
+        let now = now_unix();
+        let mut status = node_status(Phase::SettingUp, Step::Retrying);
+        status.detail = "Waiting <to> try again".to_string();
+        status.progress = Some(Progress {
+            done: 1_500,
+            total: 10_000,
+            unit: "homepages".into(),
+        });
+        status.last_error = Some(LastError {
+            message: "HTTP 503: <script>alert('x')</script> & more".into(),
+            at: now - 150,
+            retry_at: Some(now + 630),
+        });
+        let fake = backend(bank_hits());
+        let node = node(status);
+        for uri in ["/", "/search?q=us+bank", "/search"] {
+            let app = node_router(fake.clone(), node.clone());
+            let (code, headers, body) = send(app, uri).await;
+            assert_eq!(code, StatusCode::OK, "{uri}");
+            assert_eq!(headers[header::CACHE_CONTROL], "no-store");
+            assert!(headers[header::CONTENT_SECURITY_POLICY]
+                .to_str()
+                .unwrap()
+                .contains("default-src 'none'"));
+            for expected in [
+                "<meta http-equiv=\"refresh\" content=\"5\">",
+                "<title>Setting up - Plumb Search</title>",
+                "<p class=\"step\">Waiting &lt;to&gt; try again</p>",
+                "<progress value=\"1500\" max=\"10000\"></progress>",
+                "1,500 of 10,000 homepages",
+                "Something went wrong</strong> 2 minutes ago:",
+                "HTTP 503: &lt;script&gt;alert(&#39;x&#39;)&lt;/script&gt; &amp; more",
+                "Plumb will try again in 10 minutes.",
+            ] {
+                assert!(body.contains(expected), "{uri}: no {expected:?} in {body}");
+            }
+            assert!(!body.contains("<script"), "{body}");
+            assert!(!body.contains("<form"), "{body}");
+        }
+        let app = node_router(fake.clone(), node.clone());
+        let (code, headers, body) = send(app, "/api/search?q=us+bank").await;
+        assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(headers[header::RETRY_AFTER], "5");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&body).unwrap(),
+            serde_json::json!({"error": "the search index is not ready yet",
+                               "phase": "setting_up", "step": "retrying"})
+        );
+        assert!(fake.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_setup_page_shows_only_what_it_knows() {
+        let status = node_status(Phase::SettingUp, Step::Starting);
+        let body = render_setup(&status, 1_700_000_000);
+        assert!(body.contains("Downloading the Tranco list"));
+        assert!(!body.contains("<progress"));
+        assert!(!body.contains("Something went wrong"));
+        let mut status = status;
+        status.progress = Some(Progress {
+            done: 0,
+            total: 0,
+            unit: "files".into(),
+        });
+        status.last_error = Some(LastError {
+            message: "boom".into(),
+            at: 1_700_000_000,
+            retry_at: None,
+        });
+        let body = render_setup(&status, 1_700_000_000);
+        assert!(body.contains("<progress value=\"0\" max=\"1\"></progress>"));
+        assert!(body.contains("Something went wrong</strong> just now:"));
+        assert!(!body.contains("will try again"));
+    }
+
+    #[tokio::test]
+    async fn a_ready_node_searches_and_says_what_it_is_doing() {
+        let fake = backend(bank_hits());
+        let mut status = node_status(Phase::Ready, Step::Crawling);
+        status.progress = Some(Progress {
+            done: 1_500,
+            total: 10_000,
+            unit: "homepages".into(),
+        });
+        let node = node(status);
+        let app = || node_router(fake.clone(), node.clone());
+        let (code, _, body) = send(app(), "/").await;
+        assert_eq!(code, StatusCode::OK);
+        assert!(body.contains("<form action=\"/search\""), "{body}");
+        assert!(
+            body.contains("12,345 sites indexed &middot; crawling homepages, 1,500 of 10,000</p>"),
+            "{body}"
+        );
+        assert!(!body.contains("http-equiv"), "{body}");
+        let (code, _, body) = send(app(), "/search?q=us+bank").await;
+        assert_eq!(code, StatusCode::OK);
+        assert!(body.contains("href=\"https://www.usbank.com/\""), "{body}");
+        let (code, _, body) = send(app(), "/api/search?q=us+bank&limit=1").await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(
+            serde_json::from_str::<Vec<Hit>>(&body).unwrap(),
+            bank_hits()[..1].to_vec()
+        );
+        assert_eq!(fake.calls.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn notes_on_the_home_page_of_a_ready_node() {
+        let now = 1_700_000_000;
+        let note = |step, progress: Option<Progress>, failed: bool, last_refresh| {
+            let mut status = node_status(Phase::Ready, step);
+            status.progress = progress;
+            status.last_refresh = last_refresh;
+            if failed {
+                status.last_error = Some(LastError {
+                    message: "boom".into(),
+                    at: now,
+                    retry_at: None,
+                });
+            }
+            node_note(&status, now)
+        };
+        let crawled = |done| {
+            Some(Progress {
+                done,
+                total: 5_000,
+                unit: "homepages".into(),
+            })
+        };
+        let cases = [
+            (
+                note(Step::Crawling, crawled(0), false, None),
+                "crawling homepages, 0 of 5,000",
+            ),
+            (
+                note(Step::Crawling, crawled(2_500), true, None),
+                "crawling homepages, 2,500 of 5,000",
+            ),
+            (
+                note(Step::Indexing, None, false, Some(now)),
+                "rebuilding the index",
+            ),
+            (
+                note(Step::Retrying, None, true, Some(now)),
+                "the last update failed and will be tried again (see /api/status)",
+            ),
+            (
+                note(Step::Idle, None, false, Some(now - 2 * 3_600)),
+                "updated 2 hours ago",
+            ),
+            (
+                note(Step::Crawling, None, false, Some(now - 30)),
+                "updated 30 seconds ago",
+            ),
+        ];
+        for (got, expected) in cases {
+            assert_eq!(got.as_deref(), Some(expected));
+        }
+        assert_eq!(note(Step::Idle, None, false, None), None);
+    }
+
+    #[test]
+    fn durations_in_words() {
+        let words: Vec<String> = [
+            0, 1, 59, 60, 119, 3_599, 3_600, 7_200, 86_399, 86_400, 259_200,
+        ]
+        .into_iter()
+        .map(duration_words)
+        .collect();
+        assert_eq!(
+            words,
+            [
+                "0 seconds",
+                "1 second",
+                "59 seconds",
+                "1 minute",
+                "1 minute",
+                "59 minutes",
+                "1 hour",
+                "2 hours",
+                "23 hours",
+                "1 day",
+                "3 days"
+            ]
+        );
+        let now = 1_700_000_000;
+        assert_eq!(time_ago(now, now), "just now");
+        assert_eq!(time_ago(now - 9, now), "just now");
+        assert_eq!(time_ago(now - 10, now), "10 seconds ago");
+        assert_eq!(time_ago(now - 3_600, now), "1 hour ago");
+        // A clock that went back a little.
+        assert_eq!(time_ago(now + 60, now), "just now");
+        assert_eq!(time_until(now + 600, now), "in 10 minutes");
+        assert_eq!(time_until(now, now), "any moment now");
+        assert_eq!(time_until(now - 60, now), "any moment now");
     }
 
     #[test]
