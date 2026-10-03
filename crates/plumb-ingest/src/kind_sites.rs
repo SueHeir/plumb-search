@@ -1,0 +1,156 @@
+//! Official websites of organizations of the kinds people look for by name
+//! (banks, credit unions, airlines, universities, government agencies),
+//! however few Wikipedia articles they have.
+//!
+//! The official websites download keeps items with at least 25 sitelinks,
+//! which leaves out most credit unions, local banks and government agencies
+//! (Navy Federal Credit Union, the Social Security Administration's site).
+//! Asking for every item of a few kinds is small and fast instead: one
+//! query per kind, found by its English label, so no item ids are written
+//! down here. The rows are saved as `wikidata-kind-sites.tsv`, in the same
+//! format as the official websites file, and are read the same way.
+
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+use std::time::Instant;
+
+use anyhow::{bail, Context, Result};
+use tracing::{info, warn};
+
+use crate::download::{part_path, wikidata_json_to_tsv, WikidataPacing};
+use crate::facts::sparql_json;
+
+/// File name of the kind sites in a seed directory.
+pub const KIND_SITES_FILE_NAME: &str = "wikidata-kind-sites.tsv";
+
+/// The kinds asked for, by their English labels in Wikidata: those whose
+/// members people mostly reach by typing their name.
+pub const KIND_LABELS: &[&str] = &[
+    "bank",
+    "credit union",
+    "savings bank",
+    "cooperative bank",
+    "insurance company",
+    "airline",
+    "newspaper",
+    "news website",
+    "television station",
+    "radio station",
+    "university",
+    "public university",
+    "private university",
+    "college",
+    "community college",
+    "hospital",
+    "public library",
+    "government agency",
+    "independent agency of the United States government",
+    "ministry",
+    "retail chain",
+    "supermarket chain",
+    "restaurant chain",
+    "telecommunications company",
+    "internet service provider",
+    "electric utility",
+];
+
+/// The SPARQL query for the items that are instances of a kind labelled
+/// `label` in English, with their official websites and English labels.
+pub fn kind_sites_query(label: &str) -> String {
+    let label = label.replace(['\\', '"'], "");
+    format!(
+        "SELECT ?item ?itemLabel ?website WHERE {{ ?kind rdfs:label \"{label}\"@en . \
+         ?item wdt:P31 ?kind ; wdt:P856 ?website . \
+         SERVICE wikibase:label {{ bd:serviceParam wikibase:language \"en,mul\". }} }}"
+    )
+}
+
+/// Asks the SPARQL `endpoint` for the official websites of every item of
+/// each of [`KIND_LABELS`], one query per kind with `pacing.pause` between
+/// them, and writes `dir/`[`KIND_SITES_FILE_NAME`]. A kind whose query
+/// fails is left out with a warning; the download fails only when every
+/// kind does, leaving any earlier file in place.
+pub async fn download_kind_sites(
+    client: &reqwest::Client,
+    endpoint: &str,
+    dir: &Path,
+    pacing: WikidataPacing,
+) -> Result<PathBuf> {
+    info!(
+        "asking Wikidata for the official websites of {} kinds of organizations",
+        KIND_LABELS.len()
+    );
+    let started = Instant::now();
+    let mut tsv = String::from("item\tlabel\twebsite\n");
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut failed = Vec::new();
+    for (i, label) in KIND_LABELS.iter().enumerate() {
+        if i > 0 {
+            tokio::time::sleep(pacing.pause).await;
+        }
+        let rows = match sparql_json(client, endpoint, &kind_sites_query(label), pacing).await {
+            Ok(json) => wikidata_json_to_tsv(&json),
+            Err(err) => Err(err),
+        };
+        match rows {
+            Ok(rows) => {
+                let mut added = 0;
+                for row in rows.lines().skip(1) {
+                    if seen.insert(row.to_string()) {
+                        tsv.push_str(row);
+                        tsv.push('\n');
+                        added += 1;
+                    }
+                }
+                info!("Wikidata: {added} official websites of kind \"{label}\"");
+            }
+            Err(err) => {
+                warn!("could not get the official websites of kind \"{label}\": {err:#}");
+                failed.push(*label);
+            }
+        }
+    }
+    if failed.len() == KIND_LABELS.len() {
+        bail!("every Wikidata query for official websites by kind failed");
+    }
+
+    tokio::fs::create_dir_all(dir)
+        .await
+        .with_context(|| format!("creating {}", dir.display()))?;
+    let dest = dir.join(KIND_SITES_FILE_NAME);
+    let part = part_path(&dest);
+    tokio::fs::write(&part, tsv.as_bytes())
+        .await
+        .with_context(|| format!("writing {}", part.display()))?;
+    tokio::fs::rename(&part, &dest)
+        .await
+        .with_context(|| format!("renaming {} to {}", part.display(), dest.display()))?;
+    info!(
+        "wrote {} official websites by kind to {} in {:.0} s{}",
+        seen.len(),
+        dest.display(),
+        started.elapsed().as_secs_f64(),
+        if failed.is_empty() {
+            String::new()
+        } else {
+            format!(" (left out: {})", failed.join(", "))
+        }
+    );
+    Ok(dest)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_query_finds_the_kind_by_label() {
+        let query = kind_sites_query("credit union");
+        assert!(
+            query.contains("?kind rdfs:label \"credit union\"@en"),
+            "{query}"
+        );
+        assert!(query.contains("wdt:P31 ?kind ; wdt:P856 ?website"));
+        assert!(!kind_sites_query("a\"b").contains("a\"b"));
+    }
+}

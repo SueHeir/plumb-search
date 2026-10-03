@@ -30,6 +30,7 @@ pub mod country;
 pub mod eval;
 pub mod node;
 pub mod web;
+pub mod websearch;
 
 mod crawl;
 mod fetch;

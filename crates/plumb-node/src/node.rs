@@ -87,6 +87,7 @@ use tracing::{debug, info, warn};
 
 use crate::country::HomeCountry;
 use crate::web::{self, IndexBackend, SearchBackend, StatusSource};
+use crate::websearch::{Engine, WebSettings};
 
 mod network;
 mod store;
@@ -134,6 +135,8 @@ pub struct NodeConfig {
     pub alpha: Option<f32>,
     /// The home country of searches that do not name one.
     pub country: HomeCountry,
+    /// The web search engine the results page links to; `None` for no link.
+    pub web_search: Option<Engine>,
     /// Where the seed data is downloaded from on first start.
     pub sources: SeedSources,
     /// How long to wait before trying failed work again. The wait doubles
@@ -165,6 +168,7 @@ impl NodeConfig {
             cc_release: None,
             alpha: None,
             country: HomeCountry::Auto,
+            web_search: None,
             sources: SeedSources::default(),
             retry_wait: Duration::from_secs(10 * 60),
             max_retry_wait: Duration::from_secs(6 * 60 * 60),
@@ -530,7 +534,11 @@ pub async fn start(config: NodeConfig) -> Result<NodeHandle> {
 
     let (stop, stopped) = watch::channel(false);
     let inner = Arc::new(Inner::new(config, rank, opened, stopped.clone()));
-    let app = web::node_router_with(inner.clone(), inner.clone(), inner.config.country.clone());
+    let settings = WebSettings {
+        home: inner.config.country.clone(),
+        web_search: inner.config.web_search,
+    };
+    let app = web::node_router_with(inner.clone(), inner.clone(), settings);
     let server = tokio::spawn(async move {
         let mut stopped = stopped;
         // The settings panel takes changes only from this computer.
