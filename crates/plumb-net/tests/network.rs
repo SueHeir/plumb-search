@@ -376,8 +376,9 @@ async fn popularity_reports_spread_and_are_read_once_enough_are_sent() {
     for node in [&a, &b] {
         wait_for(|| (node.handle.status().connected_peers >= 1).then_some(())).await;
     }
-    // A needs to know both others to send through one to the other.
-    wait_for(|| (a.handle.status().connected_peers >= 2).then_some(())).await;
+    // A needs to know both others can relay to send through one to the
+    // other.
+    wait_for(|| (a.handle.status().relaying_peers >= 2).then_some(())).await;
 
     // A hands in reports of one pick, each under a throwaway identity
     // and through a relay.

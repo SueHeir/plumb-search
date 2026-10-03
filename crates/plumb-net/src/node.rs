@@ -162,6 +162,9 @@ pub struct NetStatus {
     /// `public`, `private` (behind NAT) or `unknown`, from AutoNAT.
     pub nat: String,
     pub connected_peers: usize,
+    /// Of those, the ones that relay sealed requests (see
+    /// [`crate::oblivious`]).
+    pub relaying_peers: usize,
     /// Relays this node holds a reservation on.
     pub relays: Vec<String>,
     pub batches_held: usize,
@@ -1838,6 +1841,7 @@ impl Task {
             .map(ToString::to_string)
             .collect();
         let connected_peers = self.swarm.connected_peers().count();
+        let relaying_peers = self.oblivious_peers.len();
         let relays = self
             .relays
             .iter()
@@ -1850,6 +1854,7 @@ impl Task {
             s.listening = listening;
             s.reachable_at = reachable_at;
             s.connected_peers = connected_peers;
+            s.relaying_peers = relaying_peers;
             s.relays = relays;
             s.batches_held = held;
             s.reports_held = reports_held;
