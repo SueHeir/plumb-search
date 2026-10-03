@@ -47,7 +47,9 @@ use crate::country::{country_name, HomeCountry, COUNTRY_CHOICES};
 use crate::node::{NodeSettings, Phase, Status, Step};
 
 mod panel;
+
 use crate::{block_on, rank_config};
+pub use panel::ADD_TO_FIREFOX_PATH;
 
 /// Results returned when a request does not say how many.
 pub const DEFAULT_LIMIT: usize = 10;
@@ -216,7 +218,8 @@ fn app(state: AppState) -> Router {
             .route("/api/status", get(api_status))
             .route("/app", get(panel::panel))
             .route("/app/settings", post(panel::save_settings))
-            .route("/app/refresh", post(panel::refresh));
+            .route("/app/refresh", post(panel::refresh))
+            .route(panel::ADD_TO_FIREFOX_PATH, get(panel::add_to_firefox));
     }
     router.with_state(state)
 }

@@ -146,6 +146,10 @@ quits.
 
 ## Use Plumb as your browser's search engine
 
+The panel's **Add to Firefox** button opens Firefox on a page with the two
+clicks it takes (Firefox lets no page add a search engine by itself). If
+Firefox is not installed, the page opens in the default browser.
+
 While the app runs, its search page is at `http://127.0.0.1:7586` in any
 browser on the same computer, and the page offers Plumb to the browser as a
 search engine:

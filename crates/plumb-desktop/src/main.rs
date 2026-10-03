@@ -156,7 +156,10 @@ fn setup(app: &AppHandle) -> Result<()> {
             })
             // Ctrl-click, middle-click and `target="_blank"` links.
             .on_new_window(move |url, _features| {
-                if is_web_page(&url) {
+                let node = opening.state::<Node>();
+                if is_add_to_firefox(&url, node.url.get()) {
+                    open_in_firefox(&opening, &url);
+                } else if is_web_page(&url) {
                     open_in_browser(&opening, &url);
                 }
                 NewWindowResponse::Deny
@@ -416,6 +419,30 @@ fn hide_main_window(app: &AppHandle) {
     }
 }
 
+/// The name the system knows Firefox by, to open a page in it.
+const FIREFOX: &str = if cfg!(target_os = "macos") {
+    "Firefox"
+} else {
+    "firefox"
+};
+
+/// Whether `url` is the node's page with the steps to add Plumb to Firefox,
+/// which only Firefox can follow: the panel's "Add to Firefox" button.
+fn is_add_to_firefox(url: &Url, node: Option<&Url>) -> bool {
+    node.is_some_and(|node| node.origin() == url.origin())
+        && url.path() == plumb_node::web::ADD_TO_FIREFOX_PATH
+}
+
+/// Opens `url` in Firefox, or in the default browser when Firefox cannot be
+/// started (most likely, it is not installed).
+fn open_in_firefox(app: &AppHandle, url: &Url) {
+    debug!("opening {url} in Firefox");
+    if let Err(err) = app.opener().open_url(url.as_str(), Some(FIREFOX)) {
+        warn!("could not open {url} in Firefox, so in the default browser: {err}");
+        open_in_browser(app, url);
+    }
+}
+
 fn open_in_browser(app: &AppHandle, url: &Url) {
     debug!("opening {url} in the default browser");
     if let Err(err) = app.opener().open_url(url.as_str(), None::<&str>) {
@@ -538,6 +565,26 @@ mod tests {
         }
         // Until the node listens, no local page is its own.
         assert_eq!(destination(&url(NODE), None, None), Destination::Browser);
+    }
+
+    #[test]
+    fn the_add_to_firefox_page_is_the_nodes_own() {
+        let node = url(NODE);
+        assert!(is_add_to_firefox(
+            &url("http://127.0.0.1:41234/add-to-firefox"),
+            Some(&node)
+        ));
+        assert!(!is_add_to_firefox(
+            &url("http://127.0.0.1:41234/add-to-firefox"),
+            None
+        ));
+        for other in [
+            "http://127.0.0.1:41234/",
+            "http://127.0.0.1:8080/add-to-firefox",
+            "https://evil.example/add-to-firefox",
+        ] {
+            assert!(!is_add_to_firefox(&url(other), Some(&node)), "{other}");
+        }
     }
 
     #[test]

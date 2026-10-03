@@ -5,7 +5,12 @@
 //! - `GET /app` shows the panel, reloading itself while work is under way
 //!   (the page runs no script),
 //! - `POST /app/settings` saves the settings form,
-//! - `POST /app/refresh` starts a refresh now.
+//! - `POST /app/refresh` starts a refresh now,
+//! - `GET /add-to-firefox` says how to add Plumb to Firefox as a search
+//!   engine. It is meant to be opened in Firefox (the desktop app opens it
+//!   there), which offers to add the engine of a page that links to an
+//!   OpenSearch description, as every Plumb page does. No page can add it by
+//!   itself: Firefox dropped `window.external.AddSearchProvider`.
 //!
 //! Changes are taken only from this computer (a loopback peer) and only from
 //! the panel itself (no `Origin` of another site), so that neither another
@@ -53,6 +58,7 @@ color:var(--bg);text-decoration:none}\
 .panel label{display:flex;gap:.6rem;align-items:flex-start}\
 .panel label input{flex:none;margin-top:.3rem}\
 .panel form button{margin-top:.75rem}\
+.howto{list-style:decimal;padding-left:1.5rem}.howto li{border:0;padding:.3rem 0}\
 .hint{margin:.25rem 0 0 1.6rem;font-size:.85rem;color:var(--muted)}\
 code{overflow-wrap:anywhere;font:.9rem ui-monospace,monospace;padding:.1rem .3rem;\
 border:1px solid var(--line);border-radius:.3rem}\
@@ -84,6 +90,44 @@ pub(super) async fn panel(State(state): State<AppState>, headers: HeaderMap, uri
         Html(page),
     )
         .into_response()
+}
+
+/// The address of the page with the steps to add Plumb to Firefox.
+pub const ADD_TO_FIREFOX_PATH: &str = "/add-to-firefox";
+
+pub(super) async fn add_to_firefox(headers: HeaderMap, uri: Uri) -> Response {
+    let Some(origin) = request_origin(&headers, &uri) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    (
+        StatusCode::OK,
+        security_headers(),
+        Html(render_add_to_firefox(&origin)),
+    )
+        .into_response()
+}
+
+fn render_add_to_firefox(origin: &str) -> String {
+    let origin = escape_html(origin);
+    let body = format!(
+        "<main class=\"wrap panel\">\n<h1>Add Plumb Search to Firefox</h1>\n\
+         <p>Firefox does not let a page add a search engine by itself, so it takes two \
+         clicks in this window:</p>\n\
+         <ol class=\"howto\">\n\
+         <li>Right-click the address bar at the top of this window.</li>\n\
+         <li>Choose <strong>Add \"Plumb Search\"</strong>.</li>\n\
+         </ol>\n\
+         <p>To make Plumb the search engine Firefox uses for the address bar, open \
+         <strong>Settings &gt; Search</strong> and pick <strong>Plumb Search</strong> as the \
+         default search engine.</p>\n\
+         <h2>If Firefox does not offer \"Add\"</h2>\n\
+         <p>In <strong>Settings &gt; Search</strong>, under <strong>Search Shortcuts</strong>, \
+         click <strong>Add</strong> and enter the name <strong>Plumb Search</strong> and this \
+         address:</p>\n<p><code>{origin}/search?q=%s</code></p>\n\
+         <p><a class=\"btn\" href=\"{origin}/\">Go to Plumb Search</a></p>\n</main>"
+    );
+    let head = format!("<style>{PANEL_STYLE}</style>\n");
+    page_with_head("Add Plumb Search to Firefox", &head, &body)
 }
 
 pub(super) async fn save_settings(State(state): State<AppState>, request: Request) -> Response {
@@ -365,15 +409,17 @@ fn render_steps(body: &mut String, status: &Status, settings: &NodeSettings, now
 }
 
 fn render_browser(body: &mut String, origin: &str) {
+    let origin = escape_html(origin);
     body.push_str(&format!(
         "<h2>Use Plumb from your browser</h2>\n\
          <p>Plumb searches in your web browser. To search from the address bar, add Plumb \
-         as a search engine in your browser's settings with this address:</p>\n\
-         <p><code>{}/search?q=%s</code></p>\n\
-         <p class=\"s\">In Firefox, you can also right-click the address bar on a Plumb page \
-         and choose Add \"Plumb Search\". Your country and other search options are on the \
-         search page.</p>\n",
-        escape_html(origin)
+         as a search engine.</p>\n\
+         <p><a class=\"btn\" href=\"{origin}{ADD_TO_FIREFOX_PATH}\" target=\"_blank\">\
+         Add to Firefox</a></p>\n\
+         <p>In other browsers, add a search engine in the browser's settings with this \
+         address:</p>\n\
+         <p><code>{origin}/search?q=%s</code></p>\n\
+         <p class=\"s\">Your country and other search options are on the search page.</p>\n"
     ));
 }
 
@@ -671,6 +717,44 @@ mod tests {
         .await;
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
         assert_eq!(*node.refreshes.lock().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn shows_how_to_add_plumb_to_firefox() {
+        let body = get_panel(app(status(Phase::Ready, Step::Idle)).0).await;
+        assert!(
+            body.contains(
+                "href=\"http://127.0.0.1:7586/add-to-firefox\" target=\"_blank\">Add to Firefox"
+            ),
+            "{body}"
+        );
+        let request = Request::get("/add-to-firefox")
+            .header(header::HOST, "127.0.0.1:7586")
+            .body(Body::empty())
+            .unwrap();
+        let response = app(status(Phase::SettingUp, Step::Downloading))
+            .0
+            .oneshot(request)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+        // Firefox offers "Add" for pages that link to an OpenSearch description.
+        assert!(
+            body.contains("<link rel=\"search\" type=\"application/opensearchdescription+xml\""),
+            "{body}"
+        );
+        assert!(
+            body.contains("Choose <strong>Add \"Plumb Search\"</strong>"),
+            "{body}"
+        );
+        assert!(
+            body.contains("<code>http://127.0.0.1:7586/search?q=%s</code>"),
+            "{body}"
+        );
     }
 
     #[tokio::test]
