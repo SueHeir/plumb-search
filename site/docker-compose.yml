@@ -1,0 +1,44 @@
+# plumbsearch.org: the website, and optionally a Plumb node behind it.
+#
+#   docker compose up -d                   # website only
+#   docker compose --profile node up -d    # website and Plumb node
+#
+# README.md in this folder covers setup and updates.
+services:
+  caddy:
+    image: caddy:2
+    # Host networking, so Caddy can reach the node on 127.0.0.1:8080 and the
+    # host firewall (ufw) applies to ports 80 and 443 as usual.
+    network_mode: host
+    # This whole folder, rather than the Caddyfile alone: a file mounted by
+    # itself keeps its old contents after `git pull` replaces it.
+    command: ["caddy", "run", "--config", "/site/Caddyfile", "--adapter", "caddyfile"]
+    volumes:
+      - .:/site:ro
+      # Certificates and the ACME account. Keep this volume, or Caddy has to
+      # request new certificates and can run into Let's Encrypt rate limits.
+      - caddy-data:/data
+      - caddy-config:/config
+    restart: unless-stopped
+
+  plumb:
+    profiles: ["node"]
+    image: ghcr.io/sueheir/plumb-search:latest
+    # Used by `docker compose --profile node build`, for when the image isn't
+    # published yet or you want another branch. PLUMB_SOURCE is a Git URL with
+    # an optional #branch, set in .env next to this file.
+    build: ${PLUMB_SOURCE:-https://github.com/SueHeir/plumb-search.git#main}
+    # Only reachable from this machine; Caddy serves it to the world.
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - plumb-data:/data
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 5m
+
+volumes:
+  caddy-data:
+  caddy-config:
+  plumb-data:
+    name: plumb-data

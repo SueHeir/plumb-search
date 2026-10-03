@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Plumb Search: find websites by name</title>
+<meta name="description" content="Plumb Search is a free, open-source search engine for finding websites by name. Run it on your own computer or home server.">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/style.css">
+<link rel="search" type="application/opensearchdescription+xml" title="Plumb Search" href="/opensearch.xml">
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="/"><img src="/favicon.svg" alt="" width="28" height="28">Plumb Search</a>
+  <nav>
+    <a href="#get">Download</a>
+    <a href="https://github.com/SueHeir/plumb-search">GitHub</a>
+  </nav>
+</header>
+
+<main>
+  <section class="hero">
+    <h1>Find websites by name.</h1>
+    <p class="lede">Type “us bank” and get usbank.com. Plumb is a free, open-source search engine that runs on your own computer, so your searches stay with you.</p>
+    <form class="try" action="/search" method="get" role="search">
+      <label for="q" class="visually-hidden">Search for a website</label>
+      <input id="q" name="q" type="search" placeholder="Try “irs” or “bank of america”" autocomplete="off" required>
+      <button type="submit">Search</button>
+    </form>
+    <p class="note">This box searches the Plumb node on this server.</p>
+    <div class="actions">
+      <a class="button primary" href="#get">Get Plumb</a>
+      <a class="button" href="https://github.com/SueHeir/plumb-search">View the code</a>
+    </div>
+  </section>
+
+  <section class="features">
+    <article>
+      <h2>Names, not pages</h2>
+      <p>Plumb keeps a small card for each site: its name, its homepage title and description, and the words other sites use when they link to it. That's about 1&nbsp;KB per site, so a million sites fit in about a gigabyte.</p>
+    </article>
+    <article>
+      <h2>The real site first</h2>
+      <p>Popularity data and Wikidata's list of official websites help the real site beat look-alikes, so “irs refund” leads to irs.gov rather than a look-alike stuffed with keywords.</p>
+    </article>
+    <article>
+      <h2>Yours to run</h2>
+      <p>Use the desktop app on Windows, macOS or Linux, or run it with Docker on a home server. It builds its own index from public data, then keeps it fresh by visiting homepages in the background.</p>
+    </article>
+  </section>
+
+  <section id="get" class="get">
+    <h2>Get Plumb</h2>
+    <div class="cards">
+      <article>
+        <h3>Desktop app</h3>
+        <p>For Windows, macOS (Apple silicon and Intel) and Linux (.deb, .rpm and AppImage). It shows the search page in its own window and opens results in your usual browser.</p>
+        <p><a class="button primary" href="https://github.com/SueHeir/plumb-search/releases">Download from GitHub</a></p>
+        <p class="small">These are early builds and aren't code-signed yet, so your computer will warn you the first time. <a href="https://github.com/SueHeir/plumb-search/blob/main/docs/desktop.md#install">How to open them</a>.</p>
+      </article>
+      <article>
+        <h3>Server or homelab</h3>
+        <p>One container for Linux on x86 or ARM, including a 64-bit Raspberry Pi. The search page is on port 8080.</p>
+<pre><code>docker run -d --name plumb --init \
+  --restart unless-stopped \
+  -p 8080:8080 -v plumb-data:/data \
+  ghcr.io/sueheir/plumb-search:latest</code></pre>
+        <p class="small"><a href="https://github.com/SueHeir/plumb-search/blob/main/docs/docker.md">Docker guide</a>: settings, updates and backups.</p>
+      </article>
+    </div>
+    <p class="tip"><strong>Make it your browser's search engine.</strong> Open your Plumb page in Firefox, right-click the address bar and choose “Add Plumb Search”. Other browsers can add it by hand with the search address <code>http://127.0.0.1:7586/search?q=%s</code> for the desktop app, or your server's address followed by <code>/search?q=%s</code>.</p>
+  </section>
+
+  <section class="roadmap">
+    <h2>Where it's going</h2>
+    <p>Today Plumb is a working prototype: each copy builds and searches its own index. Next, copies will share their index with each other, take turns checking sites in the background, and agree on what's popular without revealing who searched for what. No accounts and no ads.</p>
+    <ol>
+      <li class="done"><strong>One machine.</strong> Build an index from public data and put the official site first.</li>
+      <li><strong>Shared index.</strong> Copies stay in sync with each other, with no central server needed.</li>
+      <li><strong>Community crawling.</strong> Copies take turns checking sites, so the index stays fresh on its own.</li>
+      <li><strong>Private popularity.</strong> Count what people pick without tracking anyone, and keep bots from gaming it.</li>
+    </ol>
+  </section>
+</main>
+
+<footer>
+  <p>Plumb Search is open source under the MIT or Apache-2.0 license. <a href="https://github.com/SueHeir/plumb-search">Source code on GitHub</a>.</p>
+</footer>
+</body>
+</html>

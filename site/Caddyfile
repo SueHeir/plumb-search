@@ -1,0 +1,48 @@
+# plumbsearch.org. Caddy gets and renews the HTTPS certificates by itself.
+#
+# Everything is the static site in public/, except the search pages, which go
+# to the Plumb node on 127.0.0.1:8080 (the `node` profile in
+# docker-compose.yml). When the node isn't running, those pages say so.
+#
+# No access log is configured, so Caddy keeps no record of visitors or of
+# what they search for.
+
+www.plumbsearch.org {
+	redir https://plumbsearch.org{uri} permanent
+}
+
+plumbsearch.org {
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		# Searches are in the address, so don't pass it on to the sites people
+		# click through to.
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+
+	@node path /search /api/search /api/status /opensearch.xml
+	handle @node {
+		reverse_proxy 127.0.0.1:8080
+	}
+
+	handle {
+		header Content-Security-Policy "default-src 'none'; style-src 'self'; img-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
+		root * /site/public
+		file_server
+	}
+
+	handle_errors 502 503 504 {
+		root * /site/public
+		rewrite * /node-offline.html
+		file_server
+	}
+
+	handle_errors {
+		root * /site/public
+		rewrite * /404.html
+		file_server
+	}
+}
