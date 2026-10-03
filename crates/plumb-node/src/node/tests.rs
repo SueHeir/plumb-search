@@ -960,3 +960,60 @@ async fn the_full_seed_replaces_a_quick_start_but_keeps_what_crawls_added() {
     assert!(domains.contains(&"crawled.example"));
     assert!(domains.contains(&"linked.example"));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn background_updates_wait_while_off_and_resume_from_the_panel() {
+    let dir = recently_crawled_dir();
+    let paths = store::Paths::new(dir.path());
+    store::save_state(
+        &paths,
+        &SavedState {
+            crawl_left: 700,
+            index_stale: true,
+            last_refresh: None,
+            wikidata_missing: false,
+            quick_start: false,
+        },
+    )
+    .unwrap();
+    std::fs::write(&paths.settings, "{\"background_updates\": false}").unwrap();
+    let mut config = test_config(dir.path());
+    config.refresh_every = Some(Duration::from_secs(3600));
+    let node = start(config).await.unwrap();
+    let addr = node.addr();
+
+    let status = wait_for(addr, "the first index", ready_and_idle).await;
+    assert_eq!(status.detail, "Background updates are off");
+    assert!(!status.background_updates);
+    assert_eq!((status.crawl_left, status.last_refresh), (700, None));
+    let (code, _, body) = get(addr, "/app").await;
+    assert_eq!(code, 200);
+    assert!(
+        body.contains("Paused: background updates are off."),
+        "{body}"
+    );
+
+    // Ticking the box on the panel, from this computer, starts the round.
+    let form = "background_updates=1";
+    let mut stream = TcpStream::connect(addr).await.unwrap();
+    let request = format!(
+        "POST /app/settings HTTP/1.1\r\nHost: {addr}\r\nOrigin: http://{addr}\r\n\
+         Content-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\n\
+         Connection: close\r\n\r\n{form}",
+        form.len()
+    );
+    stream.write_all(request.as_bytes()).await.unwrap();
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).await.unwrap();
+    let response = String::from_utf8(response).unwrap();
+    assert!(response.starts_with("HTTP/1.1 303"), "{response}");
+
+    let status = wait_for(addr, "the end of the round", |s| {
+        ready_and_idle(s) && s.last_refresh.is_some()
+    })
+    .await;
+    assert!(status.background_updates);
+    assert_eq!(status.crawl_left, 0);
+    node.shutdown().await.unwrap();
+    assert_eq!(store::load_settings(&paths), NodeSettings::default());
+}

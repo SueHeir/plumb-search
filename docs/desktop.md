@@ -1,12 +1,14 @@
 # The Plumb Search desktop app
 
-The desktop app is Plumb Search in a window of its own. It runs a Plumb Search
-node inside the app, on your computer, and shows the node's search page. The
-same app builds for Windows, macOS and Linux with [Tauri](https://v2.tauri.app).
+The desktop app runs a Plumb Search node on your computer. You search in your
+own web browser, at `http://127.0.0.1:7586`. The app's window is a panel, not
+a browser: it says what works now ("Limited search is ready" or "Search is
+ready"), shows how far setup has come, holds the settings and has a button that
+opens search in your browser. The same app builds for Windows, macOS and Linux
+with [Tauri](https://v2.tauri.app).
 
-Search results open in your default browser, not in the app window, and so
-does the "As JSON" link under them. Starting the app again while it is
-running brings its window to the front.
+Every link out of the panel opens in your default browser. Starting the app
+again while it is running brings its window to the front.
 
 Test builds are not code-signed yet, so each system warns you before it opens
 them the first time. The [install](#install) steps say how to get past that.
@@ -107,22 +109,23 @@ or delete the AppImage.
 
 ## First launch
 
-The window opens with "Starting..." and then shows the node's setup page. On
-the first launch the node sets up its index in the background:
+The window opens with "Starting..." and then shows the panel. On the first
+launch the node sets up its index in the background. **This needs an internet
+connection.**
 
-1. It downloads the seed data: the Tranco list of popular sites (from
-   tranco-list.eu) and the official websites listed in Wikidata (from
-   query.wikidata.org). **This needs an internet connection.**
-2. It folds them into records for the best-ranked 250,000 sites and builds the
-   search index.
+1. It downloads the Tranco list of popular sites (from tranco-list.eu) and
+   builds a first index of the best-ranked 250,000 of them. That takes a
+   minute or two, and the panel then says "Limited search is ready".
+2. It downloads the official websites listed in Wikidata (from
+   query.wikidata.org), which takes several minutes, folds them in and
+   swaps in a better index. The panel then says "Search is ready".
 3. It crawls the homepages of the top 2,000 sites to fill in titles and
    descriptions, then keeps crawling 1,000 more every 12 hours while the app
-   runs.
+   runs. The setting "Keep the index up to date in the background" turns
+   this off (and back on).
 
-The setup page shows the progress and switches to the search box when the
-first index is ready. If a download fails, for example without internet
-access or behind a firewall that blocks those sites, the error appears on the
-setup page.
+If a download fails, for example without internet access or behind a
+firewall that blocks those sites, the error appears on the panel.
 
 The app has no proxy setting yet. Its downloads go through a proxy only when
 one is set in the `HTTPS_PROXY` or `ALL_PROXY` environment variable of the
@@ -133,8 +136,8 @@ and `http://127.0.0.1:7586/api/status` suggests `--use-system-proxy`, which
 is an option of the command-line node (`plumb run`), not of the app.
 Searching the index built from the seed data still works.
 
-Later launches open straight to the search page with the index from last
-time. Searching works offline; only setup and crawling need the internet.
+Later launches open straight to the panel, with search ready from the index
+of last time. Searching works offline; only setup and crawling need the internet.
 
 If the node cannot start at all, for example because its data folder is not
 writable or the disk is full, the app shows an error message with the reason
@@ -143,9 +146,9 @@ quits.
 
 ## Use Plumb as your browser's search engine
 
-While the app runs, its search page is also at `http://127.0.0.1:7586` in
-any browser on the same computer, and the page offers Plumb to the browser
-as a search engine:
+While the app runs, its search page is at `http://127.0.0.1:7586` in any
+browser on the same computer, and the page offers Plumb to the browser as a
+search engine:
 
 - **Firefox:** open `http://127.0.0.1:7586`, right-click the address bar and
   choose **Add "Plumb Search"**. To search with it by default, pick it under

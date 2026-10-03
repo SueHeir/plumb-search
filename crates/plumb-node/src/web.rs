@@ -15,8 +15,9 @@
 //!
 //! A long-running node (`plumb run`, see [`crate::node`]) serves the same
 //! pages through [`node_router`], plus `GET /api/status`, which returns the
-//! node's [`Status`] as JSON. Until its first index is ready, `/` and
-//! `/search` show the setup step, its progress and the last error instead,
+//! node's [`Status`] as JSON, and the node's panel at `/app` (see
+//! [`panel`]), which the desktop app shows in its window. Until its first
+//! index is ready, `/` and `/search` show the setup step, its progress and the last error instead,
 //! reloading every few seconds with a `<meta http-equiv="refresh">` (no
 //! script), and `/api/search` answers 503.
 //!
@@ -33,7 +34,7 @@ use anyhow::{Context, Result};
 use axum::extract::{Query, State};
 use axum::http::{header, HeaderMap, HeaderName, StatusCode, Uri};
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use plumb_core::{collapse_whitespace, now_unix, truncate_chars};
 use plumb_index::{Hit, RankConfig, SearchOptions, SearchResults, Searcher, SiteSearch};
@@ -43,7 +44,9 @@ use url::Url;
 
 use crate::cli::ServeArgs;
 use crate::country::{country_name, HomeCountry, COUNTRY_CHOICES};
-use crate::node::{Phase, Status, Step};
+use crate::node::{NodeSettings, Phase, Status, Step};
+
+mod panel;
 use crate::{block_on, rank_config};
 
 /// Results returned when a request does not say how many.
@@ -125,10 +128,29 @@ impl SearchBackend for IndexBackend {
     }
 }
 
-/// What a long-running node tells its web pages about itself.
+/// What a long-running node tells its web pages about itself, and what its
+/// panel (`/app`) can change.
 pub trait StatusSource: Send + Sync {
     /// The node's status, as `GET /api/status` returns it.
     fn status(&self) -> Status;
+
+    /// The node's settings; `None` when it has none.
+    fn settings(&self) -> Option<NodeSettings> {
+        None
+    }
+
+    /// Saves new settings and puts them in force.
+    fn change_settings(&self, _settings: NodeSettings) -> Result<()> {
+        anyhow::bail!("this node has no settings")
+    }
+
+    /// Starts a refresh now.
+    fn refresh_now(&self) {}
+
+    /// Where the node keeps its data, to show on the panel.
+    fn data_dir(&self) -> Option<std::path::PathBuf> {
+        None
+    }
 }
 
 #[derive(Clone)]
@@ -190,7 +212,11 @@ fn app(state: AppState) -> Router {
         .route("/api/search", get(api_search))
         .route("/opensearch.xml", get(opensearch));
     if state.node.is_some() {
-        router = router.route("/api/status", get(api_status));
+        router = router
+            .route("/api/status", get(api_status))
+            .route("/app", get(panel::panel))
+            .route("/app/settings", post(panel::save_settings))
+            .route("/app/refresh", post(panel::refresh));
     }
     router.with_state(state)
 }
@@ -1255,6 +1281,8 @@ mod tests {
             last_refresh: None,
             next_refresh: None,
             version: "0.1.0".to_string(),
+            crawl_left: 0,
+            background_updates: true,
         }
     }
 

@@ -9,10 +9,14 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
+use super::NodeSettings;
+
 /// Held locked while a node runs.
 const LOCK_FILE: &str = "node.lock";
 /// Progress that survives restarts ([`SavedState`]).
 const STATE_FILE: &str = "state.json";
+/// What the user chose ([`NodeSettings`]).
+const SETTINGS_FILE: &str = "settings.json";
 /// Every known site, one JSON line each.
 const RECORDS_FILE: &str = "records.jsonl";
 /// First-start downloads.
@@ -26,6 +30,7 @@ pub(super) struct Paths {
     pub(super) data: PathBuf,
     pub(super) records: PathBuf,
     pub(super) state: PathBuf,
+    pub(super) settings: PathBuf,
     pub(super) seed: PathBuf,
     pub(super) indexes: PathBuf,
 }
@@ -36,6 +41,7 @@ impl Paths {
             data: data.to_path_buf(),
             records: data.join(RECORDS_FILE),
             state: data.join(STATE_FILE),
+            settings: data.join(SETTINGS_FILE),
             seed: data.join(SEED_DIR),
             indexes: data.join(INDEXES_DIR),
         }
@@ -102,7 +108,11 @@ pub(super) fn lock(paths: &Paths) -> Result<Option<DirLock>> {
 /// directories in `indexes/`, temporary records and state files, and partial
 /// downloads. Only call it while holding the [`DirLock`].
 pub(super) fn remove_leftovers(paths: &Paths) {
-    let temp_prefixes = [format!(".{RECORDS_FILE}."), format!(".{STATE_FILE}.")];
+    let temp_prefixes = [
+        format!(".{RECORDS_FILE}."),
+        format!(".{STATE_FILE}."),
+        format!(".{SETTINGS_FILE}."),
+    ];
     for name in file_names(&paths.data) {
         if name.ends_with(".tmp") && temp_prefixes.iter().any(|p| name.starts_with(p)) {
             remove_leftover(&paths.data.join(name));
@@ -217,7 +227,25 @@ impl SavedState {
 /// Reads the saved state. `None` when there is none, or when it cannot be
 /// read (that is logged; the node then starts over from what is on disk).
 pub(super) fn load_state(paths: &Paths) -> Option<SavedState> {
-    let path = &paths.state;
+    load_json(&paths.state)
+}
+
+/// Reads the settings; the defaults when there are none or they cannot be
+/// read (that is logged).
+pub(super) fn load_settings(paths: &Paths) -> NodeSettings {
+    load_json(&paths.settings).unwrap_or_default()
+}
+
+/// Saves the settings atomically.
+pub(super) fn save_settings(paths: &Paths, settings: &NodeSettings) -> Result<()> {
+    let mut json = serde_json::to_vec_pretty(settings).context("encoding the settings")?;
+    json.push(b'\n');
+    write_atomically(&paths.settings, &json)
+}
+
+/// Reads a JSON file. `None` when there is none, or when it cannot be read
+/// (that is logged).
+fn load_json<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
         Err(err) if err.kind() == io::ErrorKind::NotFound => return None,

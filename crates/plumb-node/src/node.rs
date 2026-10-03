@@ -257,6 +257,25 @@ impl Default for SeedSources {
     }
 }
 
+/// What the person running a node chose, on the settings panel (`/app`).
+/// Kept in `DIR/settings.json`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NodeSettings {
+    /// Crawl homepages and rebuild the index in the background: the crawl
+    /// after setup and the scheduled refreshes. Off pauses them (after the
+    /// batch of homepages under way); setup still finishes.
+    pub background_updates: bool,
+}
+
+impl Default for NodeSettings {
+    fn default() -> Self {
+        NodeSettings {
+            background_updates: true,
+        }
+    }
+}
+
 /// What a node is doing, as `GET /api/status` reports it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Status {
@@ -291,6 +310,11 @@ pub struct Status {
     pub next_refresh: Option<u64>,
     /// The version of Plumb running the node.
     pub version: String,
+    /// Homepages still to crawl in the round under way (the crawl after
+    /// setup or a refresh); 0 when none is under way.
+    pub crawl_left: u64,
+    /// [`NodeSettings::background_updates`].
+    pub background_updates: bool,
 }
 
 /// Whether a node can search yet.
@@ -457,11 +481,15 @@ pub async fn start(config: NodeConfig) -> Result<NodeHandle> {
     let app = web::node_router_with(inner.clone(), inner.clone(), inner.config.country.clone());
     let server = tokio::spawn(async move {
         let mut stopped = stopped;
-        axum::serve(listener, app)
-            .with_graceful_shutdown(async move {
-                let _ = stopped.wait_for(|&stop| stop).await;
-            })
-            .await
+        // The settings panel takes changes only from this computer.
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(async move {
+            let _ = stopped.wait_for(|&stop| stop).await;
+        })
+        .await
     });
     let worker = tokio::spawn(worker::run(inner.clone()));
     info!(
@@ -482,6 +510,7 @@ struct Opened {
     paths: Paths,
     lock: Option<DirLock>,
     saved: SavedState,
+    settings: NodeSettings,
     index: Option<ServingIndex>,
     /// Index directories that could not be deleted yet.
     leftover: Vec<Retired>,
@@ -530,10 +559,12 @@ fn open_data_dir(config: &NodeConfig, rank: RankConfig) -> Result<Opened> {
             warn!("{err:#}");
         }
     }
+    let settings = store::load_settings(&paths);
     Ok(Opened {
         paths,
         lock,
         saved,
+        settings,
         index,
         leftover,
     })
@@ -570,6 +601,7 @@ struct Inner {
     /// Tries at Wikidata's official websites while setup went on without
     /// them ([`SavedState::wikidata_missing`]).
     wikidata: Mutex<WikidataTries>,
+    settings: Mutex<NodeSettings>,
 }
 
 /// The failures to download Wikidata's official websites, which have their
@@ -618,6 +650,7 @@ impl Inner {
                 last_error: None,
                 backoff,
             }),
+            settings: Mutex::new(opened.settings),
         }
     }
 
@@ -646,7 +679,31 @@ impl Inner {
             last_refresh: saved.last_refresh,
             next_refresh: self.next_refresh(&saved),
             version: env!("CARGO_PKG_VERSION").to_string(),
+            crawl_left: saved.crawl_left as u64,
+            background_updates: self.settings().background_updates,
         }
+    }
+
+    fn settings(&self) -> NodeSettings {
+        self.settings
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Saves new settings and puts them in force; the background work
+    /// looks at them again at once.
+    fn change_settings(&self, new: NodeSettings) -> Result<()> {
+        {
+            let mut settings = self.settings.lock().unwrap_or_else(PoisonError::into_inner);
+            if *settings != new {
+                store::save_settings(&self.paths, &new)?;
+                info!("settings changed: {new:?}");
+                *settings = new;
+            }
+        }
+        self.wake.notify_one();
+        Ok(())
     }
 
     /// When the next refresh is due, in Unix seconds.
@@ -890,6 +947,22 @@ impl SearchBackend for Inner {
 impl StatusSource for Inner {
     fn status(&self) -> Status {
         Inner::status(self)
+    }
+
+    fn settings(&self) -> Option<NodeSettings> {
+        Some(Inner::settings(self))
+    }
+
+    fn change_settings(&self, settings: NodeSettings) -> Result<()> {
+        Inner::change_settings(self, settings)
+    }
+
+    fn refresh_now(&self) {
+        self.request_refresh();
+    }
+
+    fn data_dir(&self) -> Option<PathBuf> {
+        Some(self.paths.data.clone())
     }
 }
 

@@ -65,7 +65,12 @@ pub(super) async fn run(inner: Arc<Inner>) {
             // says nothing of the work this loop is retrying.
             Ok(Next::Aside) => {}
             Ok(Next::IdleUntil(until)) => {
-                inner.set_step(Step::Idle, idle_detail(&inner.config));
+                let detail = if inner.settings().background_updates {
+                    idle_detail(&inner.config)
+                } else {
+                    "Background updates are off"
+                };
+                inner.set_step(Step::Idle, detail);
                 wait(&inner, Deadline::Wall(until)).await;
             }
             Err(err) if err.is::<Stopped>() => break,
@@ -112,6 +117,11 @@ async fn step(inner: &Arc<Inner>) -> Result<Next> {
     if wikidata_due.is_some_and(|due| due <= now_unix()) {
         complete_seed(inner).await?;
         return Ok(Next::Aside);
+    }
+    // Crawls and refreshes wait while background updates are off.
+    if !inner.settings().background_updates {
+        inner.refresh_requested.store(false, Ordering::SeqCst);
+        return Ok(Next::IdleUntil(wikidata_due));
     }
     if saved.crawl_left > 0 {
         crawl(inner).await?;
@@ -560,6 +570,10 @@ fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Option<ServingIndex
             CRAWL_BATCH_SIZE,
             &mut store,
             |batch| {
+                // Background updates turned off: pause between batches.
+                if !inner.settings().background_updates {
+                    return None;
+                }
                 handle.block_on(async {
                     tokio::select! {
                         results = crawl_homepages(batch, &cfg) => Some(results),
@@ -577,7 +591,19 @@ fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Option<ServingIndex
         )?;
         match totals.end {
             RunEnd::Finished => {}
-            RunEnd::Stopped => return Err(Stopped.into()),
+            RunEnd::Stopped if inner.stopping() => return Err(Stopped.into()),
+            RunEnd::Stopped => {
+                // Paused by the settings: index what was crawled so far,
+                // and go on from there once updates are back on.
+                info!(
+                    "background updates turned off: pausing the crawl after {} homepages",
+                    totals.attempted
+                );
+                if totals.attempted == 0 {
+                    return Ok(None);
+                }
+                return build(inner, set.into_sorted_vec()).map(Some);
+            }
             RunEnd::Offline(offline) => {
                 let proxy = if inner.config.use_system_proxy {
                     ""
@@ -729,7 +755,8 @@ async fn wait(inner: &Arc<Inner>, deadline: Deadline) {
         };
         tokio::select! {
             () = tokio::time::sleep(nap) => {}
-            () = inner.wake.notified() => {}
+            // A refresh request or new settings: look again at what to do.
+            () = inner.wake.notified() => return,
             () = inner.stopped() => return,
         }
         sweep(inner).await;
