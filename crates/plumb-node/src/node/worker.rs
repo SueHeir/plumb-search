@@ -595,6 +595,15 @@ async fn rebuild(inner: &Arc<Inner>) -> Result<()> {
 /// One that was asked for rebuilds the index even when nothing is crawled.
 fn start_round(inner: &Inner, requested: bool) -> Result<()> {
     let homepages = inner.config.crawl_per_refresh;
+    inner.journal.info(format!(
+        "{} a crawl round of {} homepages",
+        if requested {
+            "Started, as asked,"
+        } else {
+            "Started"
+        },
+        group_thousands(homepages as u64)
+    ));
     info!(
         "{}: crawling {homepages} homepages",
         if requested {
@@ -764,11 +773,15 @@ fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Option<ServingIndex
             RunEnd::Stopped => {
                 // Paused by the settings or a limit: index what was crawled
                 // so far, and go on from there later.
+                let reason = inner.pause_reason().unwrap_or_else(|| "Paused".to_owned());
                 info!(
-                    "{}: pausing the crawl after {} homepages",
-                    inner.pause_reason().as_deref().unwrap_or("paused"),
+                    "{reason}: pausing the crawl after {} homepages",
                     totals.attempted
                 );
+                inner.journal.info(format!(
+                    "{reason}: the crawl stopped after {} homepages and goes on later",
+                    group_thousands(totals.attempted as u64)
+                ));
                 if totals.attempted == 0 {
                     return Ok(None);
                 }
@@ -786,6 +799,15 @@ fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Option<ServingIndex
         }
         inner.check_stop()?;
         let o = &totals.outcomes;
+        inner.journal.info(format!(
+            "Visited {} homepages: {} fetched, {} turned Plumb away (robots.txt), {} \
+             failed, {} new sites found",
+            group_thousands(totals.attempted as u64),
+            group_thousands(o.fetched as u64),
+            group_thousands(o.robots_disallowed as u64),
+            group_thousands(o.errors() as u64),
+            group_thousands(totals.discovered as u64)
+        ));
         info!(
             "crawled {} homepages: {} fetched, {} blocked by robots.txt, {} errors; \
              {} new domains",
@@ -838,6 +860,11 @@ fn build(inner: &Inner, records: Vec<SiteRecord>) -> Result<ServingIndex> {
             return Err(err.context(format!("opening the new index in {}", dir.display())));
         }
     };
+    inner.journal.info(format!(
+        "Search index rebuilt: {} sites in {}",
+        group_thousands(stats.docs),
+        duration_words(started.elapsed().as_secs().max(1))
+    ));
     info!(
         "built the index in {} ({} sites) in {:.1} s",
         dir.display(),

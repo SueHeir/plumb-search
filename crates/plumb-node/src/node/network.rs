@@ -137,6 +137,10 @@ pub(super) async fn start(inner: &Arc<Inner>) -> Result<()> {
         .await
         .context("joining the Plumb network")?;
     info!("joined the Plumb network as {}", handle.peer_id());
+    inner.journal.info(format!(
+        "Joined the Plumb network as node {}",
+        handle.peer_id()
+    ));
     let _ = inner.net.set(Arc::new(handle));
     if inner.config.share_popularity {
         let picks = PickLog::open(&inner.paths.net.join(PICKS_FILE));
