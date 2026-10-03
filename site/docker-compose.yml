@@ -33,6 +33,11 @@ services:
     # and embeds sites in the background, best-ranked first. It also crawls
     # 20,000 homepages every 12 hours (the server default is 5,000 a day), so
     # the top 100,000 sites get text to search by meaning within a few days.
+    # It is in the Plumb network on port 4002 (plumb-relay on this machine has
+    # 4001), so private searches can be relayed to other nodes and the
+    # visitor's address stays hidden from them. It joins through plumb-relay,
+    # reached via the Docker host since a container can't reach this
+    # machine's own public address; the peer id is plumb-relay's key.
     command:
       - run
       - --data
@@ -45,9 +50,25 @@ services:
       - "12"
       - --crawl-per-refresh
       - "20000"
-    # Only reachable from this machine; Caddy serves it to the world.
+      - --network
+      - --p2p-port
+      - "4002"
+      - --public-addr
+      - /ip4/198.211.114.63/tcp/4002
+      - --public-addr
+      - /ip4/198.211.114.63/udp/4002/quic-v1
+      - --bootstrap
+      - /dns4/host.docker.internal/tcp/4001/p2p/12D3KooWJ2UWUBsxmPfXTfHa8cBBmzifa6kj5pFZKfJXYNQyJ69a
+      - --no-upnp
+      - --no-local-discovery
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    # The web port is only reachable from this machine; Caddy serves it to
+    # the world. The network port is public (Docker opens it itself).
     ports:
       - "127.0.0.1:8080:8080"
+      - "4002:4002/tcp"
+      - "4002:4002/udp"
     volumes:
       - plumb-data:/data
     # Leaves some CPU for Caddy and the relay while sites are being embedded.
