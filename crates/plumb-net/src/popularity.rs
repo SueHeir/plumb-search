@@ -71,9 +71,9 @@ pub const MAX_POPULARITY_BONUS: f32 = 0.15;
 /// The STAR label the measurement is encrypted under (`sta-rs` uses it
 /// for every message).
 const STAR_ENCRYPT_LABEL: &str = "star_encrypt";
-/// Tries at recovering a group's key from other subsets of its shares,
-/// when a bad share spoils the first.
-const RECOVERY_TRIES: usize = 8;
+/// Most subsets of a group's shares tried at recovering its key, when bad
+/// shares spoil the first. A group small enough has every subset tried.
+const RECOVERY_TRIES: usize = 64;
 
 /// The report epoch of a time.
 pub fn report_epoch(unix_secs: u64) -> u64 {
@@ -287,19 +287,28 @@ fn recover(
     threshold: u32,
 ) -> Option<(String, String)> {
     let k = threshold as usize;
+    if k == 0 || shares.len() < k {
+        return None;
+    }
+    // A small group has every subset tried in turn, so a bad share cannot
+    // hide a pick by luck; a large one has random subsets tried, since in
+    // turn they would all share their first shares.
+    let every = subsets(shares.len(), k) <= RECOVERY_TRIES;
     let mut order: Vec<usize> = (0..shares.len()).collect();
+    let mut picked: Vec<usize> = (0..k).collect();
     let mut rng = rand_core::OsRng;
     for attempt in 0..RECOVERY_TRIES {
-        if attempt > 0 {
-            if shares.len() == k {
+        if every {
+            if attempt > 0 && !next_subset(&mut picked, shares.len()) {
                 return None;
             }
+        } else {
             for i in (1..order.len()).rev() {
                 let j = (rng.next_u64() % (i as u64 + 1)) as usize;
                 order.swap(i, j);
             }
         }
-        let subset: Vec<sta_rs::Share> = order[..k].iter().map(|&i| shares[i].clone()).collect();
+        let subset: Vec<sta_rs::Share> = picked.iter().map(|&i| shares[order[i]].clone()).collect();
         let opened = catch_unwind(AssertUnwindSafe(|| {
             let commune = share_recover(&subset).ok()?;
             let mut key = [0u8; 16];
@@ -322,6 +331,36 @@ fn recover(
         }
     }
     None
+}
+
+/// How many subsets of `k` of `n` things there are, up to `usize::MAX`.
+fn subsets(n: usize, k: usize) -> usize {
+    let k = k.min(n - k);
+    let mut count: usize = 1;
+    for i in 0..k {
+        // count * (n - i) / (i + 1) stays whole at every step.
+        count = match count.checked_mul(n - i) {
+            Some(c) => c / (i + 1),
+            None => return usize::MAX,
+        };
+    }
+    count
+}
+
+/// Moves `picked`, positions in increasing order below `n`, to the next
+/// subset of its size in lexicographic order; false after the last.
+fn next_subset(picked: &mut [usize], n: usize) -> bool {
+    let k = picked.len();
+    for i in (0..k).rev() {
+        if picked[i] < n - k + i {
+            picked[i] += 1;
+            for j in i + 1..k {
+                picked[j] = picked[j - 1] + 1;
+            }
+            return true;
+        }
+    }
+    false
 }
 
 /// What the network's reports say people pick, which every node works out
@@ -633,6 +672,47 @@ mod tests {
         let counted = tally_with(&sent, epoch, 3);
         assert_eq!(counted.len(), 1);
         assert_eq!(counted[0].domain, "usbank.com");
+    }
+
+    #[test]
+    fn a_small_group_has_every_subset_tried() {
+        assert_eq!(subsets(5, 3), 10);
+        assert_eq!(subsets(25, 10), 3_268_760);
+        assert_eq!(subsets(200, 100), usize::MAX);
+        let mut picked = vec![0, 1, 2];
+        let mut seen = vec![picked.clone()];
+        while next_subset(&mut picked, 5) {
+            seen.push(picked.clone());
+        }
+        seen.dedup();
+        assert_eq!(seen.len(), 10);
+        assert_eq!(seen.last(), Some(&vec![2, 3, 4]));
+    }
+
+    #[test]
+    fn two_forged_shares_cannot_hide_a_pick() {
+        // Three real shares and two forged ones: one subset of three in
+        // ten opens the pick, and it is always found.
+        let epoch = report_epoch(NOW);
+        let mut sent = reports(epoch, "us bank", "usbank.com", 3, 3);
+        let real = sent[0].parts(3).unwrap();
+        for other in ["chase.com", "wellsfargo.com"] {
+            let other = Report::with_threshold(epoch, "bank", other, 3).unwrap();
+            let mut forged = Vec::new();
+            sta_rs::store_bytes(&real.ciphertext, &mut forged);
+            sta_rs::store_bytes(&other.parts(3).unwrap().share.to_bytes(), &mut forged);
+            sta_rs::store_bytes(&real.tag, &mut forged);
+            sent.push(Report {
+                epoch,
+                message: forged,
+            });
+        }
+        for _ in 0..10 {
+            let counted = tally_with(&sent, epoch, 3);
+            assert_eq!(counted.len(), 1);
+            assert_eq!(counted[0].domain, "usbank.com");
+            assert_eq!(counted[0].count, 5);
+        }
     }
 
     #[test]
