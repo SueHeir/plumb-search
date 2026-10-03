@@ -65,7 +65,7 @@ use serde::{Deserialize, Serialize};
 use tantivy::collector::{DocSetCollector, TopDocs};
 use tantivy::merge_policy::NoMergePolicy;
 use tantivy::query::{BooleanQuery, BoostQuery, EnableScoring, Occur, Query, Scorer, TermQuery};
-use tantivy::schema::{IndexRecordOption, Value};
+use tantivy::schema::{Field, IndexRecordOption, Value};
 use tantivy::tokenizer::TextAnalyzer;
 use tantivy::{
     DocAddress, DocSet, Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument, Term,
@@ -142,8 +142,9 @@ pub struct RankConfig {
     pub country_boost: f32,
     /// With a [`Meaning`] and a query that no site is named by in full,
     /// the share of the text match that comes from how close each site is
-    /// in meaning; the words matched give the rest. Sites with no
-    /// embedding are ranked by their words alone.
+    /// in meaning; the words matched give the rest. A site with no
+    /// embedding is taken to be as close as its words match, times the
+    /// share of the query's words it has.
     pub meaning_weight: f32,
 }
 
@@ -615,6 +616,29 @@ impl Searcher {
         let query_words = query.len as f32;
         let meaning_weight = unit_or(cfg.meaning_weight, default.meaning_weight);
 
+        // A site with no embedding (no text to make one from) is taken to
+        // be as close in meaning as its words match, times the share of the
+        // query they cover: electric.net matches "electric car maker" well
+        // but by one word in three, so it is not put level with the sites
+        // the query describes; schwab.com, matching all of "charles
+        // schwab", is.
+        let closeness_of = |addr: DocAddress| {
+            meaning.and_then(|meaning| {
+                columns[addr.segment_ord as usize]
+                    .domain(addr.doc_id)
+                    .and_then(|domain| meaning.closeness(&domain))
+            })
+        };
+        let no_vector: Vec<DocAddress> = match meaning {
+            Some(_) => candidates
+                .iter()
+                .map(|&(_, addr)| addr)
+                .filter(|&addr| closeness_of(addr).is_none())
+                .collect(),
+            None => Vec::new(),
+        };
+        let coverage = query.coverage(&searcher, &self.fields, &no_vector)?;
+
         let max_bm25 = candidates.iter().map(|&(bm25, _)| bm25).fold(0.0, f32::max);
         let mut ranked: Vec<Ranked> = Vec::with_capacity(candidates.len());
         for (bm25, addr) in candidates {
@@ -642,13 +666,8 @@ impl Searcher {
                 } else {
                     0.0
                 };
-                // A site with no embedding (no text to make one from) is
-                // ranked by its words alone, not as if far in meaning.
-                let closeness = meaning.and_then(|meaning| {
-                    column
-                        .domain(addr.doc_id)
-                        .and_then(|domain| meaning.closeness(&domain))
-                });
+                let closeness =
+                    closeness_of(addr).or_else(|| coverage.get(&addr).map(|&share| share * words));
                 match closeness {
                     Some(closeness) => {
                         (1.0 - meaning_weight) * words + meaning_weight * closeness.clamp(0.0, 1.0)
@@ -1001,10 +1020,10 @@ impl ParsedQuery {
     /// words a single word matching there gets `1/n` of the field's boost:
     /// for "us bank online banking", bank.com (whose whole name is one of
     /// the words) must not outweigh usbank.com matching every word elsewhere.
-    fn text_query(&self, f: &Fields) -> BooleanQuery {
-        let mut clauses = Clauses::default();
+    /// The fields each query word is searched in, with their boosts.
+    fn per_word(&self, f: &Fields) -> [(Field, f32); 8] {
         let name_share = 1.0 / self.words.len() as f32;
-        let per_word = [
+        [
             (f.label, LABEL_BOOST * name_share),
             (f.joined, JOINED_BOOST * name_share),
             (f.aliases, ALIASES_BOOST),
@@ -1013,9 +1032,53 @@ impl ParsedQuery {
             (f.description, DESCRIPTION_BOOST),
             (f.headings, HEADINGS_BOOST),
             (f.about, ABOUT_BOOST),
-        ];
+        ]
+    }
+
+    /// The share of the query's words each of `docs` has in its text, in
+    /// the order given: 1 for a site whose name is the whole query joined.
+    fn coverage(
+        &self,
+        searcher: &tantivy::Searcher,
+        f: &Fields,
+        docs: &[DocAddress],
+    ) -> Result<HashMap<DocAddress, f32>> {
+        let mut covered: HashMap<DocAddress, f32> = docs.iter().map(|&addr| (addr, 0.0)).collect();
+        if docs.is_empty() {
+            return Ok(covered);
+        }
+        let share = 1.0 / self.words.len() as f32;
         for word in &self.words {
-            for (field, boost) in per_word {
+            let mut clauses = Clauses::default();
+            for (field, boost) in self.per_word(f) {
+                clauses.add(Term::from_field_text(field, word), boost);
+            }
+            for (bm25, addr) in bm25_of(searcher, &clauses.into_query(), docs.to_vec())? {
+                if bm25 > 0.0 {
+                    *covered.entry(addr).or_default() += share;
+                }
+            }
+        }
+        if let Some(joined) = &self.joined {
+            let mut clauses = Clauses::default();
+            clauses.add(Term::from_field_text(f.joined, joined), 1.0);
+            clauses.add(Term::from_field_text(f.label, joined), 1.0);
+            for (bm25, addr) in bm25_of(searcher, &clauses.into_query(), docs.to_vec())? {
+                if bm25 > 0.0 {
+                    covered.insert(addr, 1.0);
+                }
+            }
+        }
+        for share in covered.values_mut() {
+            *share = share.min(1.0);
+        }
+        Ok(covered)
+    }
+
+    fn text_query(&self, f: &Fields) -> BooleanQuery {
+        let mut clauses = Clauses::default();
+        for word in &self.words {
+            for (field, boost) in self.per_word(f) {
                 clauses.add(Term::from_field_text(field, word), boost);
             }
         }
@@ -1425,7 +1488,15 @@ mod tests {
             ["tesla.com", "rivian.com"],
             "{by_meaning:?}"
         );
-        // A site with no embedding keeps its full word match.
+        // A site with no embedding that one query word matches does not
+        // beat the sites the query describes (as on plumbsearch.org, where
+        // electric.net and friends had no vector)...
+        let unembedded = FixedMeaning(vec![("tesla.com", 1.0), ("rivian.com", 0.9)]);
+        assert_eq!(
+            &search("electric car maker", Some(&unembedded))[..2],
+            ["tesla.com", "rivian.com"]
+        );
+        // ...but keeps its word match over sites far in meaning.
         let partial = FixedMeaning(vec![("tesla.com", 0.3)]);
         assert_eq!(
             search("electric car maker", Some(&partial))[0],
@@ -1435,6 +1506,43 @@ mod tests {
         let named = FixedMeaning(vec![("tesla.com", 1.0)]);
         assert_eq!(search("rivian", Some(&named))[0], "rivian.com");
         assert_eq!(search("rivian", Some(&named)).len(), 1);
+    }
+
+    #[test]
+    fn sites_with_no_embedding_matching_the_whole_query_keep_their_words() {
+        let records = vec![
+            site(
+                "schwab.com",
+                Some("Charles Schwab"),
+                None,
+                &[],
+                &[],
+                ranked(1_500, 3_000),
+            ),
+            site(
+                "wsj.com",
+                None,
+                None,
+                &["The Wall Street Journal"],
+                &[],
+                popular(300, 40_000),
+            ),
+        ];
+        let (_dir, searcher) = build(&records);
+        // The query names no site in full, so meaning counts, and wsj.com
+        // is the nearest site with a vector; schwab.com has none.
+        let meaning = FixedMeaning(vec![("wsj.com", 1.0)]);
+        let hits = searcher
+            .search_meaning(
+                "charles schwab",
+                10,
+                &RankConfig::default(),
+                &SearchOptions::default(),
+                Some(&meaning),
+            )
+            .unwrap()
+            .hits;
+        assert_eq!(hits[0].domain, "schwab.com", "{hits:?}");
     }
 
     /// Short official domains and the spelled-out or one-word domains that
