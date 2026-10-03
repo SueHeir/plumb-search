@@ -26,6 +26,7 @@ use axum::Form;
 use plumb_core::now_unix;
 use serde::Deserialize;
 use tracing::warn;
+use url::{Host, Url};
 
 use super::{
     escape_html, group_thousands, page_with_head, request_origin, security_headers, time_ago,
@@ -244,12 +245,19 @@ fn refusal(request: &Request) -> Option<&'static str> {
     let local = request
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
-        .is_some_and(|ConnectInfo(peer)| peer.ip().is_loopback());
+        // A dual-stack `[::]` listener sees IPv4 peers as `::ffff:127.0.0.1`.
+        .is_some_and(|ConnectInfo(peer)| peer.ip().to_canonical().is_loopback());
     if !local {
         return Some("Settings can only be changed on the computer Plumb runs on.");
     }
     let headers = request.headers();
     let own = request_origin(headers, request.uri());
+    // A page whose DNS name was rebound to 127.0.0.1 is same-origin with
+    // itself, so the Origin check alone would let it through: the page must
+    // also have been opened by a local name.
+    if !own.as_deref().is_some_and(local_origin) {
+        return Some("Settings can only be changed from Plumb's own settings page.");
+    }
     let origin = headers.get(header::ORIGIN).and_then(|o| o.to_str().ok());
     let cross_site = headers
         .get("sec-fetch-site")
@@ -259,6 +267,22 @@ fn refusal(request: &Request) -> Option<&'static str> {
         return Some("Settings can only be changed from Plumb's own settings page.");
     }
     None
+}
+
+/// Whether `origin` names this computer: `localhost` or a loopback address.
+fn local_origin(origin: &str) -> bool {
+    match Url::parse(origin)
+        .ok()
+        .and_then(|url| url.host().map(|h| h.to_owned()))
+    {
+        Some(Host::Domain(name)) => {
+            let name = name.trim_end_matches('.');
+            name == "localhost" || name.ends_with(".localhost")
+        }
+        Some(Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(Host::Ipv6(ip)) => ip.to_canonical().is_loopback(),
+        None => false,
+    }
 }
 
 fn forbidden(why: &str) -> Response {
@@ -806,8 +830,20 @@ mod tests {
         peer: &str,
         origin: Option<&str>,
     ) -> Response {
+        post_to_host(app, path, body, peer, "127.0.0.1:7586", origin).await
+    }
+
+    /// [`post`], with the given `Host` header.
+    async fn post_to_host(
+        app: Router,
+        path: &str,
+        body: &str,
+        peer: &str,
+        host: &str,
+        origin: Option<&str>,
+    ) -> Response {
         let mut request = Request::post(path)
-            .header(header::HOST, "127.0.0.1:7586")
+            .header(header::HOST, host)
             .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded");
         if let Some(origin) = origin {
             request = request.header(header::ORIGIN, origin);
@@ -1048,6 +1084,59 @@ mod tests {
             "/app/refresh",
             "",
             "127.0.0.1:50000",
+            Some("http://127.0.0.1:7586"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(*node.refreshes.lock().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn refuses_changes_from_a_rebound_dns_name() {
+        let (router, node) = app(status(Phase::Ready, Step::Idle));
+        // attacker.example now resolves to 127.0.0.1: the browser connects
+        // from loopback and calls the request same-origin.
+        for path in ["/app/settings", "/app/refresh"] {
+            let response = post_to_host(
+                router.clone(),
+                path,
+                "storage_limit_mb=",
+                "127.0.0.1:50000",
+                "attacker.example:7586",
+                Some("http://attacker.example:7586"),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{path}");
+        }
+        assert!(node.settings.lock().unwrap().background_updates);
+        assert_eq!(*node.refreshes.lock().unwrap(), 0);
+
+        // Local names still work.
+        for (host, origin) in [
+            ("localhost:7586", "http://localhost:7586"),
+            ("[::1]:7586", "http://[::1]:7586"),
+        ] {
+            let response = post_to_host(
+                router.clone(),
+                "/app/refresh",
+                "",
+                "127.0.0.1:50000",
+                host,
+                Some(origin),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::SEE_OTHER, "{host}");
+        }
+    }
+
+    #[tokio::test]
+    async fn accepts_ipv4_peers_on_a_dual_stack_listener() {
+        let (router, node) = app(status(Phase::Ready, Step::Idle));
+        let response = post(
+            router,
+            "/app/refresh",
+            "",
+            "[::ffff:127.0.0.1]:50000",
             Some("http://127.0.0.1:7586"),
         )
         .await;
