@@ -46,8 +46,6 @@ impl Node {
         };
         config.upnp = false;
         config.local_discovery = false;
-        // These tests check that one crawler is not enough.
-        config.trusting = false;
         config.relay_server = relay;
         config.bootstrap = bootstrap;
         let source = table(dir.path(), &local);
