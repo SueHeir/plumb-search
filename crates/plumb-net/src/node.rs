@@ -83,7 +83,7 @@ use crate::popularity::{report_epoch, PopularityTable, Report};
 use crate::proto::*;
 use crate::reports::ReportStore;
 use crate::search::{BucketPeer, NetSearch};
-use crate::store::{BatchStore, CrawlerView};
+use crate::store::{BatchStore, CrawlerView, RETAIN_EPOCHS};
 
 /// Relays a node behind NAT takes reservations on.
 pub const MAX_RELAYS: usize = 2;
@@ -163,6 +163,9 @@ pub struct NetConfig {
     /// Keep a few tokens from each node it searches, bought with this
     /// node's credits, to be answered when that node is busy.
     pub collect_tokens: bool,
+    /// Days of batches kept, [`RETAIN_EPOCHS`] unless changed; fewer for a
+    /// node that crawls a lot on a small disk.
+    pub keep_batches_days: u64,
 }
 
 impl NetConfig {
@@ -191,6 +194,7 @@ impl NetConfig {
                 .collect(),
             max_answering: MAX_ANSWERING,
             collect_tokens: true,
+            keep_batches_days: RETAIN_EPOCHS,
         }
     }
 }
@@ -312,6 +316,34 @@ impl NetHandle {
     /// Whether this node is assigned `domain` in the epoch of `now`.
     pub fn is_assigned(&self, domain: &str, now: u64) -> bool {
         is_assigned(epoch_of(now), &self.peer_id, domain, self.share_ppm)
+    }
+
+    /// The nodes that split the sites with this one when it crawls
+    /// unassigned sites: itself and those of `partners` that sent a crawl
+    /// in the last day (from [`NetStatus::crawlers`]), so the sites of a
+    /// partner that went quiet go to the others.
+    pub fn crawl_group(&self, partners: &[PeerId]) -> Vec<PeerId> {
+        let active: HashSet<String> = self
+            .status()
+            .crawlers
+            .into_iter()
+            .filter(|view| view.homepages_last_day > 0)
+            .map(|view| view.peer_id)
+            .collect();
+        let mut group = vec![self.peer_id];
+        for peer in partners {
+            if *peer != self.peer_id && !group.contains(peer) && active.contains(&peer.to_string())
+            {
+                group.push(*peer);
+            }
+        }
+        group
+    }
+
+    /// Whether `domain` is this node's to crawl among `group` (see
+    /// [`crate::assign::slice_owner`]).
+    pub fn owns_slice(&self, group: &[PeerId], domain: &str) -> bool {
+        crate::assign::slice_owner(group, domain) == Some(&self.peer_id)
     }
 
     pub fn status(&self) -> NetStatus {
@@ -1386,7 +1418,8 @@ impl Task {
         }
         if ticks.is_multiple_of(60) {
             let now = now_unix();
-            self.lock_store().prune(now);
+            self.lock_store()
+                .prune_keeping(now, self.config.keep_batches_days);
             self.agreement.prune(now);
             let agreement = self.agreement.status();
             self.with_status(|s| s.agreement = agreement);

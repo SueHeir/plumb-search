@@ -243,6 +243,20 @@ pub struct RunArgs {
     /// time and within the last 6 days.
     #[arg(long, value_name = "PATH", requires = "network")]
     pub publish_records: Option<PathBuf>,
+    /// Crawl any site, not only the ones the network assigns this node each
+    /// day. For a person's own nodes: only nodes that trust this one take
+    /// its crawls of sites it was not assigned. With --crawl-with, the
+    /// sites are split by hash so the nodes don't overlap.
+    #[arg(long, requires = "network")]
+    pub crawl_any_site: bool,
+    /// Another node (12D3Koo...) crawling with --crawl-any-site to split the
+    /// sites with; may be repeated. Each site goes to one of this node and
+    /// the ones given that crawled in the last day.
+    #[arg(long, value_name = "PEER_ID", requires = "crawl_any_site")]
+    pub crawl_with: Vec<plumb_net::PeerId>,
+    /// Days of the network's crawl batches to keep on disk [default: 35].
+    #[arg(long, value_name = "DAYS", requires = "network", value_parser = clap::value_parser!(u64).range(1..))]
+    pub keep_batches_days: Option<u64>,
 }
 
 /// Starting points for `plumb run`.

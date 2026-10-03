@@ -259,7 +259,12 @@ impl BatchStore {
 
     /// Deletes batches older than [`RETAIN_EPOCHS`] before `now`.
     pub fn prune(&mut self, now: u64) {
-        let oldest = epoch_of(now).saturating_sub(RETAIN_EPOCHS);
+        self.prune_keeping(now, RETAIN_EPOCHS);
+    }
+
+    /// Deletes batches older than `epochs` days before `now`.
+    pub fn prune_keeping(&mut self, now: u64, epochs: u64) {
+        let oldest = epoch_of(now).saturating_sub(epochs);
         let old: Vec<Hash> = self
             .headers
             .iter()
