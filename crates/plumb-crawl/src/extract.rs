@@ -41,6 +41,19 @@ const READ_TIME_LIMIT: Duration = Duration::from_secs(2);
 /// time limit checked between them.
 const READ_CHUNK_BYTES: usize = 4096;
 
+/// Most words of the page's visible text [`extract_page_meta`] keeps.
+pub const MAX_BODY_WORDS: usize = 100;
+
+/// Bytes of visible text read before [`MAX_BODY_WORDS`] are surely in hand
+/// (words average under ten bytes); the rest of the page's text is skipped.
+const BODY_TEXT_BYTES: usize = MAX_BODY_WORDS * 16;
+
+/// Elements that hold a site's furniture (menus, banners, footers, forms)
+/// rather than what the page is about; their text stays out of the body text.
+const CHROME_ELEMENTS: &[&str] = &[
+    "aside", "button", "dialog", "footer", "form", "header", "nav", "select",
+];
+
 /// Elements whose text never shows on the page.
 const HIDDEN_ELEMENTS: &[&str] = &["script", "style", "noscript", "template", "iframe"];
 
@@ -187,6 +200,9 @@ struct Page<'a> {
     headings: Vec<String>,
     /// Words in `headings`.
     heading_words: usize,
+    /// Visible text outside [`CHROME_ELEMENTS`] and headings, up to
+    /// [`BODY_TEXT_BYTES`].
+    body: String,
     /// The GET form being read, while no search address has been found.
     form: Option<SearchForm>,
     /// The link being read, when it is one to keep.
@@ -197,6 +213,11 @@ struct Page<'a> {
     hidden: usize,
     /// How many `<svg>` and `<math>` elements are open.
     foreign: usize,
+    /// How many [`CHROME_ELEMENTS`] are open.
+    chrome: usize,
+    /// Whether a link to a spot on this page (`href="#..."`, such as "Skip
+    /// to content") is open; its text stays out of the body text.
+    in_page_link: bool,
 }
 
 /// A GET form on the page, between its `<form>` and its `</form>`.
@@ -264,12 +285,15 @@ impl<'a> Page<'a> {
             heading_text: None,
             headings: Vec::new(),
             heading_words: 0,
+            body: String::new(),
             form: None,
             anchor: None,
             links: Vec::new(),
             seen: HashSet::new(),
             hidden: 0,
             foreign: 0,
+            chrome: 0,
+            in_page_link: false,
         }
     }
 
@@ -294,6 +318,7 @@ impl<'a> Page<'a> {
         match name {
             "a" => {
                 self.close_anchor();
+                self.in_page_link = attr(tag, "href").is_some_and(|h| h.trim().starts_with('#'));
                 self.open_anchor(tag);
             }
             "img" => self.image(tag),
@@ -325,13 +350,19 @@ impl<'a> Page<'a> {
         if HIDDEN_ELEMENTS.contains(&name) {
             self.hidden += 1;
         }
+        if CHROME_ELEMENTS.contains(&name) {
+            self.chrome += 1;
+        }
         contents_kind(name)
     }
 
     fn end_tag(&mut self, tag: &Tag) {
         let name: &str = &tag.name;
         match name {
-            "a" => self.close_anchor(),
+            "a" => {
+                self.close_anchor();
+                self.in_page_link = false;
+            }
             "title" => self.close_title(),
             "form" => self.close_form(),
             "h1" | "h2" => self.close_heading(),
@@ -340,6 +371,9 @@ impl<'a> Page<'a> {
         }
         if HIDDEN_ELEMENTS.contains(&name) {
             self.hidden = self.hidden.saturating_sub(1);
+        }
+        if CHROME_ELEMENTS.contains(&name) {
+            self.chrome = self.chrome.saturating_sub(1);
         }
         if WORD_BREAK_ELEMENTS.contains(&name) {
             self.word_break();
@@ -360,6 +394,14 @@ impl<'a> Page<'a> {
         if let Some(anchor) = self.visible_anchor() {
             anchor.text.push_str(text);
         }
+        if self.body_open() {
+            let room = BODY_TEXT_BYTES - self.body.len();
+            let mut end = room.min(text.len());
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            self.body.push_str(&text[..end]);
+        }
     }
 
     fn word_break(&mut self) {
@@ -369,6 +411,22 @@ impl<'a> Page<'a> {
         if let Some(heading) = &mut self.heading_text {
             heading.push(' ');
         }
+        if self.body_open() {
+            self.body.push(' ');
+        }
+    }
+
+    /// Whether text read now belongs to the body text: it shows on the
+    /// page, is not the title, a heading or the site's furniture, and there
+    /// is room.
+    fn body_open(&self) -> bool {
+        self.hidden == 0
+            && self.foreign == 0
+            && self.chrome == 0
+            && !self.in_page_link
+            && self.title_text.is_none()
+            && self.heading_text.is_none()
+            && self.body.len() < BODY_TEXT_BYTES
     }
 
     /// Keeps the heading just read, unless it repeats one or the headings
@@ -563,7 +621,9 @@ impl<'a> Page<'a> {
         self.close_title();
         self.close_heading();
         self.close_form();
+        let body: Vec<&str> = self.body.split_whitespace().take(MAX_BODY_WORDS).collect();
         PageMeta {
+            body_text: (!body.is_empty()).then(|| body.join(" ")),
             title: self.title,
             description: self.description.or(self.og_description),
             site_name: self.site_name,
@@ -695,6 +755,47 @@ mod tests {
     }
 
     #[test]
+    fn reads_body_text_without_furniture() {
+        let meta = extract(
+            "https://www.pnc.com/",
+            r##"<html><head><title>PNC Bank</title>
+                <style>h1 { color: red }</style><script>var x = "hidden";</script>
+            </head><body>
+                <header><a href="/">Logo</a><nav><a href="/login">Sign On</a></nav></header>
+                <h1>Personal <b>Banking</b></h1>
+                <form><button>Search</button></form>
+                <a href="#main">Skip to content</a>
+                <main id="main"><p>Checking accounts,<br>savings and loans.</p>
+                    <div>Open an account</div><div>today.</div>
+                    <svg><text>chart label</text></svg><noscript>Enable JS</noscript></main>
+                <aside>Related</aside>
+                <footer>Privacy | Careers</footer>
+            </body></html>"##,
+        );
+        assert_eq!(meta.headings, ["Personal Banking"]);
+        assert_eq!(
+            meta.body_text.as_deref(),
+            Some("Checking accounts, savings and loans. Open an account today.")
+        );
+    }
+
+    #[test]
+    fn body_text_stops_at_the_word_limit() {
+        let words: Vec<String> = (0..1000).map(|i| format!("w{i}")).collect();
+        let html = format!("<p>{}</p>", words.join(" "));
+        let body = extract("https://example.com/", &html).body_text.unwrap();
+        assert_eq!(body.split(' ').count(), MAX_BODY_WORDS);
+        assert!(body.starts_with("w0 w1 w2"));
+        assert!(body.ends_with(&format!("w{}", MAX_BODY_WORDS - 1)));
+
+        let menu_only = extract(
+            "https://example.com/",
+            "<html><head><title>T</title></head><body><nav>Menu</nav></body></html>",
+        );
+        assert_eq!(menu_only.body_text, None);
+    }
+
+    #[test]
     fn reads_visible_headings() {
         let meta = extract(
             "https://www.navyfederal.org/",
@@ -805,7 +906,13 @@ mod tests {
         assert_eq!(loose.site_name.as_deref(), Some("Loose OG"));
 
         let nothing = extract("https://example.com/", "<p>No head at all</p>");
-        assert_eq!(nothing, PageMeta::default());
+        assert_eq!(
+            nothing,
+            PageMeta {
+                body_text: Some("No head at all".into()),
+                ..PageMeta::default()
+            }
+        );
     }
 
     #[test]

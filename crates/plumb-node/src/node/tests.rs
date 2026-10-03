@@ -368,6 +368,7 @@ async fn falls_back_to_the_newest_index_that_opens_and_clears_leftovers() {
         index_stale: false,
         last_refresh: Some(now_unix()),
         wikidata_missing: false,
+        network_pending: 0,
         quick_start: false,
         ..SavedState::default()
     };
@@ -460,6 +461,7 @@ async fn picks_up_a_round_left_unfinished() {
             index_stale: true,
             last_refresh: None,
             wikidata_missing: false,
+            network_pending: 0,
             quick_start: false,
             ..SavedState::default()
         },
@@ -482,6 +484,7 @@ async fn picks_up_a_round_left_unfinished() {
             index_stale: false,
             last_refresh: Some(last),
             wikidata_missing: false,
+            network_pending: 0,
             quick_start: false,
             ..SavedState::default()
         }
@@ -514,6 +517,7 @@ async fn refreshes_when_due() {
             index_stale: false,
             last_refresh: Some(long_ago),
             wikidata_missing: false,
+            network_pending: 0,
             quick_start: false,
             ..SavedState::default()
         },
@@ -907,6 +911,186 @@ async fn sets_up_without_wikidata_and_adds_it_later() {
     assert_eq!(names(&dir.path().join("indexes")).len(), 1);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_node_in_the_network_takes_in_other_nodes_crawls_and_searches_them() {
+    let dir = seeded_dir();
+    let mut config = test_config(dir.path());
+    let mut net = plumb_net::NetConfig::new(PathBuf::new());
+    net.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+    net.upnp = false;
+    net.local_discovery = false;
+    config.network = Some(net);
+    let node = start(config).await.unwrap();
+    let addr = node.addr();
+    let status = wait_for(addr, "the first index", ready_and_idle).await;
+    let net_status = status.network.expect("the node joined the network");
+    let node_addr: plumb_net::Multiaddr = net_status.listening[0].parse().unwrap();
+    let node_addr = node_addr
+        .with_p2p(net_status.peer_id.parse().unwrap())
+        .unwrap();
+    assert!(dir.path().join("net/node.key").is_file());
+
+    // Two other nodes crawled a site this one has never heard of.
+    let peer_dir = tempfile::tempdir().unwrap();
+    let second_dir = tempfile::tempdir().unwrap();
+    let peer_id = plumb_net::load_or_create_key(&peer_dir.path().join("node.key"))
+        .unwrap()
+        .public()
+        .to_peer_id();
+    let second_id = plumb_net::load_or_create_key(&second_dir.path().join("node.key"))
+        .unwrap()
+        .public()
+        .to_peer_id();
+    let now = now_unix();
+    let domain = (0..)
+        .map(|i| format!("lighthouse-keepers-{i}.org"))
+        .find(|d| {
+            [peer_id, second_id].iter().all(|p| {
+                plumb_net::assign::is_assigned(
+                    plumb_net::assign::epoch_of(now),
+                    p,
+                    d,
+                    plumb_net::assign::MAX_SHARE_PPM,
+                )
+            })
+        })
+        .unwrap();
+    let mut crawled = SiteRecord::new(domain.as_str());
+    crawled.url = Some(format!("https://{domain}/"));
+    crawled.title = Some("Lighthouse Keepers Guild".to_string());
+    crawled.crawled_at = Some(now);
+    let mut peer_config = plumb_net::NetConfig::new(peer_dir.path().to_path_buf());
+    peer_config.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+    peer_config.upnp = false;
+    peer_config.local_discovery = false;
+    peer_config.bootstrap = vec![node_addr.clone()];
+    let table = plumb_net::BucketTable::build(&peer_dir.path().join("buckets"), &[crawled.clone()])
+        .unwrap();
+    let (peer, _records) = plumb_net::start(peer_config, Arc::new(table))
+        .await
+        .unwrap();
+    wait_for(addr, "the peer to connect", |s| {
+        s.network.as_ref().is_some_and(|n| n.connected_peers >= 1)
+    })
+    .await;
+
+    // The node asks the peer.
+    let mut found = None;
+    for _ in 0..100 {
+        let (code, _, body) = get(addr, "/api/network/search?q=lighthouse").await;
+        assert_eq!(code, 200, "{body}");
+        let result: serde_json::Value = serde_json::from_str(&body).unwrap();
+        if !result["hits"].as_array().unwrap().is_empty() {
+            found = Some(result);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let found = found.expect("the peer answers");
+    assert_eq!(found["hits"][0]["domain"], domain.as_str());
+    assert_eq!(found["buckets"], plumb_net::bucket::BUCKETS_PER_SEARCH);
+    assert_eq!(
+        found["hits"][0]["verified"], false,
+        "the peer has not published yet"
+    );
+    let (code, _, body) = get(addr, "/network?q=lighthouse").await;
+    assert_eq!(code, 200);
+    assert!(body.contains("Lighthouse Keepers Guild"), "{body}");
+    let (_, _, body) = get(addr, "/search?q=us+bank").await;
+    assert!(body.contains("name=\"net\" value=\"1\">"), "{body}");
+    assert!(body.contains("href=\"/search?q=us+bank"), "{body}");
+    // With the network setting on, the peer's site joins this node's, tinted.
+    let (code, _, body) = get(addr, "/search?q=lighthouse&net=1").await;
+    assert_eq!(code, 200);
+    assert!(body.contains("name=\"net\" value=\"1\" checked>"), "{body}");
+    assert!(
+        body.contains("From this site's index and the Plumb network"),
+        "{body}"
+    );
+    assert!(body.contains("<li class=\"net\">"), "{body}");
+    assert!(body.contains("Lighthouse Keepers Guild"), "{body}");
+
+    // And the other way round: the node serves the buckets of its index.
+    assert!(dir
+        .path()
+        .join("indexes/000001/buckets/buckets.idx")
+        .is_file());
+    let from_node = peer
+        .search("us bank", Duration::from_secs(5))
+        .await
+        .unwrap();
+    // With one node to ask, every bucket goes to it.
+    assert_eq!(
+        from_node.asked,
+        plumb_net::BUCKETS_PER_SEARCH,
+        "{from_node:?}"
+    );
+    assert_eq!(from_node.answered, from_node.asked, "{from_node:?}");
+    assert!(
+        from_node
+            .found
+            .iter()
+            .any(|f| f.record.domain == "usbank.com"),
+        "{from_node:?}"
+    );
+
+    // The peer publishes its crawl; the node holds it until a second
+    // crawler agrees, then keeps it and, at its next refresh, searches it
+    // from its own index.
+    let mut published = None;
+    for _ in 0..100 {
+        published = peer.publish(vec![crawled.clone()]).await.unwrap();
+        let (_, _, body) = get(addr, "/api/status").await;
+        let status: serde_json::Value = serde_json::from_str(&body).unwrap();
+        if status["network"]["agreement"]["pending_sites"] == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(published.is_some());
+    assert!(
+        !dir.path().join("net/inbox.jsonl").exists(),
+        "one crawler is not enough"
+    );
+    let second_config = {
+        let mut c = plumb_net::NetConfig::new(second_dir.path().to_path_buf());
+        c.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+        c.upnp = false;
+        c.local_discovery = false;
+        c.bootstrap = vec![node_addr.clone()];
+        c
+    };
+    let empty = plumb_net::BucketTable::build(&second_dir.path().join("buckets"), &[]).unwrap();
+    let (second, _records) = plumb_net::start(second_config, Arc::new(empty))
+        .await
+        .unwrap();
+    for _ in 0..100 {
+        second.publish(vec![crawled.clone()]).await.unwrap();
+        if dir.path().join("net/inbox.jsonl").exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        dir.path().join("net/inbox.jsonl").exists(),
+        "the second crawl arrived and agreed"
+    );
+    assert!(search(addr, "lighthouse").await.is_empty());
+    node.refresh_now();
+    wait_for(addr, "a new index", |s| {
+        ready_and_idle(s) && s.index.as_deref() != Some("000001")
+    })
+    .await;
+    let hits = search(addr, "lighthouse").await;
+    assert_eq!(hits[0].domain, domain);
+    assert_eq!(hits[0].title.as_deref(), Some("Lighthouse Keepers Guild"));
+    assert!(!dir.path().join("net/inbox.jsonl").exists());
+
+    peer.shutdown().await;
+    second.shutdown().await;
+    node.shutdown().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_full_seed_replaces_a_quick_start_but_keeps_what_crawls_added() {
     let tranco = std::fs::read(fixture("tranco.csv")).unwrap();
@@ -1066,4 +1250,36 @@ fn downloads_are_counted_per_day() {
     assert_eq!(state.downloaded_today(11 * day + 6), 1);
     assert_eq!(state.downloaded_total, 13);
     assert_eq!(store::next_day(10 * day + 7), 11 * day);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn search_by_meaning_embeds_sites_in_the_background() {
+    let dir = seeded_dir();
+    // The model is in place, so nothing is downloaded.
+    plumb_embed::write_test_model(&dir.path().join(embedding::MODEL_DIR)).unwrap();
+    let mut config = test_config(dir.path());
+    config.search_by_meaning = true;
+    let node = start(config).await.unwrap();
+    let addr = node.addr();
+    wait_for(addr, "the first index", ready_and_idle).await;
+
+    let vectors_path = dir.path().join(plumb_embed::VECTORS_FILE_NAME);
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    while node.inner.meaning.get().is_none_or(|m| m.is_empty()) {
+        assert!(std::time::Instant::now() < deadline, "no vectors made");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    // Names still win.
+    assert_eq!(search(addr, "us+bank").await[0].domain, "usbank.com");
+    // Every site with text gets a vector, saved for the next start.
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    let with_text = fixture_records()
+        .iter()
+        .filter(|r| !plumb_embed::site_text(r).is_empty())
+        .count();
+    while plumb_embed::Vectors::load(&vectors_path).map_or(0, |v| v.len()) < with_text {
+        assert!(std::time::Instant::now() < deadline, "vectors not saved");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    node.shutdown().await.unwrap();
 }

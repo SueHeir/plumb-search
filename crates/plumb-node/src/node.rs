@@ -86,9 +86,12 @@ use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
 use crate::country::HomeCountry;
+use crate::meaning::SharedMeaning;
 use crate::web::{self, IndexBackend, SearchBackend, StatusSource};
 use crate::websearch::{Engine, WebSettings};
 
+mod embedding;
+mod network;
 mod store;
 mod worker;
 
@@ -136,6 +139,11 @@ pub struct NodeConfig {
     pub country: HomeCountry,
     /// The web search engine the results page links to; `None` for no link.
     pub web_search: Option<Engine>,
+    /// Rank by meaning too, for searches that name no site: the node
+    /// downloads a small embedding model into `DIR/model` (about 130 MB)
+    /// and keeps a vector of each site's text in `DIR/vectors.bin`, made in
+    /// the background after each index build, best-ranked sites first.
+    pub search_by_meaning: bool,
     /// Where the seed data is downloaded from on first start.
     pub sources: SeedSources,
     /// How long to wait before trying failed work again. The wait doubles
@@ -143,6 +151,10 @@ pub struct NodeConfig {
     pub retry_wait: Duration,
     /// The longest wait between two tries of failed work.
     pub max_retry_wait: Duration,
+    /// Join the Plumb network: share crawl work with other nodes and answer
+    /// their searches (see [`network`]). Its `dir` is replaced with
+    /// `DIR/net`. `None`, the default for now, keeps the node on its own.
+    pub network: Option<plumb_net::NetConfig>,
     /// The settings until someone changes them on the panel, which saves
     /// them in `DIR/settings.json`.
     pub settings: NodeSettings,
@@ -164,9 +176,11 @@ impl NodeConfig {
             alpha: None,
             country: HomeCountry::Auto,
             web_search: None,
+            search_by_meaning: false,
             sources: SeedSources::default(),
             retry_wait: Duration::from_secs(10 * 60),
             max_retry_wait: Duration::from_secs(6 * 60 * 60),
+            network: None,
             settings: NodeSettings::default(),
         }
     }
@@ -345,6 +359,9 @@ pub struct Status {
     pub next_refresh: Option<u64>,
     /// The version of Plumb running the node.
     pub version: String,
+    /// The node's place in the Plumb network, when it has joined it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network: Option<plumb_net::NetStatus>,
     /// Homepages still to crawl in the round under way (the crawl after
     /// setup or a refresh); 0 when none is under way.
     pub crawl_left: u64,
@@ -424,6 +441,7 @@ pub struct NodeHandle {
     stop: watch::Sender<bool>,
     server: JoinHandle<std::io::Result<()>>,
     worker: JoinHandle<()>,
+    embedding: Option<JoinHandle<()>>,
 }
 
 impl NodeHandle {
@@ -465,6 +483,7 @@ impl NodeHandle {
             stop,
             mut server,
             worker,
+            embedding,
             ..
         } = self;
         info!("stopping the node in {}", inner.paths.data.display());
@@ -484,6 +503,12 @@ impl NodeHandle {
             }
         };
         let worked = worker.await.context("the background work failed");
+        if let Some(embedding) = embedding {
+            if let Err(err) = embedding.await {
+                warn!("search by meaning failed: {err}");
+            }
+        }
+        network::stop(&inner).await;
         // Only now may another node take over the data directory.
         drop(
             inner
@@ -541,7 +566,15 @@ pub async fn start(config: NodeConfig) -> Result<NodeHandle> {
         })
         .await
     });
+    if let Err(err) = network::start(&inner).await {
+        // The node still searches and crawls on its own.
+        warn!("{err:#}");
+    }
     let worker = tokio::spawn(worker::run(inner.clone()));
+    let embedding = inner.config.search_by_meaning.then(|| {
+        let inner = inner.clone();
+        tokio::task::spawn_blocking(move || embedding::run(inner))
+    });
     info!(
         "serving http://{addr}/ with data in {}",
         inner.paths.data.display()
@@ -552,6 +585,7 @@ pub async fn start(config: NodeConfig) -> Result<NodeHandle> {
         stop,
         server,
         worker,
+        embedding,
     })
 }
 
@@ -651,9 +685,17 @@ struct Inner {
     /// Tries at Wikidata's official websites while setup went on without
     /// them ([`SavedState::wikidata_missing`]).
     wikidata: Mutex<WikidataTries>,
+    /// The network side, once joined.
+    net: std::sync::OnceLock<Arc<plumb_net::NetHandle>>,
+    /// Records in the network inbox not yet folded in.
+    inbox_records: std::sync::atomic::AtomicU64,
+    /// Held while the inbox is appended to or moved aside.
+    inbox_lock: Mutex<()>,
     settings: Mutex<NodeSettings>,
     /// The last count of the data folder's size, and when it was made.
     disk: Mutex<Option<(std::time::Instant, u64)>>,
+    /// The model and vectors of search by meaning, once loaded.
+    meaning: SharedMeaning,
 }
 
 /// The failures to download Wikidata's official websites, which have their
@@ -702,8 +744,12 @@ impl Inner {
                 last_error: None,
                 backoff,
             }),
+            net: std::sync::OnceLock::new(),
+            inbox_records: std::sync::atomic::AtomicU64::new(0),
+            inbox_lock: Mutex::new(()),
             settings: Mutex::new(opened.settings),
             disk: Mutex::new(None),
+            meaning: SharedMeaning::default(),
         }
     }
 
@@ -732,6 +778,7 @@ impl Inner {
             last_refresh: saved.last_refresh,
             next_refresh: self.next_refresh(&saved),
             version: env!("CARGO_PKG_VERSION").to_string(),
+            network: network::handle(self).map(|net| net.status()),
             crawl_left: saved.crawl_left as u64,
             background_updates: self.settings().background_updates,
             paused: self.pause_reason().map(String::from),
@@ -1040,7 +1087,10 @@ impl SearchBackend for Inner {
         let Some(index) = self.current() else {
             bail!("the search index is not ready yet");
         };
-        index.backend().search_full(query, limit, options)
+        let meaning = self.meaning.get();
+        index
+            .backend()
+            .search_full_with(query, limit, options, meaning.as_deref())
     }
 
     fn num_docs(&self) -> u64 {
@@ -1051,6 +1101,14 @@ impl SearchBackend for Inner {
 impl StatusSource for Inner {
     fn status(&self) -> Status {
         Inner::status(self)
+    }
+
+    fn network(&self) -> Option<Arc<plumb_net::NetHandle>> {
+        network::handle(self).cloned()
+    }
+
+    fn rank(&self) -> RankConfig {
+        self.rank
     }
 
     fn settings(&self) -> Option<NodeSettings> {
@@ -1080,6 +1138,9 @@ struct ServingIndex {
     backend: Option<IndexBackend>,
     /// Set once the index files are closed and may be deleted.
     closed: Arc<AtomicBool>,
+    /// The index's buckets, which other nodes search (`indexes/NNNNNN/buckets/`);
+    /// only built by a node in the network.
+    buckets: Option<plumb_net::BucketTable>,
 }
 
 impl ServingIndex {
@@ -1091,6 +1152,7 @@ impl ServingIndex {
             docs: searcher.num_docs(),
             backend: Some(IndexBackend::new(searcher, rank)),
             closed: Arc::new(AtomicBool::new(false)),
+            buckets: plumb_net::BucketTable::open(&dir.join(network::BUCKETS_DIR)).ok(),
         })
     }
 

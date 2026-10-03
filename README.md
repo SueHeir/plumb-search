@@ -50,6 +50,10 @@ docker compose up -d
 
 On a desktop or laptop, install the desktop app for Windows, macOS or Linux ([docs/desktop.md](docs/desktop.md)). It runs the same node in a window of its own, at http://127.0.0.1:7586.
 
+### Join the Plumb network (prototype)
+
+`plumb run --network --bootstrap <node address>` connects a node to other Plumb nodes: it crawls only the sites the network assigns it each day, shares signed crawl results with the others, takes in theirs, and can search other nodes without sending them the query (`/network?q=`, linked from every results page). No port forwarding is needed. See [docs/network.md](docs/network.md) for the design, the flags and what is not done yet.
+
 ### Use Plumb as your browser's search engine
 
 Every Plumb page offers Plumb to the browser as a search engine. In Firefox, right-click the address bar on a Plumb page and choose **Add "Plumb Search"**. To add it by hand, use `http://127.0.0.1:8080/search?q=%s`, or `http://127.0.0.1:7586/search?q=%s` for the desktop app.
@@ -113,7 +117,18 @@ score = α · link_score + trust · ((1 − α) · text_score + name_bonus)
 - `name_bonus` rewards a site whose domain name (or, with a smaller bonus, one of its aliases) is the query, or the first words of it: `usbank.com` for "us bank", and half the bonus for "us bank login".
 - `trust` protects official sites from keyword-stuffed look-alikes. When a query starts with a known site's name and adds more words ("irs refund", "us bank login"), sites with almost no popularity evidence keep only part of their text match, down to half for a site with none. Otherwise `trust` is 1, so little-known sites still rank normally when no well-known site matches.
 
-`α` defaults to 0.35 and can be changed with `--alpha`. The crate docs in `crates/plumb-index` describe the details and tuning knobs.
+`α` defaults to 0.35 and can be changed with `--alpha`.
+
+### Search by meaning (optional)
+
+A query that names no site ("electric car maker") can also be matched by meaning. `plumb embed` turns each site's text (names, title, description, Wikidata's description, homepage headings and the start of the homepage text, at most 100 words) into 384 one-byte numbers with a small embedding model, [BAAI/bge-small-en-v1.5](https://huggingface.co/BAAI/bge-small-en-v1.5), run in Rust with [candle](https://github.com/huggingface/candle). The model (130 MB) is downloaded on first use. The same text gives the same vector on any machine, so nodes can check each other's.
+
+```sh
+plumb embed --records data/records.jsonl --model data/model --vectors data/vectors.bin
+plumb search --index data/index --model data/model --vectors data/vectors.bin electric car maker
+```
+
+A node does this on its own with `plumb run --search-by-meaning`: it downloads the model into `DIR/model`, embeds sites in the background after each index build (best-ranked first, saving every 10,000), and uses the vectors as they come. For a million sites that takes about 750 MB of memory. `search`, `serve` and `eval` take `--model` and `--vectors`. With them, queries that a site is named by in full, or that name a kind of site ("banks"), rank as before; for the rest, the 50 sites nearest in meaning join the candidates and 70% of `text_score` becomes how close each site is in meaning. Embedding a million sites takes several hours on a desktop CPU; run it again after a crawl and only sites whose text changed are embedded again. The crate docs in `crates/plumb-index` describe the details and tuning knobs.
 
 ## Code layout
 
@@ -123,6 +138,8 @@ score = α · link_score + trust · ((1 − α) · text_score + name_bonus)
 | `crates/plumb-ingest` | Loaders for Tranco, Common Crawl ranks and WAT files, and Wikidata; the seed builder; downloads |
 | `crates/plumb-crawl` | Polite homepage crawler that also reports link text and new domains |
 | `crates/plumb-index` | Tantivy index and navigational ranking |
+| `crates/plumb-embed` | Site text, the embedding model and the vectors file, for search by meaning |
+| `crates/plumb-net` | The Plumb network: daily crawl assignments, signed crawl batches with Merkle proofs, and the libp2p node (relays, hole punching, gossip, bucket-based network search) |
 | `crates/plumb-node` | The `plumb` command line tool, the long-running node behind `plumb run`, and the web page |
 | `crates/plumb-desktop` | The desktop app: a [Tauri](https://v2.tauri.app) window around a node running inside it. A plain `cargo build` leaves it out; see [docs/desktop.md](docs/desktop.md) |
 

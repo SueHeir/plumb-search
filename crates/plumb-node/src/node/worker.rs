@@ -14,6 +14,11 @@
 //! 5. a refresh due or asked for: start a round ([`start_round`]);
 //! 6. otherwise wait for the next refresh (or the next try at Wikidata).
 //!
+//! A node in the network first folds in the records other nodes sent
+//! ([`super::network::absorb_inbox`]), and rebuilds its index once enough
+//! have come in; its crawls take only the sites it is assigned and publish
+//! each batch of results.
+//!
 //! Slow work runs on Tokio's blocking threads and checks for shutdown only
 //! where stopping leaves nothing half-done; downloads and the homepage
 //! fetches of a crawl are simply dropped. Crawls pick homepages and save
@@ -35,6 +40,7 @@ use plumb_ingest::{
 use tokio::runtime::Handle;
 use tracing::{info, warn};
 
+use super::network::{self, REBUILD_AFTER_RECORDS};
 use super::store::{self, SavedState};
 use super::{Inner, NodeConfig, ServingIndex, Step, Stopped};
 use crate::crawl::{crawl_in_batches, select_targets, RunEnd, CRAWL_BATCH_SIZE, SECONDS_PER_DAY};
@@ -105,6 +111,17 @@ async fn step(inner: &Arc<Inner>) -> Result<Next> {
     if !inner.paths.records.is_file() {
         set_up(inner).await?;
         return Ok(Next::Continue);
+    }
+    if inner.paths.inbox.exists() || inner.paths.absorbing.exists() {
+        let absorbed = blocking(inner, network::absorb_inbox).await?;
+        if absorbed > 0 {
+            inner.update_saved(|saved| {
+                saved.network_pending += absorbed;
+                if saved.network_pending >= REBUILD_AFTER_RECORDS {
+                    saved.index_stale = true;
+                }
+            })?;
+        }
     }
     let saved = inner.saved();
     if inner.current().is_none() || (saved.index_stale && saved.crawl_left == 0) {
@@ -475,7 +492,9 @@ fn seed_records(inner: &Inner, files: &SeedFiles) -> Result<Vec<SiteRecord>> {
     if let Some(path) = &files.cc_ranks {
         inner.set_step(Step::Ingesting, "Reading the Common Crawl domain ranks");
         inner.set_progress(1, sources, "files");
-        let ranks = load_cc_domain_ranks(path, None)
+        // The download kept only the top `sites` rows: read them all, past
+        // the default cap of a million.
+        let ranks = load_cc_domain_ranks(path, Some(usize::MAX))
             .with_context(|| format!("loading Common Crawl ranks {}", path.display()))?;
         builder.add_cc_ranks(&ranks);
         drop(ranks);
@@ -558,7 +577,7 @@ fn start_round(inner: &Inner, requested: bool) -> Result<()> {
     let now = now_unix();
     inner.update_saved(|saved| {
         saved.crawl_left = homepages;
-        if requested {
+        if requested || saved.network_pending > 0 {
             saved.index_stale = true;
         } else if homepages == 0 {
             saved.last_refresh = Some(now);
@@ -588,7 +607,14 @@ fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Option<ServingIndex
     inner.check_stop()?;
 
     let window = RECRAWL_AFTER_DAYS * SECONDS_PER_DAY;
-    let targets = select_targets(set.iter(), left, now_unix(), window);
+    let net = network::handle(inner).cloned();
+    let now = now_unix();
+    // In the network, only the sites assigned to this node today.
+    let candidates = set.iter().filter(|record| {
+        net.as_ref()
+            .is_none_or(|net| net.is_assigned(&record.domain, now))
+    });
+    let targets = select_targets(candidates, left, now, window);
     if targets.is_empty() {
         info!("no homepage is due for a crawl");
     } else {
@@ -616,10 +642,19 @@ fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Option<ServingIndex
                     return None;
                 }
                 handle.block_on(async {
-                    tokio::select! {
-                        results = crawl_homepages(batch, &cfg) => Some(results),
-                        () = inner.stopped() => None,
+                    let results = tokio::select! {
+                        results = crawl_homepages(batch, &cfg) => results,
+                        () = inner.stopped() => return None,
+                    };
+                    if let Some(net) = &net {
+                        // Shared before it is saved here: a batch the
+                        // offline check throws away holds few records anyway.
+                        let records = plumb_crawl::to_records(&results);
+                        if let Err(err) = net.publish(records).await {
+                            warn!("cannot publish crawl results to the network: {err:#}");
+                        }
                     }
+                    Some(results)
                 })
             },
             |totals| {
@@ -701,6 +736,7 @@ fn build(inner: &Inner, records: Vec<SiteRecord>) -> Result<ServingIndex> {
     let started = Instant::now();
     let stats = build_index(&dir, &records)
         .with_context(|| format!("building the index in {}", dir.display()))?;
+    network::build_buckets(inner, &dir, &records);
     drop(records);
     let index = match ServingIndex::open(id, &dir, inner.rank) {
         Ok(index) => index,
@@ -725,6 +761,7 @@ async fn put_in_service(inner: &Arc<Inner>, built: ServingIndex) -> Result<()> {
     let now = now_unix();
     inner.update_saved(|saved| {
         saved.index_stale = false;
+        saved.network_pending = 0;
         if saved.crawl_left == 0 {
             saved.last_refresh = Some(now);
         }
@@ -784,6 +821,9 @@ enum Deadline {
 async fn wait(inner: &Arc<Inner>, deadline: Deadline) {
     loop {
         if inner.stopping() || inner.refresh_requested.load(Ordering::SeqCst) {
+            return;
+        }
+        if inner.inbox_records.load(Ordering::SeqCst) >= REBUILD_AFTER_RECORDS {
             return;
         }
         let nap = match deadline {

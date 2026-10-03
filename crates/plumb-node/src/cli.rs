@@ -41,6 +41,37 @@ pub enum Command {
     Serve(ServeArgs),
     /// Check how often the official site ranks first for a list of queries.
     Eval(EvalArgs),
+    /// Make a vector of each site's text with a small embedding model
+    /// (downloaded on first use), so searches can find sites by meaning.
+    Embed(EmbedArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct EmbedArgs {
+    /// Records file whose sites to embed.
+    #[arg(long, value_name = "FILE")]
+    pub records: PathBuf,
+    /// Directory of the model's files, downloaded when missing.
+    #[arg(long, value_name = "DIR")]
+    pub model: PathBuf,
+    /// Vectors file, created or brought up to date: only sites whose text
+    /// changed are embedded again.
+    #[arg(long, value_name = "FILE")]
+    pub vectors: PathBuf,
+    /// Texts embedded at once [default: one per CPU].
+    #[arg(long, value_name = "N", value_parser = parse_positive)]
+    pub threads: Option<usize>,
+}
+
+/// Search by meaning too, for queries that name no site.
+#[derive(Debug, Clone, Default, Args)]
+pub struct MeaningArgs {
+    /// Vectors file made by `plumb embed`.
+    #[arg(long, value_name = "FILE", requires = "model")]
+    pub vectors: Option<PathBuf>,
+    /// Directory of the model that made the vectors.
+    #[arg(long, value_name = "DIR", requires = "vectors")]
+    pub model: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -98,12 +129,48 @@ pub struct RunArgs {
     /// Bangs such as `!g` work either way.
     #[arg(long, value_name = "ENGINE", default_value = "off", value_parser = parse_web_search)]
     pub web_search: WebSearch,
+    /// Also find sites by meaning for searches that name no site ("electric
+    /// car maker"). Downloads a small embedding model (about 130 MB) into
+    /// DIR/model and embeds each site's text in the background after every
+    /// index build, best-ranked sites first, into DIR/vectors.bin.
+    #[arg(long)]
+    pub search_by_meaning: bool,
     /// Crawl homepages through the proxy in HTTP_PROXY, HTTPS_PROXY or
     /// ALL_PROXY (except hosts in NO_PROXY), for machines that reach the
     /// internet only through one. Without it, homepages are fetched directly
     /// (seed downloads always use those variables).
     #[arg(long)]
     pub use_system_proxy: bool,
+    /// Join the Plumb network: share crawl work with other nodes, search
+    /// them, and answer their searches. No port forwarding is needed.
+    #[arg(long)]
+    pub network: bool,
+    /// Port for node-to-node connections, over TCP and QUIC (UDP).
+    #[arg(
+        long,
+        value_name = "PORT",
+        default_value_t = 4001,
+        requires = "network"
+    )]
+    pub p2p_port: u16,
+    /// A node to connect to first, as a multiaddr ending in /p2p/<id>, e.g.
+    /// /dns4/plumbsearch.org/tcp/4001/p2p/12D3Koo...; may be repeated.
+    #[arg(long, value_name = "MULTIADDR", requires = "network")]
+    pub bootstrap: Vec<plumb_net::Multiaddr>,
+    /// An address other nodes can reach this one at, for a server with a
+    /// public address, e.g. /ip4/203.0.113.7/tcp/4001; may be repeated.
+    #[arg(long, value_name = "MULTIADDR", requires = "network")]
+    pub public_addr: Vec<plumb_net::Multiaddr>,
+    /// Relay connections for nodes behind NAT. Only for a node others can
+    /// reach (see --public-addr).
+    #[arg(long, requires = "public_addr")]
+    pub relay: bool,
+    /// Do not ask the home router to forward the port (UPnP).
+    #[arg(long, requires = "network")]
+    pub no_upnp: bool,
+    /// Do not look for other Plumb nodes on the local network (mDNS).
+    #[arg(long, requires = "network")]
+    pub no_local_discovery: bool,
 }
 
 /// Starting points for `plumb run`.
@@ -271,6 +338,8 @@ pub struct SearchArgs {
     /// Leave out other countries' sites (needs --country).
     #[arg(long, requires = "country")]
     pub only_country: bool,
+    #[command(flatten)]
+    pub meaning: MeaningArgs,
     /// What to search for, e.g. `us bank`.
     #[arg(required = true, value_name = "QUERY")]
     pub query: Vec<String>,
@@ -301,6 +370,8 @@ pub struct ServeArgs {
     /// Bangs such as `!g` work either way.
     #[arg(long, value_name = "ENGINE", default_value = "off", value_parser = parse_web_search)]
     pub web_search: WebSearch,
+    #[command(flatten)]
+    pub meaning: MeaningArgs,
 }
 
 #[derive(Debug, Args)]
@@ -327,6 +398,8 @@ pub struct EvalArgs {
     /// [default: none].
     #[arg(long, value_name = "CODE", value_parser = parse_country)]
     pub country: Option<String>,
+    #[command(flatten)]
+    pub meaning: MeaningArgs,
 }
 
 fn parse_positive(s: &str) -> Result<usize, String> {

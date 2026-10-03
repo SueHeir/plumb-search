@@ -526,7 +526,68 @@ fn robots_rules(body: &[u8]) -> Result<Robot, String> {
             MAX_ROBOTS_REGEX_BYTES >> 20
         ));
     }
-    Robot::new(ROBOTS_TOKEN, body).map_err(|err| format!("robots.txt: cannot parse it: {err:#}"))
+    Robot::new(ROBOTS_TOKEN, &product_tokens(body))
+        .map_err(|err| format!("robots.txt: cannot parse it: {err:#}"))
+}
+
+/// `body` with each `User-agent` value cut to its product token, the leading
+/// run of letters, `_` and `-` (RFC 9309 2.2.1), as Google's parser matches
+/// it. texting_robots compares the whole value, so `User-agent:
+/// PlumbSearch/1.0`, copied from our User-Agent header, would not count as
+/// meaning us and its rules would be skipped for the `*` group's.
+fn product_tokens(body: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(body.len());
+    let mut rest = body.strip_prefix(b"\xef\xbb\xbf").unwrap_or(body);
+    while !rest.is_empty() {
+        let end = rest
+            .iter()
+            .position(|&byte| matches!(byte, b'\n' | b'\r'))
+            .unwrap_or(rest.len());
+        let (line, after) = rest.split_at(end);
+        match user_agent_value(line) {
+            Some(value) => {
+                let token_len = value
+                    .iter()
+                    .take_while(|&&byte| byte.is_ascii_alphabetic() || matches!(byte, b'_' | b'-'))
+                    .count();
+                if token_len == 0 {
+                    out.extend_from_slice(line);
+                } else {
+                    out.extend_from_slice(b"User-agent: ");
+                    out.extend_from_slice(&value[..token_len]);
+                }
+            }
+            None => out.extend_from_slice(line),
+        }
+        let newlines = after
+            .iter()
+            .take_while(|&&byte| matches!(byte, b'\n' | b'\r'))
+            .count();
+        out.extend_from_slice(&after[..newlines]);
+        rest = &after[newlines..];
+    }
+    out
+}
+
+/// The value of a `User-agent` line, spelled as texting_robots accepts it,
+/// without any comment or surrounding space.
+fn user_agent_value(line: &[u8]) -> Option<&[u8]> {
+    let line = line.trim_ascii_start();
+    let key_len = ["user-agent", "user agent", "useragent"]
+        .into_iter()
+        .find(|key| {
+            line.get(..key.len())
+                .is_some_and(|start| start.eq_ignore_ascii_case(key.as_bytes()))
+        })?
+        .len();
+    let after_key = &line[key_len..];
+    let value = match after_key.trim_ascii_start().strip_prefix(b":") {
+        Some(value) => value,
+        None if after_key.first().is_some_and(|&b| b == b' ' || b == b'\t') => after_key,
+        None => return None,
+    };
+    let value = value.split(|&byte| byte == b'#').next().unwrap_or_default();
+    Some(value.trim_ascii())
 }
 
 /// An estimate, on the high side, of the memory texting_robots needs for
@@ -1847,6 +1908,29 @@ mod tests {
         ] {
             assert!(!is_html(other), "{other}");
         }
+    }
+
+    #[test]
+    fn robots_txt_groups_match_on_the_product_token() {
+        // A group for us, named as our User-Agent header spells it.
+        let body = "User-agent: *\nAllow: /\n\nUser-agent: PlumbSearch/1.0 (+https://x.test)\nDisallow: /\n";
+        let robot = robots_rules(body.as_bytes()).unwrap();
+        assert!(!robot.allowed("https://a.com/"));
+        for body in [
+            "\u{feff}user agent   plumbsearch # us\r\nDisallow: /\r\n",
+            "User-agent: Other\nUser-Agent : PlumbSearch/2\nDisallow: /\n",
+        ] {
+            let robot = robots_rules(body.as_bytes()).unwrap();
+            assert!(!robot.allowed("https://a.com/"), "{body:?}");
+        }
+        // Other crawlers' groups still do not apply.
+        let body = "User-agent: PlumbSearchBot/1.0\nDisallow: /\nUser-agent: Plumb\nDisallow: /\n";
+        assert!(robots_rules(body.as_bytes())
+            .unwrap()
+            .allowed("https://a.com/"));
+        // Everything else is left as it was.
+        let body = b"User-agent: *\r\nDisallow: /a # x\n\nSitemap: https://a.com/s.xml";
+        assert_eq!(product_tokens(body), body);
     }
 
     #[test]
