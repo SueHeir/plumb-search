@@ -9,10 +9,14 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
+use super::NodeSettings;
+
 /// Held locked while a node runs.
 const LOCK_FILE: &str = "node.lock";
 /// Progress that survives restarts ([`SavedState`]).
 const STATE_FILE: &str = "state.json";
+/// What the user chose ([`NodeSettings`]).
+const SETTINGS_FILE: &str = "settings.json";
 /// Every known site, one JSON line each.
 const RECORDS_FILE: &str = "records.jsonl";
 /// First-start downloads.
@@ -28,6 +32,7 @@ pub(super) struct Paths {
     pub(super) data: PathBuf,
     pub(super) records: PathBuf,
     pub(super) state: PathBuf,
+    pub(super) settings: PathBuf,
     pub(super) seed: PathBuf,
     pub(super) indexes: PathBuf,
     pub(super) net: PathBuf,
@@ -43,6 +48,7 @@ impl Paths {
             data: data.to_path_buf(),
             records: data.join(RECORDS_FILE),
             state: data.join(STATE_FILE),
+            settings: data.join(SETTINGS_FILE),
             seed: data.join(SEED_DIR),
             indexes: data.join(INDEXES_DIR),
             net: data.join(NET_DIR),
@@ -112,7 +118,11 @@ pub(super) fn lock(paths: &Paths) -> Result<Option<DirLock>> {
 /// directories in `indexes/`, temporary records and state files, and partial
 /// downloads. Only call it while holding the [`DirLock`].
 pub(super) fn remove_leftovers(paths: &Paths) {
-    let temp_prefixes = [format!(".{RECORDS_FILE}."), format!(".{STATE_FILE}.")];
+    let temp_prefixes = [
+        format!(".{RECORDS_FILE}."),
+        format!(".{STATE_FILE}."),
+        format!(".{SETTINGS_FILE}."),
+    ];
     for name in file_names(&paths.data) {
         if name.ends_with(".tmp") && temp_prefixes.iter().any(|p| name.starts_with(p)) {
             remove_leftover(&paths.data.join(name));
@@ -207,6 +217,46 @@ pub(super) struct SavedState {
     /// Records from other nodes folded into the records file since the
     /// index was last built.
     pub(super) network_pending: u64,
+    /// The records are a quick start from the Tranco list alone, put in
+    /// service while the rest of the seed data downloads. The full seed
+    /// replaces them, keeping only what crawls added.
+    pub(super) quick_start: bool,
+    /// The day (UTC, in days since 1970) of `downloaded_on_day`.
+    pub(super) download_day: u64,
+    /// Bytes downloaded on `download_day`.
+    pub(super) downloaded_on_day: u64,
+    /// Bytes downloaded since setup.
+    pub(super) downloaded_total: u64,
+    /// Homepages visited since setup.
+    pub(super) homepages_visited: u64,
+}
+
+const SECONDS_PER_DAY: u64 = 24 * 60 * 60;
+
+impl SavedState {
+    /// Bytes downloaded on the day of `now` (Unix seconds).
+    pub(super) fn downloaded_today(&self, now: u64) -> u64 {
+        if self.download_day == now / SECONDS_PER_DAY {
+            self.downloaded_on_day
+        } else {
+            0
+        }
+    }
+
+    pub(super) fn add_downloaded(&mut self, bytes: u64, now: u64) {
+        let today = now / SECONDS_PER_DAY;
+        if self.download_day != today {
+            self.download_day = today;
+            self.downloaded_on_day = 0;
+        }
+        self.downloaded_on_day = self.downloaded_on_day.saturating_add(bytes);
+        self.downloaded_total = self.downloaded_total.saturating_add(bytes);
+    }
+}
+
+/// The Unix time the day of `now` (UTC) ends.
+pub(super) fn next_day(now: u64) -> u64 {
+    (now / SECONDS_PER_DAY + 1) * SECONDS_PER_DAY
 }
 
 impl SavedState {
@@ -219,6 +269,11 @@ impl SavedState {
             last_refresh: None,
             wikidata_missing: false,
             network_pending: 0,
+            quick_start: false,
+            download_day: 0,
+            downloaded_on_day: 0,
+            downloaded_total: 0,
+            homepages_visited: 0,
         }
     }
 }
@@ -226,7 +281,40 @@ impl SavedState {
 /// Reads the saved state. `None` when there is none, or when it cannot be
 /// read (that is logged; the node then starts over from what is on disk).
 pub(super) fn load_state(paths: &Paths) -> Option<SavedState> {
-    let path = &paths.state;
+    load_json(&paths.state)
+}
+
+/// Reads the settings. `None` when there are none, or when they cannot be
+/// read (that is logged).
+pub(super) fn load_settings(paths: &Paths) -> Option<NodeSettings> {
+    load_json(&paths.settings)
+}
+
+/// The bytes the files under `dir` take, counting what can be read.
+pub(super) fn dir_size(dir: &Path) -> u64 {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .map(|entry| match entry.file_type() {
+            Ok(kind) if kind.is_dir() => dir_size(&entry.path()),
+            Ok(kind) if kind.is_file() => entry.metadata().map_or(0, |meta| meta.len()),
+            _ => 0,
+        })
+        .sum()
+}
+
+/// Saves the settings atomically.
+pub(super) fn save_settings(paths: &Paths, settings: &NodeSettings) -> Result<()> {
+    let mut json = serde_json::to_vec_pretty(settings).context("encoding the settings")?;
+    json.push(b'\n');
+    write_atomically(&paths.settings, &json)
+}
+
+/// Reads a JSON file. `None` when there is none, or when it cannot be read
+/// (that is logged).
+fn load_json<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
         Err(err) if err.kind() == io::ErrorKind::NotFound => return None,
@@ -368,6 +456,11 @@ mod tests {
             last_refresh: Some(1_700_000_000),
             wikidata_missing: true,
             network_pending: 0,
+            quick_start: true,
+            download_day: 20_000,
+            downloaded_on_day: 1_234,
+            downloaded_total: 5_678,
+            homepages_visited: 90,
         };
         save_state(&paths, &state).unwrap();
         assert_eq!(load_state(&paths), Some(state));
