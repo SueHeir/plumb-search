@@ -1,0 +1,43 @@
+[package]
+name = "plumb-net"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow = "1.0.104"
+futures = "0.3"
+libp2p = { version = "0.57.0", features = [
+    "autonat",
+    "cbor",
+    "dcutr",
+    "dns",
+    "ed25519",
+    "gossipsub",
+    "identify",
+    "kad",
+    "macros",
+    "noise",
+    "ping",
+    "quic",
+    "relay",
+    "request-response",
+    "serde",
+    "tcp",
+    "tokio",
+    "upnp",
+    "mdns",
+    "yamux",
+] }
+plumb-core = { version = "0.1.0", path = "../plumb-core" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+rand_core = { version = "0.6", features = ["getrandom"] }
+sha2 = "0.10"
+tokio = { version = "1.53.1", features = ["full"] }
+tracing = "0.1.44"
+
+[dev-dependencies]
+tempfile = "3.27.0"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }

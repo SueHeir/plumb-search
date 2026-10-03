@@ -747,6 +747,7 @@ mod tests {
             downloaded_today: 0,
             downloaded_total: 0,
             homepages_visited: 0,
+            network: None,
         }
     }
 
