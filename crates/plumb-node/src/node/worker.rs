@@ -31,7 +31,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{bail, Context, Result};
 use plumb_core::{now_unix, SiteRecord};
-use plumb_crawl::{crawl_homepages, CrawlConfig, CrawlOutcome, CrawlResult};
+use plumb_crawl::{crawl_homepages, CrawlConfig, CrawlOutcome, CrawlResult, CrawlTarget};
 use plumb_index::build_index;
 use plumb_ingest::{
     attach_facts, download, facts, kind_sites, load_cc_domain_ranks, load_site_facts, load_tranco,
@@ -44,7 +44,7 @@ use super::network::{self, REBUILD_AFTER_RECORDS};
 use super::store::{self, SavedState};
 use super::{Inner, NodeConfig, ServingIndex, Step, Stopped};
 use crate::crawl::{
-    crawl_in_batches, select_targets_with, RunEnd, CRAWL_BATCH_SIZE, SECONDS_PER_DAY,
+    crawl_in_batches, select_targets_with, target_for, RunEnd, CRAWL_BATCH_SIZE, SECONDS_PER_DAY,
 };
 use crate::icons::IconStore;
 use crate::records::{load_records, replace_records, RecordStore};
@@ -54,6 +54,15 @@ use crate::web::{duration_words, group_thousands};
 /// with `plumb crawl --skip-crawled-within-days 30`. Sites that could not
 /// be reached are retried sooner (see [`crate::crawl`]).
 const RECRAWL_AFTER_DAYS: u64 = 30;
+
+/// Disputed sites (see `plumb_net::agree`) a crawl round fetches at most,
+/// first, out of the round's homepages.
+const MAX_RECHECKS_PER_ROUND: usize = 100;
+
+/// A disputed site this node fetched less than this long ago is not
+/// fetched again yet: its crawl is on its way to the other nodes, or the
+/// site did not answer.
+const RECHECK_AGAIN_AFTER_SECS: u64 = SECONDS_PER_DAY;
 
 /// Seed downloads younger than this are reused when setup is tried again.
 const SEED_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
@@ -633,13 +642,39 @@ fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Option<ServingIndex
         net.as_ref()
             .is_none_or(|net| net.is_assigned(&record.domain, now))
     });
+    // Sites whose crawlers disagree are fetched whether assigned or not:
+    // this node's own crawl settles the dispute (see plumb_net::agree).
+    let rechecks: Vec<CrawlTarget> = match &net {
+        Some(net) => handle
+            .block_on(net.rechecks(MAX_RECHECKS_PER_ROUND))
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|domain| set.get(domain))
+            .filter(|record| {
+                record
+                    .crawled_at
+                    .max(record.crawl_attempted_at)
+                    .is_none_or(|last| last + RECHECK_AGAIN_AFTER_SECS <= now)
+            })
+            .map(target_for)
+            .collect(),
+        None => Vec::new(),
+    };
+    let candidates =
+        candidates.filter(|record| !rechecks.iter().any(|target| target.domain == record.domain));
     // Sites crawled before nodes kept icons are due again for theirs.
     let icons = IconStore::new(&inner.paths.icons);
     let noted = icons.noted();
-    let targets = select_targets_with(candidates, left, now, window, |record| {
-        last_crawl_answered(record) && !noted.contains(&record.domain)
-    });
+    let rest = select_targets_with(
+        candidates,
+        left.saturating_sub(rechecks.len()),
+        now,
+        window,
+        |record| last_crawl_answered(record) && !noted.contains(&record.domain),
+    );
     drop(noted);
+    let mut targets = rechecks;
+    targets.extend(rest);
     if targets.is_empty() {
         info!("no homepage is due for a crawl");
     } else {

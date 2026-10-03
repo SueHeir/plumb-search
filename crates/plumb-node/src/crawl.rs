@@ -225,7 +225,7 @@ fn by_score(a: &(f32, &SiteRecord), b: &(f32, &SiteRecord)) -> std::cmp::Orderin
 /// The homepage of `record` to fetch: `https://<domain>/`, falling back to
 /// the record's `url` (where the homepage was last reached, after
 /// redirects) when that gets no answer.
-fn target_for(record: &SiteRecord) -> CrawlTarget {
+pub(crate) fn target_for(record: &SiteRecord) -> CrawlTarget {
     CrawlTarget {
         known_url: record.url.clone(),
         ..CrawlTarget::new(&record.domain)

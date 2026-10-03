@@ -26,7 +26,7 @@ plumbsearch.org {
 	# The node's public pages: search, its JSON API, private search (the
 	# browser fetches buckets and ranks them itself) and network search.
 	# Its dashboard (/app) stays private to the server.
-	@node path /search /api/search /api/status /opensearch.xml /private /private/* /api/buckets /api/buckets/* /network /api/network/search
+	@node path /search /api/search /api/status /opensearch.xml /private /private/* /api/buckets /api/buckets/* /network /api/network/search /api/oblivious/targets /api/oblivious/forward/*
 	handle @node {
 		reverse_proxy 127.0.0.1:8080
 	}
