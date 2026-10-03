@@ -171,6 +171,11 @@ pub struct RunArgs {
     /// Do not look for other Plumb nodes on the local network (mDNS).
     #[arg(long, requires = "network")]
     pub no_local_discovery: bool,
+    /// A node (by its id, 12D3Koo...) whose crawls this node takes in as
+    /// soon as it signs them, without waiting for a second crawler to
+    /// agree. Other nodes' crawls still need agreement. May be repeated.
+    #[arg(long = "trust-peer", value_name = "PEER_ID", requires = "network")]
+    pub trust_peer: Vec<plumb_net::PeerId>,
     /// Offer private search at /private: browsers fetch groups of sites
     /// (buckets) and rank them themselves, so this node never sees what
     /// they search for. Each index also gets its buckets, about as much
