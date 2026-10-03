@@ -114,6 +114,66 @@ everything in it.
 
 ## Settings
 
+Open `/app` for the same organized node panel used by the desktop app:
+Overview, Search & browser, Resources, Network & privacy, and About.
+Network statistics reflect the live node, including peers, crawl agreement,
+popularity reports, and relay activity. Forms do not reload while being edited.
+
+The panel keeps the existing local-only write policy: remote connections
+see disabled controls and an explanation. Docker bridge networking can make
+even a host-local browser appear remote to the container. For those deployments,
+configure the node on the host with the startup flags below, or place
+`features.json` in the mounted data directory while the node is stopped:
+
+```json
+{
+  "network": true,
+  "search_by_meaning": false,
+  "private_search": true,
+  "share_popularity": false,
+  "bootstrap": []
+}
+```
+
+Feature choices in this file override startup feature flags and take effect
+on the next start (`docker compose restart`). Network transport, public
+addresses, relay, UPnP, and discovery flags are preserved. With no bootstrap
+addresses, a newly enabled network relies on local discovery; add a reachable
+node's multiaddress for remote peers. Remove `features.json` while stopped to
+use only startup flags again. Resource limits stay in `settings.json` and
+apply immediately when saved through a local panel.
+
+### Control it from the desktop app
+
+The desktop app can show and change this node's settings from another
+computer. Remote control is off until you turn it on, on the node's host:
+
+```sh
+docker exec plumb plumb remote-control on
+```
+
+It prints a token, once. In the desktop app, choose **+ Connect to a node**
+above the panel and enter the node's address (such as
+`http://192.168.1.20:8080`) and the token. The app then shows the node next
+to **This computer**, with the same Overview, Search & browser, Resources and
+Network & privacy sections, and its forms change the node: resource limits at
+once, features after `docker compose restart`.
+
+The token can read the node's status and change its settings, features and
+refreshes, nothing else. The node keeps only its SHA-256 hash, in
+`/data/remote-control.json`. It is taken only from the host itself, local
+networks (including Docker's bridge and Tailscale) and requests straight to
+the node: requests from public addresses or through a reverse proxy (with a
+`Forwarded` or `X-Forwarded-For` header) are refused. So putting the node
+behind a proxy on the internet does not expose remote control.
+`remote-control on --allow-public` lifts that limit; only use it with HTTPS
+in front of the node, since the token is sent with every request.
+
+`plumb remote-control on` again makes a new token and stops the old one
+working; `plumb remote-control off` turns remote control off, and
+`plumb remote-control status` says which it is. Both take effect at once.
+
+
 Settings are flags of `plumb run`. The image's default command is
 `run --data /data --bind 0.0.0.0:8080`, and a command you set replaces all of
 it, so keep those two flags. In `docker-compose.yml`:
