@@ -221,6 +221,16 @@ fn two_nodes_exchange_crawls_and_searches() {
             "--no-upnp",
         ]
     };
+    // Kept off the real network: no default bootstrap or trusted nodes, in
+    // images whose `plumb run` has them.
+    let help = plumb_e2e::docker(&["run", "--rm", &plumb_e2e::image(), "run", "--help"]);
+    let mut common = common.to_vec();
+    for flag in ["--no-default-bootstrap", "--no-default-trust"] {
+        if help.contains(flag) {
+            common.push(flag);
+        }
+    }
+    let common = common.as_slice();
     let mut first = Node::new("first", Some(&network), common);
     if !real {
         first.seed_from_fixtures();
