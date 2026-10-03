@@ -86,9 +86,11 @@ use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
 use crate::country::HomeCountry;
+use crate::meaning::SharedMeaning;
 use crate::web::{self, IndexBackend, SearchBackend, StatusSource};
 use crate::websearch::{Engine, WebSettings};
 
+mod embedding;
 mod network;
 mod store;
 mod worker;
@@ -137,6 +139,11 @@ pub struct NodeConfig {
     pub country: HomeCountry,
     /// The web search engine the results page links to; `None` for no link.
     pub web_search: Option<Engine>,
+    /// Rank by meaning too, for searches that name no site: the node
+    /// downloads a small embedding model into `DIR/model` (about 130 MB)
+    /// and keeps a vector of each site's text in `DIR/vectors.bin`, made in
+    /// the background after each index build, best-ranked sites first.
+    pub search_by_meaning: bool,
     /// Where the seed data is downloaded from on first start.
     pub sources: SeedSources,
     /// How long to wait before trying failed work again. The wait doubles
@@ -148,6 +155,15 @@ pub struct NodeConfig {
     /// their searches (see [`network`]). Its `dir` is replaced with
     /// `DIR/net`. `None`, the default for now, keeps the node on its own.
     pub network: Option<plumb_net::NetConfig>,
+    /// Serve private search (`/private`): browsers fetch buckets of sites
+    /// and rank them themselves, so the node never sees their searches.
+    /// Each index build also writes its buckets, which take about as much
+    /// disk as the records file. Off by default.
+    pub private_search: bool,
+    /// Share which result people open for a search, anonymously, so the
+    /// network learns what is popular (see [`network`]). Needs `network`.
+    /// Off by default.
+    pub share_popularity: bool,
     /// The settings until someone changes them on the panel, which saves
     /// them in `DIR/settings.json`.
     pub settings: NodeSettings,
@@ -169,10 +185,13 @@ impl NodeConfig {
             alpha: None,
             country: HomeCountry::Auto,
             web_search: None,
+            search_by_meaning: false,
             sources: SeedSources::default(),
             retry_wait: Duration::from_secs(10 * 60),
             max_retry_wait: Duration::from_secs(6 * 60 * 60),
             network: None,
+            private_search: false,
+            share_popularity: false,
             settings: NodeSettings::default(),
         }
     }
@@ -204,6 +223,9 @@ impl NodeConfig {
     fn check(&self) -> Result<()> {
         if self.sites == 0 {
             bail!("sites must be at least 1");
+        }
+        if self.share_popularity && self.network.is_none() {
+            bail!("sharing popularity needs the network");
         }
         if let Some(alpha) = self.alpha {
             if !(0.0..=1.0).contains(&alpha) {
@@ -433,6 +455,7 @@ pub struct NodeHandle {
     stop: watch::Sender<bool>,
     server: JoinHandle<std::io::Result<()>>,
     worker: JoinHandle<()>,
+    embedding: Option<JoinHandle<()>>,
 }
 
 impl NodeHandle {
@@ -474,6 +497,7 @@ impl NodeHandle {
             stop,
             mut server,
             worker,
+            embedding,
             ..
         } = self;
         info!("stopping the node in {}", inner.paths.data.display());
@@ -493,6 +517,11 @@ impl NodeHandle {
             }
         };
         let worked = worker.await.context("the background work failed");
+        if let Some(embedding) = embedding {
+            if let Err(err) = embedding.await {
+                warn!("search by meaning failed: {err}");
+            }
+        }
         network::stop(&inner).await;
         // Only now may another node take over the data directory.
         drop(
@@ -556,6 +585,10 @@ pub async fn start(config: NodeConfig) -> Result<NodeHandle> {
         warn!("{err:#}");
     }
     let worker = tokio::spawn(worker::run(inner.clone()));
+    let embedding = inner.config.search_by_meaning.then(|| {
+        let inner = inner.clone();
+        tokio::task::spawn_blocking(move || embedding::run(inner))
+    });
     info!(
         "serving http://{addr}/ with data in {}",
         inner.paths.data.display()
@@ -566,6 +599,7 @@ pub async fn start(config: NodeConfig) -> Result<NodeHandle> {
         stop,
         server,
         worker,
+        embedding,
     })
 }
 
@@ -671,9 +705,15 @@ struct Inner {
     inbox_records: std::sync::atomic::AtomicU64,
     /// Held while the inbox is appended to or moved aside.
     inbox_lock: Mutex<()>,
+    /// Set once the index was rebuilt to add missing buckets.
+    buckets_rebuilt: AtomicBool,
+    /// The results opened this week, when sharing popularity.
+    picks: Mutex<Option<plumb_net::PickLog>>,
     settings: Mutex<NodeSettings>,
     /// The last count of the data folder's size, and when it was made.
     disk: Mutex<Option<(std::time::Instant, u64)>>,
+    /// The model and vectors of search by meaning, once loaded.
+    meaning: SharedMeaning,
 }
 
 /// The failures to download Wikidata's official websites, which have their
@@ -725,8 +765,11 @@ impl Inner {
             net: std::sync::OnceLock::new(),
             inbox_records: std::sync::atomic::AtomicU64::new(0),
             inbox_lock: Mutex::new(()),
+            buckets_rebuilt: AtomicBool::new(false),
+            picks: Mutex::new(None),
             settings: Mutex::new(opened.settings),
             disk: Mutex::new(None),
+            meaning: SharedMeaning::default(),
         }
     }
 
@@ -1049,12 +1092,13 @@ impl fmt::Debug for Inner {
 
 impl SearchBackend for Inner {
     fn search(&self, query: &str, limit: usize) -> Result<Vec<Hit>> {
-        let Some(index) = self.current() else {
-            bail!("the search index is not ready yet");
-        };
-        index.backend().search(query, limit)
+        Ok(self
+            .search_full(query, limit, &SearchOptions::default())?
+            .hits)
     }
 
+    /// The index's results, re-ranked with what the network's popularity
+    /// reports say people pick for the query (see [`network`]).
     fn search_full(
         &self,
         query: &str,
@@ -1064,7 +1108,20 @@ impl SearchBackend for Inner {
         let Some(index) = self.current() else {
             bail!("the search index is not ready yet");
         };
-        index.backend().search_full(query, limit, options)
+        let meaning = self.meaning.get();
+        let Some(table) = network::handle(self).map(|net| net.popularity()) else {
+            return index
+                .backend()
+                .search_full_with(query, limit, options, meaning.as_deref());
+        };
+        let candidates = limit.max(network::POPULARITY_CANDIDATES);
+        let mut results =
+            index
+                .backend()
+                .search_full_with(query, candidates, options, meaning.as_deref())?;
+        network::apply_popularity(&table, query, &mut results.hits);
+        results.hits.truncate(limit);
+        Ok(results)
     }
 
     fn num_docs(&self) -> u64 {
@@ -1083,6 +1140,32 @@ impl StatusSource for Inner {
 
     fn rank(&self) -> RankConfig {
         self.rank
+    }
+
+    fn bucket_table(&self) -> Option<String> {
+        if !self.config.private_search {
+            return None;
+        }
+        let index = self.current()?;
+        index.buckets.as_ref()?;
+        index.bucket_table.clone()
+    }
+
+    fn bucket(&self, table: &str, bucket: u32) -> Option<Result<Vec<String>>> {
+        if !self.config.private_search {
+            return None;
+        }
+        let index = self.current()?;
+        let buckets = index.buckets.as_ref()?;
+        (index.bucket_table.as_deref() == Some(table)).then(|| buckets.get(bucket))
+    }
+
+    fn shares_popularity(&self) -> bool {
+        network::shares_popularity(self)
+    }
+
+    fn record_pick(&self, query: &str, domain: &str) {
+        network::record_pick(self, query, domain);
     }
 
     fn settings(&self) -> Option<NodeSettings> {
@@ -1113,8 +1196,12 @@ struct ServingIndex {
     /// Set once the index files are closed and may be deleted.
     closed: Arc<AtomicBool>,
     /// The index's buckets, which other nodes search (`indexes/NNNNNN/buckets/`);
-    /// only built by a node in the network.
+    /// only built by a node in the network or serving private search.
     buckets: Option<plumb_net::BucketTable>,
+    /// Names [`ServingIndex::buckets`] for browsers: the index id and a hash
+    /// of the bucket index, so a cached bucket is never taken for one of
+    /// another index, even after the data directory is started over.
+    bucket_table: Option<String>,
 }
 
 impl ServingIndex {
@@ -1127,6 +1214,7 @@ impl ServingIndex {
             backend: Some(IndexBackend::new(searcher, rank)),
             closed: Arc::new(AtomicBool::new(false)),
             buckets: plumb_net::BucketTable::open(&dir.join(network::BUCKETS_DIR)).ok(),
+            bucket_table: network::bucket_table_name(id, dir),
         })
     }
 

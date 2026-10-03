@@ -140,6 +140,10 @@ pub struct RankConfig {
     /// that country and taken off sites of any other country. Sites that
     /// belong to no country (most `.com`s) are left alone.
     pub country_boost: f32,
+    /// With a [`Meaning`] and a query that no site is named by in full,
+    /// the share of the text match that comes from how close each site is
+    /// in meaning; the words matched give the rest.
+    pub meaning_weight: f32,
 }
 
 impl Default for RankConfig {
@@ -153,8 +157,20 @@ impl Default for RankConfig {
             untrusted_share: 0.5,
             kind_bonus: 0.25,
             country_boost: 0.06,
+            meaning_weight: 0.7,
         }
     }
+}
+
+/// How close in meaning a query is to sites, from embeddings of the query
+/// and of each site's text: for queries that describe what they look for
+/// ("electric car maker") rather than name it.
+pub trait Meaning {
+    /// Domains of the sites nearest the query in meaning, nearest first.
+    fn nearest(&self) -> Vec<String>;
+    /// How close the site of `domain` is to the query, in `0..=1`; `None`
+    /// for a site with no embedding.
+    fn closeness(&self, domain: &str) -> Option<f32>;
 }
 
 /// What [`build_index`] built. Every record is a document, merged into
@@ -427,6 +443,22 @@ impl Searcher {
         cfg: &RankConfig,
         options: &SearchOptions,
     ) -> Result<SearchResults> {
+        self.search_meaning(query_text, limit, cfg, options, None)
+    }
+
+    /// [`Searcher::search_full`], also ranking by `meaning` when no site is
+    /// named by the whole query and the query names no kind of site: the
+    /// sites [`Meaning::nearest`] the query are re-ranked too, and
+    /// [`RankConfig::meaning_weight`] of every text match is how close the
+    /// site is in meaning. Queries that name a site rank as without it.
+    pub fn search_meaning(
+        &self,
+        query_text: &str,
+        limit: usize,
+        cfg: &RankConfig,
+        options: &SearchOptions,
+        meaning: Option<&dyn Meaning>,
+    ) -> Result<SearchResults> {
         if limit == 0 {
             return Ok(SearchResults::default());
         }
@@ -456,10 +488,25 @@ impl Searcher {
             )?,
             None => HashSet::new(),
         };
+        // Meaning helps with queries that describe a site, not with names.
+        let named_in_full = !kinds.is_empty() || names.values().any(|n| n.words() >= query.len);
+        let meaning = meaning.filter(|_| !named_in_full);
+        let nearest = match meaning {
+            Some(meaning) => {
+                let domains = meaning
+                    .nearest()
+                    .into_iter()
+                    .map(|domain| Term::from_field_text(self.fields.domain, &domain))
+                    .collect();
+                matching_docs(&searcher, domains)?
+            }
+            None => HashSet::new(),
+        };
         let known: HashSet<DocAddress> = candidates.iter().map(|&(_, addr)| addr).collect();
         let mut unranked: Vec<DocAddress> = names
             .keys()
             .chain(kinds.iter())
+            .chain(nearest.iter())
             .filter(|addr| !known.contains(addr))
             .copied()
             .collect();
@@ -506,6 +553,7 @@ impl Searcher {
         let trusted_link_score =
             unit_or(cfg.trusted_link_score, default.trusted_link_score).min(named_link_score);
         let query_words = query.len as f32;
+        let meaning_weight = unit_or(cfg.meaning_weight, default.meaning_weight);
 
         let max_bm25 = candidates.iter().map(|&(bm25, _)| bm25).fold(0.0, f32::max);
         let mut ranked: Vec<Ranked> = Vec::with_capacity(candidates.len());
@@ -528,10 +576,23 @@ impl Searcher {
                 // decides, so aa.com wins "american airlines" over
                 // americanairlines.com.
                 1.0
-            } else if max_bm25 > 0.0 {
-                (bm25 / max_bm25).clamp(0.0, 1.0)
             } else {
-                0.0
+                let words = if max_bm25 > 0.0 {
+                    (bm25 / max_bm25).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                match meaning {
+                    Some(meaning) => {
+                        let closeness = column
+                            .domain(addr.doc_id)
+                            .and_then(|domain| meaning.closeness(&domain))
+                            .unwrap_or(0.0)
+                            .clamp(0.0, 1.0);
+                        (1.0 - meaning_weight) * words + meaning_weight * closeness
+                    }
+                    None => words,
+                }
             };
             let mut name_bonus = (cfg.exact_label_bonus * name.label as f32 / query_words)
                 .max(cfg.exact_alias_bonus * name.alias as f32 / query_words);
@@ -691,6 +752,14 @@ struct Columns {
 }
 
 impl Columns {
+    fn domain(&self, doc: tantivy::DocId) -> Option<String> {
+        let domains = self.domains.as_ref()?;
+        let ord = domains.term_ords(doc).next()?;
+        let mut domain = String::new();
+        domains.ord_to_str(ord, &mut domain).ok()?;
+        Some(domain)
+    }
+
     fn country(&self, doc: tantivy::DocId) -> Option<String> {
         let countries = self.countries.as_ref()?;
         let ord = countries.term_ords(doc).next()?;
@@ -1184,6 +1253,83 @@ mod tests {
             Some("American credit union"),
             "{hits:?}"
         );
+    }
+
+    /// A [`Meaning`] with fixed closeness per domain.
+    struct FixedMeaning(Vec<(&'static str, f32)>);
+
+    impl Meaning for FixedMeaning {
+        fn nearest(&self) -> Vec<String> {
+            self.0
+                .iter()
+                .map(|(domain, _)| domain.to_string())
+                .collect()
+        }
+
+        fn closeness(&self, domain: &str) -> Option<f32> {
+            self.0
+                .iter()
+                .find(|(d, _)| *d == domain)
+                .map(|&(_, closeness)| closeness)
+        }
+    }
+
+    #[test]
+    fn meaning_finds_described_sites_but_leaves_names_alone() {
+        let records = vec![
+            site(
+                "tesla.com",
+                None,
+                None,
+                &["Tesla"],
+                &[],
+                popular(500, 20_000),
+            ),
+            site(
+                "rivian.com",
+                None,
+                None,
+                &["Rivian"],
+                &[],
+                popular(9_000, 3_000),
+            ),
+            site("electric.com", None, None, &[], &[], ranked(40_000, 200)),
+            site("carmaker.net", None, None, &[], &[], ranked(90_000, 50)),
+        ];
+        let (_dir, searcher) = build(&records);
+        let cfg = RankConfig::default();
+        let options = SearchOptions::default();
+        let meaning = FixedMeaning(vec![
+            ("tesla.com", 0.9),
+            ("rivian.com", 0.85),
+            ("electric.com", 0.2),
+        ]);
+        let search = |query: &str, meaning: Option<&dyn Meaning>| {
+            let results = searcher
+                .search_meaning(query, 10, &cfg, &options, meaning)
+                .unwrap();
+            results
+                .hits
+                .into_iter()
+                .map(|hit| hit.domain)
+                .collect::<Vec<_>>()
+        };
+        // Without meaning, the words win; tesla.com and rivian.com share
+        // none with the query.
+        let by_words = search("electric car maker", None);
+        assert_eq!(by_words.first().map(String::as_str), Some("electric.com"));
+        assert!(!by_words.contains(&"tesla.com".to_string()), "{by_words:?}");
+        // With it, the sites the query describes come first.
+        let by_meaning = search("electric car maker", Some(&meaning));
+        assert_eq!(
+            &by_meaning[..2],
+            ["tesla.com", "rivian.com"],
+            "{by_meaning:?}"
+        );
+        // A query naming a site is ranked as before.
+        let named = FixedMeaning(vec![("tesla.com", 1.0)]);
+        assert_eq!(search("rivian", Some(&named))[0], "rivian.com");
+        assert_eq!(search("rivian", Some(&named)).len(), 1);
     }
 
     /// Short official domains and the spelled-out or one-word domains that

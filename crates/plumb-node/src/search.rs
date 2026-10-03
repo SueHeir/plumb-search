@@ -7,6 +7,7 @@ use plumb_core::truncate_chars;
 use plumb_index::{build_index, Hit, SearchOptions, Searcher};
 
 use crate::cli::{IndexArgs, SearchArgs};
+use crate::meaning::MeaningIndex;
 use crate::rank_config;
 use crate::records::load_records;
 
@@ -36,7 +37,17 @@ pub fn run_search(args: SearchArgs) -> Result<()> {
         country: args.country.clone(),
         only_country: args.only_country,
     };
-    let results = searcher.search_full(&query, args.limit, &rank_config(args.alpha), &options)?;
+    let meaning = MeaningIndex::from_args(&args.meaning)?;
+    let query_meaning = meaning.as_ref().and_then(|meaning| meaning.query(&query));
+    let results = searcher.search_meaning(
+        &query,
+        args.limit,
+        &rank_config(args.alpha),
+        &options,
+        query_meaning
+            .as_ref()
+            .map(|m| m as &dyn plumb_index::Meaning),
+    )?;
     if args.json {
         println!("{}", serde_json::to_string_pretty(&results.hits)?);
     } else {

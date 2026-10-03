@@ -68,8 +68,9 @@ pub fn kind_sites_query(label: &str) -> String {
 /// Asks the SPARQL `endpoint` for the official websites of every item of
 /// each of [`KIND_LABELS`], one query per kind with `pacing.pause` between
 /// them, and writes `dir/`[`KIND_SITES_FILE_NAME`]. A kind whose query
-/// fails is left out with a warning; the download fails only when every
-/// kind does, leaving any earlier file in place.
+/// fails is left out with a warning, and the rows of any earlier file are
+/// kept, so its sites of that kind are not lost; the download fails only
+/// when every kind does, leaving any earlier file in place.
 pub async fn download_kind_sites(
     client: &reqwest::Client,
     endpoint: &str,
@@ -118,6 +119,17 @@ pub async fn download_kind_sites(
         .await
         .with_context(|| format!("creating {}", dir.display()))?;
     let dest = dir.join(KIND_SITES_FILE_NAME);
+    if !failed.is_empty() {
+        // The rows carry no kind, so keep all of the earlier ones.
+        if let Ok(earlier) = tokio::fs::read_to_string(&dest).await {
+            for row in earlier.lines().skip(1) {
+                if !row.is_empty() && seen.insert(row.to_string()) {
+                    tsv.push_str(row);
+                    tsv.push('\n');
+                }
+            }
+        }
+    }
     let part = part_path(&dest);
     tokio::fs::write(&part, tsv.as_bytes())
         .await
@@ -141,7 +153,79 @@ pub async fn download_kind_sites(
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
     use super::*;
+
+    /// A SPARQL endpoint that fails every query for banks and answers the
+    /// others with one site named after the query's kind.
+    async fn banks_fail() -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/sparql", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut request = Vec::new();
+                let mut buf = [0u8; 4096];
+                // Read until the form body, which ends the request, is in.
+                while !String::from_utf8_lossy(&request).contains("%7D+%7D") {
+                    match socket.read(&mut buf).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => request.extend_from_slice(&buf[..n]),
+                    }
+                }
+                let request = String::from_utf8_lossy(&request).replace('+', " ");
+                let kind = KIND_LABELS
+                    .iter()
+                    .find(|label| request.contains(&format!("%22{label}%22")))
+                    .copied()
+                    .unwrap_or("unknown");
+                let response = if kind == "bank" {
+                    "HTTP/1.1 500 Oops\r\ncontent-length: 0\r\n\r\n".to_string()
+                } else {
+                    let slug = kind.replace(' ', "-");
+                    let body = format!(
+                        r#"{{"results":{{"bindings":[{{"item":{{"value":"http://www.wikidata.org/entity/Q1"}},"itemLabel":{{"value":"A {kind}"}},"website":{{"value":"https://{slug}.example/"}}}}]}}}}"#
+                    );
+                    format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/sparql-results+json\r\n\
+                         content-length: {}\r\n\r\n{body}",
+                        body.len()
+                    )
+                };
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.shutdown().await;
+            }
+        });
+        url
+    }
+
+    #[tokio::test]
+    async fn a_failed_kind_keeps_its_earlier_sites() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join(KIND_SITES_FILE_NAME);
+        std::fs::write(
+            &dest,
+            "item\tlabel\twebsite\nQ9\tFirst Bank\thttps://firstbank.example/\n",
+        )
+        .unwrap();
+        let pacing = WikidataPacing {
+            pause: Duration::ZERO,
+            retry_wait: Duration::from_millis(1),
+        };
+        let client = reqwest::Client::new();
+        let path = download_kind_sites(&client, &banks_fail().await, dir.path(), pacing)
+            .await
+            .unwrap();
+        let text = std::fs::read_to_string(path).unwrap();
+        assert!(text.contains("https://airline.example/"), "{text}");
+        assert!(
+            text.contains("Q9\tFirst Bank\thttps://firstbank.example/\n"),
+            "{text}"
+        );
+        assert_eq!(text.matches("https://firstbank.example/").count(), 1);
+    }
 
     #[test]
     fn the_query_finds_the_kind_by_label() {

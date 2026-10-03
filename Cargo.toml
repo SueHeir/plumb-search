@@ -5,8 +5,10 @@ members = [
     "crates/plumb-ingest",
     "crates/plumb-crawl",
     "crates/plumb-index",
+    "crates/plumb-embed",
     "crates/plumb-net",
     "crates/plumb-node",
+    "crates/plumb-private",
     "crates/plumb-desktop",
 ]
 # Plain `cargo build` and `cargo test` leave out the desktop app, which needs
@@ -16,8 +18,10 @@ default-members = [
     "crates/plumb-ingest",
     "crates/plumb-crawl",
     "crates/plumb-index",
+    "crates/plumb-embed",
     "crates/plumb-net",
     "crates/plumb-node",
+    "crates/plumb-private",
 ]
 
 [workspace.package]
@@ -25,3 +29,13 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/SueHeir/plumb-search"
+
+# The private search page's WebAssembly (crates/plumb-private), built small
+# because every visitor downloads it: `--profile wasm`.
+[profile.wasm]
+inherits = "release"
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

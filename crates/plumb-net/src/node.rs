@@ -34,10 +34,16 @@
 //!   [`crate::bucket`] and [`crate::search`]). The node answers other
 //!   nodes' bucket requests from its own [`BucketSource`], with a proof for
 //!   every site it holds a signed crawl of.
+//! * Popularity sharing: [`NetHandle::send_report`] hands a popularity
+//!   report to another node under a throwaway identity. A node handed a
+//!   report keeps it and passes it on over the gossip topic, so every node
+//!   holds every report and counts them itself into the table
+//!   [`NetHandle::popularity`] returns (see [`crate::popularity`]). On
+//!   meeting a node, it asks for the reports of this week and last week.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -63,7 +69,13 @@ use crate::assign::{epoch_of, is_assigned, MAX_SHARE_PPM};
 use crate::batch::{accept_batch, Batch, SignedHeader};
 use crate::bucket::{BucketSource, BUCKETS};
 use crate::hash::Hash;
+use crate::oblivious::{
+    seal_response, Gateway, ObliviousRequest, ObliviousResponse, SignedKeys, MAX_MESSAGE,
+    OBLIVIOUS_PROTOCOL, RELAY_KEY_CACHE,
+};
+use crate::popularity::{report_epoch, PopularityTable, Report};
 use crate::proto::*;
+use crate::reports::ReportStore;
 use crate::search::{BucketPeer, NetSearch};
 use crate::store::BatchStore;
 
@@ -77,7 +89,15 @@ pub const TARGET_PEERS: usize = 8;
 const MAX_FETCHES: usize = 16;
 /// Bucket requests answered at once; more are turned away.
 const MAX_ANSWERING: usize = 8;
+/// Requests passed on for others at once (see [`crate::oblivious`]).
+const MAX_RELAYING: usize = 32;
 const RELAY_HOP_PROTOCOL: &str = "/libp2p/circuit/relay/0.2.0/hop";
+/// Nodes a report is offered to, one after the other, until one takes it.
+pub const REPORT_TRIES: usize = 3;
+/// Minutes between two recounts of the reports, when new ones came in.
+pub const RECOUNT_MINUTES: u64 = 10;
+/// Where the counted reports are written, for anyone curious.
+const POPULARITY_FILE: &str = "popularity.json";
 
 /// How a node joins the network.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -149,8 +169,16 @@ pub struct NetStatus {
     pub batches_received: u64,
     /// Crawls waiting for a second crawler, and crawlers no longer counted.
     pub agreement: AgreementStatus,
-    /// Bucket requests from other nodes answered.
+    /// Bucket requests from other nodes answered, sealed ones included.
     pub buckets_served: u64,
+    /// Popularity reports held, this week's and last week's.
+    pub reports_held: usize,
+    /// Popularity reports this node sent.
+    pub reports_sent: u64,
+    /// Picks that enough reports were sent of to be read.
+    pub popular_picks: usize,
+    /// Sealed bucket requests passed on for others, as their relay.
+    pub requests_relayed: u64,
 }
 
 /// Talks to the swarm task.
@@ -160,7 +188,15 @@ pub struct NetHandle {
     share_ppm: u32,
     commands: mpsc::UnboundedSender<Command>,
     status: Arc<Mutex<NetStatus>>,
+    popularity: Arc<RwLock<Arc<PopularityTable>>>,
     task: Mutex<Option<JoinHandle<()>>>,
+}
+
+/// Which connected nodes a [`Command::Peers`] asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Serving {
+    Buckets,
+    Reports,
 }
 
 enum Command {
@@ -168,7 +204,9 @@ enum Command {
         records: Vec<SiteRecord>,
         reply: oneshot::Sender<Result<Option<Hash>>>,
     },
-    Peers(oneshot::Sender<Vec<BucketPeer>>),
+    Peers(Serving, oneshot::Sender<Vec<BucketPeer>>),
+    Recount(oneshot::Sender<Arc<PopularityTable>>),
+    Oblivious(ObliviousRequest, oneshot::Sender<ObliviousResponse>),
     Dial(Multiaddr),
     Stop,
 }
@@ -205,9 +243,89 @@ impl NetHandle {
     /// that match, checked but unranked (see [`crate::search`]).
     pub async fn search(&self, query: &str, wait: Duration) -> Result<NetSearch> {
         let (reply, peers) = oneshot::channel();
-        self.send(Command::Peers(reply))?;
+        self.send(Command::Peers(Serving::Buckets, reply))?;
         let peers = peers.await.context("the network task stopped")?;
         Ok(crate::search::search(query, &peers, wait, now_unix()).await)
+    }
+
+    /// Hands `report` to another node under a throwaway identity, trying
+    /// up to [`REPORT_TRIES`] nodes at random, each for at most `wait`.
+    /// That node keeps it and passes it on to the rest.
+    pub async fn send_report(&self, report: &Report, wait: Duration) -> Result<()> {
+        let (reply, peers) = oneshot::channel();
+        self.send(Command::Peers(Serving::Reports, reply))?;
+        let mut peers = peers.await.context("the network task stopped")?;
+        if peers.is_empty() {
+            anyhow::bail!("no node to hand a report to yet");
+        }
+        crate::search::shuffle(&mut peers);
+        let mut last_error = None;
+        for peer in peers.iter().take(REPORT_TRIES) {
+            match crate::throwaway::submit_report(peer, report, wait).await {
+                Ok(_) => {
+                    self.status
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .reports_sent += 1;
+                    return Ok(());
+                }
+                Err(err) => {
+                    debug!("{} did not take a report: {err:#}", peer.peer);
+                    last_error = Some(err);
+                }
+            }
+        }
+        Err(last_error.expect("tried at least one node"))
+    }
+
+    /// What the reports this node holds say people pick, recounted every
+    /// [`RECOUNT_MINUTES`] minutes while new reports come in.
+    pub fn popularity(&self) -> Arc<PopularityTable> {
+        self.popularity
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Counts the reports held now rather than at the next recount.
+    pub async fn recount(&self) -> Result<Arc<PopularityTable>> {
+        let (reply, table) = oneshot::channel();
+        self.send(Command::Recount(reply))?;
+        table.await.context("the network task stopped")
+    }
+
+    /// As a relay: the key of `target`, the same one every asker gets for a
+    /// while (see [`crate::oblivious`]). This node's own for itself.
+    pub async fn oblivious_keys(&self, target: PeerId) -> Result<Option<SignedKeys>> {
+        match self.oblivious(ObliviousRequest::Keys { target }).await? {
+            ObliviousResponse::Keys(keys) => Ok(keys),
+            ObliviousResponse::Sealed(_) => Ok(None),
+        }
+    }
+
+    /// As a relay: passes `message`, a request sealed to `target`'s key, on
+    /// to it, and returns its sealed answer. Answers it itself when it is
+    /// the target. For a front end that relays for people who are not
+    /// nodes, such as a browser.
+    pub async fn oblivious_forward(
+        &self,
+        target: PeerId,
+        message: Vec<u8>,
+    ) -> Result<Option<Vec<u8>>> {
+        let message = serde_bytes::ByteBuf::from(message);
+        match self
+            .oblivious(ObliviousRequest::Forward { target, message })
+            .await?
+        {
+            ObliviousResponse::Sealed(answer) => Ok(answer.map(serde_bytes::ByteBuf::into_vec)),
+            ObliviousResponse::Keys(_) => Ok(None),
+        }
+    }
+
+    async fn oblivious(&self, request: ObliviousRequest) -> Result<ObliviousResponse> {
+        let (reply, answer) = oneshot::channel();
+        self.send(Command::Oblivious(request, reply))?;
+        answer.await.context("the network task stopped")
     }
 
     /// Dials `addr`, for tests and for adding a node by hand.
@@ -292,6 +410,8 @@ struct Behaviour {
     gossipsub: gossipsub::Behaviour,
     buckets: request_response::cbor::Behaviour<BucketRequest, BucketResponse>,
     batches: request_response::cbor::Behaviour<BatchRequest, BatchResponse>,
+    reports: request_response::cbor::Behaviour<ReportRequest, ReportResponse>,
+    oblivious: request_response::cbor::Behaviour<ObliviousRequest, ObliviousResponse>,
 }
 
 /// Starts the network side of a node. Returns its handle and the records
@@ -301,7 +421,19 @@ pub async fn start(
     source: Arc<dyn BucketSource>,
 ) -> Result<(NetHandle, mpsc::UnboundedReceiver<Vec<SiteRecord>>)> {
     let key = load_or_create_key(&config.dir.join("node.key"))?;
+    let (reports, table) = {
+        let dir = config.dir.clone();
+        tokio::task::spawn_blocking(move || {
+            let now = now_unix();
+            let reports = ReportStore::open(&dir.join("reports"), now)?;
+            let table = reports.table(now);
+            anyhow::Ok((reports, table))
+        })
+        .await
+        .context("opening the report store")??
+    };
     let peer_id = key.public().to_peer_id();
+    let gateway = Gateway::new(&key, now_unix())?;
     let (store, agreement) = {
         let dir = config.dir.join("batches");
         tokio::task::spawn_blocking(move || -> Result<_> {
@@ -327,14 +459,23 @@ pub async fn start(
         .gossipsub
         .subscribe(&topic)
         .context("subscribing to the batch topic")?;
+    let report_topic = gossipsub::IdentTopic::new(REPORT_TOPIC);
+    swarm
+        .behaviour_mut()
+        .gossipsub
+        .subscribe(&report_topic)
+        .context("subscribing to the report topic")?;
 
     let status = Arc::new(Mutex::new(NetStatus {
         peer_id: peer_id.to_string(),
         nat: "unknown".into(),
         batches_held: store.len(),
+        reports_held: reports.len(),
+        popular_picks: table.picks.len(),
         agreement: agreement.status(),
         ..NetStatus::default()
     }));
+    let popularity = Arc::new(RwLock::new(Arc::new(table)));
     let (commands, commands_rx) = mpsc::unbounded_channel();
     let (records_tx, records_rx) = mpsc::unbounded_channel();
     let (answers_tx, answers_rx) = mpsc::unbounded_channel();
@@ -344,7 +485,13 @@ pub async fn start(
         key: key.clone(),
         config: config.clone(),
         topic,
+        report_topic,
         store: Arc::new(Mutex::new(store)),
+        reports: Arc::new(Mutex::new(reports)),
+        popularity: popularity.clone(),
+        recount: false,
+        report_peers: HashMap::new(),
+        report_listing: HashSet::new(),
         source,
         status: status.clone(),
         records: records_tx,
@@ -362,6 +509,11 @@ pub async fn start(
         listing: HashSet::new(),
         unannounced: Vec::new(),
         answering: 0,
+        gateway,
+        oblivious_peers: HashSet::new(),
+        relay_keys: HashMap::new(),
+        waiting_keys: HashMap::new(),
+        relaying: HashMap::new(),
     };
     for addr in &config.bootstrap {
         task.dial(addr.clone());
@@ -373,6 +525,7 @@ pub async fn start(
             share_ppm: config.share_ppm.min(MAX_SHARE_PPM),
             commands,
             status,
+            popularity,
             task: Mutex::new(Some(handle)),
         },
         records_rx,
@@ -392,6 +545,18 @@ fn build_swarm(key: &Keypair, config: &NetConfig) -> Result<Swarm<Behaviour>> {
             (
                 StreamProtocol::new(BUCKET_PROTOCOL),
                 ProtocolSupport::Inbound,
+            )
+        })
+        .into_iter()
+        .collect();
+    // A node that answers searches also relays sealed ones for others, and
+    // answers those sealed to it (crate::oblivious).
+    let oblivious_protocols: Vec<(StreamProtocol, ProtocolSupport)> = config
+        .answer_searches
+        .then(|| {
+            (
+                StreamProtocol::new(OBLIVIOUS_PROTOCOL),
+                ProtocolSupport::Full,
             )
         })
         .into_iter()
@@ -489,6 +654,20 @@ fn build_swarm(key: &Keypair, config: &NetConfig) -> Result<Swarm<Behaviour>> {
                         .set_request_size_maximum(4 * 1024)
                         .set_response_size_maximum(64 * 1024 * 1024),
                     [(StreamProtocol::new(BATCH_PROTOCOL), ProtocolSupport::Full)],
+                    request_config.clone(),
+                ),
+                reports: request_response::Behaviour::with_codec(
+                    request_response::cbor::codec::Codec::default()
+                        .set_request_size_maximum(8 * 1024)
+                        .set_response_size_maximum(128 * 1024 * 1024),
+                    [(StreamProtocol::new(REPORT_PROTOCOL), ProtocolSupport::Full)],
+                    request_config.clone(),
+                ),
+                oblivious: request_response::Behaviour::with_codec(
+                    request_response::cbor::codec::Codec::default()
+                        .set_request_size_maximum(4 * 1024)
+                        .set_response_size_maximum(MAX_MESSAGE as u64 + 1024),
+                    oblivious_protocols,
                     request_config,
                 ),
             })
@@ -503,6 +682,24 @@ fn build_swarm(key: &Keypair, config: &NetConfig) -> Result<Swarm<Behaviour>> {
 enum Answer {
     Bucket(ResponseChannel<BucketResponse>, BucketResponse),
     Batch(ResponseChannel<BatchResponse>, BatchResponse),
+    Report(ResponseChannel<ReportResponse>, ReportResponse),
+    /// Picks counted in a recount of the reports.
+    Popularity(usize),
+    Sealed(Reply, ObliviousResponse),
+}
+
+/// Whoever waits for an answer on `/plumb/oblivious/1`: a remote node, or
+/// this node's own [`NetHandle`].
+enum Reply {
+    Remote(ResponseChannel<ObliviousResponse>),
+    Local(oneshot::Sender<ObliviousResponse>),
+}
+
+/// A request this node passed on as a relay.
+enum Relayed {
+    /// For the key of this node; the askers wait in `waiting_keys`.
+    Keys(PeerId),
+    Forward(Reply),
 }
 
 struct Task {
@@ -510,7 +707,16 @@ struct Task {
     key: Keypair,
     config: NetConfig,
     topic: gossipsub::IdentTopic,
+    report_topic: gossipsub::IdentTopic,
     store: Arc<Mutex<BatchStore>>,
+    reports: Arc<Mutex<ReportStore>>,
+    popularity: Arc<RwLock<Arc<PopularityTable>>>,
+    /// New reports came in since the last count.
+    recount: bool,
+    /// Connected nodes that take reports, and the addresses they listen on.
+    report_peers: HashMap<PeerId, Vec<Multiaddr>>,
+    /// Nodes asked for their reports this session.
+    report_listing: HashSet<PeerId>,
     source: Arc<dyn BucketSource>,
     status: Arc<Mutex<NetStatus>>,
     records: mpsc::UnboundedSender<Vec<SiteRecord>>,
@@ -539,6 +745,16 @@ struct Task {
     /// Our own headers not yet announced to anyone.
     unannounced: Vec<SignedHeader>,
     answering: usize,
+    /// This node's keys for sealed requests.
+    gateway: Gateway,
+    /// Connected nodes that relay and answer sealed requests.
+    oblivious_peers: HashSet<PeerId>,
+    /// As a relay: other nodes' keys, and when we fetched them.
+    relay_keys: HashMap<PeerId, (SignedKeys, u64)>,
+    /// As a relay: who waits for a node's keys we asked it for.
+    waiting_keys: HashMap<PeerId, Vec<Reply>>,
+    /// As a relay: requests passed on and not yet answered.
+    relaying: HashMap<OutboundRequestId, Relayed>,
 }
 
 impl Task {
@@ -573,9 +789,12 @@ impl Task {
             Command::Publish { records, reply } => {
                 let _ = reply.send(self.publish(records));
             }
-            Command::Peers(reply) => {
-                let peers = self
-                    .bucket_peers
+            Command::Peers(serving, reply) => {
+                let serving = match serving {
+                    Serving::Buckets => &self.bucket_peers,
+                    Serving::Reports => &self.report_peers,
+                };
+                let peers = serving
                     .iter()
                     .map(|(peer, listening)| {
                         let mut addrs = listening.clone();
@@ -617,14 +836,26 @@ impl Task {
                                 addrs.insert(0, first);
                             }
                         }
-                        BucketPeer { peer: *peer, addrs }
+                        BucketPeer {
+                            peer: *peer,
+                            addrs,
+                            oblivious: false,
+                        }
                     })
                     .filter(|p| !p.addrs.is_empty())
+                    .map(|mut p| {
+                        p.oblivious = self.oblivious_peers.contains(&p.peer);
+                        p
+                    })
                     .collect::<Vec<_>>();
                 for p in &peers {
-                    debug!("bucket peer {} at {:?}", p.peer, p.addrs);
+                    debug!("peer {} at {:?}", p.peer, p.addrs);
                 }
                 let _ = reply.send(peers);
+            }
+            Command::Recount(reply) => self.count_reports(Some(reply)),
+            Command::Oblivious(request, reply) => {
+                self.on_oblivious_request(request, Reply::Local(reply));
             }
             Command::Dial(addr) => self.dial(addr),
             Command::Stop => {}
@@ -694,6 +925,21 @@ impl Task {
                     .batches
                     .send_response(channel, response);
             }
+            Answer::Report(channel, response) => {
+                let _ = self
+                    .swarm
+                    .behaviour_mut()
+                    .reports
+                    .send_response(channel, response);
+            }
+            Answer::Popularity(picks) => self.with_status(|s| s.popular_picks = picks),
+            Answer::Sealed(reply, response) => {
+                self.answering = self.answering.saturating_sub(1);
+                if matches!(response, ObliviousResponse::Sealed(Some(_))) {
+                    self.with_status(|s| s.buckets_served += 1);
+                }
+                self.reply(reply, response);
+            }
         }
     }
 
@@ -706,6 +952,12 @@ impl Task {
     /// Once a minute: keep enough connections, look for more nodes, retry
     /// announcements and fetches, prune old batches.
     fn maintain(&mut self, ticks: u64) {
+        let now = now_unix();
+        if let Err(err) = self.gateway.rotate(&self.key, now) {
+            warn!("cannot make a new key for sealed requests: {err:#}");
+        }
+        self.relay_keys
+            .retain(|_, (keys, fetched)| *fetched + RELAY_KEY_CACHE > now && keys.expires > now);
         let connected = self.swarm.connected_peers().count();
         if connected == 0 {
             for addr in self.config.bootstrap.clone() {
@@ -748,8 +1000,40 @@ impl Task {
             self.agreement.prune(now);
             let agreement = self.agreement.status();
             self.with_status(|s| s.agreement = agreement);
+            self.lock_reports().prune(now);
+            // A new week makes last week's count stale.
+            self.recount = true;
+        }
+        if self.recount && ticks.is_multiple_of(RECOUNT_MINUTES) {
+            self.recount = false;
+            self.count_reports(None);
         }
         self.fetch_more();
+    }
+
+    /// Counts the reports held, off the swarm task, and saves the table.
+    fn count_reports(&self, reply: Option<oneshot::Sender<Arc<PopularityTable>>>) {
+        let reports = self.reports.clone();
+        let popularity = self.popularity.clone();
+        let path = self.config.dir.join(POPULARITY_FILE);
+        let tx = self.answers_tx.clone();
+        tokio::task::spawn_blocking(move || {
+            let table = reports
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .table(now_unix());
+            if let Err(err) = table.save(&path) {
+                warn!("cannot save the popularity table: {err:#}");
+            }
+            let picks = table.picks.len();
+            info!("counted the popularity reports: {picks} picks");
+            let table = Arc::new(table);
+            *popularity.write().unwrap_or_else(PoisonError::into_inner) = table.clone();
+            if let Some(reply) = reply {
+                let _ = reply.send(table);
+            }
+            let _ = tx.send(Answer::Popularity(picks));
+        });
     }
 
     fn on_event(&mut self, event: SwarmEvent<BehaviourEvent>) {
@@ -786,6 +1070,8 @@ impl Task {
             } => {
                 if num_established == 0 {
                     self.bucket_peers.remove(&peer_id);
+                    self.report_peers.remove(&peer_id);
+                    self.oblivious_peers.remove(&peer_id);
                     self.batch_peers.remove(&peer_id);
                     self.remote_addrs.remove(&peer_id);
                     self.reserved.remove(&peer_id);
@@ -821,7 +1107,11 @@ impl Task {
                 message_id,
                 message,
             }) => {
-                let verdict = self.on_header(propagation_source, &message.data);
+                let verdict = if message.topic == self.report_topic.hash() {
+                    self.on_gossip_report(&message.data)
+                } else {
+                    self.on_header(propagation_source, &message.data)
+                };
                 let _ = self
                     .swarm
                     .behaviour_mut()
@@ -837,6 +1127,8 @@ impl Task {
             }
             BehaviourEvent::Buckets(event) => self.on_bucket_event(event),
             BehaviourEvent::Batches(event) => self.on_batch_event(event),
+            BehaviourEvent::Reports(event) => self.on_report_event(event),
+            BehaviourEvent::Oblivious(event) => self.on_oblivious_event(event),
             BehaviourEvent::RelayClient(relay::client::Event::ReservationReqAccepted {
                 relay_peer_id,
                 renewal,
@@ -952,6 +1244,27 @@ impl Task {
                 .collect();
             self.bucket_peers.insert(peer, addrs);
         }
+        if supports(REPORT_PROTOCOL) {
+            let addrs = info
+                .listen_addrs
+                .iter()
+                .filter(|addr| usable(addr))
+                .cloned()
+                .collect();
+            self.report_peers.insert(peer, addrs);
+            if self.report_listing.insert(peer) {
+                let current = report_epoch(now_unix());
+                for epoch in [current.saturating_sub(1), current] {
+                    self.swarm
+                        .behaviour_mut()
+                        .reports
+                        .send_request(&peer, ReportRequest::List { epoch });
+                }
+            }
+        }
+        if supports(OBLIVIOUS_PROTOCOL) {
+            self.oblivious_peers.insert(peer);
+        }
         if supports(BATCH_PROTOCOL) {
             self.batch_peers.insert(peer);
             if self.listing.insert(peer) {
@@ -1054,31 +1367,189 @@ impl Task {
         let store = self.store.clone();
         let tx = self.answers_tx.clone();
         tokio::task::spawn_blocking(move || {
-            let records = source.bucket(request.bucket).map(|lines| {
-                let store = store.lock().unwrap_or_else(PoisonError::into_inner);
-                lines
-                    .into_iter()
-                    .map(|record| {
-                        let mut proofs = serde_json::from_str::<SiteRecord>(&record)
-                            .ok()
-                            .map(|r| {
-                                store
-                                    .proofs(&r.domain, 1 + MAX_EXTRA_PROOFS)
-                                    .unwrap_or_default()
-                            })
-                            .unwrap_or_default()
-                            .into_iter();
-                        let proof = proofs.next();
-                        BucketRecord {
-                            record,
-                            proof,
-                            also: proofs.collect(),
-                        }
-                    })
-                    .collect()
-            });
-            let _ = tx.send(Answer::Bucket(channel, BucketResponse { records }));
+            let response = lookup(&*source, &store, request.bucket);
+            let _ = tx.send(Answer::Bucket(channel, response));
         });
+    }
+
+    fn on_oblivious_event(
+        &mut self,
+        event: request_response::Event<ObliviousRequest, ObliviousResponse>,
+    ) {
+        match event {
+            request_response::Event::Message {
+                message:
+                    request_response::Message::Request {
+                        request, channel, ..
+                    },
+                ..
+            } => self.on_oblivious_request(request, Reply::Remote(channel)),
+            request_response::Event::Message {
+                message:
+                    request_response::Message::Response {
+                        request_id,
+                        response,
+                    },
+                ..
+            } => self.on_relayed(request_id, Some(response)),
+            request_response::Event::OutboundFailure {
+                request_id, error, ..
+            } => {
+                debug!("passing on a sealed request failed: {error}");
+                self.on_relayed(request_id, None);
+            }
+            _ => {}
+        }
+    }
+
+    /// A request on `/plumb/oblivious/1`, from another node or our own
+    /// handle (see [`crate::oblivious`]).
+    fn on_oblivious_request(&mut self, request: ObliviousRequest, reply: Reply) {
+        let me = *self.swarm.local_peer_id();
+        match request {
+            ObliviousRequest::OwnKeys => {
+                let keys = self.gateway.keys();
+                self.reply(reply, ObliviousResponse::Keys(Some(keys)));
+            }
+            ObliviousRequest::Keys { target } if target == me => {
+                let keys = self.gateway.keys();
+                self.reply(reply, ObliviousResponse::Keys(Some(keys)));
+            }
+            ObliviousRequest::Keys { target } => {
+                let now = now_unix();
+                if let Some((keys, fetched)) = self.relay_keys.get(&target) {
+                    if *fetched + RELAY_KEY_CACHE > now && keys.expires > now {
+                        let keys = keys.clone();
+                        self.reply(reply, ObliviousResponse::Keys(Some(keys)));
+                        return;
+                    }
+                }
+                if let Some(waiting) = self.waiting_keys.get_mut(&target) {
+                    waiting.push(reply);
+                    return;
+                }
+                if self.relaying.len() >= MAX_RELAYING {
+                    self.reply(reply, ObliviousResponse::Keys(None));
+                    return;
+                }
+                self.add_known_addresses(&target);
+                let id = self
+                    .swarm
+                    .behaviour_mut()
+                    .oblivious
+                    .send_request(&target, ObliviousRequest::OwnKeys);
+                self.relaying.insert(id, Relayed::Keys(target));
+                self.waiting_keys.insert(target, vec![reply]);
+            }
+            ObliviousRequest::Deliver { message } => self.open_sealed(message.into_vec(), reply),
+            ObliviousRequest::Forward { target, message } if target == me => {
+                self.open_sealed(message.into_vec(), reply);
+            }
+            ObliviousRequest::Forward { target, message } => {
+                if self.relaying.len() >= MAX_RELAYING || message.len() > MAX_MESSAGE {
+                    self.reply(reply, ObliviousResponse::Sealed(None));
+                    return;
+                }
+                self.add_known_addresses(&target);
+                let id = self
+                    .swarm
+                    .behaviour_mut()
+                    .oblivious
+                    .send_request(&target, ObliviousRequest::Deliver { message });
+                self.relaying.insert(id, Relayed::Forward(reply));
+                self.with_status(|s| s.requests_relayed += 1);
+            }
+        }
+    }
+
+    /// As the target: opens a sealed bucket request, and answers it sealed.
+    fn open_sealed(&mut self, message: Vec<u8>, reply: Reply) {
+        if self.answering >= MAX_ANSWERING || !self.config.answer_searches {
+            self.reply(reply, ObliviousResponse::Sealed(None));
+            return;
+        }
+        let (request, sealer) = match self.gateway.open(&message) {
+            Ok(opened) => opened,
+            Err(err) => {
+                debug!("a sealed request we cannot open: {err:#}");
+                self.reply(reply, ObliviousResponse::Sealed(None));
+                return;
+            }
+        };
+        if request.bucket >= BUCKETS {
+            self.reply(reply, ObliviousResponse::Sealed(None));
+            return;
+        }
+        debug!("serving a sealed request for bucket {}", request.bucket);
+        self.answering += 1;
+        let source = self.source.clone();
+        let store = self.store.clone();
+        let tx = self.answers_tx.clone();
+        tokio::task::spawn_blocking(move || {
+            let response = lookup(&*source, &store, request.bucket);
+            let sealed = match seal_response(sealer, &response) {
+                Ok(sealed) => Some(serde_bytes::ByteBuf::from(sealed)),
+                Err(err) => {
+                    warn!("cannot seal an answer: {err:#}");
+                    None
+                }
+            };
+            let _ = tx.send(Answer::Sealed(reply, ObliviousResponse::Sealed(sealed)));
+        });
+    }
+
+    /// As a relay: the answer to a request we passed on.
+    fn on_relayed(&mut self, id: OutboundRequestId, response: Option<ObliviousResponse>) {
+        match self.relaying.remove(&id) {
+            Some(Relayed::Keys(target)) => {
+                let keys = match response {
+                    Some(ObliviousResponse::Keys(Some(keys)))
+                        if keys.verify(&target, now_unix()).is_ok() =>
+                    {
+                        self.relay_keys.insert(target, (keys.clone(), now_unix()));
+                        Some(keys)
+                    }
+                    _ => None,
+                };
+                for reply in self.waiting_keys.remove(&target).unwrap_or_default() {
+                    self.reply(reply, ObliviousResponse::Keys(keys.clone()));
+                }
+            }
+            Some(Relayed::Forward(reply)) => {
+                let answer = match response {
+                    Some(ObliviousResponse::Sealed(answer)) => answer,
+                    _ => None,
+                };
+                self.reply(reply, ObliviousResponse::Sealed(answer));
+            }
+            None => {}
+        }
+    }
+
+    fn reply(&mut self, reply: Reply, response: ObliviousResponse) {
+        match reply {
+            Reply::Remote(channel) => {
+                let _ = self
+                    .swarm
+                    .behaviour_mut()
+                    .oblivious
+                    .send_response(channel, response);
+            }
+            Reply::Local(tx) => {
+                let _ = tx.send(response);
+            }
+        }
+    }
+
+    /// Tells the swarm where a node we know of listens, before asking it
+    /// for something while not connected.
+    fn add_known_addresses(&mut self, peer: &PeerId) {
+        if self.swarm.is_connected(peer) {
+            return;
+        }
+        for addr in self.bucket_peers.get(peer).cloned().unwrap_or_default() {
+            self.swarm.add_peer_address(*peer, addr);
+        }
     }
 
     fn on_batch_event(&mut self, event: request_response::Event<BatchRequest, BatchResponse>) {
@@ -1209,6 +1680,106 @@ impl Task {
         self.store.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    fn lock_reports(&self) -> std::sync::MutexGuard<'_, ReportStore> {
+        self.reports.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Keeps a report if it checks out and is new. Returns `None` for one
+    /// that does not check out, else whether it was new.
+    fn take_report(&mut self, report: &Report) -> Option<bool> {
+        if let Err(err) = report.check(now_unix()) {
+            debug!("refused a report: {err:#}");
+            return None;
+        }
+        let new = match self.lock_reports().insert(report) {
+            Ok(new) => new,
+            Err(err) => {
+                warn!("cannot keep a report: {err:#}");
+                false
+            }
+        };
+        if new {
+            self.recount = true;
+        }
+        Some(new)
+    }
+
+    /// A report passed on over gossip.
+    fn on_gossip_report(&mut self, data: &[u8]) -> gossipsub::MessageAcceptance {
+        let Ok(report) = serde_json::from_slice::<Report>(data) else {
+            return gossipsub::MessageAcceptance::Reject;
+        };
+        match self.take_report(&report) {
+            Some(_) => gossipsub::MessageAcceptance::Accept,
+            None => gossipsub::MessageAcceptance::Reject,
+        }
+    }
+
+    fn on_report_event(&mut self, event: request_response::Event<ReportRequest, ReportResponse>) {
+        match event {
+            request_response::Event::Message {
+                message:
+                    request_response::Message::Request {
+                        request, channel, ..
+                    },
+                ..
+            } => match request {
+                ReportRequest::Submit(report) => {
+                    let taken = self.take_report(&report) == Some(true);
+                    if taken {
+                        // Pass it on; nodes that miss it get it when they
+                        // next ask for the week's reports.
+                        let data = serde_json::to_vec(&report).expect("reports encode");
+                        let topic = self.report_topic.clone();
+                        if let Err(err) = self.swarm.behaviour_mut().gossipsub.publish(topic, data)
+                        {
+                            debug!("cannot pass a report on yet: {err}");
+                        }
+                    }
+                    let _ = self
+                        .swarm
+                        .behaviour_mut()
+                        .reports
+                        .send_response(channel, ReportResponse::Taken(taken));
+                }
+                ReportRequest::List { epoch } => {
+                    let reports = self.reports.clone();
+                    let tx = self.answers_tx.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let list = reports
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .list(epoch, MAX_LISTED_REPORTS);
+                        let _ = tx.send(Answer::Report(channel, ReportResponse::Reports(list)));
+                    });
+                }
+            },
+            request_response::Event::Message {
+                peer,
+                message:
+                    request_response::Message::Response {
+                        response: ReportResponse::Reports(reports),
+                        ..
+                    },
+                ..
+            } => {
+                let mut new = 0;
+                for report in reports.iter().take(MAX_LISTED_REPORTS) {
+                    if self.take_report(report) == Some(true) {
+                        new += 1;
+                    }
+                }
+                if new > 0 {
+                    info!("caught up on {new} popularity reports from {peer}");
+                }
+            }
+            request_response::Event::OutboundFailure { peer, error, .. } => {
+                debug!("report request to {peer} failed: {error}");
+            }
+            _ => {}
+        }
+    }
+
     fn with_status(&self, change: impl FnOnce(&mut NetStatus)) {
         change(&mut self.status.lock().unwrap_or_else(PoisonError::into_inner));
     }
@@ -1228,14 +1799,45 @@ impl Task {
             .map(|(peer, _)| peer.to_string())
             .collect();
         let held = self.lock_store().len();
+        let reports_held = self.lock_reports().len();
         self.with_status(|s| {
             s.listening = listening;
             s.reachable_at = reachable_at;
             s.connected_peers = connected_peers;
             s.relays = relays;
             s.batches_held = held;
+            s.reports_held = reports_held;
         });
     }
+}
+
+/// Bucket `bucket` of `source`, each site with the proof of its signed
+/// crawl when `store` holds one.
+fn lookup(source: &dyn BucketSource, store: &Mutex<BatchStore>, bucket: u32) -> BucketResponse {
+    let records = source.bucket(bucket).map(|lines| {
+        let store = store.lock().unwrap_or_else(PoisonError::into_inner);
+        lines
+            .into_iter()
+            .map(|record| {
+                let mut proofs = serde_json::from_str::<SiteRecord>(&record)
+                    .ok()
+                    .map(|r| {
+                        store
+                            .proofs(&r.domain, 1 + MAX_EXTRA_PROOFS)
+                            .unwrap_or_default()
+                    })
+                    .unwrap_or_default()
+                    .into_iter();
+                let proof = proofs.next();
+                BucketRecord {
+                    record,
+                    proof,
+                    also: proofs.collect(),
+                }
+            })
+            .collect()
+    });
+    BucketResponse { records }
 }
 
 /// Rebuilds the agreement step from the batches held, oldest first, so it

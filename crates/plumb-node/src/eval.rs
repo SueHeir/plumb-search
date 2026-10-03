@@ -14,6 +14,7 @@ use plumb_index::{SearchOptions, Searcher};
 use tracing::info;
 
 use crate::cli::EvalArgs;
+use crate::meaning::MeaningIndex;
 use crate::rank_config;
 
 /// One query of a queries file.
@@ -29,6 +30,8 @@ pub struct EvalQuery {
 /// Parses a queries file. Expected domains are reduced to registrable
 /// domains (`www.usbank.com` -> `usbank.com`) to match how hits are keyed.
 pub fn parse_queries(text: &str) -> Result<Vec<EvalQuery>> {
+    // Editors such as Notepad start the file with a byte-order mark.
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut queries = Vec::new();
     for (i, raw) in text.lines().enumerate() {
         let line = i + 1;
@@ -145,6 +148,7 @@ pub fn run(args: EvalArgs) -> Result<()> {
     let searcher = Searcher::open(&args.index)
         .with_context(|| format!("opening the index in {}", args.index.display()))?;
     let cfg = rank_config(args.alpha);
+    let meaning = MeaningIndex::from_args(&args.meaning)?;
     info!(
         "evaluating {} queries against {} sites (alpha {})",
         queries.len(),
@@ -158,8 +162,17 @@ pub fn run(args: EvalArgs) -> Result<()> {
             country: args.country.clone(),
             only_country: false,
         };
+        let query_meaning = meaning.as_ref().and_then(|meaning| meaning.query(&q.query));
         let hits = searcher
-            .search_full(&q.query, args.limit, &cfg, &options)
+            .search_meaning(
+                &q.query,
+                args.limit,
+                &cfg,
+                &options,
+                query_meaning
+                    .as_ref()
+                    .map(|m| m as &dyn plumb_index::Meaning),
+            )
             .with_context(|| format!("searching for {:?}", q.query))?
             .hits;
         let domains: Vec<&str> = hits.iter().map(|h| h.domain.as_str()).collect();
@@ -232,6 +245,14 @@ mod tests {
 
     fn close(a: f64, b: f64) -> bool {
         (a - b).abs() < 1e-9
+    }
+
+    #[test]
+    fn a_byte_order_mark_is_skipped() {
+        let queries = parse_queries("\u{feff}# saved by Notepad\nus bank\tusbank.com\n").unwrap();
+        assert_eq!(queries.len(), 1);
+        let queries = parse_queries("\u{feff}us bank\tusbank.com\n").unwrap();
+        assert_eq!(queries[0].query, "us bank");
     }
 
     #[test]
