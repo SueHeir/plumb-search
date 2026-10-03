@@ -21,8 +21,8 @@ use html5ever::tokenizer::{
     BufferQueue, Tag, TagKind, Token, TokenSink, TokenSinkResult, Tokenizer, TokenizerOpts,
 };
 use plumb_core::{
-    collapse_whitespace, normalize_text, registrable_domain, truncate_chars, MAX_TEXT_CHARS,
-    SEARCH_TERMS,
+    collapse_whitespace, normalize_text, registrable_domain, truncate_chars, MAX_HEADINGS,
+    MAX_HEADING_WORDS, MAX_TEXT_CHARS, SEARCH_TERMS,
 };
 use tracing::debug;
 use url::Url;
@@ -182,6 +182,11 @@ struct Page<'a> {
     og_description: Option<String>,
     site_name: Option<String>,
     search_url: Option<String>,
+    /// The text of the `<h1>` or `<h2>` being read, when it is visible.
+    heading_text: Option<String>,
+    headings: Vec<String>,
+    /// Words in `headings`.
+    heading_words: usize,
     /// The GET form being read, while no search address has been found.
     form: Option<SearchForm>,
     /// The link being read, when it is one to keep.
@@ -256,6 +261,9 @@ impl<'a> Page<'a> {
             og_description: None,
             site_name: None,
             search_url: None,
+            heading_text: None,
+            headings: Vec::new(),
+            heading_words: 0,
             form: None,
             anchor: None,
             links: Vec::new(),
@@ -273,6 +281,7 @@ impl<'a> Page<'a> {
             Token::EOFToken => {
                 self.close_anchor();
                 self.close_title();
+                self.close_heading();
             }
             _ => {}
         }
@@ -292,6 +301,14 @@ impl<'a> Page<'a> {
             "form" => self.open_form(tag),
             "input" => self.input(tag),
             "svg" | "math" if !tag.self_closing => self.foreign += 1,
+            "h1" | "h2" => {
+                self.close_heading();
+                let shown = attr(tag, "hidden").is_none()
+                    && !attr(tag, "aria-hidden").is_some_and(|v| v.eq_ignore_ascii_case("true"));
+                if self.hidden == 0 && self.foreign == 0 && shown {
+                    self.heading_text = Some(String::new());
+                }
+            }
             "title" if self.foreign == 0 && !self.title_seen => {
                 self.title_seen = true;
                 self.title_text = Some(String::new());
@@ -317,6 +334,7 @@ impl<'a> Page<'a> {
             "a" => self.close_anchor(),
             "title" => self.close_title(),
             "form" => self.close_form(),
+            "h1" | "h2" => self.close_heading(),
             "svg" | "math" => self.foreign = self.foreign.saturating_sub(1),
             _ => {}
         }
@@ -332,6 +350,13 @@ impl<'a> Page<'a> {
         if let Some(title) = &mut self.title_text {
             title.push_str(text);
         }
+        if self.hidden == 0 {
+            if let Some(heading) = &mut self.heading_text {
+                if heading.len() < MAX_TEXT_CHARS * 4 {
+                    heading.push_str(text);
+                }
+            }
+        }
         if let Some(anchor) = self.visible_anchor() {
             anchor.text.push_str(text);
         }
@@ -341,6 +366,30 @@ impl<'a> Page<'a> {
         if let Some(anchor) = self.visible_anchor() {
             anchor.text.push(' ');
         }
+        if let Some(heading) = &mut self.heading_text {
+            heading.push(' ');
+        }
+    }
+
+    /// Keeps the heading just read, unless it repeats one or the headings
+    /// are full; a heading cut by the word limit keeps its first words.
+    fn close_heading(&mut self) {
+        let Some(text) = self.heading_text.take() else {
+            return;
+        };
+        let room = MAX_HEADING_WORDS.saturating_sub(self.heading_words);
+        if self.headings.len() >= MAX_HEADINGS || room == 0 {
+            return;
+        }
+        let words: Vec<&str> = text.split_whitespace().take(room).collect();
+        let Some(heading) = clean_text(&words.join(" ")) else {
+            return;
+        };
+        if self.headings.contains(&heading) {
+            return;
+        }
+        self.heading_words += words.len();
+        self.headings.push(heading);
     }
 
     /// The open link, unless a hidden element has opened inside it.
@@ -512,12 +561,14 @@ impl<'a> Page<'a> {
     fn into_meta(mut self) -> PageMeta {
         self.close_anchor();
         self.close_title();
+        self.close_heading();
         self.close_form();
         PageMeta {
             title: self.title,
             description: self.description.or(self.og_description),
             site_name: self.site_name,
             search_url: self.search_url,
+            headings: self.headings,
             links: self.links,
         }
     }
@@ -641,6 +692,41 @@ mod tests {
         );
         assert_eq!(meta.site_name.as_deref(), Some("U.S. Bank"));
         assert!(meta.links.is_empty());
+    }
+
+    #[test]
+    fn reads_visible_headings() {
+        let meta = extract(
+            "https://www.navyfederal.org/",
+            r#"<html><body>
+                <h1>Navy Federal <span>Credit</span> Union</h1>
+                <h2 hidden>Cookie settings</h2>
+                <div style="display:none"></div>
+                <h2>Checking<br>&amp; Savings</h2>
+                <h3>Not this</h3>
+                <h2>Checking &amp; Savings</h2>
+                <template><h2>Nor this</h2></template>
+                <svg><h2>Nor this</h2></svg>
+                <h2>Auto loans
+            </body></html>"#,
+        );
+        assert_eq!(
+            meta.headings,
+            [
+                "Navy Federal Credit Union",
+                "Checking & Savings",
+                "Auto loans"
+            ]
+        );
+
+        // Capped in number and in words.
+        let many: String = (0..20).map(|i| format!("<h2>Heading {i}</h2>")).collect();
+        let meta = extract("https://a.com/", &many);
+        assert_eq!(meta.headings.len(), MAX_HEADINGS);
+        let long = format!("<h1>{}</h1><h2>more</h2>", "word ".repeat(100));
+        let meta = extract("https://a.com/", &long);
+        assert_eq!(meta.headings.len(), 1);
+        assert_eq!(meta.headings[0].split(' ').count(), MAX_HEADING_WORDS);
     }
 
     #[test]

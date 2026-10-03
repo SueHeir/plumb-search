@@ -27,6 +27,10 @@ use serde::{Deserialize, Serialize};
 pub const MAX_LINK_TEXTS: usize = 32;
 /// Most aliases kept per site.
 pub const MAX_ALIASES: usize = 16;
+/// Most homepage headings kept per site.
+pub const MAX_HEADINGS: usize = 8;
+/// Most words kept from a homepage's headings, all together.
+pub const MAX_HEADING_WORDS: usize = 60;
 /// Longest title, description, alias or link text kept, in characters.
 pub const MAX_TEXT_CHARS: usize = 300;
 
@@ -44,6 +48,10 @@ pub struct SiteRecord {
     /// Homepage meta description.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// The homepage's visible `<h1>` and `<h2>` texts, in page order, at
+    /// most [`MAX_HEADINGS`] and [`MAX_HEADING_WORDS`] words in all.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub headings: Vec<String>,
     /// Normalized text of links from other sites, most frequent first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub link_texts: Vec<LinkText>,
@@ -280,8 +288,10 @@ impl SiteRecord {
             if other.description.is_some() {
                 self.description = other.description;
             }
-            // A fresh crawl that found no search form means the site has none now.
+            // A fresh crawl that found no search form, or no headings,
+            // means the site has none now.
             self.search_url = other.search_url;
+            self.headings = other.headings;
             self.crawled_at = other.crawled_at;
         } else {
             self.url = self.url.take().or(other.url);
@@ -289,6 +299,9 @@ impl SiteRecord {
             self.description = self.description.take().or(other.description);
             if self.crawled_at.is_none() {
                 self.search_url = self.search_url.take().or(other.search_url);
+                if self.headings.is_empty() {
+                    self.headings = other.headings;
+                }
             }
         }
         self.country = self.country.take().or(other.country);
@@ -889,6 +902,28 @@ mod tests {
         }
         assert_eq!(joined("U.S. Bank"), "usbank");
         assert_eq!(joined("Bank of America"), "bankofamerica");
+    }
+
+    #[test]
+    fn headings_follow_the_fresher_crawl() {
+        let crawled = |at: u64, headings: &[&str]| SiteRecord {
+            domain: "a.com".into(),
+            crawled_at: Some(at),
+            headings: headings.iter().map(|h| h.to_string()).collect(),
+            ..SiteRecord::default()
+        };
+        let mut record = crawled(1, &["Old"]);
+        record.merge(crawled(2, &[]));
+        assert!(record.headings.is_empty());
+        let mut record = crawled(2, &["New"]);
+        record.merge(crawled(1, &["Old"]));
+        assert_eq!(record.headings, ["New"]);
+        let mut seed = SiteRecord {
+            domain: "a.com".into(),
+            ..SiteRecord::default()
+        };
+        seed.merge(crawled(1, &["Found"]));
+        assert_eq!(seed.headings, ["Found"]);
     }
 
     #[test]

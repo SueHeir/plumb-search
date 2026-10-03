@@ -86,6 +86,8 @@ const TITLE_BOOST: f32 = 2.0;
 const ANCHORS_BOOST: f32 = 1.5;
 /// BM25 boost of a query word matching the description.
 const DESCRIPTION_BOOST: f32 = 0.5;
+/// BM25 boost of a query word matching a homepage heading.
+const HEADINGS_BOOST: f32 = 0.5;
 /// BM25 boost of the whole query, joined (`us bank` -> `usbank`), matching a
 /// joined name or a label word.
 const WHOLE_QUERY_BOOST: f32 = 6.0;
@@ -873,6 +875,7 @@ impl ParsedQuery {
             (f.title, TITLE_BOOST),
             (f.anchors, ANCHORS_BOOST),
             (f.description, DESCRIPTION_BOOST),
+            (f.headings, HEADINGS_BOOST),
         ];
         for word in &self.words {
             for (field, boost) in per_word {

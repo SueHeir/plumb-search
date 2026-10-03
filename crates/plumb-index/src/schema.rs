@@ -6,6 +6,7 @@
 //! | `url`         | homepage URL                                         | stored                      |
 //! | `title`       | homepage title                                       | stored, BM25                |
 //! | `description` | meta description, then Wikidata's description      | stored, BM25                |
+//! | `headings`    | homepage `<h1>` and `<h2>` texts                     | BM25                        |
 //! | `label`       | domain label, its hyphen-split words and joined form | BM25                        |
 //! | `aliases`     | other names                                          | BM25                        |
 //! | `anchors`     | inbound link texts, frequent ones repeated           | BM25                        |
@@ -24,7 +25,7 @@
 use anyhow::{Context, Result};
 use plumb_core::{
     domain_label, joined, kind_key, normalize_text, site_country, truncate_chars, LinkText,
-    SiteRecord, MAX_ALIASES, MAX_KINDS, MAX_LINK_TEXTS, MAX_TEXT_CHARS,
+    SiteRecord, MAX_ALIASES, MAX_HEADINGS, MAX_KINDS, MAX_LINK_TEXTS, MAX_TEXT_CHARS,
 };
 use tantivy::schema::{
     Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, FAST, STORED, STRING,
@@ -37,6 +38,7 @@ pub(crate) const DOMAIN: &str = "domain";
 pub(crate) const URL: &str = "url";
 pub(crate) const TITLE: &str = "title";
 pub(crate) const DESCRIPTION: &str = "description";
+pub(crate) const HEADINGS: &str = "headings";
 pub(crate) const LABEL: &str = "label";
 pub(crate) const ALIASES: &str = "aliases";
 pub(crate) const ANCHORS: &str = "anchors";
@@ -66,6 +68,7 @@ pub(crate) struct Fields {
     pub(crate) url: Field,
     pub(crate) title: Field,
     pub(crate) description: Field,
+    pub(crate) headings: Field,
     pub(crate) label: Field,
     pub(crate) aliases: Field,
     pub(crate) anchors: Field,
@@ -91,6 +94,7 @@ impl Fields {
             url: field(URL)?,
             title: field(TITLE)?,
             description: field(DESCRIPTION)?,
+            headings: field(HEADINGS)?,
             label: field(LABEL)?,
             aliases: field(ALIASES)?,
             anchors: field(ANCHORS)?,
@@ -112,6 +116,7 @@ pub(crate) fn schema() -> Schema {
     builder.add_text_field(URL, STORED);
     builder.add_text_field(TITLE, words().set_stored());
     builder.add_text_field(DESCRIPTION, words().set_stored());
+    builder.add_text_field(HEADINGS, words());
     builder.add_text_field(LABEL, words());
     builder.add_text_field(ALIASES, words());
     builder.add_text_field(ANCHORS, words());
@@ -179,6 +184,9 @@ pub(crate) fn document(f: &Fields, record: &SiteRecord) -> TantivyDocument {
     }
     if let Some(description) = non_empty(&record.description) {
         doc.add_text(f.description, truncate_chars(description, MAX_TEXT_CHARS));
+    }
+    for heading in record.headings.iter().take(MAX_HEADINGS) {
+        doc.add_text(f.headings, truncate_chars(heading, MAX_TEXT_CHARS));
     }
     // What Wikidata says the organization is; shown when the site has no
     // description of its own.

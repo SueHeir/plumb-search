@@ -137,6 +137,11 @@ pub struct PageMeta {
     /// to the same site.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub search_url: Option<String>,
+    /// Visible `<h1>` and `<h2>` texts, in page order, each once, at most
+    /// [`plumb_core::MAX_HEADINGS`] and [`plumb_core::MAX_HEADING_WORDS`]
+    /// words in all.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub headings: Vec<String>,
     /// Links to other registrable domains, in page order.
     pub links: Vec<OutLink>,
 }
