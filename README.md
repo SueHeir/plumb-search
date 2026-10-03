@@ -25,6 +25,35 @@ plumb eval --index data/index --queries fixtures/brand_queries.tsv
 plumb serve --index data/index        # then open http://127.0.0.1:8080
 ```
 
+## Run a node
+
+`plumb run` does the work of the next section by itself, apart from the optional WAT files, and keeps going. It serves the search page at once, downloads the seed data and builds a first index, then crawls homepages and builds the index again, and from then on crawls more homepages and rebuilds the index on a schedule.
+
+```sh
+cargo build --release -p plumb-node
+./target/release/plumb run --data plumb-data
+```
+
+Then open http://127.0.0.1:8080. Until the first index is ready, the page shows what the node is doing, and `/api/status` reports the same as JSON. Setup and crawling need internet access; searching works offline.
+
+By default a node keeps the best million sites, crawls 10,000 of their homepages once its first index is built, and crawls 5,000 more every 24 hours. `--profile desktop` starts smaller (250,000 sites, 2,000 homepages at first and 1,000 more every 12 hours). `--cc-release <release-name>` also takes ranks from a Common Crawl web graph release on first start (release names are listed at https://commoncrawl.org/web-graphs; only the top rows are downloaded). `--bind 0.0.0.0:8080` serves other machines too, and since the page has no login, anyone who can reach the port can search. `plumb run --help` lists the other settings.
+
+Everything the node keeps is in its `--data` folder. `records.jsonl` holds what it has learned. Crawls add their results to `records.jsonl.journal` as they go, and the node folds that journal into `records.jsonl` once it has grown, so back up both files together. A node started with a `records.jsonl` already in its folder skips the seed downloads.
+
+The seed downloads go through a proxy set in the usual variables (`HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`, `NO_PROXY`), but homepages are fetched directly, which lets the crawler refuse sites whose names lead into private networks. If the machine reaches the internet only through a proxy, add `--use-system-proxy` to crawl through it too. Without it, every crawl fails and the node reports that the network seems to be down.
+
+On a server or homelab machine, run the Docker image instead ([docs/docker.md](docs/docker.md)):
+
+```sh
+docker compose up -d
+```
+
+On a desktop or laptop, install the desktop app for Windows, macOS or Linux ([docs/desktop.md](docs/desktop.md)). It runs the same node in a window of its own, at http://127.0.0.1:7586.
+
+### Use Plumb as your browser's search engine
+
+Every Plumb page offers Plumb to the browser as a search engine. In Firefox, right-click the address bar on a Plumb page and choose **Add "Plumb Search"**. To add it by hand, use `http://127.0.0.1:8080/search?q=%s`, or `http://127.0.0.1:7586/search?q=%s` for the desktop app.
+
 ## Building an index from real data
 
 The seed data comes from four public sources. They are only needed to get started; after that the index grows from its own crawls.
@@ -45,7 +74,9 @@ plumb fetch-data --dir data --cc-release <release-name>
 #    https://data.commoncrawl.org/crawl-data/<CC-MAIN-YYYY-WW>/wat.paths.gz;
 #    prefix each path with https://data.commoncrawl.org/ to download it.
 
-# 3. Fold everything into site records, keeping the top million.
+# 3. Fold everything into site records, keeping the best million. Only the
+#    top 2,000,000 rows of the Common Crawl ranks are read (twice --top),
+#    which takes about 2 GB of memory; --limit-per-source N changes that.
 plumb ingest --tranco data/tranco-top-1m.csv.zip \
              --cc-ranks data/<release-name>-domain-ranks.txt.gz \
              --wikidata data/wikidata-official-sites.tsv \
@@ -53,12 +84,19 @@ plumb ingest --tranco data/tranco-top-1m.csv.zip \
              --top 1000000 --out data/records.jsonl
 
 # 4. Crawl homepages to fill in titles and discover new sites through their links.
+#    Half go to sites not tried yet and half to sites due again, best first.
+#    Each batch of results is saved to data/records.jsonl.journal at once and
+#    folded into records.jsonl at the end, so an interrupted crawl keeps what
+#    it fetched. If this machine reaches the internet only through a proxy,
+#    add --use-system-proxy.
 plumb crawl --records data/records.jsonl --top 10000
 
 # 5. Build the index and run the brand-name test.
 plumb index --records data/records.jsonl --index data/index
 plumb eval --index data/index --queries eval/brand_queries.tsv
 ```
+
+To refresh the seed data later, run steps 1 and 3 again with `--records data/records.jsonl` added to step 3. Titles, link text and crawl times carry over, while ranks and official-site marks come only from the new files, so a domain that has expired and changed hands does not keep the trust it had.
 
 The crawler identifies itself as `PlumbSearch/<version> (+https://github.com/SueHeir/plumb-search)`, obeys robots.txt (including `Crawl-delay`), and fetches one page per site.
 
@@ -85,7 +123,8 @@ score = α · link_score + trust · ((1 − α) · text_score + name_bonus)
 | `crates/plumb-ingest` | Loaders for Tranco, Common Crawl ranks and WAT files, and Wikidata; the seed builder; downloads |
 | `crates/plumb-crawl` | Polite homepage crawler that also reports link text and new domains |
 | `crates/plumb-index` | Tantivy index and navigational ranking |
-| `crates/plumb-node` | The `plumb` command line tool and the local web page |
+| `crates/plumb-node` | The `plumb` command line tool, the long-running node behind `plumb run`, and the web page |
+| `crates/plumb-desktop` | The desktop app: a [Tauri](https://v2.tauri.app) window around a node running inside it. A plain `cargo build` leaves it out; see [docs/desktop.md](docs/desktop.md) |
 
 `fixtures/` holds the synthetic test data and `eval/brand_queries.tsv` the brand-name test list for real data.
 

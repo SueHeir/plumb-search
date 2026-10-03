@@ -124,6 +124,15 @@ first index is ready. If a download fails, for example without internet
 access or behind a firewall that blocks those sites, the error appears on the
 setup page.
 
+The app has no proxy setting yet. Its downloads go through a proxy only when
+one is set in the `HTTPS_PROXY` or `ALL_PROXY` environment variable of the
+app (it does not read the system's proxy settings), and it always fetches
+homepages directly. So on a network that reaches the internet only through a
+proxy, its crawls fail: the search page says that the last update failed,
+and `http://127.0.0.1:7586/api/status` suggests `--use-system-proxy`, which
+is an option of the command-line node (`plumb run`), not of the app.
+Searching the index built from the seed data still works.
+
 Later launches open straight to the search page with the index from last
 time. Searching works offline; only setup and crawling need the internet.
 
@@ -164,9 +173,11 @@ grows to a few hundred megabytes (about 1 KB per site).
 | macOS | `~/Library/Application Support/io.github.sueheir.plumbsearch` |
 | Windows | `%APPDATA%\io.github.sueheir.plumbsearch` (`C:\Users\<you>\AppData\Roaming\...`) |
 
-Inside it, `records.jsonl` holds everything the node has learned (the file to
-back up), `seed/` the downloads and `indexes/` the search index. On Linux the
-app's log folder, `logs/`, is in there too; see
+Inside it, `records.jsonl` holds everything the node has learned, and
+`records.jsonl.journal`, when there is one, the crawl results not yet folded
+into `records.jsonl`. They are the files to back up, together and with the
+app quit, so that they match. `seed/` holds the downloads and `indexes/` the
+search index. On Linux the app's log folder, `logs/`, is in there too; see
 [Troubleshooting](#troubleshooting).
 
 The window's web view keeps a small cache of its own, in
