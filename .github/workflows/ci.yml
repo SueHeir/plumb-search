@@ -19,6 +19,28 @@ jobs:
       - run: cargo clippy --workspace --exclude plumb-desktop --all-targets -- -D warnings
       - run: cargo test --workspace --exclude plumb-desktop
 
+  # The private search page's WebAssembly: it builds, passes clippy, and
+  # wasm-bindgen of the pinned version can read it.
+  private-search:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install wasm-bindgen-cli --version 0.2.108 --locked
+      - run: cargo clippy -p plumb-private --target wasm32-unknown-unknown -- -D warnings
+      - run: cargo build --locked -p plumb-private --target wasm32-unknown-unknown --profile wasm
+      - run: >-
+          wasm-bindgen --target web --no-typescript --out-dir target/private
+          target/wasm32-unknown-unknown/wasm/plumb_private.wasm
+      # The node's tests again, now with the page's script built in.
+      - run: cargo test -p plumb-node private
+        env:
+          PLUMB_PRIVATE_DIR: ../../target/private
+
   desktop:
     runs-on: ubuntu-latest
     steps:
