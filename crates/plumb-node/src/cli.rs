@@ -9,7 +9,7 @@ use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 use crate::country::HomeCountry;
 use crate::websearch::{parse_web_search, WebSearch};
 
-/// Plumb Search: a self-hostable search engine that finds sites by name.
+/// Plumb Search: a self-hostable search engine.
 ///
 /// The easy way: `plumb run --data DIR` sets everything up and keeps the
 /// index fresh. Step by step: fetch-data, ingest, crawl (optional), index,

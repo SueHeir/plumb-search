@@ -32,7 +32,7 @@ RUN --mount=type=cache,id=plumb-cargo-registry,target=/usr/local/cargo/registry 
 FROM debian:bookworm-slim
 
 LABEL org.opencontainers.image.title="Plumb Search" \
-      org.opencontainers.image.description="Self-hostable search engine that finds websites by name. Runs a Plumb Search node with its search page on port 8080." \
+      org.opencontainers.image.description="Self-hostable search engine. Runs a Plumb Search node with its search page on port 8080." \
       org.opencontainers.image.source="https://github.com/SueHeir/plumb-search" \
       org.opencontainers.image.documentation="https://github.com/SueHeir/plumb-search/blob/main/docs/docker.md" \
       org.opencontainers.image.licenses="MIT OR Apache-2.0"

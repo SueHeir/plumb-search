@@ -37,7 +37,7 @@ env:
   # GitHub's license detection sees only LICENSE-MIT. Keep them in line with
   # the LABELs in the Dockerfile.
   IMAGE_LICENSES: "MIT OR Apache-2.0"
-  IMAGE_DESCRIPTION: "Self-hostable search engine that finds websites by name. Runs a Plumb Search node with its search page on port 8080."
+  IMAGE_DESCRIPTION: "Self-hostable search engine. Runs a Plumb Search node with its search page on port 8080."
 
 jobs:
   pull-request:
