@@ -63,6 +63,8 @@ Batches older than 7 days or dated in the future are refused. A node keeps the b
 * **How soon a site is confirmed.** Assignment stays independent per node (a site is crawled by about one node in eight each day), so with N nodes a site gets about N/8 crawls a day. Over the 14-day window a site is assigned to two nodes with about 72% odds in a network of 2 nodes, 94% with 3, and almost surely with 5 or more. In a network of one, nothing from the network is ever taken in, which is the point.
 * **Own crawls judge straight away.** A crawl made within 2 days of one of the node's own crawls of the same site is scored against it at once, confirmed or not.
 
+* **Trusted nodes.** While the network is a handful of nodes, waiting for two crawlers mostly keeps good crawls out. So a node keeps a list of nodes it trusts (Liz, 2026-10-03): `plumb run --network --trust-peer 12D3Koo...` (repeatable). A crawl signed by a trusted node is taken in at once, like the node's own, and counts towards any quorum; every other crawler goes through the rules in this section. Being trusted earns a crawler nothing else: it is scored like any other, and matching its crawls vouches for no one. `GET /api/status` shows `network.agreement.trusted_peers`.
+
 ### One person, many keys
 
 A node key costs nothing to make, so one person could run many keys and agree with themselves. Batches travel by gossip, so a node usually cannot see which IP address a crawler crawls from, and grouping keys by address would not work. Instead each node checks crawlers against fetches it made itself:
