@@ -397,7 +397,10 @@ fn check_answer(records: Vec<crate::proto::BucketRecord>, now: u64) -> Option<Ve
         };
         // A proof only too old to check out says nothing either way (nodes
         // hold crawls longer than proofs last), so the site is just not
-        // verified; any other bad proof means the answer is not to be trusted.
+        // verified; nor does a real signed crawl this node's rules do not
+        // count (one its crawler was not assigned, which a node on another
+        // version may offer). Any other bad proof, a forgery, means the
+        // answer is not to be trusted.
         if let Some(proof) = item.proof.as_ref().filter(|p| !p.header.expired(now)) {
             match proof.verify(now) {
                 Ok((signed, crawler)) if signed.domain == site.record.domain => {
@@ -416,6 +419,7 @@ fn check_answer(records: Vec<crate::proto::BucketRecord>, now: u64) -> Option<Ve
                                     agreeing.push(by.to_string());
                                 }
                             }
+                            Err(_) if other.check_signed(now).is_ok() => {}
                             Ok(_) | Err(_) => {
                                 warn!("a node answered with a proof that does not check out");
                                 return None;
@@ -432,6 +436,12 @@ fn check_answer(records: Vec<crate::proto::BucketRecord>, now: u64) -> Option<Ve
                     for by in agreeing {
                         site.add_crawler(by);
                     }
+                }
+                Err(_) if proof.check_signed(now).is_ok() => {
+                    debug!(
+                        "a signed crawl of {} that does not count here",
+                        site.record.domain
+                    );
                 }
                 Ok(_) | Err(_) => {
                     warn!("a node answered with a proof that does not check out");
@@ -916,5 +926,47 @@ mod tests {
         };
         let checked = check_answer(vec![mixed], now).unwrap();
         assert!(checked[0].verified && !checked[0].confirmed);
+    }
+
+    #[test]
+    fn a_real_crawl_that_does_not_count_here_leaves_the_site_unverified() {
+        // A trusted node may publish crawls of sites it was not assigned;
+        // an answer offering one as a proof is honest, just not proof here.
+        let key = Keypair::generate_ed25519();
+        let peer = key.public().to_peer_id();
+        let now = 1_790_000_000;
+        let domain = (0..)
+            .map(|i| format!("bank{i}.com"))
+            .find(|d| !is_assigned(epoch_of(now), &peer, d, MAX_SHARE_PPM))
+            .unwrap();
+        let mut record = SiteRecord::new(domain.as_str());
+        record.title = Some("Real Bank".into());
+        record.crawled_at = Some(now);
+        let batch = Batch::sign(&key, &[record], epoch_of(now), MAX_SHARE_PPM, now)
+            .unwrap()
+            .unwrap();
+        let unassigned = BucketRecord {
+            record: batch.records[0].clone(),
+            proof: Some(batch.proof(0)),
+            also: Vec::new(),
+        };
+        let checked = check_answer(vec![unassigned, item(&SiteRecord::new("other.com"))], now)
+            .expect("the answer is kept");
+        assert_eq!(checked.len(), 2);
+        assert!(!checked[0].verified);
+
+        // As a second proof beside a good one, it is just not counted.
+        let good = crawls_by(
+            std::slice::from_ref(&Keypair::generate_ed25519()),
+            &["Bank"],
+            now,
+        );
+        let mixed = BucketRecord {
+            record: good[0].records[0].clone(),
+            proof: Some(good[0].proof(0)),
+            also: vec![batch.proof(0)],
+        };
+        let checked = check_answer(vec![mixed], now).unwrap();
+        assert!(checked[0].verified && checked[0].crawlers.len() == 1);
     }
 }

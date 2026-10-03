@@ -2276,7 +2276,9 @@ mod tests {
         limited.wikidata_error = Some(LastError {
             message: "HTTP 429".into(),
             at: now_unix(),
-            retry_at: Some(now_unix() + 600),
+            // A little past 10 minutes, so a second ticking over before the
+            // page renders still reads "10 minutes".
+            retry_at: Some(now_unix() + 630),
         });
         let body = get_panel(app(limited).0).await;
         assert!(body.contains("could not download Wikidata"), "{body}");
@@ -2289,7 +2291,8 @@ mod tests {
         let mut ready = status(Phase::Ready, Step::Idle);
         ready.sites = 260_123;
         ready.last_refresh = Some(now_unix() - 3600);
-        ready.next_refresh = Some(now_unix() + 7200);
+        // Past 2 hours by a margin, so a tick before rendering can't make it "1 hour".
+        ready.next_refresh = Some(now_unix() + 7230);
         let body = get_panel(app(ready.clone()).0).await;
         assert!(
             body.contains("<p class=\"big\">Search is ready</p>"),
@@ -2892,7 +2895,9 @@ mod tests {
         failing.last_error = Some(LastError {
             message: "downloading the Tranco list failed".into(),
             at: now_unix() - 60,
-            retry_at: Some(now_unix() + 600),
+            // A little past 10 minutes, so a second ticking over before the
+            // page renders still reads "10 minutes".
+            retry_at: Some(now_unix() + 630),
         });
         let (router, _) = app(failing);
         let body = get_section(router.clone(), "overview").await;
