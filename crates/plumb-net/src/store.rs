@@ -6,8 +6,9 @@
 //! ```
 //!
 //! For every crawled homepage the store remembers the newest batch holding
-//! it, so a search answer can carry a [`RecordProof`] for each hit. Batches
-//! older than [`RETAIN_EPOCHS`] are deleted.
+//! it from each crawler, so a search answer can carry a [`RecordProof`] for
+//! each hit, and a second one from another crawler that agrees (see
+//! [`crate::agree`]). Batches older than [`RETAIN_EPOCHS`] are deleted.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -18,6 +19,7 @@ use anyhow::{Context, Result};
 use plumb_core::SiteRecord;
 use tracing::{debug, warn};
 
+use crate::agree::agree;
 use crate::assign::epoch_of;
 use crate::batch::{Batch, RecordProof, SignedHeader};
 use crate::hash::Hash;
@@ -25,12 +27,14 @@ use crate::hash::Hash;
 /// Batches are kept for this many epochs.
 pub const RETAIN_EPOCHS: u64 = 35;
 
-/// Where a crawled homepage's newest record is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Where one crawler's newest record of a homepage is.
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct Holding {
     batch: Hash,
     index: usize,
     created_at: u64,
+    /// The crawler's public key, as in the batch header.
+    crawler: Vec<u8>,
 }
 
 #[derive(Debug)]
@@ -38,7 +42,8 @@ pub struct BatchStore {
     dir: PathBuf,
     ids: HashSet<Hash>,
     headers: HashMap<Hash, SignedHeader>,
-    newest: HashMap<String, Holding>,
+    /// Per crawled homepage, the newest record from each crawler.
+    crawls: HashMap<String, Vec<Holding>>,
 }
 
 impl BatchStore {
@@ -50,7 +55,7 @@ impl BatchStore {
             dir: dir.to_path_buf(),
             ids: HashSet::new(),
             headers: HashMap::new(),
-            newest: HashMap::new(),
+            crawls: HashMap::new(),
         };
         for entry in fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
             let path = entry?.path();
@@ -119,12 +124,47 @@ impl BatchStore {
 
     /// The proof of the newest crawled record held for `domain`.
     pub fn proof(&self, domain: &str) -> Result<Option<RecordProof>> {
-        let Some(holding) = self.newest.get(domain) else {
-            return Ok(None);
+        Ok(self.proofs(domain, 1)?.into_iter().next())
+    }
+
+    /// Up to `max` proofs of crawls of `domain` from different crawlers
+    /// that agree with each other ([`agree`]): the newest crawl that others
+    /// agree with, then those others, newest first. When no two agree, the
+    /// newest crawl alone.
+    pub fn proofs(&self, domain: &str, max: usize) -> Result<Vec<RecordProof>> {
+        let Some(held) = self.crawls.get(domain) else {
+            return Ok(Vec::new());
         };
-        Ok(self
-            .get(&holding.batch)?
-            .map(|batch| batch.proof(holding.index)))
+        let mut held: Vec<&Holding> = held.iter().collect();
+        held.sort_by_key(|h| std::cmp::Reverse(h.created_at));
+        let mut crawls: Vec<(SiteRecord, RecordProof)> = Vec::new();
+        for holding in held {
+            let Some(batch) = self.get(&holding.batch)? else {
+                continue;
+            };
+            let proof = batch.proof(holding.index);
+            if let Ok(record) = serde_json::from_str::<SiteRecord>(&proof.record) {
+                crawls.push((record, proof));
+            }
+        }
+        let group = |i: usize| -> Vec<usize> {
+            std::iter::once(i)
+                .chain((0..crawls.len()).filter(|&j| j != i && agree(&crawls[i].0, &crawls[j].0)))
+                .take(max)
+                .collect()
+        };
+        let best = (0..crawls.len())
+            .map(group)
+            .find(|g| g.len() >= max.min(2))
+            .or_else(|| (!crawls.is_empty()).then(|| vec![0]));
+        let Some(best) = best else {
+            return Ok(Vec::new());
+        };
+        Ok(best
+            .into_iter()
+            .map(|i| crawls[i].1.clone())
+            .take(max)
+            .collect())
     }
 
     /// The headers of the batches held from `epoch` on, newest first, at
@@ -176,8 +216,10 @@ impl BatchStore {
             self.ids.remove(id);
             self.headers.remove(id);
         }
-        self.newest
-            .retain(|_, holding| !old.contains(&holding.batch));
+        self.crawls.retain(|_, held| {
+            held.retain(|holding| !old.contains(&holding.batch));
+            !held.is_empty()
+        });
     }
 
     fn path(&self, id: &Hash) -> PathBuf {
@@ -198,15 +240,14 @@ impl BatchStore {
                 batch: id,
                 index,
                 created_at,
+                crawler: batch.header.header.crawler.clone(),
             };
-            self.newest
-                .entry(record.domain)
-                .and_modify(|held| {
-                    if held.created_at <= created_at {
-                        *held = holding;
-                    }
-                })
-                .or_insert(holding);
+            let held = self.crawls.entry(record.domain).or_default();
+            match held.iter_mut().find(|h| h.crawler == holding.crawler) {
+                Some(old) if old.created_at > created_at => {}
+                Some(old) => *old = holding,
+                None => held.push(holding),
+            }
         }
         self.ids.insert(id);
         self.headers.insert(id, batch.header.clone());
@@ -262,5 +303,47 @@ mod tests {
         assert!(store.is_empty());
         assert!(store.proof(&domain).unwrap().is_none());
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn proofs_come_from_crawlers_that_agree() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = 1_790_000_000;
+        let keys: Vec<Keypair> = (0..3).map(|_| Keypair::generate_ed25519()).collect();
+        let domain = (0..)
+            .map(|i| format!("s{i}.com"))
+            .find(|d| {
+                keys.iter()
+                    .all(|k| is_assigned(epoch_of(now), &k.public().to_peer_id(), d, MAX_SHARE_PPM))
+            })
+            .unwrap();
+        let mut store = BatchStore::open(dir.path()).unwrap();
+        // Two crawlers agree; a third, newer one does not.
+        for (i, (key, title)) in keys
+            .iter()
+            .zip(["Hello there", "Hello there!", "Buy pills"])
+            .enumerate()
+        {
+            let mut record = SiteRecord::new(domain.as_str());
+            record.title = Some(title.into());
+            record.crawled_at = Some(now - 5);
+            let made = now - 100 + i as u64;
+            let batch = Batch::sign(key, &[record], epoch_of(now), MAX_SHARE_PPM, made)
+                .unwrap()
+                .unwrap();
+            store.insert(&batch).unwrap();
+        }
+        let proofs = store.proofs(&domain, 2).unwrap();
+        let titles: Vec<String> = proofs
+            .iter()
+            .map(|p| p.verify(now).unwrap().0.title.unwrap())
+            .collect();
+        assert_eq!(titles, ["Hello there!", "Hello there"]);
+        // Just one asked for: the newest crawl.
+        let one = store.proof(&domain).unwrap().unwrap();
+        assert_eq!(
+            one.verify(now).unwrap().0.title.as_deref(),
+            Some("Buy pills")
+        );
     }
 }

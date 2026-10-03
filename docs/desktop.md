@@ -9,8 +9,12 @@ version) and how far setup has come. It holds the settings and has buttons that
 open search in your browser or add Plumb to Firefox. The same app builds for Windows, macOS and Linux
 with [Tauri](https://v2.tauri.app).
 
-Every link out of the panel opens in your default browser. Starting the app
-again while it is running brings its window to the front.
+Every link out of the panel opens in your default browser. Closing the window
+keeps the app running, so searches from your browser keep working: it stays
+in the menu bar on macOS and in the notification area on Windows and Linux.
+Its icon there has **Open Plumb Search** and **Quit Plumb Search**. Starting
+the app again while it is running brings its window back too, and so does
+clicking its Dock icon on macOS.
 
 Test builds are not code-signed yet, so each system warns you before it opens
 them the first time. The [install](#install) steps say how to get past that.
@@ -226,10 +230,16 @@ the one before, so when something goes wrong, send us `plumb.log`, and
 - **Blank or white window on Linux** (seen with some NVIDIA drivers and in
   virtual machines): start the app with `WEBKIT_DISABLE_DMABUF_RENDERER=1
   plumb-desktop`.
-- **Quitting:** closing the window stops the node at its next safe point.
-  An index build under way is finished first, which can take up to about
-  half a minute, so the app may keep running briefly after its window
-  closes. The node's files are never left half-written.
+- **Quitting:** choose **Quit Plumb Search** from the app's icon in the menu
+  bar or notification area (or **Quit** in the macOS app menu). Closing the
+  window does not quit. Quitting stops the node at its next safe point. An
+  index build under way is finished first, which can take up to about half
+  a minute, so the app may keep running briefly. The node's files are never
+  left half-written.
+- **No icon in the notification area on Linux:** GNOME shows such icons
+  only with the AppIndicator extension, which Ubuntu includes. Without it,
+  start the app again to bring its window back, and quit with
+  `pkill plumb-desktop`, which stops the node cleanly too.
 
 ## Build it yourself
 

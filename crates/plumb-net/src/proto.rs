@@ -4,7 +4,8 @@
 //! * `/plumb/bucket/1`: one bucket of sites ([`BucketRequest`]); the query
 //!   itself never leaves the asking node (see [`crate::bucket`]). Each site
 //!   comes with a [`RecordProof`] when the answering node holds a signed
-//!   crawl of it. Asked under a throwaway identity, over a connection of
+//!   crawl of it, and with proofs from other crawlers that agree with it
+//!   when it holds those. Asked under a throwaway identity, over a connection of
 //!   its own.
 //! * `/plumb/oblivious/1`: the same bucket requests, sealed to the answering
 //!   node's key and passed on by a relay, so the node answering never sees
@@ -76,7 +77,15 @@ pub struct BucketRecord {
     /// The site's record, as JSON.
     pub record: String,
     pub proof: Option<RecordProof>,
+    /// Proofs of other crawlers' crawls of the same site that agree with
+    /// `proof` (see [`crate::agree`]), at most [`MAX_EXTRA_PROOFS`]. Nodes
+    /// that predate them send none and ignore them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub also: Vec<RecordProof>,
 }
+
+/// Most proofs from other crawlers sent with one site of a bucket.
+pub const MAX_EXTRA_PROOFS: usize = crate::agree::QUORUM - 1;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BatchRequest {

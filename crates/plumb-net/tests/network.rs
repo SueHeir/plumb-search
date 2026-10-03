@@ -183,6 +183,9 @@ async fn nodes_share_batches_search_each_other_and_reach_through_a_relay() {
         relay_got.handle.peer_id().to_string(),
     ];
     assert!(crawlers.iter().any(|c| hit.crawler.as_deref() == Some(c)));
+    // C holds both crawls and answers with both proofs.
+    assert!(hit.confirmed, "{hit:?}");
+    assert_eq!(hit.crawlers.len(), 2);
     assert_eq!(result.rejected, 0);
     // With other nodes to relay, every request went through one.
     assert_eq!(result.direct, 0, "{result:?}");
