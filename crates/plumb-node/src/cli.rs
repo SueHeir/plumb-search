@@ -7,6 +7,7 @@ use std::time::Duration;
 use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 
 use crate::country::HomeCountry;
+use crate::websearch::{parse_web_search, WebSearch};
 
 /// Plumb Search: a self-hostable search engine that finds sites by name.
 ///
@@ -91,6 +92,12 @@ pub struct RunArgs {
     /// A search can pick another with `country=` in its address.
     #[arg(long, value_name = "CODE", default_value = "auto", value_parser = HomeCountry::parse)]
     pub country: HomeCountry,
+    /// Show "Search the web with ..." above the results, a link that hands
+    /// the query to this engine: duckduckgo, google, bing, brave or
+    /// startpage, or `off` for none. Plumb never fetches its results.
+    /// Bangs such as `!g` work either way.
+    #[arg(long, value_name = "ENGINE", default_value = "off", value_parser = parse_web_search)]
+    pub web_search: WebSearch,
     /// Crawl homepages through the proxy in HTTP_PROXY, HTTPS_PROXY or
     /// ALL_PROXY (except hosts in NO_PROXY), for machines that reach the
     /// internet only through one. Without it, homepages are fetched directly
@@ -283,6 +290,12 @@ pub struct ServeArgs {
     /// A search can pick another with `country=` in its address.
     #[arg(long, value_name = "CODE", default_value = "auto", value_parser = HomeCountry::parse)]
     pub country: HomeCountry,
+    /// Show "Search the web with ..." above the results, a link that hands
+    /// the query to this engine: duckduckgo, google, bing, brave or
+    /// startpage, or `off` for none. Plumb never fetches its results.
+    /// Bangs such as `!g` work either way.
+    #[arg(long, value_name = "ENGINE", default_value = "off", value_parser = parse_web_search)]
+    pub web_search: WebSearch,
 }
 
 #[derive(Debug, Args)]
