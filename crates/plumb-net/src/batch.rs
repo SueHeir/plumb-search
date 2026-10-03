@@ -91,6 +91,12 @@ pub struct SignedHeader {
 }
 
 impl SignedHeader {
+    /// Whether the batch is too old for [`SignedHeader::check`] at `now`:
+    /// a proof from it no longer checks out, though nothing is wrong with it.
+    pub fn expired(&self, now: u64) -> bool {
+        self.header.epoch + MAX_BATCH_AGE_EPOCHS < epoch_of(now)
+    }
+
     /// Identifies the batch: the hash of what was signed.
     pub fn id(&self) -> Hash {
         Hash::of(&[&self.header.signing_bytes()])

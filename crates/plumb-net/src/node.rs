@@ -2503,6 +2503,7 @@ fn refusal(peer: PeerId, answer: Result<CreditResponse>) -> anyhow::Error {
 /// crawl when `store` holds one.
 fn lookup(source: &dyn BucketSource, store: &Mutex<BatchStore>, bucket: u32) -> BucketResponse {
     let records = source.bucket(bucket).map(|lines| {
+        let now = now_unix();
         let store = store.lock().unwrap_or_else(PoisonError::into_inner);
         lines
             .into_iter()
@@ -2511,7 +2512,7 @@ fn lookup(source: &dyn BucketSource, store: &Mutex<BatchStore>, bucket: u32) -> 
                     .ok()
                     .map(|r| {
                         store
-                            .proofs(&r.domain, 1 + MAX_EXTRA_PROOFS)
+                            .proofs(&r.domain, 1 + MAX_EXTRA_PROOFS, now)
                             .unwrap_or_default()
                     })
                     .unwrap_or_default()
