@@ -28,16 +28,15 @@ services:
     # published yet or you want another branch. PLUMB_SOURCE is a Git URL with
     # an optional #branch, set in .env next to this file.
     build: ${PLUMB_SOURCE:-https://github.com/SueHeir/plumb-search.git#main}
-    # The image's default command plus private search (/private).
-    command: ["run", "--data", "/data", "--bind", "0.0.0.0:8080", "--private-search"]
+    # The image's default command plus private search (/private) and search
+    # by meaning: the node downloads a small embedding model into /data/model
+    # and embeds sites in the background, best-ranked first.
+    command: ["run", "--data", "/data", "--bind", "0.0.0.0:8080", "--private-search", "--search-by-meaning"]
     # Only reachable from this machine; Caddy serves it to the world.
     ports:
       - "127.0.0.1:8080:8080"
     volumes:
       - plumb-data:/data
-    # Search by meaning: the node downloads a small embedding model into
-    # /data/model and embeds sites in the background, best-ranked first.
-    command: ["run", "--data", "/data", "--bind", "0.0.0.0:8080", "--search-by-meaning"]
     # Leaves some CPU for Caddy and the relay while sites are being embedded.
     cpus: 1.5
     init: true
