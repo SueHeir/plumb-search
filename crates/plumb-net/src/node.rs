@@ -85,6 +85,10 @@ pub const MAX_RELAYS: usize = 2;
 pub const CATCH_UP_EPOCHS: u64 = 3;
 /// A node dials more nodes it knows of while it has fewer connections.
 pub const TARGET_PEERS: usize = 8;
+/// As a relay: circuits one node or IP address may open at once, before
+/// it is held to one every [`CIRCUIT_REFILL`].
+const CIRCUIT_BURST: std::num::NonZeroU32 = std::num::NonZeroU32::new(600).unwrap();
+const CIRCUIT_REFILL: Duration = Duration::from_millis(100);
 /// Batch fetches in flight at once.
 const MAX_FETCHES: usize = 16;
 /// Bucket requests answered at once; more are turned away.
@@ -647,8 +651,17 @@ fn build_swarm(key: &Keypair, config: &NetConfig) -> Result<Swarm<Behaviour>> {
                         // bucket on its own throwaway connection, so the
                         // default of 4 turns searches away.
                         max_circuits_per_peer: 64,
+                        // libp2p's default lets one IP address open 60
+                        // circuits and then one a minute. Every bucket of a
+                        // search is a circuit of its own, under a new
+                        // identity, so that cut off a node's searches after
+                        // a handful, and everyone's behind one address
+                        // (a household, or every test node on 127.0.0.1).
+                        circuit_src_rate_limiters: Vec::new(),
                         ..relay::Config::default()
-                    },
+                    }
+                    .circuit_src_per_peer(CIRCUIT_BURST, CIRCUIT_REFILL)
+                    .circuit_src_per_ip(CIRCUIT_BURST, CIRCUIT_REFILL),
                 )
             });
             let request_config =
