@@ -2045,12 +2045,12 @@ impl Task {
         self.ledger.record(&verdicts);
     }
 
-    /// Whether `crawler`'s crawls count here (see [`Agreement::counts`]) and
-    /// it was judged often enough to have a track record. Only then do its
-    /// credits buy tokens.
+    /// Whether `crawler` can have tokens here: this node trusts it strictly
+    /// ([`Agreement::vouched`], whatever the quorum rules), and it was
+    /// judged often enough to have a track record.
     fn crawls_count(&self, crawler: &PeerId) -> bool {
         let score = self.agreement.score(crawler);
-        self.agreement.counts(crawler) && score.agreed + score.disagreed >= MIN_JUDGED
+        self.agreement.vouched(crawler) && score.agreed + score.disagreed >= MIN_JUDGED
     }
 
     fn on_credit_event(&mut self, event: request_response::Event<CreditRequest, CreditResponse>) {

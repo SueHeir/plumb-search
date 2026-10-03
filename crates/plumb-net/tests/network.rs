@@ -456,16 +456,24 @@ async fn confirmed_crawls_earn_credits_that_buy_tokens() {
     wait_for(|| (r.handle.status().agreement.pending_sites == n).then_some(())).await;
     r.handle.publish(sites.clone()).await.unwrap().unwrap();
     let earned = i64::from(MIN_JUDGED) * credits_for(now_unix());
-    wait_for(|| (a.handle.status().credits.balance == earned).then_some(())).await;
-    assert_eq!(
-        a.handle.status().credits.confirmed_crawls,
-        u64::from(MIN_JUDGED)
-    );
-    assert_eq!(r.handle.status().credits.balance, earned);
-
-    // R counts the same for A, and sells it tokens for them.
-    let at_r = a.handle.credits_at(r.handle.peer_id()).await.unwrap();
+    // R counts every one of A's crawls: each matched R's own. R vouches for
+    // A only after A matched 3 of its crawls, so R's own crawls of those
+    // first sites had no witness yet; A's ledger is much the same.
+    let mut at_r = a.handle.credits_at(r.handle.peer_id()).await.unwrap();
+    for _ in 0..100 {
+        if at_r.credits == earned {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        at_r = a.handle.credits_at(r.handle.peer_id()).await.unwrap();
+    }
     assert_eq!((at_r.credits, at_r.counts), (earned, true));
+    wait_for(|| (a.handle.status().credits.balance > 0).then_some(())).await;
+    let own = a.handle.status().credits;
+    assert!(own.balance < earned, "{own:?}");
+    assert!(r.handle.status().credits.balance < earned);
+
+    // R sells A tokens for them.
     let got = a
         .handle
         .collect_tokens(r.handle.peer_id(), 8)

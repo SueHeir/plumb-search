@@ -3,12 +3,14 @@
 //!
 //! **Earning.** Every node keeps its own [`Ledger`] of every crawler it
 //! hears from, itself included. A crawler earns [`CREDITS_PER_CRAWL`] for
-//! each homepage crawl that another crawler's crawl confirmed (never for a
-//! crawl that counted on its own, however few crawlers agreement asks for)
+//! each homepage crawl that a crawler it trusts strictly (itself, or one
+//! vouched for by matching its own crawls) also made: never for a crawl
+//! that counted on its own, or only fresh keys agree with, however lenient
+//! agreement is
 //! ([`crate::agree`]), twice that for crawls made before
 //! [`FIRST_YEAR_ENDS`] (the early-adopter head start), and loses
-//! [`DISAGREE_PENALTY`] for each crawl made close in time to one confirmed
-//! by two crawlers that did not match it. Nothing else earns credits yet. Every node sees
+//! [`DISAGREE_PENALTY`] for each crawl made close in time to one two such
+//! crawlers made that did not match it. Nothing else earns credits yet. Every node sees
 //! the same signed batches, so their ledgers come out much the same, but
 //! each node only ever goes by its own.
 //!
@@ -155,10 +157,12 @@ impl Ledger {
     /// Counts the crawls agreement scored.
     pub fn record(&mut self, verdicts: &[Verdict]) {
         for verdict in verdicts {
-            // A crawl only one crawler vouches for proves nothing either
-            // way: it earns nothing, so a lone node cannot mint credits,
-            // and costs nobody who disagrees with it.
-            if verdict.agreeing < 2 {
+            // A crawl earns only when another crawler this node trusts
+            // strictly (itself included) made the same crawl, so a lone
+            // node, or fresh keys agreeing with each other, mint nothing.
+            // A crawl costs only when two such crawlers say otherwise.
+            let needed = if verdict.agreed { 1 } else { 2 };
+            if verdict.witnesses < needed {
                 continue;
             }
             let account = self.accounts.entry(verdict.crawler).or_default();
@@ -580,7 +584,7 @@ mod tests {
             crawler,
             crawled_at,
             agreed,
-            agreeing: 2,
+            witnesses: 2,
         }
     }
 
@@ -589,9 +593,9 @@ mod tests {
         let a = peer();
         let mut ledger = Ledger::in_memory();
         let mut alone = verdict(a, 0, true);
-        alone.agreeing = 1;
+        alone.witnesses = 0;
         let mut against = verdict(peer(), 0, false);
-        against.agreeing = 1;
+        against.witnesses = 1;
         ledger.record(&[alone, against]);
         assert!(ledger.is_empty(), "neither earns nor costs");
         assert_eq!(ledger.account(&a).earned, 0);
