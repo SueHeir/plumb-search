@@ -24,7 +24,9 @@
 //!   keeps it and announces its header on the gossip topic. A node that
 //!   hears of a batch it lacks fetches it from the node that passed the
 //!   header on (or the crawler), checks it, keeps it, and hands the records
-//!   it accepts ([`accept_batch`]) to the receiver returned by [`start`].
+//!   it accepts ([`accept_batch`]) to the [`Agreement`] step, which hands
+//!   a record to the receiver returned by [`start`] only once two crawlers
+//!   agree on it (see [`crate::agree`]).
 //!   On meeting a node, it asks for the batches of the last
 //!   [`CATCH_UP_EPOCHS`] epochs it missed.
 //! * Network search: [`NetHandle::search`] never sends the query; it asks
@@ -56,6 +58,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
+use crate::agree::{Agreement, AgreementStatus};
 use crate::assign::{epoch_of, is_assigned, MAX_SHARE_PPM};
 use crate::batch::{accept_batch, Batch, SignedHeader};
 use crate::bucket::{BucketSource, BUCKETS};
@@ -144,6 +147,8 @@ pub struct NetStatus {
     pub batches_held: usize,
     pub batches_published: u64,
     pub batches_received: u64,
+    /// Crawls waiting for a second crawler, and crawlers no longer counted.
+    pub agreement: AgreementStatus,
     /// Bucket requests from other nodes answered.
     pub buckets_served: u64,
 }
@@ -296,13 +301,17 @@ pub async fn start(
     source: Arc<dyn BucketSource>,
 ) -> Result<(NetHandle, mpsc::UnboundedReceiver<Vec<SiteRecord>>)> {
     let key = load_or_create_key(&config.dir.join("node.key"))?;
-    let store = {
-        let dir = config.dir.join("batches");
-        tokio::task::spawn_blocking(move || BatchStore::open(&dir))
-            .await
-            .context("opening the batch store")??
-    };
     let peer_id = key.public().to_peer_id();
+    let (store, agreement) = {
+        let dir = config.dir.join("batches");
+        tokio::task::spawn_blocking(move || -> Result<_> {
+            let store = BatchStore::open(&dir)?;
+            let agreement = replay_agreement(&store, peer_id);
+            Ok((store, agreement))
+        })
+        .await
+        .context("opening the batch store")??
+    };
     let mut swarm = build_swarm(&key, &config)?;
     for addr in &config.listen {
         if let Err(err) = swarm.listen_on(addr.clone()) {
@@ -323,6 +332,7 @@ pub async fn start(
         peer_id: peer_id.to_string(),
         nat: "unknown".into(),
         batches_held: store.len(),
+        agreement: agreement.status(),
         ..NetStatus::default()
     }));
     let (commands, commands_rx) = mpsc::unbounded_channel();
@@ -338,6 +348,7 @@ pub async fn start(
         source,
         status: status.clone(),
         records: records_tx,
+        agreement,
         answers_tx,
         bucket_peers: HashMap::new(),
         batch_peers: HashSet::new(),
@@ -503,6 +514,8 @@ struct Task {
     source: Arc<dyn BucketSource>,
     status: Arc<Mutex<NetStatus>>,
     records: mpsc::UnboundedSender<Vec<SiteRecord>>,
+    /// Crawls held until a second crawler agrees.
+    agreement: Agreement,
     answers_tx: mpsc::UnboundedSender<Answer>,
     /// Connected nodes that serve buckets, and the addresses they listen on.
     bucket_peers: HashMap<PeerId, Vec<Multiaddr>>,
@@ -630,9 +643,16 @@ impl Task {
             store.insert(&batch)?;
             store.len()
         };
+        // Our own crawl counts as one crawler towards agreement; what it
+        // confirms we already have.
+        let me = *self.swarm.local_peer_id();
+        self.agreement
+            .observe(me, accept_batch(&batch, &me, now), now);
+        let agreement = self.agreement.status();
         self.with_status(|s| {
             s.batches_published += 1;
             s.batches_held = held;
+            s.agreement = agreement;
         });
         info!("published batch {id} of {} records", batch.records.len());
         self.announce(batch.header);
@@ -723,7 +743,11 @@ impl Task {
             }
         }
         if ticks.is_multiple_of(60) {
-            self.lock_store().prune(now_unix());
+            let now = now_unix();
+            self.lock_store().prune(now);
+            self.agreement.prune(now);
+            let agreement = self.agreement.status();
+            self.with_status(|s| s.agreement = agreement);
         }
         self.fetch_more();
     }
@@ -1150,17 +1174,23 @@ impl Task {
             store.len()
         };
         let accepted = accept_batch(&batch, &crawler, now);
+        let kept = accepted.len();
+        let confirmed = self
+            .agreement
+            .observe(crawler, accepted, batch.header.header.created_at);
         info!(
-            "received batch {id} from {from}: kept {} of {} records crawled by {crawler}",
-            accepted.len(),
-            batch.records.len()
+            "received batch {id} from {from}: kept {kept} of {} records crawled by {crawler}, {} now confirmed by a second crawler",
+            batch.records.len(),
+            confirmed.len()
         );
+        let agreement = self.agreement.status();
         self.with_status(|s| {
             s.batches_received += 1;
             s.batches_held = held;
+            s.agreement = agreement;
         });
-        if !accepted.is_empty() {
-            let _ = self.records.send(accepted);
+        if !confirmed.is_empty() {
+            let _ = self.records.send(confirmed);
         }
     }
 
@@ -1195,6 +1225,32 @@ impl Task {
             s.batches_held = held;
         });
     }
+}
+
+/// Rebuilds the agreement step from the batches held, oldest first, so it
+/// needs no file of its own. What it confirms was passed on before.
+fn replay_agreement(store: &BatchStore, me: PeerId) -> Agreement {
+    let now = now_unix();
+    let mut agreement = Agreement::new(me);
+    for id in store.ids_oldest_first() {
+        let batch = match store.get(&id) {
+            Ok(Some(batch)) => batch,
+            Ok(None) => continue,
+            Err(err) => {
+                warn!("cannot read batch {id}: {err:#}");
+                continue;
+            }
+        };
+        // Checked as of when it was made, as it was when it came in.
+        let made = batch.header.header.created_at;
+        let Ok(crawler) = batch.check(made) else {
+            continue;
+        };
+        let records = accept_batch(&batch, &crawler, made);
+        agreement.observe(crawler, records, made);
+    }
+    agreement.prune(now);
+    agreement
 }
 
 /// Not an unspecified (`0.0.0.0`, `::`) address.
