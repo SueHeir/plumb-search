@@ -47,11 +47,15 @@
 //! [`OFFLINE_MIN_EXPECTED`] of them) could not be fetched, for whatever
 //! reason, means that the network is down, or that a firewall, a proxy or
 //! a setting on this side is in the way (an HTTP client that cannot be
-//! built fails every site), rather than the sites. That batch is not saved:
-//! `plumb crawl` stops with an error, and a node tries again later.
+//! built fails every site), rather than the sites. That batch is not saved.
+//! `plumb crawl` waits and fetches it again, after 30 seconds, then 1, 2
+//! and 4 minutes ([`OFFLINE_WAITS`]), since a home router that was swamped
+//! usually recovers; when the batch still looks offline, it stops with an
+//! error. A node does not wait: it tries again at its next round.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::time::Duration;
 
 use anyhow::{bail, Result};
 use plumb_core::{now_unix, RecordSet, SiteRecord};
@@ -83,10 +87,20 @@ pub(crate) const OFFLINE_MIN_EXPECTED: usize = 20;
 /// homepages that should answer could not be fetched.
 pub(crate) const OFFLINE_FAILED_PERCENT: usize = 90;
 
+/// How long `plumb crawl` waits before fetching a batch that looked offline
+/// again, one wait per try; after the last, the crawl stops.
+const OFFLINE_WAITS: [Duration; 4] = [
+    Duration::from_secs(30),
+    Duration::from_secs(60),
+    Duration::from_secs(120),
+    Duration::from_secs(240),
+];
+
 pub fn run(args: CrawlArgs) -> Result<()> {
     let runtime = runtime()?;
     let cfg = CrawlConfig {
         concurrency: args.concurrency,
+        dns_lookups: args.dns_lookups,
         use_system_proxy: args.use_system_proxy,
         ..CrawlConfig::default()
     };
@@ -95,7 +109,7 @@ pub fn run(args: CrawlArgs) -> Result<()> {
         concurrency: args.concurrency,
         runtime: runtime.handle(),
     };
-    crawl_file_with(&args, &mut fetcher)
+    crawl_file_with(&args, &OFFLINE_WAITS, &mut fetcher)
 }
 
 /// `plumb crawl`, with homepages fetched by `fetch` a batch at a time.
@@ -108,11 +122,16 @@ fn crawl_file(
         crawl: |batch| Some(fetch(batch)),
         queued: Vec::new(),
     };
-    crawl_file_with(args, &mut fetcher)
+    crawl_file_with(args, &[], &mut fetcher)
 }
 
-/// `plumb crawl`, with homepages fetched by `fetcher`.
-fn crawl_file_with(args: &CrawlArgs, fetcher: &mut impl Fetcher) -> Result<()> {
+/// `plumb crawl`, with homepages fetched by `fetcher` and a batch that looks
+/// offline fetched again after each of `offline_waits`.
+fn crawl_file_with(
+    args: &CrawlArgs,
+    offline_waits: &[Duration],
+    fetcher: &mut impl Fetcher,
+) -> Result<()> {
     let mut set = load_records(&args.records)?;
     let out = args.out.as_deref().unwrap_or(&args.records);
     let mut store = RecordStore::open(out);
@@ -136,6 +155,7 @@ fn crawl_file_with(args: &CrawlArgs, fetcher: &mut impl Fetcher) -> Result<()> {
         &targets,
         CRAWL_BATCH_SIZE,
         &mut store,
+        offline_waits,
         fetcher,
         |_| Ok(()),
     )?;
@@ -367,19 +387,23 @@ pub(crate) fn crawl_in_batches(
         crawl,
         queued: Vec::new(),
     };
-    crawl_rolling(set, targets, batch_size, store, &mut fetcher, saved)
+    crawl_rolling(set, targets, batch_size, store, &[], &mut fetcher, saved)
 }
 
 /// [`crawl_in_batches`] with any [`Fetcher`]. Targets are started
 /// `batch_size` at a time, each batch saved as tried and failed first, and
 /// whenever `batch_size` of them are done, in whatever order they finish,
-/// their results are saved and judged for being offline. On a stop or an
-/// offline batch, every site started and not done gets its old marks back.
+/// their results are saved and judged for being offline. A batch that looks
+/// offline is started again after each of `offline_waits` in turn (the
+/// thread sleeps meanwhile; each batch gets every wait). On a stop, or a
+/// batch still offline after the last wait, every site started and not
+/// done gets its old marks back.
 pub(crate) fn crawl_rolling(
     set: &mut RecordSet,
     targets: &[CrawlTarget],
     batch_size: usize,
     store: &mut RecordStore,
+    offline_waits: &[Duration],
     fetcher: &mut impl Fetcher,
     mut saved: impl FnMut(&RunTotals) -> Result<()>,
 ) -> Result<RunTotals> {
@@ -391,6 +415,8 @@ pub(crate) fn crawl_rolling(
     // Sites started and not done, with their marks from before.
     let mut started: HashMap<String, Mark> = HashMap::new();
     let mut batch = 0;
+    // Waits used since the last batch that was saved.
+    let mut tries = 0;
     loop {
         while started.len() < batch_size + fetcher.ahead() {
             let Some(chunk) = chunks.next() else {
@@ -442,9 +468,28 @@ pub(crate) fn crawl_rolling(
             .map(|result| (result.domain.as_str(), &result.outcome))
             .collect();
         if let Some(offline) = offline_batch(&before, &outcomes) {
+            warn!("{offline}");
+            if let Some(&wait) = offline_waits.get(tries) {
+                tries += 1;
+                info!(
+                    "fetching those {} homepages again in {} seconds",
+                    before.len(),
+                    wait.as_secs()
+                );
+                std::thread::sleep(wait);
+                let again: Vec<CrawlTarget> = targets
+                    .iter()
+                    .filter(|target| before.iter().any(|mark| mark.domain == target.domain))
+                    .cloned()
+                    .collect();
+                for mark in before {
+                    started.insert(mark.domain.clone(), mark);
+                }
+                fetcher.start(again);
+                continue;
+            }
             let restore = before.iter().chain(started.values());
             commit(set, store, restore.map(Mark::change).collect())?;
-            warn!("{offline}");
             totals.end = RunEnd::Offline(offline);
             return Ok(totals);
         }
@@ -469,6 +514,7 @@ pub(crate) fn crawl_rolling(
             );
         }
         batch += 1;
+        tries = 0;
         info!(
             "batch {batch}/{batches}: fetched {} of {} homepages",
             counted.fetched,
