@@ -146,18 +146,38 @@ pub struct IngestArgs {
     #[arg(long, value_name = "PATH")]
     pub wikidata: Option<PathBuf>,
     /// Records files from an earlier ingest or crawl to merge in (list several,
-    /// or repeat the flag).
+    /// or repeat the flag), each with the journal an interrupted crawl may
+    /// have left next to it (PATH.journal). Seed files given with them
+    /// replace their seed signals.
+    ///
+    /// --tranco replaces their Tranco ranks, --cc-ranks their Common Crawl
+    /// ranks and --wikidata their official-site marks, so a domain that has
+    /// lost its rank or its listing (one that expired and was registered
+    /// again, say) does not keep them. Aliases do not say where they came
+    /// from, so --wikidata also drops every alias of a site that was marked
+    /// official; the new Wikidata file adds back the labels of sites it still
+    /// lists, and crawls add back og:site_name on the next fetch. Other sites
+    /// keep their aliases, and every site keeps its page fields, link text,
+    /// linking-domain count and crawl times.
     #[arg(long, value_name = "PATH", num_args = 1..)]
     pub records: Vec<PathBuf>,
-    /// Read at most N entries from the Tranco list, the Common Crawl ranks and
-    /// each records file (all sorted best first). WAT and Wikidata files are
-    /// always read whole.
+    /// Read at most N entries from the Tranco list and the Common Crawl ranks
+    /// (both sorted best first), and keep the best N records of each records
+    /// file [default: the Common Crawl ranks stop at twice --top, or at
+    /// 1000000 without --top].
+    ///
+    /// The full Common Crawl ranks file has over 100M rows, and each million
+    /// read takes about 0.9 GB of memory. Without this flag the Tranco list is
+    /// read whole; WAT, Wikidata and records files always are.
     #[arg(long, value_name = "N")]
     pub limit_per_source: Option<usize>,
-    /// Keep only the N records with the best link score.
+    /// Keep only the N records with the best link score. This also bounds how
+    /// much of the Common Crawl ranks is read (see --limit-per-source).
     #[arg(long, value_name = "N")]
     pub top: Option<usize>,
-    /// Where to write the records (JSON lines).
+    /// Where to write the records (JSON lines). A file already there is
+    /// replaced, and a crawl journal next to it (PATH.journal) deleted; to
+    /// keep what they hold, list the file under --records too.
     #[arg(long, value_name = "PATH")]
     pub out: PathBuf,
 }

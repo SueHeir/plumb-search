@@ -13,6 +13,10 @@ use crate::cli::FetchDataArgs;
 /// machine-readable index of releases, so we point people here instead.
 const CC_WEB_GRAPHS_PAGE: &str = "https://commoncrawl.org/web-graphs";
 
+/// `--top` of the suggested `plumb ingest`, as in the README. Besides the
+/// records kept, it bounds the Common Crawl rows read, and so the memory used.
+const SUGGESTED_TOP: usize = 1_000_000;
+
 /// What happened to one dataset.
 #[derive(Debug)]
 enum Outcome {
@@ -124,7 +128,8 @@ fn cc_ranks_url(args: &FetchDataArgs) -> Result<Option<String>> {
     Ok(Some(download::cc_domain_ranks_url(release)))
 }
 
-/// The `plumb ingest` command for the files just saved.
+/// The `plumb ingest` command for the files just saved, keeping the best
+/// [`SUGGESTED_TOP`] sites.
 fn ingest_hint(outcomes: &[(&str, Outcome)], dir: &Path) -> Option<String> {
     let flags: Vec<String> = outcomes
         .iter()
@@ -137,7 +142,7 @@ fn ingest_hint(outcomes: &[(&str, Outcome)], dir: &Path) -> Option<String> {
         return None;
     }
     Some(format!(
-        "plumb ingest {} --out {}",
+        "plumb ingest {} --top {SUGGESTED_TOP} --out {}",
         flags.join(" "),
         dir.join("records.jsonl").display()
     ))
@@ -196,7 +201,7 @@ mod tests {
         ];
         assert_eq!(
             ingest_hint(&outcomes, Path::new("data")).as_deref(),
-            Some("plumb ingest --tranco data/tranco.zip --out data/records.jsonl")
+            Some("plumb ingest --tranco data/tranco.zip --top 1000000 --out data/records.jsonl")
         );
         let nothing = [("tranco", Outcome::Skipped("--skip-tranco".into()))];
         assert_eq!(ingest_hint(&nothing, Path::new("data")), None);
