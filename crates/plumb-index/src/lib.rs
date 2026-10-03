@@ -664,13 +664,29 @@ impl Searcher {
         // it is what the look-alikes are measured against. So is every site
         // of the kind the query names.
         let names = self.name_matches(&searcher, &query)?;
-        let kinds = match &query.kind {
+        let mut kinds = match &query.kind {
             Some(key) => matching_docs(
                 &searcher,
                 vec![Term::from_field_text(self.fields.kind_key, key)],
             )?,
             None => HashSet::new(),
         };
+        // A kind of two words or more that a candidate's own title or
+        // description names ("Wikipedia is a free online encyclopedia")
+        // makes it one of that kind too: Wikidata does not tag every site
+        // with every kind it is (wikipedia.org's item is a "Wikimedia
+        // content project"). Single words ("airlines") are too often just
+        // mentioned ("cheap airline tickets") to count.
+        if !kinds.is_empty() && query.len >= 2 {
+            let key = kind_key(query_text);
+            for &(_, addr) in &candidates {
+                if !kinds.contains(&addr)
+                    && self.describes_itself_as(&searcher, addr, &key, query.len)?
+                {
+                    kinds.insert(addr);
+                }
+            }
+        }
         // Meaning helps with queries that describe a site, not with names.
         let named_in_full = !kinds.is_empty() || names.values().any(|n| n.words() >= query.len);
         let meaning = meaning.filter(|_| !named_in_full);
@@ -928,6 +944,28 @@ impl Searcher {
             }
         }
         Ok(names)
+    }
+
+    /// Whether the document's title, description or Wikidata description
+    /// holds `words` consecutive words whose [`kind_key`] is `key`.
+    fn describes_itself_as(
+        &self,
+        searcher: &tantivy::Searcher,
+        addr: DocAddress,
+        key: &str,
+        words: usize,
+    ) -> Result<bool> {
+        let doc: TantivyDocument = searcher.doc(addr)?;
+        let fields = [
+            self.fields.title,
+            self.fields.description,
+            self.fields.about,
+        ];
+        Ok(fields.into_iter().any(|field| {
+            doc.get_first(field)
+                .and_then(|value| value.as_str())
+                .is_some_and(|text| names_kind(text, key, words))
+        }))
     }
 
     /// Reads the stored fields of a ranked document.
@@ -1305,6 +1343,35 @@ fn typed_domain(query: &str) -> Option<String> {
 fn assert_searcher_is_send_sync() {
     fn check<T: Send + Sync>() {}
     check::<Searcher>();
+}
+
+/// Whether `text` holds `words` consecutive words whose [`kind_key`] is
+/// `key` at the end of a phrase: "a free online encyclopedia, made by"
+/// names `onlineencyclopedia`, but "search engine optimization tools" does
+/// not name `searchengine`. A phrase ends at punctuation, the end of the
+/// text, or a word such as "that", "for" or "in".
+fn names_kind(text: &str, key: &str, words: usize) -> bool {
+    const ENDS: &[&str] = &[
+        "that", "which", "who", "where", "for", "with", "by", "from", "in", "of", "on", "and",
+        "or", "to", "since", "founded", "based", "run", "made", "created",
+    ];
+    if words == 0 {
+        return false;
+    }
+    let breaks = |c: char| {
+        matches!(
+            c,
+            ',' | '.' | ';' | ':' | '!' | '?' | '(' | ')' | '|' | '\u{2013}' | '\u{2014}'
+        )
+    };
+    text.split(breaks).any(|clause| {
+        let normalized = plumb_core::normalize_text(clause);
+        let tokens: Vec<&str> = normalized.split(' ').filter(|w| !w.is_empty()).collect();
+        tokens.windows(words).enumerate().any(|(i, window)| {
+            let next = tokens.get(i + words);
+            next.is_none_or(|next| ENDS.contains(next)) && kind_key(&window.join(" ")) == key
+        })
+    })
 }
 
 #[cfg(test)]
@@ -1895,6 +1962,81 @@ mod tests {
         assert!(!bank.contains(&"airbus.com".to_string()));
         // Generic kinds are not kept, so they find nothing by kind.
         assert!(search_in(&searcher, "public companies", &options("US", false)).is_empty());
+    }
+
+    #[test]
+    fn a_site_that_says_it_is_of_a_kind_joins_the_kind() {
+        let wikipedia = with_facts(
+            site(
+                "wikipedia.org",
+                Some("Wikipedia"),
+                Some("Wikipedia is a free online encyclopedia, created and edited by volunteers"),
+                &[],
+                &[],
+                ranked(30, 50_000),
+            ),
+            None,
+            &["Wikimedia content project"],
+        );
+        let grok = with_facts(
+            site(
+                "grokipedia.com",
+                Some("Grokipedia"),
+                None,
+                &[],
+                &[],
+                ranked(40_000, 300),
+            ),
+            None,
+            &["online encyclopedia"],
+        );
+        // A popular site that mentions a single-word kind is not one.
+        let kayak = site(
+            "kayak.com",
+            Some("KAYAK"),
+            Some("Cheap flights and airline tickets"),
+            &[],
+            &[],
+            ranked(200, 20_000),
+        );
+        let delta = with_facts(
+            site(
+                "delta.com",
+                Some("Delta Air Lines"),
+                None,
+                &[],
+                &[],
+                ranked(2_000, 5_000),
+            ),
+            Some("US"),
+            &["airline"],
+        );
+        let (_dir, searcher) = build(&[wikipedia, grok, kayak, delta]);
+        let hits = search_in(&searcher, "online encyclopedia", &options("US", false));
+        assert_eq!(hits[..2], ["wikipedia.org", "grokipedia.com"], "{hits:?}");
+        let hits = search_in(&searcher, "airlines", &options("US", false));
+        assert_eq!(hits[0], "delta.com", "{hits:?}");
+        assert!(names_kind(
+            "Free Online Encyclopedias, by all",
+            "onlineencyclopedia",
+            2
+        ));
+        assert!(names_kind(
+            "an online encyclopedia that anyone edits",
+            "onlineencyclopedia",
+            2
+        ));
+        assert!(!names_kind(
+            "online and encyclopedia",
+            "onlineencyclopedia",
+            2
+        ));
+        assert!(!names_kind(
+            "Search engine optimization tools",
+            "searchengine",
+            2
+        ));
+        assert!(names_kind("A private search engine.", "searchengine", 2));
     }
 
     #[test]
