@@ -295,7 +295,7 @@ async fn download_seed(inner: &Inner) -> Result<SeedFiles> {
     }
 
     let facts = seed.join(facts::FACTS_FILE_NAME);
-    if wikidata.is_ok() && !is_recent(&facts) {
+    if let (Ok(sites), false) = (&wikidata, is_recent(&facts)) {
         inner.set_step(
             Step::Downloading,
             "Asking Wikidata for the countries and kinds of those sites",
@@ -304,7 +304,8 @@ async fn download_seed(inner: &Inner) -> Result<SeedFiles> {
             &client,
             &sources.wikidata_sparql_url,
             seed,
-            sources.wikidata_min_sitelinks,
+            sites,
+            sources.wikidata_pacing,
         )
         .await;
         if let Err(err) = downloaded {

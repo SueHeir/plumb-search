@@ -20,6 +20,10 @@
 //!   that domain. An official website's Wikidata names count as labels,
 //!   with or without a leading "The", so "wall street journal" names
 //!   wsj.com as strongly as wall.org names itself.
+//!   A site named by the whole query (by its label, an official name or a
+//!   typed hostname) also gets a full text match, so popularity decides
+//!   among the sites a query names: aa.com, officially "American Airlines",
+//!   beats americanairlines.com.
 //! - A query that is a kind of thing ("banks", "airlines") gives every site
 //!   of that kind ([`SiteRecord::kinds`]) a full text match and
 //!   [`RankConfig::kind_bonus`], so they are listed by popularity.
@@ -510,16 +514,19 @@ impl Searcher {
             };
             let link_score = link_score_of(addr);
             let is_kind = kinds.contains(&addr);
-            let text_score = if is_kind {
-                // Being what the query names is a full match, however
-                // little of the site's own text says so.
+            let name = names.get(&addr).copied().unwrap_or_default();
+            let text_score = if is_kind || name.label >= query.len {
+                // Being what the query names, or being named by all of it,
+                // is a full match, however little of the site's own text
+                // says so: among sites the query names in full, popularity
+                // decides, so aa.com wins "american airlines" over
+                // americanairlines.com.
                 1.0
             } else if max_bm25 > 0.0 {
                 (bm25 / max_bm25).clamp(0.0, 1.0)
             } else {
                 0.0
             };
-            let name = names.get(&addr).copied().unwrap_or_default();
             let mut name_bonus = (cfg.exact_label_bonus * name.label as f32 / query_words)
                 .max(cfg.exact_alias_bonus * name.alias as f32 / query_words);
             if is_kind {
@@ -1171,13 +1178,15 @@ mod tests {
                 &[],
                 popular(80, 90_000),
             ),
+            // Look-alikes spell the whole name out in their domain and
+            // title, so they match the words better than the real site.
             site(
                 "newyorktimes.com",
-                None,
-                None,
+                Some("New York Times | New York Times News"),
+                Some("New York Times news from New York."),
                 &[],
                 &[],
-                ranked(15_000, 1_500),
+                ranked(197_000, 40),
             ),
             site(
                 "aa.com",
@@ -1186,6 +1195,14 @@ mod tests {
                 &["American Airlines"],
                 &[],
                 popular(900, 12_000),
+            ),
+            site(
+                "americanairlines.com",
+                Some("American Airlines | American Airlines flights"),
+                None,
+                &[],
+                &[],
+                ranked(506_000, 20),
             ),
             site(
                 "americanairlines.fr",

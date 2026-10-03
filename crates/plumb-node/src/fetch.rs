@@ -64,18 +64,21 @@ pub fn run(args: FetchDataArgs) -> Result<()> {
                 .await,
             )
         };
-        let facts = if args.skip_wikidata {
-            Outcome::Skipped("--skip-wikidata".to_string())
-        } else {
-            outcome(
+        let facts = match &wikidata {
+            Outcome::Saved(sites) => outcome(
                 facts::download_site_facts(
                     &client,
                     download::WIKIDATA_SPARQL_URL,
                     &args.dir,
-                    args.wikidata_min_sitelinks,
+                    sites,
+                    download::WikidataPacing::default(),
                 )
                 .await,
-            )
+            ),
+            Outcome::Skipped(why) => Outcome::Skipped(why.clone()),
+            Outcome::Failed(_) => {
+                Outcome::Skipped("needs the official websites, which failed".to_string())
+            }
         };
         [
             ("tranco", tranco),

@@ -3,7 +3,7 @@
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
-use plumb_core::{canonical_domain, linker_count, RecordSet, SiteRecord, MAX_LINK_TEXTS};
+use plumb_core::{canonical_domain, kind_key, linker_count, RecordSet, SiteRecord, MAX_LINK_TEXTS};
 use tracing::{info, warn};
 
 use crate::{CcRank, OfficialSite, TrancoEntry, WatExtract};
@@ -128,8 +128,10 @@ impl Builder {
 
     /// Marks the official websites listed in Wikidata: sets
     /// `signals.official_site`, adds the item's label as an alias and, when
-    /// the record has none yet, sets its `country` to the first claim's
-    /// country, and adds the claims' kinds (see [`crate::attach_facts`]).
+    /// the record has none yet, sets its `country`, and adds its kinds (see
+    /// [`crate::attach_facts`]). When several items claim a front page, only
+    /// the country and kinds they all share count: x.com is both X Corp.'s
+    /// and the old X.com bank's, and is no bank.
     ///
     /// Only a claim on the domain's own front page counts (see
     /// [`OfficialSite::is_root_homepage`]): `https://www.ox.ac.uk/` makes
@@ -173,12 +175,29 @@ impl Builder {
                 if label != site.item {
                     record.add_alias(label);
                 }
-                if record.country.is_none() {
-                    record.country.clone_from(&site.country);
+            }
+            // When several items claim the front page (X Corp. and the old
+            // X.com bank both claim x.com), only what they agree on is the
+            // site's: their shared country and kinds.
+            // (Claims of one item carry the same facts.)
+            let (first, others) = claims.split_first().expect("a domain has a claim");
+            let mut country = first.country.clone();
+            let mut kinds: Vec<String> = first.kinds.clone();
+            for site in others {
+                if country != site.country {
+                    country = None;
                 }
-                for kind in &site.kinds {
-                    record.add_kind(kind);
-                }
+                kinds.retain(|kind| {
+                    site.kinds
+                        .iter()
+                        .any(|other| kind_key(other) == kind_key(kind))
+                });
+            }
+            if record.country.is_none() {
+                record.country = country;
+            }
+            for kind in &kinds {
+                record.add_kind(kind);
             }
         }
         warn_invalid("Wikidata official sites", invalid);
@@ -469,6 +488,36 @@ mod tests {
                 ..Default::default()
             }
         );
+    }
+
+    #[test]
+    fn shared_front_pages_keep_only_shared_facts() {
+        let claim = |item: &str, url: &str, country: Option<&str>, kinds: &[&str]| {
+            let mut site = site(item, item, url);
+            site.country = country.map(str::to_string);
+            site.kinds = kinds.iter().map(|k| k.to_string()).collect();
+            site
+        };
+        let mut builder = Builder::new();
+        builder.add_official_sites(&[
+            claim("Q1", "x.com", Some("US"), &["social media company"]),
+            claim("Q2", "x.com", Some("US"), &["bank", "online bank"]),
+            claim(
+                "Q3",
+                "continental.com",
+                Some("DE"),
+                &["tire manufacturer", "airline"],
+            ),
+            claim("Q4", "continental.com", Some("US"), &["airlines"]),
+            claim("Q5", "usbank.com", Some("US"), &["bank"]),
+        ]);
+        let records = builder.finish(None);
+        let get = |domain: &str| records.iter().find(|r| r.domain == domain).unwrap();
+        assert_eq!(get("x.com").country.as_deref(), Some("US"));
+        assert!(get("x.com").kinds.is_empty());
+        assert_eq!(get("continental.com").country, None);
+        assert_eq!(get("continental.com").kinds, ["airline"]);
+        assert_eq!(get("usbank.com").kinds, ["bank"]);
     }
 
     #[test]
