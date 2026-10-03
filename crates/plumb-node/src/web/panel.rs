@@ -16,6 +16,9 @@
 //! the panel itself (no `Origin` of another site), so that neither another
 //! machine on the network nor a web page open in a browser can change them.
 
+mod forms;
+pub(super) use forms::{features_error, settings_error};
+
 use std::net::SocketAddr;
 use std::path::Path;
 
@@ -207,13 +210,15 @@ pub(super) async fn save_features(State(state): State<AppState>, request: Reques
         Ok(features) => features,
         Err(err) => return panel_error(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
     };
-    let section = match apply_features_form(&form, &mut features) {
+    let section = match apply_features_form(&form, &mut features, "/app") {
         Ok(section) => section,
         Err(response) => return response,
     };
     if let Err(err) = node.change_features(features) {
-        return panel_error(
+        return features_error(
             StatusCode::INTERNAL_SERVER_ERROR,
+            &form,
+            "/app",
             &format!("Could not save feature settings: {err}"),
         );
     }
@@ -228,6 +233,7 @@ pub(super) async fn save_features(State(state): State<AppState>, request: Reques
 pub(super) fn apply_features_form(
     form: &FeaturesForm,
     features: &mut FeatureSettings,
+    base: &str,
 ) -> Result<&'static str, Response> {
     let section = if form.section == "search" {
         "search"
@@ -247,7 +253,12 @@ pub(super) fn apply_features_form(
             .collect();
     }
     if let Err(err) = features.check() {
-        return Err(panel_error(StatusCode::BAD_REQUEST, &err.to_string()));
+        return Err(features_error(
+            StatusCode::BAD_REQUEST,
+            form,
+            base,
+            &err.to_string(),
+        ));
     }
     Ok(section)
 }
@@ -341,14 +352,16 @@ pub(super) async fn save_settings(State(state): State<AppState>, request: Reques
             "The settings form could not be read.",
         );
     };
-    let settings = match settings_from_form(&form) {
+    let settings = match settings_from_form(&form, "/app") {
         Ok(settings) => settings,
         Err(response) => return response,
     };
     if let Err(err) = node.change_settings(settings) {
         warn!("could not save the settings: {err:#}");
-        return panel_error(
+        return settings_error(
             StatusCode::INTERNAL_SERVER_ERROR,
+            &form,
+            "/app",
             &format!("Could not save the settings: {err:#}"),
         );
     }
@@ -359,13 +372,18 @@ pub(super) async fn save_settings(State(state): State<AppState>, request: Reques
 /// are not numbers.
 // A response is big, but these run once per request.
 #[allow(clippy::result_large_err)]
-pub(super) fn settings_from_form(form: &SettingsForm) -> Result<NodeSettings, Response> {
+pub(super) fn settings_from_form(
+    form: &SettingsForm,
+    base: &str,
+) -> Result<NodeSettings, Response> {
     let (Some(download), Some(storage)) = (
         parse_limit(&form.download_limit_mb_per_day),
         parse_limit(&form.storage_limit_mb),
     ) else {
-        return Err(panel_error(
+        return Err(settings_error(
             StatusCode::BAD_REQUEST,
+            form,
+            base,
             "Limits are whole numbers of megabytes, or empty for none. Nothing was changed.",
         ));
     };
@@ -836,7 +854,7 @@ pub(super) fn render_panel(view: &PanelView<'_>) -> String {
 }
 
 pub(super) const LAYOUT_STYLE: &str = "
-.node-switch{display:flex;flex-wrap:wrap;gap:.4rem;margin-bottom:1rem}.node-switch a{padding:.4rem .8rem;border:1px solid var(--line);border-radius:999px;text-decoration:none;font-size:.9rem;color:var(--fg)}.node-switch a[aria-current]{border-color:var(--accent);color:var(--accent);font-weight:600}.node-panel{max-width:72rem;padding:2rem 2rem 4rem}.node-heading,.section-heading{display:flex;align-items:center;justify-content:space-between;gap:1rem}.node-heading h1{font-size:1.8rem}.eyebrow{font-size:.7rem;letter-spacing:.13em;color:var(--muted);margin:0 0 .3rem}.node-nav{display:flex;flex-wrap:wrap;gap:.4rem;border-bottom:1px solid var(--line);padding:1.5rem 0 1rem;margin-bottom:1.5rem}.node-panel a{color:var(--accent)}.node-panel a.btn:not(.alt){color:var(--bg)}.node-nav a{padding:.55rem .85rem;text-decoration:none;border-radius:.5rem;color:var(--muted)}.node-nav a[aria-current]{background:var(--accent);color:var(--bg);font-weight:600}.section-heading h2{margin:0;font-size:1.4rem}.section-heading>a{font-size:.85rem}.intro{color:var(--muted);max-width:45rem}.notice{padding:.85rem 1rem;border-left:3px solid var(--accent);background:color-mix(in srgb,var(--accent) 8%,var(--bg));border-radius:.3rem}.node-panel form{max-width:46rem}.node-panel fieldset{border:0;margin:0;padding:0;min-width:0}.node-panel fieldset:disabled{opacity:.65}.node-panel textarea{display:block;width:100%;min-height:6rem;font:inherit;background:var(--bg);color:var(--fg);padding:.75rem;border:1px solid var(--line);border-radius:.5rem}.node-panel .feature{padding:.8rem 0;border-bottom:1px solid var(--line)}.node-panel .feature label{margin:0}.node-panel .feature p{margin:.35rem 0 0 1.65rem}.node-panel .state{font-size:.8rem;color:var(--muted)}.node-panel :focus-visible{outline:3px solid var(--accent);outline-offset:3px}.node-panel dl{grid-template-columns:minmax(6rem,auto) minmax(0,1fr)}@media(max-width:600px){.node-panel{padding:1rem 1rem 3rem}.node-heading{align-items:flex-start}.node-heading h1{font-size:1.5rem}.node-nav{gap:.2rem}.node-nav a{padding:.5rem .6rem;font-size:.9rem}.cards{grid-template-columns:minmax(0,1fr)}.node-panel label{flex-wrap:wrap}.section-heading{align-items:flex-start}.section-heading>a{white-space:nowrap}}";
+.node-switch{display:flex;flex-wrap:wrap;gap:.4rem;margin-bottom:1rem}.node-switch a{padding:.4rem .8rem;border:1px solid var(--line);border-radius:999px;text-decoration:none;font-size:.9rem;color:var(--fg)}.node-switch a[aria-current]{border-color:var(--accent);color:var(--accent);font-weight:600}.node-panel .cards{grid-template-columns:repeat(2,minmax(0,1fr))}.wrap.node-panel{max-width:64rem;padding:2rem 2rem 4rem}.node-heading,.section-heading{display:flex;align-items:center;justify-content:space-between;gap:1rem}.node-heading h1{font-size:1.8rem}.eyebrow{font-size:.7rem;letter-spacing:.13em;color:var(--muted);margin:0 0 .3rem}.node-nav{display:flex;flex-wrap:wrap;gap:.4rem;border-bottom:1px solid var(--line);padding:1.5rem 0 1rem;margin-bottom:1.5rem}.node-panel a{color:var(--accent)}.node-panel a.btn:not(.alt){color:var(--bg)}.node-nav a{padding:.55rem .85rem;text-decoration:none;border-radius:.5rem;color:var(--muted)}.node-nav a[aria-current]{background:var(--accent);color:var(--bg);font-weight:600}.section-heading h2{margin:0;font-size:1.4rem}.section-heading>a{font-size:.85rem}.intro{color:var(--muted);max-width:45rem}.notice{padding:.85rem 1rem;border-left:3px solid var(--accent);background:color-mix(in srgb,var(--accent) 8%,var(--bg));border-radius:.3rem}.node-panel form{max-width:46rem}.node-panel fieldset{border:0;margin:0;padding:0;min-width:0}.node-panel fieldset:disabled{opacity:.65}.node-panel textarea{display:block;width:100%;min-height:6rem;font:inherit;background:var(--bg);color:var(--fg);padding:.75rem;border:1px solid var(--line);border-radius:.5rem}.node-panel .feature{padding:.8rem 0;border-bottom:1px solid var(--line)}.node-panel .feature label{margin:0}.node-panel .feature p{margin:.35rem 0 0 1.65rem}.node-panel .state{font-size:.8rem;color:var(--muted)}.node-panel :focus-visible{outline:3px solid var(--accent);outline-offset:3px}.node-panel dl{grid-template-columns:minmax(6rem,auto) minmax(0,1fr)}@media(max-width:600px){.wrap.node-panel{padding:1rem 1rem 3rem}.node-heading{align-items:flex-start}.node-heading h1{font-size:1.5rem}.node-nav{gap:.2rem}.node-nav a{padding:.5rem .6rem;font-size:.9rem}.node-panel .cards{grid-template-columns:minmax(0,1fr)}.node-panel label{flex-wrap:wrap}.section-heading{align-items:flex-start}.section-heading>a{white-space:nowrap}}";
 
 /// A card: its class, title, headline and the HTML under them.
 fn card(body: &mut String, class: &str, title: &str, big: &str, rest: &str) {
@@ -1610,7 +1628,7 @@ mod tests {
         let body = body_text(response).await;
         assert!(body.contains("Nothing was changed."), "{body}");
         assert!(
-            body.contains("<a class=\"btn\" href=\"/app\">Back to the panel</a>"),
+            body.contains("href=\"/app?section=resources\">Back to the panel</a>"),
             "{body}"
         );
         assert!(!node.settings.lock().unwrap().background_updates);
