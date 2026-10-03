@@ -48,7 +48,7 @@
 //! allows no scripts and no external resources. Searches run on Tokio's
 //! blocking thread pool.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::Duration;
@@ -59,7 +59,11 @@ use axum::http::{header, HeaderMap, HeaderName, StatusCode, Uri};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use plumb_core::{collapse_whitespace, now_unix, truncate_chars, SiteRecord};
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine as _;
+use plumb_core::{
+    collapse_whitespace, display_url, now_unix, site_initial, truncate_chars, SiteRecord,
+};
 use plumb_index::{
     build_index, Hit, RankConfig, SearchOptions, SearchResults, Searcher, SiteSearch,
 };
@@ -91,7 +95,8 @@ pub const MAX_QUERY_CHARS: usize = 200;
 
 /// No scripts, no external resources, forms only to this server. Inline
 /// styles are allowed for the page's own `<style>` element.
-const CONTENT_SECURITY_POLICY: &str = "default-src 'none'; style-src 'unsafe-inline'; \
+const CONTENT_SECURITY_POLICY: &str =
+    "default-src 'none'; style-src 'unsafe-inline'; img-src data:; \
      form-action 'self'; base-uri 'none'; frame-ancestors 'none'";
 
 /// Seconds between two reloads of the setup page, and the `Retry-After` of
@@ -230,6 +235,11 @@ pub trait StatusSource: Send + Sync {
         let _ = (query, domain);
     }
 
+    /// The icon of `domain` as a small PNG, when a crawl found one.
+    fn icon(&self, _domain: &str) -> Option<Vec<u8>> {
+        None
+    }
+
     /// The node's settings; `None` when it has none.
     fn settings(&self) -> Option<NodeSettings> {
         None
@@ -274,6 +284,42 @@ impl AppState {
         self.node
             .as_ref()
             .is_some_and(|node| node.shares_popularity())
+    }
+
+    /// The icons of `domains` that this node has, for [`render_hit`]. Read
+    /// off the async threads: each is a small file.
+    async fn icons(&self, domains: Vec<String>) -> Icons {
+        let Some(node) = self.node.clone() else {
+            return Icons::default();
+        };
+        tokio::task::spawn_blocking(move || Icons::load(node.as_ref(), domains))
+            .await
+            .unwrap_or_default()
+    }
+}
+
+/// Site icons for a results page, as `data:` URLs: the page carries them,
+/// so the browser asks nobody else for them.
+#[derive(Debug, Default)]
+struct Icons(HashMap<String, String>);
+
+impl Icons {
+    fn load(node: &dyn StatusSource, domains: Vec<String>) -> Self {
+        let mut icons = HashMap::new();
+        for domain in domains {
+            if icons.contains_key(&domain) {
+                continue;
+            }
+            if let Some(png) = node.icon(&domain) {
+                let url = format!("data:image/png;base64,{}", BASE64.encode(png));
+                icons.insert(domain, url);
+            }
+        }
+        Icons(icons)
+    }
+
+    fn get(&self, domain: &str) -> Option<&str> {
+        self.0.get(domain).map(String::as_str)
     }
 }
 
@@ -557,18 +603,27 @@ async fn search_page(
         (local.await, NetOutcome::NotAsked)
     };
     match local {
-        Ok(results) => html_response(
-            StatusCode::OK,
-            render_results(
-                &query,
-                &results,
-                &network,
-                &settings,
-                state.settings.web_search,
-                limit,
-                state.shares_popularity(),
-            ),
-        ),
+        Ok(results) => {
+            let mut domains: Vec<String> =
+                results.hits.iter().map(|hit| hit.domain.clone()).collect();
+            if let NetOutcome::Answered(found) = &network {
+                domains.extend(found.hits.iter().map(|result| result.hit.domain.clone()));
+            }
+            let icons = state.icons(domains).await;
+            html_response(
+                StatusCode::OK,
+                render_results(
+                    &query,
+                    &results,
+                    &network,
+                    &settings,
+                    state.settings.web_search,
+                    limit,
+                    state.shares_popularity(),
+                    &icons,
+                ),
+            )
+        }
         Err(err) => {
             error!("search for {query:?} failed: {err:#}");
             html_response(StatusCode::INTERNAL_SERVER_ERROR, render_error(&query))
@@ -710,7 +765,11 @@ async fn network_page(
     }
     let options = params.options(&state.settings.home, &headers);
     match network_search(&state, &query, params.limit(), &options).await {
-        Ok(results) => html_response(StatusCode::OK, render_network(&query, &results)),
+        Ok(results) => {
+            let domains = results.hits.iter().map(|r| r.hit.domain.clone()).collect();
+            let icons = state.icons(domains).await;
+            html_response(StatusCode::OK, render_network(&query, &results, &icons))
+        }
         Err(err) => {
             error!("network search for {query:?} failed: {err:#}");
             html_response(StatusCode::INTERNAL_SERVER_ERROR, render_error(&query))
@@ -1067,9 +1126,11 @@ fn time_until(at: u64, now: u64) -> String {
 
 const STYLE: &str = "\
 :root{color-scheme:light dark;--bg:#fff;--fg:#202124;--muted:#5f6368;--link:#1a0dab;\
---url:#0d652d;--line:#dadce0;--accent:#1a73e8;--err:#b3261e;--net:#f2effb}\
+--url:#0d652d;--line:#dadce0;--accent:#1a73e8;--err:#b3261e;--net:#f2effb;--chip:#fff;\
+--seen:#681da8}\
 @media (prefers-color-scheme:dark){:root{--bg:#1f1f1f;--fg:#e8eaed;--muted:#9aa0a6;\
---link:#8ab4f8;--url:#81c995;--line:#3c4043;--accent:#8ab4f8;--err:#f2b8b5;--net:#29263a}}\
+--link:#8ab4f8;--url:#81c995;--line:#3c4043;--accent:#8ab4f8;--err:#f2b8b5;--net:#29263a;\
+--chip:#f1f3f4;--seen:#c58af9}}\
 *{box-sizing:border-box}\
 body{margin:0;background:var(--bg);color:var(--fg);\
 font:16px/1.5 system-ui,-apple-system,\"Segoe UI\",Roboto,sans-serif}\
@@ -1086,11 +1147,24 @@ border-radius:.5rem;background:var(--bg);color:var(--fg)}\
 button{font:inherit;padding:.55rem 1rem;border:0;border-radius:.5rem;\
 background:var(--accent);color:var(--bg);cursor:pointer}\
 ol{list-style:none;margin:0;padding:0}\
-li{padding:.9rem 0;border-bottom:1px solid var(--line)}\
-.t{font-size:1.15rem;color:var(--link);text-decoration:none;overflow-wrap:anywhere}\
-a.t:hover{text-decoration:underline}\
-.u{color:var(--url);font-size:.875rem;overflow-wrap:anywhere}\
-.d{margin:.25rem 0 0;overflow-wrap:anywhere}\
+main>ol{margin-top:.5rem}\
+li{padding:.85rem 0;margin:.25rem 0}\
+.r{display:block;color:inherit;text-decoration:none}\
+.site{display:flex;align-items:center;gap:.7rem;min-width:0;margin-bottom:.35rem}\
+.ic{flex:none;display:grid;place-items:center;width:1.85rem;height:1.85rem;border-radius:50%;\
+background:var(--chip);border:1px solid var(--line);overflow:hidden}\
+.ic img{display:block;width:18px;height:18px}\
+.ic.l0,.ic.l1,.ic.l2,.ic.l3,.ic.l4,.ic.l5,.ic.l6,.ic.l7{border:0;color:#fff;\
+font-size:.85rem;font-weight:600;line-height:1}\
+.l0{background:#1a73e8}.l1{background:#d93025}.l2{background:#188038}.l3{background:#e37400}\
+.l4{background:#9334e6}.l5{background:#007b83}.l6{background:#c5221f}.l7{background:#5f6368}\
+.sn{display:flex;flex-direction:column;min-width:0;line-height:1.3}\
+.dn{font-size:.875rem;color:var(--fg);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}\
+.u{font-size:.75rem;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}\
+.t{display:block;font-size:1.25rem;line-height:1.3;color:var(--link);overflow-wrap:anywhere}\
+a.r:hover .t,a.r:focus-visible .t{text-decoration:underline}\
+a.r:visited .t{color:var(--seen)}\
+.d{margin:.3rem 0 0;line-height:1.55;overflow-wrap:anywhere}\
 .tag,.m,.s{color:var(--muted)}\
 .m,.s{font-size:.8rem}\
 .m{margin-top:.25rem}\
@@ -1118,7 +1192,7 @@ box-shadow:0 6px 20px rgba(0,0,0,.18)}\
 .src a{color:var(--link)}\
 .sw{display:inline-block;width:.8em;height:.8em;margin:0 .2em -.1em 0;border-radius:.2em;\
 background:var(--net);border:1px solid var(--muted)}\
-li.net{background:var(--net);margin:0 -.75rem;padding:.9rem .75rem}\
+li.net{background:var(--net);margin:.25rem -.75rem;padding:.85rem .75rem;border-radius:.75rem}\
 select{font:inherit;padding:.15rem .3rem;border:1px solid var(--line);border-radius:.35rem;\
 background:var(--bg);color:var(--fg)}\
 .ss{margin:1rem 0 .25rem;padding:.6rem .8rem;border:1px solid var(--line);border-radius:.5rem}\
@@ -1465,6 +1539,7 @@ fn render_source(
     let _ = writeln!(out, "<p class=\"src\">{line}</p>");
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_results(
     query: &str,
     results: &SearchResults,
@@ -1473,6 +1548,7 @@ fn render_results(
     web_search: Option<Engine>,
     limit: usize,
     share_picks: bool,
+    icons: &Icons,
 ) -> String {
     let shown = merge_results(&results.hits, network, limit);
     let from_network = shown.iter().filter(|s| s.network.is_some()).count();
@@ -1506,7 +1582,8 @@ fn render_results(
             // nodes link straight to themselves.
             let go = (share_picks && item.network.is_none())
                 .then(|| go_link(query, &settings.options, &item.hit.domain));
-            render_hit(&mut body, item.hit, item.network, go.as_deref());
+            let icon = icons.get(&item.hit.domain);
+            render_hit(&mut body, item.hit, item.network, go.as_deref(), icon);
         }
         body.push_str("</ol>\n");
     }
@@ -1530,7 +1607,7 @@ fn render_results(
 
 /// What other nodes answered, and nothing from this node. Their text is as
 /// untrusted as any record's, and is escaped the same way.
-fn render_network(query: &str, results: &NetworkResults) -> String {
+fn render_network(query: &str, results: &NetworkResults, icons: &Icons) -> String {
     let mut body = format!("<div class=\"wrap\">\n{}\n<main>\n", results_header(query));
     let _ = writeln!(
         body,
@@ -1576,7 +1653,8 @@ fn render_network(query: &str, results: &NetworkResults) -> String {
     } else {
         body.push_str("<ol>\n");
         for result in &results.hits {
-            render_hit(&mut body, &result.hit, Some(result), None);
+            let icon = icons.get(&result.hit.domain);
+            render_hit(&mut body, &result.hit, Some(result), None, icon);
         }
         body.push_str("</ol>\n");
     }
@@ -1627,10 +1705,36 @@ fn go_link(query: &str, options: &SearchOptions, domain: &str) -> String {
     format!("/go?{}", link.finish())
 }
 
-/// One result. A site that came from other nodes (`network`) is tinted and
-/// says so. `go` is the `/go` link to send the click through instead of
-/// linking to the site directly.
-fn render_hit(out: &mut String, hit: &Hit, network: Option<&NetworkResult>, go: Option<&str>) {
+/// The round badge before a result: the site's icon, or else the first
+/// letter of its name on a color of its own. `icon` is a `data:` URL.
+fn site_badge(domain: &str, icon: Option<&str>) -> String {
+    match icon {
+        Some(icon) => format!(
+            "<span class=\"ic\"><img src=\"{}\" alt=\"\" width=\"18\" height=\"18\"></span>",
+            escape_html(icon)
+        ),
+        None => {
+            let (letter, color) = site_initial(domain);
+            format!(
+                "<span class=\"ic l{color}\" aria-hidden=\"true\">{}</span>",
+                escape_html(&letter.to_string())
+            )
+        }
+    }
+}
+
+/// One result: the site's badge, domain and address above its name, then
+/// its description. A site that came from other nodes (`network`) is
+/// tinted and says so. `go` is the `/go` link to send the click through
+/// instead of linking to the site directly; `icon` is the site's icon as a
+/// `data:` URL.
+fn render_hit(
+    out: &mut String,
+    hit: &Hit,
+    network: Option<&NetworkResult>,
+    go: Option<&str>,
+    icon: Option<&str>,
+) {
     let name = hit
         .title
         .as_deref()
@@ -1642,56 +1746,63 @@ fn render_hit(out: &mut String, hit: &Hit, network: Option<&NetworkResult>, go: 
     } else {
         "<li>"
     });
+    let badge = site_badge(&hit.domain, icon);
+    let domain = escape_html(&hit.domain);
     match safe_href(hit) {
         Some(href) => {
+            // The address, unless it says no more than the domain.
+            let shown = display_url(&href);
+            let url = if shown == hit.domain {
+                String::new()
+            } else {
+                format!("<span class=\"u\">{}</span>", escape_html(&shown))
+            };
             let _ = write!(
                 out,
-                "<a class=\"t\" href=\"{}\" rel=\"noreferrer\">{name}</a>\
-                 <div class=\"u\">{}</div>",
+                "<a class=\"r\" href=\"{}\" rel=\"noreferrer\"><span class=\"site\">{badge}\
+                 <span class=\"sn\"><span class=\"dn\">{domain}</span>{url}</span></span>\
+                 <span class=\"t\">{name}</span></a>",
                 escape_html(go.unwrap_or(&href)),
-                escape_html(&truncate_chars(&href, 100))
             );
         }
         None => {
             let _ = write!(
                 out,
-                "<span class=\"t\">{name}</span><div class=\"u\">{}</div>",
-                escape_html(&hit.domain)
+                "<div class=\"r\"><span class=\"site\">{badge}<span class=\"sn\">\
+                 <span class=\"dn\">{domain}</span></span></span><span class=\"t\">{name}</span></div>"
             );
         }
     }
     if let Some(description) = hit.description.as_deref().filter(|d| !d.trim().is_empty()) {
         let _ = write!(out, "<p class=\"d\">{}</p>", escape_html(description));
     }
-    let country = hit
-        .country
-        .as_deref()
-        .map(|code| format!(" &middot; {}", escape_html(country_name(code))))
-        .unwrap_or_default();
-    let source = network
-        .map(|result| {
-            let crawl = if result.confirmed {
-                "signed crawls, two nodes agree"
-            } else if result.verified {
-                "signed crawl, checked"
-            } else {
-                "unsigned (seed data)"
-            };
-            let answers = if result.answers == 1 {
-                "1 answer".to_string()
-            } else {
-                format!("{} answers", result.answers)
-            };
-            format!(" &middot; from the Plumb network ({crawl}, in {answers})")
-        })
-        .unwrap_or_default();
+    let mut meta: Vec<String> = Vec::new();
+    if let Some(code) = hit.country.as_deref() {
+        meta.push(escape_html(country_name(code)));
+    }
+    if let Some(result) = network {
+        let crawl = if result.confirmed {
+            "signed crawls, two nodes agree"
+        } else if result.verified {
+            "signed crawl, checked"
+        } else {
+            "unsigned (seed data)"
+        };
+        let answers = if result.answers == 1 {
+            "1 answer".to_string()
+        } else {
+            format!("{} answers", result.answers)
+        };
+        meta.push(format!("from the Plumb network ({crawl}, in {answers})"));
+    }
+    meta.push(format!(
+        "<span title=\"text {:.3}, link {:.3}\">score {:.3}</span>",
+        hit.text_score, hit.link_score, hit.score
+    ));
     let _ = writeln!(
         out,
-        "<div class=\"m\">{}{country}{source} &middot; score {:.3} (text {:.3}, link {:.3})</div></li>",
-        escape_html(&hit.domain),
-        hit.score,
-        hit.text_score,
-        hit.link_score
+        "<div class=\"m\">{}</div></li>",
+        meta.join(" &middot; ")
     );
 }
 
@@ -1876,13 +1987,22 @@ mod tests {
         let fake = backend(bank_hits());
         let (status, _, body) = get(Arc::clone(&fake), "/search?q=us+bank").await;
         assert_eq!(status, StatusCode::OK);
+        assert!(
+            body.contains(
+                "<a class=\"r\" href=\"https://www.usbank.com/\" rel=\"noreferrer\">\
+                 <span class=\"site\"><span class=\"ic l"
+            ),
+            "{body}"
+        );
         assert!(body.contains(
-            "<a class=\"t\" href=\"https://www.usbank.com/\" rel=\"noreferrer\">\
-             U.S. Bank | Personal &amp; Business Banking</a>"
+            "<span class=\"dn\">usbank.com</span><span class=\"u\">www.usbank.com</span>\
+             </span></span><span class=\"t\">U.S. Bank | Personal &amp; Business Banking</span></a>"
         ));
         assert!(body.contains("<p class=\"d\">Checking, savings &amp; loans.</p>"));
         // A hit without a title is shown by its domain.
-        assert!(body.contains(">usbank-login-help.com</a>"));
+        assert!(body.contains("<span class=\"t\">usbank-login-help.com</span></a>"));
+        // Without an icon, a site gets its first letter.
+        assert!(body.contains("aria-hidden=\"true\">U</span>"));
         assert!(body.contains("value=\"us bank\""));
         assert!(body.contains("href=\"/api/search?q=us+bank\""));
         assert_eq!(
@@ -2206,7 +2326,7 @@ mod tests {
         );
         // The address shown is still the site's own.
         assert!(
-            body.contains("<div class=\"u\">https://www.usbank.com/</div>"),
+            body.contains("<span class=\"u\">www.usbank.com</span>"),
             "{body}"
         );
         assert!(
@@ -2609,7 +2729,7 @@ mod tests {
         );
         assert!(body.contains("<option value=\"DE\" selected>Germany</option>"));
         assert!(body.contains("name=\"only\" value=\"1\" checked"));
-        assert!(body.contains("github.com &middot; United States &middot; score"));
+        assert!(body.contains("<div class=\"m\">United States &middot; <span title=\"text"));
         assert!(body.contains("country=DE&amp;only=1"), "{body}");
 
         // No country asked for: the server's setting, then the browser's.
@@ -2769,8 +2889,17 @@ mod tests {
             hits: local.clone(),
             site_search: None,
         };
-        let page = render_results("q", &results, &network, &settings, None, 10, false);
-        assert!(page.contains("<li class=\"net\"><a class=\"t\" href=\"https://c.com/\""));
+        let page = render_results(
+            "q",
+            &results,
+            &network,
+            &settings,
+            None,
+            10,
+            false,
+            &Icons::default(),
+        );
+        assert!(page.contains("<li class=\"net\"><a class=\"r\" href=\"https://c.com/\""));
         assert_eq!(page.matches("<li class=\"net\">").count(), 1);
         assert!(page.contains("6 of 8 requests to other nodes answered"));
         assert!(page.contains("Tinted results came only from the network."));
@@ -2795,6 +2924,7 @@ mod tests {
             None,
             10,
             false,
+            &Icons::default(),
         );
         assert!(page.contains(
             "From this site's own index. <a href=\"/search?q=q&amp;country=DE&amp;net=1\">"
@@ -2809,6 +2939,7 @@ mod tests {
             None,
             10,
             false,
+            &Icons::default(),
         );
         assert!(page.contains("the Plumb network did not answer this time"));
         assert!(page.contains("a.com"));
@@ -2821,10 +2952,110 @@ mod tests {
             None,
             10,
             false,
+            &Icons::default(),
         );
         assert!(!page.contains("Tinted"));
         let none = NetOutcome::Answered(NetworkResults::default());
-        let page = render_results("q", &results, &none, &settings, None, 10, false);
+        let page = render_results(
+            "q",
+            &results,
+            &none,
+            &settings,
+            None,
+            10,
+            false,
+            &Icons::default(),
+        );
         assert!(page.contains("no other Plumb nodes are connected right now"));
+    }
+
+    #[test]
+    fn results_show_site_icons_inline_and_letters_otherwise() {
+        let results = SearchResults {
+            hits: vec![
+                hit(
+                    "usbank.com",
+                    "https://www.usbank.com/",
+                    Some("U.S. Bank"),
+                    None,
+                ),
+                hit(
+                    "chase.com",
+                    "https://www.chase.com/personal",
+                    Some("Chase"),
+                    None,
+                ),
+            ],
+            site_search: None,
+        };
+        let mut icons = Icons::default();
+        icons
+            .0
+            .insert("usbank.com".into(), "data:image/png;base64,iVBORw0K".into());
+        let page = render_results(
+            "bank",
+            &results,
+            &NetOutcome::NotAsked,
+            &no_settings(),
+            None,
+            10,
+            false,
+            &icons,
+        );
+        assert!(page.contains(
+            "<span class=\"ic\"><img src=\"data:image/png;base64,iVBORw0K\" alt=\"\" \
+             width=\"18\" height=\"18\"></span>"
+        ));
+        let (letter, color) = site_initial("chase.com");
+        assert_eq!(letter, 'C');
+        assert!(page.contains(&format!(
+            "<span class=\"ic l{color}\" aria-hidden=\"true\">C</span>"
+        )));
+        assert!(page.contains("<span class=\"u\">www.chase.com/personal</span>"));
+        // An address that is just the domain is not repeated.
+        let results = SearchResults {
+            hits: vec![hit("jsr.io", "https://jsr.io/", Some("JSR"), None)],
+            site_search: None,
+        };
+        let page = render_results(
+            "jsr",
+            &results,
+            &NetOutcome::NotAsked,
+            &no_settings(),
+            None,
+            10,
+            false,
+            &Icons::default(),
+        );
+        assert!(
+            page.contains("<span class=\"dn\">jsr.io</span></span>"),
+            "{page}"
+        );
+        // The page loads no image from anywhere: icons ride inside it.
+        assert!(!page.contains("src=\"http"));
+        assert!(CONTENT_SECURITY_POLICY.contains("img-src data:;"));
+    }
+
+    struct IconNode;
+
+    impl StatusSource for IconNode {
+        fn status(&self) -> Status {
+            node_status(Phase::Ready, Step::Idle)
+        }
+        fn icon(&self, domain: &str) -> Option<Vec<u8>> {
+            (domain == "usbank.com").then(|| b"\x89PNG".to_vec())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_node_puts_the_icons_it_has_into_the_page() {
+        let app = node_router(backend(bank_hits()), Arc::new(IconNode));
+        let (code, _, body) = send(app, "/search?q=us+bank").await;
+        assert_eq!(code, StatusCode::OK);
+        assert!(
+            body.contains("<img src=\"data:image/png;base64,iVBORw==\""),
+            "{body}"
+        );
+        assert_eq!(body.matches("<img ").count(), 1);
     }
 }

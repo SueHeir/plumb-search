@@ -59,6 +59,7 @@ fn fetched(domain: &str, fetched_at: u64, links_to: &[&str]) -> CrawlResult {
                 links,
                 ..PageMeta::default()
             },
+            icon: None,
         }),
     }
 }
@@ -829,6 +830,7 @@ fn counts_outcomes() {
         status: 200,
         fetched_at: 1,
         meta: PageMeta::default(),
+        icon: None,
     };
     let results = [
         result("a.com", CrawlOutcome::Fetched(page)),
@@ -879,4 +881,16 @@ fn counts_outcomes() {
     let mut twice = summary;
     twice.add(&summary);
     assert_eq!((twice.failed, twice.unreachable), (6, 4));
+}
+
+#[test]
+fn sites_can_be_made_due_early() {
+    let now = 10 * DAY;
+    let records = [
+        record("fresh.com", 1, Some(9 * DAY), Some(9 * DAY)),
+        record("noted.com", 2, Some(9 * DAY), Some(9 * DAY)),
+    ];
+    assert!(select_targets(records.iter(), 10, now, WINDOW).is_empty());
+    let early = select_targets_with(records.iter(), 10, now, WINDOW, |r| r.domain == "fresh.com");
+    assert_eq!(domains(&early), ["fresh.com"]);
 }

@@ -35,6 +35,7 @@ pub mod websearch;
 
 mod crawl;
 mod fetch;
+mod icons;
 mod ingest;
 mod records;
 mod run;

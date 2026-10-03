@@ -17,8 +17,8 @@ use tracing::{debug, info, warn};
 use url::{Origin, Url};
 
 use crate::{
-    dns, extract_page_meta, CrawlConfig, CrawlOutcome, CrawlResult, CrawlTarget, CrawledPage,
-    ROBOTS_TOKEN,
+    dns, extract_page_meta, normalize_icon, CrawlConfig, CrawlOutcome, CrawlResult, CrawlTarget,
+    CrawledPage, ROBOTS_TOKEN,
 };
 
 const ROBOTS_PATH: &str = "/robots.txt";
@@ -32,6 +32,14 @@ const ROBOTS_MAX_BYTES: usize = 500 * 1024;
 const MAX_ROBOTS_REGEX_BYTES: usize = 16 << 20;
 /// Longest robots.txt `Crawl-delay` honoured; longer ones are cut to this.
 const MAX_CRAWL_DELAY: Duration = Duration::from_secs(30);
+/// Where browsers look for a site's icon when its pages name none.
+const FAVICON_PATH: &str = "/favicon.ico";
+/// Icon files tried per site, `/favicon.ico` included.
+const MAX_ICON_TRIES: usize = 3;
+/// Icon files are read up to this size; a larger one fails to decode.
+const ICON_MAX_BYTES: usize = 256 * 1024;
+/// `Accept` header for icon requests.
+const ACCEPT_ICON: &str = "image/png,image/x-icon,image/*;q=0.8,*/*;q=0.5";
 /// `Accept` header for page requests.
 const ACCEPT_HTML: &str = "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8";
 
@@ -370,7 +378,13 @@ impl<'a> Visit<'a> {
                 Err(err) => return Failure::request(None, err).into(),
             };
             let Some(next) = redirect_target(&response) else {
-                return self.read_page(domain, response).await;
+                let mut outcome = self.read_page(domain, response).await;
+                if let CrawlOutcome::Fetched(page) = &mut outcome {
+                    if self.cfg.fetch_icons {
+                        page.icon = self.fetch_icon(page).await;
+                    }
+                }
+                return outcome;
             };
             if !same_site(start, &next) {
                 return CrawlOutcome::OffsiteRedirect {
@@ -388,6 +402,80 @@ impl<'a> Visit<'a> {
             debug!("{url} redirects to {next}");
             url = next;
         }
+    }
+
+    /// The site's icon for `page`, normalized: the best two icons the page
+    /// links to, then `/favicon.ico` of the page's origin,
+    /// until one reads as a bitmap. Each URL, and each redirect, must be
+    /// allowed by its origin's robots.txt; icons may be on other sites,
+    /// such as a CDN. A failure only means no icon.
+    async fn fetch_icon(&mut self, page: &CrawledPage) -> Option<Vec<u8>> {
+        let page_url = Url::parse(&page.final_url).ok()?;
+        let mut urls: Vec<Url> = page
+            .meta
+            .icons
+            .iter()
+            .filter_map(|icon| http_url(icon).ok())
+            .take(MAX_ICON_TRIES - 1)
+            .collect();
+        if let Ok(favicon) = page_url.join(FAVICON_PATH) {
+            urls.push(favicon);
+        }
+        let mut seen = Vec::new();
+        urls.retain(|url| {
+            let new = !seen.contains(url);
+            seen.push(url.clone());
+            new
+        });
+        for start in urls {
+            let Some(body) = self.fetch_icon_file(start.clone()).await else {
+                continue;
+            };
+            let icon = tokio::task::spawn_blocking(move || normalize_icon(&body))
+                .await
+                .ok()
+                .flatten();
+            if icon.is_some() {
+                return icon;
+            }
+            debug!("{start}: not an icon this crawler can read");
+        }
+        None
+    }
+
+    /// The bytes of an icon file at `url`, following redirects anywhere
+    /// that robots.txt allows. `None` for anything but a 2xx answer that
+    /// is not a web page.
+    async fn fetch_icon_file(&mut self, mut url: Url) -> Option<Vec<u8>> {
+        for _ in 0..=self.cfg.max_redirects {
+            let crawl_delay = match self.robots(&url).await {
+                Robots::DoNotCrawl(_) => return None,
+                Robots::NoRules => None,
+                Robots::Rules(robot) => {
+                    if !allowed(&robot, &url).await {
+                        return None;
+                    }
+                    robot.delay
+                }
+            };
+            let delay = page_delay(self.cfg.per_host_delay, crawl_delay);
+            let request = self.client.get(url.clone()).header(ACCEPT, ACCEPT_ICON);
+            let response = self.send(&url, delay, request).await.ok()?;
+            if let Some(next) = redirect_target(&response) {
+                url = next;
+                continue;
+            }
+            if !response.status().is_success() {
+                return None;
+            }
+            if content_type(&response).is_some_and(|kind| is_html(&kind)) {
+                return None;
+            }
+            return read_body(response, ICON_MAX_BYTES, &self.cfg.downloaded)
+                .await
+                .ok();
+        }
+        None
     }
 
     /// The robots.txt rules for `url`'s origin, fetched on first use.
@@ -497,6 +585,7 @@ impl<'a> Visit<'a> {
                 status: status.as_u16(),
                 fetched_at,
                 meta,
+                icon: None,
             }),
             Err(err) => Failure::other(format!("parsing the page: {err}")).into(),
         }
@@ -867,6 +956,9 @@ mod tests {
             concurrency: 4,
             per_host_delay: Duration::from_millis(10),
             timeout: Duration::from_secs(3),
+            // Only the icon tests turn this on, so the others see just the
+            // requests for robots.txt and pages.
+            fetch_icons: false,
             ..CrawlConfig::default()
         }
     }
@@ -1005,6 +1097,75 @@ mod tests {
         assert_eq!(hits.paths(), ["/robots.txt", "/"]);
         assert_eq!(hits.get("/").user_agent, USER_AGENT);
         assert_eq!(hits.get("/robots.txt").user_agent, USER_AGENT);
+    }
+
+    fn icon_config() -> CrawlConfig {
+        CrawlConfig {
+            fetch_icons: true,
+            ..config()
+        }
+    }
+
+    fn png_response() -> Response {
+        Response::builder()
+            .header(header::CONTENT_TYPE, "image/png")
+            .body(crate::icon::tests::png(48, 48, 255).into())
+            .unwrap()
+    }
+
+    const ICON_HOME: &str = r#"<!doctype html><html><head><title>Icons</title>
+        <link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+        <link rel="icon" href="/static/icon-32.png" sizes="32x32">
+        </head><body>Hi</body></html>"#;
+
+    #[tokio::test]
+    async fn fetches_the_icon_a_homepage_names() {
+        let (port, hits) = serve(|_| {
+            Router::new()
+                .route("/", get(|| async { Html(ICON_HOME) }))
+                .route("/static/icon-32.png", get(|| async { png_response() }))
+        })
+        .await;
+        let page = expect_fetched(crawl_one(target(port, "/"), &icon_config()).await);
+        let icon = page.icon.expect("an icon");
+        assert!(icon.starts_with(b"\x89PNG"));
+        assert_eq!(
+            page.meta.icons,
+            [format!("http://127.0.0.1:{port}/static/icon-32.png")]
+        );
+        assert_eq!(hits.paths(), ["/robots.txt", "/", "/static/icon-32.png"]);
+    }
+
+    #[tokio::test]
+    async fn icons_obey_robots_txt_and_fall_back_to_favicon_ico() {
+        let (port, hits) = serve(|_| {
+            Router::new()
+                .route("/", get(|| async { Html(ICON_HOME) }))
+                .route(
+                    "/robots.txt",
+                    get(|| async { "User-agent: *\nDisallow: /static/\n" }),
+                )
+                .route("/static/icon-32.png", get(|| async { png_response() }))
+                .route("/favicon.ico", get(|| async { png_response() }))
+        })
+        .await;
+        let page = expect_fetched(crawl_one(target(port, "/"), &icon_config()).await);
+        assert!(page.icon.is_some());
+        assert_eq!(hits.paths(), ["/robots.txt", "/", "/favicon.ico"]);
+    }
+
+    #[tokio::test]
+    async fn a_site_without_a_readable_icon_has_none() {
+        let (port, hits) = serve(|_| {
+            home().route(
+                "/favicon.ico",
+                get(|| async { Html("<!doctype html><p>Not here") }),
+            )
+        })
+        .await;
+        let page = expect_fetched(crawl_one(target(port, "/"), &icon_config()).await);
+        assert_eq!(page.icon, None);
+        assert_eq!(hits.paths(), ["/robots.txt", "/", "/favicon.ico"]);
     }
 
     #[tokio::test]

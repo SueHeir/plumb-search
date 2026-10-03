@@ -168,13 +168,25 @@ pub(crate) fn select_targets<'a>(
     now: u64,
     window: u64,
 ) -> Vec<CrawlTarget> {
+    select_targets_with(records, budget, now, window, |_| false)
+}
+
+/// [`select_targets`], also counting the crawled sites for which `due_now`
+/// is true as due again, whenever they were last crawled.
+pub(crate) fn select_targets_with<'a>(
+    records: impl Iterator<Item = &'a SiteRecord>,
+    budget: usize,
+    now: u64,
+    window: u64,
+    due_now: impl Fn(&SiteRecord) -> bool,
+) -> Vec<CrawlTarget> {
     let mut never: Vec<(f32, &SiteRecord)> = Vec::new();
     let mut again: Vec<(f32, &SiteRecord)> = Vec::new();
     for record in records {
         let scored = (record.link_score(), record);
         match due_at(record, window) {
             None => never.push(scored),
-            Some(due) if due <= now => again.push(scored),
+            Some(due) if due <= now || due_now(record) => again.push(scored),
             Some(_) => {}
         }
     }

@@ -13,7 +13,7 @@
 //! browsers never send to the server, so back, reload and bookmarks work.
 
 use plumb_core::keys::{pick_buckets, BUCKETS};
-use plumb_core::{truncate_chars, SiteRecord};
+use plumb_core::{display_url, site_initial, truncate_chars, SiteRecord};
 use serde::Deserialize;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
@@ -318,27 +318,42 @@ fn request(url: &str, cache: RequestCache) -> Result<Request, JsValue> {
     Request::new_with_str_and_init(url, &init)
 }
 
-/// One result, built from text nodes only, like the server's results.
+/// One result, built from text nodes only, laid out like the server's
+/// results. Sites show their first letter rather than their icon: fetching
+/// icons would tell this site which results the browser found.
 fn result_item(document: &Document, hit: &Ranked) -> Result<Element, JsValue> {
     let item = document.create_element("li")?;
     let href = safe_href(&hit.url);
     let title = truncate_chars(hit.title.as_deref().unwrap_or(&hit.domain), 150);
-    let heading = match &href {
+    let link = match &href {
         Some(href) => {
             let link = document.create_element("a")?;
             link.set_attribute("href", href)?;
             link.set_attribute("rel", "noreferrer")?;
             link
         }
-        None => document.create_element("span")?,
+        None => document.create_element("div")?,
     };
-    heading.set_class_name("t");
-    heading.set_text_content(Some(&title));
-    item.append_child(&heading)?;
-    let url = document.create_element("div")?;
-    url.set_class_name("u");
-    url.set_text_content(Some(href.as_deref().unwrap_or(&hit.domain)));
-    item.append_child(&url)?;
+    link.set_class_name("r");
+    let site = span(document, "site", None)?;
+    let (letter, color) = site_initial(&hit.domain);
+    let badge = span(document, &format!("ic l{color}"), Some(&letter.to_string()))?;
+    badge.set_attribute("aria-hidden", "true")?;
+    site.append_child(&badge)?;
+    let names = span(document, "sn", None)?;
+    let domain = span(document, "dn", Some(&hit.domain))?;
+    names.append_child(&domain)?;
+    // The address, unless it says no more than the domain.
+    let shown = href.as_deref().map(display_url);
+    if let Some(shown) = shown.filter(|shown| *shown != hit.domain) {
+        let url = span(document, "u", Some(&shown))?;
+        names.append_child(&url)?;
+    }
+    site.append_child(&names)?;
+    link.append_child(&site)?;
+    let heading = span(document, "t", Some(&title))?;
+    link.append_child(&heading)?;
+    item.append_child(&link)?;
     if let Some(description) = &hit.description {
         let text = document.create_element("p")?;
         text.set_class_name("d");
@@ -346,6 +361,16 @@ fn result_item(document: &Document, hit: &Ranked) -> Result<Element, JsValue> {
         item.append_child(&text)?;
     }
     Ok(item)
+}
+
+/// A `<span>` of class `class`, holding `text` when there is some.
+fn span(document: &Document, class: &str, text: Option<&str>) -> Result<Element, JsValue> {
+    let span = document.create_element("span")?;
+    span.set_class_name(class);
+    if text.is_some() {
+        span.set_text_content(text);
+    }
+    Ok(span)
 }
 
 fn set_status(text: &str) -> Result<(), JsValue> {
