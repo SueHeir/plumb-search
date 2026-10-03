@@ -695,9 +695,10 @@ async fn sets_up_from_the_seed_data_and_retries_after_a_failure() {
     // the time out.
     let counts = host.counts();
     assert_eq!(counts["GET /tranco.csv"], 2, "{counts:?}");
+    // Then twice for the countries and kinds of the official websites.
     assert_eq!(
         counts["POST /sparql"],
-        download::wikidata_sitelink_bands(25).len() + 1,
+        download::wikidata_sitelink_bands(25).len() + 1 + 1,
         "{counts:?}"
     );
     assert_eq!(counts["GET /graph/x-domain-ranks.txt.gz"], 1, "{counts:?}");
@@ -709,6 +710,7 @@ async fn sets_up_from_the_seed_data_and_retries_after_a_failure() {
         [
             "tranco-top-1m.csv.zip",
             "wikidata-official-sites.tsv",
+            "wikidata-site-facts.tsv",
             "x-domain-ranks-top50.txt"
         ]
     );

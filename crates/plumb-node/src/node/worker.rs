@@ -33,7 +33,8 @@ use plumb_core::{now_unix, SiteRecord};
 use plumb_crawl::{crawl_homepages, CrawlConfig};
 use plumb_index::build_index;
 use plumb_ingest::{
-    download, load_cc_domain_ranks, load_tranco, load_wikidata_official_sites, Builder,
+    attach_facts, download, facts, load_cc_domain_ranks, load_site_facts, load_tranco,
+    load_wikidata_official_sites, Builder,
 };
 use tokio::runtime::Handle;
 use tracing::{info, warn};
@@ -260,6 +261,9 @@ struct SeedFiles {
     /// Setup can go on without Wikidata, so its failure is kept here
     /// rather than failing the download.
     wikidata: Result<PathBuf>,
+    /// Countries and kinds of the official websites' organizations; used
+    /// when the file exists, since setup goes on without it.
+    facts: PathBuf,
     cc_ranks: Option<PathBuf>,
 }
 
@@ -307,6 +311,26 @@ async fn download_seed(inner: &Inner) -> Result<SeedFiles> {
         wikidata = downloaded.context("could not download Wikidata's official websites");
     }
 
+    let facts = seed.join(facts::FACTS_FILE_NAME);
+    if let (Ok(sites), false) = (&wikidata, is_recent(&facts)) {
+        inner.set_step(
+            Step::Downloading,
+            "Asking Wikidata for the countries and kinds of those sites",
+        );
+        let downloaded = facts::download_site_facts(
+            &client,
+            &sources.wikidata_sparql_url,
+            seed,
+            sites,
+            sources.wikidata_pacing,
+        )
+        .await;
+        if let Err(err) = downloaded {
+            // Only the country and kind ranking need them: carry on.
+            warn!("could not get Wikidata's countries and kinds, going on without them: {err:#}");
+        }
+    }
+
     let mut cc_ranks = None;
     if let Some(url) = &cc_url {
         let path = seed.join(download::cc_domain_ranks_top_file_name(url, config.sites)?);
@@ -337,6 +361,7 @@ async fn download_seed(inner: &Inner) -> Result<SeedFiles> {
     Ok(SeedFiles {
         tranco,
         wikidata,
+        facts,
         cc_ranks,
     })
 }
@@ -383,8 +408,14 @@ fn seed_records(inner: &Inner, files: &SeedFiles) -> Result<Vec<SiteRecord>> {
     if let Some(path) = wikidata {
         inner.set_step(Step::Ingesting, "Reading Wikidata's official websites");
         inner.set_progress(sources - 1, sources, "files");
-        let sites = load_wikidata_official_sites(path)
+        let mut sites = load_wikidata_official_sites(path)
             .with_context(|| format!("loading Wikidata sites {}", path.display()))?;
+        if files.facts.is_file() {
+            match load_site_facts(&files.facts) {
+                Ok(facts) => attach_facts(&mut sites, &facts),
+                Err(err) => warn!("going on without Wikidata's countries and kinds: {err:#}"),
+            }
+        }
         builder.add_official_sites(&sites);
         drop(sites);
         inner.check_stop()?;

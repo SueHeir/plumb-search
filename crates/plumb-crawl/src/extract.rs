@@ -22,6 +22,7 @@ use html5ever::tokenizer::{
 };
 use plumb_core::{
     collapse_whitespace, normalize_text, registrable_domain, truncate_chars, MAX_TEXT_CHARS,
+    SEARCH_TERMS,
 };
 use tracing::debug;
 use url::Url;
@@ -180,6 +181,9 @@ struct Page<'a> {
     description: Option<String>,
     og_description: Option<String>,
     site_name: Option<String>,
+    search_url: Option<String>,
+    /// The GET form being read, while no search address has been found.
+    form: Option<SearchForm>,
     /// The link being read, when it is one to keep.
     anchor: Option<Anchor>,
     links: Vec<OutLink>,
@@ -189,6 +193,41 @@ struct Page<'a> {
     /// How many `<svg>` and `<math>` elements are open.
     foreign: usize,
 }
+
+/// A GET form on the page, between its `<form>` and its `</form>`.
+struct SearchForm {
+    action: Url,
+    /// The name of its search box, once seen.
+    terms: Option<String>,
+    /// Hidden fields, sent along unchanged.
+    fixed: Vec<(String, String)>,
+}
+
+/// Names of text boxes that hold search words, when not `type="search"`.
+const SEARCH_BOX_NAMES: &[&str] = &[
+    "q",
+    "query",
+    "s",
+    "search",
+    "k",
+    "keyword",
+    "keywords",
+    "term",
+    "terms",
+    "searchTerm",
+    "search_query",
+    "searchterm",
+    "text",
+    "w",
+    "_nkw",
+    "st",
+];
+
+/// Most hidden fields kept from a search form.
+const MAX_FIXED_FORM_FIELDS: usize = 4;
+
+/// Longest search address kept.
+const MAX_SEARCH_URL_BYTES: usize = 500;
 
 /// A link to another site, between its `<a>` and its `</a>`.
 struct Anchor {
@@ -216,6 +255,8 @@ impl<'a> Page<'a> {
             description: None,
             og_description: None,
             site_name: None,
+            search_url: None,
+            form: None,
             anchor: None,
             links: Vec::new(),
             seen: HashSet::new(),
@@ -248,6 +289,8 @@ impl<'a> Page<'a> {
             }
             "img" => self.image(tag),
             "meta" => self.meta(tag),
+            "form" => self.open_form(tag),
+            "input" => self.input(tag),
             "svg" | "math" if !tag.self_closing => self.foreign += 1,
             "title" if self.foreign == 0 && !self.title_seen => {
                 self.title_seen = true;
@@ -273,6 +316,7 @@ impl<'a> Page<'a> {
         match name {
             "a" => self.close_anchor(),
             "title" => self.close_title(),
+            "form" => self.close_form(),
             "svg" | "math" => self.foreign = self.foreign.saturating_sub(1),
             _ => {}
         }
@@ -388,13 +432,92 @@ impl<'a> Page<'a> {
         }
     }
 
+    /// Starts reading a form that submits with GET to this site.
+    fn open_form(&mut self, tag: &Tag) {
+        self.form = None;
+        if self.search_url.is_some() || self.foreign > 0 {
+            return;
+        }
+        let is_get = attr(tag, "method").is_none_or(|m| m.trim().eq_ignore_ascii_case("get"));
+        let action = attr(tag, "action").unwrap_or_default().trim();
+        let Ok(action) = self.base_url.join(action) else {
+            return;
+        };
+        let same_site = matches!(action.scheme(), "http" | "https")
+            && registrable_domain(action.as_str()).is_some()
+            && registrable_domain(action.as_str()) == self.own_domain;
+        if is_get && same_site {
+            self.form = Some(SearchForm {
+                action,
+                terms: None,
+                fixed: Vec::new(),
+            });
+        }
+    }
+
+    /// Notes a search box, or a hidden value sent along, in the open form.
+    fn input(&mut self, tag: &Tag) {
+        let Some(form) = &mut self.form else {
+            return;
+        };
+        let Some(name) = attr(tag, "name").map(str::trim).filter(|n| !n.is_empty()) else {
+            return;
+        };
+        let kind = attr(tag, "type")
+            .unwrap_or("text")
+            .trim()
+            .to_ascii_lowercase();
+        match kind.as_str() {
+            "hidden" if form.fixed.len() < MAX_FIXED_FORM_FIELDS => {
+                let value = attr(tag, "value").unwrap_or_default();
+                form.fixed.push((name.to_string(), value.to_string()));
+            }
+            "search" => form.terms = Some(name.to_string()),
+            "text" | "" if form.terms.is_none() && SEARCH_BOX_NAMES.contains(&name) => {
+                form.terms = Some(name.to_string());
+            }
+            _ => {}
+        }
+    }
+
+    /// Ends a form; one with a search box gives the site's search address.
+    fn close_form(&mut self) {
+        let Some(form) = self.form.take() else {
+            return;
+        };
+        let Some(terms) = form.terms else {
+            return;
+        };
+        let mut url = form.action;
+        url.set_fragment(None);
+        {
+            let mut query = url.query_pairs_mut();
+            query.clear();
+            for (name, value) in &form.fixed {
+                if *name != terms {
+                    query.append_pair(name, value);
+                }
+            }
+            query.append_pair(&terms, SEARCH_TERMS);
+        }
+        // The placeholder must survive the encoding of the query.
+        let encoded: String =
+            url::form_urlencoded::byte_serialize(SEARCH_TERMS.as_bytes()).collect();
+        let template = url.as_str().replace(&encoded, SEARCH_TERMS);
+        if template.len() <= MAX_SEARCH_URL_BYTES && template.matches(SEARCH_TERMS).count() == 1 {
+            self.search_url = Some(template);
+        }
+    }
+
     fn into_meta(mut self) -> PageMeta {
         self.close_anchor();
         self.close_title();
+        self.close_form();
         PageMeta {
             title: self.title,
             description: self.description.or(self.og_description),
             site_name: self.site_name,
+            search_url: self.search_url,
             links: self.links,
         }
     }
@@ -518,6 +641,56 @@ mod tests {
         );
         assert_eq!(meta.site_name.as_deref(), Some("U.S. Bank"));
         assert!(meta.links.is_empty());
+    }
+
+    #[test]
+    fn reads_the_search_form() {
+        let search = |html: &str| extract("https://www.shop.example/", html).search_url;
+        assert_eq!(
+            search(r#"<form action="/find" role="search"><input type="search" name="q"><button>Go</button></form>"#)
+                .as_deref(),
+            Some("https://www.shop.example/find?q={searchTerms}")
+        );
+        // Hidden fields go along; a plain text box with a search-like name counts.
+        assert_eq!(
+            search(
+                r#"<form action="https://shop.example/s?old=1#top" method="GET">
+                   <input type="hidden" name="cat" value="all &amp; more">
+                   <input name="k"></form>"#
+            )
+            .as_deref(),
+            Some("https://shop.example/s?cat=all+%26+more&k={searchTerms}")
+        );
+        // An unclosed form at the end of the page still counts.
+        assert_eq!(
+            search(r#"<form><input type=search name=query>"#).as_deref(),
+            Some("https://www.shop.example/?query={searchTerms}")
+        );
+    }
+
+    #[test]
+    fn other_forms_are_not_search_forms() {
+        let search = |html: &str| extract("https://www.shop.example/", html).search_url;
+        for html in [
+            // Posts, like a login form.
+            r#"<form method="post" action="/s"><input type="search" name="q"></form>"#,
+            // Sends to another site.
+            r#"<form action="https://evil.example/s"><input type="search" name="q"></form>"#,
+            r#"<form action="javascript:go()"><input type="search" name="q"></form>"#,
+            // No search box: a newsletter sign-up.
+            r#"<form action="/subscribe"><input type="email" name="email"><input name="name"></form>"#,
+            // A search box outside any form.
+            r#"<input type="search" name="q">"#,
+        ] {
+            assert_eq!(search(html), None, "{html}");
+        }
+        // The first search form wins.
+        let two = r#"<form action="/a"><input type="search" name="q"></form>
+                     <form action="/b"><input type="search" name="q"></form>"#;
+        assert_eq!(
+            search(two).as_deref(),
+            Some("https://www.shop.example/a?q={searchTerms}")
+        );
     }
 
     #[test]

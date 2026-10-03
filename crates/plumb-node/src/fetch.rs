@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
-use plumb_ingest::download;
+use plumb_ingest::{download, facts};
 use tracing::{error, info};
 
 use crate::block_on;
@@ -64,10 +64,27 @@ pub fn run(args: FetchDataArgs) -> Result<()> {
                 .await,
             )
         };
+        let facts = match &wikidata {
+            Outcome::Saved(sites) => outcome(
+                facts::download_site_facts(
+                    &client,
+                    download::WIKIDATA_SPARQL_URL,
+                    &args.dir,
+                    sites,
+                    download::WikidataPacing::default(),
+                )
+                .await,
+            ),
+            Outcome::Skipped(why) => Outcome::Skipped(why.clone()),
+            Outcome::Failed(_) => {
+                Outcome::Skipped("needs the official websites, which failed".to_string())
+            }
+        };
         [
             ("tranco", tranco),
             ("cc-ranks", cc_ranks),
             ("wikidata", wikidata),
+            ("wikidata-facts", facts),
         ]
     })?;
 
@@ -131,12 +148,17 @@ fn cc_ranks_url(args: &FetchDataArgs) -> Result<Option<String>> {
 /// The `plumb ingest` command for the files just saved, keeping the best
 /// [`SUGGESTED_TOP`] sites.
 fn ingest_hint(outcomes: &[(&str, Outcome)], dir: &Path) -> Option<String> {
+    let wikidata_saved = outcomes
+        .iter()
+        .any(|(name, outcome)| *name == "wikidata" && matches!(outcome, Outcome::Saved(_)));
     let flags: Vec<String> = outcomes
         .iter()
         .filter_map(|(name, outcome)| match outcome {
             Outcome::Saved(path) => Some(format!("--{name} {}", path.display())),
             _ => None,
         })
+        // Facts only make sense next to the official websites they describe.
+        .filter(|flag| !flag.starts_with("--wikidata-facts ") || wikidata_saved)
         .collect();
     if flags.is_empty() {
         return None;

@@ -132,6 +132,11 @@ pub struct PageMeta {
     pub description: Option<String>,
     /// `og:site_name`.
     pub site_name: Option<String>,
+    /// The site's search address, with `{searchTerms}` where the words go,
+    /// from the first GET form on the page with a search box that submits
+    /// to the same site.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search_url: Option<String>,
     /// Links to other registrable domains, in page order.
     pub links: Vec<OutLink>,
 }
