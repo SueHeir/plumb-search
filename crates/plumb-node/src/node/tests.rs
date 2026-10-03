@@ -368,6 +368,7 @@ async fn falls_back_to_the_newest_index_that_opens_and_clears_leftovers() {
         last_refresh: Some(now_unix()),
         wikidata_missing: false,
         quick_start: false,
+        ..SavedState::default()
     };
     store::save_state(&paths, &up_to_date).unwrap();
 
@@ -459,6 +460,7 @@ async fn picks_up_a_round_left_unfinished() {
             last_refresh: None,
             wikidata_missing: false,
             quick_start: false,
+            ..SavedState::default()
         },
     )
     .unwrap();
@@ -480,6 +482,7 @@ async fn picks_up_a_round_left_unfinished() {
             last_refresh: Some(last),
             wikidata_missing: false,
             quick_start: false,
+            ..SavedState::default()
         }
     );
     assert_eq!(names(&paths.indexes), ["000001"]);
@@ -511,6 +514,7 @@ async fn refreshes_when_due() {
             last_refresh: Some(long_ago),
             wikidata_missing: false,
             quick_start: false,
+            ..SavedState::default()
         },
     )
     .unwrap();
@@ -934,6 +938,7 @@ async fn the_full_seed_replaces_a_quick_start_but_keeps_what_crawls_added() {
             last_refresh: Some(now_unix()),
             wikidata_missing: true,
             quick_start: true,
+            ..SavedState::default()
         },
     )
     .unwrap();
@@ -973,6 +978,7 @@ async fn background_updates_wait_while_off_and_resume_from_the_panel() {
             last_refresh: None,
             wikidata_missing: false,
             quick_start: false,
+            ..SavedState::default()
         },
     )
     .unwrap();
@@ -989,9 +995,10 @@ async fn background_updates_wait_while_off_and_resume_from_the_panel() {
     let (code, _, body) = get(addr, "/app").await;
     assert_eq!(code, 200);
     assert!(
-        body.contains("Paused: background updates are off."),
+        body.contains("<p>Background updates are off.</p>"),
         "{body}"
     );
+    assert_eq!(status.paused.as_deref(), Some("Background updates are off"));
 
     // Ticking the box on the panel, from this computer, starts the round.
     let form = "background_updates=1";
@@ -1015,5 +1022,45 @@ async fn background_updates_wait_while_off_and_resume_from_the_panel() {
     assert!(status.background_updates);
     assert_eq!(status.crawl_left, 0);
     node.shutdown().await.unwrap();
-    assert_eq!(store::load_settings(&paths), NodeSettings::default());
+    assert_eq!(store::load_settings(&paths), Some(NodeSettings::default()));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn crawling_waits_for_the_next_day_once_the_download_limit_is_reached() {
+    let dir = recently_crawled_dir();
+    let paths = store::Paths::new(dir.path());
+    let mut state = SavedState {
+        crawl_left: 700,
+        index_stale: true,
+        ..SavedState::default()
+    };
+    state.add_downloaded(3 * MB, now_unix());
+    store::save_state(&paths, &state).unwrap();
+    let mut config = test_config(dir.path());
+    config.settings.download_limit_mb_per_day = 2;
+    let node = start(config).await.unwrap();
+
+    let status = wait_for(node.addr(), "the first index", ready_and_idle).await;
+    assert_eq!(
+        status.paused.as_deref(),
+        Some("Paused until tomorrow: today's download limit is reached")
+    );
+    assert_eq!(status.detail, status.paused.clone().unwrap());
+    assert_eq!((status.crawl_left, status.downloaded_today), (700, 3 * MB));
+    assert!(status.disk_used > 0);
+    node.shutdown().await.unwrap();
+}
+
+#[test]
+fn downloads_are_counted_per_day() {
+    let day = 24 * 60 * 60;
+    let mut state = SavedState::default();
+    state.add_downloaded(5, 10 * day + 1);
+    state.add_downloaded(7, 10 * day + 2);
+    assert_eq!(state.downloaded_today(10 * day + 3), 12);
+    assert_eq!(state.downloaded_today(11 * day), 0);
+    state.add_downloaded(1, 11 * day + 5);
+    assert_eq!(state.downloaded_today(11 * day + 6), 1);
+    assert_eq!(state.downloaded_total, 13);
+    assert_eq!(store::next_day(10 * day + 7), 11 * day);
 }

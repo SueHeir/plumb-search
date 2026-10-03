@@ -31,7 +31,7 @@ use super::{
     escape_html, group_thousands, page_with_head, request_origin, security_headers, time_ago,
     time_until, AppState,
 };
-use crate::node::{NodeSettings, Phase, Status, Step};
+use crate::node::{NodeSettings, Phase, Status, Step, MB};
 
 /// Seconds between two reloads of the panel while work is under way.
 const BUSY_RELOAD_SECONDS: u32 = 5;
@@ -39,27 +39,34 @@ const BUSY_RELOAD_SECONDS: u32 = 5;
 const IDLE_RELOAD_SECONDS: u32 = 60;
 
 const PANEL_STYLE: &str = "\
-.panel{max-width:40rem;padding-top:1.5rem}\
+.panel{max-width:56rem;padding-top:1.5rem}\
 .panel h1{font-size:1.6rem}\
 .panel h2{font-size:1.05rem;margin:2rem 0 .5rem}\
-.now{margin:1.25rem 0;padding:1rem 1.2rem;border:1px solid var(--line);border-radius:.75rem}\
-.now h2{margin:0 0 .25rem;font-size:1.3rem}\
-.now p{margin:.25rem 0}\
-.now.ready h2{color:var(--url)}\
-.now.limited h2{color:var(--accent)}\
-.btn{display:inline-block;padding:.55rem 1rem;border-radius:.5rem;background:var(--accent);\
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(15rem,1fr));gap:.75rem;\
+margin:1.25rem 0}\
+.card{padding:.9rem 1rem;border:1px solid var(--line);border-radius:.75rem}\
+.card h3{margin:0;font-size:.8rem;font-weight:600;text-transform:uppercase;\
+letter-spacing:.04em;color:var(--muted)}\
+.card .big{margin:.3rem 0 .2rem;font-size:1.35rem;font-weight:600}\
+.card p{margin:.2rem 0;font-size:.9rem}\
+.card.search{grid-column:1/-1}\
+.ready .big{color:var(--url)}.limited .big{color:var(--accent)}.warn .big{color:var(--err)}\
+.btns{display:flex;flex-wrap:wrap;gap:.5rem;margin-top:.6rem}\
+.btn{display:inline-block;padding:.5rem .9rem;border-radius:.5rem;background:var(--accent);\
 color:var(--bg);text-decoration:none}\
+.btn.alt{background:none;color:var(--accent);border:1px solid var(--accent)}\
 .steps li{display:flex;gap:.6rem;padding:.45rem 0;border:0}\
 .steps .i{flex:none;width:1.2rem;text-align:center}\
 .steps .done{color:var(--muted)}\
-.steps .now{margin:0;padding:0;border:0;font-weight:600}\
+.steps .now{font-weight:600}\
 .steps small{display:block;font-weight:400;color:var(--muted)}\
 .panel form{display:block}\
-.panel label{display:flex;gap:.6rem;align-items:flex-start}\
-.panel label input{flex:none;margin-top:.3rem}\
-.panel form button{margin-top:.75rem}\
+.panel label{display:flex;gap:.6rem;align-items:center;margin-top:.75rem}\
+.panel label input[type=checkbox]{flex:none}\
+.panel input[type=number]{flex:none;width:7rem}\
+.panel form button{margin-top:.9rem}\
+.hint{margin:.2rem 0 0;font-size:.85rem;color:var(--muted)}\
 .howto{list-style:decimal;padding-left:1.5rem}.howto li{border:0;padding:.3rem 0}\
-.hint{margin:.25rem 0 0 1.6rem;font-size:.85rem;color:var(--muted)}\
 code{overflow-wrap:anywhere;font:.9rem ui-monospace,monospace;padding:.1rem .3rem;\
 border:1px solid var(--line);border-radius:.3rem}\
 dl{display:grid;grid-template-columns:max-content 1fr;gap:.25rem 1rem;font-size:.9rem}\
@@ -70,6 +77,21 @@ dt{color:var(--muted)}dd{margin:0;overflow-wrap:anywhere}";
 pub(super) struct SettingsForm {
     #[serde(default)]
     background_updates: Option<String>,
+    /// Megabytes; empty for no limit.
+    #[serde(default)]
+    download_limit_mb_per_day: String,
+    /// Megabytes; empty for no limit.
+    #[serde(default)]
+    storage_limit_mb: String,
+}
+
+/// A limit typed into the form, in megabytes: empty or 0 for none.
+fn parse_limit(text: &str) -> Option<u64> {
+    let text = text.trim().replace([',', '_', ' '], "");
+    if text.is_empty() {
+        return Some(0);
+    }
+    text.parse().ok()
 }
 
 pub(super) async fn panel(State(state): State<AppState>, headers: HeaderMap, uri: Uri) -> Response {
@@ -145,8 +167,21 @@ pub(super) async fn save_settings(State(state): State<AppState>, request: Reques
         )
             .into_response();
     };
+    let (Some(download), Some(storage)) = (
+        parse_limit(&form.download_limit_mb_per_day),
+        parse_limit(&form.storage_limit_mb),
+    ) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            security_headers(),
+            "Limits are whole numbers of megabytes, or empty for none.\n",
+        )
+            .into_response();
+    };
     let settings = NodeSettings {
         background_updates: form.background_updates.is_some(),
+        download_limit_mb_per_day: download,
+        storage_limit_mb: storage,
     };
     if let Err(err) = node.change_settings(settings) {
         warn!("could not save the settings: {err:#}");
@@ -203,7 +238,7 @@ fn forbidden(why: &str) -> Response {
         .into_response()
 }
 
-/// What the panel says in its box at the top.
+/// What the panel says about search.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Readiness {
     SettingUp,
@@ -226,6 +261,26 @@ fn busy(status: &Status) -> bool {
         || !matches!(status.step, Step::Idle | Step::Retrying | Step::Stopping)
 }
 
+/// Whether setup still has steps to go: the full index or the first crawl.
+fn setting_up(status: &Status) -> bool {
+    status.phase != Phase::Ready || status.wikidata_missing || status.last_refresh.is_none()
+}
+
+/// Bytes in words: `850 KB`, `312 MB`, `1.4 GB`.
+fn bytes_words(bytes: u64) -> String {
+    const KB: u64 = 1_000;
+    const GB: u64 = 1_000 * MB;
+    if bytes >= 10 * GB {
+        format!("{} GB", group_thousands(bytes / GB))
+    } else if bytes >= GB {
+        format!("{:.1} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{} MB", bytes / MB)
+    } else {
+        format!("{} KB", bytes.div_ceil(KB))
+    }
+}
+
 pub(super) fn render_panel(
     status: &Status,
     settings: &NodeSettings,
@@ -233,11 +288,19 @@ pub(super) fn render_panel(
     data_dir: Option<&Path>,
     now: u64,
 ) -> String {
-    let mut body = String::from("<main class=\"wrap panel\">\n<h1>Plumb Search</h1>\n");
-    render_now(&mut body, status, origin, now);
-    render_steps(&mut body, status, settings, now);
-    render_browser(&mut body, origin);
+    let mut body = String::from("<main class=\"wrap panel\">\n<h1>Plumb Search node</h1>\n");
+    body.push_str("<section class=\"cards\">\n");
+    render_search_card(&mut body, status, origin, now);
+    render_storage_card(&mut body, status, settings);
+    render_downloads_card(&mut body, status, settings);
+    render_crawl_card(&mut body, status, now);
+    render_network_card(&mut body);
+    body.push_str("</section>\n");
+    if setting_up(status) {
+        render_steps(&mut body, status, now);
+    }
     render_settings(&mut body, status, settings);
+    render_browser(&mut body, origin);
     render_about(&mut body, status, data_dir, now);
     body.push_str("</main>");
     let reload = if busy(status) {
@@ -248,37 +311,59 @@ pub(super) fn render_panel(
     let head = format!(
         "<meta http-equiv=\"refresh\" content=\"{reload}\">\n<style>{PANEL_STYLE}</style>\n"
     );
-    page_with_head("Plumb Search", &head, &body)
+    page_with_head("Plumb Search node", &head, &body)
 }
 
-fn render_now(body: &mut String, status: &Status, origin: &str, now: u64) {
-    let open = format!(
-        "<p><a class=\"btn\" href=\"{}/\" target=\"_blank\">Search in your browser</a></p>\n",
-        escape_html(origin)
+/// A card: its class, title, headline and the HTML under them.
+fn card(body: &mut String, class: &str, title: &str, big: &str, rest: &str) {
+    body.push_str(&format!(
+        "<div class=\"card {class}\">\n<h3>{}</h3>\n<p class=\"big\">{}</p>\n{rest}</div>\n",
+        escape_html(title),
+        escape_html(big)
+    ));
+}
+
+fn meter(done: u64, total: u64) -> String {
+    let max = total.max(done).max(1);
+    format!(
+        "<progress value=\"{}\" max=\"{max}\"></progress>\n",
+        done.min(max)
+    )
+}
+
+fn render_search_card(body: &mut String, status: &Status, origin: &str, now: u64) {
+    let origin = escape_html(origin);
+    let buttons = format!(
+        "<div class=\"btns\"><a class=\"btn\" href=\"{origin}/\" target=\"_blank\">\
+         Search in your browser</a>\
+         <a class=\"btn alt\" href=\"{origin}{ADD_TO_FIREFOX_PATH}\" target=\"_blank\">\
+         Add to Firefox</a></div>\n"
     );
     match readiness(status) {
         Readiness::SettingUp => {
-            body.push_str(
-                "<section class=\"now setup\">\n<h2>Setting up search</h2>\n\
-                 <p>Plumb is getting a list of popular sites and building a first index. \
-                 Search is ready in a minute or two.</p>\n",
+            let mut rest = format!(
+                "<p>Getting a list of popular sites and building a first index. Search is \
+                 ready in a minute or two.</p>\n<p>{}</p>\n",
+                escape_html(&status.detail)
             );
-            render_progress(body, status);
+            if let Some(progress) = &status.progress {
+                rest.push_str(&meter(progress.done, progress.total));
+            }
             if let Some(err) = &status.last_error {
-                body.push_str(&format!(
+                rest.push_str(&format!(
                     "<p class=\"err\"><strong>Something went wrong</strong> {}: {}",
                     time_ago(err.at, now),
                     escape_html(&err.message)
                 ));
                 if let Some(retry_at) = err.retry_at {
-                    body.push_str(&format!(
+                    rest.push_str(&format!(
                         " Plumb will try again {}.",
                         time_until(retry_at, now)
                     ));
                 }
-                body.push_str("</p>\n");
+                rest.push_str("</p>\n");
             }
-            body.push_str("</section>\n");
+            card(body, "search setup", "Search", "Setting up search", &rest);
         }
         Readiness::Limited => {
             let why = if status.wikidata_error.is_some() {
@@ -288,35 +373,136 @@ fn render_now(body: &mut String, status: &Status, origin: &str, now: u64) {
                 "Plumb is still adding Wikidata's list of official websites and more \
                  rankings, so results get better once that is done."
             };
-            body.push_str(&format!(
-                "<section class=\"now limited\">\n<h2>Limited search is ready</h2>\n\
-                 <p>Search works now with the {} most popular sites. {}</p>\n{open}</section>\n",
+            let rest = format!(
+                "<p>Search works now with the {} most popular sites. {}</p>\n{buttons}",
                 group_thousands(status.sites),
                 escape_html(why)
-            ));
+            );
+            card(
+                body,
+                "search limited",
+                "Search",
+                "Limited search is ready",
+                &rest,
+            );
         }
         Readiness::Ready => {
-            body.push_str(&format!(
-                "<section class=\"now ready\">\n<h2>Search is ready</h2>\n\
-                 <p>{} sites indexed.</p>\n{open}</section>\n",
+            let rest = format!(
+                "<p>{} sites indexed.</p>\n{buttons}",
                 group_thousands(status.sites)
-            ));
+            );
+            card(body, "search ready", "Search", "Search is ready", &rest);
         }
     }
 }
 
-fn render_progress(body: &mut String, status: &Status) {
-    body.push_str(&format!("<p>{}</p>\n", escape_html(&status.detail)));
-    if let Some(progress) = &status.progress {
-        let max = progress.total.max(progress.done).max(1);
-        body.push_str(&format!(
-            "<progress value=\"{}\" max=\"{max}\"></progress>\n<p class=\"s\">{} of {} {}</p>\n",
-            progress.done,
-            group_thousands(progress.done),
-            group_thousands(progress.total),
-            escape_html(&progress.unit)
-        ));
-    }
+fn render_storage_card(body: &mut String, status: &Status, settings: &NodeSettings) {
+    let limit = settings.storage_limit_mb.saturating_mul(MB);
+    let rest = if limit == 0 {
+        "<p>No storage limit.</p>\n".to_string()
+    } else {
+        format!(
+            "{}<p>of {} allowed.</p>\n",
+            meter(status.disk_used, limit),
+            bytes_words(limit)
+        )
+    };
+    let class = if limit > 0 && status.disk_used >= limit {
+        "warn"
+    } else {
+        ""
+    };
+    card(
+        body,
+        class,
+        "Storage",
+        &bytes_words(status.disk_used),
+        &rest,
+    );
+}
+
+fn render_downloads_card(body: &mut String, status: &Status, settings: &NodeSettings) {
+    let limit = settings.download_limit_mb_per_day.saturating_mul(MB);
+    let mut rest = if limit == 0 {
+        "<p>No daily limit.</p>\n".to_string()
+    } else {
+        format!(
+            "{}<p>of {} a day.</p>\n",
+            meter(status.downloaded_today, limit),
+            bytes_words(limit)
+        )
+    };
+    rest.push_str(&format!(
+        "<p class=\"hint\">{} since setup.</p>\n",
+        bytes_words(status.downloaded_total)
+    ));
+    let class = if limit > 0 && status.downloaded_today >= limit {
+        "warn"
+    } else {
+        ""
+    };
+    card(
+        body,
+        class,
+        "Downloads today",
+        &bytes_words(status.downloaded_today),
+        &rest,
+    );
+}
+
+fn render_crawl_card(body: &mut String, status: &Status, now: u64) {
+    let crawling = status.phase == Phase::Ready && status.step == Step::Crawling;
+    let (big, mut rest) = if crawling {
+        let rest = status
+            .progress
+            .as_ref()
+            .map(|p| {
+                format!(
+                    "{}<p>{} of {} homepages in this round.</p>\n",
+                    meter(p.done, p.total),
+                    group_thousands(p.done),
+                    group_thousands(p.total)
+                )
+            })
+            .unwrap_or_default();
+        ("Visiting homepages".to_string(), rest)
+    } else if let Some(reason) = &status.paused {
+        (
+            "Paused".to_string(),
+            format!("<p>{}.</p>\n", escape_html(reason)),
+        )
+    } else if status.crawl_left > 0 {
+        (
+            "Waiting".to_string(),
+            format!(
+                "<p>{} homepages to visit once setup is done.</p>\n",
+                group_thousands(status.crawl_left)
+            ),
+        )
+    } else if let Some(next) = status.next_refresh {
+        (
+            "Up to date".to_string(),
+            format!("<p>Next round {}.</p>\n", time_until(next, now)),
+        )
+    } else {
+        ("Up to date".to_string(), String::new())
+    };
+    rest.push_str(&format!(
+        "<p class=\"hint\">{} homepages visited since setup.</p>\n",
+        group_thousands(status.homepages_visited)
+    ));
+    card(body, "", "Crawling", &big, &rest);
+}
+
+fn render_network_card(body: &mut String) {
+    card(
+        body,
+        "",
+        "Plumb network",
+        "Not connected",
+        "<p>0 nodes connected. This node builds and searches its own index; connecting to \
+         other Plumb nodes comes with network support.</p>\n",
+    );
 }
 
 /// One line of the setup steps: done, under way, waiting or to do.
@@ -337,14 +523,12 @@ fn step_item(body: &mut String, state: &str, text: &str, note: Option<String>) {
     ));
 }
 
-fn render_steps(body: &mut String, status: &Status, settings: &NodeSettings, now: u64) {
-    body.push_str("<h2>Getting search ready</h2>\n<ol class=\"steps\">\n");
+fn render_steps(body: &mut String, status: &Status, now: u64) {
+    body.push_str("<h2>Setup</h2>\n<ol class=\"steps\">\n");
     let ready = status.phase == Phase::Ready;
     let setting_up_step = |steps: &[Step]| !ready && steps.contains(&status.step);
 
-    let list = if ready {
-        "done"
-    } else if setting_up_step(&[Step::Downloading, Step::Starting, Step::Retrying]) {
+    let list = if setting_up_step(&[Step::Downloading, Step::Starting, Step::Retrying]) {
         "now"
     } else {
         "done"
@@ -389,11 +573,8 @@ fn render_steps(body: &mut String, status: &Status, settings: &NodeSettings, now
             )
         });
         ("now", note)
-    } else if !settings.background_updates {
-        (
-            "wait",
-            Some("Paused: background updates are off.".to_string()),
-        )
+    } else if let Some(reason) = status.paused.as_ref().filter(|_| status.crawl_left > 0) {
+        ("wait", Some(format!("{reason}.")))
     } else if status.last_refresh.is_some() && status.crawl_left == 0 {
         ("done", None)
     } else {
@@ -408,42 +589,55 @@ fn render_steps(body: &mut String, status: &Status, settings: &NodeSettings, now
     body.push_str("</ol>\n");
 }
 
-fn render_browser(body: &mut String, origin: &str) {
-    let origin = escape_html(origin);
-    body.push_str(&format!(
-        "<h2>Use Plumb from your browser</h2>\n\
-         <p>Plumb searches in your web browser. To search from the address bar, add Plumb \
-         as a search engine.</p>\n\
-         <p><a class=\"btn\" href=\"{origin}{ADD_TO_FIREFOX_PATH}\" target=\"_blank\">\
-         Add to Firefox</a></p>\n\
-         <p>In other browsers, add a search engine in the browser's settings with this \
-         address:</p>\n\
-         <p><code>{origin}/search?q=%s</code></p>\n\
-         <p class=\"s\">Your country and other search options are on the search page.</p>\n"
-    ));
-}
-
 fn render_settings(body: &mut String, status: &Status, settings: &NodeSettings) {
     let checked = if settings.background_updates {
         " checked"
     } else {
         ""
     };
+    let limit = |mb: u64| {
+        if mb == 0 {
+            String::new()
+        } else {
+            mb.to_string()
+        }
+    };
     body.push_str(&format!(
         "<h2>Settings</h2>\n<form method=\"post\" action=\"/app/settings\">\n\
          <label><input type=\"checkbox\" name=\"background_updates\" value=\"1\"{checked}>\
          <span>Keep the index up to date in the background</span></label>\n\
          <p class=\"hint\">Plumb visits a few thousand homepages a day to learn sites' names \
-         and find new sites, then rebuilds its index. Turn this off to save bandwidth; search \
-         keeps working with the index you have.</p>\n\
-         <button type=\"submit\">Save settings</button>\n</form>\n"
+         and find new sites, then rebuilds its index. Search keeps working when this is \
+         off.</p>\n\
+         <label>Download limit <input type=\"number\" name=\"download_limit_mb_per_day\" \
+         min=\"0\" step=\"1\" value=\"{}\" placeholder=\"none\"> MB a day</label>\n\
+         <p class=\"hint\">Crawling pauses for the rest of the day once it is reached. Empty \
+         for no limit.</p>\n\
+         <label>Storage limit <input type=\"number\" name=\"storage_limit_mb\" min=\"0\" \
+         step=\"1\" value=\"{}\" placeholder=\"none\"> MB</label>\n\
+         <p class=\"hint\">Crawling pauses while the data folder is bigger. Empty for no \
+         limit.</p>\n\
+         <button type=\"submit\">Save settings</button>\n</form>\n",
+        limit(settings.download_limit_mb_per_day),
+        limit(settings.storage_limit_mb)
     ));
-    if settings.background_updates && status.phase == Phase::Ready {
+    if status.paused.is_none() && status.phase == Phase::Ready {
         body.push_str(
             "<form method=\"post\" action=\"/app/refresh\">\
              <button type=\"submit\">Update now</button></form>\n",
         );
     }
+}
+
+fn render_browser(body: &mut String, origin: &str) {
+    let origin = escape_html(origin);
+    body.push_str(&format!(
+        "<h2>Search from your browser</h2>\n\
+         <p>Plumb searches in your web browser. Add it to Firefox with the button above, or \
+         add a search engine in another browser's settings with this address:</p>\n\
+         <p><code>{origin}/search?q=%s</code></p>\n\
+         <p class=\"hint\">Your country and other search options are on the search page.</p>\n"
+    ));
 }
 
 fn render_about(body: &mut String, status: &Status, data_dir: Option<&Path>, now: u64) {
@@ -459,9 +653,6 @@ fn render_about(body: &mut String, status: &Status, data_dir: Option<&Path>, now
     row("Sites indexed", group_thousands(status.sites));
     if let Some(last) = status.last_refresh {
         row("Last updated", time_ago(last, now));
-    }
-    if let Some(next) = status.next_refresh.filter(|_| status.background_updates) {
-        row("Next update", time_until(next, now));
     }
     if let Some(dir) = data_dir {
         row("Data folder", dir.display().to_string());
@@ -522,6 +713,11 @@ mod tests {
             version: "0.1.0".into(),
             crawl_left: 0,
             background_updates: true,
+            paused: None,
+            disk_used: 0,
+            downloaded_today: 0,
+            downloaded_total: 0,
+            homepages_visited: 0,
         }
     }
 
@@ -586,9 +782,13 @@ mod tests {
             unit: "files".into(),
         });
         let body = get_panel(app(setting_up).0).await;
-        assert!(body.contains("<h2>Setting up search</h2>"), "{body}");
+        assert!(
+            body.contains("<p class=\"big\">Setting up search</p>"),
+            "{body}"
+        );
         assert!(body.contains("Downloading the Tranco list"), "{body}");
         assert!(body.contains("<progress value=\"0\" max=\"1\">"), "{body}");
+        assert!(body.contains("<h2>Setup</h2>"), "{body}");
         assert!(body.contains("content=\"5\""), "reloads often: {body}");
         assert!(!body.contains("Search in your browser"), "{body}");
         assert!(!body.contains("Update now"), "{body}");
@@ -596,13 +796,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn says_limited_search_is_ready_until_wikidata_is_in() {
+    async fn shows_the_node_at_a_glance() {
         let mut limited = status(Phase::Ready, Step::Downloading);
         limited.sites = 250_000;
         limited.wikidata_missing = true;
         limited.detail = "Asking Wikidata for official websites".into();
-        let body = get_panel(app(limited.clone()).0).await;
-        assert!(body.contains("<h2>Limited search is ready</h2>"), "{body}");
+        limited.disk_used = 312_400_000;
+        limited.downloaded_today = 48_000_000;
+        limited.downloaded_total = 1_400_000_000;
+        limited.homepages_visited = 3_456;
+        limited.crawl_left = 2_000;
+        let (router, node) = app(limited.clone());
+        *node.settings.lock().unwrap() = NodeSettings::desktop();
+        let body = get_panel(router).await;
+        assert!(
+            body.contains("<p class=\"big\">Limited search is ready</p>"),
+            "{body}"
+        );
         assert!(body.contains("the 250,000 most popular sites"), "{body}");
         assert!(
             body.contains(
@@ -618,6 +828,36 @@ mod tests {
             body.contains("<small>Asking Wikidata for official websites</small>"),
             "{body}"
         );
+        // Storage and downloads, against the desktop's limits.
+        assert!(body.contains("<p class=\"big\">312 MB</p>"), "{body}");
+        assert!(
+            body.contains("<progress value=\"312400000\" max=\"2000000000\">"),
+            "{body}"
+        );
+        assert!(body.contains("<p>of 2.0 GB allowed.</p>"), "{body}");
+        assert!(body.contains("<p class=\"big\">48 MB</p>"), "{body}");
+        assert!(body.contains("<p>of 500 MB a day.</p>"), "{body}");
+        assert!(body.contains("1.4 GB since setup."), "{body}");
+        assert!(
+            body.contains("2,000 homepages to visit once setup is done."),
+            "{body}"
+        );
+        assert!(
+            body.contains("3,456 homepages visited since setup."),
+            "{body}"
+        );
+        assert!(
+            body.contains("<p class=\"big\">Not connected</p>"),
+            "{body}"
+        );
+        assert!(
+            body.contains("name=\"download_limit_mb_per_day\" min=\"0\" step=\"1\" value=\"500\""),
+            "{body}"
+        );
+        assert!(
+            body.contains("name=\"storage_limit_mb\" min=\"0\" step=\"1\" value=\"2000\""),
+            "{body}"
+        );
 
         limited.step = Step::Idle;
         limited.wikidata_error = Some(LastError {
@@ -631,18 +871,48 @@ mod tests {
             body.contains("Plumb will try again in 10 minutes"),
             "{body}"
         );
+        assert!(body.contains("No storage limit."), "{body}");
 
         let mut ready = status(Phase::Ready, Step::Idle);
         ready.sites = 260_123;
         ready.last_refresh = Some(now_unix() - 3600);
-        let body = get_panel(app(ready).0).await;
-        assert!(body.contains("<h2>Search is ready</h2>"), "{body}");
+        ready.next_refresh = Some(now_unix() + 7200);
+        let body = get_panel(app(ready.clone()).0).await;
+        assert!(
+            body.contains("<p class=\"big\">Search is ready</p>"),
+            "{body}"
+        );
         assert!(body.contains("260,123 sites indexed"), "{body}");
+        assert!(body.contains("Next round in 2 hours"), "{body}");
+        assert!(!body.contains("<h2>Setup</h2>"), "setup is done: {body}");
         assert!(body.contains("Update now"), "{body}");
         assert!(
             body.contains("content=\"60\""),
             "reloads seldom when idle: {body}"
         );
+
+        ready.paused = Some("Paused until tomorrow: today's download limit is reached".into());
+        let body = get_panel(app(ready).0).await;
+        assert!(body.contains("<p class=\"big\">Paused</p>"), "{body}");
+        assert!(
+            body.contains("today&#39;s download limit is reached."),
+            "{body}"
+        );
+        assert!(!body.contains("Update now"), "{body}");
+    }
+
+    #[test]
+    fn reads_limits_and_words_bytes() {
+        assert_eq!(parse_limit(""), Some(0));
+        assert_eq!(parse_limit(" 1,500 "), Some(1_500));
+        assert_eq!(parse_limit("0"), Some(0));
+        assert_eq!(parse_limit("-5"), None);
+        assert_eq!(parse_limit("2.5"), None);
+        assert_eq!(bytes_words(0), "0 KB");
+        assert_eq!(bytes_words(1_200), "2 KB");
+        assert_eq!(bytes_words(312_400_000), "312 MB");
+        assert_eq!(bytes_words(1_450_000_000), "1.4 GB");
+        assert_eq!(bytes_words(150_000_000_000), "150 GB");
     }
 
     #[tokio::test]
@@ -654,24 +924,38 @@ mod tests {
             "{body}"
         );
 
-        // An unticked box is left out of the form.
+        // An unticked box is left out of the form; empty limits are none.
+        let form = "download_limit_mb_per_day=250&storage_limit_mb=";
         let response = post(
             router.clone(),
             "/app/settings",
-            "",
+            form,
             "127.0.0.1:50000",
             Some("http://127.0.0.1:7586"),
         )
         .await;
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
         assert_eq!(response.headers()[header::LOCATION], "/app");
-        assert!(!node.settings.lock().unwrap().background_updates);
-        let body = get_panel(router.clone()).await;
-        assert!(
-            body.contains("Paused: background updates are off."),
-            "{body}"
+        assert_eq!(
+            *node.settings.lock().unwrap(),
+            NodeSettings {
+                background_updates: false,
+                download_limit_mb_per_day: 250,
+                storage_limit_mb: 0,
+            }
         );
-        assert!(!body.contains("Update now"), "{body}");
+
+        // A limit that is not a number changes nothing.
+        let response = post(
+            router.clone(),
+            "/app/settings",
+            "background_updates=1&storage_limit_mb=lots",
+            "127.0.0.1:50000",
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(!node.settings.lock().unwrap().background_updates);
 
         // Without an Origin header (some browsers leave it out) is fine too.
         let response = post(

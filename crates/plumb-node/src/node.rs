@@ -96,6 +96,9 @@ mod tests;
 
 use store::{DirLock, Paths, SavedState};
 
+/// How long a count of the data folder's size is used before counting again.
+const DISK_COUNT_MAX_AGE: Duration = Duration::from_secs(30);
+
 /// How long [`NodeHandle::shutdown`] lets open requests finish before it
 /// closes their connections.
 const SERVER_STOP_TIMEOUT: Duration = Duration::from_secs(10);
@@ -137,6 +140,9 @@ pub struct NodeConfig {
     pub retry_wait: Duration,
     /// The longest wait between two tries of failed work.
     pub max_retry_wait: Duration,
+    /// The settings until someone changes them on the panel, which saves
+    /// them in `DIR/settings.json`.
+    pub settings: NodeSettings,
 }
 
 impl NodeConfig {
@@ -157,6 +163,7 @@ impl NodeConfig {
             sources: SeedSources::default(),
             retry_wait: Duration::from_secs(10 * 60),
             max_retry_wait: Duration::from_secs(6 * 60 * 60),
+            settings: NodeSettings::default(),
         }
     }
 
@@ -169,6 +176,7 @@ impl NodeConfig {
             initial_crawl: 2_000,
             refresh_every: Some(Duration::from_secs(12 * 60 * 60)),
             crawl_per_refresh: 1_000,
+            settings: NodeSettings::desktop(),
             ..NodeConfig::server(data_dir)
         }
     }
@@ -266,15 +274,38 @@ pub struct NodeSettings {
     /// after setup and the scheduled refreshes. Off pauses them (after the
     /// batch of homepages under way); setup still finishes.
     pub background_updates: bool,
+    /// Megabytes the crawls may download per day (UTC), 0 for no limit.
+    /// Once a day's downloads reach it, crawling pauses until the next
+    /// day. Setup's downloads count, but are never held back.
+    pub download_limit_mb_per_day: u64,
+    /// Megabytes the data folder may take, 0 for no limit. Above it,
+    /// crawling pauses, since crawls add sites; search keeps working.
+    pub storage_limit_mb: u64,
 }
 
 impl Default for NodeSettings {
     fn default() -> Self {
         NodeSettings {
             background_updates: true,
+            download_limit_mb_per_day: 0,
+            storage_limit_mb: 0,
         }
     }
 }
+
+impl NodeSettings {
+    /// Defaults for a desktop: 500 MB of downloads a day and 2 GB of disk.
+    pub fn desktop() -> Self {
+        NodeSettings {
+            download_limit_mb_per_day: 500,
+            storage_limit_mb: 2_000,
+            ..NodeSettings::default()
+        }
+    }
+}
+
+/// Bytes in a megabyte, as the limits count them.
+pub const MB: u64 = 1_000_000;
 
 /// What a node is doing, as `GET /api/status` reports it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -315,6 +346,17 @@ pub struct Status {
     pub crawl_left: u64,
     /// [`NodeSettings::background_updates`].
     pub background_updates: bool,
+    /// Why crawling is paused, in words, when it is: background updates
+    /// off, or a download or storage limit reached.
+    pub paused: Option<String>,
+    /// Bytes the data folder takes, counted at most a minute ago.
+    pub disk_used: u64,
+    /// Bytes downloaded today (UTC): crawls and seed data.
+    pub downloaded_today: u64,
+    /// Bytes downloaded since the node was set up.
+    pub downloaded_total: u64,
+    /// Homepages visited since the node was set up.
+    pub homepages_visited: u64,
 }
 
 /// Whether a node can search yet.
@@ -559,7 +601,7 @@ fn open_data_dir(config: &NodeConfig, rank: RankConfig) -> Result<Opened> {
             warn!("{err:#}");
         }
     }
-    let settings = store::load_settings(&paths);
+    let settings = store::load_settings(&paths).unwrap_or_else(|| config.settings.clone());
     Ok(Opened {
         paths,
         lock,
@@ -602,6 +644,8 @@ struct Inner {
     /// them ([`SavedState::wikidata_missing`]).
     wikidata: Mutex<WikidataTries>,
     settings: Mutex<NodeSettings>,
+    /// The last count of the data folder's size, and when it was made.
+    disk: Mutex<Option<(std::time::Instant, u64)>>,
 }
 
 /// The failures to download Wikidata's official websites, which have their
@@ -651,6 +695,7 @@ impl Inner {
                 backoff,
             }),
             settings: Mutex::new(opened.settings),
+            disk: Mutex::new(None),
         }
     }
 
@@ -681,7 +726,58 @@ impl Inner {
             version: env!("CARGO_PKG_VERSION").to_string(),
             crawl_left: saved.crawl_left as u64,
             background_updates: self.settings().background_updates,
+            paused: self.pause_reason().map(String::from),
+            disk_used: self.disk_used(),
+            downloaded_today: saved.downloaded_today(now_unix()),
+            downloaded_total: saved.downloaded_total,
+            homepages_visited: saved.homepages_visited,
         }
+    }
+
+    /// Why crawls and refreshes must wait now, if they must.
+    fn pause_reason(&self) -> Option<&'static str> {
+        let settings = self.settings();
+        if !settings.background_updates {
+            return Some("Background updates are off");
+        }
+        let limit = settings.download_limit_mb_per_day;
+        if limit > 0 && self.saved().downloaded_today(now_unix()) >= limit.saturating_mul(MB) {
+            return Some("Paused until tomorrow: today's download limit is reached");
+        }
+        let limit = settings.storage_limit_mb;
+        if limit > 0 && self.disk_used() >= limit.saturating_mul(MB) {
+            return Some("Paused: the storage limit is reached");
+        }
+        None
+    }
+
+    /// Counts bytes downloaded now.
+    fn add_downloaded(&self, bytes: u64) -> Result<()> {
+        if bytes == 0 {
+            return Ok(());
+        }
+        let now = now_unix();
+        self.update_saved(|saved| saved.add_downloaded(bytes, now))
+    }
+
+    /// The size of the data folder, counted again when the last count is
+    /// more than [`DISK_COUNT_MAX_AGE`] old or [`Inner::recount_disk`]
+    /// asked for it.
+    fn disk_used(&self) -> u64 {
+        let mut count = self.disk.lock().unwrap_or_else(PoisonError::into_inner);
+        match *count {
+            Some((at, bytes)) if at.elapsed() < DISK_COUNT_MAX_AGE => bytes,
+            _ => {
+                let bytes = store::dir_size(&self.paths.data);
+                *count = Some((std::time::Instant::now(), bytes));
+                bytes
+            }
+        }
+    }
+
+    /// Has the next [`Inner::disk_used`] count the data folder again.
+    fn recount_disk(&self) {
+        *self.disk.lock().unwrap_or_else(PoisonError::into_inner) = None;
     }
 
     fn settings(&self) -> NodeSettings {

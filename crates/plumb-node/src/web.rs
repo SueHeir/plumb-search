@@ -1286,6 +1286,11 @@ mod tests {
             version: "0.1.0".to_string(),
             crawl_left: 0,
             background_updates: true,
+            paused: None,
+            disk_used: 0,
+            downloaded_today: 0,
+            downloaded_total: 0,
+            homepages_visited: 0,
         }
     }
 

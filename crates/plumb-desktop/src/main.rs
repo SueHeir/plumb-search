@@ -3,8 +3,9 @@
 //!
 //! The window opens on a bundled "Starting..." page while the node starts on
 //! Tauri's async runtime, then shows the node's panel (`/app`): what works
-//! now ("Limited search is ready"), how far setup has come, the settings and
-//! how to search from the browser. The app is no browser: searching happens
+//! now ("Limited search is ready"), storage and downloads against their
+//! limits, crawling, the Plumb network, setup progress, the settings and how
+//! to search from the browser. The app is no browser: searching happens
 //! in the default browser, and so does every link out of the panel,
 //! including the node's search page. No page can call into the app: the app
 //! defines no commands and grants no capabilities, so Tauri's IPC refuses
@@ -136,7 +137,7 @@ fn setup(app: &AppHandle) -> Result<()> {
     let mut window =
         WebviewWindowBuilder::new(app, MAIN_WINDOW, WebviewUrl::App("index.html".into()))
             .title("Plumb Search")
-            .inner_size(720.0, 860.0)
+            .inner_size(960.0, 900.0)
             .min_inner_size(400.0, 300.0)
             .resizable(true)
             .center()

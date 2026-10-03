@@ -65,11 +65,9 @@ pub(super) async fn run(inner: Arc<Inner>) {
             // says nothing of the work this loop is retrying.
             Ok(Next::Aside) => {}
             Ok(Next::IdleUntil(until)) => {
-                let detail = if inner.settings().background_updates {
-                    idle_detail(&inner.config)
-                } else {
-                    "Background updates are off"
-                };
+                let detail = inner
+                    .pause_reason()
+                    .unwrap_or_else(|| idle_detail(&inner.config));
                 inner.set_step(Step::Idle, detail);
                 wait(&inner, Deadline::Wall(until)).await;
             }
@@ -118,10 +116,14 @@ async fn step(inner: &Arc<Inner>) -> Result<Next> {
         complete_seed(inner).await?;
         return Ok(Next::Aside);
     }
-    // Crawls and refreshes wait while background updates are off.
-    if !inner.settings().background_updates {
+    // Crawls and refreshes wait while background updates are off or a
+    // limit is reached; a day's download limit ends with the day.
+    if inner.pause_reason().is_some() {
         inner.refresh_requested.store(false, Ordering::SeqCst);
-        return Ok(Next::IdleUntil(wikidata_due));
+        let tomorrow = store::next_day(now_unix());
+        return Ok(Next::IdleUntil(Some(
+            wikidata_due.map_or(tomorrow, |due| due.min(tomorrow)),
+        )));
     }
     if saved.crawl_left > 0 {
         crawl(inner).await?;
@@ -163,15 +165,18 @@ async fn set_up(inner: &Arc<Inner>) -> Result<()> {
         "no records in {} yet: setting up from the Tranco list, the rest of the seed data next",
         inner.paths.data.display()
     );
+    let before = store::dir_size(&inner.paths.seed);
     let files = tokio::select! {
         files = download_quick_seed(inner) => files?,
         () = inner.stopped() => return Err(Stopped.into()),
     };
+    let downloaded = store::dir_size(&inner.paths.seed).saturating_sub(before);
     let built = blocking(inner, move |inner| {
         let records = seed_records(inner, &files)?;
         let mut fresh = SavedState::fresh(inner.config.initial_crawl);
         fresh.wikidata_missing = true;
         fresh.quick_start = true;
+        fresh.add_downloaded(downloaded, now_unix());
         // Saved first: records on disk always come with their state.
         inner.update_saved(|saved| *saved = fresh)?;
         save_seed_records(inner, &records)?;
@@ -197,10 +202,13 @@ async fn complete_seed(inner: &Arc<Inner>) -> Result<()> {
     } else {
         info!("asking Wikidata again for the official websites setup went without");
     }
+    let before = store::dir_size(&inner.paths.seed);
     let files = tokio::select! {
         files = download_seed(inner) => files,
         () = inner.stopped() => return Err(Stopped.into()),
     };
+    inner.add_downloaded(store::dir_size(&inner.paths.seed).saturating_sub(before))?;
+    inner.recount_disk();
     let failed = |err: &anyhow::Error| {
         let retry_at = inner.wikidata_failed(err);
         warn!(
@@ -564,14 +572,17 @@ fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Option<ServingIndex
             use_system_proxy: inner.config.use_system_proxy,
             ..CrawlConfig::default()
         };
+        // Homepages counted in the saved state so far.
+        let counted = std::cell::Cell::new(0);
         let totals = crawl_in_batches(
             &mut set,
             &targets,
             CRAWL_BATCH_SIZE,
             &mut store,
             |batch| {
-                // Background updates turned off: pause between batches.
-                if !inner.settings().background_updates {
+                // Background updates turned off or a limit reached: pause
+                // between batches.
+                if inner.pause_reason().is_some() {
                     return None;
                 }
                 handle.block_on(async {
@@ -583,20 +594,28 @@ fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Option<ServingIndex
             },
             |totals| {
                 inner.set_progress(totals.attempted, targets.len(), "homepages");
+                let visited = totals.attempted - counted.replace(totals.attempted);
+                let downloaded = cfg.downloaded.swap(0, Ordering::Relaxed);
+                let now = now_unix();
                 inner.update_saved(|saved| {
                     saved.crawl_left = left.saturating_sub(totals.attempted);
                     saved.index_stale = true;
-                })
+                    saved.homepages_visited += visited as u64;
+                    saved.add_downloaded(downloaded, now);
+                })?;
+                inner.recount_disk();
+                Ok(())
             },
         )?;
         match totals.end {
             RunEnd::Finished => {}
             RunEnd::Stopped if inner.stopping() => return Err(Stopped.into()),
             RunEnd::Stopped => {
-                // Paused by the settings: index what was crawled so far,
-                // and go on from there once updates are back on.
+                // Paused by the settings or a limit: index what was crawled
+                // so far, and go on from there later.
                 info!(
-                    "background updates turned off: pausing the crawl after {} homepages",
+                    "{}: pausing the crawl after {} homepages",
+                    inner.pause_reason().unwrap_or("paused"),
                     totals.attempted
                 );
                 if totals.attempted == 0 {
@@ -711,6 +730,7 @@ where
 /// Deletes the directories of replaced indexes that no search has open any
 /// more.
 async fn sweep(inner: &Arc<Inner>) {
+    inner.recount_disk();
     if !inner.has_retired() {
         return;
     }

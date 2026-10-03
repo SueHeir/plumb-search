@@ -208,6 +208,42 @@ pub(super) struct SavedState {
     /// service while the rest of the seed data downloads. The full seed
     /// replaces them, keeping only what crawls added.
     pub(super) quick_start: bool,
+    /// The day (UTC, in days since 1970) of `downloaded_on_day`.
+    pub(super) download_day: u64,
+    /// Bytes downloaded on `download_day`.
+    pub(super) downloaded_on_day: u64,
+    /// Bytes downloaded since setup.
+    pub(super) downloaded_total: u64,
+    /// Homepages visited since setup.
+    pub(super) homepages_visited: u64,
+}
+
+const SECONDS_PER_DAY: u64 = 24 * 60 * 60;
+
+impl SavedState {
+    /// Bytes downloaded on the day of `now` (Unix seconds).
+    pub(super) fn downloaded_today(&self, now: u64) -> u64 {
+        if self.download_day == now / SECONDS_PER_DAY {
+            self.downloaded_on_day
+        } else {
+            0
+        }
+    }
+
+    pub(super) fn add_downloaded(&mut self, bytes: u64, now: u64) {
+        let today = now / SECONDS_PER_DAY;
+        if self.download_day != today {
+            self.download_day = today;
+            self.downloaded_on_day = 0;
+        }
+        self.downloaded_on_day = self.downloaded_on_day.saturating_add(bytes);
+        self.downloaded_total = self.downloaded_total.saturating_add(bytes);
+    }
+}
+
+/// The Unix time the day of `now` (UTC) ends.
+pub(super) fn next_day(now: u64) -> u64 {
+    (now / SECONDS_PER_DAY + 1) * SECONDS_PER_DAY
 }
 
 impl SavedState {
@@ -220,6 +256,10 @@ impl SavedState {
             last_refresh: None,
             wikidata_missing: false,
             quick_start: false,
+            download_day: 0,
+            downloaded_on_day: 0,
+            downloaded_total: 0,
+            homepages_visited: 0,
         }
     }
 }
@@ -230,10 +270,25 @@ pub(super) fn load_state(paths: &Paths) -> Option<SavedState> {
     load_json(&paths.state)
 }
 
-/// Reads the settings; the defaults when there are none or they cannot be
+/// Reads the settings. `None` when there are none, or when they cannot be
 /// read (that is logged).
-pub(super) fn load_settings(paths: &Paths) -> NodeSettings {
-    load_json(&paths.settings).unwrap_or_default()
+pub(super) fn load_settings(paths: &Paths) -> Option<NodeSettings> {
+    load_json(&paths.settings)
+}
+
+/// The bytes the files under `dir` take, counting what can be read.
+pub(super) fn dir_size(dir: &Path) -> u64 {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .map(|entry| match entry.file_type() {
+            Ok(kind) if kind.is_dir() => dir_size(&entry.path()),
+            Ok(kind) if kind.is_file() => entry.metadata().map_or(0, |meta| meta.len()),
+            _ => 0,
+        })
+        .sum()
 }
 
 /// Saves the settings atomically.
@@ -387,6 +442,10 @@ mod tests {
             last_refresh: Some(1_700_000_000),
             wikidata_missing: true,
             quick_start: true,
+            download_day: 20_000,
+            downloaded_on_day: 1_234,
+            downloaded_total: 5_678,
+            homepages_visited: 90,
         };
         save_state(&paths, &state).unwrap();
         assert_eq!(load_state(&paths), Some(state));

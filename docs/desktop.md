@@ -2,9 +2,11 @@
 
 The desktop app runs a Plumb Search node on your computer. You search in your
 own web browser, at `http://127.0.0.1:7586`. The app's window is a panel, not
-a browser: it says what works now ("Limited search is ready" or "Search is
-ready"), shows how far setup has come, holds the settings and has a button that
-opens search in your browser. The same app builds for Windows, macOS and Linux
+a browser but a dashboard of the node: what works now ("Limited search is
+ready" or "Search is ready"), the disk space and downloads it uses against
+their limits, how crawling is going, the Plumb network (not connected in this
+version) and how far setup has come. It holds the settings and has buttons that
+open search in your browser or add Plumb to Firefox. The same app builds for Windows, macOS and Linux
 with [Tauri](https://v2.tauri.app).
 
 Every link out of the panel opens in your default browser. Starting the app
@@ -123,6 +125,13 @@ connection.**
    descriptions, then keeps crawling 1,000 more every 12 hours while the app
    runs. The setting "Keep the index up to date in the background" turns
    this off (and back on).
+
+The app starts with a download limit of 500 MB a day and a storage limit of
+2,000 MB, which the panel's settings change (empty for no limit). Once a
+day's downloads reach the limit, crawling pauses until the next day (UTC);
+while the data folder is over its limit, crawling pauses. Setup's own
+downloads count toward the day but are never held back, and search keeps
+working either way.
 
 If a download fails, for example without internet access or behind a
 firewall that blocks those sites, the error appears on the panel.
