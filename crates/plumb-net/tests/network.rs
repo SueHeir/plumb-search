@@ -434,6 +434,41 @@ async fn popularity_reports_spread_and_are_read_once_enough_are_sent() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_node_says_who_it_is_connected_to_and_why_it_is_not() {
+    // A port nothing listens on: the bootstrap node is down.
+    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = closed.local_addr().unwrap().port();
+    drop(closed);
+    let gone: Multiaddr = format!("/ip4/127.0.0.1/tcp/{port}/p2p/{}", PeerId::random())
+        .parse()
+        .unwrap();
+    let alone = Node::start(false, vec![gone], vec![]).await;
+    let problem = wait_for(|| alone.handle.status().problem).await;
+    assert!(
+        problem.message.contains("turned the connection away"),
+        "{problem:?}"
+    );
+    assert!(alone.handle.status().alone_since.is_some());
+    alone.handle.reconnect().unwrap();
+
+    let relay = Node::start(true, vec![], vec![]).await;
+    let joined = Node::start(false, vec![relay.addr().await], vec![]).await;
+    let status = wait_for(|| {
+        let status = joined.handle.status();
+        (!status.peers.is_empty()).then_some(status)
+    })
+    .await;
+    let peer = &status.peers[0];
+    assert_eq!(peer.peer_id, relay.handle.peer_id().to_string());
+    assert!(peer.bootstrap);
+    // Over loopback, which counts as this network.
+    assert_eq!(peer.route, plumb_net::Route::Nearby);
+    assert_eq!(status.nearby_peers, 1);
+    assert_eq!(status.problem, None);
+    assert_eq!(status.alone_since, None);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn confirmed_crawls_earn_credits_that_buy_tokens() {
     use plumb_net::agree::MIN_JUDGED;
     use plumb_net::credits::credits_for;

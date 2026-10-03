@@ -257,6 +257,14 @@ pub trait StatusSource: Send + Sync {
     /// Starts a refresh now.
     fn refresh_now(&self) {}
 
+    /// Tries the network's bootstrap nodes again now.
+    fn reconnect_network(&self) -> Result<()> {
+        match self.network() {
+            Some(net) => net.reconnect(),
+            None => anyhow::bail!("The Plumb network is off on this node."),
+        }
+    }
+
     /// Where the node keeps its data, to show on the panel. Its remote
     /// control file is there too: without a data folder, the node cannot be
     /// controlled remotely.
@@ -353,6 +361,7 @@ fn app(state: AppState) -> Router {
             .route("/app/settings", post(panel::save_settings))
             .route("/app/features", post(panel::save_features))
             .route("/app/refresh", post(panel::refresh))
+            .route("/app/network/retry", post(panel::retry_network))
             .route("/app/remote-control", post(panel::save_remote_control))
             .route(panel::ADD_TO_FIREFOX_PATH, get(panel::add_to_firefox));
         router = private::routes(router);
