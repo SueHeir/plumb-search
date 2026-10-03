@@ -319,9 +319,14 @@ impl BatchStore {
             // Only crawls others can check: a node's own fetches of sites
             // it was not assigned (to settle a dispute) prove nothing to
             // anyone else.
+            // And only those a searcher counts: a crawl from outside its
+            // batch's epoch would make the searcher distrust the answer.
             let assigned =
                 crawler.is_some_and(|c| is_assigned(h.epoch, &c, &record.domain, h.share_ppm));
-            if record.crawled_at.is_none() || !assigned {
+            let in_window = record
+                .crawled_at
+                .is_some_and(|at| crate::batch::in_crawl_window(at, h.epoch));
+            if !in_window || !assigned {
                 continue;
             }
             let holding = Holding {
@@ -466,6 +471,31 @@ mod tests {
         let mut store = BatchStore::open(dir.path()).unwrap();
         store.insert(&batch).unwrap();
         assert!(store.contains(&batch.id()));
+        assert!(store.proof(&domain, now).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_crawl_from_outside_its_batchs_epoch_is_never_a_proof() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = 1_790_000_000;
+        let key = Keypair::generate_ed25519();
+        let peer = key.public().to_peer_id();
+        let domain = (0..)
+            .map(|i| format!("s{i}.com"))
+            .find(|d| is_assigned(epoch_of(now), &peer, d, MAX_SHARE_PPM))
+            .unwrap();
+        let mut record = SiteRecord::new(domain.as_str());
+        // Crawled three days before the epoch the batch is signed in.
+        record.crawled_at = Some(now - 3 * EPOCH_SECS);
+        let batch = Batch::sign(&key, &[record], epoch_of(now), MAX_SHARE_PPM, now)
+            .unwrap()
+            .unwrap();
+        assert!(
+            batch.proof(0).verify(now).is_err(),
+            "a searcher would refuse it"
+        );
+        let mut store = BatchStore::open(dir.path()).unwrap();
+        store.insert(&batch).unwrap();
         assert!(store.proof(&domain, now).unwrap().is_none());
     }
 
