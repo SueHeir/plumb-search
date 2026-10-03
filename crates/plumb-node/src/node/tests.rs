@@ -1093,6 +1093,9 @@ async fn a_node_in_the_network_takes_in_other_nodes_crawls_and_searches_them() {
     );
     assert!(body.contains("<li class=\"net\">"), "{body}");
     assert!(body.contains("Lighthouse Keepers Guild"), "{body}");
+    // The buckets were kept from the first search: the network was not
+    // asked again.
+    assert!(body.contains("the network was not asked again"), "{body}");
 
     // And the other way round: the node serves the buckets of its index.
     assert!(dir

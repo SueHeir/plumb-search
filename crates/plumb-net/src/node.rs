@@ -259,6 +259,8 @@ pub struct NetHandle {
     wallet: Arc<Mutex<Wallet>>,
     /// Tokens this node's searches spent.
     tokens_spent: Arc<std::sync::atomic::AtomicU64>,
+    /// Buckets this node's own searches fetched (see [`crate::cache`]).
+    cache: crate::cache::BucketCache,
     task: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -327,13 +329,22 @@ impl NetHandle {
     /// Searches the network for `query` without sending it: fetches the
     /// query's buckets, padded with random ones, from other nodes under
     /// throwaway identities, waiting at most `wait`, and returns the sites
-    /// that match, checked but unranked (see [`crate::search`]).
+    /// that match, checked but unranked (see [`crate::search`]). Buckets
+    /// this node fetched lately are used again instead of asked for (see
+    /// [`crate::cache`]).
     pub async fn search(&self, query: &str, wait: Duration) -> Result<NetSearch> {
         let (reply, peers) = oneshot::channel();
         self.send(Command::Peers(Serving::Buckets, reply))?;
         let peers = peers.await.context("the network task stopped")?;
-        let mut found =
-            crate::search::search(query, &peers, wait, now_unix(), Some(&self.wallet)).await;
+        let mut found = crate::search::search(
+            query,
+            &peers,
+            wait,
+            now_unix(),
+            Some(&self.wallet),
+            Some(&self.cache),
+        )
+        .await;
         self.tokens_spent
             .fetch_add(found.priority as u64, std::sync::atomic::Ordering::Relaxed);
         // Two keys of one person can sign the same crawl: a site is
@@ -359,6 +370,11 @@ impl NetHandle {
             }
         }
         Ok(found)
+    }
+
+    /// Forgets the buckets kept from this node's searches.
+    pub fn clear_search_cache(&self) {
+        self.cache.clear();
     }
 
     /// Up to `limit` sites whose crawlers disagree, for this node to fetch
@@ -752,6 +768,7 @@ pub async fn start(
             popularity,
             wallet,
             tokens_spent,
+            cache: crate::cache::BucketCache::open(&config.dir.join("bucket-cache"), now_unix()),
             task: Mutex::new(Some(handle)),
         },
         records_rx,
