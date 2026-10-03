@@ -59,6 +59,8 @@ services:
       - /ip4/198.211.114.63/udp/4002/quic-v1
       - --bootstrap
       - /dns4/host.docker.internal/tcp/4001/p2p/12D3KooWJ2UWUBsxmPfXTfHa8cBBmzifa6kj5pFZKfJXYNQyJ69a
+      # Not the default plumbsearch.org addresses, for the same reason.
+      - --no-default-bootstrap
       - --no-upnp
       - --no-local-discovery
       # Crawls from Liz's own nodes count as soon as they're signed, without

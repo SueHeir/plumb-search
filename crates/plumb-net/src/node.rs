@@ -622,6 +622,12 @@ pub async fn start(
         .context("opening the report store")??
     };
     let peer_id = key.public().to_peer_id();
+    // The network's own first nodes start from the same default list as
+    // everyone else, which names them.
+    let mut config = config;
+    config
+        .bootstrap
+        .retain(|addr| peer_of(addr) != Some(peer_id));
     let gateway = Gateway::new(&key, now_unix())?;
     let (store, agreement) = {
         let dir = config.dir.join("batches");

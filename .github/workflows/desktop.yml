@@ -6,8 +6,16 @@ name: Desktop
 # release. The builds are not code-signed yet; docs/desktop.md explains how to
 # open them anyway.
 
+# Pull requests build the installers only when they touch the desktop app:
+# three installer builds (macOS and Windows take half an hour) for every pull
+# request filled the account's runners and left main's CI queued for an
+# hour. The CI workflow's desktop job still checks the app's code on every
+# pull request.
 on:
   pull_request:
+    paths:
+      - "crates/plumb-desktop/**"
+      - ".github/workflows/desktop.yml"
   workflow_dispatch:
   push:
     tags: ["v*"]
