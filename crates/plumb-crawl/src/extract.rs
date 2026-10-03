@@ -1,11 +1,29 @@
 //! Reading a page's names and outbound links out of its HTML.
+//!
+//! The page is read as a stream of tags and text (html5ever's tokenizer)
+//! and never built into a tree. Building the tree means repairing the markup
+//! the way browsers do, and hostile markup makes that explode: each new
+//! paragraph reopens every formatting element still open, so `<p>`, a
+//! thousand `<b>`s and then `<p>x` over and over need gigabytes, and deep
+//! nesting costs time quadratic in the depth. Reading the token stream takes
+//! memory in proportion to the page, and time too, with one exception the
+//! tokenizer has: it checks each attribute of a tag against all the tag's
+//! earlier ones, so one tag with a hundred thousand attributes takes
+//! minutes. Reading therefore stops at a time limit.
 
+use std::cell::RefCell;
 use std::collections::HashSet;
+use std::time::{Duration, Instant};
 
+use html5ever::tendril::StrTendril;
+use html5ever::tokenizer::states::RawKind;
+use html5ever::tokenizer::{
+    BufferQueue, Tag, TagKind, Token, TokenSink, TokenSinkResult, Tokenizer, TokenizerOpts,
+};
 use plumb_core::{
     collapse_whitespace, normalize_text, registrable_domain, truncate_chars, MAX_TEXT_CHARS,
 };
-use scraper::{ElementRef, Html, Node, Selector};
+use tracing::debug;
 use url::Url;
 
 use crate::{OutLink, PageMeta};
@@ -13,8 +31,14 @@ use crate::{OutLink, PageMeta};
 /// Most outbound links [`extract_page_meta`] keeps from one page.
 pub const MAX_OUT_LINKS: usize = 500;
 
-/// Namespace of HTML elements; an SVG `<title>` is in another one.
-const HTML_NAMESPACE: &str = "http://www.w3.org/1999/xhtml";
+/// How long [`extract_page_meta`] keeps reading a page. Half a megabyte of
+/// ordinary or merely messy HTML takes milliseconds; only markup built to be
+/// slow comes near this, and the rest of such a page is skipped.
+const READ_TIME_LIMIT: Duration = Duration::from_secs(2);
+
+/// The page goes to the tokenizer in pieces of this many bytes, with the
+/// time limit checked between them.
+const READ_CHUNK_BYTES: usize = 4096;
 
 /// Elements whose text never shows on the page.
 const HIDDEN_ELEMENTS: &[&str] = &["script", "style", "noscript", "template", "iframe"];
@@ -67,8 +91,13 @@ const WORD_BREAK_ELEMENTS: &[&str] = &[
 /// the link's `aria-label`/`title`. Texts are whitespace-collapsed and cut to
 /// [`plumb_core::MAX_TEXT_CHARS`]. At most 500 links are kept.
 ///
+/// The page is read as a stream of tags and text, without building a tree,
+/// so memory grows only in proportion to its length, however hostile the
+/// markup. Reading stops after 2 seconds, keeping what was read by then;
+/// only markup made to be slow takes that long.
+///
 /// Details:
-/// - The title is the first `<title>` in the HTML namespace (an SVG icon's
+/// - The title is the first `<title>` outside SVG and MathML (an SVG icon's
 ///   `<title>` never counts). Meta names are matched case-insensitively,
 ///   and the Open Graph keys are accepted in `name` as well as `property`.
 ///   Empty values count as missing.
@@ -77,82 +106,322 @@ const WORD_BREAK_ELEMENTS: &[&str] = &[
 ///   skipped, fragments and credentials are stripped from the kept URLs,
 ///   and links without a registrable domain (IP addresses, `localhost`)
 ///   are dropped. Exact repeats (same URL and text) are kept once.
-/// - Link text is read the way it shows on screen: script and style
-///   contents are skipped, and block elements separate words, so
+/// - A link's text runs from its `<a>` to its `</a>` (or the next `<a>`)
+///   and is read the way it shows on screen: script and style contents are
+///   skipped, and block elements separate words, so
 ///   `<div>Acme</div><div>Bank</div>` gives `acme bank`.
 pub fn extract_page_meta(base_url: &Url, html: &str) -> PageMeta {
-    let doc = Html::parse_document(html);
-    let (description, site_name) = meta_names(&doc);
-    PageMeta {
-        title: page_title(&doc),
-        description,
-        site_name,
-        links: out_links(&doc, base_url),
+    read_page(base_url, html, READ_TIME_LIMIT)
+}
+
+/// [`extract_page_meta`], reading for at most `time_limit`.
+fn read_page(base_url: &Url, html: &str, time_limit: Duration) -> PageMeta {
+    let page = RefCell::new(Page::new(base_url));
+    let tokenizer = Tokenizer::new(Reader(&page), TokenizerOpts::default());
+    let input = BufferQueue::default();
+    let started = Instant::now();
+    for chunk in chunks(html, READ_CHUNK_BYTES) {
+        if started.elapsed() > time_limit {
+            debug!("{base_url}: stopped reading the page after {time_limit:?}");
+            break;
+        }
+        input.push_back(StrTendril::from_slice(chunk));
+        // The reader never asks the tokenizer to pause (it runs no
+        // scripts), so each call reads everything it was given.
+        let _ = tokenizer.feed(&input);
+    }
+    tokenizer.end();
+    drop(tokenizer);
+    page.into_inner().into_meta()
+}
+
+/// `text` in pieces of `size` bytes (a little more where a character
+/// straddles the cut).
+fn chunks(mut text: &str, size: usize) -> impl Iterator<Item = &str> {
+    std::iter::from_fn(move || {
+        if text.is_empty() {
+            return None;
+        }
+        let mut end = size.clamp(1, text.len());
+        while !text.is_char_boundary(end) {
+            end += 1;
+        }
+        let (chunk, rest) = text.split_at(end);
+        text = rest;
+        Some(chunk)
+    })
+}
+
+/// Feeds the tokenizer's output to a [`Page`].
+struct Reader<'p, 'a>(&'p RefCell<Page<'a>>);
+
+impl TokenSink for Reader<'_, '_> {
+    type Handle = ();
+
+    fn process_token(&self, token: Token, _line: u64) -> TokenSinkResult<()> {
+        self.0.borrow_mut().read(token)
+    }
+
+    /// Inside SVG and MathML, `<![CDATA[...]]>` is text, not a comment.
+    fn adjusted_current_node_present_but_not_in_html_namespace(&self) -> bool {
+        self.0.borrow().foreign > 0
     }
 }
 
-fn page_title(doc: &Html) -> Option<String> {
-    doc.select(&selector("title"))
-        .find(|title| &*title.value().name.ns == HTML_NAMESPACE)
-        .and_then(|title| clean_text(&title.text().collect::<String>()))
+/// What has been read of a page so far.
+struct Page<'a> {
+    base_url: &'a Url,
+    own_domain: Option<String>,
+    /// Whether the page title's `<title>` has been seen.
+    title_seen: bool,
+    /// The text of the page title's `<title>`, while it is being read.
+    title_text: Option<String>,
+    title: Option<String>,
+    description: Option<String>,
+    og_description: Option<String>,
+    site_name: Option<String>,
+    /// The link being read, when it is one to keep.
+    anchor: Option<Anchor>,
+    links: Vec<OutLink>,
+    seen: HashSet<(String, String)>,
+    /// How many [`HIDDEN_ELEMENTS`] are open.
+    hidden: usize,
+    /// How many `<svg>` and `<math>` elements are open.
+    foreign: usize,
 }
 
-/// The description (`name="description"`, else `og:description`) and
-/// `og:site_name`, each from the first tag with a non-empty value.
-fn meta_names(doc: &Html) -> (Option<String>, Option<String>) {
-    let mut description = None;
-    let mut og_description = None;
-    let mut site_name = None;
-    for meta in doc.select(&selector("meta[content]")) {
-        let meta = meta.value();
-        let content = meta.attr("content").unwrap_or_default();
-        let name = meta.attr("name").unwrap_or_default().trim();
-        let property = meta.attr("property").unwrap_or_default().trim();
+/// A link to another site, between its `<a>` and its `</a>`.
+struct Anchor {
+    url: String,
+    target_domain: String,
+    /// The visible text so far.
+    text: String,
+    /// The first image `alt` with any text in it, normalized.
+    alt: Option<String>,
+    aria_label: Option<String>,
+    title: Option<String>,
+    /// [`Page::hidden`] at the `<a>`: text counts only while no hidden
+    /// element has opened inside the link.
+    hidden: usize,
+}
+
+impl<'a> Page<'a> {
+    fn new(base_url: &'a Url) -> Self {
+        Page {
+            base_url,
+            own_domain: registrable_domain(base_url.as_str()),
+            title_seen: false,
+            title_text: None,
+            title: None,
+            description: None,
+            og_description: None,
+            site_name: None,
+            anchor: None,
+            links: Vec::new(),
+            seen: HashSet::new(),
+            hidden: 0,
+            foreign: 0,
+        }
+    }
+
+    fn read(&mut self, token: Token) -> TokenSinkResult<()> {
+        match token {
+            Token::TagToken(tag) if tag.kind == TagKind::StartTag => return self.start_tag(&tag),
+            Token::TagToken(tag) => self.end_tag(&tag),
+            Token::CharacterTokens(text) => self.text(&text),
+            Token::EOFToken => {
+                self.close_anchor();
+                self.close_title();
+            }
+            _ => {}
+        }
+        TokenSinkResult::Continue
+    }
+
+    /// Handles a start tag, and tells the tokenizer how to read what follows.
+    fn start_tag(&mut self, tag: &Tag) -> TokenSinkResult<()> {
+        let name: &str = &tag.name;
+        match name {
+            "a" => {
+                self.close_anchor();
+                self.open_anchor(tag);
+            }
+            "img" => self.image(tag),
+            "meta" => self.meta(tag),
+            "svg" | "math" if !tag.self_closing => self.foreign += 1,
+            "title" if self.foreign == 0 && !self.title_seen => {
+                self.title_seen = true;
+                self.title_text = Some(String::new());
+            }
+            _ => {}
+        }
+        if WORD_BREAK_ELEMENTS.contains(&name) {
+            self.word_break();
+        }
+        // `<x/>` closes an element only in SVG and MathML.
+        if self.foreign > 0 && tag.self_closing {
+            return TokenSinkResult::Continue;
+        }
+        if HIDDEN_ELEMENTS.contains(&name) {
+            self.hidden += 1;
+        }
+        contents_kind(name)
+    }
+
+    fn end_tag(&mut self, tag: &Tag) {
+        let name: &str = &tag.name;
+        match name {
+            "a" => self.close_anchor(),
+            "title" => self.close_title(),
+            "svg" | "math" => self.foreign = self.foreign.saturating_sub(1),
+            _ => {}
+        }
+        if HIDDEN_ELEMENTS.contains(&name) {
+            self.hidden = self.hidden.saturating_sub(1);
+        }
+        if WORD_BREAK_ELEMENTS.contains(&name) {
+            self.word_break();
+        }
+    }
+
+    fn text(&mut self, text: &str) {
+        if let Some(title) = &mut self.title_text {
+            title.push_str(text);
+        }
+        if let Some(anchor) = self.visible_anchor() {
+            anchor.text.push_str(text);
+        }
+    }
+
+    fn word_break(&mut self) {
+        if let Some(anchor) = self.visible_anchor() {
+            anchor.text.push(' ');
+        }
+    }
+
+    /// The open link, unless a hidden element has opened inside it.
+    fn visible_anchor(&mut self) -> Option<&mut Anchor> {
+        let hidden = self.hidden;
+        self.anchor
+            .as_mut()
+            .filter(|anchor| anchor.hidden == hidden)
+    }
+
+    fn open_anchor(&mut self, tag: &Tag) {
+        if self.links.len() >= MAX_OUT_LINKS {
+            return;
+        }
+        let Some(url) = attr(tag, "href").and_then(|href| resolve_link(self.base_url, href)) else {
+            return;
+        };
+        let Some(target_domain) = registrable_domain(url.as_str()) else {
+            return;
+        };
+        if self.own_domain.as_deref() == Some(target_domain.as_str()) {
+            return;
+        }
+        self.anchor = Some(Anchor {
+            url: url.into(),
+            target_domain,
+            text: String::new(),
+            alt: None,
+            aria_label: attr(tag, "aria-label").map(str::to_string),
+            title: attr(tag, "title").map(str::to_string),
+            hidden: self.hidden,
+        });
+    }
+
+    fn close_anchor(&mut self) {
+        let Some(anchor) = self.anchor.take() else {
+            return;
+        };
+        let link = OutLink {
+            text: link_text(&anchor),
+            url: anchor.url,
+            target_domain: anchor.target_domain,
+        };
+        if self.links.len() < MAX_OUT_LINKS
+            && self.seen.insert((link.url.clone(), link.text.clone()))
+        {
+            self.links.push(link);
+        }
+    }
+
+    fn image(&mut self, tag: &Tag) {
+        let Some(anchor) = self.visible_anchor() else {
+            return;
+        };
+        if anchor.alt.is_some() {
+            return;
+        }
+        let alt = clean_link_text(attr(tag, "alt").unwrap_or_default());
+        if !alt.is_empty() {
+            anchor.alt = Some(alt);
+        }
+    }
+
+    fn close_title(&mut self) {
+        if let Some(text) = self.title_text.take() {
+            self.title = clean_text(&text);
+        }
+    }
+
+    /// Takes the description (`name="description"`, else `og:description`)
+    /// and `og:site_name`, each from the first tag with a non-empty value.
+    fn meta(&mut self, tag: &Tag) {
+        let Some(content) = attr(tag, "content") else {
+            return;
+        };
+        let name = attr(tag, "name").unwrap_or_default().trim();
+        let property = attr(tag, "property").unwrap_or_default().trim();
         // Open Graph belongs in `property`, but `name` is a common mistake.
         let is_og =
             |key: &str| name.eq_ignore_ascii_case(key) || property.eq_ignore_ascii_case(key);
-        if description.is_none() && name.eq_ignore_ascii_case("description") {
-            description = clean_text(content);
+        if self.description.is_none() && name.eq_ignore_ascii_case("description") {
+            self.description = clean_text(content);
         }
-        if og_description.is_none() && is_og("og:description") {
-            og_description = clean_text(content);
+        if self.og_description.is_none() && is_og("og:description") {
+            self.og_description = clean_text(content);
         }
-        if site_name.is_none() && is_og("og:site_name") {
-            site_name = clean_text(content);
+        if self.site_name.is_none() && is_og("og:site_name") {
+            self.site_name = clean_text(content);
         }
     }
-    (description.or(og_description), site_name)
+
+    fn into_meta(mut self) -> PageMeta {
+        self.close_anchor();
+        self.close_title();
+        PageMeta {
+            title: self.title,
+            description: self.description.or(self.og_description),
+            site_name: self.site_name,
+            links: self.links,
+        }
+    }
 }
 
-fn out_links(doc: &Html, base_url: &Url) -> Vec<OutLink> {
-    let images = selector("img[alt]");
-    let own_domain = registrable_domain(base_url.as_str());
-    let mut seen = HashSet::new();
-    let mut links = Vec::new();
-    for anchor in doc.select(&selector("a[href]")) {
-        let href = anchor.value().attr("href").unwrap_or_default();
-        let Some(url) = resolve_link(base_url, href) else {
-            continue;
-        };
-        let Some(target_domain) = registrable_domain(url.as_str()) else {
-            continue;
-        };
-        if own_domain.as_deref() == Some(target_domain.as_str()) {
-            continue;
+/// How the tokenizer must read an element's contents: as text up to the
+/// element's end tag for these elements (the way a browser's parser
+/// switches it), as markup for the rest.
+fn contents_kind(name: &str) -> TokenSinkResult<()> {
+    match name {
+        "script" => TokenSinkResult::RawData(RawKind::ScriptData),
+        // `noscript` too, as in a browser with scripting on.
+        "style" | "xmp" | "iframe" | "noembed" | "noframes" | "noscript" => {
+            TokenSinkResult::RawData(RawKind::Rawtext)
         }
-        let link = OutLink {
-            url: url.into(),
-            target_domain,
-            text: link_text(anchor, &images),
-        };
-        if seen.insert((link.url.clone(), link.text.clone())) {
-            links.push(link);
-            if links.len() == MAX_OUT_LINKS {
-                break;
-            }
-        }
+        "title" | "textarea" => TokenSinkResult::RawData(RawKind::Rcdata),
+        "plaintext" => TokenSinkResult::Plaintext,
+        _ => TokenSinkResult::Continue,
     }
-    links
+}
+
+/// The value of the tag's attribute `name` (lowercase).
+fn attr<'t>(tag: &'t Tag, name: &str) -> Option<&'t str> {
+    tag.attrs
+        .iter()
+        .find(|attr| &*attr.name.local == name)
+        .map(|attr| &*attr.value)
 }
 
 /// Resolves an `href` to an absolute `http`/`https` URL without fragment or
@@ -184,63 +453,22 @@ fn resolve_link(base_url: &Url, href: &str) -> Option<Url> {
 
 /// The link's normalized text, falling back to an image's `alt`, then the
 /// link's `aria-label` or `title`: logo and icon links often have no text.
-fn link_text(anchor: ElementRef<'_>, images: &Selector) -> String {
-    let text = clean_link_text(&visible_text(anchor));
+fn link_text(anchor: &Anchor) -> String {
+    let text = clean_link_text(&anchor.text);
     if !text.is_empty() {
         return text;
     }
-    let alts = anchor
-        .select(images)
-        .filter_map(|image| image.value().attr("alt"));
-    let labels = ["aria-label", "title"]
+    let labels = [&anchor.aria_label, &anchor.title]
         .into_iter()
-        .filter_map(|attr| anchor.value().attr(attr));
-    alts.chain(labels)
-        .map(clean_link_text)
+        .flatten()
+        .map(|label| clean_link_text(label));
+    anchor
+        .alt
+        .clone()
+        .into_iter()
+        .chain(labels)
         .find(|text| !text.is_empty())
         .unwrap_or_default()
-}
-
-/// The text inside `element` as it reads on screen: text in
-/// [`HIDDEN_ELEMENTS`] is skipped and [`WORD_BREAK_ELEMENTS`] separate
-/// words. Walks the tree with its own stack, since a hostile page can nest
-/// elements deeply enough to overflow the call stack.
-fn visible_text(element: ElementRef<'_>) -> String {
-    enum Step<'a> {
-        Element(ElementRef<'a>),
-        Text(&'a str),
-        Space,
-    }
-    let mut text = String::new();
-    let mut stack = vec![Step::Element(element)];
-    while let Some(step) = stack.pop() {
-        match step {
-            Step::Text(chunk) => text.push_str(chunk),
-            Step::Space => text.push(' '),
-            Step::Element(element) => {
-                let name = element.value().name();
-                if HIDDEN_ELEMENTS.contains(&name) {
-                    continue;
-                }
-                if WORD_BREAK_ELEMENTS.contains(&name) {
-                    text.push(' ');
-                    // Popped after all the children.
-                    stack.push(Step::Space);
-                }
-                // Reversed, so the first child is popped first.
-                for child in element.children().rev() {
-                    match child.value() {
-                        Node::Text(chunk) => stack.push(Step::Text(chunk)),
-                        Node::Element(_) => {
-                            stack.extend(ElementRef::wrap(child).map(Step::Element))
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
-    }
-    text
 }
 
 /// Collapses whitespace and cuts to [`MAX_TEXT_CHARS`]; `None` if nothing is left.
@@ -253,13 +481,10 @@ fn clean_link_text(text: &str) -> String {
     truncate_chars(&normalize_text(text), MAX_TEXT_CHARS)
 }
 
-fn selector(css: &str) -> Selector {
-    Selector::parse(css).expect("built-in selectors are valid")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_alloc::peak_bytes;
 
     fn extract(base: &str, html: &str) -> PageMeta {
         extract_page_meta(&Url::parse(base).unwrap(), html)
@@ -459,6 +684,36 @@ mod tests {
     }
 
     #[test]
+    fn script_and_style_contents_are_not_markup() {
+        let meta = extract(
+            "https://example.com/",
+            r#"<head><title>Real <b>title</b></title>
+            <script>document.write('<title>Fake</title><a href="https://script.org/">x</a>');</script>
+            <style>a::after { content: "<a href='https://style.org/'>"; }</style>
+            <noscript><a href="https://noscript.org/">Enable JS</a></noscript>
+            <template><a href="https://template.org/">Later</a></template>
+            </head>
+            <a href="https://kept.org/">Kept<noscript> (no JS)</noscript></a>
+            <svg><style/><title/></svg><a href="https://after.org/">After SVG</a>"#,
+        );
+        assert_eq!(meta.title.as_deref(), Some("Real <b>title</b>"));
+        let texts: Vec<(&str, &str)> = meta
+            .links
+            .iter()
+            .map(|l| (l.target_domain.as_str(), l.text.as_str()))
+            .collect();
+        // A <template> holds markup: its links count, as they always have.
+        assert_eq!(
+            texts,
+            [
+                ("template.org", "later"),
+                ("kept.org", "kept"),
+                ("after.org", "after svg")
+            ]
+        );
+    }
+
+    #[test]
     fn copes_with_messy_html() {
         let meta = extract(
             "https://www.example.com/",
@@ -491,6 +746,21 @@ mod tests {
         let meta = extract("https://example.com/", "<<<>>><a href=<title>\u{0}</a");
         assert_eq!(meta.title, None);
         assert!(meta.links.is_empty());
+
+        // A link left open runs to the end of the page.
+        let meta = extract(
+            "https://example.com/",
+            "<a href='https://open.org/'>Never <title>Late title</title> closed",
+        );
+        assert_eq!(meta.title.as_deref(), Some("Late title"));
+        assert_eq!(
+            meta.links,
+            [link(
+                "https://open.org/",
+                "open.org",
+                "never late title closed"
+            )]
+        );
     }
 
     #[test]
@@ -540,10 +810,8 @@ mod tests {
 
     #[test]
     fn deep_nesting_does_not_overflow_the_stack() {
-        // A recursive walk of 10,000 levels would not fit in this small
-        // stack. (Far deeper pages are slow to parse: html5ever is quadratic
-        // in the nesting depth inside an `<a>`.)
-        let depth = 10_000;
+        // Nothing recurses over the nesting, so a small stack will do.
+        let depth = 100_000;
         let html = format!(
             r#"<a href="https://deep.org/">{}Deep{}</a>"#,
             "<span>".repeat(depth),
@@ -556,5 +824,104 @@ mod tests {
             .join()
             .unwrap();
         assert_eq!(meta.links, [link("https://deep.org/", "deep.org", "deep")]);
+    }
+
+    /// `head`, then `unit` over and over up to 512 KiB (the crawler's
+    /// default page limit), then a link.
+    fn hostile_page(head: &str, unit: &str) -> String {
+        let mut html = head.to_string();
+        while html.len() < 512 * 1024 {
+            html.push_str(unit);
+        }
+        html + r#"<a href="https://survivor.org/">Survivor</a>"#
+    }
+
+    #[test]
+    fn hostile_markup_takes_linear_time_and_memory() {
+        // A tree builder reopens every open formatting element in each new
+        // paragraph: with a thousand <b>s open that needs gigabytes.
+        let mut reopening = String::from("<title>Hostile</title><p>");
+        for i in 0..1000 {
+            reopening.push_str(&format!("<b x={i}>"));
+        }
+        let pages = [
+            hostile_page(&reopening, "<p>x"),
+            // Nesting that a tree builder handles in quadratic time.
+            hostile_page("<title>Hostile</title>", "<div>"),
+            hostile_page(
+                "<title>Hostile</title><a href='https://open.org/'>",
+                "<a><b><i>x",
+            ),
+        ];
+        let base = Url::parse("https://example.com/").unwrap();
+        for html in pages {
+            let started = Instant::now();
+            // No time limit: each page must be read to its end.
+            let (meta, peak) = peak_bytes(|| read_page(&base, &html, Duration::MAX));
+            let took = started.elapsed();
+            assert_eq!(meta.title.as_deref(), Some("Hostile"));
+            assert!(
+                meta.links.iter().any(|l| l.target_domain == "survivor.org"),
+                "{:?}",
+                meta.links
+            );
+            // A copy of the page and little else.
+            assert!(peak < 4 << 20, "{peak} bytes at peak");
+            assert!(took < Duration::from_secs(10), "took {took:?}");
+        }
+    }
+
+    #[test]
+    fn reading_stops_at_the_time_limit() {
+        // One tag with 80,000 distinct attributes. The tokenizer compares
+        // each attribute with all of the tag's earlier ones, which would
+        // take minutes.
+        let mut html = String::from("<title>Hostile</title><div");
+        for i in 0..80_000 {
+            html.push_str(&format!(" a{i}"));
+        }
+        html.push_str("><a href='https://survivor.org/'>Survivor</a>");
+
+        let started = Instant::now();
+        let (meta, peak) = peak_bytes(|| extract("https://example.com/", &html));
+        let took = started.elapsed();
+        // What came before the slow tag is kept.
+        assert_eq!(meta.title.as_deref(), Some("Hostile"));
+        assert!(peak < 16 << 20, "{peak} bytes at peak");
+        // The limit, plus one piece of the page past it and a wide margin
+        // for a busy machine.
+        assert!(took < READ_TIME_LIMIT * 4, "took {took:?}");
+    }
+
+    #[test]
+    fn pages_are_read_in_pieces() {
+        let text = "aé€😀".repeat(1000);
+        let pieces: Vec<&str> = chunks(&text, 7).collect();
+        assert_eq!(pieces.concat(), text);
+        // 7 bytes, or up to 3 more to finish a character; the last may be short.
+        let (last, others) = pieces.split_last().unwrap();
+        assert!(others.iter().all(|p| (7..=10).contains(&p.len())));
+        assert!(last.len() <= 10);
+        assert_eq!(chunks("", 7).count(), 0);
+
+        // Cut anywhere, a page reads the same.
+        let html =
+            r#"<title>Caf&eacute; &amp; Co</title><a href="https://x.org/">X &copy; Org</a>"#;
+        let base = Url::parse("https://example.com/").unwrap();
+        let whole = extract_page_meta(&base, html);
+        assert_eq!(whole.title.as_deref(), Some("Café & Co"));
+        assert_eq!(whole.links[0].text, "x org");
+        for size in 1..html.len() {
+            let page = RefCell::new(Page::new(&base));
+            let tokenizer = Tokenizer::new(Reader(&page), TokenizerOpts::default());
+            let input = BufferQueue::default();
+            for chunk in chunks(html, size) {
+                input.push_back(StrTendril::from_slice(chunk));
+                let _ = tokenizer.feed(&input);
+            }
+            tokenizer.end();
+            drop(tokenizer);
+            assert_eq!(page.into_inner().into_meta(), whole, "pieces of {size}");
+        }
     }
 }

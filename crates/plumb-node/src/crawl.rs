@@ -316,6 +316,7 @@ mod tests {
             domain: domain.to_string(),
             outcome: CrawlOutcome::Failed {
                 error: "connection refused".into(),
+                network: true,
             },
         }
     }
@@ -552,12 +553,14 @@ mod tests {
                 "g.com",
                 CrawlOutcome::Failed {
                     error: "dns".into(),
+                    network: true,
                 },
             ),
             result(
                 "h.com",
                 CrawlOutcome::Failed {
                     error: "timeout".into(),
+                    network: true,
                 },
             ),
         ];
