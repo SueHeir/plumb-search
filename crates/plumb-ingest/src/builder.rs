@@ -11,6 +11,9 @@ use crate::{CcRank, OfficialSite, TrancoEntry, WatExtract};
 /// More distinct Wikidata items than this claiming one domain's front page
 /// mark the domain as a shared host rather than anyone's official site.
 const MAX_ITEMS_PER_HOMEPAGE: usize = 5;
+/// How many times the sitelinks of every other item claiming a front page
+/// an item needs for its facts alone to be the site's.
+const DOMINANT_SITELINKS: u32 = 3;
 
 /// Collects seed data into site records. Each `add_*` call merges into the
 /// records already collected, so sources can be added in any order.
@@ -130,9 +133,12 @@ impl Builder {
     /// `signals.official_site`, adds the item's label and other names as
     /// aliases and, when
     /// the record has none yet, sets its `country`, and adds its kinds (see
-    /// [`crate::attach_facts`]). When several items claim a front page, only
-    /// the country and kinds they all share count: x.com is both X Corp.'s
-    /// and the old X.com bank's, and is no bank.
+    /// [`crate::attach_facts`]). When several items claim a front page, an
+    /// item with [`DOMINANT_SITELINKS`] times the sitelinks of each other
+    /// one gives the facts (wikipedia.org is Wikipedia's, an online
+    /// encyclopedia, more than its community's); else only the country and
+    /// kinds they all share count: x.com is both X Corp.'s and the old
+    /// X.com bank's, and is no bank.
     ///
     /// Only a claim on the domain's own front page counts (see
     /// [`OfficialSite::is_root_homepage`]): `https://www.ox.ac.uk/` makes
@@ -185,11 +191,26 @@ impl Builder {
                     record.add_alias(name);
                 }
             }
-            // When several items claim the front page (X Corp. and the old
-            // X.com bank both claim x.com), only what they agree on is the
-            // site's: their shared country and kinds.
+            // When several items claim the front page, the facts are those
+            // of the item that is far better known than the others
+            // (Wikipedia over the Wikipedia community at wikipedia.org);
+            // without one, only what they agree on is the site's: their
+            // shared country and kinds (x.com's former bank and X Corp.).
             // (Claims of one item carry the same facts.)
-            let (first, others) = claims.split_first().expect("a domain has a claim");
+            let dominant = claims.iter().copied().find(|site| {
+                site.sitelinks > 0
+                    && claims.iter().all(|other| {
+                        other.item == site.item
+                            || site.sitelinks >= DOMINANT_SITELINKS.saturating_mul(other.sitelinks)
+                    })
+            });
+            let (first, others): (&OfficialSite, &[&OfficialSite]) = match dominant {
+                Some(site) => (site, &[]),
+                None => {
+                    let (first, others) = claims.split_first().expect("a domain has a claim");
+                    (first, others)
+                }
+            };
             let mut country = first.country.clone();
             let mut kinds: Vec<String> = first.kinds.clone();
             for site in others {
@@ -205,9 +226,9 @@ impl Builder {
             if record.country.is_none() {
                 record.country = country;
             }
-            // A description only says what the site is when one item claims it.
-            let items: HashSet<&str> = claims.iter().map(|site| site.item.as_str()).collect();
-            if record.about.is_none() && items.len() == 1 {
+            // A description only says what the site is when one item claims
+            // it, or one is far better known.
+            if record.about.is_none() && (items.len() == 1 || dominant.is_some()) {
                 record.about.clone_from(&first.about);
             }
             for kind in &kinds {
@@ -533,6 +554,48 @@ mod tests {
         assert_eq!(get("continental.com").country, None);
         assert_eq!(get("continental.com").kinds, ["airline"]);
         assert_eq!(get("usbank.com").kinds, ["bank"]);
+    }
+
+    #[test]
+    fn a_far_better_known_item_gives_a_shared_front_page_its_facts() {
+        let claim = |item: &str, kinds: &[&str], about: &str, sitelinks: u32| {
+            let mut site = site(item, item, "wikipedia.org");
+            site.kinds = kinds.iter().map(|k| k.to_string()).collect();
+            site.about = Some(about.to_string());
+            site.sitelinks = sitelinks;
+            site
+        };
+        let mut builder = Builder::new();
+        builder.add_official_sites(&[
+            claim("Q4", &["online community"], "editors of Wikipedia", 40),
+            claim(
+                "Q52",
+                &["online encyclopedia", "wiki"],
+                "free online encyclopedia",
+                330,
+            ),
+        ]);
+        let records = builder.finish(None);
+        assert_eq!(records[0].kinds, ["online encyclopedia", "wiki"]);
+        assert_eq!(
+            records[0].about.as_deref(),
+            Some("free online encyclopedia")
+        );
+
+        // Two items about as well known still keep only what they share.
+        let mut builder = Builder::new();
+        builder.add_official_sites(&[
+            claim("Q4", &["online community"], "editors of Wikipedia", 200),
+            claim(
+                "Q52",
+                &["online encyclopedia"],
+                "free online encyclopedia",
+                330,
+            ),
+        ]);
+        let records = builder.finish(None);
+        assert!(records[0].kinds.is_empty());
+        assert_eq!(records[0].about, None);
     }
 
     #[test]

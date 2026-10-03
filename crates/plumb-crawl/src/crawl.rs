@@ -7,7 +7,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use futures::stream::{self, StreamExt};
+use futures::future::BoxFuture;
+use futures::stream::{self, FuturesUnordered, StreamExt};
 use plumb_core::{now_unix, registrable_domain};
 use reqwest::header::{ACCEPT, CONTENT_TYPE, LOCATION};
 use reqwest::{redirect, Client, ClientBuilder, RequestBuilder, Response, StatusCode};
@@ -107,6 +108,78 @@ pub async fn crawl_homepages(targets: Vec<CrawlTarget>, cfg: &CrawlConfig) -> Ve
                     outcome: Failure::other(error.clone()).into(),
                 })
                 .collect()
+        }
+    }
+}
+
+/// Fetches homepages like [`crawl_homepages`], but keeps
+/// `cfg.concurrency` of them in flight as targets are added, instead of
+/// waiting for the slowest homepage of a batch before starting the next:
+/// a site that never answers holds one slot, not the whole crawl.
+/// [`HomepageCrawler::next`] returns results in the order they finish.
+pub struct HomepageCrawler {
+    client: Result<Client, String>,
+    cfg: Arc<CrawlConfig>,
+    queued: std::collections::VecDeque<CrawlTarget>,
+    running: FuturesUnordered<BoxFuture<'static, CrawlResult>>,
+}
+
+impl HomepageCrawler {
+    pub fn new(cfg: CrawlConfig) -> Self {
+        let client = build_client(&cfg)
+            .map_err(|err| format!("building the HTTP client: {}", error_text(err)));
+        if let Err(error) = &client {
+            warn!("cannot crawl homepages: {error}");
+        }
+        HomepageCrawler {
+            client,
+            cfg: Arc::new(cfg),
+            queued: std::collections::VecDeque::new(),
+            running: FuturesUnordered::new(),
+        }
+    }
+
+    /// Adds homepages to fetch after those added before.
+    pub fn push(&mut self, targets: impl IntoIterator<Item = CrawlTarget>) {
+        self.queued.extend(targets);
+    }
+
+    /// Homepages added and not yet returned by [`Self::next`].
+    pub fn pending(&self) -> usize {
+        self.queued.len() + self.running.len()
+    }
+
+    /// The next homepage to finish; `None` once none is pending. Fetches
+    /// only make progress while this is awaited.
+    pub async fn next(&mut self) -> Option<CrawlResult> {
+        self.start_queued();
+        let result = self.running.next().await?;
+        self.start_queued();
+        Some(result)
+    }
+
+    fn start_queued(&mut self) {
+        while self.running.len() < self.cfg.concurrency.max(1) {
+            let Some(target) = self.queued.pop_front() else {
+                return;
+            };
+            let cfg = Arc::clone(&self.cfg);
+            let future: BoxFuture<'static, CrawlResult> = match &self.client {
+                Ok(client) => {
+                    let client = client.clone();
+                    Box::pin(async move { crawl_target(&client, &cfg, target).await })
+                }
+                Err(error) => {
+                    let outcome = Failure::other(error.clone()).into();
+                    Box::pin(async move {
+                        CrawlResult {
+                            domain: target.domain,
+                            outcome,
+                        }
+                    })
+                }
+            };
+            self.running.push(future);
         }
     }
 }
@@ -755,7 +828,8 @@ fn describe(outcome: &CrawlOutcome) -> String {
     }
 }
 
-fn log_summary(results: &[CrawlResult]) {
+/// Logs how many of `results` ended which way, as one "crawled N homepages:" line.
+pub fn log_summary(results: &[CrawlResult]) {
     let (mut fetched, mut disallowed, mut offsite, mut http, mut not_html) = (0, 0, 0, 0, 0);
     let (mut failed, mut no_answer) = (0, 0);
     for result in results {

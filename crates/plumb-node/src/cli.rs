@@ -136,6 +136,11 @@ pub struct RunArgs {
     /// Never refresh: keep the index as the initial crawl leaves it.
     #[arg(long, conflicts_with_all = ["refresh_hours", "crawl_per_refresh"])]
     pub no_refresh: bool,
+    /// Fold the seed files already in DIR/seed into the records again
+    /// before starting (downloading only those more than a week old), for
+    /// records made before a change to how seed data is read. Use it once.
+    #[arg(long)]
+    pub reseed: bool,
     /// Common Crawl web graph release to add domain ranks from on first
     /// start, such as cc-main-2025-26-nov-dec-jan (release names are listed
     /// on https://commoncrawl.org/web-graphs). Only the top rows are
@@ -206,6 +211,10 @@ pub struct RunArgs {
     /// agree. Other nodes' crawls still need agreement. May be repeated.
     #[arg(long = "trust-peer", value_name = "PEER_ID", requires = "network")]
     pub trust_peer: Vec<plumb_net::PeerId>,
+    /// Do not trust the plumbsearch.org node by default; only nodes given
+    /// with --trust-peer.
+    #[arg(long, requires = "network")]
+    pub no_default_trust: bool,
     /// Offer private search at /private: browsers fetch groups of sites
     /// (buckets) and rank them themselves, so this node never sees what
     /// they search for. Each index also gets its buckets, about as much

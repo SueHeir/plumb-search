@@ -93,8 +93,17 @@ const CIRCUIT_BURST: NonZeroU32 = NonZeroU32::new(600).unwrap();
 const CIRCUIT_REFILL: Duration = Duration::from_millis(100);
 /// Batch fetches in flight at once.
 const MAX_FETCHES: usize = 16;
-/// Bucket requests answered at once; more are turned away.
-const MAX_ANSWERING: usize = 8;
+/// Bucket requests answered at once for free; more are turned away as
+/// busy unless they spend a token (see [`crate::credits`]).
+pub const MAX_ANSWERING: usize = 8;
+/// Bucket requests answered at once beyond [`MAX_ANSWERING`], for tokens.
+pub const PRIORITY_SLOTS: usize = 8;
+/// A node keeps at least this many tokens from each node it searches, and
+/// asks for [`TOKEN_REFILL`] more when it has fewer.
+pub const TOKEN_LOW: usize = 4;
+pub const TOKEN_REFILL: usize = 16;
+/// Minutes between two asks for tokens from one node.
+const TOKEN_ASK_MINUTES: u64 = 30;
 /// Requests passed on for others at once (see [`crate::oblivious`]).
 const MAX_RELAYING: usize = 32;
 const RELAY_HOP_PROTOCOL: &str = "/libp2p/circuit/relay/0.2.0/hop";
@@ -104,6 +113,13 @@ pub const REPORT_TRIES: usize = 3;
 pub const RECOUNT_MINUTES: u64 = 10;
 /// Where the counted reports are written, for anyone curious.
 const POPULARITY_FILE: &str = "popularity.json";
+
+/// Nodes every node trusts unless told otherwise (see
+/// [`NetConfig::trusted_peers`]): the plumbsearch.org node, so a new node
+/// takes in crawls from the start while the network is small (Liz,
+/// 2026-10-03).
+pub const DEFAULT_TRUSTED_PEERS: &[&str] =
+    &["12D3KooWEDPBv4sacn42shoToAwu62CreVC89QFiAA31HrWv3xrg"];
 
 /// How a node joins the network.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -134,7 +150,15 @@ pub struct NetConfig {
     pub answer_searches: bool,
     /// Nodes whose crawls are taken in as soon as they sign them, instead
     /// of waiting for a second crawler to agree (see `crate::agree`).
+    /// [`DEFAULT_TRUSTED_PEERS`] unless changed.
     pub trusted_peers: Vec<PeerId>,
+    /// Bucket requests answered at once for free, [`MAX_ANSWERING`] unless
+    /// changed; up to [`PRIORITY_SLOTS`] more for requests that spend a
+    /// token.
+    pub max_answering: usize,
+    /// Keep a few tokens from each node it searches, bought with this
+    /// node's credits, to be answered when that node is busy.
+    pub collect_tokens: bool,
 }
 
 impl NetConfig {
@@ -157,7 +181,12 @@ impl NetConfig {
             local_discovery: true,
             share_ppm: MAX_SHARE_PPM,
             answer_searches: true,
-            trusted_peers: Vec::new(),
+            trusted_peers: DEFAULT_TRUSTED_PEERS
+                .iter()
+                .map(|id| id.parse().expect("a valid peer id"))
+                .collect(),
+            max_answering: MAX_ANSWERING,
+            collect_tokens: true,
         }
     }
 }
@@ -208,6 +237,8 @@ pub struct NetHandle {
     status: Arc<Mutex<NetStatus>>,
     popularity: Arc<RwLock<Arc<PopularityTable>>>,
     wallet: Arc<Mutex<Wallet>>,
+    /// Tokens this node's searches spent.
+    tokens_spent: Arc<std::sync::atomic::AtomicU64>,
     task: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -280,7 +311,10 @@ impl NetHandle {
         let (reply, peers) = oneshot::channel();
         self.send(Command::Peers(Serving::Buckets, reply))?;
         let peers = peers.await.context("the network task stopped")?;
-        let mut found = crate::search::search(query, &peers, wait, now_unix()).await;
+        let mut found =
+            crate::search::search(query, &peers, wait, now_unix(), Some(&self.wallet)).await;
+        self.tokens_spent
+            .fetch_add(found.priority as u64, std::sync::atomic::Ordering::Relaxed);
         // Two keys of one person can sign the same crawl: a site is
         // confirmed only by crawlers this node counts (see crate::agree).
         let crawlers: Vec<String> = found
@@ -589,6 +623,7 @@ pub async fn start(
         .context("opening the credits")??
     };
     let wallet = Arc::new(Mutex::new(wallet));
+    let tokens_spent = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let mut swarm = build_swarm(&key, &config)?;
     for addr in &config.listen {
         if let Err(err) = swarm.listen_on(addr.clone()) {
@@ -644,7 +679,10 @@ pub async fn start(
         ledger,
         issuer,
         wallet: wallet.clone(),
+        tokens_spent: tokens_spent.clone(),
         tokens_issued: 0,
+        priority_answered: 0,
+        token_asks: HashMap::new(),
         asking: HashMap::new(),
         answers_tx,
         bucket_peers: HashMap::new(),
@@ -677,6 +715,7 @@ pub async fn start(
             status,
             popularity,
             wallet,
+            tokens_spent,
             task: Mutex::new(Some(handle)),
         },
         records_rx,
@@ -873,7 +912,8 @@ enum Reply {
 
 /// What this node asked another for on `/plumb/credits/1`.
 enum Asking {
-    Tokens(PeerId, Pending, oneshot::Sender<Result<usize>>),
+    /// For tokens; `None` when the node tops up its own wallet.
+    Tokens(PeerId, Pending, Option<oneshot::Sender<Result<usize>>>),
     Credits(oneshot::Sender<Result<CreditsAt>>),
 }
 
@@ -910,7 +950,12 @@ struct Task {
     issuer: Issuer,
     /// Tokens other nodes signed for this node.
     wallet: Arc<Mutex<Wallet>>,
+    tokens_spent: Arc<std::sync::atomic::AtomicU64>,
     tokens_issued: u64,
+    /// Bucket requests answered while busy because they spent a token.
+    priority_answered: u64,
+    /// When we last asked each node for tokens.
+    token_asks: HashMap<PeerId, u64>,
     /// Our requests on `/plumb/credits/1` not yet answered.
     asking: HashMap<OutboundRequestId, Asking>,
     answers_tx: mpsc::UnboundedSender<Answer>,
@@ -1085,7 +1130,7 @@ impl Task {
                     .credits
                     .send_request(&issuer, request);
                 self.asking
-                    .insert(id, Asking::Tokens(issuer, pending, reply));
+                    .insert(id, Asking::Tokens(issuer, pending, Some(reply)));
             }
             Command::AskCredits(peer, reply) => {
                 let id = self
@@ -1229,6 +1274,7 @@ impl Task {
         if let Err(err) = self.ledger.save() {
             warn!("cannot save the credits ledger: {err:#}");
         }
+        self.collect_tokens(now);
         if ticks.is_multiple_of(5) && connected > 0 {
             let _ = self.swarm.behaviour_mut().kad.bootstrap();
         }
@@ -1597,12 +1643,15 @@ impl Task {
         else {
             return;
         };
-        if self.answering >= MAX_ANSWERING || request.bucket >= BUCKETS {
-            let _ = self
-                .swarm
-                .behaviour_mut()
-                .buckets
-                .send_response(channel, BucketResponse { records: None });
+        let busy = !self.admit(&request);
+        if busy || request.bucket >= BUCKETS {
+            let _ = self.swarm.behaviour_mut().buckets.send_response(
+                channel,
+                BucketResponse {
+                    records: None,
+                    busy,
+                },
+            );
             return;
         }
         debug!("serving bucket {} to {peer}", request.bucket);
@@ -1729,12 +1778,19 @@ impl Task {
                 return;
             }
         };
-        if self.answering >= MAX_ANSWERING || !self.config.answer_searches {
+        if !self.config.answer_searches || request.bucket >= BUCKETS {
             self.reply(reply, ObliviousResponse::Sealed(None));
             return;
         }
-        if request.bucket >= BUCKETS {
-            self.reply(reply, ObliviousResponse::Sealed(None));
+        if !self.admit(&request) {
+            let busy = BucketResponse {
+                records: None,
+                busy: true,
+            };
+            let sealed = seal_response(sealer, &busy)
+                .ok()
+                .map(serde_bytes::ByteBuf::from);
+            self.reply(reply, ObliviousResponse::Sealed(sealed));
             return;
         }
         debug!("serving a sealed request for bucket {}", request.bucket);
@@ -2044,6 +2100,62 @@ impl Task {
         }
     }
 
+    /// Whether to answer a bucket request now: for free while fewer than
+    /// `max_answering` are being answered, and for a token of ours up to
+    /// [`PRIORITY_SLOTS`] more. A token sent along is spent either way: it
+    /// is only sent after this node said it was busy.
+    fn admit(&mut self, request: &BucketRequest) -> bool {
+        let paid = request
+            .token
+            .as_ref()
+            .is_some_and(|token| self.issuer.redeem(token));
+        if self.answering < self.config.max_answering {
+            return true;
+        }
+        if paid && self.answering < self.config.max_answering + PRIORITY_SLOTS {
+            self.priority_answered += 1;
+            return true;
+        }
+        false
+    }
+
+    /// Asks the nodes this node searches for tokens, when it holds few of
+    /// theirs, at most every [`TOKEN_ASK_MINUTES`] each. Nodes whose
+    /// ledger has no credits for us say no, and we ask again later.
+    fn collect_tokens(&mut self, now: u64) {
+        if !self.config.collect_tokens {
+            return;
+        }
+        let peers: Vec<PeerId> = self.bucket_peers.keys().copied().collect();
+        for peer in peers {
+            let held = self
+                .wallet
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .held(&peer);
+            let recent = self
+                .token_asks
+                .get(&peer)
+                .is_some_and(|at| at + TOKEN_ASK_MINUTES * 60 > now);
+            if held >= TOKEN_LOW || recent || !self.swarm.is_connected(&peer) {
+                continue;
+            }
+            let Ok(pending) = Pending::new(TOKEN_REFILL) else {
+                continue;
+            };
+            self.token_asks.insert(peer, now);
+            let request = CreditRequest::Issue {
+                blinded: pending.blinded.clone(),
+            };
+            let id = self
+                .swarm
+                .behaviour_mut()
+                .credits
+                .send_request(&peer, request);
+            self.asking.insert(id, Asking::Tokens(peer, pending, None));
+        }
+    }
+
     /// Credits the crawls agreement just scored.
     fn count_credits(&mut self) {
         let verdicts = self.agreement.take_verdicts();
@@ -2142,13 +2254,27 @@ impl Task {
                         .add(&issuer, &issued.key, tokens)
                         .map(|()| n)
                 });
-                let _ = reply.send(kept);
+                match reply {
+                    Some(reply) => {
+                        let _ = reply.send(kept);
+                    }
+                    None => match kept {
+                        Ok(n) => debug!("got {n} tokens from {issuer}"),
+                        Err(err) => warn!("tokens from {issuer} did not check out: {err:#}"),
+                    },
+                }
             }
             (Some(Asking::Credits(reply)), Ok(CreditResponse::Balance { credits, counts })) => {
                 let _ = reply.send(Ok(CreditsAt { credits, counts }));
             }
             (Some(Asking::Tokens(_, _, reply)), answer) => {
-                let _ = reply.send(Err(refusal(peer, answer)));
+                let err = refusal(peer, answer);
+                match reply {
+                    Some(reply) => {
+                        let _ = reply.send(Err(err));
+                    }
+                    None => debug!("no tokens: {err:#}"),
+                }
             }
             (Some(Asking::Credits(reply)), answer) => {
                 let _ = reply.send(Err(refusal(peer, answer)));
@@ -2186,6 +2312,8 @@ impl Task {
             accounts: self.ledger.len(),
             tokens_issued: self.tokens_issued,
             tokens_redeemed: self.issuer.redeemed(),
+            priority_answered: self.priority_answered,
+            tokens_spent: self.tokens_spent.load(std::sync::atomic::Ordering::Relaxed),
             tokens_held: self
                 .wallet
                 .lock()
@@ -2239,7 +2367,10 @@ fn lookup(source: &dyn BucketSource, store: &Mutex<BatchStore>, bucket: u32) -> 
             })
             .collect()
     });
-    BucketResponse { records }
+    BucketResponse {
+        records,
+        busy: false,
+    }
 }
 
 /// Rebuilds the agreement step from the batches held, oldest first, so it

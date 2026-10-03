@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use plumb_net::NetConfig;
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::cli::{Profile, RunArgs};
 use crate::node::{self, NodeConfig};
@@ -16,6 +16,13 @@ use crate::web::shutdown_signal;
 const RUNTIME_STOP_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub fn run(args: RunArgs) -> Result<()> {
+    if args.reseed {
+        if node::request_reseed(&args.data)? {
+            info!("folding the seed data into the records again once the node is up");
+        } else {
+            warn!("--reseed: no records yet, so the node sets up from the seed data anyway");
+        }
+    }
     let config = node_config(args);
     let runtime = crate::runtime()?;
     let result = runtime.block_on(async move {
@@ -87,7 +94,10 @@ fn node_config(args: RunArgs) -> NodeConfig {
         net.relay_server = args.relay;
         net.upnp = !args.no_upnp;
         net.local_discovery = !args.no_local_discovery;
-        net.trusted_peers = args.trust_peer;
+        if args.no_default_trust {
+            net.trusted_peers.clear();
+        }
+        net.trusted_peers.extend(args.trust_peer);
         config.network = Some(net);
         config.share_popularity = args.share_popularity;
     }
@@ -242,10 +252,17 @@ mod tests {
             "12D3KooWEwYB7PYxRNgvSWiwkLXvwYajSmYn4yoPqmkN7NbNqJjg",
         ]);
         let net = node.network.unwrap();
+        // The plumbsearch.org node by default, and the one given.
+        let trusted: Vec<String> = net.trusted_peers.iter().map(|p| p.to_string()).collect();
         assert_eq!(
-            net.trusted_peers[0].to_string(),
-            "12D3KooWEwYB7PYxRNgvSWiwkLXvwYajSmYn4yoPqmkN7NbNqJjg"
+            trusted,
+            [
+                plumb_net::node::DEFAULT_TRUSTED_PEERS[0],
+                "12D3KooWEwYB7PYxRNgvSWiwkLXvwYajSmYn4yoPqmkN7NbNqJjg"
+            ]
         );
+        let none = config(&["--data", "d", "--network", "--no-default-trust"]);
+        assert!(none.network.unwrap().trusted_peers.is_empty());
         assert_eq!(net.listen[0].to_string(), "/ip4/0.0.0.0/tcp/4100");
         assert_eq!(net.bootstrap.len(), 1);
         assert_eq!(net.external.len(), 1);

@@ -880,3 +880,98 @@ fn counts_outcomes() {
     twice.add(&summary);
     assert_eq!((twice.failed, twice.unreachable), (6, 4));
 }
+
+/// A [`Fetcher`] that finishes the sites it was given in its own order:
+/// `slow` ones only once nothing else is left.
+struct OutOfOrder {
+    ahead: usize,
+    slow: Vec<&'static str>,
+    started: Vec<String>,
+    /// Sites started when each `finished` was called.
+    seen: Vec<usize>,
+    stop_at: Option<usize>,
+}
+
+impl Fetcher for OutOfOrder {
+    fn ahead(&self) -> usize {
+        self.ahead
+    }
+
+    fn start(&mut self, targets: Vec<CrawlTarget>) {
+        self.started.extend(targets.into_iter().map(|t| t.domain));
+    }
+
+    fn finished(&mut self, n: usize) -> Option<(Vec<String>, Vec<CrawlResult>)> {
+        self.seen.push(self.started.len());
+        if self.stop_at == Some(self.seen.len()) {
+            return None;
+        }
+        let (fast, slow): (Vec<String>, Vec<String>) = std::mem::take(&mut self.started)
+            .into_iter()
+            .partition(|domain| !self.slow.contains(&domain.as_str()));
+        let mut order: Vec<String> = fast.into_iter().chain(slow).collect();
+        self.started = order.split_off(n.min(order.len()));
+        let results = order.iter().map(|domain| fetched(domain, 1, &[])).collect();
+        Some((order, results))
+    }
+}
+
+#[test]
+fn slow_sites_do_not_hold_up_the_batches_after_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let (path, mut set, mut store) = records_file(dir.path(), &sites(7));
+    let targets = select_targets(set.iter(), 10, now_unix(), WINDOW);
+    let mut fetcher = OutOfOrder {
+        ahead: 2,
+        slow: vec!["site00.com"],
+        started: Vec::new(),
+        seen: Vec::new(),
+        stop_at: None,
+    };
+    let mut reports = Vec::new();
+    let totals = crawl_rolling(&mut set, &targets, 2, &mut store, &mut fetcher, |totals| {
+        reports.push(totals.attempted);
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(totals.end, RunEnd::Finished);
+    assert_eq!((totals.attempted, totals.outcomes.fetched), (7, 7));
+    assert_eq!(reports, [2, 4, 6, 7]);
+    // Two batches are started ahead of the two sites waited for, and the
+    // slow site is waited for only at the end.
+    assert_eq!(fetcher.seen, [4, 4, 3, 1]);
+    let saved = load_records(&path).unwrap();
+    assert!(saved.iter().all(|r| r.crawled_at == Some(1)));
+}
+
+#[test]
+fn a_stopped_rolling_crawl_gives_every_unfinished_site_its_old_marks_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut before = sites(6);
+    before[0].crawl_attempted_at = Some(77);
+    before[0].crawl_failures = 1;
+    let (path, mut set, mut store) = records_file(dir.path(), &before);
+    let targets: Vec<CrawlTarget> = before.iter().map(|r| CrawlTarget::new(&r.domain)).collect();
+    let mut fetcher = OutOfOrder {
+        ahead: 2,
+        slow: vec!["site00.com"],
+        started: Vec::new(),
+        seen: Vec::new(),
+        stop_at: Some(2),
+    };
+    let totals =
+        crawl_rolling(&mut set, &targets, 2, &mut store, &mut fetcher, |_| Ok(())).unwrap();
+    assert_eq!(totals.end, RunEnd::Stopped);
+    assert_eq!(totals.attempted, 2);
+    // site01 and site02 finished; the rest were started or never begun.
+    assert!(marks(&path, "site01.com").0.is_some());
+    assert!(marks(&path, "site02.com").0.is_some());
+    for (domain, expected) in [
+        ("site00.com", (Some(77), 1)),
+        ("site03.com", (None, 0)),
+        ("site04.com", (None, 0)),
+        ("site05.com", (None, 0)),
+    ] {
+        assert_eq!(marks(&path, domain), expected, "{domain}");
+    }
+}

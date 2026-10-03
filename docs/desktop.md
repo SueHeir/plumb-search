@@ -9,7 +9,7 @@ The panel has these sections:
 - **Overview:** search readiness, crawl progress, storage, downloads, and live peer status.
 - **Search & browser:** browser setup, search by meaning, and private browser search.
 - **Resources:** background crawling and daily download/storage limits; changes apply immediately.
-- **Network & privacy:** joining the network, bootstrap nodes, anonymous popularity sharing, crawl agreement, and relay activity.
+- **Network & privacy:** joining the network, bootstrap nodes, trusted nodes (plumbsearch.org's crawler by default), anonymous popularity sharing, crawl agreement, and relay activity.
 - **Remote control:** let the app on another computer control this node.
 - **About:** version, data location, diagnostics, and source code.
 

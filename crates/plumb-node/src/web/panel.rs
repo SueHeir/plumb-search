@@ -191,6 +191,11 @@ pub(super) struct FeaturesForm {
     private_search: Option<String>,
     share_popularity: Option<String>,
     bootstrap: String,
+    /// Set by the form that shows the trust choices, so that a form without
+    /// them leaves trust as it was.
+    trust_shown: Option<String>,
+    default_trust: Option<String>,
+    trusted: String,
 }
 
 pub(super) async fn save_features(State(state): State<AppState>, request: Request) -> Response {
@@ -251,6 +256,10 @@ pub(super) fn apply_features_form(
             .split_whitespace()
             .map(str::to_owned)
             .collect();
+        if form.trust_shown.is_some() {
+            features.no_default_trust = form.default_trust.is_none();
+            features.trusted = form.trusted.split_whitespace().map(str::to_owned).collect();
+        }
     }
     if let Err(err) = features.check() {
         return Err(features_error(
@@ -1117,6 +1126,8 @@ fn render_features(
     }
     if section == "network" {
         body.push_str(&format!("<label for=\"bootstrap\">Bootstrap nodes</label><p class=\"hint\" id=\"bootstrap-help\">One multiaddress per line. Leave empty to discover nearby nodes only; remote peers need a reachable bootstrap node.</p><textarea id=\"bootstrap\" name=\"bootstrap\" aria-describedby=\"bootstrap-help\" spellcheck=\"false\">{}</textarea>", escape_html(&saved.bootstrap.join("\n"))));
+        body.push_str(&format!("<input type=\"hidden\" name=\"trust_shown\" value=\"1\"><div class=\"feature\"><label><input type=\"checkbox\" name=\"default_trust\" value=\"1\"{}><span>Trust plumbsearch.org's crawler</span></label><p class=\"hint\">Take in crawls from the plumbsearch.org node at once, so a new node fills up while the network is small. Turn off to keep only crawls a second crawler confirms.</p></div>", if saved.no_default_trust { "" } else { " checked" }));
+        body.push_str(&format!("<label for=\"trusted\">Trusted nodes</label><p class=\"hint\" id=\"trusted-help\">Other node ids whose crawls are taken in at once, one per line. Only add nodes you run or know.</p><textarea id=\"trusted\" name=\"trusted\" aria-describedby=\"trusted-help\" spellcheck=\"false\">{}</textarea>", escape_html(&saved.trusted.join("\n"))));
     }
     body.push_str("<button type=\"submit\">Save feature settings</button></form>");
 }
@@ -1802,7 +1813,11 @@ mod tests {
     #[tokio::test]
     async fn feature_changes_require_local_access_validate_and_show_restart() {
         let (router, node) = app(status(Phase::Ready, Step::Idle));
-        for form in ["share_popularity=1", "network=1&bootstrap=not-an-address"] {
+        for form in [
+            "share_popularity=1",
+            "network=1&bootstrap=not-an-address",
+            "network=1&trust_shown=1&trusted=not-a-node",
+        ] {
             let response = post(
                 router.clone(),
                 "/app/features",
@@ -1835,6 +1850,22 @@ mod tests {
         .await;
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
         assert!(node.features.lock().unwrap().network);
+        assert!(!node.features.lock().unwrap().no_default_trust);
+        let page = get_section(router.clone(), "network").await;
+        assert!(page.contains("name=\"default_trust\" value=\"1\" checked"));
+        assert!(page.contains("name=\"trusted\""));
+        let node_id = "12D3KooWEwYB7PYxRNgvSWiwkLXvwYajSmYn4yoPqmkN7NbNqJjg";
+        let response = post(
+            router.clone(),
+            "/app/features",
+            &format!("network=1&trust_shown=1&trusted={node_id}"),
+            "127.0.0.1:50000",
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert!(node.features.lock().unwrap().no_default_trust);
+        assert_eq!(node.features.lock().unwrap().trusted, [node_id]);
         let response = post(
             router.clone(),
             "/app/features",
