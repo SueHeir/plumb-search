@@ -20,7 +20,7 @@ use std::net::SocketAddr;
 use std::path::Path;
 
 use axum::extract::{ConnectInfo, FromRequest, Request, State};
-use axum::http::{header, HeaderMap, StatusCode, Uri};
+use axum::http::{header, HeaderMap, HeaderName, StatusCode, Uri};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::Form;
 use plumb_core::now_unix;
@@ -107,9 +107,47 @@ pub(super) async fn panel(State(state): State<AppState>, headers: HeaderMap, uri
     let page = render_panel(&status, &settings, &origin, data_dir.as_deref(), now_unix());
     (
         StatusCode::OK,
-        security_headers(),
+        panel_headers(),
         [(header::CACHE_CONTROL, "no-store")],
         Html(page),
+    )
+        .into_response()
+}
+
+/// [`security_headers`] with one change: the panel's forms send their
+/// origin, which [`refusal`] checks. Under the other pages' `no-referrer`
+/// policy, browsers send `Origin: null` with every form post.
+fn panel_headers() -> [(HeaderName, &'static str); 3] {
+    security_headers().map(|(name, value)| {
+        if name == header::REFERRER_POLICY {
+            (name, PANEL_REFERRER_POLICY)
+        } else {
+            (name, value)
+        }
+    })
+}
+
+/// Sends the origin, and no more, to this node only.
+const PANEL_REFERRER_POLICY: &str = "same-origin";
+
+/// A page saying what went wrong with a change, with the way back to the
+/// panel: the desktop app's window has no back button.
+fn panel_error(status: StatusCode, message: &str) -> Response {
+    let body = format!(
+        "<main class=\"wrap panel\">\n<h1>Plumb Search node</h1>\n\
+         <p class=\"err\">{}</p>\n\
+         <p><a class=\"btn\" href=\"/app\">Back to the panel</a></p>\n</main>",
+        escape_html(message)
+    );
+    let head = format!(
+        "<meta name=\"referrer\" content=\"{PANEL_REFERRER_POLICY}\">\n\
+         <style>{PANEL_STYLE}</style>\n"
+    );
+    (
+        status,
+        panel_headers(),
+        [(header::CACHE_CONTROL, "no-store")],
+        Html(page_with_head("Plumb Search node", &head, &body)),
     )
         .into_response()
 }
@@ -160,23 +198,19 @@ pub(super) async fn save_settings(State(state): State<AppState>, request: Reques
         return forbidden(why);
     }
     let Ok(Form(form)) = Form::<SettingsForm>::from_request(request, &state).await else {
-        return (
+        return panel_error(
             StatusCode::BAD_REQUEST,
-            security_headers(),
-            "Bad settings form.\n",
-        )
-            .into_response();
+            "The settings form could not be read.",
+        );
     };
     let (Some(download), Some(storage)) = (
         parse_limit(&form.download_limit_mb_per_day),
         parse_limit(&form.storage_limit_mb),
     ) else {
-        return (
+        return panel_error(
             StatusCode::BAD_REQUEST,
-            security_headers(),
-            "Limits are whole numbers of megabytes, or empty for none.\n",
-        )
-            .into_response();
+            "Limits are whole numbers of megabytes, or empty for none. Nothing was changed.",
+        );
     };
     let settings = NodeSettings {
         background_updates: form.background_updates.is_some(),
@@ -185,12 +219,10 @@ pub(super) async fn save_settings(State(state): State<AppState>, request: Reques
     };
     if let Err(err) = node.change_settings(settings) {
         warn!("could not save the settings: {err:#}");
-        return (
+        return panel_error(
             StatusCode::INTERNAL_SERVER_ERROR,
-            security_headers(),
-            format!("Could not save the settings: {err:#}\n"),
-        )
-            .into_response();
+            &format!("Could not save the settings: {err:#}"),
+        );
     }
     Redirect::to("/app").into_response()
 }
@@ -230,12 +262,7 @@ fn refusal(request: &Request) -> Option<&'static str> {
 }
 
 fn forbidden(why: &str) -> Response {
-    (
-        StatusCode::FORBIDDEN,
-        security_headers(),
-        format!("{why}\n"),
-    )
-        .into_response()
+    panel_error(StatusCode::FORBIDDEN, why)
 }
 
 /// What the panel says about search.
@@ -308,8 +335,10 @@ pub(super) fn render_panel(
     } else {
         IDLE_RELOAD_SECONDS
     };
+    // After page_with_head's no-referrer, so it wins (see panel_headers).
     let head = format!(
-        "<meta http-equiv=\"refresh\" content=\"{reload}\">\n<style>{PANEL_STYLE}</style>\n"
+        "<meta name=\"referrer\" content=\"{PANEL_REFERRER_POLICY}\">\n\
+         <meta http-equiv=\"refresh\" content=\"{reload}\">\n<style>{PANEL_STYLE}</style>\n"
     );
     page_with_head("Plumb Search node", &head, &body)
 }
@@ -747,6 +776,21 @@ mod tests {
             .unwrap();
         let response = app.oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+        // So that its forms send their origin: no-referrer sends "null".
+        assert_eq!(response.headers()[header::REFERRER_POLICY], "same-origin");
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+        let no_referrer = body.find("content=\"no-referrer\"").unwrap();
+        let same_origin = body
+            .find("<meta name=\"referrer\" content=\"same-origin\">")
+            .unwrap();
+        assert!(same_origin > no_referrer, "the later one wins: {body}");
+        body
+    }
+
+    async fn body_text(response: Response) -> String {
         let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
@@ -955,6 +999,13 @@ mod tests {
         )
         .await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        // The window has no back button: every error page leads back.
+        let body = body_text(response).await;
+        assert!(body.contains("Nothing was changed."), "{body}");
+        assert!(
+            body.contains("<a class=\"btn\" href=\"/app\">Back to the panel</a>"),
+            "{body}"
+        );
         assert!(!node.settings.lock().unwrap().background_updates);
 
         // Without an Origin header (some browsers leave it out) is fine too.
