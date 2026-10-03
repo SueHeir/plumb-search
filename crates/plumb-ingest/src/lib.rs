@@ -20,6 +20,7 @@ pub mod builder;
 pub mod ccranks;
 pub mod download;
 pub mod facts;
+pub mod kind_sites;
 pub mod tranco;
 pub mod wat;
 pub mod wikidata;

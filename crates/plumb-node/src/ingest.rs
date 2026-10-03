@@ -110,6 +110,16 @@ pub fn run(args: IngestArgs) -> Result<()> {
         // check in add_official_sites needs every item that claims a domain.
         let mut sites = load_wikidata_official_sites(path)
             .with_context(|| format!("loading Wikidata sites {}", path.display()))?;
+        if let Some(kinds_path) = &args.wikidata_kinds {
+            let by_kind = load_wikidata_official_sites(kinds_path)
+                .with_context(|| format!("loading Wikidata sites {}", kinds_path.display()))?;
+            println!(
+                "kinds     {:>9} official sites  ({})",
+                by_kind.len(),
+                kinds_path.display()
+            );
+            sites.extend(by_kind);
+        }
         if let Some(facts_path) = &args.wikidata_facts {
             let facts = load_site_facts(facts_path)
                 .with_context(|| format!("loading Wikidata facts {}", facts_path.display()))?;
@@ -226,12 +236,14 @@ impl FreshSeeds {
         }
         if self.wikidata && signals.official_site {
             signals.official_site = false;
+            signals.sitelinks = 0;
             record.aliases.clear();
         }
         if self.wikidata {
-            // Both come only from Wikidata.
+            // These come only from Wikidata.
             record.country = None;
             record.kinds.clear();
+            record.about = None;
         }
     }
 
@@ -265,6 +277,7 @@ fn check_inputs_exist(args: &IngestArgs) -> Result<()> {
         .chain(&args.wat)
         .chain(&args.wikidata)
         .chain(&args.wikidata_facts)
+        .chain(&args.wikidata_kinds)
         .chain(&args.records)
         .collect();
     let missing: Vec<String> = inputs
@@ -313,6 +326,7 @@ mod tests {
             wat: Vec::new(),
             wikidata: None,
             wikidata_facts: None,
+            wikidata_kinds: None,
             records: Vec::new(),
             limit_per_source: None,
             top: None,

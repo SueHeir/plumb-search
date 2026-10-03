@@ -12,7 +12,8 @@ use std::time::{Duration, Instant};
 use plumb_core::{now_unix, read_jsonl, write_jsonl, SiteRecord};
 use plumb_index::Hit;
 use plumb_ingest::{
-    load_cc_domain_ranks, load_tranco, load_wikidata_official_sites, parse_wat, Builder, WatExtract,
+    kind_sites, load_cc_domain_ranks, load_tranco, load_wikidata_official_sites, parse_wat,
+    Builder, WatExtract,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -699,10 +700,11 @@ async fn sets_up_from_the_seed_data_and_retries_after_a_failure() {
     // the time out.
     let counts = host.counts();
     assert_eq!(counts["GET /tranco.csv"], 2, "{counts:?}");
-    // Then twice for the countries and kinds of the official websites.
+    // Then once per kind of organization, and once for the facts of the
+    // official websites.
     assert_eq!(
         counts["POST /sparql"],
-        download::wikidata_sitelink_bands(25).len() + 1 + 1,
+        download::wikidata_sitelink_bands(25).len() + 1 + kind_sites::KIND_LABELS.len() + 1,
         "{counts:?}"
     );
     assert_eq!(counts["GET /graph/x-domain-ranks.txt.gz"], 1, "{counts:?}");
@@ -713,6 +715,7 @@ async fn sets_up_from_the_seed_data_and_retries_after_a_failure() {
         names(&seed),
         [
             "tranco-top-1m.csv.zip",
+            "wikidata-kind-sites.tsv",
             "wikidata-official-sites.tsv",
             "wikidata-site-facts.tsv",
             "x-domain-ranks-top50.txt"

@@ -33,7 +33,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use axum::extract::{Query, State};
 use axum::http::{header, HeaderMap, HeaderName, StatusCode, Uri};
-use axum::response::{Html, IntoResponse, Response};
+use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use plumb_core::{collapse_whitespace, now_unix, truncate_chars};
@@ -45,6 +45,7 @@ use url::Url;
 use crate::cli::ServeArgs;
 use crate::country::{country_name, HomeCountry, COUNTRY_CHOICES};
 use crate::node::{NodeSettings, Phase, Status, Step};
+use crate::websearch::{bang_url, Engine, WebSettings};
 
 mod panel;
 
@@ -160,8 +161,8 @@ struct AppState {
     backend: Arc<dyn SearchBackend>,
     /// Set for a long-running node, `None` for `plumb serve`.
     node: Option<Arc<dyn StatusSource>>,
-    /// The home country of searches that do not name one.
-    home: HomeCountry,
+    /// The home country and the web search link.
+    settings: WebSettings,
 }
 
 impl AppState {
@@ -178,12 +179,12 @@ pub fn router(backend: Arc<dyn SearchBackend>) -> Router {
     router_with(backend, HomeCountry::Auto)
 }
 
-/// [`router`] with a [`HomeCountry`] setting.
-pub fn router_with(backend: Arc<dyn SearchBackend>, home: HomeCountry) -> Router {
+/// [`router`] with [`WebSettings`], or just a [`HomeCountry`].
+pub fn router_with(backend: Arc<dyn SearchBackend>, settings: impl Into<WebSettings>) -> Router {
     app(AppState {
         backend,
         node: None,
-        home,
+        settings: settings.into(),
     })
 }
 
@@ -194,16 +195,16 @@ pub fn node_router(backend: Arc<dyn SearchBackend>, status: Arc<dyn StatusSource
     node_router_with(backend, status, HomeCountry::Auto)
 }
 
-/// [`node_router`] with a [`HomeCountry`] setting.
+/// [`node_router`] with [`WebSettings`], or just a [`HomeCountry`].
 pub fn node_router_with(
     backend: Arc<dyn SearchBackend>,
     status: Arc<dyn StatusSource>,
-    home: HomeCountry,
+    settings: impl Into<WebSettings>,
 ) -> Router {
     app(AppState {
         backend,
         node: Some(status),
-        home,
+        settings: settings.into(),
     })
 }
 
@@ -231,7 +232,10 @@ pub fn run(args: ServeArgs) -> Result<()> {
     let docs = searcher.num_docs();
     let app = router_with(
         Arc::new(IndexBackend::new(searcher, rank_config(args.alpha))),
-        args.country.clone(),
+        WebSettings {
+            home: args.country.clone(),
+            web_search: args.web_search.0,
+        },
     );
     block_on(async move {
         let listener = tokio::net::TcpListener::bind(args.bind)
@@ -359,6 +363,10 @@ async fn search_page(
     headers: HeaderMap,
     Query(params): Query<SearchParams>,
 ) -> Response {
+    // A bang leaves Plumb, even while it sets up.
+    if let Some(url) = bang_url(&params.q) {
+        return (security_headers(), Redirect::to(&url)).into_response();
+    }
     if let Some(status) = state.setting_up() {
         // Reloading keeps the query, so the results show up once the index is ready.
         return setup_response(&status, now_unix());
@@ -367,9 +375,12 @@ async fn search_page(
     if query.is_empty() {
         return home_or_setup(&state);
     }
-    let options = params.options(&state.home, &headers);
+    let options = params.options(&state.settings.home, &headers);
     match run_search(&state, &query, params.limit(), &options).await {
-        Ok(results) => html_response(StatusCode::OK, render_results(&query, &results, &options)),
+        Ok(results) => html_response(
+            StatusCode::OK,
+            render_results(&query, &results, &options, state.settings.web_search),
+        ),
         Err(err) => {
             error!("search for {query:?} failed: {err:#}");
             html_response(StatusCode::INTERNAL_SERVER_ERROR, render_error(&query))
@@ -411,7 +422,7 @@ async fn api_search(
             (StatusCode::OK, security_headers(), Json(Vec::<Hit>::new())).into_response()
         };
     }
-    let options = params.options(&state.home, &headers);
+    let options = params.options(&state.settings.home, &headers);
     match run_search(&state, &query, params.limit(), &options).await {
         Ok(results) if full => (StatusCode::OK, security_headers(), Json(results)).into_response(),
         Ok(results) => (StatusCode::OK, security_headers(), Json(results.hits)).into_response(),
@@ -677,6 +688,7 @@ select{font:inherit;padding:.15rem .3rem;border:1px solid var(--line);border-rad
 background:var(--bg);color:var(--fg)}\
 .ss{margin:1rem 0 .25rem;padding:.6rem .8rem;border:1px solid var(--line);border-radius:.5rem}\
 .ss a{color:var(--link)}\
+.web{margin:.25rem 0;font-size:.9rem}.web a{color:var(--muted)}\
 .setup{max-width:36rem}\
 .step{margin:2rem 0 .5rem;font-size:1.1rem}\
 progress{width:100%;height:.75rem;accent-color:var(--accent)}\
@@ -724,7 +736,9 @@ fn render_home(docs: u64, status: Option<&Status>, now: u64) -> String {
         .unwrap_or_default();
     let body = format!(
         "<main class=\"wrap home\">\n<h1>Plumb</h1>\n\
-         {}\n<p class=\"s\">{} sites indexed{note}</p>{wikidata}\n</main>",
+         {}\n<p class=\"s\">{} sites indexed{note}</p>{wikidata}\n\
+         <p class=\"s\">Not looking for a site? Add !g, !ddg or !b to search Google, \
+         DuckDuckGo or Bing.</p>\n</main>",
         search_form("", true),
         group_thousands(docs)
     );
@@ -877,7 +891,12 @@ fn results_form(query: &str, options: &SearchOptions) -> String {
     )
 }
 
-fn render_results(query: &str, results: &SearchResults, options: &SearchOptions) -> String {
+fn render_results(
+    query: &str,
+    results: &SearchResults,
+    options: &SearchOptions,
+    web_search: Option<Engine>,
+) -> String {
     let hits = &results.hits;
     let mut body = format!(
         "<div class=\"wrap\">\n{}\n<main>\n",
@@ -885,6 +904,15 @@ fn render_results(query: &str, results: &SearchResults, options: &SearchOptions)
     );
     if let Some(site_search) = &results.site_search {
         render_site_search(&mut body, site_search);
+    }
+    if let Some(engine) = web_search {
+        let _ = writeln!(
+            body,
+            "<p class=\"web\"><a href=\"{}\" rel=\"noreferrer\">Search the web with {} for <strong>{}</strong></a></p>",
+            escape_html(&engine.url(query)),
+            escape_html(engine.name()),
+            escape_html(&truncate_chars(query, 150))
+        );
     }
     if hits.is_empty() {
         let _ = writeln!(
@@ -1873,5 +1901,43 @@ mod tests {
         assert!(query.starts_with("us bank x"));
         assert_eq!(query.chars().count(), MAX_QUERY_CHARS);
         assert_eq!(params.limit(), DEFAULT_LIMIT);
+    }
+
+    #[tokio::test]
+    async fn bangs_leave_and_the_web_search_link_is_a_setting() {
+        let fake = backend(bank_hits());
+        let (code, headers, _) = get(fake.clone(), "/search?q=%21g+boil+an+egg").await;
+        assert_eq!(code, StatusCode::SEE_OTHER);
+        assert_eq!(
+            headers[header::LOCATION],
+            "https://www.google.com/search?q=boil%20an%20egg"
+        );
+        // Even while a node sets up.
+        let setting_up = node(node_status(Phase::SettingUp, Step::Downloading));
+        let app = node_router(fake.clone(), setting_up);
+        let (code, _, _) = send(app, "/search?q=egg+%21ddg").await;
+        assert_eq!(code, StatusCode::SEE_OTHER);
+
+        // Off by default.
+        let (_, _, body) = get(fake.clone(), "/search?q=us+bank").await;
+        assert!(!body.contains("Search the web"), "{body}");
+
+        let settings = WebSettings {
+            web_search: Some(Engine::DuckDuckGo),
+            ..WebSettings::default()
+        };
+        let (_, _, body) = send(
+            router_with(fake.clone(), settings),
+            "/search?q=us+%3Cbank%3E",
+        )
+        .await;
+        assert!(
+            body.contains(
+                "<p class=\"web\"><a href=\"https://duckduckgo.com/?q=us%20%3Cbank%3E\" \
+                 rel=\"noreferrer\">Search the web with DuckDuckGo for \
+                 <strong>us &lt;bank&gt;</strong></a></p>"
+            ),
+            "{body}"
+        );
     }
 }
