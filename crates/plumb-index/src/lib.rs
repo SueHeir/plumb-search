@@ -86,6 +86,10 @@ const TITLE_BOOST: f32 = 2.0;
 const ANCHORS_BOOST: f32 = 1.5;
 /// BM25 boost of a query word matching the description.
 const DESCRIPTION_BOOST: f32 = 0.5;
+/// BM25 boost of a query word matching Wikidata's description of the
+/// organization. Higher than the site's own description: Wikidata's is
+/// written by others, so look-alikes cannot stuff it with search words.
+const ABOUT_BOOST: f32 = 2.0;
 /// BM25 boost of a query word matching a homepage heading.
 const HEADINGS_BOOST: f32 = 0.5;
 /// BM25 boost of the whole query, joined (`us bank` -> `usbank`), matching a
@@ -658,7 +662,8 @@ impl Searcher {
         Ok(Hit {
             url,
             title: text(self.fields.title),
-            description: text(self.fields.description),
+            // The site's own description, else what Wikidata says it is.
+            description: text(self.fields.description).or_else(|| text(self.fields.about)),
             domain,
             score: ranked.score,
             text_score: ranked.text_score,
@@ -876,6 +881,7 @@ impl ParsedQuery {
             (f.anchors, ANCHORS_BOOST),
             (f.description, DESCRIPTION_BOOST),
             (f.headings, HEADINGS_BOOST),
+            (f.about, ABOUT_BOOST),
         ];
         for word in &self.words {
             for (field, boost) in per_word {
