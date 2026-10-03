@@ -30,6 +30,39 @@ impl FeatureSettings {
         }
     }
 
+    /// Whether the node finds others through the Plumb network's own
+    /// bootstrap nodes ([`plumb_net::DEFAULT_BOOTSTRAP`]).
+    pub fn uses_default_bootstrap(&self) -> bool {
+        self.bootstrap
+            .iter()
+            .any(|addr| plumb_net::DEFAULT_BOOTSTRAP.contains(&addr.as_str()))
+    }
+
+    /// The bootstrap nodes added by hand, besides the default ones.
+    pub fn extra_bootstrap(&self) -> impl Iterator<Item = &str> {
+        self.bootstrap
+            .iter()
+            .map(String::as_str)
+            .filter(|addr| !plumb_net::DEFAULT_BOOTSTRAP.contains(addr))
+    }
+
+    /// Sets the bootstrap nodes: the default ones if `default`, then
+    /// `extra`, each once.
+    pub fn set_bootstrap<'a>(&mut self, default: bool, extra: impl IntoIterator<Item = &'a str>) {
+        let mut bootstrap: Vec<String> = Vec::new();
+        let defaults: &[&str] = if default {
+            &plumb_net::DEFAULT_BOOTSTRAP
+        } else {
+            &[]
+        };
+        for addr in defaults.iter().copied().chain(extra) {
+            if !bootstrap.iter().any(|a| a == addr) {
+                bootstrap.push(addr.to_owned());
+            }
+        }
+        self.bootstrap = bootstrap;
+    }
+
     pub fn check(&self) -> Result<()> {
         if self.share_popularity && !self.network {
             bail!("Turn on the Plumb network to share popularity. Nothing was changed.");
@@ -121,5 +154,23 @@ mod tests {
             FeatureSettings::load(dir.path()).unwrap(),
             Some(preferences)
         );
+    }
+
+    #[test]
+    fn the_default_bootstrap_nodes_are_one_switch() {
+        let mut features = FeatureSettings::default();
+        features.set_bootstrap(true, ["/ip4/10.0.0.2/tcp/4001"]);
+        assert!(features.uses_default_bootstrap());
+        assert_eq!(features.bootstrap.len(), 3);
+        assert_eq!(
+            features.extra_bootstrap().collect::<Vec<_>>(),
+            ["/ip4/10.0.0.2/tcp/4001"]
+        );
+        // Typing a default address in the box adds it once.
+        features.set_bootstrap(true, [plumb_net::DEFAULT_BOOTSTRAP[0]]);
+        assert_eq!(features.bootstrap.len(), 2);
+        features.set_bootstrap(false, ["/ip4/10.0.0.2/tcp/4001"]);
+        assert!(!features.uses_default_bootstrap());
+        assert_eq!(features.bootstrap, ["/ip4/10.0.0.2/tcp/4001"]);
     }
 }

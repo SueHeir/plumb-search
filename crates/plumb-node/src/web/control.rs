@@ -6,7 +6,9 @@
 //! - `POST /api/control/settings` puts a JSON [`NodeSettings`] in force,
 //! - `POST /api/control/features` saves a JSON [`FeatureSettings`] for the
 //!   next start,
-//! - `POST /api/control/refresh` starts a refresh now.
+//! - `POST /api/control/refresh` starts a refresh now,
+//! - `POST /api/control/reconnect` tries the network's bootstrap nodes
+//!   again now.
 //!
 //! Each request needs remote control turned on (otherwise 404, as if the API
 //! were not there) and its token as `Authorization: Bearer <token>`. Unless
@@ -60,6 +62,7 @@ pub(super) fn routes(router: Router<AppState>) -> Router<AppState> {
         .route("/api/control/settings", post(change_settings))
         .route("/api/control/features", post(change_features))
         .route("/api/control/refresh", post(refresh))
+        .route("/api/control/reconnect", post(reconnect))
 }
 
 fn error(status: StatusCode, message: &str) -> Response {
@@ -245,4 +248,17 @@ async fn refresh(State(state): State<AppState>, request: Request) -> Response {
     };
     node.refresh_now();
     StatusCode::NO_CONTENT.into_response()
+}
+
+async fn reconnect(State(state): State<AppState>, request: Request) -> Response {
+    if let Err(response) = authorize(&state, request.headers(), peer(&request)) {
+        return response;
+    }
+    let Some(node) = &state.node else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    match node.reconnect_network() {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(err) => error(StatusCode::CONFLICT, &err.to_string()),
+    }
 }

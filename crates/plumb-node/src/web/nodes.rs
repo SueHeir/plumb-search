@@ -5,8 +5,9 @@
 //!   token, `POST /app/nodes` checks them with the node and saves them,
 //! - `GET /app/nodes/<id>` shows that node's panel, with this node fetching
 //!   it from the node's control API ([`super::control`]),
-//! - `POST /app/nodes/<id>/settings`, `/features` and `/refresh` pass the
-//!   panel's forms on to the node, `/remove` forgets it.
+//! - `POST /app/nodes/<id>/settings`, `/features`, `/refresh` and
+//!   `/network/retry` pass the panel's forms on to the node, `/remove`
+//!   forgets it.
 //!
 //! The window never sees the tokens: they stay in `DIR/remote-nodes.json`
 //! (readable by its owner only, on Unix), and this node adds them to its
@@ -135,6 +136,7 @@ pub(super) fn routes(router: Router<AppState>) -> Router<AppState> {
         .route("/app/nodes/{id}/settings", post(change_settings))
         .route("/app/nodes/{id}/features", post(change_features))
         .route("/app/nodes/{id}/refresh", post(refresh))
+        .route("/app/nodes/{id}/network/retry", post(retry_network))
         .route("/app/nodes/{id}/remove", post(remove))
 }
 
@@ -570,6 +572,24 @@ async fn refresh(
     };
     let result = call(&remote, "/api/control/refresh", Some(b"{}".to_vec())).await;
     after_change(&remote, result, &format!("/app/nodes/{}", remote.id))
+}
+
+async fn retry_network(
+    State(state): State<AppState>,
+    UrlPath(id): UrlPath<String>,
+    request: Request,
+) -> Response {
+    let node = match manager(&state, &request) {
+        Ok(node) => node,
+        Err(response) => return response,
+    };
+    let remote = match remote_or_page(node.as_ref(), &id) {
+        Ok(remote) => remote,
+        Err(response) => return response,
+    };
+    let result = call(&remote, "/api/control/reconnect", Some(b"{}".to_vec())).await;
+    let back = format!("/app/nodes/{}?section=network&saved=retry", remote.id);
+    after_change(&remote, result, &back)
 }
 
 async fn remove(

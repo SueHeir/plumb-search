@@ -70,6 +70,7 @@ use crate::assign::{epoch_of, is_assigned, MAX_SHARE_PPM};
 use crate::batch::{accept_batch, accept_own_batch, Batch, SignedHeader};
 use crate::bucket::{BucketSource, BUCKETS};
 use crate::hash::Hash;
+use crate::joining::{explain_dial_error, peer_of, JoinProblem, PeerView, Route};
 use crate::oblivious::{
     seal_response, Gateway, ObliviousRequest, ObliviousResponse, Opened, SignedKeys, MAX_MESSAGE,
     OBLIVIOUS_PROTOCOL, RELAY_KEY_CACHE, REPORT_REQUEST_SIZE,
@@ -192,7 +193,23 @@ pub struct NetStatus {
     /// Sealed requests (bucket requests and popularity reports) passed on
     /// for others, as their relay.
     pub requests_relayed: u64,
+    /// The connected nodes, at most [`MAX_PEER_VIEWS`] of them.
+    #[serde(default)]
+    pub peers: Vec<PeerView>,
+    /// Connected nodes on the same home or office network.
+    #[serde(default)]
+    pub nearby_peers: usize,
+    /// Since when, in Unix seconds, this node has had no connections.
+    #[serde(default)]
+    pub alone_since: Option<u64>,
+    /// Why the last try to reach a bootstrap node failed, while no node is
+    /// connected.
+    #[serde(default)]
+    pub problem: Option<JoinProblem>,
 }
+
+/// How many connected nodes [`NetStatus::peers`] lists.
+pub const MAX_PEER_VIEWS: usize = 50;
 
 /// Talks to the swarm task.
 #[derive(Debug)]
@@ -223,6 +240,7 @@ enum Command {
     Counting(Vec<String>, oneshot::Sender<HashSet<String>>),
     Oblivious(ObliviousRequest, oneshot::Sender<ObliviousResponse>),
     Dial(Multiaddr),
+    Reconnect,
     Stop,
 }
 
@@ -415,6 +433,12 @@ impl NetHandle {
         self.send(Command::Dial(addr))
     }
 
+    /// Tries the bootstrap nodes again now, rather than at the next
+    /// minute's round, and asks the nodes it has for more.
+    pub fn reconnect(&self) -> Result<()> {
+        self.send(Command::Reconnect)
+    }
+
     /// Stops the swarm and waits for it. Later calls do nothing.
     pub async fn shutdown(&self) {
         let _ = self.commands.send(Command::Stop);
@@ -597,6 +621,9 @@ pub async fn start(
         relay_keys: HashMap::new(),
         waiting_keys: HashMap::new(),
         relaying: HashMap::new(),
+        bootstrap_peers: config.bootstrap.iter().filter_map(peer_of).collect(),
+        problem: None,
+        alone_since: Some(now_unix()),
     };
     for addr in &config.bootstrap {
         task.dial(addr.clone());
@@ -856,6 +883,12 @@ struct Task {
     waiting_keys: HashMap<PeerId, Vec<Reply>>,
     /// As a relay: requests passed on and not yet answered.
     relaying: HashMap<OutboundRequestId, Relayed>,
+    /// The peer ids the bootstrap addresses name.
+    bootstrap_peers: HashSet<PeerId>,
+    /// Why a bootstrap node could not be reached, until a node connects.
+    problem: Option<JoinProblem>,
+    /// Since when no node is connected.
+    alone_since: Option<u64>,
 }
 
 impl Task {
@@ -972,6 +1005,15 @@ impl Task {
                 self.on_oblivious_request(request, Reply::Local(reply));
             }
             Command::Dial(addr) => self.dial(addr),
+            Command::Reconnect => {
+                info!("trying the bootstrap nodes again");
+                for addr in self.config.bootstrap.clone() {
+                    self.dial(addr);
+                }
+                if self.swarm.connected_peers().next().is_some() {
+                    let _ = self.swarm.behaviour_mut().kad.bootstrap();
+                }
+            }
             Command::Stop => {}
         }
     }
@@ -1171,6 +1213,8 @@ impl Task {
                     ConnectedPoint::Listener { send_back_addr, .. } => send_back_addr.clone(),
                 };
                 debug!("connected to {peer_id} at {addr}");
+                self.problem = None;
+                self.alone_since = None;
                 if !is_global(&addr) {
                     self.nearby.insert(peer_id);
                 }
@@ -1184,6 +1228,9 @@ impl Task {
                 ..
             } => {
                 if num_established == 0 {
+                    if self.alone_since.is_none() && self.swarm.connected_peers().next().is_none() {
+                        self.alone_since = Some(now_unix());
+                    }
                     self.bucket_peers.remove(&peer_id);
                     self.report_peers.remove(&peer_id);
                     self.oblivious_peers.remove(&peer_id);
@@ -1206,6 +1253,28 @@ impl Task {
             }
             SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
                 debug!("could not connect to {peer_id:?}: {error}");
+                let bootstrap = peer_id.is_some_and(|p| self.bootstrap_peers.contains(&p));
+                if bootstrap && self.swarm.connected_peers().next().is_none() {
+                    // Name the node by the address it was dialed at, its
+                    // name if it has one.
+                    let addr = self
+                        .config
+                        .bootstrap
+                        .iter()
+                        .find(|a| peer_of(a) == peer_id)
+                        .cloned();
+                    let problem = explain_dial_error(addr.as_ref(), &error, now_unix());
+                    warn!("{} ({})", problem.message, problem.detail);
+                    // Of the failures of one round (a node tried by name and
+                    // by address), keep the more telling one.
+                    let keep = self
+                        .problem
+                        .as_ref()
+                        .is_some_and(|old| old.rank < problem.rank && old.at + 30 > problem.at);
+                    if !keep {
+                        self.problem = Some(problem);
+                    }
+                }
             }
             SwarmEvent::Behaviour(event) => self.on_behaviour(event),
             _ => {}
@@ -1935,7 +2004,33 @@ impl Task {
             .collect();
         let held = self.lock_store().len();
         let reports_held = self.lock_reports().len();
+        let mut peers: Vec<PeerView> = self
+            .swarm
+            .connected_peers()
+            .map(|peer| PeerView {
+                peer_id: peer.to_string(),
+                route: if self.nearby.contains(peer) {
+                    Route::Nearby
+                } else if self.remote_addrs.contains_key(peer) {
+                    Route::Direct
+                } else {
+                    Route::Relayed
+                },
+                relay: self.relays.get(peer).copied().unwrap_or(false),
+                bootstrap: self.bootstrap_peers.contains(peer),
+            })
+            .collect();
+        let nearby_peers = peers.iter().filter(|p| p.route == Route::Nearby).count();
+        // Bootstrap nodes and relays first, then the nearest.
+        peers.sort_by_key(|p| (!p.bootstrap, !p.relay, p.route != Route::Nearby));
+        peers.truncate(MAX_PEER_VIEWS);
+        let problem = self.problem.clone();
+        let alone_since = self.alone_since;
         self.with_status(|s| {
+            s.peers = peers;
+            s.nearby_peers = nearby_peers;
+            s.problem = problem;
+            s.alone_since = alone_since;
             s.listening = listening;
             s.reachable_at = reachable_at;
             s.connected_peers = connected_peers;

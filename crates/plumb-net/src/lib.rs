@@ -8,6 +8,8 @@
 //!   query.
 //! * [`oblivious`]: sending those requests sealed through a relay, so the
 //!   node answering does not see who asks.
+//! * [`joining`]: the default bootstrap nodes, and why a node is not
+//!   connected.
 //! * [`hash`]: hashes and the Merkle tree that proves one record of a batch.
 //! * [`popularity`] and [`reports`]: sharing which site people pick for a
 //!   search, readable only once many reports of the same pick are sent.
@@ -21,6 +23,7 @@ pub mod assign;
 pub mod batch;
 pub mod bucket;
 pub mod hash;
+pub mod joining;
 pub mod node;
 pub mod oblivious;
 pub mod popularity;
@@ -31,6 +34,7 @@ pub mod store;
 pub mod throwaway;
 
 pub use bucket::{BucketSource, BucketTable, BUCKETS_PER_SEARCH};
+pub use joining::{default_bootstrap, JoinProblem, PeerView, Route, DEFAULT_BOOTSTRAP};
 pub use libp2p::multiaddr::Protocol;
 pub use libp2p::{Multiaddr, PeerId};
 pub use node::{load_or_create_key, start, NetConfig, NetHandle, NetStatus};
