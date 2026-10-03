@@ -142,7 +142,8 @@ pub struct RankConfig {
     pub country_boost: f32,
     /// With a [`Meaning`] and a query that no site is named by in full,
     /// the share of the text match that comes from how close each site is
-    /// in meaning; the words matched give the rest.
+    /// in meaning; the words matched give the rest. Sites with no
+    /// embedding are ranked by their words alone.
     pub meaning_weight: f32,
 }
 
@@ -582,14 +583,16 @@ impl Searcher {
                 } else {
                     0.0
                 };
-                match meaning {
-                    Some(meaning) => {
-                        let closeness = column
-                            .domain(addr.doc_id)
-                            .and_then(|domain| meaning.closeness(&domain))
-                            .unwrap_or(0.0)
-                            .clamp(0.0, 1.0);
-                        (1.0 - meaning_weight) * words + meaning_weight * closeness
+                // A site with no embedding (no text to make one from) is
+                // ranked by its words alone, not as if far in meaning.
+                let closeness = meaning.and_then(|meaning| {
+                    column
+                        .domain(addr.doc_id)
+                        .and_then(|domain| meaning.closeness(&domain))
+                });
+                match closeness {
+                    Some(closeness) => {
+                        (1.0 - meaning_weight) * words + meaning_weight * closeness.clamp(0.0, 1.0)
                     }
                     None => words,
                 }
@@ -1325,6 +1328,12 @@ mod tests {
             &by_meaning[..2],
             ["tesla.com", "rivian.com"],
             "{by_meaning:?}"
+        );
+        // A site with no embedding keeps its full word match.
+        let partial = FixedMeaning(vec![("tesla.com", 0.3)]);
+        assert_eq!(
+            search("electric car maker", Some(&partial))[0],
+            "electric.com"
         );
         // A query naming a site is ranked as before.
         let named = FixedMeaning(vec![("tesla.com", 1.0)]);

@@ -2012,6 +2012,7 @@ mod tests {
             downloaded_today: 0,
             downloaded_total: 0,
             homepages_visited: 0,
+            meaning_sites: None,
         }
     }
 
