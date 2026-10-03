@@ -20,7 +20,7 @@ use std::net::SocketAddr;
 use std::path::Path;
 
 use axum::extract::{ConnectInfo, FromRequest, Request, State};
-use axum::http::{header, HeaderMap, StatusCode, Uri};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode, Uri};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::Form;
 use plumb_core::now_unix;
@@ -28,10 +28,16 @@ use serde::Deserialize;
 use tracing::warn;
 
 use super::{
-    escape_html, group_thousands, page_with_head, request_origin, security_headers, time_ago,
-    time_until, AppState,
+    escape_html, group_thousands, page_with_head, page_with_referrer, request_origin,
+    security_headers, time_ago, time_until, AppState,
 };
 use crate::node::{NodeSettings, Phase, Status, Step, MB};
+
+/// The panel's referrer policy. Under `no-referrer` a browser sends
+/// `Origin: null` with the panel's own forms, which `refusal` turns away;
+/// `same-origin` sends the panel's origin to the node and still nothing to
+/// other sites.
+const PANEL_REFERRER_POLICY: &str = "same-origin";
 
 /// Seconds between two reloads of the panel while work is under way.
 const BUSY_RELOAD_SECONDS: u32 = 5;
@@ -105,13 +111,19 @@ pub(super) async fn panel(State(state): State<AppState>, headers: HeaderMap, uri
     let settings = node.settings().unwrap_or_default();
     let data_dir = node.data_dir();
     let page = render_panel(&status, &settings, &origin, data_dir.as_deref(), now_unix());
-    (
+    let mut response = (
         StatusCode::OK,
         security_headers(),
         [(header::CACHE_CONTROL, "no-store")],
         Html(page),
     )
-        .into_response()
+        .into_response();
+    // The page's `<meta name="referrer">` says the same.
+    response.headers_mut().insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static(PANEL_REFERRER_POLICY),
+    );
+    response
 }
 
 /// The address of the page with the steps to add Plumb to Firefox.
@@ -229,11 +241,19 @@ fn refusal(request: &Request) -> Option<&'static str> {
     None
 }
 
+/// The page for a refused change, with a way back: the desktop app's
+/// window has no back button.
 fn forbidden(why: &str) -> Response {
+    let body = format!(
+        "<main class=\"wrap panel\">\n<h1>Nothing was changed</h1>\n<p>{}</p>\n\
+         <p><a class=\"btn\" href=\"/app\">Back to the panel</a></p>\n</main>",
+        escape_html(why)
+    );
+    let head = format!("<style>{PANEL_STYLE}</style>\n");
     (
         StatusCode::FORBIDDEN,
         security_headers(),
-        format!("{why}\n"),
+        Html(page_with_head("Nothing was changed", &head, &body)),
     )
         .into_response()
 }
@@ -311,7 +331,7 @@ pub(super) fn render_panel(
     let head = format!(
         "<meta http-equiv=\"refresh\" content=\"{reload}\">\n<style>{PANEL_STYLE}</style>\n"
     );
-    page_with_head("Plumb Search node", &head, &body)
+    page_with_referrer("Plumb Search node", PANEL_REFERRER_POLICY, &head, &body)
 }
 
 /// A card: its class, title, headline and the HTML under them.
@@ -747,10 +767,17 @@ mod tests {
             .unwrap();
         let response = app.oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+        // So that browsers send the panel's origin with its forms.
+        assert_eq!(response.headers()[header::REFERRER_POLICY], "same-origin");
         let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
-        String::from_utf8(bytes.to_vec()).unwrap()
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(
+            body.contains("<meta name=\"referrer\" content=\"same-origin\">"),
+            "{body}"
+        );
+        body
     }
 
     /// A form post to `path` from `peer`, with an `Origin` header if given.
@@ -987,6 +1014,11 @@ mod tests {
                 StatusCode::FORBIDDEN,
                 "{peer} {origin:?}"
             );
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let body = String::from_utf8(bytes.to_vec()).unwrap();
+            assert!(body.contains("href=\"/app\">Back to the panel"), "{body}");
         }
         assert!(node.settings.lock().unwrap().background_updates);
         assert_eq!(*node.refreshes.lock().unwrap(), 0);

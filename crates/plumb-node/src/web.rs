@@ -692,11 +692,17 @@ fn page(title: &str, body: &str) -> String {
 
 /// [`page`] with more elements in its `<head>`, which must be safe HTML.
 fn page_with_head(title: &str, head: &str, body: &str) -> String {
+    page_with_referrer(title, "no-referrer", head, body)
+}
+
+/// [`page_with_head`] with another referrer policy than `no-referrer`.
+fn page_with_referrer(title: &str, referrer: &str, head: &str, body: &str) -> String {
     format!(
         "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
-         <meta name=\"referrer\" content=\"no-referrer\">\n{OPENSEARCH_LINK}{head}\
+         <meta name=\"referrer\" content=\"{}\">\n{OPENSEARCH_LINK}{head}\
          <title>{}</title>\n<style>{STYLE}</style>\n</head>\n<body>\n{body}\n</body>\n</html>\n",
+        escape_html(referrer),
         escape_html(title)
     )
 }
