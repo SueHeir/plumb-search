@@ -67,7 +67,7 @@ use tracing::{debug, info, warn};
 
 use crate::agree::{Agreement, AgreementStatus};
 use crate::assign::{epoch_of, is_assigned, MAX_SHARE_PPM};
-use crate::batch::{accept_batch, Batch, SignedHeader};
+use crate::batch::{accept_batch, accept_own_batch, Batch, SignedHeader};
 use crate::bucket::{BucketSource, BUCKETS};
 use crate::hash::Hash;
 use crate::oblivious::{
@@ -215,6 +215,8 @@ enum Command {
     },
     Peers(Serving, oneshot::Sender<Vec<BucketPeer>>),
     Recount(oneshot::Sender<Arc<PopularityTable>>),
+    Rechecks(usize, oneshot::Sender<Vec<String>>),
+    Counting(Vec<String>, oneshot::Sender<HashSet<String>>),
     Oblivious(ObliviousRequest, oneshot::Sender<ObliviousResponse>),
     Dial(Multiaddr),
     Stop,
@@ -254,7 +256,39 @@ impl NetHandle {
         let (reply, peers) = oneshot::channel();
         self.send(Command::Peers(Serving::Buckets, reply))?;
         let peers = peers.await.context("the network task stopped")?;
-        Ok(crate::search::search(query, &peers, wait, now_unix()).await)
+        let mut found = crate::search::search(query, &peers, wait, now_unix()).await;
+        // Two keys of one person can sign the same crawl: a site is
+        // confirmed only by crawlers this node counts (see crate::agree).
+        let crawlers: Vec<String> = found
+            .found
+            .iter()
+            .flat_map(|site| site.crawlers.iter().cloned())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        if !crawlers.is_empty() {
+            let (reply, counting) = oneshot::channel();
+            self.send(Command::Counting(crawlers, reply))?;
+            let counting = counting.await.context("the network task stopped")?;
+            for site in &mut found.found {
+                site.confirmed = site
+                    .crawlers
+                    .iter()
+                    .filter(|c| counting.contains(*c))
+                    .count()
+                    >= crate::agree::QUORUM;
+            }
+        }
+        Ok(found)
+    }
+
+    /// Up to `limit` sites whose crawlers disagree, for this node to fetch
+    /// itself whether or not it is assigned them: its own crawl settles the
+    /// dispute once published (see [`crate::agree`]).
+    pub async fn rechecks(&self, limit: usize) -> Result<Vec<String>> {
+        let (reply, answer) = oneshot::channel();
+        self.send(Command::Rechecks(limit, reply))?;
+        answer.await.context("the network task stopped")
     }
 
     /// The connected nodes that answer bucket requests, for a front end
@@ -851,6 +885,19 @@ impl Task {
             Command::Publish { records, reply } => {
                 let _ = reply.send(self.publish(records));
             }
+            Command::Rechecks(limit, reply) => {
+                let _ = reply.send(self.agreement.rechecks(limit));
+            }
+            Command::Counting(crawlers, reply) => {
+                let counting = crawlers
+                    .into_iter()
+                    .filter(|c| {
+                        c.parse::<PeerId>()
+                            .is_ok_and(|peer| self.agreement.counts(&peer))
+                    })
+                    .collect();
+                let _ = reply.send(counting);
+            }
             Command::Peers(serving, reply) => {
                 let serving = match serving {
                     Serving::Buckets => &self.bucket_peers,
@@ -936,11 +983,12 @@ impl Task {
             store.insert(&batch)?;
             store.len()
         };
-        // Our own crawl counts as one crawler towards agreement; what it
-        // confirms we already have.
+        // Our own crawl counts as one crawler towards agreement, sites
+        // fetched to settle a dispute included; what it confirms we
+        // already have.
         let me = *self.swarm.local_peer_id();
         self.agreement
-            .observe(me, accept_batch(&batch, &me, now), now);
+            .observe(me, accept_own_batch(&batch, &me, now), now);
         let agreement = self.agreement.status();
         self.with_status(|s| {
             s.batches_published += 1;
@@ -1942,7 +1990,11 @@ fn replay_agreement(store: &BatchStore, me: PeerId) -> Agreement {
         let Ok(crawler) = batch.check(made) else {
             continue;
         };
-        let records = accept_batch(&batch, &crawler, made);
+        let records = if crawler == me {
+            accept_own_batch(&batch, &crawler, made)
+        } else {
+            accept_batch(&batch, &crawler, made)
+        };
         agreement.observe(crawler, records, made);
     }
     agreement.prune(now);
