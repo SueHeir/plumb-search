@@ -14,10 +14,14 @@
 //! connects directly unless `CrawlConfig::use_system_proxy` is set.
 
 use std::error::Error;
+use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::sync::Arc;
+use std::time::Duration;
 
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use thiserror::Error;
+use tokio::sync::Semaphore;
 
 type BoxError = Box<dyn Error + Send + Sync>;
 
@@ -55,24 +59,74 @@ const NON_GLOBAL_V6: &[(Ipv6Addr, u8)] = &[
     (Ipv6Addr::new(0x3fff, 0, 0, 0, 0, 0, 0, 0), 20),
 ];
 
-/// Resolves host names with Tokio. Unless `allow_private` is set it keeps
-/// only globally routable addresses ([`is_global`]), and when none is left
-/// the lookup fails with [`NonPublicHost`], so the request fails instead of
-/// connecting.
-#[derive(Debug, Clone, Copy)]
+/// How long a lookup that failed for the time being waits before its one
+/// retry.
+const RETRY_LOOKUP_AFTER: Duration = Duration::from_secs(1);
+
+/// Resolves host names with Tokio, at most `lookups` at a time (the rest
+/// wait). Unless `allow_private` is set it keeps only globally routable
+/// addresses ([`is_global`]), and when none is left the lookup fails with
+/// [`NonPublicHost`], so the request fails instead of connecting. A lookup
+/// that fails for the time being ([`is_temporary`]) is tried once more.
+#[derive(Debug, Clone)]
 pub(crate) struct Resolver {
-    pub(crate) allow_private: bool,
+    allow_private: bool,
+    lookups: Arc<Semaphore>,
+}
+
+impl Resolver {
+    pub(crate) fn new(allow_private: bool, lookups: usize) -> Resolver {
+        Resolver {
+            allow_private,
+            lookups: Arc::new(Semaphore::new(lookups.max(1))),
+        }
+    }
 }
 
 impl Resolve for Resolver {
     fn resolve(&self, name: Name) -> Resolving {
-        Box::pin(lookup(name.as_str().to_string(), self.allow_private))
+        let resolver = self.clone();
+        Box::pin(async move {
+            let host = name.as_str().to_string();
+            let resolved = match resolver.resolve_once(&host).await {
+                Err(err) if is_temporary(&err) => {
+                    tokio::time::sleep(RETRY_LOOKUP_AFTER).await;
+                    resolver.resolve_once(&host).await
+                }
+                resolved => resolved,
+            }?;
+            filter(host, resolved, resolver.allow_private)
+        })
     }
 }
 
+impl Resolver {
+    async fn resolve_once(&self, host: &str) -> io::Result<Vec<SocketAddr>> {
+        // The semaphore is never closed.
+        let _turn = self.lookups.acquire().await.ok();
+        // Port 0 stands for "the URL's port", which reqwest fills in.
+        Ok(tokio::net::lookup_host((host, 0)).await?.collect())
+    }
+}
+
+/// Whether a failed lookup may well work if tried again: the resolver did
+/// not answer in time (glibc's EAI_AGAIN, "Temporary failure in name
+/// resolution", also what an overloaded home router gives), as opposed to a
+/// name that does not exist.
+fn is_temporary(err: &io::Error) -> bool {
+    let message = err.to_string().to_ascii_lowercase();
+    message.contains("temporary failure") || message.contains("try again")
+}
+
+#[cfg(test)]
 async fn lookup(host: String, allow_private: bool) -> Result<Addrs, BoxError> {
-    // Port 0 stands for "the URL's port", which reqwest fills in.
-    let resolved: Vec<SocketAddr> = tokio::net::lookup_host((host.as_str(), 0)).await?.collect();
+    let resolved = Resolver::new(allow_private, 1).resolve_once(&host).await?;
+    filter(host, resolved, allow_private)
+}
+
+/// The addresses of `resolved` the crawler may connect to, as
+/// [`Resolver`] describes.
+fn filter(host: String, resolved: Vec<SocketAddr>, allow_private: bool) -> Result<Addrs, BoxError> {
     if allow_private {
         return Ok(Box::new(resolved.into_iter()));
     }
@@ -298,6 +352,30 @@ mod tests {
         );
 
         let addrs: Vec<SocketAddr> = lookup("localhost".into(), true).await.unwrap().collect();
+        assert!(
+            addrs.iter().any(|addr| addr.ip().is_loopback()),
+            "{addrs:?}"
+        );
+    }
+
+    #[test]
+    fn only_temporary_lookup_failures_are_retried() {
+        let error = |message: &str| io::Error::other(message.to_string());
+        assert!(is_temporary(&error(
+            "failed to lookup address information: Temporary failure in name resolution"
+        )));
+        assert!(is_temporary(&error(
+            "failed to lookup address information: nodename nor servname provided, or not known; try again"
+        )));
+        assert!(!is_temporary(&error(
+            "failed to lookup address information: Name or service not known"
+        )));
+    }
+
+    #[tokio::test]
+    async fn zero_lookups_at_a_time_still_resolves() {
+        let resolver = Resolver::new(true, 0);
+        let addrs = resolver.resolve_once("localhost").await.unwrap();
         assert!(
             addrs.iter().any(|addr| addr.ip().is_loopback()),
             "{addrs:?}"

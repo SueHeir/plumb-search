@@ -739,6 +739,7 @@ fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Option<ServingIndex
             &targets,
             CRAWL_BATCH_SIZE,
             &mut store,
+            &[],
             &mut fetcher,
             |totals| {
                 inner.set_progress(totals.attempted, targets.len(), "homepages");
