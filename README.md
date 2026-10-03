@@ -1,6 +1,6 @@
 # Plumb Search
 
-Plumb Search is a free, open-source search engine for finding websites by name, built to run on your own machine. Type "us bank" and usbank.com comes first.
+Plumb Search is a free, open-source search engine built to run on your own machine. Type "us bank" and usbank.com comes first.
 
 It indexes names, not pages. For each site it keeps the homepage title and description, the words other sites use when they link to it, and a few aliases. That is about 1 KB per site, so a million sites fit in roughly a gigabyte on a homelab server or a desktop.
 

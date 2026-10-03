@@ -466,7 +466,7 @@ fn render_opensearch(origin: &str) -> String {
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
          <OpenSearchDescription xmlns=\"http://a9.com/-/spec/opensearch/1.1/\">\n\
          <ShortName>Plumb Search</ShortName>\n\
-         <Description>Find a site by its name.</Description>\n\
+         <Description>Plumb Search</Description>\n\
          <InputEncoding>UTF-8</InputEncoding>\n\
          <Image width=\"32\" height=\"32\" type=\"image/png\">\
          data:image/png;base64,{ICON_PNG_BASE64}</Image>\n\
@@ -694,7 +694,7 @@ fn render_home(docs: u64, status: Option<&Status>, now: u64) -> String {
         .map(|note| format!("\n<p class=\"s\">{}</p>", escape_html(&note)))
         .unwrap_or_default();
     let body = format!(
-        "<main class=\"wrap home\">\n<h1>Plumb</h1>\n<p class=\"tag\">Find a site by its name.</p>\n\
+        "<main class=\"wrap home\">\n<h1>Plumb</h1>\n\
          {}\n<p class=\"s\">{} sites indexed{note}</p>{wikidata}\n</main>",
         search_form("", true),
         group_thousands(docs)
@@ -1600,7 +1600,7 @@ mod tests {
         );
         for expected in [
             "\n<ShortName>Plumb Search</ShortName>\n",
-            "\n<Description>Find a site by its name.</Description>\n",
+            "\n<Description>Plumb Search</Description>\n",
             "\n<InputEncoding>UTF-8</InputEncoding>\n",
             // A PNG starts with these bytes, in base64.
             "\n<Image width=\"32\" height=\"32\" type=\"image/png\">\
