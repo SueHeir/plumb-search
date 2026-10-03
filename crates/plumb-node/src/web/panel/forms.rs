@@ -87,6 +87,15 @@ pub(in crate::web) fn features_error(
             form.share_popularity.is_some(),
         ));
         fields.push_str(&format!("<label for=\"bootstrap\">Bootstrap nodes</label><p id=\"bootstrap-help\" class=\"hint\">One multiaddress per line. Leave empty to use nearby-node discovery.</p><textarea id=\"bootstrap\" name=\"bootstrap\" spellcheck=\"false\" aria-describedby=\"bootstrap-help\">{}</textarea>", escape_html(&form.bootstrap)));
+        if form.trust_shown.is_some() {
+            fields.push_str("<input type=\"hidden\" name=\"trust_shown\" value=\"1\">");
+            fields.push_str(&checkbox(
+                "default_trust",
+                "Trust plumbsearch.org's crawler",
+                form.default_trust.is_some(),
+            ));
+            fields.push_str(&format!("<label for=\"trusted\">Trusted nodes</label><p id=\"trusted-help\" class=\"hint\">Other node ids whose crawls are taken in at once, one per line. Only add nodes you run or know.</p><textarea id=\"trusted\" name=\"trusted\" spellcheck=\"false\" aria-describedby=\"trusted-help\">{}</textarea>", escape_html(&form.trusted)));
+        }
     }
     retry_page(
         status,
@@ -202,5 +211,40 @@ mod tests {
         assert!(body.contains("name=\"section\" value=\"search\""));
         assert!(body.contains("name=\"private_search\" value=\"1\" checked"));
         assert!(!body.contains("name=\"bootstrap\""));
+    }
+    #[tokio::test]
+    async fn recovery_preserves_explicit_trust_choices_and_legacy_forms() {
+        for enabled in [false, true] {
+            let form = FeaturesForm {
+                section: "network".into(),
+                trust_shown: Some("1".into()),
+                default_trust: enabled.then(|| "1".into()),
+                trusted: "bad-node\n<script>\n".into(),
+                ..Default::default()
+            };
+            let body = text(features_error(
+                StatusCode::BAD_REQUEST,
+                &form,
+                "/app/nodes/test",
+                "Invalid trusted node",
+            ))
+            .await;
+            assert!(body.contains("name=\"trust_shown\" value=\"1\""));
+            assert_eq!(
+                body.contains("name=\"default_trust\" value=\"1\" checked"),
+                enabled
+            );
+            assert!(body.contains(">bad-node\n&lt;script&gt;\n</textarea>"));
+            assert!(!body.contains("<script>"));
+        }
+        let legacy = text(features_error(
+            StatusCode::BAD_REQUEST,
+            &FeaturesForm::default(),
+            "/app",
+            "Invalid address",
+        ))
+        .await;
+        assert!(!legacy.contains("name=\"trust_shown\""));
+        assert!(!legacy.contains("name=\"default_trust\""));
     }
 }
