@@ -12,7 +12,7 @@
 //! | `aliases`     | other names                                          | BM25                        |
 //! | `anchors`     | inbound link texts, frequent ones repeated           | BM25                        |
 //! | `joined`      | label, title and its parts, aliases, top link texts  | BM25, one token per name    |
-//! | `label_key`   | joined label                                         | exact label match           |
+//! | `label_key`   | joined label, labels of sites redirecting here       | exact label match           |
 //! | `alias_key`   | joined aliases                                       | exact alias match           |
 //! | `link_score`  | [`plumb_core::link_score`]                           | stored, fast                |
 //! | `country`     | [`plumb_core::site_country`], untokenized            | stored, fast                |
@@ -157,8 +157,13 @@ fn keys(record: IndexRecordOption) -> TextOptions {
 }
 
 /// The document for `record`, whose domain is canonical
-/// ([`plumb_core::canonical_domain`]).
-pub(crate) fn document(f: &Fields, record: &SiteRecord) -> TantivyDocument {
+/// ([`plumb_core::canonical_domain`]). `redirect_names` are the domain
+/// labels of sites that redirect to it, which name it as its own label does.
+pub(crate) fn document(
+    f: &Fields,
+    record: &SiteRecord,
+    redirect_names: &[String],
+) -> TantivyDocument {
     let domain = record.domain.as_str();
     let mut doc = TantivyDocument::default();
     doc.add_text(f.domain, domain);
@@ -175,6 +180,11 @@ pub(crate) fn document(f: &Fields, record: &SiteRecord) -> TantivyDocument {
     }
     doc.add_text(f.label_key, &label);
     doc.add_text(f.joined, &label);
+    for name in redirect_names {
+        doc.add_text(f.label_key, name);
+        doc.add_text(f.joined, name);
+        doc.add_text(f.aliases, name);
+    }
 
     if let Some(title) = non_empty(&record.title) {
         let title = truncate_chars(title, MAX_TEXT_CHARS);

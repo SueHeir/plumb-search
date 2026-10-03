@@ -100,6 +100,20 @@ pub struct SiteRecord {
     /// each failure.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub crawl_failures: u32,
+    /// Where the homepage sent the crawler instead, when it redirects to
+    /// another site (`pncbank.com` -> `pnc.com`), as of the last crawl. Such
+    /// a site is the other one under another name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redirect: Option<Redirect>,
+}
+
+/// A homepage's redirect to another registrable domain.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Redirect {
+    /// The registrable domain redirected to.
+    pub to: String,
+    /// Unix seconds of the crawl that saw it.
+    pub at: u64,
 }
 
 /// Inbound link text and the sites that link with it.
@@ -287,7 +301,7 @@ impl SiteRecord {
     /// overlap, so adding would double count), `official_site` is OR-ed, and
     /// `crawl_attempted_at` keeps the later time, with the `crawl_failures`
     /// counted at that attempt (the larger count when both tried at the same
-    /// time).
+    /// time). A redirect stays only when no successful crawl came after it.
     pub fn merge(&mut self, other: SiteRecord) {
         debug_assert_eq!(self.domain, other.domain);
         let other_is_fresher = other.crawled_at.is_some() && other.crawled_at >= self.crawled_at;
@@ -317,6 +331,17 @@ impl SiteRecord {
                     self.headings = other.headings;
                 }
                 self.body_text = self.body_text.take().or(other.body_text);
+            }
+        }
+        // The latest crawl decides: a redirect seen after the last
+        // successful crawl stands, a successful crawl after it ends it.
+        self.redirect = match (self.redirect.take(), other.redirect) {
+            (Some(mine), Some(theirs)) => Some(if theirs.at >= mine.at { theirs } else { mine }),
+            (mine, theirs) => mine.or(theirs),
+        };
+        if let (Some(redirect), Some(crawled_at)) = (&self.redirect, self.crawled_at) {
+            if crawled_at > redirect.at {
+                self.redirect = None;
             }
         }
         self.country = self.country.take().or(other.country);
@@ -955,6 +980,39 @@ mod tests {
         assert!((unknown - plain - 0.15).abs() < 1e-6);
         assert!(unknown < few && few < many && many < most);
         assert!((most - plain - 0.20).abs() < 1e-6);
+    }
+
+    #[test]
+    fn redirects_last_until_a_later_successful_crawl() {
+        let redirect = |at: u64| SiteRecord {
+            redirect: Some(Redirect {
+                to: "pnc.com".into(),
+                at,
+            }),
+            ..SiteRecord::new("pncbank.com")
+        };
+        let crawled = |at: u64| SiteRecord {
+            crawled_at: Some(at),
+            title: Some("PNC Bank".into()),
+            ..SiteRecord::new("pncbank.com")
+        };
+        // In either order, the later event wins.
+        for (first, second) in [(crawled(10), redirect(20)), (redirect(20), crawled(10))] {
+            let mut record = first;
+            record.merge(second);
+            assert_eq!(
+                record.redirect.as_ref().map(|r| r.to.as_str()),
+                Some("pnc.com")
+            );
+        }
+        for (first, second) in [(crawled(30), redirect(20)), (redirect(20), crawled(30))] {
+            let mut record = first;
+            record.merge(second);
+            assert_eq!(record.redirect, None);
+        }
+        let mut record = redirect(20);
+        record.merge(redirect(10));
+        assert_eq!(record.redirect.unwrap().at, 20);
     }
 
     #[test]

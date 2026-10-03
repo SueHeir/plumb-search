@@ -175,8 +175,8 @@ pub trait Meaning {
 }
 
 /// What [`build_index`] built. Every record is a document, merged into
-/// another one, or skipped: `docs + merged + skipped` is the number of
-/// records.
+/// another one, skipped or folded into the site it redirects to: `docs +
+/// merged + skipped + redirected` is the number of records.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IndexStats {
     /// Documents in the index, one per domain.
@@ -189,6 +189,10 @@ pub struct IndexStats {
     /// included.
     #[serde(default)]
     pub skipped: u64,
+    /// Records left out because their homepage redirects to another site in
+    /// the index, whose names they joined.
+    #[serde(default)]
+    pub redirected: u64,
 }
 
 /// One search result.
@@ -269,9 +273,12 @@ pub struct SearchResults {
 /// Its parent must be writable, and `dir` itself cannot be a mount point
 /// (mount the parent).
 pub fn build_index(dir: &Path, records: &[SiteRecord]) -> Result<IndexStats> {
-    let (sites, stats) = merge_by_domain(records);
+    let (sites, mut stats) = merge_by_domain(records);
+    let (sites, redirect_names) = fold_redirects(sites);
+    stats.redirected = stats.docs - sites.len() as u64;
+    stats.docs = sites.len() as u64;
     let staging = Staging::new(dir)?;
-    write_index(staging.path(), &sites)?;
+    write_index(staging.path(), &sites, &redirect_names)?;
     staging.install()?;
     Ok(stats)
 }
@@ -315,10 +322,61 @@ fn merge_by_domain(records: &[SiteRecord]) -> (Vec<Cow<'_, SiteRecord>>, IndexSt
     (sites, stats)
 }
 
+/// Leaves out the sites whose homepage redirects to another site in
+/// `sites` (`pncbank.com` -> `pnc.com`): they are that site under another
+/// name. Their domain labels become names of the site they redirect to,
+/// returned by its position in the sites kept, so "pnc bank" names pnc.com.
+fn fold_redirects(
+    sites: Vec<Cow<'_, SiteRecord>>,
+) -> (Vec<Cow<'_, SiteRecord>>, HashMap<usize, Vec<String>>) {
+    let positions: HashMap<&str, usize> = sites
+        .iter()
+        .enumerate()
+        .map(|(i, site)| (site.domain.as_str(), i))
+        .collect();
+    // Only one step: a site that itself redirects is not a target.
+    let target_of = |site: &SiteRecord| {
+        let to = canonical_domain(&site.redirect.as_ref()?.to)?;
+        let &target = positions.get(to.as_str())?;
+        (sites[target].redirect.is_none() && sites[target].domain != site.domain).then_some(target)
+    };
+    let targets: Vec<Option<usize>> = sites.iter().map(|site| target_of(site)).collect();
+    let mut kept_at = vec![None; sites.len()];
+    let mut kept = 0;
+    for (i, target) in targets.iter().enumerate() {
+        if target.is_none() {
+            kept_at[i] = Some(kept);
+            kept += 1;
+        }
+    }
+    let mut names: HashMap<usize, Vec<String>> = HashMap::new();
+    for (i, target) in targets.iter().enumerate() {
+        if let Some(target) = target.and_then(|t| kept_at[t]) {
+            names
+                .entry(target)
+                .or_default()
+                .push(schema::label_text(&sites[i].domain));
+        }
+    }
+    drop(positions);
+    let sites = sites
+        .into_iter()
+        .zip(&targets)
+        .filter(|(_, target)| target.is_none())
+        .map(|(site, _)| site)
+        .collect();
+    (sites, names)
+}
+
 /// Writes a complete index of `sites`, whose domains are canonical and
 /// unique, into the empty directory `dir`: one commit, then a merge into a
-/// single segment.
-fn write_index(dir: &Path, sites: &[Cow<SiteRecord>]) -> Result<()> {
+/// single segment. `redirect_names` holds the names other sites give each
+/// site by redirecting to it, by position.
+fn write_index(
+    dir: &Path,
+    sites: &[Cow<SiteRecord>],
+    redirect_names: &HashMap<usize, Vec<String>>,
+) -> Result<()> {
     let schema = schema::schema();
     let fields = Fields::new(&schema)?;
     let index = Index::create_in_dir(dir, schema)
@@ -330,8 +388,9 @@ fn write_index(dir: &Path, sites: &[Cow<SiteRecord>]) -> Result<()> {
         .context("opening index writer")?;
     // Merge once at the end instead of while indexing.
     writer.set_merge_policy(Box::new(NoMergePolicy));
-    for site in sites {
-        writer.add_document(schema::document(&fields, site))?;
+    for (i, site) in sites.iter().enumerate() {
+        let names = redirect_names.get(&i).map_or(&[][..], Vec::as_slice);
+        writer.add_document(schema::document(&fields, site, names))?;
     }
     writer.commit().context("committing index")?;
     fail_point("after_commit")?;
@@ -1256,6 +1315,43 @@ mod tests {
             Some("American credit union"),
             "{hits:?}"
         );
+    }
+
+    #[test]
+    fn sites_that_redirect_name_the_site_they_redirect_to() {
+        let mut lookalike = site(
+            "pncbank.com",
+            Some("PNC Bank"),
+            None,
+            &[],
+            &[],
+            ranked(9_000, 400),
+        );
+        lookalike.redirect = Some(plumb_core::Redirect {
+            to: "pnc.com".into(),
+            at: 1,
+        });
+        // A redirect to a site not in the index changes nothing.
+        let mut elsewhere = site("fb.example", None, None, &[], &[], ranked(50_000, 10));
+        elsewhere.redirect = Some(plumb_core::Redirect {
+            to: "facebook.example".into(),
+            at: 1,
+        });
+        let records = vec![
+            site("pnc.com", None, None, &[], &[], ranked(2_000, 900)),
+            lookalike,
+            elsewhere,
+            site("bank.com", None, None, &[], &[], ranked(3_000, 900)),
+        ];
+        let dir = TempDir::new().unwrap();
+        let stats = build_index(dir.path(), &records).unwrap();
+        assert_eq!((stats.docs, stats.redirected), (3, 1));
+        let searcher = Searcher::open(dir.path()).unwrap();
+        let hits = searcher.search("pnc bank", 10).unwrap();
+        assert_eq!(hits[0].domain, "pnc.com", "{hits:?}");
+        assert!(domains(&hits).iter().all(|d| *d != "pncbank.com"));
+        assert_eq!(top(&searcher, "pncbank"), "pnc.com");
+        assert_eq!(top(&searcher, "fb example"), "fb.example");
     }
 
     /// A [`Meaning`] with fixed closeness per domain.
@@ -2277,6 +2373,7 @@ mod tests {
             docs: 1,
             merged: 0,
             skipped: 5,
+            redirected: 0,
         };
         assert_eq!(stats, expected);
         let searcher = Searcher::open(dir.path()).unwrap();
@@ -2327,6 +2424,7 @@ mod tests {
             docs: 2,
             merged: 2,
             skipped: 0,
+            redirected: 0,
         };
         assert_eq!(stats, expected);
 
