@@ -89,7 +89,14 @@ fn node_config(args: RunArgs) -> NodeConfig {
         .iter()
         .map(|addr| addr.parse().expect("a valid multiaddr"))
         .collect();
-        net.bootstrap = args.bootstrap;
+        if !args.no_default_bootstrap {
+            net.bootstrap = plumb_net::default_bootstrap();
+        }
+        for addr in args.bootstrap {
+            if !net.bootstrap.contains(&addr) {
+                net.bootstrap.push(addr);
+            }
+        }
         net.external = args.public_addr;
         net.relay_server = args.relay;
         net.upnp = !args.no_upnp;
@@ -264,7 +271,25 @@ mod tests {
         let none = config(&["--data", "d", "--network", "--no-default-trust"]);
         assert!(none.network.unwrap().trusted_peers.is_empty());
         assert_eq!(net.listen[0].to_string(), "/ip4/0.0.0.0/tcp/4100");
-        assert_eq!(net.bootstrap.len(), 1);
+        // The network's own first nodes, then the one given.
+        assert_eq!(net.bootstrap.len(), plumb_net::DEFAULT_BOOTSTRAP.len() + 1);
+        assert_eq!(
+            net.bootstrap[0].to_string(),
+            plumb_net::DEFAULT_BOOTSTRAP[0]
+        );
+        let apart = config(&["--data", "d", "--network", "--no-default-bootstrap"]);
+        assert!(apart.network.unwrap().bootstrap.is_empty());
+        let given_twice = config(&[
+            "--data",
+            "d",
+            "--network",
+            "--bootstrap",
+            plumb_net::DEFAULT_BOOTSTRAP[0],
+        ]);
+        assert_eq!(
+            given_twice.network.unwrap().bootstrap.len(),
+            plumb_net::DEFAULT_BOOTSTRAP.len()
+        );
         assert_eq!(net.external.len(), 1);
         assert!(net.relay_server && net.upnp);
         assert!(!node.share_popularity);

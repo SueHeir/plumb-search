@@ -52,7 +52,7 @@ On a desktop or laptop, install the desktop app for Windows, macOS or Linux ([do
 
 ### Join the Plumb network (prototype)
 
-`plumb run --network --bootstrap <node address>` connects a node to other Plumb nodes: it crawls only the sites the network assigns it each day, shares signed crawl results with the others, takes in theirs, and can search other nodes without sending them the query (`/network?q=`, linked from every results page). No port forwarding is needed. See [docs/network.md](docs/network.md) for the design, the flags and what is not done yet.
+`plumb run --network` connects a node to other Plumb nodes, starting from plumbsearch.org (the Docker image does this by default): it crawls only the sites the network assigns it each day, shares signed crawl results with the others, takes in theirs, and can search other nodes without sending them the query (`/network?q=`, linked from every results page). No port forwarding is needed. See [docs/network.md](docs/network.md) for the design, the flags and what is not done yet.
 
 ### Private search
 

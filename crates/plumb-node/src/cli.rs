@@ -189,9 +189,15 @@ pub struct RunArgs {
     )]
     pub p2p_port: u16,
     /// A node to connect to first, as a multiaddr ending in /p2p/<id>, e.g.
-    /// /dns4/plumbsearch.org/tcp/4001/p2p/12D3Koo...; may be repeated.
+    /// /ip4/192.168.1.20/tcp/4001/p2p/12D3Koo...; may be repeated. The
+    /// network's own first nodes, on plumbsearch.org, are tried as well.
     #[arg(long, value_name = "MULTIADDR", requires = "network")]
     pub bootstrap: Vec<plumb_net::Multiaddr>,
+    /// Do not start from the network's own first nodes on plumbsearch.org;
+    /// only from --bootstrap nodes and nodes on the local network. For test
+    /// networks that must stay apart from the real one.
+    #[arg(long, requires = "network")]
+    pub no_default_bootstrap: bool,
     /// An address other nodes can reach this one at, for a server with a
     /// public address, e.g. /ip4/203.0.113.7/tcp/4001; may be repeated.
     #[arg(long, value_name = "MULTIADDR", requires = "network")]
