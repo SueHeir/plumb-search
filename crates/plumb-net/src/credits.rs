@@ -296,10 +296,7 @@ impl Issuer {
         };
         let spent_path = dir.join(SPENT_FILE);
         let spent = match fs::read(&spent_path) {
-            Ok(bytes) => bytes
-                .chunks_exact(32)
-                .map(|c| c.try_into().expect("32 bytes"))
-                .collect(),
+            Ok(bytes) => bytes.as_chunks::<32>().0.iter().copied().collect(),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => HashSet::new(),
             Err(err) => {
                 return Err(err).with_context(|| format!("reading {}", spent_path.display()))
