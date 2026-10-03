@@ -30,13 +30,16 @@ libp2p = { version = "0.57.0", features = [
     "mdns",
     "yamux",
 ] }
-plumb-core = { version = "0.1.0", path = "../plumb-core" }
+plumb-core = { version = "0.1.0", path = "../plumb-core", features = ["oblivious"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 rand_core = { version = "0.6", features = ["getrandom"] }
 sha2 = "0.10"
 tokio = { version = "1.53.1", features = ["full"] }
 tracing = "0.1.44"
+ohttp = { version = "0.8", default-features = false, features = ["client", "server", "rust-hpke"] }
+cbor4ii = { version = "1.2", features = ["serde1"] }
+serde_bytes = "0.11"
 
 [dev-dependencies]
 tempfile = "3.27.0"

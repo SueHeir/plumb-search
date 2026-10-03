@@ -5,8 +5,12 @@
 //! request and dropped. So the node answering cannot tie the request to the
 //! asking node's permanent id (the one its crawls are signed with), nor to
 //! the other buckets of the same search, which go to other nodes under
-//! other identities. It still sees the IP address the request comes from;
-//! hiding that takes a relay run by someone else (Oblivious HTTP, planned).
+//! other identities. And each request goes **through another node**, a
+//! relay picked at random, sealed to the answering node's key (see
+//! [`crate::oblivious`]), so the node answering sees the relay's IP address,
+//! not the asker's, and the relay never sees the bucket. Only when no other
+//! node can relay (a network of two) does a request go straight to the
+//! node; [`NetSearch::direct`] counts those.
 //!
 //! Every answer is checked: a record with a proof gets the text of its
 //! signed crawl, an answer holding a proof that does not check out is
@@ -29,6 +33,10 @@ use tracing::{debug, warn};
 
 use crate::batch::MAX_RECORD_BYTES;
 use crate::bucket::{matches, search_buckets};
+use crate::oblivious::{
+    open_response, seal_request, ObliviousRequest, ObliviousResponse, MAX_MESSAGE,
+    OBLIVIOUS_PROTOCOL,
+};
 use crate::proto::{BucketRequest, BucketResponse, BUCKET_PROTOCOL};
 
 /// Nodes each bucket is asked of, when there are that many, so that one
@@ -36,6 +44,8 @@ use crate::proto::{BucketRequest, BucketResponse, BUCKET_PROTOCOL};
 pub const NODES_PER_BUCKET: usize = 2;
 /// Most records accepted in one bucket.
 pub const MAX_BUCKET_RECORDS: usize = 20_000;
+/// Relays a bucket request is tried through before giving up on it.
+pub const RELAY_TRIES: usize = 2;
 
 /// The result of a network search: candidate sites to rank locally.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -46,6 +56,12 @@ pub struct NetSearch {
     pub asked: usize,
     /// Requests answered in time.
     pub answered: usize,
+    /// Of those, answered sealed through a relay, so the node answering
+    /// never saw this node's IP address.
+    pub relayed: usize,
+    /// Requests sent straight to the node answering, because no other node
+    /// could relay them. That node saw this node's IP address.
+    pub direct: usize,
     /// Answers dropped because a proof in them did not check out.
     pub rejected: usize,
     /// The sites that match the query, unranked.
@@ -70,6 +86,9 @@ pub struct FoundSite {
 pub struct BucketPeer {
     pub peer: PeerId,
     pub addrs: Vec<Multiaddr>,
+    /// It relays sealed requests for others, and answers those sealed to
+    /// it (see [`crate::oblivious`]).
+    pub oblivious: bool,
 }
 
 /// Searches `peers` for `query`: asks for the query's buckets (padded with
@@ -102,16 +121,61 @@ pub async fn search(query: &str, peers: &[BucketPeer], wait: Duration, now: u64)
         }
     }
     out.asked = requests.len();
-    let answers = futures::future::join_all(
-        requests
-            .into_iter()
-            .map(|(bucket, peer)| async move { fetch_bucket(&peer, bucket, wait).await }),
-    )
+    // Relays, in a random order; each request starts at its own place in
+    // it, so the requests of one search go through different relays.
+    let mut relays: Vec<&BucketPeer> = peers.iter().filter(|p| p.oblivious).collect();
+    shuffle(&mut relays);
+    let routed: Vec<_> = requests
+        .into_iter()
+        .enumerate()
+        .map(|(i, (bucket, target))| {
+            let through: Vec<BucketPeer> = if target.oblivious {
+                (0..relays.len())
+                    .map(|k| relays[(i + k) % relays.len()])
+                    .filter(|r| r.peer != target.peer)
+                    .take(RELAY_TRIES)
+                    .cloned()
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            (bucket, target, through)
+        })
+        .collect();
+    out.direct = routed
+        .iter()
+        .filter(|(_, _, through)| through.is_empty())
+        .count();
+    let answers = futures::future::join_all(routed.into_iter().map(
+        |(bucket, target, through)| async move {
+            if through.is_empty() {
+                return fetch_bucket(&target, bucket, wait)
+                    .await
+                    .map(|r| (r, false));
+            }
+            // A relay that cannot reach the node gets one stand-in, in
+            // what is left of the time. Never straight to the node: that
+            // would show it who asks.
+            let deadline = tokio::time::Instant::now() + wait;
+            let mut last = None;
+            for relay in &through {
+                let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+                match fetch_oblivious(relay, &target.peer, bucket, left, now).await {
+                    Ok(response) => return Ok((response, true)),
+                    Err(err) => {
+                        debug!("relay {} for {}: {err:#}", relay.peer, target.peer);
+                        last = Some(err);
+                    }
+                }
+            }
+            Err(last.unwrap_or_else(|| anyhow::anyhow!("no relay")))
+        },
+    ))
     .await;
 
     let mut merged: HashMap<String, FoundSite> = HashMap::new();
     for answer in answers {
-        let response = match answer {
+        let (response, relayed) = match answer {
             Ok(response) => response,
             Err(err) => {
                 debug!("a bucket request failed: {err:#}");
@@ -122,6 +186,9 @@ pub async fn search(query: &str, peers: &[BucketPeer], wait: Duration, now: u64)
             continue;
         };
         out.answered += 1;
+        if relayed {
+            out.relayed += 1;
+        }
         let Some(checked) = check_answer(records, now) else {
             out.rejected += 1;
             continue;
@@ -228,17 +295,14 @@ fn worse_rank<T: Ord>(a: Option<T>, b: Option<T>) -> Option<T> {
 struct Fetcher {
     relay_client: relay::client::Behaviour,
     buckets: request_response::cbor::Behaviour<BucketRequest, BucketResponse>,
+    oblivious: request_response::cbor::Behaviour<ObliviousRequest, ObliviousResponse>,
 }
 
-/// Asks `peer` for `bucket` under a new identity, on a swarm made for this
-/// one request.
-pub async fn fetch_bucket(
-    peer: &BucketPeer,
-    bucket: u32,
-    wait: Duration,
-) -> Result<BucketResponse> {
+/// A swarm under a new identity, made for one request and dropped after.
+fn throwaway(wait: Duration) -> Result<libp2p::Swarm<Fetcher>> {
     let key = Keypair::generate_ed25519();
-    let mut swarm = libp2p::SwarmBuilder::with_existing_identity(key)
+    let config = request_response::Config::default().with_request_timeout(wait);
+    Ok(libp2p::SwarmBuilder::with_existing_identity(key)
         .with_tokio()
         .with_tcp(
             tcp::Config::default().nodelay(true),
@@ -261,11 +325,32 @@ pub async fn fetch_bucket(
                     StreamProtocol::new(BUCKET_PROTOCOL),
                     ProtocolSupport::Outbound,
                 )],
-                request_response::Config::default().with_request_timeout(wait),
+                config.clone(),
+            ),
+            oblivious: request_response::Behaviour::with_codec(
+                request_response::cbor::codec::Codec::default()
+                    .set_request_size_maximum(4 * 1024)
+                    .set_response_size_maximum(MAX_MESSAGE as u64 + 1024),
+                [(
+                    StreamProtocol::new(OBLIVIOUS_PROTOCOL),
+                    ProtocolSupport::Outbound,
+                )],
+                config,
             ),
         })
         .map_err(|err| anyhow::anyhow!("setting up a throwaway swarm: {err}"))?
-        .build();
+        .build())
+}
+
+/// Asks `peer` for `bucket` under a new identity, on a swarm made for this
+/// one request. The node sees where the request comes from; a search uses
+/// [`fetch_oblivious`] whenever it can.
+pub async fn fetch_bucket(
+    peer: &BucketPeer,
+    bucket: u32,
+    wait: Duration,
+) -> Result<BucketResponse> {
+    let mut swarm = throwaway(wait)?;
     for addr in &peer.addrs {
         swarm.add_peer_address(peer.peer, addr.clone());
     }
@@ -291,6 +376,82 @@ pub async fn fetch_bucket(
                     "a throwaway identity could not reach {}: {error}",
                     peer.peer
                 );
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Asks `target` for `bucket` through `relay`, under a new identity: gets
+/// the target's key from the relay, seals the request to it, and has the
+/// relay pass it on (see [`crate::oblivious`]). The relay sees this node's
+/// address but not the bucket; the target sees the bucket but only the
+/// relay's address.
+pub async fn fetch_oblivious(
+    relay: &BucketPeer,
+    target: &PeerId,
+    bucket: u32,
+    wait: Duration,
+    now: u64,
+) -> Result<BucketResponse> {
+    let mut swarm = throwaway(wait)?;
+    for addr in &relay.addrs {
+        swarm.add_peer_address(relay.peer, addr.clone());
+    }
+    let deadline = tokio::time::Instant::now() + wait;
+    let keys = match ask(
+        &mut swarm,
+        relay.peer,
+        ObliviousRequest::Keys { target: *target },
+        deadline,
+    )
+    .await?
+    {
+        ObliviousResponse::Keys(Some(keys)) => keys,
+        _ => bail!("the relay {} has no key for {target}", relay.peer),
+    };
+    let (message, opener) = seal_request(&keys, target, now, &BucketRequest { bucket })?;
+    let request = ObliviousRequest::Forward {
+        target: *target,
+        message: serde_bytes::ByteBuf::from(message),
+    };
+    match ask(&mut swarm, relay.peer, request, deadline).await? {
+        ObliviousResponse::Sealed(Some(answer)) => open_response(opener, &answer),
+        _ => bail!("the relay {} got no answer from {target}", relay.peer),
+    }
+}
+
+/// Sends `request` to `relay` and waits for its answer until `deadline`.
+async fn ask(
+    swarm: &mut libp2p::Swarm<Fetcher>,
+    relay: PeerId,
+    request: ObliviousRequest,
+    deadline: tokio::time::Instant,
+) -> Result<ObliviousResponse> {
+    let id = swarm
+        .behaviour_mut()
+        .oblivious
+        .send_request(&relay, request);
+    loop {
+        let event = tokio::time::timeout_at(deadline, swarm.select_next_some())
+            .await
+            .context("no answer in time")?;
+        match event {
+            SwarmEvent::Behaviour(FetcherEvent::Oblivious(request_response::Event::Message {
+                message:
+                    request_response::Message::Response {
+                        request_id,
+                        response,
+                    },
+                ..
+            })) if request_id == id => return Ok(response),
+            SwarmEvent::Behaviour(FetcherEvent::Oblivious(
+                request_response::Event::OutboundFailure {
+                    request_id, error, ..
+                },
+            )) if request_id == id => bail!("asking the relay {relay}: {error}"),
+            SwarmEvent::OutgoingConnectionError { error, .. } => {
+                debug!("a throwaway identity could not reach the relay {relay}: {error}");
             }
             _ => {}
         }

@@ -7,7 +7,16 @@ repository.workspace = true
 
 [dependencies]
 anyhow = "1.0.104"
+cbor4ii = { version = "1.2", features = ["serde1"], optional = true }
+libp2p-identity = { version = "0.3", default-features = false, features = ["ed25519", "peerid"], optional = true }
+ohttp = { version = "0.8", default-features = false, features = ["client", "rust-hpke"], optional = true }
 psl = "2.1.238"
 serde = { version = "1.0.229", features = ["derive"] }
+serde_bytes = { version = "0.11", optional = true }
 serde_json = "1.0.151"
 url = "2.5.8"
+
+[features]
+# The client half of sealed bucket requests (see `oblivious`), for nodes and
+# for the browser's WASM client.
+oblivious = ["dep:ohttp", "dep:libp2p-identity", "dep:serde_bytes", "dep:cbor4ii"]

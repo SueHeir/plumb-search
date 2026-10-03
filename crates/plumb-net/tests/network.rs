@@ -184,6 +184,9 @@ async fn nodes_share_batches_search_each_other_and_reach_through_a_relay() {
     ];
     assert!(crawlers.iter().any(|c| hit.crawler.as_deref() == Some(c)));
     assert_eq!(result.rejected, 0);
+    // With other nodes to relay, every request went through one.
+    assert_eq!(result.direct, 0, "{result:?}");
+    assert_eq!(result.relayed, result.answered, "{result:?}");
 
     // C is behind the relay: it holds a reservation, and a node that only
     // knows the relay's address reaches C through it. That includes a
@@ -197,6 +200,7 @@ async fn nodes_share_batches_search_each_other_and_reach_through_a_relay() {
     let peer = plumb_net::search::BucketPeer {
         peer: c.handle.peer_id(),
         addrs: vec![circuit.clone()],
+        oblivious: true,
     };
     let bucket = plumb_net::bucket::bucket_of("harbor");
     let served_before = c.handle.status().buckets_served;
@@ -274,6 +278,83 @@ async fn nodes_share_batches_search_each_other_and_reach_through_a_relay() {
     );
 
     for node in [a, b, c, d, e, f, relay_got] {
+        node.handle.shutdown().await;
+    }
+}
+
+/// A search goes through a relay: the node answering gets a sealed request
+/// from the relay, the relay hands everyone the same key for it, and
+/// cannot pass off a key of its own.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn bucket_requests_go_sealed_through_a_relay() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("plumb_net=debug")
+        .with_test_writer()
+        .try_init();
+
+    let relay = Node::start(true, vec![], vec![]).await;
+    let relay_addr = relay.addr().await;
+    // The crawler publishes a signed crawl; the holder catches up on it
+    // and answers from an index holding it, as C does above.
+    let crawler = Node::start(false, vec![relay_addr.clone()], vec![]).await;
+    let records = vec![crawled_for(&[crawler.handle.peer_id()], "lantern")];
+    crawler
+        .handle
+        .publish(records.clone())
+        .await
+        .unwrap()
+        .unwrap();
+    let holder = Node::start(false, vec![relay_addr.clone()], records.clone()).await;
+    // Its proof comes from the batch, held whether or not a second
+    // crawler has agreed yet.
+    wait_for(|| (holder.handle.status().batches_held >= 1).then_some(())).await;
+    let asker = Node::start(false, vec![relay_addr.clone()], vec![]).await;
+    wait_for(|| (asker.handle.status().connected_peers >= 3).then_some(())).await;
+
+    // The relay hands out the holder's own key, the same one each time.
+    let target = holder.handle.peer_id();
+    let own = holder.handle.oblivious_keys(target).await.unwrap().unwrap();
+    let mut via_relay = None;
+    for _ in 0..50 {
+        via_relay = relay.handle.oblivious_keys(target).await.unwrap();
+        if via_relay.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let via_relay = via_relay.expect("the relay fetches the key");
+    assert_eq!(via_relay, own);
+    assert_eq!(
+        relay.handle.oblivious_keys(target).await.unwrap().unwrap(),
+        own
+    );
+
+    let served_before = holder.handle.status().buckets_served;
+    let mut result = None;
+    for _ in 0..50 {
+        let found = asker
+            .handle
+            .search("lantern", Duration::from_secs(5))
+            .await
+            .unwrap();
+        if found.found.iter().any(|f| f.verified) {
+            result = Some(found);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let result = result.expect("a verified hit through a relay");
+    assert_eq!(result.found[0].record.domain, records[0].domain);
+    assert_eq!(result.direct, 0, "{result:?}");
+    assert_eq!(result.relayed, result.answered, "{result:?}");
+    assert!(holder.handle.status().buckets_served > served_before);
+    let relayed: u64 = [&relay, &crawler, &holder]
+        .iter()
+        .map(|n| n.handle.status().requests_relayed)
+        .sum();
+    assert!(relayed >= result.answered as u64, "{relayed} {result:?}");
+
+    for node in [relay, crawler, holder, asker] {
         node.handle.shutdown().await;
     }
 }
