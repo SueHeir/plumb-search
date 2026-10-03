@@ -11,8 +11,9 @@
 //!
 //! Closing the window keeps the node running, so that searches from the
 //! browser keep working: the app stays in the menu bar (macOS) or the
-//! notification area (Windows, Linux), whose menu opens the window again or
-//! quits.
+//! notification area (Windows, Linux), whose menu opens the window again,
+//! turns "Start at login" on or off, or quits. Started at login, the app
+//! opens no window.
 //!
 //! No page can call into the app: the app defines no commands and grants no
 //! capabilities, so Tauri's IPC refuses everything.
@@ -31,18 +32,22 @@ use std::time::Duration;
 use anyhow::{anyhow, Context, Result};
 use plumb_node::node::{self, NodeConfig, NodeHandle};
 use tauri::async_runtime::{self, JoinHandle};
-use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, TrayIconBuilder, TrayIconEvent};
 use tauri::webview::NewWindowResponse;
 use tauri::{
     AppHandle, Manager, RunEvent, Url, WebviewUrl, WebviewWindowBuilder, Window, WindowEvent,
 };
+use tauri_plugin_autostart::{MacosLauncher, ManagerExt as _};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_opener::OpenerExt;
 use tracing::{debug, error, info, warn};
 
 /// Label of the app's one window.
 const MAIN_WINDOW: &str = "main";
+
+/// The argument the app is started with at login, when it opens no window.
+const AT_LOGIN: &str = "--at-login";
 
 /// The node's panel, which the window shows; its forms post under it.
 const PANEL_PATH: &str = "app";
@@ -78,6 +83,12 @@ fn main() {
                 .build(),
         )
         .plugin(tauri_plugin_dialog::init())
+        // A login item on macOS, a registry entry on Windows and an
+        // autostart entry on Linux, which start the app with AT_LOGIN.
+        .plugin(tauri_plugin_autostart::init(
+            MacosLauncher::LaunchAgent,
+            Some(vec![AT_LOGIN]),
+        ))
         .manage(Node::default())
         .on_window_event(on_window_event)
         .setup(|app| {
@@ -156,6 +167,9 @@ fn setup(app: &AppHandle) -> Result<()> {
             .min_inner_size(400.0, 300.0)
             .resizable(true)
             .center()
+            // At login the node starts in the background; the menu bar icon
+            // or launching the app again opens the window.
+            .visible(!started_at_login())
             .on_navigation(move |url| {
                 let node = navigating.state::<Node>();
                 match destination(url, node.url.get(), dev_server.as_ref()) {
@@ -438,16 +452,30 @@ async fn stop_signal() -> std::io::Result<()> {
 
 /// Menu item ids of the menu bar or notification area icon.
 const MENU_OPEN: &str = "open";
+const MENU_AT_LOGIN: &str = "at-login";
 const MENU_QUIT: &str = "quit";
 
 /// Adds the icon in the menu bar (macOS) or notification area (Windows,
 /// Linux), whose menu opens the window or quits the app. Double-clicking it
 /// opens the window too, where the system reports clicks (not on Linux).
 fn add_tray_icon(app: &AppHandle) -> Result<()> {
+    let at_login = app.autolaunch().is_enabled().unwrap_or_else(|err| {
+        warn!("cannot tell whether the app starts at login: {err}");
+        false
+    });
+    let at_login = CheckMenuItem::with_id(
+        app,
+        MENU_AT_LOGIN,
+        "Start at login",
+        true,
+        at_login,
+        None::<&str>,
+    )?;
     let menu = Menu::with_items(
         app,
         &[
             &MenuItem::with_id(app, MENU_OPEN, "Open Plumb Search", true, None::<&str>)?,
+            &at_login,
             &PredefinedMenuItem::separator(app)?,
             &MenuItem::with_id(app, MENU_QUIT, "Quit Plumb Search", true, None::<&str>)?,
         ],
@@ -460,8 +488,9 @@ fn add_tray_icon(app: &AppHandle) -> Result<()> {
         .icon(icon)
         .tooltip("Plumb Search")
         .menu(&menu)
-        .on_menu_event(|app, event| match event.id.as_ref() {
+        .on_menu_event(move |app, event| match event.id.as_ref() {
             MENU_OPEN => show_main_window(app),
+            MENU_AT_LOGIN => set_start_at_login(app, &at_login),
             MENU_QUIT => app.exit(0),
             _ => {}
         })
@@ -476,6 +505,36 @@ fn add_tray_icon(app: &AppHandle) -> Result<()> {
         })
         .build(app)?;
     Ok(())
+}
+
+/// Turns starting at login on or off, as the menu item now shows; if that
+/// fails, the item goes back to what is true.
+fn set_start_at_login(app: &AppHandle, item: &CheckMenuItem<tauri::Wry>) {
+    let wanted = item.is_checked().unwrap_or(false);
+    let autolaunch = app.autolaunch();
+    let changed = if wanted {
+        autolaunch.enable()
+    } else {
+        autolaunch.disable()
+    };
+    match changed {
+        Ok(()) => info!(
+            "start at login turned {}",
+            if wanted { "on" } else { "off" }
+        ),
+        Err(err) => {
+            warn!(
+                "cannot turn start at login {}: {err}",
+                if wanted { "on" } else { "off" }
+            );
+            let _ = item.set_checked(autolaunch.is_enabled().unwrap_or(!wanted));
+        }
+    }
+}
+
+/// Whether the system started the app at login.
+fn started_at_login() -> bool {
+    std::env::args().skip(1).any(|arg| arg == AT_LOGIN)
 }
 
 /// Closing the window hides it while the app stays in the menu bar or
