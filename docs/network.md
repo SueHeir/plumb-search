@@ -149,7 +149,7 @@ plumb run --data /data --network --relay \
 * The node id is printed at start ("joined the Plumb network as 12D3Koo...") and shown in `GET /api/status` under `network.peer_id`, with the addresses it listens on, its NAT status, its relays, and counts of batches held, published and received.
 * The node key is `DIR/net/node.key`. Keep it to keep the same id; a server's id is part of the bootstrap address others use.
 * The Docker image exposes 4001; publish it with `-p 4001:4001/tcp -p 4001:4001/udp` on a server that relays.
-* No bootstrap node runs yet, so for now nodes are joined by hand with `--bootstrap`. Once plumbsearch.org runs a relay node, its address becomes the default and `--network` the default too.
+* The desktop app joins the network when it starts, through the relay on plumbsearch.org (`/dns4/plumbsearch.org/tcp/4001/p2p/12D3KooWJ2UWUBsxmPfXTfHa8cBBmzifa6kj5pFZKfJXYNQyJ69a`). `plumb run` still joins only with `--network`, and takes its `--bootstrap` nodes by hand.
 
 ## What the prototype proves, and what it does not
 
