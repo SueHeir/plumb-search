@@ -438,6 +438,11 @@ fn build_swarm(key: &Keypair, config: &NetConfig) -> Result<Swarm<Behaviour>> {
                     relay::Config {
                         max_reservations: 1024,
                         max_circuits: 256,
+                        // Circuits to or from one node. A node behind NAT
+                        // gets every network search through its relay, each
+                        // bucket on its own throwaway connection, so the
+                        // default of 4 turns searches away.
+                        max_circuits_per_peer: 64,
                         ..relay::Config::default()
                     },
                 )
