@@ -44,9 +44,17 @@ fn work(inner: &Arc<Inner>) -> Result<()> {
     let meaning = match inner.meaning.get() {
         Some(meaning) => meaning,
         None => {
-            tokio::runtime::Handle::current()
-                .block_on(ensure_model(&model_dir))
-                .context("downloading the embedding model")?;
+            // A stop does not wait for the download, which can take minutes.
+            let downloaded = tokio::runtime::Handle::current().block_on(async {
+                tokio::select! {
+                    downloaded = ensure_model(&model_dir, &inner.config.sources.model_base_url) => Some(downloaded),
+                    () = inner.stopped() => None,
+                }
+            });
+            let Some(downloaded) = downloaded else {
+                return Ok(());
+            };
+            downloaded.context("downloading the embedding model")?;
             let embedder = load_embedder(&model_dir)?;
             let vectors = load_vectors_for(&vectors_path, &embedder)?;
             info!("search by meaning: {} site vectors loaded", vectors.len());
