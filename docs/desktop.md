@@ -4,8 +4,7 @@ The desktop app runs a Plumb Search node on your computer. You search in your
 own web browser, at `http://127.0.0.1:7586`. The app's window is a panel, not
 a browser but a dashboard of the node: what works now ("Limited search is
 ready" or "Search is ready"), the disk space and downloads it uses against
-their limits, how crawling is going, the Plumb network (not connected in this
-version) and how far setup has come. It holds the settings and has buttons that
+their limits, how crawling is going, the Plumb network and how far setup has come. It holds the settings and has buttons that
 open search in your browser or add Plumb to Firefox. The same app builds for Windows, macOS and Linux
 with [Tauri](https://v2.tauri.app).
 
@@ -202,6 +201,13 @@ into `records.jsonl`. They are the files to back up, together and with the
 app quit, so that they match. `seed/` holds the downloads and `indexes/` the
 search index. On Linux the app's log folder, `logs/`, is in there too; see
 [Troubleshooting](#troubleshooting).
+
+`trusted-nodes.txt`, which isn't there unless you write it, lists nodes whose
+crawls your node accepts without checking them against other crawlers, one
+node id per line (lines starting with `#` are notes). It is read when the app
+starts, so quit and reopen the app after changing it. It does what
+`plumb-node --trust-peer` does on a server, and by default the app trusts
+nobody.
 
 The window's web view keeps a small cache of its own, in
 `~/.cache/io.github.sueheir.plumbsearch/webview` on Linux,

@@ -254,9 +254,12 @@ async fn launch_node(app: AppHandle) -> Result<NodeHandle> {
     std::fs::create_dir_all(&data_dir)
         .with_context(|| format!("creating the data folder {}", data_dir.display()))?;
     info!("data folder: {}", data_dir.display());
+    let trusted = trusted_nodes(&data_dir);
     let mut config = NodeConfig::desktop(data_dir);
     config.bind.set_port(PORT);
-    config.network = Some(network_config());
+    let mut net = network_config();
+    net.trusted_peers = trusted;
+    config.network = Some(net);
     match node::start(config.clone()).await {
         // Something else has the port; the window works on any port.
         Err(err) if !can_listen_on(config.bind) => {
@@ -290,6 +293,39 @@ fn network_config() -> plumb_net::NetConfig {
         .map(|addr| addr.parse().expect("a valid multiaddr"))
         .collect();
     net
+}
+
+/// The file in the data folder that lists nodes whose crawls this node
+/// accepts without checking, one node id per line. It doesn't exist unless
+/// someone writes it, so by default the app trusts nobody.
+const TRUSTED_NODES: &str = "trusted-nodes.txt";
+
+/// The node ids in the data folder's [`TRUSTED_NODES`] file. Blank lines and
+/// lines starting with `#` are skipped, and so, with a warning, is anything
+/// that isn't a node id.
+fn trusted_nodes(data_dir: &Path) -> Vec<plumb_net::PeerId> {
+    let path = data_dir.join(TRUSTED_NODES);
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    let mut nodes = Vec::new();
+    for line in text.lines().map(str::trim) {
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        match line.parse() {
+            Ok(node) => nodes.push(node),
+            Err(_) => warn!("{} lists {line:?}, which is not a node id", path.display()),
+        }
+    }
+    if !nodes.is_empty() {
+        info!(
+            "trusting the crawls of {} node(s) from {}",
+            nodes.len(),
+            path.display()
+        );
+    }
+    nodes
 }
 
 /// Whether a server could listen on `addr` now.
@@ -875,6 +911,28 @@ mod tests {
             .starts_with("/dns4/plumbsearch.org/tcp/4001/p2p/"));
         assert!(!net.relay_server);
         assert_eq!(net.listen.len(), 4);
+    }
+
+    #[test]
+    fn the_app_trusts_only_the_nodes_its_data_folder_lists() {
+        let dir = std::env::temp_dir().join(format!("plumb-trusted-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(
+            trusted_nodes(&dir).is_empty(),
+            "nobody is trusted by default"
+        );
+        assert!(network_config().trusted_peers.is_empty());
+
+        let node = "12D3KooWEDPBv4sacn42shoToAwu62CreVC89QFiAA31HrWv3xrg";
+        std::fs::write(
+            dir.join(TRUSTED_NODES),
+            format!("# plumbsearch.org's crawler\n\n  {node}  \nnot-a-node\n"),
+        )
+        .unwrap();
+        let trusted = trusted_nodes(&dir);
+        assert_eq!(trusted.len(), 1);
+        assert_eq!(trusted[0].to_string(), node);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
