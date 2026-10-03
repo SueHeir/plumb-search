@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use plumb_core::{RecordSet, SiteRecord, MAX_LINK_TEXTS};
+use plumb_core::{linker_count, RecordSet, SiteRecord, MAX_LINK_TEXTS};
 use tracing::info;
 
 use crate::{CcRank, OfficialSite, TrancoEntry, WatExtract};
@@ -92,13 +92,15 @@ impl Builder {
                 }
             }
             if let Some(texts) = extract.anchors.get(domain) {
-                // Only the most frequent texts can survive the cap, so skip
+                // Only the most used texts can survive the cap, so skip
                 // re-sorting the record's list for all the others.
-                let mut texts: Vec<(&String, u32)> =
-                    texts.iter().map(|(text, &count)| (text, count)).collect();
-                texts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
-                for (text, count) in texts.into_iter().take(MAX_LINK_TEXTS) {
-                    record.add_link_text(text, count);
+                let mut texts: Vec<(&String, u64, u32)> = texts
+                    .iter()
+                    .map(|(text, &linkers)| (text, linkers, linker_count(linkers)))
+                    .collect();
+                texts.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.0.cmp(b.0)));
+                for (text, linkers, _) in texts.into_iter().take(MAX_LINK_TEXTS) {
+                    record.add_link_text_linkers(text, linkers);
                 }
             }
             if let Some(linkers) = extract.linking_domains.get(domain) {
@@ -176,7 +178,7 @@ fn best_rank<T: Ord>(current: Option<T>, new: Option<T>) -> Option<T> {
 mod tests {
     use std::path::Path;
 
-    use plumb_core::{LinkText, Signals};
+    use plumb_core::{linker_bit, LinkText, Signals, MAX_LINKER_ESTIMATE};
 
     use super::*;
     use crate::{
@@ -295,11 +297,12 @@ mod tests {
         assert_eq!(usbank.aliases, ["U.S. Bank", "U.S. Bancorp"]);
         assert_eq!(
             usbank.link_texts,
-            [LinkText {
-                text: "us bank".into(),
-                count: 2
-            }]
+            [LinkText::from_linkers(
+                "us bank",
+                linker_bit("a.com") | linker_bit("b.org")
+            )]
         );
+        assert_eq!(usbank.link_texts[0].count, 2);
         assert_eq!(
             usbank.signals,
             Signals {
@@ -440,8 +443,10 @@ mod tests {
     fn wat_link_texts_keep_the_most_frequent() {
         let mut extract = WatExtract::new();
         let texts = extract.anchors.entry("x.com".into()).or_default();
+        // Text i is used by more sites the higher i is; text 99 by so many
+        // that every bit is set.
         for i in 0..100u32 {
-            texts.insert(format!("text {i}"), i + 1);
+            texts.insert(format!("text {i}"), u64::MAX >> (63 - i * 63 / 99));
         }
         extract
             .linking_domains
@@ -454,7 +459,8 @@ mod tests {
         let record = builder.finish(None).remove(0);
         assert_eq!(record.link_texts.len(), MAX_LINK_TEXTS);
         assert_eq!(record.link_texts[0].text, "text 99");
-        assert_eq!(record.link_texts[0].count, 200);
+        // Adding the same WAT data twice counts its sites once.
+        assert_eq!(record.link_texts[0].count, MAX_LINKER_ESTIMATE);
         assert_eq!(record.signals.linking_domains, 2);
     }
 

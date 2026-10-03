@@ -277,10 +277,7 @@ mod tests {
     #[test]
     fn link_texts_are_sorted_and_capped() {
         let link_texts: Vec<LinkText> = (0..40u32)
-            .map(|i| LinkText {
-                text: format!("text {i}"),
-                count: i,
-            })
+            .map(|i| LinkText::with_count(format!("text {i}"), i))
             .collect();
         let top = top_link_texts(&link_texts);
         assert_eq!(top.len(), MAX_LINK_TEXTS);

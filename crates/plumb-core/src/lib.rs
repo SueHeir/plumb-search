@@ -53,11 +53,81 @@ pub struct SiteRecord {
     pub crawl_attempted_at: Option<u64>,
 }
 
-/// Inbound link text and how many links used it.
+/// Inbound link text and the sites that link with it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LinkText {
     pub text: String,
+    /// How many distinct sites link with this text, estimated from
+    /// `linkers` ([`linker_count`]); a plain count when `linkers` is 0.
     pub count: u32,
+    /// The linking sites as a set of 64 bits, one bit per site
+    /// ([`linker_bit`]). Merging takes the union, so a site seen again, on
+    /// another of its pages or in a later crawl, never counts twice.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub linkers: u64,
+}
+
+impl LinkText {
+    /// Text used by the sites in `linkers` (see [`linker_bit`]).
+    pub fn from_linkers(text: impl Into<String>, linkers: u64) -> Self {
+        LinkText {
+            text: text.into(),
+            count: linker_count(linkers),
+            linkers,
+        }
+    }
+
+    /// Text with a plain count and no set of linking sites, for tests and
+    /// hand-made data. Merging two of these keeps the larger count.
+    pub fn with_count(text: impl Into<String>, count: u32) -> Self {
+        LinkText {
+            text: text.into(),
+            count,
+            linkers: 0,
+        }
+    }
+
+    /// Adds the linking sites of `other`, which has the same text.
+    fn absorb(&mut self, other: &LinkText) {
+        let plain = |lt: &LinkText| if lt.linkers == 0 { lt.count } else { 0 };
+        let plain = plain(self).max(plain(other));
+        self.linkers |= other.linkers;
+        self.count = linker_count(self.linkers).max(plain);
+    }
+}
+
+/// Estimate [`linker_count`] gives once all 64 bits are set.
+pub const MAX_LINKER_ESTIMATE: u32 = 300;
+
+/// The bit that stands for the site `linking_domain` in [`LinkText::linkers`]:
+/// one of 64, picked by a hash that is the same on every machine and in
+/// every version.
+pub fn linker_bit(linking_domain: &str) -> u64 {
+    // FNV-1a, then the splitmix64 finalizer so the top bits are well mixed.
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &byte in linking_domain.as_bytes() {
+        h ^= u64::from(byte);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h ^= h >> 30;
+    h = h.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    h ^= h >> 27;
+    h = h.wrapping_mul(0x94d0_49bb_1331_11eb);
+    h ^= h >> 31;
+    1 << (h >> 58)
+}
+
+/// How many distinct sites a [`LinkText::linkers`] set stands for, by linear
+/// counting: exact for one site and nearly so for a handful (two sites share
+/// a bit 1 time in 64), within about 10% up to 100, and
+/// [`MAX_LINKER_ESTIMATE`] once every bit is set.
+pub fn linker_count(linkers: u64) -> u32 {
+    let set = linkers.count_ones();
+    if set == 64 {
+        return MAX_LINKER_ESTIMATE;
+    }
+    let bits = 64.0_f64;
+    (bits * (bits / (bits - f64::from(set))).ln()).round() as u32
 }
 
 /// Popularity and trust signals. Ranks are 1-based (1 = best).
@@ -84,6 +154,10 @@ fn is_zero(n: &u32) -> bool {
     *n == 0
 }
 
+fn is_zero_u64(n: &u64) -> bool {
+    *n == 0
+}
+
 fn is_false(b: &bool) -> bool {
     !*b
 }
@@ -96,16 +170,25 @@ impl SiteRecord {
         }
     }
 
-    /// Adds `count` uses of a link text. The text is normalized first; empty
-    /// text is ignored. Keeps the list sorted and capped at [`MAX_LINK_TEXTS`].
-    pub fn add_link_text(&mut self, text: &str, count: u32) {
+    /// Adds a link to this site with `text` from the site `linking_domain`
+    /// (its registrable domain). Each linking site counts once per text,
+    /// however often it is added. See [`SiteRecord::add_link_text_linkers`].
+    pub fn add_link_text(&mut self, text: &str, linking_domain: &str) {
+        self.add_link_text_linkers(text, linker_bit(linking_domain));
+    }
+
+    /// Adds link text used by a set of linking sites, their [`linker_bit`]s
+    /// OR-ed together. The text is normalized first; empty text or an empty
+    /// set is ignored. Keeps the list sorted and capped at [`MAX_LINK_TEXTS`].
+    pub fn add_link_text_linkers(&mut self, text: &str, linkers: u64) {
         let text = truncate_chars(&normalize_text(text), MAX_TEXT_CHARS);
-        if text.is_empty() || count == 0 {
+        if text.is_empty() || linkers == 0 {
             return;
         }
-        match self.link_texts.iter_mut().find(|lt| lt.text == text) {
-            Some(lt) => lt.count = lt.count.saturating_add(count),
-            None => self.link_texts.push(LinkText { text, count }),
+        let added = LinkText::from_linkers(text, linkers);
+        match self.link_texts.iter_mut().find(|lt| lt.text == added.text) {
+            Some(lt) => lt.absorb(&added),
+            None => self.link_texts.push(added),
         }
         sort_and_cap_link_texts(&mut self.link_texts);
     }
@@ -127,7 +210,8 @@ impl SiteRecord {
     ///
     /// Page fields (url, title, description) come from whichever record was
     /// crawled more recently, and missing ones are filled from the other.
-    /// Link text counts add up, aliases are unioned, ranks keep the best
+    /// Link texts take the union of their linking sites (a site seen by both
+    /// counts once), aliases are unioned, ranks keep the best
     /// (lowest) value, `linking_domains` keeps the larger count (sources often
     /// overlap, so adding would double count), `official_site` is OR-ed, and
     /// `crawl_attempted_at` keeps the later time.
@@ -152,7 +236,7 @@ impl SiteRecord {
         }
         for lt in other.link_texts {
             match self.link_texts.iter_mut().find(|mine| mine.text == lt.text) {
-                Some(mine) => mine.count = mine.count.saturating_add(lt.count),
+                Some(mine) => mine.absorb(&lt),
                 None => self.link_texts.push(lt),
             }
         }
@@ -212,6 +296,7 @@ impl RecordSet {
     }
 
     /// The record for `domain`, created empty if it is not there yet.
+    /// `domain` must already be canonical, as [`registrable_domain`] returns it.
     pub fn entry(&mut self, domain: &str) -> &mut SiteRecord {
         self.map
             .entry(domain.to_string())
@@ -219,13 +304,22 @@ impl RecordSet {
     }
 
     /// Inserts a record, merging it into an existing one for the same domain.
-    pub fn upsert(&mut self, record: SiteRecord) {
+    /// The domain is made canonical first ([`canonical_domain`]), so
+    /// `Example.COM` and `münchen.de` land on `example.com` and
+    /// `xn--mnchen-3ya.de`. Returns false, dropping the record, when the
+    /// domain is not a valid registrable domain.
+    pub fn upsert(&mut self, mut record: SiteRecord) -> bool {
+        match canonical_domain(&record.domain) {
+            Some(domain) => record.domain = domain,
+            None => return false,
+        }
         match self.map.get_mut(&record.domain) {
             Some(existing) => existing.merge(record),
             None => {
                 self.map.insert(record.domain.clone(), record);
             }
         }
+        true
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &SiteRecord> {
@@ -298,34 +392,91 @@ pub fn link_score(signals: &Signals) -> f32 {
     score.min(1.0) as f32
 }
 
-/// The lowercase host of a URL or bare hostname, without port or trailing dot.
-/// IDNs come back as punycode. Returns `None` for IP addresses and junk.
+/// The lowercase host of an http(s) URL or a bare hostname (optionally with
+/// a port or path), without port or trailing dot. IDNs come back as
+/// punycode. Returns `None` for other schemes (`mailto:`, `ftp://`), user
+/// info without a scheme (`a@b.com`), IP addresses, and names that are not
+/// valid DNS host names ([`is_valid_host`]).
 pub fn host_of(input: &str) -> Option<String> {
     let input = input.trim();
     if input.is_empty() {
         return None;
     }
     let parsed = if input.contains("://") {
-        url::Url::parse(input).ok()?
+        let parsed = url::Url::parse(input).ok()?;
+        if !matches!(parsed.scheme(), "http" | "https") {
+            return None;
+        }
+        parsed
     } else {
+        // A bare host: anything before the first '/' other than an optional
+        // `:port` would be a scheme (`mailto:`) or user info (`user@`).
+        let authority = input.split(['/', '?', '#']).next().unwrap_or_default();
+        if authority.contains('@') {
+            return None;
+        }
+        if let Some((_, port)) = authority.split_once(':') {
+            if port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+        }
         url::Url::parse(&format!("http://{input}")).ok()?
     };
     match parsed.host()? {
         url::Host::Domain(host) => {
-            let host = host.trim_end_matches('.').to_ascii_lowercase();
-            (!host.is_empty()).then_some(host)
+            let host = host.strip_suffix('.').unwrap_or(host).to_ascii_lowercase();
+            is_valid_host(&host).then_some(host)
         }
         url::Host::Ipv4(_) | url::Host::Ipv6(_) => None,
     }
 }
 
+/// Whether `host` (lowercase ASCII, no trailing dot) is a usable DNS host
+/// name: at most 253 bytes, at least two labels, each 1 to 63 bytes of
+/// `a-z`, `0-9`, `-` or `_`, not starting or ending with `-`, and a
+/// top-level label that is not all digits.
+pub fn is_valid_host(host: &str) -> bool {
+    if host.is_empty() || host.len() > 253 {
+        return false;
+    }
+    let mut labels = 0;
+    let mut last = "";
+    for label in host.split('.') {
+        let ok = (1..=63).contains(&label.len())
+            && label
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
+            && !label.starts_with('-')
+            && !label.ends_with('-');
+        if !ok {
+            return false;
+        }
+        labels += 1;
+        last = label;
+    }
+    labels >= 2 && !last.bytes().all(|b| b.is_ascii_digit())
+}
+
 /// The registrable domain ("eTLD+1") of a URL or hostname, using the Public
 /// Suffix List: `https://www.usbank.com/x` -> `usbank.com`,
 /// `news.bbc.co.uk` -> `bbc.co.uk`. Returns `None` for IP addresses, bare
-/// public suffixes like `co.uk`, and single-label hosts like `localhost`.
+/// public suffixes like `co.uk`, single-label hosts like `localhost`, and
+/// everything [`host_of`] rejects.
 pub fn registrable_domain(input: &str) -> Option<String> {
     let host = host_of(input)?;
     psl::domain_str(&host).map(str::to_string)
+}
+
+/// The canonical spelling of a site record's domain: the domain itself
+/// when it already is a lowercase registrable domain (the common case,
+/// checked without parsing), otherwise [`registrable_domain`] of it. So
+/// `Example.com.` -> `example.com`, `münchen.de` -> `xn--mnchen-3ya.de`,
+/// `www.example.com` -> `example.com`, and junk -> `None`.
+pub fn canonical_domain(domain: &str) -> Option<String> {
+    if is_valid_host(domain) && psl::domain_str(domain) == Some(domain) {
+        return Some(domain.to_string());
+    }
+    registrable_domain(domain)
 }
 
 /// True when a URL path points at a site's front page: empty, `/`,
@@ -368,6 +519,87 @@ fn is_locale_segment(segment: &str) -> bool {
         && region.is_none_or(|r| (2..=4).contains(&r.len()) && letters(r))
 }
 
+/// Longest link text worth keeping, in characters after normalization.
+pub const MAX_ANCHOR_CHARS: usize = 100;
+
+/// Normalized link texts that say nothing about the site they point to.
+pub const GENERIC_ANCHORS: &[&str] = &[
+    "about",
+    "about us",
+    "back",
+    "back to top",
+    "click",
+    "click here",
+    "click to visit",
+    "com",
+    "contact",
+    "contact us",
+    "continue",
+    "continue reading",
+    "details",
+    "download",
+    "external link",
+    "find out more",
+    "full story",
+    "go",
+    "go to site",
+    "go to website",
+    "here",
+    "home",
+    "home page",
+    "homepage",
+    "http",
+    "https",
+    "info",
+    "learn more",
+    "link",
+    "links",
+    "main page",
+    "more",
+    "more info",
+    "more information",
+    "next",
+    "official site",
+    "official web site",
+    "official website",
+    "open",
+    "previous",
+    "read",
+    "read more",
+    "see more",
+    "site",
+    "source",
+    "this",
+    "this link",
+    "top",
+    "url",
+    "view",
+    "view more",
+    "view site",
+    "view website",
+    "visit",
+    "visit our website",
+    "visit site",
+    "visit the website",
+    "visit website",
+    "web",
+    "web site",
+    "website",
+    "www",
+];
+
+/// Whether a link's normalized `text` says something about the site it
+/// points to: not empty, at most [`MAX_ANCHOR_CHARS`], not one of the
+/// [`GENERIC_ANCHORS`] ("click here", "official website"), and not just the
+/// link's `href` or `target` URL spelled out.
+pub fn is_useful_anchor(text: &str, href: &str, target: &url::Url) -> bool {
+    !text.is_empty()
+        && text.chars().count() <= MAX_ANCHOR_CHARS
+        && !GENERIC_ANCHORS.contains(&text)
+        && text != normalize_text(href)
+        && text != normalize_text(target.as_str())
+}
+
 /// Turns Common Crawl's reversed host notation around: `com.example.www` -> `www.example.com`.
 pub fn reverse_host(reversed: &str) -> String {
     let mut labels: Vec<&str> = reversed.trim().split('.').collect();
@@ -396,7 +628,9 @@ pub fn normalize_text(text: &str) -> String {
     let mut current = String::new();
     for ch in text.chars() {
         if ch.is_alphanumeric() {
-            current.extend(ch.to_lowercase());
+            // Only letters and digits of the lowercase form, so a second
+            // pass changes nothing: `İ` lowercases to `i` plus a combining dot.
+            current.extend(ch.to_lowercase().filter(|c| c.is_alphanumeric()));
         } else if matches!(ch, '\'' | '\u{2019}' | '\u{02BC}') {
             // Apostrophes join the two halves of a word.
         } else if !current.is_empty() {
@@ -577,6 +811,13 @@ mod tests {
         assert_eq!(normalize_text("  AT&T  Wireless "), "at t wireless");
         assert_eq!(normalize_text("Café Zürich"), "café zürich");
         assert_eq!(normalize_text("---"), "");
+        // `İ` lowercases to `i` plus a combining dot; the dot is dropped so
+        // normalizing twice gives the same text.
+        assert_eq!(normalize_text("İstanbul Havalimanı"), "istanbul havalimanı");
+        for text in ["İstanbul", "Ǆemal", "ﬁnance", "Straße", "ΣΊΣΥΦΟΣ", "İİ.İ"] {
+            let once = normalize_text(text);
+            assert_eq!(normalize_text(&once), once, "{text:?}");
+        }
         assert_eq!(joined("U.S. Bank"), "usbank");
         assert_eq!(joined("Bank of America"), "bankofamerica");
     }
@@ -587,7 +828,8 @@ mod tests {
         a.title = Some("Old title".into());
         a.crawled_at = Some(100);
         a.signals.tranco_rank = Some(900);
-        a.add_link_text("U.S. Bank", 3);
+        a.add_link_text("U.S. Bank", "a.com");
+        a.add_link_text("U.S. Bank", "b.com");
 
         let mut b = SiteRecord::new("usbank.com");
         b.title = Some("U.S. Bank | Personal Banking".into());
@@ -597,7 +839,9 @@ mod tests {
         b.signals.tranco_rank = Some(1200);
         b.signals.harmonic_rank = Some(5000);
         b.signals.official_site = true;
-        b.add_link_text("us bank", 2);
+        // b.com is already counted, c.com is new.
+        b.add_link_text("us bank", "b.com");
+        b.add_link_text("us bank", "c.com");
         b.add_alias("U.S. Bancorp");
 
         a.merge(b);
@@ -611,14 +855,178 @@ mod tests {
         assert_eq!(a.signals.tranco_rank, Some(900));
         assert_eq!(a.signals.harmonic_rank, Some(5000));
         assert!(a.signals.official_site);
+        let linkers = ["a.com", "b.com", "c.com"]
+            .iter()
+            .fold(0, |bits, d| bits | linker_bit(d));
         assert_eq!(
             a.link_texts,
             vec![LinkText {
                 text: "us bank".into(),
-                count: 5
+                count: 3,
+                linkers,
             }]
         );
         assert_eq!(a.aliases, vec!["U.S. Bancorp".to_string()]);
+    }
+
+    #[test]
+    fn link_texts_count_each_linking_site_once() {
+        let mut a = SiteRecord::new("usbank.com");
+        for _ in 0..60 {
+            // One site repeating a footer link on every page.
+            a.add_link_text("US Bank", "spam.example");
+        }
+        assert_eq!(a.link_texts[0].count, 1);
+
+        // A monthly re-crawl of the same five sites adds nothing.
+        let linkers = ["a.com", "b.com", "c.com", "d.com", "e.com"];
+        let crawl = |text: &str| {
+            let mut r = SiteRecord::new("usbank.com");
+            for d in linkers {
+                r.add_link_text(text, d);
+            }
+            r
+        };
+        let mut b = crawl("us bank");
+        for _ in 0..12 {
+            b.merge(crawl("us bank"));
+        }
+        assert_eq!(b.link_texts[0].count, 5);
+
+        // Plain counts (no linker set) keep the larger count on merge.
+        let mut c = SiteRecord::new("x.com");
+        c.link_texts.push(LinkText::with_count("x", 7));
+        let mut d = SiteRecord::new("x.com");
+        d.link_texts.push(LinkText::with_count("x", 4));
+        d.add_link_text("y", "a.com");
+        c.merge(d);
+        assert_eq!(c.link_texts[0], LinkText::with_count("x", 7));
+        assert_eq!(c.link_texts[1].count, 1);
+    }
+
+    #[test]
+    fn linker_counts_are_close() {
+        assert_eq!(linker_count(0), 0);
+        assert_eq!(linker_count(1 << 7), 1);
+        assert_eq!(linker_count(u64::MAX), MAX_LINKER_ESTIMATE);
+        // The bit for a domain never changes between versions or machines.
+        assert_eq!(linker_bit("example.com"), 1 << 19);
+        assert_eq!(linker_bit("usbank.com"), 1 << 11);
+        for n in [1_u32, 2, 5, 10, 30, 60, 100] {
+            let bits = (0..n).fold(0, |bits, i| bits | linker_bit(&format!("site{i}.com")));
+            let estimate = f64::from(linker_count(bits));
+            let error = (estimate - f64::from(n)).abs() / f64::from(n);
+            assert!(error <= 0.25, "{n} sites estimated as {estimate}");
+        }
+    }
+
+    #[test]
+    fn link_text_json_round_trips() {
+        let lt = LinkText::from_linkers("us bank", linker_bit("a.com") | linker_bit("b.com"));
+        let json = serde_json::to_string(&lt).unwrap();
+        assert_eq!(serde_json::from_str::<LinkText>(&json).unwrap(), lt);
+        // Older files have a count only.
+        let old: LinkText = serde_json::from_str(r#"{"text":"x","count":3}"#).unwrap();
+        assert_eq!(old, LinkText::with_count("x", 3));
+    }
+
+    #[test]
+    fn hosts_are_validated() {
+        for bad in [
+            "mailto:a@b.com",
+            "a@b.com",
+            "ftp://example.com/",
+            "javascript:alert(1)",
+            "a..b.com",
+            "x..com",
+            ".com",
+            "-bad.com",
+            "bad-.com",
+            "example.123",
+            "example.com:http",
+        ] {
+            assert_eq!(host_of(bad), None, "{bad:?} should be rejected");
+        }
+        let long_label = format!("{}.com", "a".repeat(64));
+        assert_eq!(host_of(&long_label), None);
+        let long_name = format!("{}com", "abcdefghi.".repeat(26));
+        assert!(long_name.len() > 253);
+        assert_eq!(host_of(&long_name), None);
+        assert_eq!(host_of(&"a".repeat(70_000)), None);
+
+        assert_eq!(
+            host_of("example.com:8080/x").as_deref(),
+            Some("example.com")
+        );
+        assert_eq!(
+            host_of("HTTPS://Sub.Example.com./").as_deref(),
+            Some("sub.example.com")
+        );
+        assert_eq!(
+            host_of("my_host.example.com").as_deref(),
+            Some("my_host.example.com")
+        );
+    }
+
+    #[test]
+    fn record_domains_are_canonical() {
+        assert_eq!(
+            canonical_domain("example.com").as_deref(),
+            Some("example.com")
+        );
+        assert_eq!(
+            canonical_domain("Example.COM.").as_deref(),
+            Some("example.com")
+        );
+        assert_eq!(
+            canonical_domain("www.example.com").as_deref(),
+            Some("example.com")
+        );
+        assert_eq!(
+            canonical_domain("münchen.de").as_deref(),
+            Some("xn--mnchen-3ya.de")
+        );
+        assert_eq!(canonical_domain("co.uk"), None);
+        assert_eq!(canonical_domain("com..x"), None);
+
+        let mut set = RecordSet::new();
+        let mut a = SiteRecord::new("Example.com");
+        a.signals.tranco_rank = Some(10);
+        assert!(set.upsert(a));
+        assert!(set.upsert(SiteRecord::new("example.com")));
+        assert!(set.upsert(SiteRecord::new("münchen.de")));
+        assert!(set.upsert(SiteRecord::new("xn--mnchen-3ya.de")));
+        assert!(!set.upsert(SiteRecord::new("not a domain")));
+        assert_eq!(set.len(), 2);
+        assert_eq!(
+            set.get("example.com").unwrap().signals.tranco_rank,
+            Some(10)
+        );
+        assert!(set.get("xn--mnchen-3ya.de").is_some());
+    }
+
+    #[test]
+    fn useful_anchors() {
+        let target = url::Url::parse("https://www.usbank.com/").unwrap();
+        assert!(is_useful_anchor(
+            "us bank",
+            "https://www.usbank.com/",
+            &target
+        ));
+        assert!(!is_useful_anchor("", "/", &target));
+        assert!(!is_useful_anchor("click here", "/", &target));
+        assert!(!is_useful_anchor("official website", "/", &target));
+        assert!(!is_useful_anchor(
+            "https www usbank com",
+            "https://www.usbank.com/",
+            &target
+        ));
+        assert!(!is_useful_anchor(&"word ".repeat(30), "/", &target));
+        for text in GENERIC_ANCHORS {
+            assert_eq!(&normalize_text(text), text);
+        }
+        let unique: std::collections::HashSet<&&str> = GENERIC_ANCHORS.iter().collect();
+        assert_eq!(unique.len(), GENERIC_ANCHORS.len());
     }
 
     #[test]

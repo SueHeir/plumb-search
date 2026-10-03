@@ -186,7 +186,7 @@ mod tests {
         a.title = Some("A".into());
         a.signals.official_site = true;
         let mut b = SiteRecord::new("b.com");
-        b.add_link_text("Bee", 2);
+        b.add_link_text("Bee", "a.com");
         let summary = RecordSummary::of(&[a, b, SiteRecord::new("c.com")]);
         assert_eq!(
             summary,
