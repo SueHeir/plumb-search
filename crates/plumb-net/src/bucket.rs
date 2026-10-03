@@ -284,8 +284,8 @@ impl BucketTable {
         let mut offsets = File::open(self.dir.join("records.idx"))?;
         let mut data = File::open(self.dir.join("records.dat"))?;
         let mut out = Vec::with_capacity(raw.len() / 4);
-        for chunk in raw.chunks_exact(4) {
-            let n = u32::from_le_bytes(chunk.try_into().expect("4 bytes"));
+        for chunk in raw.as_chunks::<4>().0 {
+            let n = u32::from_le_bytes(*chunk);
             ensure!((n as usize) < self.records, "buckets.dat is damaged");
             let at = read_u64s(&mut offsets, u64::from(n), 2)?;
             ensure!(
@@ -321,8 +321,10 @@ fn read_u64s(file: &mut File, first: u64, n: usize) -> Result<Vec<u64>> {
     let mut raw = vec![0u8; n * 8];
     file.read_exact(&mut raw)?;
     Ok(raw
-        .chunks_exact(8)
-        .map(|c| u64::from_le_bytes(c.try_into().expect("8 bytes")))
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|c| u64::from_le_bytes(*c))
         .collect())
 }
 
