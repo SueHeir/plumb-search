@@ -23,6 +23,7 @@ pub mod agree;
 pub mod assign;
 pub mod batch;
 pub mod bucket;
+pub mod cache;
 pub mod credits;
 pub mod hash;
 pub mod joining;

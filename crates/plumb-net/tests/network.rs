@@ -177,6 +177,7 @@ async fn nodes_share_batches_search_each_other_and_reach_through_a_relay() {
 
     let mut result = None;
     for _ in 0..50 {
+        b.handle.clear_search_cache();
         let found = b
             .handle
             .search("harbor", Duration::from_secs(5))
@@ -204,6 +205,18 @@ async fn nodes_share_batches_search_each_other_and_reach_through_a_relay() {
     // With other nodes to relay, every request went through one.
     assert_eq!(result.direct, 0, "{result:?}");
     assert_eq!(result.relayed, result.answered, "{result:?}");
+
+    // B kept the buckets it fetched: the same search again is answered on
+    // B, without asking any node.
+    let again = b
+        .handle
+        .search("harbor", Duration::from_secs(5))
+        .await
+        .unwrap();
+    assert_eq!(again.asked, 0, "{again:?}");
+    assert_eq!(again.buckets, 0, "{again:?}");
+    assert!(again.cached > 0, "{again:?}");
+    assert_eq!(again.found, result.found);
 
     // C is behind the relay: it holds a reservation, and a node that only
     // knows the relay's address reaches C through it. That includes a
@@ -253,6 +266,7 @@ async fn nodes_share_batches_search_each_other_and_reach_through_a_relay() {
     wait_for(|| (!e.handle.status().relays.is_empty()).then_some(())).await;
     let mut reached_e = false;
     for _ in 0..50 {
+        relay_got.handle.clear_search_cache();
         let _ = relay_got
             .handle
             .search("harbor", Duration::from_secs(5))
@@ -276,6 +290,7 @@ async fn nodes_share_batches_search_each_other_and_reach_through_a_relay() {
     let mut f_reached_e = false;
     let mut last = None;
     for _ in 0..100 {
+        f.handle.clear_search_cache();
         last = Some(
             f.handle
                 .search("harbor", Duration::from_secs(5))
@@ -349,6 +364,7 @@ async fn bucket_requests_go_sealed_through_a_relay() {
     let served_before = holder.handle.status().buckets_served;
     let mut result = None;
     for _ in 0..50 {
+        asker.handle.clear_search_cache();
         let found = asker
             .handle
             .search("lantern", Duration::from_secs(5))

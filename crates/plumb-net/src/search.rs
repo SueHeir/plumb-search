@@ -35,7 +35,8 @@ use tracing::{debug, warn};
 
 use crate::agree::{agree, QUORUM};
 use crate::batch::MAX_RECORD_BYTES;
-use crate::bucket::{matches, search_buckets};
+use crate::bucket::{bucket_of, matches, search_buckets, BUCKETS, BUCKETS_PER_SEARCH};
+use crate::cache::BucketCache;
 use crate::credits::Wallet;
 use crate::oblivious::{
     open_response, seal_request, seal_request_sized, ObliviousRequest, ObliviousResponse,
@@ -77,6 +78,10 @@ pub struct NetSearch {
     pub busy: usize,
     #[serde(default)]
     pub priority: usize,
+    /// The query's buckets answered from this node's own copies of ones it
+    /// fetched lately, without asking the network (see [`crate::cache`]).
+    #[serde(default)]
+    pub cached: usize,
     /// The sites that match the query, unranked.
     pub found: Vec<FoundSite>,
 }
@@ -131,15 +136,39 @@ pub async fn search(
     wait: Duration,
     now: u64,
     wallet: Option<&Mutex<Wallet>>,
+    cache: Option<&BucketCache>,
 ) -> NetSearch {
-    let (buckets, keys) = search_buckets(query);
-    let mut out = NetSearch {
-        buckets: buckets.len(),
-        ..NetSearch::default()
-    };
-    if peers.is_empty() {
-        return out;
+    let (mut buckets, keys) = search_buckets(query);
+    let mut out = NetSearch::default();
+    // The query's own buckets this node fetched lately are used as they
+    // are; only the rest are asked for, padded again to as many buckets as
+    // every search asks for, so a search answered partly from here looks
+    // like any other.
+    let mut kept: Vec<Vec<crate::proto::BucketRecord>> = Vec::new();
+    if let Some(cache) = cache {
+        let mut real: Vec<u32> = keys.iter().map(|k| bucket_of(k)).collect();
+        real.sort_unstable();
+        real.dedup();
+        let mut missing = Vec::new();
+        for bucket in real {
+            // A kept bucket with nothing for this query is asked for again:
+            // the sites may have been crawled since.
+            match cache.get(bucket, now) {
+                Some(answers) if answers.iter().any(|a| holds_match(a, &keys)) => {
+                    out.cached += 1;
+                    kept.extend(answers);
+                }
+                _ => missing.push(bucket),
+            }
+        }
+        buckets = if missing.is_empty() {
+            Vec::new()
+        } else {
+            pad_buckets(missing)
+        };
     }
+    out.buckets = buckets.len();
+    let peers = if buckets.is_empty() { &[][..] } else { peers };
     // Spread the buckets over the nodes so that no node gets two buckets
     // of one search while others get none.
     let mut order: Vec<usize> = (0..peers.len()).collect();
@@ -147,6 +176,9 @@ pub async fn search(
     let mut next = 0;
     let mut requests = Vec::new();
     for &bucket in &buckets {
+        if peers.is_empty() {
+            break;
+        }
         let mut chosen = Vec::new();
         for _ in 0..NODES_PER_BUCKET.min(peers.len()) {
             let peer = &peers[order[next % order.len()]];
@@ -186,31 +218,50 @@ pub async fn search(
     let answers = futures::future::join_all(routed.into_iter().map(
         |(bucket, target, through)| async move {
             let deadline = tokio::time::Instant::now() + wait;
-            let (response, relayed) =
-                ask_bucket(&target, &through, BucketRequest::new(bucket), deadline, now).await?;
-            if !response.busy {
-                return Ok((response, relayed, false));
-            }
-            let token = wallet.and_then(|w| {
-                w.lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .take(&target.peer)
-            });
-            let Some(token) = token else {
-                return Ok((response, relayed, false));
+            let answer = async {
+                let (response, relayed) =
+                    ask_bucket(&target, &through, BucketRequest::new(bucket), deadline, now)
+                        .await?;
+                if !response.busy {
+                    return Ok((response, relayed, false));
+                }
+                let token = wallet.and_then(|w| {
+                    w.lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .take(&target.peer)
+                });
+                let Some(token) = token else {
+                    return Ok((response, relayed, false));
+                };
+                let paid = BucketRequest {
+                    bucket,
+                    token: Some(token),
+                };
+                let (response, relayed) =
+                    ask_bucket(&target, &through, paid, deadline, now).await?;
+                Ok::<_, anyhow::Error>((response, relayed, true))
             };
-            let paid = BucketRequest {
-                bucket,
-                token: Some(token),
-            };
-            let (response, relayed) = ask_bucket(&target, &through, paid, deadline, now).await?;
-            Ok::<_, anyhow::Error>((response, relayed, true))
+            (bucket, answer.await)
         },
     ))
     .await;
 
     let mut merged: HashMap<String, FoundSite> = HashMap::new();
-    for answer in answers {
+    let mut add = |checked: Vec<FoundSite>| {
+        for site in checked {
+            if !matches(&site.record, &keys) {
+                continue;
+            }
+            match merged.get_mut(&site.record.domain) {
+                Some(existing) => merge_site(existing, site),
+                None => {
+                    merged.insert(site.record.domain.clone(), site);
+                }
+            }
+        }
+    };
+    let mut fetched: HashMap<u32, Vec<Vec<crate::proto::BucketRecord>>> = HashMap::new();
+    for (bucket, answer) in answers {
         let (response, relayed, paid) = match answer {
             Ok(response) => response,
             Err(err) => {
@@ -232,26 +283,53 @@ pub async fn search(
         if relayed {
             out.relayed += 1;
         }
+        let keep = cache.is_some().then(|| records.clone());
         let Some(checked) = check_answer(records, now) else {
             out.rejected += 1;
             continue;
         };
-        for site in checked {
-            if !matches(&site.record, &keys) {
-                continue;
-            }
-            match merged.get_mut(&site.record.domain) {
-                Some(existing) => merge_site(existing, site),
-                None => {
-                    merged.insert(site.record.domain.clone(), site);
-                }
-            }
+        if let Some(records) = keep {
+            fetched.entry(bucket).or_default().push(records);
+        }
+        add(checked);
+    }
+    // Kept answers are checked again: a proof may have expired since.
+    for records in kept {
+        if let Some(checked) = check_answer(records, now) {
+            add(checked);
+        }
+    }
+    if let Some(cache) = cache {
+        for (bucket, answers) in fetched {
+            cache.put(bucket, answers, now);
         }
     }
     let mut found: Vec<FoundSite> = merged.into_values().collect();
     found.sort_by(|a, b| a.record.domain.cmp(&b.record.domain));
     out.found = found;
     out
+}
+
+/// Whether `records` hold a site that matches one of `keys`.
+fn holds_match(records: &[crate::proto::BucketRecord], keys: &[String]) -> bool {
+    records.iter().any(|item| {
+        serde_json::from_str::<SiteRecord>(&item.record).is_ok_and(|r| matches(&r, keys))
+    })
+}
+
+/// `buckets` (the query's own) and random ones to make up
+/// [`BUCKETS_PER_SEARCH`], in random order, as [`search_buckets`] picks them.
+fn pad_buckets(mut buckets: Vec<u32>) -> Vec<u32> {
+    let mut rng = rand_core::OsRng;
+    buckets.truncate(BUCKETS_PER_SEARCH);
+    while buckets.len() < BUCKETS_PER_SEARCH {
+        let bucket = (rng.next_u64() % u64::from(BUCKETS)) as u32;
+        if !buckets.contains(&bucket) {
+            buckets.push(bucket);
+        }
+    }
+    shuffle(&mut buckets);
+    buckets
 }
 
 /// Asks `target` for a bucket: through one of `through` (relays, tried in

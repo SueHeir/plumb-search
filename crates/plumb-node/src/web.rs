@@ -852,6 +852,9 @@ pub struct NetworkResults {
     pub direct: usize,
     /// Answers dropped because a proof in them did not check out.
     pub rejected: usize,
+    /// The query's buckets answered from this node's copies of ones it
+    /// fetched lately, without asking the network again.
+    pub cached: usize,
     pub hits: Vec<NetworkResult>,
 }
 
@@ -906,6 +909,7 @@ fn rank_found(
         relayed: found.relayed,
         direct: found.direct,
         rejected: found.rejected,
+        cached: found.cached,
         hits: Vec::new(),
     };
     if found.found.is_empty() || limit == 0 {
@@ -1573,6 +1577,17 @@ fn render_source(
         (_, NetOutcome::Failed) => {
             "From this site's own index: the Plumb network did not answer this time.".to_string()
         }
+        (_, NetOutcome::Answered(results)) if results.asked == 0 && results.cached > 0 => {
+            let mut line = "From this site's index and the Plumb network, as this node fetched it \
+                            for a recent search: the network was not asked again."
+                .to_string();
+            if from_network > 0 {
+                line.push_str(
+                    " <span class=\"sw\"></span>Tinted results came only from the network.",
+                );
+            }
+            line
+        }
         (_, NetOutcome::Answered(results)) if results.asked == 0 => {
             "From this site's own index: no other Plumb nodes are connected right now.".to_string()
         }
@@ -1588,6 +1603,9 @@ fn render_source(
                     " {} answers were dropped because their proofs did not check out.",
                     results.rejected
                 );
+            }
+            if results.cached > 0 {
+                line.push_str(" Some of it was kept from a recent search, so was not asked again.");
             }
             if from_network > 0 {
                 line.push_str(
@@ -1702,7 +1720,15 @@ fn render_network(query: &str, results: &NetworkResults) -> String {
             String::new()
         }
     );
-    if results.asked == 0 {
+    if results.cached > 0 {
+        let _ = writeln!(
+            body,
+            "<p class=\"s\">{} of this search's buckets were kept from a recent search, so the \
+             network was not asked for them again.</p>",
+            results.cached
+        );
+    }
+    if results.asked == 0 && results.cached == 0 {
         body.push_str(
             "<p class=\"none\">No other nodes are connected yet. This node keeps looking \
              for them.</p>\n",
@@ -2864,6 +2890,7 @@ mod tests {
             relayed: 6,
             direct: 0,
             rejected: 0,
+            cached: 0,
             hits: hits.into_iter().map(from_network).collect(),
         })
     }
