@@ -5,6 +5,8 @@
 //! * [`batch`]: signed crawl batches and what a node accepts from them.
 //! * [`bucket`] and [`search`]: searching other nodes without sending the
 //!   query.
+//! * [`oblivious`]: sending those requests sealed through a relay, so the
+//!   node answering does not see who asks.
 //! * [`hash`]: hashes and the Merkle tree that proves one record of a batch.
 //! * [`store`]: the batches a node keeps.
 //! * [`proto`]: the messages and protocol names.
@@ -15,6 +17,7 @@ pub mod batch;
 pub mod bucket;
 pub mod hash;
 pub mod node;
+pub mod oblivious;
 pub mod proto;
 pub mod search;
 pub mod store;
