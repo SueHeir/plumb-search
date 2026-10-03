@@ -9,6 +9,7 @@ members = [
     "crates/plumb-net",
     "crates/plumb-node",
     "crates/plumb-private",
+    "crates/plumb-e2e",
     "crates/plumb-desktop",
 ]
 # Plain `cargo build` and `cargo test` leave out the desktop app, which needs
@@ -22,6 +23,7 @@ default-members = [
     "crates/plumb-net",
     "crates/plumb-node",
     "crates/plumb-private",
+    "crates/plumb-e2e",
 ]
 
 [workspace.package]

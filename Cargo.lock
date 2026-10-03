@@ -5652,6 +5652,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "plumb-e2e"
+version = "0.1.0"
+dependencies = [
+ "plumb-core",
+ "plumb-private",
+ "serde_json",
+]
+
+[[package]]
 name = "plumb-embed"
 version = "0.1.0"
 dependencies = [
