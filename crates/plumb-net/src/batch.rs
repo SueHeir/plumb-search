@@ -374,7 +374,7 @@ fn keep_links(
 }
 
 /// Bytes as lowercase hex in JSON and CBOR.
-mod bytes_hex {
+pub(crate) mod bytes_hex {
     use serde::{Deserialize, Deserializer, Serializer};
 
     pub fn serialize<S: Serializer>(bytes: &[u8], s: S) -> Result<S::Ok, S::Error> {

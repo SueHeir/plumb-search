@@ -1035,3 +1035,106 @@ async fn a_node_in_the_network_takes_in_other_nodes_crawls_and_searches_them() {
     peer.shutdown().await;
     node.shutdown().await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_node_sharing_popularity_reports_picks_and_ranks_with_the_networks() {
+    use plumb_net::popularity::{report_epoch, MAX_POPULARITY_BONUS, REPORT_THRESHOLD};
+
+    let dir = seeded_dir();
+    let mut config = test_config(dir.path());
+    let mut net = plumb_net::NetConfig::new(PathBuf::new());
+    net.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+    net.upnp = false;
+    net.local_discovery = false;
+    config.network = Some(net);
+    config.share_popularity = true;
+    let node = start(config).await.unwrap();
+    let addr = node.addr();
+    let status = wait_for(addr, "the first index", ready_and_idle).await;
+    let net_status = status.network.expect("the node joined the network");
+    let node_addr: plumb_net::Multiaddr = net_status.listening[0].parse().unwrap();
+    let node_addr = node_addr
+        .with_p2p(net_status.peer_id.parse().unwrap())
+        .unwrap();
+
+    let before = search(addr, "us+bank").await;
+    assert!(before.len() >= 2, "{before:?}");
+    let runner_up = before[1].clone();
+
+    // A result opened from the page is noted.
+    let (_, _, body) = get(addr, "/search?q=us+bank").await;
+    let go = format!("/go?q=us+bank&amp;d={}", runner_up.domain);
+    assert!(body.contains(&go), "{body}");
+    let (code, head, _) = get(addr, &go.replace("&amp;", "&")).await;
+    assert_eq!(code, 303);
+    assert!(
+        head.contains(&format!("location: {}", runner_up.url)),
+        "{head}"
+    );
+    assert!(dir.path().join("net/picks.json").is_file());
+
+    // Another node to hand the report to.
+    let peer_dir = tempfile::tempdir().unwrap();
+    let mut peer_config = plumb_net::NetConfig::new(peer_dir.path().to_path_buf());
+    peer_config.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+    peer_config.upnp = false;
+    peer_config.local_discovery = false;
+    peer_config.bootstrap = vec![node_addr];
+    let source =
+        plumb_net::BucketTable::build(&peer_dir.path().join("buckets"), &fixture_records())
+            .unwrap();
+    let (peer, _records) = plumb_net::start(peer_config, Arc::new(source))
+        .await
+        .unwrap();
+    wait_for(addr, "the peer to connect", |s| {
+        s.network.as_ref().is_some_and(|n| n.connected_peers >= 1)
+    })
+    .await;
+
+    let mut sent = false;
+    for _ in 0..50 {
+        if network::report_one(&node.inner).await.unwrap_or(false) {
+            sent = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(sent, "the node sent its report");
+    // Sent once: the pick is not due again this week.
+    assert!(!network::report_one(&node.inner).await.unwrap());
+    for _ in 0..100 {
+        if peer.status().reports_held >= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(peer.status().reports_held, 1);
+
+    // Once enough others report the same pick, the node ranks with it.
+    let epoch = report_epoch(now_unix());
+    for _ in 1..REPORT_THRESHOLD {
+        let report = plumb_net::Report::new(epoch, "us bank", &runner_up.domain).unwrap();
+        peer.send_report(&report, Duration::from_secs(10))
+            .await
+            .unwrap();
+    }
+    let net = node.inner.net.get().unwrap().clone();
+    let mut table = net.recount().await.unwrap();
+    for _ in 0..100 {
+        if !table.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        table = net.recount().await.unwrap();
+    }
+    assert_eq!(table.picks.len(), 1, "{table:?}");
+    let after = search(addr, "us+bank").await;
+    let boosted = after.iter().find(|h| h.domain == runner_up.domain).unwrap();
+    assert!(
+        (boosted.score - (runner_up.score + MAX_POPULARITY_BONUS)).abs() < 1e-4,
+        "{before:?} {after:?}"
+    );
+
+    peer.shutdown().await;
+    node.shutdown().await.unwrap();
+}

@@ -72,11 +72,39 @@ The query never leaves the asking node, and the nodes asked cannot tell which no
 * **Ranking locally.** The asker keeps the sites that match the query's keys, builds a small temporary index of them and ranks them with its own ranking, the same as a local search.
 * Cost: measured on a 50,000-site index (the plumbsearch.org test node, mostly uncrawled seed sites), the whole bucket table is 3.6 MB and a bucket holds about 3.5 sites on average, so a search moves a few KB. Crawled sites have more keys, so a fully crawled 1M-site index will have bigger buckets; still well under the relay's 128 KiB per circuit. An answer over 20,000 sites is refused.
 
+## Popularity sharing
+
+`plumb_net::popularity`, `plumb_net::reports`, switched on with `plumb run --network --share-popularity` (off by default). Rankings learn which site people actually pick for a search, without any node learning who searched for what. This follows the design discussed on 2026-10-03, with a simple per-node cap in place of crawl tokens for now.
+
+**What a sharing node notes.** Its result pages link through `/go?q=&d=`, which redirects to the site and notes the pick ("searched `us bank`, picked usbank.com") in `DIR/net/picks.json`, on that node only. The file holds the current week and nothing older. The result page says, under the results, that picks are shared. `/go` only redirects to a site the same search returns, so it cannot be used to send people elsewhere. Only short, plain queries are ever noted: normalized, at most 6 words and 64 characters, no `@`, and no run of 4 or more digits (phone, account and street numbers, dates).
+
+**What it sends.** At random times, 20 to 100 minutes apart, it turns its most-made pick not yet reported this week into a report, at most 8 a day and each pick at most once a week. A report is **threshold-encrypted** with STAR (Brave's [`sta-rs`](https://github.com/brave/sta-rs), MPL-2.0): it carries a tag, the encrypted pick and one secret share of the key. Reports of the same pick in the same week share the tag, and the key comes back only from 10 shares (`REPORT_THRESHOLD`). Below that, a report reveals nothing but its tag. A report is a few hundred bytes.
+
+**How it travels.** The node hands the report to a random connected node over `/plumb/report/1`, under a throwaway identity and a connection of its own, the same way network searches fetch buckets. That node keeps it and passes it on over the gossip topic `plumb/reports/1`, so it reaches every node as that node's message, not the sender's. A node that meets another asks it for this week's and last week's reports, so a node that was away catches up.
+
+**How it is counted.** Every node keeps two weeks of reports (`DIR/net/reports/<week>.jsonl`, at most 200,000 a week) and counts them itself, so any node can count or recount and all get the same table. Reports are grouped by tag and ciphertext. A group of 10 or more gives up its key: the node decrypts the pick and checks it by making a report of that pick afresh, which must give the same tag and ciphertext, so forged shares cannot slip in a different pick. A group with a bad share in it is tried again with other subsets of its shares. Shares made for a lower threshold are refused. The result is written to `DIR/net/popularity.json` and recounted every 10 minutes while new reports arrive.
+
+**How it ranks.** Every node in the network, sharing or not, blends the table into its own searches: it ranks 20 results, adds a bonus of up to 0.15 to each site picked for the query (the full amount for the site picked most, less in proportion for others), and sorts again. 0.15 is about a fifth of what naming a site exactly earns, so popularity settles close calls without overruling a name match.
+
+**What this protects, and what it does not yet.**
+
+* No node, the receiving one included, can read a pick until 10 reports of it were sent, and the reports carry no node id.
+* Raw queries never leave the node, and the local log forgets them after a week.
+* **Guessable picks.** This is STARLite: a report's randomness comes from the pick itself, so anyone can guess a pick ("us bank, usbank.com"), compute its tag and see whether it was reported. They learn that somebody reported it, not who. Full STAR fixes this with a randomness server (an oblivious PRF, `ppoprf`) whose key is rotated weekly; run by a group of nodes, that is a later step. The query filters above keep reportable picks short and navigational, which is what makes this tolerable for now.
+* **IP addresses.** The node a report is handed to sees the sender's IP address (or its relay's), the same gap as network search. Reports go through the IP-hiding relay once it exists (being built in its own thread).
+* **Bots.** Nothing yet stops one machine from sending many reports of one pick under many throwaway identities, and so pushing a site up for a query. The per-node cap only binds honest nodes. Limits now: the bonus is small and bounded, a pick only counts for sites the asking node's own search returns, and stuffed reports cost the attacker 10 identities per pick per week. The real fix is anonymous crawl tokens (Privacy Pass style): a report must spend a token earned by verified crawling, planned with credits after index snapshots.
+
+Tested on one machine (`cargo test -p plumb-net popularity`, `cargo test -p plumb-node popularity`): reports below the threshold stay unreadable, other picks and other weeks do not help, copies count once, forged shares and junk do not break counting, low-threshold shares are refused; across three nodes a report handed in under a throwaway identity reaches the others, a pick becomes readable at the tenth report, and a node that joins later catches up and counts the same; a whole `plumb run` node notes a pick through `/go`, sends its report to another node, and after nine more reports of the same pick ranks that site higher by the bonus.
+
 ## Running it
 
 ```sh
 # A node at home: dials out only.
 plumb run --data plumb-data --network \
+  --bootstrap /dns4/plumbsearch.org/tcp/4001/p2p/<the server's node id>
+
+# Also share which result is opened, anonymously (off by default).
+plumb run --data plumb-data --network --share-popularity \
   --bootstrap /dns4/plumbsearch.org/tcp/4001/p2p/<the server's node id>
 
 # A reachable server that relays for others (open TCP and UDP 4001).
@@ -85,6 +113,7 @@ plumb run --data /data --network --relay \
   --public-addr /ip4/198.211.114.63/udp/4001/quic-v1
 ```
 
+* `GET /api/status` also shows `network.reports_held`, `reports_sent` and `popular_picks`.
 * The node id is printed at start ("joined the Plumb network as 12D3Koo...") and shown in `GET /api/status` under `network.peer_id`, with the addresses it listens on, its NAT status, its relays, and counts of batches held, published and received.
 * The node key is `DIR/net/node.key`. Keep it to keep the same id; a server's id is part of the bootstrap address others use.
 * The Docker image exposes 4001; publish it with `-p 4001:4001/tcp -p 4001:4001/udp` on a server that relays.
@@ -111,4 +140,4 @@ Roughly in order; the first two are what the roadmap's Phase 2 gate ("two nodes 
 5. **Hiding the asker's IP address** for network search: fetching buckets through a relay or an Oblivious HTTP relay by default, so the node asked sees neither the query nor who sent it.
 6. **Desktop app**: a switch for joining the network, crawling only when idle and on power, with a bandwidth cap.
 7. **plumbsearch.org as the first bootstrap and relay node**, then on by default.
-8. Phase 3 and 4 pieces from the white paper: homepage fetch receipts, crawl tokens, and private popularity reports.
+8. Phase 3 and 4 pieces from the white paper: homepage fetch receipts, and crawl tokens to pay for popularity reports. Popularity reports themselves are in (see above); next for them are a randomness server run by a group of nodes, so picks cannot be guessed, and sending through the IP-hiding relay.

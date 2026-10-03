@@ -85,6 +85,7 @@ fn node_config(args: RunArgs) -> NodeConfig {
         net.upnp = !args.no_upnp;
         net.local_discovery = !args.no_local_discovery;
         config.network = Some(net);
+        config.share_popularity = args.share_popularity;
     }
     config
 }
@@ -193,12 +194,18 @@ mod tests {
         assert_eq!(net.bootstrap.len(), 1);
         assert_eq!(net.external.len(), 1);
         assert!(net.relay_server && net.upnp);
+        assert!(!node.share_popularity);
+        assert!(config(&["--data", "d", "--network", "--share-popularity"]).share_popularity);
         let parse = |args: &[&str]| Cli::try_parse_from(["plumb", "run"].iter().chain(args));
         assert!(
             parse(&["--data", "d", "--relay"]).is_err(),
             "--relay needs --public-addr"
         );
         assert!(parse(&["--data", "d", "--bootstrap", "/ip4/1.2.3.4/tcp/1"]).is_err());
+        assert!(
+            parse(&["--data", "d", "--share-popularity"]).is_err(),
+            "--share-popularity needs --network"
+        );
     }
 
     #[test]

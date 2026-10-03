@@ -257,3 +257,52 @@ async fn nodes_share_batches_search_each_other_and_reach_through_a_relay() {
         node.handle.shutdown().await;
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn popularity_reports_spread_and_are_read_once_enough_are_sent() {
+    use plumb_net::popularity::{report_epoch, REPORT_THRESHOLD};
+    use plumb_net::Report;
+
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("plumb_net=debug")
+        .with_test_writer()
+        .try_init();
+
+    let relay = Node::start(true, vec![], vec![]).await;
+    let relay_addr = relay.addr().await;
+    let a = Node::start(false, vec![relay_addr.clone()], vec![]).await;
+    let b = Node::start(false, vec![relay_addr.clone()], vec![]).await;
+    for node in [&a, &b] {
+        wait_for(|| (node.handle.status().connected_peers >= 1).then_some(())).await;
+    }
+
+    // A hands in reports of one pick, each under a throwaway identity.
+    let epoch = report_epoch(now_unix());
+    let wait = Duration::from_secs(10);
+    let send = |n: u32| {
+        let a = &a;
+        async move {
+            for _ in 0..n {
+                let report = Report::new(epoch, "us bank", "usbank.com").unwrap();
+                a.handle.send_report(&report, wait).await.unwrap();
+            }
+        }
+    };
+    send(REPORT_THRESHOLD - 1).await;
+    let held = REPORT_THRESHOLD as usize - 1;
+    wait_for(|| (b.handle.status().reports_held >= held).then_some(())).await;
+    assert!(b.handle.recount().await.unwrap().is_empty());
+
+    send(1).await;
+    wait_for(|| (b.handle.status().reports_held > held).then_some(())).await;
+    let table = b.handle.recount().await.unwrap();
+    assert_eq!(table.picks.len(), 1, "{table:?}");
+    assert_eq!(table.picks[0].domain, "usbank.com");
+    assert!(table.bonus("US Bank", "usbank.com") > 0.0);
+    assert_eq!(a.handle.status().reports_sent, u64::from(REPORT_THRESHOLD));
+
+    // A node that joins later catches up on the week's reports.
+    let c = Node::start(false, vec![relay_addr], vec![]).await;
+    wait_for(|| (c.handle.status().reports_held > held).then_some(())).await;
+    assert_eq!(c.handle.recount().await.unwrap().picks, table.picks);
+}

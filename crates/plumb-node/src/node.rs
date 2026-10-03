@@ -140,6 +140,10 @@ pub struct NodeConfig {
     /// their searches (see [`network`]). Its `dir` is replaced with
     /// `DIR/net`. `None`, the default for now, keeps the node on its own.
     pub network: Option<plumb_net::NetConfig>,
+    /// Share which result people open for a search, anonymously, so the
+    /// network learns what is popular (see [`network`]). Needs `network`.
+    /// Off by default.
+    pub share_popularity: bool,
 }
 
 impl NodeConfig {
@@ -161,6 +165,7 @@ impl NodeConfig {
             retry_wait: Duration::from_secs(10 * 60),
             max_retry_wait: Duration::from_secs(6 * 60 * 60),
             network: None,
+            share_popularity: false,
         }
     }
 
@@ -190,6 +195,9 @@ impl NodeConfig {
     fn check(&self) -> Result<()> {
         if self.sites == 0 {
             bail!("sites must be at least 1");
+        }
+        if self.share_popularity && self.network.is_none() {
+            bail!("sharing popularity needs the network");
         }
         if let Some(alpha) = self.alpha {
             if !(0.0..=1.0).contains(&alpha) {
@@ -587,6 +595,8 @@ struct Inner {
     inbox_records: std::sync::atomic::AtomicU64,
     /// Held while the inbox is appended to or moved aside.
     inbox_lock: Mutex<()>,
+    /// The results opened this week, when sharing popularity.
+    picks: Mutex<Option<plumb_net::PickLog>>,
 }
 
 /// The failures to download Wikidata's official websites, which have their
@@ -638,6 +648,7 @@ impl Inner {
             net: std::sync::OnceLock::new(),
             inbox_records: std::sync::atomic::AtomicU64::new(0),
             inbox_lock: Mutex::new(()),
+            picks: Mutex::new(None),
         }
     }
 
@@ -885,12 +896,13 @@ impl fmt::Debug for Inner {
 
 impl SearchBackend for Inner {
     fn search(&self, query: &str, limit: usize) -> Result<Vec<Hit>> {
-        let Some(index) = self.current() else {
-            bail!("the search index is not ready yet");
-        };
-        index.backend().search(query, limit)
+        Ok(self
+            .search_full(query, limit, &SearchOptions::default())?
+            .hits)
     }
 
+    /// The index's results, re-ranked with what the network's popularity
+    /// reports say people pick for the query (see [`network`]).
     fn search_full(
         &self,
         query: &str,
@@ -900,7 +912,14 @@ impl SearchBackend for Inner {
         let Some(index) = self.current() else {
             bail!("the search index is not ready yet");
         };
-        index.backend().search_full(query, limit, options)
+        let Some(table) = network::handle(self).map(|net| net.popularity()) else {
+            return index.backend().search_full(query, limit, options);
+        };
+        let candidates = limit.max(network::POPULARITY_CANDIDATES);
+        let mut results = index.backend().search_full(query, candidates, options)?;
+        network::apply_popularity(&table, query, &mut results.hits);
+        results.hits.truncate(limit);
+        Ok(results)
     }
 
     fn num_docs(&self) -> u64 {
@@ -919,6 +938,14 @@ impl StatusSource for Inner {
 
     fn rank(&self) -> RankConfig {
         self.rank
+    }
+
+    fn shares_popularity(&self) -> bool {
+        network::shares_popularity(self)
+    }
+
+    fn record_pick(&self, query: &str, domain: &str) {
+        network::record_pick(self, query, domain);
     }
 }
 

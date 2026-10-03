@@ -32,10 +32,16 @@
 //!   [`crate::bucket`] and [`crate::search`]). The node answers other
 //!   nodes' bucket requests from its own [`BucketSource`], with a proof for
 //!   every site it holds a signed crawl of.
+//! * Popularity sharing: [`NetHandle::send_report`] hands a popularity
+//!   report to another node under a throwaway identity. A node handed a
+//!   report keeps it and passes it on over the gossip topic, so every node
+//!   holds every report and counts them itself into the table
+//!   [`NetHandle::popularity`] returns (see [`crate::popularity`]). On
+//!   meeting a node, it asks for the reports of this week and last week.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -60,7 +66,9 @@ use crate::assign::{epoch_of, is_assigned, MAX_SHARE_PPM};
 use crate::batch::{accept_batch, Batch, SignedHeader};
 use crate::bucket::{BucketSource, BUCKETS};
 use crate::hash::Hash;
+use crate::popularity::{report_epoch, PopularityTable, Report};
 use crate::proto::*;
+use crate::reports::ReportStore;
 use crate::search::{BucketPeer, NetSearch};
 use crate::store::BatchStore;
 
@@ -75,6 +83,12 @@ const MAX_FETCHES: usize = 16;
 /// Bucket requests answered at once; more are turned away.
 const MAX_ANSWERING: usize = 8;
 const RELAY_HOP_PROTOCOL: &str = "/libp2p/circuit/relay/0.2.0/hop";
+/// Nodes a report is offered to, one after the other, until one takes it.
+pub const REPORT_TRIES: usize = 3;
+/// Minutes between two recounts of the reports, when new ones came in.
+pub const RECOUNT_MINUTES: u64 = 10;
+/// Where the counted reports are written, for anyone curious.
+const POPULARITY_FILE: &str = "popularity.json";
 
 /// How a node joins the network.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -146,6 +160,12 @@ pub struct NetStatus {
     pub batches_received: u64,
     /// Bucket requests from other nodes answered.
     pub buckets_served: u64,
+    /// Popularity reports held, this week's and last week's.
+    pub reports_held: usize,
+    /// Popularity reports this node sent.
+    pub reports_sent: u64,
+    /// Picks that enough reports were sent of to be read.
+    pub popular_picks: usize,
 }
 
 /// Talks to the swarm task.
@@ -155,7 +175,15 @@ pub struct NetHandle {
     share_ppm: u32,
     commands: mpsc::UnboundedSender<Command>,
     status: Arc<Mutex<NetStatus>>,
+    popularity: Arc<RwLock<Arc<PopularityTable>>>,
     task: Mutex<Option<JoinHandle<()>>>,
+}
+
+/// Which connected nodes a [`Command::Peers`] asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Serving {
+    Buckets,
+    Reports,
 }
 
 enum Command {
@@ -163,7 +191,8 @@ enum Command {
         records: Vec<SiteRecord>,
         reply: oneshot::Sender<Result<Option<Hash>>>,
     },
-    Peers(oneshot::Sender<Vec<BucketPeer>>),
+    Peers(Serving, oneshot::Sender<Vec<BucketPeer>>),
+    Recount(oneshot::Sender<Arc<PopularityTable>>),
     Dial(Multiaddr),
     Stop,
 }
@@ -200,9 +229,55 @@ impl NetHandle {
     /// that match, checked but unranked (see [`crate::search`]).
     pub async fn search(&self, query: &str, wait: Duration) -> Result<NetSearch> {
         let (reply, peers) = oneshot::channel();
-        self.send(Command::Peers(reply))?;
+        self.send(Command::Peers(Serving::Buckets, reply))?;
         let peers = peers.await.context("the network task stopped")?;
         Ok(crate::search::search(query, &peers, wait, now_unix()).await)
+    }
+
+    /// Hands `report` to another node under a throwaway identity, trying
+    /// up to [`REPORT_TRIES`] nodes at random, each for at most `wait`.
+    /// That node keeps it and passes it on to the rest.
+    pub async fn send_report(&self, report: &Report, wait: Duration) -> Result<()> {
+        let (reply, peers) = oneshot::channel();
+        self.send(Command::Peers(Serving::Reports, reply))?;
+        let mut peers = peers.await.context("the network task stopped")?;
+        if peers.is_empty() {
+            anyhow::bail!("no node to hand a report to yet");
+        }
+        crate::search::shuffle(&mut peers);
+        let mut last_error = None;
+        for peer in peers.iter().take(REPORT_TRIES) {
+            match crate::throwaway::submit_report(peer, report, wait).await {
+                Ok(_) => {
+                    self.status
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .reports_sent += 1;
+                    return Ok(());
+                }
+                Err(err) => {
+                    debug!("{} did not take a report: {err:#}", peer.peer);
+                    last_error = Some(err);
+                }
+            }
+        }
+        Err(last_error.expect("tried at least one node"))
+    }
+
+    /// What the reports this node holds say people pick, recounted every
+    /// [`RECOUNT_MINUTES`] minutes while new reports come in.
+    pub fn popularity(&self) -> Arc<PopularityTable> {
+        self.popularity
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Counts the reports held now rather than at the next recount.
+    pub async fn recount(&self) -> Result<Arc<PopularityTable>> {
+        let (reply, table) = oneshot::channel();
+        self.send(Command::Recount(reply))?;
+        table.await.context("the network task stopped")
     }
 
     /// Dials `addr`, for tests and for adding a node by hand.
@@ -287,6 +362,7 @@ struct Behaviour {
     gossipsub: gossipsub::Behaviour,
     buckets: request_response::cbor::Behaviour<BucketRequest, BucketResponse>,
     batches: request_response::cbor::Behaviour<BatchRequest, BatchResponse>,
+    reports: request_response::cbor::Behaviour<ReportRequest, ReportResponse>,
 }
 
 /// Starts the network side of a node. Returns its handle and the records
@@ -301,6 +377,17 @@ pub async fn start(
         tokio::task::spawn_blocking(move || BatchStore::open(&dir))
             .await
             .context("opening the batch store")??
+    };
+    let (reports, table) = {
+        let dir = config.dir.clone();
+        tokio::task::spawn_blocking(move || {
+            let now = now_unix();
+            let reports = ReportStore::open(&dir.join("reports"), now)?;
+            let table = reports.table(now);
+            anyhow::Ok((reports, table))
+        })
+        .await
+        .context("opening the report store")??
     };
     let peer_id = key.public().to_peer_id();
     let mut swarm = build_swarm(&key, &config)?;
@@ -318,13 +405,22 @@ pub async fn start(
         .gossipsub
         .subscribe(&topic)
         .context("subscribing to the batch topic")?;
+    let report_topic = gossipsub::IdentTopic::new(REPORT_TOPIC);
+    swarm
+        .behaviour_mut()
+        .gossipsub
+        .subscribe(&report_topic)
+        .context("subscribing to the report topic")?;
 
     let status = Arc::new(Mutex::new(NetStatus {
         peer_id: peer_id.to_string(),
         nat: "unknown".into(),
         batches_held: store.len(),
+        reports_held: reports.len(),
+        popular_picks: table.picks.len(),
         ..NetStatus::default()
     }));
+    let popularity = Arc::new(RwLock::new(Arc::new(table)));
     let (commands, commands_rx) = mpsc::unbounded_channel();
     let (records_tx, records_rx) = mpsc::unbounded_channel();
     let (answers_tx, answers_rx) = mpsc::unbounded_channel();
@@ -334,7 +430,13 @@ pub async fn start(
         key: key.clone(),
         config: config.clone(),
         topic,
+        report_topic,
         store: Arc::new(Mutex::new(store)),
+        reports: Arc::new(Mutex::new(reports)),
+        popularity: popularity.clone(),
+        recount: false,
+        report_peers: HashMap::new(),
+        report_listing: HashSet::new(),
         source,
         status: status.clone(),
         records: records_tx,
@@ -362,6 +464,7 @@ pub async fn start(
             share_ppm: config.share_ppm.min(MAX_SHARE_PPM),
             commands,
             status,
+            popularity,
             task: Mutex::new(Some(handle)),
         },
         records_rx,
@@ -473,6 +576,13 @@ fn build_swarm(key: &Keypair, config: &NetConfig) -> Result<Swarm<Behaviour>> {
                         .set_request_size_maximum(4 * 1024)
                         .set_response_size_maximum(64 * 1024 * 1024),
                     [(StreamProtocol::new(BATCH_PROTOCOL), ProtocolSupport::Full)],
+                    request_config.clone(),
+                ),
+                reports: request_response::Behaviour::with_codec(
+                    request_response::cbor::codec::Codec::default()
+                        .set_request_size_maximum(8 * 1024)
+                        .set_response_size_maximum(128 * 1024 * 1024),
+                    [(StreamProtocol::new(REPORT_PROTOCOL), ProtocolSupport::Full)],
                     request_config,
                 ),
             })
@@ -487,6 +597,9 @@ fn build_swarm(key: &Keypair, config: &NetConfig) -> Result<Swarm<Behaviour>> {
 enum Answer {
     Bucket(ResponseChannel<BucketResponse>, BucketResponse),
     Batch(ResponseChannel<BatchResponse>, BatchResponse),
+    Report(ResponseChannel<ReportResponse>, ReportResponse),
+    /// Picks counted in a recount of the reports.
+    Popularity(usize),
 }
 
 struct Task {
@@ -494,7 +607,16 @@ struct Task {
     key: Keypair,
     config: NetConfig,
     topic: gossipsub::IdentTopic,
+    report_topic: gossipsub::IdentTopic,
     store: Arc<Mutex<BatchStore>>,
+    reports: Arc<Mutex<ReportStore>>,
+    popularity: Arc<RwLock<Arc<PopularityTable>>>,
+    /// New reports came in since the last count.
+    recount: bool,
+    /// Connected nodes that take reports, and the addresses they listen on.
+    report_peers: HashMap<PeerId, Vec<Multiaddr>>,
+    /// Nodes asked for their reports this session.
+    report_listing: HashSet<PeerId>,
     source: Arc<dyn BucketSource>,
     status: Arc<Mutex<NetStatus>>,
     records: mpsc::UnboundedSender<Vec<SiteRecord>>,
@@ -555,9 +677,12 @@ impl Task {
             Command::Publish { records, reply } => {
                 let _ = reply.send(self.publish(records));
             }
-            Command::Peers(reply) => {
-                let peers = self
-                    .bucket_peers
+            Command::Peers(serving, reply) => {
+                let serving = match serving {
+                    Serving::Buckets => &self.bucket_peers,
+                    Serving::Reports => &self.report_peers,
+                };
+                let peers = serving
                     .iter()
                     .map(|(peer, listening)| {
                         let mut addrs = listening.clone();
@@ -604,10 +729,11 @@ impl Task {
                     .filter(|p| !p.addrs.is_empty())
                     .collect::<Vec<_>>();
                 for p in &peers {
-                    debug!("bucket peer {} at {:?}", p.peer, p.addrs);
+                    debug!("peer {} at {:?}", p.peer, p.addrs);
                 }
                 let _ = reply.send(peers);
             }
+            Command::Recount(reply) => self.count_reports(Some(reply)),
             Command::Dial(addr) => self.dial(addr),
             Command::Stop => {}
         }
@@ -669,6 +795,14 @@ impl Task {
                     .batches
                     .send_response(channel, response);
             }
+            Answer::Report(channel, response) => {
+                let _ = self
+                    .swarm
+                    .behaviour_mut()
+                    .reports
+                    .send_response(channel, response);
+            }
+            Answer::Popularity(picks) => self.with_status(|s| s.popular_picks = picks),
         }
     }
 
@@ -719,8 +853,40 @@ impl Task {
         }
         if ticks.is_multiple_of(60) {
             self.lock_store().prune(now_unix());
+            self.lock_reports().prune(now_unix());
+            // A new week makes last week's count stale.
+            self.recount = true;
+        }
+        if self.recount && ticks.is_multiple_of(RECOUNT_MINUTES) {
+            self.recount = false;
+            self.count_reports(None);
         }
         self.fetch_more();
+    }
+
+    /// Counts the reports held, off the swarm task, and saves the table.
+    fn count_reports(&self, reply: Option<oneshot::Sender<Arc<PopularityTable>>>) {
+        let reports = self.reports.clone();
+        let popularity = self.popularity.clone();
+        let path = self.config.dir.join(POPULARITY_FILE);
+        let tx = self.answers_tx.clone();
+        tokio::task::spawn_blocking(move || {
+            let table = reports
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .table(now_unix());
+            if let Err(err) = table.save(&path) {
+                warn!("cannot save the popularity table: {err:#}");
+            }
+            let picks = table.picks.len();
+            info!("counted the popularity reports: {picks} picks");
+            let table = Arc::new(table);
+            *popularity.write().unwrap_or_else(PoisonError::into_inner) = table.clone();
+            if let Some(reply) = reply {
+                let _ = reply.send(table);
+            }
+            let _ = tx.send(Answer::Popularity(picks));
+        });
     }
 
     fn on_event(&mut self, event: SwarmEvent<BehaviourEvent>) {
@@ -757,6 +923,7 @@ impl Task {
             } => {
                 if num_established == 0 {
                     self.bucket_peers.remove(&peer_id);
+                    self.report_peers.remove(&peer_id);
                     self.batch_peers.remove(&peer_id);
                     self.remote_addrs.remove(&peer_id);
                     self.reserved.remove(&peer_id);
@@ -792,7 +959,11 @@ impl Task {
                 message_id,
                 message,
             }) => {
-                let verdict = self.on_header(propagation_source, &message.data);
+                let verdict = if message.topic == self.report_topic.hash() {
+                    self.on_gossip_report(&message.data)
+                } else {
+                    self.on_header(propagation_source, &message.data)
+                };
                 let _ = self
                     .swarm
                     .behaviour_mut()
@@ -808,6 +979,7 @@ impl Task {
             }
             BehaviourEvent::Buckets(event) => self.on_bucket_event(event),
             BehaviourEvent::Batches(event) => self.on_batch_event(event),
+            BehaviourEvent::Reports(event) => self.on_report_event(event),
             BehaviourEvent::RelayClient(relay::client::Event::ReservationReqAccepted {
                 relay_peer_id,
                 renewal,
@@ -922,6 +1094,24 @@ impl Task {
                 .cloned()
                 .collect();
             self.bucket_peers.insert(peer, addrs);
+        }
+        if supports(REPORT_PROTOCOL) {
+            let addrs = info
+                .listen_addrs
+                .iter()
+                .filter(|addr| usable(addr))
+                .cloned()
+                .collect();
+            self.report_peers.insert(peer, addrs);
+            if self.report_listing.insert(peer) {
+                let current = report_epoch(now_unix());
+                for epoch in [current.saturating_sub(1), current] {
+                    self.swarm
+                        .behaviour_mut()
+                        .reports
+                        .send_request(&peer, ReportRequest::List { epoch });
+                }
+            }
         }
         if supports(BATCH_PROTOCOL) {
             self.batch_peers.insert(peer);
@@ -1163,6 +1353,106 @@ impl Task {
         self.store.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    fn lock_reports(&self) -> std::sync::MutexGuard<'_, ReportStore> {
+        self.reports.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Keeps a report if it checks out and is new. Returns `None` for one
+    /// that does not check out, else whether it was new.
+    fn take_report(&mut self, report: &Report) -> Option<bool> {
+        if let Err(err) = report.check(now_unix()) {
+            debug!("refused a report: {err:#}");
+            return None;
+        }
+        let new = match self.lock_reports().insert(report) {
+            Ok(new) => new,
+            Err(err) => {
+                warn!("cannot keep a report: {err:#}");
+                false
+            }
+        };
+        if new {
+            self.recount = true;
+        }
+        Some(new)
+    }
+
+    /// A report passed on over gossip.
+    fn on_gossip_report(&mut self, data: &[u8]) -> gossipsub::MessageAcceptance {
+        let Ok(report) = serde_json::from_slice::<Report>(data) else {
+            return gossipsub::MessageAcceptance::Reject;
+        };
+        match self.take_report(&report) {
+            Some(_) => gossipsub::MessageAcceptance::Accept,
+            None => gossipsub::MessageAcceptance::Reject,
+        }
+    }
+
+    fn on_report_event(&mut self, event: request_response::Event<ReportRequest, ReportResponse>) {
+        match event {
+            request_response::Event::Message {
+                message:
+                    request_response::Message::Request {
+                        request, channel, ..
+                    },
+                ..
+            } => match request {
+                ReportRequest::Submit(report) => {
+                    let taken = self.take_report(&report) == Some(true);
+                    if taken {
+                        // Pass it on; nodes that miss it get it when they
+                        // next ask for the week's reports.
+                        let data = serde_json::to_vec(&report).expect("reports encode");
+                        let topic = self.report_topic.clone();
+                        if let Err(err) = self.swarm.behaviour_mut().gossipsub.publish(topic, data)
+                        {
+                            debug!("cannot pass a report on yet: {err}");
+                        }
+                    }
+                    let _ = self
+                        .swarm
+                        .behaviour_mut()
+                        .reports
+                        .send_response(channel, ReportResponse::Taken(taken));
+                }
+                ReportRequest::List { epoch } => {
+                    let reports = self.reports.clone();
+                    let tx = self.answers_tx.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let list = reports
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .list(epoch, MAX_LISTED_REPORTS);
+                        let _ = tx.send(Answer::Report(channel, ReportResponse::Reports(list)));
+                    });
+                }
+            },
+            request_response::Event::Message {
+                peer,
+                message:
+                    request_response::Message::Response {
+                        response: ReportResponse::Reports(reports),
+                        ..
+                    },
+                ..
+            } => {
+                let mut new = 0;
+                for report in reports.iter().take(MAX_LISTED_REPORTS) {
+                    if self.take_report(report) == Some(true) {
+                        new += 1;
+                    }
+                }
+                if new > 0 {
+                    info!("caught up on {new} popularity reports from {peer}");
+                }
+            }
+            request_response::Event::OutboundFailure { peer, error, .. } => {
+                debug!("report request to {peer} failed: {error}");
+            }
+            _ => {}
+        }
+    }
+
     fn with_status(&self, change: impl FnOnce(&mut NetStatus)) {
         change(&mut self.status.lock().unwrap_or_else(PoisonError::into_inner));
     }
@@ -1182,12 +1472,14 @@ impl Task {
             .map(|(peer, _)| peer.to_string())
             .collect();
         let held = self.lock_store().len();
+        let reports_held = self.lock_reports().len();
         self.with_status(|s| {
             s.listening = listening;
             s.reachable_at = reachable_at;
             s.connected_peers = connected_peers;
             s.relays = relays;
             s.batches_held = held;
+            s.reports_held = reports_held;
         });
     }
 }
