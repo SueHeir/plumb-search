@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use plumb_core::{is_homepage_path, registrable_domain, SiteRecord};
+use plumb_core::{is_homepage_path, is_useful_anchor, linker_bit, registrable_domain, SiteRecord};
 use url::Url;
 
 use crate::{CrawlOutcome, CrawlResult};
@@ -22,7 +22,11 @@ use crate::{CrawlOutcome, CrawlResult};
 ///   match for "us bank". Every link still counts toward `linking_domains`
 ///   and still creates the linked domain's record.
 /// - A link text counts once per linking domain, however often that site
-///   repeats it. Links from a site to itself are ignored.
+///   repeats it, and merging keeps it that way across crawls (see
+///   [`plumb_core::LinkText::linkers`]). Links from a site to itself are
+///   ignored, and so are texts that say nothing about the site ("click
+///   here", "official website", the URL itself; see
+///   [`plumb_core::is_useful_anchor`]).
 /// - [`CrawlOutcome::OffsiteRedirect`] adds an empty record for the
 ///   registrable domain the redirect points to, so it gets discovered, and
 ///   nothing for the domain that redirected. Other outcomes add nothing.
@@ -56,7 +60,7 @@ pub fn to_records(results: &[CrawlResult]) -> Vec<SiteRecord> {
                         .or_default()
                         .entry(page.domain.as_str())
                         .or_default();
-                    if links_to_front_page(&link.url) {
+                    if has_useful_front_page_text(&link.url, &link.text) {
                         texts.insert(link.text.as_str());
                     }
                 }
@@ -78,13 +82,15 @@ pub fn to_records(results: &[CrawlResult]) -> Vec<SiteRecord> {
     for (target, linking) in inbound {
         let mut record = SiteRecord::new(target);
         record.signals.linking_domains = u32::try_from(linking.len()).unwrap_or(u32::MAX);
-        let mut text_counts: BTreeMap<&str, u32> = BTreeMap::new();
-        for &text in linking.values().flatten() {
-            *text_counts.entry(text).or_default() += 1;
+        let mut text_linkers: BTreeMap<&str, u64> = BTreeMap::new();
+        for (&linker, texts) in &linking {
+            for &text in texts {
+                *text_linkers.entry(text).or_default() |= linker_bit(linker);
+            }
         }
-        for (text, count) in text_counts {
-            // Ignores empty texts; keeps the most frequent ones.
-            record.add_link_text(text, count);
+        for (text, linkers) in text_linkers {
+            // Ignores empty texts; keeps the most used ones.
+            record.add_link_text_linkers(text, linkers);
         }
         upsert(&mut records, record);
     }
@@ -92,9 +98,11 @@ pub fn to_records(results: &[CrawlResult]) -> Vec<SiteRecord> {
     records.into_values().collect()
 }
 
-/// Whether a link points at a site's front page; any query string is fine.
-fn links_to_front_page(url: &str) -> bool {
-    Url::parse(url).is_ok_and(|url| is_homepage_path(url.path()))
+/// Whether a link points at a site's front page (any query string is fine)
+/// with text worth keeping.
+fn has_useful_front_page_text(url: &str, text: &str) -> bool {
+    Url::parse(url)
+        .is_ok_and(|parsed| is_homepage_path(parsed.path()) && is_useful_anchor(text, url, &parsed))
 }
 
 fn upsert(records: &mut BTreeMap<String, SiteRecord>, record: SiteRecord) {
@@ -108,7 +116,7 @@ fn upsert(records: &mut BTreeMap<String, SiteRecord>, record: SiteRecord) {
 
 #[cfg(test)]
 mod tests {
-    use plumb_core::{LinkText, RecordSet};
+    use plumb_core::{linker_bit, LinkText, RecordSet};
 
     use super::*;
     use crate::{CrawledPage, OutLink, PageMeta};
@@ -250,6 +258,27 @@ mod tests {
     }
 
     #[test]
+    fn texts_that_say_nothing_about_the_site_are_dropped() {
+        let results = [fetched(
+            "a.com",
+            &[
+                ("https://acme.example/", "click here"),
+                ("https://acme.example/", "official website"),
+                ("https://acme.example/", "home"),
+                ("https://www.third.org/", "https www third org"),
+                ("https://acme.example/", "acme rockets"),
+            ],
+        )];
+        let records = to_records(&results);
+        let get = |domain: &str| records.iter().find(|r| r.domain == domain).unwrap();
+        assert_eq!(texts(get("acme.example")), [("acme rockets", 1)]);
+        // The links still count.
+        assert_eq!(get("acme.example").signals.linking_domains, 1);
+        assert!(get("third.org").link_texts.is_empty());
+        assert_eq!(get("third.org").signals.linking_domains, 1);
+    }
+
+    #[test]
     fn offsite_redirects_discover_the_destination_only() {
         let results = [
             result(
@@ -293,7 +322,9 @@ mod tests {
     fn records_merge_into_a_record_set() {
         let mut set = RecordSet::new();
         let mut known = SiteRecord::new("target.org");
-        known.add_link_text("target", 5);
+        // Seen before from old.net and a.com; a.com links again below.
+        known.add_link_text("target", "old.net");
+        known.add_link_text("target", "a.com");
         known.signals.linking_domains = 1;
         set.upsert(known);
         set.extend(to_records(&[
@@ -303,11 +334,12 @@ mod tests {
         let target = set.get("target.org").unwrap();
         assert_eq!(
             target.link_texts,
-            [LinkText {
-                text: "target".into(),
-                count: 7
-            }]
+            [LinkText::from_linkers(
+                "target",
+                linker_bit("old.net") | linker_bit("a.com") | linker_bit("b.com")
+            )]
         );
+        assert_eq!(texts(target), [("target", 3)]);
         assert_eq!(target.signals.linking_domains, 2);
         assert_eq!(set.len(), 3);
     }

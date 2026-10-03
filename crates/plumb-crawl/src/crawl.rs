@@ -448,10 +448,19 @@ mod tests {
     use axum::response::{Html, Response};
     use axum::routing::get;
     use axum::Router;
-    use plumb_core::LinkText;
+    use plumb_core::SiteRecord;
 
     use super::*;
     use crate::{to_records, OutLink, USER_AGENT};
+
+    /// A record's link texts as (text, number of linking sites).
+    fn link_texts_of(record: &SiteRecord) -> Vec<(&str, u32)> {
+        record
+            .link_texts
+            .iter()
+            .map(|lt| (lt.text.as_str(), lt.count))
+            .collect()
+    }
 
     /// A request a test server received.
     #[derive(Debug, Clone)]
@@ -1214,36 +1223,18 @@ mod tests {
         assert_eq!(beta.title.as_deref(), Some("Beta Corp"));
         assert_eq!(beta.url, Some(format!("http://127.0.0.1:{port}/beta")));
         assert!(beta.crawled_at.is_some());
-        assert_eq!(
-            beta.link_texts,
-            [LinkText {
-                text: "beta corp".into(),
-                count: 1
-            }]
-        );
+        assert_eq!(link_texts_of(beta), [("beta corp", 1)]);
         assert_eq!(beta.signals.linking_domains, 1);
 
         let alpha = &records[1];
         assert_eq!(alpha.title.as_deref(), Some("Alpha Co"));
         assert_eq!(alpha.aliases, ["Alpha"]);
-        assert_eq!(
-            alpha.link_texts,
-            [LinkText {
-                text: "alpha".into(),
-                count: 1
-            }]
-        );
+        assert_eq!(link_texts_of(alpha), [("alpha", 1)]);
 
         // Discovered. "about our partner" is on a deep link, so it is left out.
         let partner = &records[2];
         assert_eq!((partner.title.as_deref(), partner.crawled_at), (None, None));
-        assert_eq!(
-            partner.link_texts,
-            [LinkText {
-                text: "partner".into(),
-                count: 2
-            }]
-        );
+        assert_eq!(link_texts_of(partner), [("partner", 2)]);
         assert_eq!(partner.signals.linking_domains, 2);
     }
 

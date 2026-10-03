@@ -706,8 +706,11 @@ mod tests {
         for alias in aliases {
             record.add_alias(alias);
         }
-        for (text, count) in link_texts {
-            record.add_link_text(text, *count);
+        for &(text, count) in link_texts {
+            let text = plumb_core::normalize_text(text);
+            if !text.is_empty() {
+                record.link_texts.push(LinkText::with_count(text, count));
+            }
         }
         record.signals = signals;
         record
@@ -1474,10 +1477,7 @@ mod tests {
         let mut record = SiteRecord::new("example.com");
         record.title = Some(format!("Example {}", "very long title ".repeat(100)));
         record.link_texts = (1..=60)
-            .map(|i| LinkText {
-                text: format!("anchor {i}"),
-                count: i,
-            })
+            .map(|i| LinkText::with_count(format!("anchor {i}"), i))
             .collect();
         record.aliases = (100..140).map(|i| format!("alias {i}")).collect();
         let (_dir, searcher) = build(&[record]);
@@ -1639,7 +1639,9 @@ mod tests {
                     Some((0..12).map(|_| rng.word()).collect::<Vec<_>>().join(" "));
                 for _ in 0..rng.below(5) {
                     let text = format!("{} {}", rng.word(), rng.word());
-                    record.add_link_text(&text, 1 + rng.below(200) as u32);
+                    record
+                        .link_texts
+                        .push(LinkText::with_count(text, 1 + rng.below(200) as u32));
                 }
                 if rng.below(4) == 0 {
                     record.add_alias(&format!("{a} {b}"));

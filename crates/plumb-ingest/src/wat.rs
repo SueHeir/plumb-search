@@ -27,8 +27,8 @@ use anyhow::{bail, Context, Result};
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use plumb_core::{
-    collapse_whitespace, is_homepage_path, normalize_text, registrable_domain, truncate_chars,
-    MAX_TEXT_CHARS,
+    collapse_whitespace, is_homepage_path, is_useful_anchor, linker_bit, normalize_text,
+    registrable_domain, truncate_chars, MAX_TEXT_CHARS,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -36,75 +36,6 @@ use tracing::debug;
 use url::Url;
 
 use crate::snippet;
-
-/// Longest anchor text kept, in characters after normalization.
-const MAX_ANCHOR_CHARS: usize = 100;
-
-/// Normalized link texts that say nothing about the site they point to.
-const GENERIC_ANCHORS: &[&str] = &[
-    "about",
-    "about us",
-    "back",
-    "back to top",
-    "click",
-    "click here",
-    "click to visit",
-    "com",
-    "contact",
-    "contact us",
-    "continue",
-    "continue reading",
-    "details",
-    "download",
-    "external link",
-    "find out more",
-    "full story",
-    "go",
-    "go to site",
-    "go to website",
-    "here",
-    "home",
-    "home page",
-    "homepage",
-    "http",
-    "https",
-    "info",
-    "learn more",
-    "link",
-    "links",
-    "main page",
-    "more",
-    "more info",
-    "more information",
-    "next",
-    "official site",
-    "official web site",
-    "official website",
-    "open",
-    "previous",
-    "read",
-    "read more",
-    "see more",
-    "site",
-    "source",
-    "this",
-    "this link",
-    "top",
-    "url",
-    "view",
-    "view more",
-    "view site",
-    "view website",
-    "visit",
-    "visit our website",
-    "visit site",
-    "visit the website",
-    "visit website",
-    "web",
-    "web site",
-    "website",
-    "www",
-];
 
 /// Homepage fields taken from a WAT response document.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -124,8 +55,9 @@ pub struct WatExtract {
     /// Homepage metadata by domain.
     pub homepages: HashMap<String, HomepageMeta>,
     /// Inbound link text by target domain, from links to its front page:
-    /// normalized text -> number of links using it.
-    pub anchors: HashMap<String, HashMap<String, u32>>,
+    /// normalized text -> the linking sites, as [`plumb_core::linker_bit`]s
+    /// OR-ed together, so a site counts once however many of its pages link.
+    pub anchors: HashMap<String, HashMap<String, u64>>,
     /// Distinct linking domains by target domain.
     pub linking_domains: HashMap<String, HashSet<String>>,
 }
@@ -177,7 +109,7 @@ impl WatExtract {
     /// resolved against the page URL, `http`/`https` only, whose target
     /// registrable domain differs from the page's. Every such link adds the
     /// page's domain to the target's `linking_domains`. Its text goes into
-    /// `anchors` only when the link points at a front page
+    /// `anchors`, counted once per linking site, only when the link points at a front page
     /// ([`plumb_core::is_homepage_path`] on the target's path; a query string
     /// is fine), since text on deeper links names the page (a headline, a
     /// product, a social profile), not the site. That text is normalized with
@@ -270,13 +202,12 @@ impl WatExtract {
         if is_homepage_path(target.path()) {
             let text = normalize_text(link["text"].as_str().unwrap_or(""));
             if is_useful_anchor(&text, href, &target) {
-                let count = self
+                *self
                     .anchors
                     .entry(target_domain.clone())
                     .or_default()
                     .entry(text)
-                    .or_insert(0);
-                *count = count.saturating_add(1);
+                    .or_insert(0) |= linker_bit(page_domain);
             }
         }
         let linkers = self.linking_domains.entry(target_domain).or_default();
@@ -382,15 +313,6 @@ fn meta_content(metas: &[Value], matches: impl Fn(&Value) -> bool) -> Option<Str
         .iter()
         .filter(|m| matches(m))
         .find_map(|m| m["content"].as_str().and_then(clean_text))
-}
-
-/// Whether a normalized link text is worth keeping for the link's target.
-fn is_useful_anchor(text: &str, href: &str, target: &Url) -> bool {
-    !text.is_empty()
-        && text.chars().count() <= MAX_ANCHOR_CHARS
-        && !GENERIC_ANCHORS.contains(&text)
-        && text != normalize_text(href)
-        && text != normalize_text(target.as_str())
 }
 
 /// Longest WARC header line accepted, in bytes; longer means the framing is off.
@@ -819,7 +741,11 @@ mod tests {
         let mut texts: Vec<(String, u32)> = out
             .anchors
             .get(domain)
-            .map(|m| m.iter().map(|(t, c)| (t.clone(), *c)).collect())
+            .map(|m| {
+                m.iter()
+                    .map(|(t, &bits)| (t.clone(), plumb_core::linker_count(bits)))
+                    .collect()
+            })
             .unwrap_or_default();
         texts.sort();
         texts
@@ -906,7 +832,8 @@ mod tests {
             }
         );
         assert_eq!(from_plain.homepages.len(), 1);
-        assert_eq!(anchors(&from_plain, "usbank.com"), pairs(&[("us bank", 2)]));
+        // Two links from the same site count once.
+        assert_eq!(anchors(&from_plain, "usbank.com"), pairs(&[("us bank", 1)]));
         assert_eq!(linkers(&from_plain, "usbank.com"), ["example.org"]);
         assert_eq!(
             anchors(&from_plain, "example.com"),
@@ -1321,7 +1248,7 @@ mod tests {
     }
 
     #[test]
-    fn counts_add_up_across_documents_and_files() {
+    fn counts_each_linking_site_once_across_documents_and_files() {
         let dir = tempfile::tempdir().unwrap();
         let first = write_wat(
             dir.path(),
@@ -1366,16 +1293,8 @@ mod tests {
                 bad_records: 0,
             }
         );
-        assert_eq!(anchors(&out, "usbank.com"), pairs(&[("us bank", 4)]));
+        // a.com links twice (from a.com and www.a.com) but counts once.
+        assert_eq!(anchors(&out, "usbank.com"), pairs(&[("us bank", 3)]));
         assert_eq!(linkers(&out, "usbank.com"), ["a.com", "b.com", "c.com"]);
-    }
-
-    #[test]
-    fn generic_anchor_list_is_normalized() {
-        for text in GENERIC_ANCHORS {
-            assert_eq!(&normalize_text(text), text);
-        }
-        let unique: HashSet<&&str> = GENERIC_ANCHORS.iter().collect();
-        assert_eq!(unique.len(), GENERIC_ANCHORS.len());
     }
 }
