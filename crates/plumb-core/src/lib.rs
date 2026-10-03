@@ -11,6 +11,14 @@ use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+mod country;
+mod kinds;
+mod site_search;
+
+pub use country::{normalize_country, site_country, tld_country};
+pub use kinds::{is_generic_kind, kind_key, MAX_KINDS};
+pub use site_search::{search_link, search_template_for, SEARCH_TERMS};
+
 use anyhow::{Context, Result};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -51,6 +59,20 @@ pub struct SiteRecord {
     /// sites that keep failing are not retried on every crawl.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crawl_attempted_at: Option<u64>,
+    /// Country the site belongs to, as an ISO 3166-1 alpha-2 code (`US`),
+    /// from Wikidata's country of the organization whose official website
+    /// this is. When missing, [`site_country`] falls back to the domain
+    /// ending (`.fr` -> `FR`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub country: Option<String>,
+    /// What kind of thing the site's organization is, from Wikidata
+    /// ("bank", "airline"), at most [`MAX_KINDS`]. See [`SiteRecord::add_kind`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub kinds: Vec<String>,
+    /// The site's own search address, with `{searchTerms}` where the words
+    /// go (see [`search_link`]), read from a search form on its homepage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search_url: Option<String>,
 }
 
 /// Inbound link text and the sites that link with it.
@@ -206,10 +228,27 @@ impl SiteRecord {
         self.aliases.push(alias);
     }
 
+    /// Adds a kind ("bank") unless it is generic ([`is_generic_kind`]), the
+    /// same kind is already there (plurals and case aside), or the site has
+    /// [`MAX_KINDS`] already.
+    pub fn add_kind(&mut self, kind: &str) {
+        let kind = truncate_chars(&collapse_whitespace(kind), MAX_TEXT_CHARS);
+        if self.kinds.len() >= MAX_KINDS || is_generic_kind(&kind) {
+            return;
+        }
+        let key = kind_key(&kind);
+        if self.kinds.iter().any(|k| kind_key(k) == key) {
+            return;
+        }
+        self.kinds.push(kind);
+    }
+
     /// Folds another record for the same domain into this one.
     ///
-    /// Page fields (url, title, description) come from whichever record was
-    /// crawled more recently, and missing ones are filled from the other.
+    /// Page fields (url, title, description, search_url) come from whichever
+    /// record was crawled more recently, and missing ones are filled from the
+    /// other (except `search_url`: a newer crawl without a search form
+    /// clears it). The first record's `country` wins, and kinds are unioned.
     /// Link texts take the union of their linking sites (a site seen by both
     /// counts once), aliases are unioned, ranks keep the best
     /// (lowest) value, `linking_domains` keeps the larger count (sources often
@@ -228,11 +267,20 @@ impl SiteRecord {
             if other.description.is_some() {
                 self.description = other.description;
             }
+            // A fresh crawl that found no search form means the site has none now.
+            self.search_url = other.search_url;
             self.crawled_at = other.crawled_at;
         } else {
             self.url = self.url.take().or(other.url);
             self.title = self.title.take().or(other.title);
             self.description = self.description.take().or(other.description);
+            if self.crawled_at.is_none() {
+                self.search_url = self.search_url.take().or(other.search_url);
+            }
+        }
+        self.country = self.country.take().or(other.country);
+        for kind in &other.kinds {
+            self.add_kind(kind);
         }
         for lt in other.link_texts {
             match self.link_texts.iter_mut().find(|mine| mine.text == lt.text) {
@@ -820,6 +868,36 @@ mod tests {
         }
         assert_eq!(joined("U.S. Bank"), "usbank");
         assert_eq!(joined("Bank of America"), "bankofamerica");
+    }
+
+    #[test]
+    fn merge_handles_country_kinds_and_search_addresses() {
+        let mut seed = SiteRecord::new("chase.com");
+        seed.country = Some("US".into());
+        seed.add_kind("bank");
+        seed.add_kind("Public company");
+        assert_eq!(seed.kinds, ["bank"], "generic kinds are dropped");
+
+        let mut crawl = SiteRecord::new("chase.com");
+        crawl.crawled_at = Some(10);
+        crawl.search_url = Some("https://www.chase.com/search?q={searchTerms}".into());
+        crawl.country = Some("GB".into());
+        crawl.add_kind("Banks");
+        crawl.add_kind("financial services");
+        seed.merge(crawl);
+        assert_eq!(seed.country.as_deref(), Some("US"));
+        assert_eq!(seed.kinds, ["bank", "financial services"]);
+        assert!(seed.search_url.is_some());
+
+        // A later crawl without a search form clears it; an older one does not.
+        let mut older = SiteRecord::new("chase.com");
+        older.crawled_at = Some(5);
+        seed.merge(older);
+        assert!(seed.search_url.is_some());
+        let mut newer = SiteRecord::new("chase.com");
+        newer.crawled_at = Some(20);
+        seed.merge(newer);
+        assert_eq!(seed.search_url, None);
     }
 
     #[test]

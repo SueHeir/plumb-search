@@ -47,6 +47,7 @@ pub fn to_records(results: &[CrawlResult]) -> Vec<SiteRecord> {
                 if let Some(site_name) = &page.meta.site_name {
                     record.add_alias(site_name);
                 }
+                record.search_url = page.meta.search_url.clone();
                 record.crawled_at = Some(page.fetched_at);
                 upsert(&mut records, record);
 
@@ -134,6 +135,7 @@ mod tests {
                     title: Some(format!("{domain} home")),
                     description: Some("About us".into()),
                     site_name: Some(format!("{domain} site")),
+                    search_url: None,
                     links: links
                         .iter()
                         .map(|&(url, text)| OutLink {

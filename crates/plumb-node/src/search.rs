@@ -4,7 +4,7 @@ use std::fmt::Write as _;
 
 use anyhow::{Context, Result};
 use plumb_core::{read_jsonl, truncate_chars, RecordSet, SiteRecord};
-use plumb_index::{build_index, Hit, Searcher};
+use plumb_index::{build_index, Hit, SearchOptions, Searcher};
 use tracing::info;
 
 use crate::cli::{IndexArgs, SearchArgs};
@@ -38,11 +38,21 @@ pub fn run_search(args: SearchArgs) -> Result<()> {
     let searcher = Searcher::open(&args.index)
         .with_context(|| format!("opening the index in {}", args.index.display()))?;
     let query = args.query.join(" ");
-    let hits = searcher.search_with(&query, args.limit, &rank_config(args.alpha))?;
+    let options = SearchOptions {
+        country: args.country.clone(),
+        only_country: args.only_country,
+    };
+    let results = searcher.search_full(&query, args.limit, &rank_config(args.alpha), &options)?;
     if args.json {
-        println!("{}", serde_json::to_string_pretty(&hits)?);
+        println!("{}", serde_json::to_string_pretty(&results.hits)?);
     } else {
-        print!("{}", format_hits(&query, &hits));
+        if let Some(site_search) = &results.site_search {
+            println!(
+                "search {} for {:?}: {}",
+                site_search.domain, site_search.terms, site_search.url
+            );
+        }
+        print!("{}", format_hits(&query, &results.hits));
     }
     Ok(())
 }
@@ -56,9 +66,13 @@ fn format_hits(query: &str, hits: &[Hit]) -> String {
     for (i, hit) in hits.iter().enumerate() {
         let _ = writeln!(
             out,
-            "{:>2}. {}  (score {:.3}: text {:.3}, link {:.3})",
+            "{:>2}. {}{}  (score {:.3}: text {:.3}, link {:.3})",
             i + 1,
             hit.domain,
+            hit.country
+                .as_deref()
+                .map(|c| format!(" [{c}]"))
+                .unwrap_or_default(),
             hit.score,
             hit.text_score,
             hit.link_score
@@ -95,6 +109,7 @@ mod tests {
             score: 0.9,
             text_score: 0.8,
             link_score: 0.7,
+            country: None,
         }
     }
 

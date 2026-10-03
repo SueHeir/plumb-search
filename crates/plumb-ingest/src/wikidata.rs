@@ -28,6 +28,13 @@ pub struct OfficialSite {
     pub path: String,
     /// Registrable domain of `url`, e.g. `usbank.com`.
     pub domain: String,
+    /// The item's country (Wikidata P17) as an ISO 3166-1 alpha-2 code,
+    /// e.g. `US`, from [`crate::facts`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub country: Option<String>,
+    /// What the item is ("bank"), from [`crate::facts`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub kinds: Vec<String>,
 }
 
 impl OfficialSite {
@@ -46,6 +53,8 @@ impl OfficialSite {
             path: url_path(url),
             host,
             domain,
+            country: None,
+            kinds: Vec::new(),
         })
     }
 

@@ -142,7 +142,7 @@ async fn stream_body(
 }
 
 /// `dest` with `.part` appended to its file name.
-fn part_path(dest: &Path) -> PathBuf {
+pub(crate) fn part_path(dest: &Path) -> PathBuf {
     let mut part = OsString::from(dest.as_os_str());
     part.push(".part");
     PathBuf::from(part)

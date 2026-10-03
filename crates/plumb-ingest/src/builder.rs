@@ -127,7 +127,9 @@ impl Builder {
     }
 
     /// Marks the official websites listed in Wikidata: sets
-    /// `signals.official_site` and adds the item's label as an alias.
+    /// `signals.official_site`, adds the item's label as an alias and, when
+    /// the record has none yet, sets its `country` to the first claim's
+    /// country, and adds the claims' kinds (see [`crate::attach_facts`]).
     ///
     /// Only a claim on the domain's own front page counts (see
     /// [`OfficialSite::is_root_homepage`]): `https://www.ox.ac.uk/` makes
@@ -170,6 +172,12 @@ impl Builder {
                 let label = site.label.trim();
                 if label != site.item {
                     record.add_alias(label);
+                }
+                if record.country.is_none() {
+                    record.country.clone_from(&site.country);
+                }
+                for kind in &site.kinds {
+                    record.add_kind(kind);
                 }
             }
         }
@@ -610,6 +618,8 @@ mod tests {
             host: host.into(),
             path: "/".into(),
             domain: host.into(),
+            country: None,
+            kinds: Vec::new(),
         };
         builder.add_official_sites(&[
             junk("mailto:a@b.com", "a@b.com"),

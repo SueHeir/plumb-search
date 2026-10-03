@@ -25,6 +25,7 @@ use plumb_index::RankConfig;
 use tracing_subscriber::EnvFilter;
 
 pub mod cli;
+pub mod country;
 pub mod eval;
 pub mod node;
 pub mod web;

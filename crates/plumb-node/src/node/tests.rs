@@ -645,7 +645,8 @@ async fn sets_up_from_the_seed_data_and_retries_after_a_failure() {
     // What worked the first time was not downloaded again.
     let counts = host.counts();
     assert_eq!(counts["GET /tranco.csv"], 1, "{counts:?}");
-    assert_eq!(counts["POST /sparql"], 2, "{counts:?}");
+    // Official websites twice (one timeout), and the two facts queries once.
+    assert_eq!(counts["POST /sparql"], 4, "{counts:?}");
     assert_eq!(counts["GET /graph/x-domain-ranks.txt.gz"], 1, "{counts:?}");
     assert_eq!(counts.len(), 3, "{counts:?}");
 
@@ -655,6 +656,7 @@ async fn sets_up_from_the_seed_data_and_retries_after_a_failure() {
         [
             "tranco-top-1m.csv.zip",
             "wikidata-official-sites.tsv",
+            "wikidata-site-facts.tsv",
             "x-domain-ranks-top50.txt"
         ]
     );

@@ -13,11 +13,18 @@
 //! | `label_key`   | joined label                                         | exact label match           |
 //! | `alias_key`   | joined aliases                                       | exact alias match           |
 //! | `link_score`  | [`plumb_core::link_score`]                           | stored, fast                |
+//! | `country`     | [`plumb_core::site_country`], untokenized            | stored, fast                |
+//! | `kind_key`    | [`plumb_core::kind_key`] of each kind                | kind queries ("banks")      |
+//! | `search_url`  | the site's search address                            | stored, site search links   |
+//!
+//! An official website's aliases (its Wikidata names) also go into
+//! `label_key`, so they name the site as strongly as its domain does, and
+//! every alias starting with "The" is also keyed without it.
 
 use anyhow::{Context, Result};
 use plumb_core::{
-    domain_label, joined, normalize_text, truncate_chars, LinkText, SiteRecord, MAX_ALIASES,
-    MAX_LINK_TEXTS, MAX_TEXT_CHARS,
+    domain_label, joined, kind_key, normalize_text, site_country, truncate_chars, LinkText,
+    SiteRecord, MAX_ALIASES, MAX_KINDS, MAX_LINK_TEXTS, MAX_TEXT_CHARS,
 };
 use tantivy::schema::{
     Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, FAST, STORED, STRING,
@@ -37,6 +44,9 @@ pub(crate) const JOINED: &str = "joined";
 pub(crate) const LABEL_KEY: &str = "label_key";
 pub(crate) const ALIAS_KEY: &str = "alias_key";
 pub(crate) const LINK_SCORE: &str = "link_score";
+pub(crate) const COUNTRY: &str = "country";
+pub(crate) const KIND_KEY: &str = "kind_key";
+pub(crate) const SEARCH_URL: &str = "search_url";
 
 /// How many link texts (most frequent first) also get a joined form.
 const JOINED_LINK_TEXTS: usize = 8;
@@ -63,6 +73,9 @@ pub(crate) struct Fields {
     pub(crate) label_key: Field,
     pub(crate) alias_key: Field,
     pub(crate) link_score: Field,
+    pub(crate) country: Field,
+    pub(crate) kind_key: Field,
+    pub(crate) search_url: Field,
 }
 
 impl Fields {
@@ -85,6 +98,9 @@ impl Fields {
             label_key: field(LABEL_KEY)?,
             alias_key: field(ALIAS_KEY)?,
             link_score: field(LINK_SCORE)?,
+            country: field(COUNTRY)?,
+            kind_key: field(KIND_KEY)?,
+            search_url: field(SEARCH_URL)?,
         })
     }
 }
@@ -105,6 +121,9 @@ pub(crate) fn schema() -> Schema {
     builder.add_text_field(LABEL_KEY, keys(IndexRecordOption::Basic));
     builder.add_text_field(ALIAS_KEY, keys(IndexRecordOption::Basic));
     builder.add_f64_field(LINK_SCORE, FAST | STORED);
+    builder.add_text_field(COUNTRY, STRING | STORED | FAST);
+    builder.add_text_field(KIND_KEY, keys(IndexRecordOption::Basic));
+    builder.add_text_field(SEARCH_URL, STORED);
     builder.build()
 }
 
@@ -162,6 +181,7 @@ pub(crate) fn document(f: &Fields, record: &SiteRecord) -> TantivyDocument {
         doc.add_text(f.description, truncate_chars(description, MAX_TEXT_CHARS));
     }
 
+    let official = record.signals.official_site;
     for alias in record
         .aliases
         .iter()
@@ -170,8 +190,17 @@ pub(crate) fn document(f: &Fields, record: &SiteRecord) -> TantivyDocument {
     {
         let alias = truncate_chars(alias, MAX_TEXT_CHARS);
         doc.add_text(f.aliases, &alias);
-        doc.add_text(f.alias_key, &alias);
         doc.add_text(f.joined, &alias);
+        let short = without_leading_article(&alias);
+        for key in std::iter::once(alias.as_str()).chain(short.as_deref()) {
+            doc.add_text(f.alias_key, key);
+            if official {
+                doc.add_text(f.label_key, key);
+            }
+        }
+        if let Some(short) = &short {
+            doc.add_text(f.joined, short);
+        }
     }
 
     for (i, link_text) in top_link_texts(&record.link_texts).into_iter().enumerate() {
@@ -185,7 +214,28 @@ pub(crate) fn document(f: &Fields, record: &SiteRecord) -> TantivyDocument {
     }
 
     doc.add_f64(f.link_score, f64::from(record.link_score()));
+    if let Some(country) = site_country(record) {
+        doc.add_text(f.country, country);
+    }
+    for kind in record.kinds.iter().take(MAX_KINDS) {
+        let key = kind_key(kind);
+        if !key.is_empty() {
+            doc.add_text(f.kind_key, key);
+        }
+    }
+    if let Some(search_url) = non_empty(&record.search_url) {
+        doc.add_text(f.search_url, search_url.trim());
+    }
     doc
+}
+
+/// A name without a leading "The": `The Wall Street Journal` -> `Wall
+/// Street Journal`, so people who leave the article out still name it.
+/// `None` when the name does not start with it or is nothing more.
+pub(crate) fn without_leading_article(name: &str) -> Option<String> {
+    let normalized = normalize_text(name);
+    let rest = normalized.strip_prefix("the ")?;
+    (!rest.is_empty()).then(|| rest.to_string())
 }
 
 /// The domain label as people write it: `usbank.com` -> `usbank`, and
@@ -285,6 +335,17 @@ mod tests {
         assert_eq!(top.len(), MAX_LINK_TEXTS);
         assert_eq!(top[0].count, 39);
         assert!(top.iter().all(|lt| lt.count > 0));
+    }
+
+    #[test]
+    fn leading_articles_are_dropped() {
+        assert_eq!(
+            without_leading_article("The Wall Street Journal").as_deref(),
+            Some("wall street journal")
+        );
+        assert_eq!(without_leading_article("The"), None);
+        assert_eq!(without_leading_article("Theory"), None);
+        assert_eq!(without_leading_article("U.S. Bank"), None);
     }
 
     #[test]

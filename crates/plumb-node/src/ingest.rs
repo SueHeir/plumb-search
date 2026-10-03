@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use plumb_core::{read_jsonl, SiteRecord};
 use plumb_ingest::{
-    load_cc_domain_ranks, load_tranco, load_wikidata_official_sites, parse_wat, Builder,
-    WatExtract, WatStats,
+    attach_facts, load_cc_domain_ranks, load_site_facts, load_tranco, load_wikidata_official_sites,
+    parse_wat, Builder, WatExtract, WatStats,
 };
 use tracing::info;
 
@@ -71,8 +71,18 @@ pub fn run(args: IngestArgs) -> Result<()> {
     if let Some(path) = &args.wikidata {
         // Not cut to --limit-per-source: the file is not ranked, and the shared-host
         // check in add_official_sites needs every item that claims a domain.
-        let sites = load_wikidata_official_sites(path)
+        let mut sites = load_wikidata_official_sites(path)
             .with_context(|| format!("loading Wikidata sites {}", path.display()))?;
+        if let Some(facts_path) = &args.wikidata_facts {
+            let facts = load_site_facts(facts_path)
+                .with_context(|| format!("loading Wikidata facts {}", facts_path.display()))?;
+            attach_facts(&mut sites, &facts);
+            println!(
+                "facts     {:>9} items           ({})",
+                facts.len(),
+                facts_path.display()
+            );
+        }
         builder.add_official_sites(&sites);
         println!(
             "wikidata  {:>9} official sites  ({})",
@@ -116,6 +126,7 @@ fn check_inputs_exist(args: &IngestArgs) -> Result<()> {
         .chain(&args.cc_ranks)
         .chain(&args.wat)
         .chain(&args.wikidata)
+        .chain(&args.wikidata_facts)
         .chain(&args.records)
         .collect();
     let missing: Vec<String> = inputs
@@ -159,6 +170,7 @@ mod tests {
             cc_ranks: None,
             wat: paths.to_vec(),
             wikidata: None,
+            wikidata_facts: None,
             records: Vec::new(),
             limit_per_source: None,
             top: None,
