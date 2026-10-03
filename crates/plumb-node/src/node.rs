@@ -5,16 +5,18 @@
 //! # What a node does
 //!
 //! 1. On first start, when `DIR/records.jsonl` is missing, it downloads the
-//!    seed data: the Tranco list, Wikidata's official websites and, when
-//!    [`NodeConfig::cc_release`] is set, the top rows of Common Crawl's
-//!    domain ranks. It keeps the best [`NodeConfig::sites`] sites, writes
-//!    the records file and builds the first index, which is searchable from
-//!    then on. Wikidata is the one source setup can do without: when only
-//!    it fails, the first index is built from the others, the status says
-//!    Wikidata is missing, and the node keeps trying to get it (waiting as
-//!    after other failures, below) while it goes on with its work. Once
-//!    Wikidata answers, its official websites are added to the records and
-//!    the index is rebuilt.
+//!    Tranco list alone, keeps its best [`NodeConfig::sites`] sites, writes
+//!    the records file and builds a first index, which is searchable from
+//!    then on, a minute or two after starting. Right after, it downloads the
+//!    rest of the seed data, which takes many minutes: Wikidata's official
+//!    websites and, when [`NodeConfig::cc_release`] is set, the top rows of
+//!    Common Crawl's domain ranks. It keeps the best sites of all three,
+//!    replaces the quick records with them and swaps in a new index. Until
+//!    then the status says Wikidata is missing. Wikidata is the one source
+//!    the node can do without: when only it fails, the others are folded in,
+//!    and the node keeps trying to get it (waiting as after other failures,
+//!    below) while it goes on with its work. Once Wikidata answers, its
+//!    official websites are added to the records and the index is rebuilt.
 //! 2. It then crawls [`NodeConfig::initial_crawl`] homepages, rebuilds the
 //!    index and swaps the new one in.
 //! 3. Every [`NodeConfig::refresh_every`] it crawls
@@ -268,8 +270,9 @@ pub struct Status {
     pub progress: Option<Progress>,
     /// The latest failure; cleared once the work that failed succeeds.
     pub last_error: Option<LastError>,
-    /// True while the index lacks Wikidata's official websites because
-    /// setup could not download them. The node keeps trying and rebuilds
+    /// True while the index lacks Wikidata's official websites: right
+    /// after the quick first setup, while they download, and after a failure
+    /// to download them (see `wikidata_error`). The node keeps trying and rebuilds
     /// the index once they arrive; until then, official websites get no
     /// boost over look-alikes and no names from Wikidata.
     pub wikidata_missing: bool,

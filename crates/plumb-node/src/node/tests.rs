@@ -367,6 +367,7 @@ async fn falls_back_to_the_newest_index_that_opens_and_clears_leftovers() {
         index_stale: false,
         last_refresh: Some(now_unix()),
         wikidata_missing: false,
+        quick_start: false,
     };
     store::save_state(&paths, &up_to_date).unwrap();
 
@@ -457,6 +458,7 @@ async fn picks_up_a_round_left_unfinished() {
             index_stale: true,
             last_refresh: None,
             wikidata_missing: false,
+            quick_start: false,
         },
     )
     .unwrap();
@@ -477,6 +479,7 @@ async fn picks_up_a_round_left_unfinished() {
             index_stale: false,
             last_refresh: Some(last),
             wikidata_missing: false,
+            quick_start: false,
         }
     );
     assert_eq!(names(&paths.indexes), ["000001"]);
@@ -507,6 +510,7 @@ async fn refreshes_when_due() {
             index_stale: false,
             last_refresh: Some(long_ago),
             wikidata_missing: false,
+            quick_start: false,
         },
     )
     .unwrap();
@@ -716,7 +720,8 @@ async fn sets_up_from_the_seed_data_and_retries_after_a_failure() {
     assert!(usbank.signals.official_site);
     assert!(usbank.signals.tranco_rank.is_some());
     assert!(usbank.signals.harmonic_rank.is_some());
-    assert_eq!(names(&dir.path().join("indexes")), ["000001"]);
+    // The quick index of the Tranco list, then the one of all the seed data.
+    assert_eq!(names(&dir.path().join("indexes")), ["000002"]);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -742,8 +747,6 @@ async fn shows_setup_progress_and_errors_while_downloads_fail() {
     assert!(err
         .message
         .starts_with("could not download the seed data:\nthe Tranco list:"));
-    assert!(err.message.contains("Wikidata"), "{}", err.message);
-    assert!(err.message.contains("<script>"), "{}", err.message);
     assert!(
         err.retry_at.unwrap() >= err.at + 590,
         "the first retry is 10 minutes out"
@@ -763,10 +766,6 @@ async fn shows_setup_progress_and_errors_while_downloads_fail() {
         assert!(body.contains("Plumb will try again in "), "{body}");
         assert!(!body.contains("<script"), "{body}");
         assert!(!body.contains("<b>"), "{body}");
-        assert!(
-            body.contains("&lt;script&gt;alert(&#39;pwned&#39;)&lt;/script&gt; &amp; &lt;b&gt;"),
-            "{body}"
-        );
         assert!(!body.contains("<form"), "{body}");
     }
     let (code, head, body) = get(addr, "/api/search?q=us+bank").await;
@@ -804,7 +803,7 @@ async fn stops_promptly_in_the_middle_of_a_download() {
         status.progress,
         Some(Progress {
             done: 0,
-            total: 2,
+            total: 1,
             unit: "files".into()
         })
     );
@@ -812,10 +811,10 @@ async fn stops_promptly_in_the_middle_of_a_download() {
     assert_eq!(code, 200);
     assert!(body.contains("Downloading the Tranco list"), "{body}");
     assert!(
-        body.contains("<progress value=\"0\" max=\"2\"></progress>"),
+        body.contains("<progress value=\"0\" max=\"1\"></progress>"),
         "{body}"
     );
-    assert!(body.contains("0 of 2 files"), "{body}");
+    assert!(body.contains("0 of 1 files"), "{body}");
 
     let stopping = Instant::now();
     tokio::time::timeout(Duration::from_secs(10), node.shutdown())
@@ -864,7 +863,9 @@ async fn sets_up_without_wikidata_and_adds_it_later() {
     assert_eq!(records.len(), 50);
     assert!(records.iter().all(|r| !r.signals.official_site));
     let paths = store::Paths::new(dir.path());
-    assert!(store::load_state(&paths).unwrap().wikidata_missing);
+    let saved = store::load_state(&paths).unwrap();
+    assert!(saved.wikidata_missing);
+    assert!(!saved.quick_start, "the other seed files are folded in");
     let (code, _, body) = get(addr, "/").await;
     assert_eq!(code, 200);
     assert!(body.contains("could not be downloaded yet"), "{body}");
@@ -897,4 +898,65 @@ async fn sets_up_without_wikidata_and_adds_it_later() {
         usbank.aliases
     );
     assert_eq!(names(&dir.path().join("indexes")).len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_full_seed_replaces_a_quick_start_but_keeps_what_crawls_added() {
+    let tranco = std::fs::read(fixture("tranco.csv")).unwrap();
+    let sparql = sparql_json(&fixture("wikidata-official-sites.tsv"));
+    let host = SeedHost::start(move |request, _| match request {
+        "GET /tranco.csv" => http("200 OK", &tranco),
+        "POST /sparql" => http("200 OK", &sparql),
+        _ => http("404 Not Found", b"no such file"),
+    })
+    .await;
+
+    // Quick records: one only the Tranco list had, one a crawl reached, and
+    // one a crawl found links to.
+    let dir = tempfile::tempdir().unwrap();
+    let quick_only = SiteRecord::new("quick-only.example");
+    let mut crawled = SiteRecord::new("crawled.example");
+    crawled.crawl_attempted_at = Some(now_unix());
+    crawled.title = Some("Crawled".into());
+    let mut linked = SiteRecord::new("linked.example");
+    linked.add_link_text("Linked", "crawled.example");
+    write_jsonl(
+        &dir.path().join("records.jsonl"),
+        &[quick_only, crawled, linked],
+    )
+    .unwrap();
+    let paths = store::Paths::new(dir.path());
+    store::save_state(
+        &paths,
+        &SavedState {
+            crawl_left: 0,
+            index_stale: true,
+            last_refresh: Some(now_unix()),
+            wikidata_missing: true,
+            quick_start: true,
+        },
+    )
+    .unwrap();
+
+    let mut config = test_config(dir.path());
+    config.sources = host.sources();
+    config.sites = 50;
+    let node = start(config).await.unwrap();
+    let addr = node.addr();
+    let status = wait_for(addr, "the full seed", |s| {
+        ready_and_idle(s) && !s.wikidata_missing
+    })
+    .await;
+    assert_eq!(status.wikidata_error, None);
+    assert_eq!(search(addr, "us+bank").await[0].domain, "usbank.com");
+    node.shutdown().await.unwrap();
+
+    let saved = store::load_state(&paths).unwrap();
+    assert!(!saved.quick_start && !saved.wikidata_missing);
+    let records: Vec<SiteRecord> = read_jsonl(&dir.path().join("records.jsonl")).unwrap();
+    let domains: Vec<&str> = records.iter().map(|r| r.domain.as_str()).collect();
+    assert_eq!(records.len(), 52, "{domains:?}");
+    assert!(!domains.contains(&"quick-only.example"));
+    assert!(domains.contains(&"crawled.example"));
+    assert!(domains.contains(&"linked.example"));
 }

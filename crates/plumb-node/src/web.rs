@@ -724,10 +724,21 @@ fn wikidata_note(status: &Status, now: u64) -> Option<String> {
     if !status.wikidata_missing {
         return None;
     }
+    let Some(err) = &status.wikidata_error else {
+        // Right after the quick first setup, Wikidata is next.
+        if status.phase == Phase::SettingUp {
+            return None;
+        }
+        return Some(
+            "Plumb is still downloading Wikidata's list of official websites and more \
+             rankings. Search works now, and results get better once those are in."
+                .to_string(),
+        );
+    };
     let mut note = "Wikidata's list of official websites could not be downloaded yet, so the \
                     index does without it for now: official sites get no boost over look-alikes."
         .to_string();
-    if let Some(retry_at) = status.wikidata_error.as_ref().and_then(|err| err.retry_at) {
+    if let Some(retry_at) = err.retry_at {
         let _ = write!(note, " Plumb will try again {}.", time_until(retry_at, now));
     }
     Some(note)
@@ -781,9 +792,9 @@ fn render_setup(status: &Status, now: u64) -> String {
     }
     let _ = write!(
         body,
-        "<p class=\"s\">On its first start, Plumb downloads public lists of popular websites \
-         and builds its search index from them, which takes a few minutes. This page reloads \
-         every {SETUP_RELOAD_SECONDS} seconds.</p>\n</main>"
+        "<p class=\"s\">On its first start, Plumb downloads a public list of popular websites \
+         and builds a first search index from it, which takes a minute or two. It adds more \
+         lists while you search. This page reloads every {SETUP_RELOAD_SECONDS} seconds.</p>\n</main>"
     );
     let head = format!("<meta http-equiv=\"refresh\" content=\"{SETUP_RELOAD_SECONDS}\">\n");
     page_with_head("Setting up - Plumb Search", &head, &body)
@@ -1441,6 +1452,19 @@ mod tests {
                 "<p class=\"msg\">Wikidata stopped the query &lt;at&gt; its time limit</p>"
             ),
             "{body}"
+        );
+
+        // Before Wikidata is first tried, it is still to come.
+        status.wikidata_error = None;
+        assert!(!render_setup(&status, now).contains("Wikidata"));
+        status.phase = Phase::Ready;
+        assert!(
+            render_home(12, Some(&status), now).contains(
+                "Plumb is still downloading Wikidata&#39;s list of official websites and more \
+                 rankings. Search works now, and results get better once those are in."
+            ),
+            "{}",
+            render_home(12, Some(&status), now)
         );
 
         // Once Wikidata is in, nothing is said.

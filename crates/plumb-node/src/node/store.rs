@@ -194,6 +194,10 @@ pub(super) struct SavedState {
     /// Setup went ahead without Wikidata's official websites, which could
     /// not be downloaded; the node adds them once it can.
     pub(super) wikidata_missing: bool,
+    /// The records are a quick start from the Tranco list alone, put in
+    /// service while the rest of the seed data downloads. The full seed
+    /// replaces them, keeping only what crawls added.
+    pub(super) quick_start: bool,
 }
 
 impl SavedState {
@@ -205,6 +209,7 @@ impl SavedState {
             index_stale: true,
             last_refresh: None,
             wikidata_missing: false,
+            quick_start: false,
         }
     }
 }
@@ -353,6 +358,7 @@ mod tests {
             index_stale: true,
             last_refresh: Some(1_700_000_000),
             wikidata_missing: true,
+            quick_start: true,
         };
         save_state(&paths, &state).unwrap();
         assert_eq!(load_state(&paths), Some(state));
