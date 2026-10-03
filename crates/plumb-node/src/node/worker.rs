@@ -128,6 +128,14 @@ async fn step(inner: &Arc<Inner>) -> Result<Next> {
         rebuild(inner).await?;
         return Ok(Next::Continue);
     }
+    if missing_buckets(inner) {
+        // Once per start, so a build that cannot write them is not retried
+        // in a loop.
+        inner.buckets_rebuilt.store(true, Ordering::SeqCst);
+        info!("rebuilding the index to add the buckets private search and the network need");
+        rebuild(inner).await?;
+        return Ok(Next::Continue);
+    }
     let wikidata_due = saved.wikidata_missing.then(|| inner.wikidata_retry_at());
     if wikidata_due.is_some_and(|due| due <= now_unix()) {
         complete_seed(inner).await?;
@@ -548,6 +556,14 @@ fn save_seed_records(inner: &Inner, records: &[SiteRecord]) -> Result<()> {
         inner.paths.records.display()
     );
     Ok(())
+}
+
+/// Whether the index being served lacks the buckets this node needs, as an
+/// index built before private search or the network was turned on does.
+fn missing_buckets(inner: &Inner) -> bool {
+    network::wants_buckets(inner)
+        && !inner.buckets_rebuilt.load(Ordering::SeqCst)
+        && inner.current().is_some_and(|index| index.buckets.is_none())
 }
 
 /// Builds a new index of the records file and puts it in service.

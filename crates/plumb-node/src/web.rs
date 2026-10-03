@@ -79,6 +79,8 @@ mod panel;
 use crate::{block_on, rank_config};
 pub use panel::ADD_TO_FIREFOX_PATH;
 
+pub(crate) mod private;
+
 /// Results returned when a request does not say how many.
 pub const DEFAULT_LIMIT: usize = 10;
 /// Most results one request can get.
@@ -207,6 +209,16 @@ pub trait StatusSource: Send + Sync {
     fn rank(&self) -> RankConfig {
         RankConfig::default()
     }
+    /// Names the bucket table private search fetches from, when the node
+    /// serves private search and its index has buckets.
+    fn bucket_table(&self) -> Option<String> {
+        None
+    }
+    /// Bucket `bucket` of table `table`, its records as JSON; `None` when
+    /// that table is not the one served (any more).
+    fn bucket(&self, _table: &str, _bucket: u32) -> Option<Result<Vec<String>>> {
+        None
+    }
     /// Whether the node notes which result is opened for a search and
     /// reports it anonymously; its result links then go through `/go`.
     fn shares_popularity(&self) -> bool {
@@ -314,6 +326,7 @@ fn app(state: AppState) -> Router {
             .route("/app/settings", post(panel::save_settings))
             .route("/app/refresh", post(panel::refresh))
             .route(panel::ADD_TO_FIREFOX_PATH, get(panel::add_to_firefox));
+        router = private::routes(router);
     }
     router.with_state(state)
 }
@@ -446,6 +459,7 @@ fn home_or_setup(state: &AppState, params: &SearchParams, headers: &HeaderMap) -
             let settings = Settings {
                 options: params.options(&state.settings.home, headers),
                 network: state.net_setting(params),
+                private: state.private_search(),
             };
             html_response(
                 StatusCode::OK,
@@ -478,6 +492,8 @@ enum NetSetting {
 struct Settings {
     options: SearchOptions,
     network: NetSetting,
+    /// This node offers private search (`/private`).
+    private: bool,
 }
 
 impl AppState {
@@ -519,6 +535,7 @@ async fn search_page(
     let settings = Settings {
         options: params.options(&state.settings.home, &headers),
         network: state.net_setting(&params),
+        private: state.private_search(),
     };
     let limit = params.limit();
     let local = run_search(&state, &query, limit, &settings.options);
@@ -1090,6 +1107,8 @@ box-shadow:0 6px 20px rgba(0,0,0,.18)}\
 .panel .hint{margin:-.35rem 0 0 1.45rem;color:var(--muted);font-size:.8rem}\
 .panel label.off{color:var(--muted)}\
 .panel button{justify-self:end;padding:.35rem .9rem}\
+.pv{margin:0;padding-top:.5rem;border-top:1px solid var(--line)}\
+.pv a,.src a,.err a{color:var(--link)}\
 .src{margin:.75rem 0 0;font-size:.8rem;color:var(--muted)}\
 .src a{color:var(--link)}\
 .sw{display:inline-block;width:.8em;height:.8em;margin:0 .2em -.1em 0;border-radius:.2em;\
@@ -1188,6 +1207,12 @@ fn settings_form(query: &str, autofocus: bool, settings: &Settings) -> String {
              Results only they found are tinted. Takes a few seconds longer.</p>"
         }
     };
+    let private = if settings.private {
+        "<p class=\"pv\"><a href=\"/private\">Search privately</a>: your browser looks up the \
+         results itself, so this site never sees what you search for.</p>"
+    } else {
+        ""
+    };
     format!(
         "<form action=\"/search\" method=\"get\" role=\"search\">\
          <input type=\"search\" name=\"q\" value=\"{}\" placeholder=\"A site's name, e.g. us bank\" \
@@ -1196,7 +1221,7 @@ fn settings_form(query: &str, autofocus: bool, settings: &Settings) -> String {
          &#9881;&#xFE0E;</summary><div class=\"panel\">\
          <label>Country <select name=\"country\">{choices}</select></label>\
          <label><input type=\"checkbox\" name=\"only\" value=\"1\"{}> Only this country</label>\
-         {network}{network_hint}<button type=\"submit\">Apply</button></div></details>\
+         {network}{network_hint}{private}<button type=\"submit\">Apply</button></div></details>\
          <button type=\"submit\">Search</button></form>",
         escape_html(query),
         if autofocus { " autofocus" } else { "" },
@@ -2652,6 +2677,7 @@ mod tests {
         Settings {
             options: SearchOptions::default(),
             network: NetSetting::Unavailable,
+            private: false,
         }
     }
 

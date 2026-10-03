@@ -69,6 +69,7 @@ fn node_config(args: RunArgs) -> NodeConfig {
     if args.use_system_proxy {
         config.use_system_proxy = true;
     }
+    config.private_search = args.private_search;
     if args.network {
         let mut net = NetConfig::new(config.data_dir.join("net"));
         let port = args.p2p_port;
@@ -175,6 +176,8 @@ mod tests {
         assert!(!off.use_system_proxy);
         assert!(config(&["--data", "d", "--use-system-proxy"]).use_system_proxy);
         assert_eq!(off.network, None);
+        assert!(!off.private_search);
+        assert!(config(&["--data", "d", "--private-search"]).private_search);
     }
 
     #[test]

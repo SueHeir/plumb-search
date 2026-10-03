@@ -1,0 +1,52 @@
+[package]
+name = "plumb-private"
+description = "Private search in the browser: fetches buckets of sites and ranks them locally, compiled to WebAssembly."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+idna = "1.1.0"
+plumb-core = { version = "0.1.0", path = "../plumb-core" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+sha2 = "0.10"
+url = "2.5.8"
+
+# The browser side. wasm-bindgen is pinned because the wasm-bindgen command
+# that turns the build into a web module must be the very same version
+# (docs/private-search.md).
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = "0.3"
+wasm-bindgen = "=0.2.108"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = [
+    "console",
+    "Crypto",
+    "Document",
+    "Element",
+    "Event",
+    "EventTarget",
+    "HtmlButtonElement",
+    "HtmlElement",
+    "HtmlInputElement",
+    "Location",
+    "Navigator",
+    "Node",
+    "Request",
+    "RequestCache",
+    "RequestCredentials",
+    "RequestInit",
+    "RequestMode",
+    "Response",
+    "Storage",
+    "Window",
+] }
+
+[dev-dependencies]
+plumb-index = { version = "0.1.0", path = "../plumb-index" }
+tempfile = "3.27.0"

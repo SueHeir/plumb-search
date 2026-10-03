@@ -28,6 +28,8 @@ services:
     # published yet or you want another branch. PLUMB_SOURCE is a Git URL with
     # an optional #branch, set in .env next to this file.
     build: ${PLUMB_SOURCE:-https://github.com/SueHeir/plumb-search.git#main}
+    # The image's default command plus private search (/private).
+    command: ["run", "--data", "/data", "--bind", "0.0.0.0:8080", "--private-search"]
     # Only reachable from this machine; Caddy serves it to the world.
     ports:
       - "127.0.0.1:8080:8080"
