@@ -1173,7 +1173,7 @@ async fn a_node_sharing_popularity_reports_picks_and_ranks_with_the_networks() {
             .await
             .unwrap();
     }
-    let net = node.inner.net.get().unwrap().clone();
+    let net = network::handle(&node.inner).unwrap();
     let mut table = net.recount().await.unwrap();
     for _ in 0..100 {
         if !table.is_empty() {
@@ -1450,5 +1450,37 @@ async fn search_by_meaning_embeds_sites_in_the_background() {
         assert!(std::time::Instant::now() < deadline, "vectors not saved");
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    node.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn turning_the_network_setting_off_and_on_leaves_and_rejoins() {
+    let dir = seeded_dir();
+    let mut config = test_config(dir.path());
+    let mut net = plumb_net::NetConfig::new(PathBuf::new());
+    net.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+    net.upnp = false;
+    net.local_discovery = false;
+    config.network = Some(net);
+    let node = start(config).await.unwrap();
+    let addr = node.addr();
+    let status = wait_for(addr, "the first index", ready_and_idle).await;
+    let peer_id = status.network.expect("joined at start").peer_id;
+
+    let mut settings = node.inner.settings();
+    settings.join_network = false;
+    node.inner.change_settings(settings.clone()).unwrap();
+    wait_for(addr, "the node to leave", |s| s.network.is_none()).await;
+    assert!(
+        !store::load_settings(&node.inner.paths)
+            .unwrap()
+            .join_network
+    );
+
+    settings.join_network = true;
+    node.inner.change_settings(settings).unwrap();
+    let status = wait_for(addr, "the node to rejoin", |s| s.network.is_some()).await;
+    assert_eq!(status.network.unwrap().peer_id, peer_id, "same node key");
+
     node.shutdown().await.unwrap();
 }

@@ -247,6 +247,12 @@ pub trait StatusSource: Send + Sync {
     fn data_dir(&self) -> Option<std::path::PathBuf> {
         None
     }
+
+    /// Whether the node is set up to join the Plumb network, so that the
+    /// panel offers [`NodeSettings::join_network`].
+    fn can_join_network(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Clone)]

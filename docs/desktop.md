@@ -4,8 +4,8 @@ The desktop app runs a Plumb Search node on your computer. You search in your
 own web browser, at `http://127.0.0.1:7586`. The app's window is a panel, not
 a browser but a dashboard of the node: what works now ("Limited search is
 ready" or "Search is ready"), the disk space and downloads it uses against
-their limits, how crawling is going, the Plumb network (not connected in this
-version) and how far setup has come. It holds the settings and has buttons that
+their limits, how crawling is going, the Plumb network (how many nodes it is
+connected to) and how far setup has come. It holds the settings and has buttons that
 open search in your browser or add Plumb to Firefox. The same app builds for Windows, macOS and Linux
 with [Tauri](https://v2.tauri.app).
 
@@ -18,6 +18,13 @@ background when you log in, without opening its window, so your browser's
 searches work from the start. Starting
 the app again while it is running brings its window back too, and so does
 clicking its Dock icon on macOS.
+
+The app joins the Plumb network when it starts: it connects to the relay on
+plumbsearch.org, finds other nodes through it, shares crawling with them and
+answers their searches, without learning what anyone searches for. It needs
+no open port or router setup. **Join the Plumb network** in the panel's
+settings turns this off (the node then searches only its own index) and on
+again, at once.
 
 Test builds are not code-signed yet, so each system warns you before it opens
 them the first time. The [install](#install) steps say how to get past that.

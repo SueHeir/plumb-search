@@ -313,6 +313,9 @@ pub struct NodeSettings {
     /// Megabytes the data folder may take, 0 for no limit. Above it,
     /// crawling pauses, since crawls add sites; search keeps working.
     pub storage_limit_mb: u64,
+    /// Be part of the Plumb network, for a node set up to join it
+    /// ([`NodeConfig::network`]); off leaves it, on joins it again.
+    pub join_network: bool,
 }
 
 impl Default for NodeSettings {
@@ -321,6 +324,7 @@ impl Default for NodeSettings {
             background_updates: true,
             download_limit_mb_per_day: 0,
             storage_limit_mb: 0,
+            join_network: true,
         }
     }
 }
@@ -584,10 +588,7 @@ pub async fn start(config: NodeConfig) -> Result<NodeHandle> {
         })
         .await
     });
-    if let Err(err) = network::start(&inner).await {
-        // The node still searches and crawls on its own.
-        warn!("{err:#}");
-    }
+    network::follow_settings(&inner).await;
     let worker = tokio::spawn(worker::run(inner.clone()));
     let embedding = inner.config.search_by_meaning.then(|| {
         let inner = inner.clone();
@@ -703,8 +704,10 @@ struct Inner {
     /// Tries at Wikidata's official websites while setup went on without
     /// them ([`SavedState::wikidata_missing`]).
     wikidata: Mutex<WikidataTries>,
-    /// The network side, once joined.
-    net: std::sync::OnceLock<Arc<plumb_net::NetHandle>>,
+    /// The network side, while joined.
+    net: RwLock<Option<Arc<plumb_net::NetHandle>>>,
+    /// Wakes the task that joins or leaves the network as the settings say.
+    net_change: Notify,
     /// Records in the network inbox not yet folded in.
     inbox_records: std::sync::atomic::AtomicU64,
     /// Held while the inbox is appended to or moved aside.
@@ -766,7 +769,8 @@ impl Inner {
                 last_error: None,
                 backoff,
             }),
-            net: std::sync::OnceLock::new(),
+            net: RwLock::new(None),
+            net_change: Notify::new(),
             inbox_records: std::sync::atomic::AtomicU64::new(0),
             inbox_lock: Mutex::new(()),
             buckets_rebuilt: AtomicBool::new(false),
@@ -879,6 +883,7 @@ impl Inner {
             }
         }
         self.wake.notify_one();
+        self.net_change.notify_one();
         Ok(())
     }
 
@@ -1140,7 +1145,7 @@ impl StatusSource for Inner {
     }
 
     fn network(&self) -> Option<Arc<plumb_net::NetHandle>> {
-        network::handle(self).cloned()
+        network::handle(self)
     }
 
     fn rank(&self) -> RankConfig {
@@ -1187,6 +1192,10 @@ impl StatusSource for Inner {
 
     fn data_dir(&self) -> Option<PathBuf> {
         Some(self.paths.data.clone())
+    }
+
+    fn can_join_network(&self) -> bool {
+        self.config.network.is_some()
     }
 }
 

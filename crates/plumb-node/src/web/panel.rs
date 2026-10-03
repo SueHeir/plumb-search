@@ -84,6 +84,9 @@ pub(super) struct SettingsForm {
     /// Megabytes; empty for no limit.
     #[serde(default)]
     storage_limit_mb: String,
+    /// Only on the form of a node that can join the network.
+    #[serde(default)]
+    join_network: Option<String>,
 }
 
 /// A limit typed into the form, in megabytes: empty or 0 for none.
@@ -105,7 +108,14 @@ pub(super) async fn panel(State(state): State<AppState>, headers: HeaderMap, uri
     let status = node.status();
     let settings = node.settings().unwrap_or_default();
     let data_dir = node.data_dir();
-    let page = render_panel(&status, &settings, &origin, data_dir.as_deref(), now_unix());
+    let page = render_panel(
+        &status,
+        &settings,
+        node.can_join_network(),
+        &origin,
+        data_dir.as_deref(),
+        now_unix(),
+    );
     (
         StatusCode::OK,
         panel_headers(),
@@ -213,10 +223,17 @@ pub(super) async fn save_settings(State(state): State<AppState>, request: Reques
             "Limits are whole numbers of megabytes, or empty for none. Nothing was changed.",
         );
     };
+    let join_network = if node.can_join_network() {
+        form.join_network.is_some()
+    } else {
+        // Not on the form; keep what it was.
+        node.settings().unwrap_or_default().join_network
+    };
     let settings = NodeSettings {
         background_updates: form.background_updates.is_some(),
         download_limit_mb_per_day: download,
         storage_limit_mb: storage,
+        join_network,
     };
     if let Err(err) = node.change_settings(settings) {
         warn!("could not save the settings: {err:#}");
@@ -335,6 +352,7 @@ fn bytes_words(bytes: u64) -> String {
 pub(super) fn render_panel(
     status: &Status,
     settings: &NodeSettings,
+    can_join_network: bool,
     origin: &str,
     data_dir: Option<&Path>,
     now: u64,
@@ -345,12 +363,12 @@ pub(super) fn render_panel(
     render_storage_card(&mut body, status, settings);
     render_downloads_card(&mut body, status, settings);
     render_crawl_card(&mut body, status, now);
-    render_network_card(&mut body);
+    render_network_card(&mut body, status, settings, can_join_network);
     body.push_str("</section>\n");
     if setting_up(status) {
         render_steps(&mut body, status, now);
     }
-    render_settings(&mut body, settings);
+    render_settings(&mut body, settings, can_join_network);
     render_browser(&mut body, origin);
     render_about(&mut body, status, data_dir, now);
     body.push_str("</main>");
@@ -555,15 +573,67 @@ fn render_crawl_card(body: &mut String, status: &Status, now: u64) {
     card(body, "", "Crawling", &big, &rest);
 }
 
-fn render_network_card(body: &mut String) {
-    card(
-        body,
-        "",
-        "Plumb network",
-        "Not connected",
-        "<p>0 nodes connected. This node builds and searches its own index; connecting to \
-         other Plumb nodes comes with network support.</p>\n",
-    );
+fn render_network_card(
+    body: &mut String,
+    status: &Status,
+    settings: &NodeSettings,
+    can_join_network: bool,
+) {
+    let (class, big, rest) = match &status.network {
+        Some(net) => {
+            let nodes = match net.connected_peers {
+                1 => "1 node connected".to_string(),
+                n => format!("{} nodes connected", group_thousands(n as u64)),
+            };
+            let reach = if net.nat == "public" {
+                "Other nodes reach this one directly."
+            } else if !net.relays.is_empty() {
+                "Other nodes reach this one through a relay."
+            } else {
+                "Finding a way for other nodes to reach this one."
+            };
+            let big = if net.connected_peers == 0 {
+                "Connecting"
+            } else {
+                "Connected"
+            };
+            let class = if net.connected_peers == 0 {
+                ""
+            } else {
+                "ready"
+            };
+            let mut rest = format!("<p>{nodes}. {reach}</p>\n");
+            if net.buckets_served > 0 || net.batches_received > 0 {
+                rest.push_str(&format!(
+                    "<p class=\"hint\">{} searches answered for other nodes; {} batches of \
+                     sites received.</p>\n",
+                    group_thousands(net.buckets_served),
+                    group_thousands(net.batches_received)
+                ));
+            }
+            (class, big, rest)
+        }
+        None if !can_join_network => (
+            "",
+            "Not connected",
+            "<p>This node builds and searches its own index. Start it with <code>--network</code> \
+             to join the Plumb network.</p>\n"
+                .to_string(),
+        ),
+        None if !settings.join_network => (
+            "",
+            "Off",
+            "<p>Turned off in the settings below. This node searches only its own \
+             index.</p>\n"
+                .to_string(),
+        ),
+        None => (
+            "",
+            "Connecting",
+            "<p>Joining the Plumb network.</p>\n".to_string(),
+        ),
+    };
+    card(body, class, "Plumb network", big, &rest);
 }
 
 /// One line of the setup steps: done, under way, waiting or to do.
@@ -650,7 +720,7 @@ fn render_steps(body: &mut String, status: &Status, now: u64) {
     body.push_str("</ol>\n");
 }
 
-fn render_settings(body: &mut String, settings: &NodeSettings) {
+fn render_settings(body: &mut String, settings: &NodeSettings, can_join_network: bool) {
     let checked = if settings.background_updates {
         " checked"
     } else {
@@ -663,13 +733,29 @@ fn render_settings(body: &mut String, settings: &NodeSettings) {
             mb.to_string()
         }
     };
+    let network = if can_join_network {
+        let joined = if settings.join_network {
+            " checked"
+        } else {
+            ""
+        };
+        format!(
+            "<label><input type=\"checkbox\" name=\"join_network\" value=\"1\"{joined}>\
+             <span>Join the Plumb network</span></label>\n\
+             <p class=\"hint\">Shares crawling with other Plumb nodes and answers their \
+             searches, without learning what anyone searches for. No port forwarding is \
+             needed.</p>\n"
+        )
+    } else {
+        String::new()
+    };
     body.push_str(&format!(
         "<h2>Settings</h2>\n<form method=\"post\" action=\"/app/settings\">\n\
          <label><input type=\"checkbox\" name=\"background_updates\" value=\"1\"{checked}>\
          <span>Keep the index up to date in the background</span></label>\n\
          <p class=\"hint\">Plumb visits a few thousand homepages a day to learn sites' names \
          and find new sites, then rebuilds its index. Search keeps working when this is \
-         off.</p>\n\
+         off.</p>\n{network}\
          <label>Download limit <input type=\"number\" name=\"download_limit_mb_per_day\" \
          min=\"0\" step=\"1\" value=\"{}\" placeholder=\"none\"> MB a day</label>\n\
          <p class=\"hint\">Crawling pauses for the rest of the day once it is reached. Empty \
@@ -731,6 +817,7 @@ mod tests {
         status: Status,
         settings: Mutex<NodeSettings>,
         refreshes: Mutex<usize>,
+        can_join_network: bool,
     }
 
     impl StatusSource for FakeNode {
@@ -749,6 +836,9 @@ mod tests {
         }
         fn data_dir(&self) -> Option<std::path::PathBuf> {
             Some("/home/me/plumb <data>".into())
+        }
+        fn can_join_network(&self) -> bool {
+            self.can_join_network
         }
     }
 
@@ -789,10 +879,15 @@ mod tests {
     }
 
     fn app(status: Status) -> (Router, Arc<FakeNode>) {
+        node_app(status, false)
+    }
+
+    fn node_app(status: Status, can_join_network: bool) -> (Router, Arc<FakeNode>) {
         let node = Arc::new(FakeNode {
             status,
             settings: Mutex::new(NodeSettings::default()),
             refreshes: Mutex::new(0),
+            can_join_network,
         });
         (node_router(Arc::new(NoSearch), node.clone()), node)
     }
@@ -1033,6 +1128,7 @@ mod tests {
                 background_updates: false,
                 download_limit_mb_per_day: 250,
                 storage_limit_mb: 0,
+                join_network: true,
             }
         );
 
@@ -1198,5 +1294,72 @@ mod tests {
         let request = Request::get("/app").body(Body::empty()).unwrap();
         let response = router.oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn the_network_card_and_setting_follow_the_node() {
+        // A node not set up for the network neither offers the setting nor
+        // loses it when the form is saved.
+        let (router, node) = app(status(Phase::Ready, Step::Idle));
+        let body = get_panel(router.clone()).await;
+        assert!(
+            body.contains("<p class=\"big\">Not connected</p>"),
+            "{body}"
+        );
+        assert!(!body.contains("name=\"join_network\""), "{body}");
+        let response = post(
+            router,
+            "/app/settings",
+            "background_updates=1",
+            "127.0.0.1:50000",
+            Some("http://127.0.0.1:7586"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert!(node.settings.lock().unwrap().join_network);
+
+        // A desktop node: on, and joining.
+        let (router, node) = node_app(status(Phase::Ready, Step::Idle), true);
+        let body = get_panel(router.clone()).await;
+        assert!(
+            body.contains("name=\"join_network\" value=\"1\" checked>"),
+            "{body}"
+        );
+        assert!(body.contains("<p class=\"big\">Connecting</p>"), "{body}");
+
+        // Unticked, it is turned off.
+        let response = post(
+            router.clone(),
+            "/app/settings",
+            "background_updates=1",
+            "127.0.0.1:50000",
+            Some("http://127.0.0.1:7586"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert!(!node.settings.lock().unwrap().join_network);
+        let body = get_panel(router).await;
+        assert!(body.contains("<p class=\"big\">Off</p>"), "{body}");
+        assert!(
+            body.contains("name=\"join_network\" value=\"1\">"),
+            "{body}"
+        );
+
+        // Joined, through a relay.
+        let mut joined = status(Phase::Ready, Step::Idle);
+        joined.network = Some(plumb_net::NetStatus {
+            nat: "private".into(),
+            connected_peers: 3,
+            relays: vec!["/dns4/plumbsearch.org/tcp/4001".into()],
+            buckets_served: 12,
+            ..Default::default()
+        });
+        let body = get_panel(node_app(joined, true).0).await;
+        assert!(body.contains("<p class=\"big\">Connected</p>"), "{body}");
+        assert!(
+            body.contains("3 nodes connected. Other nodes reach this one through a relay."),
+            "{body}"
+        );
+        assert!(body.contains("12 searches answered"), "{body}");
     }
 }

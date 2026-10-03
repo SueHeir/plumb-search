@@ -37,7 +37,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::Path;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
+use std::sync::{Arc, PoisonError};
 
 use std::time::Duration;
 
@@ -126,6 +126,41 @@ pub(super) fn bucket_table_name(id: u64, index_dir: &Path) -> Option<String> {
     Some(format!("{id}-{}", &hash[..16]))
 }
 
+/// Joins the network now if the node is set up to and its settings say
+/// so, then follows the settings: leaves the network when "join the
+/// network" is turned off and joins again when it is turned on.
+pub(super) async fn follow_settings(inner: &Arc<Inner>) {
+    if inner.config.network.is_none() {
+        return;
+    }
+    apply_settings(inner).await;
+    let following = inner.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                () = following.stopped() => return,
+                () = following.net_change.notified() => {}
+            }
+            apply_settings(&following).await;
+        }
+    });
+}
+
+/// Joins or leaves the network, as the settings now say.
+async fn apply_settings(inner: &Arc<Inner>) {
+    let wanted = inner.settings().join_network;
+    let joined = handle(inner).is_some();
+    if wanted && !joined {
+        if let Err(err) = start(inner).await {
+            // The node still searches and crawls on its own.
+            warn!("{err:#}");
+        }
+    } else if !wanted && joined {
+        info!("leaving the Plumb network, as the settings say");
+        stop(inner).await;
+    }
+}
+
 /// Joins the network, if the node is configured to, and starts keeping
 /// what other nodes send in the inbox.
 pub(super) async fn start(inner: &Arc<Inner>) -> Result<()> {
@@ -137,7 +172,7 @@ pub(super) async fn start(inner: &Arc<Inner>) -> Result<()> {
         .await
         .context("joining the Plumb network")?;
     info!("joined the Plumb network as {}", handle.peer_id());
-    let _ = inner.net.set(Arc::new(handle));
+    *inner.net.write().unwrap_or_else(PoisonError::into_inner) = Some(Arc::new(handle));
     if inner.config.share_popularity {
         let picks = PickLog::open(&inner.paths.net.join(PICKS_FILE));
         *inner
@@ -173,13 +208,23 @@ pub(super) async fn start(inner: &Arc<Inner>) -> Result<()> {
 
 /// Stops the network side, if running.
 pub(super) async fn stop(inner: &Inner) {
-    if let Some(net) = inner.net.get() {
+    let net = inner
+        .net
+        .write()
+        .unwrap_or_else(PoisonError::into_inner)
+        .take();
+    *inner.picks.lock().unwrap_or_else(PoisonError::into_inner) = None;
+    if let Some(net) = net {
         net.shutdown().await;
     }
 }
 
-pub(super) fn handle(inner: &Inner) -> Option<&Arc<NetHandle>> {
-    inner.net.get()
+pub(super) fn handle(inner: &Inner) -> Option<Arc<NetHandle>> {
+    inner
+        .net
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone()
 }
 
 /// Whether the node notes and reports the results opened on its page.

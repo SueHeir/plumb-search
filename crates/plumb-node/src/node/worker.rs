@@ -623,7 +623,7 @@ fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Option<ServingIndex
     inner.check_stop()?;
 
     let window = RECRAWL_AFTER_DAYS * SECONDS_PER_DAY;
-    let net = network::handle(inner).cloned();
+    let net = network::handle(inner);
     let now = now_unix();
     // In the network, only the sites assigned to this node today.
     let candidates = set.iter().filter(|record| {
