@@ -54,6 +54,16 @@
 //!   crawlers. So a group of keys that turns on one site after earning
 //!   their votes loses them, and the site is not changed in the meantime.
 //!
+//! # Trusted nodes
+//!
+//! While the network is a handful of nodes, waiting for two crawlers to
+//! agree mostly keeps good crawls out. So a node can name nodes it trusts
+//! (`NetConfig::trusted_peers`, `plumb run --trust-peer`): a crawl signed
+//! by one of them is taken in at once, like the node's own, and counts
+//! towards any quorum. Everyone else goes through the rules above. Being
+//! trusted by a node earns nothing else: a trusted crawler is scored like
+//! any other, and its crawls vouch for no one.
+//!
 //! The state is rebuilt from the batches held on disk at start (see
 //! [`crate::store`]), so it needs no file of its own, and observations older
 //! than [`WINDOW_EPOCHS`] are dropped, which also lets a distrusted crawler
@@ -158,6 +168,10 @@ pub struct AgreementStatus {
     /// Sites held back by a dispute, waiting for this node to fetch them.
     #[serde(default)]
     pub disputed_sites: usize,
+    /// Nodes whose crawls this node takes in without waiting for a second
+    /// crawler.
+    #[serde(default)]
+    pub trusted_peers: usize,
 }
 
 /// One crawler's latest crawl of a homepage.
@@ -193,13 +207,16 @@ pub struct Agreement {
     own: usize,
     /// Disputed sites this node should fetch itself.
     rechecks: BTreeSet<String>,
+    /// Nodes whose crawls are taken in at once (see "Trusted nodes").
+    trusted: HashSet<PeerId>,
     /// Scored since the last [`Agreement::take_verdicts`].
     verdicts: Vec<Verdict>,
 }
 
 impl Agreement {
-    /// An empty agreement step for the node `me`.
-    pub fn new(me: PeerId) -> Agreement {
+    /// An empty agreement step for the node `me`, taking crawls signed by
+    /// `trusted` nodes in at once.
+    pub fn new(me: PeerId, trusted: impl IntoIterator<Item = PeerId>) -> Agreement {
         Agreement {
             me,
             homepages: HashMap::new(),
@@ -209,6 +226,7 @@ impl Agreement {
             vouches: HashMap::new(),
             own: 0,
             rechecks: BTreeSet::new(),
+            trusted: trusted.into_iter().filter(|peer| *peer != me).collect(),
             verdicts: Vec::new(),
         }
     }
@@ -282,7 +300,7 @@ impl Agreement {
     /// this node has crawled anything itself, has been vouched for by
     /// matching this node's own crawls of [`VOUCHES_NEEDED`] sites.
     pub fn counts(&self, crawler: &PeerId) -> bool {
-        if *crawler == self.me {
+        if *crawler == self.me || self.trusted.contains(crawler) {
             return true;
         }
         let score = self.score(crawler);
@@ -318,6 +336,7 @@ impl Agreement {
                 .filter(|(_, score)| !score.distrusted() && score.vouched >= VOUCHES_NEEDED)
                 .count(),
             disputed_sites: self.rechecks.len(),
+            trusted_peers: self.trusted.len(),
         }
     }
 
@@ -350,6 +369,12 @@ impl Agreement {
             self.rechecks.remove(&domain);
         }
         self.judge_against_own(&domain);
+        if self.trusted.contains(&crawler) {
+            let held = &self.homepages[&domain];
+            let record = held.iter().find(|o| o.crawler == crawler)?.record.clone();
+            self.confirmed.insert(domain, record.clone());
+            return Some(record);
+        }
         let held = &self.homepages[&domain];
         let new = held.iter().position(|o| o.crawler == crawler)?;
         // The crawls that match this one, from crawlers that count.
@@ -434,7 +459,10 @@ impl Agreement {
     /// least as large.
     fn disputed(&self, domain: &str, group: &[usize], newest: usize) -> Option<bool> {
         let held = &self.homepages[domain];
-        if group.iter().any(|&i| held[i].crawler == self.me) {
+        if group
+            .iter()
+            .any(|&i| held[i].crawler == self.me || self.trusted.contains(&held[i].crawler))
+        {
             return None;
         }
         let near = |o: &Observation| {
@@ -541,6 +569,15 @@ impl Agreement {
             None => held.push(mention),
         }
         let held = &self.mentions[domain];
+        if self.trusted.contains(&crawler) {
+            let m = held.iter().find(|m| m.crawler == crawler)?;
+            let mut site = SiteRecord::new(domain);
+            site.signals.linking_domains = m.linking_domains;
+            for lt in &m.texts {
+                site.add_link_text_linkers(&lt.text, lt.linkers);
+            }
+            return Some(site);
+        }
         let counting: Vec<&Mention> = held.iter().filter(|m| self.counts(&m.crawler)).collect();
         if counting.len() < QUORUM {
             return None;
@@ -631,7 +668,7 @@ mod tests {
         let (a, b, me) = (PeerId::random(), PeerId::random(), PeerId::random());
         // This node crawls nothing, so every crawler counts towards a
         // quorum, but none is vouched for.
-        let mut agreement = Agreement::new(me);
+        let mut agreement = Agreement::new(me, []);
         agreement.observe(a, vec![crawl("usbank.com", "U.S. Bank", NOW)], NOW);
         let out = agreement.observe(b, vec![crawl("usbank.com", "U.S. Bank", NOW + 1)], NOW + 1);
         assert_eq!(out.len(), 1, "a quorum of two counting crawlers");
@@ -643,9 +680,19 @@ mod tests {
     }
 
     #[test]
+    fn a_trusted_nodes_lone_crawl_is_taken_in_but_scores_nothing() {
+        let (t, me) = (PeerId::random(), PeerId::random());
+        let mut agreement = Agreement::new(me, [t]);
+        let out = agreement.observe(t, vec![crawl("usbank.com", "U.S. Bank", NOW)], NOW);
+        assert_eq!(out.len(), 1);
+        assert!(agreement.take_verdicts().is_empty(), "no credits for it");
+        assert!(!agreement.vouched(&t));
+    }
+
+    #[test]
     fn a_crawl_matching_our_own_has_us_as_witness() {
         let (a, me) = (PeerId::random(), PeerId::random());
-        let mut agreement = Agreement::new(me);
+        let mut agreement = Agreement::new(me, []);
         agreement.observe(me, vec![crawl("usbank.com", "U.S. Bank", NOW)], NOW);
         agreement.observe(a, vec![crawl("usbank.com", "U.S. Bank", NOW + 1)], NOW + 1);
         let verdicts = agreement.take_verdicts();
@@ -669,7 +716,7 @@ mod tests {
     #[test]
     fn one_crawl_is_held_until_a_second_crawler_agrees() {
         let (a, b, me) = (PeerId::random(), PeerId::random(), PeerId::random());
-        let mut agreement = Agreement::new(me);
+        let mut agreement = Agreement::new(me, []);
         let out = agreement.observe(a, vec![crawl("usbank.com", "U.S. Bank", NOW)], NOW);
         assert!(out.is_empty());
         assert_eq!(agreement.status().pending_sites, 1);
@@ -696,7 +743,7 @@ mod tests {
             PeerId::random(),
             PeerId::random(),
         );
-        let mut agreement = Agreement::new(me);
+        let mut agreement = Agreement::new(me, []);
         let poisoned = crawl("usbank.com", "Free crypto giveaway", NOW);
         assert!(agreement.observe(bad, vec![poisoned], NOW).is_empty());
         assert!(agreement
@@ -722,7 +769,7 @@ mod tests {
             PeerId::random(),
             PeerId::random(),
         );
-        let mut agreement = Agreement::new(me);
+        let mut agreement = Agreement::new(me, []);
         for i in 0..MIN_JUDGED {
             let d = format!("site{i}.com");
             agreement.observe(bad, vec![crawl(&d, "Spam spam spam", NOW)], NOW);
@@ -749,7 +796,7 @@ mod tests {
             PeerId::random(),
             PeerId::random(),
         );
-        let mut agreement = Agreement::new(me);
+        let mut agreement = Agreement::new(me, []);
         agreement.observe(a, vec![crawl("shop.com", "Summer sale", NOW)], NOW);
         let later = NOW + 5 * EPOCH_SECS;
         agreement.observe(b, vec![crawl("shop.com", "Winter sale", later)], later);
@@ -761,7 +808,7 @@ mod tests {
     #[test]
     fn only_aliases_two_crawlers_saw_are_kept() {
         let (a, b, me) = (PeerId::random(), PeerId::random(), PeerId::random());
-        let mut agreement = Agreement::new(me);
+        let mut agreement = Agreement::new(me, []);
         let mut one = crawl("usbank.com", "U.S. Bank", NOW);
         one.add_alias("U.S. Bank");
         one.add_alias("Cheap Pills");
@@ -776,7 +823,7 @@ mod tests {
     #[test]
     fn link_text_and_new_names_need_two_crawlers() {
         let (a, b, me) = (PeerId::random(), PeerId::random(), PeerId::random());
-        let mut agreement = Agreement::new(me);
+        let mut agreement = Agreement::new(me, []);
         let mut named = SiteRecord::new("newbank.com");
         named.add_link_text_linkers("New Bank", 0b01);
         named.add_link_text_linkers("click here to win", 0b01);
@@ -797,7 +844,7 @@ mod tests {
     #[test]
     fn old_observations_are_dropped() {
         let (a, b, me) = (PeerId::random(), PeerId::random(), PeerId::random());
-        let mut agreement = Agreement::new(me);
+        let mut agreement = Agreement::new(me, []);
         agreement.observe(a, vec![crawl("usbank.com", "U.S. Bank", NOW)], NOW);
         agreement.prune(NOW + (WINDOW_EPOCHS + 1) * EPOCH_SECS);
         assert_eq!(agreement.status(), AgreementStatus::default());
@@ -821,7 +868,7 @@ mod tests {
     #[test]
     fn fresh_keys_do_not_count_once_this_node_crawls_until_they_match_its_crawls() {
         let (x, y, me) = (PeerId::random(), PeerId::random(), PeerId::random());
-        let mut agreement = Agreement::new(me);
+        let mut agreement = Agreement::new(me, []);
         agreement.observe(me, vec![crawl("mine.com", "Mine", NOW)], NOW);
         // Two keys of one person agreeing with each other are not enough.
         agreement.observe(x, vec![crawl("usbank.com", "Free crypto", NOW)], NOW);
@@ -841,7 +888,7 @@ mod tests {
     #[test]
     fn the_same_crawl_sent_again_vouches_once() {
         let (x, me) = (PeerId::random(), PeerId::random());
-        let mut agreement = Agreement::new(me);
+        let mut agreement = Agreement::new(me, []);
         agreement.observe(me, vec![crawl("mine.com", "Mine", NOW)], NOW);
         for i in 0..5 {
             agreement.observe(x, vec![crawl("mine.com", "Mine", NOW + i)], NOW + i);
@@ -866,7 +913,7 @@ mod tests {
             PeerId::random(),
             PeerId::random(),
         );
-        let mut agreement = Agreement::new(me);
+        let mut agreement = Agreement::new(me, []);
         vouch_for(&mut agreement, me, &[a, b, x, y], NOW);
         agreement.observe(a, vec![crawl("usbank.com", "U.S. Bank", NOW)], NOW);
         let out = agreement.observe(b, vec![crawl("usbank.com", "U.S. Bank", NOW)], NOW);
@@ -919,7 +966,7 @@ mod tests {
             PeerId::random(),
             PeerId::random(),
         );
-        let mut agreement = Agreement::new(me);
+        let mut agreement = Agreement::new(me, []);
         vouch_for(&mut agreement, me, &[a, x, y], NOW);
         agreement.observe(a, vec![crawl("new.com", "New Bank", NOW)], NOW);
         agreement.observe(x, vec![crawl("new.com", "Free crypto", NOW)], NOW);
@@ -940,11 +987,49 @@ mod tests {
             PeerId::random(),
             PeerId::random(),
         );
-        let mut agreement = Agreement::new(me);
+        let mut agreement = Agreement::new(me, []);
         agreement.observe(x, vec![crawl("new.com", "Free crypto", NOW)], NOW);
         agreement.observe(a, vec![crawl("new.com", "New Bank", NOW)], NOW);
         let out = agreement.observe(b, vec![crawl("new.com", "New Bank", NOW)], NOW);
         assert_eq!(out[0].title.as_deref(), Some("New Bank"));
         assert!(agreement.rechecks(10).is_empty());
+    }
+
+    #[test]
+    fn a_trusted_node_crawl_is_taken_in_at_once() {
+        let (trusted, x, y, me) = (
+            PeerId::random(),
+            PeerId::random(),
+            PeerId::random(),
+            PeerId::random(),
+        );
+        let mut agreement = Agreement::new(me, [trusted]);
+        agreement.observe(me, vec![crawl("mine.com", "Mine", NOW)], NOW);
+        let mut one = crawl("usbank.com", "U.S. Bank", NOW);
+        one.add_alias("US Bank");
+        let out = agreement.observe(trusted, vec![one], NOW);
+        assert_eq!(out[0].title.as_deref(), Some("U.S. Bank"));
+        assert_eq!(out[0].aliases, vec!["US Bank".to_string()]);
+        assert_eq!(agreement.status().trusted_peers, 1);
+        let mut named = SiteRecord::new("newbank.com");
+        named.add_link_text_linkers("New Bank", 0b01);
+        let out = agreement.observe(trusted, vec![named], NOW);
+        assert_eq!(out[0].link_texts.len(), 1);
+        // Anyone else still needs the full rules: two fresh keys are not
+        // enough, and matching a trusted crawl vouches for no one.
+        agreement.observe(x, vec![crawl("shop.com", "Free crypto", NOW)], NOW);
+        let out = agreement.observe(y, vec![crawl("shop.com", "Free crypto", NOW)], NOW);
+        assert!(out.is_empty());
+        for i in 0..VOUCHES_NEEDED {
+            let d = format!("t{i}.com");
+            agreement.observe(trusted, vec![crawl(&d, "T", NOW)], NOW);
+            agreement.observe(x, vec![crawl(&d, "T", NOW)], NOW);
+        }
+        assert_eq!(agreement.score(&x).vouched, 0);
+        assert!(!agreement.counts(&x));
+        // A trusted crawl and one other agreeing make a quorum.
+        agreement.observe(x, vec![crawl("cafe.com", "Cafe", NOW)], NOW);
+        let out = agreement.observe(trusted, vec![crawl("cafe.com", "Cafe", NOW)], NOW);
+        assert_eq!(out.len(), 1);
     }
 }
