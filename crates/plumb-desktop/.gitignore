@@ -1,0 +1,4 @@
+# Written by tauri-build on every build.
+/gen/schemas
+# The 1024x1024 render of app-icon.svg; see examples/render_icon.rs.
+/app-icon.png

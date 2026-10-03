@@ -1,0 +1,192 @@
+# Builds the server image (Dockerfile) and publishes it to the GitHub
+# Container Registry as ghcr.io/<owner>/<repo>, lowercased.
+#
+# - Pull requests: build for linux/amd64 and smoke-test it; nothing is pushed.
+# - Pushes to main and v* tags: build linux/amd64 and linux/arm64 natively on
+#   their own runners, push each by digest, then merge them into one
+#   multi-arch image tagged `latest` (main), the version (v* tags) and
+#   `sha-<commit>`. This is Docker's "distribute build across multiple
+#   runners" pattern: https://docs.docker.com/build/ci/github-actions/multi-platform/
+name: Docker image
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: read
+
+# A newer push to a pull request cancels its older run. Runs for main and tags
+# queue instead, so `latest` always ends up at the newest commit.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # docker/metadata-action tag rules, shared by the per-platform labels and the
+  # published tags.
+  IMAGE_TAGS: |
+    type=raw,value=latest,enable={{is_default_branch}}
+    type=semver,pattern={{version}}
+    type=semver,pattern={{major}}.{{minor}}
+    type=semver,pattern={{major}},enable=${{ !startsWith(github.ref, 'refs/tags/v0.') }}
+    type=sha
+  # metadata-action would take these from the repository settings, where
+  # GitHub's license detection sees only LICENSE-MIT. Keep them in line with
+  # the LABELs in the Dockerfile.
+  IMAGE_LICENSES: "MIT OR Apache-2.0"
+  IMAGE_DESCRIPTION: "Self-hostable search engine that finds websites by name. Runs a Plumb Search node with its search page on port 8080."
+
+jobs:
+  pull-request:
+    name: Build linux/amd64 (not pushed)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build
+        uses: docker/build-push-action@v7
+        with:
+          platforms: linux/amd64
+          load: true
+          tags: plumb-search:ci
+          cache-from: type=gha,scope=linux-amd64
+          cache-to: type=gha,scope=linux-amd64,mode=max
+
+      - name: Smoke test
+        run: |
+          docker run --rm plumb-search:ci --version
+          # The flags of the image's default command must exist in this build.
+          read -ra cmd < <(docker image inspect --format '{{join .Config.Cmd " "}}' plumb-search:ci)
+          docker run --rm plumb-search:ci "${cmd[@]}" --help > /dev/null
+
+  build:
+    name: Build ${{ matrix.platform }}
+    if: github.event_name == 'push'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Prepare
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+          echo "PLATFORM_PAIR=${PLATFORM//\//-}" >> "$GITHUB_ENV"
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.IMAGE }}
+          flavor: latest=false
+          tags: ${{ env.IMAGE_TAGS }}
+          labels: |
+            org.opencontainers.image.licenses=${{ env.IMAGE_LICENSES }}
+            org.opencontainers.image.description=${{ env.IMAGE_DESCRIPTION }}
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          platforms: ${{ matrix.platform }}
+          labels: ${{ steps.meta.outputs.labels }}
+          tags: ${{ env.IMAGE }}
+          outputs: type=image,push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=${{ env.PLATFORM_PAIR }}
+          cache-to: type=gha,scope=${{ env.PLATFORM_PAIR }},mode=max
+
+      - name: Export digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/digests"
+          touch "$RUNNER_TEMP/digests/${DIGEST#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v7
+        with:
+          name: digests-${{ env.PLATFORM_PAIR }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    name: Publish multi-arch image
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Prepare
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+
+      - name: Download digests
+        uses: actions/download-artifact@v8
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.IMAGE }}
+          flavor: latest=false
+          tags: ${{ env.IMAGE_TAGS }}
+
+      # The index annotations are what the GHCR package page shows for a
+      # multi-arch image.
+      - name: Create the multi-arch manifest and push its tags
+        working-directory: ${{ runner.temp }}/digests
+        env:
+          METADATA: ${{ steps.meta.outputs.json }}
+        run: |
+          args=(
+            --annotation "index:org.opencontainers.image.description=$IMAGE_DESCRIPTION"
+            --annotation "index:org.opencontainers.image.licenses=$IMAGE_LICENSES"
+            --annotation "index:org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
+          )
+          while read -r tag; do args+=(--tag "$tag"); done < <(jq -r '.tags[]' <<< "$METADATA")
+          for digest in *; do args+=("$IMAGE@sha256:$digest"); done
+          docker buildx imagetools create "${args[@]}"
+
+      - name: Inspect the image
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: docker buildx imagetools inspect "$IMAGE:$VERSION"

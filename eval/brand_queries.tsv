@@ -1,0 +1,176 @@
+# Real-world brand-name test for Plumb Search: navigational queries for
+# well-known organizations, each with its official registrable domain.
+#
+# Run it against an index built from real seed data, for example:
+#   plumb eval --index data/index --queries eval/brand_queries.tsv
+#
+# Format: query<TAB>expected_domain[,another_ok_domain]. Blank lines and lines
+# starting with `#` are skipped. Only unambiguous pairs are listed; where an
+# organization officially runs its main site on more than one registrable
+# domain, each of them is accepted.
+
+# Banks and finance
+bank of america	bankofamerica.com
+chase	chase.com
+wells fargo	wellsfargo.com
+us bank	usbank.com
+citibank	citi.com,citibank.com
+capital one	capitalone.com
+american express	americanexpress.com
+pnc bank	pnc.com
+truist	truist.com
+goldman sachs	goldmansachs.com
+charles schwab	schwab.com
+fidelity investments	fidelity.com
+vanguard	vanguard.com
+paypal	paypal.com
+venmo	venmo.com
+ally bank	ally.com
+navy federal credit union	navyfederal.org
+usaa	usaa.com
+discover card	discover.com
+mastercard	mastercard.com,mastercard.us
+
+# Retail
+amazon	amazon.com
+walmart	walmart.com
+target	target.com
+costco	costco.com
+home depot	homedepot.com
+lowes	lowes.com
+best buy	bestbuy.com
+ikea	ikea.com
+ebay	ebay.com
+etsy	etsy.com
+macys	macys.com
+walgreens	walgreens.com
+cvs pharmacy	cvs.com
+kroger	kroger.com
+nike	nike.com
+wayfair	wayfair.com
+
+# Restaurants
+starbucks	starbucks.com
+mcdonalds	mcdonalds.com
+dominos	dominos.com
+chipotle	chipotle.com
+taco bell	tacobell.com
+chick-fil-a	chick-fil-a.com
+
+# Airlines and travel
+delta air lines	delta.com
+united airlines	united.com
+american airlines	aa.com
+southwest airlines	southwest.com
+jetblue	jetblue.com
+alaska airlines	alaskaair.com
+british airways	britishairways.com
+lufthansa	lufthansa.com
+air canada	aircanada.com
+emirates	emirates.com
+expedia	expedia.com
+airbnb	airbnb.com
+booking.com	booking.com
+marriott	marriott.com
+hilton	hilton.com
+amtrak	amtrak.com
+
+# Government and international organizations
+irs	irs.gov
+social security administration	ssa.gov
+usps	usps.com
+medicare	medicare.gov
+nasa	nasa.gov
+cdc	cdc.gov
+fbi	fbi.gov
+veterans affairs	va.gov
+fema	fema.gov
+national weather service	weather.gov
+fda	fda.gov
+nih	nih.gov
+state department	state.gov
+white house	whitehouse.gov
+census bureau	census.gov
+federal reserve	federalreserve.gov
+sec	sec.gov
+uscis	uscis.gov
+smithsonian	si.edu
+european union	europa.eu
+world health organization	who.int
+united nations	un.org
+
+# News and media
+new york times	nytimes.com
+washington post	washingtonpost.com
+wall street journal	wsj.com
+cnn	cnn.com
+bbc	bbc.co.uk,bbc.com
+fox news	foxnews.com
+npr	npr.org
+reuters	reuters.com
+associated press	apnews.com,ap.org
+the guardian	theguardian.com
+bloomberg	bloomberg.com
+usa today	usatoday.com
+espn	espn.com
+forbes	forbes.com
+pbs	pbs.org
+the weather channel	weather.com
+national geographic	nationalgeographic.com
+financial times	ft.com
+
+# Technology
+google	google.com
+youtube	youtube.com
+facebook	facebook.com
+instagram	instagram.com
+twitter	x.com,twitter.com
+linkedin	linkedin.com
+reddit	reddit.com
+wikipedia	wikipedia.org
+microsoft	microsoft.com
+apple	apple.com
+netflix	netflix.com
+spotify	spotify.com
+github	github.com
+stack overflow	stackoverflow.com
+dropbox	dropbox.com
+zoom	zoom.us,zoom.com
+slack	slack.com
+adobe	adobe.com
+ibm	ibm.com
+nvidia	nvidia.com
+samsung	samsung.com
+yahoo	yahoo.com
+duckduckgo	duckduckgo.com
+mozilla	mozilla.org
+openai	openai.com
+python	python.org
+
+# Universities
+mit	mit.edu
+harvard	harvard.edu
+stanford	stanford.edu
+yale	yale.edu
+princeton	princeton.edu
+uc berkeley	berkeley.edu
+ucla	ucla.edu
+caltech	caltech.edu
+carnegie mellon	cmu.edu
+university of michigan	umich.edu
+university of oxford	ox.ac.uk
+university of cambridge	cam.ac.uk
+
+# Telecom, shipping, insurance, cars, health and more
+ups	ups.com
+fedex	fedex.com
+verizon	verizon.com
+at&t	att.com
+t-mobile	t-mobile.com
+geico	geico.com
+state farm	statefarm.com
+toyota	toyota.com
+tesla	tesla.com
+mayo clinic	mayoclinic.org
+american red cross	redcross.org
+craigslist	craigslist.org

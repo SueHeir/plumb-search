@@ -1,0 +1,16 @@
+[package]
+name = "plumb-index"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow = "1.0.104"
+idna = "1.1.0"
+plumb-core = { version = "0.1.0", path = "../plumb-core" }
+serde = { version = "1.0.229", features = ["derive"] }
+tantivy = "0.26.2"
+
+[dev-dependencies]
+tempfile = "3.27.0"
