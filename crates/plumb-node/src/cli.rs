@@ -88,6 +88,33 @@ pub struct RunArgs {
     /// (seed downloads always use those variables).
     #[arg(long)]
     pub use_system_proxy: bool,
+    /// Join the Plumb network: share crawl work with other nodes, search
+    /// them, and answer their searches. No port forwarding is needed.
+    #[arg(long)]
+    pub network: bool,
+    /// Port for node-to-node connections, over TCP and QUIC (UDP).
+    #[arg(
+        long,
+        value_name = "PORT",
+        default_value_t = 4001,
+        requires = "network"
+    )]
+    pub p2p_port: u16,
+    /// A node to connect to first, as a multiaddr ending in /p2p/<id>, e.g.
+    /// /dns4/plumbsearch.org/tcp/4001/p2p/12D3Koo...; may be repeated.
+    #[arg(long, value_name = "MULTIADDR", requires = "network")]
+    pub bootstrap: Vec<plumb_net::Multiaddr>,
+    /// An address other nodes can reach this one at, for a server with a
+    /// public address, e.g. /ip4/203.0.113.7/tcp/4001; may be repeated.
+    #[arg(long, value_name = "MULTIADDR", requires = "network")]
+    pub public_addr: Vec<plumb_net::Multiaddr>,
+    /// Relay connections for nodes behind NAT. Only for a node others can
+    /// reach (see --public-addr).
+    #[arg(long, requires = "public_addr")]
+    pub relay: bool,
+    /// Do not ask the home router to forward the port (UPnP).
+    #[arg(long, requires = "network")]
+    pub no_upnp: bool,
 }
 
 /// Starting points for `plumb run`.

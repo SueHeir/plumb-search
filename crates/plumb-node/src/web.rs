@@ -14,6 +14,11 @@
 //! reloading every few seconds with a `<meta http-equiv="refresh">` (no
 //! script), and `/api/search` answers 503.
 //!
+//! A node in the Plumb network also serves `GET /network?q=`, which asks
+//! other nodes ([`plumb_net::NetHandle::search`]) and shows what they
+//! answered, and the same as JSON at `GET /api/network/search?q=`. Its
+//! result pages link there.
+//!
 //! Titles, descriptions and URLs in the index come from the open web, so
 //! every piece of record text is HTML-escaped, only `http`/`https` URLs
 //! become links, and pages are served with a Content-Security-Policy that
@@ -22,6 +27,7 @@
 
 use std::fmt::Write as _;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use axum::extract::{Query, State};
@@ -31,6 +37,7 @@ use axum::routing::get;
 use axum::{Json, Router};
 use plumb_core::{collapse_whitespace, now_unix, truncate_chars};
 use plumb_index::{Hit, RankConfig, Searcher};
+use plumb_net::{NetHandle, NetSearch, NetworkHit};
 use serde::Deserialize;
 use tracing::{debug, error, info};
 use url::Url;
@@ -54,6 +61,9 @@ const CONTENT_SECURITY_POLICY: &str = "default-src 'none'; style-src 'unsafe-inl
 /// Seconds between two reloads of the setup page, and the `Retry-After` of
 /// a search asked for before the index is ready.
 const SETUP_RELOAD_SECONDS: u32 = 5;
+
+/// How long a network search waits for other nodes to answer.
+const NETWORK_SEARCH_WAIT: Duration = Duration::from_secs(4);
 
 /// The media type of an OpenSearch description.
 const OPENSEARCH_TYPE: &str = "application/opensearchdescription+xml";
@@ -99,6 +109,10 @@ impl SearchBackend for IndexBackend {
 pub trait StatusSource: Send + Sync {
     /// The node's status, as `GET /api/status` returns it.
     fn status(&self) -> Status;
+    /// The network side, for a node that joined the Plumb network.
+    fn network(&self) -> Option<Arc<NetHandle>> {
+        None
+    }
 }
 
 #[derive(Clone)]
@@ -114,6 +128,10 @@ impl AppState {
     fn setting_up(&self) -> Option<Status> {
         let status = self.node.as_ref()?.status();
         (status.phase != Phase::Ready).then_some(status)
+    }
+
+    fn network(&self) -> Option<Arc<NetHandle>> {
+        self.node.as_ref()?.network()
     }
 }
 
@@ -142,7 +160,10 @@ fn app(state: AppState) -> Router {
         .route("/api/search", get(api_search))
         .route("/opensearch.xml", get(opensearch));
     if state.node.is_some() {
-        router = router.route("/api/status", get(api_status));
+        router = router
+            .route("/api/status", get(api_status))
+            .route("/network", get(network_page))
+            .route("/api/network/search", get(api_network_search));
     }
     router.with_state(state)
 }
@@ -253,7 +274,10 @@ async fn search_page(
         return home_or_setup(&state);
     }
     match run_search(&state, &query, params.limit()).await {
-        Ok(hits) => html_response(StatusCode::OK, render_results(&query, &hits)),
+        Ok(hits) => html_response(
+            StatusCode::OK,
+            render_results(&query, &hits, state.network().is_some()),
+        ),
         Err(err) => {
             error!("search for {query:?} failed: {err:#}");
             html_response(StatusCode::INTERNAL_SERVER_ERROR, render_error(&query))
@@ -286,6 +310,66 @@ async fn api_search(State(state): State<AppState>, Query(params): Query<SearchPa
         Err(err) => {
             error!("search for {query:?} failed: {err:#}");
             let body = serde_json::json!({ "error": "search failed" });
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                security_headers(),
+                Json(body),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// `GET /network?q=`: what other nodes answer, for a node in the network.
+async fn network_page(
+    State(state): State<AppState>,
+    Query(params): Query<SearchParams>,
+) -> Response {
+    let Some(net) = state.network() else {
+        return html_response(StatusCode::NOT_FOUND, render_no_network());
+    };
+    let query = params.query();
+    if query.is_empty() {
+        return home_or_setup(&state);
+    }
+    match net
+        .search(&query, params.limit(), NETWORK_SEARCH_WAIT)
+        .await
+    {
+        Ok(found) => html_response(StatusCode::OK, render_network(&query, &found)),
+        Err(err) => {
+            error!("network search for {query:?} failed: {err:#}");
+            html_response(StatusCode::INTERNAL_SERVER_ERROR, render_error(&query))
+        }
+    }
+}
+
+/// `GET /api/network/search?q=&limit=`: a [`NetSearch`] as JSON.
+async fn api_network_search(
+    State(state): State<AppState>,
+    Query(params): Query<SearchParams>,
+) -> Response {
+    let Some(net) = state.network() else {
+        let body = serde_json::json!({ "error": "this node has not joined the Plumb network" });
+        return (StatusCode::NOT_FOUND, security_headers(), Json(body)).into_response();
+    };
+    let query = params.query();
+    if query.is_empty() {
+        return (
+            StatusCode::OK,
+            security_headers(),
+            Json(NetSearch::default()),
+        )
+            .into_response();
+    }
+    match net
+        .search(&query, params.limit(), NETWORK_SEARCH_WAIT)
+        .await
+    {
+        Ok(found) => (StatusCode::OK, security_headers(), Json(found)).into_response(),
+        Err(err) => {
+            error!("network search for {query:?} failed: {err:#}");
+            let body = serde_json::json!({ "error": "network search failed" });
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 security_headers(),
@@ -677,7 +761,7 @@ fn results_header(query: &str) -> String {
     )
 }
 
-fn render_results(query: &str, hits: &[Hit]) -> String {
+fn render_results(query: &str, hits: &[Hit], network: bool) -> String {
     let mut body = format!("<div class=\"wrap\">\n{}\n<main>\n", results_header(query));
     if hits.is_empty() {
         let _ = writeln!(
@@ -692,13 +776,120 @@ fn render_results(query: &str, hits: &[Hit]) -> String {
         }
         body.push_str("</ol>\n");
     }
-    let api: String = url::form_urlencoded::byte_serialize(query.as_bytes()).collect();
-    let api = escape_html(&format!("/api/search?q={api}"));
+    let encoded: String = url::form_urlencoded::byte_serialize(query.as_bytes()).collect();
+    if network {
+        let _ = writeln!(
+            body,
+            "<p class=\"s\"><a href=\"{}\">Ask other Plumb nodes too</a></p>",
+            escape_html(&format!("/network?q={encoded}"))
+        );
+    }
+    let api = escape_html(&format!("/api/search?q={encoded}"));
     let _ = write!(
         body,
         "<p class=\"s\">As JSON: <a href=\"{api}\">{api}</a></p>\n</main>\n</div>"
     );
     page(&format!("{query} - Plumb Search"), &body)
+}
+
+/// What other nodes answered. Their text is as untrusted as any record's,
+/// and is escaped the same way.
+fn render_network(query: &str, found: &NetSearch) -> String {
+    let mut body = format!("<div class=\"wrap\">\n{}\n<main>\n", results_header(query));
+    let _ = writeln!(
+        body,
+        "<p class=\"s\">From the Plumb network: {} of {} nodes asked answered{}.</p>",
+        found.answered,
+        found.asked,
+        if found.rejected > 0 {
+            format!(
+                "; {} answers were dropped because their proofs did not check out",
+                found.rejected
+            )
+        } else {
+            String::new()
+        }
+    );
+    if found.asked == 0 {
+        body.push_str(
+            "<p class=\"none\">No other nodes are connected yet. This node keeps looking \
+             for them.</p>\n",
+        );
+    } else if found.hits.is_empty() {
+        let _ = writeln!(
+            body,
+            "<p class=\"none\">No node had a site matching <strong>{}</strong>.</p>",
+            escape_html(query)
+        );
+    } else {
+        body.push_str("<ol>\n");
+        for hit in &found.hits {
+            render_network_hit(&mut body, hit, found.answered);
+        }
+        body.push_str("</ol>\n");
+    }
+    let encoded: String = url::form_urlencoded::byte_serialize(query.as_bytes()).collect();
+    let local = escape_html(&format!("/search?q={encoded}"));
+    let api = escape_html(&format!("/api/network/search?q={encoded}"));
+    let _ = write!(
+        body,
+        "<p class=\"s\"><a href=\"{local}\">Back to this node's results</a> &middot; \
+         As JSON: <a href=\"{api}\">{api}</a></p>\n</main>\n</div>"
+    );
+    page(&format!("{query} - Plumb network"), &body)
+}
+
+fn render_network_hit(out: &mut String, hit: &NetworkHit, answered: usize) {
+    let name = hit
+        .title
+        .as_deref()
+        .filter(|t| !t.trim().is_empty())
+        .unwrap_or(&hit.domain);
+    let name = escape_html(&truncate_chars(name, 150));
+    let href = http_url(&hit.url).or_else(|| homepage_url(&hit.domain));
+    out.push_str("<li>");
+    match href {
+        Some(href) => {
+            let _ = write!(
+                out,
+                "<a class=\"t\" href=\"{}\" rel=\"noreferrer\">{name}</a>\
+                 <div class=\"u\">{}</div>",
+                escape_html(&href),
+                escape_html(&truncate_chars(&href, 100))
+            );
+        }
+        None => {
+            let _ = write!(
+                out,
+                "<span class=\"t\">{name}</span><div class=\"u\">{}</div>",
+                escape_html(&hit.domain)
+            );
+        }
+    }
+    if let Some(description) = hit.description.as_deref().filter(|d| !d.trim().is_empty()) {
+        let _ = write!(out, "<p class=\"d\">{}</p>", escape_html(description));
+    }
+    let source = if hit.verified {
+        "signed crawl, checked"
+    } else {
+        "unsigned (seed data)"
+    };
+    let _ = writeln!(
+        out,
+        "<div class=\"m\">{} &middot; {source} &middot; from {} of {answered} nodes</div></li>",
+        escape_html(&hit.domain),
+        hit.answered_by
+    );
+}
+
+fn render_no_network() -> String {
+    let body = format!(
+        "<div class=\"wrap\">\n{}\n<main>\n<p class=\"none\">This node has not joined the \
+         Plumb network. Start it with <code>plumb run --network</code> to search other \
+         nodes.</p>\n</main>\n</div>",
+        results_header("")
+    );
+    page("Plumb network", &body)
 }
 
 fn render_hit(out: &mut String, hit: &Hit) {
@@ -1050,6 +1241,7 @@ mod tests {
             last_refresh: None,
             next_refresh: None,
             version: "0.1.0".to_string(),
+            network: None,
         }
     }
 

@@ -62,5 +62,7 @@ WORKDIR /data
 # replaces those by renaming, and a mount point cannot be renamed.
 VOLUME /data
 EXPOSE 8080
+# Node-to-node connections, used with `plumb run --network` (docs/network.md).
+EXPOSE 4001/tcp 4001/udp
 ENTRYPOINT ["plumb"]
 CMD ["run", "--data", "/data", "--bind", "0.0.0.0:8080"]

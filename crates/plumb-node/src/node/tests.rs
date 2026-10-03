@@ -367,6 +367,7 @@ async fn falls_back_to_the_newest_index_that_opens_and_clears_leftovers() {
         index_stale: false,
         last_refresh: Some(now_unix()),
         wikidata_missing: false,
+        network_pending: 0,
     };
     store::save_state(&paths, &up_to_date).unwrap();
 
@@ -457,6 +458,7 @@ async fn picks_up_a_round_left_unfinished() {
             index_stale: true,
             last_refresh: None,
             wikidata_missing: false,
+            network_pending: 0,
         },
     )
     .unwrap();
@@ -477,6 +479,7 @@ async fn picks_up_a_round_left_unfinished() {
             index_stale: false,
             last_refresh: Some(last),
             wikidata_missing: false,
+            network_pending: 0,
         }
     );
     assert_eq!(names(&paths.indexes), ["000001"]);
@@ -507,6 +510,7 @@ async fn refreshes_when_due() {
             index_stale: false,
             last_refresh: Some(long_ago),
             wikidata_missing: false,
+            network_pending: 0,
         },
     )
     .unwrap();
@@ -895,4 +899,131 @@ async fn sets_up_without_wikidata_and_adds_it_later() {
         usbank.aliases
     );
     assert_eq!(names(&dir.path().join("indexes")).len(), 1);
+}
+
+/// Finds the crawled records it was given whose title contains the query,
+/// standing in for another node's index.
+struct PeerIndex(Vec<SiteRecord>);
+
+impl plumb_net::LocalSearch for PeerIndex {
+    fn search(&self, query: &str, limit: usize) -> Vec<plumb_net::LocalHit> {
+        let query = query.to_lowercase();
+        self.0
+            .iter()
+            .filter(|r| {
+                r.title
+                    .as_deref()
+                    .is_some_and(|t| t.to_lowercase().contains(&query))
+            })
+            .take(limit)
+            .map(|r| plumb_net::LocalHit {
+                domain: r.domain.clone(),
+                url: r.url.clone().unwrap(),
+                title: r.title.clone(),
+                description: None,
+                score: 1.0,
+            })
+            .collect()
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_node_in_the_network_takes_in_other_nodes_crawls_and_searches_them() {
+    let dir = seeded_dir();
+    let mut config = test_config(dir.path());
+    let mut net = plumb_net::NetConfig::new(PathBuf::new());
+    net.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+    net.upnp = false;
+    config.network = Some(net);
+    let node = start(config).await.unwrap();
+    let addr = node.addr();
+    let status = wait_for(addr, "the first index", ready_and_idle).await;
+    let net_status = status.network.expect("the node joined the network");
+    let node_addr: plumb_net::Multiaddr = net_status.listening[0].parse().unwrap();
+    let node_addr = node_addr
+        .with_p2p(net_status.peer_id.parse().unwrap())
+        .unwrap();
+    assert!(dir.path().join("net/node.key").is_file());
+
+    // Another node crawled a site this one has never heard of.
+    let peer_dir = tempfile::tempdir().unwrap();
+    let key = plumb_net::load_or_create_key(&peer_dir.path().join("node.key")).unwrap();
+    let peer_id = key.public().to_peer_id();
+    let now = now_unix();
+    let domain = (0..)
+        .map(|i| format!("lighthouse-keepers-{i}.org"))
+        .find(|d| {
+            plumb_net::assign::is_assigned(
+                plumb_net::assign::epoch_of(now),
+                &peer_id,
+                d,
+                plumb_net::assign::MAX_SHARE_PPM,
+            )
+        })
+        .unwrap();
+    let mut crawled = SiteRecord::new(domain.as_str());
+    crawled.url = Some(format!("https://{domain}/"));
+    crawled.title = Some("Lighthouse Keepers Guild".to_string());
+    crawled.crawled_at = Some(now);
+    let mut peer_config = plumb_net::NetConfig::new(peer_dir.path().to_path_buf());
+    peer_config.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+    peer_config.upnp = false;
+    peer_config.bootstrap = vec![node_addr];
+    let (peer, _records) =
+        plumb_net::start(peer_config, Arc::new(PeerIndex(vec![crawled.clone()])))
+            .await
+            .unwrap();
+    wait_for(addr, "the peer to connect", |s| {
+        s.network.as_ref().is_some_and(|n| n.connected_peers >= 1)
+    })
+    .await;
+
+    // The node asks the peer.
+    let mut found = None;
+    for _ in 0..100 {
+        let (code, _, body) = get(addr, "/api/network/search?q=lighthouse").await;
+        assert_eq!(code, 200, "{body}");
+        let result: plumb_net::NetSearch = serde_json::from_str(&body).unwrap();
+        if !result.hits.is_empty() {
+            found = Some(result);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let found = found.expect("the peer answers");
+    assert_eq!(found.hits[0].domain, domain);
+    let (code, _, body) = get(addr, "/network?q=lighthouse").await;
+    assert_eq!(code, 200);
+    assert!(body.contains("Lighthouse Keepers Guild"), "{body}");
+    let (_, _, body) = get(addr, "/search?q=us+bank").await;
+    assert!(body.contains("href=\"/network?q=us+bank\""), "{body}");
+
+    // The peer publishes its crawl; the node keeps it and, at its next
+    // refresh, searches it from its own index.
+    let mut published = None;
+    for _ in 0..100 {
+        published = peer.publish(vec![crawled.clone()]).await.unwrap();
+        if dir.path().join("net/inbox.jsonl").exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(published.is_some());
+    assert!(
+        dir.path().join("net/inbox.jsonl").exists(),
+        "the batch arrived"
+    );
+    assert!(search(addr, "lighthouse").await.is_empty());
+    node.refresh_now();
+    wait_for(addr, "a new index", |s| {
+        ready_and_idle(s) && s.index.as_deref() != Some("000001")
+    })
+    .await;
+    let hits = search(addr, "lighthouse").await;
+    assert_eq!(hits[0].domain, domain);
+    assert_eq!(hits[0].title.as_deref(), Some("Lighthouse Keepers Guild"));
+    assert!(!dir.path().join("net/inbox.jsonl").exists());
+
+    peer.shutdown().await;
+    node.shutdown().await.unwrap();
 }

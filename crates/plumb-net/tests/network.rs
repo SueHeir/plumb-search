@@ -1,0 +1,197 @@
+//! Several nodes on this machine: crawl batches spread from one to all,
+//! a network search is answered with proofs, a node behind a relay is
+//! reachable through it, and a late node catches up.
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use plumb_core::{now_unix, SiteRecord};
+use plumb_net::assign::{epoch_of, is_assigned, MAX_SHARE_PPM};
+use plumb_net::{LocalHit, LocalSearch, Multiaddr, NetConfig, NetHandle, PeerId};
+use tempfile::TempDir;
+use tokio::sync::mpsc::UnboundedReceiver;
+
+/// Finds the records it was given whose domain or title contains the query.
+struct Fixed(Vec<SiteRecord>);
+
+impl LocalSearch for Fixed {
+    fn search(&self, query: &str, limit: usize) -> Vec<LocalHit> {
+        self.0
+            .iter()
+            .filter(|r| {
+                r.domain.contains(query) || r.title.as_deref().is_some_and(|t| t.contains(query))
+            })
+            .take(limit)
+            .map(|r| LocalHit {
+                domain: r.domain.clone(),
+                url: format!("https://{}/", r.domain),
+                title: r.title.clone(),
+                description: None,
+                score: 1.0,
+            })
+            .collect()
+    }
+}
+
+struct Node {
+    handle: NetHandle,
+    records: UnboundedReceiver<Vec<SiteRecord>>,
+    _dir: TempDir,
+}
+
+impl Node {
+    async fn start(relay: bool, bootstrap: Vec<Multiaddr>, local: Vec<SiteRecord>) -> Node {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = NetConfig::new(dir.path().to_path_buf());
+        config.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+        config.upnp = false;
+        config.relay_server = relay;
+        config.bootstrap = bootstrap;
+        let (handle, records) = plumb_net::start(config, Arc::new(Fixed(local)))
+            .await
+            .unwrap();
+        Node {
+            handle,
+            records,
+            _dir: dir,
+        }
+    }
+
+    /// Its TCP address with `/p2p/<id>`.
+    async fn addr(&self) -> Multiaddr {
+        let status = wait_for(|| {
+            let status = self.handle.status();
+            (!status.listening.is_empty()).then_some(status)
+        })
+        .await;
+        let addr: Multiaddr = status.listening[0].parse().unwrap();
+        addr.with_p2p(self.handle.peer_id()).unwrap()
+    }
+
+    async fn next_records(&mut self) -> Vec<SiteRecord> {
+        tokio::time::timeout(Duration::from_secs(30), self.records.recv())
+            .await
+            .expect("records within 30 s")
+            .expect("the node is running")
+    }
+}
+
+async fn wait_for<T>(mut check: impl FnMut() -> Option<T>) -> T {
+    for _ in 0..300 {
+        if let Some(value) = check() {
+            return value;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("gave up waiting");
+}
+
+/// A crawled homepage `peer` is assigned today, whose title contains `word`.
+fn crawled_for(peer: &PeerId, word: &str) -> SiteRecord {
+    let now = now_unix();
+    let domain = (0..)
+        .map(|i| format!("{word}{i}.com"))
+        .find(|d| is_assigned(epoch_of(now), peer, d, MAX_SHARE_PPM))
+        .unwrap();
+    let mut record = SiteRecord::new(domain.as_str());
+    record.url = Some(format!("https://{domain}/"));
+    record.title = Some(format!("The {word} site"));
+    record.crawled_at = Some(now);
+    record
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn nodes_share_batches_search_each_other_and_reach_through_a_relay() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("plumb_net=debug")
+        .with_test_writer()
+        .try_init();
+
+    let relay = Node::start(true, vec![], vec![]).await;
+    let relay_addr = relay.addr().await;
+
+    // A crawls and publishes; B hears of it.
+    let a_dir_records = |peer: &PeerId| vec![crawled_for(peer, "harbor")];
+    let a = Node::start(false, vec![relay_addr.clone()], vec![]).await;
+    let mut b = Node::start(false, vec![relay_addr.clone()], vec![]).await;
+    wait_for(|| (a.handle.status().connected_peers >= 1).then_some(())).await;
+    wait_for(|| (b.handle.status().connected_peers >= 1).then_some(())).await;
+    // Gossip needs the mesh to form before a publish reaches anyone; a
+    // header published too early is announced again once a node subscribes.
+    let published = a_dir_records(&a.handle.peer_id());
+    let id = a.handle.publish(published.clone()).await.unwrap().unwrap();
+    let got = b.next_records().await;
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].domain, published[0].domain);
+    assert_eq!(got[0].title, published[0].title);
+    // The relay keeps and passes on batches too.
+    let relay_got = {
+        let mut relay = relay;
+        let records = relay.next_records().await;
+        assert_eq!(records[0].domain, published[0].domain);
+        relay
+    };
+    assert!(b.handle.status().batches_held >= 1, "{id}");
+
+    // C answers searches from an index holding A's crawl, with a proof
+    // from the batch it received.
+    let mut c = Node::start(false, vec![relay_addr.clone()], published.clone()).await;
+    let caught_up = c.next_records().await;
+    assert_eq!(
+        caught_up[0].domain, published[0].domain,
+        "catches up on join"
+    );
+    wait_for(|| (b.handle.status().connected_peers >= 2).then_some(())).await;
+
+    let mut result = None;
+    for _ in 0..50 {
+        let found = b
+            .handle
+            .search("harbor", 10, Duration::from_secs(5))
+            .await
+            .unwrap();
+        if found.hits.iter().any(|h| h.verified) {
+            result = Some(found);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let result = result.expect("a verified hit from C");
+    let hit = &result.hits[0];
+    assert_eq!(hit.domain, published[0].domain);
+    assert_eq!(
+        hit.crawler.as_deref(),
+        Some(a.handle.peer_id().to_string().as_str())
+    );
+    assert_eq!(result.rejected, 0);
+
+    // C is behind the relay: it holds a reservation, and a node that only
+    // knows the relay's address reaches C through it.
+    wait_for(|| (!c.handle.status().relays.is_empty()).then_some(())).await;
+    let circuit = relay_addr
+        .clone()
+        .with(plumb_net::Protocol::P2pCircuit)
+        .with_p2p(c.handle.peer_id())
+        .unwrap();
+    let d = Node::start(false, vec![], vec![]).await;
+    d.handle.dial(circuit).unwrap();
+    let mut through_relay = None;
+    for _ in 0..50 {
+        let found = d
+            .handle
+            .search("harbor", 10, Duration::from_secs(5))
+            .await
+            .unwrap();
+        if !found.hits.is_empty() {
+            through_relay = Some(found);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let through_relay = through_relay.expect("D searches C over the relay");
+    assert!(through_relay.hits[0].verified);
+
+    for node in [a, b, c, d, relay_got] {
+        node.handle.shutdown().await;
+    }
+}

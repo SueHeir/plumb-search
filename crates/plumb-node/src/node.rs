@@ -85,6 +85,7 @@ use tracing::{debug, info, warn};
 
 use crate::web::{self, IndexBackend, SearchBackend, StatusSource};
 
+mod network;
 mod store;
 mod worker;
 
@@ -132,6 +133,10 @@ pub struct NodeConfig {
     pub retry_wait: Duration,
     /// The longest wait between two tries of failed work.
     pub max_retry_wait: Duration,
+    /// Join the Plumb network: share crawl work with other nodes and answer
+    /// their searches (see [`network`]). Its `dir` is replaced with
+    /// `DIR/net`. `None`, the default for now, keeps the node on its own.
+    pub network: Option<plumb_net::NetConfig>,
 }
 
 impl NodeConfig {
@@ -151,6 +156,7 @@ impl NodeConfig {
             sources: SeedSources::default(),
             retry_wait: Duration::from_secs(10 * 60),
             max_retry_wait: Duration::from_secs(6 * 60 * 60),
+            network: None,
         }
     }
 
@@ -284,6 +290,9 @@ pub struct Status {
     pub next_refresh: Option<u64>,
     /// The version of Plumb running the node.
     pub version: String,
+    /// The node's place in the Plumb network, when it has joined it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network: Option<plumb_net::NetStatus>,
 }
 
 /// Whether a node can search yet.
@@ -407,6 +416,7 @@ impl NodeHandle {
             }
         };
         let worked = worker.await.context("the background work failed");
+        network::stop(&inner).await;
         // Only now may another node take over the data directory.
         drop(
             inner
@@ -456,6 +466,10 @@ pub async fn start(config: NodeConfig) -> Result<NodeHandle> {
             })
             .await
     });
+    if let Err(err) = network::start(&inner).await {
+        // The node still searches and crawls on its own.
+        warn!("{err:#}");
+    }
     let worker = tokio::spawn(worker::run(inner.clone()));
     info!(
         "serving http://{addr}/ with data in {}",
@@ -563,6 +577,12 @@ struct Inner {
     /// Tries at Wikidata's official websites while setup went on without
     /// them ([`SavedState::wikidata_missing`]).
     wikidata: Mutex<WikidataTries>,
+    /// The network side, once joined.
+    net: std::sync::OnceLock<Arc<plumb_net::NetHandle>>,
+    /// Records in the network inbox not yet folded in.
+    inbox_records: std::sync::atomic::AtomicU64,
+    /// Held while the inbox is appended to or moved aside.
+    inbox_lock: Mutex<()>,
 }
 
 /// The failures to download Wikidata's official websites, which have their
@@ -611,6 +631,9 @@ impl Inner {
                 last_error: None,
                 backoff,
             }),
+            net: std::sync::OnceLock::new(),
+            inbox_records: std::sync::atomic::AtomicU64::new(0),
+            inbox_lock: Mutex::new(()),
         }
     }
 
@@ -639,6 +662,7 @@ impl Inner {
             last_refresh: saved.last_refresh,
             next_refresh: self.next_refresh(&saved),
             version: env!("CARGO_PKG_VERSION").to_string(),
+            network: network::handle(self).map(|net| net.status()),
         }
     }
 
@@ -871,6 +895,10 @@ impl SearchBackend for Inner {
 impl StatusSource for Inner {
     fn status(&self) -> Status {
         Inner::status(self)
+    }
+
+    fn network(&self) -> Option<Arc<plumb_net::NetHandle>> {
+        network::handle(self).cloned()
     }
 }
 
