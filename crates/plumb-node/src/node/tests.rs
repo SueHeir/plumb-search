@@ -988,7 +988,18 @@ async fn a_node_in_the_network_takes_in_other_nodes_crawls_and_searches_them() {
     assert_eq!(code, 200);
     assert!(body.contains("Lighthouse Keepers Guild"), "{body}");
     let (_, _, body) = get(addr, "/search?q=us+bank").await;
-    assert!(body.contains("href=\"/network?q=us+bank\""), "{body}");
+    assert!(body.contains("name=\"net\" value=\"1\">"), "{body}");
+    assert!(body.contains("href=\"/search?q=us+bank"), "{body}");
+    // With the network setting on, the peer's site joins this node's, tinted.
+    let (code, _, body) = get(addr, "/search?q=lighthouse&net=1").await;
+    assert_eq!(code, 200);
+    assert!(body.contains("name=\"net\" value=\"1\" checked>"), "{body}");
+    assert!(
+        body.contains("From this site's index and the Plumb network"),
+        "{body}"
+    );
+    assert!(body.contains("<li class=\"net\">"), "{body}");
+    assert!(body.contains("Lighthouse Keepers Guild"), "{body}");
 
     // And the other way round: the node serves the buckets of its index.
     assert!(dir

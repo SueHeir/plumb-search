@@ -25,8 +25,15 @@
 //! searches other nodes without sending them the query
 //! ([`plumb_net::NetHandle::search`]: it fetches buckets of sites under
 //! throwaway identities), ranks what comes back with its own ranking, and
-//! shows it; `GET /api/network/search?q=` returns the same as JSON. Its
-//! result pages link there.
+//! shows it; `GET /api/network/search?q=` returns the same as JSON.
+//!
+//! The search pages keep their settings (country, "only this country" and
+//! "use the Plumb network") behind a gear, a `<details>` element, so they
+//! need no script. With `net=1`, `/search` asks the network as well as this
+//! node's own index and merges the two by score; sites only the network
+//! found are tinted. Every results page says where its results came from,
+//! and a node that has not joined the network shows the setting turned off
+//! and says why.
 //!
 //! A node that shares popularity (`plumb run --share-popularity`) links its
 //! results through `GET /go?q=&d=`, which notes that the site `d` was
@@ -41,6 +48,7 @@
 //! allows no scripts and no external resources. Searches run on Tokio's
 //! blocking thread pool.
 
+use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::Duration;
@@ -51,8 +59,7 @@ use axum::http::{header, HeaderMap, HeaderName, StatusCode, Uri};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use plumb_core::SiteRecord;
-use plumb_core::{collapse_whitespace, now_unix, truncate_chars};
+use plumb_core::{collapse_whitespace, now_unix, truncate_chars, SiteRecord};
 use plumb_index::{
     build_index, Hit, RankConfig, SearchOptions, SearchResults, Searcher, SiteSearch,
 };
@@ -339,6 +346,8 @@ struct SearchParams {
     only: Option<String>,
     /// `1`: `/api/search` answers with a [`SearchResults`] object.
     full: Option<String>,
+    /// `1` (or `on`, `true`): `/search` asks the Plumb network too.
+    net: Option<String>,
 }
 
 /// Whether a flag parameter is set: `1`, `on`, `true` or `yes`.
@@ -383,20 +392,31 @@ impl SearchParams {
     }
 }
 
-async fn home(State(state): State<AppState>) -> Response {
-    home_or_setup(&state)
+async fn home(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(params): Query<SearchParams>,
+) -> Response {
+    home_or_setup(&state, &params, &headers)
 }
 
-/// The home page, or the setup page while a node is still setting up.
-fn home_or_setup(state: &AppState) -> Response {
+/// The home page, or the setup page while a node is still setting up. Its
+/// settings gear shows what `params` and `headers` ask for.
+fn home_or_setup(state: &AppState, params: &SearchParams, headers: &HeaderMap) -> Response {
     let status = state.node.as_ref().map(|node| node.status());
     let now = now_unix();
     match &status {
         Some(status) if status.phase != Phase::Ready => setup_response(status, now),
-        _ => html_response(
-            StatusCode::OK,
-            render_home(state.backend.num_docs(), status.as_ref(), now),
-        ),
+        _ => {
+            let settings = Settings {
+                options: params.options(&state.settings.home, headers),
+                network: state.net_setting(params),
+            };
+            html_response(
+                StatusCode::OK,
+                render_home(state.backend.num_docs(), status.as_ref(), now, &settings),
+            )
+        }
     }
 }
 
@@ -408,6 +428,40 @@ fn setup_response(status: &Status, now: u64) -> Response {
         Html(render_setup(status, now)),
     )
         .into_response()
+}
+
+/// Whether a search asks the Plumb network, as the settings gear shows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NetSetting {
+    /// This node has not joined the network: its own index only.
+    Unavailable,
+    Off,
+    On,
+}
+
+/// What the settings gear holds.
+struct Settings {
+    options: SearchOptions,
+    network: NetSetting,
+}
+
+impl AppState {
+    fn net_setting(&self, params: &SearchParams) -> NetSetting {
+        match (self.network().is_some(), flag(&params.net)) {
+            (false, _) => NetSetting::Unavailable,
+            (true, false) => NetSetting::Off,
+            (true, true) => NetSetting::On,
+        }
+    }
+}
+
+/// How the network part of a search went, for the line that says where
+/// the results came from.
+enum NetOutcome {
+    /// The network was not asked.
+    NotAsked,
+    Answered(NetworkResults),
+    Failed,
 }
 
 async fn search_page(
@@ -425,18 +479,39 @@ async fn search_page(
     }
     let query = params.query();
     if query.is_empty() {
-        return home_or_setup(&state);
+        return home_or_setup(&state, &params, &headers);
     }
-    let options = params.options(&state.settings.home, &headers);
-    match run_search(&state, &query, params.limit(), &options).await {
+    let settings = Settings {
+        options: params.options(&state.settings.home, &headers),
+        network: state.net_setting(&params),
+    };
+    let limit = params.limit();
+    let local = run_search(&state, &query, limit, &settings.options);
+    let (local, network) = if settings.network == NetSetting::On {
+        let network = network_search(&state, &query, limit, &settings.options);
+        let (local, network) = tokio::join!(local, network);
+        let network = match network {
+            Ok(results) => NetOutcome::Answered(results),
+            Err(err) => {
+                // The page still has this node's own results.
+                error!("network search for {query:?} failed: {err:#}");
+                NetOutcome::Failed
+            }
+        };
+        (local, network)
+    } else {
+        (local.await, NetOutcome::NotAsked)
+    };
+    match local {
         Ok(results) => html_response(
             StatusCode::OK,
             render_results(
                 &query,
                 &results,
-                &options,
+                &network,
+                &settings,
                 state.settings.web_search,
-                state.network().is_some(),
+                limit,
                 state.shares_popularity(),
             ),
         ),
@@ -523,6 +598,7 @@ async fn go(
         country: params.country,
         only: params.only,
         full: None,
+        net: None,
     };
     let query = search.query();
     let back = {
@@ -565,9 +641,10 @@ fn redirect(location: &str) -> Response {
         .into_response()
 }
 
-/// `GET /network?q=`: what other nodes answer, for a node in the network.
+/// `GET /network?q=`: only what other nodes answer, for a node in the network.
 async fn network_page(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(params): Query<SearchParams>,
 ) -> Response {
     if state.network().is_none() {
@@ -575,9 +652,10 @@ async fn network_page(
     }
     let query = params.query();
     if query.is_empty() {
-        return home_or_setup(&state);
+        return home_or_setup(&state, &params, &headers);
     }
-    match network_search(&state, &query, params.limit()).await {
+    let options = params.options(&state.settings.home, &headers);
+    match network_search(&state, &query, params.limit(), &options).await {
         Ok(results) => html_response(StatusCode::OK, render_network(&query, &results)),
         Err(err) => {
             error!("network search for {query:?} failed: {err:#}");
@@ -589,6 +667,7 @@ async fn network_page(
 /// `GET /api/network/search?q=&limit=`: [`NetworkResults`] as JSON.
 async fn api_network_search(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(params): Query<SearchParams>,
 ) -> Response {
     if state.network().is_none() {
@@ -604,7 +683,8 @@ async fn api_network_search(
         )
             .into_response();
     }
-    match network_search(&state, &query, params.limit()).await {
+    let options = params.options(&state.settings.home, &headers);
+    match network_search(&state, &query, params.limit(), &options).await {
         Ok(results) => (StatusCode::OK, security_headers(), Json(results)).into_response(),
         Err(err) => {
             error!("network search for {query:?} failed: {err:#}");
@@ -646,9 +726,14 @@ pub struct NetworkResult {
 }
 
 /// Fetches the query's buckets from other nodes and ranks the sites that
-/// match with this node's own ranking, in a small index built for the
-/// purpose and deleted after.
-async fn network_search(state: &AppState, query: &str, limit: usize) -> Result<NetworkResults> {
+/// match with this node's own ranking and the searcher's choices, in a
+/// small index built for the purpose and deleted after.
+async fn network_search(
+    state: &AppState,
+    query: &str,
+    limit: usize,
+    options: &SearchOptions,
+) -> Result<NetworkResults> {
     let net = state.network().context("not in the network")?;
     let rank = state
         .node
@@ -656,7 +741,8 @@ async fn network_search(state: &AppState, query: &str, limit: usize) -> Result<N
         .map_or_else(RankConfig::default, |node| node.rank());
     let found = net.search(query, NETWORK_SEARCH_WAIT).await?;
     let query = query.to_string();
-    tokio::task::spawn_blocking(move || rank_found(found, &query, limit, &rank))
+    let options = options.clone();
+    tokio::task::spawn_blocking(move || rank_found(found, &query, limit, &rank, &options))
         .await
         .context("the ranking task failed")?
 }
@@ -666,6 +752,7 @@ fn rank_found(
     query: &str,
     limit: usize,
     rank: &RankConfig,
+    options: &SearchOptions,
 ) -> Result<NetworkResults> {
     let mut results = NetworkResults {
         buckets: found.buckets,
@@ -681,7 +768,9 @@ fn rank_found(
     let index = dir.path().join("index");
     let records: Vec<SiteRecord> = found.found.iter().map(|f| f.record.clone()).collect();
     build_index(&index, &records)?;
-    let hits = Searcher::open(&index)?.search_with(query, limit, rank)?;
+    let hits = Searcher::open(&index)?
+        .search_full(query, limit, rank, options)?
+        .hits;
     let by_domain: std::collections::HashMap<&str, &FoundSite> = found
         .found
         .iter()
@@ -913,9 +1002,9 @@ fn time_until(at: u64, now: u64) -> String {
 
 const STYLE: &str = "\
 :root{color-scheme:light dark;--bg:#fff;--fg:#202124;--muted:#5f6368;--link:#1a0dab;\
---url:#0d652d;--line:#dadce0;--accent:#1a73e8;--err:#b3261e}\
+--url:#0d652d;--line:#dadce0;--accent:#1a73e8;--err:#b3261e;--net:#f2effb}\
 @media (prefers-color-scheme:dark){:root{--bg:#1f1f1f;--fg:#e8eaed;--muted:#9aa0a6;\
---link:#8ab4f8;--url:#81c995;--line:#3c4043;--accent:#8ab4f8;--err:#f2b8b5}}\
+--link:#8ab4f8;--url:#81c995;--line:#3c4043;--accent:#8ab4f8;--err:#f2b8b5;--net:#29263a}}\
 *{box-sizing:border-box}\
 body{margin:0;background:var(--bg);color:var(--fg);\
 font:16px/1.5 system-ui,-apple-system,\"Segoe UI\",Roboto,sans-serif}\
@@ -943,9 +1032,26 @@ a.t:hover{text-decoration:underline}\
 .s{margin-top:1.5rem}\
 .none{margin:1.5rem 0}\
 header form{flex-wrap:wrap}\
-.f{flex-basis:100%;display:flex;flex-wrap:wrap;gap:.5rem 1rem;align-items:center;\
-font-size:.85rem;color:var(--muted)}\
-.f input{flex:none}\
+form[role=search]{position:relative}\
+.gear{flex:none}\
+.gear>summary{list-style:none;cursor:pointer;padding:.55rem .7rem;border:1px solid var(--line);\
+border-radius:.5rem;color:var(--muted);user-select:none}\
+.gear>summary::-webkit-details-marker{display:none}\
+.gear[open]>summary,.gear>summary:hover{color:var(--fg);border-color:var(--accent)}\
+.panel{position:absolute;right:0;top:calc(100% + .4rem);z-index:2;width:min(20rem,calc(100vw - 2rem));\
+display:grid;gap:.6rem;padding:.8rem .9rem;text-align:left;font-size:.875rem;\
+background:var(--bg);border:1px solid var(--line);border-radius:.6rem;\
+box-shadow:0 6px 20px rgba(0,0,0,.18)}\
+.panel label{display:flex;gap:.45rem;align-items:center}\
+.panel input{flex:none;margin:0}\
+.panel .hint{margin:-.35rem 0 0 1.45rem;color:var(--muted);font-size:.8rem}\
+.panel label.off{color:var(--muted)}\
+.panel button{justify-self:end;padding:.35rem .9rem}\
+.src{margin:.75rem 0 0;font-size:.8rem;color:var(--muted)}\
+.src a{color:var(--link)}\
+.sw{display:inline-block;width:.8em;height:.8em;margin:0 .2em -.1em 0;border-radius:.2em;\
+background:var(--net);border:1px solid var(--muted)}\
+li.net{background:var(--net);margin:0 -.75rem;padding:.9rem .75rem}\
 select{font:inherit;padding:.15rem .3rem;border:1px solid var(--line);border-radius:.35rem;\
 background:var(--bg);color:var(--fg)}\
 .ss{margin:1rem 0 .25rem;padding:.6rem .8rem;border:1px solid var(--line);border-radius:.5rem}\
@@ -986,8 +1092,77 @@ fn search_form(query: &str, autofocus: bool) -> String {
     )
 }
 
+/// The search form with its settings tucked behind a gear: the home
+/// country, whether to leave out other countries' sites, and whether to
+/// ask the Plumb network too. A `<details>` opens the gear, so it needs no
+/// script; the settings travel with the search as query parameters.
+fn settings_form(query: &str, autofocus: bool, settings: &Settings) -> String {
+    let options = &settings.options;
+    let current = options.country.as_deref();
+    let mut choices = format!(
+        "<option value=\"any\"{}>Any country</option>",
+        if current.is_none() { " selected" } else { "" }
+    );
+    let listed = current.is_some_and(|c| COUNTRY_CHOICES.iter().any(|(code, _)| *code == c));
+    if let (Some(code), false) = (current, listed) {
+        let _ = write!(
+            choices,
+            "<option value=\"{0}\" selected>{0}</option>",
+            escape_html(code)
+        );
+    }
+    for (code, name) in COUNTRY_CHOICES {
+        let selected = if current == Some(*code) {
+            " selected"
+        } else {
+            ""
+        };
+        let _ = write!(
+            choices,
+            "<option value=\"{code}\"{selected}>{name}</option>"
+        );
+    }
+    let network = match settings.network {
+        NetSetting::Unavailable => {
+            "<label class=\"off\"><input type=\"checkbox\" disabled> Use the Plumb network \
+             for search</label><p class=\"hint\">Not on this site: it has not joined the Plumb \
+             network, so results come only from its own index.</p>"
+        }
+        NetSetting::Off | NetSetting::On => {
+            if settings.network == NetSetting::On {
+                "<label><input type=\"checkbox\" name=\"net\" value=\"1\" checked> Use the \
+                 Plumb network for search</label>"
+            } else {
+                "<label><input type=\"checkbox\" name=\"net\" value=\"1\"> Use the Plumb \
+                 network for search</label>"
+            }
+        }
+    };
+    let network_hint = match settings.network {
+        NetSetting::Unavailable => "",
+        NetSetting::Off | NetSetting::On => {
+            "<p class=\"hint\">Also asks other Plumb nodes, without sending them your search. \
+             Results only they found are tinted. Takes a few seconds longer.</p>"
+        }
+    };
+    format!(
+        "<form action=\"/search\" method=\"get\" role=\"search\">\
+         <input type=\"search\" name=\"q\" value=\"{}\" placeholder=\"A site's name, e.g. us bank\" \
+         aria-label=\"Search\" autocomplete=\"off\"{}>\
+         <details class=\"gear\"><summary title=\"Settings\" aria-label=\"Settings\">\
+         &#9881;&#xFE0E;</summary><div class=\"panel\">\
+         <label>Country <select name=\"country\">{choices}</select></label>\
+         <label><input type=\"checkbox\" name=\"only\" value=\"1\"{}> Only this country</label>\
+         {network}{network_hint}<button type=\"submit\">Apply</button></div></details>\
+         <button type=\"submit\">Search</button></form>",
+        escape_html(query),
+        if autofocus { " autofocus" } else { "" },
+        if options.only_country { " checked" } else { "" }
+    )
+}
+
 /// The home page; a node's `status` adds what it is doing to the count of sites.
-fn render_home(docs: u64, status: Option<&Status>, now: u64) -> String {
+fn render_home(docs: u64, status: Option<&Status>, now: u64, settings: &Settings) -> String {
     let note = status
         .and_then(|status| node_note(status, now))
         .map(|note| format!(" &middot; {}", escape_html(&note)))
@@ -1001,7 +1176,7 @@ fn render_home(docs: u64, status: Option<&Status>, now: u64) -> String {
          {}\n<p class=\"s\">{} sites indexed{note}</p>{wikidata}\n\
          <p class=\"s\">Not looking for a site? Add !g, !ddg or !b to search Google, \
          DuckDuckGo or Bing.</p>\n</main>",
-        search_form("", true),
+        settings_form("", true, settings),
         group_thousands(docs)
     );
     page("Plumb Search", &body)
@@ -1112,60 +1287,127 @@ fn results_header(query: &str) -> String {
     )
 }
 
-/// The results page's search form, which also picks the home country and
-/// whether to leave out other countries' sites.
-fn results_form(query: &str, options: &SearchOptions) -> String {
-    let current = options.country.as_deref();
-    let mut choices = format!(
-        "<option value=\"any\"{}>Any country</option>",
-        if current.is_none() { " selected" } else { "" }
-    );
-    let listed = current.is_some_and(|c| COUNTRY_CHOICES.iter().any(|(code, _)| *code == c));
-    if let (Some(code), false) = (current, listed) {
-        let _ = write!(
-            choices,
-            "<option value=\"{0}\" selected>{0}</option>",
-            escape_html(code)
-        );
-    }
-    for (code, name) in COUNTRY_CHOICES {
-        let selected = if current == Some(*code) {
-            " selected"
-        } else {
-            ""
-        };
-        let _ = write!(
-            choices,
-            "<option value=\"{code}\"{selected}>{name}</option>"
-        );
-    }
+/// The results page's header: the logo and the search form with its
+/// settings gear.
+fn results_form(query: &str, settings: &Settings) -> String {
     format!(
-        "<header><a class=\"logo\" href=\"/\">Plumb</a>\
-         <form action=\"/search\" method=\"get\" role=\"search\">\
-         <input type=\"search\" name=\"q\" value=\"{}\" placeholder=\"A site's name, e.g. us bank\" \
-         aria-label=\"Search\" autocomplete=\"off\">\
-         <button type=\"submit\">Search</button>\
-         <div class=\"f\"><label>Country <select name=\"country\">{choices}</select></label> \
-         <label><input type=\"checkbox\" name=\"only\" value=\"1\"{}> Only this country</label></div>\
-         </form></header>",
-        escape_html(query),
-        if options.only_country { " checked" } else { "" }
+        "<header><a class=\"logo\" href=\"/\">Plumb</a>{}</header>",
+        settings_form(query, false, settings)
     )
+}
+
+/// `path?q=...` with the searcher's choices, for links between pages.
+fn search_link(path: &str, query: &str, options: &SearchOptions, net: bool) -> String {
+    let mut params = url::form_urlencoded::Serializer::new(String::new());
+    params.append_pair("q", query);
+    if let Some(country) = &options.country {
+        params.append_pair("country", country);
+    }
+    if options.only_country {
+        params.append_pair("only", "1");
+    }
+    if net {
+        params.append_pair("net", "1");
+    }
+    format!("{path}?{}", params.finish())
+}
+
+/// One result as shown: a hit, and what the network said about it when only
+/// the network found it.
+struct Shown<'a> {
+    hit: &'a Hit,
+    network: Option<&'a NetworkResult>,
+}
+
+/// This node's hits and the network's, best score first, at most `limit`.
+/// A site both found is shown once, as this node's: only sites this node
+/// did not find count as from the network. Both lists are ranked with this
+/// node's ranking and the same choices, and scores are normalized per
+/// search, so they compare.
+fn merge_results<'a>(local: &'a [Hit], network: &'a NetOutcome, limit: usize) -> Vec<Shown<'a>> {
+    let mut shown: Vec<Shown> = local
+        .iter()
+        .map(|hit| Shown { hit, network: None })
+        .collect();
+    if let NetOutcome::Answered(results) = network {
+        let seen: HashSet<&str> = local.iter().map(|hit| hit.domain.as_str()).collect();
+        shown.extend(
+            results
+                .hits
+                .iter()
+                .filter(|result| !seen.contains(result.hit.domain.as_str()))
+                .map(|result| Shown {
+                    hit: &result.hit,
+                    network: Some(result),
+                }),
+        );
+        // Stable, so ties keep this node's hits first.
+        shown.sort_by(|a, b| b.hit.score.total_cmp(&a.hit.score));
+    }
+    shown.truncate(limit);
+    shown
+}
+
+/// The line above the results that says where they came from.
+fn render_source(
+    out: &mut String,
+    query: &str,
+    settings: &Settings,
+    network: &NetOutcome,
+    from_network: usize,
+) {
+    let line = match (settings.network, network) {
+        (NetSetting::Unavailable, _) => "From this site's own index.".to_string(),
+        (_, NetOutcome::NotAsked) => format!(
+            "From this site's own index. <a href=\"{}\">Use the Plumb network too</a>",
+            escape_html(&search_link("/search", query, &settings.options, true))
+        ),
+        (_, NetOutcome::Failed) => {
+            "From this site's own index: the Plumb network did not answer this time.".to_string()
+        }
+        (_, NetOutcome::Answered(results)) if results.asked == 0 => {
+            "From this site's own index: no other Plumb nodes are connected right now.".to_string()
+        }
+        (_, NetOutcome::Answered(results)) => {
+            let mut line = format!(
+                "From this site's index and the Plumb network: {} of {} requests to other nodes \
+                 answered, without sending them your search.",
+                results.answered, results.asked
+            );
+            if results.rejected > 0 {
+                let _ = write!(
+                    line,
+                    " {} answers were dropped because their proofs did not check out.",
+                    results.rejected
+                );
+            }
+            if from_network > 0 {
+                line.push_str(
+                    " <span class=\"sw\"></span>Tinted results came only from the network.",
+                );
+            }
+            line
+        }
+    };
+    let _ = writeln!(out, "<p class=\"src\">{line}</p>");
 }
 
 fn render_results(
     query: &str,
     results: &SearchResults,
-    options: &SearchOptions,
+    network: &NetOutcome,
+    settings: &Settings,
     web_search: Option<Engine>,
-    network: bool,
+    limit: usize,
     share_picks: bool,
 ) -> String {
-    let hits = &results.hits;
+    let shown = merge_results(&results.hits, network, limit);
+    let from_network = shown.iter().filter(|s| s.network.is_some()).count();
     let mut body = format!(
         "<div class=\"wrap\">\n{}\n<main>\n",
-        results_form(query, options)
+        results_form(query, settings)
     );
+    render_source(&mut body, query, settings, network, from_network);
     if let Some(site_search) = &results.site_search {
         render_site_search(&mut body, site_search);
     }
@@ -1178,7 +1420,7 @@ fn render_results(
             escape_html(&truncate_chars(query, 150))
         );
     }
-    if hits.is_empty() {
+    if shown.is_empty() {
         let _ = writeln!(
             body,
             "<p class=\"none\">No sites match <strong>{}</strong>.</p>",
@@ -1186,9 +1428,12 @@ fn render_results(
         );
     } else {
         body.push_str("<ol>\n");
-        for hit in hits {
-            let go = share_picks.then(|| go_link(query, options, &hit.domain));
-            render_hit(&mut body, hit, go.as_deref());
+        for item in &shown {
+            // `/go` only follows this node's own results, so sites from other
+            // nodes link straight to themselves.
+            let go = (share_picks && item.network.is_none())
+                .then(|| go_link(query, &settings.options, &item.hit.domain));
+            render_hit(&mut body, item.hit, item.network, go.as_deref());
         }
         body.push_str("</ol>\n");
     }
@@ -1199,32 +1444,19 @@ fn render_results(
              read it until many nodes report the same pick, and never with who made it.</p>\n",
         );
     }
-    if network {
-        let encoded: String = url::form_urlencoded::byte_serialize(query.as_bytes()).collect();
-        let _ = writeln!(
-            body,
-            "<p class=\"s\"><a href=\"{}\">Ask other Plumb nodes too</a></p>",
-            escape_html(&format!("/network?q={encoded}"))
-        );
+    let options = &settings.options;
+    let api = escape_html(&search_link("/api/search", query, options, false));
+    let mut json = format!("<a href=\"{api}\">{api}</a>");
+    if matches!(network, NetOutcome::Answered(_)) {
+        let api = escape_html(&search_link("/api/network/search", query, options, false));
+        let _ = write!(json, " and <a href=\"{api}\">{api}</a>");
     }
-    let mut api = url::form_urlencoded::Serializer::new(String::new());
-    api.append_pair("q", query);
-    if let Some(country) = &options.country {
-        api.append_pair("country", country);
-    }
-    if options.only_country {
-        api.append_pair("only", "1");
-    }
-    let api = escape_html(&format!("/api/search?{}", api.finish()));
-    let _ = write!(
-        body,
-        "<p class=\"s\">As JSON: <a href=\"{api}\">{api}</a></p>\n</main>\n</div>"
-    );
+    let _ = write!(body, "<p class=\"s\">As JSON: {json}</p>\n</main>\n</div>");
     page(&format!("{query} - Plumb Search"), &body)
 }
 
-/// What other nodes answered. Their text is as untrusted as any record's,
-/// and is escaped the same way.
+/// What other nodes answered, and nothing from this node. Their text is as
+/// untrusted as any record's, and is escaped the same way.
 fn render_network(query: &str, results: &NetworkResults) -> String {
     let mut body = format!("<div class=\"wrap\">\n{}\n<main>\n", results_header(query));
     let _ = writeln!(
@@ -1258,7 +1490,7 @@ fn render_network(query: &str, results: &NetworkResults) -> String {
     } else {
         body.push_str("<ol>\n");
         for result in &results.hits {
-            render_network_hit(&mut body, result);
+            render_hit(&mut body, &result.hit, Some(result), None);
         }
         body.push_str("</ol>\n");
     }
@@ -1271,49 +1503,6 @@ fn render_network(query: &str, results: &NetworkResults) -> String {
          As JSON: <a href=\"{api}\">{api}</a></p>\n</main>\n</div>"
     );
     page(&format!("{query} - Plumb network"), &body)
-}
-
-fn render_network_hit(out: &mut String, result: &NetworkResult) {
-    let hit = &result.hit;
-    let name = hit
-        .title
-        .as_deref()
-        .filter(|t| !t.trim().is_empty())
-        .unwrap_or(&hit.domain);
-    let name = escape_html(&truncate_chars(name, 150));
-    out.push_str("<li>");
-    match safe_href(hit) {
-        Some(href) => {
-            let _ = write!(
-                out,
-                "<a class=\"t\" href=\"{}\" rel=\"noreferrer\">{name}</a>\
-                 <div class=\"u\">{}</div>",
-                escape_html(&href),
-                escape_html(&truncate_chars(&href, 100))
-            );
-        }
-        None => {
-            let _ = write!(
-                out,
-                "<span class=\"t\">{name}</span><div class=\"u\">{}</div>",
-                escape_html(&hit.domain)
-            );
-        }
-    }
-    if let Some(description) = hit.description.as_deref().filter(|d| !d.trim().is_empty()) {
-        let _ = write!(out, "<p class=\"d\">{}</p>", escape_html(description));
-    }
-    let source = if result.verified {
-        "signed crawl, checked"
-    } else {
-        "unsigned (seed data)"
-    };
-    let _ = writeln!(
-        out,
-        "<div class=\"m\">{} &middot; {source} &middot; in {} answers</div></li>",
-        escape_html(&hit.domain),
-        result.answers
-    );
 }
 
 fn render_no_network() -> String {
@@ -1352,16 +1541,21 @@ fn go_link(query: &str, options: &SearchOptions, domain: &str) -> String {
     format!("/go?{}", link.finish())
 }
 
-/// One result. `go` is the `/go` link to send the click through instead of
+/// One result. A site that came from other nodes (`network`) is tinted and
+/// says so. `go` is the `/go` link to send the click through instead of
 /// linking to the site directly.
-fn render_hit(out: &mut String, hit: &Hit, go: Option<&str>) {
+fn render_hit(out: &mut String, hit: &Hit, network: Option<&NetworkResult>, go: Option<&str>) {
     let name = hit
         .title
         .as_deref()
         .filter(|t| !t.trim().is_empty())
         .unwrap_or(&hit.domain);
     let name = escape_html(&truncate_chars(name, 150));
-    out.push_str("<li>");
+    out.push_str(if network.is_some() {
+        "<li class=\"net\">"
+    } else {
+        "<li>"
+    });
     match safe_href(hit) {
         Some(href) => {
             let _ = write!(
@@ -1388,9 +1582,24 @@ fn render_hit(out: &mut String, hit: &Hit, go: Option<&str>) {
         .as_deref()
         .map(|code| format!(" &middot; {}", escape_html(country_name(code))))
         .unwrap_or_default();
+    let source = network
+        .map(|result| {
+            let crawl = if result.verified {
+                "signed crawl, checked"
+            } else {
+                "unsigned (seed data)"
+            };
+            let answers = if result.answers == 1 {
+                "1 answer".to_string()
+            } else {
+                format!("{} answers", result.answers)
+            };
+            format!(" &middot; from the Plumb network ({crawl}, in {answers})")
+        })
+        .unwrap_or_default();
     let _ = writeln!(
         out,
-        "<div class=\"m\">{}{country} &middot; score {:.3} (text {:.3}, link {:.3})</div></li>",
+        "<div class=\"m\">{}{country}{source} &middot; score {:.3} (text {:.3}, link {:.3})</div></li>",
         escape_html(&hit.domain),
         hit.score,
         hit.text_score,
@@ -2003,19 +2212,19 @@ mod tests {
         assert!(!render_setup(&status, now).contains("Wikidata"));
         status.phase = Phase::Ready;
         assert!(
-            render_home(12, Some(&status), now).contains(
+            render_home(12, Some(&status), now, &no_settings()).contains(
                 "Plumb is still downloading Wikidata&#39;s list of official websites and more \
                  rankings. Search works now, and results get better once those are in."
             ),
             "{}",
-            render_home(12, Some(&status), now)
+            render_home(12, Some(&status), now, &no_settings())
         );
 
         // Once Wikidata is in, nothing is said.
         status.wikidata_missing = false;
         status.wikidata_error = None;
         assert!(!render_setup(&status, now).contains("Wikidata"));
-        assert!(!render_home(12, Some(&status), now).contains("Wikidata"));
+        assert!(!render_home(12, Some(&status), now, &no_settings()).contains("Wikidata"));
     }
 
     #[test]
@@ -2383,41 +2592,146 @@ mod tests {
         assert_eq!(params.limit(), DEFAULT_LIMIT);
     }
 
+    fn no_settings() -> Settings {
+        Settings {
+            options: SearchOptions::default(),
+            network: NetSetting::Unavailable,
+        }
+    }
+
+    fn scored(domain: &str, score: f32) -> Hit {
+        let mut hit = hit(domain, &format!("https://{domain}/"), None, None);
+        hit.score = score;
+        hit
+    }
+
+    fn from_network(hit: Hit) -> NetworkResult {
+        NetworkResult {
+            hit,
+            verified: true,
+            crawler: Some("12D3KooWexample".into()),
+            answers: 2,
+        }
+    }
+
+    fn answered(hits: Vec<Hit>) -> NetOutcome {
+        NetOutcome::Answered(NetworkResults {
+            buckets: 4,
+            asked: 8,
+            answered: 6,
+            rejected: 0,
+            hits: hits.into_iter().map(from_network).collect(),
+        })
+    }
+
     #[tokio::test]
-    async fn bangs_leave_and_the_web_search_link_is_a_setting() {
-        let fake = backend(bank_hits());
-        let (code, headers, _) = get(fake.clone(), "/search?q=%21g+boil+an+egg").await;
-        assert_eq!(code, StatusCode::SEE_OTHER);
-        assert_eq!(
-            headers[header::LOCATION],
-            "https://www.google.com/search?q=boil%20an%20egg"
-        );
-        // Even while a node sets up.
-        let setting_up = node(node_status(Phase::SettingUp, Step::Downloading));
-        let app = node_router(fake.clone(), setting_up);
-        let (code, _, _) = send(app, "/search?q=egg+%21ddg").await;
-        assert_eq!(code, StatusCode::SEE_OTHER);
+    async fn settings_sit_behind_a_gear() {
+        for uri in ["/", "/search?q=us+bank&net=1"] {
+            let (code, _, body) = get(backend(bank_hits()), uri).await;
+            assert_eq!(code, StatusCode::OK);
+            assert!(body.contains("<details class=\"gear\">"), "{uri}: {body}");
+            assert!(body.contains("name=\"country\""), "{uri}");
+            assert!(body.contains("name=\"only\""), "{uri}");
+            // `plumb serve` is in no network: the setting is off, and says why.
+            assert!(
+                body.contains("<input type=\"checkbox\" disabled> Use the Plumb network"),
+                "{uri}"
+            );
+            assert!(body.contains("has not joined the Plumb network"), "{uri}");
+            assert!(!body.contains("name=\"net\""), "{uri}");
+        }
+        let (_, _, body) = get(backend(bank_hits()), "/search?q=us+bank&net=1").await;
+        assert!(body.contains("<p class=\"src\">From this site's own index.</p>"));
+        assert!(!body.contains("class=\"net\""));
+    }
 
-        // Off by default.
-        let (_, _, body) = get(fake.clone(), "/search?q=us+bank").await;
-        assert!(!body.contains("Search the web"), "{body}");
+    #[test]
+    fn the_network_setting_shows_its_state() {
+        let mut settings = no_settings();
+        settings.network = NetSetting::Off;
+        let off = settings_form("x", false, &settings);
+        assert!(off.contains("name=\"net\" value=\"1\"> Use the Plumb network"));
+        settings.network = NetSetting::On;
+        let on = settings_form("x", false, &settings);
+        assert!(on.contains("name=\"net\" value=\"1\" checked> Use the Plumb network"));
+        assert!(on.contains("without sending them your search"));
+    }
 
-        let settings = WebSettings {
-            web_search: Some(Engine::DuckDuckGo),
-            ..WebSettings::default()
+    #[test]
+    fn network_only_sites_are_merged_by_score_and_tinted() {
+        let local = vec![scored("a.com", 0.9), scored("b.com", 0.5)];
+        let network = answered(vec![scored("b.com", 0.8), scored("c.com", 0.7)]);
+        let shown = merge_results(&local, &network, 10);
+        let order: Vec<(&str, bool)> = shown
+            .iter()
+            .map(|s| (s.hit.domain.as_str(), s.network.is_some()))
+            .collect();
+        // b.com is this node's own, so it keeps its own score and no tint.
+        assert_eq!(order, [("a.com", false), ("c.com", true), ("b.com", false)]);
+        assert_eq!(merge_results(&local, &network, 2).len(), 2);
+
+        let mut settings = no_settings();
+        settings.network = NetSetting::On;
+        let results = SearchResults {
+            hits: local.clone(),
+            site_search: None,
         };
-        let (_, _, body) = send(
-            router_with(fake.clone(), settings),
-            "/search?q=us+%3Cbank%3E",
-        )
-        .await;
-        assert!(
-            body.contains(
-                "<p class=\"web\"><a href=\"https://duckduckgo.com/?q=us%20%3Cbank%3E\" \
-                 rel=\"noreferrer\">Search the web with DuckDuckGo for \
-                 <strong>us &lt;bank&gt;</strong></a></p>"
-            ),
-            "{body}"
+        let page = render_results("q", &results, &network, &settings, None, 10, false);
+        assert!(page.contains("<li class=\"net\"><a class=\"t\" href=\"https://c.com/\""));
+        assert_eq!(page.matches("<li class=\"net\">").count(), 1);
+        assert!(page.contains("6 of 8 requests to other nodes answered"));
+        assert!(page.contains("Tinted results came only from the network."));
+        assert!(page.contains("from the Plumb network (signed crawl, checked, in 2 answers)"));
+        assert!(page.contains("/api/network/search?q=q"));
+    }
+
+    #[test]
+    fn the_source_line_says_where_results_came_from() {
+        let results = SearchResults {
+            hits: vec![scored("a.com", 0.9)],
+            site_search: None,
+        };
+        let mut settings = no_settings();
+        settings.network = NetSetting::Off;
+        settings.options.country = Some("DE".into());
+        let page = render_results(
+            "q",
+            &results,
+            &NetOutcome::NotAsked,
+            &settings,
+            None,
+            10,
+            false,
         );
+        assert!(page.contains(
+            "From this site's own index. <a href=\"/search?q=q&amp;country=DE&amp;net=1\">"
+        ));
+
+        settings.network = NetSetting::On;
+        let page = render_results(
+            "q",
+            &results,
+            &NetOutcome::Failed,
+            &settings,
+            None,
+            10,
+            false,
+        );
+        assert!(page.contains("the Plumb network did not answer this time"));
+        assert!(page.contains("a.com"));
+
+        let page = render_results(
+            "q",
+            &results,
+            &answered(Vec::new()),
+            &settings,
+            None,
+            10,
+            false,
+        );
+        assert!(!page.contains("Tinted"));
+        let none = NetOutcome::Answered(NetworkResults::default());
+        let page = render_results("q", &results, &none, &settings, None, 10, false);
+        assert!(page.contains("no other Plumb nodes are connected right now"));
     }
 }

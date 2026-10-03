@@ -6,8 +6,10 @@ The website at https://plumbsearch.org and the server setup behind it.
   code and to the desktop installers on GitHub Releases.
 - `Caddyfile` serves it with HTTPS (Caddy gets and renews the certificates),
   redirects `www.plumbsearch.org` and plain HTTP to `https://plumbsearch.org`,
-  and passes `/search`, `/api/search`, `/api/status` and `/opensearch.xml` to a
-  Plumb node on the same machine. While no node is running, those addresses
+  and passes the node's public pages (`/search`, `/api/search`, `/api/status`,
+  `/opensearch.xml`, private search under `/private` and `/api/buckets`, and
+  network search) to a Plumb node on the same machine. Its dashboard, `/app`,
+  is not passed on. While no node is running, those addresses
   show a "search isn't available" page instead.
 - `docker-compose.yml` runs Caddy, and with the `node` profile, the Plumb node.
 
