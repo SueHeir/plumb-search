@@ -19,8 +19,8 @@
     "license": "MIT OR Apache-2.0",
     "homepage": "https://github.com/SueHeir/plumb-search",
     "category": "Utility",
-    "shortDescription": "Find websites by name with a search engine that runs on your computer",
-    "longDescription": "Plumb Search is a free, open-source search engine for finding websites by name. It builds its own index of site names from public seed data and its own homepage crawls, and searches it on your computer.",
+    "shortDescription": "A search engine that runs on your computer",
+    "longDescription": "Plumb Search is a free, open-source search engine. It builds its own index of site names from public seed data and its own homepage crawls, and searches it on your computer.",
     "icon": [
       "icons/128x128.png",
       "icons/32x32.png",
