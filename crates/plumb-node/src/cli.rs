@@ -44,6 +44,36 @@ pub enum Command {
     /// Make a vector of each site's text with a small embedding model
     /// (downloaded on first use), so searches can find sites by meaning.
     Embed(EmbedArgs),
+    /// Let the Plumb Search app on another computer change this node's
+    /// settings: `on` makes a new token (shown once), `off` stops it.
+    RemoteControl(RemoteControlArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct RemoteControlArgs {
+    /// The node's data directory, as given to `plumb run --data`.
+    #[arg(long, value_name = "DIR", global = true, default_value = ".")]
+    pub data: PathBuf,
+    #[command(subcommand)]
+    pub action: RemoteControlAction,
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub enum RemoteControlAction {
+    /// Turn remote control on with a new token, which replaces any earlier
+    /// one, and print it.
+    On {
+        /// Also take requests from public addresses and through reverse
+        /// proxies. Without it, only this computer and local networks
+        /// (and Tailscale) can use the token. Put the node behind HTTPS
+        /// first, or the token crosses the internet in the clear.
+        #[arg(long)]
+        allow_public: bool,
+    },
+    /// Turn remote control off: no token works any more.
+    Off,
+    /// Say whether remote control is on.
+    Status,
 }
 
 #[derive(Debug, Args)]

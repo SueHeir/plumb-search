@@ -4,12 +4,13 @@ The desktop app runs a Plumb Search node on your computer. Search opens in
 your browser at `http://127.0.0.1:7586`; the app window manages the node.
 It shares its panel and feature settings with Docker, from this repository.
 
-The panel has five sections:
+The panel has these sections:
 
 - **Overview:** search readiness, crawl progress, storage, downloads, and live peer status.
 - **Search & browser:** browser setup, search by meaning, and private browser search.
 - **Resources:** background crawling and daily download/storage limits; changes apply immediately.
 - **Network & privacy:** joining the network, bootstrap nodes, anonymous popularity sharing, crawl agreement, and relay activity.
+- **Remote control:** let the app on another computer control this node.
 - **About:** version, data location, diagnostics, and source code.
 
 Optional features are off until enabled. Save feature choices, then use **Quit
@@ -41,6 +42,30 @@ clicking its Dock icon on macOS.
 
 Test builds are not code-signed yet, so each system warns you before it opens
 them the first time. The [install](#install) steps say how to get past that.
+
+## Control your other nodes
+
+Above the panel, **This computer** is the app's own node. **+ Connect to a
+node** adds another one, such as a Docker container or homelab server, so the
+app becomes the control center for all of them:
+
+1. Turn on remote control on that node. In its own panel (opened on its
+   computer), go to **Remote control** and click **Turn on and make a token**.
+   For Docker, run `docker exec <container> plumb remote-control on` on its
+   host. Either way you get a token, shown once.
+2. In the app, click **+ Connect to a node** and enter the node's address
+   (such as `http://192.168.1.20:8080`) and the token.
+
+The node then has its own tab with the same sections. Its forms change that
+node; if it cannot be reached, or its token was replaced, the tab says why
+and offers to connect again or forget it. Tokens are kept in
+`remote-nodes.json` in the app's data folder, readable only by you, and the
+app's own node sends them; the window never sees them. A node takes remote
+control only from its own computer and local networks unless its owner
+allows more (see [Docker](docker.md#control-it-from-the-desktop-app)).
+
+The app's own node listens only on this computer, so other computers cannot
+control it.
 
 ## Get a test build
 

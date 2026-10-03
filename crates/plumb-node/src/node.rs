@@ -90,6 +90,7 @@ use crate::meaning::SharedMeaning;
 use crate::web::{self, IndexBackend, SearchBackend, StatusSource};
 use crate::websearch::{Engine, WebSettings};
 
+pub mod control;
 mod embedding;
 pub mod features;
 mod network;
@@ -168,6 +169,11 @@ pub struct NodeConfig {
     /// The settings until someone changes them on the panel, which saves
     /// them in `DIR/settings.json`.
     pub settings: NodeSettings,
+    /// Let the panel control other nodes too ("Connect to a node"), with
+    /// their remote control tokens, kept in `DIR/remote-nodes.json`. On for
+    /// the desktop app, which is meant to be the control center of a
+    /// person's nodes; off for servers.
+    pub manage_other_nodes: bool,
 }
 
 impl NodeConfig {
@@ -194,6 +200,7 @@ impl NodeConfig {
             private_search: false,
             share_popularity: false,
             settings: NodeSettings::default(),
+            manage_other_nodes: false,
         }
     }
 
@@ -207,6 +214,7 @@ impl NodeConfig {
             refresh_every: Some(Duration::from_secs(12 * 60 * 60)),
             crawl_per_refresh: 1_000,
             settings: NodeSettings::desktop(),
+            manage_other_nodes: true,
             ..NodeConfig::server(data_dir)
         }
     }
@@ -1203,6 +1211,14 @@ impl StatusSource for Inner {
 
     fn data_dir(&self) -> Option<PathBuf> {
         Some(self.paths.data.clone())
+    }
+
+    fn bind(&self) -> Option<SocketAddr> {
+        Some(self.config.bind)
+    }
+
+    fn manages_other_nodes(&self) -> bool {
+        self.config.manage_other_nodes
     }
 }
 

@@ -74,6 +74,8 @@ use crate::meaning::{MeaningIndex, SharedMeaning};
 use crate::node::{NodeSettings, Phase, Status, Step};
 use crate::websearch::{bang_url, Engine, WebSettings};
 
+mod control;
+mod nodes;
 mod panel;
 
 use crate::{block_on, rank_config};
@@ -254,9 +256,21 @@ pub trait StatusSource: Send + Sync {
     /// Starts a refresh now.
     fn refresh_now(&self) {}
 
-    /// Where the node keeps its data, to show on the panel.
+    /// Where the node keeps its data, to show on the panel. Its remote
+    /// control file is there too: without a data folder, the node cannot be
+    /// controlled remotely.
     fn data_dir(&self) -> Option<std::path::PathBuf> {
         None
+    }
+
+    /// The address the node was told to listen on.
+    fn bind(&self) -> Option<std::net::SocketAddr> {
+        None
+    }
+
+    /// Whether the panel may list and control other nodes.
+    fn manages_other_nodes(&self) -> bool {
+        false
     }
 }
 
@@ -338,9 +352,12 @@ fn app(state: AppState) -> Router {
             .route("/app/settings", post(panel::save_settings))
             .route("/app/features", post(panel::save_features))
             .route("/app/refresh", post(panel::refresh))
+            .route("/app/remote-control", post(panel::save_remote_control))
             .route(panel::ADD_TO_FIREFOX_PATH, get(panel::add_to_firefox));
         router = private::routes(router);
         router = relay::routes(router);
+        router = control::routes(router);
+        router = nodes::routes(router);
     }
     router.with_state(state)
 }

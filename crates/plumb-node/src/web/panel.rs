@@ -32,6 +32,7 @@ use super::{
     escape_html, group_thousands, page_with_head, request_origin, security_headers, time_ago,
     time_until, AppState,
 };
+use crate::node::control;
 use crate::node::features::FeatureSettings;
 use crate::node::{NodeSettings, Phase, Status, Step, MB};
 
@@ -40,7 +41,7 @@ const BUSY_RELOAD_SECONDS: u32 = 5;
 /// Seconds between two reloads otherwise.
 const IDLE_RELOAD_SECONDS: u32 = 60;
 
-const PANEL_STYLE: &str = "\
+pub(super) const PANEL_STYLE: &str = "\
 .node-panel{max-width:56rem;padding-top:1.5rem}\
 .node-panel h1{font-size:1.6rem}\
 .node-panel h2{font-size:1.05rem;margin:2rem 0 .5rem}\
@@ -98,7 +99,7 @@ fn parse_limit(text: &str) -> Option<u64> {
 
 #[derive(Default, Deserialize)]
 #[serde(default)]
-struct PanelQuery {
+pub(super) struct PanelQuery {
     section: String,
     saved: String,
 }
@@ -130,6 +131,20 @@ pub(super) async fn panel(State(state): State<AppState>, request: Request) -> Re
         }
     };
     let data_dir = node.data_dir();
+    let writable = refusal(&request).is_none();
+    // Other nodes are only listed for someone who could control them.
+    let switcher = if writable && node.manages_other_nodes() {
+        super::nodes::switcher(node.as_ref(), None)
+    } else {
+        String::new()
+    };
+    let remote_control = RemoteControlView {
+        on: data_dir
+            .as_deref()
+            .and_then(|dir| control::load(dir).ok().flatten())
+            .map(|control| control.allow_public),
+        loopback_only: node.bind().is_some_and(|addr| addr.ip().is_loopback()),
+    };
     let page = render_panel(&PanelView {
         status: &node.status(),
         settings: &node.settings().unwrap_or_default(),
@@ -139,9 +154,22 @@ pub(super) async fn panel(State(state): State<AppState>, request: Request) -> Re
         query: &query,
         active: &active,
         saved: &saved,
-        writable: refusal(&request).is_none(),
+        writable,
         private_ready: state.private_search(),
+        base: "/app",
+        eyebrow: if switcher.is_empty() {
+            "YOUR SEARCH NODE"
+        } else {
+            "THIS COMPUTER"
+        },
+        switcher: &switcher,
+        remote_control: data_dir.is_some().then_some(&remote_control),
     });
+    panel_page(page)
+}
+
+/// A panel page as served: never cached, and sending its origin with forms.
+pub(super) fn panel_page(page: String) -> Response {
     (
         StatusCode::OK,
         panel_headers(),
@@ -179,6 +207,28 @@ pub(super) async fn save_features(State(state): State<AppState>, request: Reques
         Ok(features) => features,
         Err(err) => return panel_error(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
     };
+    let section = match apply_features_form(&form, &mut features) {
+        Ok(section) => section,
+        Err(response) => return response,
+    };
+    if let Err(err) = node.change_features(features) {
+        return panel_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("Could not save feature settings: {err}"),
+        );
+    }
+    Redirect::to(&format!("/app?section={section}&saved=features")).into_response()
+}
+
+/// Puts the choices of the features form, from section "search" or
+/// "network", into `features`, and returns the section; the error page when
+/// they cannot work together.
+// A response is big, but these run once per request.
+#[allow(clippy::result_large_err)]
+pub(super) fn apply_features_form(
+    form: &FeaturesForm,
+    features: &mut FeatureSettings,
+) -> Result<&'static str, Response> {
     let section = if form.section == "search" {
         "search"
     } else {
@@ -197,15 +247,9 @@ pub(super) async fn save_features(State(state): State<AppState>, request: Reques
             .collect();
     }
     if let Err(err) = features.check() {
-        return panel_error(StatusCode::BAD_REQUEST, &err.to_string());
+        return Err(panel_error(StatusCode::BAD_REQUEST, &err.to_string()));
     }
-    if let Err(err) = node.change_features(features) {
-        return panel_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("Could not save feature settings: {err}"),
-        );
-    }
-    Redirect::to(&format!("/app?section={section}&saved=features")).into_response()
+    Ok(section)
 }
 
 /// [`security_headers`] with one change: the panel's forms send their
@@ -226,7 +270,7 @@ const PANEL_REFERRER_POLICY: &str = "same-origin";
 
 /// A page saying what went wrong with a change, with the way back to the
 /// panel: the desktop app's window has no back button.
-fn panel_error(status: StatusCode, message: &str) -> Response {
+pub(super) fn panel_error(status: StatusCode, message: &str) -> Response {
     let body = format!(
         "<main class=\"wrap node-panel\">\n<h1>Plumb Search node</h1>\n\
          <p class=\"err\">{}</p>\n\
@@ -297,19 +341,9 @@ pub(super) async fn save_settings(State(state): State<AppState>, request: Reques
             "The settings form could not be read.",
         );
     };
-    let (Some(download), Some(storage)) = (
-        parse_limit(&form.download_limit_mb_per_day),
-        parse_limit(&form.storage_limit_mb),
-    ) else {
-        return panel_error(
-            StatusCode::BAD_REQUEST,
-            "Limits are whole numbers of megabytes, or empty for none. Nothing was changed.",
-        );
-    };
-    let settings = NodeSettings {
-        background_updates: form.background_updates.is_some(),
-        download_limit_mb_per_day: download,
-        storage_limit_mb: storage,
+    let settings = match settings_from_form(&form) {
+        Ok(settings) => settings,
+        Err(response) => return response,
     };
     if let Err(err) = node.change_settings(settings) {
         warn!("could not save the settings: {err:#}");
@@ -319,6 +353,168 @@ pub(super) async fn save_settings(State(state): State<AppState>, request: Reques
         );
     }
     Redirect::to("/app?section=resources&saved=settings").into_response()
+}
+
+/// The settings the settings form asks for; the error page when its limits
+/// are not numbers.
+// A response is big, but these run once per request.
+#[allow(clippy::result_large_err)]
+pub(super) fn settings_from_form(form: &SettingsForm) -> Result<NodeSettings, Response> {
+    let (Some(download), Some(storage)) = (
+        parse_limit(&form.download_limit_mb_per_day),
+        parse_limit(&form.storage_limit_mb),
+    ) else {
+        return Err(panel_error(
+            StatusCode::BAD_REQUEST,
+            "Limits are whole numbers of megabytes, or empty for none. Nothing was changed.",
+        ));
+    };
+    Ok(NodeSettings {
+        background_updates: form.background_updates.is_some(),
+        download_limit_mb_per_day: download,
+        storage_limit_mb: storage,
+    })
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+pub(super) struct RemoteControlForm {
+    /// `on` makes a new token; anything else turns remote control off.
+    action: String,
+    allow_public: Option<String>,
+}
+
+/// `POST /app/remote-control`: turns remote control on with a new token,
+/// shown on the page this answers with and nowhere else, or off.
+pub(super) async fn save_remote_control(
+    State(state): State<AppState>,
+    request: Request,
+) -> Response {
+    let Some(node) = state.node.clone() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    if let Some(why) = refusal(&request) {
+        return forbidden(why);
+    }
+    let Some(dir) = node.data_dir() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let origin = request_origin(request.headers(), request.uri()).unwrap_or_default();
+    let Ok(Form(form)) = Form::<RemoteControlForm>::from_request(request, &state).await else {
+        return panel_error(StatusCode::BAD_REQUEST, "The form could not be read.");
+    };
+    if form.action != "on" {
+        if let Err(err) = control::turn_off(&dir) {
+            return panel_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("Could not turn remote control off: {err:#}"),
+            );
+        }
+        return Redirect::to("/app?section=remote").into_response();
+    }
+    let allow_public = form.allow_public.is_some();
+    match control::turn_on(&dir, allow_public) {
+        Ok(token) => panel_page(render_new_token(&token, &origin, node.bind())),
+        Err(err) => panel_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("Could not turn remote control on: {err:#}"),
+        ),
+    }
+}
+
+/// The page that shows a new token, the one time it can be read.
+fn render_new_token(token: &str, origin: &str, bind: Option<SocketAddr>) -> String {
+    let address = match bind {
+        Some(addr) if addr.ip().is_unspecified() => {
+            format!("http://&lt;this computer's address&gt;:{}", addr.port())
+        }
+        _ => escape_html(origin),
+    };
+    let body = format!(
+        "<main class=\"wrap node-panel\">\n<h1>Remote control is on</h1>\n\
+         <p>On the other computer, open the Plumb Search app, choose \
+         <strong>Connect to a node</strong>, and enter this node's address and token:</p>\n\
+         <dl><dt>Address</dt><dd><code>{address}</code></dd>\n\
+         <dt>Token</dt><dd><code>{}</code></dd></dl>\n\
+         <p class=\"notice\">Copy the token now: this is the only time it is shown. \
+         Anyone with it can change this node's settings, so keep it like a password. \
+         Making a new token, or turning remote control off, stops the old one working.</p>\n\
+         <p><a class=\"btn\" href=\"/app?section=remote\">Done</a></p>\n</main>",
+        escape_html(token)
+    );
+    let head = format!(
+        "<meta name=\"referrer\" content=\"{PANEL_REFERRER_POLICY}\">\n\
+         <style>{PANEL_STYLE}</style><style>{LAYOUT_STYLE}</style>\n"
+    );
+    page_with_head("Remote control - Plumb Search", &head, &body)
+}
+
+fn render_remote_control(body: &mut String, remote: &RemoteControlView, writable: bool) {
+    body.push_str(
+        "<p class=\"intro\">Let the Plumb Search app on another computer change this \
+         node's settings, crawling and features. It can read the node's status and change \
+         its settings, nothing else.</p>",
+    );
+    let (big, rest) = match remote.on {
+        None => ("Off", "<p>No other computer can change this node.</p>"),
+        Some(false) => (
+            "On",
+            "<p>From this computer and local networks only (home and office \
+             networks, Docker, Tailscale), with the token.</p>",
+        ),
+        Some(true) => (
+            "On, from anywhere",
+            "<p>From any address, with the token. Use HTTPS in front of the node so the \
+             token is not sent in the clear.</p>",
+        ),
+    };
+    body.push_str("<section class=\"cards\">");
+    card(body, "", "Remote control", big, rest);
+    body.push_str("</section>");
+    if remote.loopback_only {
+        body.push_str(
+            "<p class=\"notice\">This node only listens on this computer (127.0.0.1), so \
+             other computers cannot reach it. Remote control is for nodes that serve the \
+             network, such as a Docker container or a homelab server started with \
+             <code>--bind 0.0.0.0:8080</code>.</p>",
+        );
+    }
+    if !writable {
+        body.push_str(
+            "<p class=\"hint\">To turn remote control on for a Docker container, run \
+             <code>docker exec &lt;container&gt; plumb remote-control on</code> \
+             on its host. It prints the token.</p><fieldset disabled>",
+        );
+    }
+    let turn_on = if remote.on.is_some() {
+        "Make a new token"
+    } else {
+        "Turn on and make a token"
+    };
+    body.push_str(&format!(
+        "<form method=\"post\" action=\"/app/remote-control\">\
+         <input type=\"hidden\" name=\"action\" value=\"on\">\
+         <label><input type=\"checkbox\" name=\"allow_public\" value=\"1\"{}>\
+         <span>Also from public addresses and through a reverse proxy</span></label>\
+         <p class=\"hint\">Leave this off unless the node is behind HTTPS. Off, only \
+         this computer and local networks can use the token.</p>\
+         <button type=\"submit\">{turn_on}</button></form>",
+        if remote.on == Some(true) {
+            " checked"
+        } else {
+            ""
+        }
+    ));
+    if remote.on.is_some() {
+        body.push_str(
+            "<form method=\"post\" action=\"/app/remote-control\">\
+             <input type=\"hidden\" name=\"action\" value=\"off\">\
+             <button type=\"submit\" class=\"alt\">Turn remote control off</button></form>",
+        );
+    }
+    if !writable {
+        body.push_str("</fieldset>");
+    }
 }
 
 pub(super) async fn refresh(State(state): State<AppState>, request: Request) -> Response {
@@ -334,7 +530,7 @@ pub(super) async fn refresh(State(state): State<AppState>, request: Request) -> 
 
 /// Why a change is refused: it does not come from this computer, or a page
 /// of another site sent it. `None` when it may go ahead.
-fn refusal(request: &Request) -> Option<&'static str> {
+pub(super) fn refusal(request: &Request) -> Option<&'static str> {
     let local = request
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
@@ -378,7 +574,7 @@ fn local_origin(origin: &str) -> bool {
     }
 }
 
-fn forbidden(why: &str) -> Response {
+pub(super) fn forbidden(why: &str) -> Response {
     panel_error(StatusCode::FORBIDDEN, why)
 }
 
@@ -425,20 +621,40 @@ fn bytes_words(bytes: u64) -> String {
     }
 }
 
-struct PanelView<'a> {
-    status: &'a Status,
-    settings: &'a NodeSettings,
-    origin: &'a str,
-    data_dir: Option<&'a Path>,
-    now: u64,
-    query: &'a PanelQuery,
-    active: &'a FeatureSettings,
-    saved: &'a FeatureSettings,
-    writable: bool,
-    private_ready: bool,
+pub(super) struct PanelView<'a> {
+    pub(super) status: &'a Status,
+    pub(super) settings: &'a NodeSettings,
+    /// Where the node's search pages are: links to them start with it.
+    pub(super) origin: &'a str,
+    pub(super) data_dir: Option<&'a Path>,
+    pub(super) now: u64,
+    pub(super) query: &'a PanelQuery,
+    pub(super) active: &'a FeatureSettings,
+    pub(super) saved: &'a FeatureSettings,
+    pub(super) writable: bool,
+    pub(super) private_ready: bool,
+    /// The panel's own address, `/app` for this node and
+    /// `/app/nodes/<id>` for another node controlled from here; its links
+    /// and forms start with it.
+    pub(super) base: &'a str,
+    /// Above the title: what node this is.
+    pub(super) eyebrow: &'a str,
+    /// The row of nodes to switch between, as HTML; empty for none.
+    pub(super) switcher: &'a str,
+    /// This node's remote control, for its "Remote control" section; `None`
+    /// on the panel of another node.
+    pub(super) remote_control: Option<&'a RemoteControlView>,
 }
 
-fn render_panel(view: &PanelView<'_>) -> String {
+/// What the "Remote control" section shows.
+pub(super) struct RemoteControlView {
+    /// On, and whether from public addresses too.
+    pub(super) on: Option<bool>,
+    /// The node only listens on this computer, so no other can reach it.
+    pub(super) loopback_only: bool,
+}
+
+pub(super) fn render_panel(view: &PanelView<'_>) -> String {
     let PanelView {
         status,
         settings,
@@ -450,24 +666,32 @@ fn render_panel(view: &PanelView<'_>) -> String {
         saved,
         writable,
         private_ready,
+        base,
+        eyebrow,
+        switcher,
+        remote_control,
     } = *view;
-    let sections = [
+    let mut sections = vec![
         ("overview", "Overview"),
         ("search", "Search & browser"),
         ("resources", "Resources"),
         ("network", "Network & privacy"),
-        ("about", "About"),
     ];
+    if remote_control.is_some() {
+        sections.push(("remote", "Remote control"));
+    }
+    sections.push(("about", "About"));
     let section = if sections.iter().any(|(key, _)| *key == query.section) {
         query.section.as_str()
     } else {
         "overview"
     };
     let title = sections.iter().find(|(key, _)| *key == section).unwrap().1;
-    let mut body = String::from("<main class=\"wrap node-panel\"><div class=\"node-heading\"><div><p class=\"eyebrow\">YOUR SEARCH NODE</p><h1>Plumb Search</h1></div><a class=\"btn alt\" href=\"/\" target=\"_blank\">Open search ↗</a></div><nav class=\"node-nav\" aria-label=\"Node settings\">");
-    for (key, label) in sections {
+    let site = escape_html(origin);
+    let mut body = format!("<main class=\"wrap node-panel\">{switcher}<div class=\"node-heading\"><div><p class=\"eyebrow\">{}</p><h1>Plumb Search</h1></div><a class=\"btn alt\" href=\"{site}/\" target=\"_blank\">Open search ↗</a></div><nav class=\"node-nav\" aria-label=\"Node settings\">", escape_html(eyebrow));
+    for (key, label) in sections.iter().copied() {
         body.push_str(&format!(
-            "<a href=\"/app?section={key}\"{}>{}</a>",
+            "<a href=\"{base}?section={key}\"{}>{}</a>",
             if key == section {
                 " aria-current=\"page\""
             } else {
@@ -476,7 +700,7 @@ fn render_panel(view: &PanelView<'_>) -> String {
             escape_html(label)
         ));
     }
-    body.push_str(&format!("</nav><div class=\"section-heading\"><h2>{}</h2><a href=\"/app?section={section}\">Refresh status</a></div>", escape_html(title)));
+    body.push_str(&format!("</nav><div class=\"section-heading\"><h2>{}</h2><a href=\"{base}?section={section}\">Refresh status</a></div>", escape_html(title)));
     if active != saved {
         body.push_str("<p class=\"notice\" role=\"status\">Feature changes saved. Quit and reopen the desktop app, or restart the Docker container, to apply them. Closing the desktop window does not quit the app.</p>");
     } else if query.saved == "settings" {
@@ -498,7 +722,7 @@ fn render_panel(view: &PanelView<'_>) -> String {
             if !writable {
                 body.push_str("<fieldset disabled>");
             }
-            render_crawl_card(&mut body, status, now);
+            render_crawl_card(&mut body, status, now, base);
             if !writable {
                 body.push_str("</fieldset>");
             }
@@ -519,7 +743,7 @@ fn render_panel(view: &PanelView<'_>) -> String {
             if !writable {
                 body.push_str("<fieldset disabled>");
             }
-            render_settings(&mut body, settings);
+            render_settings(&mut body, settings, base);
             if !writable {
                 body.push_str("</fieldset>");
             }
@@ -549,9 +773,9 @@ fn render_panel(view: &PanelView<'_>) -> String {
                 "Preparing index"
             };
             let link = if private_ready {
-                "<p><a class=\"btn alt\" href=\"/private\" target=\"_blank\">Open private search ↗</a></p>"
+                format!("<p><a class=\"btn alt\" href=\"{site}/private\" target=\"_blank\">Open private search ↗</a></p>")
             } else {
-                ""
+                String::new()
             };
             card(
                 &mut body,
@@ -564,7 +788,7 @@ fn render_panel(view: &PanelView<'_>) -> String {
             if !writable {
                 body.push_str("<fieldset disabled>");
             }
-            render_features(&mut body, active, saved, "search");
+            render_features(&mut body, active, saved, "search", base);
             if !writable {
                 body.push_str("</fieldset>");
             }
@@ -578,14 +802,19 @@ fn render_panel(view: &PanelView<'_>) -> String {
             if !writable {
                 body.push_str("<fieldset disabled>");
             }
-            render_features(&mut body, active, saved, "network");
+            render_features(&mut body, active, saved, "network", base);
             if !writable {
                 body.push_str("</fieldset>");
             }
         }
+        "remote" => {
+            if let Some(remote) = remote_control {
+                render_remote_control(&mut body, remote, writable);
+            }
+        }
         _ => {
             render_about(&mut body, status, data_dir, now);
-            body.push_str("<p>Desktop and Docker run the same node and settings panel.</p><p><a href=\"https://github.com/SueHeir/plumb-search\" target=\"_blank\">Source code &amp; documentation ↗</a> · <a href=\"/api/status\" target=\"_blank\">Diagnostic status ↗</a></p><p class=\"hint\">Desktop: use the tray or menu bar for Start at login and Quit Plumb Search.</p>");
+            body.push_str(&format!("<p>Desktop and Docker run the same node and settings panel.</p><p><a href=\"https://github.com/SueHeir/plumb-search\" target=\"_blank\">Source code &amp; documentation ↗</a> · <a href=\"{site}/api/status\" target=\"_blank\">Diagnostic status ↗</a></p><p class=\"hint\">Desktop: use the tray or menu bar for Start at login and Quit Plumb Search.</p>"));
         }
     }
     body.push_str("</main>");
@@ -606,8 +835,8 @@ fn render_panel(view: &PanelView<'_>) -> String {
     page_with_head(&format!("{title} - Plumb Search"), &head, &body)
 }
 
-const LAYOUT_STYLE: &str = "
-.node-panel{max-width:72rem;padding:2rem 2rem 4rem}.node-heading,.section-heading{display:flex;align-items:center;justify-content:space-between;gap:1rem}.node-heading h1{font-size:1.8rem}.eyebrow{font-size:.7rem;letter-spacing:.13em;color:var(--muted);margin:0 0 .3rem}.node-nav{display:flex;flex-wrap:wrap;gap:.4rem;border-bottom:1px solid var(--line);padding:1.5rem 0 1rem;margin-bottom:1.5rem}.node-panel a{color:var(--accent)}.node-panel a.btn:not(.alt){color:var(--bg)}.node-nav a{padding:.55rem .85rem;text-decoration:none;border-radius:.5rem;color:var(--muted)}.node-nav a[aria-current]{background:var(--accent);color:var(--bg);font-weight:600}.section-heading h2{margin:0;font-size:1.4rem}.section-heading>a{font-size:.85rem}.intro{color:var(--muted);max-width:45rem}.notice{padding:.85rem 1rem;border-left:3px solid var(--accent);background:color-mix(in srgb,var(--accent) 8%,var(--bg));border-radius:.3rem}.node-panel form{max-width:46rem}.node-panel fieldset{border:0;margin:0;padding:0;min-width:0}.node-panel fieldset:disabled{opacity:.65}.node-panel textarea{display:block;width:100%;min-height:6rem;font:inherit;background:var(--bg);color:var(--fg);padding:.75rem;border:1px solid var(--line);border-radius:.5rem}.node-panel .feature{padding:.8rem 0;border-bottom:1px solid var(--line)}.node-panel .feature label{margin:0}.node-panel .feature p{margin:.35rem 0 0 1.65rem}.node-panel .state{font-size:.8rem;color:var(--muted)}.node-panel :focus-visible{outline:3px solid var(--accent);outline-offset:3px}.node-panel dl{grid-template-columns:minmax(6rem,auto) minmax(0,1fr)}@media(max-width:600px){.node-panel{padding:1rem 1rem 3rem}.node-heading{align-items:flex-start}.node-heading h1{font-size:1.5rem}.node-nav{gap:.2rem}.node-nav a{padding:.5rem .6rem;font-size:.9rem}.cards{grid-template-columns:minmax(0,1fr)}.node-panel label{flex-wrap:wrap}.section-heading{align-items:flex-start}.section-heading>a{white-space:nowrap}}";
+pub(super) const LAYOUT_STYLE: &str = "
+.node-switch{display:flex;flex-wrap:wrap;gap:.4rem;margin-bottom:1rem}.node-switch a{padding:.4rem .8rem;border:1px solid var(--line);border-radius:999px;text-decoration:none;font-size:.9rem;color:var(--fg)}.node-switch a[aria-current]{border-color:var(--accent);color:var(--accent);font-weight:600}.node-panel{max-width:72rem;padding:2rem 2rem 4rem}.node-heading,.section-heading{display:flex;align-items:center;justify-content:space-between;gap:1rem}.node-heading h1{font-size:1.8rem}.eyebrow{font-size:.7rem;letter-spacing:.13em;color:var(--muted);margin:0 0 .3rem}.node-nav{display:flex;flex-wrap:wrap;gap:.4rem;border-bottom:1px solid var(--line);padding:1.5rem 0 1rem;margin-bottom:1.5rem}.node-panel a{color:var(--accent)}.node-panel a.btn:not(.alt){color:var(--bg)}.node-nav a{padding:.55rem .85rem;text-decoration:none;border-radius:.5rem;color:var(--muted)}.node-nav a[aria-current]{background:var(--accent);color:var(--bg);font-weight:600}.section-heading h2{margin:0;font-size:1.4rem}.section-heading>a{font-size:.85rem}.intro{color:var(--muted);max-width:45rem}.notice{padding:.85rem 1rem;border-left:3px solid var(--accent);background:color-mix(in srgb,var(--accent) 8%,var(--bg));border-radius:.3rem}.node-panel form{max-width:46rem}.node-panel fieldset{border:0;margin:0;padding:0;min-width:0}.node-panel fieldset:disabled{opacity:.65}.node-panel textarea{display:block;width:100%;min-height:6rem;font:inherit;background:var(--bg);color:var(--fg);padding:.75rem;border:1px solid var(--line);border-radius:.5rem}.node-panel .feature{padding:.8rem 0;border-bottom:1px solid var(--line)}.node-panel .feature label{margin:0}.node-panel .feature p{margin:.35rem 0 0 1.65rem}.node-panel .state{font-size:.8rem;color:var(--muted)}.node-panel :focus-visible{outline:3px solid var(--accent);outline-offset:3px}.node-panel dl{grid-template-columns:minmax(6rem,auto) minmax(0,1fr)}@media(max-width:600px){.node-panel{padding:1rem 1rem 3rem}.node-heading{align-items:flex-start}.node-heading h1{font-size:1.5rem}.node-nav{gap:.2rem}.node-nav a{padding:.5rem .6rem;font-size:.9rem}.cards{grid-template-columns:minmax(0,1fr)}.node-panel label{flex-wrap:wrap}.section-heading{align-items:flex-start}.section-heading>a{white-space:nowrap}}";
 
 /// A card: its class, title, headline and the HTML under them.
 fn card(body: &mut String, class: &str, title: &str, big: &str, rest: &str) {
@@ -745,7 +974,7 @@ fn render_downloads_card(body: &mut String, status: &Status, settings: &NodeSett
     );
 }
 
-fn render_crawl_card(body: &mut String, status: &Status, now: u64) {
+fn render_crawl_card(body: &mut String, status: &Status, now: u64, base: &str) {
     let crawling = status.phase == Phase::Ready && status.step == Step::Crawling;
     let (big, mut rest) = if crawling {
         let rest = status
@@ -801,10 +1030,10 @@ fn render_crawl_card(body: &mut String, status: &Status, now: u64) {
     // Starts the next round now; while one runs, or crawling is paused,
     // there is nothing to start.
     if status.phase == Phase::Ready && !busy(status) && status.paused.is_none() {
-        rest.push_str(
-            "<form method=\"post\" action=\"/app/refresh\">\
-             <button type=\"submit\" class=\"alt\">Update now</button></form>\n",
-        );
+        rest.push_str(&format!(
+            "<form method=\"post\" action=\"{base}/refresh\">\
+             <button type=\"submit\" class=\"alt\">Update now</button></form>\n"
+        ));
     }
     card(body, "", "Crawling", &big, &rest);
 }
@@ -853,8 +1082,9 @@ fn render_features(
     active: &FeatureSettings,
     saved: &FeatureSettings,
     section: &str,
+    base: &str,
 ) {
-    body.push_str("<h2>Optional features</h2><p class=\"hint\">Saved choices apply after you quit and reopen the app or restart the container. Existing Docker transport and relay flags are preserved.</p><form method=\"post\" action=\"/app/features\">");
+    body.push_str(&format!("<h2>Optional features</h2><p class=\"hint\">Saved choices apply after you quit and reopen the app or restart the container. Existing Docker transport and relay flags are preserved.</p><form method=\"post\" action=\"{base}/features\">"));
     body.push_str(&format!(
         "<input type=\"hidden\" name=\"section\" value=\"{section}\">"
     ));
@@ -957,7 +1187,7 @@ fn render_steps(body: &mut String, status: &Status, now: u64) {
     body.push_str("</ol>\n");
 }
 
-fn render_settings(body: &mut String, settings: &NodeSettings) {
+fn render_settings(body: &mut String, settings: &NodeSettings, base: &str) {
     let checked = if settings.background_updates {
         " checked"
     } else {
@@ -971,7 +1201,7 @@ fn render_settings(body: &mut String, settings: &NodeSettings) {
         }
     };
     body.push_str(&format!(
-        "<h2>Crawling &amp; limits</h2>\n<form method=\"post\" action=\"/app/settings\">\n\
+        "<h2>Crawling &amp; limits</h2>\n<form method=\"post\" action=\"{base}/settings\">\n\
          <label><input type=\"checkbox\" name=\"background_updates\" value=\"1\"{checked}>\
          <span>Keep the index up to date in the background</span></label>\n\
          <p class=\"hint\">Plumb visits a few thousand homepages a day to learn sites' names \

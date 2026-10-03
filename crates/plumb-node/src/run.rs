@@ -115,6 +115,50 @@ fn listening_message(addr: SocketAddr) -> String {
     )
 }
 
+/// `plumb remote-control`: turns remote control on or off in a node's data
+/// directory. A running node notices at its next request.
+pub fn remote_control(args: crate::cli::RemoteControlArgs) -> Result<()> {
+    use crate::cli::RemoteControlAction;
+    use crate::node::control;
+    use anyhow::Context as _;
+    let dir = &args.data;
+    if !dir.is_dir() {
+        anyhow::bail!(
+            "{} is not a directory; pass the node's data directory, as given to plumb run --data",
+            dir.display()
+        );
+    }
+    match args.action {
+        RemoteControlAction::On { allow_public } => {
+            let token = control::turn_on(dir, allow_public)
+                .with_context(|| format!("turning remote control on in {}", dir.display()))?;
+            println!("Remote control is on. The token, shown only this once:\n\n  {token}\n");
+            println!(
+                "In the Plumb Search app on another computer, choose \"Connect to a node\" and \
+                 enter this node's address (such as http://192.168.1.20:8080) and the token."
+            );
+            if allow_public {
+                println!("It works from any address. Keep the node behind HTTPS.");
+            } else {
+                println!("It works from this computer and local networks only.");
+            }
+        }
+        RemoteControlAction::Off => {
+            if control::turn_off(dir)? {
+                println!("Remote control is off.");
+            } else {
+                println!("Remote control was already off.");
+            }
+        }
+        RemoteControlAction::Status => match control::load(dir)? {
+            None => println!("Remote control is off."),
+            Some(on) if on.allow_public => println!("Remote control is on, from any address."),
+            Some(_) => println!("Remote control is on, from this computer and local networks."),
+        },
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use clap::Parser;

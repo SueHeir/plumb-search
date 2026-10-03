@@ -15,6 +15,12 @@
 //! turns "Start at login" on or off, or quits. Started at login, the app
 //! opens no window.
 //!
+//! The panel is also the control center for the person's other nodes, such
+//! as a Docker container on a homelab: "Connect to a node" saves a node's
+//! address and remote control token, and the panel then shows and changes
+//! that node's settings, with the app's own node making the requests (see
+//! `plumb_node::node::control`). The window never sees the tokens.
+//!
 //! No page can call into the app: the app defines no commands and grants no
 //! capabilities, so Tauri's IPC refuses everything.
 
@@ -734,6 +740,9 @@ mod tests {
             "http://127.0.0.1:41234/app?section=network",
             "http://127.0.0.1:41234/app/features",
             "http://127.0.0.1:41234/app/refresh",
+            // Other nodes, controlled through this one.
+            "http://127.0.0.1:41234/app/nodes/new",
+            "http://127.0.0.1:41234/app/nodes/3f2a9c01b7de?section=resources",
         ] {
             assert_eq!(
                 destination(&url(page), Some(&node), None),
