@@ -1,8 +1,9 @@
 //! Throwaway identities: a new key, a swarm of its own and a new
 //! connection for one request, dropped after. The node asked cannot tie
 //! the request to the asking node's permanent id, nor to its other
-//! requests. It still sees the IP address the request comes from (or its
-//! relay's); hiding that takes a relay run by someone else (planned).
+//! requests. It still sees the IP address the request comes from, so
+//! requests go sealed through another node when one can relay (see
+//! [`crate::oblivious`]).
 
 use std::time::Duration;
 

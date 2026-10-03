@@ -36,10 +36,13 @@ use crate::agree::{agree, QUORUM};
 use crate::batch::MAX_RECORD_BYTES;
 use crate::bucket::{matches, search_buckets};
 use crate::oblivious::{
-    open_response, seal_request, ObliviousRequest, ObliviousResponse, MAX_MESSAGE,
-    OBLIVIOUS_PROTOCOL,
+    open_response, seal_request, seal_request_sized, ObliviousRequest, ObliviousResponse,
+    MAX_MESSAGE, OBLIVIOUS_PROTOCOL, REPORT_REQUEST_SIZE,
 };
-use crate::proto::{BucketRequest, BucketResponse, BUCKET_PROTOCOL, MAX_EXTRA_PROOFS};
+use crate::popularity::Report;
+use crate::proto::{
+    BucketRequest, BucketResponse, ReportResponse, BUCKET_PROTOCOL, MAX_EXTRA_PROOFS,
+};
 
 /// Nodes each bucket is asked of, when there are that many, so that one
 /// node cannot hide a site or boost one's popularity alone.
@@ -362,7 +365,7 @@ fn throwaway(wait: Duration) -> Result<libp2p::Swarm<Fetcher>> {
         ),
         oblivious: request_response::Behaviour::with_codec(
             request_response::cbor::codec::Codec::default()
-                .set_request_size_maximum(4 * 1024)
+                .set_request_size_maximum(2 * REPORT_REQUEST_SIZE as u64)
                 .set_response_size_maximum(MAX_MESSAGE as u64 + 1024),
             [(
                 StreamProtocol::new(OBLIVIOUS_PROTOCOL),
@@ -448,6 +451,50 @@ pub async fn fetch_oblivious(
     };
     match ask(&mut swarm, relay.peer, request, deadline).await? {
         ObliviousResponse::Sealed(Some(answer)) => open_response(opener, &answer),
+        _ => bail!("the relay {} got no answer from {target}", relay.peer),
+    }
+}
+
+/// Hands `report` to `target` through `relay`, under a new identity, sealed
+/// the same way as [`fetch_oblivious`] and padded to
+/// [`REPORT_REQUEST_SIZE`]: the relay sees this node's address but not the
+/// report, the target the report but only the relay's address. Returns
+/// whether the target took it (it may already hold it).
+pub async fn submit_report_oblivious(
+    relay: &BucketPeer,
+    target: &PeerId,
+    report: &Report,
+    wait: Duration,
+    now: u64,
+) -> Result<bool> {
+    let mut swarm = throwaway(wait)?;
+    for addr in &relay.addrs {
+        swarm.add_peer_address(relay.peer, addr.clone());
+    }
+    let deadline = tokio::time::Instant::now() + wait;
+    let keys = match ask(
+        &mut swarm,
+        relay.peer,
+        ObliviousRequest::Keys { target: *target },
+        deadline,
+    )
+    .await?
+    {
+        ObliviousResponse::Keys(Some(keys)) => keys,
+        _ => bail!("the relay {} has no key for {target}", relay.peer),
+    };
+    let (message, opener) = seal_request_sized(&keys, target, now, report, REPORT_REQUEST_SIZE)?;
+    let request = ObliviousRequest::Forward {
+        target: *target,
+        message: serde_bytes::ByteBuf::from(message),
+    };
+    match ask(&mut swarm, relay.peer, request, deadline).await? {
+        ObliviousResponse::Sealed(Some(answer)) => {
+            match open_response::<ReportResponse>(opener, &answer)? {
+                ReportResponse::Taken(taken) => Ok(taken),
+                ReportResponse::Reports(_) => bail!("{target} answered something else"),
+            }
+        }
         _ => bail!("the relay {} got no answer from {target}", relay.peer),
     }
 }

@@ -70,8 +70,8 @@ use crate::batch::{accept_batch, Batch, SignedHeader};
 use crate::bucket::{BucketSource, BUCKETS};
 use crate::hash::Hash;
 use crate::oblivious::{
-    seal_response, Gateway, ObliviousRequest, ObliviousResponse, SignedKeys, MAX_MESSAGE,
-    OBLIVIOUS_PROTOCOL, RELAY_KEY_CACHE,
+    seal_response, Gateway, ObliviousRequest, ObliviousResponse, Opened, SignedKeys, MAX_MESSAGE,
+    OBLIVIOUS_PROTOCOL, RELAY_KEY_CACHE, REPORT_REQUEST_SIZE,
 };
 use crate::popularity::{report_epoch, PopularityTable, Report};
 use crate::proto::*;
@@ -162,6 +162,9 @@ pub struct NetStatus {
     /// `public`, `private` (behind NAT) or `unknown`, from AutoNAT.
     pub nat: String,
     pub connected_peers: usize,
+    /// Of those, the ones that relay sealed requests (see
+    /// [`crate::oblivious`]).
+    pub relaying_peers: usize,
     /// Relays this node holds a reservation on.
     pub relays: Vec<String>,
     pub batches_held: usize,
@@ -177,7 +180,8 @@ pub struct NetStatus {
     pub reports_sent: u64,
     /// Picks that enough reports were sent of to be read.
     pub popular_picks: usize,
-    /// Sealed bucket requests passed on for others, as their relay.
+    /// Sealed requests (bucket requests and popularity reports) passed on
+    /// for others, as their relay.
     pub requests_relayed: u64,
 }
 
@@ -250,7 +254,11 @@ impl NetHandle {
 
     /// Hands `report` to another node under a throwaway identity, trying
     /// up to [`REPORT_TRIES`] nodes at random, each for at most `wait`.
-    /// That node keeps it and passes it on to the rest.
+    /// That node keeps it and passes it on to the rest. It goes sealed
+    /// through a third node picked at random, a relay (see
+    /// [`crate::oblivious`]), so the node it is handed to never sees this
+    /// node's IP address; straight only when no other node can relay (a
+    /// network of two).
     pub async fn send_report(&self, report: &Report, wait: Duration) -> Result<()> {
         let (reply, peers) = oneshot::channel();
         self.send(Command::Peers(Serving::Reports, reply))?;
@@ -259,9 +267,31 @@ impl NetHandle {
             anyhow::bail!("no node to hand a report to yet");
         }
         crate::search::shuffle(&mut peers);
+        let relays: Vec<&BucketPeer> = peers.iter().filter(|p| p.oblivious).collect();
+        let routes: Vec<(&BucketPeer, Option<&BucketPeer>)> = if relays.len() >= 2 {
+            // Each target through the relay after it, so no node is both.
+            (0..relays.len())
+                .map(|i| (relays[i], Some(relays[(i + 1) % relays.len()])))
+                .collect()
+        } else {
+            peers.iter().map(|p| (p, None)).collect()
+        };
         let mut last_error = None;
-        for peer in peers.iter().take(REPORT_TRIES) {
-            match crate::throwaway::submit_report(peer, report, wait).await {
+        for (peer, relay) in routes.into_iter().take(REPORT_TRIES) {
+            let sent = match relay {
+                Some(relay) => {
+                    crate::search::submit_report_oblivious(
+                        relay,
+                        &peer.peer,
+                        report,
+                        wait,
+                        now_unix(),
+                    )
+                    .await
+                }
+                None => crate::throwaway::submit_report(peer, report, wait).await,
+            };
+            match sent {
                 Ok(_) => {
                     self.status
                         .lock()
@@ -665,7 +695,7 @@ fn build_swarm(key: &Keypair, config: &NetConfig) -> Result<Swarm<Behaviour>> {
                 ),
                 oblivious: request_response::Behaviour::with_codec(
                     request_response::cbor::codec::Codec::default()
-                        .set_request_size_maximum(4 * 1024)
+                        .set_request_size_maximum(2 * REPORT_REQUEST_SIZE as u64)
                         .set_response_size_maximum(MAX_MESSAGE as u64 + 1024),
                     oblivious_protocols,
                     request_config,
@@ -1462,20 +1492,33 @@ impl Task {
         }
     }
 
-    /// As the target: opens a sealed bucket request, and answers it sealed.
+    /// As the target: opens a sealed bucket request or report, and answers
+    /// it sealed.
     fn open_sealed(&mut self, message: Vec<u8>, reply: Reply) {
-        if self.answering >= MAX_ANSWERING || !self.config.answer_searches {
-            self.reply(reply, ObliviousResponse::Sealed(None));
-            return;
-        }
         let (request, sealer) = match self.gateway.open(&message) {
-            Ok(opened) => opened,
+            Ok((Opened::Bucket(request), sealer)) => (request, sealer),
+            Ok((Opened::Report(report), sealer)) => {
+                let taken = self.take_submitted(&report);
+                let sealed = match seal_response(sealer, &ReportResponse::Taken(taken)) {
+                    Ok(sealed) => Some(serde_bytes::ByteBuf::from(sealed)),
+                    Err(err) => {
+                        warn!("cannot seal an answer: {err:#}");
+                        None
+                    }
+                };
+                self.reply(reply, ObliviousResponse::Sealed(sealed));
+                return;
+            }
             Err(err) => {
                 debug!("a sealed request we cannot open: {err:#}");
                 self.reply(reply, ObliviousResponse::Sealed(None));
                 return;
             }
         };
+        if self.answering >= MAX_ANSWERING || !self.config.answer_searches {
+            self.reply(reply, ObliviousResponse::Sealed(None));
+            return;
+        }
         if request.bucket >= BUCKETS {
             self.reply(reply, ObliviousResponse::Sealed(None));
             return;
@@ -1704,6 +1747,22 @@ impl Task {
         Some(new)
     }
 
+    /// A report handed to this node, straight or sealed through a relay:
+    /// keeps it and, if new, passes it on. Returns whether it was taken.
+    fn take_submitted(&mut self, report: &Report) -> bool {
+        let taken = self.take_report(report) == Some(true);
+        if taken {
+            // Nodes that miss it get it when they next ask for the week's
+            // reports.
+            let data = serde_json::to_vec(report).expect("reports encode");
+            let topic = self.report_topic.clone();
+            if let Err(err) = self.swarm.behaviour_mut().gossipsub.publish(topic, data) {
+                debug!("cannot pass a report on yet: {err}");
+            }
+        }
+        taken
+    }
+
     /// A report passed on over gossip.
     fn on_gossip_report(&mut self, data: &[u8]) -> gossipsub::MessageAcceptance {
         let Ok(report) = serde_json::from_slice::<Report>(data) else {
@@ -1725,17 +1784,7 @@ impl Task {
                 ..
             } => match request {
                 ReportRequest::Submit(report) => {
-                    let taken = self.take_report(&report) == Some(true);
-                    if taken {
-                        // Pass it on; nodes that miss it get it when they
-                        // next ask for the week's reports.
-                        let data = serde_json::to_vec(&report).expect("reports encode");
-                        let topic = self.report_topic.clone();
-                        if let Err(err) = self.swarm.behaviour_mut().gossipsub.publish(topic, data)
-                        {
-                            debug!("cannot pass a report on yet: {err}");
-                        }
-                    }
+                    let taken = self.take_submitted(&report);
                     let _ = self
                         .swarm
                         .behaviour_mut()
@@ -1792,6 +1841,7 @@ impl Task {
             .map(ToString::to_string)
             .collect();
         let connected_peers = self.swarm.connected_peers().count();
+        let relaying_peers = self.oblivious_peers.len();
         let relays = self
             .relays
             .iter()
@@ -1804,6 +1854,7 @@ impl Task {
             s.listening = listening;
             s.reachable_at = reachable_at;
             s.connected_peers = connected_peers;
+            s.relaying_peers = relaying_peers;
             s.relays = relays;
             s.batches_held = held;
             s.reports_held = reports_held;
