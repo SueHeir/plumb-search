@@ -15,8 +15,9 @@
 //!
 //! A long-running node (`plumb run`, see [`crate::node`]) serves the same
 //! pages through [`node_router`], plus `GET /api/status`, which returns the
-//! node's [`Status`] as JSON. Until its first index is ready, `/` and
-//! `/search` show the setup step, its progress and the last error instead,
+//! node's [`Status`] as JSON, and the node's panel at `/app` (see
+//! [`panel`]), which the desktop app shows in its window. Until its first
+//! index is ready, `/` and `/search` show the setup step, its progress and the last error instead,
 //! reloading every few seconds with a `<meta http-equiv="refresh">` (no
 //! script), and `/api/search` answers 503.
 //!
@@ -33,7 +34,7 @@ use anyhow::{Context, Result};
 use axum::extract::{Query, State};
 use axum::http::{header, HeaderMap, HeaderName, StatusCode, Uri};
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use plumb_core::{collapse_whitespace, now_unix, truncate_chars};
 use plumb_index::{Hit, RankConfig, SearchOptions, SearchResults, Searcher, SiteSearch};
@@ -43,8 +44,12 @@ use url::Url;
 
 use crate::cli::ServeArgs;
 use crate::country::{country_name, HomeCountry, COUNTRY_CHOICES};
-use crate::node::{Phase, Status, Step};
+use crate::node::{NodeSettings, Phase, Status, Step};
+
+mod panel;
+
 use crate::{block_on, rank_config};
+pub use panel::ADD_TO_FIREFOX_PATH;
 
 /// Results returned when a request does not say how many.
 pub const DEFAULT_LIMIT: usize = 10;
@@ -125,10 +130,29 @@ impl SearchBackend for IndexBackend {
     }
 }
 
-/// What a long-running node tells its web pages about itself.
+/// What a long-running node tells its web pages about itself, and what its
+/// panel (`/app`) can change.
 pub trait StatusSource: Send + Sync {
     /// The node's status, as `GET /api/status` returns it.
     fn status(&self) -> Status;
+
+    /// The node's settings; `None` when it has none.
+    fn settings(&self) -> Option<NodeSettings> {
+        None
+    }
+
+    /// Saves new settings and puts them in force.
+    fn change_settings(&self, _settings: NodeSettings) -> Result<()> {
+        anyhow::bail!("this node has no settings")
+    }
+
+    /// Starts a refresh now.
+    fn refresh_now(&self) {}
+
+    /// Where the node keeps its data, to show on the panel.
+    fn data_dir(&self) -> Option<std::path::PathBuf> {
+        None
+    }
 }
 
 #[derive(Clone)]
@@ -190,7 +214,12 @@ fn app(state: AppState) -> Router {
         .route("/api/search", get(api_search))
         .route("/opensearch.xml", get(opensearch));
     if state.node.is_some() {
-        router = router.route("/api/status", get(api_status));
+        router = router
+            .route("/api/status", get(api_status))
+            .route("/app", get(panel::panel))
+            .route("/app/settings", post(panel::save_settings))
+            .route("/app/refresh", post(panel::refresh))
+            .route(panel::ADD_TO_FIREFOX_PATH, get(panel::add_to_firefox));
     }
     router.with_state(state)
 }
@@ -724,10 +753,21 @@ fn wikidata_note(status: &Status, now: u64) -> Option<String> {
     if !status.wikidata_missing {
         return None;
     }
+    let Some(err) = &status.wikidata_error else {
+        // Right after the quick first setup, Wikidata is next.
+        if status.phase == Phase::SettingUp {
+            return None;
+        }
+        return Some(
+            "Plumb is still downloading Wikidata's list of official websites and more \
+             rankings. Search works now, and results get better once those are in."
+                .to_string(),
+        );
+    };
     let mut note = "Wikidata's list of official websites could not be downloaded yet, so the \
                     index does without it for now: official sites get no boost over look-alikes."
         .to_string();
-    if let Some(retry_at) = status.wikidata_error.as_ref().and_then(|err| err.retry_at) {
+    if let Some(retry_at) = err.retry_at {
         let _ = write!(note, " Plumb will try again {}.", time_until(retry_at, now));
     }
     Some(note)
@@ -781,9 +821,9 @@ fn render_setup(status: &Status, now: u64) -> String {
     }
     let _ = write!(
         body,
-        "<p class=\"s\">On its first start, Plumb downloads public lists of popular websites \
-         and builds its search index from them, which takes a few minutes. This page reloads \
-         every {SETUP_RELOAD_SECONDS} seconds.</p>\n</main>"
+        "<p class=\"s\">On its first start, Plumb downloads a public list of popular websites \
+         and builds a first search index from it, which takes a minute or two. It adds more \
+         lists while you search. This page reloads every {SETUP_RELOAD_SECONDS} seconds.</p>\n</main>"
     );
     let head = format!("<meta http-equiv=\"refresh\" content=\"{SETUP_RELOAD_SECONDS}\">\n");
     page_with_head("Setting up - Plumb Search", &head, &body)
@@ -1244,6 +1284,13 @@ mod tests {
             last_refresh: None,
             next_refresh: None,
             version: "0.1.0".to_string(),
+            crawl_left: 0,
+            background_updates: true,
+            paused: None,
+            disk_used: 0,
+            downloaded_today: 0,
+            downloaded_total: 0,
+            homepages_visited: 0,
         }
     }
 
@@ -1441,6 +1488,19 @@ mod tests {
                 "<p class=\"msg\">Wikidata stopped the query &lt;at&gt; its time limit</p>"
             ),
             "{body}"
+        );
+
+        // Before Wikidata is first tried, it is still to come.
+        status.wikidata_error = None;
+        assert!(!render_setup(&status, now).contains("Wikidata"));
+        status.phase = Phase::Ready;
+        assert!(
+            render_home(12, Some(&status), now).contains(
+                "Plumb is still downloading Wikidata&#39;s list of official websites and more \
+                 rankings. Search works now, and results get better once those are in."
+            ),
+            "{}",
+            render_home(12, Some(&status), now)
         );
 
         // Once Wikidata is in, nothing is said.
