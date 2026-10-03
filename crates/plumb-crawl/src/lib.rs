@@ -12,6 +12,8 @@
 //! - [`to_records`] turns crawl results into [`plumb_core::SiteRecord`]s
 //!   to merge into a [`plumb_core::RecordSet`].
 
+use std::sync::atomic::AtomicU64;
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -72,6 +74,10 @@ pub struct CrawlConfig {
     /// host name is still checked, so give a proxy on a private network as an
     /// IP address.
     pub use_system_proxy: bool,
+    /// Counts the bytes of response bodies read (robots.txt files and
+    /// pages, after decompression), so that a caller can keep track of
+    /// the crawl's downloads. Clones of a config share the count.
+    pub downloaded: Arc<AtomicU64>,
 }
 
 impl Default for CrawlConfig {
@@ -85,6 +91,7 @@ impl Default for CrawlConfig {
             max_redirects: 5,
             allow_private_addresses: false,
             use_system_proxy: false,
+            downloaded: Arc::default(),
         }
     }
 }
