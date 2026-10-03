@@ -1059,10 +1059,21 @@ impl Task {
                 lines
                     .into_iter()
                     .map(|record| {
-                        let proof = serde_json::from_str::<SiteRecord>(&record)
+                        let mut proofs = serde_json::from_str::<SiteRecord>(&record)
                             .ok()
-                            .and_then(|r| store.proof(&r.domain).unwrap_or(None));
-                        BucketRecord { record, proof }
+                            .map(|r| {
+                                store
+                                    .proofs(&r.domain, 1 + MAX_EXTRA_PROOFS)
+                                    .unwrap_or_default()
+                            })
+                            .unwrap_or_default()
+                            .into_iter();
+                        let proof = proofs.next();
+                        BucketRecord {
+                            record,
+                            proof,
+                            also: proofs.collect(),
+                        }
                     })
                     .collect()
             });

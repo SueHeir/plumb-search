@@ -629,6 +629,8 @@ pub struct NetworkResult {
     pub verified: bool,
     /// The node that signed that crawl.
     pub crawler: Option<String>,
+    /// Signed crawls from two or more different nodes agree on the text.
+    pub confirmed: bool,
     /// How many answers held the site.
     pub answers: usize,
 }
@@ -691,6 +693,7 @@ fn rank_found(
         results.hits.push(NetworkResult {
             verified: site.verified,
             crawler: site.crawler.clone(),
+            confirmed: site.confirmed,
             answers: site.answers,
             hit,
         });
@@ -1467,7 +1470,9 @@ fn render_hit(out: &mut String, hit: &Hit, network: Option<&NetworkResult>) {
         .unwrap_or_default();
     let source = network
         .map(|result| {
-            let crawl = if result.verified {
+            let crawl = if result.confirmed {
+                "signed crawls, two nodes agree"
+            } else if result.verified {
                 "signed crawl, checked"
             } else {
                 "unsigned (seed data)"
@@ -2411,6 +2416,7 @@ mod tests {
             hit,
             verified: true,
             crawler: Some("12D3KooWexample".into()),
+            confirmed: false,
             answers: 2,
         }
     }
