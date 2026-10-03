@@ -7,9 +7,11 @@
 //! 1. no records file: download the seed data, ingest it, build the first
 //!    index ([`set_up`]);
 //! 2. no index, or one older than the records: build one ([`rebuild`]);
-//! 3. homepages left in a round: crawl them, then rebuild ([`crawl`]);
-//! 4. a refresh due or asked for: start a round ([`start_round`]);
-//! 5. otherwise wait for the next refresh.
+//! 3. Wikidata's official websites missing from setup and a try due:
+//!    download them and add them to the records ([`add_wikidata`]);
+//! 4. homepages left in a round: crawl them, then rebuild ([`crawl`]);
+//! 5. a refresh due or asked for: start a round ([`start_round`]);
+//! 6. otherwise wait for the next refresh (or the next try at Wikidata).
 //!
 //! Slow work runs on Tokio's blocking threads and checks for shutdown only
 //! where stopping leaves nothing half-done; downloads and the homepage
@@ -57,6 +59,9 @@ pub(super) async fn run(inner: Arc<Inner>) {
                 backoff.reset();
                 inner.clear_error();
             }
+            // A try at Wikidata, which keeps its own waits between tries,
+            // says nothing of the work this loop is retrying.
+            Ok(Next::Aside) => {}
             Ok(Next::IdleUntil(until)) => {
                 inner.set_step(Step::Idle, idle_detail(&inner.config));
                 wait(&inner, Deadline::Wall(until)).await;
@@ -83,6 +88,8 @@ pub(super) async fn run(inner: Arc<Inner>) {
 enum Next {
     /// Look for more work right away.
     Continue,
+    /// Look for more work right away, after a try at Wikidata.
+    Aside,
     /// Nothing to do until this Unix time (forever when `None`), unless a
     /// refresh is asked for.
     IdleUntil(Option<u64>),
@@ -99,6 +106,11 @@ async fn step(inner: &Arc<Inner>) -> Result<Next> {
         rebuild(inner).await?;
         return Ok(Next::Continue);
     }
+    let wikidata_due = saved.wikidata_missing.then(|| inner.wikidata_retry_at());
+    if wikidata_due.is_some_and(|due| due <= now_unix()) {
+        add_wikidata(inner).await?;
+        return Ok(Next::Aside);
+    }
     if saved.crawl_left > 0 {
         crawl(inner).await?;
         return Ok(Next::Continue);
@@ -114,7 +126,11 @@ async fn step(inner: &Arc<Inner>) -> Result<Next> {
         start_round(inner, requested)?;
         return Ok(Next::Continue);
     }
-    Ok(Next::IdleUntil(due))
+    let until = match (due, wikidata_due) {
+        (Some(due), Some(wikidata)) => Some(due.min(wikidata)),
+        (due, wikidata) => due.or(wikidata),
+    };
+    Ok(Next::IdleUntil(until))
 }
 
 fn idle_detail(config: &NodeConfig) -> &'static str {
@@ -136,10 +152,21 @@ async fn set_up(inner: &Arc<Inner>) -> Result<()> {
         files = download_seed(inner) => files?,
         () = inner.stopped() => return Err(Stopped.into()),
     };
+    if let Err(err) = &files.wikidata {
+        let retry_at = inner.wikidata_failed(err);
+        warn!(
+            "{err:#}; setting up without Wikidata's official websites for now, \
+             trying again in {}",
+            duration_words(retry_at.saturating_sub(now_unix()))
+        );
+    }
     let built = blocking(inner, move |inner| {
-        let records = ingest(inner, &files)?;
-        let fresh = SavedState::fresh(inner.config.initial_crawl);
+        let records = seed_records(inner, &files)?;
+        let mut fresh = SavedState::fresh(inner.config.initial_crawl);
+        fresh.wikidata_missing = files.wikidata.is_err();
+        // Saved first: records on disk always come with their state.
         inner.update_saved(|saved| *saved = fresh)?;
+        save_seed_records(inner, &records)?;
         inner.check_stop()?;
         build(inner, records)
     })
@@ -147,17 +174,83 @@ async fn set_up(inner: &Arc<Inner>) -> Result<()> {
     put_in_service(inner, built).await
 }
 
+/// Tries again to download Wikidata's official websites, which setup went
+/// on without. When they come, they are folded into the records as setup
+/// would have done, and an index of the result is put in service. A
+/// failure only sets the time of the next try: it is shown in the status,
+/// but does not hold up other work.
+async fn add_wikidata(inner: &Arc<Inner>) -> Result<()> {
+    info!("asking Wikidata again for the official websites setup went without");
+    let files = tokio::select! {
+        files = download_seed(inner) => files,
+        () = inner.stopped() => return Err(Stopped.into()),
+    };
+    let files = match files {
+        Err(err)
+        | Ok(SeedFiles {
+            wikidata: Err(err), ..
+        }) => {
+            let retry_at = inner.wikidata_failed(&err);
+            warn!(
+                "{err:#}; trying Wikidata again in {}",
+                duration_words(retry_at.saturating_sub(now_unix()))
+            );
+            return Ok(());
+        }
+        Ok(files) => files,
+    };
+    inner.wikidata_arrived();
+    let built = blocking(inner, move |inner| {
+        let seed = seed_records(inner, &files)?;
+        inner.set_step(Step::Ingesting, "Reading the site records");
+        let mut set = load_records(&inner.paths.records)?;
+        let before = set.len();
+        set.extend(seed);
+        inner.check_stop()?;
+        let records = set.into_sorted_vec();
+        inner.set_step(
+            Step::Ingesting,
+            format!(
+                "Saving {} site records",
+                group_thousands(records.len() as u64)
+            ),
+        );
+        replace_records(&inner.paths.records, &records)?;
+        inner.update_saved(|saved| {
+            saved.wikidata_missing = false;
+            saved.index_stale = true;
+        })?;
+        info!(
+            "added Wikidata's official websites to the records: {} sites, {} of them new",
+            records.len(),
+            records.len().saturating_sub(before)
+        );
+        inner.check_stop()?;
+        build(inner, records)
+    })
+    .await?;
+    // Not put_in_service: this is no refresh, and a round under way goes on.
+    inner.install(built);
+    inner.update_saved(|saved| saved.index_stale = false)?;
+    sweep(inner).await;
+    Ok(())
+}
+
 /// The files a setup ingests.
 #[derive(Debug)]
 struct SeedFiles {
     tranco: PathBuf,
-    wikidata: PathBuf,
+    /// Setup can go on without Wikidata, so its failure is kept here
+    /// rather than failing the download.
+    wikidata: Result<PathBuf>,
     cc_ranks: Option<PathBuf>,
 }
 
 /// Downloads the seed data into `seed/`, keeping files that an earlier try
 /// saved in the last week. Every source is tried before failing, so the ones
-/// that worked are not fetched again next time.
+/// that worked are not fetched again next time. Only the Tranco list and
+/// Common Crawl's ranks are needed; a failure to get Wikidata's official
+/// websites is returned in [`SeedFiles::wikidata`].
 async fn download_seed(inner: &Inner) -> Result<SeedFiles> {
     let config = &inner.config;
     let sources = &config.sources;
@@ -179,20 +272,22 @@ async fn download_seed(inner: &Inner) -> Result<SeedFiles> {
         }
     }
 
-    let wikidata = seed.join(download::WIKIDATA_FILE_NAME);
+    let mut wikidata = Ok(seed.join(download::WIKIDATA_FILE_NAME));
     inner.set_step(Step::Downloading, "Asking Wikidata for official websites");
     inner.set_progress(1, total, "files");
-    if !is_recent(&wikidata) {
-        let downloaded = download::download_wikidata_official_sites_from(
+    if !wikidata.as_ref().is_ok_and(|path| is_recent(path)) {
+        let downloaded = download::download_wikidata_official_sites_paced(
             &client,
             &sources.wikidata_sparql_url,
             seed,
             sources.wikidata_min_sitelinks,
+            sources.wikidata_pacing,
         )
         .await;
-        if let Err(err) = downloaded {
+        if let Err(err) = &downloaded {
             failures.push(format!("Wikidata's official websites: {err:#}"));
         }
+        wikidata = downloaded.context("could not download Wikidata's official websites");
     }
 
     let mut cc_ranks = None;
@@ -217,7 +312,9 @@ async fn download_seed(inner: &Inner) -> Result<SeedFiles> {
     }
 
     inner.set_progress(total, total, "files");
-    if !failures.is_empty() {
+    // The other sources are needed; their failure is reported with
+    // Wikidata's, if any, which is tried again then too.
+    if failures.len() > usize::from(wikidata.is_err()) {
         bail!("could not download the seed data:\n{}", failures.join("\n"));
     }
     Ok(SeedFiles {
@@ -241,10 +338,11 @@ fn is_recent(path: &Path) -> bool {
             .map_or(true, |age| age < SEED_MAX_AGE)
 }
 
-/// Folds the seed files into site records, keeps the best
-/// [`NodeConfig::sites`] and saves them as the records file.
-fn ingest(inner: &Inner, files: &SeedFiles) -> Result<Vec<SiteRecord>> {
-    let sources = 2 + usize::from(files.cc_ranks.is_some());
+/// Folds the seed files into site records and keeps the best
+/// [`NodeConfig::sites`], best first.
+fn seed_records(inner: &Inner, files: &SeedFiles) -> Result<Vec<SiteRecord>> {
+    let wikidata = files.wikidata.as_ref().ok();
+    let sources = 1 + usize::from(wikidata.is_some()) + usize::from(files.cc_ranks.is_some());
     let mut builder = Builder::new();
 
     inner.set_step(Step::Ingesting, "Reading the Tranco list");
@@ -265,16 +363,27 @@ fn ingest(inner: &Inner, files: &SeedFiles) -> Result<Vec<SiteRecord>> {
         inner.check_stop()?;
     }
 
-    inner.set_step(Step::Ingesting, "Reading Wikidata's official websites");
-    inner.set_progress(sources - 1, sources, "files");
-    let sites = load_wikidata_official_sites(&files.wikidata)
-        .with_context(|| format!("loading Wikidata sites {}", files.wikidata.display()))?;
-    builder.add_official_sites(&sites);
-    drop(sites);
-    inner.check_stop()?;
+    if let Some(path) = wikidata {
+        inner.set_step(Step::Ingesting, "Reading Wikidata's official websites");
+        inner.set_progress(sources - 1, sources, "files");
+        let sites = load_wikidata_official_sites(path)
+            .with_context(|| format!("loading Wikidata sites {}", path.display()))?;
+        builder.add_official_sites(&sites);
+        drop(sites);
+        inner.check_stop()?;
+    }
 
     let found = builder.len();
     let records = builder.finish(Some(inner.config.sites));
+    info!(
+        "kept the best {} of {found} sites from the seed data",
+        records.len()
+    );
+    Ok(records)
+}
+
+/// Saves the records of a setup as the records file.
+fn save_seed_records(inner: &Inner, records: &[SiteRecord]) -> Result<()> {
     inner.set_step(
         Step::Ingesting,
         format!(
@@ -282,13 +391,13 @@ fn ingest(inner: &Inner, files: &SeedFiles) -> Result<Vec<SiteRecord>> {
             group_thousands(records.len() as u64)
         ),
     );
-    replace_records(&inner.paths.records, &records)?;
+    replace_records(&inner.paths.records, records)?;
     info!(
-        "kept the best {} of {found} sites from the seed data in {}",
+        "saved {} site records in {}",
         records.len(),
         inner.paths.records.display()
     );
-    Ok(records)
+    Ok(())
 }
 
 /// Builds a new index of the records file and puts it in service.
@@ -547,14 +656,14 @@ async fn wait(inner: &Arc<Inner>, deadline: Deadline) {
 /// Waits between tries of failed work: `first`, then twice as long after
 /// each failure in a row, up to `max`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Backoff {
+pub(super) struct Backoff {
     first: Duration,
     max: Duration,
     next: Duration,
 }
 
 impl Backoff {
-    fn new(first: Duration, max: Duration) -> Self {
+    pub(super) fn new(first: Duration, max: Duration) -> Self {
         Backoff {
             first,
             max: max.max(first),
@@ -563,14 +672,14 @@ impl Backoff {
     }
 
     /// The wait after one more failure.
-    fn next_delay(&mut self) -> Duration {
+    pub(super) fn next_delay(&mut self) -> Duration {
         let delay = self.next;
         self.next = self.next.saturating_mul(2).min(self.max);
         delay
     }
 
     /// Back to the first wait, after a success.
-    fn reset(&mut self) {
+    pub(super) fn reset(&mut self) {
         self.next = self.first;
     }
 }
