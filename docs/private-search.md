@@ -37,11 +37,29 @@ Two things keep repeated searches from giving that away:
   searches does not single out the real ones. Another browser pads
   differently.
 
-The node still sees the visitor's IP address and when they search, as any
-web page would. Hiding that takes a relay between the browser and the node
-run by someone else, which is planned: browsers would send their bucket
-requests through plumbsearch.org, encrypted for other nodes (Oblivious HTTP,
-as the network does between nodes).
+## Hiding who asks
+
+Fetched straight from the node, the buckets come with the visitor's IP
+address. A node that is also in the Plumb network (`--network`) hides it
+by relaying, with Oblivious HTTP as nodes do among themselves
+(`plumb_core::oblivious`):
+
+1. The browser asks the node for a few other nodes that answer bucket
+   requests, each with its key signed by that node
+   (`GET /api/oblivious/targets`). It checks each signature against the
+   node's id, so the relay cannot slip in a key of its own.
+2. It seals each bucket number to one of those nodes' keys, padded to a
+   fixed size, and posts it to the relay
+   (`POST /api/oblivious/forward/{peer}`), which passes it on over the
+   network and the sealed answer back. Each bucket goes to two nodes.
+3. It opens the answers, drops URLs off a site's own domain, and merges
+   copies of a site from different nodes keeping the less favorable
+   popularity, so one node cannot push its sites up.
+
+The relay sees the browser's address and which node it asks, but not the
+bucket; the answering node sees the bucket but only the relay. The page
+says which way the buckets came. With no other node to ask, the browser
+fetches them from the node directly, as above.
 
 ## Ranking in the browser
 
@@ -102,3 +120,5 @@ cache it for good too.
 | `GET /private/{hash}/{file}` | The page's script: `boot.js`, `plumb_private.js`, `plumb_private_bg.wasm`. |
 | `GET /api/buckets` | `{"table": "2-1f0e...", "buckets": 16384}`, or 503 when the node serves no buckets. Never cached. |
 | `GET /api/buckets/{table}/{n}` | Bucket `n` of that table: a JSON list of site records, trimmed to the names, top link texts and signals. Cached for good; 404 once a newer index replaced the table. |
+| `GET /api/oblivious/targets` | `{"targets": [{"peer": "12D3...", "keys": {...}}]}`: up to 8 nodes to seal bucket requests to. Empty when the node is not in the network. Never cached. |
+| `POST /api/oblivious/forward/{peer}` | A sealed bucket request for that node (at most 1 KiB), answered with its sealed answer. Only to nodes the relay knows answer bucket requests; 404 otherwise, 502 or 504 when the node does not answer. |

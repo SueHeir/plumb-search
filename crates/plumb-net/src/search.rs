@@ -536,7 +536,7 @@ async fn ask(
     }
 }
 
-pub(crate) fn shuffle<T>(items: &mut [T]) {
+pub fn shuffle<T>(items: &mut [T]) {
     let mut rng = rand_core::OsRng;
     for i in (1..items.len()).rev() {
         let j = (rng.next_u64() % (i as u64 + 1)) as usize;

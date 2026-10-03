@@ -5674,8 +5674,10 @@ dependencies = [
 name = "plumb-private"
 version = "0.1.0"
 dependencies = [
+ "getrandom 0.4.3",
  "idna",
  "js-sys",
+ "libp2p-identity",
  "plumb-core",
  "plumb-index",
  "serde",
