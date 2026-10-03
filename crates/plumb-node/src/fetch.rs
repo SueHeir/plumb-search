@@ -77,17 +77,11 @@ pub fn run(args: FetchDataArgs) -> Result<()> {
                 .await,
             )
         };
-        let sites_files: Vec<PathBuf> = [&wikidata, &kind_sites]
-            .into_iter()
-            .filter_map(|outcome| match outcome {
-                Outcome::Saved(path) => Some(path.clone()),
-                _ => None,
-            })
-            .collect();
+        let sites_files = facts_sources(&args.dir);
         let facts = if args.skip_wikidata {
             Outcome::Skipped("--skip-wikidata".to_string())
         } else if sites_files.is_empty() {
-            Outcome::Skipped("needs the official websites, which failed".to_string())
+            Outcome::Skipped("needs the official websites, which are missing".to_string())
         } else {
             outcome(
                 facts::download_site_facts(
@@ -127,6 +121,21 @@ pub fn run(args: FetchDataArgs) -> Result<()> {
         bail!("could not download {}", failed.join(", "));
     }
     Ok(())
+}
+
+/// The official-site files on disk that facts are fetched for. A file whose
+/// download failed this run keeps its earlier copy, which still counts: facts
+/// for only the files saved this run would replace a complete facts file with
+/// one that leaves the other file's sites out.
+fn facts_sources(dir: &Path) -> Vec<PathBuf> {
+    [
+        download::WIKIDATA_FILE_NAME,
+        kind_sites::KIND_SITES_FILE_NAME,
+    ]
+    .into_iter()
+    .map(|name| dir.join(name))
+    .filter(|path| path.is_file())
+    .collect()
 }
 
 fn outcome(result: Result<PathBuf>) -> Outcome {
@@ -207,6 +216,21 @@ mod tests {
             skip_wikidata: false,
             wikidata_min_sitelinks: 25,
         }
+    }
+
+    #[test]
+    fn facts_cover_official_sites_from_earlier_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(facts_sources(dir.path()).is_empty());
+        // Only the kinds download worked this run; the main file is from the
+        // last run and its sites still need facts.
+        let sites = dir.path().join(download::WIKIDATA_FILE_NAME);
+        let kinds = dir.path().join(kind_sites::KIND_SITES_FILE_NAME);
+        std::fs::write(&sites, "item\tsite\n").unwrap();
+        std::fs::write(&kinds, "item\tsite\n").unwrap();
+        assert_eq!(facts_sources(dir.path()), [sites.clone(), kinds]);
+        std::fs::remove_file(dir.path().join(kind_sites::KIND_SITES_FILE_NAME)).unwrap();
+        assert_eq!(facts_sources(dir.path()), [sites]);
     }
 
     #[test]

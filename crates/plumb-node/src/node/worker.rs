@@ -500,7 +500,9 @@ fn seed_records(inner: &Inner, files: &SeedFiles) -> Result<Vec<SiteRecord>> {
     if let Some(path) = &files.cc_ranks {
         inner.set_step(Step::Ingesting, "Reading the Common Crawl domain ranks");
         inner.set_progress(1, sources, "files");
-        let ranks = load_cc_domain_ranks(path, None)
+        // The download kept only the top `sites` rows: read them all, past
+        // the default cap of a million.
+        let ranks = load_cc_domain_ranks(path, Some(usize::MAX))
             .with_context(|| format!("loading Common Crawl ranks {}", path.display()))?;
         builder.add_cc_ranks(&ranks);
         drop(ranks);

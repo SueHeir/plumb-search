@@ -26,7 +26,7 @@ mod records;
 mod test_alloc;
 
 pub use crawl::crawl_homepages;
-pub use extract::{extract_page_meta, MAX_OUT_LINKS};
+pub use extract::{extract_page_meta, MAX_BODY_WORDS, MAX_OUT_LINKS};
 pub use records::to_records;
 
 /// Sent with every request so site owners can see who is crawling and why.
@@ -149,6 +149,11 @@ pub struct PageMeta {
     /// words in all.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub headings: Vec<String>,
+    /// The page's visible text in reading order, without scripts, menus,
+    /// headers, footers, forms and headings, cut to [`MAX_BODY_WORDS`]
+    /// words.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_text: Option<String>,
     /// Links to other registrable domains, in page order.
     pub links: Vec<OutLink>,
 }
@@ -180,6 +185,8 @@ pub struct CrawledPage {
 
 /// What happened to one target. See [`crawl_homepages`] for when each
 /// outcome is produced.
+// A fetched page is the common outcome, so boxing it would buy nothing.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CrawlOutcome {
     Fetched(CrawledPage),
