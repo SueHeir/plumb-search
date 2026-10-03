@@ -312,6 +312,7 @@ mod tests {
                 "d.com",
                 CrawlOutcome::Failed {
                     error: "timed out".into(),
+                    network: true,
                 },
             ),
         ];
