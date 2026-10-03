@@ -9,13 +9,20 @@
 //!    [`NodeConfig::cc_release`] is set, the top rows of Common Crawl's
 //!    domain ranks. It keeps the best [`NodeConfig::sites`] sites, writes
 //!    the records file and builds the first index, which is searchable from
-//!    then on.
+//!    then on. Wikidata is the one source setup can do without: when only
+//!    it fails, the first index is built from the others, the status says
+//!    Wikidata is missing, and the node keeps trying to get it (waiting as
+//!    after other failures, below) while it goes on with its work. Once
+//!    Wikidata answers, its official websites are added to the records and
+//!    the index is rebuilt.
 //! 2. It then crawls [`NodeConfig::initial_crawl`] homepages, rebuilds the
 //!    index and swaps the new one in.
 //! 3. Every [`NodeConfig::refresh_every`] it crawls
-//!    [`NodeConfig::crawl_per_refresh`] more homepages (the best-ranked ones
-//!    not visited for 30 days, as `plumb crawl` picks them), rebuilds and
-//!    swaps again.
+//!    [`NodeConfig::crawl_per_refresh`] more homepages, rebuilds and swaps
+//!    again. As with `plumb crawl`, half of each round goes to sites never
+//!    crawled and half to sites due again (30 days after their last visit,
+//!    sooner for sites that could not be reached), best-ranked first, so the
+//!    node keeps reaching new sites while it refreshes the best ones.
 //!
 //! Until the first index is ready, `/` and `/search` show the setup step,
 //! its progress and the last error, reloading every 5 seconds;
@@ -26,27 +33,34 @@
 //! never stops a node: it is shown on the setup page and in `/api/status`,
 //! and the work is tried again after [`NodeConfig::retry_wait`] (10 minutes),
 //! doubling after each failure in a row up to [`NodeConfig::max_retry_wait`]
-//! (6 hours). After a restart a node picks up where it left off: setup is
-//! not repeated, a crawl that was cut short goes on, and the next refresh
-//! falls due on schedule.
+//! (6 hours). A batch of homepages that nearly all fail counts as such a
+//! failure (the network is down, or a proxy is needed; see
+//! [`NodeConfig::use_system_proxy`]) and is not saved. After a restart a node
+//! picks up where it left off: setup is not repeated, a crawl that was cut
+//! short goes on, and the next refresh falls due on schedule.
 //!
 //! # Data directory
 //!
 //! ```text
 //! DIR/
-//!   node.lock         locked while a node runs, so two never share DIR
-//!   state.json        progress that survives restarts
-//!   records.jsonl     every known site, one JSON line each
-//!   seed/             first-start downloads; may be deleted once
-//!                     records.jsonl exists
-//!   indexes/000001/   a complete search index
-//!   indexes/000002/   ...the newest one that opens is searched
+//!   node.lock                locked while a node runs, so two never share DIR
+//!   state.json               progress that survives restarts
+//!   records.jsonl            every known site, one JSON line each
+//!   records.jsonl.journal    crawl results not yet folded into records.jsonl
+//!   seed/                    first-start downloads; may be deleted once
+//!                            records.jsonl exists
+//!   indexes/000001/          a complete search index
+//!   indexes/000002/          ...the newest one that opens is searched
 //! ```
 //!
 //! The node owns the directory. The records and state files are replaced
-//! atomically (written to a temporary file, then renamed), so a crash or a
-//! power cut leaves the previous version, never a half-written one, and
-//! downloads only take their final name once complete. Each index build goes
+//! atomically (written to a temporary file and flushed to disk, then
+//! renamed), so a crash or a power cut leaves the previous version, never a
+//! half-written one, and downloads only take their final name once complete.
+//! Crawls append each batch to the journal instead of rewriting the records
+//! file, and fold it in once it reaches a quarter of the file's size (see
+//! [`crate::records`]); the journal is replayed whenever the records are
+//! read. Each index build goes
 //! into a new numbered directory, by way of a hidden staging directory, and
 //! is never renamed or changed after that; older indexes are deleted once no
 //! search has them open (Windows refuses to delete open files), and a failed
@@ -100,6 +114,13 @@ pub struct NodeConfig {
     pub refresh_every: Option<Duration>,
     /// Homepages crawled per refresh.
     pub crawl_per_refresh: usize,
+    /// Fetch homepages through the system proxy (`HTTP_PROXY`, `HTTPS_PROXY`
+    /// or `ALL_PROXY`, except hosts in `NO_PROXY`), for machines that reach
+    /// the internet only through one. Off by default: homepages are fetched
+    /// directly, which lets the crawler refuse sites whose names lead to
+    /// private networks, something it cannot check through a proxy. Seed
+    /// downloads always use these variables.
+    pub use_system_proxy: bool,
     /// Common Crawl web graph release to take domain ranks from, such as
     /// `cc-main-2025-26-nov-dec-jan`; only the rows needed are downloaded.
     pub cc_release: Option<String>,
@@ -127,6 +148,7 @@ impl NodeConfig {
             initial_crawl: 10_000,
             refresh_every: Some(Duration::from_secs(24 * 60 * 60)),
             crawl_per_refresh: 5_000,
+            use_system_proxy: false,
             cc_release: None,
             alpha: None,
             country: HomeCountry::Auto,
@@ -209,8 +231,12 @@ pub struct SeedSources {
     /// A SPARQL endpoint that answers Wikidata queries.
     pub wikidata_sparql_url: String,
     /// Only Wikidata items with at least this many Wikipedia sitelinks are
-    /// fetched, which keeps the query small enough to finish.
+    /// fetched, which keeps the download small enough to finish (see
+    /// [`download::download_wikidata_official_sites`]).
     pub wikidata_min_sitelinks: u32,
+    /// How the Wikidata queries are spaced out: the pause between two and
+    /// the wait before trying one again.
+    pub wikidata_pacing: download::WikidataPacing,
     /// A Common Crawl domain ranks file to read instead of the one of
     /// [`NodeConfig::cc_release`]; when set, Common Crawl ranks are used
     /// even without a release.
@@ -223,6 +249,7 @@ impl Default for SeedSources {
             tranco_url: download::TRANCO_LATEST_URL.to_string(),
             wikidata_sparql_url: download::WIKIDATA_SPARQL_URL.to_string(),
             wikidata_min_sitelinks: 25,
+            wikidata_pacing: download::WikidataPacing::default(),
             cc_ranks_url: None,
         }
     }
@@ -241,6 +268,14 @@ pub struct Status {
     pub progress: Option<Progress>,
     /// The latest failure; cleared once the work that failed succeeds.
     pub last_error: Option<LastError>,
+    /// True while the index lacks Wikidata's official websites because
+    /// setup could not download them. The node keeps trying and rebuilds
+    /// the index once they arrive; until then, official websites get no
+    /// boost over look-alikes and no names from Wikidata.
+    pub wikidata_missing: bool,
+    /// The last failure to download Wikidata's official websites, and when
+    /// the node tries again; `None` once they are in.
+    pub wikidata_error: Option<LastError>,
     /// Sites in the index being searched; 0 while setting up.
     pub sites: u64,
     /// The directory under `indexes/` of the index being searched.
@@ -529,6 +564,17 @@ struct Inner {
     wake: Notify,
     refresh_requested: AtomicBool,
     lock: Mutex<Option<DirLock>>,
+    /// Tries at Wikidata's official websites while setup went on without
+    /// them ([`SavedState::wikidata_missing`]).
+    wikidata: Mutex<WikidataTries>,
+}
+
+/// The failures to download Wikidata's official websites, which have their
+/// own wait between tries: other work goes on meanwhile.
+#[derive(Debug)]
+struct WikidataTries {
+    last_error: Option<LastError>,
+    backoff: worker::Backoff,
 }
 
 /// What the background work is doing, for [`Status`].
@@ -547,6 +593,7 @@ impl Inner {
         opened: Opened,
         stopped: watch::Receiver<bool>,
     ) -> Self {
+        let backoff = worker::Backoff::new(config.retry_wait, config.max_retry_wait);
         Inner {
             config,
             paths: opened.paths,
@@ -564,6 +611,10 @@ impl Inner {
             wake: Notify::new(),
             refresh_requested: AtomicBool::new(false),
             lock: Mutex::new(opened.lock),
+            wikidata: Mutex::new(WikidataTries {
+                last_error: None,
+                backoff,
+            }),
         }
     }
 
@@ -581,6 +632,12 @@ impl Inner {
             detail: activity.detail,
             progress: activity.progress,
             last_error: activity.last_error,
+            wikidata_missing: saved.wikidata_missing,
+            wikidata_error: if saved.wikidata_missing {
+                self.wikidata_tries().last_error.clone()
+            } else {
+                None
+            },
             sites: index.map_or(0, |(_, docs)| docs),
             index: index.map(|(id, _)| store::index_name(id)),
             last_refresh: saved.last_refresh,
@@ -629,6 +686,41 @@ impl Inner {
 
     fn clear_error(&self) {
         self.activity().last_error = None;
+    }
+
+    fn wikidata_tries(&self) -> std::sync::MutexGuard<'_, WikidataTries> {
+        self.wikidata.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Notes a failure to download Wikidata's official websites and returns
+    /// when to try again, in Unix seconds.
+    fn wikidata_failed(&self, err: &anyhow::Error) -> u64 {
+        let mut tries = self.wikidata_tries();
+        let now = now_unix();
+        let retry_at = now.saturating_add(tries.backoff.next_delay().as_secs());
+        tries.last_error = Some(LastError {
+            message: format!("{err:#}"),
+            at: now,
+            retry_at: Some(retry_at),
+        });
+        retry_at
+    }
+
+    /// When to try Wikidata again, in Unix seconds: 0 (now) when it has not
+    /// failed since the node started.
+    fn wikidata_retry_at(&self) -> u64 {
+        self.wikidata_tries()
+            .last_error
+            .as_ref()
+            .and_then(|err| err.retry_at)
+            .unwrap_or(0)
+    }
+
+    /// Forgets the failures once Wikidata has answered.
+    fn wikidata_arrived(&self) {
+        let mut tries = self.wikidata_tries();
+        tries.last_error = None;
+        tries.backoff.reset();
     }
 
     fn saved(&self) -> SavedState {

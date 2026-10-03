@@ -3,26 +3,20 @@
 use std::fmt::Write as _;
 
 use anyhow::{Context, Result};
-use plumb_core::{read_jsonl, truncate_chars, RecordSet, SiteRecord};
+use plumb_core::truncate_chars;
 use plumb_index::{build_index, Hit, SearchOptions, Searcher};
-use tracing::info;
 
 use crate::cli::{IndexArgs, SearchArgs};
 use crate::rank_config;
+use crate::records::load_records;
 
 pub fn run_index(args: IndexArgs) -> Result<()> {
-    let records: Vec<SiteRecord> = read_jsonl(&args.records)
-        .with_context(|| format!("loading records {}", args.records.display()))?;
-    let read = records.len();
     // Files written by plumb hold one record per domain already; merging
-    // makes hand-made or concatenated files safe to index too.
-    let records = records.into_iter().collect::<RecordSet>().into_sorted_vec();
-    if records.len() < read {
-        info!(
-            "merged {} duplicate records for the same domain",
-            read - records.len()
-        );
-    }
+    // makes hand-made or concatenated files safe to index too. The journal
+    // of a crawl that was cut short is replayed.
+    let records = load_records(&args.records)
+        .with_context(|| format!("loading records {}", args.records.display()))?
+        .into_sorted_vec();
     let stats = build_index(&args.index, &records)
         .with_context(|| format!("building the index in {}", args.index.display()))?;
     println!(

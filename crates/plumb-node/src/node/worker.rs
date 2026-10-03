@@ -7,13 +7,16 @@
 //! 1. no records file: download the seed data, ingest it, build the first
 //!    index ([`set_up`]);
 //! 2. no index, or one older than the records: build one ([`rebuild`]);
-//! 3. homepages left in a round: crawl them, then rebuild ([`crawl`]);
-//! 4. a refresh due or asked for: start a round ([`start_round`]);
-//! 5. otherwise wait for the next refresh.
+//! 3. Wikidata's official websites missing from setup and a try due:
+//!    download them and add them to the records ([`add_wikidata`]);
+//! 4. homepages left in a round: crawl them, then rebuild ([`crawl`]);
+//! 5. a refresh due or asked for: start a round ([`start_round`]);
+//! 6. otherwise wait for the next refresh (or the next try at Wikidata).
 //!
 //! Slow work runs on Tokio's blocking threads and checks for shutdown only
 //! where stopping leaves nothing half-done; downloads and the homepage
-//! fetches of a crawl are simply dropped.
+//! fetches of a crawl are simply dropped. Crawls pick homepages and save
+//! their results as `plumb crawl` does ([`crate::crawl`]).
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
@@ -21,8 +24,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{bail, Context, Result};
-use plumb_core::{now_unix, read_jsonl, RecordSet, SiteRecord};
-use plumb_crawl::{crawl_homepages, CrawlConfig, CrawlOutcome, CrawlResult};
+use plumb_core::{now_unix, SiteRecord};
+use plumb_crawl::{crawl_homepages, CrawlConfig};
 use plumb_index::build_index;
 use plumb_ingest::{
     attach_facts, download, facts, load_cc_domain_ranks, load_site_facts, load_tranco,
@@ -31,14 +34,15 @@ use plumb_ingest::{
 use tokio::runtime::Handle;
 use tracing::{info, warn};
 
-use super::store::{self, Paths, SavedState};
+use super::store::{self, SavedState};
 use super::{Inner, NodeConfig, ServingIndex, Step, Stopped};
-use crate::crawl::{crawl_in_batches, select_targets, CRAWL_BATCH_SIZE, SECONDS_PER_DAY};
+use crate::crawl::{crawl_in_batches, select_targets, RunEnd, CRAWL_BATCH_SIZE, SECONDS_PER_DAY};
+use crate::records::{load_records, replace_records, RecordStore};
 use crate::web::{duration_words, group_thousands};
-use crate::write_records_atomically;
 
-/// A homepage fetched or tried this recently is not due for a crawl, as
-/// with `plumb crawl --skip-crawled-within-days 30`.
+/// A homepage fetched or answered this recently is not due for a crawl, as
+/// with `plumb crawl --skip-crawled-within-days 30`. Sites that could not
+/// be reached are retried sooner (see [`crate::crawl`]).
 const RECRAWL_AFTER_DAYS: u64 = 30;
 
 /// Seed downloads younger than this are reused when setup is tried again.
@@ -46,10 +50,6 @@ const SEED_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 /// How often a wait looks at the clock and at old indexes to delete.
 const TICK: Duration = Duration::from_secs(60);
-
-/// A batch of at least this many homepages of which not one answered means
-/// the network is down (or blocked), not the sites.
-const OFFLINE_MIN_BATCH: usize = 20;
 
 /// Does the node's background work until it stops.
 pub(super) async fn run(inner: Arc<Inner>) {
@@ -60,6 +60,9 @@ pub(super) async fn run(inner: Arc<Inner>) {
                 backoff.reset();
                 inner.clear_error();
             }
+            // A try at Wikidata, which keeps its own waits between tries,
+            // says nothing of the work this loop is retrying.
+            Ok(Next::Aside) => {}
             Ok(Next::IdleUntil(until)) => {
                 inner.set_step(Step::Idle, idle_detail(&inner.config));
                 wait(&inner, Deadline::Wall(until)).await;
@@ -86,6 +89,8 @@ pub(super) async fn run(inner: Arc<Inner>) {
 enum Next {
     /// Look for more work right away.
     Continue,
+    /// Look for more work right away, after a try at Wikidata.
+    Aside,
     /// Nothing to do until this Unix time (forever when `None`), unless a
     /// refresh is asked for.
     IdleUntil(Option<u64>),
@@ -102,6 +107,11 @@ async fn step(inner: &Arc<Inner>) -> Result<Next> {
         rebuild(inner).await?;
         return Ok(Next::Continue);
     }
+    let wikidata_due = saved.wikidata_missing.then(|| inner.wikidata_retry_at());
+    if wikidata_due.is_some_and(|due| due <= now_unix()) {
+        add_wikidata(inner).await?;
+        return Ok(Next::Aside);
+    }
     if saved.crawl_left > 0 {
         crawl(inner).await?;
         return Ok(Next::Continue);
@@ -117,7 +127,11 @@ async fn step(inner: &Arc<Inner>) -> Result<Next> {
         start_round(inner, requested)?;
         return Ok(Next::Continue);
     }
-    Ok(Next::IdleUntil(due))
+    let until = match (due, wikidata_due) {
+        (Some(due), Some(wikidata)) => Some(due.min(wikidata)),
+        (due, wikidata) => due.or(wikidata),
+    };
+    Ok(Next::IdleUntil(until))
 }
 
 fn idle_detail(config: &NodeConfig) -> &'static str {
@@ -139,10 +153,21 @@ async fn set_up(inner: &Arc<Inner>) -> Result<()> {
         files = download_seed(inner) => files?,
         () = inner.stopped() => return Err(Stopped.into()),
     };
+    if let Err(err) = &files.wikidata {
+        let retry_at = inner.wikidata_failed(err);
+        warn!(
+            "{err:#}; setting up without Wikidata's official websites for now, \
+             trying again in {}",
+            duration_words(retry_at.saturating_sub(now_unix()))
+        );
+    }
     let built = blocking(inner, move |inner| {
-        let records = ingest(inner, &files)?;
-        let fresh = SavedState::fresh(inner.config.initial_crawl);
+        let records = seed_records(inner, &files)?;
+        let mut fresh = SavedState::fresh(inner.config.initial_crawl);
+        fresh.wikidata_missing = files.wikidata.is_err();
+        // Saved first: records on disk always come with their state.
         inner.update_saved(|saved| *saved = fresh)?;
+        save_seed_records(inner, &records)?;
         inner.check_stop()?;
         build(inner, records)
     })
@@ -150,11 +175,75 @@ async fn set_up(inner: &Arc<Inner>) -> Result<()> {
     put_in_service(inner, built).await
 }
 
+/// Tries again to download Wikidata's official websites, which setup went
+/// on without. When they come, they are folded into the records as setup
+/// would have done, and an index of the result is put in service. A
+/// failure only sets the time of the next try: it is shown in the status,
+/// but does not hold up other work.
+async fn add_wikidata(inner: &Arc<Inner>) -> Result<()> {
+    info!("asking Wikidata again for the official websites setup went without");
+    let files = tokio::select! {
+        files = download_seed(inner) => files,
+        () = inner.stopped() => return Err(Stopped.into()),
+    };
+    let files = match files {
+        Err(err)
+        | Ok(SeedFiles {
+            wikidata: Err(err), ..
+        }) => {
+            let retry_at = inner.wikidata_failed(&err);
+            warn!(
+                "{err:#}; trying Wikidata again in {}",
+                duration_words(retry_at.saturating_sub(now_unix()))
+            );
+            return Ok(());
+        }
+        Ok(files) => files,
+    };
+    inner.wikidata_arrived();
+    let built = blocking(inner, move |inner| {
+        let seed = seed_records(inner, &files)?;
+        inner.set_step(Step::Ingesting, "Reading the site records");
+        let mut set = load_records(&inner.paths.records)?;
+        let before = set.len();
+        set.extend(seed);
+        inner.check_stop()?;
+        let records = set.into_sorted_vec();
+        inner.set_step(
+            Step::Ingesting,
+            format!(
+                "Saving {} site records",
+                group_thousands(records.len() as u64)
+            ),
+        );
+        replace_records(&inner.paths.records, &records)?;
+        inner.update_saved(|saved| {
+            saved.wikidata_missing = false;
+            saved.index_stale = true;
+        })?;
+        info!(
+            "added Wikidata's official websites to the records: {} sites, {} of them new",
+            records.len(),
+            records.len().saturating_sub(before)
+        );
+        inner.check_stop()?;
+        build(inner, records)
+    })
+    .await?;
+    // Not put_in_service: this is no refresh, and a round under way goes on.
+    inner.install(built);
+    inner.update_saved(|saved| saved.index_stale = false)?;
+    sweep(inner).await;
+    Ok(())
+}
+
 /// The files a setup ingests.
 #[derive(Debug)]
 struct SeedFiles {
     tranco: PathBuf,
-    wikidata: PathBuf,
+    /// Setup can go on without Wikidata, so its failure is kept here
+    /// rather than failing the download.
+    wikidata: Result<PathBuf>,
     /// Countries and kinds of the official websites' organizations; used
     /// when the file exists, since setup goes on without it.
     facts: PathBuf,
@@ -163,7 +252,9 @@ struct SeedFiles {
 
 /// Downloads the seed data into `seed/`, keeping files that an earlier try
 /// saved in the last week. Every source is tried before failing, so the ones
-/// that worked are not fetched again next time.
+/// that worked are not fetched again next time. Only the Tranco list and
+/// Common Crawl's ranks are needed; a failure to get Wikidata's official
+/// websites is returned in [`SeedFiles::wikidata`].
 async fn download_seed(inner: &Inner) -> Result<SeedFiles> {
     let config = &inner.config;
     let sources = &config.sources;
@@ -185,24 +276,26 @@ async fn download_seed(inner: &Inner) -> Result<SeedFiles> {
         }
     }
 
-    let wikidata = seed.join(download::WIKIDATA_FILE_NAME);
+    let mut wikidata = Ok(seed.join(download::WIKIDATA_FILE_NAME));
     inner.set_step(Step::Downloading, "Asking Wikidata for official websites");
     inner.set_progress(1, total, "files");
-    if !is_recent(&wikidata) {
-        let downloaded = download::download_wikidata_official_sites_from(
+    if !wikidata.as_ref().is_ok_and(|path| is_recent(path)) {
+        let downloaded = download::download_wikidata_official_sites_paced(
             &client,
             &sources.wikidata_sparql_url,
             seed,
             sources.wikidata_min_sitelinks,
+            sources.wikidata_pacing,
         )
         .await;
-        if let Err(err) = downloaded {
+        if let Err(err) = &downloaded {
             failures.push(format!("Wikidata's official websites: {err:#}"));
         }
+        wikidata = downloaded.context("could not download Wikidata's official websites");
     }
 
     let facts = seed.join(facts::FACTS_FILE_NAME);
-    if !is_recent(&facts) {
+    if wikidata.is_ok() && !is_recent(&facts) {
         inner.set_step(
             Step::Downloading,
             "Asking Wikidata for the countries and kinds of those sites",
@@ -242,7 +335,9 @@ async fn download_seed(inner: &Inner) -> Result<SeedFiles> {
     }
 
     inner.set_progress(total, total, "files");
-    if !failures.is_empty() {
+    // The other sources are needed; their failure is reported with
+    // Wikidata's, if any, which is tried again then too.
+    if failures.len() > usize::from(wikidata.is_err()) {
         bail!("could not download the seed data:\n{}", failures.join("\n"));
     }
     Ok(SeedFiles {
@@ -267,10 +362,11 @@ fn is_recent(path: &Path) -> bool {
             .map_or(true, |age| age < SEED_MAX_AGE)
 }
 
-/// Folds the seed files into site records, keeps the best
-/// [`NodeConfig::sites`] and saves them as the records file.
-fn ingest(inner: &Inner, files: &SeedFiles) -> Result<Vec<SiteRecord>> {
-    let sources = 2 + usize::from(files.cc_ranks.is_some());
+/// Folds the seed files into site records and keeps the best
+/// [`NodeConfig::sites`], best first.
+fn seed_records(inner: &Inner, files: &SeedFiles) -> Result<Vec<SiteRecord>> {
+    let wikidata = files.wikidata.as_ref().ok();
+    let sources = 1 + usize::from(wikidata.is_some()) + usize::from(files.cc_ranks.is_some());
     let mut builder = Builder::new();
 
     inner.set_step(Step::Ingesting, "Reading the Tranco list");
@@ -291,22 +387,33 @@ fn ingest(inner: &Inner, files: &SeedFiles) -> Result<Vec<SiteRecord>> {
         inner.check_stop()?;
     }
 
-    inner.set_step(Step::Ingesting, "Reading Wikidata's official websites");
-    inner.set_progress(sources - 1, sources, "files");
-    let mut sites = load_wikidata_official_sites(&files.wikidata)
-        .with_context(|| format!("loading Wikidata sites {}", files.wikidata.display()))?;
-    if files.facts.is_file() {
-        match load_site_facts(&files.facts) {
-            Ok(facts) => attach_facts(&mut sites, &facts),
-            Err(err) => warn!("going on without Wikidata's countries and kinds: {err:#}"),
+    if let Some(path) = wikidata {
+        inner.set_step(Step::Ingesting, "Reading Wikidata's official websites");
+        inner.set_progress(sources - 1, sources, "files");
+        let mut sites = load_wikidata_official_sites(path)
+            .with_context(|| format!("loading Wikidata sites {}", path.display()))?;
+        if files.facts.is_file() {
+            match load_site_facts(&files.facts) {
+                Ok(facts) => attach_facts(&mut sites, &facts),
+                Err(err) => warn!("going on without Wikidata's countries and kinds: {err:#}"),
+            }
         }
+        builder.add_official_sites(&sites);
+        drop(sites);
+        inner.check_stop()?;
     }
-    builder.add_official_sites(&sites);
-    drop(sites);
-    inner.check_stop()?;
 
     let found = builder.len();
     let records = builder.finish(Some(inner.config.sites));
+    info!(
+        "kept the best {} of {found} sites from the seed data",
+        records.len()
+    );
+    Ok(records)
+}
+
+/// Saves the records of a setup as the records file.
+fn save_seed_records(inner: &Inner, records: &[SiteRecord]) -> Result<()> {
     inner.set_step(
         Step::Ingesting,
         format!(
@@ -314,20 +421,20 @@ fn ingest(inner: &Inner, files: &SeedFiles) -> Result<Vec<SiteRecord>> {
             group_thousands(records.len() as u64)
         ),
     );
-    write_records_atomically(&inner.paths.records, &records)?;
+    replace_records(&inner.paths.records, records)?;
     info!(
-        "kept the best {} of {found} sites from the seed data in {}",
+        "saved {} site records in {}",
         records.len(),
         inner.paths.records.display()
     );
-    Ok(records)
+    Ok(())
 }
 
 /// Builds a new index of the records file and puts it in service.
 async fn rebuild(inner: &Arc<Inner>) -> Result<()> {
     let built = blocking(inner, |inner| {
         inner.set_step(Step::Indexing, "Reading the site records");
-        let records = read_records(&inner.paths)?.into_sorted_vec();
+        let records = load_records(&inner.paths.records)?.into_sorted_vec();
         inner.check_stop()?;
         build(inner, records)
     })
@@ -369,46 +476,43 @@ async fn crawl(inner: &Arc<Inner>) -> Result<()> {
     }
 }
 
-/// Crawls the homepages left in the round, saving the records file and the
-/// state after every batch, then builds an index. `None` when there turned
+/// Crawls the homepages left in the round, saving each batch as it goes
+/// (see [`crate::crawl`]), then builds an index. `None` when there turned
 /// out to be nothing to crawl and nothing new to index.
 fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Option<ServingIndex>> {
     let left = inner.saved().crawl_left;
     inner.set_step(Step::Crawling, "Reading the site records");
-    let mut set = read_records(&inner.paths)?;
+    let mut set = load_records(&inner.paths.records)?;
+    let mut store = RecordStore::open(&inner.paths.records);
     inner.check_stop()?;
 
-    let cutoff = now_unix().saturating_sub(RECRAWL_AFTER_DAYS * SECONDS_PER_DAY);
-    let targets = select_targets(set.iter(), left, cutoff);
+    let window = RECRAWL_AFTER_DAYS * SECONDS_PER_DAY;
+    let targets = select_targets(set.iter(), left, now_unix(), window);
     if targets.is_empty() {
         info!("no homepage is due for a crawl");
     } else {
         info!(
-            "crawling {} homepages, {CRAWL_BATCH_SIZE} between saves",
+            "crawling {} homepages, {CRAWL_BATCH_SIZE} at a time",
             targets.len()
         );
         inner.set_step(Step::Crawling, "Crawling homepages");
         inner.set_progress(0, targets.len(), "homepages");
-        let cfg = CrawlConfig::default();
-        let mut offline = false;
+        let cfg = CrawlConfig {
+            use_system_proxy: inner.config.use_system_proxy,
+            ..CrawlConfig::default()
+        };
         let totals = crawl_in_batches(
             &mut set,
             &targets,
             CRAWL_BATCH_SIZE,
-            &inner.paths.records,
+            &mut store,
             |batch| {
-                let size = batch.len();
-                let results = handle.block_on(async {
+                handle.block_on(async {
                     tokio::select! {
                         results = crawl_homepages(batch, &cfg) => Some(results),
                         () = inner.stopped() => None,
                     }
-                })?;
-                if seems_offline(size, &results) {
-                    offline = true;
-                    return None;
-                }
-                Some(results)
+                })
             },
             |totals| {
                 inner.set_progress(totals.attempted, targets.len(), "homepages");
@@ -418,12 +522,18 @@ fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Option<ServingIndex
                 })
             },
         )?;
-        if offline {
-            bail!(
-                "no homepage in a batch of {} answered, so the network seems to be down \
-                 (that batch was not saved)",
-                CRAWL_BATCH_SIZE.min(targets.len() - totals.attempted)
-            );
+        match totals.end {
+            RunEnd::Finished => {}
+            RunEnd::Stopped => return Err(Stopped.into()),
+            RunEnd::Offline(offline) => {
+                let proxy = if inner.config.use_system_proxy {
+                    ""
+                } else {
+                    ". If this machine reaches the internet only through a proxy, turn on \
+                     use_system_proxy (plumb run --use-system-proxy)"
+                };
+                bail!("{offline}{proxy}");
+            }
         }
         inner.check_stop()?;
         let o = &totals.outcomes;
@@ -447,17 +557,6 @@ fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Option<ServingIndex
     }
     inner.check_stop()?;
     build(inner, set.into_sorted_vec()).map(Some)
-}
-
-/// True when a whole batch failed before any server answered: no page, no
-/// status code, not even robots.txt rules. With enough homepages in the
-/// batch, that is the network (or a firewall), not the sites, so the batch
-/// is not saved: saving would mark every one of them as tried for 30 days.
-fn seems_offline(batch: usize, results: &[CrawlResult]) -> bool {
-    batch >= OFFLINE_MIN_BATCH
-        && results
-            .iter()
-            .all(|result| matches!(result.outcome, CrawlOutcome::Failed { .. }))
 }
 
 /// Builds an index of `records` in a new numbered directory and opens it.
@@ -510,26 +609,24 @@ async fn put_in_service(inner: &Arc<Inner>, built: ServingIndex) -> Result<()> {
     Ok(())
 }
 
-/// Reads the records file into a set, merging records for the same domain
-/// (a file put there by hand may have some).
-fn read_records(paths: &Paths) -> Result<RecordSet> {
-    let records: Vec<SiteRecord> = read_jsonl(&paths.records)
-        .with_context(|| format!("loading records {}", paths.records.display()))?;
-    Ok(records.into_iter().collect())
-}
-
 /// Runs `work` on a blocking thread and waits for it to end, even when the
 /// node is stopping: the work checks for that itself, between steps where
-/// stopping leaves nothing half-done. A panic becomes an error.
+/// stopping leaves nothing half-done. A panic becomes an error. The memory
+/// the work freed (records, index buffers) is then handed back to the
+/// system.
 async fn blocking<T, F>(inner: &Arc<Inner>, work: F) -> Result<T>
 where
     T: Send + 'static,
     F: FnOnce(&Inner) -> Result<T> + Send + 'static,
 {
     let inner = Arc::clone(inner);
-    tokio::task::spawn_blocking(move || work(&inner))
+    let done = tokio::task::spawn_blocking(move || work(&inner))
         .await
-        .context("background work crashed")?
+        .context("background work crashed");
+    // Not on an async thread: handing back a few hundred megabytes takes
+    // tens of milliseconds.
+    let _ = tokio::task::spawn_blocking(crate::release_freed_memory).await;
+    done?
 }
 
 /// Deletes the directories of replaced indexes that no search has open any
@@ -589,14 +686,14 @@ async fn wait(inner: &Arc<Inner>, deadline: Deadline) {
 /// Waits between tries of failed work: `first`, then twice as long after
 /// each failure in a row, up to `max`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Backoff {
+pub(super) struct Backoff {
     first: Duration,
     max: Duration,
     next: Duration,
 }
 
 impl Backoff {
-    fn new(first: Duration, max: Duration) -> Self {
+    pub(super) fn new(first: Duration, max: Duration) -> Self {
         Backoff {
             first,
             max: max.max(first),
@@ -605,22 +702,20 @@ impl Backoff {
     }
 
     /// The wait after one more failure.
-    fn next_delay(&mut self) -> Duration {
+    pub(super) fn next_delay(&mut self) -> Duration {
         let delay = self.next;
         self.next = self.next.saturating_mul(2).min(self.max);
         delay
     }
 
     /// Back to the first wait, after a success.
-    fn reset(&mut self) {
+    pub(super) fn reset(&mut self) {
         self.next = self.first;
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use plumb_crawl::{CrawledPage, PageMeta};
-
     use super::*;
 
     #[test]
@@ -637,46 +732,6 @@ mod tests {
         let mut odd = Backoff::new(minutes(10), minutes(1));
         assert_eq!(odd.next_delay(), minutes(10));
         assert_eq!(odd.next_delay(), minutes(10));
-    }
-
-    fn result(domain: &str, outcome: CrawlOutcome) -> CrawlResult {
-        CrawlResult {
-            domain: domain.to_string(),
-            outcome,
-        }
-    }
-
-    #[test]
-    fn a_batch_with_no_answer_at_all_means_offline() {
-        let failed = |i: usize| {
-            result(
-                &format!("site{i}.com"),
-                CrawlOutcome::Failed {
-                    error: "dns error".into(),
-                    network: true,
-                },
-            )
-        };
-        let all_failed: Vec<CrawlResult> = (0..OFFLINE_MIN_BATCH).map(failed).collect();
-        assert!(seems_offline(all_failed.len(), &all_failed));
-        // Small batches can fail whole: a few dead sites are not an outage.
-        assert!(!seems_offline(3, &all_failed[..3]));
-        // One answer, of any kind, shows the network works.
-        for answer in [
-            CrawlOutcome::RobotsDisallowed,
-            CrawlOutcome::HttpStatus { status: 503 },
-            CrawlOutcome::Fetched(CrawledPage {
-                domain: "up.com".into(),
-                final_url: "https://up.com/".into(),
-                status: 200,
-                fetched_at: 1,
-                meta: PageMeta::default(),
-            }),
-        ] {
-            let mut results = all_failed.clone();
-            results.push(result("up.com", answer));
-            assert!(!seems_offline(results.len(), &results));
-        }
     }
 
     #[test]

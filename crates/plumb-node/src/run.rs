@@ -63,11 +63,16 @@ fn node_config(args: RunArgs) -> NodeConfig {
         config.alpha = args.alpha;
     }
     config.country = args.country;
+    if args.use_system_proxy {
+        config.use_system_proxy = true;
+    }
     config
 }
 
 /// Where to point a browser. An address that listens on every interface
-/// (`0.0.0.0`, `::`) is reached on this machine through loopback.
+/// (`0.0.0.0`, `::`) is reached through loopback on the machine that runs
+/// Plumb, through that machine's address from others, and through the
+/// published host port when Plumb runs in a container.
 fn listening_message(addr: SocketAddr) -> String {
     let local = match addr.ip() {
         IpAddr::V4(ip) if ip.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
@@ -76,9 +81,13 @@ fn listening_message(addr: SocketAddr) -> String {
             return format!("Plumb Search is running at http://{addr}/ (Ctrl-C to stop)");
         }
     };
+    let port = addr.port();
     format!(
-        "Plumb Search is listening on {addr}; on this machine, open http://{}/ (Ctrl-C to stop)",
-        SocketAddr::new(local, addr.port())
+        "Plumb Search is listening on port {port} of every network interface ({addr}). \
+         Open http://{}/ on the machine it runs on, or that machine's address from \
+         another; in a container, open the host port published for {port} instead. \
+         (Ctrl-C to stop)",
+        SocketAddr::new(local, port)
     )
 }
 
@@ -140,6 +149,8 @@ mod tests {
         let off = config(&["--data", "d", "--no-refresh"]);
         assert_eq!(off.refresh_every, None);
         assert_eq!(off.crawl_per_refresh, 5_000);
+        assert!(!off.use_system_proxy);
+        assert!(config(&["--data", "d", "--use-system-proxy"]).use_system_proxy);
     }
 
     #[test]
@@ -150,9 +161,12 @@ mod tests {
         );
         assert_eq!(
             listening_message("0.0.0.0:8080".parse().unwrap()),
-            "Plumb Search is listening on 0.0.0.0:8080; on this machine, \
-             open http://127.0.0.1:8080/ (Ctrl-C to stop)"
+            "Plumb Search is listening on port 8080 of every network interface \
+             (0.0.0.0:8080). Open http://127.0.0.1:8080/ on the machine it runs on, or \
+             that machine's address from another; in a container, open the host port \
+             published for 8080 instead. (Ctrl-C to stop)"
         );
-        assert!(listening_message("[::]:80".parse().unwrap()).contains("http://[::1]:80/"));
+        let v6 = listening_message("[::]:80".parse().unwrap());
+        assert!(v6.contains("([::]:80). Open http://[::1]:80/ on"), "{v6}");
     }
 }

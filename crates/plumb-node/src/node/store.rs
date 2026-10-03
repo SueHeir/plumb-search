@@ -191,6 +191,9 @@ pub(super) struct SavedState {
     pub(super) index_stale: bool,
     /// When the last round of crawling ended, in Unix seconds.
     pub(super) last_refresh: Option<u64>,
+    /// Setup went ahead without Wikidata's official websites, which could
+    /// not be downloaded; the node adds them once it can.
+    pub(super) wikidata_missing: bool,
 }
 
 impl SavedState {
@@ -201,6 +204,7 @@ impl SavedState {
             crawl_left: initial_crawl,
             index_stale: true,
             last_refresh: None,
+            wikidata_missing: false,
         }
     }
 }
@@ -234,8 +238,8 @@ pub(super) fn save_state(paths: &Paths, state: &SavedState) -> Result<()> {
 }
 
 /// Writes `bytes` to a temporary file next to `path`, flushes it to disk,
-/// then renames it over `path`: readers see the old file or the new one,
-/// never a mix.
+/// renames it over `path` and flushes the directory (on Unix): readers see
+/// the old file or the new one, never a mix, even after a power cut.
 pub(super) fn write_atomically(path: &Path, bytes: &[u8]) -> Result<()> {
     let tmp = crate::temp_path_for(path);
     let written = File::create(&tmp).and_then(|mut file| {
@@ -250,6 +254,7 @@ pub(super) fn write_atomically(path: &Path, bytes: &[u8]) -> Result<()> {
         let _ = fs::remove_file(&tmp);
         return Err(err).with_context(|| format!("moving {} to {}", tmp.display(), path.display()));
     }
+    crate::sync_parent_dir(path);
     Ok(())
 }
 
@@ -347,6 +352,7 @@ mod tests {
             crawl_left: 1_500,
             index_stale: true,
             last_refresh: Some(1_700_000_000),
+            wikidata_missing: true,
         };
         save_state(&paths, &state).unwrap();
         assert_eq!(load_state(&paths), Some(state));

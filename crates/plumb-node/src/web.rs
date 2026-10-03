@@ -689,9 +689,13 @@ fn render_home(docs: u64, status: Option<&Status>, now: u64) -> String {
         .and_then(|status| node_note(status, now))
         .map(|note| format!(" &middot; {}", escape_html(&note)))
         .unwrap_or_default();
+    let wikidata = status
+        .and_then(|status| wikidata_note(status, now))
+        .map(|note| format!("\n<p class=\"s\">{}</p>", escape_html(&note)))
+        .unwrap_or_default();
     let body = format!(
         "<main class=\"wrap home\">\n<h1>Plumb</h1>\n<p class=\"tag\">Find a site by its name.</p>\n\
-         {}\n<p class=\"s\">{} sites indexed{note}</p>\n</main>",
+         {}\n<p class=\"s\">{} sites indexed{note}</p>{wikidata}\n</main>",
         search_form("", true),
         group_thousands(docs)
     );
@@ -712,6 +716,20 @@ fn node_note(status: &Status, now: u64) -> Option<String> {
         }
         _ => format!("updated {}", time_ago(status.last_refresh?, now)),
     };
+    Some(note)
+}
+
+/// Says that the index lacks Wikidata's official websites, while it does.
+fn wikidata_note(status: &Status, now: u64) -> Option<String> {
+    if !status.wikidata_missing {
+        return None;
+    }
+    let mut note = "Wikidata's list of official websites could not be downloaded yet, so the \
+                    index does without it for now: official sites get no boost over look-alikes."
+        .to_string();
+    if let Some(retry_at) = status.wikidata_error.as_ref().and_then(|err| err.retry_at) {
+        let _ = write!(note, " Plumb will try again {}.", time_until(retry_at, now));
+    }
     Some(note)
 }
 
@@ -754,6 +772,12 @@ fn render_setup(status: &Status, now: u64) -> String {
             );
         }
         body.push_str("</div>\n");
+    }
+    if let Some(note) = wikidata_note(status, now) {
+        let _ = writeln!(body, "<p>{}</p>", escape_html(&note));
+        if let Some(err) = &status.wikidata_error {
+            let _ = writeln!(body, "<p class=\"msg\">{}</p>", escape_html(&err.message));
+        }
     }
     let _ = write!(
         body,
@@ -1213,6 +1237,8 @@ mod tests {
             detail: "Downloading the Tranco list of popular sites".to_string(),
             progress: None,
             last_error: None,
+            wikidata_missing: false,
+            wikidata_error: None,
             sites: 0,
             index: None,
             last_refresh: None,
@@ -1253,7 +1279,8 @@ mod tests {
             serde_json::json!({"message": "no network", "at": 1_700_000_000u64,
                                "retry_at": 1_700_000_600u64})
         );
-        for null in ["index", "last_refresh", "next_refresh"] {
+        assert_eq!(json["wikidata_missing"], false);
+        for null in ["index", "last_refresh", "next_refresh", "wikidata_error"] {
             assert!(json[null].is_null(), "{null}");
         }
         assert_eq!(json["sites"], 0);
@@ -1369,6 +1396,58 @@ mod tests {
             bank_hits()[..1].to_vec()
         );
         assert_eq!(fake.calls.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_node_without_wikidata_says_so() {
+        let now = now_unix();
+        let mut status = node_status(Phase::Ready, Step::Idle);
+        status.wikidata_missing = true;
+        status.wikidata_error = Some(LastError {
+            message: "Wikidata stopped the query <at> its time limit".into(),
+            at: now - 60,
+            retry_at: Some(now + 630),
+        });
+        let fake = backend(bank_hits());
+        let (code, _, body) = send(node_router(fake.clone(), node(status.clone())), "/").await;
+        assert_eq!(code, StatusCode::OK);
+        assert!(
+            body.contains(
+                "<p class=\"s\">Wikidata&#39;s list of official websites could not be \
+                 downloaded yet, so the index does without it for now: official sites get no \
+                 boost over look-alikes. Plumb will try again in 10 minutes.</p>"
+            ),
+            "{body}"
+        );
+        let (_, _, body) = send(
+            node_router(fake.clone(), node(status.clone())),
+            "/api/status",
+        )
+        .await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["wikidata_missing"], true);
+        assert_eq!(
+            json["wikidata_error"]["message"],
+            "Wikidata stopped the query <at> its time limit"
+        );
+
+        // While the first index is built, the setup page says it too, with why.
+        status.phase = Phase::SettingUp;
+        status.step = Step::Indexing;
+        let body = render_setup(&status, now);
+        assert!(body.contains("could not be downloaded yet"), "{body}");
+        assert!(
+            body.contains(
+                "<p class=\"msg\">Wikidata stopped the query &lt;at&gt; its time limit</p>"
+            ),
+            "{body}"
+        );
+
+        // Once Wikidata is in, nothing is said.
+        status.wikidata_missing = false;
+        status.wikidata_error = None;
+        assert!(!render_setup(&status, now).contains("Wikidata"));
+        assert!(!render_home(12, Some(&status), now).contains("Wikidata"));
     }
 
     #[test]

@@ -3427,6 +3427,7 @@ dependencies = [
  "anyhow",
  "flate2",
  "futures-util",
+ "httpdate",
  "plumb-core",
  "reqwest",
  "serde",

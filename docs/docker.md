@@ -71,7 +71,8 @@ Everything is in the named volume `plumb-data`, mounted at `/data`:
 
 | Path | What it holds |
 | --- | --- |
-| `/data/records.jsonl` | One JSON line per site: everything the node has learned. This is the file to back up. |
+| `/data/records.jsonl` | One JSON line per site: everything the node has learned. Back it up together with the journal. |
+| `/data/records.jsonl.journal` | Crawl results not yet folded into `records.jsonl`. Crawls add to it as they go, and the node folds it in once it reaches a quarter of the size of `records.jsonl` (64 MB at least). Back it up with `records.jsonl`. |
 | `/data/indexes/000001/`, ... | The search index, rebuilt from the records. Each rebuild makes a new numbered directory and deletes the old one. |
 | `/data/seed/` | The first-start downloads. They can be deleted once `records.jsonl` exists. |
 | `/data/state.json` | Progress that survives restarts, such as when the next refresh is due |
@@ -94,10 +95,18 @@ mkdir plumb-data && sudo chown 10001:10001 plumb-data
       - ./plumb-data:/data
 ```
 
-To back up the records, copy them out:
-`docker compose cp plumb:/data/records.jsonl records.jsonl`. When a node
-starts with a `records.jsonl` already in `/data`, it skips the seed
-downloads, so the same file can start a new installation.
+To back up the records, copy out the journal, when there is one, and then
+`records.jsonl` (in that order, so that a journal folded in between the two
+copies is not missed):
+
+```sh
+docker compose cp plumb:/data/records.jsonl.journal .
+docker compose cp plumb:/data/records.jsonl .
+```
+
+When a node starts with a `records.jsonl` already in `/data`, it skips the
+seed downloads, so the same files can start a new installation; the node
+reads a journal next to `records.jsonl` together with it.
 
 `docker compose down -v` deletes the container together with the volume and
 everything in it.
@@ -133,6 +142,7 @@ docker run -d --name plumb --init --restart unless-stopped --stop-timeout 300 \
 | `--no-refresh` | | Never refresh: keep the index as the initial crawl leaves it. |
 | `--profile desktop` | `server` | Smaller defaults: 250,000 sites, 2,000 homepages at first and 1,000 more every 12 hours. The flags above still override it. |
 | `--alpha A` | the index's default | Weight of the popularity prior in the ranking, from 0 to 1. |
+| `--use-system-proxy` | off | Crawl homepages through the proxy in `HTTPS_PROXY`, `HTTP_PROXY` or `ALL_PROXY`; see [Behind a proxy](#behind-a-proxy). |
 
 "First start only" settings take effect when the node sets itself up, that is,
 while `/data/records.jsonl` does not exist yet. To change them later, start
@@ -148,6 +158,35 @@ change that, for example:
     environment:
       RUST_LOG: debug
 ```
+
+### Behind a proxy
+
+If the server reaches the internet only through a proxy, pass the proxy's
+address to the container in the usual variables and add `--use-system-proxy`
+to the command:
+
+```yaml
+services:
+  plumb:
+    command: ["run", "--data", "/data", "--bind", "0.0.0.0:8080", "--use-system-proxy"]
+    environment:
+      HTTPS_PROXY: http://proxy.example.com:3128
+      HTTP_PROXY: http://proxy.example.com:3128
+```
+
+With `docker run`, put `-e HTTPS_PROXY=http://proxy.example.com:3128
+-e HTTP_PROXY=http://proxy.example.com:3128` before the image name and
+`--use-system-proxy` at the end of the command. `NO_PROXY` lists hosts to
+reach directly.
+
+The seed downloads use these variables in any case, but without
+`--use-system-proxy` the node fetches homepages directly, so behind such a
+proxy every crawl fails: the page says the last update failed, and
+`/api/status` and the log say the network seems to be down. Through a proxy,
+the crawler cannot check that a site's name leads to a public address, as it
+does when it connects directly, so a site could point it at hosts on your own
+network that the proxy can reach. Use a proxy that refuses private addresses,
+or one that cannot reach anything you want kept private.
 
 ## Updating
 
@@ -203,17 +242,20 @@ upper bound. Real records may come out somewhat smaller or larger.
 | Search index | 100 MB | 500 MB |
 | Index build time | 20 to 26 seconds | 66 seconds |
 | Peak memory | 1.3 GB | 2.2 GB |
-| Memory between refreshes | 130 to 230 MB | 1 to 1.3 GB |
+| Memory between refreshes | under 100 MB | under 100 MB |
 
 - **Disk**: the node writes a new index and a new `records.jsonl` before it
-  deletes the old ones, so allow for two of each, plus the seed downloads
-  (tens of megabytes, estimate) and the image (about 120 MB). About 3 GB of
-  free space covers the upper bound.
+  deletes the old ones, so allow for two of each, plus the crawl journal
+  (up to a quarter of `records.jsonl`, or 64 MB if that is more), the seed
+  downloads (tens of megabytes, estimate) and the image (about 120 MB).
+  About 3 GB of free space covers the upper bound.
 - **Memory**: memory peaks while the node reads all its records, at the start
   of every crawl and rebuild, and while it builds an index. A crawl keeps
   the records in memory until it ends (about 0.6 GB for a new node), and
-  afterwards the node holds on to part of what it used, which is the figure
-  between refreshes. A new node needs about 1.5 GB of free memory, growing
+  afterwards the node hands what it used back to the system, so between
+  refreshes it needs little more than the index pages that searches read
+  (measured on a later build than the other figures, with similar
+  synthetic records). A new node needs about 1.5 GB of free memory, growing
   toward 2.5 GB as it crawls. With less, use `--profile desktop` or a smaller
   `--sites`; memory grows about in proportion to the number of sites
   (estimate).

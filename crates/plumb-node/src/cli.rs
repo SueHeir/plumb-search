@@ -91,6 +91,12 @@ pub struct RunArgs {
     /// A search can pick another with `country=` in its address.
     #[arg(long, value_name = "CODE", default_value = "auto", value_parser = HomeCountry::parse)]
     pub country: HomeCountry,
+    /// Crawl homepages through the proxy in HTTP_PROXY, HTTPS_PROXY or
+    /// ALL_PROXY (except hosts in NO_PROXY), for machines that reach the
+    /// internet only through one. Without it, homepages are fetched directly
+    /// (seed downloads always use those variables).
+    #[arg(long)]
+    pub use_system_proxy: bool,
 }
 
 /// Starting points for `plumb run`.
@@ -154,18 +160,38 @@ pub struct IngestArgs {
     #[arg(long, value_name = "PATH", requires = "wikidata")]
     pub wikidata_facts: Option<PathBuf>,
     /// Records files from an earlier ingest or crawl to merge in (list several,
-    /// or repeat the flag).
+    /// or repeat the flag), each with the journal an interrupted crawl may
+    /// have left next to it (PATH.journal). Seed files given with them
+    /// replace their seed signals.
+    ///
+    /// --tranco replaces their Tranco ranks, --cc-ranks their Common Crawl
+    /// ranks and --wikidata their official-site marks, so a domain that has
+    /// lost its rank or its listing (one that expired and was registered
+    /// again, say) does not keep them. Aliases do not say where they came
+    /// from, so --wikidata also drops every alias of a site that was marked
+    /// official; the new Wikidata file adds back the labels of sites it still
+    /// lists, and crawls add back og:site_name on the next fetch. Other sites
+    /// keep their aliases, and every site keeps its page fields, link text,
+    /// linking-domain count and crawl times.
     #[arg(long, value_name = "PATH", num_args = 1..)]
     pub records: Vec<PathBuf>,
-    /// Read at most N entries from the Tranco list, the Common Crawl ranks and
-    /// each records file (all sorted best first). WAT and Wikidata files are
-    /// always read whole.
+    /// Read at most N entries from the Tranco list and the Common Crawl ranks
+    /// (both sorted best first), and keep the best N records of each records
+    /// file [default: the Common Crawl ranks stop at twice --top, or at
+    /// 1000000 without --top].
+    ///
+    /// The full Common Crawl ranks file has over 100M rows, and each million
+    /// read takes about 0.9 GB of memory. Without this flag the Tranco list is
+    /// read whole; WAT, Wikidata and records files always are.
     #[arg(long, value_name = "N")]
     pub limit_per_source: Option<usize>,
-    /// Keep only the N records with the best link score.
+    /// Keep only the N records with the best link score. This also bounds how
+    /// much of the Common Crawl ranks is read (see --limit-per-source).
     #[arg(long, value_name = "N")]
     pub top: Option<usize>,
-    /// Where to write the records (JSON lines).
+    /// Where to write the records (JSON lines). A file already there is
+    /// replaced, and a crawl journal next to it (PATH.journal) deleted; to
+    /// keep what they hold, list the file under --records too.
     #[arg(long, value_name = "PATH")]
     pub out: PathBuf,
 }
@@ -175,22 +201,30 @@ pub struct CrawlArgs {
     /// Records file to pick homepages from (JSON lines).
     #[arg(long, value_name = "PATH")]
     pub records: PathBuf,
-    /// How many homepages to fetch: the records with the best link score
-    /// among those not fetched or tried recently.
+    /// How many homepages to fetch: half from sites never tried and half from
+    /// sites due again, best link score first in each (a half with too few
+    /// leaves the rest to the other).
     #[arg(long, value_name = "N", default_value_t = 1000)]
     pub top: usize,
-    /// Leave out records whose homepage was fetched, or tried and failed,
-    /// within this many days.
+    /// Days before a homepage that was fetched, or answered with an error,
+    /// is due again. Sites that could not be reached at all are retried
+    /// after 1 day, then 2, 4, 8... days, up to this.
     #[arg(long, value_name = "D", default_value_t = 30)]
     pub skip_crawled_within_days: u64,
     /// Homepage fetches in flight at once.
     #[arg(long, value_name = "N", default_value_t = 16, value_parser = parse_positive)]
     pub concurrency: usize,
-    /// Where to write the updated records, saved after every batch of
-    /// homepages so an interrupted crawl keeps what it fetched
-    /// [default: overwrite --records].
+    /// Where to write the updated records [default: overwrite --records].
+    /// Each batch of homepages is saved at once to a journal next to it
+    /// (PATH.journal), which is folded in at the end, so an interrupted crawl
+    /// keeps what it fetched; the next crawl or index of PATH picks it up.
     #[arg(long, value_name = "PATH")]
     pub out: Option<PathBuf>,
+    /// Fetch homepages through the proxy in HTTP_PROXY, HTTPS_PROXY or
+    /// ALL_PROXY (except hosts in NO_PROXY), for machines that reach the
+    /// internet only through one. Without it, homepages are fetched directly.
+    #[arg(long)]
+    pub use_system_proxy: bool,
 }
 
 #[derive(Debug, Args)]
@@ -439,6 +473,7 @@ mod tests {
             (None, None, None)
         );
         assert!(!args.no_refresh);
+        assert!(!args.use_system_proxy);
         assert!(parse(&["run"]).is_err());
 
         let cli = parse(&[
@@ -528,6 +563,12 @@ mod tests {
         assert_eq!(args.skip_crawled_within_days, 30);
         assert_eq!(args.concurrency, 16);
         assert_eq!(args.out, None);
+        assert!(!args.use_system_proxy);
         assert!(parse(&["crawl", "--records", "r", "--concurrency", "0"]).is_err());
+        let cli = parse(&["crawl", "--records", "r", "--use-system-proxy"]).unwrap();
+        let Command::Crawl(args) = cli.command else {
+            panic!("not crawl");
+        };
+        assert!(args.use_system_proxy);
     }
 }
