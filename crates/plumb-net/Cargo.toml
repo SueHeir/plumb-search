@@ -27,6 +27,7 @@ libp2p = { version = "0.57.0", features = [
     "tcp",
     "tokio",
     "upnp",
+    "mdns",
     "yamux",
 ] }
 plumb-core = { version = "0.1.0", path = "../plumb-core" }

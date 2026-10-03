@@ -910,6 +910,7 @@ async fn a_node_in_the_network_takes_in_other_nodes_crawls_and_searches_them() {
     let mut net = plumb_net::NetConfig::new(PathBuf::new());
     net.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
     net.upnp = false;
+    net.local_discovery = false;
     config.network = Some(net);
     let node = start(config).await.unwrap();
     let addr = node.addr();
@@ -944,6 +945,7 @@ async fn a_node_in_the_network_takes_in_other_nodes_crawls_and_searches_them() {
     let mut peer_config = plumb_net::NetConfig::new(peer_dir.path().to_path_buf());
     peer_config.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
     peer_config.upnp = false;
+    peer_config.local_discovery = false;
     peer_config.bootstrap = vec![node_addr];
     let table = plumb_net::BucketTable::build(&peer_dir.path().join("buckets"), &[crawled.clone()])
         .unwrap();

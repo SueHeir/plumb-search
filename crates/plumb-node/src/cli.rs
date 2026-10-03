@@ -124,6 +124,9 @@ pub struct RunArgs {
     /// Do not ask the home router to forward the port (UPnP).
     #[arg(long, requires = "network")]
     pub no_upnp: bool,
+    /// Do not look for other Plumb nodes on the local network (mDNS).
+    #[arg(long, requires = "network")]
+    pub no_local_discovery: bool,
 }
 
 /// Starting points for `plumb run`.
