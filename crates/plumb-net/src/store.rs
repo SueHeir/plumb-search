@@ -141,6 +141,17 @@ impl BatchStore {
         headers
     }
 
+    /// The ids of the batches held, oldest first.
+    pub fn ids_oldest_first(&self) -> Vec<Hash> {
+        let mut ids: Vec<(u64, Hash)> = self
+            .headers
+            .iter()
+            .map(|(id, h)| (h.header.created_at, *id))
+            .collect();
+        ids.sort();
+        ids.into_iter().map(|(_, id)| id).collect()
+    }
+
     /// Deletes batches older than [`RETAIN_EPOCHS`] before `now`.
     pub fn prune(&mut self, now: u64) {
         let oldest = epoch_of(now).saturating_sub(RETAIN_EPOCHS);
