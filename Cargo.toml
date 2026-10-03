@@ -6,10 +6,12 @@ members = [
     "crates/plumb-crawl",
     "crates/plumb-index",
     "crates/plumb-node",
+    "crates/plumb-embed",
     "crates/plumb-desktop",
 ]
 # Plain `cargo build` and `cargo test` leave out the desktop app, which needs
-# GUI libraries (WebKitGTK on Linux); build it with `-p plumb-desktop`.
+# GUI libraries (WebKitGTK on Linux); build it with `-p plumb-desktop`. The
+# embedding prototype downloads ONNX Runtime; build it with `-p plumb-embed`.
 default-members = [
     "crates/plumb-core",
     "crates/plumb-ingest",

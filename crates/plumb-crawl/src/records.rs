@@ -136,6 +136,8 @@ mod tests {
                     description: Some("About us".into()),
                     site_name: Some(format!("{domain} site")),
                     search_url: None,
+                    heading: None,
+                    body_text: None,
                     links: links
                         .iter()
                         .map(|&(url, text)| OutLink {

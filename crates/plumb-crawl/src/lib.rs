@@ -24,7 +24,7 @@ mod records;
 mod test_alloc;
 
 pub use crawl::crawl_homepages;
-pub use extract::{extract_page_meta, MAX_OUT_LINKS};
+pub use extract::{extract_page_meta, MAX_BODY_WORDS, MAX_OUT_LINKS};
 pub use records::to_records;
 
 /// Sent with every request so site owners can see who is crawling and why.
@@ -132,6 +132,13 @@ pub struct PageMeta {
     pub description: Option<String>,
     /// `og:site_name`.
     pub site_name: Option<String>,
+    /// Text of the first `<h1>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heading: Option<String>,
+    /// The page's visible text in reading order, without scripts, menus,
+    /// headers, footers and forms, cut to [`MAX_BODY_WORDS`] words.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_text: Option<String>,
     /// The site's search address, with `{searchTerms}` where the words go,
     /// from the first GET form on the page with a search box that submits
     /// to the same site.
@@ -168,6 +175,8 @@ pub struct CrawledPage {
 
 /// What happened to one target. See [`crawl_homepages`] for when each
 /// outcome is produced.
+// A fetched page is the common outcome, so boxing it would buy nothing.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CrawlOutcome {
     Fetched(CrawledPage),
