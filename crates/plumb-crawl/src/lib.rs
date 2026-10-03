@@ -25,7 +25,7 @@ mod records;
 #[cfg(test)]
 mod test_alloc;
 
-pub use crawl::crawl_homepages;
+pub use crawl::{crawl_homepages, log_summary, HomepageCrawler};
 pub use extract::{extract_page_meta, MAX_BODY_WORDS, MAX_OUT_LINKS};
 pub use records::to_records;
 

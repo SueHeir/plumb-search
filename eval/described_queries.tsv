@@ -1,0 +1,42 @@
+# Searches that describe a site rather than name it, for search by meaning.
+# query<TAB>expected_domain[,another_ok_domain]
+electric car maker	tesla.com,rivian.com,lucidmotors.com
+newspaper in chicago	chicagotribune.com,suntimes.com
+video streaming service	netflix.com,youtube.com,hulu.com,disneyplus.com,max.com
+online encyclopedia	wikipedia.org,britannica.com
+music streaming	spotify.com,apple.com,pandora.com,tidal.com
+online marketplace for handmade goods	etsy.com
+search engine	google.com,bing.com,duckduckgo.com
+code hosting	github.com,gitlab.com,bitbucket.org
+professional networking site	linkedin.com
+vacation rentals	airbnb.com,vrbo.com
+ride sharing app	uber.com,lyft.com
+photo sharing app	instagram.com,flickr.com,pinterest.com
+short video app	tiktok.com
+online dictionary	merriam-webster.com,dictionary.com,cambridge.org
+weather forecast	weather.com,weather.gov,accuweather.com
+movie database	imdb.com,themoviedb.org
+restaurant reviews	yelp.com,tripadvisor.com
+hotel booking	booking.com,expedia.com,hotels.com
+cheap flights	kayak.com,expedia.com,skyscanner.com,google.com
+programming questions and answers	stackoverflow.com
+free online courses	coursera.org,edx.org,khanacademy.org
+language learning app	duolingo.com
+password manager	1password.com,bitwarden.com,lastpass.com
+video calls	zoom.us,zoom.com,google.com,microsoft.com
+team chat	slack.com,discord.com,microsoft.com
+cloud storage	dropbox.com,box.com,google.com,live.com
+home improvement store	homedepot.com,lowes.com
+used cars	carvana.com,autotrader.com,cars.com,carmax.com
+real estate listings	zillow.com,realtor.com,redfin.com
+job search	indeed.com,linkedin.com,glassdoor.com
+tax filing software	intuit.com,hrblock.com
+online auction	ebay.com
+food delivery	doordash.com,ubereats.com,grubhub.com
+grocery delivery	instacart.com
+british broadcaster	bbc.co.uk,bbc.com
+german carmaker	volkswagen.de,vw.com,bmw.com,bmw.de,mercedes-benz.com,audi.com,porsche.com
+japanese electronics company	sony.com,panasonic.com,sony.net
+space agency	nasa.gov,esa.int
+social security benefits	ssa.gov
+open source operating system	linux.org,kernel.org,ubuntu.com,debian.org
