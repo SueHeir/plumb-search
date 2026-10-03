@@ -80,6 +80,7 @@ use crate::{block_on, rank_config};
 pub use panel::ADD_TO_FIREFOX_PATH;
 
 pub(crate) mod private;
+mod relay;
 
 /// Results returned when a request does not say how many.
 pub const DEFAULT_LIMIT: usize = 10;
@@ -327,6 +328,7 @@ fn app(state: AppState) -> Router {
             .route("/app/refresh", post(panel::refresh))
             .route(panel::ADD_TO_FIREFOX_PATH, get(panel::add_to_firefox));
         router = private::routes(router);
+        router = relay::routes(router);
     }
     router.with_state(state)
 }

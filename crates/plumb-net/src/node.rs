@@ -248,6 +248,15 @@ impl NetHandle {
         Ok(crate::search::search(query, &peers, wait, now_unix()).await)
     }
 
+    /// The connected nodes that answer bucket requests, for a front end
+    /// that relays sealed bucket requests for browsers.
+    pub async fn bucket_peers(&self) -> Result<Vec<PeerId>> {
+        let (reply, peers) = oneshot::channel();
+        self.send(Command::Peers(Serving::Buckets, reply))?;
+        let peers = peers.await.context("the network task stopped")?;
+        Ok(peers.into_iter().map(|peer| peer.peer).collect())
+    }
+
     /// Hands `report` to another node under a throwaway identity, trying
     /// up to [`REPORT_TRIES`] nodes at random, each for at most `wait`.
     /// That node keeps it and passes it on to the rest.

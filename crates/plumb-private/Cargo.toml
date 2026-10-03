@@ -11,7 +11,8 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 idna = "1.1.0"
-plumb-core = { version = "0.1.0", path = "../plumb-core" }
+plumb-core = { version = "0.1.0", path = "../plumb-core", features = ["oblivious"] }
+libp2p-identity = { version = "0.3", default-features = false, features = ["peerid"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 sha2 = "0.10"
@@ -21,6 +22,9 @@ url = "2.5.8"
 # that turns the build into a web module must be the very same version
 # (docs/private-search.md).
 [target.'cfg(target_arch = "wasm32")'.dependencies]
+# The sealing code draws random numbers; in a browser they come from
+# crypto.getRandomValues.
+getrandom = { version = "0.4", features = ["wasm_js"] }
 js-sys = "0.3"
 wasm-bindgen = "=0.2.108"
 wasm-bindgen-futures = "0.4"
@@ -42,6 +46,7 @@ web-sys = { version = "0.3", features = [
     "RequestCredentials",
     "RequestInit",
     "RequestMode",
+    "Headers",
     "Response",
     "Storage",
     "Window",

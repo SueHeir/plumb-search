@@ -23,6 +23,7 @@ use web_sys::{
     RequestCredentials, RequestInit, RequestMode, Response, Window,
 };
 
+use crate::sealed::Targets;
 use crate::{
     language_country, padding, query_from_fragment, read_bucket, safe_href, search, Options,
     Ranked, LIMIT,
@@ -131,7 +132,15 @@ async fn try_show() -> Result<(), JsValue> {
     }
     let secret = padding_secret(&window)?;
     let (buckets, keys) = pick_buckets(&query, padding(&secret, &query));
-    let answers = fetch_buckets(&window, &info.table, &buckets).await?;
+    // Through this site to other nodes when it can, so no one sees both who
+    // asks and what for; otherwise from this site directly.
+    let (answers, sealed) = match fetch_sealed(&window, &buckets).await {
+        Ok(answers) => (answers, true),
+        Err(err) => {
+            web_sys::console::log_1(&err);
+            (fetch_buckets(&window, &info.table, &buckets).await?, false)
+        }
+    };
     let hits = search(&query, &keys, answers, &options, LIMIT);
 
     // The query may have changed while the buckets came in.
@@ -152,8 +161,14 @@ async fn try_show() -> Result<(), JsValue> {
         ))
     } else {
         set_status(&format!(
-            "Picked in your browser from {} buckets of sites.",
-            buckets.len()
+            "Picked in your browser from {} buckets of sites{}.",
+            buckets.len(),
+            if sealed {
+                ", fetched from other Plumb nodes through this site, so neither saw both \
+                 who you are and which buckets you asked for"
+            } else {
+                " from this site"
+            }
         ))
     }
 }
@@ -196,6 +211,86 @@ async fn fetch_buckets(
             read_bucket(&text).map_err(|err| JsValue::from_str(&err))
         })
         .collect()
+}
+
+/// Fetches the buckets from other nodes through this site, each sealed to
+/// the node that answers it (see [`crate::sealed`]); each bucket is asked of
+/// two nodes when there are two, so that one node alone cannot make a site
+/// look more popular. Fails when this site lists no other node, or when
+/// any request fails.
+async fn fetch_sealed(window: &Window, buckets: &[u32]) -> Result<Vec<Vec<SiteRecord>>, JsValue> {
+    let listed: Targets =
+        serde_json::from_str(&fetch_text(window, "/api/oblivious/targets").await?)
+            .map_err(|_| JsValue::from_str("no list of nodes"))?;
+    let mut targets = listed.targets;
+    if targets.is_empty() {
+        return Err("no other node to ask".into());
+    }
+    let crypto = window.crypto()?;
+    for i in (1..targets.len()).rev() {
+        let j = (random_u64(&crypto) % (i as u64 + 1)) as usize;
+        targets.swap(i, j);
+    }
+    let now = (js_sys::Date::now() / 1000.0) as u64;
+    let per_bucket = targets.len().min(2);
+    let mut next = 0;
+    let requests = js_sys::Array::new();
+    let mut openers = Vec::new();
+    for &bucket in buckets {
+        for _ in 0..per_bucket {
+            let target = &targets[next % targets.len()];
+            next += 1;
+            let (sealed, opener) =
+                crate::sealed::seal(target, bucket, now).map_err(|err| JsValue::from_str(&err))?;
+            let url = format!(
+                "/api/oblivious/forward/{}",
+                String::from(js_sys::encode_uri_component(&target.peer))
+            );
+            let init = RequestInit::new();
+            init.set_method("POST");
+            init.set_mode(RequestMode::SameOrigin);
+            init.set_credentials(RequestCredentials::Omit);
+            init.set_cache(RequestCache::NoStore);
+            let body = js_sys::Uint8Array::from(sealed.as_slice());
+            init.set_body(&body);
+            let request = Request::new_with_str_and_init(&url, &init)?;
+            request
+                .headers()
+                .set("Content-Type", "application/octet-stream")?;
+            requests.push(&window.fetch_with_request(&request));
+            openers.push(opener);
+        }
+    }
+    let responses: js_sys::Array = JsFuture::from(js_sys::Promise::all(&requests))
+        .await?
+        .dyn_into()?;
+    let bodies = js_sys::Array::new();
+    for response in responses.iter() {
+        let response: Response = response.dyn_into()?;
+        if !response.ok() {
+            return Err(format!("a node did not answer ({})", response.status()).into());
+        }
+        let body = response.array_buffer()?;
+        bodies.push(&body);
+    }
+    let bodies: js_sys::Array = JsFuture::from(js_sys::Promise::all(&bodies))
+        .await?
+        .dyn_into()?;
+    bodies
+        .iter()
+        .zip(openers)
+        .map(|(body, opener)| {
+            let bytes = js_sys::Uint8Array::new(&body).to_vec();
+            crate::sealed::open(opener, &bytes).map_err(|err| JsValue::from_str(&err))
+        })
+        .collect()
+}
+
+/// A random number from the browser's cryptographic generator.
+fn random_u64(crypto: &web_sys::Crypto) -> u64 {
+    let mut bytes = [0u8; 8];
+    let _ = crypto.get_random_values_with_u8_array(&mut bytes);
+    u64::from_le_bytes(bytes)
 }
 
 async fn fetch_text(window: &Window, url: &str) -> Result<String, JsValue> {
