@@ -55,7 +55,7 @@ letter-spacing:.04em;color:var(--muted)}\
 .btns{display:flex;flex-wrap:wrap;gap:.5rem;margin-top:.6rem}\
 .btn{display:inline-block;padding:.5rem .9rem;border-radius:.5rem;background:var(--accent);\
 color:var(--bg);text-decoration:none}\
-.btn.alt{background:none;color:var(--accent);border:1px solid var(--accent)}\
+.btn.alt,button.alt{background:none;color:var(--accent);border:1px solid var(--accent)}\
 .steps li{display:flex;gap:.6rem;padding:.45rem 0;border:0}\
 .steps .i{flex:none;width:1.2rem;text-align:center}\
 .steps .done{color:var(--muted)}\
@@ -350,7 +350,7 @@ pub(super) fn render_panel(
     if setting_up(status) {
         render_steps(&mut body, status, now);
     }
-    render_settings(&mut body, status, settings);
+    render_settings(&mut body, settings);
     render_browser(&mut body, origin);
     render_about(&mut body, status, data_dir, now);
     body.push_str("</main>");
@@ -544,6 +544,14 @@ fn render_crawl_card(body: &mut String, status: &Status, now: u64) {
         "<p class=\"hint\">{} homepages visited since setup.</p>\n",
         group_thousands(status.homepages_visited)
     ));
+    // Starts the next round now; while one runs, or crawling is paused,
+    // there is nothing to start.
+    if status.phase == Phase::Ready && !crawling && status.paused.is_none() {
+        rest.push_str(
+            "<form method=\"post\" action=\"/app/refresh\">\
+             <button type=\"submit\" class=\"alt\">Update now</button></form>\n",
+        );
+    }
     card(body, "", "Crawling", &big, &rest);
 }
 
@@ -642,7 +650,7 @@ fn render_steps(body: &mut String, status: &Status, now: u64) {
     body.push_str("</ol>\n");
 }
 
-fn render_settings(body: &mut String, status: &Status, settings: &NodeSettings) {
+fn render_settings(body: &mut String, settings: &NodeSettings) {
     let checked = if settings.background_updates {
         " checked"
     } else {
@@ -674,12 +682,6 @@ fn render_settings(body: &mut String, status: &Status, settings: &NodeSettings) 
         limit(settings.download_limit_mb_per_day),
         limit(settings.storage_limit_mb)
     ));
-    if status.paused.is_none() && status.phase == Phase::Ready {
-        body.push_str(
-            "<form method=\"post\" action=\"/app/refresh\">\
-             <button type=\"submit\">Update now</button></form>\n",
-        );
-    }
 }
 
 fn render_browser(body: &mut String, origin: &str) {
@@ -971,6 +973,13 @@ mod tests {
             body.contains("content=\"60\""),
             "reloads seldom when idle: {body}"
         );
+
+        // A round under way leaves nothing to start.
+        let mut crawling = ready.clone();
+        crawling.step = Step::Crawling;
+        let body = get_panel(app(crawling).0).await;
+        assert!(body.contains("Visiting homepages"), "{body}");
+        assert!(!body.contains("Update now"), "{body}");
 
         ready.paused = Some("Paused until tomorrow: today's download limit is reached".into());
         let body = get_panel(app(ready).0).await;
