@@ -12,7 +12,8 @@ use std::time::{Duration, Instant};
 use plumb_core::{now_unix, read_jsonl, write_jsonl, SiteRecord};
 use plumb_index::Hit;
 use plumb_ingest::{
-    load_cc_domain_ranks, load_tranco, load_wikidata_official_sites, parse_wat, Builder, WatExtract,
+    kind_sites, load_cc_domain_ranks, load_tranco, load_wikidata_official_sites, parse_wat,
+    Builder, WatExtract,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -368,6 +369,8 @@ async fn falls_back_to_the_newest_index_that_opens_and_clears_leftovers() {
         last_refresh: Some(now_unix()),
         wikidata_missing: false,
         network_pending: 0,
+        quick_start: false,
+        ..SavedState::default()
     };
     store::save_state(&paths, &up_to_date).unwrap();
 
@@ -459,6 +462,8 @@ async fn picks_up_a_round_left_unfinished() {
             last_refresh: None,
             wikidata_missing: false,
             network_pending: 0,
+            quick_start: false,
+            ..SavedState::default()
         },
     )
     .unwrap();
@@ -480,6 +485,8 @@ async fn picks_up_a_round_left_unfinished() {
             last_refresh: Some(last),
             wikidata_missing: false,
             network_pending: 0,
+            quick_start: false,
+            ..SavedState::default()
         }
     );
     assert_eq!(names(&paths.indexes), ["000001"]);
@@ -511,6 +518,8 @@ async fn refreshes_when_due() {
             last_refresh: Some(long_ago),
             wikidata_missing: false,
             network_pending: 0,
+            quick_start: false,
+            ..SavedState::default()
         },
     )
     .unwrap();
@@ -695,10 +704,11 @@ async fn sets_up_from_the_seed_data_and_retries_after_a_failure() {
     // the time out.
     let counts = host.counts();
     assert_eq!(counts["GET /tranco.csv"], 2, "{counts:?}");
-    // Then twice for the countries and kinds of the official websites.
+    // Then once per kind of organization, and once for the facts of the
+    // official websites.
     assert_eq!(
         counts["POST /sparql"],
-        download::wikidata_sitelink_bands(25).len() + 1 + 1,
+        download::wikidata_sitelink_bands(25).len() + 1 + kind_sites::KIND_LABELS.len() + 1,
         "{counts:?}"
     );
     assert_eq!(counts["GET /graph/x-domain-ranks.txt.gz"], 1, "{counts:?}");
@@ -709,6 +719,7 @@ async fn sets_up_from_the_seed_data_and_retries_after_a_failure() {
         names(&seed),
         [
             "tranco-top-1m.csv.zip",
+            "wikidata-kind-sites.tsv",
             "wikidata-official-sites.tsv",
             "wikidata-site-facts.tsv",
             "x-domain-ranks-top50.txt"
@@ -720,7 +731,8 @@ async fn sets_up_from_the_seed_data_and_retries_after_a_failure() {
     assert!(usbank.signals.official_site);
     assert!(usbank.signals.tranco_rank.is_some());
     assert!(usbank.signals.harmonic_rank.is_some());
-    assert_eq!(names(&dir.path().join("indexes")), ["000001"]);
+    // The quick index of the Tranco list, then the one of all the seed data.
+    assert_eq!(names(&dir.path().join("indexes")), ["000002"]);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -746,8 +758,6 @@ async fn shows_setup_progress_and_errors_while_downloads_fail() {
     assert!(err
         .message
         .starts_with("could not download the seed data:\nthe Tranco list:"));
-    assert!(err.message.contains("Wikidata"), "{}", err.message);
-    assert!(err.message.contains("<script>"), "{}", err.message);
     assert!(
         err.retry_at.unwrap() >= err.at + 590,
         "the first retry is 10 minutes out"
@@ -767,10 +777,6 @@ async fn shows_setup_progress_and_errors_while_downloads_fail() {
         assert!(body.contains("Plumb will try again in "), "{body}");
         assert!(!body.contains("<script"), "{body}");
         assert!(!body.contains("<b>"), "{body}");
-        assert!(
-            body.contains("&lt;script&gt;alert(&#39;pwned&#39;)&lt;/script&gt; &amp; &lt;b&gt;"),
-            "{body}"
-        );
         assert!(!body.contains("<form"), "{body}");
     }
     let (code, head, body) = get(addr, "/api/search?q=us+bank").await;
@@ -808,7 +814,7 @@ async fn stops_promptly_in_the_middle_of_a_download() {
         status.progress,
         Some(Progress {
             done: 0,
-            total: 2,
+            total: 1,
             unit: "files".into()
         })
     );
@@ -816,10 +822,10 @@ async fn stops_promptly_in_the_middle_of_a_download() {
     assert_eq!(code, 200);
     assert!(body.contains("Downloading the Tranco list"), "{body}");
     assert!(
-        body.contains("<progress value=\"0\" max=\"2\"></progress>"),
+        body.contains("<progress value=\"0\" max=\"1\"></progress>"),
         "{body}"
     );
-    assert!(body.contains("0 of 2 files"), "{body}");
+    assert!(body.contains("0 of 1 files"), "{body}");
 
     let stopping = Instant::now();
     tokio::time::timeout(Duration::from_secs(10), node.shutdown())
@@ -868,7 +874,9 @@ async fn sets_up_without_wikidata_and_adds_it_later() {
     assert_eq!(records.len(), 50);
     assert!(records.iter().all(|r| !r.signals.official_site));
     let paths = store::Paths::new(dir.path());
-    assert!(store::load_state(&paths).unwrap().wikidata_missing);
+    let saved = store::load_state(&paths).unwrap();
+    assert!(saved.wikidata_missing);
+    assert!(!saved.quick_start, "the other seed files are folded in");
     let (code, _, body) = get(addr, "/").await;
     assert_eq!(code, 200);
     assert!(body.contains("could not be downloaded yet"), "{body}");
@@ -1137,4 +1145,165 @@ async fn a_node_sharing_popularity_reports_picks_and_ranks_with_the_networks() {
 
     peer.shutdown().await;
     node.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_full_seed_replaces_a_quick_start_but_keeps_what_crawls_added() {
+    let tranco = std::fs::read(fixture("tranco.csv")).unwrap();
+    let sparql = sparql_json(&fixture("wikidata-official-sites.tsv"));
+    let host = SeedHost::start(move |request, _| match request {
+        "GET /tranco.csv" => http("200 OK", &tranco),
+        "POST /sparql" => http("200 OK", &sparql),
+        _ => http("404 Not Found", b"no such file"),
+    })
+    .await;
+
+    // Quick records: one only the Tranco list had, one a crawl reached, and
+    // one a crawl found links to.
+    let dir = tempfile::tempdir().unwrap();
+    let quick_only = SiteRecord::new("quick-only.example");
+    let mut crawled = SiteRecord::new("crawled.example");
+    crawled.crawl_attempted_at = Some(now_unix());
+    crawled.title = Some("Crawled".into());
+    let mut linked = SiteRecord::new("linked.example");
+    linked.add_link_text("Linked", "crawled.example");
+    write_jsonl(
+        &dir.path().join("records.jsonl"),
+        &[quick_only, crawled, linked],
+    )
+    .unwrap();
+    let paths = store::Paths::new(dir.path());
+    store::save_state(
+        &paths,
+        &SavedState {
+            crawl_left: 0,
+            index_stale: true,
+            last_refresh: Some(now_unix()),
+            wikidata_missing: true,
+            quick_start: true,
+            ..SavedState::default()
+        },
+    )
+    .unwrap();
+
+    let mut config = test_config(dir.path());
+    config.sources = host.sources();
+    config.sites = 50;
+    let node = start(config).await.unwrap();
+    let addr = node.addr();
+    let status = wait_for(addr, "the full seed", |s| {
+        ready_and_idle(s) && !s.wikidata_missing
+    })
+    .await;
+    assert_eq!(status.wikidata_error, None);
+    assert_eq!(search(addr, "us+bank").await[0].domain, "usbank.com");
+    node.shutdown().await.unwrap();
+
+    let saved = store::load_state(&paths).unwrap();
+    assert!(!saved.quick_start && !saved.wikidata_missing);
+    let records: Vec<SiteRecord> = read_jsonl(&dir.path().join("records.jsonl")).unwrap();
+    let domains: Vec<&str> = records.iter().map(|r| r.domain.as_str()).collect();
+    assert_eq!(records.len(), 52, "{domains:?}");
+    assert!(!domains.contains(&"quick-only.example"));
+    assert!(domains.contains(&"crawled.example"));
+    assert!(domains.contains(&"linked.example"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn background_updates_wait_while_off_and_resume_from_the_panel() {
+    let dir = recently_crawled_dir();
+    let paths = store::Paths::new(dir.path());
+    store::save_state(
+        &paths,
+        &SavedState {
+            crawl_left: 700,
+            index_stale: true,
+            last_refresh: None,
+            wikidata_missing: false,
+            quick_start: false,
+            ..SavedState::default()
+        },
+    )
+    .unwrap();
+    std::fs::write(&paths.settings, "{\"background_updates\": false}").unwrap();
+    let mut config = test_config(dir.path());
+    config.refresh_every = Some(Duration::from_secs(3600));
+    let node = start(config).await.unwrap();
+    let addr = node.addr();
+
+    let status = wait_for(addr, "the first index", ready_and_idle).await;
+    assert_eq!(status.detail, "Background updates are off");
+    assert!(!status.background_updates);
+    assert_eq!((status.crawl_left, status.last_refresh), (700, None));
+    let (code, _, body) = get(addr, "/app").await;
+    assert_eq!(code, 200);
+    assert!(
+        body.contains("<p>Background updates are off.</p>"),
+        "{body}"
+    );
+    assert_eq!(status.paused.as_deref(), Some("Background updates are off"));
+
+    // Ticking the box on the panel, from this computer, starts the round.
+    let form = "background_updates=1";
+    let mut stream = TcpStream::connect(addr).await.unwrap();
+    let request = format!(
+        "POST /app/settings HTTP/1.1\r\nHost: {addr}\r\nOrigin: http://{addr}\r\n\
+         Content-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\n\
+         Connection: close\r\n\r\n{form}",
+        form.len()
+    );
+    stream.write_all(request.as_bytes()).await.unwrap();
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).await.unwrap();
+    let response = String::from_utf8(response).unwrap();
+    assert!(response.starts_with("HTTP/1.1 303"), "{response}");
+
+    let status = wait_for(addr, "the end of the round", |s| {
+        ready_and_idle(s) && s.last_refresh.is_some()
+    })
+    .await;
+    assert!(status.background_updates);
+    assert_eq!(status.crawl_left, 0);
+    node.shutdown().await.unwrap();
+    assert_eq!(store::load_settings(&paths), Some(NodeSettings::default()));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn crawling_waits_for_the_next_day_once_the_download_limit_is_reached() {
+    let dir = recently_crawled_dir();
+    let paths = store::Paths::new(dir.path());
+    let mut state = SavedState {
+        crawl_left: 700,
+        index_stale: true,
+        ..SavedState::default()
+    };
+    state.add_downloaded(3 * MB, now_unix());
+    store::save_state(&paths, &state).unwrap();
+    let mut config = test_config(dir.path());
+    config.settings.download_limit_mb_per_day = 2;
+    let node = start(config).await.unwrap();
+
+    let status = wait_for(node.addr(), "the first index", ready_and_idle).await;
+    assert_eq!(
+        status.paused.as_deref(),
+        Some("Paused until tomorrow: today's download limit is reached")
+    );
+    assert_eq!(status.detail, status.paused.clone().unwrap());
+    assert_eq!((status.crawl_left, status.downloaded_today), (700, 3 * MB));
+    assert!(status.disk_used > 0);
+    node.shutdown().await.unwrap();
+}
+
+#[test]
+fn downloads_are_counted_per_day() {
+    let day = 24 * 60 * 60;
+    let mut state = SavedState::default();
+    state.add_downloaded(5, 10 * day + 1);
+    state.add_downloaded(7, 10 * day + 2);
+    assert_eq!(state.downloaded_today(10 * day + 3), 12);
+    assert_eq!(state.downloaded_today(11 * day), 0);
+    state.add_downloaded(1, 11 * day + 5);
+    assert_eq!(state.downloaded_today(11 * day + 6), 1);
+    assert_eq!(state.downloaded_total, 13);
+    assert_eq!(store::next_day(10 * day + 7), 11 * day);
 }

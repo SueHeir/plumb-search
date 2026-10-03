@@ -86,6 +86,12 @@ const TITLE_BOOST: f32 = 2.0;
 const ANCHORS_BOOST: f32 = 1.5;
 /// BM25 boost of a query word matching the description.
 const DESCRIPTION_BOOST: f32 = 0.5;
+/// BM25 boost of a query word matching Wikidata's description of the
+/// organization. Higher than the site's own description: Wikidata's is
+/// written by others, so look-alikes cannot stuff it with search words.
+const ABOUT_BOOST: f32 = 2.0;
+/// BM25 boost of a query word matching a homepage heading.
+const HEADINGS_BOOST: f32 = 0.5;
 /// BM25 boost of the whole query, joined (`us bank` -> `usbank`), matching a
 /// joined name or a label word.
 const WHOLE_QUERY_BOOST: f32 = 6.0;
@@ -656,7 +662,8 @@ impl Searcher {
         Ok(Hit {
             url,
             title: text(self.fields.title),
-            description: text(self.fields.description),
+            // The site's own description, else what Wikidata says it is.
+            description: text(self.fields.description).or_else(|| text(self.fields.about)),
             domain,
             score: ranked.score,
             text_score: ranked.text_score,
@@ -873,6 +880,8 @@ impl ParsedQuery {
             (f.title, TITLE_BOOST),
             (f.anchors, ANCHORS_BOOST),
             (f.description, DESCRIPTION_BOOST),
+            (f.headings, HEADINGS_BOOST),
+            (f.about, ABOUT_BOOST),
         ];
         for word in &self.words {
             for (field, boost) in per_word {
@@ -1154,6 +1163,27 @@ mod tests {
             record.add_kind(kind);
         }
         record
+    }
+
+    #[test]
+    fn wikidata_descriptions_are_searched_and_shown() {
+        let mut navy = site("navyfederal.org", None, None, &[], &[], ranked(4_000, 500));
+        navy.about = Some("American credit union".into());
+        let records = vec![
+            navy,
+            site("navy.mil", None, None, &[], &[], popular(2_000, 9_000)),
+            site("credit.com", None, None, &[], &[], ranked(30_000, 300)),
+        ];
+        let (_dir, searcher) = build(&records);
+        // Names still count for more than descriptions, but a site that
+        // only its description matches is found, and shows it.
+        let hits = searcher.search("american credit union", 10).unwrap();
+        let navy = hits.iter().find(|hit| hit.domain == "navyfederal.org");
+        assert_eq!(
+            navy.and_then(|hit| hit.description.as_deref()),
+            Some("American credit union"),
+            "{hits:?}"
+        );
     }
 
     /// Short official domains and the spelled-out or one-word domains that

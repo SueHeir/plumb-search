@@ -15,8 +15,9 @@
 //!
 //! A long-running node (`plumb run`, see [`crate::node`]) serves the same
 //! pages through [`node_router`], plus `GET /api/status`, which returns the
-//! node's [`Status`] as JSON. Until its first index is ready, `/` and
-//! `/search` show the setup step, its progress and the last error instead,
+//! node's [`Status`] as JSON, and the node's panel at `/app` (see
+//! [`panel`]), which the desktop app shows in its window. Until its first
+//! index is ready, `/` and `/search` show the setup step, its progress and the last error instead,
 //! reloading every few seconds with a `<meta http-equiv="refresh">` (no
 //! script), and `/api/search` answers 503.
 //!
@@ -47,8 +48,8 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use axum::extract::{Query, State};
 use axum::http::{header, HeaderMap, HeaderName, StatusCode, Uri};
-use axum::response::{Html, IntoResponse, Response};
-use axum::routing::get;
+use axum::response::{Html, IntoResponse, Redirect, Response};
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use plumb_core::SiteRecord;
 use plumb_core::{collapse_whitespace, now_unix, truncate_chars};
@@ -62,8 +63,13 @@ use url::Url;
 
 use crate::cli::ServeArgs;
 use crate::country::{country_name, HomeCountry, COUNTRY_CHOICES};
-use crate::node::{Phase, Status, Step};
+use crate::node::{NodeSettings, Phase, Status, Step};
+use crate::websearch::{bang_url, Engine, WebSettings};
+
+mod panel;
+
 use crate::{block_on, rank_config};
+pub use panel::ADD_TO_FIREFOX_PATH;
 
 /// Results returned when a request does not say how many.
 pub const DEFAULT_LIMIT: usize = 10;
@@ -147,7 +153,8 @@ impl SearchBackend for IndexBackend {
     }
 }
 
-/// What a long-running node tells its web pages about itself.
+/// What a long-running node tells its web pages about itself, and what its
+/// panel (`/app`) can change.
 pub trait StatusSource: Send + Sync {
     /// The node's status, as `GET /api/status` returns it.
     fn status(&self) -> Status;
@@ -168,6 +175,24 @@ pub trait StatusSource: Send + Sync {
     fn record_pick(&self, query: &str, domain: &str) {
         let _ = (query, domain);
     }
+
+    /// The node's settings; `None` when it has none.
+    fn settings(&self) -> Option<NodeSettings> {
+        None
+    }
+
+    /// Saves new settings and puts them in force.
+    fn change_settings(&self, _settings: NodeSettings) -> Result<()> {
+        anyhow::bail!("this node has no settings")
+    }
+
+    /// Starts a refresh now.
+    fn refresh_now(&self) {}
+
+    /// Where the node keeps its data, to show on the panel.
+    fn data_dir(&self) -> Option<std::path::PathBuf> {
+        None
+    }
 }
 
 #[derive(Clone)]
@@ -175,8 +200,8 @@ struct AppState {
     backend: Arc<dyn SearchBackend>,
     /// Set for a long-running node, `None` for `plumb serve`.
     node: Option<Arc<dyn StatusSource>>,
-    /// The home country of searches that do not name one.
-    home: HomeCountry,
+    /// The home country and the web search link.
+    settings: WebSettings,
 }
 
 impl AppState {
@@ -203,12 +228,12 @@ pub fn router(backend: Arc<dyn SearchBackend>) -> Router {
     router_with(backend, HomeCountry::Auto)
 }
 
-/// [`router`] with a [`HomeCountry`] setting.
-pub fn router_with(backend: Arc<dyn SearchBackend>, home: HomeCountry) -> Router {
+/// [`router`] with [`WebSettings`], or just a [`HomeCountry`].
+pub fn router_with(backend: Arc<dyn SearchBackend>, settings: impl Into<WebSettings>) -> Router {
     app(AppState {
         backend,
         node: None,
-        home,
+        settings: settings.into(),
     })
 }
 
@@ -219,16 +244,16 @@ pub fn node_router(backend: Arc<dyn SearchBackend>, status: Arc<dyn StatusSource
     node_router_with(backend, status, HomeCountry::Auto)
 }
 
-/// [`node_router`] with a [`HomeCountry`] setting.
+/// [`node_router`] with [`WebSettings`], or just a [`HomeCountry`].
 pub fn node_router_with(
     backend: Arc<dyn SearchBackend>,
     status: Arc<dyn StatusSource>,
-    home: HomeCountry,
+    settings: impl Into<WebSettings>,
 ) -> Router {
     app(AppState {
         backend,
         node: Some(status),
-        home,
+        settings: settings.into(),
     })
 }
 
@@ -243,7 +268,11 @@ fn app(state: AppState) -> Router {
             .route("/api/status", get(api_status))
             .route("/go", get(go))
             .route("/network", get(network_page))
-            .route("/api/network/search", get(api_network_search));
+            .route("/api/network/search", get(api_network_search))
+            .route("/app", get(panel::panel))
+            .route("/app/settings", post(panel::save_settings))
+            .route("/app/refresh", post(panel::refresh))
+            .route(panel::ADD_TO_FIREFOX_PATH, get(panel::add_to_firefox));
     }
     router.with_state(state)
 }
@@ -255,7 +284,10 @@ pub fn run(args: ServeArgs) -> Result<()> {
     let docs = searcher.num_docs();
     let app = router_with(
         Arc::new(IndexBackend::new(searcher, rank_config(args.alpha))),
-        args.country.clone(),
+        WebSettings {
+            home: args.country.clone(),
+            web_search: args.web_search.0,
+        },
     );
     block_on(async move {
         let listener = tokio::net::TcpListener::bind(args.bind)
@@ -383,6 +415,10 @@ async fn search_page(
     headers: HeaderMap,
     Query(params): Query<SearchParams>,
 ) -> Response {
+    // A bang leaves Plumb, even while it sets up.
+    if let Some(url) = bang_url(&params.q) {
+        return (security_headers(), Redirect::to(&url)).into_response();
+    }
     if let Some(status) = state.setting_up() {
         // Reloading keeps the query, so the results show up once the index is ready.
         return setup_response(&status, now_unix());
@@ -391,7 +427,7 @@ async fn search_page(
     if query.is_empty() {
         return home_or_setup(&state);
     }
-    let options = params.options(&state.home, &headers);
+    let options = params.options(&state.settings.home, &headers);
     match run_search(&state, &query, params.limit(), &options).await {
         Ok(results) => html_response(
             StatusCode::OK,
@@ -399,6 +435,7 @@ async fn search_page(
                 &query,
                 &results,
                 &options,
+                state.settings.web_search,
                 state.network().is_some(),
                 state.shares_popularity(),
             ),
@@ -444,7 +481,7 @@ async fn api_search(
             (StatusCode::OK, security_headers(), Json(Vec::<Hit>::new())).into_response()
         };
     }
-    let options = params.options(&state.home, &headers);
+    let options = params.options(&state.settings.home, &headers);
     match run_search(&state, &query, params.limit(), &options).await {
         Ok(results) if full => (StatusCode::OK, security_headers(), Json(results)).into_response(),
         Ok(results) => (StatusCode::OK, security_headers(), Json(results.hits)).into_response(),
@@ -495,7 +532,7 @@ async fn go(
     let found = if query.is_empty() || state.setting_up().is_some() {
         None
     } else {
-        let options = search.options(&state.home, &headers);
+        let options = search.options(&state.settings.home, &headers);
         match run_search(&state, &query, MAX_LIMIT, &options).await {
             Ok(results) => results.hits.into_iter().find(|hit| hit.domain == params.d),
             Err(err) => {
@@ -731,7 +768,7 @@ fn render_opensearch(origin: &str) -> String {
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
          <OpenSearchDescription xmlns=\"http://a9.com/-/spec/opensearch/1.1/\">\n\
          <ShortName>Plumb Search</ShortName>\n\
-         <Description>Find a site by its name.</Description>\n\
+         <Description>Plumb Search</Description>\n\
          <InputEncoding>UTF-8</InputEncoding>\n\
          <Image width=\"32\" height=\"32\" type=\"image/png\">\
          data:image/png;base64,{ICON_PNG_BASE64}</Image>\n\
@@ -913,6 +950,7 @@ select{font:inherit;padding:.15rem .3rem;border:1px solid var(--line);border-rad
 background:var(--bg);color:var(--fg)}\
 .ss{margin:1rem 0 .25rem;padding:.6rem .8rem;border:1px solid var(--line);border-radius:.5rem}\
 .ss a{color:var(--link)}\
+.web{margin:.25rem 0;font-size:.9rem}.web a{color:var(--muted)}\
 .setup{max-width:36rem}\
 .step{margin:2rem 0 .5rem;font-size:1.1rem}\
 progress{width:100%;height:.75rem;accent-color:var(--accent)}\
@@ -959,8 +997,10 @@ fn render_home(docs: u64, status: Option<&Status>, now: u64) -> String {
         .map(|note| format!("\n<p class=\"s\">{}</p>", escape_html(&note)))
         .unwrap_or_default();
     let body = format!(
-        "<main class=\"wrap home\">\n<h1>Plumb</h1>\n<p class=\"tag\">Find a site by its name.</p>\n\
-         {}\n<p class=\"s\">{} sites indexed{note}</p>{wikidata}\n</main>",
+        "<main class=\"wrap home\">\n<h1>Plumb</h1>\n\
+         {}\n<p class=\"s\">{} sites indexed{note}</p>{wikidata}\n\
+         <p class=\"s\">Not looking for a site? Add !g, !ddg or !b to search Google, \
+         DuckDuckGo or Bing.</p>\n</main>",
         search_form("", true),
         group_thousands(docs)
     );
@@ -989,10 +1029,21 @@ fn wikidata_note(status: &Status, now: u64) -> Option<String> {
     if !status.wikidata_missing {
         return None;
     }
+    let Some(err) = &status.wikidata_error else {
+        // Right after the quick first setup, Wikidata is next.
+        if status.phase == Phase::SettingUp {
+            return None;
+        }
+        return Some(
+            "Plumb is still downloading Wikidata's list of official websites and more \
+             rankings. Search works now, and results get better once those are in."
+                .to_string(),
+        );
+    };
     let mut note = "Wikidata's list of official websites could not be downloaded yet, so the \
                     index does without it for now: official sites get no boost over look-alikes."
         .to_string();
-    if let Some(retry_at) = status.wikidata_error.as_ref().and_then(|err| err.retry_at) {
+    if let Some(retry_at) = err.retry_at {
         let _ = write!(note, " Plumb will try again {}.", time_until(retry_at, now));
     }
     Some(note)
@@ -1046,9 +1097,9 @@ fn render_setup(status: &Status, now: u64) -> String {
     }
     let _ = write!(
         body,
-        "<p class=\"s\">On its first start, Plumb downloads public lists of popular websites \
-         and builds its search index from them, which takes a few minutes. This page reloads \
-         every {SETUP_RELOAD_SECONDS} seconds.</p>\n</main>"
+        "<p class=\"s\">On its first start, Plumb downloads a public list of popular websites \
+         and builds a first search index from it, which takes a minute or two. It adds more \
+         lists while you search. This page reloads every {SETUP_RELOAD_SECONDS} seconds.</p>\n</main>"
     );
     let head = format!("<meta http-equiv=\"refresh\" content=\"{SETUP_RELOAD_SECONDS}\">\n");
     page_with_head("Setting up - Plumb Search", &head, &body)
@@ -1106,6 +1157,7 @@ fn render_results(
     query: &str,
     results: &SearchResults,
     options: &SearchOptions,
+    web_search: Option<Engine>,
     network: bool,
     share_picks: bool,
 ) -> String {
@@ -1116,6 +1168,15 @@ fn render_results(
     );
     if let Some(site_search) = &results.site_search {
         render_site_search(&mut body, site_search);
+    }
+    if let Some(engine) = web_search {
+        let _ = writeln!(
+            body,
+            "<p class=\"web\"><a href=\"{}\" rel=\"noreferrer\">Search the web with {} for <strong>{}</strong></a></p>",
+            escape_html(&engine.url(query)),
+            escape_html(engine.name()),
+            escape_html(&truncate_chars(query, 150))
+        );
     }
     if hits.is_empty() {
         let _ = writeln!(
@@ -1649,6 +1710,13 @@ mod tests {
             next_refresh: None,
             version: "0.1.0".to_string(),
             network: None,
+            crawl_left: 0,
+            background_updates: true,
+            paused: None,
+            disk_used: 0,
+            downloaded_today: 0,
+            downloaded_total: 0,
+            homepages_visited: 0,
         }
     }
 
@@ -1930,6 +1998,19 @@ mod tests {
             "{body}"
         );
 
+        // Before Wikidata is first tried, it is still to come.
+        status.wikidata_error = None;
+        assert!(!render_setup(&status, now).contains("Wikidata"));
+        status.phase = Phase::Ready;
+        assert!(
+            render_home(12, Some(&status), now).contains(
+                "Plumb is still downloading Wikidata&#39;s list of official websites and more \
+                 rankings. Search works now, and results get better once those are in."
+            ),
+            "{}",
+            render_home(12, Some(&status), now)
+        );
+
         // Once Wikidata is in, nothing is said.
         status.wikidata_missing = false;
         status.wikidata_error = None;
@@ -2087,7 +2168,7 @@ mod tests {
         );
         for expected in [
             "\n<ShortName>Plumb Search</ShortName>\n",
-            "\n<Description>Find a site by its name.</Description>\n",
+            "\n<Description>Plumb Search</Description>\n",
             "\n<InputEncoding>UTF-8</InputEncoding>\n",
             // A PNG starts with these bytes, in base64.
             "\n<Image width=\"32\" height=\"32\" type=\"image/png\">\
@@ -2300,5 +2381,43 @@ mod tests {
         assert!(query.starts_with("us bank x"));
         assert_eq!(query.chars().count(), MAX_QUERY_CHARS);
         assert_eq!(params.limit(), DEFAULT_LIMIT);
+    }
+
+    #[tokio::test]
+    async fn bangs_leave_and_the_web_search_link_is_a_setting() {
+        let fake = backend(bank_hits());
+        let (code, headers, _) = get(fake.clone(), "/search?q=%21g+boil+an+egg").await;
+        assert_eq!(code, StatusCode::SEE_OTHER);
+        assert_eq!(
+            headers[header::LOCATION],
+            "https://www.google.com/search?q=boil%20an%20egg"
+        );
+        // Even while a node sets up.
+        let setting_up = node(node_status(Phase::SettingUp, Step::Downloading));
+        let app = node_router(fake.clone(), setting_up);
+        let (code, _, _) = send(app, "/search?q=egg+%21ddg").await;
+        assert_eq!(code, StatusCode::SEE_OTHER);
+
+        // Off by default.
+        let (_, _, body) = get(fake.clone(), "/search?q=us+bank").await;
+        assert!(!body.contains("Search the web"), "{body}");
+
+        let settings = WebSettings {
+            web_search: Some(Engine::DuckDuckGo),
+            ..WebSettings::default()
+        };
+        let (_, _, body) = send(
+            router_with(fake.clone(), settings),
+            "/search?q=us+%3Cbank%3E",
+        )
+        .await;
+        assert!(
+            body.contains(
+                "<p class=\"web\"><a href=\"https://duckduckgo.com/?q=us%20%3Cbank%3E\" \
+                 rel=\"noreferrer\">Search the web with DuckDuckGo for \
+                 <strong>us &lt;bank&gt;</strong></a></p>"
+            ),
+            "{body}"
+        );
     }
 }

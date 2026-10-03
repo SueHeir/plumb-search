@@ -4,11 +4,12 @@
 //! Each turn of [`run`] looks at what is on disk and in the saved state and
 //! does the next piece of work, so the same code resumes after a restart:
 //!
-//! 1. no records file: download the seed data, ingest it, build the first
-//!    index ([`set_up`]);
+//! 1. no records file: download the Tranco list and put a quick first index
+//!    of it in service ([`set_up`]);
 //! 2. no index, or one older than the records: build one ([`rebuild`]);
-//! 3. Wikidata's official websites missing from setup and a try due:
-//!    download them and add them to the records ([`add_wikidata`]);
+//! 3. the rest of the seed data (Wikidata's official websites, Common
+//!    Crawl's ranks) missing and a try due: download it and fold it into
+//!    the records ([`complete_seed`]);
 //! 4. homepages left in a round: crawl them, then rebuild ([`crawl`]);
 //! 5. a refresh due or asked for: start a round ([`start_round`]);
 //! 6. otherwise wait for the next refresh (or the next try at Wikidata).
@@ -33,7 +34,7 @@ use plumb_core::{now_unix, SiteRecord};
 use plumb_crawl::{crawl_homepages, CrawlConfig};
 use plumb_index::build_index;
 use plumb_ingest::{
-    attach_facts, download, facts, load_cc_domain_ranks, load_site_facts, load_tranco,
+    attach_facts, download, facts, kind_sites, load_cc_domain_ranks, load_site_facts, load_tranco,
     load_wikidata_official_sites, Builder,
 };
 use tokio::runtime::Handle;
@@ -70,7 +71,10 @@ pub(super) async fn run(inner: Arc<Inner>) {
             // says nothing of the work this loop is retrying.
             Ok(Next::Aside) => {}
             Ok(Next::IdleUntil(until)) => {
-                inner.set_step(Step::Idle, idle_detail(&inner.config));
+                let detail = inner
+                    .pause_reason()
+                    .unwrap_or_else(|| idle_detail(&inner.config));
+                inner.set_step(Step::Idle, detail);
                 wait(&inner, Deadline::Wall(until)).await;
             }
             Err(err) if err.is::<Stopped>() => break,
@@ -126,8 +130,17 @@ async fn step(inner: &Arc<Inner>) -> Result<Next> {
     }
     let wikidata_due = saved.wikidata_missing.then(|| inner.wikidata_retry_at());
     if wikidata_due.is_some_and(|due| due <= now_unix()) {
-        add_wikidata(inner).await?;
+        complete_seed(inner).await?;
         return Ok(Next::Aside);
+    }
+    // Crawls and refreshes wait while background updates are off or a
+    // limit is reached; a day's download limit ends with the day.
+    if inner.pause_reason().is_some() {
+        inner.refresh_requested.store(false, Ordering::SeqCst);
+        let tomorrow = store::next_day(now_unix());
+        return Ok(Next::IdleUntil(Some(
+            wikidata_due.map_or(tomorrow, |due| due.min(tomorrow)),
+        )));
     }
     if saved.crawl_left > 0 {
         crawl(inner).await?;
@@ -159,29 +172,28 @@ fn idle_detail(config: &NodeConfig) -> &'static str {
     }
 }
 
-/// First start: downloads the seed data, keeps the best sites in a new
-/// records file and puts the first index of them in service.
+/// First start: downloads the Tranco list alone, keeps its best sites in a
+/// new records file and puts a first index of them in service, so search
+/// works within a minute or two. The rest of the seed data, whose downloads
+/// take many minutes (Wikidata's above all), is folded in right after by
+/// [`complete_seed`].
 async fn set_up(inner: &Arc<Inner>) -> Result<()> {
     info!(
-        "no records in {} yet: setting up from the seed data",
+        "no records in {} yet: setting up from the Tranco list, the rest of the seed data next",
         inner.paths.data.display()
     );
+    let before = store::dir_size(&inner.paths.seed);
     let files = tokio::select! {
-        files = download_seed(inner) => files?,
+        files = download_quick_seed(inner) => files?,
         () = inner.stopped() => return Err(Stopped.into()),
     };
-    if let Err(err) = &files.wikidata {
-        let retry_at = inner.wikidata_failed(err);
-        warn!(
-            "{err:#}; setting up without Wikidata's official websites for now, \
-             trying again in {}",
-            duration_words(retry_at.saturating_sub(now_unix()))
-        );
-    }
+    let downloaded = store::dir_size(&inner.paths.seed).saturating_sub(before);
     let built = blocking(inner, move |inner| {
         let records = seed_records(inner, &files)?;
         let mut fresh = SavedState::fresh(inner.config.initial_crawl);
-        fresh.wikidata_missing = files.wikidata.is_err();
+        fresh.wikidata_missing = true;
+        fresh.quick_start = true;
+        fresh.add_downloaded(downloaded, now_unix());
         // Saved first: records on disk always come with their state.
         inner.update_saved(|saved| *saved = fresh)?;
         save_seed_records(inner, &records)?;
@@ -192,37 +204,66 @@ async fn set_up(inner: &Arc<Inner>) -> Result<()> {
     put_in_service(inner, built).await
 }
 
-/// Tries again to download Wikidata's official websites, which setup went
-/// on without. When they come, they are folded into the records as setup
-/// would have done, and an index of the result is put in service. A
-/// failure only sets the time of the next try: it is shown in the status,
-/// but does not hold up other work.
-async fn add_wikidata(inner: &Arc<Inner>) -> Result<()> {
-    info!("asking Wikidata again for the official websites setup went without");
+/// Downloads the rest of the seed data, which setup went on without, and
+/// folds it into the records as a full setup would have, then puts an index
+/// of the result in service. After a quick start ([`SavedState::quick_start`])
+/// the full seed replaces the quick records, keeping what crawls added; when
+/// only Wikidata fails, the other files are folded in already.
+///
+/// A failure of Wikidata only sets the time of the next try: it is shown in
+/// the status, but does not hold up other work.
+async fn complete_seed(inner: &Arc<Inner>) -> Result<()> {
+    let quick = inner.saved().quick_start;
+    if quick {
+        info!("downloading the rest of the seed data: Wikidata's official websites and more");
+    } else {
+        info!("asking Wikidata again for the official websites setup went without");
+    }
+    let before = store::dir_size(&inner.paths.seed);
     let files = tokio::select! {
         files = download_seed(inner) => files,
         () = inner.stopped() => return Err(Stopped.into()),
     };
+    inner.add_downloaded(store::dir_size(&inner.paths.seed).saturating_sub(before))?;
+    inner.recount_disk();
+    let failed = |err: &anyhow::Error| {
+        let retry_at = inner.wikidata_failed(err);
+        warn!(
+            "{err:#}; trying Wikidata again in {}",
+            duration_words(retry_at.saturating_sub(now_unix()))
+        );
+    };
     let files = match files {
-        Err(err)
-        | Ok(SeedFiles {
-            wikidata: Err(err), ..
-        }) => {
-            let retry_at = inner.wikidata_failed(&err);
-            warn!(
-                "{err:#}; trying Wikidata again in {}",
-                duration_words(retry_at.saturating_sub(now_unix()))
-            );
+        Ok(files) => files,
+        Err(err) => {
+            failed(&err);
             return Ok(());
         }
-        Ok(files) => files,
     };
-    inner.wikidata_arrived();
+    if let (Err(err), false) = (&files.wikidata, quick) {
+        failed(err);
+        return Ok(());
+    }
+    // Noted once the other files are in, so that the status and the saved
+    // state agree.
+    let wikidata_err = files
+        .wikidata
+        .as_ref()
+        .err()
+        .map(|err| anyhow::anyhow!("{err:#}"));
+    let wikidata_missing = wikidata_err.is_some();
     let built = blocking(inner, move |inner| {
         let seed = seed_records(inner, &files)?;
         inner.set_step(Step::Ingesting, "Reading the site records");
         let mut set = load_records(&inner.paths.records)?;
         let before = set.len();
+        if quick {
+            // Quick records the full seed leaves out are dropped, unless a
+            // crawl reached them or found links to them.
+            set.retain(|record| {
+                record.crawl_attempted_at.is_some() || !record.link_texts.is_empty()
+            });
+        }
         set.extend(seed);
         inner.check_stop()?;
         let records = set.into_sorted_vec();
@@ -235,13 +276,13 @@ async fn add_wikidata(inner: &Arc<Inner>) -> Result<()> {
         );
         replace_records(&inner.paths.records, &records)?;
         inner.update_saved(|saved| {
-            saved.wikidata_missing = false;
+            saved.wikidata_missing = wikidata_missing;
+            saved.quick_start = false;
             saved.index_stale = true;
         })?;
         info!(
-            "added Wikidata's official websites to the records: {} sites, {} of them new",
+            "folded the seed data into the records: {} sites (there were {before})",
             records.len(),
-            records.len().saturating_sub(before)
         );
         inner.check_stop()?;
         build(inner, records)
@@ -250,6 +291,10 @@ async fn add_wikidata(inner: &Arc<Inner>) -> Result<()> {
     // Not put_in_service: this is no refresh, and a round under way goes on.
     inner.install(built);
     inner.update_saved(|saved| saved.index_stale = false)?;
+    match &wikidata_err {
+        None => inner.wikidata_arrived(),
+        Some(err) => failed(err),
+    }
     sweep(inner).await;
     Ok(())
 }
@@ -264,6 +309,9 @@ struct SeedFiles {
     /// Countries and kinds of the official websites' organizations; used
     /// when the file exists, since setup goes on without it.
     facts: PathBuf,
+    /// Official websites of banks, credit unions and other kinds of
+    /// organizations, however few sitelinks; used when the file exists.
+    kind_sites: PathBuf,
     cc_ranks: Option<PathBuf>,
 }
 
@@ -311,6 +359,25 @@ async fn download_seed(inner: &Inner) -> Result<SeedFiles> {
         wikidata = downloaded.context("could not download Wikidata's official websites");
     }
 
+    let kind_sites = seed.join(kind_sites::KIND_SITES_FILE_NAME);
+    if wikidata.is_ok() && !is_recent(&kind_sites) {
+        inner.set_step(
+            Step::Downloading,
+            "Asking Wikidata for the sites of banks, credit unions and other organizations",
+        );
+        let downloaded = kind_sites::download_kind_sites(
+            &client,
+            &sources.wikidata_sparql_url,
+            seed,
+            sources.wikidata_pacing,
+        )
+        .await;
+        if let Err(err) = downloaded {
+            // More official sites help, but are not needed: carry on.
+            warn!("could not get Wikidata's sites by kind, going on without them: {err:#}");
+        }
+    }
+
     let facts = seed.join(facts::FACTS_FILE_NAME);
     if let (Ok(sites), false) = (&wikidata, is_recent(&facts)) {
         inner.set_step(
@@ -321,7 +388,7 @@ async fn download_seed(inner: &Inner) -> Result<SeedFiles> {
             &client,
             &sources.wikidata_sparql_url,
             seed,
-            sites,
+            &[sites.clone(), kind_sites.clone()],
             sources.wikidata_pacing,
         )
         .await;
@@ -362,7 +429,34 @@ async fn download_seed(inner: &Inner) -> Result<SeedFiles> {
         tranco,
         wikidata,
         facts,
+        kind_sites,
         cc_ranks,
+    })
+}
+
+/// Downloads only the Tranco list into `seed/` (kept when an earlier try
+/// saved it in the last week), for a quick start.
+async fn download_quick_seed(inner: &Inner) -> Result<SeedFiles> {
+    let seed = &inner.paths.seed;
+    let tranco = seed.join(download::TRANCO_FILE_NAME);
+    inner.set_step(
+        Step::Downloading,
+        "Downloading the Tranco list of popular sites",
+    );
+    inner.set_progress(0, 1, "files");
+    if !is_recent(&tranco) {
+        let client = download::http_client()?;
+        download::download_to_file(&client, &inner.config.sources.tranco_url, &tranco)
+            .await
+            .context("could not download the seed data:\nthe Tranco list")?;
+    }
+    inner.set_progress(1, 1, "files");
+    Ok(SeedFiles {
+        tranco,
+        wikidata: Err(anyhow::anyhow!("not downloaded yet")),
+        facts: seed.join(facts::FACTS_FILE_NAME),
+        kind_sites: seed.join(kind_sites::KIND_SITES_FILE_NAME),
+        cc_ranks: None,
     })
 }
 
@@ -410,6 +504,12 @@ fn seed_records(inner: &Inner, files: &SeedFiles) -> Result<Vec<SiteRecord>> {
         inner.set_progress(sources - 1, sources, "files");
         let mut sites = load_wikidata_official_sites(path)
             .with_context(|| format!("loading Wikidata sites {}", path.display()))?;
+        if files.kind_sites.is_file() {
+            match load_wikidata_official_sites(&files.kind_sites) {
+                Ok(by_kind) => sites.extend(by_kind),
+                Err(err) => warn!("going on without Wikidata's sites by kind: {err:#}"),
+            }
+        }
         if files.facts.is_file() {
             match load_site_facts(&files.facts) {
                 Ok(facts) => attach_facts(&mut sites, &facts),
@@ -526,12 +626,19 @@ fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Option<ServingIndex
             use_system_proxy: inner.config.use_system_proxy,
             ..CrawlConfig::default()
         };
+        // Homepages counted in the saved state so far.
+        let counted = std::cell::Cell::new(0);
         let totals = crawl_in_batches(
             &mut set,
             &targets,
             CRAWL_BATCH_SIZE,
             &mut store,
             |batch| {
+                // Background updates turned off or a limit reached: pause
+                // between batches.
+                if inner.pause_reason().is_some() {
+                    return None;
+                }
                 handle.block_on(async {
                     let results = tokio::select! {
                         results = crawl_homepages(batch, &cfg) => results,
@@ -550,15 +657,35 @@ fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Option<ServingIndex
             },
             |totals| {
                 inner.set_progress(totals.attempted, targets.len(), "homepages");
+                let visited = totals.attempted - counted.replace(totals.attempted);
+                let downloaded = cfg.downloaded.swap(0, Ordering::Relaxed);
+                let now = now_unix();
                 inner.update_saved(|saved| {
                     saved.crawl_left = left.saturating_sub(totals.attempted);
                     saved.index_stale = true;
-                })
+                    saved.homepages_visited += visited as u64;
+                    saved.add_downloaded(downloaded, now);
+                })?;
+                inner.recount_disk();
+                Ok(())
             },
         )?;
         match totals.end {
             RunEnd::Finished => {}
-            RunEnd::Stopped => return Err(Stopped.into()),
+            RunEnd::Stopped if inner.stopping() => return Err(Stopped.into()),
+            RunEnd::Stopped => {
+                // Paused by the settings or a limit: index what was crawled
+                // so far, and go on from there later.
+                info!(
+                    "{}: pausing the crawl after {} homepages",
+                    inner.pause_reason().unwrap_or("paused"),
+                    totals.attempted
+                );
+                if totals.attempted == 0 {
+                    return Ok(None);
+                }
+                return build(inner, set.into_sorted_vec()).map(Some);
+            }
             RunEnd::Offline(offline) => {
                 let proxy = if inner.config.use_system_proxy {
                     ""
@@ -668,6 +795,7 @@ where
 /// Deletes the directories of replaced indexes that no search has open any
 /// more.
 async fn sweep(inner: &Arc<Inner>) {
+    inner.recount_disk();
     if !inner.has_retired() {
         return;
     }
@@ -715,7 +843,8 @@ async fn wait(inner: &Arc<Inner>, deadline: Deadline) {
         };
         tokio::select! {
             () = tokio::time::sleep(nap) => {}
-            () = inner.wake.notified() => {}
+            // A refresh request or new settings: look again at what to do.
+            () = inner.wake.notified() => return,
             () = inner.stopped() => return,
         }
         sweep(inner).await;
