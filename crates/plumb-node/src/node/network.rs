@@ -9,7 +9,11 @@
 //!   work ([`absorb_inbox`]). Rebuilding the index for every batch would
 //!   keep a node busy, so the index is rebuilt once
 //!   [`REBUILD_AFTER_RECORDS`] records have come in, or at the next refresh.
-//! * Other nodes' searches are answered from the index being served.
+//! * Other nodes search by bucket (see `plumb_net::bucket`), never sending
+//!   their query. Each index build also writes the index's buckets into
+//!   `indexes/NNNNNN/buckets/` ([`build_buckets`]), and bucket requests are
+//!   answered from the index being served. An index built before the node
+//!   joined has none, and serves no buckets until the next build.
 //!
 //! ```text
 //! DIR/net/
@@ -21,41 +25,61 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
+use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use plumb_core::SiteRecord;
-use plumb_net::{LocalHit, LocalSearch, NetHandle};
+use plumb_net::{BucketSource, BucketTable, NetHandle};
 use tracing::{info, warn};
 
 use super::Inner;
 use crate::records::{load_records, Change, RecordStore};
-use crate::web::SearchBackend;
 
 /// Records from other nodes that make a node rebuild its index before the
 /// next refresh.
 pub(crate) const REBUILD_AFTER_RECORDS: u64 = 2_000;
 
-/// Answers other nodes' searches from the index this node serves.
+/// Where an index keeps its buckets, inside its directory.
+pub(super) const BUCKETS_DIR: &str = "buckets";
+
+/// Answers other nodes' bucket requests from the index this node serves.
 struct ServedIndex(Arc<Inner>);
 
-impl LocalSearch for ServedIndex {
-    fn search(&self, query: &str, limit: usize) -> Vec<LocalHit> {
-        match SearchBackend::search(&*self.0, query, limit) {
-            Ok(hits) => hits
-                .into_iter()
-                .map(|hit| LocalHit {
-                    domain: hit.domain,
-                    url: hit.url,
-                    title: hit.title,
-                    description: hit.description,
-                    score: hit.score,
-                })
-                .collect(),
-            // Not ready yet: nothing to offer.
-            Err(_) => Vec::new(),
+impl BucketSource for ServedIndex {
+    fn bucket(&self, bucket: u32) -> Option<Vec<String>> {
+        let index = self.0.current()?;
+        let table = index.buckets.as_ref()?;
+        match table.get(bucket) {
+            Ok(records) => Some(records),
+            Err(err) => {
+                warn!("cannot read bucket {bucket}: {err:#}");
+                None
+            }
         }
+    }
+}
+
+/// Writes the buckets of a new index into its directory, for a node that
+/// answers other nodes' searches. A failure is logged, not raised: the index
+/// still works, it just serves no buckets.
+pub(super) fn build_buckets(inner: &Inner, index_dir: &Path, records: &[SiteRecord]) {
+    if !inner
+        .config
+        .network
+        .as_ref()
+        .is_some_and(|n| n.answer_searches)
+    {
+        return;
+    }
+    let dir = index_dir.join(BUCKETS_DIR);
+    if let Err(err) = BucketTable::build(&dir, records) {
+        warn!(
+            "cannot write the buckets of {}: {err:#}",
+            index_dir.display()
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 }
 

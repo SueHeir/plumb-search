@@ -5,8 +5,8 @@
 //!
 //! A node dials out to its bootstrap nodes and to the nodes they tell it
 //! about (Kademlia), over TCP and QUIC. That is all most nodes need:
-//! fetching batches, sending searches and answering the searches of nodes
-//! it dialed all happen over connections it opened itself.
+//! fetching batches, asking for buckets and answering bucket requests all
+//! happen over connections it opened itself.
 //!
 //! Reachable nodes (a server, a VPS, a homelab with a forwarded port or
 //! UPnP) run with [`NetConfig::relay_server`] on and their public address in
@@ -27,11 +27,11 @@
 //!   it accepts ([`accept_batch`]) to the receiver returned by [`start`].
 //!   On meeting a node, it asks for the batches of the last
 //!   [`CATCH_UP_EPOCHS`] epochs it missed.
-//! * Network search: [`NetHandle::search`] asks up to
-//!   [`SEARCH_FANOUT`] nodes at random and merges their answers; answers
-//!   with a proof are checked, and an answer whose proof fails is dropped.
-//!   The node answers other nodes' searches from its own index through
-//!   [`LocalSearch`].
+//! * Network search: [`NetHandle::search`] never sends the query; it asks
+//!   other nodes for buckets of sites under throwaway identities (see
+//!   [`crate::bucket`] and [`crate::search`]). The node answers other
+//!   nodes' bucket requests from its own [`BucketSource`], with a proof for
+//!   every site it holds a signed crawl of.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
@@ -50,8 +50,7 @@ use libp2p::{
     autonat, dcutr, gossipsub, identify, kad, noise, ping, relay, tcp, upnp, yamux, Multiaddr,
     PeerId, StreamProtocol, Swarm,
 };
-use plumb_core::{canonical_domain, now_unix, registrable_domain, SiteRecord};
-use rand_core::RngCore;
+use plumb_core::{now_unix, SiteRecord};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -59,21 +58,21 @@ use tracing::{debug, info, warn};
 
 use crate::assign::{epoch_of, is_assigned, MAX_SHARE_PPM};
 use crate::batch::{accept_batch, Batch, SignedHeader};
+use crate::bucket::{BucketSource, BUCKETS};
 use crate::hash::Hash;
 use crate::proto::*;
+use crate::search::{BucketPeer, NetSearch};
 use crate::store::BatchStore;
 
 /// Relays a node behind NAT takes reservations on.
 pub const MAX_RELAYS: usize = 2;
-/// Nodes a network search asks.
-pub const SEARCH_FANOUT: usize = 3;
 /// Epochs of batches a node asks for when it meets another.
 pub const CATCH_UP_EPOCHS: u64 = 3;
 /// A node dials more nodes it knows of while it has fewer connections.
 pub const TARGET_PEERS: usize = 8;
 /// Batch fetches in flight at once.
 const MAX_FETCHES: usize = 16;
-/// Searches from other nodes answered at once; more are turned away.
+/// Bucket requests answered at once; more are turned away.
 const MAX_ANSWERING: usize = 8;
 const RELAY_HOP_PROTOCOL: &str = "/libp2p/circuit/relay/0.2.0/hop";
 
@@ -97,7 +96,8 @@ pub struct NetConfig {
     /// Share of all sites this node takes on each epoch, in parts per
     /// million, at most [`MAX_SHARE_PPM`].
     pub share_ppm: u32,
-    /// Answer other nodes' searches from the local index.
+    /// Answer other nodes' bucket requests (network searches) from the
+    /// local [`BucketSource`].
     pub answer_searches: bool,
 }
 
@@ -124,52 +124,6 @@ impl NetConfig {
     }
 }
 
-/// A hit from this node's own index, for answering other nodes.
-#[derive(Debug, Clone, PartialEq)]
-pub struct LocalHit {
-    pub domain: String,
-    pub url: String,
-    pub title: Option<String>,
-    pub description: Option<String>,
-    pub score: f32,
-}
-
-/// Searches this node's own index for other nodes. Called on a blocking
-/// thread.
-pub trait LocalSearch: Send + Sync + 'static {
-    fn search(&self, query: &str, limit: usize) -> Vec<LocalHit>;
-}
-
-/// The result of a network search.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct NetSearch {
-    /// Nodes asked.
-    pub asked: usize,
-    /// Nodes that answered in time.
-    pub answered: usize,
-    /// Answers dropped because a proof in them did not check out.
-    pub rejected: usize,
-    /// Merged hits, best first.
-    pub hits: Vec<NetworkHit>,
-}
-
-/// A hit merged from the answers of several nodes.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct NetworkHit {
-    pub domain: String,
-    pub url: String,
-    pub title: Option<String>,
-    pub description: Option<String>,
-    /// The text comes from a signed crawl whose proof checked out.
-    pub verified: bool,
-    /// The node that signed that crawl.
-    pub crawler: Option<String>,
-    /// How many of the nodes that answered returned this site.
-    pub answered_by: usize,
-    /// Mean of the answering nodes' scores, each scaled to their best hit.
-    pub score: f32,
-}
-
 /// What the network side of a node is doing, for `GET /api/status`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NetStatus {
@@ -185,7 +139,8 @@ pub struct NetStatus {
     pub batches_held: usize,
     pub batches_published: u64,
     pub batches_received: u64,
-    pub searches_answered: u64,
+    /// Bucket requests from other nodes answered.
+    pub buckets_served: u64,
 }
 
 /// Talks to the swarm task.
@@ -203,12 +158,7 @@ enum Command {
         records: Vec<SiteRecord>,
         reply: oneshot::Sender<Result<Option<Hash>>>,
     },
-    Search {
-        query: String,
-        limit: u32,
-        answers: mpsc::UnboundedSender<(PeerId, Option<SearchResponse>)>,
-        asked: oneshot::Sender<usize>,
-    },
+    Peers(oneshot::Sender<Vec<BucketPeer>>),
     Dial(Multiaddr),
     Stop,
 }
@@ -239,28 +189,15 @@ impl NetHandle {
         answer.await.context("the network task stopped")?
     }
 
-    /// Asks up to [`SEARCH_FANOUT`] nodes for `query` and merges what comes
-    /// back within `wait`.
-    pub async fn search(&self, query: &str, limit: usize, wait: Duration) -> Result<NetSearch> {
-        let limit = (limit as u32).clamp(1, MAX_SEARCH_HITS);
-        let (answers_tx, mut answers) = mpsc::unbounded_channel();
-        let (asked_tx, asked) = oneshot::channel();
-        self.send(Command::Search {
-            query: query.to_string(),
-            limit,
-            answers: answers_tx,
-            asked: asked_tx,
-        })?;
-        let asked = asked.await.context("the network task stopped")?;
-        let mut collected = Vec::new();
-        let deadline = tokio::time::Instant::now() + wait;
-        while collected.len() < asked {
-            match tokio::time::timeout_at(deadline, answers.recv()).await {
-                Ok(Some(answer)) => collected.push(answer),
-                Ok(None) | Err(_) => break,
-            }
-        }
-        Ok(merge_answers(asked, collected, limit as usize, now_unix()))
+    /// Searches the network for `query` without sending it: fetches the
+    /// query's buckets, padded with random ones, from other nodes under
+    /// throwaway identities, waiting at most `wait`, and returns the sites
+    /// that match, checked but unranked (see [`crate::search`]).
+    pub async fn search(&self, query: &str, wait: Duration) -> Result<NetSearch> {
+        let (reply, peers) = oneshot::channel();
+        self.send(Command::Peers(reply))?;
+        let peers = peers.await.context("the network task stopped")?;
+        Ok(crate::search::search(query, &peers, wait, now_unix()).await)
     }
 
     /// Dials `addr`, for tests and for adding a node by hand.
@@ -342,7 +279,7 @@ struct Behaviour {
     ping: ping::Behaviour,
     kad: kad::Behaviour<kad::store::MemoryStore>,
     gossipsub: gossipsub::Behaviour,
-    search: request_response::cbor::Behaviour<SearchRequest, SearchResponse>,
+    buckets: request_response::cbor::Behaviour<BucketRequest, BucketResponse>,
     batches: request_response::cbor::Behaviour<BatchRequest, BatchResponse>,
 }
 
@@ -350,7 +287,7 @@ struct Behaviour {
 /// accepted from other nodes' batches, one batch at a time.
 pub async fn start(
     config: NetConfig,
-    local: Arc<dyn LocalSearch>,
+    source: Arc<dyn BucketSource>,
 ) -> Result<(NetHandle, mpsc::UnboundedReceiver<Vec<SiteRecord>>)> {
     let key = load_or_create_key(&config.dir.join("node.key"))?;
     let store = {
@@ -392,15 +329,14 @@ pub async fn start(
         config: config.clone(),
         topic,
         store: Arc::new(Mutex::new(store)),
-        local,
+        source,
         status: status.clone(),
         records: records_tx,
         answers_tx,
-        searchable: HashSet::new(),
+        bucket_peers: HashMap::new(),
         batch_peers: HashSet::new(),
         relays: HashMap::new(),
         remote_addrs: HashMap::new(),
-        searches: HashMap::new(),
         wanted: VecDeque::new(),
         wanted_ids: HashSet::new(),
         fetching: HashMap::new(),
@@ -428,11 +364,18 @@ fn build_swarm(key: &Keypair, config: &NetConfig) -> Result<Swarm<Behaviour>> {
     let peer_id = key.public().to_peer_id();
     let relay_server = config.relay_server;
     let upnp = config.upnp;
-    let search_support = if config.answer_searches {
-        ProtocolSupport::Full
-    } else {
-        ProtocolSupport::Outbound
-    };
+    // Buckets are only ever asked for by throwaway swarms (crate::search),
+    // so this one only answers, and only when it serves buckets at all.
+    let bucket_protocols: Vec<(StreamProtocol, ProtocolSupport)> = config
+        .answer_searches
+        .then(|| {
+            (
+                StreamProtocol::new(BUCKET_PROTOCOL),
+                ProtocolSupport::Inbound,
+            )
+        })
+        .into_iter()
+        .collect();
     let swarm = libp2p::SwarmBuilder::with_existing_identity(key.clone())
         .with_tokio()
         .with_tcp(
@@ -494,8 +437,11 @@ fn build_swarm(key: &Keypair, config: &NetConfig) -> Result<Swarm<Behaviour>> {
                 ping: ping::Behaviour::default(),
                 kad,
                 gossipsub,
-                search: request_response::cbor::Behaviour::new(
-                    [(StreamProtocol::new(SEARCH_PROTOCOL), search_support)],
+                buckets: request_response::Behaviour::with_codec(
+                    request_response::cbor::codec::Codec::default()
+                        .set_request_size_maximum(1024)
+                        .set_response_size_maximum(64 * 1024 * 1024),
+                    bucket_protocols,
                     request_config.clone(),
                 ),
                 batches: request_response::Behaviour::with_codec(
@@ -515,11 +461,9 @@ fn build_swarm(key: &Keypair, config: &NetConfig) -> Result<Swarm<Behaviour>> {
 
 /// Work done off the swarm task whose result goes back to a remote node.
 enum Answer {
-    Search(ResponseChannel<SearchResponse>, SearchResponse),
+    Bucket(ResponseChannel<BucketResponse>, BucketResponse),
     Batch(ResponseChannel<BatchResponse>, BatchResponse),
 }
-
-type Answers = mpsc::UnboundedSender<(PeerId, Option<SearchResponse>)>;
 
 struct Task {
     swarm: Swarm<Behaviour>,
@@ -527,20 +471,18 @@ struct Task {
     config: NetConfig,
     topic: gossipsub::IdentTopic,
     store: Arc<Mutex<BatchStore>>,
-    local: Arc<dyn LocalSearch>,
+    source: Arc<dyn BucketSource>,
     status: Arc<Mutex<NetStatus>>,
     records: mpsc::UnboundedSender<Vec<SiteRecord>>,
     answers_tx: mpsc::UnboundedSender<Answer>,
-    /// Connected nodes that answer searches.
-    searchable: HashSet<PeerId>,
+    /// Connected nodes that serve buckets, and the addresses they listen on.
+    bucket_peers: HashMap<PeerId, Vec<Multiaddr>>,
     /// Connected nodes that serve batches.
     batch_peers: HashSet<PeerId>,
     /// Relays we asked for a reservation, and whether it was granted.
     relays: HashMap<PeerId, bool>,
     /// The address of each connected node, as we reached it or it reached us.
     remote_addrs: HashMap<PeerId, Multiaddr>,
-    /// Network searches waiting for answers.
-    searches: HashMap<OutboundRequestId, Answers>,
     /// Batches to fetch, and from whom.
     wanted: VecDeque<(Hash, Vec<PeerId>)>,
     wanted_ids: HashSet<Hash>,
@@ -584,26 +526,22 @@ impl Task {
             Command::Publish { records, reply } => {
                 let _ = reply.send(self.publish(records));
             }
-            Command::Search {
-                query,
-                limit,
-                answers,
-                asked,
-            } => {
-                let mut peers: Vec<PeerId> = self.searchable.iter().copied().collect();
-                shuffle(&mut peers);
-                peers.truncate(SEARCH_FANOUT);
-                for peer in &peers {
-                    let id = self.swarm.behaviour_mut().search.send_request(
-                        peer,
-                        SearchRequest {
-                            query: query.clone(),
-                            limit,
-                        },
-                    );
-                    self.searches.insert(id, answers.clone());
-                }
-                let _ = asked.send(peers.len());
+            Command::Peers(reply) => {
+                let peers = self
+                    .bucket_peers
+                    .iter()
+                    .map(|(peer, listening)| {
+                        let mut addrs = listening.clone();
+                        if let Some(addr) = self.remote_addrs.get(peer) {
+                            if !addrs.contains(addr) {
+                                addrs.insert(0, addr.clone());
+                            }
+                        }
+                        BucketPeer { peer: *peer, addrs }
+                    })
+                    .filter(|p| !p.addrs.is_empty())
+                    .collect();
+                let _ = reply.send(peers);
             }
             Command::Dial(addr) => self.dial(addr),
             Command::Stop => {}
@@ -650,14 +588,14 @@ impl Task {
 
     fn on_answer(&mut self, answer: Answer) {
         match answer {
-            Answer::Search(channel, response) => {
+            Answer::Bucket(channel, response) => {
                 self.answering = self.answering.saturating_sub(1);
                 let _ = self
                     .swarm
                     .behaviour_mut()
-                    .search
+                    .buckets
                     .send_response(channel, response);
-                self.with_status(|s| s.searches_answered += 1);
+                self.with_status(|s| s.buckets_served += 1);
             }
             Answer::Batch(channel, response) => {
                 let _ = self
@@ -750,7 +688,7 @@ impl Task {
                 ..
             } => {
                 if num_established == 0 {
-                    self.searchable.remove(&peer_id);
+                    self.bucket_peers.remove(&peer_id);
                     self.batch_peers.remove(&peer_id);
                     self.remote_addrs.remove(&peer_id);
                     if self.relays.remove(&peer_id).is_some() {
@@ -798,7 +736,7 @@ impl Task {
                     }
                 }
             }
-            BehaviourEvent::Search(event) => self.on_search_event(event),
+            BehaviourEvent::Buckets(event) => self.on_bucket_event(event),
             BehaviourEvent::Batches(event) => self.on_batch_event(event),
             BehaviourEvent::RelayClient(relay::client::Event::ReservationReqAccepted {
                 relay_peer_id,
@@ -849,8 +787,14 @@ impl Task {
                 }
             }
         }
-        if supports(SEARCH_PROTOCOL) {
-            self.searchable.insert(peer);
+        if supports(BUCKET_PROTOCOL) {
+            let addrs = info
+                .listen_addrs
+                .iter()
+                .filter(|addr| is_specific(addr))
+                .cloned()
+                .collect();
+            self.bucket_peers.insert(peer, addrs);
         }
         if supports(BATCH_PROTOCOL) {
             self.batch_peers.insert(peer);
@@ -928,82 +872,46 @@ impl Task {
         }
     }
 
-    fn on_search_event(&mut self, event: request_response::Event<SearchRequest, SearchResponse>) {
-        match event {
-            request_response::Event::Message {
-                peer,
-                message:
-                    request_response::Message::Request {
-                        request, channel, ..
-                    },
-                ..
-            } => {
-                if self.answering >= MAX_ANSWERING || request.query.len() > MAX_QUERY_BYTES {
-                    let _ = self
-                        .swarm
-                        .behaviour_mut()
-                        .search
-                        .send_response(channel, SearchResponse { hits: Vec::new() });
-                    return;
-                }
-                debug!("answering a search from {peer}");
-                self.answering += 1;
-                let local = self.local.clone();
-                let store = self.store.clone();
-                let tx = self.answers_tx.clone();
-                tokio::task::spawn_blocking(move || {
-                    let limit = request.limit.min(MAX_SEARCH_HITS) as usize;
-                    let hits = local
-                        .search(&request.query, limit)
-                        .into_iter()
-                        .map(|hit| {
-                            let proof = store
-                                .lock()
-                                .unwrap_or_else(PoisonError::into_inner)
-                                .proof(&hit.domain)
-                                .unwrap_or_else(|err| {
-                                    warn!("cannot read a batch: {err:#}");
-                                    None
-                                });
-                            NetHit {
-                                domain: hit.domain,
-                                url: hit.url,
-                                title: hit.title,
-                                description: hit.description,
-                                score: hit.score,
-                                proof,
-                            }
-                        })
-                        .collect();
-                    let _ = tx.send(Answer::Search(channel, SearchResponse { hits }));
-                });
-            }
-            request_response::Event::Message {
-                peer,
-                message:
-                    request_response::Message::Response {
-                        request_id,
-                        response,
-                    },
-                ..
-            } => {
-                if let Some(answers) = self.searches.remove(&request_id) {
-                    let _ = answers.send((peer, Some(response)));
-                }
-            }
-            request_response::Event::OutboundFailure {
-                peer,
-                request_id,
-                error,
-                ..
-            } => {
-                debug!("search sent to {peer} failed: {error}");
-                if let Some(answers) = self.searches.remove(&request_id) {
-                    let _ = answers.send((peer, None));
-                }
-            }
-            _ => {}
+    fn on_bucket_event(&mut self, event: request_response::Event<BucketRequest, BucketResponse>) {
+        let request_response::Event::Message {
+            peer,
+            message:
+                request_response::Message::Request {
+                    request, channel, ..
+                },
+            ..
+        } = event
+        else {
+            return;
+        };
+        if self.answering >= MAX_ANSWERING || request.bucket >= BUCKETS {
+            let _ = self
+                .swarm
+                .behaviour_mut()
+                .buckets
+                .send_response(channel, BucketResponse { records: None });
+            return;
         }
+        debug!("serving bucket {} to {peer}", request.bucket);
+        self.answering += 1;
+        let source = self.source.clone();
+        let store = self.store.clone();
+        let tx = self.answers_tx.clone();
+        tokio::task::spawn_blocking(move || {
+            let records = source.bucket(request.bucket).map(|lines| {
+                let store = store.lock().unwrap_or_else(PoisonError::into_inner);
+                lines
+                    .into_iter()
+                    .map(|record| {
+                        let proof = serde_json::from_str::<SiteRecord>(&record)
+                            .ok()
+                            .and_then(|r| store.proof(&r.domain).unwrap_or(None));
+                        BucketRecord { record, proof }
+                    })
+                    .collect()
+            });
+            let _ = tx.send(Answer::Bucket(channel, BucketResponse { records }));
+        });
     }
 
     fn on_batch_event(&mut self, event: request_response::Event<BatchRequest, BatchResponse>) {
@@ -1157,109 +1065,6 @@ impl Task {
     }
 }
 
-/// Checks and merges the answers of several nodes. Hits with a proof that
-/// fails make the whole answer count as a lie and be dropped. A site's
-/// score is the mean of its scores scaled to each node's best hit, and
-/// sites more nodes returned come first.
-fn merge_answers(
-    asked: usize,
-    answers: Vec<(PeerId, Option<SearchResponse>)>,
-    limit: usize,
-    now: u64,
-) -> NetSearch {
-    let mut out = NetSearch {
-        asked,
-        ..NetSearch::default()
-    };
-    let mut merged: Vec<NetworkHit> = Vec::new();
-    let mut scores: HashMap<String, Vec<f32>> = HashMap::new();
-    for (peer, response) in answers {
-        let Some(response) = response else {
-            continue;
-        };
-        out.answered += 1;
-        let mut checked = Vec::new();
-        let mut honest = true;
-        for hit in response.hits.into_iter().take(MAX_SEARCH_HITS as usize) {
-            if canonical_domain(&hit.domain).as_deref() != Some(hit.domain.as_str()) {
-                continue;
-            }
-            // A link always goes to the site the hit names, whatever URL
-            // an unproven answer gives.
-            let url = if registrable_domain(&hit.url).as_deref() == Some(hit.domain.as_str()) {
-                hit.url
-            } else {
-                format!("https://{}/", hit.domain)
-            };
-            let mut network_hit = NetworkHit {
-                domain: hit.domain.clone(),
-                url,
-                title: hit.title,
-                description: hit.description,
-                verified: false,
-                crawler: None,
-                answered_by: 1,
-                score: hit.score,
-            };
-            if let Some(proof) = &hit.proof {
-                match proof.verify(now) {
-                    Ok((record, crawler)) if record.domain == hit.domain => {
-                        network_hit.url = record
-                            .url
-                            .unwrap_or_else(|| format!("https://{}/", record.domain));
-                        network_hit.title = record.title;
-                        network_hit.description = record.description;
-                        network_hit.verified = true;
-                        network_hit.crawler = Some(crawler.to_string());
-                    }
-                    Ok(_) | Err(_) => {
-                        warn!("{peer} answered a search with a proof that does not check out");
-                        honest = false;
-                        break;
-                    }
-                }
-            }
-            checked.push(network_hit);
-        }
-        if !honest {
-            out.rejected += 1;
-            continue;
-        }
-        let best = checked
-            .iter()
-            .map(|h| h.score)
-            .fold(f32::MIN, f32::max)
-            .max(f32::EPSILON);
-        for hit in checked {
-            let scaled = (hit.score / best).clamp(0.0, 1.0);
-            scores.entry(hit.domain.clone()).or_default().push(scaled);
-            match merged.iter_mut().find(|m| m.domain == hit.domain) {
-                Some(existing) => {
-                    existing.answered_by += 1;
-                    if hit.verified && !existing.verified {
-                        let answered_by = existing.answered_by;
-                        *existing = NetworkHit { answered_by, ..hit };
-                    }
-                }
-                None => merged.push(hit),
-            }
-        }
-    }
-    for hit in &mut merged {
-        let s = &scores[&hit.domain];
-        hit.score = s.iter().sum::<f32>() / out.answered.max(1) as f32;
-    }
-    merged.sort_by(|a, b| {
-        b.answered_by
-            .cmp(&a.answered_by)
-            .then(b.score.total_cmp(&a.score))
-            .then(a.domain.cmp(&b.domain))
-    });
-    merged.truncate(limit);
-    out.hits = merged;
-    out
-}
-
 /// Not an unspecified (`0.0.0.0`, `::`) address.
 fn is_specific(addr: &Multiaddr) -> bool {
     !addr.iter().any(|p| match p {
@@ -1273,125 +1078,4 @@ fn without_p2p(addr: Multiaddr) -> Multiaddr {
     addr.into_iter()
         .filter(|p| !matches!(p, Protocol::P2p(_)))
         .collect()
-}
-
-fn shuffle<T>(items: &mut [T]) {
-    let mut rng = rand_core::OsRng;
-    for i in (1..items.len()).rev() {
-        let j = (rng.next_u64() % (i as u64 + 1)) as usize;
-        items.swap(i, j);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn hit(domain: &str, score: f32) -> NetHit {
-        NetHit {
-            domain: domain.into(),
-            url: format!("https://{domain}/"),
-            title: Some(domain.into()),
-            description: None,
-            score,
-            proof: None,
-        }
-    }
-
-    #[test]
-    fn unproven_hits_link_only_to_the_site_they_name() {
-        let mut lying = hit("usbank.com", 1.0);
-        lying.url = "https://usbank-login.example/".into();
-        let merged = merge_answers(
-            1,
-            vec![(
-                PeerId::random(),
-                Some(SearchResponse {
-                    hits: vec![lying, hit("not a domain", 1.0)],
-                }),
-            )],
-            10,
-            0,
-        );
-        assert_eq!(merged.hits.len(), 1);
-        assert_eq!(merged.hits[0].url, "https://usbank.com/");
-    }
-
-    #[test]
-    fn an_answer_with_a_forged_proof_is_dropped_whole() {
-        let key = Keypair::generate_ed25519();
-        let peer = key.public().to_peer_id();
-        let now = 1_790_000_000;
-        let domain = (0..)
-            .map(|i| format!("bank{i}.com"))
-            .find(|d| is_assigned(epoch_of(now), &peer, d, MAX_SHARE_PPM))
-            .unwrap();
-        let mut record = SiteRecord::new(domain.as_str());
-        record.title = Some("Real Bank".into());
-        record.crawled_at = Some(now);
-        let batch = Batch::sign(&key, &[record], epoch_of(now), MAX_SHARE_PPM, now)
-            .unwrap()
-            .unwrap();
-        let mut proof = batch.proof(0);
-        proof.record = proof.record.replace("Real Bank", "Log in here");
-        let mut forged = hit(&domain, 1.0);
-        forged.proof = Some(proof);
-        let honest = NetHit {
-            proof: Some(batch.proof(0)),
-            ..hit(&domain, 1.0)
-        };
-        let merged = merge_answers(
-            2,
-            vec![
-                (
-                    PeerId::random(),
-                    Some(SearchResponse {
-                        hits: vec![hit("other.com", 2.0), forged],
-                    }),
-                ),
-                (
-                    PeerId::random(),
-                    Some(SearchResponse { hits: vec![honest] }),
-                ),
-            ],
-            10,
-            now,
-        );
-        assert_eq!(merged.rejected, 1);
-        assert_eq!(merged.hits.len(), 1);
-        assert!(merged.hits[0].verified);
-        assert_eq!(merged.hits[0].title.as_deref(), Some("Real Bank"));
-    }
-
-    #[test]
-    fn sites_more_nodes_agree_on_come_first() {
-        let (a, b) = (PeerId::random(), PeerId::random());
-        let merged = merge_answers(
-            3,
-            vec![
-                (
-                    a,
-                    Some(SearchResponse {
-                        hits: vec![hit("x.com", 9.0), hit("y.com", 3.0)],
-                    }),
-                ),
-                (
-                    b,
-                    Some(SearchResponse {
-                        hits: vec![hit("y.com", 1.0)],
-                    }),
-                ),
-                (PeerId::random(), None),
-            ],
-            10,
-            0,
-        );
-        assert_eq!((merged.asked, merged.answered), (3, 2));
-        let order: Vec<_> = merged
-            .hits
-            .iter()
-            .map(|h| (h.domain.as_str(), h.answered_by))
-            .collect();
-        assert_eq!(order, vec![("y.com", 2), ("x.com", 1)]);
-    }
 }

@@ -901,32 +901,6 @@ async fn sets_up_without_wikidata_and_adds_it_later() {
     assert_eq!(names(&dir.path().join("indexes")).len(), 1);
 }
 
-/// Finds the crawled records it was given whose title contains the query,
-/// standing in for another node's index.
-struct PeerIndex(Vec<SiteRecord>);
-
-impl plumb_net::LocalSearch for PeerIndex {
-    fn search(&self, query: &str, limit: usize) -> Vec<plumb_net::LocalHit> {
-        let query = query.to_lowercase();
-        self.0
-            .iter()
-            .filter(|r| {
-                r.title
-                    .as_deref()
-                    .is_some_and(|t| t.to_lowercase().contains(&query))
-            })
-            .take(limit)
-            .map(|r| plumb_net::LocalHit {
-                domain: r.domain.clone(),
-                url: r.url.clone().unwrap(),
-                title: r.title.clone(),
-                description: None,
-                score: 1.0,
-            })
-            .collect()
-    }
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_node_in_the_network_takes_in_other_nodes_crawls_and_searches_them() {
     let dir = seeded_dir();
@@ -969,10 +943,11 @@ async fn a_node_in_the_network_takes_in_other_nodes_crawls_and_searches_them() {
     peer_config.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
     peer_config.upnp = false;
     peer_config.bootstrap = vec![node_addr];
-    let (peer, _records) =
-        plumb_net::start(peer_config, Arc::new(PeerIndex(vec![crawled.clone()])))
-            .await
-            .unwrap();
+    let table = plumb_net::BucketTable::build(&peer_dir.path().join("buckets"), &[crawled.clone()])
+        .unwrap();
+    let (peer, _records) = plumb_net::start(peer_config, Arc::new(table))
+        .await
+        .unwrap();
     wait_for(addr, "the peer to connect", |s| {
         s.network.as_ref().is_some_and(|n| n.connected_peers >= 1)
     })
@@ -983,20 +958,49 @@ async fn a_node_in_the_network_takes_in_other_nodes_crawls_and_searches_them() {
     for _ in 0..100 {
         let (code, _, body) = get(addr, "/api/network/search?q=lighthouse").await;
         assert_eq!(code, 200, "{body}");
-        let result: plumb_net::NetSearch = serde_json::from_str(&body).unwrap();
-        if !result.hits.is_empty() {
+        let result: serde_json::Value = serde_json::from_str(&body).unwrap();
+        if !result["hits"].as_array().unwrap().is_empty() {
             found = Some(result);
             break;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     let found = found.expect("the peer answers");
-    assert_eq!(found.hits[0].domain, domain);
+    assert_eq!(found["hits"][0]["domain"], domain.as_str());
+    assert_eq!(found["buckets"], plumb_net::bucket::BUCKETS_PER_SEARCH);
+    assert_eq!(
+        found["hits"][0]["verified"], false,
+        "the peer has not published yet"
+    );
     let (code, _, body) = get(addr, "/network?q=lighthouse").await;
     assert_eq!(code, 200);
     assert!(body.contains("Lighthouse Keepers Guild"), "{body}");
     let (_, _, body) = get(addr, "/search?q=us+bank").await;
     assert!(body.contains("href=\"/network?q=us+bank\""), "{body}");
+
+    // And the other way round: the node serves the buckets of its index.
+    assert!(dir
+        .path()
+        .join("indexes/000001/buckets/buckets.idx")
+        .is_file());
+    let from_node = peer
+        .search("us bank", Duration::from_secs(5))
+        .await
+        .unwrap();
+    // With one node to ask, every bucket goes to it.
+    assert_eq!(
+        from_node.asked,
+        plumb_net::BUCKETS_PER_SEARCH,
+        "{from_node:?}"
+    );
+    assert_eq!(from_node.answered, from_node.asked, "{from_node:?}");
+    assert!(
+        from_node
+            .found
+            .iter()
+            .any(|f| f.record.domain == "usbank.com"),
+        "{from_node:?}"
+    );
 
     // The peer publishes its crawl; the node keeps it and, at its next
     // refresh, searches it from its own index.

@@ -3,6 +3,8 @@
 //!
 //! * [`assign`]: which sites a node crawls each day.
 //! * [`batch`]: signed crawl batches and what a node accepts from them.
+//! * [`bucket`] and [`search`]: searching other nodes without sending the
+//!   query.
 //! * [`hash`]: hashes and the Merkle tree that proves one record of a batch.
 //! * [`store`]: the batches a node keeps.
 //! * [`proto`]: the messages and protocol names.
@@ -10,14 +12,15 @@
 
 pub mod assign;
 pub mod batch;
+pub mod bucket;
 pub mod hash;
 pub mod node;
 pub mod proto;
+pub mod search;
 pub mod store;
 
+pub use bucket::{BucketSource, BucketTable, BUCKETS_PER_SEARCH};
 pub use libp2p::multiaddr::Protocol;
 pub use libp2p::{Multiaddr, PeerId};
-pub use node::{
-    load_or_create_key, start, LocalHit, LocalSearch, NetConfig, NetHandle, NetSearch, NetStatus,
-    NetworkHit,
-};
+pub use node::{load_or_create_key, start, NetConfig, NetHandle, NetStatus};
+pub use search::{FoundSite, NetSearch};

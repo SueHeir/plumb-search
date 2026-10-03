@@ -900,6 +900,10 @@ impl StatusSource for Inner {
     fn network(&self) -> Option<Arc<plumb_net::NetHandle>> {
         network::handle(self).cloned()
     }
+
+    fn rank(&self) -> RankConfig {
+        self.rank
+    }
 }
 
 /// An index the node searches, or did until a newer one replaced it.
@@ -912,6 +916,9 @@ struct ServingIndex {
     backend: Option<IndexBackend>,
     /// Set once the index files are closed and may be deleted.
     closed: Arc<AtomicBool>,
+    /// The index's buckets, which other nodes search (`indexes/NNNNNN/buckets/`);
+    /// only built by a node in the network.
+    buckets: Option<plumb_net::BucketTable>,
 }
 
 impl ServingIndex {
@@ -923,6 +930,7 @@ impl ServingIndex {
             docs: searcher.num_docs(),
             backend: Some(IndexBackend::new(searcher, rank)),
             closed: Arc::new(AtomicBool::new(false)),
+            buckets: plumb_net::BucketTable::open(&dir.join(network::BUCKETS_DIR)).ok(),
         })
     }
 

@@ -6,13 +6,13 @@ Everything here is opt-in for now. A node started without `--network` works exac
 
 ## In one paragraph
 
-Every day each node is assigned a random eighth of all sites, picked by a hash of the day, its node id and the site. It crawls only those, signs each batch of results with its node key, and announces the batch to the network. Other nodes fetch the batch from whoever passed the announcement on, check the signature and that every homepage in it was really the crawler's to crawl that day, keep only what a homepage crawl can see (title, description, URL, site name, link text), and fold it into their own records. Any node can also ask a few other nodes to search for it; answers carry a Merkle proof for every hit taken from a signed crawl, so a node cannot invent or alter a result without being caught. Nodes behind home routers need no port forwarding: they only dial out, and reach each other through relays and hole punching.
+Every day each node is assigned a random eighth of all sites, picked by a hash of the day, its node id and the site. It crawls only those, signs each batch of results with its node key, and announces the batch to the network. Other nodes fetch the batch from whoever passed the announcement on, check the signature and that every homepage in it was really the crawler's to crawl that day, keep only what a homepage crawl can see (title, description, URL, site name, link text), and fold it into their own records. Any node can also search the network without sending its query: it fetches a few hashed buckets of sites (padded with random ones) from other nodes under a throwaway identity, ranks them itself, and checks a Merkle proof on every site taken from a signed crawl, so a node cannot invent or alter a result without being caught. Nodes behind home routers need no port forwarding: they only dial out, and reach each other through relays and hole punching.
 
 ## Getting connected without port forwarding
 
 This follows the plan agreed on 2026-10-03.
 
-* **Most nodes only dial out**, like a browser. Fetching batches, announcing them, sending searches and answering searches all work over connections a node opened itself.
+* **Most nodes only dial out**, like a browser. Fetching batches, announcing them, fetching buckets and serving them all work over connections a node opened itself.
 * **Reachable nodes** (a server, a VPS, a homelab with a forwarded port) run with `--public-addr` and `--relay`. They accept connections and relay small messages for nodes behind NAT. `plumbsearch.org` is meant to be the first one.
 * **A node behind NAT** takes a reservation on up to two relays it is connected to (circuit relay v2). Other nodes can then reach it at `<relay address>/p2p-circuit/p2p/<its id>`.
 * **Hole punching** (DCUtR): when two nodes meet over a relay, they try to open a direct connection through both NATs and move their traffic there. libp2p's own measurements put success at about 70%; the rest stay on the relay, which is fine for searches and announcements (rust-libp2p caps a relayed circuit at 2 minutes and 128 KiB by default).
@@ -60,12 +60,15 @@ Batches older than 7 days or dated in the future are refused. A node keeps the b
 
 ## Network search
 
+The query never leaves the asking node, and the nodes asked cannot tell which node is asking (Liz's choice, 2026-10-03).
+
 * `GET /network?q=` on a node's web page (linked from every results page as "Ask other Plumb nodes too"), and `GET /api/network/search?q=` as JSON.
-* The node asks up to 3 connected nodes at random over `/plumb/search/1` and waits up to 4 seconds.
-* Each answering node searches its own index and attaches, for every hit it holds a signed crawl of, a **record proof**: the signed batch header, the record and its Merkle path. The asking node checks the signature, the path and the assignment, and shows the signed title and URL rather than whatever the answer said.
-* An answer with any proof that does not check out is dropped whole. A hit without a proof (from seed data) is shown as unsigned, and its link always goes to `https://<the domain it names>/`, never to another site.
-* Hits several nodes agree on come first, then by score scaled to each node's best hit.
-* Privacy: the nodes asked see the query, like any search engine would. That is why network search is a separate button and not on by default. An Oblivious HTTP relay (planned) would hide who asked.
+* **Buckets, not queries.** Every node that answers searches keeps a bucket table next to each index it builds (`indexes/<n>/buckets/`). Each site is filed under its keys: its words and joined names from the domain label, title, aliases and top link texts. A key goes to one of 16,384 buckets by hash, and each key keeps its best 32 sites by link score.
+* **Asking.** The asker turns the query into keys the same way, takes the buckets of up to 4 of them, pads that to exactly 4 with random buckets and shuffles them. It asks for each bucket over `/plumb/bucket/1` from up to 2 connected nodes. The node asked sees only bucket numbers, and many unrelated names share each bucket, so it cannot recover the query or tell which buckets were the padding.
+* **A throwaway identity for every request.** Each bucket fetch uses a fresh node key and its own short-lived connection, dialed straight to the node or through its relay. The node asked cannot link the request to the asker's network identity, or the 4 bucket requests of one search to each other. It still sees the IP address the connection comes from (or the relay's, for a relayed fetch); hiding that is the Oblivious HTTP step below.
+* **Checking answers.** For every site the answering node holds a signed crawl of, it attaches a **record proof**: the signed batch header, the record and its Merkle path. The asker checks the signature, the path and the assignment. An answer with any proof that does not check out is dropped whole. Sites without a proof (from seed data) are shown as unsigned, their link always goes to `https://<the domain it names>/`, and their popularity signals are taken as the worst any node reported.
+* **Ranking locally.** The asker keeps the sites that match the query's keys, builds a small temporary index of them and ranks them with its own ranking, the same as a local search.
+* Cost (an estimate, not measured yet): with a 1M-site index, a bucket should hold a few hundred sites, so one search moves a few MB across its 8 fetches. Measuring this on a real index, and tuning the bucket count to it, is part of the cross-machine test. An answer over 20,000 sites is refused.
 
 ## Running it
 
@@ -89,8 +92,8 @@ plumb run --data /data --network --relay \
 
 Tested on one machine (`cargo test -p plumb-net`, `cargo test -p plumb-node a_node_in_the_network`):
 
-* Four nodes and a relay: a batch published by one reaches all the others; a node that joins later catches up; a network search returns a verified hit with its crawler named; a node behind the relay is reached through it, and hole punching then opens a direct connection.
-* A whole `plumb run` node in the network answers through `/api/network/search` and `/network`, takes in another node's batch, and searches it from its own index after a rebuild.
+* Four nodes and a relay: a batch published by one reaches all the others; a node that joins later catches up; a network search fetches buckets under throwaway identities and returns a verified site with its crawler named; a bucket is fetched through the relay alone; a node behind the relay is reached through it, and hole punching then opens a direct connection.
+* A whole `plumb run` node in the network writes a bucket table with each index, serves it to other nodes, searches the network through `/api/network/search` and `/network`, takes in another node's batch, and searches it from its own index after a rebuild.
 * Unit tests: Merkle proofs for every tree size up to 33, tampered records, re-dated headers, swapped keys, unassigned homepages, injected link text, forged proofs in search answers, and links that point away from the site they name.
 
 Not yet tested: nodes on different machines and real NATs (needs Liz's machines and plumbsearch.org), and anything at scale.
@@ -103,7 +106,7 @@ Roughly in order; the first two are what the roadmap's Phase 2 gate ("two nodes 
 2. **Agreement between crawlers.** Keep a homepage's new title only once two crawlers agree (or after a spot-check re-fetch), once the network is big enough for that. Today the newest signed crawl wins.
 3. **Abuse limits.** Connection limits, per-node rate limits on requests, peer scoring in gossipsub, and banning keys whose batches fail checks.
 4. **An unpredictable epoch seed** from a public randomness beacon (drand), so keys cannot be made in advance for a target site.
-5. **Oblivious HTTP** for network search, so the nodes asked cannot tell who asked.
+5. **Hiding the asker's IP address** for network search: fetching buckets through a relay or an Oblivious HTTP relay by default, so the node asked sees neither the query nor who sent it.
 6. **Desktop app**: a switch for joining the network, crawling only when idle and on power, with a bandwidth cap.
 7. **plumbsearch.org as the first bootstrap and relay node**, then on by default.
 8. Phase 3 and 4 pieces from the white paper: homepage fetch receipts, crawl tokens, and private popularity reports.

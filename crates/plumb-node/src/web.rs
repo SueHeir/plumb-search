@@ -14,9 +14,11 @@
 //! reloading every few seconds with a `<meta http-equiv="refresh">` (no
 //! script), and `/api/search` answers 503.
 //!
-//! A node in the Plumb network also serves `GET /network?q=`, which asks
-//! other nodes ([`plumb_net::NetHandle::search`]) and shows what they
-//! answered, and the same as JSON at `GET /api/network/search?q=`. Its
+//! A node in the Plumb network also serves `GET /network?q=`, which
+//! searches other nodes without sending them the query
+//! ([`plumb_net::NetHandle::search`]: it fetches buckets of sites under
+//! throwaway identities), ranks what comes back with its own ranking, and
+//! shows it; `GET /api/network/search?q=` returns the same as JSON. Its
 //! result pages link there.
 //!
 //! Titles, descriptions and URLs in the index come from the open web, so
@@ -35,10 +37,11 @@ use axum::http::{header, HeaderMap, HeaderName, StatusCode, Uri};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
+use plumb_core::SiteRecord;
 use plumb_core::{collapse_whitespace, now_unix, truncate_chars};
-use plumb_index::{Hit, RankConfig, Searcher};
-use plumb_net::{NetHandle, NetSearch, NetworkHit};
-use serde::Deserialize;
+use plumb_index::{build_index, Hit, RankConfig, Searcher};
+use plumb_net::{FoundSite, NetHandle, NetSearch};
+use serde::{Deserialize, Serialize};
 use tracing::{debug, error, info};
 use url::Url;
 
@@ -112,6 +115,10 @@ pub trait StatusSource: Send + Sync {
     /// The network side, for a node that joined the Plumb network.
     fn network(&self) -> Option<Arc<NetHandle>> {
         None
+    }
+    /// How the node ranks, which it also uses for what other nodes send.
+    fn rank(&self) -> RankConfig {
+        RankConfig::default()
     }
 }
 
@@ -325,18 +332,15 @@ async fn network_page(
     State(state): State<AppState>,
     Query(params): Query<SearchParams>,
 ) -> Response {
-    let Some(net) = state.network() else {
+    if state.network().is_none() {
         return html_response(StatusCode::NOT_FOUND, render_no_network());
-    };
+    }
     let query = params.query();
     if query.is_empty() {
         return home_or_setup(&state);
     }
-    match net
-        .search(&query, params.limit(), NETWORK_SEARCH_WAIT)
-        .await
-    {
-        Ok(found) => html_response(StatusCode::OK, render_network(&query, &found)),
+    match network_search(&state, &query, params.limit()).await {
+        Ok(results) => html_response(StatusCode::OK, render_network(&query, &results)),
         Err(err) => {
             error!("network search for {query:?} failed: {err:#}");
             html_response(StatusCode::INTERNAL_SERVER_ERROR, render_error(&query))
@@ -344,29 +348,26 @@ async fn network_page(
     }
 }
 
-/// `GET /api/network/search?q=&limit=`: a [`NetSearch`] as JSON.
+/// `GET /api/network/search?q=&limit=`: [`NetworkResults`] as JSON.
 async fn api_network_search(
     State(state): State<AppState>,
     Query(params): Query<SearchParams>,
 ) -> Response {
-    let Some(net) = state.network() else {
+    if state.network().is_none() {
         let body = serde_json::json!({ "error": "this node has not joined the Plumb network" });
         return (StatusCode::NOT_FOUND, security_headers(), Json(body)).into_response();
-    };
+    }
     let query = params.query();
     if query.is_empty() {
         return (
             StatusCode::OK,
             security_headers(),
-            Json(NetSearch::default()),
+            Json(NetworkResults::default()),
         )
             .into_response();
     }
-    match net
-        .search(&query, params.limit(), NETWORK_SEARCH_WAIT)
-        .await
-    {
-        Ok(found) => (StatusCode::OK, security_headers(), Json(found)).into_response(),
+    match network_search(&state, &query, params.limit()).await {
+        Ok(results) => (StatusCode::OK, security_headers(), Json(results)).into_response(),
         Err(err) => {
             error!("network search for {query:?} failed: {err:#}");
             let body = serde_json::json!({ "error": "network search failed" });
@@ -378,6 +379,88 @@ async fn api_network_search(
                 .into_response()
         }
     }
+}
+
+/// What a network search found, ranked by this node.
+#[derive(Debug, Default, Serialize)]
+pub struct NetworkResults {
+    /// Buckets asked for, padding included.
+    pub buckets: usize,
+    /// Requests sent, each to one node under its own throwaway identity.
+    pub asked: usize,
+    pub answered: usize,
+    /// Answers dropped because a proof in them did not check out.
+    pub rejected: usize,
+    pub hits: Vec<NetworkResult>,
+}
+
+/// One site from other nodes, ranked here.
+#[derive(Debug, Serialize)]
+pub struct NetworkResult {
+    #[serde(flatten)]
+    pub hit: Hit,
+    /// The text comes from a signed crawl whose proof checked out.
+    pub verified: bool,
+    /// The node that signed that crawl.
+    pub crawler: Option<String>,
+    /// How many answers held the site.
+    pub answers: usize,
+}
+
+/// Fetches the query's buckets from other nodes and ranks the sites that
+/// match with this node's own ranking, in a small index built for the
+/// purpose and deleted after.
+async fn network_search(state: &AppState, query: &str, limit: usize) -> Result<NetworkResults> {
+    let net = state.network().context("not in the network")?;
+    let rank = state
+        .node
+        .as_ref()
+        .map_or_else(RankConfig::default, |node| node.rank());
+    let found = net.search(query, NETWORK_SEARCH_WAIT).await?;
+    let query = query.to_string();
+    tokio::task::spawn_blocking(move || rank_found(found, &query, limit, &rank))
+        .await
+        .context("the ranking task failed")?
+}
+
+fn rank_found(
+    found: NetSearch,
+    query: &str,
+    limit: usize,
+    rank: &RankConfig,
+) -> Result<NetworkResults> {
+    let mut results = NetworkResults {
+        buckets: found.buckets,
+        asked: found.asked,
+        answered: found.answered,
+        rejected: found.rejected,
+        hits: Vec::new(),
+    };
+    if found.found.is_empty() || limit == 0 {
+        return Ok(results);
+    }
+    let dir = tempfile::tempdir().context("making a folder for ranking")?;
+    let index = dir.path().join("index");
+    let records: Vec<SiteRecord> = found.found.iter().map(|f| f.record.clone()).collect();
+    build_index(&index, &records)?;
+    let hits = Searcher::open(&index)?.search_with(query, limit, rank)?;
+    let by_domain: std::collections::HashMap<&str, &FoundSite> = found
+        .found
+        .iter()
+        .map(|f| (f.record.domain.as_str(), f))
+        .collect();
+    for hit in hits {
+        let Some(site) = by_domain.get(hit.domain.as_str()) else {
+            continue;
+        };
+        results.hits.push(NetworkResult {
+            verified: site.verified,
+            crawler: site.crawler.clone(),
+            answers: site.answers,
+            hit,
+        });
+    }
+    Ok(results)
 }
 
 /// `GET /api/status`, routed for nodes only.
@@ -794,28 +877,31 @@ fn render_results(query: &str, hits: &[Hit], network: bool) -> String {
 
 /// What other nodes answered. Their text is as untrusted as any record's,
 /// and is escaped the same way.
-fn render_network(query: &str, found: &NetSearch) -> String {
+fn render_network(query: &str, results: &NetworkResults) -> String {
     let mut body = format!("<div class=\"wrap\">\n{}\n<main>\n", results_header(query));
     let _ = writeln!(
         body,
-        "<p class=\"s\">From the Plumb network: {} of {} nodes asked answered{}.</p>",
-        found.answered,
-        found.asked,
-        if found.rejected > 0 {
+        "<p class=\"s\">From the Plumb network, without sending your search: {} buckets of \
+         sites asked of other nodes under throwaway identities, {} of {} requests answered{}. \
+         Ranked on this node.</p>",
+        results.buckets,
+        results.answered,
+        results.asked,
+        if results.rejected > 0 {
             format!(
                 "; {} answers were dropped because their proofs did not check out",
-                found.rejected
+                results.rejected
             )
         } else {
             String::new()
         }
     );
-    if found.asked == 0 {
+    if results.asked == 0 {
         body.push_str(
             "<p class=\"none\">No other nodes are connected yet. This node keeps looking \
              for them.</p>\n",
         );
-    } else if found.hits.is_empty() {
+    } else if results.hits.is_empty() {
         let _ = writeln!(
             body,
             "<p class=\"none\">No node had a site matching <strong>{}</strong>.</p>",
@@ -823,8 +909,8 @@ fn render_network(query: &str, found: &NetSearch) -> String {
         );
     } else {
         body.push_str("<ol>\n");
-        for hit in &found.hits {
-            render_network_hit(&mut body, hit, found.answered);
+        for result in &results.hits {
+            render_network_hit(&mut body, result);
         }
         body.push_str("</ol>\n");
     }
@@ -839,16 +925,16 @@ fn render_network(query: &str, found: &NetSearch) -> String {
     page(&format!("{query} - Plumb network"), &body)
 }
 
-fn render_network_hit(out: &mut String, hit: &NetworkHit, answered: usize) {
+fn render_network_hit(out: &mut String, result: &NetworkResult) {
+    let hit = &result.hit;
     let name = hit
         .title
         .as_deref()
         .filter(|t| !t.trim().is_empty())
         .unwrap_or(&hit.domain);
     let name = escape_html(&truncate_chars(name, 150));
-    let href = http_url(&hit.url).or_else(|| homepage_url(&hit.domain));
     out.push_str("<li>");
-    match href {
+    match safe_href(hit) {
         Some(href) => {
             let _ = write!(
                 out,
@@ -869,16 +955,16 @@ fn render_network_hit(out: &mut String, hit: &NetworkHit, answered: usize) {
     if let Some(description) = hit.description.as_deref().filter(|d| !d.trim().is_empty()) {
         let _ = write!(out, "<p class=\"d\">{}</p>", escape_html(description));
     }
-    let source = if hit.verified {
+    let source = if result.verified {
         "signed crawl, checked"
     } else {
         "unsigned (seed data)"
     };
     let _ = writeln!(
         out,
-        "<div class=\"m\">{} &middot; {source} &middot; from {} of {answered} nodes</div></li>",
+        "<div class=\"m\">{} &middot; {source} &middot; in {} answers</div></li>",
         escape_html(&hit.domain),
-        hit.answered_by
+        result.answers
     );
 }
 

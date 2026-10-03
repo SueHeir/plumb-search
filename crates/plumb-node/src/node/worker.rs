@@ -576,6 +576,7 @@ fn build(inner: &Inner, records: Vec<SiteRecord>) -> Result<ServingIndex> {
     let started = Instant::now();
     let stats = build_index(&dir, &records)
         .with_context(|| format!("building the index in {}", dir.display()))?;
+    network::build_buckets(inner, &dir, &records);
     drop(records);
     let index = match ServingIndex::open(id, &dir, inner.rank) {
         Ok(index) => index,

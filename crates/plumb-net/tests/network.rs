@@ -7,30 +7,14 @@ use std::time::Duration;
 
 use plumb_core::{now_unix, SiteRecord};
 use plumb_net::assign::{epoch_of, is_assigned, MAX_SHARE_PPM};
-use plumb_net::{LocalHit, LocalSearch, Multiaddr, NetConfig, NetHandle, PeerId};
+use plumb_net::{BucketSource, BucketTable, Multiaddr, NetConfig, NetHandle, PeerId};
 use tempfile::TempDir;
 use tokio::sync::mpsc::UnboundedReceiver;
 
-/// Finds the records it was given whose domain or title contains the query.
-struct Fixed(Vec<SiteRecord>);
-
-impl LocalSearch for Fixed {
-    fn search(&self, query: &str, limit: usize) -> Vec<LocalHit> {
-        self.0
-            .iter()
-            .filter(|r| {
-                r.domain.contains(query) || r.title.as_deref().is_some_and(|t| t.contains(query))
-            })
-            .take(limit)
-            .map(|r| LocalHit {
-                domain: r.domain.clone(),
-                url: format!("https://{}/", r.domain),
-                title: r.title.clone(),
-                description: None,
-                score: 1.0,
-            })
-            .collect()
-    }
+/// Serves the buckets of the records it was given, as a node with an
+/// index of them would.
+fn table(dir: &std::path::Path, records: &[SiteRecord]) -> Arc<dyn BucketSource> {
+    Arc::new(BucketTable::build(&dir.join("buckets"), records).unwrap())
 }
 
 struct Node {
@@ -47,9 +31,8 @@ impl Node {
         config.upnp = false;
         config.relay_server = relay;
         config.bootstrap = bootstrap;
-        let (handle, records) = plumb_net::start(config, Arc::new(Fixed(local)))
-            .await
-            .unwrap();
+        let source = table(dir.path(), &local);
+        let (handle, records) = plumb_net::start(config, source).await.unwrap();
         Node {
             handle,
             records,
@@ -147,18 +130,19 @@ async fn nodes_share_batches_search_each_other_and_reach_through_a_relay() {
     for _ in 0..50 {
         let found = b
             .handle
-            .search("harbor", 10, Duration::from_secs(5))
+            .search("harbor", Duration::from_secs(5))
             .await
             .unwrap();
-        if found.hits.iter().any(|h| h.verified) {
+        if found.found.iter().any(|h| h.verified) {
             result = Some(found);
             break;
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
     let result = result.expect("a verified hit from C");
-    let hit = &result.hits[0];
-    assert_eq!(hit.domain, published[0].domain);
+    let hit = &result.found[0];
+    assert_eq!(hit.record.domain, published[0].domain);
+    assert_eq!(result.buckets, plumb_net::bucket::BUCKETS_PER_SEARCH);
     assert_eq!(
         hit.crawler.as_deref(),
         Some(a.handle.peer_id().to_string().as_str())
@@ -166,30 +150,44 @@ async fn nodes_share_batches_search_each_other_and_reach_through_a_relay() {
     assert_eq!(result.rejected, 0);
 
     // C is behind the relay: it holds a reservation, and a node that only
-    // knows the relay's address reaches C through it.
+    // knows the relay's address reaches C through it. That includes a
+    // throwaway identity asking for a bucket.
     wait_for(|| (!c.handle.status().relays.is_empty()).then_some(())).await;
     let circuit = relay_addr
         .clone()
         .with(plumb_net::Protocol::P2pCircuit)
         .with_p2p(c.handle.peer_id())
         .unwrap();
+    let peer = plumb_net::search::BucketPeer {
+        peer: c.handle.peer_id(),
+        addrs: vec![circuit.clone()],
+    };
+    let bucket = plumb_net::bucket::bucket_of("harbor");
+    let served_before = c.handle.status().buckets_served;
+    let answer = plumb_net::search::fetch_bucket(&peer, bucket, Duration::from_secs(10))
+        .await
+        .expect("a bucket fetched over the relay");
+    let records = answer.records.expect("C serves buckets");
+    assert!(records.iter().any(|r| r.proof.is_some()));
+    assert_eq!(c.handle.status().buckets_served, served_before + 1);
+
     let d = Node::start(false, vec![], vec![]).await;
     d.handle.dial(circuit).unwrap();
     let mut through_relay = None;
     for _ in 0..50 {
         let found = d
             .handle
-            .search("harbor", 10, Duration::from_secs(5))
+            .search("harbor", Duration::from_secs(5))
             .await
             .unwrap();
-        if !found.hits.is_empty() {
+        if !found.found.is_empty() {
             through_relay = Some(found);
             break;
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
-    let through_relay = through_relay.expect("D searches C over the relay");
-    assert!(through_relay.hits[0].verified);
+    let through_relay = through_relay.expect("D searches C after meeting it over the relay");
+    assert!(through_relay.found[0].verified);
 
     for node in [a, b, c, d, relay_got] {
         node.handle.shutdown().await;
