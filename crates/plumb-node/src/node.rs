@@ -846,6 +846,9 @@ struct Inner {
     net: std::sync::OnceLock<Arc<plumb_net::NetHandle>>,
     /// Records in the network inbox not yet folded in.
     inbox_records: std::sync::atomic::AtomicU64,
+    /// When this node last put an index in service (Unix time; 0 for not
+    /// since it started).
+    last_build: std::sync::atomic::AtomicU64,
     /// Held while the inbox is appended to or moved aside.
     inbox_lock: Mutex<()>,
     /// Set once the index was rebuilt to add missing buckets.
@@ -1039,6 +1042,7 @@ impl Inner {
             }),
             net: std::sync::OnceLock::new(),
             inbox_records: std::sync::atomic::AtomicU64::new(0),
+            last_build: std::sync::atomic::AtomicU64::new(0),
             inbox_lock: Mutex::new(()),
             buckets_rebuilt: AtomicBool::new(false),
             picks: Mutex::new(None),

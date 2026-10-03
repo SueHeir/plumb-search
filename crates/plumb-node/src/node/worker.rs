@@ -41,7 +41,7 @@ use plumb_ingest::{
 use tokio::runtime::Handle;
 use tracing::{info, warn};
 
-use super::network::{self, REBUILD_AFTER_RECORDS};
+use super::network::{self, NETWORK_REBUILD_GAP, REBUILD_AFTER_RECORDS};
 use super::store::{self, SavedState};
 use super::{Inner, NodeConfig, ServingIndex, Step, Stopped};
 use crate::crawl::{
@@ -133,13 +133,15 @@ async fn step(inner: &Arc<Inner>) -> Result<Next> {
     if inner.paths.inbox.exists() || inner.paths.absorbing.exists() {
         let absorbed = blocking(inner, network::absorb_inbox).await?;
         if absorbed > 0 {
-            inner.update_saved(|saved| {
-                saved.network_pending += absorbed;
-                if saved.network_pending >= REBUILD_AFTER_RECORDS {
-                    saved.index_stale = true;
-                }
-            })?;
+            inner.update_saved(|saved| saved.network_pending += absorbed)?;
         }
+    }
+    // Enough records from other nodes rebuild the index, but no sooner
+    // than NETWORK_REBUILD_GAP after the last build.
+    let network_rebuild_at =
+        (inner.saved().network_pending >= REBUILD_AFTER_RECORDS).then(|| network_rebuild_at(inner));
+    if network_rebuild_at.is_some_and(|at| at <= now_unix()) && !inner.saved().index_stale {
+        inner.update_saved(|saved| saved.index_stale = true)?;
     }
     let saved = inner.saved();
     if inner.current().is_none() || (saved.index_stale && saved.crawl_left == 0) {
@@ -189,11 +191,21 @@ async fn step(inner: &Arc<Inner>) -> Result<Next> {
         start_round(inner, requested)?;
         return Ok(Next::Continue);
     }
-    let until = match (due, wikidata_due) {
-        (Some(due), Some(wikidata)) => Some(due.min(wikidata)),
-        (due, wikidata) => due.or(wikidata),
-    };
+    let until = [due, wikidata_due, network_rebuild_at]
+        .into_iter()
+        .flatten()
+        .min();
     Ok(Next::IdleUntil(until))
+}
+
+/// When records from other nodes may next rebuild the index: once
+/// [`NETWORK_REBUILD_GAP`] has passed since the last build (right away when
+/// none was built since the node started).
+fn network_rebuild_at(inner: &Inner) -> u64 {
+    match inner.last_build.load(Ordering::SeqCst) {
+        0 => 0,
+        last => last.saturating_add(NETWORK_REBUILD_GAP.as_secs()),
+    }
 }
 
 fn idle_detail(config: &NodeConfig) -> &'static str {
@@ -975,6 +987,7 @@ fn build(inner: &Inner, records: Vec<SiteRecord>) -> Result<ServingIndex> {
 async fn put_in_service(inner: &Arc<Inner>, built: ServingIndex) -> Result<()> {
     inner.install(built);
     let now = now_unix();
+    inner.last_build.store(now, Ordering::SeqCst);
     inner.update_saved(|saved| {
         saved.index_stale = false;
         saved.network_pending = 0;
@@ -1039,6 +1052,8 @@ async fn wait(inner: &Arc<Inner>, deadline: Deadline) {
         if inner.stopping() || inner.refresh_requested.load(Ordering::SeqCst) {
             return;
         }
+        // Records from other nodes are folded in as they pile up; whether
+        // they rebuild the index is up to step().
         if inner.inbox_records.load(Ordering::SeqCst) >= REBUILD_AFTER_RECORDS {
             return;
         }
