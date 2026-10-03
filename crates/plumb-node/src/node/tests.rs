@@ -66,9 +66,18 @@ fn test_config(dir: &Path) -> NodeConfig {
         tranco_url: format!("{nowhere}/tranco.csv"),
         wikidata_sparql_url: format!("{nowhere}/sparql"),
         wikidata_min_sitelinks: 25,
+        wikidata_pacing: quick_wikidata(),
         cc_ranks_url: None,
     };
     config
+}
+
+/// No pauses between Wikidata queries, and a moment's wait before a retry.
+fn quick_wikidata() -> download::WikidataPacing {
+    download::WikidataPacing {
+        pause: Duration::ZERO,
+        retry_wait: Duration::from_millis(1),
+    }
 }
 
 /// The names in `dir`, sorted; nothing when it does not exist.
@@ -357,6 +366,7 @@ async fn falls_back_to_the_newest_index_that_opens_and_clears_leftovers() {
         crawl_left: 0,
         index_stale: false,
         last_refresh: Some(now_unix()),
+        wikidata_missing: false,
     };
     store::save_state(&paths, &up_to_date).unwrap();
 
@@ -446,6 +456,7 @@ async fn picks_up_a_round_left_unfinished() {
             crawl_left: 700,
             index_stale: true,
             last_refresh: None,
+            wikidata_missing: false,
         },
     )
     .unwrap();
@@ -465,6 +476,7 @@ async fn picks_up_a_round_left_unfinished() {
             crawl_left: 0,
             index_stale: false,
             last_refresh: Some(last),
+            wikidata_missing: false,
         }
     );
     assert_eq!(names(&paths.indexes), ["000001"]);
@@ -494,6 +506,7 @@ async fn refreshes_when_due() {
             crawl_left: 0,
             index_stale: false,
             last_refresh: Some(long_ago),
+            wikidata_missing: false,
         },
     )
     .unwrap();
@@ -542,6 +555,7 @@ impl SeedHost {
             tranco_url: self.url("/tranco.csv"),
             wikidata_sparql_url: self.url("/sparql"),
             wikidata_min_sitelinks: 25,
+            wikidata_pacing: quick_wikidata(),
             cc_ranks_url: None,
         }
     }
@@ -642,8 +656,10 @@ async fn sets_up_from_the_seed_data_and_retries_after_a_failure() {
     // gzipped kind is tested in plumb-ingest).
     let ranks = std::fs::read(fixture("cc-domain-ranks.txt")).unwrap();
     let host = SeedHost::start(move |request, nth| match request {
+        // The Tranco list fails once, which fails the setup.
+        "GET /tranco.csv" if nth == 1 => http("503 Service Unavailable", b"busy"),
         "GET /tranco.csv" => http("200 OK", &tranco),
-        // Wikidata's query times out once.
+        // Wikidata's first query times out once; the download tries again.
         "POST /sparql" if nth == 1 => http("504 Gateway Timeout", b"Query timeout"),
         "POST /sparql" => http("200 OK", &sparql),
         "GET /graph/x-domain-ranks.txt.gz" => http("200 OK", &ranks),
@@ -664,14 +680,22 @@ async fn sets_up_from_the_seed_data_and_retries_after_a_failure() {
     let status = wait_for(addr, "setup", ready_and_idle).await;
     assert_eq!(status.sites, 50);
     assert_eq!(status.last_error, None, "cleared by the retry that worked");
+    assert!(!status.wikidata_missing);
+    assert_eq!(status.wikidata_error, None);
     let hits = search(addr, "us+bank").await;
     assert_eq!(hits[0].domain, "usbank.com");
     node.shutdown().await.unwrap();
 
-    // What worked the first time was not downloaded again.
+    // What worked the first time was not downloaded again. Wikidata was
+    // asked once for each band of sitelink counts, and once more after
+    // the time out.
     let counts = host.counts();
-    assert_eq!(counts["GET /tranco.csv"], 1, "{counts:?}");
-    assert_eq!(counts["POST /sparql"], 2, "{counts:?}");
+    assert_eq!(counts["GET /tranco.csv"], 2, "{counts:?}");
+    assert_eq!(
+        counts["POST /sparql"],
+        download::wikidata_sitelink_bands(25).len() + 1,
+        "{counts:?}"
+    );
     assert_eq!(counts["GET /graph/x-domain-ranks.txt.gz"], 1, "{counts:?}");
     assert_eq!(counts.len(), 3, "{counts:?}");
 
@@ -798,4 +822,77 @@ async fn stops_promptly_in_the_middle_of_a_download() {
         .unwrap();
     assert!(stopping.elapsed() < Duration::from_secs(5));
     host.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sets_up_without_wikidata_and_adds_it_later() {
+    let tranco = std::fs::read(fixture("tranco.csv")).unwrap();
+    let sparql = sparql_json(&fixture("wikidata-official-sites.tsv"));
+    let wikidata_up = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let up = Arc::clone(&wikidata_up);
+    let host = SeedHost::start(move |request, _| match request {
+        "GET /tranco.csv" => http("200 OK", &tranco),
+        "POST /sparql" if up.load(std::sync::atomic::Ordering::SeqCst) => http("200 OK", &sparql),
+        "POST /sparql" => http("403 Forbidden", b"blocked"),
+        _ => http("404 Not Found", b"no such file"),
+    })
+    .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = test_config(dir.path());
+    config.sources = host.sources();
+    config.sites = 50;
+    config.retry_wait = Duration::from_millis(300);
+    config.max_retry_wait = Duration::from_secs(1);
+    let node = start(config).await.unwrap();
+    let addr = node.addr();
+
+    // Setup goes ahead with the Tranco list alone.
+    let status = wait_for(addr, "setup without Wikidata", |s| {
+        s.phase == Phase::Ready && s.wikidata_error.is_some()
+    })
+    .await;
+    assert_eq!(status.sites, 50);
+    assert!(status.wikidata_missing);
+    assert_eq!(status.last_error, None, "{status:#?}");
+    let err = status.wikidata_error.unwrap();
+    assert!(err.message.contains("HTTP 403"), "{}", err.message);
+    assert!(err.retry_at.is_some());
+    let records: Vec<SiteRecord> = read_jsonl(&dir.path().join("records.jsonl")).unwrap();
+    assert_eq!(records.len(), 50);
+    assert!(records.iter().all(|r| !r.signals.official_site));
+    let paths = store::Paths::new(dir.path());
+    assert!(store::load_state(&paths).unwrap().wikidata_missing);
+    let (code, _, body) = get(addr, "/").await;
+    assert_eq!(code, 200);
+    assert!(body.contains("could not be downloaded yet"), "{body}");
+    let (_, _, body) = get(addr, "/api/status").await;
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(json["wikidata_missing"], true);
+    assert!(json["wikidata_error"]["message"].is_string(), "{json}");
+
+    // Wikidata comes back: its sites are folded in and the index rebuilt.
+    wikidata_up.store(true, std::sync::atomic::Ordering::SeqCst);
+    let status = wait_for(addr, "Wikidata's sites", |s| {
+        ready_and_idle(s) && !s.wikidata_missing
+    })
+    .await;
+    assert_eq!(status.wikidata_error, None);
+    assert_ne!(status.index.as_deref(), Some("000001"));
+    let (_, _, body) = get(addr, "/").await;
+    assert!(!body.contains("Wikidata"), "{body}");
+    node.shutdown().await.unwrap();
+
+    assert!(!store::load_state(&paths).unwrap().wikidata_missing);
+    let records: Vec<SiteRecord> = read_jsonl(&dir.path().join("records.jsonl")).unwrap();
+    assert!(records.len() >= 50, "{}", records.len());
+    let usbank = records.iter().find(|r| r.domain == "usbank.com").unwrap();
+    assert!(usbank.signals.official_site);
+    assert!(usbank.signals.tranco_rank.is_some());
+    assert!(
+        usbank.aliases.iter().any(|alias| alias == "U.S. Bancorp"),
+        "{:?}",
+        usbank.aliases
+    );
+    assert_eq!(names(&dir.path().join("indexes")).len(), 1);
 }

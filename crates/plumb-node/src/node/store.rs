@@ -191,6 +191,9 @@ pub(super) struct SavedState {
     pub(super) index_stale: bool,
     /// When the last round of crawling ended, in Unix seconds.
     pub(super) last_refresh: Option<u64>,
+    /// Setup went ahead without Wikidata's official websites, which could
+    /// not be downloaded; the node adds them once it can.
+    pub(super) wikidata_missing: bool,
 }
 
 impl SavedState {
@@ -201,6 +204,7 @@ impl SavedState {
             crawl_left: initial_crawl,
             index_stale: true,
             last_refresh: None,
+            wikidata_missing: false,
         }
     }
 }
@@ -348,6 +352,7 @@ mod tests {
             crawl_left: 1_500,
             index_stale: true,
             last_refresh: Some(1_700_000_000),
+            wikidata_missing: true,
         };
         save_state(&paths, &state).unwrap();
         assert_eq!(load_state(&paths), Some(state));
