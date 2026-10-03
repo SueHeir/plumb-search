@@ -105,6 +105,13 @@ pub const RECOUNT_MINUTES: u64 = 10;
 /// Where the counted reports are written, for anyone curious.
 const POPULARITY_FILE: &str = "popularity.json";
 
+/// Nodes every node trusts unless told otherwise (see
+/// [`NetConfig::trusted_peers`]): the plumbsearch.org node, so a new node
+/// takes in crawls from the start while the network is small (Liz,
+/// 2026-10-03).
+pub const DEFAULT_TRUSTED_PEERS: &[&str] =
+    &["12D3KooWEDPBv4sacn42shoToAwu62CreVC89QFiAA31HrWv3xrg"];
+
 /// How a node joins the network.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NetConfig {
@@ -134,6 +141,7 @@ pub struct NetConfig {
     pub answer_searches: bool,
     /// Nodes whose crawls are taken in as soon as they sign them, instead
     /// of waiting for a second crawler to agree (see `crate::agree`).
+    /// [`DEFAULT_TRUSTED_PEERS`] unless changed.
     pub trusted_peers: Vec<PeerId>,
 }
 
@@ -157,7 +165,10 @@ impl NetConfig {
             local_discovery: true,
             share_ppm: MAX_SHARE_PPM,
             answer_searches: true,
-            trusted_peers: Vec::new(),
+            trusted_peers: DEFAULT_TRUSTED_PEERS
+                .iter()
+                .map(|id| id.parse().expect("a valid peer id"))
+                .collect(),
         }
     }
 }
