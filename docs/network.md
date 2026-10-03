@@ -165,6 +165,15 @@ plumb run --data plumb-data --network --share-popularity
 plumb run --data plumb-data --network --crawl-concurrency 128 \
   --publish-records /path/to/crawl/records.jsonl
 
+# One person's crawlers covering every site between them: each crawls
+# any site, not just its daily share, and they split the sites by hash
+# (each names the others; one that stops crawling for a day hands its
+# share to the rest). Nodes that trust them take all their crawls.
+plumb run --data plumb-data --network --crawl-any-site \
+  --crawl-with <other node's id> --crawl-with <third node's id> \
+  --refresh-hours 1 --crawl-per-refresh 50000 --crawl-concurrency 64 \
+  --keep-batches-days 14
+
 # A test network kept apart from the real one.
 plumb run --data test-data --network --no-default-bootstrap --no-default-trust \
   --bootstrap /ip4/192.168.1.20/tcp/4001/p2p/<that node's id>

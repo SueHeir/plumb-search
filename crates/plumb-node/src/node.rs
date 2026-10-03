@@ -180,6 +180,15 @@ pub struct NodeConfig {
     /// Each index build also writes its buckets, which take about as much
     /// disk as the records file. Off by default.
     pub private_search: bool,
+    /// In the network, crawl any site instead of only those assigned for
+    /// the day: this node's slice of all sites, split with those of
+    /// `crawl_with` that sent crawls in the last day. Only nodes that trust
+    /// this one take the crawls of sites it was not assigned. Needs
+    /// `network`.
+    pub crawl_any_site: bool,
+    /// The nodes that share the sites with this one under `crawl_any_site`;
+    /// they should crawl with it on and name this node in turn.
+    pub crawl_with: Vec<plumb_net::PeerId>,
     /// Also share the homepages crawled into this records file (with its
     /// journal), such as one a `plumb crawl` is filling, and fold them into
     /// this node's records: every half hour, those crawled since the last
@@ -227,6 +236,8 @@ impl NodeConfig {
             network: None,
             private_search: false,
             share_popularity: false,
+            crawl_any_site: false,
+            crawl_with: Vec::new(),
             publish_records: None,
             settings: NodeSettings::default(),
             manage_other_nodes: false,
@@ -264,6 +275,9 @@ impl NodeConfig {
         }
         if self.share_popularity && self.network.is_none() {
             bail!("sharing popularity needs the network");
+        }
+        if self.crawl_any_site && self.network.is_none() {
+            bail!("crawling any site needs the network");
         }
         if self.publish_records.is_some() && self.network.is_none() {
             bail!("publishing a records file needs the network");

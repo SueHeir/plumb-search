@@ -108,9 +108,14 @@ fn node_config(args: RunArgs) -> NodeConfig {
             net.trusted_peers.clear();
         }
         net.trusted_peers.extend(args.trust_peer);
+        if let Some(days) = args.keep_batches_days {
+            net.keep_batches_days = days;
+        }
         config.network = Some(net);
         config.share_popularity = args.share_popularity;
         config.publish_records = args.publish_records;
+        config.crawl_any_site = args.crawl_any_site;
+        config.crawl_with = args.crawl_with;
     }
     config
 }
@@ -312,6 +317,26 @@ mod tests {
             parse(&["--data", "d", "--share-popularity"]).is_err(),
             "--share-popularity needs --network"
         );
+        let peer = "12D3KooWDHxYtCdqrfk6QM21uNnSYcg38K18rDE4hPv71HKQGUxT";
+        let any = config(&[
+            "--data",
+            "d",
+            "--network",
+            "--crawl-any-site",
+            "--crawl-with",
+            peer,
+            "--keep-batches-days",
+            "10",
+            "--crawl-concurrency",
+            "64",
+        ]);
+        assert!(any.crawl_any_site);
+        assert_eq!(any.crawl_with, vec![peer.parse().unwrap()]);
+        assert_eq!(any.network.unwrap().keep_batches_days, 10);
+        assert_eq!(any.crawl_concurrency, Some(64));
+        assert_eq!(net.keep_batches_days, 35);
+        assert!(parse(&["--data", "d", "--network", "--crawl-with", peer]).is_err());
+        assert!(parse(&["--data", "d", "--crawl-any-site"]).is_err());
     }
 
     #[test]

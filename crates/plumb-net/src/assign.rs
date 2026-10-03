@@ -48,9 +48,48 @@ pub fn is_assigned(epoch: u64, peer: &PeerId, domain: &str, share_ppm: u32) -> b
     u128::from(hash.prefix_u64()) < threshold
 }
 
+/// Which of `group` crawls `domain` when nodes of one person split the
+/// sites among themselves instead of following the daily assignment:
+/// the one whose hash with the domain is highest (rendezvous hashing), so
+/// each site has one owner, and when a node leaves the group only its
+/// sites move. `None` for an empty group.
+pub fn slice_owner<'a>(group: &'a [PeerId], domain: &str) -> Option<&'a PeerId> {
+    group.iter().max_by_key(|peer| {
+        Hash::of(&[
+            b"plumb-slice-v1\0",
+            &peer.to_bytes(),
+            b"\0",
+            domain.as_bytes(),
+        ])
+        .prefix_u64()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_group_splits_the_sites_evenly_and_a_leaver_moves_only_its_own() {
+        let group: Vec<PeerId> = (0..3).map(|_| PeerId::random()).collect();
+        let domains: Vec<String> = (0..30_000).map(|i| format!("site{i}.com")).collect();
+        let owners: Vec<PeerId> = domains
+            .iter()
+            .map(|d| *slice_owner(&group, d).unwrap())
+            .collect();
+        for peer in &group {
+            let n = owners.iter().filter(|o| *o == peer).count();
+            assert!((9_000..11_000).contains(&n), "{n}");
+        }
+        let left = &group[..2];
+        for (domain, owner) in domains.iter().zip(&owners) {
+            let now = *slice_owner(left, domain).unwrap();
+            if *owner != group[2] {
+                assert_eq!(now, *owner, "{domain} moved");
+            }
+        }
+        assert!(slice_owner(&[], "a.com").is_none());
+    }
 
     #[test]
     fn about_the_share_of_sites_is_assigned_and_it_changes_every_epoch() {
