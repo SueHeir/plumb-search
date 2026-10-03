@@ -106,6 +106,11 @@ pub struct RunArgs {
     /// Never refresh: keep the index as the initial crawl leaves it.
     #[arg(long, conflicts_with_all = ["refresh_hours", "crawl_per_refresh"])]
     pub no_refresh: bool,
+    /// Fold the seed files already in DIR/seed into the records again
+    /// before starting (downloading only those more than a week old), for
+    /// records made before a change to how seed data is read. Use it once.
+    #[arg(long)]
+    pub reseed: bool,
     /// Common Crawl web graph release to add domain ranks from on first
     /// start, such as cc-main-2025-26-nov-dec-jan (release names are listed
     /// on https://commoncrawl.org/web-graphs). Only the top rows are

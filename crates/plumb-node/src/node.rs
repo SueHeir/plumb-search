@@ -71,7 +71,7 @@
 
 use std::fmt;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::Duration;
@@ -549,6 +549,26 @@ impl NodeHandle {
 /// it, when the address cannot be bound, or when the configuration cannot
 /// work (such as an alpha above 1). A multi-threaded runtime is best: crawls
 /// and index builds run on its blocking threads.
+/// Has the node in `data_dir` fold the seed files in `DIR/seed` into its
+/// records again at its next start, as it does when Wikidata's arrive late:
+/// files from the last week are used as they are, older or missing ones are
+/// downloaded again. For a node whose records predate a change to how seed
+/// data is read. Returns false, changing nothing, when the directory has no
+/// node yet. Fails while another node holds the directory.
+pub fn request_reseed(data_dir: &Path) -> Result<bool> {
+    let paths = Paths::new(data_dir);
+    if !paths.records.is_file() {
+        return Ok(false);
+    }
+    let _lock = store::lock(&paths)?;
+    let Some(mut state) = store::load_state(&paths) else {
+        return Ok(false);
+    };
+    state.wikidata_missing = true;
+    store::save_state(&paths, &state)?;
+    Ok(true)
+}
+
 pub async fn start(config: NodeConfig) -> Result<NodeHandle> {
     config.check()?;
     let rank = crate::rank_config(config.alpha);
