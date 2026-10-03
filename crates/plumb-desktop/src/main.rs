@@ -24,7 +24,7 @@
 mod logging;
 
 use std::net::{SocketAddr, TcpListener};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::Duration;
@@ -56,6 +56,13 @@ const PANEL_PATH: &str = "app";
 /// one launch to the next, and with it a browser search engine set up as
 /// `http://127.0.0.1:7586/search?q=%s`. 7586 spells PLUM on a phone keypad.
 const PORT: u16 = 7586;
+
+/// The Plumb network's first nodes, which the app connects to and learns
+/// the others from: the relay on plumbsearch.org, by name and by address.
+const BOOTSTRAP: [&str; 2] = [
+    "/dns4/plumbsearch.org/tcp/4001/p2p/12D3KooWJ2UWUBsxmPfXTfHa8cBBmzifa6kj5pFZKfJXYNQyJ69a",
+    "/ip4/198.211.114.63/tcp/4001/p2p/12D3KooWJ2UWUBsxmPfXTfHa8cBBmzifa6kj5pFZKfJXYNQyJ69a",
+];
 
 /// How long the node gets to stop when the app quits, before the app exits
 /// anyway. Stopping finishes an index build already under way, which takes
@@ -249,6 +256,7 @@ async fn launch_node(app: AppHandle) -> Result<NodeHandle> {
     info!("data folder: {}", data_dir.display());
     let mut config = NodeConfig::desktop(data_dir);
     config.bind.set_port(PORT);
+    config.network = Some(network_config());
     match node::start(config.clone()).await {
         // Something else has the port; the window works on any port.
         Err(err) if !can_listen_on(config.bind) => {
@@ -258,6 +266,30 @@ async fn launch_node(app: AppHandle) -> Result<NodeHandle> {
         }
         started => started,
     }
+}
+
+/// How the app joins the Plumb network, which the panel's "Join the Plumb
+/// network" setting turns off and on. Like any home node, it needs no open
+/// port: it connects out, through the relay when nothing else reaches it.
+/// It listens on ports the system picks, which never clash with another
+/// program's.
+fn network_config() -> plumb_net::NetConfig {
+    // The node puts the network's files in its data folder.
+    let mut net = plumb_net::NetConfig::new(PathBuf::new());
+    net.listen = [
+        "/ip4/0.0.0.0/tcp/0",
+        "/ip4/0.0.0.0/udp/0/quic-v1",
+        "/ip6/::/tcp/0",
+        "/ip6/::/udp/0/quic-v1",
+    ]
+    .iter()
+    .map(|addr| addr.parse().expect("a valid multiaddr"))
+    .collect();
+    net.bootstrap = BOOTSTRAP
+        .iter()
+        .map(|addr| addr.parse().expect("a valid multiaddr"))
+        .collect();
+    net
 }
 
 /// Whether a server could listen on `addr` now.
@@ -832,6 +864,17 @@ mod tests {
                  Data folder: {folder}"
             )
         );
+    }
+
+    #[test]
+    fn the_app_joins_the_network_through_plumbsearch_org() {
+        let net = network_config();
+        assert_eq!(net.bootstrap.len(), 2);
+        assert!(net.bootstrap[0]
+            .to_string()
+            .starts_with("/dns4/plumbsearch.org/tcp/4001/p2p/"));
+        assert!(!net.relay_server);
+        assert_eq!(net.listen.len(), 4);
     }
 
     #[test]

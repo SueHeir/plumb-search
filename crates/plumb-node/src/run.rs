@@ -94,6 +94,7 @@ fn node_config(args: RunArgs) -> NodeConfig {
         net.relay_server = args.relay;
         net.upnp = !args.no_upnp;
         net.local_discovery = !args.no_local_discovery;
+        net.trusted_peers = args.trust_peer;
         config.network = Some(net);
         config.share_popularity = args.share_popularity;
     }
@@ -200,8 +201,14 @@ mod tests {
             "--public-addr",
             "/ip4/203.0.113.7/tcp/4100",
             "--relay",
+            "--trust-peer",
+            "12D3KooWEwYB7PYxRNgvSWiwkLXvwYajSmYn4yoPqmkN7NbNqJjg",
         ]);
         let net = node.network.unwrap();
+        assert_eq!(
+            net.trusted_peers[0].to_string(),
+            "12D3KooWEwYB7PYxRNgvSWiwkLXvwYajSmYn4yoPqmkN7NbNqJjg"
+        );
         assert_eq!(net.listen[0].to_string(), "/ip4/0.0.0.0/tcp/4100");
         assert_eq!(net.bootstrap.len(), 1);
         assert_eq!(net.external.len(), 1);
@@ -214,6 +221,10 @@ mod tests {
             "--relay needs --public-addr"
         );
         assert!(parse(&["--data", "d", "--bootstrap", "/ip4/1.2.3.4/tcp/1"]).is_err());
+        assert!(
+            parse(&["--data", "d", "--network", "--trust-peer", "not-a-peer"]).is_err(),
+            "a trusted peer must be a node id"
+        );
         assert!(
             parse(&["--data", "d", "--share-popularity"]).is_err(),
             "--share-popularity needs --network"

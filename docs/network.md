@@ -63,6 +63,8 @@ Batches older than 7 days or dated in the future are refused. A node keeps the b
 * **How soon a site is confirmed.** Assignment stays independent per node (a site is crawled by about one node in eight each day), so with N nodes a site gets about N/8 crawls a day. Over the 14-day window a site is assigned to two nodes with about 72% odds in a network of 2 nodes, 94% with 3, and almost surely with 5 or more. In a network of one, nothing from the network is ever taken in, which is the point.
 * **Own crawls judge straight away.** A crawl made within 2 days of one of the node's own crawls of the same site is scored against it at once, confirmed or not.
 
+* **Trusted nodes.** While the network is a handful of nodes, waiting for two crawlers mostly keeps good crawls out. So a node keeps a list of nodes it trusts (Liz, 2026-10-03): `plumb run --network --trust-peer 12D3Koo...` (repeatable). A crawl signed by a trusted node is taken in at once, like the node's own, and counts towards any quorum; every other crawler goes through the rules in this section. Being trusted earns a crawler nothing else: it is scored like any other, and matching its crawls vouches for no one. `GET /api/status` shows `network.agreement.trusted_peers`.
+
 ### One person, many keys
 
 A node key costs nothing to make, so one person could run many keys and agree with themselves. Batches travel by gossip, so a node usually cannot see which IP address a crawler crawls from, and grouping keys by address would not work. Instead each node checks crawlers against fetches it made itself:
@@ -149,7 +151,7 @@ plumb run --data /data --network --relay \
 * The node id is printed at start ("joined the Plumb network as 12D3Koo...") and shown in `GET /api/status` under `network.peer_id`, with the addresses it listens on, its NAT status, its relays, and counts of batches held, published and received.
 * The node key is `DIR/net/node.key`. Keep it to keep the same id; a server's id is part of the bootstrap address others use.
 * The Docker image exposes 4001; publish it with `-p 4001:4001/tcp -p 4001:4001/udp` on a server that relays.
-* No bootstrap node runs yet, so for now nodes are joined by hand with `--bootstrap`. Once plumbsearch.org runs a relay node, its address becomes the default and `--network` the default too.
+* The desktop app joins the network when it starts, through the relay on plumbsearch.org (`/dns4/plumbsearch.org/tcp/4001/p2p/12D3KooWJ2UWUBsxmPfXTfHa8cBBmzifa6kj5pFZKfJXYNQyJ69a`). `plumb run` still joins only with `--network`, and takes its `--bootstrap` nodes by hand.
 
 ## What the prototype proves, and what it does not
 
