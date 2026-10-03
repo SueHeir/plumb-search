@@ -9,6 +9,7 @@ publish = false
 
 [dependencies]
 anyhow = "1.0.104"
+plumb-net = { version = "0.1.0", path = "../plumb-net" }
 plumb-node = { version = "0.1.0", path = "../plumb-node" }
 tauri = { version = "2.12.1", features = ["tray-icon"] }
 tauri-plugin-autostart = "2.7.0"

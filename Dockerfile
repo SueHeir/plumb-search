@@ -1,11 +1,13 @@
 # syntax=docker/dockerfile:1
 
 # Plumb Search node for servers: `plumb run` serves the search page on port
-# 8080 and keeps everything it downloads and builds in the /data volume.
-# docs/docker.md covers running, settings and updates.
+# 8080, joins the Plumb network over port 4001 and keeps everything it
+# downloads and builds in the /data volume. docs/docker.md covers running,
+# settings and updates.
 #
 #   docker build -t plumb-search .
-#   docker run -d --init -p 8080:8080 -v plumb-data:/data plumb-search
+#   docker run -d --init -p 8080:8080 -p 4001:4001/tcp -p 4001:4001/udp \
+#     -v plumb-data:/data plumb-search
 
 # Rust toolchain of the build stage; pin one with --build-arg RUST_VERSION=1.99.
 ARG RUST_VERSION=1
@@ -71,7 +73,8 @@ WORKDIR /data
 # replaces those by renaming, and a mount point cannot be renamed.
 VOLUME /data
 EXPOSE 8080
-# Node-to-node connections, used with `plumb run --network` (docs/network.md).
+# Node-to-node connections (docs/network.md). The node dials out, so it joins
+# without this port published or forwarded; others reach it directly when it is.
 EXPOSE 4001/tcp 4001/udp
 ENTRYPOINT ["plumb"]
-CMD ["run", "--data", "/data", "--bind", "0.0.0.0:8080"]
+CMD ["run", "--data", "/data", "--bind", "0.0.0.0:8080", "--network"]

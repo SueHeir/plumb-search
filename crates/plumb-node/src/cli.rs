@@ -44,6 +44,36 @@ pub enum Command {
     /// Make a vector of each site's text with a small embedding model
     /// (downloaded on first use), so searches can find sites by meaning.
     Embed(EmbedArgs),
+    /// Let the Plumb Search app on another computer change this node's
+    /// settings: `on` makes a new token (shown once), `off` stops it.
+    RemoteControl(RemoteControlArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct RemoteControlArgs {
+    /// The node's data directory, as given to `plumb run --data`.
+    #[arg(long, value_name = "DIR", global = true, default_value = ".")]
+    pub data: PathBuf,
+    #[command(subcommand)]
+    pub action: RemoteControlAction,
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub enum RemoteControlAction {
+    /// Turn remote control on with a new token, which replaces any earlier
+    /// one, and print it.
+    On {
+        /// Also take requests from public addresses and through reverse
+        /// proxies. Without it, only this computer and local networks
+        /// (and Tailscale) can use the token. Put the node behind HTTPS
+        /// first, or the token crosses the internet in the clear.
+        #[arg(long)]
+        allow_public: bool,
+    },
+    /// Turn remote control off: no token works any more.
+    Off,
+    /// Say whether remote control is on.
+    Status,
 }
 
 #[derive(Debug, Args)]
@@ -106,6 +136,11 @@ pub struct RunArgs {
     /// Never refresh: keep the index as the initial crawl leaves it.
     #[arg(long, conflicts_with_all = ["refresh_hours", "crawl_per_refresh"])]
     pub no_refresh: bool,
+    /// Fold the seed files already in DIR/seed into the records again
+    /// before starting (downloading only those more than a week old), for
+    /// records made before a change to how seed data is read. Use it once.
+    #[arg(long)]
+    pub reseed: bool,
     /// Common Crawl web graph release to add domain ranks from on first
     /// start, such as cc-main-2025-26-nov-dec-jan (release names are listed
     /// on https://commoncrawl.org/web-graphs). Only the top rows are
@@ -154,9 +189,15 @@ pub struct RunArgs {
     )]
     pub p2p_port: u16,
     /// A node to connect to first, as a multiaddr ending in /p2p/<id>, e.g.
-    /// /dns4/plumbsearch.org/tcp/4001/p2p/12D3Koo...; may be repeated.
+    /// /ip4/192.168.1.20/tcp/4001/p2p/12D3Koo...; may be repeated. The
+    /// network's own first nodes, on plumbsearch.org, are tried as well.
     #[arg(long, value_name = "MULTIADDR", requires = "network")]
     pub bootstrap: Vec<plumb_net::Multiaddr>,
+    /// Do not start from the network's own first nodes on plumbsearch.org;
+    /// only from --bootstrap nodes and nodes on the local network. For test
+    /// networks that must stay apart from the real one.
+    #[arg(long, requires = "network")]
+    pub no_default_bootstrap: bool,
     /// An address other nodes can reach this one at, for a server with a
     /// public address, e.g. /ip4/203.0.113.7/tcp/4001; may be repeated.
     #[arg(long, value_name = "MULTIADDR", requires = "network")]
@@ -171,6 +212,15 @@ pub struct RunArgs {
     /// Do not look for other Plumb nodes on the local network (mDNS).
     #[arg(long, requires = "network")]
     pub no_local_discovery: bool,
+    /// A node (by its id, 12D3Koo...) whose crawls this node takes in as
+    /// soon as it signs them, without waiting for a second crawler to
+    /// agree. Other nodes' crawls still need agreement. May be repeated.
+    #[arg(long = "trust-peer", value_name = "PEER_ID", requires = "network")]
+    pub trust_peer: Vec<plumb_net::PeerId>,
+    /// Do not trust the plumbsearch.org node by default; only nodes given
+    /// with --trust-peer.
+    #[arg(long, requires = "network")]
+    pub no_default_trust: bool,
     /// Offer private search at /private: browsers fetch groups of sites
     /// (buckets) and rank them themselves, so this node never sees what
     /// they search for. Each index also gets its buckets, about as much
@@ -305,6 +355,11 @@ pub struct CrawlArgs {
     /// Homepage fetches in flight at once.
     #[arg(long, value_name = "N", default_value_t = 16, value_parser = parse_positive)]
     pub concurrency: usize,
+    /// Host name lookups in flight at once. Home routers drop lookups when
+    /// hundreds arrive together; lower this if many sites come back as
+    /// "could not be reached" at a high --concurrency.
+    #[arg(long, value_name = "N", default_value_t = 32, value_parser = parse_positive)]
+    pub dns_lookups: usize,
     /// Where to write the updated records [default: overwrite --records].
     /// Each batch of homepages is saved at once to a journal next to it
     /// (PATH.journal), which is folded in at the end, so an interrupted crawl
@@ -350,6 +405,9 @@ pub struct SearchArgs {
     /// Leave out other countries' sites (needs --country).
     #[arg(long, requires = "country")]
     pub only_country: bool,
+    /// Search for the query exactly as typed, without correcting typos.
+    #[arg(long)]
+    pub exact: bool,
     #[command(flatten)]
     pub meaning: MeaningArgs,
     /// What to search for, e.g. `us bank`.
@@ -410,6 +468,9 @@ pub struct EvalArgs {
     /// [default: none].
     #[arg(long, value_name = "CODE", value_parser = parse_country)]
     pub country: Option<String>,
+    /// Search for each query exactly as written, without correcting typos.
+    #[arg(long)]
+    pub exact: bool,
     #[command(flatten)]
     pub meaning: MeaningArgs,
 }

@@ -61,7 +61,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use plumb_core::{collapse_whitespace, now_unix, truncate_chars, SiteRecord};
 use plumb_index::{
-    build_index, Hit, RankConfig, SearchOptions, SearchResults, Searcher, SiteSearch,
+    build_index, Hit, RankConfig, SearchOptions, SearchResults, Searcher, SiteSearch, Spelling,
 };
 use plumb_net::{FoundSite, NetHandle, NetSearch};
 use serde::{Deserialize, Serialize};
@@ -74,6 +74,8 @@ use crate::meaning::{MeaningIndex, SharedMeaning};
 use crate::node::{NodeSettings, Phase, Status, Step};
 use crate::websearch::{bang_url, Engine, WebSettings};
 
+mod control;
+mod nodes;
 mod panel;
 
 use crate::{block_on, rank_config};
@@ -127,6 +129,7 @@ pub trait SearchBackend: Send + Sync {
         Ok(SearchResults {
             hits: self.search(query, limit)?,
             site_search: None,
+            spelling: None,
         })
     }
     /// Number of sites that can be found.
@@ -230,6 +233,17 @@ pub trait StatusSource: Send + Sync {
         let _ = (query, domain);
     }
 
+    /// Active and next-start feature choices, shared by desktop and Docker.
+    fn features(&self) -> crate::node::features::FeatureSettings {
+        Default::default()
+    }
+    fn saved_features(&self) -> Result<crate::node::features::FeatureSettings> {
+        Ok(self.features())
+    }
+    fn change_features(&self, _features: crate::node::features::FeatureSettings) -> Result<()> {
+        anyhow::bail!("this node has no feature settings")
+    }
+
     /// The node's settings; `None` when it has none.
     fn settings(&self) -> Option<NodeSettings> {
         None
@@ -243,9 +257,55 @@ pub trait StatusSource: Send + Sync {
     /// Starts a refresh now.
     fn refresh_now(&self) {}
 
-    /// Where the node keeps its data, to show on the panel.
+    /// Restarts the node, to apply saved feature changes; only a node whose
+    /// [`Status::can_restart`] says so can.
+    fn restart(&self) -> Result<()> {
+        anyhow::bail!("This node cannot restart itself. Restart it where it runs.")
+    }
+
+    /// What the node did lately, newest first.
+    fn activity_log(&self) -> Vec<crate::node::LogEntry> {
+        Vec::new()
+    }
+
+    /// Tries failed work again now.
+    fn retry(&self, _what: crate::node::Retry) -> Result<()> {
+        anyhow::bail!("This node cannot retry work from the panel.")
+    }
+
+    /// Saves a backup in the data folder's `backups/`.
+    fn make_backup(&self) -> Result<crate::node::backup::BackupInfo> {
+        anyhow::bail!("This node has no data folder to back up.")
+    }
+
+    /// Restores `backup` into the data folder, then restarts if it can.
+    fn restore_backup(&self, _backup: &crate::node::backup::Backup) -> Result<()> {
+        anyhow::bail!("This node has no data folder to restore into.")
+    }
+
+    /// Tries the network's bootstrap nodes again now.
+    fn reconnect_network(&self) -> Result<()> {
+        match self.network() {
+            Some(net) => net.reconnect(),
+            None => anyhow::bail!("The Plumb network is off on this node."),
+        }
+    }
+
+    /// Where the node keeps its data, to show on the panel. Its remote
+    /// control file is there too: without a data folder, the node cannot be
+    /// controlled remotely.
     fn data_dir(&self) -> Option<std::path::PathBuf> {
         None
+    }
+
+    /// The address the node was told to listen on.
+    fn bind(&self) -> Option<std::net::SocketAddr> {
+        None
+    }
+
+    /// Whether the panel may list and control other nodes.
+    fn manages_other_nodes(&self) -> bool {
+        false
     }
 }
 
@@ -325,10 +385,22 @@ fn app(state: AppState) -> Router {
             .route("/api/network/search", get(api_network_search))
             .route("/app", get(panel::panel))
             .route("/app/settings", post(panel::save_settings))
+            .route("/app/features", post(panel::save_features))
             .route("/app/refresh", post(panel::refresh))
+            .route("/app/network/retry", post(panel::retry_network))
+            .route("/app/pause", post(panel::pause))
+            .route("/app/retry", post(panel::retry))
+            .route("/app/backup", post(panel::backup))
+            .route("/app/backups/restore", post(panel::restore_saved))
+            .route("/app/restore", post(panel::restore_upload))
+            .route("/app/backups/{name}", get(panel::download_backup))
+            .route("/app/restart", post(panel::restart))
+            .route("/app/remote-control", post(panel::save_remote_control))
             .route(panel::ADD_TO_FIREFOX_PATH, get(panel::add_to_firefox));
         router = private::routes(router);
         router = relay::routes(router);
+        router = control::routes(router);
+        router = nodes::routes(router);
     }
     router.with_state(state)
 }
@@ -398,6 +470,9 @@ struct SearchParams {
     full: Option<String>,
     /// `1` (or `on`, `true`): `/search` asks the Plumb network too.
     net: Option<String>,
+    /// `1` (or `on`, `true`): search for the query as typed, without
+    /// correcting typos.
+    exact: Option<String>,
 }
 
 /// Whether a flag parameter is set: `1`, `on`, `true` or `yes`.
@@ -438,6 +513,7 @@ impl SearchParams {
         SearchOptions {
             only_country: flag(&self.only) && country.is_some(),
             country,
+            exact: flag(&self.exact),
         }
     }
 }
@@ -540,10 +616,15 @@ async fn search_page(
         private: state.private_search(),
     };
     let limit = params.limit();
-    let local = run_search(&state, &query, limit, &settings.options);
+    let local = run_search(&state, &query, limit, &settings.options).await;
     let (local, network) = if settings.network == NetSetting::On {
-        let network = network_search(&state, &query, limit, &settings.options);
-        let (local, network) = tokio::join!(local, network);
+        // The network is asked for what this node's results are for, the
+        // corrected query when a typo was corrected.
+        let asked = match &local {
+            Ok(results) => searched_for(&query, results),
+            Err(_) => &query,
+        };
+        let network = network_search(&state, asked, limit, &settings.options).await;
         let network = match network {
             Ok(results) => NetOutcome::Answered(results),
             Err(err) => {
@@ -554,7 +635,7 @@ async fn search_page(
         };
         (local, network)
     } else {
-        (local.await, NetOutcome::NotAsked)
+        (local, NetOutcome::NotAsked)
     };
     match local {
         Ok(results) => html_response(
@@ -636,6 +717,7 @@ struct GoParams {
     d: String,
     country: Option<String>,
     only: Option<String>,
+    exact: Option<String>,
 }
 
 /// `GET /go?q=&d=`: notes that `d` was picked for the query, when the node
@@ -653,6 +735,7 @@ async fn go(
         only: params.only,
         full: None,
         net: None,
+        exact: params.exact,
     };
     let query = search.query();
     let back = {
@@ -832,8 +915,14 @@ fn rank_found(
     let index = dir.path().join("index");
     let records: Vec<SiteRecord> = found.found.iter().map(|f| f.record.clone()).collect();
     build_index(&index, &records)?;
+    // The few sites found are no dictionary to correct typos against: the
+    // query was corrected, if at all, by this node's own index.
+    let options = SearchOptions {
+        exact: true,
+        ..options.clone()
+    };
     let hits = Searcher::open(&index)?
-        .search_full(query, limit, rank, options)?
+        .search_full(query, limit, rank, &options)?
         .hits;
     let by_domain: std::collections::HashMap<&str, &FoundSite> = found
         .found
@@ -1123,6 +1212,7 @@ select{font:inherit;padding:.15rem .3rem;border:1px solid var(--line);border-rad
 background:var(--bg);color:var(--fg)}\
 .ss{margin:1rem 0 .25rem;padding:.6rem .8rem;border:1px solid var(--line);border-radius:.5rem}\
 .ss a{color:var(--link)}\
+.sp{margin:1rem 0 .25rem}.sp a{color:var(--link)}\
 .web{margin:.25rem 0;font-size:.9rem}.web a{color:var(--muted)}\
 .setup{max-width:36rem}\
 .step{margin:2rem 0 .5rem;font-size:1.1rem}\
@@ -1382,7 +1472,52 @@ fn search_link(path: &str, query: &str, options: &SearchOptions, net: bool) -> S
     if net {
         params.append_pair("net", "1");
     }
+    if options.exact {
+        params.append_pair("exact", "1");
+    }
     format!("{path}?{}", params.finish())
+}
+
+/// What `results` are for: the corrected query when a typo was corrected,
+/// else `query`.
+fn searched_for<'a>(query: &'a str, results: &'a SearchResults) -> &'a str {
+    match &results.spelling {
+        Some(spelling) if spelling.applied => &spelling.query,
+        _ => query,
+    }
+}
+
+/// "Showing results for amazon. Search instead for amazom", or "Did you
+/// mean amazon?", above the results.
+fn render_spelling(out: &mut String, query: &str, spelling: &Spelling, options: &SearchOptions) {
+    let fixed_options = SearchOptions {
+        exact: false,
+        ..options.clone()
+    };
+    let fixed = format!(
+        "<a href=\"{}\"><strong>{}</strong></a>",
+        escape_html(&search_link(
+            "/search",
+            &spelling.query,
+            &fixed_options,
+            false
+        )),
+        escape_html(&truncate_chars(&spelling.query, 150))
+    );
+    if spelling.applied {
+        let typed_options = SearchOptions {
+            exact: true,
+            ..options.clone()
+        };
+        let _ = writeln!(
+            out,
+            "<p class=\"sp\">Showing results for {fixed}. Search instead for <a href=\"{}\">{}</a></p>",
+            escape_html(&search_link("/search", query, &typed_options, false)),
+            escape_html(&truncate_chars(query, 150))
+        );
+    } else {
+        let _ = writeln!(out, "<p class=\"sp\">Did you mean {fixed}?</p>");
+    }
 }
 
 /// One result as shown: a hit, and what the network said about it when only
@@ -1481,6 +1616,11 @@ fn render_results(
         results_form(query, settings)
     );
     render_source(&mut body, query, settings, network, from_network);
+    if let Some(spelling) = &results.spelling {
+        render_spelling(&mut body, query, spelling, &settings.options);
+    }
+    // Picks are noted for what the results are for.
+    let picked_for = searched_for(query, results);
     if let Some(site_search) = &results.site_search {
         render_site_search(&mut body, site_search);
     }
@@ -1505,7 +1645,7 @@ fn render_results(
             // `/go` only follows this node's own results, so sites from other
             // nodes link straight to themselves.
             let go = (share_picks && item.network.is_none())
-                .then(|| go_link(query, &settings.options, &item.hit.domain));
+                .then(|| go_link(picked_for, &settings.options, &item.hit.domain));
             render_hit(&mut body, item.hit, item.network, go.as_deref());
         }
         body.push_str("</ol>\n");
@@ -1623,6 +1763,9 @@ fn go_link(query: &str, options: &SearchOptions, domain: &str) -> String {
     link.append_pair("country", options.country.as_deref().unwrap_or("any"));
     if options.only_country {
         link.append_pair("only", "1");
+    }
+    if options.exact {
+        link.append_pair("exact", "1");
     }
     format!("/go?{}", link.finish())
 }
@@ -1874,7 +2017,11 @@ mod tests {
     #[tokio::test]
     async fn search_page_lists_hits() {
         let fake = backend(bank_hits());
-        let (status, _, body) = get(Arc::clone(&fake), "/search?q=us+bank").await;
+        let (status, _, body) = send(
+            router_with(fake.clone(), HomeCountry::Off),
+            "/search?q=us+bank",
+        )
+        .await;
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains(
             "<a class=\"t\" href=\"https://www.usbank.com/\" rel=\"noreferrer\">\
@@ -2015,6 +2162,9 @@ mod tests {
             downloaded_total: 0,
             homepages_visited: 0,
             meaning_sites: None,
+            meaning_work: None,
+            can_restart: false,
+            paused_until: None,
         }
     }
 
@@ -2578,6 +2728,7 @@ mod tests {
                     terms: query.trim_start_matches("github ").into(),
                     url: self.link.clone(),
                 }),
+                spelling: None,
             })
         }
 
@@ -2768,6 +2919,7 @@ mod tests {
         let results = SearchResults {
             hits: local.clone(),
             site_search: None,
+            spelling: None,
         };
         let page = render_results("q", &results, &network, &settings, None, 10, false);
         assert!(page.contains("<li class=\"net\"><a class=\"t\" href=\"https://c.com/\""));
@@ -2779,10 +2931,78 @@ mod tests {
     }
 
     #[test]
+    fn corrected_typos_are_shown_with_a_way_back() {
+        let mut results = SearchResults {
+            hits: vec![scored("amazon.com", 0.9)],
+            site_search: None,
+            spelling: Some(Spelling {
+                query: "amazon".into(),
+                applied: true,
+            }),
+        };
+        let mut settings = no_settings();
+        settings.options.country = Some("DE".into());
+        let page = render_results(
+            "amazom",
+            &results,
+            &NetOutcome::NotAsked,
+            &settings,
+            None,
+            10,
+            true,
+        );
+        assert!(
+            page.contains(
+                "<p class=\"sp\">Showing results for <a href=\"/search?q=amazon&amp;country=DE\">\
+             <strong>amazon</strong></a>. Search instead for \
+             <a href=\"/search?q=amazom&amp;country=DE&amp;exact=1\">amazom</a></p>"
+            ),
+            "{page}"
+        );
+        // Picks are noted for the corrected query.
+        assert!(page.contains("/go?q=amazon&amp;d=amazon.com"), "{page}");
+
+        results.spelling = Some(Spelling {
+            query: "google".into(),
+            applied: false,
+        });
+        let page = render_results(
+            "gogle",
+            &results,
+            &NetOutcome::NotAsked,
+            &no_settings(),
+            None,
+            10,
+            true,
+        );
+        assert!(page.contains(
+            "<p class=\"sp\">Did you mean <a href=\"/search?q=google\"><strong>google</strong></a>?</p>"
+        ), "{page}");
+        assert!(page.contains("/go?q=gogle&amp;d=amazon.com"), "{page}");
+
+        // Searching as typed carries on through the picks.
+        let mut settings = no_settings();
+        settings.options.exact = true;
+        results.spelling = None;
+        let page = render_results(
+            "gogle",
+            &results,
+            &NetOutcome::NotAsked,
+            &settings,
+            None,
+            10,
+            true,
+        );
+        assert!(page.contains("&amp;exact=1"), "{page}");
+        assert!(!page.contains("class=\"sp\""), "{page}");
+    }
+
+    #[test]
     fn the_source_line_says_where_results_came_from() {
         let results = SearchResults {
             hits: vec![scored("a.com", 0.9)],
             site_search: None,
+            spelling: None,
         };
         let mut settings = no_settings();
         settings.network = NetSetting::Off;

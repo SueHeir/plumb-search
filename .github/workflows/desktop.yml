@@ -6,8 +6,16 @@ name: Desktop
 # release. The builds are not code-signed yet; docs/desktop.md explains how to
 # open them anyway.
 
+# Pull requests build the installers only when they touch the desktop app:
+# three installer builds (macOS and Windows take half an hour) for every pull
+# request filled the account's runners and left main's CI queued for an
+# hour. The CI workflow's desktop job still checks the app's code on every
+# pull request.
 on:
   pull_request:
+    paths:
+      - "crates/plumb-desktop/**"
+      - ".github/workflows/desktop.yml"
   workflow_dispatch:
   push:
     tags: ["v*"]
@@ -79,6 +87,13 @@ jobs:
       - name: Install tauri-cli
         if: steps.tauri-cli.outputs.cache-hit != 'true'
         run: cargo install tauri-cli --version "${{ env.TAURI_CLI_VERSION }}" --locked
+
+      - name: Build private browser search
+        run: |
+          rustup target add wasm32-unknown-unknown
+          cargo install wasm-bindgen-cli --version 0.2.108 --locked
+          cargo build --locked -p plumb-private --target wasm32-unknown-unknown --profile wasm
+          wasm-bindgen --target web --no-typescript --out-dir target/private target/wasm32-unknown-unknown/wasm/plumb_private.wasm
 
       - name: Build the installers
         working-directory: crates/plumb-desktop

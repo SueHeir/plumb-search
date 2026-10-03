@@ -8,14 +8,20 @@ services:
     build: .
     ports:
       - "8080:8080"
+      # The Plumb network. The node joins without these, by dialing out;
+      # forwarding 4001 (TCP and UDP) on the router to this machine lets
+      # other nodes reach it directly instead of through a relay.
+      - "4001:4001/tcp"
+      - "4001:4001/udp"
     volumes:
       # Mount the volume at /data itself, not at an index directory or a file
       # inside it: the node replaces those by renaming, and a mount point
       # cannot be renamed.
       - plumb-data:/data
     # Settings are flags of `plumb run` (see docs/docker.md). To change them,
-    # uncomment this line and add flags, keeping --data and --bind as they are:
-    # command: ["run", "--data", "/data", "--bind", "0.0.0.0:8080", "--sites", "250000"]
+    # uncomment this line and add flags, keeping --data and --bind as they are
+    # (leave out --network to keep the node to itself):
+    # command: ["run", "--data", "/data", "--bind", "0.0.0.0:8080", "--network", "--sites", "250000"]
     init: true
     restart: unless-stopped
     # A stopping node first finishes an index build that is under way: up to

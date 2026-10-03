@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use plumb_net::NetConfig;
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::cli::{Profile, RunArgs};
 use crate::node::{self, NodeConfig};
@@ -16,6 +16,13 @@ use crate::web::shutdown_signal;
 const RUNTIME_STOP_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub fn run(args: RunArgs) -> Result<()> {
+    if args.reseed {
+        if node::request_reseed(&args.data)? {
+            info!("folding the seed data into the records again once the node is up");
+        } else {
+            warn!("--reseed: no records yet, so the node sets up from the seed data anyway");
+        }
+    }
     let config = node_config(args);
     let runtime = crate::runtime()?;
     let result = runtime.block_on(async move {
@@ -82,11 +89,22 @@ fn node_config(args: RunArgs) -> NodeConfig {
         .iter()
         .map(|addr| addr.parse().expect("a valid multiaddr"))
         .collect();
-        net.bootstrap = args.bootstrap;
+        if !args.no_default_bootstrap {
+            net.bootstrap = plumb_net::default_bootstrap();
+        }
+        for addr in args.bootstrap {
+            if !net.bootstrap.contains(&addr) {
+                net.bootstrap.push(addr);
+            }
+        }
         net.external = args.public_addr;
         net.relay_server = args.relay;
         net.upnp = !args.no_upnp;
         net.local_discovery = !args.no_local_discovery;
+        if args.no_default_trust {
+            net.trusted_peers.clear();
+        }
+        net.trusted_peers.extend(args.trust_peer);
         config.network = Some(net);
         config.share_popularity = args.share_popularity;
     }
@@ -113,6 +131,50 @@ fn listening_message(addr: SocketAddr) -> String {
          (Ctrl-C to stop)",
         SocketAddr::new(local, port)
     )
+}
+
+/// `plumb remote-control`: turns remote control on or off in a node's data
+/// directory. A running node notices at its next request.
+pub fn remote_control(args: crate::cli::RemoteControlArgs) -> Result<()> {
+    use crate::cli::RemoteControlAction;
+    use crate::node::control;
+    use anyhow::Context as _;
+    let dir = &args.data;
+    if !dir.is_dir() {
+        anyhow::bail!(
+            "{} is not a directory; pass the node's data directory, as given to plumb run --data",
+            dir.display()
+        );
+    }
+    match args.action {
+        RemoteControlAction::On { allow_public } => {
+            let token = control::turn_on(dir, allow_public)
+                .with_context(|| format!("turning remote control on in {}", dir.display()))?;
+            println!("Remote control is on. The token, shown only this once:\n\n  {token}\n");
+            println!(
+                "In the Plumb Search app on another computer, choose \"Connect to a node\" and \
+                 enter this node's address (such as http://192.168.1.20:8080) and the token."
+            );
+            if allow_public {
+                println!("It works from any address. Keep the node behind HTTPS.");
+            } else {
+                println!("It works from this computer and local networks only.");
+            }
+        }
+        RemoteControlAction::Off => {
+            if control::turn_off(dir)? {
+                println!("Remote control is off.");
+            } else {
+                println!("Remote control was already off.");
+            }
+        }
+        RemoteControlAction::Status => match control::load(dir)? {
+            None => println!("Remote control is off."),
+            Some(on) if on.allow_public => println!("Remote control is on, from any address."),
+            Some(_) => println!("Remote control is on, from this computer and local networks."),
+        },
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -193,10 +255,41 @@ mod tests {
             "--public-addr",
             "/ip4/203.0.113.7/tcp/4100",
             "--relay",
+            "--trust-peer",
+            "12D3KooWEwYB7PYxRNgvSWiwkLXvwYajSmYn4yoPqmkN7NbNqJjg",
         ]);
         let net = node.network.unwrap();
+        // The plumbsearch.org node by default, and the one given.
+        let trusted: Vec<String> = net.trusted_peers.iter().map(|p| p.to_string()).collect();
+        assert_eq!(
+            trusted,
+            [
+                plumb_net::node::DEFAULT_TRUSTED_PEERS[0],
+                "12D3KooWEwYB7PYxRNgvSWiwkLXvwYajSmYn4yoPqmkN7NbNqJjg"
+            ]
+        );
+        let none = config(&["--data", "d", "--network", "--no-default-trust"]);
+        assert!(none.network.unwrap().trusted_peers.is_empty());
         assert_eq!(net.listen[0].to_string(), "/ip4/0.0.0.0/tcp/4100");
-        assert_eq!(net.bootstrap.len(), 1);
+        // The network's own first nodes, then the one given.
+        assert_eq!(net.bootstrap.len(), plumb_net::DEFAULT_BOOTSTRAP.len() + 1);
+        assert_eq!(
+            net.bootstrap[0].to_string(),
+            plumb_net::DEFAULT_BOOTSTRAP[0]
+        );
+        let apart = config(&["--data", "d", "--network", "--no-default-bootstrap"]);
+        assert!(apart.network.unwrap().bootstrap.is_empty());
+        let given_twice = config(&[
+            "--data",
+            "d",
+            "--network",
+            "--bootstrap",
+            plumb_net::DEFAULT_BOOTSTRAP[0],
+        ]);
+        assert_eq!(
+            given_twice.network.unwrap().bootstrap.len(),
+            plumb_net::DEFAULT_BOOTSTRAP.len()
+        );
         assert_eq!(net.external.len(), 1);
         assert!(net.relay_server && net.upnp);
         assert!(!node.share_popularity);
@@ -207,6 +300,10 @@ mod tests {
             "--relay needs --public-addr"
         );
         assert!(parse(&["--data", "d", "--bootstrap", "/ip4/1.2.3.4/tcp/1"]).is_err());
+        assert!(
+            parse(&["--data", "d", "--network", "--trust-peer", "not-a-peer"]).is_err(),
+            "a trusted peer must be a node id"
+        );
         assert!(
             parse(&["--data", "d", "--share-popularity"]).is_err(),
             "--share-popularity needs --network"

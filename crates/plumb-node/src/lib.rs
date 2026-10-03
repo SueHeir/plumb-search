@@ -36,6 +36,7 @@ pub mod websearch;
 mod crawl;
 mod fetch;
 mod ingest;
+mod limits;
 mod records;
 mod run;
 mod search;
@@ -71,6 +72,7 @@ pub fn init_logging() {
 
 /// Runs one `plumb` subcommand.
 pub fn run(cli: Cli) -> Result<()> {
+    limits::raise_open_file_limit();
     match cli.command {
         Command::Run(args) => run::run(args),
         Command::FetchData(args) => fetch::run(args),
@@ -81,6 +83,7 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::Serve(args) => web::run(args),
         Command::Eval(args) => eval::run(args),
         Command::Embed(args) => meaning::run_embed(args),
+        Command::RemoteControl(args) => run::remote_control(args),
     }
 }
 

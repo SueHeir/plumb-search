@@ -15,6 +15,12 @@
 //! turns "Start at login" on or off, or quits. Started at login, the app
 //! opens no window.
 //!
+//! The panel is also the control center for the person's other nodes, such
+//! as a Docker container on a homelab: "Connect to a node" saves a node's
+//! address and remote control token, and the panel then shows and changes
+//! that node's settings, with the app's own node making the requests (see
+//! `plumb_node::node::control`). The window never sees the tokens.
+//!
 //! No page can call into the app: the app defines no commands and grants no
 //! capabilities, so Tauri's IPC refuses everything.
 
@@ -24,7 +30,7 @@
 mod logging;
 
 use std::net::{SocketAddr, TcpListener};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::Duration;
@@ -223,6 +229,13 @@ async fn start_node(app: AppHandle) -> Option<NodeHandle> {
     match started {
         Ok(node) => {
             info!("node listening on {}", node.url());
+            // The panel's "Restart to apply".
+            let signal = node.restart_signal();
+            let restarting = app.clone();
+            async_runtime::spawn(async move {
+                signal.requested().await;
+                restart_node(&restarting);
+            });
             if let Err(err) = show_node_page(&app, &node) {
                 error!("could not show the node's page: {err:#}");
             }
@@ -239,16 +252,41 @@ async fn start_node(app: AppHandle) -> Option<NodeHandle> {
     }
 }
 
+/// Stops the node and starts it again, which applies the feature settings
+/// saved on the panel. The window shows the panel again once the node is
+/// back.
+fn restart_node(app: &AppHandle) {
+    let node = app.state::<Node>();
+    let mut phase = node.phase();
+    // Quitting meanwhile wins.
+    let Phase::Started(_) = &*phase else {
+        return;
+    };
+    let Phase::Started(task) = std::mem::replace(&mut *phase, Phase::NotStarted) else {
+        unreachable!("matched above");
+    };
+    info!("restarting the node");
+    let app = app.clone();
+    *phase = Phase::Started(async_runtime::spawn(async move {
+        stop_node(task).await;
+        start_node(app).await
+    }));
+}
+
 async fn launch_node(app: AppHandle) -> Result<NodeHandle> {
-    let data_dir = app
-        .path()
-        .app_data_dir()
-        .context("finding the app data folder")?;
+    let data_dir = match std::env::var_os("PLUMB_DESKTOP_DATA_DIR") {
+        Some(dir) => std::path::PathBuf::from(dir),
+        None => app
+            .path()
+            .app_data_dir()
+            .context("finding the app data folder")?,
+    };
     std::fs::create_dir_all(&data_dir)
         .with_context(|| format!("creating the data folder {}", data_dir.display()))?;
     info!("data folder: {}", data_dir.display());
     let mut config = NodeConfig::desktop(data_dir);
     config.bind.set_port(PORT);
+    config.network = Some(network_config());
     match node::start(config.clone()).await {
         // Something else has the port; the window works on any port.
         Err(err) if !can_listen_on(config.bind) => {
@@ -258,6 +296,29 @@ async fn launch_node(app: AppHandle) -> Result<NodeHandle> {
         }
         started => started,
     }
+}
+
+/// How the app joins the Plumb network, which the panel's "Join the Plumb
+/// network" setting turns off and on. Like any home node, it needs no open
+/// port: it connects out, through the relay when nothing else reaches it.
+/// It listens on ports the system picks, which never clash with another
+/// program's.
+fn network_config() -> plumb_net::NetConfig {
+    // The node puts the network's files in its data folder.
+    let mut net = plumb_net::NetConfig::new(PathBuf::new());
+    net.listen = [
+        "/ip4/0.0.0.0/tcp/0",
+        "/ip4/0.0.0.0/udp/0/quic-v1",
+        "/ip6/::/tcp/0",
+        "/ip6/::/udp/0/quic-v1",
+    ]
+    .iter()
+    .map(|addr| addr.parse().expect("a valid multiaddr"))
+    .collect();
+    // The Plumb network's first nodes, which the app connects to and learns
+    // the others from: the relay on plumbsearch.org, by name and by address.
+    net.bootstrap = plumb_net::default_bootstrap();
+    net
 }
 
 /// Whether a server could listen on `addr` now.
@@ -696,7 +757,12 @@ mod tests {
         for page in [
             "http://127.0.0.1:41234/app",
             "http://127.0.0.1:41234/app/settings",
+            "http://127.0.0.1:41234/app?section=network",
+            "http://127.0.0.1:41234/app/features",
             "http://127.0.0.1:41234/app/refresh",
+            // Other nodes, controlled through this one.
+            "http://127.0.0.1:41234/app/nodes/new",
+            "http://127.0.0.1:41234/app/nodes/3f2a9c01b7de?section=resources",
         ] {
             assert_eq!(
                 destination(&url(page), Some(&node), None),
@@ -832,6 +898,17 @@ mod tests {
                  Data folder: {folder}"
             )
         );
+    }
+
+    #[test]
+    fn the_app_joins_the_network_through_plumbsearch_org() {
+        let net = network_config();
+        assert_eq!(net.bootstrap.len(), 2);
+        assert!(net.bootstrap[0]
+            .to_string()
+            .starts_with("/dns4/plumbsearch.org/tcp/4001/p2p/"));
+        assert!(!net.relay_server);
+        assert_eq!(net.listen.len(), 4);
     }
 
     #[test]

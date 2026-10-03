@@ -25,7 +25,7 @@ mod records;
 #[cfg(test)]
 mod test_alloc;
 
-pub use crawl::crawl_homepages;
+pub use crawl::{crawl_homepages, log_summary, HomepageCrawler};
 pub use extract::{extract_page_meta, MAX_BODY_WORDS, MAX_OUT_LINKS};
 pub use records::to_records;
 
@@ -45,6 +45,13 @@ pub struct CrawlConfig {
     pub user_agent: String,
     /// Fetches in flight at once across all hosts.
     pub concurrency: usize,
+    /// Host name lookups in flight at once. Home routers forward DNS for the
+    /// whole house, and a burst of hundreds of lookups makes many of them
+    /// fail ("temporary failure in name resolution"), which looks like the
+    /// sites being down. Lookups beyond this wait their turn, so
+    /// `concurrency` can stay high for slow sites without flooding the
+    /// resolver. Zero counts as one.
+    pub dns_lookups: usize,
     /// Pause between a host's answer and the next request to that host
     /// (robots.txt, then the page, then any redirects).
     pub per_host_delay: Duration,
@@ -85,6 +92,7 @@ impl Default for CrawlConfig {
         CrawlConfig {
             user_agent: USER_AGENT.to_string(),
             concurrency: 16,
+            dns_lookups: 32,
             per_host_delay: Duration::from_secs(1),
             timeout: Duration::from_secs(15),
             max_bytes: 512 * 1024,

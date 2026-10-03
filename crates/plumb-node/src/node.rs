@@ -71,7 +71,7 @@
 
 use std::fmt;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::Duration;
@@ -90,14 +90,21 @@ use crate::meaning::SharedMeaning;
 use crate::web::{self, IndexBackend, SearchBackend, StatusSource};
 use crate::websearch::{Engine, WebSettings};
 
+pub mod backup;
+pub mod control;
 mod embedding;
+pub mod features;
+pub mod journal;
 mod network;
+pub mod schedule;
 mod store;
 mod worker;
 
 #[cfg(test)]
 mod tests;
 
+pub use journal::{LogEntry, LogLevel};
+pub use schedule::{CrawlHours, Workload};
 use store::{DirLock, Paths, SavedState};
 
 /// How long a count of the data folder's size is used before counting again.
@@ -167,6 +174,11 @@ pub struct NodeConfig {
     /// The settings until someone changes them on the panel, which saves
     /// them in `DIR/settings.json`.
     pub settings: NodeSettings,
+    /// Let the panel control other nodes too ("Connect to a node"), with
+    /// their remote control tokens, kept in `DIR/remote-nodes.json`. On for
+    /// the desktop app, which is meant to be the control center of a
+    /// person's nodes; off for servers.
+    pub manage_other_nodes: bool,
 }
 
 impl NodeConfig {
@@ -193,6 +205,7 @@ impl NodeConfig {
             private_search: false,
             share_popularity: false,
             settings: NodeSettings::default(),
+            manage_other_nodes: false,
         }
     }
 
@@ -206,6 +219,7 @@ impl NodeConfig {
             refresh_every: Some(Duration::from_secs(12 * 60 * 60)),
             crawl_per_refresh: 1_000,
             settings: NodeSettings::desktop(),
+            manage_other_nodes: true,
             ..NodeConfig::server(data_dir)
         }
     }
@@ -317,6 +331,13 @@ pub struct NodeSettings {
     /// Megabytes the data folder may take, 0 for no limit. Above it,
     /// crawling pauses, since crawls add sites; search keeps working.
     pub storage_limit_mb: u64,
+    /// How hard to crawl; a preset also sets the two limits above.
+    pub workload: Workload,
+    /// Crawl only during these hours of the node's own clock; `None` for
+    /// any time.
+    pub crawl_hours: Option<CrawlHours>,
+    /// Crawling is paused until this Unix time ("pause for an hour").
+    pub paused_until: Option<u64>,
 }
 
 impl Default for NodeSettings {
@@ -325,6 +346,9 @@ impl Default for NodeSettings {
             background_updates: true,
             download_limit_mb_per_day: 0,
             storage_limit_mb: 0,
+            workload: Workload::Custom,
+            crawl_hours: None,
+            paused_until: None,
         }
     }
 }
@@ -335,7 +359,17 @@ impl NodeSettings {
         NodeSettings {
             download_limit_mb_per_day: 500,
             storage_limit_mb: 2_000,
+            workload: Workload::Balanced,
             ..NodeSettings::default()
+        }
+    }
+
+    /// Takes on `workload`, and its limits when it is a preset.
+    pub fn set_workload(&mut self, workload: Workload) {
+        self.workload = workload;
+        if let Some((download, storage)) = workload.limits() {
+            self.download_limit_mb_per_day = download;
+            self.storage_limit_mb = storage;
         }
     }
 }
@@ -386,8 +420,12 @@ pub struct Status {
     /// [`NodeSettings::background_updates`].
     pub background_updates: bool,
     /// Why crawling is paused, in words, when it is: background updates
-    /// off, or a download or storage limit reached.
+    /// off, paused for a while, outside the crawl hours, or a download or
+    /// storage limit reached.
     pub paused: Option<String>,
+    /// When that pause ends by itself, in Unix seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paused_until: Option<u64>,
     /// Bytes the data folder takes, counted at most a minute ago.
     pub disk_used: u64,
     /// Bytes downloaded today (UTC): crawls and seed data.
@@ -400,6 +438,25 @@ pub struct Status {
     /// model is loaded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub meaning_sites: Option<u64>,
+    /// What search by meaning is doing in the background: downloading its
+    /// model, making site vectors, or waiting after a failure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meaning_work: Option<BackgroundWork>,
+    /// Whether the node can be restarted from the panel, to apply saved
+    /// feature changes (the desktop app's node can).
+    #[serde(default)]
+    pub can_restart: bool,
+}
+
+/// Work going on beside the main step, for the panel.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackgroundWork {
+    /// What it is doing, in words.
+    pub detail: String,
+    pub progress: Option<Progress>,
+    /// The last failure, when it waits to try again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<LastError>,
 }
 
 /// Whether a node can search yet.
@@ -491,6 +548,14 @@ impl NodeHandle {
         self.inner.request_refresh();
     }
 
+    /// Asks for the node to be restarted, which the panel offers once a
+    /// program waits on this signal: the desktop app stops the node and
+    /// starts it again with the saved features.
+    pub fn restart_signal(&self) -> RestartSignal {
+        self.inner.restart.0.listening.store(true, Ordering::SeqCst);
+        self.inner.restart.clone()
+    }
+
     /// Stops the web server and the background work and waits for both. A
     /// crawl or index build in progress stops at its next safe point, so the
     /// records file and the index on disk are never left half-written.
@@ -539,9 +604,30 @@ impl NodeHandle {
                 .unwrap_or_else(PoisonError::into_inner)
                 .take(),
         );
+        inner.journal.info("Stopped");
         info!("node stopped");
         served.and(worked)
     }
+}
+
+/// Has the node in `data_dir` fold the seed files in `DIR/seed` into its
+/// records again at its next start, as it does when Wikidata's arrive late:
+/// files from the last week are used as they are, older or missing ones are
+/// downloaded again. For a node whose records predate a change to how seed
+/// data is read. Returns false, changing nothing, when the directory has no
+/// node yet. Fails while another node holds the directory.
+pub fn request_reseed(data_dir: &Path) -> Result<bool> {
+    let paths = Paths::new(data_dir);
+    if !paths.records.is_file() {
+        return Ok(false);
+    }
+    let _lock = store::lock(&paths)?;
+    let Some(mut state) = store::load_state(&paths) else {
+        return Ok(false);
+    };
+    state.wikidata_missing = true;
+    store::save_state(&paths, &state)?;
+    Ok(true)
 }
 
 /// Starts a node on the current Tokio runtime and returns once the web
@@ -553,7 +639,11 @@ impl NodeHandle {
 /// it, when the address cannot be bound, or when the configuration cannot
 /// work (such as an alpha above 1). A multi-threaded runtime is best: crawls
 /// and index builds run on its blocking threads.
-pub async fn start(config: NodeConfig) -> Result<NodeHandle> {
+pub async fn start(mut config: NodeConfig) -> Result<NodeHandle> {
+    crate::limits::raise_open_file_limit();
+    if let Some(features) = features::FeatureSettings::load(&config.data_dir)? {
+        features.apply(&mut config)?;
+    }
     config.check()?;
     let rank = crate::rank_config(config.alpha);
     let opened = {
@@ -571,6 +661,10 @@ pub async fn start(config: NodeConfig) -> Result<NodeHandle> {
 
     let (stop, stopped) = watch::channel(false);
     let inner = Arc::new(Inner::new(config, rank, opened, stopped.clone()));
+    inner.journal.info(format!(
+        "Plumb Search {} started",
+        env!("CARGO_PKG_VERSION")
+    ));
     let settings = WebSettings {
         home: inner.config.country.clone(),
         web_search: inner.config.web_search,
@@ -722,6 +816,137 @@ struct Inner {
     disk: Mutex<Option<(std::time::Instant, u64)>>,
     /// The model and vectors of search by meaning, once loaded.
     meaning: SharedMeaning,
+    /// What search by meaning is doing in the background.
+    meaning_work: Mutex<Option<MeaningWork>>,
+    /// Asks whoever runs the node (the desktop app) to restart it.
+    restart: RestartSignal,
+    /// What the node did, for the panel's activity log.
+    journal: journal::Journal,
+    /// Cuts short search by meaning's wait after a failure.
+    meaning_retry: AtomicBool,
+}
+
+/// Failed work the panel can have tried again now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Retry {
+    /// The setup, crawl or rebuild that failed.
+    Work,
+    /// The download of Wikidata's official websites.
+    Wikidata,
+    /// Search by meaning's model download or vectors.
+    Meaning,
+}
+
+/// A settings change in words, for the activity log.
+fn settings_change_words(old: &NodeSettings, new: &NodeSettings) -> String {
+    let now = now_unix();
+    if old.paused_until != new.paused_until
+        && *old
+            == (NodeSettings {
+                paused_until: old.paused_until,
+                ..new.clone()
+            })
+    {
+        return match new.paused_until {
+            Some(until) if until > now => format!(
+                "Paused by you for {}",
+                crate::web::duration_words(until - now)
+            ),
+            _ => "Resumed by you".to_owned(),
+        };
+    }
+    let mut parts = Vec::new();
+    if old.background_updates != new.background_updates {
+        parts.push(if new.background_updates {
+            "background updates on".to_owned()
+        } else {
+            "background updates off".to_owned()
+        });
+    }
+    if old.workload != new.workload {
+        parts.push(format!("workload {}", new.workload.name()));
+    }
+    if old.download_limit_mb_per_day != new.download_limit_mb_per_day {
+        parts.push(match new.download_limit_mb_per_day {
+            0 => "no download limit".to_owned(),
+            mb => format!("download limit {mb} MB a day"),
+        });
+    }
+    if old.storage_limit_mb != new.storage_limit_mb {
+        parts.push(match new.storage_limit_mb {
+            0 => "no storage limit".to_owned(),
+            mb => format!("storage limit {mb} MB"),
+        });
+    }
+    if old.crawl_hours != new.crawl_hours {
+        parts.push(match new.crawl_hours {
+            Some(hours) => format!("crawl hours {}", hours.words()),
+            None => "crawl at any hour".to_owned(),
+        });
+    }
+    if parts.is_empty() {
+        "Settings saved".to_owned()
+    } else {
+        format!("Settings changed: {}", parts.join(", "))
+    }
+}
+
+/// Why background work waits, and until when.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Pause {
+    reason: String,
+    /// When it ends by itself; `None` when someone has to act.
+    until: Option<u64>,
+}
+
+impl Pause {
+    fn new(reason: impl Into<String>, until: Option<u64>) -> Pause {
+        Pause {
+            reason: reason.into(),
+            until,
+        }
+    }
+}
+
+/// What search by meaning is doing, for [`Inner::meaning_work`].
+#[derive(Debug, Clone)]
+enum MeaningWork {
+    Downloading,
+    Loading,
+    Embedding { done: u64, total: u64 },
+    Failed(LastError),
+}
+
+/// A request to restart the node, from the panel to the program running
+/// it. Only a program that listens ([`NodeHandle::restart_signal`]) makes
+/// the panel offer it.
+#[derive(Debug, Clone, Default)]
+pub struct RestartSignal(Arc<RestartState>);
+
+#[derive(Debug, Default)]
+struct RestartState {
+    listening: AtomicBool,
+    requested: Notify,
+}
+
+impl RestartSignal {
+    /// Waits for a restart request.
+    pub async fn requested(&self) {
+        self.0.listening.store(true, Ordering::SeqCst);
+        self.0.requested.notified().await;
+    }
+
+    fn can_restart(&self) -> bool {
+        self.0.listening.load(Ordering::SeqCst)
+    }
+
+    fn request(&self) -> bool {
+        if self.can_restart() {
+            self.0.requested.notify_one();
+        }
+        self.can_restart()
+    }
 }
 
 /// The failures to download Wikidata's official websites, which have their
@@ -749,6 +974,7 @@ impl Inner {
         stopped: watch::Receiver<bool>,
     ) -> Self {
         let backoff = worker::Backoff::new(config.retry_wait, config.max_retry_wait);
+        let journal = journal::Journal::open(&opened.paths.data);
         Inner {
             config,
             paths: opened.paths,
@@ -778,6 +1004,10 @@ impl Inner {
             settings: Mutex::new(opened.settings),
             disk: Mutex::new(None),
             meaning: SharedMeaning::default(),
+            meaning_work: Mutex::new(None),
+            restart: RestartSignal::default(),
+            journal,
+            meaning_retry: AtomicBool::new(false),
         }
     }
 
@@ -785,6 +1015,7 @@ impl Inner {
         let activity = self.activity().clone();
         let saved = self.saved();
         let index = self.current_summary();
+        let pause = self.pause();
         Status {
             phase: if index.is_some() {
                 Phase::Ready
@@ -809,8 +1040,11 @@ impl Inner {
             network: network::handle(self).map(|net| net.status()),
             crawl_left: saved.crawl_left as u64,
             meaning_sites: self.meaning.get().map(|meaning| meaning.len() as u64),
+            meaning_work: self.meaning_work(),
+            can_restart: self.restart.can_restart(),
             background_updates: self.settings().background_updates,
-            paused: self.pause_reason().map(String::from),
+            paused: pause.as_ref().map(|p| p.reason.clone()),
+            paused_until: pause.and_then(|p| p.until),
             disk_used: self.disk_used(),
             downloaded_today: saved.downloaded_today(now_unix()),
             downloaded_total: saved.downloaded_total,
@@ -819,20 +1053,92 @@ impl Inner {
     }
 
     /// Why crawls and refreshes must wait now, if they must.
-    fn pause_reason(&self) -> Option<&'static str> {
+    fn pause_reason(&self) -> Option<String> {
+        self.pause().map(|pause| pause.reason)
+    }
+
+    /// Why crawls and refreshes must wait now, and until when, if they must.
+    fn pause(&self) -> Option<Pause> {
         let settings = self.settings();
+        let now = now_unix();
         if !settings.background_updates {
-            return Some("Background updates are off");
+            return Some(Pause::new("Background updates are off", None));
+        }
+        if let Some(until) = settings.paused_until.filter(|&until| until > now) {
+            return Some(Pause::new("Paused by you", Some(until)));
+        }
+        if let Some(hours) = settings.crawl_hours {
+            let (hour, minute, second) = schedule::local_time();
+            let wait = hours.wait(hour, minute, second);
+            if wait > 0 {
+                return Some(Pause::new(
+                    format!("Waiting for the crawl hours, {}", hours.words()),
+                    Some(now + wait),
+                ));
+            }
         }
         let limit = settings.download_limit_mb_per_day;
-        if limit > 0 && self.saved().downloaded_today(now_unix()) >= limit.saturating_mul(MB) {
-            return Some("Paused until tomorrow: today's download limit is reached");
+        if limit > 0 && self.saved().downloaded_today(now) >= limit.saturating_mul(MB) {
+            return Some(Pause::new(
+                "Paused until tomorrow: today's download limit is reached",
+                Some(store::next_day(now)),
+            ));
         }
         let limit = settings.storage_limit_mb;
         if limit > 0 && self.disk_used() >= limit.saturating_mul(MB) {
-            return Some("Paused: the storage limit is reached");
+            return Some(Pause::new("Paused: the storage limit is reached", None));
         }
         None
+    }
+
+    /// What search by meaning is doing, for [`Status::meaning_work`].
+    fn meaning_work(&self) -> Option<BackgroundWork> {
+        let work = self
+            .meaning_work
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()?;
+        Some(match work {
+            MeaningWork::Downloading => {
+                // The model's files, the one being written included.
+                let done = store::dir_size(&self.paths.data.join(embedding::MODEL_DIR)) / MB;
+                BackgroundWork {
+                    detail: "Downloading the search-by-meaning model".into(),
+                    progress: Some(Progress {
+                        done: done.min(embedding::MODEL_MB),
+                        total: embedding::MODEL_MB,
+                        unit: "MB".into(),
+                    }),
+                    error: None,
+                }
+            }
+            MeaningWork::Loading => BackgroundWork {
+                detail: "Loading the search-by-meaning model".into(),
+                progress: None,
+                error: None,
+            },
+            MeaningWork::Embedding { done, total } => BackgroundWork {
+                detail: "Making site vectors for search by meaning".into(),
+                progress: Some(Progress {
+                    done,
+                    total,
+                    unit: "sites".into(),
+                }),
+                error: None,
+            },
+            MeaningWork::Failed(error) => BackgroundWork {
+                detail: "Search by meaning is waiting to try again".into(),
+                progress: None,
+                error: Some(error),
+            },
+        })
+    }
+
+    fn set_meaning_work(&self, work: Option<MeaningWork>) {
+        *self
+            .meaning_work
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = work;
     }
 
     /// Counts bytes downloaded now.
@@ -879,6 +1185,7 @@ impl Inner {
             if *settings != new {
                 store::save_settings(&self.paths, &new)?;
                 info!("settings changed: {new:?}");
+                self.journal.info(settings_change_words(&settings, &new));
                 *settings = new;
             }
         }
@@ -913,6 +1220,15 @@ impl Inner {
     }
 
     fn set_error(&self, err: &anyhow::Error, retry_at: u64) {
+        let message = format!("{err:#}");
+        let repeated = self
+            .activity()
+            .last_error
+            .as_ref()
+            .is_some_and(|last| last.message == message);
+        if !repeated {
+            self.journal.error(message);
+        }
         let mut activity = self.activity();
         activity.step = Step::Retrying;
         activity.detail = "Waiting to try again after an error".to_string();
@@ -925,7 +1241,9 @@ impl Inner {
     }
 
     fn clear_error(&self) {
-        self.activity().last_error = None;
+        if self.activity().last_error.take().is_some() {
+            self.journal.info("Working again after the error");
+        }
     }
 
     fn wikidata_tries(&self) -> std::sync::MutexGuard<'_, WikidataTries> {
@@ -935,6 +1253,9 @@ impl Inner {
     /// Notes a failure to download Wikidata's official websites and returns
     /// when to try again, in Unix seconds.
     fn wikidata_failed(&self, err: &anyhow::Error) -> u64 {
+        self.journal.warning(format!(
+            "Could not download Wikidata's official websites: {err:#}"
+        ));
         let mut tries = self.wikidata_tries();
         let now = now_unix();
         let retry_at = now.saturating_add(tries.backoff.next_delay().as_secs());
@@ -958,6 +1279,7 @@ impl Inner {
 
     /// Forgets the failures once Wikidata has answered.
     fn wikidata_arrived(&self) {
+        self.journal.info("Wikidata's official websites are in");
         let mut tries = self.wikidata_tries();
         tries.last_error = None;
         tries.backoff.reset();
@@ -1177,6 +1499,74 @@ impl StatusSource for Inner {
         network::record_pick(self, query, domain);
     }
 
+    fn features(&self) -> features::FeatureSettings {
+        features::FeatureSettings::from_config(&self.config)
+    }
+
+    fn saved_features(&self) -> Result<features::FeatureSettings> {
+        Ok(features::FeatureSettings::load(&self.paths.data)?.unwrap_or_else(|| self.features()))
+    }
+
+    fn change_features(&self, features: features::FeatureSettings) -> Result<()> {
+        features.save(&self.paths.data)?;
+        self.journal
+            .info("Feature settings saved; they apply when the node restarts");
+        Ok(())
+    }
+
+    fn activity_log(&self) -> Vec<LogEntry> {
+        self.journal.entries()
+    }
+
+    fn retry(&self, what: Retry) -> Result<()> {
+        match what {
+            Retry::Work => self.request_refresh(),
+            Retry::Wikidata => {
+                if let Some(err) = &mut self.wikidata_tries().last_error {
+                    err.retry_at = Some(now_unix());
+                }
+                self.wake.notify_one();
+            }
+            Retry::Meaning => {
+                if !self.config.search_by_meaning {
+                    bail!("Search by meaning is off on this node.");
+                }
+                self.meaning_retry.store(true, Ordering::SeqCst);
+            }
+        }
+        self.journal.info(match what {
+            Retry::Work => "Trying the failed work again, as asked",
+            Retry::Wikidata => "Trying Wikidata again, as asked",
+            Retry::Meaning => "Trying search by meaning again, as asked",
+        });
+        Ok(())
+    }
+
+    fn make_backup(&self) -> Result<backup::BackupInfo> {
+        let made = backup::save(&self.paths.data, None)?;
+        self.journal.info(format!("Backup made: {}", made.name));
+        Ok(made)
+    }
+
+    fn restore_backup(&self, restored: &backup::Backup) -> Result<()> {
+        // Restoring can be undone with the backup made first.
+        let before = backup::save(&self.paths.data, Some("before-restore"))?;
+        restored.restore(&self.paths.data)?;
+        if let Some(settings) = store::load_settings(&self.paths) {
+            *self.settings.lock().unwrap_or_else(PoisonError::into_inner) = settings;
+            self.wake.notify_one();
+        }
+        self.journal.warning(format!(
+            "Backup from {} restored; the settings before it are in {}",
+            restored.version, before.name
+        ));
+        // Keys and features take effect at the next start.
+        if self.restart.request() {
+            self.journal.info("Restarting to finish restoring");
+        }
+        Ok(())
+    }
+
     fn settings(&self) -> Option<NodeSettings> {
         Some(Inner::settings(self))
     }
@@ -1189,8 +1579,25 @@ impl StatusSource for Inner {
         self.request_refresh();
     }
 
+    fn restart(&self) -> Result<()> {
+        if !self.restart.request() {
+            bail!("This node cannot restart itself. Restart it where it runs.");
+        }
+        info!("restart asked for from the panel");
+        self.journal.info("Restarting, as asked on the panel");
+        Ok(())
+    }
+
     fn data_dir(&self) -> Option<PathBuf> {
         Some(self.paths.data.clone())
+    }
+
+    fn bind(&self) -> Option<SocketAddr> {
+        Some(self.config.bind)
+    }
+
+    fn manages_other_nodes(&self) -> bool {
+        self.config.manage_other_nodes
     }
 }
 

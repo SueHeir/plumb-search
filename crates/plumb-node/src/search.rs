@@ -36,6 +36,7 @@ pub fn run_search(args: SearchArgs) -> Result<()> {
     let options = SearchOptions {
         country: args.country.clone(),
         only_country: args.only_country,
+        exact: args.exact,
     };
     let meaning = MeaningIndex::from_args(&args.meaning)?;
     let query_meaning = meaning.as_ref().and_then(|meaning| meaning.query(&query));
@@ -51,6 +52,13 @@ pub fn run_search(args: SearchArgs) -> Result<()> {
     if args.json {
         println!("{}", serde_json::to_string_pretty(&results.hits)?);
     } else {
+        if let Some(spelling) = &results.spelling {
+            if spelling.applied {
+                println!("showing results for {:?}", spelling.query);
+            } else {
+                println!("did you mean {:?}?", spelling.query);
+            }
+        }
         if let Some(site_search) = &results.site_search {
             println!(
                 "search {} for {:?}: {}",
