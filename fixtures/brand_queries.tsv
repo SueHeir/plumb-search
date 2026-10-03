@@ -1,0 +1,62 @@
+# Brand-name test for the synthetic fixtures in this folder (see README.md).
+# Format: query<TAB>expected_domain[,another_ok_domain]
+#
+# Each expected site matches the query at least as well as any look-alike
+# and has far stronger popularity signals, so any sensible ranker that blends
+# name matching with popularity should get them all. Some names are only
+# findable through link text or aliases (bofa, amex, nyt, citibank), and some
+# real sites share a name (chase / chase center, delta / delta faucet,
+# ford / ford foundation, amazon / amazon jobs).
+us bank	usbank.com
+U.S. Bank	usbank.com
+bank of america	bankofamerica.com
+bofa	bankofamerica.com
+chase	chase.com
+chase bank	chase.com
+chase center	chasecenter.com
+wells fargo	wellsfargo.com
+citibank	citi.com
+capital one	capitalone.com
+american express	americanexpress.com
+amex	americanexpress.com
+paypal	paypal.com
+irs	irs.gov
+internal revenue service	irs.gov
+social security	ssa.gov
+usps	usps.com
+medicare	medicare.gov
+nasa	nasa.gov
+cdc	cdc.gov
+veterans affairs	va.gov
+amazon	amazon.com
+amazon jobs	amazon.jobs
+walmart	walmart.com
+target	target.com
+home depot	homedepot.com
+best buy	bestbuy.com
+ikea	ikea.com
+McDonald's	mcdonalds.com
+delta	delta.com
+delta faucet	deltafaucet.com
+united airlines	united.com
+american airlines	aa.com
+southwest airlines	southwest.com
+new york times	nytimes.com
+nyt	nytimes.com
+bbc	bbc.co.uk,bbc.com
+cnn	cnn.com
+espn	espn.com
+google	google.com
+facebook	facebook.com
+youtube	youtube.com
+microsoft	microsoft.com
+apple	apple.com
+netflix	netflix.com
+wikipedia	wikipedia.org
+reddit	reddit.com
+mit	mit.edu
+harvard	harvard.edu
+stanford university	stanford.edu
+AT&T	att.com
+ford	ford.com
+ford foundation	fordfoundation.org

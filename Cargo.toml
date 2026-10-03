@@ -1,0 +1,15 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/plumb-core",
+    "crates/plumb-ingest",
+    "crates/plumb-crawl",
+    "crates/plumb-index",
+    "crates/plumb-node",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/SueHeir/plumb-search"
