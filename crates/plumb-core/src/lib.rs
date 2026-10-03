@@ -302,6 +302,31 @@ impl SiteRecord {
     /// `crawl_attempted_at` keeps the later time, with the `crawl_failures`
     /// counted at that attempt (the larger count when both tried at the same
     /// time). A redirect stays only when no successful crawl came after it.
+    /// [`SiteRecord::merge`] for a crawl another node shared. Shared crawls
+    /// carry only some of what a crawl finds (no search box, and page text
+    /// only from trusted crawlers), so a field the shared crawl leaves empty
+    /// keeps what this node has rather than being cleared.
+    pub fn merge_shared(&mut self, other: SiteRecord) {
+        let search_url = other.search_url.is_none().then(|| self.search_url.take());
+        let headings = other
+            .headings
+            .is_empty()
+            .then(|| std::mem::take(&mut self.headings));
+        let body_text = other.body_text.is_none().then(|| self.body_text.take());
+        self.merge(other);
+        if let Some(mine) = search_url {
+            self.search_url = self.search_url.take().or(mine);
+        }
+        if let Some(mine) = headings {
+            if self.headings.is_empty() {
+                self.headings = mine;
+            }
+        }
+        if let Some(mine) = body_text {
+            self.body_text = self.body_text.take().or(mine);
+        }
+    }
+
     pub fn merge(&mut self, other: SiteRecord) {
         debug_assert_eq!(self.domain, other.domain);
         let other_is_fresher = other.crawled_at.is_some() && other.crawled_at >= self.crawled_at;
@@ -431,13 +456,27 @@ impl RecordSet {
     /// `Example.COM` and `münchen.de` land on `example.com` and
     /// `xn--mnchen-3ya.de`. Returns false, dropping the record, when the
     /// domain is not a valid registrable domain.
-    pub fn upsert(&mut self, mut record: SiteRecord) -> bool {
+    pub fn upsert(&mut self, record: SiteRecord) -> bool {
+        self.upsert_with(record, SiteRecord::merge)
+    }
+
+    /// [`RecordSet::upsert`] for a crawl another node shared, merged with
+    /// [`SiteRecord::merge_shared`].
+    pub fn upsert_shared(&mut self, record: SiteRecord) -> bool {
+        self.upsert_with(record, SiteRecord::merge_shared)
+    }
+
+    fn upsert_with(
+        &mut self,
+        mut record: SiteRecord,
+        merge: impl FnOnce(&mut SiteRecord, SiteRecord),
+    ) -> bool {
         match canonical_domain(&record.domain) {
             Some(domain) => record.domain = domain,
             None => return false,
         }
         match self.map.get_mut(&record.domain) {
-            Some(existing) => existing.merge(record),
+            Some(existing) => merge(existing, record),
             None => {
                 self.map.insert(record.domain.clone(), record);
             }
@@ -1095,6 +1134,49 @@ mod tests {
         };
         seed.merge(crawled(1, &["Found"]));
         assert_eq!(seed.headings, ["Found"]);
+    }
+
+    #[test]
+    fn a_shared_crawl_updates_the_page_but_keeps_what_it_leaves_out() {
+        let mut mine = SiteRecord {
+            domain: "a.com".into(),
+            title: Some("Old".into()),
+            crawled_at: Some(1),
+            search_url: Some("https://a.com/search?q={q}".into()),
+            headings: vec!["Welcome".into()],
+            body_text: Some("A shop for things".into()),
+            ..SiteRecord::default()
+        };
+        let shared = SiteRecord {
+            domain: "a.com".into(),
+            title: Some("New".into()),
+            crawled_at: Some(2),
+            ..SiteRecord::default()
+        };
+        let mut plain = mine.clone();
+        plain.merge(shared.clone());
+        assert!(plain.search_url.is_none() && plain.body_text.is_none());
+
+        mine.merge_shared(shared);
+        assert_eq!(mine.title.as_deref(), Some("New"));
+        assert_eq!(mine.crawled_at, Some(2));
+        assert_eq!(
+            mine.search_url.as_deref(),
+            Some("https://a.com/search?q={q}")
+        );
+        assert_eq!(mine.headings, ["Welcome"]);
+        assert_eq!(mine.body_text.as_deref(), Some("A shop for things"));
+
+        // Text a trusted crawler shared does replace it.
+        mine.merge_shared(SiteRecord {
+            domain: "a.com".into(),
+            crawled_at: Some(3),
+            headings: vec!["Hello".into()],
+            body_text: Some("Now a blog".into()),
+            ..SiteRecord::default()
+        });
+        assert_eq!(mine.headings, ["Hello"]);
+        assert_eq!(mine.body_text.as_deref(), Some("Now a blog"));
     }
 
     #[test]
