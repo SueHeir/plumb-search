@@ -436,6 +436,11 @@ pub(crate) mod bytes_hex {
         if s.len() % 2 != 0 || s.len() > 8_192 {
             return Err(serde::de::Error::custom("bad hex length"));
         }
+        // Checked first so slicing below can't split a multi-byte character:
+        // this reads what other nodes send, and a panic would stop the network.
+        if !s.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(serde::de::Error::custom("not hex"));
+        }
         (0..s.len())
             .step_by(2)
             .map(|i| u8::from_str_radix(&s[i..i + 2], 16).map_err(serde::de::Error::custom))
@@ -448,6 +453,21 @@ mod tests {
     use plumb_core::LinkText;
 
     use super::*;
+
+    #[test]
+    fn hex_that_is_not_ascii_is_refused_without_a_panic() {
+        #[derive(Deserialize)]
+        struct Hexed {
+            #[serde(with = "bytes_hex")]
+            bytes: Vec<u8>,
+        }
+        for bad in ["\"\u{e9}\u{e9}\"", "\"0\u{e9}a\"", "\"zz\"", "\"+1\""] {
+            let json = format!("{{\"bytes\":{bad}}}");
+            assert!(serde_json::from_str::<Hexed>(&json).is_err(), "{bad}");
+        }
+        let ok: Hexed = serde_json::from_str("{\"bytes\":\"0aFf\"}").unwrap();
+        assert_eq!(ok.bytes, [0x0a, 0xff]);
+    }
 
     const NOW: u64 = 1_790_000_000;
 
