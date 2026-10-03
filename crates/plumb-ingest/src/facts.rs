@@ -1,14 +1,16 @@
 //! Wikidata facts about the organizations behind official websites: the
-//! country (P17) and what kind of thing each is (instance of, P31, and
+//! country (P17), what kind of thing each is (instance of, P31, and
 //! industry, P452), for the "your country" setting and for queries naming
-//! a kind, like "banks".
+//! a kind, like "banks", and the English names it is also known by
+//! ("NYT", "AA"), so people can name a site the way they say it.
 //!
 //! They are asked for by item: the items of the official websites file go
 //! to the query service in batches of [`FACTS_BATCH`] ids (SPARQL
 //! `VALUES`), each answered in a few seconds, since a query over every item
 //! with a website runs past the service's 60-second limit. They are saved as
 //! `wikidata-site-facts.tsv` with the header
-//! `item\tcountry\tkind`, one fact per row (the other column empty).
+//! `item\tcountry\tkind\talias`, one fact per row (the other columns empty).
+//! Files from before names were asked for have no `alias` column.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -26,6 +28,9 @@ use crate::{load_wikidata_official_sites, open_maybe_gz, Line, LineReader, Offic
 /// File name of the facts in a seed directory.
 pub const FACTS_FILE_NAME: &str = "wikidata-site-facts.tsv";
 
+/// The facts file's first line.
+pub const FACTS_HEADER: &str = "item\tcountry\tkind\talias\n";
+
 /// What Wikidata says about one item.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SiteFacts {
@@ -34,7 +39,16 @@ pub struct SiteFacts {
     pub country: Option<String>,
     /// English labels of what the item is ("bank", "airline"), in file order.
     pub kinds: Vec<String>,
+    /// Other English names of the item ("NYT"), at most [`MAX_NAMES`], in
+    /// file order.
+    pub names: Vec<String>,
 }
+
+/// The most other names kept per item; items like countries have dozens.
+pub const MAX_NAMES: usize = 6;
+
+/// Longer other names are descriptions rather than names, and are skipped.
+const MAX_NAME_CHARS: usize = 60;
 
 /// Facts by Wikidata item id (`Q739868`).
 pub type FactsByItem = HashMap<String, SiteFacts>;
@@ -49,15 +63,17 @@ const BATCH_TRIES: u32 = 3;
 /// A batch this small that still fails fails the download.
 const MIN_BATCH: usize = 125;
 
-/// The SPARQL query for the country codes (P17) and the English labels of
-/// what they are (instance of, P31, and industry, P452) of `items`, Wikidata
-/// item ids such as `Q739868`.
+/// The SPARQL query for the country codes (P17), the English labels of
+/// what they are (instance of, P31, and industry, P452) and the English
+/// other names (`skos:altLabel`) of `items`, Wikidata item ids such as
+/// `Q739868`.
 pub fn facts_query(items: &[String]) -> String {
     let values: String = items.iter().map(|item| format!(" wd:{item}")).collect();
     format!(
-        "SELECT DISTINCT ?item ?country ?kind WHERE {{ VALUES ?item {{{values} }} \
+        "SELECT DISTINCT ?item ?country ?kind ?alias WHERE {{ VALUES ?item {{{values} }} \
          {{ ?item wdt:P17 ?c . ?c wdt:P297 ?country . }} UNION \
-         {{ ?item wdt:P31|wdt:P452 ?k . ?k rdfs:label ?kind . FILTER(LANG(?kind) = \"en\") }} }}"
+         {{ ?item wdt:P31|wdt:P452 ?k . ?k rdfs:label ?kind . FILTER(LANG(?kind) = \"en\") }} UNION \
+         {{ ?item skos:altLabel ?alias . FILTER(LANG(?alias) = \"en\") }} }}"
     )
 }
 
@@ -103,7 +119,7 @@ pub async fn download_site_facts(
         items.len()
     );
     let started = Instant::now();
-    let mut tsv = String::from("item\tcountry\tkind\n");
+    let mut tsv = String::from(FACTS_HEADER);
     // The batches still to ask for, the next one last.
     let mut todo: Vec<&[String]> = items.chunks(FACTS_BATCH).rev().collect();
     let mut queries = 0u32;
@@ -255,7 +271,8 @@ struct Term {
 }
 
 /// Appends the rows of the SPARQL JSON results of a [`facts_query`] to
-/// `tsv`, one fact per row: `item\tcountry\t` or `item\t\tkind`.
+/// `tsv`, one fact per row: `item\tcountry\t\t`, `item\t\tkind\t` or
+/// `item\t\t\talias`.
 pub fn push_facts(tsv: &mut String, json: &[u8]) -> Result<()> {
     let response: Response =
         serde_json::from_slice(json).context("parsing Wikidata SPARQL results")?;
@@ -279,10 +296,13 @@ pub fn push_facts(tsv: &mut String, json: &[u8]) -> Result<()> {
             continue;
         }
         if let Some(country) = cell("country") {
-            tsv.push_str(&format!("{item}\t{country}\t\n"));
+            tsv.push_str(&format!("{item}\t{country}\t\t\n"));
         }
         if let Some(kind) = cell("kind") {
-            tsv.push_str(&format!("{item}\t\t{kind}\n"));
+            tsv.push_str(&format!("{item}\t\t{kind}\t\n"));
+        }
+        if let Some(alias) = cell("alias") {
+            tsv.push_str(&format!("{item}\t\t\t{alias}\n"));
         }
     }
     Ok(())
@@ -290,11 +310,12 @@ pub fn push_facts(tsv: &mut String, json: &[u8]) -> Result<()> {
 
 /// Reads a facts file ([`FACTS_FILE_NAME`]); it may be gzipped. Rows with
 /// an unknown country code are skipped, and an item with more than one
-/// country gets none.
+/// country gets none. Other names past [`MAX_NAMES`] per item, or longer
+/// than 60 characters, are skipped.
 pub fn load_site_facts(path: &Path) -> Result<FactsByItem> {
     let mut lines = LineReader::new(open_maybe_gz(path)?);
     let read_err = || format!("reading {}", path.display());
-    let mut columns: Option<(usize, usize, usize)> = None;
+    let mut columns: Option<(usize, usize, usize, Option<usize>)> = None;
     let mut facts = FactsByItem::new();
     let mut countries: HashMap<String, Vec<String>> = HashMap::new();
     while let Some((line_no, line)) = lines.next_line().with_context(read_err)? {
@@ -305,7 +326,7 @@ pub fn load_site_facts(path: &Path) -> Result<FactsByItem> {
             continue;
         }
         let fields: Vec<&str> = line.split('\t').map(str::trim).collect();
-        let Some((item_col, country_col, kind_col)) = columns else {
+        let Some((item_col, country_col, kind_col, alias_col)) = columns else {
             let position = |name: &str| {
                 fields
                     .iter()
@@ -317,7 +338,13 @@ pub fn load_site_facts(path: &Path) -> Result<FactsByItem> {
                         )
                     })
             };
-            columns = Some((position("item")?, position("country")?, position("kind")?));
+            let alias = fields.iter().position(|f| f.eq_ignore_ascii_case("alias"));
+            columns = Some((
+                position("item")?,
+                position("country")?,
+                position("kind")?,
+                alias,
+            ));
             continue;
         };
         let field = |i: usize| fields.get(i).copied().unwrap_or_default();
@@ -338,6 +365,13 @@ pub fn load_site_facts(path: &Path) -> Result<FactsByItem> {
                 .or_default()
                 .kinds
                 .push(kind.to_string());
+        }
+        let alias = alias_col.map(field).unwrap_or_default();
+        if !alias.is_empty() && alias.chars().count() <= MAX_NAME_CHARS {
+            let names = &mut facts.entry(item.to_string()).or_default().names;
+            if names.len() < MAX_NAMES && !names.iter().any(|n| n == alias) {
+                names.push(alias.to_string());
+            }
         }
     }
     if columns.is_none() {
@@ -363,6 +397,7 @@ pub fn attach_facts(sites: &mut [OfficialSite], facts: &FactsByItem) {
         if let Some(found) = facts.get(&site.item) {
             site.country = found.country.clone();
             site.kinds = found.kinds.clone();
+            site.names = found.names.clone();
         }
     }
 }
@@ -379,15 +414,17 @@ mod tests {
             {"item":{"value":"http://www.wikidata.org/entity/Q3"},"country":{"value":"FR"}},
             {"item":{"value":"http://www.wikidata.org/entity/Q3"},"country":{"value":"DE"}},
             {"item":{"value":"http://www.wikidata.org/entity/Q4"},"country":{"value":"XX"}},
+            {"item":{"value":"http://www.wikidata.org/entity/Q1"},"alias":{"value":"US Bank"}},
             {"item":{"value":"http://www.wikidata.org/entity/Q1"},"kind":{"value":"bank"}},
             {"item":{"value":"http://www.wikidata.org/entity/Q1"},"kind":{"value":"public\tcompany"}},
             {"item":{"value":"http://www.wikidata.org/entity/Q2"},"kind":{"value":"bank"}},
             {"item":{"value":"http://www.wikidata.org/entity/Q5"}}
         ]}}"#;
-        let mut tsv = String::from("item\tcountry\tkind\n");
+        let mut tsv = String::from(FACTS_HEADER);
         push_facts(&mut tsv, answer).unwrap();
-        assert!(tsv.starts_with("item\tcountry\tkind\nQ1\tUS\t\n"));
-        assert!(tsv.contains("Q1\t\tpublic company\n"));
+        assert!(tsv.starts_with("item\tcountry\tkind\talias\nQ1\tUS\t\t\n"));
+        assert!(tsv.contains("Q1\t\tpublic company\t\n"));
+        assert!(tsv.contains("Q1\t\t\tUS Bank\n"));
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(FACTS_FILE_NAME);
@@ -395,6 +432,7 @@ mod tests {
         let facts = load_site_facts(&path).unwrap();
         assert_eq!(facts["Q1"].country.as_deref(), Some("US"));
         assert_eq!(facts["Q1"].kinds, ["bank", "public company"]);
+        assert_eq!(facts["Q1"].names, ["US Bank"]);
         assert_eq!(facts["Q2"].country.as_deref(), Some("DE"));
         // Several countries: a multinational, so none.
         assert_eq!(facts["Q3"].country, None);
@@ -408,7 +446,25 @@ mod tests {
         attach_facts(&mut sites, &facts);
         assert_eq!(sites[0].country.as_deref(), Some("US"));
         assert_eq!(sites[0].kinds, ["bank", "public company"]);
+        assert_eq!(sites[0].names, ["US Bank"]);
         assert_eq!(sites[1].country, None);
+    }
+
+    #[test]
+    fn files_without_names_still_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FACTS_FILE_NAME);
+        std::fs::write(&path, "item\tcountry\tkind\nQ1\tUS\t\nQ1\t\tbank\n").unwrap();
+        let facts = load_site_facts(&path).unwrap();
+        assert_eq!(facts["Q1"].kinds, ["bank"]);
+        assert!(facts["Q1"].names.is_empty());
+
+        let long = "x".repeat(61);
+        let rows: String = (0..10).map(|i| format!("Q2\t\t\tName {i}\n")).collect();
+        std::fs::write(&path, format!("{FACTS_HEADER}{rows}Q3\t\t\t{long}\n")).unwrap();
+        let facts = load_site_facts(&path).unwrap();
+        assert_eq!(facts["Q2"].names.len(), MAX_NAMES);
+        assert!(!facts.contains_key("Q3"));
     }
 
     #[test]
@@ -417,6 +473,7 @@ mod tests {
         assert!(query.contains("VALUES ?item { wd:Q1 wd:Q22 }"), "{query}");
         assert!(query.contains("wdt:P17"));
         assert!(query.contains("wdt:P31|wdt:P452"));
+        assert!(query.contains("skos:altLabel"));
     }
 
     #[test]

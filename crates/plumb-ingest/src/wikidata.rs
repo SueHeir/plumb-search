@@ -35,6 +35,9 @@ pub struct OfficialSite {
     /// What the item is ("bank"), from [`crate::facts`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub kinds: Vec<String>,
+    /// The item's other English names ("NYT"), from [`crate::facts`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub names: Vec<String>,
 }
 
 impl OfficialSite {
@@ -55,6 +58,7 @@ impl OfficialSite {
             domain,
             country: None,
             kinds: Vec::new(),
+            names: Vec::new(),
         })
     }
 

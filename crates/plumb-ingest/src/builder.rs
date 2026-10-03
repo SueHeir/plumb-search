@@ -127,7 +127,8 @@ impl Builder {
     }
 
     /// Marks the official websites listed in Wikidata: sets
-    /// `signals.official_site`, adds the item's label as an alias and, when
+    /// `signals.official_site`, adds the item's label and other names as
+    /// aliases and, when
     /// the record has none yet, sets its `country`, and adds its kinds (see
     /// [`crate::attach_facts`]). When several items claim a front page, only
     /// the country and kinds they all share count: x.com is both X Corp.'s
@@ -174,6 +175,12 @@ impl Builder {
                 let label = site.label.trim();
                 if label != site.item {
                     record.add_alias(label);
+                }
+            }
+            // Then their other names, after every main name.
+            for site in claims {
+                for name in &site.names {
+                    record.add_alias(name);
                 }
             }
             // When several items claim the front page (X Corp. and the old
@@ -521,6 +528,19 @@ mod tests {
     }
 
     #[test]
+    fn other_names_follow_the_main_names() {
+        let mut nyt = site("Q9684", "The New York Times", "nytimes.com");
+        nyt.names = vec!["NYT".into(), "New York Times".into()];
+        let mut builder = Builder::new();
+        builder.add_official_sites(&[nyt, site("Q2", "NYT Company", "nytimes.com")]);
+        let records = builder.finish(None);
+        assert_eq!(
+            records[0].aliases,
+            ["The New York Times", "NYT Company", "NYT", "New York Times"]
+        );
+    }
+
+    #[test]
     fn official_sites_skip_shared_hosts() {
         let mut sites: Vec<OfficialSite> = (1..=5)
             .map(|i| site(&format!("Q{i}"), &format!("Brand {i}"), "five.com"))
@@ -669,6 +689,7 @@ mod tests {
             domain: host.into(),
             country: None,
             kinds: Vec::new(),
+            names: Vec::new(),
         };
         builder.add_official_sites(&[
             junk("mailto:a@b.com", "a@b.com"),
