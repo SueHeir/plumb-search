@@ -6,6 +6,16 @@ members = [
     "crates/plumb-crawl",
     "crates/plumb-index",
     "crates/plumb-node",
+    "crates/plumb-desktop",
+]
+# Plain `cargo build` and `cargo test` leave out the desktop app, which needs
+# GUI libraries (WebKitGTK on Linux); build it with `-p plumb-desktop`.
+default-members = [
+    "crates/plumb-core",
+    "crates/plumb-ingest",
+    "crates/plumb-crawl",
+    "crates/plumb-index",
+    "crates/plumb-node",
 ]
 
 [workspace.package]

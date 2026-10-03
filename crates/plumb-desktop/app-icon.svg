@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!--
+    Plumb Search app icon: a plumb line holding an inverted teardrop weight.
+    Kept to a few bold shapes so it still reads at 16x16. To regenerate the
+    platform icons, see examples/render_icon.rs.
+  -->
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2c5aa0"/>
+      <stop offset="1" stop-color="#183a6d"/>
+    </linearGradient>
+    <linearGradient id="brass" x1="0.15" y1="0.1" x2="0.85" y2="0.9">
+      <stop offset="0" stop-color="#ffe08a"/>
+      <stop offset="0.5" stop-color="#f0b43c"/>
+      <stop offset="1" stop-color="#c7841f"/>
+    </linearGradient>
+  </defs>
+  <!-- Background tile -->
+  <rect x="64" y="64" width="896" height="896" rx="200" fill="url(#tile)"/>
+  <!-- The line, hanging from the top edge -->
+  <rect x="480" y="64" width="64" height="260" fill="#eef2f7"/>
+  <!-- The weight: a circle of radius 200 at (512, 545) with tangents to the tip at (512, 915) -->
+  <path d="M512 915 L680.3 653.1 A200 200 0 1 0 343.7 653.1 Z" fill="url(#brass)"/>
+  <!-- The cap the line is tied to -->
+  <rect x="446" y="310" width="132" height="58" rx="16" fill="#b87a1e"/>
+  <!-- Highlight -->
+  <ellipse cx="442" cy="478" rx="46" ry="94" transform="rotate(25 442 478)" fill="#fff" fill-opacity="0.35"/>
+</svg>
