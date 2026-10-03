@@ -257,6 +257,12 @@ pub trait StatusSource: Send + Sync {
     /// Starts a refresh now.
     fn refresh_now(&self) {}
 
+    /// Restarts the node, to apply saved feature changes; only a node whose
+    /// [`Status::can_restart`] says so can.
+    fn restart(&self) -> Result<()> {
+        anyhow::bail!("This node cannot restart itself. Restart it where it runs.")
+    }
+
     /// Tries the network's bootstrap nodes again now.
     fn reconnect_network(&self) -> Result<()> {
         match self.network() {
@@ -362,6 +368,8 @@ fn app(state: AppState) -> Router {
             .route("/app/features", post(panel::save_features))
             .route("/app/refresh", post(panel::refresh))
             .route("/app/network/retry", post(panel::retry_network))
+            .route("/app/pause", post(panel::pause))
+            .route("/app/restart", post(panel::restart))
             .route("/app/remote-control", post(panel::save_remote_control))
             .route(panel::ADD_TO_FIREFOX_PATH, get(panel::add_to_firefox));
         router = private::routes(router);
@@ -2129,6 +2137,9 @@ mod tests {
             downloaded_total: 0,
             homepages_visited: 0,
             meaning_sites: None,
+            meaning_work: None,
+            can_restart: false,
+            paused_until: None,
         }
     }
 

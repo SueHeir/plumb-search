@@ -5,8 +5,8 @@
 //!   token, `POST /app/nodes` checks them with the node and saves them,
 //! - `GET /app/nodes/<id>` shows that node's panel, with this node fetching
 //!   it from the node's control API ([`super::control`]),
-//! - `POST /app/nodes/<id>/settings`, `/features`, `/refresh` and
-//!   `/network/retry` pass the panel's forms on to the node, `/remove`
+//! - `POST /app/nodes/<id>/settings`, `/features`, `/refresh`, `/pause`
+//!   and `/network/retry` pass the panel's forms on to the node, `/remove`
 //!   forgets it.
 //!
 //! The window never sees the tokens: they stay in `DIR/remote-nodes.json`
@@ -31,8 +31,8 @@ use url::Url;
 
 use super::control::{ControlError, ControlView};
 use super::panel::{
-    apply_features_form, forbidden, panel_error, panel_page, refusal, render_panel,
-    settings_from_form, FeaturesForm, PanelQuery, PanelView, SettingsForm, LAYOUT_STYLE,
+    apply_features_form, forbidden, panel_error, panel_page, paused, refusal, render_panel,
+    settings_from_form, FeaturesForm, PanelQuery, PanelView, PauseForm, SettingsForm, LAYOUT_STYLE,
     PANEL_STYLE,
 };
 use super::{escape_html, page_with_head, AppState, StatusSource};
@@ -137,6 +137,7 @@ pub(super) fn routes(router: Router<AppState>) -> Router<AppState> {
         .route("/app/nodes/{id}/features", post(change_features))
         .route("/app/nodes/{id}/refresh", post(refresh))
         .route("/app/nodes/{id}/network/retry", post(retry_network))
+        .route("/app/nodes/{id}/pause", post(pause))
         .route("/app/nodes/{id}/remove", post(remove))
 }
 
@@ -513,7 +514,11 @@ async fn change_settings(
             "The settings form could not be read.",
         );
     };
-    let settings = match settings_from_form(&form) {
+    let current = match fetch_view(&remote).await {
+        Ok(view) => view.settings,
+        Err(error) => return after_change(&remote, Err(error), ""),
+    };
+    let settings = match settings_from_form(&form, &current) {
         Ok(settings) => settings,
         Err(response) => return response,
     };
@@ -571,6 +576,34 @@ async fn refresh(
         Err(response) => return response,
     };
     let result = call(&remote, "/api/control/refresh", Some(b"{}".to_vec())).await;
+    after_change(&remote, result, &format!("/app/nodes/{}", remote.id))
+}
+
+async fn pause(
+    State(state): State<AppState>,
+    UrlPath(id): UrlPath<String>,
+    request: Request,
+) -> Response {
+    let node = match manager(&state, &request) {
+        Ok(node) => node,
+        Err(response) => return response,
+    };
+    let remote = match remote_or_page(node.as_ref(), &id) {
+        Ok(remote) => remote,
+        Err(response) => return response,
+    };
+    let Ok(Form(form)) = Form::<PauseForm>::from_request(request, &state).await else {
+        return panel_error(StatusCode::BAD_REQUEST, "The pause form could not be read.");
+    };
+    let current = match fetch_view(&remote).await {
+        Ok(view) => view.settings,
+        Err(error) => return after_change(&remote, Err(error), ""),
+    };
+    let Some(settings) = paused(&current, &form, now_unix()) else {
+        return panel_error(StatusCode::BAD_REQUEST, "The pause form could not be read.");
+    };
+    let body = serde_json::to_vec(&settings).expect("settings as JSON");
+    let result = call(&remote, "/api/control/settings", Some(body)).await;
     after_change(&remote, result, &format!("/app/nodes/{}", remote.id))
 }
 
@@ -734,6 +767,9 @@ mod end_to_end {
                 downloaded_total: 0,
                 homepages_visited: 0,
                 meaning_sites: None,
+                meaning_work: None,
+                can_restart: false,
+                paused_until: None,
                 network: None,
             }
         }

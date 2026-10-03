@@ -7,6 +7,10 @@
 //! - `POST /app/settings` saves the settings form,
 //! - `POST /app/refresh` starts a refresh now,
 //! - `POST /app/network/retry` tries the network's bootstrap nodes again,
+//! - `POST /app/pause` pauses background work for an hour or until
+//!   tomorrow, or resumes it,
+//! - `POST /app/restart` restarts the node to apply saved feature changes,
+//!   where the program running it allows,
 //! - `GET /add-to-firefox` says how to add Plumb to Firefox as a search
 //!   engine. It is meant to be opened in Firefox (the desktop app opens it
 //!   there), which offers to add the engine of a page that links to an
@@ -35,7 +39,7 @@ use super::{
 };
 use crate::node::control;
 use crate::node::features::FeatureSettings;
-use crate::node::{NodeSettings, Phase, Status, Step, MB};
+use crate::node::{CrawlHours, NodeSettings, Phase, Status, Step, Workload, MB};
 
 /// Seconds between two reloads of the panel while work is under way.
 const BUSY_RELOAD_SECONDS: u32 = 5;
@@ -87,6 +91,46 @@ pub(super) struct SettingsForm {
     /// Megabytes; empty for no limit.
     #[serde(default)]
     storage_limit_mb: String,
+    /// A [`Workload`] name; empty keeps the limits as typed.
+    #[serde(default)]
+    workload: String,
+    /// Ticked to crawl only between `crawl_from` and `crawl_to`.
+    #[serde(default)]
+    crawl_hours: Option<String>,
+    #[serde(default)]
+    crawl_from: String,
+    #[serde(default)]
+    crawl_to: String,
+}
+
+/// The pause form: `hour`, `tomorrow` or `resume`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub(super) struct PauseForm {
+    until: String,
+}
+
+/// `settings` paused or resumed as the pause form asks, at `now`; `None`
+/// when the form makes no sense.
+pub(super) fn paused(settings: &NodeSettings, form: &PauseForm, now: u64) -> Option<NodeSettings> {
+    let until = match form.until.as_str() {
+        "hour" => Some(now + 3600),
+        "tomorrow" => Some(next_morning(now)),
+        "resume" => None,
+        _ => return None,
+    };
+    Some(NodeSettings {
+        paused_until: until,
+        ..settings.clone()
+    })
+}
+
+/// 06:00 tomorrow on the node's clock, roughly: the seconds left of today
+/// and six hours.
+fn next_morning(now: u64) -> u64 {
+    let (hour, minute, second) = crate::node::schedule::local_time();
+    let today = u64::from(hour) * 3600 + u64::from(minute) * 60 + u64::from(second);
+    now + (24 * 3600 - today) + 6 * 3600
 }
 
 /// A limit typed into the form, in megabytes: empty or 0 for none.
@@ -353,7 +397,8 @@ pub(super) async fn save_settings(State(state): State<AppState>, request: Reques
             "The settings form could not be read.",
         );
     };
-    let settings = match settings_from_form(&form) {
+    let current = node.settings().unwrap_or_default();
+    let settings = match settings_from_form(&form, &current) {
         Ok(settings) => settings,
         Err(response) => return response,
     };
@@ -371,7 +416,10 @@ pub(super) async fn save_settings(State(state): State<AppState>, request: Reques
 /// are not numbers.
 // A response is big, but these run once per request.
 #[allow(clippy::result_large_err)]
-pub(super) fn settings_from_form(form: &SettingsForm) -> Result<NodeSettings, Response> {
+pub(super) fn settings_from_form(
+    form: &SettingsForm,
+    current: &NodeSettings,
+) -> Result<NodeSettings, Response> {
     let (Some(download), Some(storage)) = (
         parse_limit(&form.download_limit_mb_per_day),
         parse_limit(&form.storage_limit_mb),
@@ -381,11 +429,30 @@ pub(super) fn settings_from_form(form: &SettingsForm) -> Result<NodeSettings, Re
             "Limits are whole numbers of megabytes, or empty for none. Nothing was changed.",
         ));
     };
-    Ok(NodeSettings {
+    let hour = |text: &str| text.trim().parse::<u8>().ok().filter(|h| *h < 24);
+    let crawl_hours = match &form.crawl_hours {
+        None => None,
+        Some(_) => match (hour(&form.crawl_from), hour(&form.crawl_to)) {
+            (Some(from), Some(to)) => Some(CrawlHours { from, to }),
+            _ => {
+                return Err(panel_error(
+                    StatusCode::BAD_REQUEST,
+                    "Crawl hours are whole hours from 0 to 23. Nothing was changed.",
+                ))
+            }
+        },
+    };
+    let mut settings = NodeSettings {
         background_updates: form.background_updates.is_some(),
         download_limit_mb_per_day: download,
         storage_limit_mb: storage,
-    })
+        workload: Workload::Custom,
+        crawl_hours,
+        // A pause stays until it ends or is lifted.
+        paused_until: current.paused_until,
+    };
+    settings.set_workload(Workload::from_name(&form.workload).unwrap_or(Workload::Custom));
+    Ok(settings)
 }
 
 #[derive(Default, Deserialize)]
@@ -538,6 +605,50 @@ pub(super) async fn refresh(State(state): State<AppState>, request: Request) -> 
     }
     node.refresh_now();
     Redirect::to("/app").into_response()
+}
+
+pub(super) async fn pause(State(state): State<AppState>, request: Request) -> Response {
+    let Some(node) = state.node.clone() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    if let Some(why) = refusal(&request) {
+        return forbidden(why);
+    }
+    let Ok(Form(form)) = Form::<PauseForm>::from_request(request, &state).await else {
+        return panel_error(StatusCode::BAD_REQUEST, "The pause form could not be read.");
+    };
+    let current = node.settings().unwrap_or_default();
+    let Some(settings) = paused(&current, &form, now_unix()) else {
+        return panel_error(StatusCode::BAD_REQUEST, "The pause form could not be read.");
+    };
+    if let Err(err) = node.change_settings(settings) {
+        return panel_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("Could not save the settings: {err:#}"),
+        );
+    }
+    Redirect::to("/app").into_response()
+}
+
+pub(super) async fn restart(State(state): State<AppState>, request: Request) -> Response {
+    let Some(node) = &state.node else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    if let Some(why) = refusal(&request) {
+        return forbidden(why);
+    }
+    if let Err(err) = node.restart() {
+        return panel_error(StatusCode::CONFLICT, &err.to_string());
+    }
+    panel_page(page_with_head(
+        "Restarting - Plumb Search",
+        &format!(
+            "<meta http-equiv=\"refresh\" content=\"5;url=/app\"><style>{PANEL_STYLE}</style>"
+        ),
+        "<main class=\"wrap node-panel\"><h1>Restarting Plumb Search</h1>\
+         <p>The node is stopping and starting again with the saved settings. This page \
+         comes back by itself.</p></main>",
+    ))
 }
 
 pub(super) async fn retry_network(State(state): State<AppState>, request: Request) -> Response {
@@ -726,7 +837,9 @@ pub(super) fn render_panel(view: &PanelView<'_>) -> String {
         ));
     }
     body.push_str(&format!("</nav><div class=\"section-heading\"><h2>{}</h2><a href=\"{base}?section={section}\">Refresh status</a></div>", escape_html(title)));
-    if active != saved {
+    if active != saved && status.can_restart && writable {
+        body.push_str(&format!("<form method=\"post\" action=\"{base}/restart\" class=\"notice\" role=\"status\"><p>Feature changes saved. They apply once the node restarts, which takes a few seconds; search pauses meanwhile.</p><button type=\"submit\">Restart to apply</button></form>"));
+    } else if active != saved {
         body.push_str("<p class=\"notice\" role=\"status\">Feature changes saved. Quit and reopen the desktop app, or restart the Docker container, to apply them. Closing the desktop window does not quit the app.</p>");
     } else if query.saved == "settings" {
         body.push_str(
@@ -749,10 +862,13 @@ pub(super) fn render_panel(view: &PanelView<'_>) -> String {
             if !writable {
                 body.push_str("<fieldset disabled>");
             }
-            render_crawl_card(&mut body, status, now, base);
+            render_crawl_card(&mut body, status, settings, now, base);
             render_network_card(&mut body, status, active, now, base);
             if !writable {
                 body.push_str("</fieldset>");
+            }
+            if status.meaning_work.is_some() {
+                render_meaning_card(&mut body, status, active, now);
             }
             body.push_str("</section>");
             if setting_up(status) {
@@ -778,18 +894,7 @@ pub(super) fn render_panel(view: &PanelView<'_>) -> String {
         "search" => {
             body.push_str("<p class=\"intro\">Choose how you search and connect your browser to this node.</p><section class=\"cards\">");
             render_search_card(&mut body, status, origin, now);
-            let meaning = match status.meaning_sites {
-                Some(n) => format!("{} sites ready", group_thousands(n)),
-                None if active.search_by_meaning => "Preparing model".into(),
-                None => "Off".into(),
-            };
-            card(
-                &mut body,
-                "",
-                "Search by meaning",
-                &meaning,
-                "<p>Find sites by their subject as well as their name. Enable it below.</p>",
-            );
+            render_meaning_card(&mut body, status, active, now);
             let private = if private_ready {
                 "Ready"
             } else if !active.private_search {
@@ -870,7 +975,7 @@ pub(super) fn render_panel(view: &PanelView<'_>) -> String {
 }
 
 pub(super) const LAYOUT_STYLE: &str = "
-.node-switch{display:flex;flex-wrap:wrap;gap:.4rem;margin-bottom:1rem}.node-switch a{padding:.4rem .8rem;border:1px solid var(--line);border-radius:999px;text-decoration:none;font-size:.9rem;color:var(--fg)}.node-switch a[aria-current]{border-color:var(--accent);color:var(--accent);font-weight:600}.node-panel{max-width:72rem;padding:2rem 2rem 4rem}.node-heading,.section-heading{display:flex;align-items:center;justify-content:space-between;gap:1rem}.node-heading h1{font-size:1.8rem}.eyebrow{font-size:.7rem;letter-spacing:.13em;color:var(--muted);margin:0 0 .3rem}.node-nav{display:flex;flex-wrap:wrap;gap:.4rem;border-bottom:1px solid var(--line);padding:1.5rem 0 1rem;margin-bottom:1.5rem}.node-panel a{color:var(--accent)}.node-panel a.btn:not(.alt){color:var(--bg)}.node-nav a{padding:.55rem .85rem;text-decoration:none;border-radius:.5rem;color:var(--muted)}.node-nav a[aria-current]{background:var(--accent);color:var(--bg);font-weight:600}.section-heading h2{margin:0;font-size:1.4rem}.section-heading>a{font-size:.85rem}.intro{color:var(--muted);max-width:45rem}.notice{padding:.85rem 1rem;border-left:3px solid var(--accent);background:color-mix(in srgb,var(--accent) 8%,var(--bg));border-radius:.3rem}.node-panel form{max-width:46rem}.node-panel fieldset{border:0;margin:0;padding:0;min-width:0}.cards>fieldset{display:contents}.node-panel details{margin-top:1rem}.node-panel summary{cursor:pointer;color:var(--accent)}.node-panel fieldset:disabled{opacity:.65}.node-panel textarea{display:block;width:100%;min-height:6rem;font:inherit;background:var(--bg);color:var(--fg);padding:.75rem;border:1px solid var(--line);border-radius:.5rem}.node-panel .feature{padding:.8rem 0;border-bottom:1px solid var(--line)}.node-panel .feature label{margin:0}.node-panel .feature p{margin:.35rem 0 0 1.65rem}.node-panel .state{font-size:.8rem;color:var(--muted)}.node-panel :focus-visible{outline:3px solid var(--accent);outline-offset:3px}.node-panel dl{grid-template-columns:minmax(6rem,auto) minmax(0,1fr)}@media(max-width:600px){.node-panel{padding:1rem 1rem 3rem}.node-heading{align-items:flex-start}.node-heading h1{font-size:1.5rem}.node-nav{gap:.2rem}.node-nav a{padding:.5rem .6rem;font-size:.9rem}.cards{grid-template-columns:minmax(0,1fr)}.node-panel label{flex-wrap:wrap}.section-heading{align-items:flex-start}.section-heading>a{white-space:nowrap}}";
+.node-switch{display:flex;flex-wrap:wrap;gap:.4rem;margin-bottom:1rem}.node-switch a{padding:.4rem .8rem;border:1px solid var(--line);border-radius:999px;text-decoration:none;font-size:.9rem;color:var(--fg)}.node-switch a[aria-current]{border-color:var(--accent);color:var(--accent);font-weight:600}.node-panel{max-width:72rem;padding:2rem 2rem 4rem}.node-heading,.section-heading{display:flex;align-items:center;justify-content:space-between;gap:1rem}.node-heading h1{font-size:1.8rem}.eyebrow{font-size:.7rem;letter-spacing:.13em;color:var(--muted);margin:0 0 .3rem}.node-nav{display:flex;flex-wrap:wrap;gap:.4rem;border-bottom:1px solid var(--line);padding:1.5rem 0 1rem;margin-bottom:1.5rem}.node-panel a{color:var(--accent)}.node-panel a.btn:not(.alt){color:var(--bg)}.node-nav a{padding:.55rem .85rem;text-decoration:none;border-radius:.5rem;color:var(--muted)}.node-nav a[aria-current]{background:var(--accent);color:var(--bg);font-weight:600}.section-heading h2{margin:0;font-size:1.4rem}.section-heading>a{font-size:.85rem}.intro{color:var(--muted);max-width:45rem}.notice{padding:.85rem 1rem;border-left:3px solid var(--accent);background:color-mix(in srgb,var(--accent) 8%,var(--bg));border-radius:.3rem}.node-panel form{max-width:46rem}.node-panel fieldset{border:0;margin:0;padding:0;min-width:0}.node-panel .workload{margin-top:1rem}.node-panel .workload legend{font-weight:600}.node-panel select{font:inherit;background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:.3rem}.cards>fieldset{display:contents}.node-panel details{margin-top:1rem}.node-panel summary{cursor:pointer;color:var(--accent)}.node-panel fieldset:disabled{opacity:.65}.node-panel textarea{display:block;width:100%;min-height:6rem;font:inherit;background:var(--bg);color:var(--fg);padding:.75rem;border:1px solid var(--line);border-radius:.5rem}.node-panel .feature{padding:.8rem 0;border-bottom:1px solid var(--line)}.node-panel .feature label{margin:0}.node-panel .feature p{margin:.35rem 0 0 1.65rem}.node-panel .state{font-size:.8rem;color:var(--muted)}.node-panel :focus-visible{outline:3px solid var(--accent);outline-offset:3px}.node-panel dl{grid-template-columns:minmax(6rem,auto) minmax(0,1fr)}@media(max-width:600px){.node-panel{padding:1rem 1rem 3rem}.node-heading{align-items:flex-start}.node-heading h1{font-size:1.5rem}.node-nav{gap:.2rem}.node-nav a{padding:.5rem .6rem;font-size:.9rem}.cards{grid-template-columns:minmax(0,1fr)}.node-panel label{flex-wrap:wrap}.section-heading{align-items:flex-start}.section-heading>a{white-space:nowrap}}";
 
 /// A card: its class, title, headline and the HTML under them.
 fn card(body: &mut String, class: &str, title: &str, big: &str, rest: &str) {
@@ -1008,7 +1113,13 @@ fn render_downloads_card(body: &mut String, status: &Status, settings: &NodeSett
     );
 }
 
-fn render_crawl_card(body: &mut String, status: &Status, now: u64, base: &str) {
+fn render_crawl_card(
+    body: &mut String,
+    status: &Status,
+    settings: &NodeSettings,
+    now: u64,
+    base: &str,
+) {
     let crawling = status.phase == Phase::Ready && status.step == Step::Crawling;
     let (big, mut rest) = if crawling {
         let rest = status
@@ -1025,9 +1136,14 @@ fn render_crawl_card(body: &mut String, status: &Status, now: u64, base: &str) {
             .unwrap_or_default();
         ("Visiting homepages".to_string(), rest)
     } else if status.step == Step::Indexing {
+        let meter = status
+            .progress
+            .as_ref()
+            .map(|p| meter(p.done, p.total))
+            .unwrap_or_default();
         (
             "Rebuilding index".to_string(),
-            "<p>Preparing updated search results.</p>".to_string(),
+            format!("{meter}<p>{}.</p>", escape_html(&status.detail)),
         )
     } else if status.phase != Phase::Ready {
         ("Waiting for setup".to_string(), String::new())
@@ -1037,9 +1153,13 @@ fn render_crawl_card(body: &mut String, status: &Status, now: u64, base: &str) {
             "<p>The last update failed. Plumb will retry automatically.</p>".to_string(),
         )
     } else if let Some(reason) = &status.paused {
+        let resumes = status
+            .paused_until
+            .map(|until| format!("<p>Resumes {}.</p>\n", time_until(until, now)))
+            .unwrap_or_default();
         (
             "Paused".to_string(),
-            format!("<p>{}.</p>\n", escape_html(reason)),
+            format!("<p>{}.</p>\n{resumes}", escape_html(reason)),
         )
     } else if status.crawl_left > 0 {
         (
@@ -1069,7 +1189,77 @@ fn render_crawl_card(body: &mut String, status: &Status, now: u64, base: &str) {
              <button type=\"submit\" class=\"alt\">Update now</button></form>\n"
         ));
     }
+    rest.push_str(&pause_buttons(status, settings, base));
     card(body, "", "Crawling", &big, &rest);
+}
+
+fn render_meaning_card(body: &mut String, status: &Status, active: &FeatureSettings, now: u64) {
+    let headline = match status.meaning_sites {
+        Some(n) => format!("{} sites ready", group_thousands(n)),
+        None if active.search_by_meaning => "Preparing".into(),
+        None => "Off".into(),
+    };
+    let rest = match &status.meaning_work {
+        Some(work) => {
+            let mut rest = String::new();
+            if let Some(p) = &work.progress {
+                rest.push_str(&meter(p.done, p.total));
+            }
+            rest.push_str(&format!("<p>{}", escape_html(&work.detail)));
+            if let Some(p) = &work.progress {
+                let about = if p.unit == "MB" { "about " } else { "" };
+                rest.push_str(&format!(
+                    ": {} of {about}{} {}",
+                    group_thousands(p.done),
+                    group_thousands(p.total),
+                    escape_html(&p.unit)
+                ));
+            }
+            rest.push_str(".</p>");
+            if let Some(err) = &work.error {
+                let retry = err
+                    .retry_at
+                    .map(|at| format!(" Trying again {}.", time_until(at, now)))
+                    .unwrap_or_default();
+                rest.push_str(&format!(
+                    "<p class=\"hint\">{}{retry}</p>",
+                    escape_html(&err.message)
+                ));
+            }
+            rest
+        }
+        None => "<p>Find sites by their subject as well as their name. Turn it on under Search \
+                 &amp; browser.</p>"
+            .to_owned(),
+    };
+    let class = if status
+        .meaning_work
+        .as_ref()
+        .is_some_and(|w| w.error.is_some())
+    {
+        "warn"
+    } else {
+        ""
+    };
+    card(body, class, "Search by meaning", &headline, &rest);
+}
+
+/// "Pause for an hour" and "Pause until tomorrow" while background work may
+/// run, "Resume" while someone paused it.
+fn pause_buttons(status: &Status, settings: &NodeSettings, base: &str) -> String {
+    let paused_by_hand = settings.paused_until.is_some_and(|until| {
+        status.paused_until == Some(until) && status.paused.as_deref() == Some("Paused by you")
+    });
+    let buttons = if paused_by_hand {
+        "<button type=\"submit\" name=\"until\" value=\"resume\">Resume now</button>"
+    } else if status.background_updates && status.paused.is_none() {
+        "<button type=\"submit\" name=\"until\" value=\"hour\" class=\"alt\">Pause for an \
+         hour</button><button type=\"submit\" name=\"until\" value=\"tomorrow\" \
+         class=\"alt\">Pause until tomorrow</button>"
+    } else {
+        return String::new();
+    };
+    format!("<form method=\"post\" action=\"{base}/pause\" class=\"btns\">{buttons}</form>\n")
 }
 
 fn render_network_card(
@@ -1393,11 +1583,7 @@ fn render_steps(body: &mut String, status: &Status, now: u64) {
 }
 
 fn render_settings(body: &mut String, settings: &NodeSettings, base: &str) {
-    let checked = if settings.background_updates {
-        " checked"
-    } else {
-        ""
-    };
+    let checked = |on: bool| if on { " checked" } else { "" };
     let limit = |mb: u64| {
         if mb == 0 {
             String::new()
@@ -1407,22 +1593,80 @@ fn render_settings(body: &mut String, settings: &NodeSettings, base: &str) {
     };
     body.push_str(&format!(
         "<h2>Crawling &amp; limits</h2>\n<form method=\"post\" action=\"{base}/settings\">\n\
-         <label><input type=\"checkbox\" name=\"background_updates\" value=\"1\"{checked}>\
+         <label><input type=\"checkbox\" name=\"background_updates\" value=\"1\"{}>\
          <span>Keep the index up to date in the background</span></label>\n\
          <p class=\"hint\">Plumb visits a few thousand homepages a day to learn sites' names \
          and find new sites, then rebuilds its index. Search keeps working when this is \
-         off.</p>\n\
+         off.</p>\n<fieldset class=\"workload\"><legend>Workload</legend>\n",
+        checked(settings.background_updates)
+    ));
+    for (workload, label, hint) in [
+        (
+            Workload::Light,
+            "Light",
+            "4 homepages at a time, 100 MB of downloads a day, 1 GB of disk. For a laptop or \
+             a slow connection.",
+        ),
+        (
+            Workload::Balanced,
+            "Balanced",
+            "16 homepages at a time, 500 MB a day, 2 GB of disk.",
+        ),
+        (
+            Workload::Full,
+            "Full",
+            "32 homepages at a time and no limits. For a server or homelab.",
+        ),
+        (
+            Workload::Custom,
+            "Custom",
+            "16 homepages at a time, with the limits below.",
+        ),
+    ] {
+        body.push_str(&format!(
+            "<label><input type=\"radio\" name=\"workload\" value=\"{}\"{}><span>{label} \
+             <span class=\"state\">{hint}</span></span></label>\n",
+            workload.name(),
+            checked(settings.workload == workload)
+        ));
+    }
+    body.push_str(&format!(
+        "</fieldset>\n\
          <label>Download limit <input type=\"number\" name=\"download_limit_mb_per_day\" \
          min=\"0\" step=\"1\" value=\"{}\" placeholder=\"none\"> MB per UTC day</label>\n\
          <p class=\"hint\">Crawling pauses for the rest of the UTC day once it is reached. Empty \
-         for no limit.</p>\n\
+         for no limit. Used with Custom; a preset sets it.</p>\n\
          <label>Storage limit <input type=\"number\" name=\"storage_limit_mb\" min=\"0\" \
          step=\"1\" value=\"{}\" placeholder=\"none\"> MB</label>\n\
          <p class=\"hint\">Crawling pauses while the data folder is bigger. Empty for no \
-         limit.</p>\n\
-         <button type=\"submit\">Save settings</button>\n</form>\n",
+         limit. Used with Custom; a preset sets it.</p>\n",
         limit(settings.download_limit_mb_per_day),
         limit(settings.storage_limit_mb)
+    ));
+    let hours = settings
+        .crawl_hours
+        .unwrap_or(CrawlHours { from: 22, to: 7 });
+    let options = |selected: u8| {
+        (0..24u8)
+            .map(|h| {
+                format!(
+                    "<option value=\"{h}\"{}>{h:02}:00</option>",
+                    if h == selected { " selected" } else { "" }
+                )
+            })
+            .collect::<String>()
+    };
+    let (hour, minute, _) = crate::node::schedule::local_time();
+    body.push_str(&format!(
+        "<label><input type=\"checkbox\" name=\"crawl_hours\" value=\"1\"{}>\
+         <span>Only crawl between <select name=\"crawl_from\" aria-label=\"From\">{}</select> \
+         and <select name=\"crawl_to\" aria-label=\"Until\">{}</select></span></label>\n\
+         <p class=\"hint\">On the node\u{2019}s clock, which reads {hour:02}:{minute:02} now. \
+         Overnight hours work too, such as 22:00 to 07:00.</p>\n\
+         <button type=\"submit\">Save settings</button>\n</form>\n",
+        checked(settings.crawl_hours.is_some()),
+        options(hours.from),
+        options(hours.to)
     ));
 }
 
@@ -1524,6 +1768,9 @@ mod tests {
             downloaded_total: 0,
             homepages_visited: 0,
             meaning_sites: None,
+            meaning_work: None,
+            can_restart: false,
+            paused_until: None,
             network: None,
         }
     }
@@ -1795,6 +2042,7 @@ mod tests {
                 background_updates: false,
                 download_limit_mb_per_day: 250,
                 storage_limit_mb: 0,
+                ..NodeSettings::default()
             }
         );
 
@@ -2186,6 +2434,133 @@ mod tests {
         assert!(saved.bootstrap.is_empty());
         let body = get_section(router, "network").await;
         assert!(!body.contains("name=\"plumb_bootstrap\" value=\"1\" checked"));
+    }
+
+    #[tokio::test]
+    async fn presets_crawl_hours_and_pauses_are_one_click() {
+        let (router, node) = app(status(Phase::Ready, Step::Idle));
+        let form = "background_updates=1&workload=light&download_limit_mb_per_day=999\
+                    &crawl_hours=1&crawl_from=22&crawl_to=7";
+        let response = post(
+            router.clone(),
+            "/app/settings",
+            form,
+            "127.0.0.1:50000",
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let saved = node.settings.lock().unwrap().clone();
+        assert_eq!(saved.workload, Workload::Light);
+        // The preset's limits win over what was typed.
+        assert_eq!(
+            (saved.download_limit_mb_per_day, saved.storage_limit_mb),
+            (100, 1_000)
+        );
+        assert_eq!(saved.crawl_hours, Some(CrawlHours { from: 22, to: 7 }));
+        let body = get_section(router.clone(), "resources").await;
+        assert!(body.contains("value=\"light\" checked"), "{body}");
+        assert!(body.contains("name=\"crawl_hours\" value=\"1\" checked"));
+        assert!(body.contains("<option value=\"22\" selected>22:00</option>"));
+
+        let response = post(
+            router.clone(),
+            "/app/settings",
+            "crawl_hours=1&crawl_from=25&crawl_to=7",
+            "127.0.0.1:50000",
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let before = now_unix();
+        let response = post(
+            router.clone(),
+            "/app/pause",
+            "until=hour",
+            "127.0.0.1:50000",
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let until = node.settings.lock().unwrap().paused_until.unwrap();
+        assert!((before + 3600..=now_unix() + 3600).contains(&until));
+        // Saving the settings form keeps the pause.
+        post(
+            router.clone(),
+            "/app/settings",
+            "workload=full",
+            "127.0.0.1:50000",
+            None,
+        )
+        .await;
+        let saved = node.settings.lock().unwrap().clone();
+        assert_eq!(saved.paused_until, Some(until));
+        assert_eq!(saved.workload, Workload::Full);
+        assert_eq!(saved.crawl_hours, None);
+        post(
+            router.clone(),
+            "/app/pause",
+            "until=resume",
+            "127.0.0.1:50000",
+            None,
+        )
+        .await;
+        assert_eq!(node.settings.lock().unwrap().paused_until, None);
+        for (form, peer, code) in [
+            ("until=forever", "127.0.0.1:50000", StatusCode::BAD_REQUEST),
+            ("until=hour", "192.168.1.20:50000", StatusCode::FORBIDDEN),
+        ] {
+            assert_eq!(
+                post(router.clone(), "/app/pause", form, peer, None)
+                    .await
+                    .status(),
+                code
+            );
+        }
+        // This node cannot restart itself.
+        assert_eq!(
+            post(router, "/app/restart", "", "127.0.0.1:50000", None)
+                .await
+                .status(),
+            StatusCode::CONFLICT
+        );
+    }
+
+    #[tokio::test]
+    async fn the_panel_shows_pauses_progress_and_restart_to_apply() {
+        let mut paused = status(Phase::Ready, Step::Idle);
+        paused.background_updates = true;
+        paused.paused = Some("Paused by you".into());
+        paused.paused_until = Some(now_unix() + 1800);
+        paused.can_restart = true;
+        paused.meaning_work = Some(crate::node::BackgroundWork {
+            detail: "Downloading the search-by-meaning model".into(),
+            progress: Some(Progress {
+                done: 48,
+                total: 130,
+                unit: "MB".into(),
+            }),
+            error: None,
+        });
+        let (router, node) = app(paused);
+        node.settings.lock().unwrap().paused_until = Some(now_unix() + 1800);
+        let body = get_section(router.clone(), "overview").await;
+        assert!(body.contains("<p>Resumes in "), "{body}");
+        assert!(body.contains("value=\"resume\">Resume now</button>"));
+        assert!(body.contains("Downloading the search-by-meaning model: 48 of about 130 MB."));
+        assert!(!body.contains("Restart to apply"));
+        // Saved feature changes that differ from the running ones.
+        node.features.lock().unwrap().search_by_meaning = true;
+        let body = get_section(router, "overview").await;
+        assert!(body.contains("action=\"/app/restart\""), "{body}");
+        assert!(body.contains("Restart to apply"));
+
+        let mut running = status(Phase::Ready, Step::Idle);
+        running.background_updates = true;
+        let (router, _) = app(running);
+        let body = get_section(router, "overview").await;
+        assert!(body.contains("value=\"hour\" class=\"alt\">Pause for an hour"));
     }
 
     #[tokio::test]

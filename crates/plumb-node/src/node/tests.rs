@@ -1481,3 +1481,49 @@ async fn search_by_meaning_embeds_sites_in_the_background() {
     }
     node.shutdown().await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pause_for_an_hour_holds_the_crawl_and_resume_lifts_it() {
+    let dir = recently_crawled_dir();
+    let paths = store::Paths::new(dir.path());
+    store::save_state(
+        &paths,
+        &SavedState {
+            crawl_left: 700,
+            index_stale: true,
+            ..SavedState::default()
+        },
+    )
+    .unwrap();
+    let until = now_unix() + 3600;
+    let mut config = test_config(dir.path());
+    config.settings.paused_until = Some(until);
+    let node = start(config).await.unwrap();
+    let status = wait_for(node.addr(), "the first index", ready_and_idle).await;
+    assert_eq!(status.paused.as_deref(), Some("Paused by you"));
+    assert_eq!(status.paused_until, Some(until));
+    assert_eq!(status.crawl_left, 700);
+    // Nobody listens for a restart yet, so the panel offers none.
+    assert!(!status.can_restart);
+    let signal = node.restart_signal();
+    assert!(node.status().can_restart);
+    let restart = tokio::spawn(async move { signal.requested().await });
+    StatusSource::restart(node.inner.as_ref()).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), restart)
+        .await
+        .expect("the restart request arrives")
+        .unwrap();
+
+    node.inner
+        .change_settings(NodeSettings {
+            paused_until: None,
+            ..node.inner.settings()
+        })
+        .unwrap();
+    let status = wait_for(node.addr(), "the end of the round", |s| {
+        ready_and_idle(s) && s.crawl_left == 0
+    })
+    .await;
+    assert_eq!(status.paused, None);
+    node.shutdown().await.unwrap();
+}
