@@ -67,9 +67,17 @@ fn work(inner: &Arc<Inner>) -> Result<()> {
         Some(meaning) => meaning,
         None => {
             inner.set_meaning_work(Some(MeaningWork::Downloading));
-            tokio::runtime::Handle::current()
-                .block_on(ensure_model(&model_dir))
-                .context("downloading the embedding model")?;
+            // A stop does not wait for the download, which can take minutes.
+            let downloaded = tokio::runtime::Handle::current().block_on(async {
+                tokio::select! {
+                    downloaded = ensure_model(&model_dir, &inner.config.sources.model_base_url) => Some(downloaded),
+                    () = inner.stopped() => None,
+                }
+            });
+            let Some(downloaded) = downloaded else {
+                return Ok(());
+            };
+            downloaded.context("downloading the embedding model")?;
             inner.set_meaning_work(Some(MeaningWork::Loading));
             inner.journal.info("Search by meaning: the model is ready");
             let embedder = load_embedder(&model_dir)?;

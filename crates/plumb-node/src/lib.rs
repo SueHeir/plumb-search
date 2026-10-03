@@ -35,6 +35,7 @@ pub mod websearch;
 
 mod crawl;
 mod fetch;
+mod icons;
 mod ingest;
 mod limits;
 mod records;
@@ -44,8 +45,10 @@ mod search;
 use cli::{Cli, Command};
 
 /// Log filter used when `RUST_LOG` is unset or empty: `info` for everything
-/// except Tantivy, which logs every commit and merge step at `info`.
-pub const DEFAULT_LOG_FILTER: &str = "info,tantivy=warn";
+/// except Tantivy, which logs every commit and merge step at `info`, and
+/// rustls-platform-verifier, which logs each homepage with a bad
+/// certificate as an error, though the crawler expects and counts those.
+pub const DEFAULT_LOG_FILTER: &str = "info,tantivy=warn,rustls_platform_verifier=off";
 
 /// Sends `tracing` output to stderr (stdout is kept for command output such
 /// as `search --json`), filtered by `RUST_LOG` or [`DEFAULT_LOG_FILTER`].

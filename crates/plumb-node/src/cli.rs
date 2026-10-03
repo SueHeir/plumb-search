@@ -114,7 +114,7 @@ pub struct RunArgs {
     #[arg(long, value_name = "ADDR", default_value = "127.0.0.1:8080")]
     pub bind: SocketAddr,
     /// Defaults to start from. server: 1,000,000 sites, 10,000 homepages
-    /// crawled at first and 5,000 more every 24 hours. desktop: 250,000
+    /// crawled at first and 5,000 more every hour. desktop: 250,000
     /// sites, 2,000 homepages at first and 1,000 more every 12 hours.
     #[arg(long, value_enum, default_value_t = Profile::Server)]
     pub profile: Profile,
@@ -133,6 +133,10 @@ pub struct RunArgs {
     /// Homepages crawled per refresh [default: from --profile].
     #[arg(long, value_name = "N", value_parser = parse_positive)]
     pub crawl_per_refresh: Option<usize>,
+    /// Homepages fetched at once while crawling [default: 16]. The panel's
+    /// workload presets (light, balanced, full) set their own.
+    #[arg(long, value_name = "N", value_parser = parse_positive)]
+    pub crawl_concurrency: Option<usize>,
     /// Never refresh: keep the index as the initial crawl leaves it.
     #[arg(long, conflicts_with_all = ["refresh_hours", "crawl_per_refresh"])]
     pub no_refresh: bool,
@@ -233,6 +237,12 @@ pub struct RunArgs {
     /// many nodes report the same pick.
     #[arg(long, requires = "network")]
     pub share_popularity: bool,
+    /// Also share the homepages crawled into this records file, such as one
+    /// `plumb crawl` is filling (its journal included), and add them to this
+    /// node's own records: every half hour, those crawled since the last
+    /// time and within the last 6 days.
+    #[arg(long, value_name = "PATH", requires = "network")]
+    pub publish_records: Option<PathBuf>,
 }
 
 /// Starting points for `plumb run`.

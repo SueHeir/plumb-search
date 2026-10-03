@@ -3,7 +3,7 @@
 The Docker image runs a Plumb Search node on a server or homelab machine.
 `plumb run` serves the search page and a JSON API on port 8080. On first start
 it downloads seed data and builds its index (searchable within a minute or
-two, from the Tranco list, while the rest of the seed data downloads), and from then on it keeps
+two, from the Tranco list; the rest of the seed data follows its first crawl), and from then on it keeps
 crawling homepages and rebuilding the index. It also joins the Plumb network
 (see [Join the Plumb network](#join-the-plumb-network)), so its crawls help
 every other node and theirs help it. Everything it keeps is in one volume
@@ -218,7 +218,7 @@ it, so keep those two flags. In `docker-compose.yml`:
 ```yaml
 services:
   plumb:
-    command: ["run", "--data", "/data", "--bind", "0.0.0.0:8080", "--refresh-hours", "12"]
+    command: ["run", "--data", "/data", "--bind", "0.0.0.0:8080", "--sites", "250000"]
 ```
 
 Then apply it with `docker compose up -d`. With `docker run`, put the command
@@ -227,7 +227,7 @@ after the image name:
 ```sh
 docker run -d --name plumb --init --restart unless-stopped --stop-timeout 300 \
   -p 8080:8080 -v plumb-data:/data ghcr.io/sueheir/plumb-search:latest \
-  run --data /data --bind 0.0.0.0:8080 --refresh-hours 12
+  run --data /data --bind 0.0.0.0:8080 --sites 250000
 ```
 
 | Flag | Default | What it does |
@@ -235,7 +235,7 @@ docker run -d --name plumb --init --restart unless-stopped --stop-timeout 300 \
 | `--sites N` | 1,000,000 | How many of the best-ranked sites to keep from the seed data. First start only. |
 | `--cc-release NAME` | none | Also take ranks from a Common Crawl web graph release, such as `cc-main-2025-26-nov-dec-jan` (listed at https://commoncrawl.org/web-graphs). Only the top rows are downloaded. First start only. |
 | `--initial-crawl N` | 10,000 | Homepages to crawl once the first index is built; `0` for none. |
-| `--refresh-hours H` | 24 | Hours between refreshes, which crawl more homepages and rebuild the index, e.g. `24` or `0.5`. |
+| `--refresh-hours H` | 1 | Hours between refreshes, which crawl more homepages and rebuild the index, e.g. `24` or `0.5`. |
 | `--crawl-per-refresh N` | 5,000 | Homepages crawled per refresh. |
 | `--no-refresh` | | Never refresh: keep the index as the initial crawl leaves it. |
 | `--reseed` | | Fold the seed files already in `DIR/seed` into the records again before starting (only files over a week old are downloaded again). For records made before a change to how seed data is read; use it once. |
@@ -332,8 +332,10 @@ Rough figures for the default 1,000,000 sites, measured with the image on a
 node has seed ranks for every site but has crawled few homepages, so its
 records are small. They grow as it crawls: the second column is a node that
 has crawled 90% of its sites, at about 860 bytes per site. At the default
-5,000 homepages a day that takes more than half a year, so treat it as an
-upper bound. Real records may come out somewhat smaller or larger.
+5,000 homepages an hour, with each site crawled at most once every 30 days,
+a node gets there within a month or two, sooner in the network, where it
+also takes in other nodes' crawls. Real records may come out somewhat
+smaller or larger.
 
 | | New node | 90% of homepages crawled |
 | --- | --- | --- |
@@ -348,6 +350,14 @@ upper bound. Real records may come out somewhat smaller or larger.
   (up to a quarter of `records.jsonl`, or 64 MB if that is more), the seed
   downloads (tens of megabytes, estimate) and the image (about 120 MB).
   About 3 GB of free space covers the upper bound.
+- **Network**: a node in the network also keeps every crawl batch it sees,
+  its own and other nodes', for 35 days in `/data/net/batches`, at roughly
+  1 KB per homepage (estimate). A node crawling all day at the default pace
+  adds about 120 MB a day of its own, so give a network node 5 to 10 GB more,
+  and more as the network grows.
+- **Bandwidth**: at most 512 KB is read of each homepage, and most are far
+  smaller; crawling 120,000 homepages a day comes to a few GB a day
+  (estimate). `--refresh-hours 6` or `--crawl-per-refresh 1000` crawls less.
 - **Memory**: memory peaks while the node reads all its records, at the start
   of every crawl and rebuild, and while it builds an index. A crawl keeps
   the records in memory until it ends (about 0.6 GB for a new node), and

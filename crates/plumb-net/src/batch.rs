@@ -14,6 +14,11 @@
 //! name) for sites the crawler was assigned that epoch, and link text and
 //! new domains found on those homepages. Popularity ranks, Wikidata status
 //! and crawl bookkeeping are never taken from another node.
+//!
+//! A crawler the node's operator trusts by name
+//! ([`accept_trusted_batch`]), like the node's own crawls, is not held to
+//! its daily assignment, and its homepages' headings and text are kept too,
+//! so search by meaning has text for them.
 
 use std::collections::HashSet;
 
@@ -86,6 +91,12 @@ pub struct SignedHeader {
 }
 
 impl SignedHeader {
+    /// Whether the batch is too old for [`SignedHeader::check`] at `now`:
+    /// a proof from it no longer checks out, though nothing is wrong with it.
+    pub fn expired(&self, now: u64) -> bool {
+        self.header.epoch + MAX_BATCH_AGE_EPOCHS < epoch_of(now)
+    }
+
     /// Identifies the batch: the hash of what was signed.
     pub fn id(&self) -> Hash {
         Hash::of(&[&self.header.signing_bytes()])
@@ -239,7 +250,7 @@ impl RecordProof {
             "the record is not in the signed batch"
         );
         let record = parse_record(&self.record)?;
-        let Some(record) = accept_crawled(record, &crawler, h, now, true) else {
+        let Some(record) = accept_crawled(record, &crawler, h, now, Source::Other) else {
             bail!("the record is not a homepage crawl the crawler was assigned");
         };
         Ok((record, crawler))
@@ -263,7 +274,15 @@ impl RecordProof {
 /// Everything else (ranks, Wikidata status, crawl attempts and failures) is
 /// dropped: those come from public seed data or local bookkeeping.
 pub fn accept_batch(batch: &Batch, crawler: &PeerId, now: u64) -> Vec<SiteRecord> {
-    accept(batch, crawler, now, true)
+    accept(batch, crawler, now, Source::Other)
+}
+
+/// What a node takes from a batch a crawler it trusts signed: the same as
+/// [`accept_batch`], except that its homepages need not be ones it was
+/// assigned (the operator vouches for it, so its whole crawl counts), and
+/// their headings and text are kept as well.
+pub fn accept_trusted_batch(batch: &Batch, crawler: &PeerId, now: u64) -> Vec<SiteRecord> {
+    accept(batch, crawler, now, Source::Trusted)
 }
 
 /// What a node takes from a batch it signed itself: the same as
@@ -271,10 +290,19 @@ pub fn accept_batch(batch: &Batch, crawler: &PeerId, now: u64) -> Vec<SiteRecord
 /// assigned, since a node may fetch a disputed site to settle it (see
 /// [`crate::agree`]). Other nodes still ignore those.
 pub fn accept_own_batch(batch: &Batch, me: &PeerId, now: u64) -> Vec<SiteRecord> {
-    accept(batch, me, now, false)
+    accept(batch, me, now, Source::Trusted)
 }
 
-fn accept(batch: &Batch, crawler: &PeerId, now: u64, assigned_only: bool) -> Vec<SiteRecord> {
+/// Whose batch it is, for what is kept of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Source {
+    /// Any crawler: assigned sites only, homepage facts only.
+    Other,
+    /// This node or one its operator trusts: any site, with its text.
+    Trusted,
+}
+
+fn accept(batch: &Batch, crawler: &PeerId, now: u64, source: Source) -> Vec<SiteRecord> {
     let h = &batch.header.header;
     let parsed: Vec<SiteRecord> = batch
         .records
@@ -288,7 +316,7 @@ fn accept(batch: &Batch, crawler: &PeerId, now: u64, assigned_only: bool) -> Vec
     for record in parsed {
         if record.crawled_at.is_some() {
             let links = (record.link_texts.clone(), record.signals.linking_domains);
-            if let Some(kept) = accept_crawled(record, crawler, h, now, assigned_only) {
+            if let Some(kept) = accept_crawled(record, crawler, h, now, source) {
                 crawled.push((kept, links));
             }
         } else {
@@ -346,7 +374,7 @@ fn accept_crawled(
     crawler: &PeerId,
     header: &BatchHeader,
     now: u64,
-    assigned_only: bool,
+    source: Source,
 ) -> Option<SiteRecord> {
     let crawled_at = record.crawled_at?;
     let epoch_start = header.epoch * EPOCH_SECS;
@@ -355,7 +383,7 @@ fn accept_crawled(
         && crawled_at < epoch_start + 2 * EPOCH_SECS
         && crawled_at <= now + EPOCH_SECS / 24;
     let assigned = || is_assigned(header.epoch, crawler, &record.domain, header.share_ppm);
-    if !in_epoch || (assigned_only && !assigned()) {
+    if !in_epoch || (source == Source::Other && !assigned()) {
         return None;
     }
     let url = record
@@ -367,6 +395,10 @@ fn accept_crawled(
     kept.description = record.description;
     for alias in &record.aliases {
         kept.add_alias(alias);
+    }
+    if source == Source::Trusted {
+        kept.headings = record.headings;
+        kept.body_text = record.body_text;
     }
     kept.crawled_at = Some(crawled_at);
     Some(kept)
@@ -404,6 +436,11 @@ pub(crate) mod bytes_hex {
         if s.len() % 2 != 0 || s.len() > 8_192 {
             return Err(serde::de::Error::custom("bad hex length"));
         }
+        // Checked first so slicing below can't split a multi-byte character:
+        // this reads what other nodes send, and a panic would stop the network.
+        if !s.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(serde::de::Error::custom("not hex"));
+        }
         (0..s.len())
             .step_by(2)
             .map(|i| u8::from_str_radix(&s[i..i + 2], 16).map_err(serde::de::Error::custom))
@@ -416,6 +453,21 @@ mod tests {
     use plumb_core::LinkText;
 
     use super::*;
+
+    #[test]
+    fn hex_that_is_not_ascii_is_refused_without_a_panic() {
+        #[derive(Deserialize)]
+        struct Hexed {
+            #[serde(with = "bytes_hex")]
+            bytes: Vec<u8>,
+        }
+        for bad in ["\"\u{e9}\u{e9}\"", "\"0\u{e9}a\"", "\"zz\"", "\"+1\""] {
+            let json = format!("{{\"bytes\":{bad}}}");
+            assert!(serde_json::from_str::<Hexed>(&json).is_err(), "{bad}");
+        }
+        let ok: Hexed = serde_json::from_str("{\"bytes\":\"0aFf\"}").unwrap();
+        assert_eq!(ok.bytes, [0x0a, 0xff]);
+    }
 
     const NOW: u64 = 1_790_000_000;
 
@@ -514,6 +566,41 @@ mod tests {
         let own = accept_own_batch(&batch, &peer, NOW);
         assert_eq!(own.len(), 3);
         assert_eq!(own[2].domain, not_mine);
+    }
+
+    #[test]
+    fn a_trusted_crawler_counts_for_every_site_with_its_text() {
+        let key = Keypair::generate_ed25519();
+        let peer = key.public().to_peer_id();
+        let mine = assigned_domains(&peer, 1);
+        let not_mine = (0..)
+            .map(|i| format!("other{i}.org"))
+            .find(|d| !is_assigned(epoch_of(NOW), &peer, d, MAX_SHARE_PPM))
+            .unwrap();
+        let mut records = vec![crawled(&mine[0]), crawled(&not_mine)];
+        for record in &mut records {
+            record.headings = vec!["Widgets for everyone".into()];
+            record.body_text = Some("We make widgets for homes and offices.".into());
+        }
+        let batch = sign(&key, &records);
+        let crawler = batch.check(NOW).unwrap();
+
+        let trusted = accept_trusted_batch(&batch, &crawler, NOW);
+        let domains: Vec<_> = trusted.iter().map(|r| r.domain.as_str()).collect();
+        assert_eq!(domains, vec![mine[0].as_str(), not_mine.as_str()]);
+        assert!(trusted
+            .iter()
+            .all(|r| r.body_text.is_some() && !r.headings.is_empty()));
+        assert_eq!(trusted[0].signals, Default::default());
+        assert_eq!(trusted[0].crawl_failures, 0);
+
+        // Anyone else: the assigned site only, without its text.
+        let other = accept_batch(&batch, &crawler, NOW);
+        assert_eq!(other.len(), 1);
+        assert_eq!(
+            (other[0].body_text.as_deref(), other[0].headings.len()),
+            (None, 0)
+        );
     }
 
     #[test]

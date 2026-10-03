@@ -7,8 +7,9 @@
 //! 1. On first start, when `DIR/records.jsonl` is missing, it downloads the
 //!    Tranco list alone, keeps its best [`NodeConfig::sites`] sites, writes
 //!    the records file and builds a first index, which is searchable from
-//!    then on, a minute or two after starting. Right after, it downloads the
-//!    rest of the seed data, which takes many minutes: Wikidata's official
+//!    then on, a minute or two after starting. After its first crawl (2), it
+//!    downloads the rest of the seed data, which takes many minutes (half an
+//!    hour or more when Wikidata is busy): Wikidata's official
 //!    websites and, when [`NodeConfig::cc_release`] is set, the top rows of
 //!    Common Crawl's domain ranks. It keeps the best sites of all three,
 //!    replaces the quick records with them and swaps in a new index. Until
@@ -17,8 +18,11 @@
 //!    and the node keeps trying to get it (waiting as after other failures,
 //!    below) while it goes on with its work. Once Wikidata answers, its
 //!    official websites are added to the records and the index is rebuilt.
-//! 2. It then crawls [`NodeConfig::initial_crawl`] homepages, rebuilds the
-//!    index and swaps the new one in.
+//! 2. Right after the first index, it crawls [`NodeConfig::initial_crawl`]
+//!    homepages, rebuilds the index and swaps the new one in. This comes
+//!    before the rest of the seed data so that a node in the network has
+//!    crawls to share within minutes. A paused node gets the seed data
+//!    first.
 //! 3. Every [`NodeConfig::refresh_every`] it crawls
 //!    [`NodeConfig::crawl_per_refresh`] more homepages, rebuilds and swaps
 //!    again. As with `plumb crawl`, half of each round goes to sites never
@@ -53,6 +57,8 @@
 //!                            records.jsonl exists
 //!   indexes/000001/          a complete search index
 //!   indexes/000002/          ...the newest one that opens is searched
+//!   icons/3f/example.com.png site icons for results pages (see
+//!                            [`crate::icons`]); empty when a site had none
 //! ```
 //!
 //! The node owns the directory. The records and state files are replaced
@@ -130,6 +136,13 @@ pub struct NodeConfig {
     pub refresh_every: Option<Duration>,
     /// Homepages crawled per refresh.
     pub crawl_per_refresh: usize,
+    /// Homepages fetched at once under the custom workload (the panel's
+    /// presets set their own); `None` for the crawler's usual 16.
+    pub crawl_concurrency: Option<usize>,
+    /// During a long crawl, put an index of what was crawled so far in
+    /// service this often, so new sites show up in searches (and get
+    /// vectors) while the crawl goes on. The crawl then carries on.
+    pub index_during_crawl_every: Duration,
     /// Fetch homepages through the system proxy (`HTTP_PROXY`, `HTTPS_PROXY`
     /// or `ALL_PROXY`, except hosts in `NO_PROXY`), for machines that reach
     /// the internet only through one. Off by default: homepages are fetched
@@ -167,6 +180,11 @@ pub struct NodeConfig {
     /// Each index build also writes its buckets, which take about as much
     /// disk as the records file. Off by default.
     pub private_search: bool,
+    /// Also share the homepages crawled into this records file (with its
+    /// journal), such as one a `plumb crawl` is filling, and fold them into
+    /// this node's records: every half hour, those crawled since the last
+    /// time and within the last 6 days. Needs `network`.
+    pub publish_records: Option<PathBuf>,
     /// Share which result people open for a search, anonymously, so the
     /// network learns what is popular (see [`network`]). Needs `network`.
     /// Off by default.
@@ -183,15 +201,20 @@ pub struct NodeConfig {
 
 impl NodeConfig {
     /// Defaults for a server or homelab: 1,000,000 sites, 10,000 homepages
-    /// crawled at first and 5,000 more every 24 hours, on 127.0.0.1:8080.
+    /// crawled at first and 5,000 more every hour, on 127.0.0.1:8080. An
+    /// always-on machine crawls most of the day: 120,000 homepages, about
+    /// the eighth of the sites a node is assigned in the network each day
+    /// (plumb_net::assign), and a site is due again after 30 days anyway.
     pub fn server(data_dir: PathBuf) -> Self {
         NodeConfig {
             data_dir,
             bind: SocketAddr::from(([127, 0, 0, 1], 8080)),
             sites: 1_000_000,
             initial_crawl: 10_000,
-            refresh_every: Some(Duration::from_secs(24 * 60 * 60)),
+            refresh_every: Some(Duration::from_secs(60 * 60)),
             crawl_per_refresh: 5_000,
+            crawl_concurrency: None,
+            index_during_crawl_every: Duration::from_secs(15 * 60),
             use_system_proxy: false,
             cc_release: None,
             alpha: None,
@@ -204,6 +227,7 @@ impl NodeConfig {
             network: None,
             private_search: false,
             share_popularity: false,
+            publish_records: None,
             settings: NodeSettings::default(),
             manage_other_nodes: false,
         }
@@ -240,6 +264,9 @@ impl NodeConfig {
         }
         if self.share_popularity && self.network.is_none() {
             bail!("sharing popularity needs the network");
+        }
+        if self.publish_records.is_some() && self.network.is_none() {
+            bail!("publishing a records file needs the network");
         }
         if let Some(alpha) = self.alpha {
             if !(0.0..=1.0).contains(&alpha) {
@@ -297,6 +324,9 @@ pub struct SeedSources {
     /// [`NodeConfig::cc_release`]; when set, Common Crawl ranks are used
     /// even without a release.
     pub cc_ranks_url: Option<String>,
+    /// Where the embedding model's files are downloaded from, for search by
+    /// meaning: each of [`plumb_embed::MODEL_FILES`] is appended.
+    pub model_base_url: String,
 }
 
 impl Default for SeedSources {
@@ -307,6 +337,7 @@ impl Default for SeedSources {
             wikidata_min_sitelinks: 25,
             wikidata_pacing: download::WikidataPacing::default(),
             cc_ranks_url: None,
+            model_base_url: plumb_embed::MODEL_BASE_URL.to_string(),
         }
     }
 }
@@ -1493,6 +1524,10 @@ impl StatusSource for Inner {
 
     fn record_pick(&self, query: &str, domain: &str) {
         network::record_pick(self, query, domain);
+    }
+
+    fn icon(&self, domain: &str) -> Option<Vec<u8>> {
+        crate::icons::IconStore::new(&self.paths.icons).get(domain)
     }
 
     fn features(&self) -> features::FeatureSettings {

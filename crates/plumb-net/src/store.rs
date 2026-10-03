@@ -16,7 +16,9 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use libp2p::identity::PublicKey;
 use plumb_core::SiteRecord;
+use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
 use crate::agree::agree;
@@ -26,6 +28,29 @@ use crate::hash::Hash;
 
 /// Batches are kept for this many epochs.
 pub const RETAIN_EPOCHS: u64 = 35;
+
+/// How much one crawler sent, from the batches a node holds: whether a node
+/// is contributing, and how often. In `GET /api/status` as
+/// `network.crawlers`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CrawlerView {
+    pub peer_id: String,
+    /// This node itself.
+    #[serde(default)]
+    pub me: bool,
+    /// On this node's trust list ([`crate::NetConfig::trusted_peers`]).
+    #[serde(default)]
+    pub trusted: bool,
+    /// Homepages in its batches made in the last 24 hours.
+    pub homepages_last_day: u64,
+    /// Homepages in its batches made in the last 7 days.
+    pub homepages_last_week: u64,
+    /// Homepages in all its batches held.
+    pub homepages_held: u64,
+    pub batches_held: u64,
+    /// When its newest batch held was made, in Unix seconds.
+    pub last_batch_at: u64,
+}
 
 /// Where one crawler's newest record of a homepage is.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -123,19 +148,28 @@ impl BatchStore {
     }
 
     /// The proof of the newest crawled record held for `domain`.
-    pub fn proof(&self, domain: &str) -> Result<Option<RecordProof>> {
-        Ok(self.proofs(domain, 1)?.into_iter().next())
+    pub fn proof(&self, domain: &str, now: u64) -> Result<Option<RecordProof>> {
+        Ok(self.proofs(domain, 1, now)?.into_iter().next())
     }
 
     /// Up to `max` proofs of crawls of `domain` from different crawlers
     /// that agree with each other ([`agree`]): the newest crawl that others
     /// agree with, then those others, newest first. When no two agree, the
-    /// newest crawl alone.
-    pub fn proofs(&self, domain: &str, max: usize) -> Result<Vec<RecordProof>> {
+    /// newest crawl alone. Crawls from batches too old to check out at
+    /// `now` ([`SignedHeader::expired`]) are left out: one such proof would
+    /// make the searcher throw the whole answer away.
+    pub fn proofs(&self, domain: &str, max: usize, now: u64) -> Result<Vec<RecordProof>> {
         let Some(held) = self.crawls.get(domain) else {
             return Ok(Vec::new());
         };
-        let mut held: Vec<&Holding> = held.iter().collect();
+        let mut held: Vec<&Holding> = held
+            .iter()
+            .filter(|h| {
+                self.headers
+                    .get(&h.batch)
+                    .is_some_and(|header| !header.expired(now))
+            })
+            .collect();
         held.sort_by_key(|h| std::cmp::Reverse(h.created_at));
         let mut crawls: Vec<(SiteRecord, RecordProof)> = Vec::new();
         for holding in held {
@@ -179,6 +213,46 @@ impl BatchStore {
         headers.sort_by_key(|h| std::cmp::Reverse(h.header.created_at));
         headers.truncate(max);
         headers
+    }
+
+    /// What each crawler sent, from the headers of the batches held, the
+    /// most homepages in the last day first. `me` and `trusted` are left
+    /// for the caller.
+    pub fn crawlers(&self, now: u64) -> Vec<CrawlerView> {
+        const DAY: u64 = 24 * 60 * 60;
+        let mut by_key: HashMap<&[u8], CrawlerView> = HashMap::new();
+        for signed in self.headers.values() {
+            let h = &signed.header;
+            let view = by_key.entry(h.crawler.as_slice()).or_default();
+            let count = u64::from(h.count);
+            let age = now.saturating_sub(h.created_at);
+            if age < DAY {
+                view.homepages_last_day += count;
+            }
+            if age < 7 * DAY {
+                view.homepages_last_week += count;
+            }
+            view.homepages_held += count;
+            view.batches_held += 1;
+            view.last_batch_at = view.last_batch_at.max(h.created_at);
+        }
+        // Keys are decoded once per crawler, not once per batch.
+        let mut crawlers: Vec<CrawlerView> = by_key
+            .into_iter()
+            .filter_map(|(key, view)| {
+                let peer = PublicKey::try_decode_protobuf(key).ok()?.to_peer_id();
+                Some(CrawlerView {
+                    peer_id: peer.to_string(),
+                    ..view
+                })
+            })
+            .collect();
+        crawlers.sort_by(|a, b| {
+            (b.homepages_last_day, b.homepages_last_week, b.last_batch_at)
+                .cmp(&(a.homepages_last_day, a.homepages_last_week, a.last_batch_at))
+                .then_with(|| a.peer_id.cmp(&b.peer_id))
+        });
+        crawlers
     }
 
     /// The ids of the batches held, oldest first.
@@ -282,6 +356,7 @@ mod tests {
 
     use super::*;
     use crate::assign::{is_assigned, EPOCH_SECS, MAX_SHARE_PPM};
+    use crate::batch::MAX_BATCH_AGE_EPOCHS;
 
     #[test]
     fn batches_are_kept_across_reopening_proven_and_pruned() {
@@ -305,13 +380,67 @@ mod tests {
         drop(store);
         let mut store = BatchStore::open(dir.path()).unwrap();
         assert!(store.contains(&batch.id()));
-        let proof = store.proof(&domain).unwrap().unwrap();
+        let proof = store.proof(&domain, now).unwrap().unwrap();
         assert_eq!(proof.verify(now).unwrap().0.title.as_deref(), Some("Hello"));
 
         store.prune(now + (RETAIN_EPOCHS + 1) * EPOCH_SECS);
         assert!(store.is_empty());
-        assert!(store.proof(&domain).unwrap().is_none());
+        assert!(store.proof(&domain, now).unwrap().is_none());
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn crawlers_are_counted_by_day_and_week() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = 1_790_000_000;
+        let busy = Keypair::generate_ed25519();
+        let quiet = Keypair::generate_ed25519();
+        let batch = |key: &Keypair, n: usize, at: u64| {
+            let records: Vec<SiteRecord> = (0..n)
+                .map(|i| {
+                    let mut record = SiteRecord::new(format!("s{i}-{at}.com").as_str());
+                    record.crawled_at = Some(at);
+                    record
+                })
+                .collect();
+            Batch::sign(key, &records, epoch_of(at), MAX_SHARE_PPM, at)
+                .unwrap()
+                .unwrap()
+        };
+        let mut store = BatchStore::open(dir.path()).unwrap();
+        store.insert(&batch(&busy, 3, now - 60)).unwrap();
+        store
+            .insert(&batch(&busy, 2, now - 3 * EPOCH_SECS))
+            .unwrap();
+        store
+            .insert(&batch(&quiet, 4, now - 10 * EPOCH_SECS))
+            .unwrap();
+
+        let crawlers = store.crawlers(now);
+        assert_eq!(crawlers.len(), 2);
+        let first = &crawlers[0];
+        assert_eq!(first.peer_id, busy.public().to_peer_id().to_string());
+        assert_eq!(
+            (
+                first.homepages_last_day,
+                first.homepages_last_week,
+                first.homepages_held,
+                first.batches_held,
+                first.last_batch_at
+            ),
+            (3, 5, 5, 2, now - 60)
+        );
+        let second = &crawlers[1];
+        assert_eq!(second.peer_id, quiet.public().to_peer_id().to_string());
+        assert_eq!(
+            (
+                second.homepages_last_day,
+                second.homepages_last_week,
+                second.homepages_held
+            ),
+            (0, 0, 4)
+        );
+        assert!(!first.me && !first.trusted);
     }
 
     #[test]
@@ -332,7 +461,7 @@ mod tests {
         let mut store = BatchStore::open(dir.path()).unwrap();
         store.insert(&batch).unwrap();
         assert!(store.contains(&batch.id()));
-        assert!(store.proof(&domain).unwrap().is_none());
+        assert!(store.proof(&domain, now).unwrap().is_none());
     }
 
     #[test]
@@ -363,17 +492,42 @@ mod tests {
                 .unwrap();
             store.insert(&batch).unwrap();
         }
-        let proofs = store.proofs(&domain, 2).unwrap();
+        let proofs = store.proofs(&domain, 2, now).unwrap();
         let titles: Vec<String> = proofs
             .iter()
             .map(|p| p.verify(now).unwrap().0.title.unwrap())
             .collect();
         assert_eq!(titles, ["Hello there!", "Hello there"]);
         // Just one asked for: the newest crawl.
-        let one = store.proof(&domain).unwrap().unwrap();
+        let one = store.proof(&domain, now).unwrap().unwrap();
         assert_eq!(
             one.verify(now).unwrap().0.title.as_deref(),
             Some("Buy pills")
         );
+    }
+
+    #[test]
+    fn crawls_too_old_to_prove_are_not_offered_as_proofs() {
+        let dir = tempfile::tempdir().unwrap();
+        let made = 1_790_000_000;
+        let key = Keypair::generate_ed25519();
+        let peer = key.public().to_peer_id();
+        let domain = (0..)
+            .map(|i| format!("s{i}.com"))
+            .find(|d| is_assigned(epoch_of(made), &peer, d, MAX_SHARE_PPM))
+            .unwrap();
+        let mut record = SiteRecord::new(domain.as_str());
+        record.crawled_at = Some(made - 5);
+        let batch = Batch::sign(&key, &[record], epoch_of(made), MAX_SHARE_PPM, made)
+            .unwrap()
+            .unwrap();
+        let mut store = BatchStore::open(dir.path()).unwrap();
+        store.insert(&batch).unwrap();
+        let week = made + MAX_BATCH_AGE_EPOCHS * EPOCH_SECS;
+        let proof = store.proof(&domain, week).unwrap().unwrap();
+        assert!(proof.verify(week).is_ok());
+        let later = week + EPOCH_SECS;
+        assert!(store.proof(&domain, later).unwrap().is_none());
+        assert!(store.contains(&batch.id()));
     }
 }

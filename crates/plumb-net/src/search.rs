@@ -35,7 +35,8 @@ use tracing::{debug, warn};
 
 use crate::agree::{agree, QUORUM};
 use crate::batch::MAX_RECORD_BYTES;
-use crate::bucket::{matches, search_buckets};
+use crate::bucket::{bucket_of, matches, search_buckets, BUCKETS, BUCKETS_PER_SEARCH};
+use crate::cache::BucketCache;
 use crate::credits::Wallet;
 use crate::oblivious::{
     open_response, seal_request, seal_request_sized, ObliviousRequest, ObliviousResponse,
@@ -77,6 +78,10 @@ pub struct NetSearch {
     pub busy: usize,
     #[serde(default)]
     pub priority: usize,
+    /// The query's buckets answered from this node's own copies of ones it
+    /// fetched lately, without asking the network (see [`crate::cache`]).
+    #[serde(default)]
+    pub cached: usize,
     /// The sites that match the query, unranked.
     pub found: Vec<FoundSite>,
 }
@@ -131,15 +136,39 @@ pub async fn search(
     wait: Duration,
     now: u64,
     wallet: Option<&Mutex<Wallet>>,
+    cache: Option<&BucketCache>,
 ) -> NetSearch {
-    let (buckets, keys) = search_buckets(query);
-    let mut out = NetSearch {
-        buckets: buckets.len(),
-        ..NetSearch::default()
-    };
-    if peers.is_empty() {
-        return out;
+    let (mut buckets, keys) = search_buckets(query);
+    let mut out = NetSearch::default();
+    // The query's own buckets this node fetched lately are used as they
+    // are; only the rest are asked for, padded again to as many buckets as
+    // every search asks for, so a search answered partly from here looks
+    // like any other.
+    let mut kept: Vec<Vec<crate::proto::BucketRecord>> = Vec::new();
+    if let Some(cache) = cache {
+        let mut real: Vec<u32> = keys.iter().map(|k| bucket_of(k)).collect();
+        real.sort_unstable();
+        real.dedup();
+        let mut missing = Vec::new();
+        for bucket in real {
+            // A kept bucket with nothing for this query is asked for again:
+            // the sites may have been crawled since.
+            match cache.get(bucket, now) {
+                Some(answers) if answers.iter().any(|a| holds_match(a, &keys)) => {
+                    out.cached += 1;
+                    kept.extend(answers);
+                }
+                _ => missing.push(bucket),
+            }
+        }
+        buckets = if missing.is_empty() {
+            Vec::new()
+        } else {
+            pad_buckets(missing)
+        };
     }
+    out.buckets = buckets.len();
+    let peers = if buckets.is_empty() { &[][..] } else { peers };
     // Spread the buckets over the nodes so that no node gets two buckets
     // of one search while others get none.
     let mut order: Vec<usize> = (0..peers.len()).collect();
@@ -147,6 +176,9 @@ pub async fn search(
     let mut next = 0;
     let mut requests = Vec::new();
     for &bucket in &buckets {
+        if peers.is_empty() {
+            break;
+        }
         let mut chosen = Vec::new();
         for _ in 0..NODES_PER_BUCKET.min(peers.len()) {
             let peer = &peers[order[next % order.len()]];
@@ -186,31 +218,50 @@ pub async fn search(
     let answers = futures::future::join_all(routed.into_iter().map(
         |(bucket, target, through)| async move {
             let deadline = tokio::time::Instant::now() + wait;
-            let (response, relayed) =
-                ask_bucket(&target, &through, BucketRequest::new(bucket), deadline, now).await?;
-            if !response.busy {
-                return Ok((response, relayed, false));
-            }
-            let token = wallet.and_then(|w| {
-                w.lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .take(&target.peer)
-            });
-            let Some(token) = token else {
-                return Ok((response, relayed, false));
+            let answer = async {
+                let (response, relayed) =
+                    ask_bucket(&target, &through, BucketRequest::new(bucket), deadline, now)
+                        .await?;
+                if !response.busy {
+                    return Ok((response, relayed, false));
+                }
+                let token = wallet.and_then(|w| {
+                    w.lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .take(&target.peer)
+                });
+                let Some(token) = token else {
+                    return Ok((response, relayed, false));
+                };
+                let paid = BucketRequest {
+                    bucket,
+                    token: Some(token),
+                };
+                let (response, relayed) =
+                    ask_bucket(&target, &through, paid, deadline, now).await?;
+                Ok::<_, anyhow::Error>((response, relayed, true))
             };
-            let paid = BucketRequest {
-                bucket,
-                token: Some(token),
-            };
-            let (response, relayed) = ask_bucket(&target, &through, paid, deadline, now).await?;
-            Ok::<_, anyhow::Error>((response, relayed, true))
+            (bucket, answer.await)
         },
     ))
     .await;
 
     let mut merged: HashMap<String, FoundSite> = HashMap::new();
-    for answer in answers {
+    let mut add = |checked: Vec<FoundSite>| {
+        for site in checked {
+            if !matches(&site.record, &keys) {
+                continue;
+            }
+            match merged.get_mut(&site.record.domain) {
+                Some(existing) => merge_site(existing, site),
+                None => {
+                    merged.insert(site.record.domain.clone(), site);
+                }
+            }
+        }
+    };
+    let mut fetched: HashMap<u32, Vec<Vec<crate::proto::BucketRecord>>> = HashMap::new();
+    for (bucket, answer) in answers {
         let (response, relayed, paid) = match answer {
             Ok(response) => response,
             Err(err) => {
@@ -232,26 +283,53 @@ pub async fn search(
         if relayed {
             out.relayed += 1;
         }
+        let keep = cache.is_some().then(|| records.clone());
         let Some(checked) = check_answer(records, now) else {
             out.rejected += 1;
             continue;
         };
-        for site in checked {
-            if !matches(&site.record, &keys) {
-                continue;
-            }
-            match merged.get_mut(&site.record.domain) {
-                Some(existing) => merge_site(existing, site),
-                None => {
-                    merged.insert(site.record.domain.clone(), site);
-                }
-            }
+        if let Some(records) = keep {
+            fetched.entry(bucket).or_default().push(records);
+        }
+        add(checked);
+    }
+    // Kept answers are checked again: a proof may have expired since.
+    for records in kept {
+        if let Some(checked) = check_answer(records, now) {
+            add(checked);
+        }
+    }
+    if let Some(cache) = cache {
+        for (bucket, answers) in fetched {
+            cache.put(bucket, answers, now);
         }
     }
     let mut found: Vec<FoundSite> = merged.into_values().collect();
     found.sort_by(|a, b| a.record.domain.cmp(&b.record.domain));
     out.found = found;
     out
+}
+
+/// Whether `records` hold a site that matches one of `keys`.
+fn holds_match(records: &[crate::proto::BucketRecord], keys: &[String]) -> bool {
+    records.iter().any(|item| {
+        serde_json::from_str::<SiteRecord>(&item.record).is_ok_and(|r| matches(&r, keys))
+    })
+}
+
+/// `buckets` (the query's own) and random ones to make up
+/// [`BUCKETS_PER_SEARCH`], in random order, as [`search_buckets`] picks them.
+fn pad_buckets(mut buckets: Vec<u32>) -> Vec<u32> {
+    let mut rng = rand_core::OsRng;
+    buckets.truncate(BUCKETS_PER_SEARCH);
+    while buckets.len() < BUCKETS_PER_SEARCH {
+        let bucket = (rng.next_u64() % u64::from(BUCKETS)) as u32;
+        if !buckets.contains(&bucket) {
+            buckets.push(bucket);
+        }
+    }
+    shuffle(&mut buckets);
+    buckets
 }
 
 /// Asks `target` for a bucket: through one of `through` (relays, tried in
@@ -317,13 +395,21 @@ fn check_answer(records: Vec<crate::proto::BucketRecord>, now: u64) -> Option<Ve
             crawlers: Vec::new(),
             confirmed: false,
         };
-        if let Some(proof) = &item.proof {
+        // A proof only too old to check out says nothing either way (nodes
+        // hold crawls longer than proofs last), so the site is just not
+        // verified; any other bad proof means the answer is not to be trusted.
+        if let Some(proof) = item.proof.as_ref().filter(|p| !p.header.expired(now)) {
             match proof.verify(now) {
                 Ok((signed, crawler)) if signed.domain == site.record.domain => {
                     // Other crawlers' proofs must check out too, and count
                     // only when they agree with the first.
                     let mut agreeing = Vec::new();
-                    for other in item.also.iter().take(MAX_EXTRA_PROOFS) {
+                    for other in item
+                        .also
+                        .iter()
+                        .filter(|p| !p.header.expired(now))
+                        .take(MAX_EXTRA_PROOFS)
+                    {
                         match other.verify(now) {
                             Ok((theirs, by)) if theirs.domain == signed.domain => {
                                 if agree(&signed, &theirs) {
@@ -627,7 +713,7 @@ mod tests {
     use libp2p::identity::Keypair;
 
     use super::*;
-    use crate::assign::{epoch_of, is_assigned, MAX_SHARE_PPM};
+    use crate::assign::{epoch_of, is_assigned, EPOCH_SECS, MAX_SHARE_PPM};
     use crate::batch::Batch;
     use crate::proto::BucketRecord;
 
@@ -803,5 +889,32 @@ mod tests {
             also: vec![forged],
         };
         assert!(check_answer(vec![forged], now).is_none());
+    }
+
+    #[test]
+    fn a_proof_too_old_to_check_leaves_the_site_unverified_not_the_answer_dropped() {
+        let made = 1_790_000_000;
+        let now = made + 10 * EPOCH_SECS;
+        let keys = [Keypair::generate_ed25519(), Keypair::generate_ed25519()];
+        let batches = crawls_by(&keys, &["Real Bank", "Real Bank!"], made);
+        let shown = batches[0].records[0].clone();
+        let old = BucketRecord {
+            record: shown.clone(),
+            proof: Some(batches[0].proof(0)),
+            also: vec![batches[1].proof(0)],
+        };
+        let checked = check_answer(vec![old, item(&SiteRecord::new("other.com"))], now).unwrap();
+        assert_eq!(checked.len(), 2);
+        assert!(!checked[0].verified && !checked[0].confirmed);
+
+        // A fresh proof with an old second one still counts on its own.
+        let fresh = crawls_by(&keys[..1], &["Real Bank"], now);
+        let mixed = BucketRecord {
+            record: fresh[0].records[0].clone(),
+            proof: Some(fresh[0].proof(0)),
+            also: vec![batches[1].proof(0)],
+        };
+        let checked = check_answer(vec![mixed], now).unwrap();
+        assert!(checked[0].verified && !checked[0].confirmed);
     }
 }
