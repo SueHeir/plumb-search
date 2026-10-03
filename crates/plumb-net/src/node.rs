@@ -2578,17 +2578,26 @@ fn refusal(peer: PeerId, answer: Result<CreditResponse>) -> anyhow::Error {
 fn lookup(source: &dyn BucketSource, store: &Mutex<BatchStore>, bucket: u32) -> BucketResponse {
     let records = source.bucket(bucket).map(|lines| {
         let now = now_unix();
-        let store = store.lock().unwrap_or_else(PoisonError::into_inner);
+        // Where each site's proofs are is in memory; the batches are read
+        // after the lock is let go, so gossip and fetches aren't held up.
+        let (sources, mut reader) = {
+            let store = store.lock().unwrap_or_else(PoisonError::into_inner);
+            let sources: Vec<Vec<(Hash, usize)>> = lines
+                .iter()
+                .map(|record| {
+                    serde_json::from_str::<SiteRecord>(record)
+                        .map(|r| store.proof_sources(&r.domain, now))
+                        .unwrap_or_default()
+                })
+                .collect();
+            (sources, store.reader())
+        };
         lines
             .into_iter()
-            .map(|record| {
-                let mut proofs = serde_json::from_str::<SiteRecord>(&record)
-                    .ok()
-                    .map(|r| {
-                        store
-                            .proofs(&r.domain, 1 + MAX_EXTRA_PROOFS, now)
-                            .unwrap_or_default()
-                    })
+            .zip(sources)
+            .map(|(record, sources)| {
+                let mut proofs = reader
+                    .proofs(&sources, 1 + MAX_EXTRA_PROOFS)
                     .unwrap_or_default()
                     .into_iter();
                 let proof = proofs.next();

@@ -62,6 +62,74 @@ struct Holding {
     crawler: Vec<u8>,
 }
 
+/// Reads batches of a [`BatchStore`] to prove records, keeping the last
+/// few read with their leaf hashes: the sites of one bucket often come from
+/// the same batches. A batch deleted meanwhile is just not there.
+#[derive(Debug)]
+pub struct BatchReader {
+    dir: PathBuf,
+    cache: HashMap<Hash, Option<(Batch, Vec<Hash>)>>,
+}
+
+/// Batches a [`BatchReader`] keeps read at once.
+const READER_CACHE: usize = 16;
+
+impl BatchReader {
+    /// The proof of record `index` of batch `id`, if held.
+    pub fn proof(&mut self, id: &Hash, index: usize) -> Result<Option<RecordProof>> {
+        if !self.cache.contains_key(id) {
+            if self.cache.len() >= READER_CACHE {
+                self.cache.clear();
+            }
+            let read = match read_batch(&self.dir.join(format!("{id}.json"))) {
+                Ok(batch) => {
+                    let leaves = batch.leaf_hashes();
+                    Some((batch, leaves))
+                }
+                Err(err) if is_not_found(&err) => None,
+                Err(err) => return Err(err),
+            };
+            self.cache.insert(*id, read);
+        }
+        Ok(self.cache[id]
+            .as_ref()
+            .filter(|(batch, _)| index < batch.records.len())
+            .map(|(batch, leaves)| batch.proof_with(index, leaves)))
+    }
+
+    /// [`BatchStore::proofs`] from the `sources` [`BatchStore::proof_sources`]
+    /// gave.
+    pub fn proofs(&mut self, sources: &[(Hash, usize)], max: usize) -> Result<Vec<RecordProof>> {
+        let mut crawls: Vec<(SiteRecord, RecordProof)> = Vec::new();
+        for (id, index) in sources {
+            let Some(proof) = self.proof(id, *index)? else {
+                continue;
+            };
+            if let Ok(record) = serde_json::from_str::<SiteRecord>(&proof.record) {
+                crawls.push((record, proof));
+            }
+        }
+        let group = |i: usize| -> Vec<usize> {
+            std::iter::once(i)
+                .chain((0..crawls.len()).filter(|&j| j != i && agree(&crawls[i].0, &crawls[j].0)))
+                .take(max)
+                .collect()
+        };
+        let best = (0..crawls.len())
+            .map(group)
+            .find(|g| g.len() >= max.min(2))
+            .or_else(|| (!crawls.is_empty()).then(|| vec![0]));
+        let Some(best) = best else {
+            return Ok(Vec::new());
+        };
+        Ok(best
+            .into_iter()
+            .map(|i| crawls[i].1.clone())
+            .take(max)
+            .collect())
+    }
+}
+
 #[derive(Debug)]
 pub struct BatchStore {
     dir: PathBuf,
@@ -159,8 +227,16 @@ impl BatchStore {
     /// `now` ([`SignedHeader::expired`]) are left out: one such proof would
     /// make the searcher throw the whole answer away.
     pub fn proofs(&self, domain: &str, max: usize, now: u64) -> Result<Vec<RecordProof>> {
+        self.reader().proofs(&self.proof_sources(domain, now), max)
+    }
+
+    /// Where the crawls of `domain` that [`BatchStore::proofs`] picks from
+    /// are: (batch, record index), newest first. Cheap, from memory; the
+    /// batches are read with a [`BatchReader`], which needs no lock on the
+    /// store.
+    pub fn proof_sources(&self, domain: &str, now: u64) -> Vec<(Hash, usize)> {
         let Some(held) = self.crawls.get(domain) else {
-            return Ok(Vec::new());
+            return Vec::new();
         };
         let mut held: Vec<&Holding> = held
             .iter()
@@ -171,34 +247,15 @@ impl BatchStore {
             })
             .collect();
         held.sort_by_key(|h| std::cmp::Reverse(h.created_at));
-        let mut crawls: Vec<(SiteRecord, RecordProof)> = Vec::new();
-        for holding in held {
-            let Some(batch) = self.get(&holding.batch)? else {
-                continue;
-            };
-            let proof = batch.proof(holding.index);
-            if let Ok(record) = serde_json::from_str::<SiteRecord>(&proof.record) {
-                crawls.push((record, proof));
-            }
+        held.into_iter().map(|h| (h.batch, h.index)).collect()
+    }
+
+    /// Reads held batches from disk for proofs.
+    pub fn reader(&self) -> BatchReader {
+        BatchReader {
+            dir: self.dir.clone(),
+            cache: HashMap::new(),
         }
-        let group = |i: usize| -> Vec<usize> {
-            std::iter::once(i)
-                .chain((0..crawls.len()).filter(|&j| j != i && agree(&crawls[i].0, &crawls[j].0)))
-                .take(max)
-                .collect()
-        };
-        let best = (0..crawls.len())
-            .map(group)
-            .find(|g| g.len() >= max.min(2))
-            .or_else(|| (!crawls.is_empty()).then(|| vec![0]));
-        let Some(best) = best else {
-            return Ok(Vec::new());
-        };
-        Ok(best
-            .into_iter()
-            .map(|i| crawls[i].1.clone())
-            .take(max)
-            .collect())
     }
 
     /// The headers of the batches held from `epoch` on, newest first, at
@@ -274,7 +331,7 @@ impl BatchStore {
     /// Deletes batches older than `epochs` days before `now`.
     pub fn prune_keeping(&mut self, now: u64, epochs: u64) {
         let oldest = epoch_of(now).saturating_sub(epochs);
-        let old: Vec<Hash> = self
+        let old: HashSet<Hash> = self
             .headers
             .iter()
             .filter(|(_, header)| header.header.epoch < oldest)
