@@ -70,6 +70,7 @@ use url::Url;
 
 use crate::cli::ServeArgs;
 use crate::country::{country_name, HomeCountry, COUNTRY_CHOICES};
+use crate::meaning::{MeaningIndex, SharedMeaning};
 use crate::node::{NodeSettings, Phase, Status, Step};
 use crate::websearch::{bang_url, Engine, WebSettings};
 
@@ -133,11 +134,43 @@ pub trait SearchBackend: Send + Sync {
 pub struct IndexBackend {
     searcher: Searcher,
     rank: RankConfig,
+    meaning: SharedMeaning,
 }
 
 impl IndexBackend {
     pub fn new(searcher: Searcher, rank: RankConfig) -> Self {
-        IndexBackend { searcher, rank }
+        IndexBackend {
+            searcher,
+            rank,
+            meaning: SharedMeaning::default(),
+        }
+    }
+
+    /// Also ranks by meaning, for queries that name no site, once
+    /// `meaning` holds a model and vectors.
+    pub fn with_meaning(mut self, meaning: SharedMeaning) -> Self {
+        self.meaning = meaning;
+        self
+    }
+
+    /// [`SearchBackend::search_full`], ranking by `meaning` too when given.
+    pub fn search_full_with(
+        &self,
+        query: &str,
+        limit: usize,
+        options: &SearchOptions,
+        meaning: Option<&MeaningIndex>,
+    ) -> Result<SearchResults> {
+        let query_meaning = meaning.and_then(|meaning| meaning.query(query));
+        self.searcher.search_meaning(
+            query,
+            limit,
+            &self.rank,
+            options,
+            query_meaning
+                .as_ref()
+                .map(|m| m as &dyn plumb_index::Meaning),
+        )
     }
 }
 
@@ -152,7 +185,8 @@ impl SearchBackend for IndexBackend {
         limit: usize,
         options: &SearchOptions,
     ) -> Result<SearchResults> {
-        self.searcher.search_full(query, limit, &self.rank, options)
+        let meaning = self.meaning.get();
+        self.search_full_with(query, limit, options, meaning.as_deref())
     }
 
     fn num_docs(&self) -> u64 {
@@ -289,8 +323,9 @@ pub fn run(args: ServeArgs) -> Result<()> {
     let searcher = Searcher::open(&args.index)
         .with_context(|| format!("opening the index in {}", args.index.display()))?;
     let docs = searcher.num_docs();
+    let meaning = SharedMeaning::new(MeaningIndex::from_args(&args.meaning)?);
     let app = router_with(
-        Arc::new(IndexBackend::new(searcher, rank_config(args.alpha))),
+        Arc::new(IndexBackend::new(searcher, rank_config(args.alpha)).with_meaning(meaning)),
         WebSettings {
             home: args.country.clone(),
             web_search: args.web_search.0,
@@ -707,6 +742,12 @@ pub struct NetworkResults {
     /// Requests sent, each to one node under its own throwaway identity.
     pub asked: usize,
     pub answered: usize,
+    /// Answered sealed through another node, so the node answering never
+    /// saw this node's IP address.
+    pub relayed: usize,
+    /// Sent straight to the node answering, because no other node could
+    /// relay; that node saw this node's IP address.
+    pub direct: usize,
     /// Answers dropped because a proof in them did not check out.
     pub rejected: usize,
     pub hits: Vec<NetworkResult>,
@@ -758,6 +799,8 @@ fn rank_found(
         buckets: found.buckets,
         asked: found.asked,
         answered: found.answered,
+        relayed: found.relayed,
+        direct: found.direct,
         rejected: found.rejected,
         hits: Vec::new(),
     };
@@ -1462,11 +1505,24 @@ fn render_network(query: &str, results: &NetworkResults) -> String {
     let _ = writeln!(
         body,
         "<p class=\"s\">From the Plumb network, without sending your search: {} buckets of \
-         sites asked of other nodes under throwaway identities, {} of {} requests answered{}. \
+         sites asked of other nodes under throwaway identities, {} of {} requests answered{}{}. \
          Ranked on this node.</p>",
         results.buckets,
         results.answered,
         results.asked,
+        if results.direct > 0 {
+            format!(
+                "; {} sent straight to a node, which saw this node's address, because no \
+                 other node could pass them on",
+                results.direct
+            )
+        } else if results.asked > 0 {
+            "; each through another node, so the node answering never saw this node's \
+             address"
+                .to_string()
+        } else {
+            String::new()
+        },
         if results.rejected > 0 {
             format!(
                 "; {} answers were dropped because their proofs did not check out",
@@ -2619,6 +2675,8 @@ mod tests {
             buckets: 4,
             asked: 8,
             answered: 6,
+            relayed: 6,
+            direct: 0,
             rejected: 0,
             hits: hits.into_iter().map(from_network).collect(),
         })

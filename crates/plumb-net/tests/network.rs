@@ -1,4 +1,5 @@
-//! Several nodes on this machine: crawl batches spread from one to all,
+//! Several nodes on this machine: crawl batches spread from one to all and
+//! count once two crawlers agree,
 //! a network search is answered with proofs, a node behind a relay is
 //! reachable through it, and a late node catches up.
 
@@ -85,12 +86,17 @@ async fn wait_for<T>(mut check: impl FnMut() -> Option<T>) -> T {
     panic!("gave up waiting");
 }
 
-/// A crawled homepage `peer` is assigned today, whose title contains `word`.
-fn crawled_for(peer: &PeerId, word: &str) -> SiteRecord {
+/// A crawled homepage all of `peers` are assigned today, whose title
+/// contains `word`.
+fn crawled_for(peers: &[PeerId], word: &str) -> SiteRecord {
     let now = now_unix();
     let domain = (0..)
         .map(|i| format!("{word}{i}.com"))
-        .find(|d| is_assigned(epoch_of(now), peer, d, MAX_SHARE_PPM))
+        .find(|d| {
+            peers
+                .iter()
+                .all(|peer| is_assigned(epoch_of(now), peer, d, MAX_SHARE_PPM))
+        })
         .unwrap();
     let mut record = SiteRecord::new(domain.as_str());
     record.url = Some(format!("https://{domain}/"));
@@ -106,30 +112,43 @@ async fn nodes_share_batches_search_each_other_and_reach_through_a_relay() {
         .with_test_writer()
         .try_init();
 
-    let relay = Node::start(true, vec![], vec![]).await;
+    let mut relay = Node::start(true, vec![], vec![]).await;
     let relay_addr = relay.addr().await;
 
-    // A crawls and publishes; B hears of it.
-    let a_dir_records = |peer: &PeerId| vec![crawled_for(peer, "harbor")];
+    // A crawls and publishes; B hears of it but holds it until a second
+    // crawler, the relay, publishes the same. (Another node would do, but
+    // every extra node spends the relay's per-address circuit budget, which
+    // all of these share on 127.0.0.1.)
     let a = Node::start(false, vec![relay_addr.clone()], vec![]).await;
     let mut b = Node::start(false, vec![relay_addr.clone()], vec![]).await;
-    wait_for(|| (a.handle.status().connected_peers >= 1).then_some(())).await;
-    wait_for(|| (b.handle.status().connected_peers >= 1).then_some(())).await;
+    for node in [&a, &b] {
+        wait_for(|| (node.handle.status().connected_peers >= 1).then_some(())).await;
+    }
     // Gossip needs the mesh to form before a publish reaches anyone; a
     // header published too early is announced again once a node subscribes.
-    let published = a_dir_records(&a.handle.peer_id());
+    let published = vec![crawled_for(
+        &[a.handle.peer_id(), relay.handle.peer_id()],
+        "harbor",
+    )];
     let id = a.handle.publish(published.clone()).await.unwrap().unwrap();
+    wait_for(|| (b.handle.status().agreement.pending_sites == 1).then_some(())).await;
+    assert!(b.records.try_recv().is_err(), "one crawler is not enough");
+    let mut again = published.clone();
+    again[0].title = Some(format!("{}!", again[0].title.as_deref().unwrap()));
+    wait_for(|| (relay.handle.status().agreement.pending_sites == 1).then_some(())).await;
+    assert!(
+        relay.records.try_recv().is_err(),
+        "one crawler is not enough"
+    );
+    relay.handle.publish(again).await.unwrap().unwrap();
     let got = b.next_records().await;
     assert_eq!(got.len(), 1);
     assert_eq!(got[0].domain, published[0].domain);
-    assert_eq!(got[0].title, published[0].title);
-    // The relay keeps and passes on batches too.
-    let relay_got = {
-        let mut relay = relay;
-        let records = relay.next_records().await;
-        assert_eq!(records[0].domain, published[0].domain);
-        relay
-    };
+    assert_eq!(got[0].title.as_deref(), Some("The harbor site!"));
+    assert_eq!(b.handle.status().agreement.confirmed_sites, 1);
+    // The relay's own crawl confirmed A's; what that confirms it already has.
+    assert_eq!(relay.handle.status().agreement.confirmed_sites, 1);
+    let relay_got = relay;
     assert!(b.handle.status().batches_held >= 1, "{id}");
 
     // C answers searches from an index holding A's crawl, with a proof
@@ -159,11 +178,15 @@ async fn nodes_share_batches_search_each_other_and_reach_through_a_relay() {
     let hit = &result.found[0];
     assert_eq!(hit.record.domain, published[0].domain);
     assert_eq!(result.buckets, plumb_net::bucket::BUCKETS_PER_SEARCH);
-    assert_eq!(
-        hit.crawler.as_deref(),
-        Some(a.handle.peer_id().to_string().as_str())
-    );
+    let crawlers = [
+        a.handle.peer_id().to_string(),
+        relay_got.handle.peer_id().to_string(),
+    ];
+    assert!(crawlers.iter().any(|c| hit.crawler.as_deref() == Some(c)));
     assert_eq!(result.rejected, 0);
+    // With other nodes to relay, every request went through one.
+    assert_eq!(result.direct, 0, "{result:?}");
+    assert_eq!(result.relayed, result.answered, "{result:?}");
 
     // C is behind the relay: it holds a reservation, and a node that only
     // knows the relay's address reaches C through it. That includes a
@@ -177,6 +200,7 @@ async fn nodes_share_batches_search_each_other_and_reach_through_a_relay() {
     let peer = plumb_net::search::BucketPeer {
         peer: c.handle.peer_id(),
         addrs: vec![circuit.clone()],
+        oblivious: true,
     };
     let bucket = plumb_net::bucket::bucket_of("harbor");
     let served_before = c.handle.status().buckets_served;
@@ -254,6 +278,83 @@ async fn nodes_share_batches_search_each_other_and_reach_through_a_relay() {
     );
 
     for node in [a, b, c, d, e, f, relay_got] {
+        node.handle.shutdown().await;
+    }
+}
+
+/// A search goes through a relay: the node answering gets a sealed request
+/// from the relay, the relay hands everyone the same key for it, and
+/// cannot pass off a key of its own.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn bucket_requests_go_sealed_through_a_relay() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("plumb_net=debug")
+        .with_test_writer()
+        .try_init();
+
+    let relay = Node::start(true, vec![], vec![]).await;
+    let relay_addr = relay.addr().await;
+    // The crawler publishes a signed crawl; the holder catches up on it
+    // and answers from an index holding it, as C does above.
+    let crawler = Node::start(false, vec![relay_addr.clone()], vec![]).await;
+    let records = vec![crawled_for(&[crawler.handle.peer_id()], "lantern")];
+    crawler
+        .handle
+        .publish(records.clone())
+        .await
+        .unwrap()
+        .unwrap();
+    let holder = Node::start(false, vec![relay_addr.clone()], records.clone()).await;
+    // Its proof comes from the batch, held whether or not a second
+    // crawler has agreed yet.
+    wait_for(|| (holder.handle.status().batches_held >= 1).then_some(())).await;
+    let asker = Node::start(false, vec![relay_addr.clone()], vec![]).await;
+    wait_for(|| (asker.handle.status().connected_peers >= 3).then_some(())).await;
+
+    // The relay hands out the holder's own key, the same one each time.
+    let target = holder.handle.peer_id();
+    let own = holder.handle.oblivious_keys(target).await.unwrap().unwrap();
+    let mut via_relay = None;
+    for _ in 0..50 {
+        via_relay = relay.handle.oblivious_keys(target).await.unwrap();
+        if via_relay.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let via_relay = via_relay.expect("the relay fetches the key");
+    assert_eq!(via_relay, own);
+    assert_eq!(
+        relay.handle.oblivious_keys(target).await.unwrap().unwrap(),
+        own
+    );
+
+    let served_before = holder.handle.status().buckets_served;
+    let mut result = None;
+    for _ in 0..50 {
+        let found = asker
+            .handle
+            .search("lantern", Duration::from_secs(5))
+            .await
+            .unwrap();
+        if found.found.iter().any(|f| f.verified) {
+            result = Some(found);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let result = result.expect("a verified hit through a relay");
+    assert_eq!(result.found[0].record.domain, records[0].domain);
+    assert_eq!(result.direct, 0, "{result:?}");
+    assert_eq!(result.relayed, result.answered, "{result:?}");
+    assert!(holder.handle.status().buckets_served > served_before);
+    let relayed: u64 = [&relay, &crawler, &holder]
+        .iter()
+        .map(|n| n.handle.status().requests_relayed)
+        .sum();
+    assert!(relayed >= result.answered as u64, "{relayed} {result:?}");
+
+    for node in [relay, crawler, holder, asker] {
         node.handle.shutdown().await;
     }
 }

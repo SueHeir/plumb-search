@@ -930,20 +930,29 @@ async fn a_node_in_the_network_takes_in_other_nodes_crawls_and_searches_them() {
         .unwrap();
     assert!(dir.path().join("net/node.key").is_file());
 
-    // Another node crawled a site this one has never heard of.
+    // Two other nodes crawled a site this one has never heard of.
     let peer_dir = tempfile::tempdir().unwrap();
-    let key = plumb_net::load_or_create_key(&peer_dir.path().join("node.key")).unwrap();
-    let peer_id = key.public().to_peer_id();
+    let second_dir = tempfile::tempdir().unwrap();
+    let peer_id = plumb_net::load_or_create_key(&peer_dir.path().join("node.key"))
+        .unwrap()
+        .public()
+        .to_peer_id();
+    let second_id = plumb_net::load_or_create_key(&second_dir.path().join("node.key"))
+        .unwrap()
+        .public()
+        .to_peer_id();
     let now = now_unix();
     let domain = (0..)
         .map(|i| format!("lighthouse-keepers-{i}.org"))
         .find(|d| {
-            plumb_net::assign::is_assigned(
-                plumb_net::assign::epoch_of(now),
-                &peer_id,
-                d,
-                plumb_net::assign::MAX_SHARE_PPM,
-            )
+            [peer_id, second_id].iter().all(|p| {
+                plumb_net::assign::is_assigned(
+                    plumb_net::assign::epoch_of(now),
+                    p,
+                    d,
+                    plumb_net::assign::MAX_SHARE_PPM,
+                )
+            })
         })
         .unwrap();
     let mut crawled = SiteRecord::new(domain.as_str());
@@ -954,7 +963,7 @@ async fn a_node_in_the_network_takes_in_other_nodes_crawls_and_searches_them() {
     peer_config.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
     peer_config.upnp = false;
     peer_config.local_discovery = false;
-    peer_config.bootstrap = vec![node_addr];
+    peer_config.bootstrap = vec![node_addr.clone()];
     let table = plumb_net::BucketTable::build(&peer_dir.path().join("buckets"), &[crawled.clone()])
         .unwrap();
     let (peer, _records) = plumb_net::start(peer_config, Arc::new(table))
@@ -1025,20 +1034,46 @@ async fn a_node_in_the_network_takes_in_other_nodes_crawls_and_searches_them() {
         "{from_node:?}"
     );
 
-    // The peer publishes its crawl; the node keeps it and, at its next
-    // refresh, searches it from its own index.
+    // The peer publishes its crawl; the node holds it until a second
+    // crawler agrees, then keeps it and, at its next refresh, searches it
+    // from its own index.
     let mut published = None;
     for _ in 0..100 {
         published = peer.publish(vec![crawled.clone()]).await.unwrap();
-        if dir.path().join("net/inbox.jsonl").exists() {
+        let (_, _, body) = get(addr, "/api/status").await;
+        let status: serde_json::Value = serde_json::from_str(&body).unwrap();
+        if status["network"]["agreement"]["pending_sites"] == 1 {
             break;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     assert!(published.is_some());
     assert!(
+        !dir.path().join("net/inbox.jsonl").exists(),
+        "one crawler is not enough"
+    );
+    let second_config = {
+        let mut c = plumb_net::NetConfig::new(second_dir.path().to_path_buf());
+        c.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+        c.upnp = false;
+        c.local_discovery = false;
+        c.bootstrap = vec![node_addr.clone()];
+        c
+    };
+    let empty = plumb_net::BucketTable::build(&second_dir.path().join("buckets"), &[]).unwrap();
+    let (second, _records) = plumb_net::start(second_config, Arc::new(empty))
+        .await
+        .unwrap();
+    for _ in 0..100 {
+        second.publish(vec![crawled.clone()]).await.unwrap();
+        if dir.path().join("net/inbox.jsonl").exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
         dir.path().join("net/inbox.jsonl").exists(),
-        "the batch arrived"
+        "the second crawl arrived and agreed"
     );
     assert!(search(addr, "lighthouse").await.is_empty());
     node.refresh_now();
@@ -1052,6 +1087,7 @@ async fn a_node_in_the_network_takes_in_other_nodes_crawls_and_searches_them() {
     assert!(!dir.path().join("net/inbox.jsonl").exists());
 
     peer.shutdown().await;
+    second.shutdown().await;
     node.shutdown().await.unwrap();
 }
 
@@ -1317,4 +1353,36 @@ fn downloads_are_counted_per_day() {
     assert_eq!(state.downloaded_today(11 * day + 6), 1);
     assert_eq!(state.downloaded_total, 13);
     assert_eq!(store::next_day(10 * day + 7), 11 * day);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn search_by_meaning_embeds_sites_in_the_background() {
+    let dir = seeded_dir();
+    // The model is in place, so nothing is downloaded.
+    plumb_embed::write_test_model(&dir.path().join(embedding::MODEL_DIR)).unwrap();
+    let mut config = test_config(dir.path());
+    config.search_by_meaning = true;
+    let node = start(config).await.unwrap();
+    let addr = node.addr();
+    wait_for(addr, "the first index", ready_and_idle).await;
+
+    let vectors_path = dir.path().join(plumb_embed::VECTORS_FILE_NAME);
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    while node.inner.meaning.get().is_none_or(|m| m.is_empty()) {
+        assert!(std::time::Instant::now() < deadline, "no vectors made");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    // Names still win.
+    assert_eq!(search(addr, "us+bank").await[0].domain, "usbank.com");
+    // Every site with text gets a vector, saved for the next start.
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    let with_text = fixture_records()
+        .iter()
+        .filter(|r| !plumb_embed::site_text(r).is_empty())
+        .count();
+    while plumb_embed::Vectors::load(&vectors_path).map_or(0, |v| v.len()) < with_text {
+        assert!(std::time::Instant::now() < deadline, "vectors not saved");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    node.shutdown().await.unwrap();
 }

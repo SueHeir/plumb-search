@@ -13,6 +13,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 mod country;
 mod kinds;
+#[cfg(feature = "oblivious")]
+pub mod oblivious;
 mod site_search;
 
 pub use country::{normalize_country, site_country, tld_country};
@@ -52,6 +54,11 @@ pub struct SiteRecord {
     /// most [`MAX_HEADINGS`] and [`MAX_HEADING_WORDS`] words in all.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub headings: Vec<String>,
+    /// The start of the homepage's visible text, leaving out menus,
+    /// headers, footers and headings, at most 100 words. Not searched by
+    /// its words; it goes into the site's embedding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_text: Option<String>,
     /// Normalized text of links from other sites, most frequent first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub link_texts: Vec<LinkText>,
@@ -297,6 +304,7 @@ impl SiteRecord {
             // means the site has none now.
             self.search_url = other.search_url;
             self.headings = other.headings;
+            self.body_text = other.body_text;
             self.crawled_at = other.crawled_at;
         } else {
             self.url = self.url.take().or(other.url);
@@ -307,6 +315,7 @@ impl SiteRecord {
                 if self.headings.is_empty() {
                     self.headings = other.headings;
                 }
+                self.body_text = self.body_text.take().or(other.body_text);
             }
         }
         self.country = self.country.take().or(other.country);

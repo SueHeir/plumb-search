@@ -6,6 +6,9 @@
 //!   comes with a [`RecordProof`] when the answering node holds a signed
 //!   crawl of it. Asked under a throwaway identity, over a connection of
 //!   its own.
+//! * `/plumb/oblivious/1`: the same bucket requests, sealed to the answering
+//!   node's key and passed on by a relay, so the node answering never sees
+//!   the asker's IP address (see [`crate::oblivious`]).
 //! * `/plumb/batch/1`: a batch by id, or the headers of the batches a node
 //!   holds since an epoch, so a node that was away can catch up.
 //! * Gossip topic `plumb/batches/1`: the [`SignedHeader`] of every new
