@@ -8,7 +8,8 @@
 //!   they arrive, and folded into the records file between two pieces of
 //!   work ([`absorb_inbox`]). Rebuilding the index for every batch would
 //!   keep a node busy, so the index is rebuilt once
-//!   [`REBUILD_AFTER_RECORDS`] records have come in, or at the next refresh.
+//!   [`REBUILD_AFTER_RECORDS`] records have come in, at most once every
+//!   [`NETWORK_REBUILD_GAP`], or at the next refresh.
 //! * Other nodes search by bucket (see `plumb_net::bucket`), never sending
 //!   their query. Each index build also writes the index's buckets into
 //!   `indexes/NNNNNN/buckets/` ([`build_buckets`]), and bucket requests are
@@ -62,6 +63,11 @@ use crate::records::{load_records, Change, RecordStore};
 /// Records from other nodes that make a node rebuild its index before the
 /// next refresh.
 pub(crate) const REBUILD_AFTER_RECORDS: u64 = 2_000;
+
+/// The least time between two index builds that records from other nodes
+/// ask for. A build of a million sites takes a few minutes and over 2 GB of
+/// memory, and a busy network can send 2,000 records every few minutes.
+pub(crate) const NETWORK_REBUILD_GAP: std::time::Duration = std::time::Duration::from_secs(30 * 60);
 
 /// Where an index keeps its buckets, inside its directory.
 pub(super) const BUCKETS_DIR: &str = "buckets";
