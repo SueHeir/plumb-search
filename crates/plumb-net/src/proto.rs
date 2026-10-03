@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
 
 use crate::batch::{Batch, RecordProof, SignedHeader};
-use crate::credits::Issued;
+use crate::credits::{Issued, Token};
 use crate::hash::Hash;
 use crate::popularity::Report;
 
@@ -66,15 +66,35 @@ pub enum ReportResponse {
 }
 
 /// Asks for one bucket (see [`crate::bucket`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BucketRequest {
     pub bucket: u32,
+    /// A token the answering node issued (see [`crate::credits`]), spent
+    /// to be answered when it is too busy to answer for free. Nodes that
+    /// predate tokens ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<Token>,
 }
 
-/// A bucket's records; `None` from a node that has no bucket table.
+impl BucketRequest {
+    /// A free request for `bucket`.
+    pub fn new(bucket: u32) -> BucketRequest {
+        BucketRequest {
+            bucket,
+            token: None,
+        }
+    }
+}
+
+/// A bucket's records; `None` from a node that has no bucket table, or
+/// that is too busy (`busy`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BucketResponse {
     pub records: Option<Vec<BucketRecord>>,
+    /// Turned away for now: too many requests at once. A request with a
+    /// token of the node's gets in.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub busy: bool,
 }
 
 /// One site of a bucket, with the proof of its signed crawl when the

@@ -179,6 +179,7 @@ mod tests {
                     also: Vec::new(),
                 },
             ]),
+            busy: false,
         };
         let sites = sealed::open(opener, &seal_response(reply, &answer).unwrap()).unwrap();
         assert_eq!(sites.len(), 2);

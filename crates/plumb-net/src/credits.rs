@@ -14,6 +14,14 @@
 //! the same signed batches, so their ledgers come out much the same, but
 //! each node only ever goes by its own.
 //!
+//! **What tokens buy: priority when busy.** A node answers a few bucket
+//! requests at once for free and turns more away as busy. A request that
+//! carries a token of its own still gets in, up to a few more at once, so
+//! the people who crawl are answered first when it is swamped. Free
+//! searches still work, they just wait or try another node. A node keeps a
+//! few tokens from each node it searches, topped up in the background, and
+//! spends one only when a node said it was busy.
+//!
 //! **Tokens.** Credits are never sent anywhere. A node asks another node,
 //! the **issuer**, for tokens over its own identity; the issuer checks its
 //! ledger, signs the tokens blind (a VOPRF over ristretto255, as in Privacy
@@ -545,6 +553,12 @@ pub struct CreditStatus {
     /// Tokens this node issued to others, and that were handed back.
     pub tokens_issued: u64,
     pub tokens_redeemed: usize,
+    /// Bucket requests this node answered while busy, for tokens.
+    #[serde(default)]
+    pub priority_answered: u64,
+    /// Tokens this node's own searches spent at busy nodes.
+    #[serde(default)]
+    pub tokens_spent: u64,
     /// Tokens this node holds, from all issuers.
     pub tokens_held: usize,
 }
