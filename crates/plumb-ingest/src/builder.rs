@@ -203,6 +203,11 @@ impl Builder {
             if record.country.is_none() {
                 record.country = country;
             }
+            // A description only says what the site is when one item claims it.
+            let items: HashSet<&str> = claims.iter().map(|site| site.item.as_str()).collect();
+            if record.about.is_none() && items.len() == 1 {
+                record.about.clone_from(&first.about);
+            }
             for kind in &kinds {
                 record.add_kind(kind);
             }
@@ -690,6 +695,7 @@ mod tests {
             country: None,
             kinds: Vec::new(),
             names: Vec::new(),
+            about: None,
         };
         builder.add_official_sites(&[
             junk("mailto:a@b.com", "a@b.com"),

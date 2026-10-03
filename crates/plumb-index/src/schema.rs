@@ -5,7 +5,7 @@
 //! | `domain`      | registrable domain, untokenized                      | stored, fast, typed domains |
 //! | `url`         | homepage URL                                         | stored                      |
 //! | `title`       | homepage title                                       | stored, BM25                |
-//! | `description` | meta description                                     | stored, BM25                |
+//! | `description` | meta description, then Wikidata's description      | stored, BM25                |
 //! | `label`       | domain label, its hyphen-split words and joined form | BM25                        |
 //! | `aliases`     | other names                                          | BM25                        |
 //! | `anchors`     | inbound link texts, frequent ones repeated           | BM25                        |
@@ -179,6 +179,11 @@ pub(crate) fn document(f: &Fields, record: &SiteRecord) -> TantivyDocument {
     }
     if let Some(description) = non_empty(&record.description) {
         doc.add_text(f.description, truncate_chars(description, MAX_TEXT_CHARS));
+    }
+    // What Wikidata says the organization is; shown when the site has no
+    // description of its own.
+    if let Some(about) = non_empty(&record.about) {
+        doc.add_text(f.description, truncate_chars(about, MAX_TEXT_CHARS));
     }
 
     let official = record.signals.official_site;

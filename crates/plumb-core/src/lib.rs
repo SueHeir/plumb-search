@@ -69,6 +69,10 @@ pub struct SiteRecord {
     /// ("bank", "airline"), at most [`MAX_KINDS`]. See [`SiteRecord::add_kind`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub kinds: Vec<String>,
+    /// What the site's organization is, in a few words, from Wikidata's
+    /// English description ("American bank holding company").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub about: Option<String>,
     /// The site's own search address, with `{searchTerms}` where the words
     /// go (see [`search_link`]), read from a search form on its homepage.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -288,6 +292,7 @@ impl SiteRecord {
             }
         }
         self.country = self.country.take().or(other.country);
+        self.about = self.about.take().or(other.about);
         for kind in &other.kinds {
             self.add_kind(kind);
         }

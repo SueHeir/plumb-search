@@ -1156,6 +1156,27 @@ mod tests {
         record
     }
 
+    #[test]
+    fn wikidata_descriptions_are_searched_and_shown() {
+        let mut navy = site("navyfederal.org", None, None, &[], &[], ranked(4_000, 500));
+        navy.about = Some("American credit union".into());
+        let records = vec![
+            navy,
+            site("navy.mil", None, None, &[], &[], popular(2_000, 9_000)),
+            site("credit.com", None, None, &[], &[], ranked(30_000, 300)),
+        ];
+        let (_dir, searcher) = build(&records);
+        // Names still count for more than descriptions, but a site that
+        // only its description matches is found, and shows it.
+        let hits = searcher.search("american credit union", 10).unwrap();
+        let navy = hits.iter().find(|hit| hit.domain == "navyfederal.org");
+        assert_eq!(
+            navy.and_then(|hit| hit.description.as_deref()),
+            Some("American credit union"),
+            "{hits:?}"
+        );
+    }
+
     /// Short official domains and the spelled-out or one-word domains that
     /// beat them before Wikidata names counted as labels.
     fn short_names_corpus() -> Vec<SiteRecord> {

@@ -239,9 +239,10 @@ impl FreshSeeds {
             record.aliases.clear();
         }
         if self.wikidata {
-            // Both come only from Wikidata.
+            // These come only from Wikidata.
             record.country = None;
             record.kinds.clear();
+            record.about = None;
         }
     }
 
