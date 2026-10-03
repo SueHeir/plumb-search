@@ -141,6 +141,33 @@ impl FeatureSettings {
 
     pub fn apply(&self, config: &mut NodeConfig) -> Result<()> {
         self.check()?;
+        // Choices saved in the panel are the latest word, but someone who
+        // started the node with a flag should hear why it does nothing.
+        for (name, on_command_line, saved) in [
+            ("--network", config.network.is_some(), self.network),
+            (
+                "--search-by-meaning",
+                config.search_by_meaning,
+                self.search_by_meaning,
+            ),
+            (
+                "--private-search",
+                config.private_search,
+                self.private_search,
+            ),
+            (
+                "--share-popularity",
+                config.share_popularity,
+                self.share_popularity,
+            ),
+        ] {
+            if on_command_line && !saved {
+                tracing::warn!(
+                    "{name} is ignored: it was turned off in the panel's Optional features, \
+                     saved in features.json; turn it on there"
+                );
+            }
+        }
         config.search_by_meaning = self.search_by_meaning;
         config.private_search = self.private_search;
         config.share_popularity = self.share_popularity;
