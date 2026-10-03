@@ -10,10 +10,15 @@
 //! An empty file means the site was crawled and had no icon the crawler
 //! could read, so it is not looked for again until the next crawl.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, Write};
 use std::path::PathBuf;
+
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine as _;
+use plumb_core::SiteRecord;
+use plumb_crawl::{normalize_icon, CrawlOutcome, CrawlResult};
 
 /// Icon files larger than this are not shown.
 const MAX_ICON_BYTES: u64 = 16 * 1024;
@@ -98,6 +103,41 @@ impl IconStore {
     }
 }
 
+/// Longest icon shared with a crawl, as base64 text: a 32-pixel PNG is
+/// usually 1 to 3 KB, and the whole record must stay within
+/// [`plumb_net::batch::MAX_RECORD_BYTES`].
+const MAX_SHARED_ICON_CHARS: usize = 8 * 1024;
+
+/// Puts each fetched homepage's icon on its record, for sharing a crawl
+/// with the network (see [`SiteRecord::icon`]).
+pub(crate) fn attach(records: &mut [SiteRecord], results: &[CrawlResult]) {
+    let icons: HashMap<&str, &[u8]> = results
+        .iter()
+        .filter_map(|result| match &result.outcome {
+            CrawlOutcome::Fetched(page) => Some((page.domain.as_str(), page.icon.as_deref()?)),
+            _ => None,
+        })
+        .collect();
+    for record in records {
+        if let Some(icon) = icons.get(record.domain.as_str()) {
+            let text = BASE64.encode(icon);
+            if text.len() <= MAX_SHARED_ICON_CHARS {
+                record.icon = Some(text);
+            }
+        }
+    }
+}
+
+/// The icon another node shared, redrawn here ([`normalize_icon`]) so
+/// what is kept is always a small PNG this node made. `None` when it is
+/// not one.
+pub(crate) fn from_shared(text: &str) -> Option<Vec<u8>> {
+    if text.len() > MAX_SHARED_ICON_CHARS {
+        return None;
+    }
+    normalize_icon(&BASE64.decode(text).ok()?)
+}
+
 /// FNV-1a of `domain`, folded to a byte: stable across builds and machines.
 fn shard(domain: &str) -> u8 {
     let mut hash: u32 = 0x811c_9dc5;
@@ -109,8 +149,55 @@ fn shard(domain: &str) -> u8 {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    /// An 8 by 8 red BMP, the smallest image an icon can be made from.
+    pub(crate) fn bmp() -> Vec<u8> {
+        let (side, row) = (8u32, 24u32);
+        let size = 54 + row * side;
+        let mut out = b"BM".to_vec();
+        for v in [size, 0, 54, 40, side, side] {
+            out.extend(v.to_le_bytes());
+        }
+        out.extend(1u16.to_le_bytes());
+        out.extend(24u16.to_le_bytes());
+        for v in [0u32, row * side, 2835, 2835, 0, 0] {
+            out.extend(v.to_le_bytes());
+        }
+        for _ in 0..side * side {
+            out.extend([0, 0, 255]);
+        }
+        out
+    }
+
+    #[test]
+    fn icons_are_shared_as_base64_and_redrawn_when_taken_in() {
+        let icon = normalize_icon(&bmp()).expect("an icon");
+        let page = |domain: &str, icon: Option<Vec<u8>>| CrawlResult {
+            domain: domain.into(),
+            outcome: CrawlOutcome::Fetched(plumb_crawl::CrawledPage {
+                domain: domain.into(),
+                final_url: format!("https://{domain}/"),
+                status: 200,
+                fetched_at: 1,
+                meta: plumb_crawl::PageMeta::default(),
+                icon,
+            }),
+        };
+        let mut records = vec![SiteRecord::new("a.com"), SiteRecord::new("b.com")];
+        attach(
+            &mut records,
+            &[page("a.com", Some(icon.clone())), page("b.com", None)],
+        );
+        let shared = records[0].icon.as_deref().expect("shared");
+        assert!(records[1].icon.is_none());
+        let taken = from_shared(shared).expect("taken in");
+        assert!(taken.starts_with(b"\x89PNG"));
+        assert_eq!(from_shared("not base64!"), None);
+        assert_eq!(from_shared(&BASE64.encode(b"not an image")), None);
+        assert_eq!(from_shared(&"A".repeat(MAX_SHARED_ICON_CHARS + 4)), None);
+    }
 
     #[test]
     fn keeps_icons_and_notes_sites_without_one() {

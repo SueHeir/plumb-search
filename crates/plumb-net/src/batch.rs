@@ -20,7 +20,7 @@
 //! its daily assignment, and its homepages' headings and text are kept too,
 //! so search by meaning has text for them.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::{bail, ensure, Context, Result};
 use libp2p::identity::{Keypair, PublicKey};
@@ -158,8 +158,10 @@ pub struct Batch {
 impl Batch {
     /// Signs `records` with `key`. Records with invalid domains, or longer
     /// than [`MAX_RECORD_BYTES`], are left out, and at most
-    /// [`MAX_BATCH_RECORDS`] are kept, within [`MAX_BATCH_BYTES`]; `None`
-    /// when none are.
+    /// [`MAX_BATCH_RECORDS`] lines are kept, within [`MAX_BATCH_BYTES`];
+    /// `None` when none are. A record's icon ([`SiteRecord::icon`]) goes on
+    /// a line of its own after the records ([`IconLine`]), while there is
+    /// room, so proofs of the record never carry it.
     pub fn sign(
         key: &Keypair,
         records: &[SiteRecord],
@@ -168,14 +170,34 @@ impl Batch {
         now: u64,
     ) -> Result<Option<Batch>> {
         let mut lines = Vec::new();
+        let mut icons = Vec::new();
         let mut bytes = 0;
         for record in records.iter().take(MAX_BATCH_RECORDS) {
             if canonical_domain(&record.domain).as_deref() != Some(record.domain.as_str()) {
                 continue;
             }
-            let line = serde_json::to_string(record).context("encoding a record")?;
+            let mut record = std::borrow::Cow::Borrowed(record);
+            let icon = record.icon.is_some().then(|| record.to_mut().icon.take());
+            let line = serde_json::to_string(&*record).context("encoding a record")?;
             if line.len() > MAX_RECORD_BYTES {
                 continue;
+            }
+            if bytes + line.len() > MAX_BATCH_BYTES {
+                break;
+            }
+            bytes += line.len();
+            lines.push(line);
+            if let Some(Some(png)) = icon {
+                icons.push(IconLine {
+                    icon_of: record.domain.clone(),
+                    png,
+                });
+            }
+        }
+        for icon in icons {
+            let line = serde_json::to_string(&icon).context("encoding an icon")?;
+            if lines.len() >= MAX_BATCH_RECORDS || line.len() > MAX_RECORD_BYTES {
+                break;
             }
             if bytes + line.len() > MAX_BATCH_BYTES {
                 break;
@@ -350,6 +372,17 @@ fn accept(batch: &Batch, crawler: &PeerId, now: u64, source: Source) -> Vec<Site
         .iter()
         .filter_map(|line| parse_record(line).ok())
         .collect();
+    let mut icons: HashMap<String, String> = HashMap::new();
+    if source == Source::Trusted {
+        for line in &batch.records {
+            if line.len() > MAX_RECORD_BYTES || !line.starts_with("{\"icon_of\"") {
+                continue;
+            }
+            if let Ok(icon) = serde_json::from_str::<IconLine>(line) {
+                icons.insert(icon.icon_of, icon.png);
+            }
+        }
+    }
     // Crawled homepages, each with the links other homepages of the batch
     // made to it, and the rest.
     let mut crawled = Vec::new();
@@ -373,6 +406,7 @@ fn accept(batch: &Batch, crawler: &PeerId, now: u64, source: Source) -> Vec<Site
     let mut kept: Vec<SiteRecord> = Vec::with_capacity(crawled.len());
     for (mut record, (texts, linking)) in crawled {
         keep_links(&mut record, &texts, linking, crawled_bits, max_linkers);
+        record.icon = icons.remove(&record.domain);
         kept.push(record);
     }
     let mut linked = 0;
@@ -395,6 +429,17 @@ fn accept(batch: &Batch, crawler: &PeerId, now: u64, source: Source) -> Vec<Site
         linked += 1;
     }
     kept
+}
+
+/// A site's icon in a batch, on a line of its own: a 32-pixel PNG, base64,
+/// of a homepage crawled in the same batch. Nodes that don't know this
+/// line skip it, as a record that does not parse. Only icons from this
+/// node's own and trusted crawls are taken in.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IconLine {
+    pub icon_of: String,
+    pub png: String,
 }
 
 /// Reads one record from another node, with its domain made canonical.
@@ -553,6 +598,39 @@ mod tests {
         let back: Batch = serde_json::from_str(&json).unwrap();
         assert_eq!(back.check(NOW).unwrap(), peer);
         assert_eq!(back.id(), batch.id());
+    }
+
+    #[test]
+    fn icons_travel_on_lines_of_their_own_and_only_trusted_ones_are_taken() {
+        let key = Keypair::generate_ed25519();
+        let peer = key.public().to_peer_id();
+        let domains = assigned_domains(&peer, 2);
+        let mut with_icon = crawled(&domains[0]);
+        with_icon.icon = Some("iVBORw0KGgo=".into());
+        let batch = sign(&key, &[with_icon, crawled(&domains[1])]);
+        assert_eq!(batch.records.len(), 3);
+        assert!(!batch.records[0].contains("iVBOR"), "{}", batch.records[0]);
+        let line: IconLine = serde_json::from_str(&batch.records[2]).unwrap();
+        assert_eq!(
+            (line.icon_of.as_str(), line.png.as_str()),
+            (domains[0].as_str(), "iVBORw0KGgo=")
+        );
+        assert!(batch.check(NOW).is_ok());
+        // A proof of the homepage carries no icon.
+        assert!(!batch.proof(0).record.contains("iVBOR"));
+
+        let trusted = accept_trusted_batch(&batch, &peer, NOW);
+        let icon_of = |records: &[SiteRecord], d: &str| {
+            records.iter().find(|r| r.domain == d).unwrap().icon.clone()
+        };
+        assert_eq!(
+            icon_of(&trusted, &domains[0]).as_deref(),
+            Some("iVBORw0KGgo=")
+        );
+        assert_eq!(icon_of(&trusted, &domains[1]), None);
+        let other = accept_batch(&batch, &peer, NOW);
+        assert_eq!(other.len(), 2);
+        assert!(other.iter().all(|r| r.icon.is_none()));
     }
 
     #[test]

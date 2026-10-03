@@ -344,11 +344,12 @@ impl Agreement {
         let crawled_at = record.crawled_at?;
         let domain = record.domain.clone();
         // Only the homepage facts are compared ([`agree`]); the page text
-        // a trusted or own crawl carries (a few hundred words a site) is
+        // and icon a trusted or own crawl carries (a few KB a site) are
         // passed on with it, not held for two weeks.
         let headings = std::mem::take(&mut record.headings);
         let body_text = record.body_text.take();
         let search_url = record.search_url.take();
+        let icon = record.icon.take();
         let held = self.homepages.entry(domain.clone()).or_default();
         let mut observation = Observation {
             crawler,
@@ -382,6 +383,7 @@ impl Agreement {
             record.headings = headings;
             record.body_text = body_text;
             record.search_url = search_url;
+            record.icon = icon;
             return Some(record);
         }
         let held = &self.homepages[&domain];

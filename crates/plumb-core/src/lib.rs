@@ -105,6 +105,12 @@ pub struct SiteRecord {
     /// a site is the other one under another name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub redirect: Option<Redirect>,
+    /// The site's icon as a small PNG, base64, only while a crawl travels
+    /// between nodes (a node's own crawl results to the network, a trusted
+    /// crawler's to this node). Never kept in a records file: a node keeps
+    /// icons in a store of their own, and [`SiteRecord::merge`] ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
 }
 
 /// A homepage's redirect to another registrable domain.
