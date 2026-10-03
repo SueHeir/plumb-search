@@ -20,6 +20,7 @@
 //! one answer carried them all or several answers did.
 
 use std::collections::HashMap;
+use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
@@ -35,9 +36,10 @@ use tracing::{debug, warn};
 use crate::agree::{agree, QUORUM};
 use crate::batch::MAX_RECORD_BYTES;
 use crate::bucket::{matches, search_buckets};
+use crate::credits::Wallet;
 use crate::oblivious::{
     open_response, seal_request, seal_request_sized, ObliviousRequest, ObliviousResponse,
-    MAX_MESSAGE, OBLIVIOUS_PROTOCOL, REPORT_REQUEST_SIZE,
+    MAX_MESSAGE, OBLIVIOUS_PROTOCOL, PRIORITY_REQUEST_SIZE, REPORT_REQUEST_SIZE,
 };
 use crate::popularity::Report;
 use crate::proto::{
@@ -69,6 +71,12 @@ pub struct NetSearch {
     pub direct: usize,
     /// Answers dropped because a proof in them did not check out.
     pub rejected: usize,
+    /// Requests a busy node turned away, and of those, the ones it then
+    /// answered for a token (see [`crate::credits`]).
+    #[serde(default)]
+    pub busy: usize,
+    #[serde(default)]
+    pub priority: usize,
     /// The sites that match the query, unranked.
     pub found: Vec<FoundSite>,
 }
@@ -114,8 +122,16 @@ pub struct BucketPeer {
 
 /// Searches `peers` for `query`: asks for the query's buckets (padded with
 /// random ones), each of up to [`NODES_PER_BUCKET`] nodes under a
-/// throwaway identity, and keeps the sites that match the query.
-pub async fn search(query: &str, peers: &[BucketPeer], wait: Duration, now: u64) -> NetSearch {
+/// throwaway identity, and keeps the sites that match the query. A node
+/// that says it is busy is asked again with one of its tokens from
+/// `wallet`, when it holds one.
+pub async fn search(
+    query: &str,
+    peers: &[BucketPeer],
+    wait: Duration,
+    now: u64,
+    wallet: Option<&Mutex<Wallet>>,
+) -> NetSearch {
     let (buckets, keys) = search_buckets(query);
     let mut out = NetSearch {
         buckets: buckets.len(),
@@ -169,43 +185,49 @@ pub async fn search(query: &str, peers: &[BucketPeer], wait: Duration, now: u64)
         .count();
     let answers = futures::future::join_all(routed.into_iter().map(
         |(bucket, target, through)| async move {
-            if through.is_empty() {
-                return fetch_bucket(&target, bucket, wait)
-                    .await
-                    .map(|r| (r, false));
-            }
-            // A relay that cannot reach the node gets one stand-in, in
-            // what is left of the time. Never straight to the node: that
-            // would show it who asks.
             let deadline = tokio::time::Instant::now() + wait;
-            let mut last = None;
-            for relay in &through {
-                let left = deadline.saturating_duration_since(tokio::time::Instant::now());
-                match fetch_oblivious(relay, &target.peer, bucket, left, now).await {
-                    Ok(response) => return Ok((response, true)),
-                    Err(err) => {
-                        debug!("relay {} for {}: {err:#}", relay.peer, target.peer);
-                        last = Some(err);
-                    }
-                }
+            let (response, relayed) =
+                ask_bucket(&target, &through, BucketRequest::new(bucket), deadline, now).await?;
+            if !response.busy {
+                return Ok((response, relayed, false));
             }
-            Err(last.unwrap_or_else(|| anyhow::anyhow!("no relay")))
+            let token = wallet.and_then(|w| {
+                w.lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .take(&target.peer)
+            });
+            let Some(token) = token else {
+                return Ok((response, relayed, false));
+            };
+            let paid = BucketRequest {
+                bucket,
+                token: Some(token),
+            };
+            let (response, relayed) = ask_bucket(&target, &through, paid, deadline, now).await?;
+            Ok::<_, anyhow::Error>((response, relayed, true))
         },
     ))
     .await;
 
     let mut merged: HashMap<String, FoundSite> = HashMap::new();
     for answer in answers {
-        let (response, relayed) = match answer {
+        let (response, relayed, paid) = match answer {
             Ok(response) => response,
             Err(err) => {
                 debug!("a bucket request failed: {err:#}");
                 continue;
             }
         };
+        if response.busy {
+            out.busy += 1;
+        }
         let Some(records) = response.records else {
             continue;
         };
+        if paid {
+            out.busy += 1;
+            out.priority += 1;
+        }
         out.answered += 1;
         if relayed {
             out.relayed += 1;
@@ -230,6 +252,37 @@ pub async fn search(query: &str, peers: &[BucketPeer], wait: Duration, now: u64)
     found.sort_by(|a, b| a.record.domain.cmp(&b.record.domain));
     out.found = found;
     out
+}
+
+/// Asks `target` for a bucket: through one of `through` (relays, tried in
+/// turn) when there are any, else straight. Returns the answer and whether
+/// it came through a relay.
+async fn ask_bucket(
+    target: &BucketPeer,
+    through: &[BucketPeer],
+    request: BucketRequest,
+    deadline: tokio::time::Instant,
+    now: u64,
+) -> Result<(BucketResponse, bool)> {
+    let left = || deadline.saturating_duration_since(tokio::time::Instant::now());
+    if through.is_empty() {
+        return fetch_bucket_with(target, request, left())
+            .await
+            .map(|r| (r, false));
+    }
+    // A relay that cannot reach the node gets one stand-in, in what is left
+    // of the time. Never straight to the node: that would show it who asks.
+    let mut last = None;
+    for relay in through {
+        match fetch_oblivious_with(relay, &target.peer, &request, left(), now).await {
+            Ok(response) => return Ok((response, true)),
+            Err(err) => {
+                debug!("relay {} for {}: {err:#}", relay.peer, target.peer);
+                last = Some(err);
+            }
+        }
+    }
+    Err(last.unwrap_or_else(|| anyhow::anyhow!("no relay")))
 }
 
 /// The records of one answer, checked, or `None` when a proof in it fails.
@@ -384,6 +437,15 @@ pub async fn fetch_bucket(
     bucket: u32,
     wait: Duration,
 ) -> Result<BucketResponse> {
+    fetch_bucket_with(peer, BucketRequest::new(bucket), wait).await
+}
+
+/// [`fetch_bucket`] for any request, one that spends a token included.
+pub async fn fetch_bucket_with(
+    peer: &BucketPeer,
+    request: BucketRequest,
+    wait: Duration,
+) -> Result<BucketResponse> {
     let mut swarm = throwaway(wait)?;
     for addr in &peer.addrs {
         swarm.add_peer_address(peer.peer, addr.clone());
@@ -391,7 +453,7 @@ pub async fn fetch_bucket(
     swarm
         .behaviour_mut()
         .buckets
-        .send_request(&peer.peer, BucketRequest { bucket });
+        .send_request(&peer.peer, request);
     let deadline = tokio::time::Instant::now() + wait;
     loop {
         let event = tokio::time::timeout_at(deadline, swarm.select_next_some())
@@ -428,6 +490,18 @@ pub async fn fetch_oblivious(
     wait: Duration,
     now: u64,
 ) -> Result<BucketResponse> {
+    fetch_oblivious_with(relay, target, &BucketRequest::new(bucket), wait, now).await
+}
+
+/// [`fetch_oblivious`] for any request. One that spends a token is padded
+/// to [`PRIORITY_REQUEST_SIZE`] rather than the free requests' size.
+pub async fn fetch_oblivious_with(
+    relay: &BucketPeer,
+    target: &PeerId,
+    request: &BucketRequest,
+    wait: Duration,
+    now: u64,
+) -> Result<BucketResponse> {
     let mut swarm = throwaway(wait)?;
     for addr in &relay.addrs {
         swarm.add_peer_address(relay.peer, addr.clone());
@@ -444,7 +518,11 @@ pub async fn fetch_oblivious(
         ObliviousResponse::Keys(Some(keys)) => keys,
         _ => bail!("the relay {} has no key for {target}", relay.peer),
     };
-    let (message, opener) = seal_request(&keys, target, now, &BucketRequest { bucket })?;
+    let (message, opener) = if request.token.is_some() {
+        seal_request_sized(&keys, target, now, request, PRIORITY_REQUEST_SIZE)?
+    } else {
+        seal_request(&keys, target, now, request)?
+    };
     let request = ObliviousRequest::Forward {
         target: *target,
         message: serde_bytes::ByteBuf::from(message),

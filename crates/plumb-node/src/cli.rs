@@ -206,6 +206,10 @@ pub struct RunArgs {
     /// agree. Other nodes' crawls still need agreement. May be repeated.
     #[arg(long = "trust-peer", value_name = "PEER_ID", requires = "network")]
     pub trust_peer: Vec<plumb_net::PeerId>,
+    /// Do not trust the plumbsearch.org node by default; only nodes given
+    /// with --trust-peer.
+    #[arg(long, requires = "network")]
+    pub no_default_trust: bool,
     /// Offer private search at /private: browsers fetch groups of sites
     /// (buckets) and rank them themselves, so this node never sees what
     /// they search for. Each index also gets its buckets, about as much

@@ -3,6 +3,7 @@
 //!
 //! * [`assign`]: which sites a node crawls each day.
 //! * [`agree`]: records count only once two crawlers agree on them.
+//! * [`credits`]: what crawling earns, and anonymous one-time tokens.
 //! * [`batch`]: signed crawl batches and what a node accepts from them.
 //! * [`bucket`] and [`search`]: searching other nodes without sending the
 //!   query.
@@ -22,6 +23,7 @@ pub mod agree;
 pub mod assign;
 pub mod batch;
 pub mod bucket;
+pub mod credits;
 pub mod hash;
 pub mod joining;
 pub mod node;
@@ -37,6 +39,6 @@ pub use bucket::{BucketSource, BucketTable, BUCKETS_PER_SEARCH};
 pub use joining::{default_bootstrap, JoinProblem, PeerView, Route, DEFAULT_BOOTSTRAP};
 pub use libp2p::multiaddr::Protocol;
 pub use libp2p::{Multiaddr, PeerId};
-pub use node::{load_or_create_key, start, NetConfig, NetHandle, NetStatus};
+pub use node::{load_or_create_key, start, CreditsAt, NetConfig, NetHandle, NetStatus};
 pub use popularity::{PickLog, PopularityTable, Report};
 pub use search::{FoundSite, NetSearch};

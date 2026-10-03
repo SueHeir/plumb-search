@@ -61,6 +61,15 @@ services:
       - /dns4/host.docker.internal/tcp/4001/p2p/12D3KooWJ2UWUBsxmPfXTfHa8cBBmzifa6kj5pFZKfJXYNQyJ69a
       - --no-upnp
       - --no-local-discovery
+      # Crawls from Liz's own nodes count as soon as they're signed, without
+      # waiting for a second crawler: plumb-relay on this machine, her
+      # MacBook, and elizabeth-hpc.
+      - --trust-peer
+      - 12D3KooWJ2UWUBsxmPfXTfHa8cBBmzifa6kj5pFZKfJXYNQyJ69a
+      - --trust-peer
+      - 12D3KooWAM8qy5A1q71QZTbdav8PHZ2KetvAc98VRxnB9wqLrLXt
+      - --trust-peer
+      - 12D3KooWDHxYtCdqrfk6QM21uNnSYcg38K18rDE4hPv71HKQGUxT
     extra_hosts:
       - "host.docker.internal:host-gateway"
     # The web port is only reachable from this machine; Caddy serves it to
