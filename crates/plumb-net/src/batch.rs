@@ -239,7 +239,7 @@ impl RecordProof {
             "the record is not in the signed batch"
         );
         let record = parse_record(&self.record)?;
-        let Some(record) = accept_crawled(record, &crawler, h, now) else {
+        let Some(record) = accept_crawled(record, &crawler, h, now, true) else {
             bail!("the record is not a homepage crawl the crawler was assigned");
         };
         Ok((record, crawler))
@@ -263,6 +263,18 @@ impl RecordProof {
 /// Everything else (ranks, Wikidata status, crawl attempts and failures) is
 /// dropped: those come from public seed data or local bookkeeping.
 pub fn accept_batch(batch: &Batch, crawler: &PeerId, now: u64) -> Vec<SiteRecord> {
+    accept(batch, crawler, now, true)
+}
+
+/// What a node takes from a batch it signed itself: the same as
+/// [`accept_batch`], except that its homepages need not be ones it was
+/// assigned, since a node may fetch a disputed site to settle it (see
+/// [`crate::agree`]). Other nodes still ignore those.
+pub fn accept_own_batch(batch: &Batch, me: &PeerId, now: u64) -> Vec<SiteRecord> {
+    accept(batch, me, now, false)
+}
+
+fn accept(batch: &Batch, crawler: &PeerId, now: u64, assigned_only: bool) -> Vec<SiteRecord> {
     let h = &batch.header.header;
     let parsed: Vec<SiteRecord> = batch
         .records
@@ -276,7 +288,7 @@ pub fn accept_batch(batch: &Batch, crawler: &PeerId, now: u64) -> Vec<SiteRecord
     for record in parsed {
         if record.crawled_at.is_some() {
             let links = (record.link_texts.clone(), record.signals.linking_domains);
-            if let Some(kept) = accept_crawled(record, crawler, h, now) {
+            if let Some(kept) = accept_crawled(record, crawler, h, now, assigned_only) {
                 crawled.push((kept, links));
             }
         } else {
@@ -334,6 +346,7 @@ fn accept_crawled(
     crawler: &PeerId,
     header: &BatchHeader,
     now: u64,
+    assigned_only: bool,
 ) -> Option<SiteRecord> {
     let crawled_at = record.crawled_at?;
     let epoch_start = header.epoch * EPOCH_SECS;
@@ -341,7 +354,8 @@ fn accept_crawled(
     let in_epoch = crawled_at >= epoch_start
         && crawled_at < epoch_start + 2 * EPOCH_SECS
         && crawled_at <= now + EPOCH_SECS / 24;
-    if !in_epoch || !is_assigned(header.epoch, crawler, &record.domain, header.share_ppm) {
+    let assigned = || is_assigned(header.epoch, crawler, &record.domain, header.share_ppm);
+    if !in_epoch || (assigned_only && !assigned()) {
         return None;
     }
     let url = record
@@ -496,6 +510,10 @@ mod tests {
             "ranks are never taken from peers"
         );
         assert_eq!(first.crawl_failures, 0);
+        // A node's own batch keeps the site it fetched to settle a dispute.
+        let own = accept_own_batch(&batch, &peer, NOW);
+        assert_eq!(own.len(), 3);
+        assert_eq!(own[2].domain, not_mine);
     }
 
     #[test]
