@@ -395,13 +395,21 @@ fn check_answer(records: Vec<crate::proto::BucketRecord>, now: u64) -> Option<Ve
             crawlers: Vec::new(),
             confirmed: false,
         };
-        if let Some(proof) = &item.proof {
+        // A proof only too old to check out says nothing either way (nodes
+        // hold crawls longer than proofs last), so the site is just not
+        // verified; any other bad proof means the answer is not to be trusted.
+        if let Some(proof) = item.proof.as_ref().filter(|p| !p.header.expired(now)) {
             match proof.verify(now) {
                 Ok((signed, crawler)) if signed.domain == site.record.domain => {
                     // Other crawlers' proofs must check out too, and count
                     // only when they agree with the first.
                     let mut agreeing = Vec::new();
-                    for other in item.also.iter().take(MAX_EXTRA_PROOFS) {
+                    for other in item
+                        .also
+                        .iter()
+                        .filter(|p| !p.header.expired(now))
+                        .take(MAX_EXTRA_PROOFS)
+                    {
                         match other.verify(now) {
                             Ok((theirs, by)) if theirs.domain == signed.domain => {
                                 if agree(&signed, &theirs) {
@@ -705,7 +713,7 @@ mod tests {
     use libp2p::identity::Keypair;
 
     use super::*;
-    use crate::assign::{epoch_of, is_assigned, MAX_SHARE_PPM};
+    use crate::assign::{epoch_of, is_assigned, EPOCH_SECS, MAX_SHARE_PPM};
     use crate::batch::Batch;
     use crate::proto::BucketRecord;
 
@@ -881,5 +889,32 @@ mod tests {
             also: vec![forged],
         };
         assert!(check_answer(vec![forged], now).is_none());
+    }
+
+    #[test]
+    fn a_proof_too_old_to_check_leaves_the_site_unverified_not_the_answer_dropped() {
+        let made = 1_790_000_000;
+        let now = made + 10 * EPOCH_SECS;
+        let keys = [Keypair::generate_ed25519(), Keypair::generate_ed25519()];
+        let batches = crawls_by(&keys, &["Real Bank", "Real Bank!"], made);
+        let shown = batches[0].records[0].clone();
+        let old = BucketRecord {
+            record: shown.clone(),
+            proof: Some(batches[0].proof(0)),
+            also: vec![batches[1].proof(0)],
+        };
+        let checked = check_answer(vec![old, item(&SiteRecord::new("other.com"))], now).unwrap();
+        assert_eq!(checked.len(), 2);
+        assert!(!checked[0].verified && !checked[0].confirmed);
+
+        // A fresh proof with an old second one still counts on its own.
+        let fresh = crawls_by(&keys[..1], &["Real Bank"], now);
+        let mixed = BucketRecord {
+            record: fresh[0].records[0].clone(),
+            proof: Some(fresh[0].proof(0)),
+            also: vec![batches[1].proof(0)],
+        };
+        let checked = check_answer(vec![mixed], now).unwrap();
+        assert!(checked[0].verified && !checked[0].confirmed);
     }
 }
