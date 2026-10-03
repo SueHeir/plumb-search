@@ -13,6 +13,10 @@ pub struct FeatureSettings {
     pub private_search: bool,
     pub share_popularity: bool,
     pub bootstrap: Vec<String>,
+    /// Turns off trusting [`plumb_net::node::DEFAULT_TRUSTED_PEERS`].
+    pub no_default_trust: bool,
+    /// Node ids whose crawls are taken in at once, besides the default ones.
+    pub trusted: Vec<String>,
 }
 
 impl FeatureSettings {
@@ -27,7 +31,42 @@ impl FeatureSettings {
                 .as_ref()
                 .map(|n| n.bootstrap.iter().map(ToString::to_string).collect())
                 .unwrap_or_default(),
+            no_default_trust: config.network.as_ref().is_some_and(|n| {
+                default_trusted()
+                    .iter()
+                    .any(|id| !n.trusted_peers.contains(id))
+            }),
+            trusted: config
+                .network
+                .as_ref()
+                .map(|n| {
+                    let defaults = default_trusted();
+                    n.trusted_peers
+                        .iter()
+                        .filter(|id| !defaults.contains(id))
+                        .map(ToString::to_string)
+                        .collect()
+                })
+                .unwrap_or_default(),
         }
+    }
+
+    /// The nodes whose crawls are taken in at once under these settings.
+    fn trusted_peers(&self) -> Result<Vec<plumb_net::PeerId>> {
+        let mut peers = if self.no_default_trust {
+            Vec::new()
+        } else {
+            default_trusted()
+        };
+        for id in &self.trusted {
+            let id = id
+                .parse()
+                .with_context(|| format!("Invalid trusted node id: {id}"))?;
+            if !peers.contains(&id) {
+                peers.push(id);
+            }
+        }
+        Ok(peers)
     }
 
     pub fn check(&self) -> Result<()> {
@@ -42,6 +81,7 @@ impl FeatureSettings {
                     .with_context(|| format!("Invalid bootstrap address: {address}"))?,
             );
         }
+        self.trusted_peers()?;
         Ok(())
     }
 
@@ -80,11 +120,16 @@ impl FeatureSettings {
                 .iter()
                 .map(|s| s.parse())
                 .collect::<Result<_, _>>()?;
+            net.trusted_peers = self.trusted_peers()?;
         } else {
             config.network = None;
         }
         Ok(())
     }
+}
+
+fn default_trusted() -> Vec<plumb_net::PeerId> {
+    plumb_net::NetConfig::new(Default::default()).trusted_peers
 }
 
 #[cfg(test)]
@@ -101,6 +146,8 @@ mod tests {
             search_by_meaning: true,
             share_popularity: true,
             bootstrap: vec!["/ip4/127.0.0.1/tcp/4002".into()],
+            no_default_trust: true,
+            trusted: vec!["12D3KooWEwYB7PYxRNgvSWiwkLXvwYajSmYn4yoPqmkN7NbNqJjg".into()],
         };
         preferences.save(dir.path()).unwrap();
         FeatureSettings::load(dir.path())
@@ -121,5 +168,34 @@ mod tests {
             FeatureSettings::load(dir.path()).unwrap(),
             Some(preferences)
         );
+    }
+
+    #[test]
+    fn nodes_trust_plumbsearch_org_unless_turned_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = NodeConfig::desktop(dir.path().into());
+        let mut features = FeatureSettings {
+            network: true,
+            ..Default::default()
+        };
+        features.apply(&mut config).unwrap();
+        let trusted = &config.network.as_ref().unwrap().trusted_peers;
+        assert_eq!(trusted, &default_trusted());
+        assert!(!trusted.is_empty());
+        assert_eq!(FeatureSettings::from_config(&config), features);
+
+        let extra = "12D3KooWEwYB7PYxRNgvSWiwkLXvwYajSmYn4yoPqmkN7NbNqJjg";
+        features.trusted = vec![extra.into()];
+        features.apply(&mut config).unwrap();
+        assert_eq!(config.network.as_ref().unwrap().trusted_peers.len(), 2);
+        features.no_default_trust = true;
+        features.apply(&mut config).unwrap();
+        let trusted = &config.network.as_ref().unwrap().trusted_peers;
+        assert_eq!(trusted.len(), 1);
+        assert_eq!(trusted[0].to_string(), extra);
+        assert_eq!(FeatureSettings::from_config(&config), features);
+
+        features.trusted = vec!["not-a-node".into()];
+        assert!(features.check().is_err());
     }
 }
