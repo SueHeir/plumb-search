@@ -2,6 +2,7 @@
 //! each other's searches. See `docs/network.md` for the design.
 //!
 //! * [`assign`]: which sites a node crawls each day.
+//! * [`agree`]: records count only once two crawlers agree on them.
 //! * [`batch`]: signed crawl batches and what a node accepts from them.
 //! * [`bucket`] and [`search`]: searching other nodes without sending the
 //!   query.
@@ -12,6 +13,7 @@
 //! * [`proto`]: the messages and protocol names.
 //! * [`node`]: the libp2p swarm and the [`NetHandle`] that drives it.
 
+pub mod agree;
 pub mod assign;
 pub mod batch;
 pub mod bucket;

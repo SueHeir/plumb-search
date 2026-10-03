@@ -29,7 +29,7 @@ This follows the plan agreed on 2026-10-03.
 * Nobody picks their own sites, the assignment changes every day, and any node can check a crawler's claim from the batch header alone.
 * A key can write at most an eighth of the sites per day, and with dozens of nodes most sites have several crawlers a day.
 * A node in the network chooses its crawl targets as before (half never-crawled, half due again, best-ranked first), but only among the sites assigned to it today.
-* **Known weakness:** the epoch is public, so someone after one particular site can make keys until one is assigned to it (with a share of one eighth, any key gets a given site about every 8 days anyway). Assignment spreads the work and caps how much one key writes; it does not stop a targeted attack. That needs cross-checks between crawlers and spot checks (see "Next steps").
+* **Known weakness:** the epoch is public, so someone after one particular site can make keys until one is assigned to it (with a share of one eighth, any key gets a given site about every 8 days anyway). Assignment spreads the work and caps how much one key writes; it does not stop a targeted attack by itself. Agreement between crawlers (below) means one such key is not enough; an attacker needs two keys assigned to the same site whose crawls match, which the drand seed in "Next steps" makes much harder.
 
 ## Crawl batches
 
@@ -51,6 +51,18 @@ What a node keeps from another node's batch (`accept_batch`):
 
 Batches older than 7 days or dated in the future are refused. A node keeps the batches it holds for 35 days (`DIR/net/batches/`), serves them to others, and uses them to prove its search answers.
 
+## Agreement between crawlers
+
+`plumb_net::agree`. A record from the network counts only once two or more different nodes crawled it and saw the same thing, so one bad node cannot poison the index alone.
+
+* **Homepage facts.** For each site the node holds the latest crawl from each crawler (its own crawls included). Once two crawlers' crawls agree, the newest of them goes to the inbox, with only the aliases both saw. Until then the node keeps what it had: its own crawl or the seed data.
+* **"The same."** Homepages change, so this is not byte equality: the URLs must be on the same host, and the titles and descriptions must share at least 75% of their words after the index's own text normalization (case, punctuation and `U.S.`/`US` ignored). When per-site embedding text (title, description, headings, Wikidata description) lands from the search quality work, it can use the same normalization.
+* **Link text and new domains.** Held per target site and crawler. A new domain counts once two crawlers named it, a piece of link text once two crawlers reported it, and the count of linking sites is the one at least two crawlers reached.
+* **Scoring crawlers.** Each confirmation gives every crawler in the agreeing group an agreement, and every other crawler whose crawl of that site was made within 2 days but did not match a disagreement (further apart, the site may simply have changed). A crawler judged at least 10 times that agrees less than half the time is distrusted: its crawls are still held and scored, but no longer count towards agreement. The node's own crawls always count.
+* **State.** Nothing new on disk: the node rebuilds it at start from the batches it holds, oldest first. Crawls older than 14 days are dropped, so a distrusted crawler can earn its way back. `GET /api/status` shows `network.agreement`: sites pending, sites confirmed, crawlers distrusted.
+* **How soon a site is confirmed.** Assignment stays independent per node (a site is crawled by about one node in eight each day), so with N nodes a site gets about N/8 crawls a day. Over the 14-day window a site is assigned to two nodes with about 72% odds in a network of 2 nodes, 94% with 3, and almost surely with 5 or more. In a network of one, nothing from the network is ever taken in, which is the point.
+* **Known gaps.** Two keys run by one person count as two crawlers; that needs the unpredictable epoch seed and, later, crawl tokens. Network search answers still prove a site with one crawler's signed record (see "Next steps").
+
 ## Spreading batches
 
 `plumb_net::node`, `plumb_net::proto`.
@@ -58,7 +70,7 @@ Batches older than 7 days or dated in the future are refused. A node keeps the b
 * A new batch's signed header is announced on the gossipsub topic `plumb/batches/1`. Gossip messages are validated before they are passed on, so a bad header stops at the first honest node.
 * A node that hears of a batch it lacks fetches it with `/plumb/batch/1` from the node that passed the header on, or from the crawler, at most 16 at a time.
 * When two nodes meet, each asks the other for the headers of the batches it holds from the last 3 epochs, and fetches what it missed. A node that was off for a day catches up this way.
-* Records accepted from other nodes go to `DIR/net/inbox.jsonl` as they arrive. Between two pieces of work, the node folds the inbox into its records file through the same journal crawls use. It rebuilds its index once 2,000 records have come in, or at its next refresh.
+* Records confirmed by a second crawler (see above) go to `DIR/net/inbox.jsonl` as they arrive. Between two pieces of work, the node folds the inbox into its records file through the same journal crawls use. It rebuilds its index once 2,000 records have come in, or at its next refresh.
 
 ## Network search
 
@@ -101,9 +113,9 @@ plumb run --data /data --network --relay \
 
 Tested on one machine (`cargo test -p plumb-net`, `cargo test -p plumb-node a_node_in_the_network`):
 
-* Four nodes and a relay: a batch published by one reaches all the others; a node that joins later catches up; a network search fetches buckets under throwaway identities, each sealed through another node, and returns a verified site with its crawler named; a bucket is fetched through the relay alone; a node behind the relay is reached through it, and hole punching then opens a direct connection.
+* Four nodes and a relay: a batch published by one reaches all the others, and its site counts only once a second crawler (the relay) publishes a matching crawl; a node that joins later catches up; a network search fetches buckets under throwaway identities, each sealed through another node, and returns a verified site with its crawler named; a bucket is fetched through the relay alone; a node behind the relay is reached through it, and hole punching then opens a direct connection.
 * Sealed requests: a relay hands out the target's own key, the same one each time; a search's requests all go through relays and none straight to the node answering; a verified site comes back.
-* A whole `plumb run` node in the network writes a bucket table with each index, serves it to other nodes, searches the network through `/api/network/search` and `/network`, takes in another node's batch, and searches it from its own index after a rebuild.
+* A whole `plumb run` node in the network writes a bucket table with each index, serves it to other nodes, searches the network through `/api/network/search` and `/network`, holds another node's crawl until a second node's crawl agrees, then takes it in and searches it from its own index after a rebuild.
 * Unit tests: Merkle proofs for every tree size up to 33, tampered records, re-dated headers, swapped keys, unassigned homepages, injected link text, forged proofs in search answers, links that point away from the site they name, sealed requests and answers that round-trip, keys swapped by a relay or expired, an old key accepted only until it expires, and padding.
 
 Tested across machines on 2026-10-03: a relay node on plumbsearch.org (in Docker) and a node on a home Mac behind NAT, no port forwarding. The Mac joined through the relay within 20 seconds, the two shared crawl batches both ways, and private bucket searches were answered in both directions (4 of 4 buckets every time, each fetch from a fresh identity). Two bugs found on the way and fixed: the relay had no usable address for nodes behind NAT (now: identify pushes address changes, and a relay reaches its reserved clients through its own loopback address, since a container may not reach its own public IP), and nodes passed their home-network addresses to the whole network (now kept for nodes on the same network). Then a third node, a Linux machine on the same home network as the Mac, joined. The two home nodes first never met (fixed: relayed addresses now go into Kademlia, so nodes behind NAT find each other), then could not connect through their shared router (fixed: mDNS, see above). With mDNS the Mac found the Linux machine within a second and connected to it directly, and searches from every node got answers to all 8 bucket fetches, most sites confirmed by two nodes. Not yet tested: hole punching between two different home networks, and anything at scale.
@@ -113,7 +125,7 @@ Tested across machines on 2026-10-03: a relay node on plumbsearch.org (in Docker
 Roughly in order; the first two are what the roadmap's Phase 2 gate ("two nodes stay identical using daily changes alone") needs.
 
 1. **Index snapshots.** A Merkle-rooted snapshot of the shared site list, so a new node downloads it from any node instead of each node building its own from seed data, and two nodes can check they agree. Daily changes are then the batches since the snapshot.
-2. **Agreement between crawlers.** Keep a homepage's new title only once two crawlers agree (or after a spot-check re-fetch), once the network is big enough for that. Today the newest signed crawl wins.
+2. **Agreement between crawlers: built** (see above). Still to do: network search answers that carry proofs from two agreeing crawlers, spot-check re-fetches of a site whose crawlers disagree, and a check in snapshots that each record was confirmed.
 3. **Abuse limits.** Connection limits, per-node rate limits on requests, peer scoring in gossipsub, and banning keys whose batches fail checks.
 4. **An unpredictable epoch seed** from a public randomness beacon (drand), so keys cannot be made in advance for a target site.
 5. **Desktop app**: a switch for joining the network, crawling only when idle and on power, with a bandwidth cap.
