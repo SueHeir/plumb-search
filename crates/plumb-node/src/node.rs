@@ -632,6 +632,7 @@ pub fn request_reseed(data_dir: &Path) -> Result<bool> {
 /// work (such as an alpha above 1). A multi-threaded runtime is best: crawls
 /// and index builds run on its blocking threads.
 pub async fn start(mut config: NodeConfig) -> Result<NodeHandle> {
+    crate::limits::raise_open_file_limit();
     if let Some(features) = features::FeatureSettings::load(&config.data_dir)? {
         features.apply(&mut config)?;
     }
