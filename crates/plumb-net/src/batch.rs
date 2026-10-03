@@ -37,6 +37,10 @@ pub const MAX_BATCH_RECORDS: usize = 4_096;
 /// Longest record, as JSON, accepted from another node.
 pub const MAX_RECORD_BYTES: usize = 16 * 1024;
 
+/// Most bytes of records in one batch. A full batch of homepages with text
+/// is a few MB; this keeps one peer from handing over 64 MB at a time.
+pub const MAX_BATCH_BYTES: usize = 16 * 1024 * 1024;
+
 /// Batches from epochs older than this many days are not accepted.
 pub const MAX_BATCH_AGE_EPOCHS: u64 = 7;
 
@@ -91,6 +95,12 @@ pub struct SignedHeader {
 }
 
 impl SignedHeader {
+    /// Whether the batch is too old for [`SignedHeader::check`] at `now`:
+    /// a proof from it no longer checks out, though nothing is wrong with it.
+    pub fn expired(&self, now: u64) -> bool {
+        self.header.epoch + MAX_BATCH_AGE_EPOCHS < epoch_of(now)
+    }
+
     /// Identifies the batch: the hash of what was signed.
     pub fn id(&self) -> Hash {
         Hash::of(&[&self.header.signing_bytes()])
@@ -146,8 +156,10 @@ pub struct Batch {
 }
 
 impl Batch {
-    /// Signs `records` with `key`. Records with invalid domains are left
-    /// out, and at most [`MAX_BATCH_RECORDS`] are kept; `None` when none are.
+    /// Signs `records` with `key`. Records with invalid domains, or longer
+    /// than [`MAX_RECORD_BYTES`], are left out, and at most
+    /// [`MAX_BATCH_RECORDS`] are kept, within [`MAX_BATCH_BYTES`]; `None`
+    /// when none are.
     pub fn sign(
         key: &Keypair,
         records: &[SiteRecord],
@@ -156,11 +168,20 @@ impl Batch {
         now: u64,
     ) -> Result<Option<Batch>> {
         let mut lines = Vec::new();
+        let mut bytes = 0;
         for record in records.iter().take(MAX_BATCH_RECORDS) {
             if canonical_domain(&record.domain).as_deref() != Some(record.domain.as_str()) {
                 continue;
             }
-            lines.push(serde_json::to_string(record).context("encoding a record")?);
+            let line = serde_json::to_string(record).context("encoding a record")?;
+            if line.len() > MAX_RECORD_BYTES {
+                continue;
+            }
+            if bytes + line.len() > MAX_BATCH_BYTES {
+                break;
+            }
+            bytes += line.len();
+            lines.push(line);
         }
         if lines.is_empty() {
             return Ok(None);
@@ -204,6 +225,11 @@ impl Batch {
             "the header counts {} records, the batch holds {}",
             h.count,
             self.records.len()
+        );
+        let bytes: usize = self.records.iter().map(String::len).sum();
+        ensure!(
+            bytes <= MAX_BATCH_BYTES,
+            "the batch holds {bytes} bytes of records, more than {MAX_BATCH_BYTES}"
         );
         ensure!(
             merkle_root(&self.leaves()) == h.root,
@@ -430,6 +456,11 @@ pub(crate) mod bytes_hex {
         if s.len() % 2 != 0 || s.len() > 8_192 {
             return Err(serde::de::Error::custom("bad hex length"));
         }
+        // Checked first so slicing below can't split a multi-byte character:
+        // this reads what other nodes send, and a panic would stop the network.
+        if !s.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(serde::de::Error::custom("not hex"));
+        }
         (0..s.len())
             .step_by(2)
             .map(|i| u8::from_str_radix(&s[i..i + 2], 16).map_err(serde::de::Error::custom))
@@ -442,6 +473,21 @@ mod tests {
     use plumb_core::LinkText;
 
     use super::*;
+
+    #[test]
+    fn hex_that_is_not_ascii_is_refused_without_a_panic() {
+        #[derive(Deserialize)]
+        struct Hexed {
+            #[serde(with = "bytes_hex")]
+            bytes: Vec<u8>,
+        }
+        for bad in ["\"\u{e9}\u{e9}\"", "\"0\u{e9}a\"", "\"zz\"", "\"+1\""] {
+            let json = format!("{{\"bytes\":{bad}}}");
+            assert!(serde_json::from_str::<Hexed>(&json).is_err(), "{bad}");
+        }
+        let ok: Hexed = serde_json::from_str("{\"bytes\":\"0aFf\"}").unwrap();
+        assert_eq!(ok.bytes, [0x0a, 0xff]);
+    }
 
     const NOW: u64 = 1_790_000_000;
 
@@ -483,6 +529,45 @@ mod tests {
         let back: Batch = serde_json::from_str(&json).unwrap();
         assert_eq!(back.check(NOW).unwrap(), peer);
         assert_eq!(back.id(), batch.id());
+    }
+
+    #[test]
+    fn records_too_long_are_not_signed_and_a_batch_too_big_is_refused() {
+        let key = Keypair::generate_ed25519();
+        let peer = key.public().to_peer_id();
+        let domains = assigned_domains(&peer, 1_100);
+        let long = |d: &String, len: usize| {
+            let mut record = crawled(d);
+            record.title = Some("x".repeat(len));
+            record
+        };
+        let batch = sign(
+            &key,
+            &[long(&domains[0], MAX_RECORD_BYTES), crawled(&domains[1])],
+        );
+        assert_eq!(batch.records.len(), 1);
+
+        // Signed by hand, past the limits `sign` keeps to.
+        let lines: Vec<String> = domains
+            .iter()
+            .map(|d| serde_json::to_string(&long(d, 15 * 1024)).unwrap())
+            .collect();
+        let leaves: Vec<Hash> = lines.iter().map(|l| leaf_hash(l.as_bytes())).collect();
+        let header = BatchHeader {
+            crawler: key.public().encode_protobuf(),
+            epoch: epoch_of(NOW),
+            share_ppm: MAX_SHARE_PPM,
+            created_at: NOW,
+            count: lines.len() as u32,
+            root: merkle_root(&leaves),
+        };
+        let signature = key.sign(&header.signing_bytes()).unwrap();
+        let huge = Batch {
+            header: SignedHeader { header, signature },
+            records: lines,
+        };
+        let err = huge.check(NOW).unwrap_err().to_string();
+        assert!(err.contains("bytes of records"), "{err}");
     }
 
     #[test]
