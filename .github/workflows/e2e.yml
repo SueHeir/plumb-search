@@ -1,0 +1,74 @@
+# End-to-end tests of the Docker image (crates/plumb-e2e): a node whose
+# setup is killed again and again, and two nodes exchanging crawls and
+# answering each other's searches. Each test runs first on the synthetic
+# fixtures, then with real data: the Tranco list, Wikidata, the embedding
+# model and real homepages, as a node's first start does. The real run
+# depends on those sites answering, so this workflow is not a required check.
+name: End to end
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - "crates/**"
+      - "Cargo.lock"
+      - "Dockerfile"
+      - ".github/workflows/e2e.yml"
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  docker:
+    name: ${{ matrix.test }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        test:
+          - setup_survives_being_killed
+          - two_nodes_exchange_crawls_and_searches
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      # The same cache as the Docker image workflow's pull request build.
+      - name: Build the image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: plumb-search:e2e
+          cache-from: type=gha,scope=linux-amd64
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: e2e
+
+      - name: With the fixtures
+        env:
+          PLUMB_E2E_IMAGE: plumb-search:e2e
+        run: >-
+          cargo test --locked -p plumb-e2e --test docker --
+          --ignored --exact --nocapture ${{ matrix.test }}
+
+      - name: With real data
+        env:
+          PLUMB_E2E_IMAGE: plumb-search:e2e
+          PLUMB_E2E_REAL: "1"
+        run: >-
+          cargo test --locked -p plumb-e2e --test docker --
+          --ignored --exact --nocapture ${{ matrix.test }}

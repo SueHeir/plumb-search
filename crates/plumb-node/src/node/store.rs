@@ -115,8 +115,8 @@ pub(super) fn lock(paths: &Paths) -> Result<Option<DirLock>> {
 }
 
 /// Removes what interrupted work left behind, best effort: hidden staging
-/// directories in `indexes/`, temporary records and state files, and partial
-/// downloads. Only call it while holding the [`DirLock`].
+/// directories in `indexes/`, temporary records, state and vectors files,
+/// and partial downloads of the seed data and the model. Only call it while holding the [`DirLock`].
 pub(super) fn remove_leftovers(paths: &Paths) {
     let temp_prefixes = [
         format!(".{RECORDS_FILE}."),
@@ -124,13 +124,18 @@ pub(super) fn remove_leftovers(paths: &Paths) {
         format!(".{SETTINGS_FILE}."),
     ];
     for name in file_names(&paths.data) {
-        if name.ends_with(".tmp") && temp_prefixes.iter().any(|p| name.starts_with(p)) {
+        let partial_vectors = name == format!("{}.part", plumb_embed::VECTORS_FILE_NAME);
+        if partial_vectors
+            || name.ends_with(".tmp") && temp_prefixes.iter().any(|p| name.starts_with(p))
+        {
             remove_leftover(&paths.data.join(name));
         }
     }
-    for name in file_names(&paths.seed) {
-        if name.ends_with(".part") {
-            remove_leftover(&paths.seed.join(name));
+    for dir in [&paths.seed, &paths.data.join(super::embedding::MODEL_DIR)] {
+        for name in file_names(dir) {
+            if name.ends_with(".part") {
+                remove_leftover(&dir.join(name));
+            }
         }
     }
     for name in file_names(&paths.indexes) {
@@ -404,9 +409,13 @@ mod tests {
         fs::write(paths.indexes.join(".000003.new-99-0/meta.json"), "{}").unwrap();
         fs::create_dir_all(paths.indexes.join("000002")).unwrap();
         fs::create_dir_all(&paths.seed).unwrap();
+        fs::create_dir_all(dir.path().join("model")).unwrap();
         for file in [
             "seed/tranco-top-1m.csv.zip",
             "seed/wikidata-official-sites.tsv.part",
+            "vectors.bin.part",
+            "model/model.safetensors.part",
+            "model/config.json",
             "records.jsonl",
             ".records.jsonl.99.tmp",
             "state.json",
@@ -418,11 +427,13 @@ mod tests {
         remove_leftovers(&paths);
         assert_eq!(names(&paths.indexes), ["000002"]);
         assert_eq!(names(&paths.seed), ["tranco-top-1m.csv.zip"]);
+        assert_eq!(names(&dir.path().join("model")), ["config.json"]);
         assert_eq!(
             names(dir.path()),
             [
                 ".hidden-by-the-user",
                 "indexes",
+                "model",
                 "records.jsonl",
                 "seed",
                 "state.json"

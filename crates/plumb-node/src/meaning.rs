@@ -303,7 +303,7 @@ pub(crate) fn embed_records(
 /// for every site in the records file whose text changed since the last
 /// run, and drops the vectors of sites no longer there.
 pub fn run_embed(args: EmbedArgs) -> Result<()> {
-    block_on(ensure_model(&args.model))??;
+    block_on(ensure_model(&args.model, MODEL_BASE_URL))??;
     let embedder = load_embedder(&args.model)?;
     let records = load_records(&args.records)
         .with_context(|| format!("loading records {}", args.records.display()))?
@@ -331,8 +331,9 @@ pub fn run_embed(args: EmbedArgs) -> Result<()> {
     Ok(())
 }
 
-/// Downloads the model's files into `dir`, those not there yet.
-pub(crate) async fn ensure_model(dir: &Path) -> Result<()> {
+/// Downloads the model's files into `dir` from `base_url` (each of
+/// [`MODEL_FILES`] appended), those not there yet.
+pub(crate) async fn ensure_model(dir: &Path, base_url: &str) -> Result<()> {
     if MODEL_FILES.iter().all(|name| dir.join(name).is_file()) {
         return Ok(());
     }
@@ -344,7 +345,7 @@ pub(crate) async fn ensure_model(dir: &Path) -> Result<()> {
         if dest.is_file() {
             continue;
         }
-        let url = format!("{MODEL_BASE_URL}{name}");
+        let url = format!("{base_url}{name}");
         plumb_ingest::download::download_to_file(&client, &url, &dest)
             .await
             .with_context(|| format!("downloading {url}"))?;

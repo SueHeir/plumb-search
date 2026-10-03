@@ -69,6 +69,7 @@ fn test_config(dir: &Path) -> NodeConfig {
         wikidata_min_sitelinks: 25,
         wikidata_pacing: quick_wikidata(),
         cc_ranks_url: None,
+        model_base_url: format!("{nowhere}/model/"),
     };
     config
 }
@@ -576,6 +577,7 @@ impl SeedHost {
             wikidata_min_sitelinks: 25,
             wikidata_pacing: quick_wikidata(),
             cc_ranks_url: None,
+            model_base_url: self.url("/model/"),
         }
     }
 
@@ -840,6 +842,53 @@ async fn stops_promptly_in_the_middle_of_a_download() {
         .unwrap();
     assert!(stopping.elapsed() < Duration::from_secs(5));
     host.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stops_promptly_in_the_middle_of_the_model_download() {
+    // A model host that sends the start of a file and then nothing.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let host = tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((mut socket, _)) = listener.accept().await {
+            let mut buf = [0u8; 4096];
+            let _ = socket.read(&mut buf).await;
+            let _ = socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1000000\r\n\r\n{")
+                .await;
+            held.push(socket);
+        }
+    });
+    let dir = seeded_dir();
+    let mut config = test_config(dir.path());
+    config.search_by_meaning = true;
+    config.sources.model_base_url = format!("{base}/model/");
+    let node = start(config).await.unwrap();
+    wait_for(node.addr(), "the first index", ready_and_idle).await;
+    let part = dir.path().join("model/config.json.part");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !part.is_file() {
+        assert!(
+            Instant::now() < deadline,
+            "the model download did not start"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let stopping = Instant::now();
+    tokio::time::timeout(Duration::from_secs(20), node.shutdown())
+        .await
+        .expect("shutdown does not wait for the model download")
+        .unwrap();
+    assert!(stopping.elapsed() < Duration::from_secs(15));
+    host.abort();
+
+    // The next start clears the partial file away.
+    let node = start(test_config(dir.path())).await.unwrap();
+    wait_for(node.addr(), "a restart", ready_and_idle).await;
+    assert!(!part.exists());
+    node.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

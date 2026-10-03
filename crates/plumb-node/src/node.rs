@@ -297,6 +297,9 @@ pub struct SeedSources {
     /// [`NodeConfig::cc_release`]; when set, Common Crawl ranks are used
     /// even without a release.
     pub cc_ranks_url: Option<String>,
+    /// Where the embedding model's files are downloaded from, for search by
+    /// meaning: each of [`plumb_embed::MODEL_FILES`] is appended.
+    pub model_base_url: String,
 }
 
 impl Default for SeedSources {
@@ -307,6 +310,7 @@ impl Default for SeedSources {
             wikidata_min_sitelinks: 25,
             wikidata_pacing: download::WikidataPacing::default(),
             cc_ranks_url: None,
+            model_base_url: plumb_embed::MODEL_BASE_URL.to_string(),
         }
     }
 }
