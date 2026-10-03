@@ -106,7 +106,7 @@ plumb eval --index data/index --queries eval/brand_queries.tsv
 
 To refresh the seed data later, run steps 1 and 3 again with `--records data/records.jsonl` added to step 3. Titles, link text and crawl times carry over, while ranks and official-site marks come only from the new files, so a domain that has expired and changed hands does not keep the trust it had.
 
-The crawler identifies itself as `PlumbSearch/<version> (+https://github.com/SueHeir/plumb-search)`, obeys robots.txt (including `Crawl-delay`), and fetches one page per site.
+The crawler identifies itself as `PlumbSearch/<version> (+https://github.com/SueHeir/plumb-search)`, obeys robots.txt (including `Crawl-delay`), and fetches one page per site, plus the site's icon for results pages. Icons are redrawn as small PNGs and served inside the results page, so a searcher's browser never contacts the sites or any icon service.
 
 ## How ranking works
 

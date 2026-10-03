@@ -29,6 +29,12 @@ use url::Url;
 
 use crate::{OutLink, PageMeta};
 
+/// Most icon links [`extract_page_meta`] keeps from one page.
+pub const MAX_ICONS: usize = 3;
+
+/// Most `<link rel="icon">`s read from one page.
+const MAX_ICON_LINKS: usize = 64;
+
 /// Most outbound links [`extract_page_meta`] keeps from one page.
 pub const MAX_OUT_LINKS: usize = 500;
 
@@ -195,6 +201,8 @@ struct Page<'a> {
     og_description: Option<String>,
     site_name: Option<String>,
     search_url: Option<String>,
+    /// `<link rel="icon">` and the like, with their [`icon_rank`].
+    icons: Vec<(u32, String)>,
     /// The text of the `<h1>` or `<h2>` being read, when it is visible.
     heading_text: Option<String>,
     headings: Vec<String>,
@@ -282,6 +290,7 @@ impl<'a> Page<'a> {
             og_description: None,
             site_name: None,
             search_url: None,
+            icons: Vec::new(),
             heading_text: None,
             headings: Vec::new(),
             heading_words: 0,
@@ -323,6 +332,7 @@ impl<'a> Page<'a> {
             }
             "img" => self.image(tag),
             "meta" => self.meta(tag),
+            "link" if self.foreign == 0 => self.link(tag),
             "form" => self.open_form(tag),
             "input" => self.input(tag),
             "svg" | "math" if !tag.self_closing => self.foreign += 1,
@@ -539,6 +549,25 @@ impl<'a> Page<'a> {
         }
     }
 
+    /// Notes a `<link>` to the site's icon.
+    fn link(&mut self, tag: &Tag) {
+        if self.icons.len() >= MAX_ICON_LINKS {
+            return;
+        }
+        let rel = attr(tag, "rel").unwrap_or_default().to_ascii_lowercase();
+        let Some(href) = attr(tag, "href") else {
+            return;
+        };
+        let Some(url) = resolve_link(self.base_url, href) else {
+            return;
+        };
+        let kind = attr(tag, "type").unwrap_or_default();
+        let sizes = attr(tag, "sizes").unwrap_or_default();
+        if let Some(rank) = icon_rank(&rel, kind, sizes, url.path()) {
+            self.icons.push((rank, url.into()));
+        }
+    }
+
     /// Starts reading a form that submits with GET to this site.
     fn open_form(&mut self, tag: &Tag) {
         self.form = None;
@@ -628,10 +657,69 @@ impl<'a> Page<'a> {
             description: self.description.or(self.og_description),
             site_name: self.site_name,
             search_url: self.search_url,
+            icons: best_icons(self.icons),
             headings: self.headings,
             links: self.links,
         }
     }
+}
+
+/// The page's icons, best first, each once, at most [`MAX_ICONS`]. A
+/// stable sort keeps page order among equals.
+fn best_icons(mut icons: Vec<(u32, String)>) -> Vec<String> {
+    icons.sort_by_key(|(rank, _)| *rank);
+    let mut best: Vec<String> = Vec::new();
+    for (_, url) in icons {
+        if best.len() == MAX_ICONS {
+            break;
+        }
+        if !best.contains(&url) {
+            best.push(url);
+        }
+    }
+    best
+}
+
+/// How good a `<link>` is as the site's icon for a results page, lower
+/// being better, or `None` when it is not a usable icon. `rel` is
+/// lowercase. Results show icons at 16 to 32 pixels, so a square of 32 to
+/// 256 pixels is best, then an icon of unknown size (often a 32-pixel
+/// `.ico`), then the larger Apple touch icon, then very large or small
+/// ones. SVG images and Safari's one-color `mask-icon`s are left out:
+/// the crawler only reads bitmap formats.
+fn icon_rank(rel: &str, kind: &str, sizes: &str, path: &str) -> Option<u32> {
+    let words: Vec<&str> = rel.split_ascii_whitespace().collect();
+    let icon = words.contains(&"icon");
+    let touch = words
+        .iter()
+        .any(|w| *w == "apple-touch-icon" || *w == "apple-touch-icon-precomposed");
+    if !icon && !touch {
+        return None;
+    }
+    let svg = kind.trim().to_ascii_lowercase().starts_with("image/svg")
+        || path.to_ascii_lowercase().ends_with(".svg")
+        || sizes.trim().eq_ignore_ascii_case("any");
+    if svg {
+        return None;
+    }
+    let size = sizes
+        .split_ascii_whitespace()
+        .filter_map(|size| {
+            let (w, h) = size
+                .to_ascii_lowercase()
+                .split_once('x')
+                .map(|(w, h)| (w.parse::<u32>().ok(), h.parse::<u32>().ok()))?;
+            Some(w?.min(h?))
+        })
+        .max();
+    let rank = match (touch, size) {
+        (false, Some(px)) if (32..=256).contains(&px) => px - 32,
+        (false, None) => 300,
+        (true, _) => 400,
+        (false, Some(px)) if px > 256 => 500,
+        (false, Some(px)) => 600 + (32 - px),
+    };
+    Some(rank)
 }
 
 /// How the tokenizer must read an element's contents: as text up to the
@@ -913,6 +1001,36 @@ mod tests {
                 ..PageMeta::default()
             }
         );
+    }
+
+    #[test]
+    fn picks_the_icons_best_for_a_results_page() {
+        let meta = extract(
+            "https://www.example.com/shop/",
+            r#"<head>
+            <link rel="apple-touch-icon" href="/touch.png">
+            <link rel="mask-icon" href="/mask.svg" color="black">
+            <link rel="icon" type="image/svg+xml" href="/icon.svg">
+            <link rel="icon" href="/16.png" sizes="16x16">
+            <link rel="shortcut icon" href="favicon.ico">
+            <link rel="icon" href="https://cdn.example.net/64.png" sizes="64x64">
+            <link rel="stylesheet" href="/site.css">
+            <link rel="icon" href="javascript:alert(1)">
+            </head>"#,
+        );
+        assert_eq!(
+            meta.icons,
+            [
+                "https://cdn.example.net/64.png",
+                "https://www.example.com/shop/favicon.ico",
+                "https://www.example.com/touch.png",
+            ]
+        );
+        let svg_only = extract(
+            "https://example.com/",
+            r#"<link rel="icon" href="/i.svg"><svg><link rel="icon" href="/in-svg.png"></svg>"#,
+        );
+        assert!(svg_only.icons.is_empty());
     }
 
     #[test]

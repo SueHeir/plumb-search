@@ -31,7 +31,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{bail, Context, Result};
 use plumb_core::{now_unix, SiteRecord};
-use plumb_crawl::{CrawlConfig, CrawlResult, CrawlTarget, HomepageCrawler};
+use plumb_crawl::{CrawlConfig, CrawlOutcome, CrawlResult, CrawlTarget, HomepageCrawler};
 use plumb_index::build_index;
 use plumb_ingest::{
     attach_facts, download, facts, kind_sites, load_cc_domain_ranks, load_site_facts, load_tranco,
@@ -44,9 +44,10 @@ use super::network::{self, REBUILD_AFTER_RECORDS};
 use super::store::{self, SavedState};
 use super::{Inner, NodeConfig, ServingIndex, Step, Stopped};
 use crate::crawl::{
-    crawl_rolling, select_targets, target_for, Fetcher, Rolling, RunEnd, CRAWL_BATCH_SIZE,
+    crawl_rolling, select_targets_with, target_for, Fetcher, Rolling, RunEnd, CRAWL_BATCH_SIZE,
     SECONDS_PER_DAY,
 };
+use crate::icons::IconStore;
 use crate::records::{load_records, replace_records, RecordStore};
 use crate::web::{duration_words, group_thousands};
 
@@ -624,12 +625,13 @@ fn start_round(inner: &Inner, requested: bool) -> Result<()> {
 }
 
 /// Fetches homepages for a node's crawl: keeps them in flight across
-/// batches, stops on shutdown or when background updates are paused, and
-/// shares each batch's results with the network.
+/// batches, stops on shutdown or when background updates are paused, keeps
+/// the sites' icons, and shares each batch's results with the network.
 struct NodeFetcher<'a> {
     rolling: Rolling<'a>,
     inner: &'a Inner,
     net: Option<&'a plumb_net::NetHandle>,
+    icons: &'a IconStore,
 }
 
 impl Fetcher for NodeFetcher<'_> {
@@ -648,12 +650,13 @@ impl Fetcher for NodeFetcher<'_> {
             return None;
         }
         let crawler = &mut self.rolling.crawler;
-        let (inner, net) = (self.inner, self.net);
+        let (inner, net, icons) = (self.inner, self.net, self.icons);
         self.rolling.runtime.block_on(async move {
             let results = tokio::select! {
                 results = Rolling::next_results(crawler, n) => results,
                 () = inner.stopped() => return None,
             };
+            save_icons(icons, &results);
             if let Some(net) = net {
                 // Shared before it is saved here: a batch the offline
                 // check throws away holds few records anyway.
@@ -717,7 +720,17 @@ fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Option<ServingIndex
     };
     let candidates =
         candidates.filter(|record| !rechecks.iter().any(|target| target.domain == record.domain));
-    let rest = select_targets(candidates, left.saturating_sub(rechecks.len()), now, window);
+    // Sites crawled before nodes kept icons are due again for theirs.
+    let icons = IconStore::new(&inner.paths.icons);
+    let noted = icons.noted();
+    let rest = select_targets_with(
+        candidates,
+        left.saturating_sub(rechecks.len()),
+        now,
+        window,
+        |record| last_crawl_answered(record) && !noted.contains(&record.domain),
+    );
+    drop(noted);
     let mut targets = rechecks;
     targets.extend(rest);
     if targets.is_empty() {
@@ -744,6 +757,7 @@ fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Option<ServingIndex
             },
             inner,
             net: net.as_deref(),
+            icons: &icons,
         };
         let totals = crawl_rolling(
             &mut set,
@@ -828,6 +842,26 @@ fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Option<ServingIndex
     }
     inner.check_stop()?;
     build(inner, set.into_sorted_vec()).map(Some)
+}
+
+/// Whether the last try at `record`'s homepage fetched it.
+fn last_crawl_answered(record: &SiteRecord) -> bool {
+    record
+        .crawled_at
+        .is_some_and(|at| at >= record.crawl_attempted_at.unwrap_or(0))
+}
+
+/// Notes the icon, or the lack of one, of every homepage fetched. A site
+/// whose homepage was not fetched keeps what an earlier crawl found.
+fn save_icons(icons: &IconStore, results: &[CrawlResult]) {
+    for result in results {
+        if let CrawlOutcome::Fetched(page) = &result.outcome {
+            if let Err(err) = icons.put(&result.domain, page.icon.as_deref()) {
+                warn!("cannot save the icon of {}: {err}", result.domain);
+                return;
+            }
+        }
+    }
 }
 
 /// Builds an index of `records` in a new numbered directory and opens it.
@@ -1007,6 +1041,49 @@ impl Backoff {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_sites_whose_last_crawl_answered_wait_for_an_icon() {
+        let mut record = SiteRecord::new("a.com");
+        assert!(!last_crawl_answered(&record), "never crawled");
+        record.crawled_at = Some(10);
+        assert!(last_crawl_answered(&record));
+        record.crawl_attempted_at = Some(10);
+        assert!(last_crawl_answered(&record));
+        record.crawl_attempted_at = Some(20);
+        assert!(!last_crawl_answered(&record), "the last try failed");
+    }
+
+    #[test]
+    fn fetched_homepages_note_their_icon_or_its_lack() {
+        use plumb_crawl::{CrawledPage, PageMeta};
+        let dir = tempfile::tempdir().unwrap();
+        let icons = IconStore::new(dir.path());
+        let page = |domain: &str, icon: Option<Vec<u8>>| CrawlResult {
+            domain: domain.into(),
+            outcome: CrawlOutcome::Fetched(CrawledPage {
+                domain: domain.into(),
+                final_url: format!("https://{domain}/"),
+                status: 200,
+                fetched_at: 1,
+                meta: PageMeta::default(),
+                icon,
+            }),
+        };
+        let results = [
+            page("a.com", Some(b"png".to_vec())),
+            page("b.com", None),
+            CrawlResult {
+                domain: "c.com".into(),
+                outcome: CrawlOutcome::RobotsDisallowed,
+            },
+        ];
+        save_icons(&icons, &results);
+        assert_eq!(icons.get("a.com").as_deref(), Some(&b"png"[..]));
+        let noted = icons.noted();
+        assert!(noted.contains("a.com") && noted.contains("b.com"));
+        assert!(!noted.contains("c.com"));
+    }
 
     #[test]
     fn backoff_doubles_up_to_the_cap() {

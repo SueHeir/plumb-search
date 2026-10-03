@@ -807,6 +807,44 @@ pub fn collapse_whitespace(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// An address as results pages show it: without `http://` or `https://`,
+/// without the slash of a bare homepage, and cut to 100 characters.
+pub fn display_url(href: &str) -> String {
+    let shown = href
+        .strip_prefix("https://")
+        .or_else(|| href.strip_prefix("http://"))
+        .unwrap_or(href);
+    let shown = match shown.split_once('/') {
+        Some((host, "")) => host,
+        _ => shown,
+    };
+    truncate_chars(shown, 100)
+}
+
+/// How many colors [`site_initial`] picks from.
+pub const SITE_INITIAL_COLORS: u8 = 8;
+
+/// What a results page shows for a site that has no icon: the first
+/// letter or digit of its host name after any `www.`, in capitals (`?` when
+/// there is none), and a color number below [`SITE_INITIAL_COLORS`] that
+/// stays the same for the site everywhere: on a node's pages and in the
+/// browser's private search alike.
+pub fn site_initial(domain: &str) -> (char, u8) {
+    let host = domain.strip_prefix("www.").unwrap_or(domain);
+    let letter = host
+        .chars()
+        .find(|c| c.is_alphanumeric())
+        .and_then(|c| c.to_uppercase().next())
+        .unwrap_or('?');
+    // FNV-1a, so the color never changes between builds or machines.
+    let mut hash: u32 = 0x811c_9dc5;
+    for byte in domain.bytes() {
+        hash ^= u32::from(byte);
+        hash = hash.wrapping_mul(0x0100_0193);
+    }
+    (letter, (hash % u32::from(SITE_INITIAL_COLORS)) as u8)
+}
+
 /// Cuts `text` to at most `max` characters (not bytes).
 pub fn truncate_chars(text: &str, max: usize) -> String {
     match text.char_indices().nth(max) {
@@ -869,6 +907,28 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn addresses_are_shown_without_the_scheme() {
+        assert_eq!(display_url("https://www.usbank.com/"), "www.usbank.com");
+        assert_eq!(display_url("http://a.com/b/"), "a.com/b/");
+        assert_eq!(display_url("https://a.com/?q=1"), "a.com/?q=1");
+    }
+
+    #[test]
+    fn site_initials() {
+        assert_eq!(site_initial("www.usbank.com").0, 'U');
+        assert_eq!(site_initial("123movies.to").0, '1');
+        assert_eq!(site_initial("éte.fr").0, 'É');
+        assert_eq!(site_initial("").0, '?');
+        assert_eq!(site_initial("example.com"), site_initial("example.com"));
+        let colors: std::collections::HashSet<u8> = ["a.com", "b.com", "c.com", "d.com", "e.com"]
+            .iter()
+            .map(|d| site_initial(d).1)
+            .collect();
+        assert!(colors.len() > 1);
+        assert!(colors.iter().all(|c| *c < SITE_INITIAL_COLORS));
+    }
 
     #[test]
     fn registrable_domains() {

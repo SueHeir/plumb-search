@@ -25,6 +25,8 @@ const SEED_DIR: &str = "seed";
 const INDEXES_DIR: &str = "indexes";
 /// The network side's files (see [`super::network`]).
 const NET_DIR: &str = "net";
+/// Site icons for results pages (see [`crate::icons`]).
+const ICONS_DIR: &str = "icons";
 
 /// The files and directories of a data directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,6 +38,7 @@ pub(super) struct Paths {
     pub(super) seed: PathBuf,
     pub(super) indexes: PathBuf,
     pub(super) net: PathBuf,
+    pub(super) icons: PathBuf,
     /// Records from other nodes, not yet folded in.
     pub(super) inbox: PathBuf,
     /// The inbox while it is being folded in.
@@ -52,6 +55,7 @@ impl Paths {
             seed: data.join(SEED_DIR),
             indexes: data.join(INDEXES_DIR),
             net: data.join(NET_DIR),
+            icons: data.join(ICONS_DIR),
             inbox: data.join(NET_DIR).join("inbox.jsonl"),
             absorbing: data.join(NET_DIR).join("inbox.absorbing"),
         }

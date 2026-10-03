@@ -53,6 +53,8 @@
 //!                            records.jsonl exists
 //!   indexes/000001/          a complete search index
 //!   indexes/000002/          ...the newest one that opens is searched
+//!   icons/3f/example.com.png site icons for results pages (see
+//!                            [`crate::icons`]); empty when a site had none
 //! ```
 //!
 //! The node owns the directory. The records and state files are replaced
@@ -1497,6 +1499,10 @@ impl StatusSource for Inner {
 
     fn record_pick(&self, query: &str, domain: &str) {
         network::record_pick(self, query, domain);
+    }
+
+    fn icon(&self, domain: &str) -> Option<Vec<u8>> {
+        crate::icons::IconStore::new(&self.paths.icons).get(domain)
     }
 
     fn features(&self) -> features::FeatureSettings {
