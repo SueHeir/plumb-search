@@ -12,6 +12,8 @@
 //! - [`to_records`] turns crawl results into [`plumb_core::SiteRecord`]s
 //!   to merge into a [`plumb_core::RecordSet`].
 
+use std::sync::atomic::AtomicU64;
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -72,6 +74,10 @@ pub struct CrawlConfig {
     /// host name is still checked, so give a proxy on a private network as an
     /// IP address.
     pub use_system_proxy: bool,
+    /// Counts the bytes of response bodies read (robots.txt files and
+    /// pages, after decompression), so that a caller can keep track of
+    /// the crawl's downloads. Clones of a config share the count.
+    pub downloaded: Arc<AtomicU64>,
 }
 
 impl Default for CrawlConfig {
@@ -85,6 +91,7 @@ impl Default for CrawlConfig {
             max_redirects: 5,
             allow_private_addresses: false,
             use_system_proxy: false,
+            downloaded: Arc::default(),
         }
     }
 }
@@ -137,6 +144,11 @@ pub struct PageMeta {
     /// to the same site.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub search_url: Option<String>,
+    /// Visible `<h1>` and `<h2>` texts, in page order, each once, at most
+    /// [`plumb_core::MAX_HEADINGS`] and [`plumb_core::MAX_HEADING_WORDS`]
+    /// words in all.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub headings: Vec<String>,
     /// Links to other registrable domains, in page order.
     pub links: Vec<OutLink>,
 }

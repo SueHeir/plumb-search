@@ -92,7 +92,7 @@ async fn private_page(
         q: String::new(),
         ..params
     }
-    .options(&state.home, &headers)
+    .options(&state.settings.home, &headers)
     .country;
     let available = state.private_search();
     let status = if available {

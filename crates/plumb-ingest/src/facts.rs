@@ -1,14 +1,18 @@
 //! Wikidata facts about the organizations behind official websites: the
-//! country (P17) and what kind of thing each is (instance of, P31, and
+//! country (P17), what kind of thing each is (instance of, P31, and
 //! industry, P452), for the "your country" setting and for queries naming
-//! a kind, like "banks".
+//! a kind, like "banks", the English names it is also known by ("NYT",
+//! "AA"), so people can name a site the way they say it, its English
+//! description ("American bank holding company"), and its number of
+//! sitelinks (Wikipedia articles), how widely known it is.
 //!
 //! They are asked for by item: the items of the official websites file go
 //! to the query service in batches of [`FACTS_BATCH`] ids (SPARQL
 //! `VALUES`), each answered in a few seconds, since a query over every item
 //! with a website runs past the service's 60-second limit. They are saved as
 //! `wikidata-site-facts.tsv` with the header
-//! `item\tcountry\tkind`, one fact per row (the other column empty).
+//! `item\tcountry\tkind\talias\tabout\tsitelinks`, one fact per row (the
+//! other columns empty). Older files may lack the last three columns.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -26,6 +30,9 @@ use crate::{load_wikidata_official_sites, open_maybe_gz, Line, LineReader, Offic
 /// File name of the facts in a seed directory.
 pub const FACTS_FILE_NAME: &str = "wikidata-site-facts.tsv";
 
+/// The facts file's first line.
+pub const FACTS_HEADER: &str = "item\tcountry\tkind\talias\tabout\tsitelinks\n";
+
 /// What Wikidata says about one item.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SiteFacts {
@@ -34,7 +41,23 @@ pub struct SiteFacts {
     pub country: Option<String>,
     /// English labels of what the item is ("bank", "airline"), in file order.
     pub kinds: Vec<String>,
+    /// Other English names of the item ("NYT"), at most [`MAX_NAMES`], in
+    /// file order.
+    pub names: Vec<String>,
+    /// The English description, cut to [`MAX_ABOUT_CHARS`].
+    pub about: Option<String>,
+    /// Number of sitelinks; 0 when unknown.
+    pub sitelinks: u32,
 }
+
+/// Longest description kept, in characters.
+pub const MAX_ABOUT_CHARS: usize = 200;
+
+/// The most other names kept per item; items like countries have dozens.
+pub const MAX_NAMES: usize = 6;
+
+/// Longer other names are descriptions rather than names, and are skipped.
+const MAX_NAME_CHARS: usize = 60;
 
 /// Facts by Wikidata item id (`Q739868`).
 pub type FactsByItem = HashMap<String, SiteFacts>;
@@ -49,15 +72,20 @@ const BATCH_TRIES: u32 = 3;
 /// A batch this small that still fails fails the download.
 const MIN_BATCH: usize = 125;
 
-/// The SPARQL query for the country codes (P17) and the English labels of
-/// what they are (instance of, P31, and industry, P452) of `items`, Wikidata
-/// item ids such as `Q739868`.
+/// The SPARQL query for the country codes (P17), the English labels of
+/// what they are (instance of, P31, and industry, P452), the English other
+/// names (`skos:altLabel`), the English description and the number of
+/// sitelinks of `items`, Wikidata item ids such as
+/// `Q739868`.
 pub fn facts_query(items: &[String]) -> String {
     let values: String = items.iter().map(|item| format!(" wd:{item}")).collect();
     format!(
-        "SELECT DISTINCT ?item ?country ?kind WHERE {{ VALUES ?item {{{values} }} \
+        "SELECT DISTINCT ?item ?country ?kind ?alias ?about ?sitelinks WHERE {{ VALUES ?item {{{values} }} \
          {{ ?item wdt:P17 ?c . ?c wdt:P297 ?country . }} UNION \
-         {{ ?item wdt:P31|wdt:P452 ?k . ?k rdfs:label ?kind . FILTER(LANG(?kind) = \"en\") }} }}"
+         {{ ?item wdt:P31|wdt:P452 ?k . ?k rdfs:label ?kind . FILTER(LANG(?kind) = \"en\") }} UNION \
+         {{ ?item skos:altLabel ?alias . FILTER(LANG(?alias) = \"en\") }} UNION \
+         {{ ?item schema:description ?about . FILTER(LANG(?about) = \"en\") }} UNION \
+         {{ ?item wikibase:sitelinks ?sitelinks . }} }}"
     )
 }
 
@@ -80,7 +108,8 @@ fn is_item_id(item: &str) -> bool {
 }
 
 /// Asks the SPARQL `endpoint` for the facts of the items of the official
-/// websites file `sites_file` ([`official_items`]), [`FACTS_BATCH`] at a
+/// websites files `sites_files` ([`official_items`]; files that do not
+/// exist are skipped), [`FACTS_BATCH`] at a
 /// time with `pacing.pause` between queries, and writes
 /// `dir/`[`FACTS_FILE_NAME`]. A batch that fails after a few tries (HTTP
 /// 429 or 5xx, a cut-off answer, a lost connection) is asked for again in
@@ -90,20 +119,31 @@ pub async fn download_site_facts(
     client: &reqwest::Client,
     endpoint: &str,
     dir: &Path,
-    sites_file: &Path,
+    sites_files: &[PathBuf],
     pacing: WikidataPacing,
 ) -> Result<PathBuf> {
-    let file = sites_file.to_path_buf();
-    let items = tokio::task::spawn_blocking(move || official_items(&file))
-        .await
-        .context("reading the official websites")??;
+    let files = sites_files.to_vec();
+    let items = tokio::task::spawn_blocking(move || -> Result<Vec<String>> {
+        let mut seen = HashSet::new();
+        let mut items = Vec::new();
+        for file in files.iter().filter(|file| file.is_file()) {
+            for item in official_items(file)? {
+                if seen.insert(item.clone()) {
+                    items.push(item);
+                }
+            }
+        }
+        Ok(items)
+    })
+    .await
+    .context("reading the official websites")??;
     let batches = items.len().div_ceil(FACTS_BATCH);
     info!(
         "asking Wikidata for the countries and kinds of {} items, in {batches} queries",
         items.len()
     );
     let started = Instant::now();
-    let mut tsv = String::from("item\tcountry\tkind\n");
+    let mut tsv = String::from(FACTS_HEADER);
     // The batches still to ask for, the next one last.
     let mut todo: Vec<&[String]> = items.chunks(FACTS_BATCH).rev().collect();
     let mut queries = 0u32;
@@ -112,7 +152,7 @@ pub async fn download_site_facts(
             tokio::time::sleep(pacing.pause).await;
         }
         queries += 1;
-        match query_batch(client, endpoint, batch, pacing).await {
+        match sparql_json(client, endpoint, &facts_query(batch), pacing).await {
             Ok(json) => {
                 push_facts(&mut tsv, &json)?;
             }
@@ -151,20 +191,20 @@ pub async fn download_site_facts(
     Ok(dest)
 }
 
-/// Asks about one batch, trying again after HTTP 429 or 5xx and failed
-/// connections, waiting `pacing.retry_wait`, doubling.
-async fn query_batch(
+/// Runs `query`, trying again after HTTP 429 or 5xx, a cut-off answer and
+/// failed connections, waiting `pacing.retry_wait`, doubling; returns the
+/// SPARQL JSON answer.
+pub(crate) async fn sparql_json(
     client: &reqwest::Client,
     endpoint: &str,
-    batch: &[String],
+    query: &str,
     pacing: WikidataPacing,
 ) -> Result<Vec<u8>> {
-    let query = facts_query(batch);
     let mut wait = pacing.retry_wait;
     let mut tries = 0;
     loop {
         tries += 1;
-        match sparql(client, endpoint, &query).await {
+        match sparql(client, endpoint, query).await {
             Ok(json) => return Ok(json),
             Err(Query::Fatal(err)) => return Err(err),
             Err(Query::Again(err)) if tries >= BATCH_TRIES => {
@@ -172,7 +212,7 @@ async fn query_batch(
             }
             Err(Query::Again(err)) => {
                 warn!(
-                    "Wikidata facts query: {err:#}; trying again in {:.1} s",
+                    "Wikidata query: {err:#}; trying again in {:.1} s",
                     wait.as_secs_f64()
                 );
                 tokio::time::sleep(wait).await;
@@ -255,7 +295,7 @@ struct Term {
 }
 
 /// Appends the rows of the SPARQL JSON results of a [`facts_query`] to
-/// `tsv`, one fact per row: `item\tcountry\t` or `item\t\tkind`.
+/// `tsv`, one fact per row, the others of its five columns empty.
 pub fn push_facts(tsv: &mut String, json: &[u8]) -> Result<()> {
     let response: Response =
         serde_json::from_slice(json).context("parsing Wikidata SPARQL results")?;
@@ -278,11 +318,15 @@ pub fn push_facts(tsv: &mut String, json: &[u8]) -> Result<()> {
         if item.is_empty() {
             continue;
         }
-        if let Some(country) = cell("country") {
-            tsv.push_str(&format!("{item}\t{country}\t\n"));
-        }
-        if let Some(kind) = cell("kind") {
-            tsv.push_str(&format!("{item}\t\t{kind}\n"));
+        for (column, name) in ["country", "kind", "alias", "about", "sitelinks"]
+            .into_iter()
+            .enumerate()
+        {
+            if let Some(value) = cell(name) {
+                let before = "\t".repeat(column + 1);
+                let after = "\t".repeat(4 - column);
+                tsv.push_str(&format!("{item}{before}{value}{after}\n"));
+            }
         }
     }
     Ok(())
@@ -290,11 +334,15 @@ pub fn push_facts(tsv: &mut String, json: &[u8]) -> Result<()> {
 
 /// Reads a facts file ([`FACTS_FILE_NAME`]); it may be gzipped. Rows with
 /// an unknown country code are skipped, and an item with more than one
-/// country gets none.
+/// country gets none. Other names past [`MAX_NAMES`] per item, or longer
+/// than 60 characters, are skipped.
 pub fn load_site_facts(path: &Path) -> Result<FactsByItem> {
     let mut lines = LineReader::new(open_maybe_gz(path)?);
     let read_err = || format!("reading {}", path.display());
-    let mut columns: Option<(usize, usize, usize)> = None;
+    // item, country, kind, then alias, about and sitelinks when the file
+    // has them.
+    type Columns = (usize, usize, usize, [Option<usize>; 3]);
+    let mut columns: Option<Columns> = None;
     let mut facts = FactsByItem::new();
     let mut countries: HashMap<String, Vec<String>> = HashMap::new();
     while let Some((line_no, line)) = lines.next_line().with_context(read_err)? {
@@ -305,7 +353,9 @@ pub fn load_site_facts(path: &Path) -> Result<FactsByItem> {
             continue;
         }
         let fields: Vec<&str> = line.split('\t').map(str::trim).collect();
-        let Some((item_col, country_col, kind_col)) = columns else {
+        let Some((item_col, country_col, kind_col, [alias_col, about_col, sitelinks_col])) =
+            columns
+        else {
             let position = |name: &str| {
                 fields
                     .iter()
@@ -317,7 +367,13 @@ pub fn load_site_facts(path: &Path) -> Result<FactsByItem> {
                         )
                     })
             };
-            columns = Some((position("item")?, position("country")?, position("kind")?));
+            let optional = |name: &str| fields.iter().position(|f| f.eq_ignore_ascii_case(name));
+            columns = Some((
+                position("item")?,
+                position("country")?,
+                position("kind")?,
+                [optional("alias"), optional("about"), optional("sitelinks")],
+            ));
             continue;
         };
         let field = |i: usize| fields.get(i).copied().unwrap_or_default();
@@ -338,6 +394,24 @@ pub fn load_site_facts(path: &Path) -> Result<FactsByItem> {
                 .or_default()
                 .kinds
                 .push(kind.to_string());
+        }
+        if let Some(sitelinks) = sitelinks_col.and_then(|c| field(c).parse::<u32>().ok()) {
+            let entry = facts.entry(item.to_string()).or_default();
+            entry.sitelinks = entry.sitelinks.max(sitelinks);
+        }
+        let about = about_col.map(field).unwrap_or_default();
+        if !about.is_empty() {
+            let entry = facts.entry(item.to_string()).or_default();
+            if entry.about.is_none() {
+                entry.about = Some(plumb_core::truncate_chars(about, MAX_ABOUT_CHARS));
+            }
+        }
+        let alias = alias_col.map(field).unwrap_or_default();
+        if !alias.is_empty() && alias.chars().count() <= MAX_NAME_CHARS {
+            let names = &mut facts.entry(item.to_string()).or_default().names;
+            if names.len() < MAX_NAMES && !names.iter().any(|n| n == alias) {
+                names.push(alias.to_string());
+            }
         }
     }
     if columns.is_none() {
@@ -363,6 +437,9 @@ pub fn attach_facts(sites: &mut [OfficialSite], facts: &FactsByItem) {
         if let Some(found) = facts.get(&site.item) {
             site.country = found.country.clone();
             site.kinds = found.kinds.clone();
+            site.names = found.names.clone();
+            site.about = found.about.clone();
+            site.sitelinks = found.sitelinks;
         }
     }
 }
@@ -379,15 +456,21 @@ mod tests {
             {"item":{"value":"http://www.wikidata.org/entity/Q3"},"country":{"value":"FR"}},
             {"item":{"value":"http://www.wikidata.org/entity/Q3"},"country":{"value":"DE"}},
             {"item":{"value":"http://www.wikidata.org/entity/Q4"},"country":{"value":"XX"}},
+            {"item":{"value":"http://www.wikidata.org/entity/Q1"},"alias":{"value":"US Bank"}},
+            {"item":{"value":"http://www.wikidata.org/entity/Q1"},"about":{"value":"American bank"}},
+            {"item":{"value":"http://www.wikidata.org/entity/Q1"},"sitelinks":{"value":"42"}},
             {"item":{"value":"http://www.wikidata.org/entity/Q1"},"kind":{"value":"bank"}},
             {"item":{"value":"http://www.wikidata.org/entity/Q1"},"kind":{"value":"public\tcompany"}},
             {"item":{"value":"http://www.wikidata.org/entity/Q2"},"kind":{"value":"bank"}},
             {"item":{"value":"http://www.wikidata.org/entity/Q5"}}
         ]}}"#;
-        let mut tsv = String::from("item\tcountry\tkind\n");
+        let mut tsv = String::from(FACTS_HEADER);
         push_facts(&mut tsv, answer).unwrap();
-        assert!(tsv.starts_with("item\tcountry\tkind\nQ1\tUS\t\n"));
-        assert!(tsv.contains("Q1\t\tpublic company\n"));
+        assert!(tsv.starts_with("item\tcountry\tkind\talias\tabout\tsitelinks\nQ1\tUS\t\t\t\t\n"));
+        assert!(tsv.contains("Q1\t\tpublic company\t\t\t\n"));
+        assert!(tsv.contains("Q1\t\t\tUS Bank\t\t\n"));
+        assert!(tsv.contains("Q1\t\t\t\tAmerican bank\t\n"));
+        assert!(tsv.contains("Q1\t\t\t\t\t42\n"));
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(FACTS_FILE_NAME);
@@ -395,6 +478,9 @@ mod tests {
         let facts = load_site_facts(&path).unwrap();
         assert_eq!(facts["Q1"].country.as_deref(), Some("US"));
         assert_eq!(facts["Q1"].kinds, ["bank", "public company"]);
+        assert_eq!(facts["Q1"].names, ["US Bank"]);
+        assert_eq!(facts["Q1"].about.as_deref(), Some("American bank"));
+        assert_eq!(facts["Q1"].sitelinks, 42);
         assert_eq!(facts["Q2"].country.as_deref(), Some("DE"));
         // Several countries: a multinational, so none.
         assert_eq!(facts["Q3"].country, None);
@@ -408,7 +494,25 @@ mod tests {
         attach_facts(&mut sites, &facts);
         assert_eq!(sites[0].country.as_deref(), Some("US"));
         assert_eq!(sites[0].kinds, ["bank", "public company"]);
+        assert_eq!(sites[0].names, ["US Bank"]);
         assert_eq!(sites[1].country, None);
+    }
+
+    #[test]
+    fn files_without_names_still_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FACTS_FILE_NAME);
+        std::fs::write(&path, "item\tcountry\tkind\nQ1\tUS\t\nQ1\t\tbank\n").unwrap();
+        let facts = load_site_facts(&path).unwrap();
+        assert_eq!(facts["Q1"].kinds, ["bank"]);
+        assert!(facts["Q1"].names.is_empty());
+
+        let long = "x".repeat(61);
+        let rows: String = (0..10).map(|i| format!("Q2\t\t\tName {i}\t\t\n")).collect();
+        std::fs::write(&path, format!("{FACTS_HEADER}{rows}Q3\t\t\t{long}\t\t\n")).unwrap();
+        let facts = load_site_facts(&path).unwrap();
+        assert_eq!(facts["Q2"].names.len(), MAX_NAMES);
+        assert!(!facts.contains_key("Q3"));
     }
 
     #[test]
@@ -417,6 +521,9 @@ mod tests {
         assert!(query.contains("VALUES ?item { wd:Q1 wd:Q22 }"), "{query}");
         assert!(query.contains("wdt:P17"));
         assert!(query.contains("wdt:P31|wdt:P452"));
+        assert!(query.contains("skos:altLabel"));
+        assert!(query.contains("schema:description"));
+        assert!(query.contains("wikibase:sitelinks"));
     }
 
     #[test]
