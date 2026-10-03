@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
-use plumb_ingest::{download, facts};
+use plumb_ingest::{download, facts, kind_sites};
 use tracing::{error, info};
 
 use crate::block_on;
@@ -64,26 +64,47 @@ pub fn run(args: FetchDataArgs) -> Result<()> {
                 .await,
             )
         };
-        let facts = match &wikidata {
-            Outcome::Saved(sites) => outcome(
+        let kind_sites = if args.skip_wikidata {
+            Outcome::Skipped("--skip-wikidata".to_string())
+        } else {
+            outcome(
+                kind_sites::download_kind_sites(
+                    &client,
+                    download::WIKIDATA_SPARQL_URL,
+                    &args.dir,
+                    download::WikidataPacing::default(),
+                )
+                .await,
+            )
+        };
+        let sites_files: Vec<PathBuf> = [&wikidata, &kind_sites]
+            .into_iter()
+            .filter_map(|outcome| match outcome {
+                Outcome::Saved(path) => Some(path.clone()),
+                _ => None,
+            })
+            .collect();
+        let facts = if args.skip_wikidata {
+            Outcome::Skipped("--skip-wikidata".to_string())
+        } else if sites_files.is_empty() {
+            Outcome::Skipped("needs the official websites, which failed".to_string())
+        } else {
+            outcome(
                 facts::download_site_facts(
                     &client,
                     download::WIKIDATA_SPARQL_URL,
                     &args.dir,
-                    sites,
+                    &sites_files,
                     download::WikidataPacing::default(),
                 )
                 .await,
-            ),
-            Outcome::Skipped(why) => Outcome::Skipped(why.clone()),
-            Outcome::Failed(_) => {
-                Outcome::Skipped("needs the official websites, which failed".to_string())
-            }
+            )
         };
         [
             ("tranco", tranco),
             ("cc-ranks", cc_ranks),
             ("wikidata", wikidata),
+            ("wikidata-kinds", kind_sites),
             ("wikidata-facts", facts),
         ]
     })?;
@@ -157,8 +178,11 @@ fn ingest_hint(outcomes: &[(&str, Outcome)], dir: &Path) -> Option<String> {
             Outcome::Saved(path) => Some(format!("--{name} {}", path.display())),
             _ => None,
         })
-        // Facts only make sense next to the official websites they describe.
-        .filter(|flag| !flag.starts_with("--wikidata-facts ") || wikidata_saved)
+        // Facts and kind sites only go next to the official websites.
+        .filter(|flag| {
+            !(flag.starts_with("--wikidata-facts ") || flag.starts_with("--wikidata-kinds "))
+                || wikidata_saved
+        })
         .collect();
     if flags.is_empty() {
         return None;

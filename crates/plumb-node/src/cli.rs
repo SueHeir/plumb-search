@@ -166,6 +166,11 @@ pub struct IngestArgs {
     /// --wikidata.
     #[arg(long, value_name = "PATH", requires = "wikidata")]
     pub wikidata_facts: Option<PathBuf>,
+    /// Wikidata official websites of banks, credit unions, airlines and other
+    /// kinds of organizations, whatever their sitelinks (the
+    /// wikidata-kind-sites.tsv that fetch-data writes); needs --wikidata.
+    #[arg(long, value_name = "PATH", requires = "wikidata")]
+    pub wikidata_kinds: Option<PathBuf>,
     /// Records files from an earlier ingest or crawl to merge in (list several,
     /// or repeat the flag), each with the journal an interrupted crawl may
     /// have left next to it (PATH.journal). Seed files given with them

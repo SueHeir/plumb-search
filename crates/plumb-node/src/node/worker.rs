@@ -28,7 +28,7 @@ use plumb_core::{now_unix, SiteRecord};
 use plumb_crawl::{crawl_homepages, CrawlConfig};
 use plumb_index::build_index;
 use plumb_ingest::{
-    attach_facts, download, facts, load_cc_domain_ranks, load_site_facts, load_tranco,
+    attach_facts, download, facts, kind_sites, load_cc_domain_ranks, load_site_facts, load_tranco,
     load_wikidata_official_sites, Builder,
 };
 use tokio::runtime::Handle;
@@ -247,6 +247,9 @@ struct SeedFiles {
     /// Countries and kinds of the official websites' organizations; used
     /// when the file exists, since setup goes on without it.
     facts: PathBuf,
+    /// Official websites of banks, credit unions and other kinds of
+    /// organizations, however few sitelinks; used when the file exists.
+    kind_sites: PathBuf,
     cc_ranks: Option<PathBuf>,
 }
 
@@ -294,6 +297,25 @@ async fn download_seed(inner: &Inner) -> Result<SeedFiles> {
         wikidata = downloaded.context("could not download Wikidata's official websites");
     }
 
+    let kind_sites = seed.join(kind_sites::KIND_SITES_FILE_NAME);
+    if wikidata.is_ok() && !is_recent(&kind_sites) {
+        inner.set_step(
+            Step::Downloading,
+            "Asking Wikidata for the sites of banks, credit unions and other organizations",
+        );
+        let downloaded = kind_sites::download_kind_sites(
+            &client,
+            &sources.wikidata_sparql_url,
+            seed,
+            sources.wikidata_pacing,
+        )
+        .await;
+        if let Err(err) = downloaded {
+            // More official sites help, but are not needed: carry on.
+            warn!("could not get Wikidata's sites by kind, going on without them: {err:#}");
+        }
+    }
+
     let facts = seed.join(facts::FACTS_FILE_NAME);
     if let (Ok(sites), false) = (&wikidata, is_recent(&facts)) {
         inner.set_step(
@@ -304,7 +326,7 @@ async fn download_seed(inner: &Inner) -> Result<SeedFiles> {
             &client,
             &sources.wikidata_sparql_url,
             seed,
-            sites,
+            &[sites.clone(), kind_sites.clone()],
             sources.wikidata_pacing,
         )
         .await;
@@ -345,6 +367,7 @@ async fn download_seed(inner: &Inner) -> Result<SeedFiles> {
         tranco,
         wikidata,
         facts,
+        kind_sites,
         cc_ranks,
     })
 }
@@ -393,6 +416,12 @@ fn seed_records(inner: &Inner, files: &SeedFiles) -> Result<Vec<SiteRecord>> {
         inner.set_progress(sources - 1, sources, "files");
         let mut sites = load_wikidata_official_sites(path)
             .with_context(|| format!("loading Wikidata sites {}", path.display()))?;
+        if files.kind_sites.is_file() {
+            match load_wikidata_official_sites(&files.kind_sites) {
+                Ok(by_kind) => sites.extend(by_kind),
+                Err(err) => warn!("going on without Wikidata's sites by kind: {err:#}"),
+            }
+        }
         if files.facts.is_file() {
             match load_site_facts(&files.facts) {
                 Ok(facts) => attach_facts(&mut sites, &facts),

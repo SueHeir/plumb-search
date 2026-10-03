@@ -96,7 +96,8 @@ fn is_item_id(item: &str) -> bool {
 }
 
 /// Asks the SPARQL `endpoint` for the facts of the items of the official
-/// websites file `sites_file` ([`official_items`]), [`FACTS_BATCH`] at a
+/// websites files `sites_files` ([`official_items`]; files that do not
+/// exist are skipped), [`FACTS_BATCH`] at a
 /// time with `pacing.pause` between queries, and writes
 /// `dir/`[`FACTS_FILE_NAME`]. A batch that fails after a few tries (HTTP
 /// 429 or 5xx, a cut-off answer, a lost connection) is asked for again in
@@ -106,13 +107,24 @@ pub async fn download_site_facts(
     client: &reqwest::Client,
     endpoint: &str,
     dir: &Path,
-    sites_file: &Path,
+    sites_files: &[PathBuf],
     pacing: WikidataPacing,
 ) -> Result<PathBuf> {
-    let file = sites_file.to_path_buf();
-    let items = tokio::task::spawn_blocking(move || official_items(&file))
-        .await
-        .context("reading the official websites")??;
+    let files = sites_files.to_vec();
+    let items = tokio::task::spawn_blocking(move || -> Result<Vec<String>> {
+        let mut seen = HashSet::new();
+        let mut items = Vec::new();
+        for file in files.iter().filter(|file| file.is_file()) {
+            for item in official_items(file)? {
+                if seen.insert(item.clone()) {
+                    items.push(item);
+                }
+            }
+        }
+        Ok(items)
+    })
+    .await
+    .context("reading the official websites")??;
     let batches = items.len().div_ceil(FACTS_BATCH);
     info!(
         "asking Wikidata for the countries and kinds of {} items, in {batches} queries",
@@ -128,7 +140,7 @@ pub async fn download_site_facts(
             tokio::time::sleep(pacing.pause).await;
         }
         queries += 1;
-        match query_batch(client, endpoint, batch, pacing).await {
+        match sparql_json(client, endpoint, &facts_query(batch), pacing).await {
             Ok(json) => {
                 push_facts(&mut tsv, &json)?;
             }
@@ -167,20 +179,20 @@ pub async fn download_site_facts(
     Ok(dest)
 }
 
-/// Asks about one batch, trying again after HTTP 429 or 5xx and failed
-/// connections, waiting `pacing.retry_wait`, doubling.
-async fn query_batch(
+/// Runs `query`, trying again after HTTP 429 or 5xx, a cut-off answer and
+/// failed connections, waiting `pacing.retry_wait`, doubling; returns the
+/// SPARQL JSON answer.
+pub(crate) async fn sparql_json(
     client: &reqwest::Client,
     endpoint: &str,
-    batch: &[String],
+    query: &str,
     pacing: WikidataPacing,
 ) -> Result<Vec<u8>> {
-    let query = facts_query(batch);
     let mut wait = pacing.retry_wait;
     let mut tries = 0;
     loop {
         tries += 1;
-        match sparql(client, endpoint, &query).await {
+        match sparql(client, endpoint, query).await {
             Ok(json) => return Ok(json),
             Err(Query::Fatal(err)) => return Err(err),
             Err(Query::Again(err)) if tries >= BATCH_TRIES => {
@@ -188,7 +200,7 @@ async fn query_batch(
             }
             Err(Query::Again(err)) => {
                 warn!(
-                    "Wikidata facts query: {err:#}; trying again in {:.1} s",
+                    "Wikidata query: {err:#}; trying again in {:.1} s",
                     wait.as_secs_f64()
                 );
                 tokio::time::sleep(wait).await;
