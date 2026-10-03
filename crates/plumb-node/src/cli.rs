@@ -44,6 +44,36 @@ pub enum Command {
     /// Make a vector of each site's text with a small embedding model
     /// (downloaded on first use), so searches can find sites by meaning.
     Embed(EmbedArgs),
+    /// Let the Plumb Search app on another computer change this node's
+    /// settings: `on` makes a new token (shown once), `off` stops it.
+    RemoteControl(RemoteControlArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct RemoteControlArgs {
+    /// The node's data directory, as given to `plumb run --data`.
+    #[arg(long, value_name = "DIR", global = true, default_value = ".")]
+    pub data: PathBuf,
+    #[command(subcommand)]
+    pub action: RemoteControlAction,
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub enum RemoteControlAction {
+    /// Turn remote control on with a new token, which replaces any earlier
+    /// one, and print it.
+    On {
+        /// Also take requests from public addresses and through reverse
+        /// proxies. Without it, only this computer and local networks
+        /// (and Tailscale) can use the token. Put the node behind HTTPS
+        /// first, or the token crosses the internet in the clear.
+        #[arg(long)]
+        allow_public: bool,
+    },
+    /// Turn remote control off: no token works any more.
+    Off,
+    /// Say whether remote control is on.
+    Status,
 }
 
 #[derive(Debug, Args)]
@@ -181,6 +211,10 @@ pub struct RunArgs {
     /// agree. Other nodes' crawls still need agreement. May be repeated.
     #[arg(long = "trust-peer", value_name = "PEER_ID", requires = "network")]
     pub trust_peer: Vec<plumb_net::PeerId>,
+    /// Do not trust the plumbsearch.org node by default; only nodes given
+    /// with --trust-peer.
+    #[arg(long, requires = "network")]
+    pub no_default_trust: bool,
     /// Offer private search at /private: browsers fetch groups of sites
     /// (buckets) and rank them themselves, so this node never sees what
     /// they search for. Each index also gets its buckets, about as much
@@ -360,6 +394,9 @@ pub struct SearchArgs {
     /// Leave out other countries' sites (needs --country).
     #[arg(long, requires = "country")]
     pub only_country: bool,
+    /// Search for the query exactly as typed, without correcting typos.
+    #[arg(long)]
+    pub exact: bool,
     #[command(flatten)]
     pub meaning: MeaningArgs,
     /// What to search for, e.g. `us bank`.
@@ -420,6 +457,9 @@ pub struct EvalArgs {
     /// [default: none].
     #[arg(long, value_name = "CODE", value_parser = parse_country)]
     pub country: Option<String>,
+    /// Search for each query exactly as written, without correcting typos.
+    #[arg(long)]
+    pub exact: bool,
     #[command(flatten)]
     pub meaning: MeaningArgs,
 }

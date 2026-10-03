@@ -41,6 +41,8 @@ tracing = "0.1.44"
 ohttp = { version = "0.8", default-features = false, features = ["client", "server", "rust-hpke"] }
 cbor4ii = { version = "1.2", features = ["serde1"] }
 serde_bytes = "0.11"
+voprf = { version = "0.5", default-features = false, features = ["ristretto255-ciphersuite", "alloc", "serde"] }
+subtle = "2.6.1"
 
 [dev-dependencies]
 tempfile = "3.27.0"

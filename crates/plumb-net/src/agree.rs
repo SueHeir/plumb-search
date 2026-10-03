@@ -134,6 +134,24 @@ impl Score {
     }
 }
 
+/// One crawl scored for or against its crawler, for counting credits
+/// (see [`crate::credits`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Verdict {
+    pub crawler: PeerId,
+    /// When the crawl was made.
+    pub crawled_at: u64,
+    /// It agreed with the confirmed crawl; otherwise it was close in time
+    /// and did not match.
+    pub agreed: bool,
+    /// Crawlers other than this one that this node trusts strictly (see
+    /// [`Agreement::vouched`]) whose crawls make up the confirmed one,
+    /// this node's own included. Credits go by this, not by what counts
+    /// towards a quorum, so fresh keys agreeing with each other earn
+    /// nothing however lenient agreement is.
+    pub witnesses: usize,
+}
+
 /// What the agreement step holds, for the status page.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgreementStatus {
@@ -191,6 +209,8 @@ pub struct Agreement {
     rechecks: BTreeSet<String>,
     /// Nodes whose crawls are taken in at once (see "Trusted nodes").
     trusted: HashSet<PeerId>,
+    /// Scored since the last [`Agreement::take_verdicts`].
+    verdicts: Vec<Verdict>,
 }
 
 impl Agreement {
@@ -207,6 +227,7 @@ impl Agreement {
             own: 0,
             rechecks: BTreeSet::new(),
             trusted: trusted.into_iter().filter(|peer| *peer != me).collect(),
+            verdicts: Vec::new(),
         }
     }
 
@@ -269,6 +290,11 @@ impl Agreement {
         self.scores.get(crawler).copied().unwrap_or_default()
     }
 
+    /// The crawls scored since the last call, oldest first.
+    pub fn take_verdicts(&mut self) -> Vec<Verdict> {
+        std::mem::take(&mut self.verdicts)
+    }
+
     /// Whether `crawler`'s crawls count towards a quorum here: this node's
     /// own always do; another crawler's when it is not distrusted and, once
     /// this node has crawled anything itself, has been vouched for by
@@ -279,6 +305,18 @@ impl Agreement {
         }
         let score = self.score(crawler);
         !score.distrusted() && (self.own == 0 || score.vouched >= VOUCHES_NEEDED)
+    }
+
+    /// Whether this node trusts `crawler` strictly: it is this node, or it
+    /// is not distrusted and matched this node's own crawls of
+    /// [`VOUCHES_NEEDED`] sites. Unlike [`Agreement::counts`], never true
+    /// for a crawler merely because this node crawls nothing itself.
+    pub fn vouched(&self, crawler: &PeerId) -> bool {
+        if *crawler == self.me {
+            return true;
+        }
+        let score = self.score(crawler);
+        !score.distrusted() && score.vouched >= VOUCHES_NEEDED
     }
 
     /// Up to `limit` disputed sites this node should fetch itself to settle
@@ -387,19 +425,26 @@ impl Agreement {
                 .iter()
                 .any(|&i| held[i].crawled_at.abs_diff(o.crawled_at) <= JUDGE_WINDOW_SECS)
         };
+        // Other crawlers in the group this node trusts strictly, for credits.
+        let witnesses = |i: usize| {
+            group
+                .iter()
+                .filter(|&&j| j != i && self.vouched(&held[j].crawler))
+                .count()
+        };
         let mut verdicts = Vec::new();
         for (i, o) in held.iter().enumerate() {
             if o.judged {
                 continue;
             }
             if group.contains(&i) {
-                verdicts.push((i, true));
+                verdicts.push((i, true, witnesses(i)));
             } else if near(o) {
-                verdicts.push((i, false));
+                verdicts.push((i, false, witnesses(i)));
             }
         }
-        for (i, agreed) in verdicts {
-            self.judge(&domain, i, agreed, ours);
+        for (i, agreed, witnesses) in verdicts {
+            self.judge(&domain, i, agreed, ours, witnesses);
         }
         self.confirmed.insert(domain, confirmed.clone());
         Some(confirmed)
@@ -470,16 +515,24 @@ impl Agreement {
             .map(|(i, o)| (i, agree(&o.record, &own.record)))
             .collect();
         for (i, agreed) in verdicts {
-            self.judge(domain, i, agreed, true);
+            // Compared with this node's own crawl: one witness, this node.
+            self.judge(domain, i, agreed, true, 1);
         }
     }
 
     /// Scores crawl `i` of `domain` for or against its crawler; `ours` when
-    /// the crawl it was compared with includes this node's own.
-    fn judge(&mut self, domain: &str, i: usize, agreed: bool, ours: bool) {
+    /// the crawl it was compared with includes this node's own, which
+    /// `witnesses` other strictly trusted crawlers made.
+    fn judge(&mut self, domain: &str, i: usize, agreed: bool, ours: bool, witnesses: usize) {
         let o = &mut self.homepages.get_mut(domain).expect("held")[i];
         o.judged = true;
         let crawler = o.crawler;
+        self.verdicts.push(Verdict {
+            crawler,
+            crawled_at: o.crawled_at,
+            agreed,
+            witnesses,
+        });
         let score = self.scores.entry(crawler).or_default();
         if agreed {
             score.agreed += 1;
@@ -608,6 +661,44 @@ mod tests {
         r.description = Some("Banking, loans and mortgages.".to_string());
         r.crawled_at = Some(at);
         r
+    }
+
+    #[test]
+    fn fresh_keys_agreeing_with_each_other_are_no_witnesses() {
+        let (a, b, me) = (PeerId::random(), PeerId::random(), PeerId::random());
+        // This node crawls nothing, so every crawler counts towards a
+        // quorum, but none is vouched for.
+        let mut agreement = Agreement::new(me, []);
+        agreement.observe(a, vec![crawl("usbank.com", "U.S. Bank", NOW)], NOW);
+        let out = agreement.observe(b, vec![crawl("usbank.com", "U.S. Bank", NOW + 1)], NOW + 1);
+        assert_eq!(out.len(), 1, "a quorum of two counting crawlers");
+        let verdicts = agreement.take_verdicts();
+        assert_eq!(verdicts.len(), 2);
+        assert!(verdicts.iter().all(|v| v.agreed && v.witnesses == 0));
+        assert!(!agreement.vouched(&a) && agreement.counts(&a));
+        assert!(agreement.vouched(&me));
+    }
+
+    #[test]
+    fn a_trusted_nodes_lone_crawl_is_taken_in_but_scores_nothing() {
+        let (t, me) = (PeerId::random(), PeerId::random());
+        let mut agreement = Agreement::new(me, [t]);
+        let out = agreement.observe(t, vec![crawl("usbank.com", "U.S. Bank", NOW)], NOW);
+        assert_eq!(out.len(), 1);
+        assert!(agreement.take_verdicts().is_empty(), "no credits for it");
+        assert!(!agreement.vouched(&t));
+    }
+
+    #[test]
+    fn a_crawl_matching_our_own_has_us_as_witness() {
+        let (a, me) = (PeerId::random(), PeerId::random());
+        let mut agreement = Agreement::new(me, []);
+        agreement.observe(me, vec![crawl("usbank.com", "U.S. Bank", NOW)], NOW);
+        agreement.observe(a, vec![crawl("usbank.com", "U.S. Bank", NOW + 1)], NOW + 1);
+        let verdicts = agreement.take_verdicts();
+        let theirs = verdicts.iter().find(|v| v.crawler == a).unwrap();
+        assert!(theirs.agreed);
+        assert_eq!(theirs.witnesses, 1);
     }
 
     #[test]

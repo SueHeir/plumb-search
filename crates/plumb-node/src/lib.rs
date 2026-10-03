@@ -79,6 +79,7 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::Serve(args) => web::run(args),
         Command::Eval(args) => eval::run(args),
         Command::Embed(args) => meaning::run_embed(args),
+        Command::RemoteControl(args) => run::remote_control(args),
     }
 }
 

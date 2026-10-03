@@ -15,6 +15,12 @@
 //! turns "Start at login" on or off, or quits. Started at login, the app
 //! opens no window.
 //!
+//! The panel is also the control center for the person's other nodes, such
+//! as a Docker container on a homelab: "Connect to a node" saves a node's
+//! address and remote control token, and the panel then shows and changes
+//! that node's settings, with the app's own node making the requests (see
+//! `plumb_node::node::control`). The window never sees the tokens.
+//!
 //! No page can call into the app: the app defines no commands and grants no
 //! capabilities, so Tauri's IPC refuses everything.
 
@@ -247,10 +253,13 @@ async fn start_node(app: AppHandle) -> Option<NodeHandle> {
 }
 
 async fn launch_node(app: AppHandle) -> Result<NodeHandle> {
-    let data_dir = app
-        .path()
-        .app_data_dir()
-        .context("finding the app data folder")?;
+    let data_dir = match std::env::var_os("PLUMB_DESKTOP_DATA_DIR") {
+        Some(dir) => std::path::PathBuf::from(dir),
+        None => app
+            .path()
+            .app_data_dir()
+            .context("finding the app data folder")?,
+    };
     std::fs::create_dir_all(&data_dir)
         .with_context(|| format!("creating the data folder {}", data_dir.display()))?;
     info!("data folder: {}", data_dir.display());
@@ -728,7 +737,12 @@ mod tests {
         for page in [
             "http://127.0.0.1:41234/app",
             "http://127.0.0.1:41234/app/settings",
+            "http://127.0.0.1:41234/app?section=network",
+            "http://127.0.0.1:41234/app/features",
             "http://127.0.0.1:41234/app/refresh",
+            // Other nodes, controlled through this one.
+            "http://127.0.0.1:41234/app/nodes/new",
+            "http://127.0.0.1:41234/app/nodes/3f2a9c01b7de?section=resources",
         ] {
             assert_eq!(
                 destination(&url(page), Some(&node), None),

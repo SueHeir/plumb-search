@@ -90,7 +90,9 @@ use crate::meaning::SharedMeaning;
 use crate::web::{self, IndexBackend, SearchBackend, StatusSource};
 use crate::websearch::{Engine, WebSettings};
 
+pub mod control;
 mod embedding;
+pub mod features;
 mod network;
 mod store;
 mod worker;
@@ -167,6 +169,11 @@ pub struct NodeConfig {
     /// The settings until someone changes them on the panel, which saves
     /// them in `DIR/settings.json`.
     pub settings: NodeSettings,
+    /// Let the panel control other nodes too ("Connect to a node"), with
+    /// their remote control tokens, kept in `DIR/remote-nodes.json`. On for
+    /// the desktop app, which is meant to be the control center of a
+    /// person's nodes; off for servers.
+    pub manage_other_nodes: bool,
 }
 
 impl NodeConfig {
@@ -193,6 +200,7 @@ impl NodeConfig {
             private_search: false,
             share_popularity: false,
             settings: NodeSettings::default(),
+            manage_other_nodes: false,
         }
     }
 
@@ -206,6 +214,7 @@ impl NodeConfig {
             refresh_every: Some(Duration::from_secs(12 * 60 * 60)),
             crawl_per_refresh: 1_000,
             settings: NodeSettings::desktop(),
+            manage_other_nodes: true,
             ..NodeConfig::server(data_dir)
         }
     }
@@ -540,15 +549,6 @@ impl NodeHandle {
     }
 }
 
-/// Starts a node on the current Tokio runtime and returns once the web
-/// server is listening. Setup and refreshes run in the background; until the
-/// first index is ready, the web page shows setup progress instead of a
-/// search box. A records file already in `data_dir` skips the downloads.
-///
-/// Fails when the data directory cannot be created or another node is using
-/// it, when the address cannot be bound, or when the configuration cannot
-/// work (such as an alpha above 1). A multi-threaded runtime is best: crawls
-/// and index builds run on its blocking threads.
 /// Has the node in `data_dir` fold the seed files in `DIR/seed` into its
 /// records again at its next start, as it does when Wikidata's arrive late:
 /// files from the last week are used as they are, older or missing ones are
@@ -569,7 +569,19 @@ pub fn request_reseed(data_dir: &Path) -> Result<bool> {
     Ok(true)
 }
 
-pub async fn start(config: NodeConfig) -> Result<NodeHandle> {
+/// Starts a node on the current Tokio runtime and returns once the web
+/// server is listening. Setup and refreshes run in the background; until the
+/// first index is ready, the web page shows setup progress instead of a
+/// search box. A records file already in `data_dir` skips the downloads.
+///
+/// Fails when the data directory cannot be created or another node is using
+/// it, when the address cannot be bound, or when the configuration cannot
+/// work (such as an alpha above 1). A multi-threaded runtime is best: crawls
+/// and index builds run on its blocking threads.
+pub async fn start(mut config: NodeConfig) -> Result<NodeHandle> {
+    if let Some(features) = features::FeatureSettings::load(&config.data_dir)? {
+        features.apply(&mut config)?;
+    }
     config.check()?;
     let rank = crate::rank_config(config.alpha);
     let opened = {
@@ -1193,6 +1205,18 @@ impl StatusSource for Inner {
         network::record_pick(self, query, domain);
     }
 
+    fn features(&self) -> features::FeatureSettings {
+        features::FeatureSettings::from_config(&self.config)
+    }
+
+    fn saved_features(&self) -> Result<features::FeatureSettings> {
+        Ok(features::FeatureSettings::load(&self.paths.data)?.unwrap_or_else(|| self.features()))
+    }
+
+    fn change_features(&self, features: features::FeatureSettings) -> Result<()> {
+        features.save(&self.paths.data)
+    }
+
     fn settings(&self) -> Option<NodeSettings> {
         Some(Inner::settings(self))
     }
@@ -1207,6 +1231,14 @@ impl StatusSource for Inner {
 
     fn data_dir(&self) -> Option<PathBuf> {
         Some(self.paths.data.clone())
+    }
+
+    fn bind(&self) -> Option<SocketAddr> {
+        Some(self.config.bind)
+    }
+
+    fn manages_other_nodes(&self) -> bool {
+        self.config.manage_other_nodes
     }
 }
 

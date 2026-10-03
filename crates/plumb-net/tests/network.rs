@@ -38,6 +38,19 @@ impl Node {
         listen: bool,
     ) -> Node {
         let dir = tempfile::tempdir().unwrap();
+        Self::start_config(dir, relay, bootstrap, local, listen, |_| {}).await
+    }
+
+    /// [`Node::start_with`] in `dir`, with `tweak` applied to the config
+    /// last.
+    async fn start_config(
+        dir: TempDir,
+        relay: bool,
+        bootstrap: Vec<Multiaddr>,
+        local: Vec<SiteRecord>,
+        listen: bool,
+        tweak: impl FnOnce(&mut NetConfig),
+    ) -> Node {
         let mut config = NetConfig::new(dir.path().to_path_buf());
         config.listen = if listen {
             vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()]
@@ -48,6 +61,7 @@ impl Node {
         config.local_discovery = false;
         config.relay_server = relay;
         config.bootstrap = bootstrap;
+        tweak(&mut config);
         let source = table(dir.path(), &local);
         let (handle, records) = plumb_net::start(config, source).await.unwrap();
         Node {
@@ -417,4 +431,154 @@ async fn popularity_reports_spread_and_are_read_once_enough_are_sent() {
     let c = Node::start(false, vec![relay_addr], vec![]).await;
     wait_for(|| (c.handle.status().reports_held > held).then_some(())).await;
     assert_eq!(c.handle.recount().await.unwrap().picks, table.picks);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn confirmed_crawls_earn_credits_that_buy_tokens() {
+    use plumb_net::agree::MIN_JUDGED;
+    use plumb_net::credits::credits_for;
+
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("plumb_net=debug")
+        .with_test_writer()
+        .try_init();
+
+    let r = Node::start(true, vec![], vec![]).await;
+    let r_addr = r.addr().await;
+    let a = Node::start(false, vec![r_addr.clone()], vec![]).await;
+    let b = Node::start(false, vec![r_addr], vec![]).await;
+    for node in [&a, &b] {
+        wait_for(|| (node.handle.status().connected_peers >= 1).then_some(())).await;
+    }
+    let peers = [a.handle.peer_id(), r.handle.peer_id()];
+
+    // Before crawling anything, A's crawls do not count at R: no tokens.
+    let at_r = a.handle.credits_at(r.handle.peer_id()).await.unwrap();
+    assert_eq!((at_r.credits, at_r.counts), (0, false));
+    assert!(a
+        .handle
+        .collect_tokens(r.handle.peer_id(), 4)
+        .await
+        .is_err());
+
+    // A and R crawl the same sites and agree on every one.
+    let sites: Vec<SiteRecord> = (0..MIN_JUDGED)
+        .map(|i| crawled_for(&peers, &format!("credit{i}x")))
+        .collect();
+    a.handle.publish(sites.clone()).await.unwrap().unwrap();
+    let n = sites.len();
+    wait_for(|| (r.handle.status().agreement.pending_sites == n).then_some(())).await;
+    r.handle.publish(sites.clone()).await.unwrap().unwrap();
+    let earned = i64::from(MIN_JUDGED) * credits_for(now_unix());
+    // R counts every one of A's crawls: each matched R's own. R vouches for
+    // A only after A matched 3 of its crawls, so R's own crawls of those
+    // first sites had no witness yet; A's ledger is much the same.
+    let mut at_r = a.handle.credits_at(r.handle.peer_id()).await.unwrap();
+    for _ in 0..100 {
+        if at_r.credits == earned {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        at_r = a.handle.credits_at(r.handle.peer_id()).await.unwrap();
+    }
+    assert_eq!((at_r.credits, at_r.counts), (earned, true));
+    wait_for(|| (a.handle.status().credits.balance > 0).then_some(())).await;
+    let own = a.handle.status().credits;
+    assert!(own.balance < earned, "{own:?}");
+    assert!(r.handle.status().credits.balance < earned);
+
+    // R sells A tokens for them.
+    let got = a
+        .handle
+        .collect_tokens(r.handle.peer_id(), 8)
+        .await
+        .unwrap();
+    assert_eq!(got, 8);
+    assert_eq!(a.handle.tokens_held(&r.handle.peer_id()), 8);
+    let at_r = a.handle.credits_at(r.handle.peer_id()).await.unwrap();
+    assert_eq!(at_r.credits, earned - 8);
+    wait_for(|| (r.handle.status().credits.tokens_issued == 8).then_some(())).await;
+    wait_for(|| (a.handle.status().credits.tokens_held == 8).then_some(())).await;
+    // Asking for more than is left gets what is left.
+    let rest = usize::try_from(earned - 8).unwrap();
+    let got = a
+        .handle
+        .collect_tokens(r.handle.peer_id(), 64)
+        .await
+        .unwrap();
+    assert_eq!(got, rest);
+
+    // B never crawled: R has nothing for it, and A's credits are A's.
+    let refused = b.handle.collect_tokens(r.handle.peer_id(), 1).await;
+    assert!(refused.is_err(), "{refused:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_busy_node_answers_searches_that_spend_its_tokens() {
+    use plumb_net::agree::MIN_JUDGED;
+
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("plumb_net=debug")
+        .with_test_writer()
+        .try_init();
+
+    // Keys first, to pick sites both are assigned.
+    let (a_dir, r_dir) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let key = |dir: &TempDir| {
+        plumb_net::load_or_create_key(&dir.path().join("node.key"))
+            .unwrap()
+            .public()
+            .to_peer_id()
+    };
+    let peers = [key(&a_dir), key(&r_dir)];
+    let sites: Vec<SiteRecord> = (0..MIN_JUDGED)
+        .map(|i| crawled_for(&peers, &format!("busy{i}x")))
+        .collect();
+
+    // R holds those sites and is always busy: it answers nothing for free.
+    let r = Node::start_config(r_dir, true, vec![], sites.clone(), true, |c| {
+        c.max_answering = 0;
+    })
+    .await;
+    let r_addr = r.addr().await;
+    let a = Node::start_config(a_dir, false, vec![r_addr], vec![], true, |_| {}).await;
+    wait_for(|| (a.handle.status().connected_peers >= 1).then_some(())).await;
+    let r = &r.handle;
+
+    // A and R crawl the same sites, so R counts credits for A.
+    a.handle.publish(sites.clone()).await.unwrap().unwrap();
+    let n = sites.len();
+    wait_for(|| (r.status().agreement.pending_sites == n).then_some(())).await;
+    r.publish(sites.clone()).await.unwrap().unwrap();
+    let mut credits = 0;
+    for _ in 0..100 {
+        credits = a.handle.credits_at(r.peer_id()).await.unwrap().credits;
+        if credits > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(credits > 0);
+
+    // Without tokens, R turns every request away.
+    let wait = Duration::from_secs(10);
+    let free = a.handle.search("busy0x", wait).await.unwrap();
+    assert!(free.busy > 0, "{free:?}");
+    assert_eq!(free.priority, 0);
+    assert_eq!(free.answered, 0, "{free:?}");
+
+    // With tokens, R answers them, spending one each.
+    let got = a.handle.collect_tokens(r.peer_id(), 8).await.unwrap();
+    assert_eq!(got, 8);
+    let paid = a.handle.search("busy0x", wait).await.unwrap();
+    assert!(paid.priority > 0, "{paid:?}");
+    assert_eq!(paid.priority, paid.answered, "{paid:?}");
+    assert!(paid
+        .found
+        .iter()
+        .any(|s| s.record.domain == sites[0].domain));
+    let spent = paid.priority;
+    assert_eq!(a.handle.tokens_held(&r.peer_id()), 8 - spent);
+    wait_for(|| (a.handle.status().credits.tokens_spent == spent as u64).then_some(())).await;
+    wait_for(|| (r.status().credits.priority_answered == spent as u64).then_some(())).await;
 }

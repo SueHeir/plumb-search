@@ -32,6 +32,8 @@ use super::{
     escape_html, group_thousands, page_with_head, request_origin, security_headers, time_ago,
     time_until, AppState,
 };
+use crate::node::control;
+use crate::node::features::FeatureSettings;
 use crate::node::{NodeSettings, Phase, Status, Step, MB};
 
 /// Seconds between two reloads of the panel while work is under way.
@@ -39,10 +41,10 @@ const BUSY_RELOAD_SECONDS: u32 = 5;
 /// Seconds between two reloads otherwise.
 const IDLE_RELOAD_SECONDS: u32 = 60;
 
-const PANEL_STYLE: &str = "\
-.panel{max-width:56rem;padding-top:1.5rem}\
-.panel h1{font-size:1.6rem}\
-.panel h2{font-size:1.05rem;margin:2rem 0 .5rem}\
+pub(super) const PANEL_STYLE: &str = "\
+.node-panel{max-width:56rem;padding-top:1.5rem}\
+.node-panel h1{font-size:1.6rem}\
+.node-panel h2{font-size:1.05rem;margin:2rem 0 .5rem}\
 .cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(15rem,1fr));gap:.75rem;\
 margin:1.25rem 0}\
 .card{padding:.9rem 1rem;border:1px solid var(--line);border-radius:.75rem}\
@@ -61,11 +63,11 @@ color:var(--bg);text-decoration:none}\
 .steps .done{color:var(--muted)}\
 .steps .now{font-weight:600}\
 .steps small{display:block;font-weight:400;color:var(--muted)}\
-.panel form{display:block}\
-.panel label{display:flex;gap:.6rem;align-items:center;margin-top:.75rem}\
-.panel label input[type=checkbox]{flex:none}\
-.panel input[type=number]{flex:none;width:7rem}\
-.panel form button{margin-top:.9rem}\
+.node-panel form{display:block}\
+.node-panel label{display:flex;gap:.6rem;align-items:center;margin-top:.75rem}\
+.node-panel label input[type=checkbox]{flex:none}\
+.node-panel input[type=number]{flex:none;width:7rem}\
+.node-panel form button{margin-top:.9rem}\
 .hint{margin:.2rem 0 0;font-size:.85rem;color:var(--muted)}\
 .howto{list-style:decimal;padding-left:1.5rem}.howto li{border:0;padding:.3rem 0}\
 code{overflow-wrap:anywhere;font:.9rem ui-monospace,monospace;padding:.1rem .3rem;\
@@ -95,17 +97,79 @@ fn parse_limit(text: &str) -> Option<u64> {
     text.parse().ok()
 }
 
-pub(super) async fn panel(State(state): State<AppState>, headers: HeaderMap, uri: Uri) -> Response {
+#[derive(Default, Deserialize)]
+#[serde(default)]
+pub(super) struct PanelQuery {
+    section: String,
+    saved: String,
+}
+
+pub(super) async fn panel(State(state): State<AppState>, request: Request) -> Response {
     let Some(node) = &state.node else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    let Some(origin) = request_origin(&headers, &uri) else {
+    let Some(origin) = request_origin(request.headers(), request.uri()) else {
         return StatusCode::BAD_REQUEST.into_response();
     };
-    let status = node.status();
-    let settings = node.settings().unwrap_or_default();
+    let query = match axum::extract::Query::<PanelQuery>::try_from_uri(request.uri()) {
+        Ok(query) => query.0,
+        Err(_) => {
+            return panel_error(
+                StatusCode::BAD_REQUEST,
+                "The panel address could not be read.",
+            )
+        }
+    };
+    let active = node.features();
+    let saved = match node.saved_features() {
+        Ok(saved) => saved,
+        Err(err) => {
+            return panel_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("Could not read feature settings: {err}"),
+            )
+        }
+    };
     let data_dir = node.data_dir();
-    let page = render_panel(&status, &settings, &origin, data_dir.as_deref(), now_unix());
+    let writable = refusal(&request).is_none();
+    // Other nodes are only listed for someone who could control them.
+    let switcher = if writable && node.manages_other_nodes() {
+        super::nodes::switcher(node.as_ref(), None)
+    } else {
+        String::new()
+    };
+    let remote_control = RemoteControlView {
+        on: data_dir
+            .as_deref()
+            .and_then(|dir| control::load(dir).ok().flatten())
+            .map(|control| control.allow_public),
+        loopback_only: node.bind().is_some_and(|addr| addr.ip().is_loopback()),
+    };
+    let page = render_panel(&PanelView {
+        status: &node.status(),
+        settings: &node.settings().unwrap_or_default(),
+        origin: &origin,
+        data_dir: data_dir.as_deref(),
+        now: now_unix(),
+        query: &query,
+        active: &active,
+        saved: &saved,
+        writable,
+        private_ready: state.private_search(),
+        base: "/app",
+        eyebrow: if switcher.is_empty() {
+            "YOUR SEARCH NODE"
+        } else {
+            "THIS COMPUTER"
+        },
+        switcher: &switcher,
+        remote_control: data_dir.is_some().then_some(&remote_control),
+    });
+    panel_page(page)
+}
+
+/// A panel page as served: never cached, and sending its origin with forms.
+pub(super) fn panel_page(page: String) -> Response {
     (
         StatusCode::OK,
         panel_headers(),
@@ -113,6 +177,88 @@ pub(super) async fn panel(State(state): State<AppState>, headers: HeaderMap, uri
         Html(page),
     )
         .into_response()
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+pub(super) struct FeaturesForm {
+    section: String,
+    network: Option<String>,
+    search_by_meaning: Option<String>,
+    private_search: Option<String>,
+    share_popularity: Option<String>,
+    bootstrap: String,
+    /// Set by the form that shows the trust choices, so that a form without
+    /// them leaves trust as it was.
+    trust_shown: Option<String>,
+    default_trust: Option<String>,
+    trusted: String,
+}
+
+pub(super) async fn save_features(State(state): State<AppState>, request: Request) -> Response {
+    let Some(node) = &state.node else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    if let Some(why) = refusal(&request) {
+        return forbidden(why);
+    }
+    let Ok(Form(form)) = Form::<FeaturesForm>::from_request(request, &state).await else {
+        return panel_error(
+            StatusCode::BAD_REQUEST,
+            "The feature settings could not be read.",
+        );
+    };
+    let mut features = match node.saved_features() {
+        Ok(features) => features,
+        Err(err) => return panel_error(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
+    };
+    let section = match apply_features_form(&form, &mut features) {
+        Ok(section) => section,
+        Err(response) => return response,
+    };
+    if let Err(err) = node.change_features(features) {
+        return panel_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("Could not save feature settings: {err}"),
+        );
+    }
+    Redirect::to(&format!("/app?section={section}&saved=features")).into_response()
+}
+
+/// Puts the choices of the features form, from section "search" or
+/// "network", into `features`, and returns the section; the error page when
+/// they cannot work together.
+// A response is big, but these run once per request.
+#[allow(clippy::result_large_err)]
+pub(super) fn apply_features_form(
+    form: &FeaturesForm,
+    features: &mut FeatureSettings,
+) -> Result<&'static str, Response> {
+    let section = if form.section == "search" {
+        "search"
+    } else {
+        "network"
+    };
+    if section == "search" {
+        features.search_by_meaning = form.search_by_meaning.is_some();
+        features.private_search = form.private_search.is_some();
+    } else {
+        features.network = form.network.is_some();
+        features.share_popularity = form.share_popularity.is_some();
+        features.bootstrap = form
+            .bootstrap
+            .split_whitespace()
+            .map(str::to_owned)
+            .collect();
+        if form.trust_shown.is_some() {
+            features.no_default_trust = form.default_trust.is_none();
+            features.trusted = form.trusted.split_whitespace().map(str::to_owned).collect();
+        }
+    }
+    if let Err(err) = features.check() {
+        return Err(panel_error(StatusCode::BAD_REQUEST, &err.to_string()));
+    }
+    Ok(section)
 }
 
 /// [`security_headers`] with one change: the panel's forms send their
@@ -133,9 +279,9 @@ const PANEL_REFERRER_POLICY: &str = "same-origin";
 
 /// A page saying what went wrong with a change, with the way back to the
 /// panel: the desktop app's window has no back button.
-fn panel_error(status: StatusCode, message: &str) -> Response {
+pub(super) fn panel_error(status: StatusCode, message: &str) -> Response {
     let body = format!(
-        "<main class=\"wrap panel\">\n<h1>Plumb Search node</h1>\n\
+        "<main class=\"wrap node-panel\">\n<h1>Plumb Search node</h1>\n\
          <p class=\"err\">{}</p>\n\
          <p><a class=\"btn\" href=\"/app\">Back to the panel</a></p>\n</main>",
         escape_html(message)
@@ -171,7 +317,7 @@ pub(super) async fn add_to_firefox(headers: HeaderMap, uri: Uri) -> Response {
 fn render_add_to_firefox(origin: &str) -> String {
     let origin = escape_html(origin);
     let body = format!(
-        "<main class=\"wrap panel\">\n<h1>Add Plumb Search to Firefox</h1>\n\
+        "<main class=\"wrap node-panel\">\n<h1>Add Plumb Search to Firefox</h1>\n\
          <p>Firefox does not let a page add a search engine by itself, so it takes two \
          clicks in this window:</p>\n\
          <ol class=\"howto\">\n\
@@ -204,19 +350,9 @@ pub(super) async fn save_settings(State(state): State<AppState>, request: Reques
             "The settings form could not be read.",
         );
     };
-    let (Some(download), Some(storage)) = (
-        parse_limit(&form.download_limit_mb_per_day),
-        parse_limit(&form.storage_limit_mb),
-    ) else {
-        return panel_error(
-            StatusCode::BAD_REQUEST,
-            "Limits are whole numbers of megabytes, or empty for none. Nothing was changed.",
-        );
-    };
-    let settings = NodeSettings {
-        background_updates: form.background_updates.is_some(),
-        download_limit_mb_per_day: download,
-        storage_limit_mb: storage,
+    let settings = match settings_from_form(&form) {
+        Ok(settings) => settings,
+        Err(response) => return response,
     };
     if let Err(err) = node.change_settings(settings) {
         warn!("could not save the settings: {err:#}");
@@ -225,7 +361,169 @@ pub(super) async fn save_settings(State(state): State<AppState>, request: Reques
             &format!("Could not save the settings: {err:#}"),
         );
     }
-    Redirect::to("/app").into_response()
+    Redirect::to("/app?section=resources&saved=settings").into_response()
+}
+
+/// The settings the settings form asks for; the error page when its limits
+/// are not numbers.
+// A response is big, but these run once per request.
+#[allow(clippy::result_large_err)]
+pub(super) fn settings_from_form(form: &SettingsForm) -> Result<NodeSettings, Response> {
+    let (Some(download), Some(storage)) = (
+        parse_limit(&form.download_limit_mb_per_day),
+        parse_limit(&form.storage_limit_mb),
+    ) else {
+        return Err(panel_error(
+            StatusCode::BAD_REQUEST,
+            "Limits are whole numbers of megabytes, or empty for none. Nothing was changed.",
+        ));
+    };
+    Ok(NodeSettings {
+        background_updates: form.background_updates.is_some(),
+        download_limit_mb_per_day: download,
+        storage_limit_mb: storage,
+    })
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+pub(super) struct RemoteControlForm {
+    /// `on` makes a new token; anything else turns remote control off.
+    action: String,
+    allow_public: Option<String>,
+}
+
+/// `POST /app/remote-control`: turns remote control on with a new token,
+/// shown on the page this answers with and nowhere else, or off.
+pub(super) async fn save_remote_control(
+    State(state): State<AppState>,
+    request: Request,
+) -> Response {
+    let Some(node) = state.node.clone() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    if let Some(why) = refusal(&request) {
+        return forbidden(why);
+    }
+    let Some(dir) = node.data_dir() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let origin = request_origin(request.headers(), request.uri()).unwrap_or_default();
+    let Ok(Form(form)) = Form::<RemoteControlForm>::from_request(request, &state).await else {
+        return panel_error(StatusCode::BAD_REQUEST, "The form could not be read.");
+    };
+    if form.action != "on" {
+        if let Err(err) = control::turn_off(&dir) {
+            return panel_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("Could not turn remote control off: {err:#}"),
+            );
+        }
+        return Redirect::to("/app?section=remote").into_response();
+    }
+    let allow_public = form.allow_public.is_some();
+    match control::turn_on(&dir, allow_public) {
+        Ok(token) => panel_page(render_new_token(&token, &origin, node.bind())),
+        Err(err) => panel_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("Could not turn remote control on: {err:#}"),
+        ),
+    }
+}
+
+/// The page that shows a new token, the one time it can be read.
+fn render_new_token(token: &str, origin: &str, bind: Option<SocketAddr>) -> String {
+    let address = match bind {
+        Some(addr) if addr.ip().is_unspecified() => {
+            format!("http://&lt;this computer's address&gt;:{}", addr.port())
+        }
+        _ => escape_html(origin),
+    };
+    let body = format!(
+        "<main class=\"wrap node-panel\">\n<h1>Remote control is on</h1>\n\
+         <p>On the other computer, open the Plumb Search app, choose \
+         <strong>Connect to a node</strong>, and enter this node's address and token:</p>\n\
+         <dl><dt>Address</dt><dd><code>{address}</code></dd>\n\
+         <dt>Token</dt><dd><code>{}</code></dd></dl>\n\
+         <p class=\"notice\">Copy the token now: this is the only time it is shown. \
+         Anyone with it can change this node's settings, so keep it like a password. \
+         Making a new token, or turning remote control off, stops the old one working.</p>\n\
+         <p><a class=\"btn\" href=\"/app?section=remote\">Done</a></p>\n</main>",
+        escape_html(token)
+    );
+    let head = format!(
+        "<meta name=\"referrer\" content=\"{PANEL_REFERRER_POLICY}\">\n\
+         <style>{PANEL_STYLE}</style><style>{LAYOUT_STYLE}</style>\n"
+    );
+    page_with_head("Remote control - Plumb Search", &head, &body)
+}
+
+fn render_remote_control(body: &mut String, remote: &RemoteControlView, writable: bool) {
+    body.push_str(
+        "<p class=\"intro\">Let the Plumb Search app on another computer change this \
+         node's settings, crawling and features. It can read the node's status and change \
+         its settings, nothing else.</p>",
+    );
+    let (big, rest) = match remote.on {
+        None => ("Off", "<p>No other computer can change this node.</p>"),
+        Some(false) => (
+            "On",
+            "<p>From this computer and local networks only (home and office \
+             networks, Docker, Tailscale), with the token.</p>",
+        ),
+        Some(true) => (
+            "On, from anywhere",
+            "<p>From any address, with the token. Use HTTPS in front of the node so the \
+             token is not sent in the clear.</p>",
+        ),
+    };
+    body.push_str("<section class=\"cards\">");
+    card(body, "", "Remote control", big, rest);
+    body.push_str("</section>");
+    if remote.loopback_only {
+        body.push_str(
+            "<p class=\"notice\">This node only listens on this computer (127.0.0.1), so \
+             other computers cannot reach it. Remote control is for nodes that serve the \
+             network, such as a Docker container or a homelab server started with \
+             <code>--bind 0.0.0.0:8080</code>.</p>",
+        );
+    }
+    if !writable {
+        body.push_str(
+            "<p class=\"hint\">To turn remote control on for a Docker container, run \
+             <code>docker exec &lt;container&gt; plumb remote-control on</code> \
+             on its host. It prints the token.</p><fieldset disabled>",
+        );
+    }
+    let turn_on = if remote.on.is_some() {
+        "Make a new token"
+    } else {
+        "Turn on and make a token"
+    };
+    body.push_str(&format!(
+        "<form method=\"post\" action=\"/app/remote-control\">\
+         <input type=\"hidden\" name=\"action\" value=\"on\">\
+         <label><input type=\"checkbox\" name=\"allow_public\" value=\"1\"{}>\
+         <span>Also from public addresses and through a reverse proxy</span></label>\
+         <p class=\"hint\">Leave this off unless the node is behind HTTPS. Off, only \
+         this computer and local networks can use the token.</p>\
+         <button type=\"submit\">{turn_on}</button></form>",
+        if remote.on == Some(true) {
+            " checked"
+        } else {
+            ""
+        }
+    ));
+    if remote.on.is_some() {
+        body.push_str(
+            "<form method=\"post\" action=\"/app/remote-control\">\
+             <input type=\"hidden\" name=\"action\" value=\"off\">\
+             <button type=\"submit\" class=\"alt\">Turn remote control off</button></form>",
+        );
+    }
+    if !writable {
+        body.push_str("</fieldset>");
+    }
 }
 
 pub(super) async fn refresh(State(state): State<AppState>, request: Request) -> Response {
@@ -241,7 +539,7 @@ pub(super) async fn refresh(State(state): State<AppState>, request: Request) -> 
 
 /// Why a change is refused: it does not come from this computer, or a page
 /// of another site sent it. `None` when it may go ahead.
-fn refusal(request: &Request) -> Option<&'static str> {
+pub(super) fn refusal(request: &Request) -> Option<&'static str> {
     let local = request
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
@@ -285,7 +583,7 @@ fn local_origin(origin: &str) -> bool {
     }
 }
 
-fn forbidden(why: &str) -> Response {
+pub(super) fn forbidden(why: &str) -> Response {
     panel_error(StatusCode::FORBIDDEN, why)
 }
 
@@ -332,40 +630,222 @@ fn bytes_words(bytes: u64) -> String {
     }
 }
 
-pub(super) fn render_panel(
-    status: &Status,
-    settings: &NodeSettings,
-    origin: &str,
-    data_dir: Option<&Path>,
-    now: u64,
-) -> String {
-    let mut body = String::from("<main class=\"wrap panel\">\n<h1>Plumb Search node</h1>\n");
-    body.push_str("<section class=\"cards\">\n");
-    render_search_card(&mut body, status, origin, now);
-    render_storage_card(&mut body, status, settings);
-    render_downloads_card(&mut body, status, settings);
-    render_crawl_card(&mut body, status, now);
-    render_network_card(&mut body);
-    body.push_str("</section>\n");
-    if setting_up(status) {
-        render_steps(&mut body, status, now);
-    }
-    render_settings(&mut body, settings);
-    render_browser(&mut body, origin);
-    render_about(&mut body, status, data_dir, now);
-    body.push_str("</main>");
-    let reload = if busy(status) {
-        BUSY_RELOAD_SECONDS
-    } else {
-        IDLE_RELOAD_SECONDS
-    };
-    // After page_with_head's no-referrer, so it wins (see panel_headers).
-    let head = format!(
-        "<meta name=\"referrer\" content=\"{PANEL_REFERRER_POLICY}\">\n\
-         <meta http-equiv=\"refresh\" content=\"{reload}\">\n<style>{PANEL_STYLE}</style>\n"
-    );
-    page_with_head("Plumb Search node", &head, &body)
+pub(super) struct PanelView<'a> {
+    pub(super) status: &'a Status,
+    pub(super) settings: &'a NodeSettings,
+    /// Where the node's search pages are: links to them start with it.
+    pub(super) origin: &'a str,
+    pub(super) data_dir: Option<&'a Path>,
+    pub(super) now: u64,
+    pub(super) query: &'a PanelQuery,
+    pub(super) active: &'a FeatureSettings,
+    pub(super) saved: &'a FeatureSettings,
+    pub(super) writable: bool,
+    pub(super) private_ready: bool,
+    /// The panel's own address, `/app` for this node and
+    /// `/app/nodes/<id>` for another node controlled from here; its links
+    /// and forms start with it.
+    pub(super) base: &'a str,
+    /// Above the title: what node this is.
+    pub(super) eyebrow: &'a str,
+    /// The row of nodes to switch between, as HTML; empty for none.
+    pub(super) switcher: &'a str,
+    /// This node's remote control, for its "Remote control" section; `None`
+    /// on the panel of another node.
+    pub(super) remote_control: Option<&'a RemoteControlView>,
 }
+
+/// What the "Remote control" section shows.
+pub(super) struct RemoteControlView {
+    /// On, and whether from public addresses too.
+    pub(super) on: Option<bool>,
+    /// The node only listens on this computer, so no other can reach it.
+    pub(super) loopback_only: bool,
+}
+
+pub(super) fn render_panel(view: &PanelView<'_>) -> String {
+    let PanelView {
+        status,
+        settings,
+        origin,
+        data_dir,
+        now,
+        query,
+        active,
+        saved,
+        writable,
+        private_ready,
+        base,
+        eyebrow,
+        switcher,
+        remote_control,
+    } = *view;
+    let mut sections = vec![
+        ("overview", "Overview"),
+        ("search", "Search & browser"),
+        ("resources", "Resources"),
+        ("network", "Network & privacy"),
+    ];
+    if remote_control.is_some() {
+        sections.push(("remote", "Remote control"));
+    }
+    sections.push(("about", "About"));
+    let section = if sections.iter().any(|(key, _)| *key == query.section) {
+        query.section.as_str()
+    } else {
+        "overview"
+    };
+    let title = sections.iter().find(|(key, _)| *key == section).unwrap().1;
+    let site = escape_html(origin);
+    let mut body = format!("<main class=\"wrap node-panel\">{switcher}<div class=\"node-heading\"><div><p class=\"eyebrow\">{}</p><h1>Plumb Search</h1></div><a class=\"btn alt\" href=\"{site}/\" target=\"_blank\">Open search ↗</a></div><nav class=\"node-nav\" aria-label=\"Node settings\">", escape_html(eyebrow));
+    for (key, label) in sections.iter().copied() {
+        body.push_str(&format!(
+            "<a href=\"{base}?section={key}\"{}>{}</a>",
+            if key == section {
+                " aria-current=\"page\""
+            } else {
+                ""
+            },
+            escape_html(label)
+        ));
+    }
+    body.push_str(&format!("</nav><div class=\"section-heading\"><h2>{}</h2><a href=\"{base}?section={section}\">Refresh status</a></div>", escape_html(title)));
+    if active != saved {
+        body.push_str("<p class=\"notice\" role=\"status\">Feature changes saved. Quit and reopen the desktop app, or restart the Docker container, to apply them. Closing the desktop window does not quit the app.</p>");
+    } else if query.saved == "settings" {
+        body.push_str(
+            "<p class=\"notice\" role=\"status\">Resource settings saved and applied.</p>",
+        );
+    } else if query.saved == "features" {
+        body.push_str("<p class=\"notice\" role=\"status\">Feature settings saved. No restart is needed because they match the running node.</p>");
+    }
+    if !writable {
+        body.push_str("<p class=\"notice\">Viewing this node remotely. Settings are read-only. To change them, open the desktop app or connect to the node through a loopback address on its host. Docker bridge networking may also require host-side configuration.</p>");
+    }
+    match section {
+        "overview" => {
+            body.push_str("<p class=\"intro\">Search readiness, background work, and the resources your node is using.</p><section class=\"cards\" aria-label=\"Node overview\">");
+            render_search_card(&mut body, status, origin, now);
+            render_storage_card(&mut body, status, settings);
+            render_downloads_card(&mut body, status, settings);
+            if !writable {
+                body.push_str("<fieldset disabled>");
+            }
+            render_crawl_card(&mut body, status, now, base);
+            if !writable {
+                body.push_str("</fieldset>");
+            }
+            render_network_card(&mut body, status, active);
+            body.push_str("</section>");
+            if setting_up(status) {
+                render_steps(&mut body, status, now);
+            }
+            if let Some(err) = &status.last_error {
+                body.push_str(&format!("<div class=\"err\" role=\"alert\"><strong>Last update failed</strong><p>{}</p></div>", escape_html(&err.message)));
+            }
+        }
+        "resources" => {
+            body.push_str("<p class=\"intro\">Control background crawling and its download and storage budget. Changes apply immediately.</p><section class=\"cards\">");
+            render_storage_card(&mut body, status, settings);
+            render_downloads_card(&mut body, status, settings);
+            body.push_str("</section>");
+            if !writable {
+                body.push_str("<fieldset disabled>");
+            }
+            render_settings(&mut body, settings, base);
+            if !writable {
+                body.push_str("</fieldset>");
+            }
+        }
+        "search" => {
+            body.push_str("<p class=\"intro\">Choose how you search and connect your browser to this node.</p><section class=\"cards\">");
+            render_search_card(&mut body, status, origin, now);
+            let meaning = match status.meaning_sites {
+                Some(n) => format!("{} sites ready", group_thousands(n)),
+                None if active.search_by_meaning => "Preparing model".into(),
+                None => "Off".into(),
+            };
+            card(
+                &mut body,
+                "",
+                "Search by meaning",
+                &meaning,
+                "<p>Find sites by their subject as well as their name. Enable it below.</p>",
+            );
+            let private = if private_ready {
+                "Ready"
+            } else if !active.private_search {
+                "Off"
+            } else if !super::private::in_build() {
+                "Unavailable in this build"
+            } else {
+                "Preparing index"
+            };
+            let link = if private_ready {
+                format!("<p><a class=\"btn alt\" href=\"{site}/private\" target=\"_blank\">Open private search ↗</a></p>")
+            } else {
+                String::new()
+            };
+            card(
+                &mut body,
+                "",
+                "Private browser search",
+                private,
+                &format!("<p>Rank results in your browser so your query stays there.</p>{link}"),
+            );
+            body.push_str("</section>");
+            if !writable {
+                body.push_str("<fieldset disabled>");
+            }
+            render_features(&mut body, active, saved, "search", base);
+            if !writable {
+                body.push_str("</fieldset>");
+            }
+            render_browser(&mut body, origin);
+        }
+        "network" => {
+            body.push_str("<p class=\"intro\">Connect to other nodes, check shared crawling, and choose optional search features.</p><section class=\"cards\">");
+            render_network_card(&mut body, status, active);
+            render_network_details(&mut body, status);
+            body.push_str("</section>");
+            if !writable {
+                body.push_str("<fieldset disabled>");
+            }
+            render_features(&mut body, active, saved, "network", base);
+            if !writable {
+                body.push_str("</fieldset>");
+            }
+        }
+        "remote" => {
+            if let Some(remote) = remote_control {
+                render_remote_control(&mut body, remote, writable);
+            }
+        }
+        _ => {
+            render_about(&mut body, status, data_dir, now);
+            body.push_str(&format!("<p>Desktop and Docker run the same node and settings panel.</p><p><a href=\"https://github.com/SueHeir/plumb-search\" target=\"_blank\">Source code &amp; documentation ↗</a> · <a href=\"{site}/api/status\" target=\"_blank\">Diagnostic status ↗</a></p><p class=\"hint\">Desktop: use the tray or menu bar for Start at login and Quit Plumb Search.</p>"));
+        }
+    }
+    body.push_str("</main>");
+    // Never reload forms: a timed reload discards unsaved edits and keyboard focus.
+    let reload = if section == "overview" && query.saved.is_empty() {
+        format!(
+            "<meta http-equiv=\"refresh\" content=\"{}\">",
+            if busy(status) {
+                BUSY_RELOAD_SECONDS
+            } else {
+                IDLE_RELOAD_SECONDS
+            }
+        )
+    } else {
+        String::new()
+    };
+    let head = format!("<meta name=\"referrer\" content=\"{PANEL_REFERRER_POLICY}\">{reload}<style>{PANEL_STYLE}</style><style>{LAYOUT_STYLE}</style>");
+    page_with_head(&format!("{title} - Plumb Search"), &head, &body)
+}
+
+pub(super) const LAYOUT_STYLE: &str = "
+.node-switch{display:flex;flex-wrap:wrap;gap:.4rem;margin-bottom:1rem}.node-switch a{padding:.4rem .8rem;border:1px solid var(--line);border-radius:999px;text-decoration:none;font-size:.9rem;color:var(--fg)}.node-switch a[aria-current]{border-color:var(--accent);color:var(--accent);font-weight:600}.node-panel{max-width:72rem;padding:2rem 2rem 4rem}.node-heading,.section-heading{display:flex;align-items:center;justify-content:space-between;gap:1rem}.node-heading h1{font-size:1.8rem}.eyebrow{font-size:.7rem;letter-spacing:.13em;color:var(--muted);margin:0 0 .3rem}.node-nav{display:flex;flex-wrap:wrap;gap:.4rem;border-bottom:1px solid var(--line);padding:1.5rem 0 1rem;margin-bottom:1.5rem}.node-panel a{color:var(--accent)}.node-panel a.btn:not(.alt){color:var(--bg)}.node-nav a{padding:.55rem .85rem;text-decoration:none;border-radius:.5rem;color:var(--muted)}.node-nav a[aria-current]{background:var(--accent);color:var(--bg);font-weight:600}.section-heading h2{margin:0;font-size:1.4rem}.section-heading>a{font-size:.85rem}.intro{color:var(--muted);max-width:45rem}.notice{padding:.85rem 1rem;border-left:3px solid var(--accent);background:color-mix(in srgb,var(--accent) 8%,var(--bg));border-radius:.3rem}.node-panel form{max-width:46rem}.node-panel fieldset{border:0;margin:0;padding:0;min-width:0}.node-panel fieldset:disabled{opacity:.65}.node-panel textarea{display:block;width:100%;min-height:6rem;font:inherit;background:var(--bg);color:var(--fg);padding:.75rem;border:1px solid var(--line);border-radius:.5rem}.node-panel .feature{padding:.8rem 0;border-bottom:1px solid var(--line)}.node-panel .feature label{margin:0}.node-panel .feature p{margin:.35rem 0 0 1.65rem}.node-panel .state{font-size:.8rem;color:var(--muted)}.node-panel :focus-visible{outline:3px solid var(--accent);outline-offset:3px}.node-panel dl{grid-template-columns:minmax(6rem,auto) minmax(0,1fr)}@media(max-width:600px){.node-panel{padding:1rem 1rem 3rem}.node-heading{align-items:flex-start}.node-heading h1{font-size:1.5rem}.node-nav{gap:.2rem}.node-nav a{padding:.5rem .6rem;font-size:.9rem}.cards{grid-template-columns:minmax(0,1fr)}.node-panel label{flex-wrap:wrap}.section-heading{align-items:flex-start}.section-heading>a{white-space:nowrap}}";
 
 /// A card: its class, title, headline and the HTML under them.
 fn card(body: &mut String, class: &str, title: &str, big: &str, rest: &str) {
@@ -503,7 +983,7 @@ fn render_downloads_card(body: &mut String, status: &Status, settings: &NodeSett
     );
 }
 
-fn render_crawl_card(body: &mut String, status: &Status, now: u64) {
+fn render_crawl_card(body: &mut String, status: &Status, now: u64, base: &str) {
     let crawling = status.phase == Phase::Ready && status.step == Step::Crawling;
     let (big, mut rest) = if crawling {
         let rest = status
@@ -519,6 +999,18 @@ fn render_crawl_card(body: &mut String, status: &Status, now: u64) {
             })
             .unwrap_or_default();
         ("Visiting homepages".to_string(), rest)
+    } else if status.step == Step::Indexing {
+        (
+            "Rebuilding index".to_string(),
+            "<p>Preparing updated search results.</p>".to_string(),
+        )
+    } else if status.phase != Phase::Ready {
+        ("Waiting for setup".to_string(), String::new())
+    } else if status.last_error.is_some() {
+        (
+            "Retrying update".to_string(),
+            "<p>The last update failed. Plumb will retry automatically.</p>".to_string(),
+        )
     } else if let Some(reason) = &status.paused {
         (
             "Paused".to_string(),
@@ -546,24 +1038,80 @@ fn render_crawl_card(body: &mut String, status: &Status, now: u64) {
     ));
     // Starts the next round now; while one runs, or crawling is paused,
     // there is nothing to start.
-    if status.phase == Phase::Ready && !crawling && status.paused.is_none() {
-        rest.push_str(
-            "<form method=\"post\" action=\"/app/refresh\">\
-             <button type=\"submit\" class=\"alt\">Update now</button></form>\n",
-        );
+    if status.phase == Phase::Ready && !busy(status) && status.paused.is_none() {
+        rest.push_str(&format!(
+            "<form method=\"post\" action=\"{base}/refresh\">\
+             <button type=\"submit\" class=\"alt\">Update now</button></form>\n"
+        ));
     }
     card(body, "", "Crawling", &big, &rest);
 }
 
-fn render_network_card(body: &mut String) {
+fn render_network_card(body: &mut String, status: &Status, active: &FeatureSettings) {
+    let (headline, rest) = match &status.network {
+        Some(net) => (if net.connected_peers > 0 { "Connected" } else { "Looking for peers" }, format!("<p>{} nodes connected · {} relay peers.</p><p class=\"hint\">Shared crawl batches: {} received, {} published.</p>", net.connected_peers, net.relaying_peers, net.batches_received, net.batches_published)),
+        None if active.network => ("Starting", "<p>The Plumb network is enabled and is starting.</p>".into()),
+        None => ("Not connected", "<p>Network sharing is off. This node searches its own index.</p>".into()),
+    };
+    card(body, "", "Plumb network", headline, &rest);
+}
+
+fn render_network_details(body: &mut String, status: &Status) {
+    let Some(net) = &status.network else {
+        return;
+    };
+    let agreement = &net.agreement;
+    card(body, "", "Crawl agreement", &format!("{} sites confirmed", group_thousands(agreement.confirmed_sites as u64)), &format!("<p>{} waiting for agreement · {} disputed.</p><p class=\"hint\">{} trusted crawlers · {} distrusted.</p>", agreement.pending_sites, agreement.disputed_sites, agreement.vouched_crawlers, agreement.distrusted_crawlers));
     card(
         body,
         "",
-        "Plumb network",
-        "Not connected",
-        "<p>0 nodes connected. This node builds and searches its own index; connecting to \
-         other Plumb nodes comes with network support.</p>\n",
+        "Popularity sharing",
+        &format!("{} reports sent", net.reports_sent),
+        &format!(
+            "<p>{} reports held · {} popular picks.</p>",
+            net.reports_held, net.popular_picks
+        ),
     );
+    card(body, "", "Relay activity", &format!("{} requests relayed", net.requests_relayed), &format!("<p>{} bucket requests answered.</p><p class=\"hint\">Reachability: {}. {} relay reservations.</p>", net.buckets_served, escape_html(&net.nat), net.relays.len()));
+    card(
+        body,
+        "search",
+        "Node identity",
+        "Network addresses",
+        &format!(
+            "<p class=\"msg\">{}</p><p class=\"msg\">{}</p>",
+            escape_html(&net.peer_id),
+            escape_html(&net.reachable_at.join("\n"))
+        ),
+    );
+}
+
+fn render_features(
+    body: &mut String,
+    active: &FeatureSettings,
+    saved: &FeatureSettings,
+    section: &str,
+    base: &str,
+) {
+    body.push_str(&format!("<h2>Optional features</h2><p class=\"hint\">Saved choices apply after you quit and reopen the app or restart the container. Existing Docker transport and relay flags are preserved.</p><form method=\"post\" action=\"{base}/features\">"));
+    body.push_str(&format!(
+        "<input type=\"hidden\" name=\"section\" value=\"{section}\">"
+    ));
+    for (name, label, value, running, hint) in [
+        ("network", "Join the Plumb network", saved.network, active.network, "Share signed crawls and search other nodes. Uses port 4001 by default, local discovery, and UPnP; existing server flags still configure transport."),
+        ("search_by_meaning", "Search by meaning", saved.search_by_meaning, active.search_by_meaning, "Find sites by topic. Downloads a model (about 130 MB) and builds site vectors in the background."),
+        ("private_search", "Private browser search", saved.private_search, active.private_search, "Keep search words in the browser. Requires a build with the private-search module and extra disk space for search buckets."),
+        ("share_popularity", "Share anonymous popularity", saved.share_popularity, active.share_popularity, "Requires the Plumb network. Reports which results are opened to help improve ranking. Off unless you enable it."),
+    ] {
+        if (section == "search") != matches!(name, "search_by_meaning" | "private_search") { continue; }
+        body.push_str(&format!("<div class=\"feature\"><label><input type=\"checkbox\" name=\"{name}\" value=\"1\"{}><span>{label} <span class=\"state\">· currently {}</span></span></label><p class=\"hint\">{hint}</p></div>", if value { " checked" } else { "" }, if running { "on" } else { "off" }));
+    }
+    if section == "network" {
+        body.push_str(&format!("<label for=\"bootstrap\">Bootstrap nodes</label><p class=\"hint\" id=\"bootstrap-help\">One multiaddress per line. Leave empty to discover nearby nodes only; remote peers need a reachable bootstrap node.</p><textarea id=\"bootstrap\" name=\"bootstrap\" aria-describedby=\"bootstrap-help\" spellcheck=\"false\">{}</textarea>", escape_html(&saved.bootstrap.join("\n"))));
+        body.push_str(&format!("<input type=\"hidden\" name=\"trust_shown\" value=\"1\"><div class=\"feature\"><label><input type=\"checkbox\" name=\"default_trust\" value=\"1\"{}><span>Trust plumbsearch.org's crawler</span></label><p class=\"hint\">Take in crawls from the plumbsearch.org node at once, so a new node fills up while the network is small. Turn off to keep only crawls a second crawler confirms.</p></div>", if saved.no_default_trust { "" } else { " checked" }));
+        body.push_str(&format!("<label for=\"trusted\">Trusted nodes</label><p class=\"hint\" id=\"trusted-help\">Other node ids whose crawls are taken in at once, one per line. Only add nodes you run or know.</p><textarea id=\"trusted\" name=\"trusted\" aria-describedby=\"trusted-help\" spellcheck=\"false\">{}</textarea>", escape_html(&saved.trusted.join("\n"))));
+    }
+    body.push_str("<button type=\"submit\">Save feature settings</button></form>");
 }
 
 /// One line of the setup steps: done, under way, waiting or to do.
@@ -650,7 +1198,7 @@ fn render_steps(body: &mut String, status: &Status, now: u64) {
     body.push_str("</ol>\n");
 }
 
-fn render_settings(body: &mut String, settings: &NodeSettings) {
+fn render_settings(body: &mut String, settings: &NodeSettings, base: &str) {
     let checked = if settings.background_updates {
         " checked"
     } else {
@@ -664,15 +1212,15 @@ fn render_settings(body: &mut String, settings: &NodeSettings) {
         }
     };
     body.push_str(&format!(
-        "<h2>Settings</h2>\n<form method=\"post\" action=\"/app/settings\">\n\
+        "<h2>Crawling &amp; limits</h2>\n<form method=\"post\" action=\"{base}/settings\">\n\
          <label><input type=\"checkbox\" name=\"background_updates\" value=\"1\"{checked}>\
          <span>Keep the index up to date in the background</span></label>\n\
          <p class=\"hint\">Plumb visits a few thousand homepages a day to learn sites' names \
          and find new sites, then rebuilds its index. Search keeps working when this is \
          off.</p>\n\
          <label>Download limit <input type=\"number\" name=\"download_limit_mb_per_day\" \
-         min=\"0\" step=\"1\" value=\"{}\" placeholder=\"none\"> MB a day</label>\n\
-         <p class=\"hint\">Crawling pauses for the rest of the day once it is reached. Empty \
+         min=\"0\" step=\"1\" value=\"{}\" placeholder=\"none\"> MB per UTC day</label>\n\
+         <p class=\"hint\">Crawling pauses for the rest of the UTC day once it is reached. Empty \
          for no limit.</p>\n\
          <label>Storage limit <input type=\"number\" name=\"storage_limit_mb\" min=\"0\" \
          step=\"1\" value=\"{}\" placeholder=\"none\"> MB</label>\n\
@@ -696,7 +1244,7 @@ fn render_browser(body: &mut String, origin: &str) {
 }
 
 fn render_about(body: &mut String, status: &Status, data_dir: Option<&Path>, now: u64) {
-    body.push_str("<h2>About</h2>\n<dl>\n");
+    body.push_str("<dl>\n");
     let mut row = |name: &str, value: String| {
         body.push_str(&format!(
             "<dt>{}</dt><dd>{}</dd>\n",
@@ -731,6 +1279,7 @@ mod tests {
         status: Status,
         settings: Mutex<NodeSettings>,
         refreshes: Mutex<usize>,
+        features: Mutex<FeatureSettings>,
     }
 
     impl StatusSource for FakeNode {
@@ -746,6 +1295,13 @@ mod tests {
         }
         fn refresh_now(&self) {
             *self.refreshes.lock().unwrap() += 1;
+        }
+        fn saved_features(&self) -> anyhow::Result<FeatureSettings> {
+            Ok(self.features.lock().unwrap().clone())
+        }
+        fn change_features(&self, features: FeatureSettings) -> anyhow::Result<()> {
+            *self.features.lock().unwrap() = features;
+            Ok(())
         }
         fn data_dir(&self) -> Option<std::path::PathBuf> {
             Some("/home/me/plumb <data>".into())
@@ -793,15 +1349,27 @@ mod tests {
             status,
             settings: Mutex::new(NodeSettings::default()),
             refreshes: Mutex::new(0),
+            features: Mutex::new(FeatureSettings::default()),
         });
         (node_router(Arc::new(NoSearch), node.clone()), node)
     }
 
     async fn get_panel(app: Router) -> String {
-        let request = Request::get("/app")
+        let mut body = String::new();
+        for section in ["overview", "search", "resources", "network", "about"] {
+            body.push_str(&get_section(app.clone(), section).await);
+        }
+        body
+    }
+
+    async fn get_section(app: Router, section: &str) -> String {
+        let mut request = Request::get(format!("/app?section={section}"))
             .header(header::HOST, "127.0.0.1:7586")
             .body(Body::empty())
             .unwrap();
+        request.extensions_mut().insert(ConnectInfo(
+            "127.0.0.1:50000".parse::<SocketAddr>().unwrap(),
+        ));
         let response = app.oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         // So that its forms send their origin: no-referrer sends "null".
@@ -1026,7 +1594,10 @@ mod tests {
         )
         .await;
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
-        assert_eq!(response.headers()[header::LOCATION], "/app");
+        assert_eq!(
+            response.headers()[header::LOCATION],
+            "/app?section=resources&saved=settings"
+        );
         assert_eq!(
             *node.settings.lock().unwrap(),
             NodeSettings {
@@ -1190,6 +1761,118 @@ mod tests {
             body.contains("<code>http://127.0.0.1:7586/search?q=%s</code>"),
             "{body}"
         );
+    }
+
+    #[tokio::test]
+    async fn editing_pages_keep_unsaved_input_and_show_real_network_state() {
+        let mut status = status(Phase::Ready, Step::Idle);
+        status.network = Some(plumb_net::NetStatus {
+            connected_peers: 3,
+            relaying_peers: 2,
+            batches_received: 8,
+            peer_id: "<untrusted-peer>".into(),
+            ..Default::default()
+        });
+        let (router, _) = app(status);
+        for section in ["resources", "network", "search", "about"] {
+            let body = get_section(router.clone(), section).await;
+            assert!(!body.contains("http-equiv=\"refresh\""));
+            assert!(body.contains(&format!(
+                "href=\"/app?section={section}\" aria-current=\"page\""
+            )));
+        }
+        let search = get_section(router.clone(), "search").await;
+        assert!(search.contains("name=\"search_by_meaning\""));
+        assert!(search.contains("name=\"private_search\""));
+        assert!(!search.contains("name=\"network\""));
+        assert!(search.contains("class=\"wrap node-panel\""));
+        let body = get_section(router, "network").await;
+        assert!(body.contains("3 nodes connected · 2 relay peers"));
+        assert!(body.contains("&lt;untrusted-peer&gt;"));
+        assert!(!body.contains("<untrusted-peer>"));
+    }
+
+    #[tokio::test]
+    async fn feature_changes_require_local_access_validate_and_show_restart() {
+        let (router, node) = app(status(Phase::Ready, Step::Idle));
+        for form in [
+            "share_popularity=1",
+            "network=1&bootstrap=not-an-address",
+            "network=1&trust_shown=1&trusted=not-a-node",
+        ] {
+            let response = post(
+                router.clone(),
+                "/app/features",
+                form,
+                "127.0.0.1:50000",
+                None,
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(*node.features.lock().unwrap(), FeatureSettings::default());
+        }
+        for (peer, origin) in [
+            ("192.168.1.20:50000", None),
+            ("127.0.0.1:50000", Some("https://evil.example")),
+        ] {
+            assert_eq!(
+                post(router.clone(), "/app/features", "network=1", peer, origin)
+                    .await
+                    .status(),
+                StatusCode::FORBIDDEN
+            );
+        }
+        let response = post(
+            router.clone(),
+            "/app/features",
+            "network=1&private_search=1&search_by_meaning=1&share_popularity=1",
+            "127.0.0.1:50000",
+            Some("http://127.0.0.1:7586"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert!(node.features.lock().unwrap().network);
+        assert!(!node.features.lock().unwrap().no_default_trust);
+        let page = get_section(router.clone(), "network").await;
+        assert!(page.contains("name=\"default_trust\" value=\"1\" checked"));
+        assert!(page.contains("name=\"trusted\""));
+        let node_id = "12D3KooWEwYB7PYxRNgvSWiwkLXvwYajSmYn4yoPqmkN7NbNqJjg";
+        let response = post(
+            router.clone(),
+            "/app/features",
+            &format!("network=1&trust_shown=1&trusted={node_id}"),
+            "127.0.0.1:50000",
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert!(node.features.lock().unwrap().no_default_trust);
+        assert_eq!(node.features.lock().unwrap().trusted, [node_id]);
+        let response = post(
+            router.clone(),
+            "/app/features",
+            "section=search&private_search=1",
+            "127.0.0.1:50000",
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert!(node.features.lock().unwrap().network);
+        assert!(node.features.lock().unwrap().private_search);
+        assert!(!node.features.lock().unwrap().search_by_meaning);
+        assert!(get_section(router.clone(), "network")
+            .await
+            .contains("Feature changes saved."));
+        let mut request = Request::get("/app?section=resources")
+            .header(header::HOST, "server:8080")
+            .body(Body::empty())
+            .unwrap();
+        request.extensions_mut().insert(ConnectInfo(
+            "192.168.1.20:50000".parse::<SocketAddr>().unwrap(),
+        ));
+        let body = body_text(router.oneshot(request).await.unwrap()).await;
+        assert!(body.contains("Settings are read-only"));
+        assert!(body.contains("<fieldset disabled>"));
     }
 
     #[tokio::test]

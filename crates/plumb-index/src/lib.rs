@@ -43,6 +43,11 @@
 //!   anyway, and when no site is named a little-known site still comes
 //!   first. A typed hostname always has full trust.
 //!
+//! A query that names no site in full is checked for typos, and searched
+//! again corrected when that finds a better match: "amazom" shows
+//! amazon.com, with a note that the results are for "amazon". See
+//! [`Searcher::search_meaning`] and the [`spell`] module.
+//!
 //! All text, at index and at query time, goes through
 //! [`plumb_core::normalize_text`] and is then ASCII-folded, so `U.S. Bank`,
 //! `us bank` and `US BANK` are the same query and `nestle` finds `Nestlé`.
@@ -50,6 +55,7 @@
 mod analysis;
 mod replace;
 mod schema;
+mod spell;
 
 use std::borrow::Cow;
 use std::collections::hash_map::Entry;
@@ -99,6 +105,16 @@ const WHOLE_QUERY_BOOST: f32 = 6.0;
 const DOMAIN_BOOST: f32 = 10.0;
 /// Most distinct query words used; the rest are ignored.
 const MAX_QUERY_WORDS: usize = 16;
+/// The least link score of a well-known site (roughly the top 30,000).
+pub const WELL_KNOWN_LINK_SCORE: f32 = 0.5;
+/// How much more link score a well-known site whose name is a typo away
+/// must have than what a query finds as typed for the query to be taken as
+/// that typo: twitter.com over twiter.com.
+pub const TYPO_POPULARITY_MARGIN: f32 = 0.3;
+/// A site the whole query names with this link score or more keeps its
+/// name even when a far better-known one is a typo away. Typo-squatters
+/// such as twiter.com score below it (0.25 to 0.37 on real data).
+pub const KEEPS_ITS_NAME_LINK_SCORE: f32 = 0.4;
 /// Memory budget of the index writer, shared by its threads. Enough for a
 /// million records without flushing tiny segments.
 const WRITER_HEAP_BYTES: usize = 200_000_000;
@@ -226,6 +242,8 @@ pub struct SearchOptions {
     /// Leave out sites of countries other than [`SearchOptions::country`].
     /// Global sites stay. Does nothing without a country.
     pub only_country: bool,
+    /// Search for the query exactly as typed, without correcting typos.
+    pub exact: bool,
 }
 
 /// A link into a site's own search for the words after its name:
@@ -246,6 +264,20 @@ pub struct SearchResults {
     /// Offered when the query starts with a site's name and goes on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub site_search: Option<SiteSearch>,
+    /// Set when the query looks misspelled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spelling: Option<Spelling>,
+}
+
+/// A corrected spelling of a query: "amazom" -> "amazon".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Spelling {
+    /// The corrected query, in lowercase words without punctuation.
+    pub query: String,
+    /// The hits are for [`Spelling::query`] ("Showing results for ...");
+    /// when false they are for the query as typed and this is only a
+    /// suggestion ("Did you mean ...?").
+    pub applied: bool,
 }
 
 /// Builds a fresh index of `records` in `dir`, replacing any index already
@@ -512,6 +544,20 @@ impl Searcher {
     /// sites [`Meaning::nearest`] the query are re-ranked too, and
     /// [`RankConfig::meaning_weight`] of every text match is how close the
     /// site is in meaning. Queries that name a site rank as without it.
+    ///
+    /// Typos are corrected (see [`spell`]) unless [`SearchOptions::exact`]
+    /// is set or the query is a hostname. When the query's first words are
+    /// a typo away from the name of a well-known site
+    /// ([`WELL_KNOWN_LINK_SCORE`]) with [`TYPO_POPULARITY_MARGIN`] more
+    /// link score than what the query finds as typed (the sites it names
+    /// in full, if below [`KEEPS_ITS_NAME_LINK_SCORE`], else its best hit),
+    /// the results are for the corrected query
+    /// ([`Spelling::applied`]): "twiter" shows twitter.com, not the
+    /// typo-squatter twiter.com, and "Search instead for" keeps the way
+    /// back. Otherwise a query that names a site in full is left alone, so
+    /// an exact match wins; any other query is searched corrected too, and
+    /// its hits replace the query's own when its best hit scores at least
+    /// as high, else the correction is only suggested.
     pub fn search_meaning(
         &self,
         query_text: &str,
@@ -520,16 +566,92 @@ impl Searcher {
         options: &SearchOptions,
         meaning: Option<&dyn Meaning>,
     ) -> Result<SearchResults> {
+        let (results, named) = self.rank(query_text, limit, cfg, options, meaning)?;
+        if options.exact || limit == 0 || named.typed {
+            return Ok(results);
+        }
+        // A site named in full with popularity of its own keeps its name;
+        // so does a kind of site.
+        match named.full_link_score {
+            Some(score) if score >= KEEPS_ITS_NAME_LINK_SCORE => return Ok(results),
+            None if named.kind => return Ok(results),
+            _ => {}
+        }
+        let searcher = self.reader.searcher();
+        let link_score = |docs: &HashSet<DocAddress>| best_link_score(&searcher, docs);
+        let named_words = if named.full_link_score.is_some() {
+            0
+        } else {
+            named.words
+        };
+        let Some(fix) = spell::correct(
+            &searcher,
+            &self.fields,
+            &self.words,
+            query_text,
+            named_words,
+            &link_score,
+        )?
+        else {
+            return Ok(results);
+        };
+        let typed_link_score = named
+            .full_link_score
+            .or_else(|| results.hits.first().map(|hit| hit.link_score))
+            .unwrap_or(0.0);
+        let far_more_popular = fix.name_link_score.is_some_and(|score| {
+            score >= WELL_KNOWN_LINK_SCORE && score >= typed_link_score + TYPO_POPULARITY_MARGIN
+        });
+        if named.full_link_score.is_some() && !far_more_popular {
+            return Ok(results);
+        }
+        let (fixed, _) = self.rank(&fix.query, limit, cfg, options, meaning)?;
+        let Some(fixed_best) = fixed.hits.first() else {
+            return Ok(results);
+        };
+        let better = far_more_popular
+            || results
+                .hits
+                .first()
+                .is_none_or(|best| fixed_best.score >= best.score);
+        if better {
+            return Ok(SearchResults {
+                spelling: Some(Spelling {
+                    query: fix.query,
+                    applied: true,
+                }),
+                ..fixed
+            });
+        }
+        Ok(SearchResults {
+            spelling: Some(Spelling {
+                query: fix.query,
+                applied: false,
+            }),
+            ..results
+        })
+    }
+
+    /// The ranked results of `query_text` as typed, and how the query names
+    /// sites.
+    fn rank(
+        &self,
+        query_text: &str,
+        limit: usize,
+        cfg: &RankConfig,
+        options: &SearchOptions,
+        meaning: Option<&dyn Meaning>,
+    ) -> Result<(SearchResults, Named)> {
         if limit == 0 {
-            return Ok(SearchResults::default());
+            return Ok(Default::default());
         }
         let Some(query) = ParsedQuery::new(query_text, &self.words, &self.joined) else {
-            return Ok(SearchResults::default());
+            return Ok(Default::default());
         };
         let searcher = self.reader.searcher();
         let num_docs = usize::try_from(searcher.num_docs()).unwrap_or(usize::MAX);
         if num_docs == 0 {
-            return Ok(SearchResults::default());
+            return Ok(Default::default());
         }
 
         let text_query = query.text_query(&self.fields);
@@ -574,8 +696,20 @@ impl Searcher {
         unranked.sort_unstable();
         unranked.dedup();
         candidates.extend(bm25_of(&searcher, &text_query, unranked)?);
+        let full_names: HashSet<DocAddress> = names
+            .iter()
+            .filter(|(_, name)| name.words() >= query.len)
+            .map(|(&addr, _)| addr)
+            .collect();
+        let named = Named {
+            words: names.values().map(NameMatch::words).max().unwrap_or(0),
+            full_link_score: (!full_names.is_empty())
+                .then(|| best_link_score(&searcher, &full_names)),
+            kind: !kinds.is_empty(),
+            typed: query.domain.is_some(),
+        };
         if candidates.is_empty() {
-            return Ok(SearchResults::default());
+            return Ok((SearchResults::default(), named));
         }
 
         let columns = searcher
@@ -726,7 +860,12 @@ impl Searcher {
             .into_iter()
             .map(|ranked| self.hit(&searcher, ranked))
             .collect::<Result<_>>()?;
-        Ok(SearchResults { hits, site_search })
+        let results = SearchResults {
+            hits,
+            site_search,
+            spelling: None,
+        };
+        Ok((results, named))
     }
 
     /// A link into the search of the site at `addr` for the words of `query`
@@ -813,6 +952,38 @@ impl Searcher {
             country: ranked.country,
         })
     }
+}
+
+/// How a query names sites, for typo correction.
+#[derive(Debug, Clone, Copy, Default)]
+struct Named {
+    /// The most of the query's first words a site's name covers exactly.
+    words: usize,
+    /// The best link score among the sites the whole query names, if any.
+    full_link_score: Option<f32>,
+    /// The query names a kind of site that the index has.
+    kind: bool,
+    /// The query is a hostname or URL.
+    typed: bool,
+}
+
+/// The best link score among `docs`, 0 for none.
+fn best_link_score(searcher: &tantivy::Searcher, docs: &HashSet<DocAddress>) -> f32 {
+    let mut best = 0.0f32;
+    let mut columns: HashMap<u32, Option<tantivy::columnar::Column<f64>>> = HashMap::new();
+    for addr in docs {
+        let column = columns.entry(addr.segment_ord).or_insert_with(|| {
+            searcher
+                .segment_reader(addr.segment_ord)
+                .fast_fields()
+                .f64(schema::LINK_SCORE)
+                .ok()
+        });
+        if let Some(score) = column.as_ref().and_then(|c| c.first(addr.doc_id)) {
+            best = best.max(score as f32);
+        }
+    }
+    best
 }
 
 /// A candidate with its blended score.
@@ -1687,6 +1858,7 @@ mod tests {
         SearchOptions {
             country: Some(country.to_string()),
             only_country,
+            exact: false,
         }
     }
 
@@ -1753,6 +1925,7 @@ mod tests {
                 &SearchOptions {
                     country: None,
                     only_country: true,
+                    exact: false,
                 },
             )
             .unwrap()
@@ -2837,5 +3010,269 @@ mod tests {
             stats.docs
         );
         assert!(build_time.as_secs() < 300, "build took {build_time:?}");
+    }
+
+    /// Well-known sites, an obscure look-alike, and enough sites about
+    /// pizza and forecasts that the index knows those words.
+    fn typo_corpus() -> Vec<SiteRecord> {
+        let mut records = vec![
+            site(
+                "google.com",
+                Some("Google"),
+                None,
+                &[],
+                &[],
+                popular(1, 90_000),
+            ),
+            site(
+                "amazon.com",
+                Some("Amazon.com. Spend less. Smile more."),
+                None,
+                &["Amazon"],
+                &[("amazon prime", 300)],
+                popular(10, 50_000),
+            ),
+            site(
+                "bankofamerica.com",
+                Some("Bank of America - Banking, Credit Cards, Loans"),
+                None,
+                &["Bank of America"],
+                &[],
+                popular(300, 20_000),
+            ),
+            site(
+                "weather.com",
+                Some("The Weather Channel"),
+                None,
+                &[],
+                &[("weather forecast", 200)],
+                popular(150, 30_000),
+            ),
+            site(
+                "piazza.com",
+                Some("Piazza: ask questions in class"),
+                None,
+                &[],
+                &[],
+                popular(4_000, 3_000),
+            ),
+            site(
+                "gogle.com",
+                Some("Gogle - free prizes"),
+                None,
+                &[],
+                &[],
+                obscure(40_000_000, 1),
+            ),
+            site(
+                "amazen.com",
+                Some("Amazen deals"),
+                None,
+                &[],
+                &[],
+                obscure(30_000_000, 2),
+            ),
+        ];
+        records.extend([
+            site(
+                "hilton.com",
+                Some("Hilton"),
+                None,
+                &[],
+                &[],
+                popular(900, 15_000),
+            ),
+            site(
+                "hilten.com",
+                Some("Hilten"),
+                None,
+                &[],
+                &[],
+                ranked(40_000, 2_000),
+            ),
+            site(
+                "capitalone.com",
+                Some("Capital One"),
+                None,
+                &["Capital One"],
+                &[],
+                popular(200, 20_000),
+            ),
+            site(
+                "tacobell.com",
+                Some("Taco Bell"),
+                None,
+                &["Taco Bell"],
+                &[],
+                popular(1_500, 10_000),
+            ),
+            site(
+                "fedex.com",
+                Some("FedEx"),
+                None,
+                &[],
+                &[],
+                popular(400, 20_000),
+            ),
+            site("edx.org", Some("edX"), None, &[], &[], popular(300, 30_000)),
+        ]);
+        for i in 0..25 {
+            records.push(site(
+                &format!("capitol{i}.gov"),
+                Some(&format!("Capitol office {i}")),
+                None,
+                &[],
+                &[],
+                obscure(3_000_000 + i, 10),
+            ));
+            records.push(site(
+                &format!("taco{i}.com"),
+                Some(&format!("Taco stand {i}")),
+                None,
+                &[],
+                &[],
+                obscure(4_000_000 + i, 10),
+            ));
+        }
+        for i in 0..25 {
+            records.push(site(
+                &format!("pizzeria{i}.com"),
+                Some(&format!("Pizza place number {i}")),
+                None,
+                &[],
+                &[],
+                obscure(1_000_000 + i, 10),
+            ));
+        }
+        for i in 0..5 {
+            records.push(site(
+                &format!("forecaster{i}.com"),
+                Some("Local forecast"),
+                None,
+                &[],
+                &[],
+                obscure(2_000_000 + i, 10),
+            ));
+        }
+        records
+    }
+
+    fn search_spelled(searcher: &Searcher, query: &str) -> SearchResults {
+        searcher
+            .search_full(query, 10, &RankConfig::default(), &SearchOptions::default())
+            .unwrap()
+    }
+
+    fn applied(query: &str) -> Option<Spelling> {
+        Some(Spelling {
+            query: query.to_string(),
+            applied: true,
+        })
+    }
+
+    #[test]
+    fn misspelled_names_find_the_site() {
+        let (_dir, searcher) = build(&typo_corpus());
+        for (typed, fixed, domain) in [
+            ("amazom", "amazon", "amazon.com"),
+            ("Amazn", "amazon", "amazon.com"),
+            ("gooogle", "google", "google.com"),
+            ("bank of amercia", "bank of america", "bankofamerica.com"),
+            ("bank of americ", "bank of america", "bankofamerica.com"),
+            ("weather forcast", "weather forecast", "weather.com"),
+        ] {
+            let results = search_spelled(&searcher, typed);
+            assert_eq!(results.spelling, applied(fixed), "{typed}");
+            assert_eq!(results.hits[0].domain, domain, "{typed}");
+        }
+    }
+
+    #[test]
+    fn typos_never_lead_to_look_alikes() {
+        let (_dir, searcher) = build(&typo_corpus());
+        // amazen.com is as near "amazn" as amazon.com, but has nothing to
+        // show for itself.
+        let results = search_spelled(&searcher, "amazn");
+        assert_eq!(results.spelling, applied("amazon"));
+        assert_eq!(domains(&results.hits)[0], "amazon.com");
+    }
+
+    #[test]
+    fn exact_names_are_not_corrected() {
+        let (_dir, searcher) = build(&typo_corpus());
+        for query in [
+            "amazon",
+            "google",
+            "bank of america",
+            "piazza",
+            "amazon.com",
+        ] {
+            let results = search_spelled(&searcher, query);
+            assert_eq!(results.spelling, None, "{query}");
+        }
+        // A little-known site named exactly is taken as a typo of the
+        // far better-known site a letter away: the typo-squatter gogle.com
+        // does not get the searches meant for google.com.
+        let results = search_spelled(&searcher, "gogle");
+        assert_eq!(results.spelling, applied("google"));
+        assert_eq!(results.hits[0].domain, "google.com");
+        // Searching as typed still finds it.
+        let options = SearchOptions {
+            exact: true,
+            ..SearchOptions::default()
+        };
+        let hits = searcher
+            .search_full("gogle", 10, &RankConfig::default(), &options)
+            .unwrap()
+            .hits;
+        assert_eq!(hits[0].domain, "gogle.com");
+        // A site with popularity of its own keeps its name, though a more
+        // popular one is a letter away.
+        let results = search_spelled(&searcher, "hilten");
+        assert_eq!(results.spelling, None);
+        assert_eq!(results.hits[0].domain, "hilten.com");
+    }
+
+    #[test]
+    fn several_word_names_and_first_letters() {
+        let (_dir, searcher) = build(&typo_corpus());
+        for (typed, fixed, domain) in [
+            // "capitol" and "taco" are words the index knows, and "bel" is
+            // short, but together they are a typo of a well-known name.
+            ("capitol one", "capital one", "capitalone.com"),
+            ("taco bel", "taco bell", "tacobell.com"),
+            // edx.org and fedex.com are both an edit away; typos rarely
+            // change the first letter.
+            ("fedx", "fedex", "fedex.com"),
+        ] {
+            let results = search_spelled(&searcher, typed);
+            assert_eq!(results.spelling, applied(fixed), "{typed}");
+            assert_eq!(results.hits[0].domain, domain, "{typed}");
+        }
+    }
+
+    #[test]
+    fn known_words_and_short_words_are_left_alone() {
+        let (_dir, searcher) = build(&typo_corpus());
+        // piazza.com is a letter away, but pizza is a word the index knows.
+        let results = search_spelled(&searcher, "pizza");
+        assert_eq!(results.spelling, None);
+        assert!(results.hits[0].domain.starts_with("pizzeria"));
+        // Too short to tell a typo from another name.
+        assert_eq!(search_spelled(&searcher, "gle").spelling, None);
+    }
+
+    #[test]
+    fn exact_searches_skip_correction() {
+        let (_dir, searcher) = build(&typo_corpus());
+        let options = SearchOptions {
+            exact: true,
+            ..SearchOptions::default()
+        };
+        let results = searcher
+            .search_full("amazom", 10, &RankConfig::default(), &options)
+            .unwrap();
+        assert_eq!(results.spelling, None);
+        assert!(!domains(&results.hits).contains(&"amazon.com"));
     }
 }
