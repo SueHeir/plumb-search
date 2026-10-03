@@ -149,6 +149,7 @@ mod tests {
                     description: Some("About us".into()),
                     site_name: Some(format!("{domain} site")),
                     search_url: None,
+                    icons: Vec::new(),
                     headings: Vec::new(),
                     body_text: None,
                     links: links
@@ -160,6 +161,7 @@ mod tests {
                         })
                         .collect(),
                 },
+                icon: None,
             }),
         }
     }

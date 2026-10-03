@@ -7,8 +7,9 @@
 //! 1. On first start, when `DIR/records.jsonl` is missing, it downloads the
 //!    Tranco list alone, keeps its best [`NodeConfig::sites`] sites, writes
 //!    the records file and builds a first index, which is searchable from
-//!    then on, a minute or two after starting. Right after, it downloads the
-//!    rest of the seed data, which takes many minutes: Wikidata's official
+//!    then on, a minute or two after starting. After its first crawl (2), it
+//!    downloads the rest of the seed data, which takes many minutes (half an
+//!    hour or more when Wikidata is busy): Wikidata's official
 //!    websites and, when [`NodeConfig::cc_release`] is set, the top rows of
 //!    Common Crawl's domain ranks. It keeps the best sites of all three,
 //!    replaces the quick records with them and swaps in a new index. Until
@@ -17,8 +18,11 @@
 //!    and the node keeps trying to get it (waiting as after other failures,
 //!    below) while it goes on with its work. Once Wikidata answers, its
 //!    official websites are added to the records and the index is rebuilt.
-//! 2. It then crawls [`NodeConfig::initial_crawl`] homepages, rebuilds the
-//!    index and swaps the new one in.
+//! 2. Right after the first index, it crawls [`NodeConfig::initial_crawl`]
+//!    homepages, rebuilds the index and swaps the new one in. This comes
+//!    before the rest of the seed data so that a node in the network has
+//!    crawls to share within minutes. A paused node gets the seed data
+//!    first.
 //! 3. Every [`NodeConfig::refresh_every`] it crawls
 //!    [`NodeConfig::crawl_per_refresh`] more homepages, rebuilds and swaps
 //!    again. As with `plumb crawl`, half of each round goes to sites never
@@ -53,6 +57,8 @@
 //!                            records.jsonl exists
 //!   indexes/000001/          a complete search index
 //!   indexes/000002/          ...the newest one that opens is searched
+//!   icons/3f/example.com.png site icons for results pages (see
+//!                            [`crate::icons`]); empty when a site had none
 //! ```
 //!
 //! The node owns the directory. The records and state files are replaced
@@ -297,6 +303,9 @@ pub struct SeedSources {
     /// [`NodeConfig::cc_release`]; when set, Common Crawl ranks are used
     /// even without a release.
     pub cc_ranks_url: Option<String>,
+    /// Where the embedding model's files are downloaded from, for search by
+    /// meaning: each of [`plumb_embed::MODEL_FILES`] is appended.
+    pub model_base_url: String,
 }
 
 impl Default for SeedSources {
@@ -307,6 +316,7 @@ impl Default for SeedSources {
             wikidata_min_sitelinks: 25,
             wikidata_pacing: download::WikidataPacing::default(),
             cc_ranks_url: None,
+            model_base_url: plumb_embed::MODEL_BASE_URL.to_string(),
         }
     }
 }
@@ -1493,6 +1503,10 @@ impl StatusSource for Inner {
 
     fn record_pick(&self, query: &str, domain: &str) {
         network::record_pick(self, query, domain);
+    }
+
+    fn icon(&self, domain: &str) -> Option<Vec<u8>> {
+        crate::icons::IconStore::new(&self.paths.icons).get(domain)
     }
 
     fn features(&self) -> features::FeatureSettings {

@@ -1,0 +1,13 @@
+[package]
+name = "plumb-e2e"
+description = "End-to-end tests of the packaged node: Docker containers of the image, killed and restarted, and talking to each other."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+plumb-core = { version = "0.1.0", path = "../plumb-core" }
+plumb-private = { version = "0.1.0", path = "../plumb-private" }
+serde_json = "1.0.151"

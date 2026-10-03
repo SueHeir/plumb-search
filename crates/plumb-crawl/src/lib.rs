@@ -21,12 +21,14 @@ use serde::{Deserialize, Serialize};
 mod crawl;
 mod dns;
 mod extract;
+mod icon;
 mod records;
 #[cfg(test)]
 mod test_alloc;
 
 pub use crawl::{crawl_homepages, log_summary, HomepageCrawler};
-pub use extract::{extract_page_meta, MAX_BODY_WORDS, MAX_OUT_LINKS};
+pub use extract::{extract_page_meta, MAX_BODY_WORDS, MAX_ICONS, MAX_OUT_LINKS};
+pub use icon::{normalize_icon, ICON_SIZE};
 pub use records::to_records;
 
 /// Sent with every request so site owners can see who is crawling and why.
@@ -61,6 +63,11 @@ pub struct CrawlConfig {
     pub max_bytes: usize,
     /// Redirects followed per request.
     pub max_redirects: usize,
+    /// After a homepage, also fetch the site's icon for results pages (see
+    /// [`CrawledPage::icon`]): at most [`MAX_ICONS`] icons the page links
+    /// to and `/favicon.ico`, each allowed by robots.txt, until one reads
+    /// as a bitmap.
+    pub fetch_icons: bool,
     /// Also connect to host names that resolve to addresses off the public
     /// internet: loopback, private, link-local, CGNAT and other special
     /// ranges. Off by default, so a hostile domain whose DNS points at, say,
@@ -97,6 +104,7 @@ impl Default for CrawlConfig {
             timeout: Duration::from_secs(15),
             max_bytes: 512 * 1024,
             max_redirects: 5,
+            fetch_icons: true,
             allow_private_addresses: false,
             use_system_proxy: false,
             downloaded: Arc::default(),
@@ -152,6 +160,11 @@ pub struct PageMeta {
     /// to the same site.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub search_url: Option<String>,
+    /// The site's icons from `<link rel="icon">` and Apple touch icon
+    /// links, best for a results page first, at most [`MAX_ICONS`]. SVG
+    /// icons are left out.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub icons: Vec<String>,
     /// Visible `<h1>` and `<h2>` texts, in page order, each once, at most
     /// [`plumb_core::MAX_HEADINGS`] and [`plumb_core::MAX_HEADING_WORDS`]
     /// words in all.
@@ -189,6 +202,11 @@ pub struct CrawledPage {
     /// Unix seconds.
     pub fetched_at: u64,
     pub meta: PageMeta,
+    /// The site's icon as a [`ICON_SIZE`]-pixel square PNG, made by
+    /// [`normalize_icon`], when [`CrawlConfig::fetch_icons`] is on and one
+    /// was found. Left out of the JSON form.
+    #[serde(skip)]
+    pub icon: Option<Vec<u8>>,
 }
 
 /// What happened to one target. See [`crawl_homepages`] for when each
