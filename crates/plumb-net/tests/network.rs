@@ -25,9 +25,24 @@ struct Node {
 
 impl Node {
     async fn start(relay: bool, bootstrap: Vec<Multiaddr>, local: Vec<SiteRecord>) -> Node {
+        Self::start_with(relay, bootstrap, local, true).await
+    }
+
+    /// `listen: false` makes a node only other nodes' relays can reach,
+    /// like one behind a home router.
+    async fn start_with(
+        relay: bool,
+        bootstrap: Vec<Multiaddr>,
+        local: Vec<SiteRecord>,
+        listen: bool,
+    ) -> Node {
         let dir = tempfile::tempdir().unwrap();
         let mut config = NetConfig::new(dir.path().to_path_buf());
-        config.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+        config.listen = if listen {
+            vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()]
+        } else {
+            vec![]
+        };
         config.upnp = false;
         config.relay_server = relay;
         config.bootstrap = bootstrap;
@@ -189,7 +204,27 @@ async fn nodes_share_batches_search_each_other_and_reach_through_a_relay() {
     let through_relay = through_relay.expect("D searches C after meeting it over the relay");
     assert!(through_relay.found[0].verified);
 
-    for node in [a, b, c, d, relay_got] {
+    // E cannot be dialed at all, only reached through the relay, and the
+    // relay itself searches it. The relay learns of E's relayed address
+    // from the reservation, after E first introduced itself.
+    let e = Node::start_with(false, vec![relay_addr.clone()], published.clone(), false).await;
+    wait_for(|| (!e.handle.status().relays.is_empty()).then_some(())).await;
+    let mut reached_e = false;
+    for _ in 0..50 {
+        let _ = relay_got
+            .handle
+            .search("harbor", Duration::from_secs(5))
+            .await
+            .unwrap();
+        if e.handle.status().buckets_served > 0 {
+            reached_e = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert!(reached_e, "the relay's search reaches E through itself");
+
+    for node in [a, b, c, d, e, relay_got] {
         node.handle.shutdown().await;
     }
 }

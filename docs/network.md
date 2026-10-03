@@ -68,7 +68,7 @@ The query never leaves the asking node, and the nodes asked cannot tell which no
 * **A throwaway identity for every request.** Each bucket fetch uses a fresh node key and its own short-lived connection, dialed straight to the node or through its relay. The node asked cannot link the request to the asker's network identity, or the 4 bucket requests of one search to each other. It still sees the IP address the connection comes from (or the relay's, for a relayed fetch); hiding that is the Oblivious HTTP step below.
 * **Checking answers.** For every site the answering node holds a signed crawl of, it attaches a **record proof**: the signed batch header, the record and its Merkle path. The asker checks the signature, the path and the assignment. An answer with any proof that does not check out is dropped whole. Sites without a proof (from seed data) are shown as unsigned, their link always goes to `https://<the domain it names>/`, and their popularity signals are taken as the worst any node reported.
 * **Ranking locally.** The asker keeps the sites that match the query's keys, builds a small temporary index of them and ranks them with its own ranking, the same as a local search.
-* Cost (an estimate, not measured yet): with a 1M-site index, a bucket should hold a few hundred sites, so one search moves a few MB across its 8 fetches. Measuring this on a real index, and tuning the bucket count to it, is part of the cross-machine test. An answer over 20,000 sites is refused.
+* Cost: measured on a 50,000-site index (the plumbsearch.org test node, mostly uncrawled seed sites), the whole bucket table is 3.6 MB and a bucket holds about 3.5 sites on average, so a search moves a few KB. Crawled sites have more keys, so a fully crawled 1M-site index will have bigger buckets; still well under the relay's 128 KiB per circuit. An answer over 20,000 sites is refused.
 
 ## Running it
 
@@ -96,7 +96,7 @@ Tested on one machine (`cargo test -p plumb-net`, `cargo test -p plumb-node a_no
 * A whole `plumb run` node in the network writes a bucket table with each index, serves it to other nodes, searches the network through `/api/network/search` and `/network`, takes in another node's batch, and searches it from its own index after a rebuild.
 * Unit tests: Merkle proofs for every tree size up to 33, tampered records, re-dated headers, swapped keys, unassigned homepages, injected link text, forged proofs in search answers, and links that point away from the site they name.
 
-Not yet tested: nodes on different machines and real NATs (needs Liz's machines and plumbsearch.org), and anything at scale.
+Tested across machines on 2026-10-03: a relay node on plumbsearch.org and a node on a home Mac behind NAT. The Mac joined through the relay within 20 seconds, both shared crawl batches with each other, and the Mac's private search was answered by the server. Searches from the relay to the Mac failed at first: the relay did not use the Mac's relayed address. The likely causes are fixed (re-check across machines pending): nodes push address changes, a relay reaches nodes that hold a reservation with it through its own addresses, and home-network addresses are no longer passed to nodes outside that network. Not yet tested at scale.
 
 ## Next steps
 

@@ -337,6 +337,7 @@ pub async fn start(
         batch_peers: HashSet::new(),
         relays: HashMap::new(),
         remote_addrs: HashMap::new(),
+        reserved: HashSet::new(),
         wanted: VecDeque::new(),
         wanted_ids: HashSet::new(),
         fetching: HashMap::new(),
@@ -432,7 +433,10 @@ fn build_swarm(key: &Keypair, config: &NetConfig) -> Result<Swarm<Behaviour>> {
                 upnp: upnp.then(upnp::tokio::Behaviour::default).into(),
                 identify: identify::Behaviour::new(
                     identify::Config::new(IDENTIFY_PROTOCOL.into(), key.public())
-                        .with_agent_version(format!("plumb/{}", env!("CARGO_PKG_VERSION"))),
+                        .with_agent_version(format!("plumb/{}", env!("CARGO_PKG_VERSION")))
+                        // A node behind NAT gets its relayed address only
+                        // after the first exchange; tell connected nodes.
+                        .with_push_listen_addr_updates(true),
                 ),
                 ping: ping::Behaviour::default(),
                 kad,
@@ -483,6 +487,8 @@ struct Task {
     relays: HashMap<PeerId, bool>,
     /// The address of each connected node, as we reached it or it reached us.
     remote_addrs: HashMap<PeerId, Multiaddr>,
+    /// Nodes that hold a reservation with us (when we are a relay).
+    reserved: HashSet<PeerId>,
     /// Batches to fetch, and from whom.
     wanted: VecDeque<(Hash, Vec<PeerId>)>,
     wanted_ids: HashSet<Hash>,
@@ -535,6 +541,25 @@ impl Task {
                         if let Some(addr) = self.remote_addrs.get(peer) {
                             if !addrs.contains(addr) {
                                 addrs.insert(0, addr.clone());
+                            }
+                        }
+                        // A node behind NAT that relays through us: a
+                        // throwaway identity reaches it through our own
+                        // listening addresses.
+                        if self.reserved.contains(peer) {
+                            let me = *self.swarm.local_peer_id();
+                            for listen in self.swarm.listeners() {
+                                if is_specific(listen)
+                                    && !listen.iter().any(|p| p == Protocol::P2pCircuit)
+                                {
+                                    let circuit = without_p2p(listen.clone())
+                                        .with(Protocol::P2p(me))
+                                        .with(Protocol::P2pCircuit)
+                                        .with(Protocol::P2p(*peer));
+                                    if !addrs.contains(&circuit) {
+                                        addrs.push(circuit);
+                                    }
+                                }
                             }
                         }
                         BucketPeer { peer: *peer, addrs }
@@ -691,6 +716,7 @@ impl Task {
                     self.bucket_peers.remove(&peer_id);
                     self.batch_peers.remove(&peer_id);
                     self.remote_addrs.remove(&peer_id);
+                    self.reserved.remove(&peer_id);
                     if self.relays.remove(&peer_id).is_some() {
                         info!("lost the relay {peer_id}");
                     }
@@ -748,6 +774,12 @@ impl Task {
                 }
                 self.relays.insert(relay_peer_id, true);
             }
+            BehaviourEvent::Relay(relay::Event::ReservationReqAccepted { src_peer_id, .. }) => {
+                self.reserved.insert(src_peer_id);
+            }
+            BehaviourEvent::Relay(relay::Event::ReservationTimedOut { src_peer_id }) => {
+                self.reserved.remove(&src_peer_id);
+            }
             BehaviourEvent::Dcutr(dcutr::Event {
                 remote_peer_id,
                 result,
@@ -777,9 +809,12 @@ impl Task {
             debug!("{peer} is not a Plumb node ({})", info.agent_version);
             return;
         }
+        // Home network addresses only help nodes on the same network.
+        let nearby = self.remote_addrs.get(&peer).is_some_and(|a| !is_global(a));
+        let usable = |addr: &Multiaddr| is_specific(addr) && (nearby || is_global(addr));
         if supports(KAD_PROTOCOL) {
             for addr in &info.listen_addrs {
-                if is_specific(addr) && !addr.iter().any(|p| p == Protocol::P2pCircuit) {
+                if usable(addr) && !addr.iter().any(|p| p == Protocol::P2pCircuit) {
                     self.swarm
                         .behaviour_mut()
                         .kad
@@ -791,7 +826,7 @@ impl Task {
             let addrs = info
                 .listen_addrs
                 .iter()
-                .filter(|addr| is_specific(addr))
+                .filter(|addr| usable(addr))
                 .cloned()
                 .collect();
             self.bucket_peers.insert(peer, addrs);
@@ -1074,8 +1109,62 @@ fn is_specific(addr: &Multiaddr) -> bool {
     })
 }
 
+/// Reachable from anywhere: not a loopback, private, shared (CGNAT),
+/// link-local or unique-local address. Names (`/dns4/...`) count as global.
+fn is_global(addr: &Multiaddr) -> bool {
+    addr.iter()
+        .find_map(|p| match p {
+            Protocol::Ip4(ip) => Some(
+                !(ip.is_loopback()
+                    || ip.is_private()
+                    || ip.is_link_local()
+                    || ip.is_unspecified()
+                    || (ip.octets()[0] == 100 && ip.octets()[1] & 0xc0 == 64)),
+            ),
+            Protocol::Ip6(ip) => {
+                let first = ip.segments()[0];
+                Some(
+                    !(ip.is_loopback()
+                        || ip.is_unspecified()
+                        || first & 0xfe00 == 0xfc00
+                        || first & 0xffc0 == 0xfe80),
+                )
+            }
+            _ => None,
+        })
+        .unwrap_or(true)
+}
+
 fn without_p2p(addr: Multiaddr) -> Multiaddr {
     addr.into_iter()
         .filter(|p| !matches!(p, Protocol::P2p(_)))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn home_network_addresses_are_not_global() {
+        for local in [
+            "/ip4/127.0.0.1/tcp/4001",
+            "/ip4/192.168.4.21/tcp/4101",
+            "/ip4/10.0.0.2/udp/4001/quic-v1",
+            "/ip4/100.64.1.1/tcp/1",
+            "/ip6/fd2e:4ba7:777b:1::5/udp/4101/quic-v1",
+            "/ip6/fe80::1/tcp/1",
+            "/ip6/::1/tcp/1",
+        ] {
+            assert!(!is_global(&local.parse().unwrap()), "{local}");
+        }
+        for public in [
+            "/ip4/198.211.114.63/tcp/4001",
+            "/ip6/2604:a880:400:d1::5:1815:7001/tcp/4001",
+            "/dns4/plumbsearch.org/tcp/4001",
+            "/ip4/198.211.114.63/tcp/4001/p2p/12D3KooWJ2UWUBsxmPfXTfHa8cBBmzifa6kj5pFZKfJXYNQyJ69a/p2p-circuit",
+        ] {
+            assert!(is_global(&public.parse().unwrap()), "{public}");
+        }
+    }
 }
