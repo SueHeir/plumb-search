@@ -61,16 +61,22 @@ impl BucketSource for ServedIndex {
     }
 }
 
+/// Whether this node's indexes need buckets: it answers other nodes'
+/// searches, or serves private search to browsers.
+pub(super) fn wants_buckets(inner: &Inner) -> bool {
+    inner.config.private_search
+        || inner
+            .config
+            .network
+            .as_ref()
+            .is_some_and(|n| n.answer_searches)
+}
+
 /// Writes the buckets of a new index into its directory, for a node that
-/// answers other nodes' searches. A failure is logged, not raised: the index
-/// still works, it just serves no buckets.
+/// [`wants_buckets`]. A failure is logged, not raised: the index still
+/// works, it just serves no buckets.
 pub(super) fn build_buckets(inner: &Inner, index_dir: &Path, records: &[SiteRecord]) {
-    if !inner
-        .config
-        .network
-        .as_ref()
-        .is_some_and(|n| n.answer_searches)
-    {
+    if !wants_buckets(inner) {
         return;
     }
     let dir = index_dir.join(BUCKETS_DIR);
@@ -81,6 +87,15 @@ pub(super) fn build_buckets(inner: &Inner, index_dir: &Path, records: &[SiteReco
         );
         let _ = fs::remove_dir_all(&dir);
     }
+}
+
+/// The name browsers know an index's buckets by (see `GET /api/buckets`):
+/// the index id and the start of a hash of its bucket index. `None` when
+/// the index has no buckets.
+pub(super) fn bucket_table_name(id: u64, index_dir: &Path) -> Option<String> {
+    let idx = fs::read(index_dir.join(BUCKETS_DIR).join("buckets.idx")).ok()?;
+    let hash = plumb_net::hash::Hash::of(&[&idx]).to_hex();
+    Some(format!("{id}-{}", &hash[..16]))
 }
 
 /// Joins the network, if the node is configured to, and starts keeping

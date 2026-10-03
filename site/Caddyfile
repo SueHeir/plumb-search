@@ -23,7 +23,9 @@ plumbsearch.org {
 		-Server
 	}
 
-	@node path /search /api/search /api/status /opensearch.xml
+	# /private is private search, whose page fetches /api/buckets/...: the
+	# node only ever sees bucket numbers, never the search.
+	@node path /search /api/search /api/status /opensearch.xml /private /private/* /api/buckets /api/buckets/*
 	handle @node {
 		reverse_proxy 127.0.0.1:8080
 	}

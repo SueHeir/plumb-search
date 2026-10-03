@@ -127,6 +127,12 @@ pub struct RunArgs {
     /// Do not look for other Plumb nodes on the local network (mDNS).
     #[arg(long, requires = "network")]
     pub no_local_discovery: bool,
+    /// Offer private search at /private: browsers fetch groups of sites
+    /// (buckets) and rank them themselves, so this node never sees what
+    /// they search for. Each index also gets its buckets, about as much
+    /// disk again as the records file.
+    #[arg(long)]
+    pub private_search: bool,
 }
 
 /// Starting points for `plumb run`.

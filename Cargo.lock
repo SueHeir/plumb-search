@@ -4669,6 +4669,7 @@ dependencies = [
  "psl",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "url",
 ]
 
@@ -4769,6 +4770,7 @@ dependencies = [
  "plumb-index",
  "plumb-ingest",
  "plumb-net",
+ "plumb-private",
  "serde",
  "serde_json",
  "sys-locale",
@@ -4778,6 +4780,24 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+]
+
+[[package]]
+name = "plumb-private"
+version = "0.1.0"
+dependencies = [
+ "idna",
+ "js-sys",
+ "plumb-core",
+ "plumb-index",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "url",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
 ]
 
 [[package]]

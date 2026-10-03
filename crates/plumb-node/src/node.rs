@@ -140,6 +140,11 @@ pub struct NodeConfig {
     /// their searches (see [`network`]). Its `dir` is replaced with
     /// `DIR/net`. `None`, the default for now, keeps the node on its own.
     pub network: Option<plumb_net::NetConfig>,
+    /// Serve private search (`/private`): browsers fetch buckets of sites
+    /// and rank them themselves, so the node never sees their searches.
+    /// Each index build also writes its buckets, which take about as much
+    /// disk as the records file. Off by default.
+    pub private_search: bool,
 }
 
 impl NodeConfig {
@@ -161,6 +166,7 @@ impl NodeConfig {
             retry_wait: Duration::from_secs(10 * 60),
             max_retry_wait: Duration::from_secs(6 * 60 * 60),
             network: None,
+            private_search: false,
         }
     }
 
@@ -587,6 +593,8 @@ struct Inner {
     inbox_records: std::sync::atomic::AtomicU64,
     /// Held while the inbox is appended to or moved aside.
     inbox_lock: Mutex<()>,
+    /// Set once the index was rebuilt to add missing buckets.
+    buckets_rebuilt: AtomicBool,
 }
 
 /// The failures to download Wikidata's official websites, which have their
@@ -638,6 +646,7 @@ impl Inner {
             net: std::sync::OnceLock::new(),
             inbox_records: std::sync::atomic::AtomicU64::new(0),
             inbox_lock: Mutex::new(()),
+            buckets_rebuilt: AtomicBool::new(false),
         }
     }
 
@@ -920,6 +929,24 @@ impl StatusSource for Inner {
     fn rank(&self) -> RankConfig {
         self.rank
     }
+
+    fn bucket_table(&self) -> Option<String> {
+        if !self.config.private_search {
+            return None;
+        }
+        let index = self.current()?;
+        index.buckets.as_ref()?;
+        index.bucket_table.clone()
+    }
+
+    fn bucket(&self, table: &str, bucket: u32) -> Option<Result<Vec<String>>> {
+        if !self.config.private_search {
+            return None;
+        }
+        let index = self.current()?;
+        let buckets = index.buckets.as_ref()?;
+        (index.bucket_table.as_deref() == Some(table)).then(|| buckets.get(bucket))
+    }
 }
 
 /// An index the node searches, or did until a newer one replaced it.
@@ -933,8 +960,12 @@ struct ServingIndex {
     /// Set once the index files are closed and may be deleted.
     closed: Arc<AtomicBool>,
     /// The index's buckets, which other nodes search (`indexes/NNNNNN/buckets/`);
-    /// only built by a node in the network.
+    /// only built by a node in the network or serving private search.
     buckets: Option<plumb_net::BucketTable>,
+    /// Names [`ServingIndex::buckets`] for browsers: the index id and a hash
+    /// of the bucket index, so a cached bucket is never taken for one of
+    /// another index, even after the data directory is started over.
+    bucket_table: Option<String>,
 }
 
 impl ServingIndex {
@@ -947,6 +978,7 @@ impl ServingIndex {
             backend: Some(IndexBackend::new(searcher, rank)),
             closed: Arc::new(AtomicBool::new(false)),
             buckets: plumb_net::BucketTable::open(&dir.join(network::BUCKETS_DIR)).ok(),
+            bucket_table: network::bucket_table_name(id, dir),
         })
     }
 

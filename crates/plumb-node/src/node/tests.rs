@@ -1046,3 +1046,69 @@ async fn a_node_in_the_network_takes_in_other_nodes_crawls_and_searches_them() {
     peer.shutdown().await;
     node.shutdown().await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn private_search_serves_buckets_a_browser_can_search() {
+    let dir = seeded_dir();
+    // Without private search: no buckets, and nothing private on offer.
+    let node = start(test_config(dir.path())).await.unwrap();
+    let addr = node.addr();
+    wait_for(addr, "the first index", ready_and_idle).await;
+    assert_eq!(get(addr, "/api/buckets").await.0, 503);
+    assert_eq!(get(addr, "/private").await.0, 503);
+    assert!(!get(addr, "/").await.2.contains("href=\"/private\""));
+    node.shutdown().await.unwrap();
+
+    // Turned on, the index built before it is rebuilt with its buckets.
+    let mut config = test_config(dir.path());
+    config.private_search = true;
+    let node = start(config).await.unwrap();
+    let addr = node.addr();
+    let status = wait_for(addr, "an index with buckets", |s| {
+        ready_and_idle(s) && s.index.as_deref() == Some("000002")
+    })
+    .await;
+    assert_eq!(status.last_error, None);
+    let (code, head, body) = get(addr, "/api/buckets").await;
+    assert_eq!(code, 200, "{body}");
+    assert!(head.contains("cache-control: no-store"), "{head}");
+    let info: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let table = info["table"].as_str().unwrap().to_string();
+    assert!(table.starts_with("2-"), "{table}");
+    assert_eq!(info["buckets"], plumb_core::keys::BUCKETS);
+
+    // What the page's script does, with fixed padding.
+    let query = "us bank";
+    let mut n = 0u64;
+    let (buckets, keys) = plumb_core::keys::pick_buckets(query, || {
+        n += 1;
+        n * 7_777
+    });
+    let mut answers = Vec::new();
+    for bucket in &buckets {
+        let (code, head, body) = get(addr, &format!("/api/buckets/{table}/{bucket}")).await;
+        assert_eq!(code, 200, "{body}");
+        assert!(head.contains("immutable"), "{head}");
+        answers.push(plumb_private::read_bucket(&body).unwrap());
+    }
+    let hits = plumb_private::search(query, &keys, answers, &Default::default(), 10);
+    assert_eq!(hits[0].domain, "usbank.com", "{hits:?}");
+
+    // Another table's buckets, or no such bucket, are not served.
+    assert_eq!(get(addr, "/api/buckets/1-0000/5").await.0, 404);
+    let past_end = format!("/api/buckets/{table}/{}", plumb_core::keys::BUCKETS);
+    assert_eq!(get(addr, &past_end).await.0, 404);
+
+    let (code, head, body) = get(addr, "/private").await;
+    if crate::web::private::in_build() {
+        assert_eq!(code, 200, "{body}");
+        assert!(
+            head.contains("script-src 'self' 'wasm-unsafe-eval'"),
+            "{head}"
+        );
+        assert!(get(addr, "/").await.2.contains("href=\"/private\""));
+    } else {
+        assert_eq!(code, 503, "{body}");
+    }
+    node.shutdown().await.unwrap();
+}
