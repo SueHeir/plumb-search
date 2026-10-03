@@ -1,0 +1,98 @@
+:root {
+  --bg: #fbfaf7;
+  --surface: #ffffff;
+  --text: #1c2333;
+  --muted: #5a6275;
+  --line: #e3e1da;
+  --accent: #2c599e;
+  --accent-text: #ffffff;
+  --code-bg: #f1efe9;
+  color-scheme: light dark;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #12151c;
+    --surface: #1a1f29;
+    --text: #e8eaf0;
+    --muted: #a3aabb;
+    --line: #2c3342;
+    --accent: #7ea6e6;
+    --accent-text: #0e1420;
+    --code-bg: #232a37;
+  }
+}
+
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 17px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+a { color: var(--accent); }
+h1, h2, h3 { line-height: 1.2; }
+code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.85em; }
+code { background: var(--code-bg); padding: 0.1em 0.35em; border-radius: 4px; overflow-wrap: anywhere; }
+pre { background: var(--code-bg); padding: 0.9em 1em; border-radius: 8px; overflow-x: auto; }
+pre code { background: none; padding: 0; overflow-wrap: normal; }
+
+.top, main, footer { max-width: 960px; margin: 0 auto; padding: 0 16px; }
+.top { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding-top: 1.25rem; padding-bottom: 1.25rem; }
+.brand { display: flex; align-items: center; gap: 0.5rem; font-weight: 700; font-size: 1.15rem; color: var(--text); text-decoration: none; }
+.top nav { display: flex; gap: 1.25rem; }
+.top nav a { color: var(--muted); text-decoration: none; }
+.top nav a:hover { color: var(--text); }
+
+.hero { padding: 3.5rem 0 3rem; max-width: 680px; }
+.hero h1 { font-size: clamp(2.2rem, 6vw, 3.4rem); margin: 0 0 1rem; letter-spacing: -0.02em; }
+.lede { font-size: 1.2rem; color: var(--muted); margin: 0 0 2rem; }
+
+.try { display: flex; gap: 0.5rem; }
+.try input {
+  flex: 1; min-width: 0;
+  font: inherit; padding: 0.7em 0.9em;
+  border: 1px solid var(--line); border-radius: 10px;
+  background: var(--surface); color: var(--text);
+}
+.try input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+.try button, .button {
+  font: inherit; font-weight: 600; cursor: pointer;
+  padding: 0.7em 1.2em; border-radius: 10px;
+  border: 1px solid var(--line); background: var(--surface); color: var(--text);
+  text-decoration: none; display: inline-block;
+}
+.try button, .button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+.note { color: var(--muted); font-size: 0.85rem; margin: 0.5rem 0 2rem; }
+.actions { display: flex; flex-wrap: wrap; gap: 0.75rem; }
+
+.features { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 1.5rem; padding: 2.5rem 0; border-top: 1px solid var(--line); }
+.features h2 { font-size: 1.15rem; margin: 0 0 0.5rem; }
+.features p { margin: 0; color: var(--muted); }
+
+.get, .owners, .roadmap { padding: 2.5rem 0; border-top: 1px solid var(--line); }
+.get > h2, .owners > h2, .roadmap > h2 { font-size: 1.7rem; margin: 0 0 1.25rem; }
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1.5rem; }
+.cards article { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 1.5rem; min-width: 0; }
+.cards h3 { margin: 0 0 0.5rem; font-size: 1.2rem; }
+.small { font-size: 0.88rem; color: var(--muted); }
+.tip { margin: 1.75rem 0 0; color: var(--muted); }
+.tip strong { color: var(--text); }
+
+.roadmap > p, .owners > p, .owners ul { max-width: 680px; color: var(--muted); }
+.owners pre { max-width: 680px; }
+.roadmap ol { padding-left: 1.4rem; max-width: 680px; }
+.roadmap li { margin: 0.4rem 0; }
+.roadmap li.done::marker { color: var(--accent); font-weight: 700; }
+
+.message { padding: 4rem 16px; }
+.message h1 { font-size: 2rem; }
+
+footer { padding-top: 2rem; padding-bottom: 3rem; border-top: 1px solid var(--line); color: var(--muted); font-size: 0.9rem; }
+
+.visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+@media (max-width: 480px) {
+  .top nav { gap: 0.9rem; }
+  .try { flex-direction: column; }
+}
