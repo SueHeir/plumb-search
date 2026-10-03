@@ -131,6 +131,10 @@ pub struct NetConfig {
     /// Answer other nodes' bucket requests (network searches) from the
     /// local [`BucketSource`].
     pub answer_searches: bool,
+    /// Take in a record from the network once one crawler signed it,
+    /// instead of waiting for two to agree (see `crate::agree`). On by
+    /// default while the network is small.
+    pub trusting: bool,
 }
 
 impl NetConfig {
@@ -153,6 +157,7 @@ impl NetConfig {
             local_discovery: true,
             share_ppm: MAX_SHARE_PPM,
             answer_searches: true,
+            trusting: true,
         }
     }
 }
@@ -516,7 +521,7 @@ pub async fn start(
         let dir = config.dir.join("batches");
         tokio::task::spawn_blocking(move || -> Result<_> {
             let store = BatchStore::open(&dir)?;
-            let agreement = replay_agreement(&store, peer_id);
+            let agreement = replay_agreement(&store, peer_id, config.trusting);
             Ok((store, agreement))
         })
         .await
@@ -1973,9 +1978,9 @@ fn lookup(source: &dyn BucketSource, store: &Mutex<BatchStore>, bucket: u32) -> 
 
 /// Rebuilds the agreement step from the batches held, oldest first, so it
 /// needs no file of its own. What it confirms was passed on before.
-fn replay_agreement(store: &BatchStore, me: PeerId) -> Agreement {
+fn replay_agreement(store: &BatchStore, me: PeerId, trusting: bool) -> Agreement {
     let now = now_unix();
-    let mut agreement = Agreement::new(me);
+    let mut agreement = Agreement::new(me, trusting);
     for id in store.ids_oldest_first() {
         let batch = match store.get(&id) {
             Ok(Some(batch)) => batch,

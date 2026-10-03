@@ -919,6 +919,8 @@ async fn a_node_in_the_network_takes_in_other_nodes_crawls_and_searches_them() {
     net.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
     net.upnp = false;
     net.local_discovery = false;
+    // Requires two crawlers, which this test checks.
+    net.trusting = false;
     config.network = Some(net);
     let node = start(config).await.unwrap();
     let addr = node.addr();

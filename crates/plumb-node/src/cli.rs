@@ -171,6 +171,12 @@ pub struct RunArgs {
     /// Do not look for other Plumb nodes on the local network (mDNS).
     #[arg(long, requires = "network")]
     pub no_local_discovery: bool,
+    /// Take in another node's crawl of a site only once a second crawler
+    /// agrees with it, and count a crawler only after its crawls matched
+    /// this node's own. Without it (for now, while the network is small)
+    /// one signed crawl is enough.
+    #[arg(long, requires = "network")]
+    pub require_agreement: bool,
     /// Offer private search at /private: browsers fetch groups of sites
     /// (buckets) and rank them themselves, so this node never sees what
     /// they search for. Each index also gets its buckets, about as much

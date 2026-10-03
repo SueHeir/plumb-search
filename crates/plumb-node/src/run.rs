@@ -87,6 +87,7 @@ fn node_config(args: RunArgs) -> NodeConfig {
         net.relay_server = args.relay;
         net.upnp = !args.no_upnp;
         net.local_discovery = !args.no_local_discovery;
+        net.trusting = !args.require_agreement;
         config.network = Some(net);
         config.share_popularity = args.share_popularity;
     }
