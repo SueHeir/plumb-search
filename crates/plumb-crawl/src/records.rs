@@ -2,7 +2,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use plumb_core::{is_homepage_path, is_useful_anchor, linker_bit, registrable_domain, SiteRecord};
+use plumb_core::{
+    is_homepage_path, is_useful_anchor, linker_bit, now_unix, registrable_domain, Redirect,
+    SiteRecord,
+};
 use url::Url;
 
 use crate::{CrawlOutcome, CrawlResult};
@@ -29,7 +32,8 @@ use crate::{CrawlOutcome, CrawlResult};
 ///   [`plumb_core::is_useful_anchor`]).
 /// - [`CrawlOutcome::OffsiteRedirect`] adds an empty record for the
 ///   registrable domain the redirect points to, so it gets discovered, and
-///   nothing for the domain that redirected. Other outcomes add nothing.
+///   marks the domain that redirected with a [`Redirect`] to it, timed now.
+///   Other outcomes add nothing.
 /// - Records for the same domain are merged with [`SiteRecord::merge`], so
 ///   there is one record per domain, sorted by domain.
 pub fn to_records(results: &[CrawlResult]) -> Vec<SiteRecord> {
@@ -37,6 +41,7 @@ pub fn to_records(results: &[CrawlResult]) -> Vec<SiteRecord> {
     // Linked domain -> linking (crawled) domain -> distinct link texts.
     let mut inbound: BTreeMap<&str, BTreeMap<&str, BTreeSet<&str>>> = BTreeMap::new();
 
+    let now = now_unix();
     for result in results {
         match &result.outcome {
             CrawlOutcome::Fetched(page) => {
@@ -71,6 +76,12 @@ pub fn to_records(results: &[CrawlResult]) -> Vec<SiteRecord> {
             CrawlOutcome::OffsiteRedirect { final_url } => {
                 if let Some(domain) = registrable_domain(final_url) {
                     if domain != result.domain {
+                        let mut from = SiteRecord::new(result.domain.as_str());
+                        from.redirect = Some(Redirect {
+                            to: domain.clone(),
+                            at: now,
+                        });
+                        upsert(&mut records, from);
                         upsert(&mut records, SiteRecord::new(domain));
                     }
                 }
@@ -285,7 +296,7 @@ mod tests {
     }
 
     #[test]
-    fn offsite_redirects_discover_the_destination_only() {
+    fn offsite_redirects_discover_the_destination_and_mark_the_source() {
         let results = [
             result(
                 "fb.com",
@@ -300,7 +311,13 @@ mod tests {
                 },
             ),
         ];
-        assert_eq!(to_records(&results), [SiteRecord::new("facebook.com")]);
+        let records = to_records(&results);
+        assert_eq!(records.len(), 2, "{records:?}");
+        assert_eq!(records[0], SiteRecord::new("facebook.com"));
+        assert_eq!(records[1].domain, "fb.com");
+        let redirect = records[1].redirect.as_ref().unwrap();
+        assert_eq!(redirect.to, "facebook.com");
+        assert!(redirect.at > 0);
     }
 
     #[test]
