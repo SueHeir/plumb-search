@@ -210,8 +210,8 @@ pub(crate) struct Embedded {
 /// changed since its vector was made, on `threads` threads, and drops the
 /// vectors of sites not in `records`. Calls `save` after every
 /// [`SAVE_EVERY`] sites and at the end, and logs progress every
-/// [`REPORT_EVERY`]. Stops early, after a save, once
-/// `stop` says so.
+/// [`REPORT_EVERY`], when it also tells `progress` how many of how many
+/// are done. Stops early, after a save, once `stop` says so.
 pub(crate) fn embed_records(
     embedder: &Embedder,
     vectors: &RwLock<Vectors>,
@@ -219,6 +219,7 @@ pub(crate) fn embed_records(
     threads: usize,
     stop: &(dyn Fn() -> bool + Sync),
     save: &mut dyn FnMut(&Vectors) -> Result<()>,
+    progress: &mut dyn FnMut(usize, usize),
 ) -> Result<Embedded> {
     let write = || vectors.write().unwrap_or_else(PoisonError::into_inner);
     let domains: HashSet<&str> = records.iter().map(|r| r.domain.as_str()).collect();
@@ -249,6 +250,7 @@ pub(crate) fn embed_records(
     let done = AtomicUsize::new(0);
     let failed = AtomicUsize::new(0);
     let chunks = todo.len().div_ceil(REPORT_EVERY);
+    progress(0, todo.len());
     for (n, chunk) in todo.chunks(REPORT_EVERY).enumerate() {
         let next = AtomicUsize::new(0);
         std::thread::scope(|scope| {
@@ -278,6 +280,7 @@ pub(crate) fn embed_records(
             save(&vectors.read().unwrap_or_else(PoisonError::into_inner))?;
         }
         let done = done.load(Ordering::Relaxed);
+        progress(done, todo.len());
         info!(
             "embedded {done} of {} sites ({:.1} a second)",
             todo.len(),
@@ -316,6 +319,7 @@ pub fn run_embed(args: EmbedArgs) -> Result<()> {
         threads,
         &|| false,
         &mut |vectors| vectors.save(&args.vectors),
+        &mut |_, _| {},
     )?;
     println!(
         "{} site vectors in {} ({} embedded now, {} failed)",

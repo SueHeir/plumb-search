@@ -218,9 +218,10 @@ fn client_builder(cfg: &CrawlConfig) -> ClientBuilder {
         .timeout(cfg.timeout)
         .gzip(true)
         .redirect(redirect::Policy::none())
-        .dns_resolver(dns::Resolver {
-            allow_private: cfg.allow_private_addresses,
-        });
+        .dns_resolver(dns::Resolver::new(
+            cfg.allow_private_addresses,
+            cfg.dns_lookups,
+        ));
     // reqwest uses the system proxy unless told not to; behind a proxy the
     // resolver above would see only the proxy's name, not the targets'.
     if cfg.use_system_proxy {

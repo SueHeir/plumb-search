@@ -355,6 +355,11 @@ pub struct CrawlArgs {
     /// Homepage fetches in flight at once.
     #[arg(long, value_name = "N", default_value_t = 16, value_parser = parse_positive)]
     pub concurrency: usize,
+    /// Host name lookups in flight at once. Home routers drop lookups when
+    /// hundreds arrive together; lower this if many sites come back as
+    /// "could not be reached" at a high --concurrency.
+    #[arg(long, value_name = "N", default_value_t = 32, value_parser = parse_positive)]
+    pub dns_lookups: usize,
     /// Where to write the updated records [default: overwrite --records].
     /// Each batch of homepages is saved at once to a journal next to it
     /// (PATH.journal), which is folded in at the end, so an interrupted crawl
