@@ -4,12 +4,15 @@
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
-use plumb_core::registrable_domain;
+use plumb_core::{host_of, is_homepage_path, registrable_domain};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
+use url::Url;
 
-use crate::{open_maybe_gz, snippet, LineReader};
+use crate::{open_maybe_gz, snippet, too_long_note, Line, LineReader, MAX_LINE_BYTES};
 
+/// One "official website" statement: an item, its label and the URL it
+/// claims. Build it with [`OfficialSite::new`], which derives the other fields.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OfficialSite {
     /// Wikidata item id, e.g. `Q739868`.
@@ -18,15 +21,63 @@ pub struct OfficialSite {
     pub label: String,
     /// The official website URL as stated in Wikidata.
     pub url: String,
-    /// Registrable domain of `url`.
+    /// Host of `url`: lowercase, punycode, without port or trailing dot,
+    /// e.g. `www.usbank.com`.
+    pub host: String,
+    /// Path of `url` without the query, e.g. `/` or `/acmerockets`.
+    pub path: String,
+    /// Registrable domain of `url`, e.g. `usbank.com`.
     pub domain: String,
+}
+
+impl OfficialSite {
+    /// The claim that `item` (called `label`) has the official website
+    /// `url`, or `None` when `url` has no registrable domain: not http(s),
+    /// an IP address, a bare public suffix or a malformed host name. A bare
+    /// host name such as `google.com` is read as an http URL.
+    pub fn new(item: impl Into<String>, label: impl Into<String>, url: &str) -> Option<Self> {
+        let url = url.trim();
+        let host = host_of(url)?;
+        let domain = registrable_domain(&host)?;
+        Some(OfficialSite {
+            item: item.into(),
+            label: label.into(),
+            url: url.to_string(),
+            path: url_path(url),
+            host,
+            domain,
+        })
+    }
+
+    /// True when the claim is for the front page of the registrable domain
+    /// itself: the host is the domain or `www.` plus it, and the path is a
+    /// front page ([`plumb_core::is_homepage_path`]; a query string is
+    /// ignored). Only these claims say the domain is the item's site. A
+    /// subdomain (`www.balliol.ox.ac.uk`, `en.wikipedia.org`) or a deeper
+    /// path (`linktr.ee/acmerockets`) is a part or a tenant of the site.
+    pub fn is_root_homepage(&self) -> bool {
+        let canonical_host = self.host == self.domain
+            || self.host.strip_prefix("www.") == Some(self.domain.as_str());
+        canonical_host && is_homepage_path(&self.path)
+    }
+}
+
+/// The path of an http(s) URL, or of a bare host name read as one.
+fn url_path(url: &str) -> String {
+    let parsed = if url.contains("://") {
+        Url::parse(url)
+    } else {
+        Url::parse(&format!("http://{url}"))
+    };
+    parsed.map(|u| u.path().to_string()).unwrap_or_default()
 }
 
 /// Reads a tab separated file with the header `item\tlabel\twebsite` (the
 /// format [`crate::download::download_wikidata_official_sites`] writes).
 /// `item` may be a bare id (`Q739868`) or an entity URL
 /// (`http://www.wikidata.org/entity/Q739868`); it is stored as the bare id.
-/// Rows whose website has no registrable domain are skipped.
+/// Rows whose website has no registrable domain (see [`OfficialSite::new`])
+/// are skipped.
 ///
 /// Columns are found by header name, so their order does not matter; a
 /// missing header is an error. Rows with too few fields or an empty item or
@@ -40,8 +91,12 @@ pub fn load_wikidata_official_sites(path: &Path) -> Result<Vec<OfficialSite>> {
                 "{} is empty; expected the header `item\\tlabel\\twebsite`",
                 path.display()
             ),
-            Some((_, line)) if line.trim().is_empty() => continue,
-            Some((_, line)) => break line.into_owned(),
+            Some((line_no, Line::TooLong)) => bail!(
+                "{}: line {line_no} is over {MAX_LINE_BYTES} bytes; expected the header `item\\tlabel\\twebsite`",
+                path.display()
+            ),
+            Some((_, Line::Text(line))) if line.trim().is_empty() => continue,
+            Some((_, Line::Text(line))) => break line.into_owned(),
         }
     };
     let names: Vec<String> = header
@@ -65,9 +120,15 @@ pub fn load_wikidata_official_sites(path: &Path) -> Result<Vec<OfficialSite>> {
     let mut first_bad: Option<(u64, String)> = None;
     let mut no_domain = 0u64;
     while let Some((line_no, line)) = lines.next_line().with_context(read_err)? {
-        if line.trim().is_empty() {
-            continue;
-        }
+        let line = match line {
+            Line::Text(line) if line.trim().is_empty() => continue,
+            Line::Text(line) => line,
+            Line::TooLong => {
+                bad_rows += 1;
+                first_bad.get_or_insert_with(|| (line_no, too_long_note()));
+                continue;
+            }
+        };
         let fields: Vec<&str> = line.split('\t').map(str::trim).collect();
         let field = |i: usize| fields.get(i).copied();
         let item = field(item_col).map(bare_item_id).filter(|i| !i.is_empty());
@@ -78,16 +139,11 @@ pub fn load_wikidata_official_sites(path: &Path) -> Result<Vec<OfficialSite>> {
             first_bad.get_or_insert_with(|| (line_no, snippet(&line)));
             continue;
         };
-        let Some(domain) = registrable_domain(website) else {
+        let Some(site) = OfficialSite::new(item, label, website) else {
             no_domain += 1;
             continue;
         };
-        sites.push(OfficialSite {
-            item: item.to_string(),
-            label: label.to_string(),
-            url: website.to_string(),
-            domain,
-        });
+        sites.push(site);
     }
 
     if let Some((line_no, line)) = first_bad {
@@ -114,13 +170,12 @@ pub(crate) fn bare_item_id(item: &str) -> &str {
 mod tests {
     use super::*;
 
-    fn site(item: &str, label: &str, url: &str, domain: &str) -> OfficialSite {
-        OfficialSite {
-            item: item.into(),
-            label: label.into(),
-            url: url.into(),
-            domain: domain.into(),
-        }
+    fn site(item: &str, label: &str, url: &str) -> OfficialSite {
+        OfficialSite::new(item, label, url).unwrap()
+    }
+
+    fn domains(sites: &[OfficialSite]) -> Vec<&str> {
+        sites.iter().map(|s| s.domain.as_str()).collect()
     }
 
     fn write(dir: &Path, data: &str) -> std::path::PathBuf {
@@ -139,19 +194,16 @@ mod tests {
              http://www.wikidata.org/entity/Q42\tBBC News\thttps://news.bbc.co.uk\r\n\
              https://www.wikidata.org/wiki/Q95\tGoogle\tgoogle.com\n",
         );
+        let sites = load_wikidata_official_sites(&path).unwrap();
         assert_eq!(
-            load_wikidata_official_sites(&path).unwrap(),
+            sites,
             vec![
-                site(
-                    "Q739868",
-                    "U.S. Bancorp",
-                    "https://www.usbank.com/",
-                    "usbank.com"
-                ),
-                site("Q42", "BBC News", "https://news.bbc.co.uk", "bbc.co.uk"),
-                site("Q95", "Google", "google.com", "google.com"),
+                site("Q739868", "U.S. Bancorp", "https://www.usbank.com/"),
+                site("Q42", "BBC News", "https://news.bbc.co.uk"),
+                site("Q95", "Google", "google.com"),
             ]
         );
+        assert_eq!(domains(&sites), ["usbank.com", "bbc.co.uk", "google.com"]);
     }
 
     #[test]
@@ -165,12 +217,7 @@ mod tests {
         std::fs::write(&path, enc.finish().unwrap()).unwrap();
         assert_eq!(
             load_wikidata_official_sites(&path).unwrap(),
-            vec![site(
-                "Q739868",
-                "U.S. Bancorp",
-                "https://www.usbank.com/",
-                "usbank.com"
-            )]
+            vec![site("Q739868", "U.S. Bancorp", "https://www.usbank.com/")]
         );
     }
 
@@ -183,12 +230,7 @@ mod tests {
         );
         assert_eq!(
             load_wikidata_official_sites(&path).unwrap(),
-            vec![site(
-                "Q1",
-                "Example",
-                "https://example.org/about",
-                "example.org"
-            )]
+            vec![site("Q1", "Example", "https://example.org/about")]
         );
     }
 
@@ -205,15 +247,98 @@ mod tests {
              Q3\tAn IP\thttp://192.168.0.1/\n\
              Q4\tA suffix\thttps://co.uk/\n\
              Q5\t\thttps://nolabel.com/\n\
-             Q6\tGood\thttps://good.com/\n",
+             Q6\tGood\thttps://good.com/\n\
+             Q7\tMail\tmailto:a@b.com\n\
+             Q8\tEmpty label\thttps://a..b.com/\n\
+             Q9\tFTP\tftp://files.example.com/\n",
         );
+        let sites = load_wikidata_official_sites(&path).unwrap();
         assert_eq!(
-            load_wikidata_official_sites(&path).unwrap(),
+            sites,
             vec![
-                site("Q5", "", "https://nolabel.com/", "nolabel.com"),
-                site("Q6", "Good", "https://good.com/", "good.com"),
+                site("Q5", "", "https://nolabel.com/"),
+                site("Q6", "Good", "https://good.com/"),
             ]
         );
+        assert_eq!(domains(&sites), ["nolabel.com", "good.com"]);
+
+        let long_line = format!(
+            "item\tlabel\twebsite\nQ1\t{}\thttps://a.com/\nQ2\tB\thttps://b.com/\n",
+            "x".repeat(crate::MAX_LINE_BYTES)
+        );
+        let path = write(dir.path(), &long_line);
+        assert_eq!(
+            load_wikidata_official_sites(&path).unwrap(),
+            vec![site("Q2", "B", "https://b.com/")]
+        );
+    }
+
+    #[test]
+    fn official_site_parts_and_root_homepages() {
+        let parts = |url: &str| {
+            OfficialSite::new("Q1", "Label", url).map(|s| {
+                (
+                    s.host.clone(),
+                    s.path.clone(),
+                    s.domain.clone(),
+                    s.is_root_homepage(),
+                )
+            })
+        };
+        let some = |host: &str, path: &str, domain: &str, root: bool| {
+            Some((host.to_string(), path.to_string(), domain.to_string(), root))
+        };
+        assert_eq!(
+            parts("https://www.usbank.com/"),
+            some("www.usbank.com", "/", "usbank.com", true)
+        );
+        assert_eq!(
+            parts(" HTTPS://WWW.Example.COM.:443 "),
+            some("www.example.com", "/", "example.com", true)
+        );
+        assert_eq!(
+            parts("google.com"),
+            some("google.com", "/", "google.com", true)
+        );
+        assert_eq!(
+            parts("https://example.com/en-us/index.html?ref=wd"),
+            some("example.com", "/en-us/index.html", "example.com", true)
+        );
+        // A subdomain, a deeper path or a tenant's page is not the domain's front page.
+        assert_eq!(
+            parts("https://www.balliol.ox.ac.uk/"),
+            some("www.balliol.ox.ac.uk", "/", "ox.ac.uk", false)
+        );
+        assert_eq!(
+            parts("https://en.wikipedia.org/wiki/Main_Page"),
+            some(
+                "en.wikipedia.org",
+                "/wiki/Main_Page",
+                "wikipedia.org",
+                false
+            )
+        );
+        assert_eq!(
+            parts("https://linktr.ee/acmerockets"),
+            some("linktr.ee", "/acmerockets", "linktr.ee", false)
+        );
+        assert_eq!(
+            parts("example.org/about"),
+            some("example.org", "/about", "example.org", false)
+        );
+        for junk in [
+            "mailto:a@b.com",
+            "a@b.com",
+            "ftp://example.com/",
+            "https://a..b.com/",
+            "https://192.168.0.1/",
+            "https://co.uk/",
+            "",
+        ] {
+            assert_eq!(parts(junk), None, "{junk}");
+        }
+        let huge = format!("https://{}.com/", "a".repeat(70_000));
+        assert_eq!(parts(&huge), None);
     }
 
     #[test]

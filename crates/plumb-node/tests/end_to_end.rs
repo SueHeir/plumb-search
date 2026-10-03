@@ -101,9 +101,11 @@ fn ingest_index_search_and_eval_the_fixtures() {
     assert!(usbank.signals.official_site);
     assert!(usbank.signals.linking_domains >= 2);
     assert!(usbank.link_texts.iter().any(|lt| lt.text == "us bank"));
-    // A shared host claimed by many Wikidata items is nobody's official site.
+    // Facebook's own front-page claim makes it official; the pages other
+    // Wikidata items list on facebook.com add no aliases.
     let facebook = records.iter().find(|r| r.domain == "facebook.com").unwrap();
-    assert!(!facebook.signals.official_site);
+    assert!(facebook.signals.official_site);
+    assert_eq!(facebook.aliases, ["Facebook"]);
     // A domain only seen as a link target is discovered.
     assert!(records.iter().any(|r| r.domain == "github.com"));
 
