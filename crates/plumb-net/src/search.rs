@@ -285,6 +285,12 @@ pub async fn fetch_bucket(
             SwarmEvent::Behaviour(FetcherEvent::Buckets(
                 request_response::Event::OutboundFailure { error, .. },
             )) => bail!("asking {} for a bucket: {error}", peer.peer),
+            SwarmEvent::OutgoingConnectionError { error, .. } => {
+                debug!(
+                    "a throwaway identity could not reach {}: {error}",
+                    peer.peer
+                );
+            }
             _ => {}
         }
     }

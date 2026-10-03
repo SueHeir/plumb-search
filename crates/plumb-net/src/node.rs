@@ -545,27 +545,44 @@ impl Task {
                         }
                         // A node behind NAT that relays through us: a
                         // throwaway identity reaches it through our own
-                        // listening addresses.
+                        // listening addresses, loopback first. Its other
+                        // circuits through us go: they name our public
+                        // address, which a container or a router may not
+                        // let us reach from inside, and the relay client
+                        // dials a relay only once at a time, so one stuck
+                        // dial would hold up the ones that work.
                         if self.reserved.contains(peer) {
                             let me = *self.swarm.local_peer_id();
-                            for listen in self.swarm.listeners() {
-                                if is_specific(listen)
-                                    && !listen.iter().any(|p| p == Protocol::P2pCircuit)
-                                {
-                                    let circuit = without_p2p(listen.clone())
+                            addrs.retain(|a| !is_circuit_through(a, &me));
+                            let mut local: Vec<Multiaddr> = self
+                                .swarm
+                                .listeners()
+                                .filter(|l| {
+                                    is_specific(l) && !l.iter().any(|p| p == Protocol::P2pCircuit)
+                                })
+                                .map(|l| {
+                                    without_p2p(l.clone())
                                         .with(Protocol::P2p(me))
                                         .with(Protocol::P2pCircuit)
-                                        .with(Protocol::P2p(*peer));
-                                    if !addrs.contains(&circuit) {
-                                        addrs.push(circuit);
-                                    }
-                                }
+                                        .with(Protocol::P2p(*peer))
+                                })
+                                .collect();
+                            local.sort_by_key(|a| is_global(a) || !is_loopback(a));
+                            local.dedup();
+                            if let Some(first) = local.first().cloned() {
+                                // One local route is enough, and keeps the
+                                // relay dial from going anywhere else.
+                                addrs.retain(|a| !a.iter().any(|p| p == Protocol::P2pCircuit));
+                                addrs.insert(0, first);
                             }
                         }
                         BucketPeer { peer: *peer, addrs }
                     })
                     .filter(|p| !p.addrs.is_empty())
-                    .collect();
+                    .collect::<Vec<_>>();
+                for p in &peers {
+                    debug!("bucket peer {} at {:?}", p.peer, p.addrs);
+                }
                 let _ = reply.send(peers);
             }
             Command::Dial(addr) => self.dial(addr),
@@ -1135,6 +1152,29 @@ fn is_global(addr: &Multiaddr) -> bool {
         .unwrap_or(true)
 }
 
+fn is_loopback(addr: &Multiaddr) -> bool {
+    addr.iter().any(|p| match p {
+        Protocol::Ip4(ip) => ip.is_loopback(),
+        Protocol::Ip6(ip) => ip.is_loopback(),
+        _ => false,
+    })
+}
+
+/// A relayed address whose relay is `relay`.
+fn is_circuit_through(addr: &Multiaddr, relay: &PeerId) -> bool {
+    let mut previous = None;
+    for p in addr.iter() {
+        if p == Protocol::P2pCircuit {
+            return previous == Some(*relay);
+        }
+        previous = match p {
+            Protocol::P2p(id) => Some(id),
+            _ => None,
+        };
+    }
+    false
+}
+
 fn without_p2p(addr: Multiaddr) -> Multiaddr {
     addr.into_iter()
         .filter(|p| !matches!(p, Protocol::P2p(_)))
@@ -1166,5 +1206,21 @@ mod tests {
         ] {
             assert!(is_global(&public.parse().unwrap()), "{public}");
         }
+    }
+
+    #[test]
+    fn circuits_are_matched_by_their_relay() {
+        let relay = PeerId::random();
+        let other = PeerId::random();
+        let target = PeerId::random();
+        let through = |r: PeerId| -> Multiaddr {
+            format!("/ip4/198.211.114.63/tcp/4001/p2p/{r}/p2p-circuit/p2p/{target}")
+                .parse()
+                .unwrap()
+        };
+        assert!(is_circuit_through(&through(relay), &relay));
+        assert!(!is_circuit_through(&through(other), &relay));
+        let direct: Multiaddr = format!("/ip4/1.2.3.4/tcp/1/p2p/{relay}").parse().unwrap();
+        assert!(!is_circuit_through(&direct, &relay));
     }
 }
