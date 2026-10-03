@@ -5673,9 +5673,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "idna",
+ "levenshtein_automata",
  "plumb-core",
  "serde",
  "tantivy",
+ "tantivy-fst",
  "tempfile",
 ]
 

@@ -350,6 +350,9 @@ pub struct SearchArgs {
     /// Leave out other countries' sites (needs --country).
     #[arg(long, requires = "country")]
     pub only_country: bool,
+    /// Search for the query exactly as typed, without correcting typos.
+    #[arg(long)]
+    pub exact: bool,
     #[command(flatten)]
     pub meaning: MeaningArgs,
     /// What to search for, e.g. `us bank`.
@@ -410,6 +413,9 @@ pub struct EvalArgs {
     /// [default: none].
     #[arg(long, value_name = "CODE", value_parser = parse_country)]
     pub country: Option<String>,
+    /// Search for each query exactly as written, without correcting typos.
+    #[arg(long)]
+    pub exact: bool,
     #[command(flatten)]
     pub meaning: MeaningArgs,
 }
