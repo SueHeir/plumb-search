@@ -58,6 +58,7 @@ use plumb_net::{BucketSource, BucketTable, NetHandle, PickLog, PopularityTable, 
 use tracing::{debug, info, warn};
 
 use super::Inner;
+use crate::icons::{self, IconStore};
 use crate::records::{load_records, Change, RecordStore};
 
 /// Records from other nodes that make a node rebuild its index before the
@@ -472,10 +473,12 @@ pub(super) fn absorb_inbox(inner: &Inner) -> Result<u64> {
     let file = File::open(&paths.absorbing)
         .with_context(|| format!("opening {}", paths.absorbing.display()))?;
     let mut changes = Vec::new();
+    let icons = IconStore::new(&paths.icons);
     for line in BufReader::new(file).lines() {
         let line = line.with_context(|| format!("reading {}", paths.absorbing.display()))?;
         // A crash can cut the last line short.
-        if let Ok(record) = serde_json::from_str::<SiteRecord>(&line) {
+        if let Ok(mut record) = serde_json::from_str::<SiteRecord>(&line) {
+            keep_shared_icon(&icons, &mut record);
             changes.push(Change::MergeShared { record });
         }
     }
@@ -494,11 +497,42 @@ pub(super) fn absorb_inbox(inner: &Inner) -> Result<u64> {
     Ok(n)
 }
 
+/// Moves the icon a shared crawl carries into the icon store: icons are
+/// never kept in the records file.
+fn keep_shared_icon(icons: &IconStore, record: &mut SiteRecord) {
+    let Some(icon) = record.icon.take().as_deref().and_then(icons::from_shared) else {
+        return;
+    };
+    if let Err(err) = icons.put(&record.domain, Some(&icon)) {
+        warn!("cannot save the icon of {}: {err}", record.domain);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use plumb_net::popularity::{Popular, MAX_POPULARITY_BONUS};
 
     use super::*;
+
+    #[test]
+    fn a_shared_icon_goes_to_the_icon_store_not_the_record() {
+        use base64::Engine as _;
+        let dir = tempfile::tempdir().unwrap();
+        let icons = IconStore::new(dir.path());
+        // A 1x1 PNG is too small to be an icon: dropped, but still not kept.
+        let mut tiny = SiteRecord::new("tiny.com");
+        tiny.icon = Some("iVBORw0KGgo=".into());
+        keep_shared_icon(&icons, &mut tiny);
+        assert!(tiny.icon.is_none());
+        assert_eq!(icons.get("tiny.com"), None);
+
+        let png = plumb_crawl::normalize_icon(&crate::icons::tests::bmp()).unwrap();
+        let mut record = SiteRecord::new("a.com");
+        record.icon = Some(base64::engine::general_purpose::STANDARD.encode(&png));
+        keep_shared_icon(&icons, &mut record);
+        assert!(record.icon.is_none());
+        assert!(icons.get("a.com").unwrap().starts_with(b"\x89PNG"));
+    }
 
     fn hit(domain: &str, score: f32) -> Hit {
         Hit {

@@ -697,7 +697,8 @@ impl Fetcher for NodeFetcher<'_> {
             if let Some(net) = net {
                 // Shared before it is saved here: a batch the offline
                 // check throws away holds few records anyway.
-                let records = plumb_crawl::to_records(&results);
+                let mut records = plumb_crawl::to_records(&results);
+                crate::icons::attach(&mut records, &results);
                 if let Err(err) = net.publish(records).await {
                     warn!("cannot publish crawl results to the network: {err:#}");
                 }

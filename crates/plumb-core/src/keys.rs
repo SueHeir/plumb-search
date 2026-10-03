@@ -162,6 +162,7 @@ pub fn slim_record(mut record: SiteRecord) -> SiteRecord {
     record.crawled_at = None;
     record.crawl_attempted_at = None;
     record.crawl_failures = 0;
+    record.icon = None;
     record
 }
 

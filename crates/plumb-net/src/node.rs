@@ -1282,7 +1282,7 @@ impl Task {
         let now = now_unix();
         let mut last = None;
         for (epoch, records) in by_crawl_epoch(records, now) {
-            for chunk in records.chunks(MAX_BATCH_RECORDS) {
+            for chunk in batch_chunks(&records) {
                 if let Some(id) = self.publish_batch(chunk, epoch, now)? {
                     last = Some(id);
                 }
@@ -2621,6 +2621,25 @@ fn lookup(source: &dyn BucketSource, store: &Mutex<BatchStore>, bucket: u32) -> 
     }
 }
 
+/// `records` in runs that fit one batch each: [`MAX_BATCH_RECORDS`] lines,
+/// a record with an icon taking two (see [`Batch::sign`]).
+fn batch_chunks(records: &[SiteRecord]) -> Vec<&[SiteRecord]> {
+    let mut chunks = Vec::new();
+    let (mut start, mut lines) = (0, 0);
+    for (i, record) in records.iter().enumerate() {
+        let need = 1 + usize::from(record.icon.is_some());
+        if lines + need > MAX_BATCH_RECORDS {
+            chunks.push(&records[start..i]);
+            (start, lines) = (i, 0);
+        }
+        lines += need;
+    }
+    if start < records.len() {
+        chunks.push(&records[start..]);
+    }
+    chunks
+}
+
 /// Rebuilds the agreement step from the batches held, oldest first, so it
 /// needs no file of its own. What it confirms was passed on before.
 /// [`BatchStore::crawlers`], with this node and its trusted nodes marked.
@@ -2749,6 +2768,24 @@ fn without_p2p(addr: Multiaddr) -> Multiaddr {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_record_with_an_icon_takes_two_lines_of_a_batch() {
+        let record = |i: usize, icon: bool| {
+            let mut r = SiteRecord::new(format!("s{i}.com").as_str());
+            r.icon = icon.then(|| "x".to_string());
+            r
+        };
+        let plain: Vec<SiteRecord> = (0..MAX_BATCH_RECORDS + 1)
+            .map(|i| record(i, false))
+            .collect();
+        let sizes: Vec<usize> = batch_chunks(&plain).iter().map(|c| c.len()).collect();
+        assert_eq!(sizes, [MAX_BATCH_RECORDS, 1]);
+        let iconed: Vec<SiteRecord> = (0..MAX_BATCH_RECORDS).map(|i| record(i, true)).collect();
+        let sizes: Vec<usize> = batch_chunks(&iconed).iter().map(|c| c.len()).collect();
+        assert_eq!(sizes, [MAX_BATCH_RECORDS / 2, MAX_BATCH_RECORDS / 2]);
+        assert!(batch_chunks(&[]).is_empty());
+    }
 
     #[test]
     fn crawls_are_published_in_the_epoch_they_were_made() {
