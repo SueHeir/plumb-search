@@ -169,8 +169,6 @@ impl Node {
             "127.0.0.1::8080",
             "-v",
             &volume,
-            "-e",
-            "RUST_LOG=info,tantivy=warn",
         ];
         if let Some(network) = &self.network {
             args.extend(["--network", network]);

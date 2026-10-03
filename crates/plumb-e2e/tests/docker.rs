@@ -278,16 +278,17 @@ fn two_nodes_exchange_crawls_and_searches() {
     }
 
     if real {
-        // Their crawls reach each other.
+        // Each publishes its crawl, and the other receives it.
         for node in [&first, &second] {
-            let status = node.wait_for("a batch from the other node", 40 * MINUTE, |s| {
+            node.wait_for("a published crawl", 40 * MINUTE, |s| {
+                s["network"]["batches_published"].as_u64().unwrap_or(0) >= 1
+            });
+        }
+        for node in [&first, &second] {
+            let status = node.wait_for("a batch from the other node", 5 * MINUTE, |s| {
                 s["network"]["batches_received"].as_u64().unwrap_or(0) >= 1
             });
             eprintln!("{}: {}", node.name, status["network"]);
-            assert!(
-                status["network"]["batches_published"].as_u64().unwrap_or(0) >= 1,
-                "{status}"
-            );
         }
     }
 }
