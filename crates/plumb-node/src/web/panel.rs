@@ -11,6 +11,11 @@
 //!   tomorrow, or resumes it,
 //! - `POST /app/restart` restarts the node to apply saved feature changes,
 //!   where the program running it allows,
+//! - `POST /app/retry` tries failed work again now,
+//! - `POST /app/backup` saves a backup in the data folder, `GET
+//!   /app/backups/<name>` downloads one, and `POST /app/backups/restore`
+//!   (a saved one, by name) and `POST /app/restore` (an uploaded one)
+//!   restore one,
 //! - `GET /add-to-firefox` says how to add Plumb to Firefox as a search
 //!   engine. It is meant to be opened in Firefox (the desktop app opens it
 //!   there), which offers to add the engine of a page that links to an
@@ -37,9 +42,12 @@ use super::{
     escape_html, group_thousands, page_with_head, request_origin, security_headers, time_ago,
     time_until, AppState,
 };
+use crate::node::backup::{self, Backup, BackupInfo};
 use crate::node::control;
 use crate::node::features::FeatureSettings;
-use crate::node::{CrawlHours, NodeSettings, Phase, Status, Step, Workload, MB};
+use crate::node::{
+    CrawlHours, LogEntry, LogLevel, NodeSettings, Phase, Retry, Status, Step, Workload, MB,
+};
 
 /// Seconds between two reloads of the panel while work is under way.
 const BUSY_RELOAD_SECONDS: u32 = 5;
@@ -101,6 +109,31 @@ pub(super) struct SettingsForm {
     crawl_from: String,
     #[serde(default)]
     crawl_to: String,
+}
+
+/// The retry form: `work`, `wikidata` or `meaning`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub(super) struct RetryForm {
+    what: String,
+}
+
+impl RetryForm {
+    pub(super) fn what(&self) -> Option<Retry> {
+        match self.what.as_str() {
+            "work" => Some(Retry::Work),
+            "wikidata" => Some(Retry::Wikidata),
+            "meaning" => Some(Retry::Meaning),
+            _ => None,
+        }
+    }
+}
+
+/// The form restoring a saved backup.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub(super) struct RestoreForm {
+    name: String,
 }
 
 /// The pause form: `hour`, `tomorrow` or `resume`.
@@ -209,6 +242,10 @@ pub(super) async fn panel(State(state): State<AppState>, request: Request) -> Re
         },
         switcher: &switcher,
         remote_control: data_dir.is_some().then_some(&remote_control),
+        activity: &node.activity_log(),
+        backups: (writable && data_dir.is_some())
+            .then(|| backup::list(data_dir.as_deref().expect("checked")))
+            .as_deref(),
     });
     panel_page(page)
 }
@@ -630,6 +667,142 @@ pub(super) async fn pause(State(state): State<AppState>, request: Request) -> Re
     Redirect::to("/app").into_response()
 }
 
+pub(super) async fn retry(State(state): State<AppState>, request: Request) -> Response {
+    let Some(node) = state.node.clone() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    if let Some(why) = refusal(&request) {
+        return forbidden(why);
+    }
+    let Ok(Form(form)) = Form::<RetryForm>::from_request(request, &state).await else {
+        return panel_error(StatusCode::BAD_REQUEST, "The retry form could not be read.");
+    };
+    let Some(what) = form.what() else {
+        return panel_error(StatusCode::BAD_REQUEST, "The retry form could not be read.");
+    };
+    if let Err(err) = node.retry(what) {
+        return panel_error(StatusCode::CONFLICT, &err.to_string());
+    }
+    Redirect::to("/app").into_response()
+}
+
+pub(super) async fn backup(State(state): State<AppState>, request: Request) -> Response {
+    let Some(node) = &state.node else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    if let Some(why) = refusal(&request) {
+        return forbidden(why);
+    }
+    match node.make_backup() {
+        Ok(_) => Redirect::to("/app?section=backup&saved=backup").into_response(),
+        Err(err) => panel_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("Could not make a backup: {err:#}"),
+        ),
+    }
+}
+
+pub(super) async fn download_backup(
+    State(state): State<AppState>,
+    axum::extract::Path(name): axum::extract::Path<String>,
+    request: Request,
+) -> Response {
+    let Some(node) = &state.node else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    // It holds keys: only for this computer, like the settings.
+    if let Some(why) = refusal(&request) {
+        return forbidden(why);
+    }
+    let Some(path) = node.data_dir().and_then(|dir| backup::path_of(&dir, &name)) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    match std::fs::read(&path) {
+        Ok(bytes) => (
+            StatusCode::OK,
+            [
+                (header::CONTENT_TYPE, "application/json".to_owned()),
+                (header::CACHE_CONTROL, "no-store".to_owned()),
+                (
+                    header::CONTENT_DISPOSITION,
+                    format!("attachment; filename=\"{name}\""),
+                ),
+            ],
+            bytes,
+        )
+            .into_response(),
+        Err(_) => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+pub(super) async fn restore_saved(State(state): State<AppState>, request: Request) -> Response {
+    let Some(node) = state.node.clone() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    if let Some(why) = refusal(&request) {
+        return forbidden(why);
+    }
+    let Ok(Form(form)) = Form::<RestoreForm>::from_request(request, &state).await else {
+        return panel_error(
+            StatusCode::BAD_REQUEST,
+            "The restore form could not be read.",
+        );
+    };
+    let Some(path) = node
+        .data_dir()
+        .and_then(|dir| backup::path_of(&dir, &form.name))
+    else {
+        return panel_error(StatusCode::NOT_FOUND, "There is no such backup.");
+    };
+    let Ok(bytes) = std::fs::read(&path) else {
+        return panel_error(StatusCode::NOT_FOUND, "There is no such backup.");
+    };
+    restore_bytes(node.as_ref(), &bytes)
+}
+
+pub(super) async fn restore_upload(State(state): State<AppState>, request: Request) -> Response {
+    let Some(node) = state.node.clone() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    if let Some(why) = refusal(&request) {
+        return forbidden(why);
+    }
+    let Ok(mut form) = axum::extract::Multipart::from_request(request, &state).await else {
+        return panel_error(
+            StatusCode::BAD_REQUEST,
+            "The backup file could not be read.",
+        );
+    };
+    while let Ok(Some(field)) = form.next_field().await {
+        if field.name() == Some("backup") {
+            return match field.bytes().await {
+                Ok(bytes) if !bytes.is_empty() => restore_bytes(node.as_ref(), &bytes),
+                _ => panel_error(StatusCode::BAD_REQUEST, "Choose a backup file first."),
+            };
+        }
+    }
+    panel_error(StatusCode::BAD_REQUEST, "Choose a backup file first.")
+}
+
+fn restore_bytes(node: &dyn super::StatusSource, bytes: &[u8]) -> Response {
+    let backup = match Backup::parse(bytes) {
+        Ok(backup) => backup,
+        Err(err) => {
+            return panel_error(
+                StatusCode::BAD_REQUEST,
+                &format!("{err:#}. Nothing was changed."),
+            )
+        }
+    };
+    if let Err(err) = node.restore_backup(&backup) {
+        return panel_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("Could not restore the backup: {err:#}"),
+        );
+    }
+    Redirect::to("/app?section=backup&saved=restored").into_response()
+}
+
 pub(super) async fn restart(State(state): State<AppState>, request: Request) -> Response {
     let Some(node) = &state.node else {
         return StatusCode::NOT_FOUND.into_response();
@@ -780,6 +953,11 @@ pub(super) struct PanelView<'a> {
     /// This node's remote control, for its "Remote control" section; `None`
     /// on the panel of another node.
     pub(super) remote_control: Option<&'a RemoteControlView>,
+    /// The node's activity log, newest first.
+    pub(super) activity: &'a [LogEntry],
+    /// This node's saved backups, for its "Backup" section; `None` on the
+    /// panel of another node.
+    pub(super) backups: Option<&'a [BackupInfo]>,
 }
 
 /// What the "Remote control" section shows.
@@ -806,6 +984,8 @@ pub(super) fn render_panel(view: &PanelView<'_>) -> String {
         eyebrow,
         switcher,
         remote_control,
+        activity,
+        backups,
     } = *view;
     let mut sections = vec![
         ("overview", "Overview"),
@@ -815,6 +995,10 @@ pub(super) fn render_panel(view: &PanelView<'_>) -> String {
     ];
     if remote_control.is_some() {
         sections.push(("remote", "Remote control"));
+    }
+    sections.push(("activity", "Activity"));
+    if backups.is_some() {
+        sections.push(("backup", "Backup"));
     }
     sections.push(("about", "About"));
     let section = if sections.iter().any(|(key, _)| *key == query.section) {
@@ -845,6 +1029,17 @@ pub(super) fn render_panel(view: &PanelView<'_>) -> String {
         body.push_str(
             "<p class=\"notice\" role=\"status\">Resource settings saved and applied.</p>",
         );
+    } else if query.saved == "backup" {
+        body.push_str("<p class=\"notice\" role=\"status\">Backup saved.</p>");
+    } else if query.saved == "restored" {
+        body.push_str(if status.can_restart {
+            "<p class=\"notice\" role=\"status\">Backup restored. The node is restarting to \
+             finish; the settings from before are in a backup marked before-restore.</p>"
+        } else {
+            "<p class=\"notice\" role=\"status\">Backup restored. Restart the node (for \
+             Docker, the container) to finish; the settings from before are in a backup \
+             marked before-restore.</p>"
+        });
     } else if query.saved == "retry" {
         body.push_str("<p class=\"notice\" role=\"status\">Trying the bootstrap nodes again. Refresh the status in a few seconds.</p>");
     } else if query.saved == "features" {
@@ -856,7 +1051,7 @@ pub(super) fn render_panel(view: &PanelView<'_>) -> String {
     match section {
         "overview" => {
             body.push_str("<p class=\"intro\">Search readiness, background work, and the resources your node is using.</p><section class=\"cards\" aria-label=\"Node overview\">");
-            render_search_card(&mut body, status, origin, now);
+            render_search_card(&mut body, status, origin, now, base);
             render_storage_card(&mut body, status, settings);
             render_downloads_card(&mut body, status, settings);
             if !writable {
@@ -868,14 +1063,30 @@ pub(super) fn render_panel(view: &PanelView<'_>) -> String {
                 body.push_str("</fieldset>");
             }
             if status.meaning_work.is_some() {
-                render_meaning_card(&mut body, status, active, now);
+                render_meaning_card(&mut body, status, active, now, base);
             }
             body.push_str("</section>");
             if setting_up(status) {
                 render_steps(&mut body, status, now);
             }
             if let Some(err) = &status.last_error {
-                body.push_str(&format!("<div class=\"err\" role=\"alert\"><strong>Last update failed</strong><p>{}</p></div>", escape_html(&err.message)));
+                let retry = if writable {
+                    retry_button(base, "work", "Try again now")
+                } else {
+                    String::new()
+                };
+                let when = err
+                    .retry_at
+                    .map(|at| format!(" Plumb tries again by itself {}.", time_until(at, now)))
+                    .unwrap_or_default();
+                body.push_str(&format!("<div class=\"err\" role=\"alert\"><strong>Last update failed</strong><p>{}</p><p class=\"hint\">{}{when}</p>{retry}</div>", escape_html(&err.message), escape_html(&time_ago(err.at, now))));
+            }
+            if !activity.is_empty() {
+                body.push_str("<h2>Recent activity</h2>");
+                render_log(&mut body, &activity[..activity.len().min(5)], now);
+                body.push_str(&format!(
+                    "<p><a href=\"{base}?section=activity\">All activity</a></p>"
+                ));
             }
         }
         "resources" => {
@@ -893,8 +1104,8 @@ pub(super) fn render_panel(view: &PanelView<'_>) -> String {
         }
         "search" => {
             body.push_str("<p class=\"intro\">Choose how you search and connect your browser to this node.</p><section class=\"cards\">");
-            render_search_card(&mut body, status, origin, now);
-            render_meaning_card(&mut body, status, active, now);
+            render_search_card(&mut body, status, origin, now, base);
+            render_meaning_card(&mut body, status, active, now, base);
             let private = if private_ready {
                 "Ready"
             } else if !active.private_search {
@@ -946,6 +1157,20 @@ pub(super) fn render_panel(view: &PanelView<'_>) -> String {
                 body.push_str("</fieldset>");
             }
         }
+        "activity" => {
+            body.push_str("<p class=\"intro\">What the node did and what went wrong, newest first. It keeps the last few hundred entries.</p>");
+            if activity.is_empty() {
+                body.push_str("<p>Nothing yet.</p>");
+            } else {
+                render_log(&mut body, activity, now);
+            }
+            body.push_str(&format!("<p class=\"hint\">For a bug report, the <a href=\"{site}/api/status\" target=\"_blank\">diagnostic status</a> has the details.</p>"));
+        }
+        "backup" => {
+            if let Some(backups) = backups {
+                render_backups(&mut body, backups, now);
+            }
+        }
         "remote" => {
             if let Some(remote) = remote_control {
                 render_remote_control(&mut body, remote, writable);
@@ -975,7 +1200,7 @@ pub(super) fn render_panel(view: &PanelView<'_>) -> String {
 }
 
 pub(super) const LAYOUT_STYLE: &str = "
-.node-switch{display:flex;flex-wrap:wrap;gap:.4rem;margin-bottom:1rem}.node-switch a{padding:.4rem .8rem;border:1px solid var(--line);border-radius:999px;text-decoration:none;font-size:.9rem;color:var(--fg)}.node-switch a[aria-current]{border-color:var(--accent);color:var(--accent);font-weight:600}.node-panel{max-width:72rem;padding:2rem 2rem 4rem}.node-heading,.section-heading{display:flex;align-items:center;justify-content:space-between;gap:1rem}.node-heading h1{font-size:1.8rem}.eyebrow{font-size:.7rem;letter-spacing:.13em;color:var(--muted);margin:0 0 .3rem}.node-nav{display:flex;flex-wrap:wrap;gap:.4rem;border-bottom:1px solid var(--line);padding:1.5rem 0 1rem;margin-bottom:1.5rem}.node-panel a{color:var(--accent)}.node-panel a.btn:not(.alt){color:var(--bg)}.node-nav a{padding:.55rem .85rem;text-decoration:none;border-radius:.5rem;color:var(--muted)}.node-nav a[aria-current]{background:var(--accent);color:var(--bg);font-weight:600}.section-heading h2{margin:0;font-size:1.4rem}.section-heading>a{font-size:.85rem}.intro{color:var(--muted);max-width:45rem}.notice{padding:.85rem 1rem;border-left:3px solid var(--accent);background:color-mix(in srgb,var(--accent) 8%,var(--bg));border-radius:.3rem}.node-panel form{max-width:46rem}.node-panel fieldset{border:0;margin:0;padding:0;min-width:0}.node-panel .workload{margin-top:1rem}.node-panel .workload legend{font-weight:600}.node-panel select{font:inherit;background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:.3rem}.cards>fieldset{display:contents}.node-panel details{margin-top:1rem}.node-panel summary{cursor:pointer;color:var(--accent)}.node-panel fieldset:disabled{opacity:.65}.node-panel textarea{display:block;width:100%;min-height:6rem;font:inherit;background:var(--bg);color:var(--fg);padding:.75rem;border:1px solid var(--line);border-radius:.5rem}.node-panel .feature{padding:.8rem 0;border-bottom:1px solid var(--line)}.node-panel .feature label{margin:0}.node-panel .feature p{margin:.35rem 0 0 1.65rem}.node-panel .state{font-size:.8rem;color:var(--muted)}.node-panel :focus-visible{outline:3px solid var(--accent);outline-offset:3px}.node-panel dl{grid-template-columns:minmax(6rem,auto) minmax(0,1fr)}@media(max-width:600px){.node-panel{padding:1rem 1rem 3rem}.node-heading{align-items:flex-start}.node-heading h1{font-size:1.5rem}.node-nav{gap:.2rem}.node-nav a{padding:.5rem .6rem;font-size:.9rem}.cards{grid-template-columns:minmax(0,1fr)}.node-panel label{flex-wrap:wrap}.section-heading{align-items:flex-start}.section-heading>a{white-space:nowrap}}";
+.node-switch{display:flex;flex-wrap:wrap;gap:.4rem;margin-bottom:1rem}.node-switch a{padding:.4rem .8rem;border:1px solid var(--line);border-radius:999px;text-decoration:none;font-size:.9rem;color:var(--fg)}.node-switch a[aria-current]{border-color:var(--accent);color:var(--accent);font-weight:600}.node-panel{max-width:72rem;padding:2rem 2rem 4rem}.node-heading,.section-heading{display:flex;align-items:center;justify-content:space-between;gap:1rem}.node-heading h1{font-size:1.8rem}.eyebrow{font-size:.7rem;letter-spacing:.13em;color:var(--muted);margin:0 0 .3rem}.node-nav{display:flex;flex-wrap:wrap;gap:.4rem;border-bottom:1px solid var(--line);padding:1.5rem 0 1rem;margin-bottom:1.5rem}.node-panel a{color:var(--accent)}.node-panel a.btn:not(.alt){color:var(--bg)}.node-nav a{padding:.55rem .85rem;text-decoration:none;border-radius:.5rem;color:var(--muted)}.node-nav a[aria-current]{background:var(--accent);color:var(--bg);font-weight:600}.section-heading h2{margin:0;font-size:1.4rem}.section-heading>a{font-size:.85rem}.intro{color:var(--muted);max-width:45rem}.notice{padding:.85rem 1rem;border-left:3px solid var(--accent);background:color-mix(in srgb,var(--accent) 8%,var(--bg));border-radius:.3rem}.node-panel form{max-width:46rem}.node-panel fieldset{border:0;margin:0;padding:0;min-width:0}.node-panel .workload{margin-top:1rem}.log{list-style:none;padding:0;margin:.5rem 0}.log li{display:flex;flex-wrap:wrap;gap:.25rem 1rem;align-items:baseline;padding:.45rem 0;border-bottom:1px solid var(--line)}.log time{flex:none;min-width:7rem;color:var(--muted);font-size:.85rem}.log li span{flex:1 1 20rem;overflow-wrap:anywhere}.log .error span{color:var(--err)}.log.backups li{align-items:center}.log.backups form{margin:0;display:inline}.log.backups .btns{flex:none;margin:0}.node-panel .workload legend{font-weight:600}.node-panel select{font:inherit;background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:.3rem}.cards>fieldset{display:contents}.node-panel details{margin-top:1rem}.node-panel summary{cursor:pointer;color:var(--accent)}.node-panel fieldset:disabled{opacity:.65}.node-panel textarea{display:block;width:100%;min-height:6rem;font:inherit;background:var(--bg);color:var(--fg);padding:.75rem;border:1px solid var(--line);border-radius:.5rem}.node-panel .feature{padding:.8rem 0;border-bottom:1px solid var(--line)}.node-panel .feature label{margin:0}.node-panel .feature p{margin:.35rem 0 0 1.65rem}.node-panel .state{font-size:.8rem;color:var(--muted)}.node-panel :focus-visible{outline:3px solid var(--accent);outline-offset:3px}.node-panel dl{grid-template-columns:minmax(6rem,auto) minmax(0,1fr)}@media(max-width:600px){.node-panel{padding:1rem 1rem 3rem}.node-heading{align-items:flex-start}.node-heading h1{font-size:1.5rem}.node-nav{gap:.2rem}.node-nav a{padding:.5rem .6rem;font-size:.9rem}.cards{grid-template-columns:minmax(0,1fr)}.node-panel label{flex-wrap:wrap}.section-heading{align-items:flex-start}.section-heading>a{white-space:nowrap}}";
 
 /// A card: its class, title, headline and the HTML under them.
 fn card(body: &mut String, class: &str, title: &str, big: &str, rest: &str) {
@@ -994,7 +1219,7 @@ fn meter(done: u64, total: u64) -> String {
     )
 }
 
-fn render_search_card(body: &mut String, status: &Status, origin: &str, now: u64) {
+fn render_search_card(body: &mut String, status: &Status, origin: &str, now: u64, base: &str) {
     let origin = escape_html(origin);
     let buttons = format!(
         "<div class=\"btns\"><a class=\"btn\" href=\"{origin}/\" target=\"_blank\">\
@@ -1036,8 +1261,13 @@ fn render_search_card(body: &mut String, status: &Status, origin: &str, now: u64
                 "Plumb is still adding Wikidata's list of official websites and more \
                  rankings, so results get better once that is done."
             };
+            let retry = if status.wikidata_error.is_some() {
+                retry_button(base, "wikidata", "Try Wikidata again now")
+            } else {
+                String::new()
+            };
             let rest = format!(
-                "<p>Search works now with the {} most popular sites. {}</p>\n{buttons}",
+                "<p>Search works now with the {} most popular sites. {}</p>\n{retry}{buttons}",
                 group_thousands(status.sites),
                 escape_html(why)
             );
@@ -1193,7 +1423,13 @@ fn render_crawl_card(
     card(body, "", "Crawling", &big, &rest);
 }
 
-fn render_meaning_card(body: &mut String, status: &Status, active: &FeatureSettings, now: u64) {
+fn render_meaning_card(
+    body: &mut String,
+    status: &Status,
+    active: &FeatureSettings,
+    now: u64,
+    base: &str,
+) {
     let headline = match status.meaning_sites {
         Some(n) => format!("{} sites ready", group_thousands(n)),
         None if active.search_by_meaning => "Preparing".into(),
@@ -1222,8 +1458,9 @@ fn render_meaning_card(body: &mut String, status: &Status, active: &FeatureSetti
                     .map(|at| format!(" Trying again {}.", time_until(at, now)))
                     .unwrap_or_default();
                 rest.push_str(&format!(
-                    "<p class=\"hint\">{}{retry}</p>",
-                    escape_html(&err.message)
+                    "<p class=\"hint\">{}{retry}</p>{}",
+                    escape_html(&err.message),
+                    retry_button(base, "meaning", "Try again now")
                 ));
             }
             rest
@@ -1242,6 +1479,79 @@ fn render_meaning_card(body: &mut String, status: &Status, active: &FeatureSetti
         ""
     };
     card(body, class, "Search by meaning", &headline, &rest);
+}
+
+/// A form with one button that tries `what` again.
+fn retry_button(base: &str, what: &str, label: &str) -> String {
+    format!(
+        "<form method=\"post\" action=\"{base}/retry\"><input type=\"hidden\" name=\"what\" \
+         value=\"{what}\"><button type=\"submit\" class=\"alt\">{label}</button></form>"
+    )
+}
+
+/// Activity log entries, newest first as given.
+fn render_log(body: &mut String, entries: &[LogEntry], now: u64) {
+    body.push_str("<ol class=\"log\">");
+    for entry in entries {
+        let (class, label) = match entry.level {
+            LogLevel::Info => ("info", ""),
+            LogLevel::Warning => ("warning", "<strong>Warning:</strong> "),
+            LogLevel::Error => ("error", "<strong>Error:</strong> "),
+        };
+        let at = chrono::DateTime::from_timestamp(entry.at as i64, 0)
+            .map(|t| {
+                t.with_timezone(&chrono::Local)
+                    .format("%Y-%m-%d %H:%M")
+                    .to_string()
+            })
+            .unwrap_or_default();
+        body.push_str(&format!(
+            "<li class=\"{class}\"><time title=\"{at}\">{}</time><span>{label}{}</span></li>",
+            escape_html(&time_ago(entry.at, now)),
+            escape_html(&entry.message)
+        ));
+    }
+    body.push_str("</ol>");
+}
+
+fn render_backups(body: &mut String, backups: &[BackupInfo], now: u64) {
+    let what: Vec<&str> = backup::FILES.iter().map(|(_, what)| *what).collect();
+    body.push_str(&format!(
+        "<p class=\"intro\">A backup keeps what cannot be downloaded again: {}. Sites and \
+         the index are left out; a restored node rebuilds them. Backups hold this node\u{2019}s \
+         keys, so keep them private.</p>\
+         <form method=\"post\" action=\"/app/backup\"><button type=\"submit\">Make a backup \
+         now</button></form>",
+        escape_html(&what.join(", ").to_lowercase())
+    ));
+    body.push_str("<h2>Saved backups</h2>");
+    if backups.is_empty() {
+        body.push_str("<p>None yet.</p>");
+    } else {
+        body.push_str("<ol class=\"log backups\">");
+        for b in backups {
+            let name = escape_html(&b.name);
+            body.push_str(&format!(
+                "<li><span><code>{name}</code> <small>{} \u{b7} {} KB</small></span>\
+                 <span class=\"btns\"><a class=\"btn alt\" href=\"/app/backups/{name}\" \
+                 target=\"_blank\">Download</a><form method=\"post\" \
+                 action=\"/app/backups/restore\"><input type=\"hidden\" name=\"name\" \
+                 value=\"{name}\"><button type=\"submit\" class=\"alt\">Restore</button>\
+                 </form></span></li>",
+                escape_html(&time_ago(b.created_at, now)),
+                b.bytes.div_ceil(1000)
+            ));
+        }
+        body.push_str("</ol>");
+    }
+    body.push_str(
+        "<h2>Restore from a file</h2><form method=\"post\" action=\"/app/restore\" \
+         enctype=\"multipart/form-data\"><label>Backup file <input type=\"file\" \
+         name=\"backup\" accept=\".json,application/json\" required></label>\
+         <p class=\"hint\">Restoring replaces this node\u{2019}s settings and keys with the \
+         backup\u{2019}s, after saving the current ones as a backup marked before-restore, \
+         then restarts the node.</p><button type=\"submit\">Restore</button></form>",
+    );
 }
 
 /// "Pause for an hour" and "Pause until tomorrow" while background work may
@@ -1743,6 +2053,19 @@ mod tests {
         }
         fn data_dir(&self) -> Option<std::path::PathBuf> {
             Some("/home/me/plumb <data>".into())
+        }
+        fn activity_log(&self) -> Vec<LogEntry> {
+            vec![LogEntry {
+                at: now_unix() - 120,
+                level: LogLevel::Error,
+                message: "Could not reach <tranco-list.eu>".into(),
+            }]
+        }
+        fn retry(&self, what: Retry) -> anyhow::Result<()> {
+            match what {
+                Retry::Work => Ok(()),
+                _ => anyhow::bail!("Search by meaning is off on this node."),
+            }
         }
     }
 
@@ -2561,6 +2884,61 @@ mod tests {
         let (router, _) = app(running);
         let body = get_section(router, "overview").await;
         assert!(body.contains("value=\"hour\" class=\"alt\">Pause for an hour"));
+    }
+
+    #[tokio::test]
+    async fn failures_offer_a_retry_and_the_activity_log_reads_plainly() {
+        let mut failing = status(Phase::Ready, Step::Retrying);
+        failing.last_error = Some(LastError {
+            message: "downloading the Tranco list failed".into(),
+            at: now_unix() - 60,
+            retry_at: Some(now_unix() + 600),
+        });
+        let (router, _) = app(failing);
+        let body = get_section(router.clone(), "overview").await;
+        assert!(
+            body.contains("value=\"work\"><button type=\"submit\" class=\"alt\">Try again now"),
+            "{body}"
+        );
+        assert!(
+            body.contains("Plumb tries again by itself in 10 minutes."),
+            "{body}"
+        );
+        assert!(body.contains("<h2>Recent activity</h2>"));
+        assert!(body.contains("<strong>Error:</strong> Could not reach &lt;tranco-list.eu&gt;"));
+        let body = get_section(router.clone(), "activity").await;
+        assert!(body.contains("2 minutes ago"), "{body}");
+        // The fake node keeps no backups, but its own panel offers them.
+        let body = get_section(router.clone(), "backup").await;
+        assert!(body.contains("Make a backup now"), "{body}");
+        assert!(body.contains("enctype=\"multipart/form-data\""));
+
+        for (form, code) in [
+            ("what=work", StatusCode::SEE_OTHER),
+            ("what=meaning", StatusCode::CONFLICT),
+            ("what=everything", StatusCode::BAD_REQUEST),
+        ] {
+            let response = post(router.clone(), "/app/retry", form, "127.0.0.1:50000", None).await;
+            assert_eq!(response.status(), code, "{form}");
+        }
+        let response = post(
+            router.clone(),
+            "/app/retry",
+            "what=work",
+            "192.168.1.20:50000",
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let response = post(
+            router,
+            "/app/backups/restore",
+            "name=..%2F..%2Fetc%2Fpasswd",
+            "127.0.0.1:50000",
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

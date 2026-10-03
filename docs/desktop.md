@@ -199,6 +199,21 @@ stops the node and starts it again without quitting the app; a Docker node
 needs its container restarted. While search by meaning downloads its model
 or makes site vectors, the panel shows how far it has come.
 
+The Activity section is the node's log in plain sentences: starts and
+stops, crawl rounds and what they found, index rebuilds, settings changes,
+and every failure, newest first (the last few hundred entries, kept in
+`activity.jsonl` in the data folder). Failures on the panel come with "Try
+again now": the failed update, Wikidata's official websites and search by
+meaning each have one, and the network card has its own.
+
+The Backup section saves what cannot be downloaded again: the settings,
+the node's network identity and crawl credits, and the remote control
+files. Sites and the index are left out, since a node rebuilds them.
+Backups are kept in `backups/` in the data folder (the last 10), can be
+downloaded, and restore from that list or from a file. Restoring first
+saves the current files as a backup marked `before-restore`, then restarts
+the node. Backups hold the node's keys, so keep them private.
+
 If a download fails, for example without internet access or behind a
 firewall that blocks those sites, the error appears on the panel.
 

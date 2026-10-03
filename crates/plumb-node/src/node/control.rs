@@ -118,7 +118,7 @@ pub(crate) fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn hex_decode(text: &str) -> Result<Vec<u8>> {
+pub(crate) fn hex_decode(text: &str) -> Result<Vec<u8>> {
     if !text.len().is_multiple_of(2) || !text.is_ascii() {
         bail!("not hex");
     }

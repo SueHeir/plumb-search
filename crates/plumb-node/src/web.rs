@@ -263,6 +263,26 @@ pub trait StatusSource: Send + Sync {
         anyhow::bail!("This node cannot restart itself. Restart it where it runs.")
     }
 
+    /// What the node did lately, newest first.
+    fn activity_log(&self) -> Vec<crate::node::LogEntry> {
+        Vec::new()
+    }
+
+    /// Tries failed work again now.
+    fn retry(&self, _what: crate::node::Retry) -> Result<()> {
+        anyhow::bail!("This node cannot retry work from the panel.")
+    }
+
+    /// Saves a backup in the data folder's `backups/`.
+    fn make_backup(&self) -> Result<crate::node::backup::BackupInfo> {
+        anyhow::bail!("This node has no data folder to back up.")
+    }
+
+    /// Restores `backup` into the data folder, then restarts if it can.
+    fn restore_backup(&self, _backup: &crate::node::backup::Backup) -> Result<()> {
+        anyhow::bail!("This node has no data folder to restore into.")
+    }
+
     /// Tries the network's bootstrap nodes again now.
     fn reconnect_network(&self) -> Result<()> {
         match self.network() {
@@ -369,6 +389,11 @@ fn app(state: AppState) -> Router {
             .route("/app/refresh", post(panel::refresh))
             .route("/app/network/retry", post(panel::retry_network))
             .route("/app/pause", post(panel::pause))
+            .route("/app/retry", post(panel::retry))
+            .route("/app/backup", post(panel::backup))
+            .route("/app/backups/restore", post(panel::restore_saved))
+            .route("/app/restore", post(panel::restore_upload))
+            .route("/app/backups/{name}", get(panel::download_backup))
             .route("/app/restart", post(panel::restart))
             .route("/app/remote-control", post(panel::save_remote_control))
             .route(panel::ADD_TO_FIREFOX_PATH, get(panel::add_to_firefox));

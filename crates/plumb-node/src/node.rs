@@ -90,9 +90,11 @@ use crate::meaning::SharedMeaning;
 use crate::web::{self, IndexBackend, SearchBackend, StatusSource};
 use crate::websearch::{Engine, WebSettings};
 
+pub mod backup;
 pub mod control;
 mod embedding;
 pub mod features;
+pub mod journal;
 mod network;
 pub mod schedule;
 mod store;
@@ -101,6 +103,7 @@ mod worker;
 #[cfg(test)]
 mod tests;
 
+pub use journal::{LogEntry, LogLevel};
 pub use schedule::{CrawlHours, Workload};
 use store::{DirLock, Paths, SavedState};
 
@@ -597,6 +600,7 @@ impl NodeHandle {
                 .unwrap_or_else(PoisonError::into_inner)
                 .take(),
         );
+        inner.journal.info("Stopped");
         info!("node stopped");
         served.and(worked)
     }
@@ -653,6 +657,10 @@ pub async fn start(mut config: NodeConfig) -> Result<NodeHandle> {
 
     let (stop, stopped) = watch::channel(false);
     let inner = Arc::new(Inner::new(config, rank, opened, stopped.clone()));
+    inner.journal.info(format!(
+        "Plumb Search {} started",
+        env!("CARGO_PKG_VERSION")
+    ));
     let settings = WebSettings {
         home: inner.config.country.clone(),
         web_search: inner.config.web_search,
@@ -808,6 +816,76 @@ struct Inner {
     meaning_work: Mutex<Option<MeaningWork>>,
     /// Asks whoever runs the node (the desktop app) to restart it.
     restart: RestartSignal,
+    /// What the node did, for the panel's activity log.
+    journal: journal::Journal,
+    /// Cuts short search by meaning's wait after a failure.
+    meaning_retry: AtomicBool,
+}
+
+/// Failed work the panel can have tried again now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Retry {
+    /// The setup, crawl or rebuild that failed.
+    Work,
+    /// The download of Wikidata's official websites.
+    Wikidata,
+    /// Search by meaning's model download or vectors.
+    Meaning,
+}
+
+/// A settings change in words, for the activity log.
+fn settings_change_words(old: &NodeSettings, new: &NodeSettings) -> String {
+    let now = now_unix();
+    if old.paused_until != new.paused_until
+        && *old
+            == (NodeSettings {
+                paused_until: old.paused_until,
+                ..new.clone()
+            })
+    {
+        return match new.paused_until {
+            Some(until) if until > now => format!(
+                "Paused by you for {}",
+                crate::web::duration_words(until - now)
+            ),
+            _ => "Resumed by you".to_owned(),
+        };
+    }
+    let mut parts = Vec::new();
+    if old.background_updates != new.background_updates {
+        parts.push(if new.background_updates {
+            "background updates on".to_owned()
+        } else {
+            "background updates off".to_owned()
+        });
+    }
+    if old.workload != new.workload {
+        parts.push(format!("workload {}", new.workload.name()));
+    }
+    if old.download_limit_mb_per_day != new.download_limit_mb_per_day {
+        parts.push(match new.download_limit_mb_per_day {
+            0 => "no download limit".to_owned(),
+            mb => format!("download limit {mb} MB a day"),
+        });
+    }
+    if old.storage_limit_mb != new.storage_limit_mb {
+        parts.push(match new.storage_limit_mb {
+            0 => "no storage limit".to_owned(),
+            mb => format!("storage limit {mb} MB"),
+        });
+    }
+    if old.crawl_hours != new.crawl_hours {
+        parts.push(match new.crawl_hours {
+            Some(hours) => format!("crawl hours {}", hours.words()),
+            None => "crawl at any hour".to_owned(),
+        });
+    }
+    if parts.is_empty() {
+        "Settings saved".to_owned()
+    } else {
+        format!("Settings changed: {}", parts.join(", "))
+    }
 }
 
 /// Why background work waits, and until when.
@@ -892,6 +970,7 @@ impl Inner {
         stopped: watch::Receiver<bool>,
     ) -> Self {
         let backoff = worker::Backoff::new(config.retry_wait, config.max_retry_wait);
+        let journal = journal::Journal::open(&opened.paths.data);
         Inner {
             config,
             paths: opened.paths,
@@ -923,6 +1002,8 @@ impl Inner {
             meaning: SharedMeaning::default(),
             meaning_work: Mutex::new(None),
             restart: RestartSignal::default(),
+            journal,
+            meaning_retry: AtomicBool::new(false),
         }
     }
 
@@ -1100,6 +1181,7 @@ impl Inner {
             if *settings != new {
                 store::save_settings(&self.paths, &new)?;
                 info!("settings changed: {new:?}");
+                self.journal.info(settings_change_words(&settings, &new));
                 *settings = new;
             }
         }
@@ -1134,6 +1216,15 @@ impl Inner {
     }
 
     fn set_error(&self, err: &anyhow::Error, retry_at: u64) {
+        let message = format!("{err:#}");
+        let repeated = self
+            .activity()
+            .last_error
+            .as_ref()
+            .is_some_and(|last| last.message == message);
+        if !repeated {
+            self.journal.error(message);
+        }
         let mut activity = self.activity();
         activity.step = Step::Retrying;
         activity.detail = "Waiting to try again after an error".to_string();
@@ -1146,7 +1237,9 @@ impl Inner {
     }
 
     fn clear_error(&self) {
-        self.activity().last_error = None;
+        if self.activity().last_error.take().is_some() {
+            self.journal.info("Working again after the error");
+        }
     }
 
     fn wikidata_tries(&self) -> std::sync::MutexGuard<'_, WikidataTries> {
@@ -1156,6 +1249,9 @@ impl Inner {
     /// Notes a failure to download Wikidata's official websites and returns
     /// when to try again, in Unix seconds.
     fn wikidata_failed(&self, err: &anyhow::Error) -> u64 {
+        self.journal.warning(format!(
+            "Could not download Wikidata's official websites: {err:#}"
+        ));
         let mut tries = self.wikidata_tries();
         let now = now_unix();
         let retry_at = now.saturating_add(tries.backoff.next_delay().as_secs());
@@ -1179,6 +1275,7 @@ impl Inner {
 
     /// Forgets the failures once Wikidata has answered.
     fn wikidata_arrived(&self) {
+        self.journal.info("Wikidata's official websites are in");
         let mut tries = self.wikidata_tries();
         tries.last_error = None;
         tries.backoff.reset();
@@ -1407,7 +1504,63 @@ impl StatusSource for Inner {
     }
 
     fn change_features(&self, features: features::FeatureSettings) -> Result<()> {
-        features.save(&self.paths.data)
+        features.save(&self.paths.data)?;
+        self.journal
+            .info("Feature settings saved; they apply when the node restarts");
+        Ok(())
+    }
+
+    fn activity_log(&self) -> Vec<LogEntry> {
+        self.journal.entries()
+    }
+
+    fn retry(&self, what: Retry) -> Result<()> {
+        match what {
+            Retry::Work => self.request_refresh(),
+            Retry::Wikidata => {
+                if let Some(err) = &mut self.wikidata_tries().last_error {
+                    err.retry_at = Some(now_unix());
+                }
+                self.wake.notify_one();
+            }
+            Retry::Meaning => {
+                if !self.config.search_by_meaning {
+                    bail!("Search by meaning is off on this node.");
+                }
+                self.meaning_retry.store(true, Ordering::SeqCst);
+            }
+        }
+        self.journal.info(match what {
+            Retry::Work => "Trying the failed work again, as asked",
+            Retry::Wikidata => "Trying Wikidata again, as asked",
+            Retry::Meaning => "Trying search by meaning again, as asked",
+        });
+        Ok(())
+    }
+
+    fn make_backup(&self) -> Result<backup::BackupInfo> {
+        let made = backup::save(&self.paths.data, None)?;
+        self.journal.info(format!("Backup made: {}", made.name));
+        Ok(made)
+    }
+
+    fn restore_backup(&self, restored: &backup::Backup) -> Result<()> {
+        // Restoring can be undone with the backup made first.
+        let before = backup::save(&self.paths.data, Some("before-restore"))?;
+        restored.restore(&self.paths.data)?;
+        if let Some(settings) = store::load_settings(&self.paths) {
+            *self.settings.lock().unwrap_or_else(PoisonError::into_inner) = settings;
+            self.wake.notify_one();
+        }
+        self.journal.warning(format!(
+            "Backup from {} restored; the settings before it are in {}",
+            restored.version, before.name
+        ));
+        // Keys and features take effect at the next start.
+        if self.restart.request() {
+            self.journal.info("Restarting to finish restoring");
+        }
+        Ok(())
     }
 
     fn settings(&self) -> Option<NodeSettings> {
@@ -1427,6 +1580,7 @@ impl StatusSource for Inner {
             bail!("This node cannot restart itself. Restart it where it runs.");
         }
         info!("restart asked for from the panel");
+        self.journal.info("Restarting, as asked on the panel");
         Ok(())
     }
 

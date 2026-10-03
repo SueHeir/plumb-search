@@ -39,12 +39,24 @@ pub(super) fn run(inner: Arc<Inner>) {
             RETRY_WAIT.as_secs() / 60
         );
         let now = now_unix();
+        inner
+            .journal
+            .warning(format!("Search by meaning failed: {err:#}"));
         inner.set_meaning_work(Some(MeaningWork::Failed(LastError {
             message: format!("{err:#}"),
             at: now,
             retry_at: Some(now + RETRY_WAIT.as_secs()),
         })));
-        nap(&inner, RETRY_WAIT);
+        let until = Instant::now() + RETRY_WAIT;
+        while !inner.stopping() && Instant::now() < until {
+            if inner
+                .meaning_retry
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                break;
+            }
+            std::thread::sleep(TICK);
+        }
     }
 }
 
@@ -59,6 +71,7 @@ fn work(inner: &Arc<Inner>) -> Result<()> {
                 .block_on(ensure_model(&model_dir))
                 .context("downloading the embedding model")?;
             inner.set_meaning_work(Some(MeaningWork::Loading));
+            inner.journal.info("Search by meaning: the model is ready");
             let embedder = load_embedder(&model_dir)?;
             let vectors = load_vectors_for(&vectors_path, &embedder)?;
             info!("search by meaning: {} site vectors loaded", vectors.len());
@@ -110,6 +123,12 @@ fn work(inner: &Arc<Inner>) -> Result<()> {
             embedded.failed,
             meaning.len()
         );
+        if embedded.done > 0 {
+            inner.journal.info(format!(
+                "Search by meaning: {} sites got a vector",
+                crate::web::group_thousands(embedded.done as u64)
+            ));
+        }
         embedded_for = Some(index);
     }
     Ok(())
