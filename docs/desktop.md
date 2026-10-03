@@ -132,6 +132,27 @@ writable or the disk is full, the app shows an error message with the reason
 and the locations of the data folder and the [log](#troubleshooting), then
 quits.
 
+## Use Plumb as your browser's search engine
+
+While the app runs, its search page is also at `http://127.0.0.1:7586` in
+any browser on the same computer, and the page offers Plumb to the browser
+as a search engine:
+
+- **Firefox:** open `http://127.0.0.1:7586`, right-click the address bar and
+  choose **Add "Plumb Search"**. To search with it by default, pick it under
+  **Settings > Search > Default Search Engine**.
+- **Chrome:** once you have opened `http://127.0.0.1:7586`, Chrome lists
+  Plumb Search under **Settings > Search engine > Manage search engines and
+  site search** as an inactive shortcut. Activate it there, and make it the
+  default from its menu if you like.
+- **By hand, in any browser:** add a search engine with the address
+  `http://127.0.0.1:7586/search?q=%s`.
+
+Searches reach Plumb only while the app is running. If another program has
+port 7586 when the app starts, the app uses a free port instead and shows a
+message saying so; a search engine set up with 7586 then gets no answer until
+that port is free and the app is started again.
+
 ## Where data lives
 
 The node keeps its downloads, records and index in the app's data folder. It

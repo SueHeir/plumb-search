@@ -2,7 +2,10 @@
 //!
 //! - `GET /` shows a search box,
 //! - `GET /search?q=` shows results as server-rendered HTML,
-//! - `GET /api/search?q=&limit=` returns a JSON list of [`Hit`]s.
+//! - `GET /api/search?q=&limit=` returns a JSON list of [`Hit`]s,
+//! - `GET /opensearch.xml` describes the search engine to browsers
+//!   (OpenSearch 1.1), so that they can offer to add it; every page links to
+//!   it.
 //!
 //! A long-running node (`plumb run`, see [`crate::node`]) serves the same
 //! pages through [`node_router`], plus `GET /api/status`, which returns the
@@ -22,7 +25,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use axum::extract::{Query, State};
-use axum::http::{header, HeaderName, StatusCode};
+use axum::http::{header, HeaderMap, HeaderName, StatusCode, Uri};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
@@ -51,6 +54,15 @@ const CONTENT_SECURITY_POLICY: &str = "default-src 'none'; style-src 'unsafe-inl
 /// Seconds between two reloads of the setup page, and the `Retry-After` of
 /// a search asked for before the index is ready.
 const SETUP_RELOAD_SECONDS: u32 = 5;
+
+/// The media type of an OpenSearch description.
+const OPENSEARCH_TYPE: &str = "application/opensearchdescription+xml";
+
+/// In the `<head>` of every page, so that browsers offer to add Plumb as a
+/// search engine.
+const OPENSEARCH_LINK: &str = "<link rel=\"search\" \
+     type=\"application/opensearchdescription+xml\" title=\"Plumb Search\" \
+     href=\"/opensearch.xml\">\n";
 
 /// Answers queries for the web handlers. [`IndexBackend`] is the real one;
 /// tests can plug in their own.
@@ -127,7 +139,8 @@ fn app(state: AppState) -> Router {
     let mut router = Router::new()
         .route("/", get(home))
         .route("/search", get(search_page))
-        .route("/api/search", get(api_search));
+        .route("/api/search", get(api_search))
+        .route("/opensearch.xml", get(opensearch));
     if state.node.is_some() {
         router = router.route("/api/status", get(api_status));
     }
@@ -297,6 +310,87 @@ async fn api_status(State(state): State<AppState>) -> Response {
         .into_response()
 }
 
+/// `GET /opensearch.xml`: the OpenSearch description browsers add Plumb
+/// from. Its search URL is on the host the request was sent to, so it is
+/// right however the server is reached: `127.0.0.1:8080`, the desktop app's
+/// port or a server's name on the LAN.
+async fn opensearch(headers: HeaderMap, uri: Uri) -> Response {
+    let Some(origin) = request_origin(&headers, &uri) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            security_headers(),
+            "The Host header is missing or is not a host name and port.\n",
+        )
+            .into_response();
+    };
+    (
+        StatusCode::OK,
+        security_headers(),
+        [(header::CONTENT_TYPE, OPENSEARCH_TYPE)],
+        render_opensearch(&origin),
+    )
+        .into_response()
+}
+
+/// The origin a request was sent to, such as `http://127.0.0.1:7586`: the
+/// `Host` header (or, without one, the request's authority, as in HTTP/2),
+/// with `https` when a proxy in front says so in `X-Forwarded-Proto`. `None`
+/// unless the host is a plain host name or address with an optional port.
+fn request_origin(headers: &HeaderMap, uri: &Uri) -> Option<String> {
+    let host = match headers.get(header::HOST) {
+        Some(host) => host.to_str().ok()?,
+        None => uri.authority()?.as_str(),
+    };
+    let https = headers
+        .get("x-forwarded-proto")
+        .and_then(|proto| proto.to_str().ok())
+        .and_then(|proto| proto.split(',').next())
+        .is_some_and(|proto| proto.trim().eq_ignore_ascii_case("https"));
+    let scheme = if https { "https" } else { "http" };
+    let url = Url::parse(&format!("{scheme}://{host}/")).ok()?;
+    let plain = url.username().is_empty()
+        && url.password().is_none()
+        && url.host().is_some()
+        && url.path() == "/"
+        && url.query().is_none()
+        && url.fragment().is_none();
+    plain.then(|| url.origin().ascii_serialization())
+}
+
+/// The OpenSearch 1.1 description of the search engine at `origin`.
+fn render_opensearch(origin: &str) -> String {
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+         <OpenSearchDescription xmlns=\"http://a9.com/-/spec/opensearch/1.1/\">\n\
+         <ShortName>Plumb Search</ShortName>\n\
+         <Description>Find a site by its name.</Description>\n\
+         <InputEncoding>UTF-8</InputEncoding>\n\
+         <Image width=\"32\" height=\"32\" type=\"image/png\">\
+         data:image/png;base64,{ICON_PNG_BASE64}</Image>\n\
+         <Url type=\"text/html\" method=\"get\" template=\"{}/search?q={{searchTerms}}\"/>\n\
+         </OpenSearchDescription>\n",
+        escape_html(origin)
+    )
+}
+
+/// The desktop app's icon (`crates/plumb-desktop/icons/32x32.png`, cut to
+/// 255 colors), for the OpenSearch description.
+const ICON_PNG_BASE64: &str = "\
+iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAMAAABEpIrGAAABjFBMVEX///8sWZ4oVpw3Y6Tk6fIqV5suX6osWqEpVpk4\
+ZKbo7vcoVJUmU5g2YKDj6fEmUZIoVZg1XpwjTIrj6O/m8f9YZXjYyLDYyK8oUY4mUJAZSZMqToa1dBeybgskTYsYRoxJ\
+Z429sYTaq03YpkjapUW4oWhHYoZoe4z/3YL/5IT846T90Gj5zGT9yVbzvEtkb3ccSIz536H31YP0xFn0wVLvvFDyuUTw\
+tT5HXn0iSochSYUXRIj/4nv325L63pz50nrttUT4tzixklA5WYP913bxt0HusTvrrjjhpzg2UnseRH0WQYNWa4LmqTXp\
+qzVPX3EgRoH2y2nipDPkoizanTAdRYEdQnu/qG7/0F/poymphEMhRXsSPoFOYnjeoDHhnSlLWm0cQnoOOoCWiWX/xkmG\
+c0/BjjUcQHYQO31YYmhRWWMXOm4OOXqehU/3tjbnoCeSd0cYOm0aPXIVO3QnRXDUnTjenSzJkDANN3hfYFzhnCdbXFkZ\
+PHAZPHENN3aogTynfzsxR2kxSGkXOW3LNf1CAAAAAXRSTlMAQObYZgAAAeZJREFUOMutk+tf0lAYxyWVTY9yxEshKnir\
+CJFQpiTWkDSnTuYEd0pnmHmZilaAmhleyn/c7dwge+vv1fN8f9+dz3lxVlf3SHG5nuDUNzTUk8nlqqkb3QKJ2NTc3CTS\
+xd1Y7QEQcVpaPZ7WFjIDwA03FMX/BVGEbtK3CYALXo/HywUgtGGh3T6NBno7OryQr2I7EQBHUOjsFKob4AINgF1Pn3X5\
+IN+pALsp8Pf09vX19vip0g2ZEMDxBfsHBoeGh5+/8PsIYQLrX4ZehUMjkdHoaz9BgX+EWH8oNBYej0sTk4k3sVphKpB0\
+lumBt+/CckqSojPp90GHJANTTLATmx2fk2U5IkU/zCsLizGHUWHJmZPq8lxKHktJ0cmEktFWghguUUEnwmoK9/NaNrcy\
+bSO9KthRZ1cjcdwrmezaouEwJujIsHf146c4vkAmu76hmrphIJ0KBrJjbn4epX1+64tqOswgwjbCMb/u7M4kFC2bX9/b\
+NAnbrhVsZTCtaJl8bt9khAmWs1jmwWFasy+4dXRgEkKFArJojk++5de+/zhmOypgoYhKJFb59Cx3/vO0bFGAiuRRMqFk\
+XfzKXf6+YH0J0VddQVcMXd/cXrP5ClXYj1Hh35T//C3z83jv3KNw9yCF4mP91vcYNadv9VISrAAAAABJRU5ErkJggg==";
+
 /// Runs a search on the blocking thread pool, since searching is CPU and
 /// disk work. A panicking backend becomes an error, not a dropped connection.
 async fn run_search(state: &AppState, query: &str, limit: usize) -> Result<Vec<Hit>> {
@@ -453,7 +547,7 @@ fn page_with_head(title: &str, head: &str, body: &str) -> String {
     format!(
         "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
-         <meta name=\"referrer\" content=\"no-referrer\">\n{head}\
+         <meta name=\"referrer\" content=\"no-referrer\">\n{OPENSEARCH_LINK}{head}\
          <title>{}</title>\n<style>{STYLE}</style>\n</head>\n<body>\n{body}\n</body>\n</html>\n",
         escape_html(title)
     )
@@ -702,8 +796,22 @@ mod tests {
     }
 
     async fn send(app: Router, uri: &str) -> (StatusCode, HeaderMap, String) {
-        let request = Request::builder().uri(uri).body(Body::empty()).unwrap();
-        let response = app.oneshot(request).await.unwrap();
+        send_with_headers(app, uri, &[]).await
+    }
+
+    async fn send_with_headers(
+        app: Router,
+        uri: &str,
+        headers: &[(&str, &str)],
+    ) -> (StatusCode, HeaderMap, String) {
+        let mut request = Request::builder().uri(uri);
+        for (name, value) in headers {
+            request = request.header(*name, *value);
+        }
+        let response = app
+            .oneshot(request.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
         let status = response.status();
         let headers = response.headers().clone();
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
@@ -1158,6 +1266,149 @@ mod tests {
         assert_eq!(time_until(now + 600, now), "in 10 minutes");
         assert_eq!(time_until(now, now), "any moment now");
         assert_eq!(time_until(now - 60, now), "any moment now");
+    }
+
+    /// Whether `body` links to the OpenSearch description from its `<head>`.
+    fn links_to_opensearch(body: &str) -> bool {
+        let link = "<link rel=\"search\" type=\"application/opensearchdescription+xml\" \
+                    title=\"Plumb Search\" href=\"/opensearch.xml\">";
+        match (body.find(link), body.find("</head>")) {
+            (Some(link), Some(head_end)) => link < head_end,
+            _ => false,
+        }
+    }
+
+    #[tokio::test]
+    async fn every_page_links_to_the_opensearch_description() {
+        for uri in ["/", "/search?q=us+bank"] {
+            let (_, headers, body) = get(backend(bank_hits()), uri).await;
+            assert!(links_to_opensearch(&body), "{uri}: {body}");
+            // The link loads nothing into the page, so the policy stays as strict.
+            assert_eq!(
+                headers[header::CONTENT_SECURITY_POLICY],
+                CONTENT_SECURITY_POLICY
+            );
+        }
+        let failing = Arc::new(FakeBackend {
+            fail: true,
+            ..FakeBackend::default()
+        });
+        let (_, _, body) = get(failing, "/search?q=x").await;
+        assert!(links_to_opensearch(&body), "{body}");
+        let setting_up = node(node_status(Phase::SettingUp, Step::Downloading));
+        let (_, _, body) = send(node_router(backend(Vec::new()), setting_up), "/").await;
+        assert!(body.contains("<title>Setting up - Plumb Search</title>"));
+        assert!(links_to_opensearch(&body), "{body}");
+    }
+
+    async fn opensearch_for(
+        app: Router,
+        headers: &[(&str, &str)],
+    ) -> (StatusCode, HeaderMap, String) {
+        send_with_headers(app, "/opensearch.xml", headers).await
+    }
+
+    #[tokio::test]
+    async fn the_opensearch_description_describes_plumb() {
+        let (code, headers, body) =
+            opensearch_for(router(backend(Vec::new())), &[("host", "127.0.0.1:7586")]).await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(
+            headers[header::CONTENT_TYPE],
+            "application/opensearchdescription+xml"
+        );
+        assert_eq!(headers[header::X_CONTENT_TYPE_OPTIONS], "nosniff");
+        assert!(
+            body.starts_with(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+                 <OpenSearchDescription xmlns=\"http://a9.com/-/spec/opensearch/1.1/\">\n"
+            ),
+            "{body}"
+        );
+        for expected in [
+            "\n<ShortName>Plumb Search</ShortName>\n",
+            "\n<Description>Find a site by its name.</Description>\n",
+            "\n<InputEncoding>UTF-8</InputEncoding>\n",
+            // A PNG starts with these bytes, in base64.
+            "\n<Image width=\"32\" height=\"32\" type=\"image/png\">\
+             data:image/png;base64,iVBORw0KGgo",
+            "\n<Url type=\"text/html\" method=\"get\" \
+             template=\"http://127.0.0.1:7586/search?q={searchTerms}\"/>\n",
+        ] {
+            assert!(body.contains(expected), "no {expected:?} in {body}");
+        }
+        assert!(body.ends_with("</OpenSearchDescription>\n"), "{body}");
+        let base64 = body.split("base64,").nth(1).unwrap();
+        let base64 = &base64[..base64.find('<').unwrap()];
+        assert!(base64
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"+/=".contains(&b)));
+    }
+
+    #[tokio::test]
+    async fn the_opensearch_description_searches_the_host_it_was_asked_from() {
+        let cases: [(&[(&str, &str)], &str); 6] = [
+            (&[("host", "127.0.0.1:8080")], "http://127.0.0.1:8080"),
+            (&[("host", "Plumb.LAN:8080")], "http://plumb.lan:8080"),
+            (&[("host", "192.168.1.20")], "http://192.168.1.20"),
+            (&[("host", "[::1]:7586")], "http://[::1]:7586"),
+            (&[("host", "localhost:80")], "http://localhost"),
+            (
+                &[
+                    ("host", "search.example.org"),
+                    ("x-forwarded-proto", "https, http"),
+                ],
+                "https://search.example.org",
+            ),
+        ];
+        for (headers, origin) in cases {
+            let (code, _, body) = opensearch_for(router(backend(Vec::new())), headers).await;
+            assert_eq!(code, StatusCode::OK, "{headers:?}");
+            let template = format!("template=\"{origin}/search?q={{searchTerms}}\"");
+            assert!(
+                body.contains(&template),
+                "{headers:?}: no {template} in {body}"
+            );
+        }
+
+        // A node serves it too, even before its index is ready.
+        let setting_up = node(node_status(Phase::SettingUp, Step::Downloading));
+        let app = node_router(backend(Vec::new()), setting_up);
+        let (code, _, body) = opensearch_for(app, &[("host", "127.0.0.1:7586")]).await;
+        assert_eq!(code, StatusCode::OK);
+        assert!(body.contains("template=\"http://127.0.0.1:7586/search?q={searchTerms}\""));
+    }
+
+    #[tokio::test]
+    async fn the_opensearch_description_needs_a_plain_host() {
+        for host in [
+            "",
+            "user@example.com",
+            "example.com/path",
+            "example.com?q=1",
+            "example.com#top",
+            "exa mple.com",
+            "example.com:99999",
+            "\"><script>alert(1)</script>",
+        ] {
+            let (code, _, body) =
+                opensearch_for(router(backend(Vec::new())), &[("host", host)]).await;
+            assert_eq!(code, StatusCode::BAD_REQUEST, "{host:?}: {body}");
+            assert!(!body.contains("<script"), "{body}");
+        }
+        let (code, _, _) = opensearch_for(router(backend(Vec::new())), &[]).await;
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn the_opensearch_description_escapes_the_host() {
+        let body = render_opensearch("http://a&b'c\"d<e>.example");
+        assert!(
+            body.contains(
+                "template=\"http://a&amp;b&#39;c&quot;d&lt;e&gt;.example/search?q={searchTerms}\""
+            ),
+            "{body}"
+        );
     }
 
     #[test]

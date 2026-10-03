@@ -51,6 +51,20 @@ to the machine itself, for example behind a reverse proxy, publish it as
 `http://<server>:8080/api/status` reports what the node is doing as JSON
 (`phase` is `setting_up` or `ready`), which suits uptime monitors.
 
+## Use Plumb as your browser's search engine
+
+Plumb's pages offer it to the browser as a search engine. In Firefox, open
+the Plumb page, right-click the address bar and choose **Add "Plumb
+Search"**. Chrome lists it under **Settings > Search engine > Manage search
+engines and site search** as an inactive shortcut once you have opened the
+page; activate it there. Any browser can also take it by hand, with the
+address `http://<server>:8080/search?q=%s` (`http://127.0.0.1:8080/search?q=%s`
+on the same machine).
+
+The search address the page offers is made from the address the browser
+reached Plumb at. Behind a reverse proxy, pass on the original `Host` header,
+and set `X-Forwarded-Proto: https` when the proxy serves HTTPS.
+
 ## Where the data lives
 
 Everything is in the named volume `plumb-data`, mounted at `/data`:

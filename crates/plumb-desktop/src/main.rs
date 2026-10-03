@@ -14,6 +14,7 @@
 
 mod logging;
 
+use std::net::{SocketAddr, TcpListener};
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::Duration;
@@ -29,6 +30,11 @@ use tracing::{debug, error, info, warn};
 
 /// Label of the app's one window.
 const MAIN_WINDOW: &str = "main";
+
+/// The port the node listens on, so that its address stays the same from
+/// one launch to the next, and with it a browser search engine set up as
+/// `http://127.0.0.1:7586/search?q=%s`. 7586 spells PLUM on a phone keypad.
+const PORT: u16 = 7586;
 
 /// How long the node gets to stop when the app quits, before the app exits
 /// anyway. Stopping finishes an index build already under way, which takes
@@ -178,6 +184,9 @@ async fn start_node(app: AppHandle) -> Option<NodeHandle> {
             if let Err(err) = show_node_page(&app, &node) {
                 error!("could not show the node's page: {err:#}");
             }
+            if node.addr().port() != PORT {
+                report_other_port(&app, node.addr().port());
+            }
             Some(node)
         }
         Err(err) => {
@@ -196,7 +205,43 @@ async fn launch_node(app: AppHandle) -> Result<NodeHandle> {
     std::fs::create_dir_all(&data_dir)
         .with_context(|| format!("creating the data folder {}", data_dir.display()))?;
     info!("data folder: {}", data_dir.display());
-    node::start(NodeConfig::desktop(data_dir)).await
+    let mut config = NodeConfig::desktop(data_dir);
+    config.bind.set_port(PORT);
+    match node::start(config.clone()).await {
+        // Something else has the port; the window works on any port.
+        Err(err) if !can_listen_on(config.bind) => {
+            warn!("cannot listen on port {PORT}, so using a free port instead: {err:#}");
+            config.bind.set_port(0);
+            node::start(config).await
+        }
+        started => started,
+    }
+}
+
+/// Whether a server could listen on `addr` now.
+fn can_listen_on(addr: SocketAddr) -> bool {
+    TcpListener::bind(addr).is_ok()
+}
+
+/// Tells the user that the node is not on [`PORT`] this time, so a browser
+/// search engine set up for Plumb Search cannot reach it.
+fn report_other_port(app: &AppHandle, port: u16) {
+    let message = format!(
+        "Port {PORT} is taken, probably by another program, so Plumb Search is using \
+         port {port} this time.\n\n\
+         A browser search engine set up with http://127.0.0.1:{PORT} cannot reach Plumb \
+         Search until that port is free and Plumb Search is started again."
+    );
+    let mut dialog = app
+        .dialog()
+        .message(message)
+        .title("Plumb Search")
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::Ok);
+    if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
+        dialog = dialog.parent(&window);
+    }
+    dialog.show(|_| {});
 }
 
 fn show_node_page(app: &AppHandle, node: &NodeHandle) -> Result<()> {
@@ -543,6 +588,15 @@ mod tests {
                  Data folder: {folder}"
             )
         );
+    }
+
+    #[test]
+    fn a_port_in_use_cannot_be_listened_on() {
+        let taken = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = taken.local_addr().unwrap();
+        assert!(!can_listen_on(addr));
+        drop(taken);
+        assert!(can_listen_on(addr));
     }
 
     #[test]
