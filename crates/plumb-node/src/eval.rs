@@ -14,6 +14,7 @@ use plumb_index::{SearchOptions, Searcher};
 use tracing::info;
 
 use crate::cli::EvalArgs;
+use crate::meaning::MeaningIndex;
 use crate::rank_config;
 
 /// One query of a queries file.
@@ -145,6 +146,7 @@ pub fn run(args: EvalArgs) -> Result<()> {
     let searcher = Searcher::open(&args.index)
         .with_context(|| format!("opening the index in {}", args.index.display()))?;
     let cfg = rank_config(args.alpha);
+    let meaning = MeaningIndex::from_args(&args.meaning)?;
     info!(
         "evaluating {} queries against {} sites (alpha {})",
         queries.len(),
@@ -158,8 +160,17 @@ pub fn run(args: EvalArgs) -> Result<()> {
             country: args.country.clone(),
             only_country: false,
         };
+        let query_meaning = meaning.as_ref().and_then(|meaning| meaning.query(&q.query));
         let hits = searcher
-            .search_full(&q.query, args.limit, &cfg, &options)
+            .search_meaning(
+                &q.query,
+                args.limit,
+                &cfg,
+                &options,
+                query_meaning
+                    .as_ref()
+                    .map(|m| m as &dyn plumb_index::Meaning),
+            )
             .with_context(|| format!("searching for {:?}", q.query))?
             .hits;
         let domains: Vec<&str> = hits.iter().map(|h| h.domain.as_str()).collect();
