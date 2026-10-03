@@ -273,6 +273,7 @@ fn merge_site(existing: &mut FoundSite, other: FoundSite) {
         tranco_rank: worse_rank(a.tranco_rank, b.tranco_rank),
         linking_domains: a.linking_domains.min(b.linking_domains),
         official_site: a.official_site && b.official_site,
+        sitelinks: a.sitelinks.min(b.sitelinks),
     };
     let signals = worse(existing.record.signals.clone(), &other.record.signals);
     if other.verified && !existing.verified {

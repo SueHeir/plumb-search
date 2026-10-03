@@ -12,7 +12,8 @@ use std::time::{Duration, Instant};
 use plumb_core::{now_unix, read_jsonl, write_jsonl, SiteRecord};
 use plumb_index::Hit;
 use plumb_ingest::{
-    load_cc_domain_ranks, load_tranco, load_wikidata_official_sites, parse_wat, Builder, WatExtract,
+    kind_sites, load_cc_domain_ranks, load_tranco, load_wikidata_official_sites, parse_wat,
+    Builder, WatExtract,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -703,10 +704,11 @@ async fn sets_up_from_the_seed_data_and_retries_after_a_failure() {
     // the time out.
     let counts = host.counts();
     assert_eq!(counts["GET /tranco.csv"], 2, "{counts:?}");
-    // Then twice for the countries and kinds of the official websites.
+    // Then once per kind of organization, and once for the facts of the
+    // official websites.
     assert_eq!(
         counts["POST /sparql"],
-        download::wikidata_sitelink_bands(25).len() + 1 + 1,
+        download::wikidata_sitelink_bands(25).len() + 1 + kind_sites::KIND_LABELS.len() + 1,
         "{counts:?}"
     );
     assert_eq!(counts["GET /graph/x-domain-ranks.txt.gz"], 1, "{counts:?}");
@@ -717,6 +719,7 @@ async fn sets_up_from_the_seed_data_and_retries_after_a_failure() {
         names(&seed),
         [
             "tranco-top-1m.csv.zip",
+            "wikidata-kind-sites.tsv",
             "wikidata-official-sites.tsv",
             "wikidata-site-facts.tsv",
             "x-domain-ranks-top50.txt"
@@ -985,7 +988,18 @@ async fn a_node_in_the_network_takes_in_other_nodes_crawls_and_searches_them() {
     assert_eq!(code, 200);
     assert!(body.contains("Lighthouse Keepers Guild"), "{body}");
     let (_, _, body) = get(addr, "/search?q=us+bank").await;
-    assert!(body.contains("href=\"/network?q=us+bank\""), "{body}");
+    assert!(body.contains("name=\"net\" value=\"1\">"), "{body}");
+    assert!(body.contains("href=\"/search?q=us+bank"), "{body}");
+    // With the network setting on, the peer's site joins this node's, tinted.
+    let (code, _, body) = get(addr, "/search?q=lighthouse&net=1").await;
+    assert_eq!(code, 200);
+    assert!(body.contains("name=\"net\" value=\"1\" checked>"), "{body}");
+    assert!(
+        body.contains("From this site's index and the Plumb network"),
+        "{body}"
+    );
+    assert!(body.contains("<li class=\"net\">"), "{body}");
+    assert!(body.contains("Lighthouse Keepers Guild"), "{body}");
 
     // And the other way round: the node serves the buckets of its index.
     assert!(dir
