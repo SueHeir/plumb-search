@@ -22,10 +22,9 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use futures::StreamExt;
-use libp2p::identity::Keypair;
 use libp2p::request_response::{self, ProtocolSupport};
 use libp2p::swarm::{NetworkBehaviour, SwarmEvent};
-use libp2p::{noise, relay, tcp, yamux, Multiaddr, PeerId, StreamProtocol};
+use libp2p::{relay, Multiaddr, PeerId, StreamProtocol};
 use plumb_core::{canonical_domain, registrable_domain, Signals, SiteRecord};
 use rand_core::RngCore;
 use serde::{Deserialize, Serialize};
@@ -300,46 +299,30 @@ struct Fetcher {
 
 /// A swarm under a new identity, made for one request and dropped after.
 fn throwaway(wait: Duration) -> Result<libp2p::Swarm<Fetcher>> {
-    let key = Keypair::generate_ed25519();
     let config = request_response::Config::default().with_request_timeout(wait);
-    Ok(libp2p::SwarmBuilder::with_existing_identity(key)
-        .with_tokio()
-        .with_tcp(
-            tcp::Config::default().nodelay(true),
-            noise::Config::new,
-            yamux::Config::default,
-        )
-        .context("setting up TCP")?
-        .with_quic()
-        .with_dns()
-        .context("setting up DNS")?
-        .with_relay_client(noise::Config::new, yamux::Config::default)
-        .context("setting up the relay client")?
-        .with_behaviour(|_, relay_client| Fetcher {
-            relay_client,
-            buckets: request_response::Behaviour::with_codec(
-                request_response::cbor::codec::Codec::default()
-                    .set_request_size_maximum(1024)
-                    .set_response_size_maximum(64 * 1024 * 1024),
-                [(
-                    StreamProtocol::new(BUCKET_PROTOCOL),
-                    ProtocolSupport::Outbound,
-                )],
-                config.clone(),
-            ),
-            oblivious: request_response::Behaviour::with_codec(
-                request_response::cbor::codec::Codec::default()
-                    .set_request_size_maximum(4 * 1024)
-                    .set_response_size_maximum(MAX_MESSAGE as u64 + 1024),
-                [(
-                    StreamProtocol::new(OBLIVIOUS_PROTOCOL),
-                    ProtocolSupport::Outbound,
-                )],
-                config,
-            ),
-        })
-        .map_err(|err| anyhow::anyhow!("setting up a throwaway swarm: {err}"))?
-        .build())
+    crate::throwaway::swarm(|relay_client| Fetcher {
+        relay_client,
+        buckets: request_response::Behaviour::with_codec(
+            request_response::cbor::codec::Codec::default()
+                .set_request_size_maximum(1024)
+                .set_response_size_maximum(64 * 1024 * 1024),
+            [(
+                StreamProtocol::new(BUCKET_PROTOCOL),
+                ProtocolSupport::Outbound,
+            )],
+            config.clone(),
+        ),
+        oblivious: request_response::Behaviour::with_codec(
+            request_response::cbor::codec::Codec::default()
+                .set_request_size_maximum(4 * 1024)
+                .set_response_size_maximum(MAX_MESSAGE as u64 + 1024),
+            [(
+                StreamProtocol::new(OBLIVIOUS_PROTOCOL),
+                ProtocolSupport::Outbound,
+            )],
+            config,
+        ),
+    })
 }
 
 /// Asks `peer` for `bucket` under a new identity, on a swarm made for this
@@ -458,7 +441,7 @@ async fn ask(
     }
 }
 
-fn shuffle<T>(items: &mut [T]) {
+pub(crate) fn shuffle<T>(items: &mut [T]) {
     let mut rng = rand_core::OsRng;
     for i in (1..items.len()).rev() {
         let j = (rng.next_u64() % (i as u64 + 1)) as usize;

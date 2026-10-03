@@ -14,6 +14,13 @@
 //!   `indexes/NNNNNN/buckets/` ([`build_buckets`]), and bucket requests are
 //!   answered from the index being served. An index built before the node
 //!   joined has none, and serves no buckets until the next build.
+//! * Popularity (see `plumb_net::popularity`): every node in the network
+//!   ranks with what the reports it holds say people pick for a query
+//!   ([`apply_popularity`]). A node started with
+//!   [`NodeConfig::share_popularity`](super::NodeConfig::share_popularity)
+//!   also notes which result its web page's users open ([`record_pick`])
+//!   and sends a few reports of those picks a day, at random times
+//!   ([`report_picks`]).
 //!
 //! ```text
 //! DIR/net/
@@ -21,6 +28,9 @@
 //!   batches/           signed batches held (see plumb_net::store)
 //!   inbox.jsonl        records from other nodes not yet folded in
 //!   inbox.absorbing    the inbox being folded in
+//!   reports/           popularity reports of this week and last week
+//!   popularity.json    what they say, as last counted
+//!   picks.json         results opened here this week (sharing nodes only)
 //! ```
 
 use std::fs::{self, File, OpenOptions};
@@ -29,10 +39,14 @@ use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
+use std::time::Duration;
+
 use anyhow::{Context, Result};
-use plumb_core::SiteRecord;
-use plumb_net::{BucketSource, BucketTable, NetHandle};
-use tracing::{info, warn};
+use plumb_core::{now_unix, SiteRecord};
+use plumb_index::Hit;
+use plumb_net::popularity::report_epoch;
+use plumb_net::{BucketSource, BucketTable, NetHandle, PickLog, PopularityTable, Report};
+use tracing::{debug, info, warn};
 
 use super::Inner;
 use crate::records::{load_records, Change, RecordStore};
@@ -43,6 +57,20 @@ pub(crate) const REBUILD_AFTER_RECORDS: u64 = 2_000;
 
 /// Where an index keeps its buckets, inside its directory.
 pub(super) const BUCKETS_DIR: &str = "buckets";
+
+/// Results a search ranks before popularity re-orders them, so that a
+/// popular site just below the page can still move onto it.
+pub(super) const POPULARITY_CANDIDATES: usize = 20;
+
+/// The shortest and longest wait between two tries at sending a report.
+/// Random, so the time a report goes out says little about when the pick
+/// was made.
+const REPORT_GAP_MINUTES: std::ops::Range<u64> = 20..100;
+
+/// How long a node handed a report has to take it.
+const REPORT_WAIT: Duration = Duration::from_secs(20);
+
+const PICKS_FILE: &str = "picks.json";
 
 /// Answers other nodes' bucket requests from the index this node serves.
 struct ServedIndex(Arc<Inner>);
@@ -95,6 +123,15 @@ pub(super) async fn start(inner: &Arc<Inner>) -> Result<()> {
         .context("joining the Plumb network")?;
     info!("joined the Plumb network as {}", handle.peer_id());
     let _ = inner.net.set(Arc::new(handle));
+    if inner.config.share_popularity {
+        let picks = PickLog::open(&inner.paths.net.join(PICKS_FILE));
+        *inner
+            .picks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(picks);
+        info!("sharing popularity: results opened here are reported anonymously");
+        tokio::spawn(report_picks(inner.clone()));
+    }
     let receiver = inner.clone();
     tokio::spawn(async move {
         while let Some(batch) = records.recv().await {
@@ -128,6 +165,105 @@ pub(super) async fn stop(inner: &Inner) {
 
 pub(super) fn handle(inner: &Inner) -> Option<&Arc<NetHandle>> {
     inner.net.get()
+}
+
+/// Whether the node notes and reports the results opened on its page.
+pub(super) fn shares_popularity(inner: &Inner) -> bool {
+    inner
+        .picks
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .is_some()
+}
+
+/// Notes that `domain` was opened from the results for `query`, when the
+/// node shares popularity. Queries that are never reported (see
+/// `plumb_net::popularity::pick_query`) are not kept.
+pub(super) fn record_pick(inner: &Inner, query: &str, domain: &str) {
+    let mut picks = inner
+        .picks
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(picks) = picks.as_mut() {
+        if let Err(err) = picks.record(query, domain, now_unix()) {
+            warn!("cannot note a pick: {err:#}");
+        }
+    }
+}
+
+/// Adds each hit's popularity bonus to its score and sorts again. The
+/// order of hits with equal scores is kept.
+pub(super) fn apply_popularity(table: &PopularityTable, query: &str, hits: &mut [Hit]) {
+    if table.is_empty() {
+        return;
+    }
+    let mut changed = false;
+    for hit in hits.iter_mut() {
+        let bonus = table.bonus(query, &hit.domain);
+        if bonus > 0.0 {
+            hit.score += bonus;
+            changed = true;
+        }
+    }
+    if changed {
+        hits.sort_by(|a, b| b.score.total_cmp(&a.score));
+    }
+}
+
+/// Sends the reports of this week's picks, one at a time at random
+/// intervals, as many a day as `plumb_net::popularity::REPORTS_PER_DAY`
+/// allows, until the node stops.
+async fn report_picks(inner: Arc<Inner>) {
+    loop {
+        let minutes = random_in(REPORT_GAP_MINUTES);
+        tokio::select! {
+            () = inner.stopped() => return,
+            () = tokio::time::sleep(Duration::from_secs(minutes * 60)) => {}
+        }
+        if let Err(err) = report_one(&inner).await {
+            debug!("no popularity report sent this time: {err:#}");
+        }
+    }
+}
+
+/// A number in `range`, unpredictable enough to spread reports out.
+fn random_in(range: std::ops::Range<u64>) -> u64 {
+    use std::hash::BuildHasher;
+    let random = std::collections::hash_map::RandomState::new().hash_one(now_unix());
+    range.start + random % (range.end - range.start)
+}
+
+/// Sends the report of the pick due next, if any.
+pub(super) async fn report_one(inner: &Inner) -> Result<bool> {
+    let Some(net) = handle(inner) else {
+        return Ok(false);
+    };
+    let now = now_unix();
+    let due = inner
+        .picks
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_mut()
+        .and_then(|picks| picks.next_due(now));
+    let Some((query, domain)) = due else {
+        return Ok(false);
+    };
+    let report = tokio::task::spawn_blocking({
+        let (query, domain) = (query.clone(), domain.clone());
+        move || Report::new(report_epoch(now), &query, &domain)
+    })
+    .await
+    .context("the report task failed")??;
+    net.send_report(&report, REPORT_WAIT).await?;
+    if let Some(picks) = inner
+        .picks
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_mut()
+    {
+        picks.sent(&query, &domain, now)?;
+    }
+    Ok(true)
 }
 
 fn append_inbox(inner: &Inner, records: &[SiteRecord]) -> Result<()> {
@@ -199,4 +335,55 @@ pub(super) fn absorb_inbox(inner: &Inner) -> Result<u64> {
         info!("folded {n} records from the network into the records file");
     }
     Ok(n)
+}
+
+#[cfg(test)]
+mod tests {
+    use plumb_net::popularity::{Popular, MAX_POPULARITY_BONUS};
+
+    use super::*;
+
+    fn hit(domain: &str, score: f32) -> Hit {
+        Hit {
+            domain: domain.to_string(),
+            url: format!("https://{domain}/"),
+            title: None,
+            description: None,
+            score,
+            text_score: 0.5,
+            link_score: 0.5,
+            country: None,
+        }
+    }
+
+    #[test]
+    fn popular_picks_move_up_a_close_call_but_not_past_a_clear_winner() {
+        let table = PopularityTable::new(
+            vec![1],
+            [Popular {
+                query: "delta".into(),
+                domain: "delta.com".into(),
+                count: 40,
+            }],
+        );
+        let mut hits = vec![
+            hit("deltafaucet.com", 1.30),
+            hit("delta.com", 1.20),
+            hit("delta.org", 1.19),
+        ];
+        apply_popularity(&table, "Delta", &mut hits);
+        let order: Vec<&str> = hits.iter().map(|h| h.domain.as_str()).collect();
+        assert_eq!(order, ["delta.com", "deltafaucet.com", "delta.org"]);
+        assert!((hits[0].score - (1.20 + MAX_POPULARITY_BONUS)).abs() < 1e-6);
+
+        let mut clear = vec![hit("deltafaucet.com", 2.0), hit("delta.com", 1.0)];
+        apply_popularity(&table, "delta", &mut clear);
+        assert_eq!(clear[0].domain, "deltafaucet.com");
+
+        // Other queries are left alone.
+        let mut other = vec![hit("delta.org", 1.0), hit("delta.com", 0.9)];
+        apply_popularity(&table, "delta airlines", &mut other);
+        assert_eq!(other[0].domain, "delta.org");
+        assert_eq!(other[1].score, 0.9);
+    }
 }

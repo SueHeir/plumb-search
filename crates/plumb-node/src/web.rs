@@ -35,6 +35,13 @@
 //! and a node that has not joined the network shows the setting turned off
 //! and says why.
 //!
+//! A node that shares popularity (`plumb run --share-popularity`) links its
+//! results through `GET /go?q=&d=`, which notes that the site `d` was
+//! picked for the query ([`StatusSource::record_pick`]) and redirects to
+//! it. It redirects only to a site the same search returns, so it cannot
+//! be used to send people elsewhere, and its result pages say that picks
+//! are shared.
+//!
 //! Titles, descriptions and URLs in the index come from the open web, so
 //! every piece of record text is HTML-escaped, only `http`/`https` URLs
 //! become links, and pages are served with a Content-Security-Policy that
@@ -200,6 +207,15 @@ pub trait StatusSource: Send + Sync {
     fn rank(&self) -> RankConfig {
         RankConfig::default()
     }
+    /// Whether the node notes which result is opened for a search and
+    /// reports it anonymously; its result links then go through `/go`.
+    fn shares_popularity(&self) -> bool {
+        false
+    }
+    /// Notes that `domain` was opened from the results for `query`.
+    fn record_pick(&self, query: &str, domain: &str) {
+        let _ = (query, domain);
+    }
 
     /// The node's settings; `None` when it has none.
     fn settings(&self) -> Option<NodeSettings> {
@@ -239,6 +255,12 @@ impl AppState {
 
     fn network(&self) -> Option<Arc<NetHandle>> {
         self.node.as_ref()?.network()
+    }
+
+    fn shares_popularity(&self) -> bool {
+        self.node
+            .as_ref()
+            .is_some_and(|node| node.shares_popularity())
     }
 }
 
@@ -285,6 +307,7 @@ fn app(state: AppState) -> Router {
     if state.node.is_some() {
         router = router
             .route("/api/status", get(api_status))
+            .route("/go", get(go))
             .route("/network", get(network_page))
             .route("/api/network/search", get(api_network_search))
             .route("/app", get(panel::panel))
@@ -524,6 +547,7 @@ async fn search_page(
                 &settings,
                 state.settings.web_search,
                 limit,
+                state.shares_popularity(),
             ),
         ),
         Err(err) => {
@@ -582,6 +606,74 @@ async fn api_search(
                 .into_response()
         }
     }
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct GoParams {
+    #[serde(default)]
+    q: String,
+    /// The domain picked.
+    #[serde(default)]
+    d: String,
+    country: Option<String>,
+    only: Option<String>,
+}
+
+/// `GET /go?q=&d=`: notes that `d` was picked for the query, when the node
+/// shares popularity, and redirects to it. Only a site the same search
+/// returns is redirected to; anything else goes back to the results.
+async fn go(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(params): Query<GoParams>,
+) -> Response {
+    let search = SearchParams {
+        q: params.q,
+        limit: Some(MAX_LIMIT),
+        country: params.country,
+        only: params.only,
+        full: None,
+        net: None,
+    };
+    let query = search.query();
+    let back = {
+        let encoded: String = url::form_urlencoded::byte_serialize(query.as_bytes()).collect();
+        format!("/search?q={encoded}")
+    };
+    let found = if query.is_empty() || state.setting_up().is_some() {
+        None
+    } else {
+        let options = search.options(&state.settings.home, &headers);
+        match run_search(&state, &query, MAX_LIMIT, &options).await {
+            Ok(results) => results.hits.into_iter().find(|hit| hit.domain == params.d),
+            Err(err) => {
+                error!("search for {query:?} failed: {err:#}");
+                None
+            }
+        }
+    };
+    let Some((hit, href)) = found.and_then(|hit| safe_href(&hit).map(|href| (hit, href))) else {
+        return redirect(&back);
+    };
+    if state.shares_popularity() {
+        if let Some(node) = state.node.clone() {
+            let _ =
+                tokio::task::spawn_blocking(move || node.record_pick(&query, &hit.domain)).await;
+        }
+    }
+    redirect(&href)
+}
+
+fn redirect(location: &str) -> Response {
+    (
+        StatusCode::SEE_OTHER,
+        security_headers(),
+        [
+            (header::LOCATION, location.to_string()),
+            (header::CACHE_CONTROL, "no-store".to_string()),
+        ],
+    )
+        .into_response()
 }
 
 /// `GET /network?q=`: only what other nodes answer, for a node in the network.
@@ -1350,6 +1442,7 @@ fn render_results(
     settings: &Settings,
     web_search: Option<Engine>,
     limit: usize,
+    share_picks: bool,
 ) -> String {
     let shown = merge_results(&results.hits, network, limit);
     let from_network = shown.iter().filter(|s| s.network.is_some()).count();
@@ -1379,9 +1472,20 @@ fn render_results(
     } else {
         body.push_str("<ol>\n");
         for item in &shown {
-            render_hit(&mut body, item.hit, item.network);
+            // `/go` only follows this node's own results, so sites from other
+            // nodes link straight to themselves.
+            let go = (share_picks && item.network.is_none())
+                .then(|| go_link(query, &settings.options, &item.hit.domain));
+            render_hit(&mut body, item.hit, item.network, go.as_deref());
         }
         body.push_str("</ol>\n");
+    }
+    if share_picks {
+        body.push_str(
+            "<p class=\"s\">This node shares which result is opened for a search: it notes \
+             the pick here and reports it to other Plumb nodes, encrypted so that no node can \
+             read it until many nodes report the same pick, and never with who made it.</p>\n",
+        );
     }
     let options = &settings.options;
     let api = escape_html(&search_link("/api/search", query, options, false));
@@ -1442,7 +1546,7 @@ fn render_network(query: &str, results: &NetworkResults) -> String {
     } else {
         body.push_str("<ol>\n");
         for result in &results.hits {
-            render_hit(&mut body, &result.hit, Some(result));
+            render_hit(&mut body, &result.hit, Some(result), None);
         }
         body.push_str("</ol>\n");
     }
@@ -1481,9 +1585,22 @@ fn render_site_search(out: &mut String, site_search: &SiteSearch) {
     );
 }
 
+/// The `/go` link that notes a pick of `domain` for `query`.
+fn go_link(query: &str, options: &SearchOptions, domain: &str) -> String {
+    let mut link = url::form_urlencoded::Serializer::new(String::new());
+    link.append_pair("q", query);
+    link.append_pair("d", domain);
+    link.append_pair("country", options.country.as_deref().unwrap_or("any"));
+    if options.only_country {
+        link.append_pair("only", "1");
+    }
+    format!("/go?{}", link.finish())
+}
+
 /// One result. A site that came from other nodes (`network`) is tinted and
-/// says so.
-fn render_hit(out: &mut String, hit: &Hit, network: Option<&NetworkResult>) {
+/// says so. `go` is the `/go` link to send the click through instead of
+/// linking to the site directly.
+fn render_hit(out: &mut String, hit: &Hit, network: Option<&NetworkResult>, go: Option<&str>) {
     let name = hit
         .title
         .as_deref()
@@ -1501,7 +1618,7 @@ fn render_hit(out: &mut String, hit: &Hit, network: Option<&NetworkResult>) {
                 out,
                 "<a class=\"t\" href=\"{}\" rel=\"noreferrer\">{name}</a>\
                  <div class=\"u\">{}</div>",
-                escape_html(&href),
+                escape_html(go.unwrap_or(&href)),
                 escape_html(&truncate_chars(&href, 100))
             );
         }
@@ -2017,6 +2134,88 @@ mod tests {
             bank_hits()[..1].to_vec()
         );
         assert_eq!(fake.calls.lock().unwrap().len(), 2);
+    }
+
+    /// A ready node that shares popularity and remembers the picks.
+    struct SharingNode {
+        status: Status,
+        picks: Mutex<Vec<(String, String)>>,
+    }
+
+    impl StatusSource for SharingNode {
+        fn status(&self) -> Status {
+            self.status.clone()
+        }
+        fn shares_popularity(&self) -> bool {
+            true
+        }
+        fn record_pick(&self, query: &str, domain: &str) {
+            self.picks
+                .lock()
+                .unwrap()
+                .push((query.to_string(), domain.to_string()));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_node_sharing_popularity_notes_the_result_opened_and_says_so() {
+        let fake = backend(bank_hits());
+        let node = Arc::new(SharingNode {
+            status: node_status(Phase::Ready, Step::Idle),
+            picks: Mutex::new(Vec::new()),
+        });
+        let app = || node_router(fake.clone(), node.clone());
+        let (code, _, body) = send(app(), "/search?q=us+bank&country=any").await;
+        assert_eq!(code, StatusCode::OK);
+        assert!(
+            body.contains("href=\"/go?q=us+bank&amp;d=usbank.com&amp;country=any\""),
+            "{body}"
+        );
+        // The address shown is still the site's own.
+        assert!(
+            body.contains("<div class=\"u\">https://www.usbank.com/</div>"),
+            "{body}"
+        );
+        assert!(
+            body.contains("This node shares which result is opened"),
+            "{body}"
+        );
+
+        let (code, headers, _) = send(app(), "/go?q=us+bank&d=usbank.com&country=any").await;
+        assert_eq!(code, StatusCode::SEE_OTHER);
+        assert_eq!(headers[header::LOCATION], "https://www.usbank.com/");
+        assert_eq!(
+            *node.picks.lock().unwrap(),
+            vec![("us bank".to_string(), "usbank.com".to_string())]
+        );
+
+        // Only to a site the search returns: anything else goes back.
+        for uri in [
+            "/go?q=us+bank&d=evil.example",
+            "/go?q=&d=usbank.com",
+            "/go?d=usbank.com",
+        ] {
+            let (code, headers, _) = send(app(), uri).await;
+            assert_eq!(code, StatusCode::SEE_OTHER, "{uri}");
+            assert!(
+                headers[header::LOCATION]
+                    .to_str()
+                    .unwrap()
+                    .starts_with("/search?q="),
+                "{uri}"
+            );
+        }
+        assert_eq!(node.picks.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_node_not_sharing_popularity_links_straight_to_sites() {
+        let fake = backend(bank_hits());
+        let node = node(node_status(Phase::Ready, Step::Idle));
+        let (_, _, body) = send(node_router(fake, node), "/search?q=us+bank").await;
+        assert!(body.contains("href=\"https://www.usbank.com/\""), "{body}");
+        assert!(!body.contains("/go?"), "{body}");
+        assert!(!body.contains("shares which result"), "{body}");
     }
 
     #[tokio::test]
@@ -2535,7 +2734,7 @@ mod tests {
             hits: local.clone(),
             site_search: None,
         };
-        let page = render_results("q", &results, &network, &settings, None, 10);
+        let page = render_results("q", &results, &network, &settings, None, 10, false);
         assert!(page.contains("<li class=\"net\"><a class=\"t\" href=\"https://c.com/\""));
         assert_eq!(page.matches("<li class=\"net\">").count(), 1);
         assert!(page.contains("6 of 8 requests to other nodes answered"));
@@ -2553,20 +2752,44 @@ mod tests {
         let mut settings = no_settings();
         settings.network = NetSetting::Off;
         settings.options.country = Some("DE".into());
-        let page = render_results("q", &results, &NetOutcome::NotAsked, &settings, None, 10);
+        let page = render_results(
+            "q",
+            &results,
+            &NetOutcome::NotAsked,
+            &settings,
+            None,
+            10,
+            false,
+        );
         assert!(page.contains(
             "From this site's own index. <a href=\"/search?q=q&amp;country=DE&amp;net=1\">"
         ));
 
         settings.network = NetSetting::On;
-        let page = render_results("q", &results, &NetOutcome::Failed, &settings, None, 10);
+        let page = render_results(
+            "q",
+            &results,
+            &NetOutcome::Failed,
+            &settings,
+            None,
+            10,
+            false,
+        );
         assert!(page.contains("the Plumb network did not answer this time"));
         assert!(page.contains("a.com"));
 
-        let page = render_results("q", &results, &answered(Vec::new()), &settings, None, 10);
+        let page = render_results(
+            "q",
+            &results,
+            &answered(Vec::new()),
+            &settings,
+            None,
+            10,
+            false,
+        );
         assert!(!page.contains("Tinted"));
         let none = NetOutcome::Answered(NetworkResults::default());
-        let page = render_results("q", &results, &none, &settings, None, 10);
+        let page = render_results("q", &results, &none, &settings, None, 10, false);
         assert!(page.contains("no other Plumb nodes are connected right now"));
     }
 }

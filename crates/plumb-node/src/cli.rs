@@ -171,6 +171,12 @@ pub struct RunArgs {
     /// Do not look for other Plumb nodes on the local network (mDNS).
     #[arg(long, requires = "network")]
     pub no_local_discovery: bool,
+    /// Share which result is opened for a search, anonymously: this node
+    /// notes the pick (on its own disk, for the current week) and sends a
+    /// few threshold-encrypted reports a day, which no node can read until
+    /// many nodes report the same pick.
+    #[arg(long, requires = "network")]
+    pub share_popularity: bool,
 }
 
 /// Starting points for `plumb run`.
