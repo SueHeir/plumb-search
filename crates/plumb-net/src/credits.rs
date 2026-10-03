@@ -3,11 +3,12 @@
 //!
 //! **Earning.** Every node keeps its own [`Ledger`] of every crawler it
 //! hears from, itself included. A crawler earns [`CREDITS_PER_CRAWL`] for
-//! each homepage crawl that another crawler's crawl confirmed
+//! each homepage crawl that another crawler's crawl confirmed (never for a
+//! crawl that counted on its own, however few crawlers agreement asks for)
 //! ([`crate::agree`]), twice that for crawls made before
 //! [`FIRST_YEAR_ENDS`] (the early-adopter head start), and loses
-//! [`DISAGREE_PENALTY`] for each crawl made close in time to a confirmed one
-//! that did not match it. Nothing else earns credits yet. Every node sees
+//! [`DISAGREE_PENALTY`] for each crawl made close in time to one confirmed
+//! by two crawlers that did not match it. Nothing else earns credits yet. Every node sees
 //! the same signed batches, so their ledgers come out much the same, but
 //! each node only ever goes by its own.
 //!
@@ -154,6 +155,12 @@ impl Ledger {
     /// Counts the crawls agreement scored.
     pub fn record(&mut self, verdicts: &[Verdict]) {
         for verdict in verdicts {
+            // A crawl only one crawler vouches for proves nothing either
+            // way: it earns nothing, so a lone node cannot mint credits,
+            // and costs nobody who disagrees with it.
+            if verdict.agreeing < 2 {
+                continue;
+            }
             let account = self.accounts.entry(verdict.crawler).or_default();
             if verdict.agreed {
                 account.earned += credits_for(verdict.crawled_at);
@@ -576,7 +583,22 @@ mod tests {
             crawler,
             crawled_at,
             agreed,
+            agreeing: 2,
         }
+    }
+
+    #[test]
+    fn a_crawl_nobody_else_confirmed_earns_nothing() {
+        let a = peer();
+        let mut ledger = Ledger::in_memory();
+        let mut alone = verdict(a, 0, true);
+        alone.agreeing = 1;
+        let mut against = verdict(peer(), 0, false);
+        against.agreeing = 1;
+        ledger.record(&[alone, against]);
+        assert!(ledger.is_empty(), "neither earns nor costs");
+        assert_eq!(ledger.account(&a).earned, 0);
+        assert_eq!(ledger.account(&a).confirmed, 0);
     }
 
     #[test]

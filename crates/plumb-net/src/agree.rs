@@ -93,6 +93,9 @@ pub struct Verdict {
     /// It agreed with the confirmed crawl; otherwise it was close in time
     /// and did not match.
     pub agreed: bool,
+    /// Crawlers that count whose crawls agreed with the confirmed one,
+    /// this crawl's included when it agreed.
+    pub agreeing: usize,
 }
 
 /// What the agreement step holds, for the status page.
@@ -302,6 +305,7 @@ impl Agreement {
                 crawler: held[i].crawler,
                 crawled_at: held[i].crawled_at,
                 agreed,
+                agreeing: counting,
             });
             if agreed {
                 score.agreed += 1;
