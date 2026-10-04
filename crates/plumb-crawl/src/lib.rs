@@ -26,7 +26,7 @@ mod records;
 #[cfg(test)]
 mod test_alloc;
 
-pub use crawl::{crawl_homepages, log_summary, HomepageCrawler};
+pub use crawl::{crawl_homepages, fetch_site_icons, log_summary, HomepageCrawler};
 pub use extract::{extract_page_meta, MAX_BODY_WORDS, MAX_ICONS, MAX_OUT_LINKS};
 pub use icon::{normalize_icon, ICON_SIZE};
 pub use records::to_records;

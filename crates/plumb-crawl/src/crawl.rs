@@ -213,6 +213,33 @@ async fn crawl_with(
     results
 }
 
+/// Fetches only the icon of each target's site, not its homepage: the
+/// `/favicon.ico` of its start URL's origin (`target.url`, or
+/// `https://<domain>/`), with robots.txt and the per-host delay obeyed as in
+/// a crawl ([`crawl_homepages`]). For a site whose homepage was crawled but
+/// whose icon was never kept. `None` for a site with no icon this crawler
+/// can read, or no answer. Must run inside a Tokio runtime.
+pub async fn fetch_site_icons(
+    targets: Vec<CrawlTarget>,
+    cfg: &CrawlConfig,
+) -> Vec<(String, Option<Vec<u8>>)> {
+    let Ok(client) = build_client(cfg) else {
+        return Vec::new();
+    };
+    let client = &client;
+    stream::iter(targets)
+        .map(|target| async move {
+            let icon = match start_url(&target) {
+                Ok(url) => Visit::new(client, cfg).fetch_icon_of(&url, &[]).await,
+                Err(_) => None,
+            };
+            (target.domain, icon)
+        })
+        .buffer_unordered(cfg.concurrency.max(1))
+        .collect()
+        .await
+}
+
 /// One client for the whole batch, so connections are reused.
 fn build_client(cfg: &CrawlConfig) -> reqwest::Result<Client> {
     client_builder(cfg).build()
@@ -485,9 +512,13 @@ impl<'a> Visit<'a> {
     /// such as a CDN. A failure only means no icon.
     async fn fetch_icon(&mut self, page: &CrawledPage) -> Option<Vec<u8>> {
         let page_url = Url::parse(&page.final_url).ok()?;
-        let mut urls: Vec<Url> = page
-            .meta
-            .icons
+        self.fetch_icon_of(&page_url, &page.meta.icons).await
+    }
+
+    /// [`Visit::fetch_icon`] for the page at `page_url` that links to
+    /// `named` icons.
+    async fn fetch_icon_of(&mut self, page_url: &Url, named: &[String]) -> Option<Vec<u8>> {
+        let mut urls: Vec<Url> = named
             .iter()
             .filter_map(|icon| http_url(icon).ok())
             .take(MAX_ICON_TRIES - 1)
@@ -1227,6 +1258,25 @@ mod tests {
         let page = expect_fetched(crawl_one(target(port, "/"), &icon_config()).await);
         assert!(page.icon.is_some());
         assert_eq!(hits.paths(), ["/robots.txt", "/", "/favicon.ico"]);
+    }
+
+    #[tokio::test]
+    async fn fetches_just_a_sites_icon() {
+        let (port, hits) = serve(|_| {
+            Router::new()
+                .route("/", get(|| async { Html(ICON_HOME) }))
+                .route("/favicon.ico", get(|| async { png_response() }))
+        })
+        .await;
+        let found = fetch_site_icons(vec![target(port, "/")], &config()).await;
+        assert_eq!(found.len(), 1);
+        assert!(found[0]
+            .1
+            .as_ref()
+            .expect("an icon")
+            .starts_with(b"\x89PNG"));
+        // The homepage itself is not fetched.
+        assert_eq!(hits.paths(), ["/robots.txt", "/favicon.ico"]);
     }
 
     #[tokio::test]

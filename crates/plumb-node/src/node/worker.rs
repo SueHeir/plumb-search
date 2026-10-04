@@ -33,7 +33,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{bail, Context, Result};
-use plumb_core::{now_unix, SiteRecord};
+use plumb_core::{now_unix, RecordSet, SiteRecord};
 use plumb_crawl::{CrawlConfig, CrawlOutcome, CrawlResult, CrawlTarget, HomepageCrawler};
 use plumb_index::build_index;
 use plumb_ingest::{
@@ -62,6 +62,12 @@ const RECRAWL_AFTER_DAYS: u64 = 30;
 /// Nodes keep site icons from crawls since about this time (Unix seconds,
 /// 2026-10-02). A site crawled before it is due again for its icon.
 const ICONS_KEPT_SINCE: u64 = 1_791_000_000;
+
+/// Sites without an icon here that a crawl round fetches just the icon of,
+/// most linked first: crawls that came from the network before nodes shared
+/// icons, or through filling, carry none, and those sites would otherwise
+/// show a letter until their next crawl.
+const ICON_CATCH_UP_PER_ROUND: usize = 1_000;
 
 /// Disputed sites (see `plumb_net::agree`) a crawl round fetches at most,
 /// first, out of the round's homepages.
@@ -956,6 +962,7 @@ fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Option<ServingIndex
         );
     }
 
+    catch_up_icons(inner, handle, &set, &icons)?;
     inner.update_saved(|saved| saved.crawl_left = 0)?;
     if !inner.saved().index_stale {
         let now = now_unix();
@@ -970,8 +977,8 @@ fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Option<ServingIndex
 /// Whether the last try at `record`'s homepage fetched it.
 /// Whether a site last crawled before nodes kept icons is due again for
 /// its icon. A newer crawl without an icon here came from the network
-/// (icons aren't shared yet); fetching it again would undo the point of
-/// sharing crawls, so its icon waits for its next regular crawl.
+/// without one; fetching it again would undo the point of sharing crawls,
+/// so its icon is fetched on its own ([`catch_up_icons`]).
 fn due_for_icon(record: &SiteRecord, noted: &HashSet<String>) -> bool {
     last_crawl_answered(record)
         && record.crawled_at.is_some_and(|at| at < ICONS_KEPT_SINCE)
@@ -982,6 +989,73 @@ fn last_crawl_answered(record: &SiteRecord) -> bool {
     record
         .crawled_at
         .is_some_and(|at| at >= record.crawl_attempted_at.unwrap_or(0))
+}
+
+/// The best-linked sites, up to [`ICON_CATCH_UP_PER_ROUND`], whose last
+/// crawl answered but which have no icon noted here: their icons are
+/// fetched on their own ([`catch_up_icons`]).
+fn icon_catch_up_targets(set: &RecordSet, noted: &HashSet<String>) -> Vec<CrawlTarget> {
+    sorted_by_link_score(set)
+        .into_iter()
+        .filter(|record| last_crawl_answered(record) && !noted.contains(&record.domain))
+        .take(ICON_CATCH_UP_PER_ROUND)
+        .map(|record| CrawlTarget {
+            url: record.url.clone().unwrap_or_default(),
+            known_url: None,
+            domain: record.domain.clone(),
+        })
+        .collect()
+}
+
+/// Fetches just the icons of [`icon_catch_up_targets`] and notes what was
+/// found, an empty file for none, so a site is not asked again before its
+/// next crawl. Not a crawl: no record changes and nothing is published.
+fn catch_up_icons(
+    inner: &Inner,
+    handle: &Handle,
+    set: &RecordSet,
+    icons: &IconStore,
+) -> Result<()> {
+    if inner.pause_reason().is_some() {
+        return Ok(());
+    }
+    let targets = icon_catch_up_targets(set, &icons.noted());
+    if targets.is_empty() {
+        return Ok(());
+    }
+    info!(
+        "fetching the icons of {} sites that have none here",
+        targets.len()
+    );
+    inner.set_step(Step::Crawling, "Fetching site icons");
+    let cfg = CrawlConfig {
+        use_system_proxy: inner.config.use_system_proxy,
+        concurrency: inner
+            .settings()
+            .workload
+            .concurrency_or(inner.config.crawl_concurrency),
+        ..CrawlConfig::default()
+    };
+    let found = handle.block_on(async {
+        tokio::select! {
+            found = plumb_crawl::fetch_site_icons(targets, &cfg) => Some(found),
+            () = inner.stopped() => None,
+        }
+    });
+    inner.add_downloaded(cfg.downloaded.swap(0, Ordering::Relaxed))?;
+    let Some(found) = found else {
+        return Err(Stopped.into());
+    };
+    let mut kept = 0;
+    for (domain, icon) in &found {
+        if let Err(err) = icons.put(domain, icon.as_deref()) {
+            warn!("cannot save the icon of {domain}: {err}");
+            return Ok(());
+        }
+        kept += usize::from(icon.is_some());
+    }
+    info!("found icons for {kept} of {} sites", found.len());
+    Ok(())
 }
 
 /// Notes the icon, or the lack of one, of every homepage fetched. A site
@@ -1237,6 +1311,33 @@ mod tests {
             &noted
         ));
         assert!(!due_for_icon(&SiteRecord::new("never.com"), &noted));
+    }
+
+    #[test]
+    fn icons_are_caught_up_for_the_best_linked_crawled_sites_not_noted() {
+        let site = |domain: &str, rank: u32, crawled: bool| {
+            let mut record = SiteRecord::new(domain);
+            record.signals.tranco_rank = Some(rank);
+            if crawled {
+                record.crawled_at = Some(ICONS_KEPT_SINCE + 60);
+                record.url = Some(format!("https://www.{domain}/"));
+            }
+            record
+        };
+        let set: RecordSet = [
+            site("third.com", 30, true),
+            site("first.com", 1, true),
+            site("noted.com", 2, true),
+            site("never.com", 3, false),
+            site("second.com", 20, true),
+        ]
+        .into_iter()
+        .collect();
+        let noted: HashSet<String> = ["noted.com".to_string()].into();
+        let targets = icon_catch_up_targets(&set, &noted);
+        let domains: Vec<&str> = targets.iter().map(|t| t.domain.as_str()).collect();
+        assert_eq!(domains, ["first.com", "second.com", "third.com"]);
+        assert_eq!(targets[0].url, "https://www.first.com/");
     }
 
     #[test]
