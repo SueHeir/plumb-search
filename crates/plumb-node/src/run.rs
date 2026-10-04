@@ -80,6 +80,8 @@ fn node_config(args: RunArgs) -> NodeConfig {
         config.use_system_proxy = true;
     }
     config.private_search = args.private_search;
+    // On for the desktop profile already.
+    config.search_history |= args.search_history;
     config.seed_from_network = !args.seed_from_outside;
     if args.network {
         let mut net = NetConfig::new(config.data_dir.join("net"));

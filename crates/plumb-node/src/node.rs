@@ -112,7 +112,7 @@ mod fill;
 pub mod journal;
 mod network;
 pub mod schedule;
-mod store;
+pub(crate) mod store;
 mod worker;
 
 #[cfg(test)]
@@ -222,6 +222,11 @@ pub struct NodeConfig {
     /// the desktop app, which is meant to be the control center of a
     /// person's nodes; off for servers.
     pub manage_other_nodes: bool,
+    /// Keep a search history for each browser that searches this node
+    /// (see [`crate::history`]), in `DIR/history`. On for the desktop app,
+    /// where the people searching are the people the computer belongs to;
+    /// off for servers, which strangers may search.
+    pub search_history: bool,
 }
 
 impl NodeConfig {
@@ -258,6 +263,7 @@ impl NodeConfig {
             publish_records: None,
             settings: NodeSettings::default(),
             manage_other_nodes: false,
+            search_history: false,
         }
     }
 
@@ -272,6 +278,7 @@ impl NodeConfig {
             crawl_per_refresh: 1_000,
             settings: NodeSettings::desktop(),
             manage_other_nodes: true,
+            search_history: true,
             ..NodeConfig::server(data_dir)
         }
     }
@@ -1718,6 +1725,12 @@ impl StatusSource for Inner {
 
     fn manages_other_nodes(&self) -> bool {
         self.config.manage_other_nodes
+    }
+
+    fn search_history(&self) -> Option<crate::history::HistoryStore> {
+        self.config
+            .search_history
+            .then(|| crate::history::HistoryStore::new(self.paths.data.join("history")))
     }
 }
 

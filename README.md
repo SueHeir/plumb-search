@@ -58,6 +58,8 @@ On a desktop or laptop, install the desktop app for Windows, macOS or Linux ([do
 
 `plumb run --private-search` adds a `/private` search page, linked from the settings gear, where the node never sees what people search for: the browser fetches a few buckets of sites, padded with random ones, and ranks them itself in WebAssembly. See [docs/private-search.md](docs/private-search.md).
 
+The desktop app, and `plumb run --search-history`, keep a search history for each browser that searches the node: the home page lists your past searches, sites you opened before are labelled and come first the next time you search, and `/history` lists and clears it. Each browser gets its own profile (a cookie), so people sharing a node see only their own. Both choices are in the settings gear; the node-wide switch is "Remember searches" on the panel. Leave it off on a public server.
+
 ### Use Plumb as your browser's search engine
 
 Every Plumb page offers Plumb to the browser as a search engine. In Firefox, right-click the address bar on a Plumb page and choose **Add "Plumb Search"**. To add it by hand, use `http://127.0.0.1:8080/search?q=%s`, or `http://127.0.0.1:7586/search?q=%s` for the desktop app.

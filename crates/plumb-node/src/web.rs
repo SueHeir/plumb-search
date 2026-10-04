@@ -79,6 +79,7 @@ use crate::node::{NodeSettings, Phase, Status, Step};
 use crate::websearch::{bang_url, Engine, WebSettings};
 
 mod control;
+mod history;
 mod nodes;
 mod panel;
 
@@ -318,6 +319,12 @@ pub trait StatusSource: Send + Sync {
     fn manages_other_nodes(&self) -> bool {
         false
     }
+
+    /// Where the node keeps each browser's search history; `None` when it
+    /// keeps none.
+    fn search_history(&self) -> Option<crate::history::HistoryStore> {
+        None
+    }
 }
 
 #[derive(Clone)]
@@ -449,6 +456,7 @@ fn app(state: AppState) -> Router {
         router = relay::routes(router);
         router = control::routes(router);
         router = nodes::routes(router);
+        router = history::routes(router);
     }
     router.with_state(state)
 }
@@ -521,6 +529,12 @@ struct SearchParams {
     /// `1` (or `on`, `true`): search for the query as typed, without
     /// correcting typos.
     exact: Option<String>,
+    /// `1`: the settings gear's form sent the history choices below.
+    hist: Option<String>,
+    /// `1`: show past searches.
+    hs: Option<String>,
+    /// `1`: rank sites opened before higher.
+    hr: Option<String>,
 }
 
 /// Whether a flag parameter is set: `1`, `on`, `true` or `yes`.
@@ -541,6 +555,11 @@ impl SearchParams {
 
     fn limit(&self) -> usize {
         self.limit.unwrap_or(DEFAULT_LIMIT).min(MAX_LIMIT)
+    }
+
+    /// The history choices the settings gear's form sent, if it sent them.
+    fn history_prefs(&self) -> Option<history::Prefs> {
+        history::prefs_from_form(&self.hist, &self.hs, &self.hr)
     }
 
     /// The searcher's choices: the `country` parameter when it is valid,
@@ -582,15 +601,21 @@ fn home_or_setup(state: &AppState, params: &SearchParams, headers: &HeaderMap) -
     match &status {
         Some(status) if status.phase != Phase::Ready => setup_response(status, now),
         _ => {
+            let visitor = history::Visitor::of(state, headers, params.history_prefs());
             let settings = Settings {
                 options: params.options(&state.settings.home, headers),
                 network: state.net_setting(params),
                 private: state.private_search(),
+                history: visitor.as_ref().map(history::Visitor::view),
             };
-            html_response(
+            let response = html_response(
                 StatusCode::OK,
                 render_home(state.backend.num_docs(), status.as_ref(), now, &settings),
-            )
+            );
+            match &visitor {
+                Some(visitor) => visitor.send_cookies(response),
+                None => response,
+            }
         }
     }
 }
@@ -620,6 +645,8 @@ struct Settings {
     network: NetSetting,
     /// This node offers private search (`/private`).
     private: bool,
+    /// The searcher's history, on a node that keeps one.
+    history: Option<history::HistoryView>,
 }
 
 impl AppState {
@@ -658,10 +685,12 @@ async fn search_page(
     if query.is_empty() {
         return home_or_setup(&state, &params, &headers);
     }
-    let settings = Settings {
+    let mut visitor = history::Visitor::of(&state, &headers, params.history_prefs());
+    let mut settings = Settings {
         options: params.options(&state.settings.home, &headers),
         network: state.net_setting(&params),
         private: state.private_search(),
+        history: None,
     };
     let limit = params.limit();
     let local = run_search(&state, &query, limit, &settings.options).await;
@@ -685,8 +714,14 @@ async fn search_page(
     } else {
         (local, NetOutcome::NotAsked)
     };
-    match local {
-        Ok(results) => {
+    let response = match local {
+        Ok(mut results) => {
+            if let Some(visitor) = &mut visitor {
+                let searched = searched_for(&query, &results).to_owned();
+                visitor.rank(&searched, &mut results.hits);
+                visitor.note_search(&query);
+                settings.history = Some(visitor.view());
+            }
             let mut domains: Vec<String> =
                 results.hits.iter().map(|hit| hit.domain.clone()).collect();
             if let NetOutcome::Answered(found) = &network {
@@ -711,6 +746,10 @@ async fn search_page(
             error!("search for {query:?} failed: {err:#}");
             html_response(StatusCode::INTERNAL_SERVER_ERROR, render_error(&query))
         }
+    };
+    match &visitor {
+        Some(visitor) => visitor.send_cookies(response),
+        None => response,
     }
 }
 
@@ -793,6 +832,9 @@ async fn go(
         full: None,
         net: None,
         exact: params.exact,
+        hist: None,
+        hs: None,
+        hr: None,
     };
     let query = search.query();
     let back = {
@@ -814,6 +856,9 @@ async fn go(
     let Some((hit, href)) = found.and_then(|hit| safe_href(&hit).map(|href| (hit, href))) else {
         return redirect(&back);
     };
+    if let Some(mut visitor) = history::Visitor::of(&state, &headers, None) {
+        visitor.note_opened(&query, &hit.domain);
+    }
     if state.shares_popularity() {
         if let Some(node) = state.node.clone() {
             let _ =
@@ -1300,7 +1345,20 @@ progress{width:100%;height:.75rem;accent-color:var(--accent)}\
 .err{margin-top:1.5rem;padding:.25rem 1rem;border:1px solid var(--err);border-radius:.5rem;\
 text-align:left}\
 .err strong{color:var(--err)}\
-.msg{white-space:pre-wrap;overflow-wrap:anywhere;font:.85rem/1.4 ui-monospace,monospace}";
+.msg{white-space:pre-wrap;overflow-wrap:anywhere;font:.85rem/1.4 ui-monospace,monospace}\
+.op{color:var(--url);font-weight:600}\
+.panel a{color:var(--link)}\
+.recent{margin:1rem auto 0;max-width:36rem;display:flex;flex-wrap:wrap;gap:.4rem;\
+justify-content:center;align-items:center;font-size:.875rem}\
+.recent ul{display:contents;list-style:none}\
+.recent li{margin:0;padding:0}\
+.recent li a{display:inline-block;padding:.2rem .7rem;border:1px solid var(--line);\
+border-radius:1rem;color:var(--fg);text-decoration:none}\
+.recent li a:hover{border-color:var(--accent)}\
+.recent .all{color:var(--muted)}\
+.hist h1{font-size:1.6rem;margin-top:1.25rem}.hist h2{font-size:1.05rem;margin:1.75rem 0 .5rem}\
+.hist ul{padding-left:1.1rem}.hist li{padding:.2rem 0;margin:0}.hist li a{color:var(--link)}\
+.hist form{margin-top:1.5rem}";
 
 /// A whole HTML document; `body` must already be escaped.
 fn page(title: &str, body: &str) -> String {
@@ -1382,6 +1440,11 @@ fn settings_form(query: &str, autofocus: bool, settings: &Settings) -> String {
              Results only they found are tinted. Takes a few seconds longer.</p>"
         }
     };
+    let history = settings
+        .history
+        .as_ref()
+        .map(history::HistoryView::settings_html)
+        .unwrap_or_default();
     let private = if settings.private {
         "<p class=\"pv\"><a href=\"/private\">Search privately</a>: your browser looks up the \
          results itself, so this site never sees what you search for.</p>"
@@ -1396,7 +1459,7 @@ fn settings_form(query: &str, autofocus: bool, settings: &Settings) -> String {
          &#9881;&#xFE0E;</summary><div class=\"panel\">\
          <label>Country <select name=\"country\">{choices}</select></label>\
          <label><input type=\"checkbox\" name=\"only\" value=\"1\"{}> Only this country</label>\
-         {network}{network_hint}{private}<button type=\"submit\">Apply</button></div></details>\
+         {network}{network_hint}{history}{private}<button type=\"submit\">Apply</button></div></details>\
          <button type=\"submit\">Search</button></form>",
         escape_html(query),
         if autofocus { " autofocus" } else { "" },
@@ -1414,9 +1477,14 @@ fn render_home(docs: u64, status: Option<&Status>, now: u64, settings: &Settings
         .and_then(|status| wikidata_note(status, now))
         .map(|note| format!("\n<p class=\"s\">{}</p>", escape_html(&note)))
         .unwrap_or_default();
+    let recent = settings
+        .history
+        .as_ref()
+        .map(|history| history.recent_html(&settings.options))
+        .unwrap_or_default();
     let body = format!(
         "<main class=\"wrap home\">\n<h1>Plumb</h1>\n\
-         {}\n<p class=\"s\">{} sites indexed{note}</p>{wikidata}\n\
+         {}{recent}\n<p class=\"s\">{} sites indexed{note}</p>{wikidata}\n\
          <p class=\"s\">Not looking for a site? Add !g, !ddg or !b to search Google, \
          DuckDuckGo or Bing.</p>\n</main>",
         settings_form("", true, settings),
@@ -1715,8 +1783,14 @@ fn render_results(
     if let Some(spelling) = &results.spelling {
         render_spelling(&mut body, query, spelling, &settings.options);
     }
-    // Picks are noted for what the results are for.
+    // Picks are noted for what the results are for: shared, or kept in the
+    // searcher's history.
     let picked_for = searched_for(query, results);
+    let notes_picks = share_picks
+        || settings
+            .history
+            .as_ref()
+            .is_some_and(|history| history.prefs.on());
     if let Some(site_search) = &results.site_search {
         render_site_search(&mut body, site_search);
     }
@@ -1740,10 +1814,21 @@ fn render_results(
         for item in &shown {
             // `/go` only follows this node's own results, so sites from other
             // nodes link straight to themselves.
-            let go = (share_picks && item.network.is_none())
+            let go = (notes_picks && item.network.is_none())
                 .then(|| go_link(picked_for, &settings.options, &item.hit.domain));
             let icon = icons.get(&item.hit.domain);
-            render_hit(&mut body, item.hit, item.network, go.as_deref(), icon);
+            let opened = settings
+                .history
+                .as_ref()
+                .is_some_and(|history| history.opened.contains(&item.hit.domain));
+            render_hit(
+                &mut body,
+                item.hit,
+                item.network,
+                go.as_deref(),
+                icon,
+                opened,
+            );
         }
         body.push_str("</ol>\n");
     }
@@ -1822,7 +1907,7 @@ fn render_network(query: &str, results: &NetworkResults, icons: &Icons) -> Strin
         body.push_str("<ol>\n");
         for result in &results.hits {
             let icon = icons.get(&result.hit.domain);
-            render_hit(&mut body, &result.hit, Some(result), None, icon);
+            render_hit(&mut body, &result.hit, Some(result), None, icon, false);
         }
         body.push_str("</ol>\n");
     }
@@ -1905,6 +1990,7 @@ fn render_hit(
     network: Option<&NetworkResult>,
     go: Option<&str>,
     icon: Option<&str>,
+    opened: bool,
 ) {
     let name = hit
         .title
@@ -1948,6 +2034,9 @@ fn render_hit(
         let _ = write!(out, "<p class=\"d\">{}</p>", escape_html(description));
     }
     let mut meta: Vec<String> = Vec::new();
+    if opened {
+        meta.push("<span class=\"op\">You opened this before</span>".to_string());
+    }
     if let Some(code) = hit.country.as_deref() {
         meta.push(escape_html(country_name(code)));
     }
@@ -2983,6 +3072,7 @@ mod tests {
 
     fn no_settings() -> Settings {
         Settings {
+            history: None,
             options: SearchOptions::default(),
             network: NetSetting::Unavailable,
             private: false,
@@ -3289,6 +3379,119 @@ mod tests {
         // The page loads no image from anywhere: icons ride inside it.
         assert!(!page.contains("src=\"http"));
         assert!(CONTENT_SECURITY_POLICY.contains("img-src data:;"));
+    }
+
+    /// A node that keeps search history in a folder.
+    struct HistoryNode(std::path::PathBuf);
+
+    impl StatusSource for HistoryNode {
+        fn status(&self) -> Status {
+            node_status(Phase::Ready, Step::Idle)
+        }
+        fn search_history(&self) -> Option<crate::history::HistoryStore> {
+            Some(crate::history::HistoryStore::new(&self.0))
+        }
+    }
+
+    /// The `name=value` of the cookie `name` that `headers` set.
+    fn set_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
+        headers
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .find(|v| v.starts_with(&format!("{name}=")))
+            .map(|v| v.split(';').next().unwrap().to_string())
+    }
+
+    #[tokio::test]
+    async fn each_browser_keeps_its_own_history_and_opened_sites_come_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let node = Arc::new(HistoryNode(dir.path().join("history")));
+        let fake = backend(bank_hits());
+        let app = || node_router(fake.clone(), node.clone());
+
+        // The first search gives the browser a profile and links through /go.
+        let (code, headers, body) = send(app(), "/search?q=us+bank&country=any").await;
+        assert_eq!(code, StatusCode::OK);
+        let profile = set_cookie(&headers, "plumb_profile").expect("a profile cookie");
+        assert!(
+            body.contains("href=\"/go?q=us+bank&amp;d=usbank-login-help.com&amp;country=any\""),
+            "{body}"
+        );
+        assert!(!body.contains("You opened this before"), "{body}");
+        assert!(body.contains("name=\"hist\""), "{body}");
+        let first = |body: &str| {
+            body.find("usbank.com</span>").unwrap()
+                < body.find("usbank-login-help.com</span>").unwrap()
+        };
+        assert!(first(&body));
+
+        // Opening the second result puts it first next time, labelled.
+        let me = [("cookie", profile.as_str())];
+        let (code, _, _) = send_with_headers(
+            app(),
+            "/go?q=us+bank&d=usbank-login-help.com&country=any",
+            &me,
+        )
+        .await;
+        assert_eq!(code, StatusCode::SEE_OTHER);
+        let (_, _, body) = send_with_headers(app(), "/search?q=us+bank&country=any", &me).await;
+        assert!(!first(&body), "{body}");
+        assert!(body.contains("You opened this before"), "{body}");
+
+        // The home page lists past searches; the history page lists both.
+        let (_, _, home) = send_with_headers(app(), "/", &me).await;
+        assert!(home.contains("class=\"recent\""), "{home}");
+        assert!(home.contains(">us bank</a>"), "{home}");
+        let (code, _, page) = send_with_headers(app(), "/history", &me).await;
+        assert_eq!(code, StatusCode::OK);
+        assert!(page.contains("usbank-login-help.com"), "{page}");
+
+        // Another browser sees none of it.
+        let (_, headers, other) = send(app(), "/search?q=us+bank&country=any").await;
+        assert!(set_cookie(&headers, "plumb_profile").is_some_and(|c| c != profile));
+        assert!(!other.contains("You opened this before"), "{other}");
+        assert!(first(&other));
+
+        // Turning both choices off: no labels, no reordering, no list.
+        let (_, headers, body) =
+            send_with_headers(app(), "/search?q=us+bank&country=any&hist=1", &me).await;
+        let prefs = set_cookie(&headers, "plumb_history").unwrap();
+        assert_eq!(prefs, "plumb_history=s0r0");
+        assert!(first(&body), "{body}");
+        assert!(!body.contains("You opened this before"), "{body}");
+        let both = format!("{profile}; {prefs}");
+        let (_, _, home) = send_with_headers(app(), "/", &[("cookie", both.as_str())]).await;
+        assert!(!home.contains("class=\"recent\""), "{home}");
+
+        // Clearing empties it.
+        let response = app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/history/clear")
+                    .header("cookie", profile.as_str())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let (_, _, page) = send_with_headers(app(), "/history", &me).await;
+        assert!(page.contains("No searches yet."), "{page}");
+    }
+
+    #[tokio::test]
+    async fn nodes_without_history_set_no_cookies() {
+        let app = node_router(
+            backend(bank_hits()),
+            node(node_status(Phase::Ready, Step::Idle)),
+        );
+        let (_, headers, body) = send(app.clone(), "/search?q=us+bank").await;
+        assert!(headers.get(header::SET_COOKIE).is_none());
+        assert!(!body.contains("name=\"hist\""), "{body}");
+        let (code, _, _) = send(app, "/history").await;
+        assert_eq!(code, StatusCode::NOT_FOUND);
     }
 
     struct IconNode;
