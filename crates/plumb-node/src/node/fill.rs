@@ -6,7 +6,9 @@
 //! appends them to the inbox like any record from the network: they are
 //! folded into the records file and indexed at the next build. It stops at
 //! [`FILL_UP_TO_PERCENT`] of the storage limit, so crawling still has room,
-//! and at the day's download limit. With no storage limit it takes the
+//! and at the day's download limit, and before the index grows past what
+//! an index build can hold in half the machine's memory
+//! ([`BUILD_MEMORY_PERCENT`]). With no storage limit it takes the
 //! trusted node's whole list, a full node's copy of the shared index.
 //!
 //! Once through the list it rests [`FILL_AGAIN_AFTER`] before starting
@@ -71,6 +73,15 @@ pub(super) const DISK_PER_RECORD_BYTE: u64 = 4;
 /// Rest after going through a trusted node's whole list.
 pub(super) const FILL_AGAIN_AFTER: Duration = Duration::from_secs(7 * 24 * 3600);
 
+/// Peak memory an index build takes per site: a build of a million
+/// sites peaks at about 2.2 GB, rounded up.
+pub(super) const BUILD_BYTES_PER_SITE: u64 = 2_500;
+
+/// Share of the machine's memory (or its container's limit) an index
+/// build may take; filling stops before the index outgrows it, so a 4 GB
+/// server stops at about 800,000 sites.
+pub(super) const BUILD_MEMORY_PERCENT: u64 = 50;
+
 const FILL_FILE: &str = "fill.json";
 
 /// How far filling got, kept in `DIR/net/fill.json`.
@@ -94,6 +105,9 @@ pub(super) struct FillState {
     pub pending: u64,
     #[serde(skip)]
     pub pending_since: u64,
+    /// Sites taken in since the last index build.
+    #[serde(skip)]
+    pub pending_sites: u64,
     /// What filling is doing, in words.
     #[serde(skip)]
     pub detail: String,
@@ -161,6 +175,46 @@ pub(super) fn room(
     Ok(Some((cap - used) / DISK_PER_RECORD_BYTE))
 }
 
+/// How many more sites the index may grow by before a build of it takes
+/// more than [`BUILD_MEMORY_PERCENT`] of `memory` bytes, when known, and
+/// why none when none.
+pub(super) fn site_room(
+    memory: Option<u64>,
+    sites: u64,
+    pending_sites: u64,
+) -> std::result::Result<Option<u64>, &'static str> {
+    let Some(memory) = memory else {
+        return Ok(None);
+    };
+    let cap = memory / 100 * BUILD_MEMORY_PERCENT / BUILD_BYTES_PER_SITE;
+    let have = sites.saturating_add(pending_sites);
+    if have >= cap {
+        return Err("Full: a bigger index would not fit in this machine's memory");
+    }
+    Ok(Some(cap - have))
+}
+
+/// The memory this node may use, in bytes: the machine's, or its
+/// container's limit when lower. `None` where it cannot be read (only
+/// Linux is read).
+fn memory_limit() -> Option<u64> {
+    let machine = fs::read_to_string("/proc/meminfo").ok().and_then(|info| {
+        let line = info.lines().find(|l| l.starts_with("MemTotal:"))?;
+        let kb: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
+        Some(kb * 1024)
+    });
+    let container = [
+        "/sys/fs/cgroup/memory.max",
+        "/sys/fs/cgroup/memory/memory.limit_in_bytes",
+    ]
+    .iter()
+    .find_map(|path| fs::read_to_string(path).ok()?.trim().parse::<u64>().ok());
+    match (machine, container) {
+        (Some(m), Some(c)) => Some(m.min(c)),
+        (m, c) => m.or(c),
+    }
+}
+
 /// Fills the node's space round after round until it stops.
 pub(super) async fn fill_space(inner: Arc<Inner>) {
     let mut wait = FIRST_FILL_AFTER;
@@ -200,8 +254,13 @@ async fn fill_round(inner: &Arc<Inner>) -> Result<()> {
     // Sites taken in are reckoned on disk once an index is built after them.
     if inner.last_build.load(Ordering::SeqCst) > state.pending_since {
         state.pending = 0;
+        state.pending_sites = 0;
     }
     let settings = inner.settings();
+    if !settings.fill_from_network {
+        inner.update_fill(|s| s.detail = "Off".into());
+        return Ok(());
+    }
     if !settings.background_updates || settings.paused_until.is_some_and(|until| until > now) {
         inner.update_fill(|s| s.detail = "Paused with crawling".into());
         return Ok(());
@@ -224,12 +283,22 @@ async fn fill_round(inner: &Arc<Inner>) -> Result<()> {
             return Ok(());
         }
     };
+    let sites = inner.current_summary().map_or(0, |(_, docs)| docs);
+    let mut site_room = match site_room(memory_limit(), sites, state.pending_sites) {
+        Ok(room) => room,
+        Err(why) => {
+            inner.update_fill(|s| s.detail = why.into());
+            return Ok(());
+        }
+    };
     inner.update_fill(|s| s.detail = "Asking a trusted node for its crawled sites".into());
     let mut prefer = state.peer.as_deref().and_then(|p| p.parse().ok());
     let mut taken: u64 = 0;
     let mut busy = 0;
-    while taken < FILL_PER_ROUND && room != Some(0) {
-        let count = (FILL_PER_ROUND - taken).min(u64::from(FILL_PAGE)) as u32;
+    while taken < FILL_PER_ROUND && room != Some(0) && site_room != Some(0) {
+        let count = (FILL_PER_ROUND - taken)
+            .min(u64::from(FILL_PAGE))
+            .min(site_room.unwrap_or(u64::MAX)) as u32;
         let Some(page) = net.fill(prefer, state.next, count).await? else {
             inner.update_fill(|s| s.detail = "Waiting for a trusted node to connect".into());
             break;
@@ -279,6 +348,8 @@ async fn fill_round(inner: &Arc<Inner>) -> Result<()> {
         }
         state.pending += page.bytes.saturating_mul(DISK_PER_RECORD_BYTE);
         room = room.map(|left| left.saturating_sub(page.bytes));
+        site_room = site_room.map(|left| left.saturating_sub(n));
+        state.pending_sites += n;
         taken += n;
         state.filled += n;
         state.next = page.next;
@@ -303,6 +374,10 @@ async fn fill_round(inner: &Arc<Inner>) -> Result<()> {
     if room == Some(0) {
         inner.update_fill(|s| {
             s.detail = "Full: the storage limit leaves no room for more sites".into()
+        });
+    } else if site_room == Some(0) {
+        inner.update_fill(|s| {
+            s.detail = "Full: a bigger index would not fit in this machine's memory".into()
         });
     }
     if taken > 0 {
@@ -357,6 +432,20 @@ mod tests {
     }
 
     #[test]
+    fn stops_before_an_index_build_outgrows_the_memory() {
+        const GB: u64 = 1_000_000_000;
+        assert_eq!(site_room(None, 5_000_000, 0), Ok(None));
+        // A 4 GB server: about 800,000 sites.
+        assert_eq!(site_room(Some(4 * GB), 600_000, 0), Ok(Some(200_000)));
+        assert_eq!(site_room(Some(4 * GB), 600_000, 150_000), Ok(Some(50_000)));
+        assert!(site_room(Some(4 * GB), 800_000, 0).is_err());
+        assert!(site_room(Some(4 * GB), 1_190_000, 0).is_err());
+        // A 16 GB desktop: 3.2 million.
+        assert_eq!(site_room(Some(16 * GB), 250_000, 0), Ok(Some(2_950_000)));
+        assert!(memory_limit().is_none_or(|m| m > 0));
+    }
+
+    #[test]
     fn remembers_how_far_it_got() {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(FillState::load(dir.path()), FillState::default());
@@ -368,6 +457,7 @@ mod tests {
             done_at: None,
             pending: 77,
             pending_since: 1,
+            pending_sites: 9,
             detail: "busy".into(),
         };
         state.save(dir.path()).unwrap();

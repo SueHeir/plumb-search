@@ -109,6 +109,13 @@ pub(super) struct SettingsForm {
     crawl_from: String,
     #[serde(default)]
     crawl_to: String,
+    /// Ticked to fill free space from the network.
+    #[serde(default)]
+    fill_from_network: Option<String>,
+    /// Sent by forms that show the fill checkbox; without it the setting
+    /// is kept as it is.
+    #[serde(default)]
+    fill_shown: Option<String>,
 }
 
 /// The retry form: `work`, `wikidata` or `meaning`.
@@ -487,6 +494,11 @@ pub(super) fn settings_from_form(
         crawl_hours,
         // A pause stays until it ends or is lifted.
         paused_until: current.paused_until,
+        fill_from_network: if form.fill_shown.is_some() {
+            form.fill_from_network.is_some()
+        } else {
+            current.fill_from_network
+        },
     };
     settings.set_workload(Workload::from_name(&form.workload).unwrap_or(Workload::Custom));
     Ok(settings)
@@ -1961,9 +1973,16 @@ fn render_settings(body: &mut String, settings: &NodeSettings, base: &str) {
          <label>Storage limit <input type=\"number\" name=\"storage_limit_mb\" min=\"0\" \
          step=\"1\" value=\"{}\" placeholder=\"none\"> MB</label>\n\
          <p class=\"hint\">Crawling pauses while the data folder is bigger. Empty for no \
-         limit. Used with Custom; a preset sets it.</p>\n",
+         limit. Used with Custom; a preset sets it.</p>\n\
+         <input type=\"hidden\" name=\"fill_shown\" value=\"1\">\
+         <label><input type=\"checkbox\" name=\"fill_from_network\" value=\"1\"{}>\
+         <span>Fill free space with the network's crawls</span></label>\n\
+         <p class=\"hint\">Asks a node you trust for the sites it has crawled, most popular \
+         first, until 90% of the storage limit (or of what this machine's memory can index) \
+         is used. In the network only.</p>\n",
         limit(settings.download_limit_mb_per_day),
-        limit(settings.storage_limit_mb)
+        limit(settings.storage_limit_mb),
+        checked(settings.fill_from_network)
     ));
     let hours = settings
         .crawl_hours
@@ -2428,6 +2447,34 @@ mod tests {
         .await;
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
         assert!(node.settings.lock().unwrap().background_updates);
+        // A form without the fill box keeps the fill setting.
+        assert!(node.settings.lock().unwrap().fill_from_network);
+        let panel = get_panel(router.clone()).await;
+        assert!(
+            panel.contains("name=\"fill_from_network\" value=\"1\" checked"),
+            "{panel}"
+        );
+        // The panel's form shows it; unticked turns filling off.
+        let response = post(
+            router.clone(),
+            "/app/settings",
+            "background_updates=1&fill_shown=1",
+            "[::1]:50000",
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert!(!node.settings.lock().unwrap().fill_from_network);
+        let response = post(
+            router.clone(),
+            "/app/settings",
+            "background_updates=1&fill_shown=1&fill_from_network=1",
+            "[::1]:50000",
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert!(node.settings.lock().unwrap().fill_from_network);
 
         // Another machine, or a page of another site, may not.
         for (peer, origin) in [

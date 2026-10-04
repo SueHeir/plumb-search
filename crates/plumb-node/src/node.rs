@@ -385,6 +385,9 @@ pub struct NodeSettings {
     pub crawl_hours: Option<CrawlHours>,
     /// Crawling is paused until this Unix time ("pause for an hour").
     pub paused_until: Option<u64>,
+    /// Fill free space with the crawls of nodes this one trusts (see
+    /// `node/fill.rs`), in the network.
+    pub fill_from_network: bool,
 }
 
 impl Default for NodeSettings {
@@ -396,6 +399,7 @@ impl Default for NodeSettings {
             workload: Workload::Custom,
             crawl_hours: None,
             paused_until: None,
+            fill_from_network: true,
         }
     }
 }
@@ -933,6 +937,13 @@ fn settings_change_words(old: &NodeSettings, new: &NodeSettings) -> String {
         parts.push(match new.storage_limit_mb {
             0 => "no storage limit".to_owned(),
             mb => format!("storage limit {mb} MB"),
+        });
+    }
+    if old.fill_from_network != new.fill_from_network {
+        parts.push(if new.fill_from_network {
+            "filling free space from the network on".to_owned()
+        } else {
+            "filling free space from the network off".to_owned()
         });
     }
     if old.crawl_hours != new.crawl_hours {
