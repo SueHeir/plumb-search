@@ -498,6 +498,7 @@ mod tests {
     }
 
     /// A process id that is not running, for leftovers of a crashed build.
+    #[cfg(target_os = "linux")]
     fn dead_pid() -> u32 {
         let mut child = std::process::Command::new("true").spawn().unwrap();
         let pid = child.id();
