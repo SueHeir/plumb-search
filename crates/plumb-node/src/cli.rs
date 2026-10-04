@@ -267,6 +267,13 @@ pub struct RunArgs {
     /// sites with no limit).
     #[arg(long, requires = "network")]
     pub no_fill: bool,
+    /// On first start, download the seed data (Tranco, Common Crawl,
+    /// Wikidata, Wikipedia) even in the network. Without it, a new node
+    /// in the network sets up from the sites of a node it trusts, and
+    /// downloads the seed data only when none answers. Setting up from
+    /// the network needs filling (no --no-fill) and a trusted node.
+    #[arg(long)]
+    pub seed_from_outside: bool,
 }
 
 /// Starting points for `plumb run`.

@@ -4,7 +4,15 @@
 //!
 //! # What a node does
 //!
-//! 1. On first start, when `DIR/records.jsonl` is missing, it downloads the
+//! 1. On first start in the network, when `DIR/records.jsonl` is missing,
+//!    it takes the best sites of a node it trusts, crawled or not, with
+//!    their ranks, names and Wikidata facts, builds a first index of them
+//!    and takes in the rest of them in the background; it downloads no
+//!    seed data (see `node/fill.rs` and [`NodeConfig::seed_from_network`]).
+//!    When no trusted node answers, or outside the network, it sets up
+//!    from the seed data instead:
+//!
+//!    On first start, when `DIR/records.jsonl` is missing, it downloads the
 //!    Tranco list alone, keeps its best [`NodeConfig::sites`] sites, writes
 //!    the records file and builds a first index, which is searchable from
 //!    then on, a minute or two after starting. After its first crawl (2), it
@@ -166,6 +174,12 @@ pub struct NodeConfig {
     /// and keeps a vector of each site's text in `DIR/vectors.bin`, made in
     /// the background after each index build, best-ranked sites first.
     pub search_by_meaning: bool,
+    /// On first start in the network, set up from the sites of a node this
+    /// one trusts rather than from the seed downloads (Tranco, Common
+    /// Crawl, Wikidata, Wikipedia), which are then a fallback for when no
+    /// trusted node answers (see `node/fill.rs`). Needs `network` with
+    /// filling on and a trusted node. On by default.
+    pub seed_from_network: bool,
     /// Where the seed data is downloaded from on first start.
     pub sources: SeedSources,
     /// How long to wait before trying failed work again. The wait doubles
@@ -232,6 +246,7 @@ impl NodeConfig {
             country: HomeCountry::Auto,
             web_search: None,
             search_by_meaning: false,
+            seed_from_network: true,
             sources: SeedSources::default(),
             retry_wait: Duration::from_secs(10 * 60),
             max_retry_wait: Duration::from_secs(6 * 60 * 60),

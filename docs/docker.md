@@ -2,8 +2,12 @@
 
 The Docker image runs a Plumb Search node on a server or homelab machine.
 `plumb run` serves the search page and a JSON API on port 8080. On first start
-it downloads seed data and builds its index (searchable within a minute or
-two, from the Tranco list; the rest of the seed data follows its first crawl), and from then on it keeps
+it takes the best sites of the plumbsearch.org node (or another node it
+trusts) and builds its index from them, searchable within two or three
+minutes, with the rest of that node's sites following in the background; only
+when no trusted node answers does it download the seed data instead
+(searchable within a minute or two, from the Tranco list; the rest of the
+seed data follows its first crawl). From then on it keeps
 crawling homepages and rebuilding the index. It also joins the Plumb network
 (see [Join the Plumb network](#join-the-plumb-network)), so its crawls help
 every other node and theirs help it. Everything it keeps is in one volume
@@ -22,7 +26,8 @@ docker compose up -d
 
 Then open `http://<server>:8080` (`http://localhost:8080` on the same machine).
 
-The first start downloads the seed data, so the container needs internet
+A first start that cannot reach a trusted node in the network (or runs with
+`--seed-from-outside`) downloads the seed data, so the container needs internet
 access: the Tranco list comes from tranco-list.eu and the official websites
 from query.wikidata.org (plus Common Crawl ranks from data.commoncrawl.org
 when you set `--cc-release`). Until the first index is ready, the page shows
@@ -238,6 +243,7 @@ docker run -d --name plumb --init --restart unless-stopped --stop-timeout 300 \
 | `--refresh-hours H` | 1 | Hours between refreshes, which crawl more homepages and rebuild the index, e.g. `24` or `0.5`. |
 | `--crawl-per-refresh N` | 5,000 | Homepages crawled per refresh. |
 | `--no-refresh` | | Never refresh: keep the index as the initial crawl leaves it. |
+| `--seed-from-outside` | | Set up from the seed downloads even in the network, instead of from a trusted node's sites. First start only. |
 | `--reseed` | | Fold the seed files already in `DIR/seed` into the records again before starting (only files over a week old are downloaded again). For records made before a change to how seed data is read; use it once. |
 | `--profile desktop` | `server` | Smaller defaults: 250,000 sites, 2,000 homepages at first and 1,000 more every 12 hours. The flags above still override it. |
 | `--alpha A` | the index's default | Weight of the popularity prior in the ranking, from 0 to 1. |

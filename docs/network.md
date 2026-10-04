@@ -108,6 +108,24 @@ once and 6 a minute from one node, so a new node cannot swamp a small
 server. The panel's "Fill free space with the network's crawls" box (on
 by default, in the desktop app too) and `--no-fill` turn it off.
 
+**Setting up from the network** (Liz, 2026-10-04: "new nodes don't need
+to pull from wiki or anywhere anymore"). A new node in the network that
+trusts a node sets up from it instead of downloading the seed data: it asks
+with `all` set, and the trusted node sends every site of its list, crawled
+or not, up to 5,000 a page. Each record carries what the trusted node's own
+seed gave it (Tranco and Common Crawl ranks, Wikidata names, countries,
+kinds and descriptions, Wikipedia intros), so nothing is downloaded from
+Tranco, Common Crawl, Wikidata or Wikipedia. The best 50,000 make the first
+index; filling then takes the rest, a round a minute, until the node holds
+`--sites` of them (or as many as its storage and memory allow), and goes on
+filling as usual from there. When no trusted node answers within two
+minutes, or it sends fewer than 1,000 sites, the node downloads the seed
+data as before; so does `--seed-from-outside`, `--no-fill`, or a node that
+trusts no one. Nodes from before this ignore `all` and send crawled sites
+only, which still sets a node up, without the uncrawled ones. The ranks and
+facts are as fresh as the trusted node's seed: refreshing them means
+reseeding that node.
+
 ## Network search
 
 The query never leaves the asking node, and the nodes asked cannot tell which node is asking (Liz's choice, 2026-10-03), nor see its IP address.

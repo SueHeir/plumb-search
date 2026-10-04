@@ -729,7 +729,7 @@ async fn a_node_fills_its_space_from_a_node_it_trusts_and_no_other() {
 
     // Best-ranked first, crawled sites only, a stretch at a time.
     let first = loop {
-        if let Some(page) = f.handle.fill(None, 0, 5).await.unwrap() {
+        if let Some(page) = f.handle.fill(None, 0, 5, false).await.unwrap() {
             break page;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -748,10 +748,35 @@ async fn a_node_fills_its_space_from_a_node_it_trusts_and_no_other() {
         ]
     );
     assert!(first.records.iter().all(|r| r.crawled_at.is_some()));
+    // A node setting up asks for every site, crawled or not.
+    let all = f
+        .handle
+        .fill(Some(s_id), 0, 5, true)
+        .await
+        .unwrap()
+        .unwrap();
+    let domains: Vec<&str> = all.records.iter().map(|r| r.domain.as_str()).collect();
+    assert_eq!(
+        domains,
+        [
+            "filler0.com",
+            "filler1.com",
+            "filler2.com",
+            "filler3.com",
+            "filler4.com"
+        ]
+    );
+    assert_eq!(all.records[1].signals.tranco_rank, Some(2));
+    assert_eq!(all.next, 5);
     let mut filled = first.records.len();
     let mut from = first.next;
     loop {
-        let page = f.handle.fill(Some(s_id), from, 5).await.unwrap().unwrap();
+        let page = f
+            .handle
+            .fill(Some(s_id), from, 5, false)
+            .await
+            .unwrap()
+            .unwrap();
         if page.busy {
             // Asked too often this minute: S turns F away for now.
             break;
@@ -768,7 +793,7 @@ async fn a_node_fills_its_space_from_a_node_it_trusts_and_no_other() {
     // U is connected to S too, but takes nothing from a node it does not
     // trust.
     wait_for(|| (u.handle.status().connected_peers >= 1).then_some(())).await;
-    assert!(u.handle.fill(None, 0, 5).await.unwrap().is_none());
+    assert!(u.handle.fill(None, 0, 5, false).await.unwrap().is_none());
 
     f.handle.shutdown().await;
     u.handle.shutdown().await;
