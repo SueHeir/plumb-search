@@ -140,7 +140,8 @@ fn render_private(available: bool, country: Option<&str>) -> String {
          <button type=\"submit\" id=\"pq-go\" disabled>Search</button></form></header>\n\
          <p class=\"src\"><strong>Private search.</strong> Your browser looks up the results \
          itself: it fetches a few groups of sites from this server, padded with random ones, \
-         and picks the matches. This server never sees what you search for. \
+         and picks the matches. Query text stays in your browser. The requested groups \
+         can still reveal likely searches to answering nodes. \
          <a href=\"/\">Normal search</a></p>\n{note}\n\
          <p class=\"s\" id=\"pq-status\" role=\"status\"></p>\n<ol id=\"pq-results\"></ol>\n\
          </main>",

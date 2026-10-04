@@ -1,7 +1,9 @@
 # Private search
 
 A Plumb node started with `--private-search` offers a second search page,
-`/private`, where the node never learns what people search for. The
+`/private`, where query text stays in the browser and results are ranked
+there. Bucket numbers can still reveal likely queries; this is not Private
+Information Retrieval or an unconditional anonymity guarantee. The
 browser looks up the results itself:
 
 1. It works out the query's **keys**: the whole query joined and its words
@@ -24,9 +26,11 @@ WebAssembly, and links to the normal search.
 
 ## What the node learns
 
-Four bucket numbers per search, each shared by a few hundred keys. It does
-not learn which of the four were real, nor which keys in them were meant.
-Two things keep repeated searches from giving that away:
+Direct retrieval reveals four bucket numbers and the visitor's address to
+the serving node. Relayed retrieval reveals bucket numbers to answering
+nodes. Although buckets include unrelated keys and padding, an observer
+can hash a dictionary of likely queries and narrow the possibilities.
+Two mechanisms reduce additional disclosure from repeated requests:
 
 - A bucket's address names its table (the index it came from), and its
   contents never change, so the browser caches it for a year. Searching
@@ -47,7 +51,8 @@ by relaying, with Oblivious HTTP as nodes do among themselves
 1. The browser asks the node for a few other nodes that answer bucket
    requests, each with its key signed by that node
    (`GET /api/oblivious/targets`). It checks each signature against the
-   node's id, so the relay cannot slip in a key of its own.
+   advertised peer id. The relay chooses that list; the signature does not
+   prove that a listed peer has a different operator.
 2. It seals each bucket number to one of those nodes' keys, padded to a
    fixed size, and posts it to the relay
    (`POST /api/oblivious/forward/{peer}`), which passes it on over the
@@ -57,9 +62,16 @@ by relaying, with Oblivious HTTP as nodes do among themselves
    popularity, so one node cannot push its sites up.
 
 The relay sees the browser's address and which node it asks, but not the
-bucket; the answering node sees the bucket but only the relay. The page
-says which way the buckets came. With no other node to ask, the browser
-fetches them from the node directly, as above.
+bucket; the answering node sees the bucket but only the relay. Operators
+controlling both hops can combine their observations. Signed keys establish
+peer identity, not independent operators. The page says which way the
+buckets came. On any sealed-path failure, the browser currently fetches
+directly from the serving node, as above.
+
+The browser path does not use the native node's scheduled retrieval queue
+or retained disk cache. Its direct fetches use HTTP caching, and sealed
+fetches currently run on each search. See [native cache behavior](cache-first-search.md)
+and the [privacy review](reviews/privacy-security.md) for these limits.
 
 ## Ranking in the browser
 

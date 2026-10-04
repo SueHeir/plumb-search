@@ -35,7 +35,7 @@ use tracing::{debug, warn};
 
 use crate::agree::{agree, QUORUM};
 use crate::batch::MAX_RECORD_BYTES;
-use crate::bucket::{bucket_of, matches, search_buckets};
+use crate::bucket::{bucket_of, matches, query_keys, search_buckets};
 use crate::cache::BucketCache;
 use crate::credits::Wallet;
 use crate::oblivious::{
@@ -83,6 +83,12 @@ pub struct NetSearch {
     /// fetched lately, without asking the network (see [`crate::cache`]).
     #[serde(default)]
     pub cached: usize,
+    /// Real buckets absent from usable local storage, awaiting a scheduled round.
+    #[serde(default)]
+    pub pending: usize,
+    /// Retained buckets used past their freshness deadline; refresh is queued.
+    #[serde(default)]
+    pub stale: usize,
     /// The sites that match the query, unranked.
     pub found: Vec<FoundSite>,
     /// Size of the records fetched, for [`crate::rounds::RoundStatus`].
@@ -155,10 +161,14 @@ pub async fn search(
         real.dedup();
         let mut missing = Vec::new();
         for bucket in real {
-            // A kept bucket with nothing for this query is asked for again:
-            // the sites may have been crawled since.
             match cache.get(bucket, now) {
-                Some(answers) if answers.iter().any(|a| holds_match(a, &keys)) => {
+                // A valid empty answer is also a cache hit: absence of a
+                // matching site must not trigger query-dependent refetching.
+                Some(answers)
+                    if answers
+                        .iter()
+                        .any(|a| check_answer(a.clone(), now).is_some()) =>
+                {
                     out.cached += 1;
                     kept.extend(answers);
                 }
@@ -184,7 +194,19 @@ pub async fn background_round(
     wallet: Option<&Mutex<Wallet>>,
     cache: &BucketCache,
 ) -> NetSearch {
-    let buckets = fill_round(Vec::new(), Some(cache), now);
+    background_round_for(peers, wait, now, wallet, cache, Vec::new()).await
+}
+
+/// Only the scheduler calls this, with at most one round of queued bucket IDs.
+pub(crate) async fn background_round_for(
+    peers: &[BucketPeer],
+    wait: Duration,
+    now: u64,
+    wallet: Option<&Mutex<Wallet>>,
+    cache: &BucketCache,
+    queued: Vec<u32>,
+) -> NetSearch {
+    let buckets = fill_round(queued, Some(cache), now);
     let out = NetSearch::default();
     round(
         buckets,
@@ -359,10 +381,84 @@ async fn round(
     out
 }
 
-/// Whether `records` hold a site that matches one of `keys`.
-fn holds_match(records: &[crate::proto::BucketRecord], keys: &[String]) -> bool {
-    records.iter().any(|item| {
-        serde_json::from_str::<SiteRecord>(&item.record).is_ok_and(|r| matches(&r, keys))
+/// Search retained buckets locally, including stale and valid empty answers.
+/// This never sends requests, alters round deadlines, or extends proof validity.
+pub fn cache_search(query: &str, cache: &BucketCache, now: u64) -> NetSearch {
+    cache_search_with_refresh(query, cache, now).0
+}
+
+/// Return only real bucket IDs for the in-memory refresh queue, never the query.
+pub(crate) fn cache_search_with_refresh(
+    query: &str,
+    cache: &BucketCache,
+    now: u64,
+) -> (NetSearch, Vec<u32>) {
+    // Preserve pick_buckets' whole-query-first key order and four-unique-
+    // bucket limit, including collision keys encountered before that limit.
+    let mut keys = Vec::new();
+    let mut buckets = Vec::new();
+    for key in query_keys(query) {
+        if buckets.len() == crate::bucket::BUCKETS_PER_SEARCH {
+            break;
+        }
+        let bucket = bucket_of(&key);
+        if !buckets.contains(&bucket) {
+            buckets.push(bucket);
+        }
+        keys.push(key);
+    }
+    let mut out = NetSearch::default();
+    let mut refresh = Vec::new();
+    let mut merged: HashMap<String, FoundSite> = HashMap::new();
+    for bucket in buckets {
+        let Some(saved) = cache.get_retained(bucket, now) else {
+            out.pending += 1;
+            refresh.push(bucket);
+            continue;
+        };
+        let mut usable = false;
+        for records in saved.answers {
+            let Some(checked) = check_answer(records, now) else {
+                out.rejected += 1;
+                continue;
+            };
+            usable = true;
+            for site in checked {
+                if !matches(&site.record, &keys) {
+                    continue;
+                }
+                match merged.get_mut(&site.record.domain) {
+                    Some(existing) => merge_site(existing, site),
+                    None => {
+                        merged.insert(site.record.domain.clone(), site);
+                    }
+                }
+            }
+        }
+        if usable {
+            out.cached += 1;
+            if saved.stale {
+                out.stale += 1;
+                refresh.push(bucket);
+            }
+        } else {
+            out.pending += 1;
+            refresh.push(bucket);
+        }
+    }
+    out.found = merged.into_values().collect();
+    out.found
+        .sort_by(|a, b| a.record.domain.cmp(&b.record.domain));
+    (out, refresh)
+}
+
+pub(crate) fn bucket_ready(cache: &BucketCache, bucket: u32, now: u64) -> bool {
+    cache.get_retained(bucket, now).is_some_and(|saved| {
+        !saved.stale
+            && saved
+                .answers
+                .into_iter()
+                .any(|answer| check_answer(answer, now).is_some())
     })
 }
 
@@ -1002,5 +1098,96 @@ mod tests {
         };
         let checked = check_answer(vec![mixed], now).unwrap();
         assert!(checked[0].verified && checked[0].crawlers.len() == 1);
+    }
+
+    #[test]
+    fn retained_stale_results_and_empty_answers_are_searchable_offline() {
+        let now = 1_790_000_000;
+        let dir = tempfile::tempdir().unwrap();
+        let cache = BucketCache::open(dir.path(), now);
+        let record = SiteRecord::new("acme.com");
+        cache.put(bucket_of("acme"), vec![vec![item(&record)]], now);
+        let stale = cache_search("acme", &cache, now + crate::cache::FRESH_FOR);
+        assert_eq!(stale.found.len(), 1);
+        assert_eq!(stale.cached, 1);
+        assert_eq!(stale.stale, 1);
+        assert_eq!(stale.pending, 0);
+        assert_eq!(stale.asked, 0);
+        assert_eq!(stale.buckets, 0);
+        cache.put(bucket_of("absent"), vec![vec![]], now);
+        let negative = cache_search("absent", &cache, now);
+        assert_eq!(negative.cached, 1);
+        assert_eq!(negative.pending, 0);
+        assert_eq!(negative.stale, 0);
+        assert!(negative.found.is_empty());
+        assert!(cache_search_with_refresh("absent", &cache, now)
+            .1
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn fresh_negative_cache_does_not_launch_a_legacy_round() {
+        let now = 1_790_000_000;
+        let dir = tempfile::tempdir().unwrap();
+        let cache = BucketCache::open(dir.path(), now);
+        cache.put(bucket_of("absent"), vec![vec![]], now);
+        let out = search(
+            "absent",
+            &[],
+            Duration::from_secs(1),
+            now,
+            None,
+            Some(&cache),
+        )
+        .await;
+        assert_eq!(out.cached, 1);
+        assert_eq!(out.buckets, 0); // A round would have four buckets even with no peers.
+        assert_eq!(out.asked, 0);
+    }
+
+    #[test]
+    fn cache_read_rejects_forged_answers_and_rechecks_expired_proofs() {
+        let now = 1_790_000_000;
+        let dir = tempfile::tempdir().unwrap();
+        let cache = BucketCache::open(dir.path(), now);
+        let batch = crawls_by(&[Keypair::generate_ed25519()], &["Real Bank"], now).remove(0);
+        let honest = BucketRecord {
+            record: batch.records[0].clone(),
+            proof: Some(batch.proof(0)),
+            also: Vec::new(),
+        };
+        let mut forged = honest.clone();
+        forged.proof.as_mut().unwrap().record.push(' ');
+        cache.put(bucket_of("bank"), vec![vec![forged]], now);
+        let rejected = cache_search("bank", &cache, now);
+        assert_eq!(rejected.pending, 1);
+        assert_eq!(rejected.cached, 0);
+        assert_eq!(rejected.rejected, 1);
+        assert!(rejected.found.is_empty());
+        cache.put(bucket_of("bank"), vec![vec![honest]], now);
+        assert!(cache_search("bank", &cache, now).found[0].verified);
+        let old = cache_search("bank", &cache, now + 10 * EPOCH_SECS);
+        assert_eq!(old.stale, 1);
+        assert!(!old.found[0].verified);
+        assert!(!old.found[0].confirmed);
+    }
+
+    #[test]
+    fn cache_search_keeps_the_existing_four_unique_bucket_key_policy() {
+        let now = 1_790_000_000;
+        let dir = tempfile::tempdir().unwrap();
+        let cache = BucketCache::open(dir.path(), now);
+        let query = "one two three four five six seven eight nine ten";
+        let (_, keys) = search_buckets(query);
+        let mut expected = Vec::new();
+        for key in keys {
+            let bucket = bucket_of(&key);
+            if !expected.contains(&bucket) {
+                expected.push(bucket);
+            }
+        }
+        let (result, queued) = cache_search_with_refresh(query, &cache, now);
+        assert_eq!(queued, expected);
+        assert_eq!(result.pending, crate::bucket::BUCKETS_PER_SEARCH);
     }
 }

@@ -47,6 +47,18 @@ pub enum Command {
     /// Let the Plumb Search app on another computer change this node's
     /// settings: `on` makes a new token (shown once), `off` stops it.
     RemoteControl(RemoteControlArgs),
+    /// Measure node storage and private-search bucket sizes without changing data.
+    Storage(StorageArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct StorageArgs {
+    /// Existing node data directory. Symlinks are excluded from the scan.
+    #[arg(long, value_name = "DIR")]
+    pub data: PathBuf,
+    /// Print aggregate measurements as JSON.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -231,9 +243,9 @@ pub struct RunArgs {
     #[arg(long, requires = "network")]
     pub no_default_trust: bool,
     /// Offer private search at /private: browsers fetch groups of sites
-    /// (buckets) and rank them themselves, so this node never sees what
-    /// they search for. Each index also gets its buckets, about as much
-    /// disk again as the records file.
+    /// (buckets) and rank them themselves. Query text stays in the browser,
+    /// but requested buckets can reveal likely searches. Each index also gets
+    /// its buckets, about as much disk again as the records file.
     #[arg(long)]
     pub private_search: bool,
     /// Keep a search history for each browser that searches this node, in
@@ -266,9 +278,9 @@ pub struct RunArgs {
     /// the ones given that crawled in the last day.
     #[arg(long, value_name = "PEER_ID", requires = "crawl_any_site")]
     pub crawl_with: Vec<plumb_net::PeerId>,
-    /// Average minutes between background rounds of bucket requests, which
-    /// make this node's network searches look like the rest of its traffic;
-    /// 0 sends none, so searches stand out [default: 10].
+    /// Minutes between scheduled background rounds of bucket requests.
+    /// Searches queue missing buckets for these rounds; 0 disables them and
+    /// fetches immediately when searching [default: 10].
     #[arg(long, value_name = "MINUTES", requires = "network")]
     pub round_minutes: Option<u64>,
     /// Days of the network's crawl batches to keep on disk [default: 35].
@@ -606,6 +618,19 @@ mod tests {
 
     fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
         Cli::try_parse_from(std::iter::once("plumb").chain(args.iter().copied()))
+    }
+
+    #[test]
+    fn storage_requires_data_and_accepts_json() {
+        assert!(parse(&["storage"]).is_err());
+        let Command::Storage(args) = parse(&["storage", "--data", "/data", "--json"])
+            .unwrap()
+            .command
+        else {
+            panic!("not storage")
+        };
+        assert_eq!(args.data, PathBuf::from("/data"));
+        assert!(args.json);
     }
 
     #[test]

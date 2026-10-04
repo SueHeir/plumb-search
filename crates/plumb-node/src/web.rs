@@ -961,6 +961,10 @@ pub struct NetworkResults {
     /// The query's buckets answered from this node's copies of ones it
     /// fetched lately, without asking the network again.
     pub cached: usize,
+    /// Needed buckets waiting for a scheduled background download.
+    pub pending: usize,
+    /// Retained buckets used while their background refresh is due.
+    pub stale: usize,
     pub hits: Vec<NetworkResult>,
 }
 
@@ -1016,6 +1020,8 @@ fn rank_found(
         direct: found.direct,
         rejected: found.rejected,
         cached: found.cached,
+        pending: found.pending,
+        stale: found.stale,
         hits: Vec::new(),
     };
     if found.found.is_empty() || limit == 0 {
@@ -1438,8 +1444,8 @@ fn settings_form(query: &str, autofocus: bool, settings: &Settings) -> String {
     let network_hint = match settings.network {
         NetSetting::Unavailable => "",
         NetSetting::Off | NetSetting::On => {
-            "<p class=\"hint\">Also asks other Plumb nodes, without sending them your search. \
-             Results only they found are tinted. Takes a few seconds longer.</p>"
+            "<p class=\"hint\">Uses data from other Plumb nodes without sending query text. \
+             Results only they found are tinted. Missing data may wait for a background download.</p>"
         }
     };
     let history = settings
@@ -1723,10 +1729,28 @@ fn render_source(
         (_, NetOutcome::Failed) => {
             "From this site's own index: the Plumb network did not answer this time.".to_string()
         }
-        (_, NetOutcome::Answered(results)) if results.asked == 0 && results.cached > 0 => {
-            let mut line = "From this site's index and the Plumb network, as this node fetched it \
-                            for a recent search: the network was not asked again."
+        (_, NetOutcome::Answered(results)) if results.pending > 0 => {
+            let mut line = "From this site's index and any saved Plumb results. More results \
+                            are waiting for the next background download; search again later."
                 .to_string();
+            if results.stale > 0 {
+                line.push_str(" Some saved results may be out of date.");
+            }
+            if from_network > 0 {
+                line.push_str(
+                    " <span class=\"sw\"></span>Tinted results came from saved Plumb data.",
+                );
+            }
+            line
+        }
+        (_, NetOutcome::Answered(results)) if results.asked == 0 && results.cached > 0 => {
+            let mut line =
+                "From this site's index and saved Plumb results, read locally.".to_string();
+            if results.stale > 0 {
+                line.push_str(
+                    " Some saved results may be out of date and will refresh in the background.",
+                );
+            }
             if from_network > 0 {
                 line.push_str(
                     " <span class=\"sw\"></span>Tinted results came only from the network.",
@@ -1751,7 +1775,7 @@ fn render_source(
                 );
             }
             if results.cached > 0 {
-                line.push_str(" Some of it was kept from a recent search, so was not asked again.");
+                line.push_str(" Some results came from saved Plumb data.");
             }
             if from_network > 0 {
                 line.push_str(
@@ -1856,56 +1880,74 @@ fn render_results(
 /// untrusted as any record's, and is escaped the same way.
 fn render_network(query: &str, results: &NetworkResults, icons: &Icons) -> String {
     let mut body = format!("<div class=\"wrap\">\n{}\n<main>\n", results_header(query));
-    let _ = writeln!(
-        body,
-        "<p class=\"s\">From the Plumb network, without sending your search: {} buckets of \
+    if results.asked == 0 && (results.cached > 0 || results.pending > 0) {
+        body.push_str(
+            "<p class=\"s\">Plumb results are read from saved data and ranked on this node.</p>\n",
+        );
+    } else {
+        let _ = writeln!(
+            body,
+            "<p class=\"s\">From the Plumb network, without sending your search: {} buckets of \
          sites asked of other nodes under throwaway identities, {} of {} requests answered{}{}. \
          Ranked on this node.</p>",
-        results.buckets,
-        results.answered,
-        results.asked,
-        if results.direct > 0 {
-            format!(
-                "; {} sent straight to a node, which saw this node's address, because no \
+            results.buckets,
+            results.answered,
+            results.asked,
+            if results.direct > 0 {
+                format!(
+                    "; {} sent straight to a node, which saw this node's address, because no \
                  other node could pass them on",
-                results.direct
-            )
-        } else if results.asked > 0 {
-            "; each through another node, so the node answering never saw this node's \
+                    results.direct
+                )
+            } else if results.asked > 0 {
+                "; each through another node, so the node answering never saw this node's \
              address"
-                .to_string()
-        } else {
-            String::new()
-        },
-        if results.rejected > 0 {
-            format!(
-                "; {} answers were dropped because their proofs did not check out",
-                results.rejected
-            )
-        } else {
-            String::new()
-        }
-    );
+                    .to_string()
+            } else {
+                String::new()
+            },
+            if results.rejected > 0 {
+                format!(
+                    "; {} answers were dropped because their proofs did not check out",
+                    results.rejected
+                )
+            } else {
+                String::new()
+            }
+        );
+    }
     if results.cached > 0 {
         let _ = writeln!(
             body,
-            "<p class=\"s\">{} of this search's buckets were kept from a recent search, so the \
+            "<p class=\"s\">{} of this search's buckets came from saved Plumb data, so the \
              network was not asked for them again.</p>",
             results.cached
         );
     }
-    if results.asked == 0 && results.cached == 0 {
+    if results.pending > 0 {
+        body.push_str(
+            "<p class=\"s\">More results are waiting for the next background download. \
+             Search again later.</p>\n",
+        );
+    }
+    if results.stale > 0 {
+        body.push_str(
+            "<p class=\"s\">Some saved results may be out of date and will refresh \
+             in the background.</p>\n",
+        );
+    }
+    if results.asked == 0 && results.cached == 0 && results.pending == 0 {
         body.push_str(
             "<p class=\"none\">No other nodes are connected yet. This node keeps looking \
              for them.</p>\n",
         );
-    } else if results.hits.is_empty() {
+    } else if results.hits.is_empty() && results.pending == 0 {
         let _ = writeln!(
             body,
             "<p class=\"none\">No node had a site matching <strong>{}</strong>.</p>",
             escape_html(query)
         );
-    } else {
+    } else if !results.hits.is_empty() {
         body.push_str("<ol>\n");
         for result in &results.hits {
             let icon = icons.get(&result.hit.domain);
@@ -3106,6 +3148,8 @@ mod tests {
             direct: 0,
             rejected: 0,
             cached: 0,
+            pending: 0,
+            stale: 0,
             hits: hits.into_iter().map(from_network).collect(),
         })
     }
@@ -3140,7 +3184,8 @@ mod tests {
         settings.network = NetSetting::On;
         let on = settings_form("x", false, &settings);
         assert!(on.contains("name=\"net\" value=\"1\" checked> Use the Plumb network"));
-        assert!(on.contains("without sending them your search"));
+        assert!(on.contains("without sending query text"));
+        assert!(on.contains("Missing data may wait for a background download"));
     }
 
     #[test]
@@ -3312,6 +3357,40 @@ mod tests {
             &Icons::default(),
         );
         assert!(page.contains("no other Plumb nodes are connected right now"));
+    }
+
+    #[test]
+    fn scheduled_downloads_and_stale_results_have_clear_status() {
+        let pending = NetworkResults {
+            pending: 2,
+            ..Default::default()
+        };
+        let page = render_network("us bank", &pending, &Icons::default());
+        assert!(
+            page.contains("waiting for the next background download"),
+            "{page}"
+        );
+        assert!(!page.contains("No other nodes are connected"), "{page}");
+        assert!(!page.contains("No node had a site matching"), "{page}");
+
+        let stale = NetworkResults {
+            cached: 1,
+            stale: 1,
+            ..Default::default()
+        };
+        let mut line = String::new();
+        let mut settings = no_settings();
+        settings.network = NetSetting::On;
+        render_source(
+            &mut line,
+            "us bank",
+            &settings,
+            &NetOutcome::Answered(stale),
+            0,
+        );
+        assert!(line.contains("saved Plumb results, read locally"), "{line}");
+        assert!(line.contains("may be out of date"), "{line}");
+        assert!(!line.contains("no other Plumb nodes"), "{line}");
     }
 
     #[test]

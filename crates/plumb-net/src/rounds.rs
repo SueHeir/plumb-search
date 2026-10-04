@@ -1,42 +1,22 @@
-//! One steady stream of bucket requests, so that a node's searches look
-//! the same on the network as the rest of its traffic (Liz, 2026-10-04:
-//! "no one should know the difference between search and updates").
+//! Background bucket requests at fixed deadlines, independent of searches.
 //!
-//! A network search fetches [`BUCKETS_PER_SEARCH`] buckets, each from
-//! [`crate::search::NODES_PER_BUCKET`] nodes, under throwaway identities,
-//! sealed through relays (see [`crate::search`]). On its own, that burst of
-//! requests would show whoever watches a node's traffic (its relays, its
-//! internet provider) the moment it searches, even though nobody can see
-//! what for. So every node also fetches **rounds** of buckets in the
-//! background, at random times, [`NetConfig::round_every`] apart on
-//! average, built exactly like a search's: the same number of buckets, the
-//! same number of nodes per bucket, the same throwaway identities and
-//! relays, the same sizes, the same retry with a token when a node is busy.
+//! When rounds are enabled, a native search reads retained local buckets and
+//! queues only missing/stale real bucket IDs. It never sends a request, changes
+//! the next deadline, or spends a future slot. At each scheduled slot, at most
+//! four queued IDs plus random fillers form the existing padded transport round.
+//! Busy or failed refreshes return to the queue tail for a later slot.
 //!
-//! * **A search is a round.** Its own buckets go in, and the rest of the
-//!   round is filled with buckets this node has not fetched lately, as a
-//!   background round would be. A search does not wait for the next round:
-//!   it goes at once and the next background round is skipped in its place
-//!   ([`Pace::searched`]), so a node sends the same number of rounds an hour
-//!   whether it searches or not (up to [`MAX_OWED`] searches ahead).
-//! * **A background round is useful.** Its answers are checked like a
-//!   search's and kept in the bucket cache ([`crate::cache`]), so a later
-//!   search that needs those buckets is answered on the node, with no
-//!   request at all.
-//! * Nodes answering, and relays passing requests on, see the same thing
-//!   either way: a bucket number from a throwaway identity, or a sealed
-//!   request of one size.
+//! Fixed cadence intentionally replaces the old exponential waits and
+//! search-triggered substitution. The scheduler skips slots while an earlier
+//! round is still running; it never sends catch-up bursts. Query arrivals and
+//! round completion do not reset its deadlines. Disabling rounds retains legacy
+//! immediate-fetch behavior and therefore does not provide this timing policy.
 //!
-//! What still differs: a node that searches far more often than its rounds
-//! come (more than [`MAX_OWED`] searches within that many rounds) sends
-//! more rounds than usual for a while, which shows it is busier, never
-//! which rounds are its searches. Crawl batches (`/plumb/batch/1` and the
-//! gossip topic) are not part of this: every node fetches every batch,
-//! whatever it searches, so they say nothing about searches.
-//!
-//! [`NetConfig::round_every`]: crate::NetConfig::round_every
+//! This does not make searches fully unobservable: answering nodes still learn
+//! bucket IDs, response size classes and peer availability vary, and query-driven
+//! bucket selection can affect the contents of future scheduled requests.
 
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::collections::{HashSet, VecDeque};
 use std::time::Duration;
 
 use rand_core::RngCore;
@@ -46,70 +26,81 @@ use crate::bucket::BUCKETS;
 pub use crate::bucket::BUCKETS_PER_SEARCH;
 use crate::cache::BucketCache;
 
-/// Average time between two rounds unless changed: 10 minutes, about
+/// Fixed interval between rounds unless changed: 10 minutes, about
 /// 150 rounds a day.
 pub const ROUND_EVERY: Duration = Duration::from_secs(10 * 60);
 /// For the desktop app, which runs on home internet: 30 minutes, about 50
 /// rounds a day.
 pub const DESKTOP_ROUND_EVERY: Duration = Duration::from_secs(30 * 60);
-/// Searches that may each take the place of a later background round.
-/// Beyond that, a search still goes at once, as an extra round.
-pub const MAX_OWED: u32 = 6;
+/// Maximum real bucket IDs waiting or being fetched. No queries are stored.
+pub(crate) const MAX_PENDING: usize = 4096;
 /// Tries at finding a bucket not fetched lately before taking any.
 const FILL_TRIES: usize = 64;
 
-/// When rounds go, and the background rounds owed to searches.
+/// The configured fixed background cadence. Searches cannot modify it.
 #[derive(Debug)]
 pub struct Pace {
     every: Option<Duration>,
-    owed: AtomicU32,
 }
 
 impl Pace {
-    /// Rounds `every` apart on average; `None` sends no background rounds.
     pub fn new(every: Option<Duration>) -> Pace {
         Pace {
             every: every.filter(|e| !e.is_zero()),
-            owed: AtomicU32::new(0),
         }
     }
 
     pub fn every(&self) -> Option<Duration> {
         self.every
     }
+}
 
-    /// A search just sent a round: the next background round is skipped
-    /// in its place.
-    pub fn searched(&self) {
-        if self.every.is_some() {
-            let _ = update(&self.owed, |n| (n < MAX_OWED).then_some(n + 1));
+/// Deduplicates waiting and in-flight IDs under the same bounded budget.
+#[derive(Debug, Default)]
+pub(crate) struct PendingBuckets {
+    waiting: VecDeque<u32>,
+    known: HashSet<u32>,
+    generation: u64,
+}
+
+impl PendingBuckets {
+    pub(crate) fn queue(&mut self, buckets: impl IntoIterator<Item = u32>) {
+        for bucket in buckets {
+            if bucket < BUCKETS && self.known.len() < MAX_PENDING && self.known.insert(bucket) {
+                self.waiting.push_back(bucket);
+            }
         }
     }
 
-    /// Whether the round due now was already sent by a search, and so is
-    /// skipped.
-    pub fn skip(&self) -> bool {
-        update(&self.owed, |n| n.checked_sub(1)).is_some()
+    pub(crate) fn take_round(&mut self) -> (u64, Vec<u32>) {
+        let count = self.waiting.len().min(BUCKETS_PER_SEARCH);
+        (self.generation, self.waiting.drain(..count).collect())
     }
 
-    /// How long until the next round: random, `every` on average, as the
-    /// times between events that happen at random (exponential), so that
-    /// a search, which comes whenever someone types, could have been any
-    /// round. Capped at 8 times `every`.
-    pub fn next_wait(&self) -> Option<Duration> {
-        let every = self.every?;
-        // In (0, 1], so the logarithm is finite.
-        let u = ((rand_core::OsRng.next_u64() >> 11) + 1) as f64 / (1u64 << 53) as f64;
-        Some(every.mul_f64((-u.ln()).min(8.0)))
+    /// Release in-flight IDs and put failed refreshes behind current waiters.
+    pub(crate) fn finish(&mut self, generation: u64, taken: &[u32], retry: Vec<u32>) {
+        if generation != self.generation {
+            return; // Clear must not resurrect IDs from an older in-flight round.
+        }
+        for bucket in taken {
+            self.known.remove(bucket);
+        }
+        self.queue(retry);
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        self.waiting.clear();
+        self.known.clear();
     }
 }
 
-/// What this node's rounds did, its searches' included, for
+/// What this node's scheduled rounds did, for
 /// `GET /api/status`. Searches are not counted apart: this page is public
 /// on a public node.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoundStatus {
-    /// Average seconds between rounds; `None` when background rounds are
+    /// Configured fixed seconds between slots; `None` when background rounds are
     /// off.
     pub every_secs: Option<u64>,
     /// Rounds sent since the node started.
@@ -143,60 +134,46 @@ pub fn fill_round(mut real: Vec<u32>, cache: Option<&BucketCache>, now: u64) -> 
     real
 }
 
-/// Sets `value` to what `f` makes of it, unless `f` says `None`; returns
-/// the old value when it changed. `fetch_update` written out, as Rust
-/// renamed it (`try_update`) in a release older toolchains don't have.
-fn update(value: &AtomicU32, f: impl Fn(u32) -> Option<u32>) -> Option<u32> {
-    let mut old = value.load(Ordering::Relaxed);
-    loop {
-        let new = f(old)?;
-        match value.compare_exchange_weak(old, new, Ordering::Relaxed, Ordering::Relaxed) {
-            Ok(old) => return Some(old),
-            Err(now) => old = now,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn a_search_takes_the_place_of_a_later_round() {
-        let pace = Pace::new(Some(Duration::from_secs(60)));
-        assert!(!pace.skip());
-        pace.searched();
-        pace.searched();
-        assert!(pace.skip());
-        assert!(pace.skip());
-        assert!(!pace.skip());
-        // Only so many ahead.
-        for _ in 0..MAX_OWED + 5 {
-            pace.searched();
-        }
-        let skipped = std::iter::from_fn(|| pace.skip().then_some(())).count();
-        assert_eq!(skipped, MAX_OWED as usize);
+    fn pending_ids_are_bounded_deduplicated_and_retries_go_to_tail() {
+        let mut pending = PendingBuckets::default();
+        pending.queue([1, 2, 2, 3, 4, 5, BUCKETS]);
+        assert_eq!(pending.known.len(), 5);
+        let (generation, first) = pending.take_round();
+        assert_eq!(first, [1, 2, 3, 4]);
+        pending.queue([1, 5, 6]); // In-flight IDs remain deduplicated.
+        pending.finish(generation, &first, vec![1, 3]);
+        assert_eq!(pending.take_round().1, [5, 6, 1, 3]);
+        pending.queue(0..BUCKETS);
+        assert_eq!(pending.known.len(), MAX_PENDING);
+        let before = pending.waiting.len();
+        pending.queue(0..BUCKETS);
+        assert_eq!(pending.waiting.len(), before);
     }
 
     #[test]
-    fn no_rounds_when_off() {
-        let pace = Pace::new(None);
-        pace.searched();
-        assert!(!pace.skip());
-        assert_eq!(pace.next_wait(), None);
+    fn clearing_queued_ids_prevents_inflight_retry_resurrection() {
+        let mut pending = PendingBuckets::default();
+        pending.queue([1, 2, 3]);
+        let (generation, taken) = pending.take_round();
+        pending.clear();
+        pending.queue([1, 4]);
+        pending.finish(generation, &taken, vec![1, 2, 3]);
+        assert_eq!(pending.take_round().1, [1, 4]);
+    }
+
+    #[test]
+    fn cadence_has_no_search_dependent_state() {
+        assert_eq!(Pace::new(None).every(), None);
         assert_eq!(Pace::new(Some(Duration::ZERO)).every(), None);
-    }
-
-    #[test]
-    fn waits_average_out_to_the_pace() {
-        let pace = Pace::new(Some(Duration::from_secs(100)));
-        let n = 20_000;
-        let total: f64 = (0..n)
-            .map(|_| pace.next_wait().unwrap().as_secs_f64())
-            .sum();
-        let mean = total / f64::from(n);
-        assert!((95.0..105.0).contains(&mean), "{mean}");
-        assert!((0..1000).all(|_| pace.next_wait().unwrap() <= Duration::from_secs(800)));
+        assert_eq!(
+            Pace::new(Some(Duration::from_secs(60))).every(),
+            Some(Duration::from_secs(60))
+        );
     }
 
     #[test]

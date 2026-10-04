@@ -12,6 +12,8 @@ The query-diagnostic portion of R8 is also fixed: search handlers, embedding fai
 
 Post-fix validation on macOS: 642 workspace tests passed with three existing ignored tests, plus 13 desktop tests. Formatting and clippy passed for the workspace and desktop with warnings denied. The private client passed WASM clippy, an optimized build and pinned wasm-bindgen processing; four node tests passed with the resulting client embedded. The updated offline probe passed. A Linux-only test helper gained a matching platform guard so macOS clippy could run. These checks did not deploy or test the live fleet.
 
+A subsequent change extends the existing native cache and rounds: retained data survives the 12-hour freshness deadline, and enabled background rounds service queued misses at fixed deadlines instead of sending immediately and skipping later rounds. This addresses native search-triggered bursts, while leaving bucket inference, response-size classes, peer availability and the browser's separate fallback path open. See [cache-first search](../cache-first-search.md). A read-only `plumb storage` report supports sizing the deployed corpus without a server configuration change.
+
 ## Threat model
 
 The reviewed boundaries are a visitor versus the serving node; a browser versus its downloaded client code; a requester versus relays and answering peers; a node versus malicious crawl providers; a desktop versus managed remote nodes; and sensitive files versus other operating-system users. Network observers can see timing and sizes even when payloads are encrypted. Someone controlling both relay and answering peer can combine their observations. Browser extensions, compromised operating systems and site-navigation tracking remain outside these mechanisms.

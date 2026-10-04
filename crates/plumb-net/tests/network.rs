@@ -248,6 +248,10 @@ async fn nodes_share_batches_search_each_other_and_reach_through_a_relay() {
     d.handle.dial(circuit).unwrap();
     let mut through_relay = None;
     for _ in 0..50 {
+        // Peers discovered before C may give a valid negative answer. This
+        // connectivity test deliberately refreshes while discovery completes;
+        // ordinary repeated searches now retain that negative cache answer.
+        d.handle.clear_search_cache();
         let found = d
             .handle
             .search("harbor", Duration::from_secs(5))
@@ -668,17 +672,16 @@ async fn nodes_send_rounds_of_bucket_requests_without_searching() {
     })
     .await;
 
-    // A search is a round like the others, counted with them.
-    let sent = a.handle.status().rounds.sent;
+    // A cache miss queues real buckets for the next independently due round.
+    // The search sends no requests itself, even while waiting for that round.
     let found = a
         .handle
         .search("quay", Duration::from_secs(5))
         .await
         .unwrap();
-    if found.asked > 0 {
-        assert_eq!(found.buckets, plumb_net::bucket::BUCKETS_PER_SEARCH);
-        assert!(a.handle.status().rounds.sent > sent);
-    }
+    assert_eq!(found.asked, 0, "{found:?}");
+    assert_eq!(found.buckets, 0, "{found:?}");
+    assert_eq!(found.pending, 0, "{found:?}");
     assert!(found
         .found
         .iter()
@@ -687,6 +690,86 @@ async fn nodes_send_rounds_of_bucket_requests_without_searching() {
     a.handle.shutdown().await;
     h.handle.shutdown().await;
     r.handle.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn many_cache_misses_send_nothing_before_the_scheduled_deadline() {
+    let server = Node::start(false, vec![], vec![]).await;
+    let addr = server.addr().await;
+    let asker = Node::start_config(
+        tempfile::tempdir().unwrap(),
+        false,
+        vec![addr],
+        vec![],
+        true,
+        |config| config.round_every = Some(Duration::from_secs(60)),
+    )
+    .await;
+    wait_for(|| (asker.handle.status().connected_peers >= 1).then_some(())).await;
+    for query in (0..24).map(|i| format!("uncached{i}")) {
+        let found = asker
+            .handle
+            .search(&query, Duration::from_millis(3))
+            .await
+            .unwrap();
+        assert_eq!(found.asked, 0, "{found:?}");
+        assert_eq!(found.buckets, 0, "{found:?}");
+        assert!(found.pending > 0, "{found:?}");
+    }
+    assert_eq!(asker.handle.status().rounds.sent, 0);
+    assert_eq!(server.handle.status().buckets_served, 0);
+    asker.handle.shutdown().await;
+    server.handle.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn scheduled_empty_answers_are_reused_without_search_triggered_fetches() {
+    let server = Node::start(false, vec![], vec![]).await;
+    let addr = server.addr().await;
+    let asker = Node::start_config(
+        tempfile::tempdir().unwrap(),
+        false,
+        vec![],
+        vec![],
+        true,
+        |config| config.round_every = Some(Duration::from_millis(500)),
+    )
+    .await;
+    // A due slot with no peers must leave queued IDs in place.
+    let missing = asker
+        .handle
+        .search("emptyneedle", Duration::from_millis(600))
+        .await
+        .unwrap();
+    assert!(missing.pending > 0);
+    assert_eq!(asker.handle.status().rounds.sent, 0);
+    asker.handle.dial(addr).unwrap();
+    wait_for(|| (asker.handle.status().connected_peers >= 1).then_some(())).await;
+    let answer = asker
+        .handle
+        .search("emptyneedle", Duration::from_secs(5))
+        .await
+        .unwrap();
+    assert_eq!(answer.pending, 0, "{answer:?}");
+    assert!(answer.cached > 0, "{answer:?}");
+    assert!(answer.found.is_empty(), "{answer:?}");
+    assert_eq!(answer.asked, 0);
+    let before = server.handle.status().buckets_served;
+    for _ in 0..16 {
+        let again = tokio::time::timeout(
+            Duration::from_millis(100),
+            asker.handle.search("emptyneedle", Duration::from_secs(5)),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(again.pending, 0);
+        assert_eq!(again.asked, 0);
+        assert!(again.cached > 0);
+    }
+    assert_eq!(server.handle.status().buckets_served, before);
+    asker.handle.shutdown().await;
+    server.handle.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

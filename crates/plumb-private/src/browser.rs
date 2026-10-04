@@ -157,15 +157,15 @@ async fn try_show() -> Result<(), JsValue> {
     }
     if hits.is_empty() {
         set_status(&format!(
-            "No sites found for \u{201c}{query}\u{201d}. Your search stayed in your browser."
+            "No sites found for \u{201c}{query}\u{201d}. Query text stayed in your browser."
         ))
     } else {
         set_status(&format!(
             "Picked in your browser from {} buckets of sites{}.",
             buckets.len(),
             if sealed {
-                ", fetched from other Plumb nodes through this site, so neither saw both \
-                 who you are and which buckets you asked for"
+                ", fetched from other Plumb nodes through this site. Answering nodes see \
+                 bucket numbers; this site sees your address. Colluding operators can combine them"
             } else {
                 " from this site"
             }

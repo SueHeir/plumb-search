@@ -1102,14 +1102,14 @@ async fn a_node_in_the_network_takes_in_other_nodes_crawls_and_searches_them() {
     assert_eq!(code, 200);
     assert!(body.contains("name=\"net\" value=\"1\" checked>"), "{body}");
     assert!(
-        body.contains("From this site's index and the Plumb network"),
+        body.contains("From this site's index and saved Plumb results"),
         "{body}"
     );
     assert!(body.contains("<li class=\"net\">"), "{body}");
     assert!(body.contains("Lighthouse Keepers Guild"), "{body}");
     // The buckets were kept from the first search: the network was not
     // asked again.
-    assert!(body.contains("the network was not asked again"), "{body}");
+    assert!(body.contains("saved Plumb results, read locally"), "{body}");
 
     // The node hands its sites, best-ranked first, to a node filling up.
     let page = loop {

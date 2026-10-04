@@ -20,11 +20,18 @@ relay -> private_browser [label="encrypted answer"];
 fallback [label="Direct fallback to serving site\nSite sees address + all four bucket numbers", fillcolor="#fee2e2"];
 private_browser -> fallback [label="no targets OR any relay error", style=dashed, color="#dc2626"];
 }
-subgraph cluster_peer { label="Network search from a node"; color="#cbd5e1";
+subgraph cluster_peer { label="Native network search: scheduled downloads enabled"; color="#cbd5e1";
 asking [label="Asking node\nSees browser's full query"];
+cache [label="Retained bucket cache\nLocal matching / proof rechecks\nOverdue data remains usable", fillcolor="#dcfce7"];
+pending [label="Bounded in-memory queue\nMissing / overdue bucket IDs"];
+rounds [label="Fixed scheduled slots\n4 buckets: queued + background\nNo search-triggered burst"];
 peer_relay [label="Random relay\nThrowaway requester identity"];
-answering [label="Answering peer\nBucket / relay address"];
-asking -> peer_relay -> answering [label="sealed bucket request"];
-asking -> answering [label="direct when no eligible relay", style=dashed, color="#dc2626"];
+answering [label="Answering peer\nBucket / relay address\nLikely-query inference remains", fillcolor="#fee2e2"];
+asking -> cache [label="read locally"];
+asking -> pending [label="enqueue IDs only"];
+pending -> rounds [label="next due slot"];
+rounds -> peer_relay -> answering [label="sealed bucket request"];
+rounds -> answering [label="direct when no eligible relay", style=dashed, color="#dc2626"];
+answering -> cache [label="validated answers", style=dashed];
 }
 }

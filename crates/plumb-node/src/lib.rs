@@ -31,6 +31,7 @@ pub mod eval;
 pub mod history;
 pub mod meaning;
 pub mod node;
+pub mod storage;
 pub mod web;
 pub mod websearch;
 
@@ -86,6 +87,7 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::Eval(args) => eval::run(args),
         Command::Embed(args) => meaning::run_embed(args),
         Command::RemoteControl(args) => run::remote_control(args),
+        Command::Storage(args) => storage::run(args),
     }
 }
 

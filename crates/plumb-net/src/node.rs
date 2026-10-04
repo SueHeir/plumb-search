@@ -30,8 +30,8 @@
 //!   On meeting a node, it asks for the batches of the last
 //!   [`CATCH_UP_EPOCHS`] epochs it missed, and every [`RELIST_MINUTES`]
 //!   asks the nodes it is connected to again for recent ones.
-//! * Network search: [`NetHandle::search`] never sends the query; it asks
-//!   other nodes for buckets of sites under throwaway identities (see
+//! * Network search: [`NetHandle::search`] never sends the query; scheduled
+//!   rounds fetch buckets and searches read retained local copies (see
 //!   [`crate::bucket`] and [`crate::search`]). The node answers other
 //!   nodes' bucket requests from its own [`BucketSource`], with a proof for
 //!   every site it holds a signed crawl of.
@@ -62,7 +62,7 @@ use libp2p::{
 };
 use plumb_core::{now_unix, SiteRecord};
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
@@ -84,7 +84,7 @@ use crate::oblivious::{
 use crate::popularity::{report_epoch, PopularityTable, Report};
 use crate::proto::*;
 use crate::reports::ReportStore;
-use crate::rounds::{Pace, RoundStatus, ROUND_EVERY};
+use crate::rounds::{Pace, PendingBuckets, RoundStatus, ROUND_EVERY};
 use crate::search::{BucketPeer, NetSearch};
 use crate::store::{BatchStore, CrawlerView, RETAIN_EPOCHS};
 
@@ -187,9 +187,9 @@ pub struct NetConfig {
     /// Days of batches kept, [`RETAIN_EPOCHS`] unless changed; fewer for a
     /// node that crawls a lot on a small disk.
     pub keep_batches_days: u64,
-    /// Average time between two background rounds of bucket requests, so
-    /// that searches look like the rest of the node's traffic (see
-    /// [`crate::rounds`]); [`ROUND_EVERY`] unless changed, `None` for none.
+    /// Fixed interval between independently scheduled bucket rounds (see
+    /// [`crate::rounds`]). Enabled searches read retained local data. `None`
+    /// preserves legacy immediate-fetch behavior; default is [`ROUND_EVERY`].
     pub round_every: Option<Duration>,
     /// Ask trusted nodes for their crawls to fill this node's free space
     /// (see [`crate::fill`]); the node decides how much. On unless changed.
@@ -285,8 +285,8 @@ pub struct NetStatus {
     /// updated every minute.
     #[serde(default)]
     pub crawlers: Vec<CrawlerView>,
-    /// This node's rounds of bucket requests, its searches' included (see
-    /// [`crate::rounds`]).
+    /// This node's scheduled rounds, or immediate legacy rounds when disabled
+    /// (see [`crate::rounds`]); no separate search or pending-query counters.
     #[serde(default)]
     pub rounds: RoundStatus,
 }
@@ -305,11 +305,13 @@ pub struct NetHandle {
     wallet: Arc<Mutex<Wallet>>,
     /// Tokens this node's searches spent.
     tokens_spent: Arc<std::sync::atomic::AtomicU64>,
-    /// Buckets this node's own searches and rounds fetched (see
+    /// Buckets retained from scheduled rounds or legacy immediate searches (see
     /// [`crate::cache`]).
     cache: Arc<crate::cache::BucketCache>,
     /// When background rounds go (see [`crate::rounds`]).
     pace: Arc<Pace>,
+    pending_buckets: Arc<Mutex<PendingBuckets>>,
+    round_updates: watch::Sender<u64>,
     rounds: Mutex<Option<JoinHandle<()>>>,
     /// Searches under way, at most [`MAX_SEARCHES`]: each one sends many
     /// requests and may spend tokens, and a public node's search page is
@@ -418,39 +420,56 @@ impl NetHandle {
         answer.await.context("the network task stopped")?
     }
 
-    /// Searches the network for `query` without sending it: fetches the
-    /// query's buckets, padded with random ones, from other nodes under
-    /// throwaway identities, waiting at most `wait`, and returns the sites
-    /// that match, checked but unranked (see [`crate::search`]). Buckets
-    /// this node fetched lately are used again instead of asked for (see
-    /// [`crate::cache`]).
-    ///
-    /// At most [`MAX_SEARCHES`] run at once; a search that can't start
-    /// within `wait` fails as busy.
+    /// Reads retained buckets locally when rounds are enabled, queueing real
+    /// missing/stale bucket IDs for the independently scheduled background task.
+    /// Stale results are returned immediately. An empty missing result may wait
+    /// up to `wait` for a scheduled round, but never triggers or advances one.
+    /// With rounds disabled, preserves legacy immediate network fetching.
     pub async fn search(&self, query: &str, wait: Duration) -> Result<NetSearch> {
-        let _turn = tokio::time::timeout(wait, self.searches.acquire())
+        let deadline = tokio::time::Instant::now() + wait;
+        let _turn = tokio::time::timeout_at(deadline, self.searches.acquire())
             .await
             .map_err(|_| anyhow::anyhow!("too many network searches at once; try again"))?
             .context("the network is shutting down")?;
-        let (reply, peers) = oneshot::channel();
-        self.send(Command::Peers(Serving::Buckets, reply))?;
-        let peers = peers.await.context("the network task stopped")?;
-        let mut found = crate::search::search(
-            query,
-            &peers,
-            wait,
-            now_unix(),
-            Some(&self.wallet),
-            Some(&self.cache),
-        )
-        .await;
-        self.tokens_spent
-            .fetch_add(found.priority as u64, std::sync::atomic::Ordering::Relaxed);
-        if found.asked > 0 {
-            // This search was a round: one background round fewer.
-            self.pace.searched();
-            count_round(&self.status, &found);
-        }
+        let mut found = if self.pace.every().is_some() {
+            // Subscribe before reading to avoid losing a completion between a
+            // cache miss and waiting. This only observes scheduled work.
+            let mut updates = self.round_updates.subscribe();
+            loop {
+                let (cached, refresh) =
+                    crate::search::cache_search_with_refresh(query, &self.cache, now_unix());
+                self.pending_buckets
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .queue(refresh);
+                if cached.pending == 0 || !cached.found.is_empty() {
+                    break cached;
+                }
+                match tokio::time::timeout_at(deadline, updates.changed()).await {
+                    Ok(Ok(())) => continue,
+                    _ => break cached,
+                }
+            }
+        } else {
+            let (reply, peers) = oneshot::channel();
+            self.send(Command::Peers(Serving::Buckets, reply))?;
+            let peers = peers.await.context("the network task stopped")?;
+            let found = crate::search::search(
+                query,
+                &peers,
+                deadline.saturating_duration_since(tokio::time::Instant::now()),
+                now_unix(),
+                Some(&self.wallet),
+                Some(&self.cache),
+            )
+            .await;
+            self.tokens_spent
+                .fetch_add(found.priority as u64, std::sync::atomic::Ordering::Relaxed);
+            if found.asked > 0 {
+                count_round(&self.status, &found);
+            }
+            found
+        };
         // Two keys of one person can sign the same crawl: a site is
         // confirmed only by crawlers this node counts (see crate::agree).
         let crawlers: Vec<String> = found
@@ -476,8 +495,14 @@ impl NetHandle {
         Ok(found)
     }
 
-    /// Forgets the buckets kept from this node's searches.
+    /// Forgets retained buckets and queued refresh IDs. An already in-flight
+    /// scheduled round may still finish and store its answers after this call;
+    /// it cannot resurrect retries from the cleared queue.
     pub fn clear_search_cache(&self) {
+        self.pending_buckets
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
         self.cache.clear();
     }
 
@@ -911,6 +936,8 @@ pub async fn start(
         .unwrap_or_else(PoisonError::into_inner)
         .rounds
         .every_secs = pace.every().map(|e| e.as_secs());
+    let pending_buckets = Arc::new(Mutex::new(PendingBuckets::default()));
+    let (round_updates, _) = watch::channel(0);
     let rounds = pace.every().is_some().then(|| {
         tokio::spawn(background_rounds(
             pace.clone(),
@@ -918,6 +945,9 @@ pub async fn start(
             wallet.clone(),
             cache.clone(),
             status.clone(),
+            pending_buckets.clone(),
+            round_updates.clone(),
+            tokens_spent.clone(),
         ))
     });
     Ok((
@@ -931,6 +961,8 @@ pub async fn start(
             tokens_spent,
             cache,
             pace,
+            pending_buckets,
+            round_updates,
             rounds: Mutex::new(rounds),
             searches: Arc::new(tokio::sync::Semaphore::new(MAX_SEARCHES)),
             task: Mutex::new(Some(handle)),
@@ -939,38 +971,65 @@ pub async fn start(
     ))
 }
 
-/// Sends a background round of bucket requests at random times, as
-/// [`Pace`] says, skipping those a search already sent in their place (see
-/// [`crate::rounds`]). Stops with the network task.
+/// Fixed absolute deadlines, with no query wakeup or catch-up bursts. A slow
+/// round consumes its slot; ticks while it is in flight are skipped rather than
+/// shifting subsequent deadlines. JoinSet aborts in-flight work on shutdown.
+#[allow(clippy::too_many_arguments)]
 async fn background_rounds(
     pace: Arc<Pace>,
     commands: mpsc::UnboundedSender<Command>,
     wallet: Arc<Mutex<Wallet>>,
     cache: Arc<crate::cache::BucketCache>,
     status: Arc<Mutex<NetStatus>>,
+    pending: Arc<Mutex<PendingBuckets>>,
+    updates: watch::Sender<u64>,
+    tokens_spent: Arc<std::sync::atomic::AtomicU64>,
 ) {
-    while let Some(wait) = pace.next_wait() {
-        tokio::time::sleep(wait).await;
-        if pace.skip() {
-            continue;
+    let Some(every) = pace.every() else {
+        return;
+    };
+    let mut timer = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
+    timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut running = tokio::task::JoinSet::new();
+    loop {
+        tokio::select! {
+            _ = commands.closed() => return,
+            _ = running.join_next(), if !running.is_empty() => {},
+            _ = timer.tick() => {
+                if !running.is_empty() {
+                    continue;
+                }
+                let commands = commands.clone();
+                let wallet = wallet.clone();
+                let cache = cache.clone();
+                let status = status.clone();
+                let pending = pending.clone();
+                let updates = updates.clone();
+                let tokens_spent = tokens_spent.clone();
+                running.spawn(async move {
+                    let (reply, peers) = oneshot::channel();
+                    if commands.send(Command::Peers(Serving::Buckets, reply)).is_err() {
+                        return;
+                    }
+                    let Ok(peers) = peers.await else { return; };
+                    if peers.is_empty() {
+                        return; // Queued IDs stay queued until a later due slot.
+                    }
+                    let (generation, queued) = pending.lock().unwrap_or_else(PoisonError::into_inner).take_round();
+                    let found = crate::search::background_round_for(
+                        &peers, ROUND_WAIT, now_unix(), Some(&wallet), &cache, queued.clone()
+                    ).await;
+                    tokens_spent.fetch_add(found.priority as u64, std::sync::atomic::Ordering::Relaxed);
+                    count_round(&status, &found);
+                    let now = now_unix();
+                    let retry = queued.iter().copied()
+                        .filter(|&bucket| !crate::search::bucket_ready(&cache, bucket, now))
+                        .collect();
+                    pending.lock().unwrap_or_else(PoisonError::into_inner).finish(generation, &queued, retry);
+                    updates.send_modify(|generation| *generation = generation.wrapping_add(1));
+                });
+            }
         }
-        let (reply, peers) = oneshot::channel();
-        if commands
-            .send(Command::Peers(Serving::Buckets, reply))
-            .is_err()
-        {
-            return;
-        }
-        let Ok(peers) = peers.await else {
-            return;
-        };
-        if peers.is_empty() {
-            continue;
-        }
-        let found =
-            crate::search::background_round(&peers, ROUND_WAIT, now_unix(), Some(&wallet), &cache)
-                .await;
-        count_round(&status, &found);
     }
 }
 
