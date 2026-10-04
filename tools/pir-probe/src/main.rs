@@ -143,9 +143,11 @@ fn validate_object(data: &[u8], expected: usize, modulus: u64) -> Result<()> {
         data.len() == expected && expected >= 32 && (expected - 32).is_multiple_of(8),
         "invalid PIR object size"
     );
-    for chunk in data[32..].chunks_exact(8) {
+    // The size check above leaves no remainder.
+    let (coefficients, _) = data[32..].as_chunks::<8>();
+    for chunk in coefficients {
         ensure!(
-            u64::from_ne_bytes(chunk.try_into()?) < modulus,
+            u64::from_ne_bytes(*chunk) < modulus,
             "PIR coefficient exceeds modulus"
         );
     }
