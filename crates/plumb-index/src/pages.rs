@@ -152,6 +152,27 @@ fn base_title(title: &str) -> &str {
     }
 }
 
+/// Whether `domain`'s first label spells the page's title without its
+/// qualifier, or that title's first word: cvs.com for "CVS Pharmacy",
+/// capitalone.com for "Capital One", tauri.app for "Tauri (software
+/// framework)". Such a site is most likely what the page is about.
+fn site_is_titled(domain: &str, title: &str) -> bool {
+    let label = domain.split('.').next().unwrap_or("");
+    let squash = |text: &str| -> String {
+        text.chars()
+            .filter(|c| c.is_alphanumeric())
+            .flat_map(char::to_lowercase)
+            .collect()
+    };
+    let label = squash(label);
+    if label.is_empty() {
+        return false;
+    }
+    let base = base_title(title);
+    let first = base.split_whitespace().next().unwrap_or("");
+    label == squash(base) || label == squash(first)
+}
+
 /// What [`build_page_index`] did.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PageIndexStats {
@@ -373,19 +394,25 @@ pub struct PlacedPage {
 ///   query names in full, and others scoring at least
 ///   [`MIN_PARTIAL_SCORE`]; only one when the best site is named by the
 ///   query too.
-/// - A named page comes right after the best site when that site is an
-///   official website ([`crate::Hit::official`]: "tauri" lists tauri.app,
-///   then the article) or better known than the page is read
-///   ([`PageHit::popularity`] against [`crate::Hit::link_score`]).
-///   Otherwise it comes first: "leonardo da vinci" lists the article
-///   before leonardodavinci.net. Pages named only in part come after
+/// - A named page comes right after the best site when the query names
+///   that site too, the site's name spells the page's title (cvs.com for
+///   "CVS Pharmacy"), it is an official website ([`crate::Hit::official`]),
+///   or it is better known than the page is read ([`PageHit::popularity`]
+///   against [`crate::Hit::link_score`]). Otherwise the page comes first:
+///   "marie curie" lists the article before a little known site that is
+///   only about her. Pages named only in part come after
 ///   [`PARTIAL_AFTER`] sites.
 pub fn place_pages(sites: &[crate::Hit], pages: Vec<PageHit>) -> Vec<PlacedPage> {
     let site_named = sites.first().is_some_and(|hit| hit.named);
     // A named page goes first only when the best site may be a namesake.
     let page_first = |page: &PageHit| match sites.first() {
         None => true,
-        Some(site) => !site.official && page.popularity > site.link_score,
+        Some(site) => {
+            !site.named
+                && !site.official
+                && !site_is_titled(&site.domain, &page.page.title)
+                && page.popularity > site.link_score
+        }
     };
     let most = if site_named { 1 } else { MAX_PAGES_LISTED };
     let mut placed: Vec<PlacedPage> = Vec::new();
@@ -572,27 +599,41 @@ mod tests {
     }
 
     #[test]
-    fn well_known_sites_stay_before_named_pages() {
-        // A little known site named by the query comes after a much read
-        // article of the same name...
+    fn sites_the_page_may_be_about_stay_first() {
+        // A much read page comes before a little known site that is
+        // neither named by the query nor called after the page...
         let placed = place_pages(
-            &[known_site("mariecurie.org.uk", true, 0.5)],
+            &[known_site("radium-history.org", false, 0.4)],
             vec![found("Marie Curie", None, true, 0.8)],
         );
         assert_eq!(placed[0].at, 0);
-        // ...but not after an official website, however little known...
-        let mut tauri = known_site("tauri.app", true, 0.3);
-        tauri.official = true;
-        let placed = place_pages(&[tauri], vec![found("Tauri", None, true, 0.8)]);
-        assert_eq!(placed[0].at, 1);
-        // ...and a well known one comes before it, named or not.
-        for named in [true, false] {
-            let placed = place_pages(
-                &[known_site("cvs.com", named, 0.9), site("a.com", false)],
-                vec![found("CVS Pharmacy", None, true, 0.6)],
-            );
-            assert_eq!(placed[0].at, 1);
+        // ...but after a site the query names, one called after the page,
+        // an official website, or a well known site.
+        let named = known_site("tauri.app", true, 0.3);
+        let titled = known_site("geico.com", false, 0.3);
+        let mut official = known_site("example.org", false, 0.3);
+        official.official = true;
+        let known = known_site("example.com", false, 0.9);
+        for (site, title) in [
+            (named, "Tauri (software framework)"),
+            (titled, "GEICO"),
+            (official, "Example"),
+            (known, "Example"),
+        ] {
+            let placed = place_pages(&[site], vec![found(title, None, true, 0.8)]);
+            assert_eq!(placed[0].at, 1, "{title}");
         }
+    }
+
+    #[test]
+    fn sites_called_after_pages() {
+        assert!(site_is_titled("cvs.com", "CVS Pharmacy"));
+        assert!(site_is_titled("capitalone.com", "Capital One"));
+        assert!(site_is_titled("turbotax.intuit.com", "TurboTax"));
+        assert!(site_is_titled("robinhood.com", "Robin Hood"));
+        assert!(site_is_titled("tauri.app", "Tauri (software framework)"));
+        assert!(!site_is_titled("leonardodavinci.net", "Marie Curie"));
+        assert!(!site_is_titled("curie.fr", "Marie Curie"));
     }
 
     #[test]
