@@ -201,7 +201,7 @@ impl Default for RankConfig {
             kind_bonus: 0.25,
             country_boost: 0.06,
             meaning_weight: 0.7,
-            described_alpha: None,
+            described_alpha: Some(0.5),
             partial_label_bonus: None,
         }
     }
@@ -798,12 +798,16 @@ impl Searcher {
         };
 
         let default = RankConfig::default();
-        let named_in_full = !kinds.is_empty()
-            || names
-                .values()
-                .any(|name| name.typed || name.words() >= query.len);
+        // A query is taken to describe what it looks for unless it names a
+        // kind of thing, a site in full, or a well-known site by its first
+        // words ("chase center tickets"; not code.gov in "code hosting").
+        let navigational = named_in_full
+            || query.domain.is_some()
+            || names.iter().any(|(&addr, name)| {
+                name.typed || (name.words() > 0 && link_score_of(addr) >= WELL_KNOWN_LINK_SCORE)
+            });
         let alpha = match cfg.described_alpha {
-            Some(described) if !named_in_full => unit_or(described, default.alpha),
+            Some(described) if !navigational => unit_or(described, default.alpha),
             _ => unit_or(cfg.alpha, default.alpha),
         };
         let partial_label_bonus = cfg.partial_label_bonus.unwrap_or(cfg.exact_label_bonus);
@@ -2438,10 +2442,12 @@ mod tests {
             }
         };
 
-        // No site is named "online" or "online banking": a plain blend.
+        // No site is named "online" or "online banking": a plain blend, at
+        // the popularity weight of queries that describe what they look for.
+        let alpha = cfg.described_alpha.unwrap();
         let hits = searcher.search("online banking", 10).unwrap();
         check(&hits, &|hit| {
-            cfg.alpha * hit.link_score + (1.0 - cfg.alpha) * hit.text_score
+            alpha * hit.link_score + (1.0 - alpha) * hit.text_score
         });
 
         // "us bank" is usbank.com's whole name: the label bonus, full trust.
@@ -2669,6 +2675,7 @@ mod tests {
             alpha: 0.0,
             exact_label_bonus: 0.0,
             exact_alias_bonus: 0.0,
+            described_alpha: None,
             ..RankConfig::default()
         };
         let hits = searcher.search_with("bank", 20, &text_only).unwrap();
@@ -2709,7 +2716,7 @@ mod tests {
     fn partial_label_bonus_only_applies_to_part_of_the_query() {
         let (_dir, searcher) = build(&corpus());
         let no_partial = RankConfig {
-            partial_label_bonus: Some(0.0),
+            partial_label_bonus: None,
             ..RankConfig::default()
         };
         let full = searcher
