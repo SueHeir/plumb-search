@@ -28,7 +28,7 @@
 
 use anyhow::{ensure, Context, Result};
 use libp2p::PeerId;
-use plumb_core::{canonical_domain, SiteRecord};
+use plumb_core::{canonical_domain, registrable_domain, search_link, SiteRecord};
 
 use crate::assign::EPOCH_SECS;
 use crate::batch::MAX_RECORD_BYTES;
@@ -117,7 +117,8 @@ pub fn answer(source: &dyn BucketSource, from: u64, count: u32, all: bool) -> Fi
 /// fields, names, link text and ranks, without the answering node's own
 /// bookkeeping (crawl tries, redirects, icon). `None` for a record that
 /// does not parse, is too long, names no registrable domain, or was never
-/// crawled.
+/// crawled. Unsafe homepage URLs and site-search templates are stripped
+/// without discarding the rest of the record.
 pub fn accept_filled(line: &str, now: u64) -> Option<SiteRecord> {
     parse(line, now, false).ok()
 }
@@ -132,6 +133,18 @@ fn parse(line: &str, now: u64, uncrawled: bool) -> Result<SiteRecord> {
     ensure!(line.len() <= MAX_RECORD_BYTES, "a record is too long");
     let mut record: SiteRecord = serde_json::from_str(line).context("a record does not parse")?;
     record.domain = canonical_domain(&record.domain).context("not a registrable domain")?;
+    // A trusted node may hold old or malformed records. Its trust does not
+    // allow a result to navigate to another site or run a non-web scheme.
+    record.url = record.url.filter(|url| {
+        let lower = url.to_ascii_lowercase();
+        (lower.starts_with("https://") || lower.starts_with("http://"))
+            && registrable_domain(url).as_deref() == Some(record.domain.as_str())
+    });
+    // Use the same validation as links generated from these templates,
+    // including the known twitter.com -> x.com move.
+    record.search_url = record
+        .search_url
+        .filter(|template| search_link(template, &record.domain, "x").is_some());
     match record.crawled_at {
         Some(crawled_at) => {
             ensure!(crawled_at <= now + EPOCH_SECS / 24, "crawled in the future");
@@ -241,5 +254,118 @@ mod tests {
         assert!(accept_filled(&future, 2_000).is_none());
         assert!(accept_seed(&future, 2_000).is_none());
         assert!(accept_filled("not json", 2_000).is_none());
+    }
+
+    #[test]
+    fn fill_and_seed_strip_unsafe_homepage_urls_without_losing_site_data() {
+        for crawled in [true, false] {
+            for url in [
+                "https://attacker.com/steal",
+                "https://example.com.attacker.com/",
+                "https://example.com@attacker.com/",
+                "javascript:alert(document.cookie)",
+                "data:text/html,<script>alert(1)</script>",
+                "file:///etc/passwd",
+                "ftp://example.com/",
+                "example.com/path",
+                "//example.com/path",
+                "https://127.0.0.1/",
+                "https://",
+            ] {
+                let mut record = site("Example.COM", 5, crawled);
+                record.url = Some(url.into());
+                record.about = Some("A useful site".into());
+                let line = serde_json::to_string(&record).unwrap();
+                let kept = if crawled {
+                    accept_filled(&line, 2_000)
+                } else {
+                    accept_seed(&line, 2_000)
+                }
+                .unwrap();
+                assert!(
+                    kept.url.is_none(),
+                    "kept unsafe URL {url}, crawled={crawled}"
+                );
+                assert_eq!(kept.domain, "example.com");
+                assert_eq!(kept.signals.tranco_rank, Some(5));
+                assert_eq!(kept.about.as_deref(), Some("A useful site"));
+                assert_eq!(kept.crawled_at, record.crawled_at);
+            }
+        }
+    }
+
+    #[test]
+    fn fill_and_seed_keep_web_urls_on_the_canonical_registrable_domain() {
+        for crawled in [true, false] {
+            for (domain, url, expected_domain) in [
+                ("Example.COM", "https://www.example.com/", "example.com"),
+                ("example.com", "http://example.com/path", "example.com"),
+                ("example.com", "HTTPS://shop.Example.COM/", "example.com"),
+                (
+                    "example.co.uk",
+                    "https://www.example.co.uk/",
+                    "example.co.uk",
+                ),
+                ("münchen.de", "https://www.münchen.de/", "xn--mnchen-3ya.de"),
+            ] {
+                let mut record = site(domain, 5, crawled);
+                record.url = Some(url.into());
+                let line = serde_json::to_string(&record).unwrap();
+                let kept = if crawled {
+                    accept_filled(&line, 2_000)
+                } else {
+                    accept_seed(&line, 2_000)
+                }
+                .unwrap();
+                assert_eq!(kept.domain, expected_domain);
+                assert_eq!(kept.url.as_deref(), Some(url));
+            }
+        }
+    }
+
+    #[test]
+    fn fill_and_seed_validate_query_bearing_search_templates() {
+        for crawled in [true, false] {
+            for (domain, template, valid) in [
+                (
+                    "Example.COM",
+                    "https://www.example.com/search?q={searchTerms}",
+                    true,
+                ),
+                ("example.com", "http://example.com/find/{searchTerms}", true),
+                ("twitter.com", "https://x.com/search?q={searchTerms}", true),
+                (
+                    "example.com",
+                    "https://attacker.com/search?q={searchTerms}",
+                    false,
+                ),
+                (
+                    "example.com",
+                    "https://example.com@attacker.com/?q={searchTerms}",
+                    false,
+                ),
+                ("example.com", "javascript:alert('{searchTerms}')", false),
+                ("example.com", "ftp://example.com/?q={searchTerms}", false),
+                ("example.com", "example.com/?q={searchTerms}", false),
+                ("example.com", "https://example.com/search", false),
+                (
+                    "example.com",
+                    "https://example.com/{searchTerms}?q={searchTerms}",
+                    false,
+                ),
+            ] {
+                let mut record = site(domain, 5, crawled);
+                record.search_url = Some(template.into());
+                let line = serde_json::to_string(&record).unwrap();
+                let kept = if crawled {
+                    accept_filled(&line, 2_000)
+                } else {
+                    accept_seed(&line, 2_000)
+                }
+                .unwrap();
+                assert_eq!(kept.search_url.as_deref(), valid.then_some(template));
+                assert_eq!(kept.signals.tranco_rank, Some(5));
+            }
+        }
     }
 }
