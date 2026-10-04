@@ -513,6 +513,18 @@ impl RecordSet {
     }
 }
 
+/// All records, in no particular order. Each record is freed as soon as it
+/// is taken, so a caller that keeps only a little of each never holds two
+/// copies of the set.
+impl IntoIterator for RecordSet {
+    type Item = SiteRecord;
+    type IntoIter = std::collections::hash_map::IntoValues<String, SiteRecord>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.map.into_values()
+    }
+}
+
 impl Extend<SiteRecord> for RecordSet {
     fn extend<I: IntoIterator<Item = SiteRecord>>(&mut self, iter: I) {
         for record in iter {

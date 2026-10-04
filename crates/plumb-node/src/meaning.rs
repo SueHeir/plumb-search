@@ -9,7 +9,7 @@ use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard};
 use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
-use plumb_core::SiteRecord;
+use plumb_core::RecordSet;
 use plumb_embed::{
     site_text, text_hash, Embedder, Vectors, MODEL_BASE_URL, MODEL_FILES, MODEL_NAME,
 };
@@ -210,45 +210,54 @@ pub(crate) struct Embedded {
     pub failed: usize,
 }
 
-/// Makes a vector for each of `records` (best first, as given) whose text
-/// changed since its vector was made, on `threads` threads, and drops the
-/// vectors of sites not in `records`. Calls `save` after every
-/// [`SAVE_EVERY`] sites and at the end, and logs progress every
+/// Makes a vector for each of `records` whose text changed since its
+/// vector was made, best [`plumb_core::SiteRecord::link_score`] first, on `threads`
+/// threads, and drops the vectors of sites not in `records`. Calls `save`
+/// after every [`SAVE_EVERY`] sites and at the end, and logs progress every
 /// [`REPORT_EVERY`], when it also tells `progress` how many of how many
 /// are done. Stops early, after a save, once `stop` says so.
+///
+/// The records are taken, and each is freed once its text is read: a run
+/// can take hours, and holding every record that long, next to the copy an
+/// index build or crawl loads, is more than a small server has. Only the
+/// domain, hash and text of the sites to embed are kept.
 pub(crate) fn embed_records(
     embedder: &Embedder,
     vectors: &RwLock<Vectors>,
-    records: &[SiteRecord],
+    records: RecordSet,
     threads: usize,
     stop: &(dyn Fn() -> bool + Sync),
     save: &mut dyn FnMut(&Vectors) -> Result<()>,
     progress: &mut dyn FnMut(usize, usize),
 ) -> Result<Embedded> {
     let write = || vectors.write().unwrap_or_else(PoisonError::into_inner);
-    let domains: HashSet<&str> = records.iter().map(|r| r.domain.as_str()).collect();
-    write().retain(|domain| domains.contains(domain));
+    {
+        let domains: HashSet<&str> = records.iter().map(|r| r.domain.as_str()).collect();
+        write().retain(|domain| domains.contains(domain));
+    }
 
+    let total = records.len();
     let mut todo = Vec::new();
     {
         let vectors = vectors.read().unwrap_or_else(PoisonError::into_inner);
         for record in records {
-            let text = site_text(record);
+            let text = site_text(&record);
             if text.is_empty() {
                 continue;
             }
             let hash = text_hash(&text);
             if vectors.get(&record.domain).map(|(saved, _)| saved) != Some(&hash) {
-                todo.push((record.link_score(), record.domain.as_str(), hash, text));
+                let score = record.link_score();
+                todo.push((score, record.domain, hash, text));
             }
         }
         // The most popular sites first: a long run (all of them, after
         // their text changed) gets to the sites most searched for early.
-        todo.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(b.1)));
+        todo.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        todo.shrink_to_fit();
         info!(
-            "{} of {} sites need a vector ({} have one)",
+            "{} of {total} sites need a vector ({} have one)",
             todo.len(),
-            records.len(),
             vectors.len()
         );
     }
@@ -313,8 +322,7 @@ pub fn run_embed(args: EmbedArgs) -> Result<()> {
     block_on(ensure_model(&args.model, MODEL_BASE_URL))??;
     let embedder = load_embedder(&args.model)?;
     let records = load_records(&args.records)
-        .with_context(|| format!("loading records {}", args.records.display()))?
-        .into_sorted_vec();
+        .with_context(|| format!("loading records {}", args.records.display()))?;
     let vectors = RwLock::new(load_vectors_for(&args.vectors, &embedder)?);
     let threads = args
         .threads
@@ -322,7 +330,7 @@ pub fn run_embed(args: EmbedArgs) -> Result<()> {
     let embedded = embed_records(
         &embedder,
         &vectors,
-        &records,
+        records,
         threads,
         &|| false,
         &mut |vectors| vectors.save(&args.vectors),
@@ -389,7 +397,7 @@ mod tests {
         embed_records(
             &embedder,
             &vectors,
-            &[obscure, popular],
+            [obscure, popular].into_iter().collect(),
             1,
             &stop,
             &mut |_| Ok(()),
