@@ -91,7 +91,9 @@ pub fn run(args: FetchDataArgs) -> Result<()> {
             Outcome::Skipped("--skip-wikidata".to_string())
         } else if let Some(path) = kept(facts::FACTS_FILE_NAME) {
             Outcome::Kept(path)
-        } else if sites_files.is_empty() {
+        } else if !args.dir.join(download::WIKIDATA_FILE_NAME).is_file() {
+            // Facts for the by-kind sites alone would leave out most
+            // official sites, and the intros picked from them too.
             Outcome::Skipped("needs the official websites, which are missing".to_string())
         } else {
             outcome(

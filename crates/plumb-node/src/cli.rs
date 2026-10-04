@@ -304,7 +304,8 @@ pub struct FetchDataArgs {
     pub wikidata_min_sitelinks: u32,
     /// Keep each file an earlier run saved in --dir within this many days
     /// instead of fetching it again, so a rerun only fetches what is missing,
-    /// stale or failed. 0 fetches everything.
+    /// stale or failed. A file copied in from another run's folder counts
+    /// as just saved. 0 fetches everything.
     #[arg(long, value_name = "DAYS", default_value_t = 0)]
     pub keep_days: u64,
 }
