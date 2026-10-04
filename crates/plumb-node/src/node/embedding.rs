@@ -102,13 +102,12 @@ fn work(inner: &Arc<Inner>) -> Result<()> {
             continue;
         }
         let records = load_records(&inner.paths.records)
-            .with_context(|| format!("loading {}", inner.paths.records.display()))?
-            .into_sorted_vec();
+            .with_context(|| format!("loading {}", inner.paths.records.display()))?;
         let started = Instant::now();
         let embedded = embed_records(
             meaning.embedder(),
             meaning.vectors(),
-            &records,
+            records,
             threads,
             &|| inner.stopping(),
             &mut |vectors| vectors.save(&vectors_path),
@@ -120,7 +119,6 @@ fn work(inner: &Arc<Inner>) -> Result<()> {
             },
         )?;
         inner.set_meaning_work(None);
-        drop(records);
         if inner.stopping() {
             break;
         }
