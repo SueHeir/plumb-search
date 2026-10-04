@@ -511,7 +511,11 @@ mod tests {
     #[test]
     fn repository_query_files_are_valid() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        for file in ["fixtures/brand_queries.tsv", "eval/brand_queries.tsv"] {
+        for file in [
+            "fixtures/brand_queries.tsv",
+            "eval/brand_queries.tsv",
+            "eval/ai_queries.tsv",
+        ] {
             let text = std::fs::read_to_string(root.join(file)).unwrap();
             let queries = parse_queries(&text).unwrap();
             assert!(
