@@ -20,6 +20,7 @@ use std::sync::{Mutex, PoisonError};
 
 use anyhow::{Context, Result};
 use plumb_core::collapse_whitespace;
+use plumb_core::SiteRecord;
 use plumb_index::Hit;
 use serde::{Deserialize, Serialize};
 
@@ -91,6 +92,12 @@ impl About {
         about
     }
 
+    /// Topics as typed in a form, one per line or comma, cleaned, once
+    /// each, at most [`MAX_INTERESTS`].
+    pub fn topics_from_text(text: &str) -> Vec<String> {
+        About::from_form(text, "", "").interests
+    }
+
     /// Whether nothing is set.
     pub fn is_empty(&self) -> bool {
         self.interests.is_empty() && self.pinned.is_empty() && self.hidden.is_empty()
@@ -113,10 +120,7 @@ impl About {
         let words = hit_words(hit);
         self.interests
             .iter()
-            .find(|interest| {
-                let wanted: Vec<String> = words_of(interest).collect();
-                !wanted.is_empty() && wanted.iter().all(|w| words.contains(w))
-            })
+            .find(|interest| matches_words(interest, &words))
             .map(|interest| Reason::Interest(interest))
     }
 
@@ -197,6 +201,99 @@ fn covers(listed: &str, domain: &str) -> bool {
         || domain
             .strip_suffix(listed)
             .is_some_and(|rest| rest.ends_with('.'))
+}
+
+/// Whether every word of `interest` is among `words`.
+fn matches_words(interest: &str, words: &HashSet<String>) -> bool {
+    let mut wanted = words_of(interest).peekable();
+    wanted.peek().is_some() && wanted.all(|w| words.contains(&w))
+}
+
+/// Topics to match sites against when choosing which sites a node keeps
+/// or crawls first: a node's focus topics, and the interests of the About
+/// profiles kept on it.
+#[derive(Debug, Clone, Default)]
+pub struct Topics {
+    /// Each topic's words, stemmed.
+    topics: Vec<Vec<String>>,
+}
+
+impl Topics {
+    pub fn new<'a>(topics: impl IntoIterator<Item = &'a String>) -> Topics {
+        let mut seen = HashSet::new();
+        let topics = topics
+            .into_iter()
+            .map(|topic| words_of(topic).collect::<Vec<_>>())
+            .filter(|words| !words.is_empty() && seen.insert(words.clone()))
+            .collect();
+        Topics { topics }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.topics.is_empty()
+    }
+
+    /// A key that changes when the topics do.
+    pub fn key(&self) -> String {
+        let mut topics: Vec<String> = self.topics.iter().map(|t| t.join(" ")).collect();
+        topics.sort();
+        topics.join(",")
+    }
+
+    /// Whether `record` is about one of the topics: every word of a topic
+    /// is in its name, description, Wikidata facts or headings.
+    pub fn matches(&self, record: &SiteRecord) -> bool {
+        if self.topics.is_empty() {
+            return false;
+        }
+        let words = record_words(record);
+        self.topics
+            .iter()
+            .any(|topic| topic.iter().all(|w| words.contains(w)))
+    }
+}
+
+/// The words a site record is matched on.
+fn record_words(record: &SiteRecord) -> HashSet<String> {
+    let mut words = HashSet::new();
+    let mut add = |text: &str| words.extend(words_of(text));
+    add(&record.domain.replace(['.', '-'], " "));
+    for text in [&record.title, &record.description, &record.about]
+        .into_iter()
+        .flatten()
+    {
+        add(text);
+    }
+    for text in record
+        .kinds
+        .iter()
+        .chain(&record.aliases)
+        .chain(&record.headings)
+    {
+        add(text);
+    }
+    words
+}
+
+/// Every interest of the About profiles in `dir`, a node's history folder.
+pub fn all_interests(dir: &Path) -> Vec<String> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut interests = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(profile) = name.to_str().and_then(|n| n.strip_suffix(".about.json")) else {
+            continue;
+        };
+        if !valid_profile(profile) {
+            continue;
+        }
+        if let Some(about) = read(&entry.path()) {
+            interests.extend(about.interests);
+        }
+    }
+    interests
 }
 
 /// The words a result is matched on: its name, description and domain.
@@ -375,6 +472,30 @@ mod tests {
         assert_eq!(domains, ["seriouseats.com", "allrecipes.com"]);
         assert_eq!(about.reason(&hits[0]), Some(Reason::Pinned));
         assert!(!about.hides("notpinterest.com"));
+    }
+
+    #[test]
+    fn topics_match_site_records_and_profiles_add_theirs() {
+        let mut steam = SiteRecord::new("steampowered.com");
+        steam.title = Some("Welcome to Steam".into());
+        steam.kinds = vec!["video game".into()];
+        let mut bank = SiteRecord::new("chase.com");
+        bank.title = Some("Chase Bank".into());
+        let topics = Topics::new(&["Games".to_owned(), "games".to_owned()]);
+        assert!(topics.matches(&steam));
+        assert!(!topics.matches(&bank));
+        assert!(!Topics::default().matches(&steam));
+        assert_eq!(topics.key(), Topics::new(&["game".to_owned()]).key());
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = AboutStore::new(dir.path());
+        let profile = new_profile().unwrap();
+        store
+            .save(&profile, &About::from_form("cooking", "", ""))
+            .unwrap();
+        std::fs::write(dir.path().join("x.about.json"), "{}").unwrap();
+        assert_eq!(all_interests(dir.path()), ["cooking"]);
+        assert!(all_interests(&dir.path().join("none")).is_empty());
     }
 
     #[test]

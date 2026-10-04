@@ -62,6 +62,8 @@ The desktop app, and `plumb run --search-history`, keep a search history for eac
 
 The same nodes have an "About you" page (`/about`, linked from the settings gear) where each browser can list its interests, sites it always wants first, and sites it never wants to see. Results that match an interest move up a little and say which interest they match, so "rust" leans towards the language for a programmer and the game for a gamer. Like the history, it stays on the node for that browser only and is applied after results are found, so it is never part of a search sent to other nodes.
 
+A node with a storage limit keeps a quarter of it for sites about those interests: it fills with the network's best sites up to 65% of the limit, then reads on down a trusted node's list keeping only sites about them, asking for the same pages either way so the trusted node learns nothing of the interests. Full nodes can also set **Focus topics** on the panel (or `plumb run --focus games`, repeatable): they crawl sites about those topics first and twice as often, so the more nodes focus on a topic, the better the network knows it. Unlike About you interests, focus topics are public in effect, since other nodes see what a node crawls.
+
 ### Use Plumb as your browser's search engine
 
 Every Plumb page offers Plumb to the browser as a search engine. In Firefox, right-click the address bar on a Plumb page and choose **Add "Plumb Search"**. To add it by hand, use `http://127.0.0.1:8080/search?q=%s`, or `http://127.0.0.1:7586/search?q=%s` for the desktop app.

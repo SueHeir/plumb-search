@@ -15,6 +15,17 @@
 //! over: crawls shared since arrive anyway as they are made. How far it
 //! got is kept in `DIR/net/fill.json`.
 //!
+//! # Topics
+//!
+//! A node with topics to keep (its focus topics, and the interests on the
+//! About pages of the browsers that search it, see
+//! [`super::Inner::keep_topics`]) saves [`FOCUS_SHARE_PERCENT`] of its
+//! storage limit for them: it takes the list's best sites up to the rest,
+//! then reads on down the list keeping only the sites about a topic. It
+//! asks for the same pages either way, so the node it asks learns nothing
+//! of the topics. When the topics change, it reads on from where the best
+//! sites stopped again.
+//!
 //! # Setting up from the network
 //!
 //! A new node in the network that trusts a node sets up from it rather than
@@ -42,6 +53,7 @@ use tracing::{debug, info, warn};
 
 use super::network::{self, REBUILD_AFTER_RECORDS};
 use super::{Inner, Step, Stopped, MB};
+use crate::about::Topics;
 
 /// Time between two fill rounds.
 #[cfg(not(test))]
@@ -113,6 +125,10 @@ const FILL_BUSY_TRIES: u32 = 4;
 /// Share of the storage limit filling stops at.
 pub(super) const FILL_UP_TO_PERCENT: u64 = 90;
 
+/// Share of the storage limit kept for sites about the node's topics, when
+/// it has some: the best sites fill up to [`FILL_UP_TO_PERCENT`] less this.
+pub(super) const FOCUS_SHARE_PERCENT: u64 = 25;
+
 /// Disk a site takes for each byte of its record as sent: the records
 /// file, the index, the buckets and the vector for search by meaning.
 pub(super) const DISK_PER_RECORD_BYTE: u64 = 4;
@@ -148,6 +164,11 @@ pub(super) struct FillState {
     /// Still setting up from the network: take every site, crawled or
     /// not, until the node holds `NodeConfig::sites` of them.
     pub seed: bool,
+    /// Where in the list the best sites ran out of room and keeping only
+    /// sites about the node's topics began.
+    pub focus_from: Option<u64>,
+    /// The topics kept last ([`crate::about::Topics::key`]).
+    pub focus_key: String,
     /// Bytes of disk the sites taken in since the last index build are
     /// reckoned to take once indexed, which the disk count does not show
     /// yet, and since when.
@@ -214,10 +235,20 @@ pub(super) fn room(
     disk_used: u64,
     pending: u64,
 ) -> std::result::Result<Option<u64>, &'static str> {
+    room_up_to(limit_mb, FILL_UP_TO_PERCENT, disk_used, pending)
+}
+
+/// [`room`] up to `percent` of the storage limit.
+fn room_up_to(
+    limit_mb: u64,
+    percent: u64,
+    disk_used: u64,
+    pending: u64,
+) -> std::result::Result<Option<u64>, &'static str> {
     if limit_mb == 0 {
         return Ok(None);
     }
-    let cap = limit_mb.saturating_mul(MB) / 100 * FILL_UP_TO_PERCENT;
+    let cap = limit_mb.saturating_mul(MB) / 100 * percent;
     let used = disk_used.saturating_add(pending);
     if used >= cap {
         return Err("Full: the storage limit leaves no room for more sites");
@@ -426,13 +457,27 @@ async fn fill_round(inner: &Arc<Inner>) -> Result<()> {
     let now = now_unix();
     let mut state = inner.fill_state();
     let seed = state.seed;
+    let topics = if seed {
+        Topics::default()
+    } else {
+        inner.keep_topics()
+    };
+    let key = topics.key();
+    if state.focus_key != key {
+        // New topics: read on from where the best sites stopped again.
+        if let Some(from) = state.focus_from {
+            state.next = from;
+            state.done_at = None;
+        }
+        state.focus_key = key;
+    }
     if let Some(done) = state.done_at {
         if now < done + FILL_AGAIN_AFTER.as_secs() {
             inner.update_fill(|s| s.detail = "Done: holds the trusted node's crawled sites".into());
             return Ok(());
         }
         state.done_at = None;
-        state.next = 0;
+        state.next = state.focus_from.unwrap_or(0);
     }
     // Sites taken in are reckoned on disk once an index is built after them.
     if inner.last_build.load(Ordering::SeqCst) > state.pending_since {
@@ -467,8 +512,34 @@ async fn fill_round(inner: &Arc<Inner>) -> Result<()> {
         inner.update_fill(|s| s.detail = "Waiting for the sites taken in to be indexed".into());
         return Ok(());
     }
-    let mut room = match room(settings.storage_limit_mb, inner.disk_used(), state.pending) {
-        Ok(room) => room,
+    let best_percent = if topics.is_empty() {
+        FILL_UP_TO_PERCENT
+    } else {
+        FILL_UP_TO_PERCENT - FOCUS_SHARE_PERCENT
+    };
+    let used = inner.disk_used();
+    let best = room_up_to(settings.storage_limit_mb, best_percent, used, state.pending);
+    let (mut room, focus) = match best {
+        Ok(room) => {
+            // Room for the best sites again (a higher limit): they go on
+            // from where they stopped.
+            if let Some(from) = state.focus_from.take() {
+                state.next = state.next.min(from);
+            }
+            (room, false)
+        }
+        Err(_) if !topics.is_empty() => {
+            match room(settings.storage_limit_mb, used, state.pending) {
+                Ok(room) => {
+                    state.focus_from.get_or_insert(state.next);
+                    (room, true)
+                }
+                Err(why) => {
+                    inner.update_fill(|s| s.detail = why.into());
+                    return Ok(());
+                }
+            }
+        }
         Err(why) => {
             inner.update_fill(|s| s.detail = why.into());
             return Ok(());
@@ -531,10 +602,20 @@ async fn fill_round(inner: &Arc<Inner>) -> Result<()> {
                 continue;
             }
         }
-        let n = page.records.len() as u64;
         let done = page.done();
+        let scanned = page.records.len() as u64;
+        let mut records = page.records;
+        if focus {
+            records.retain(|record| topics.matches(record));
+        }
+        let n = records.len() as u64;
+        // The disk the sites kept take: all of the page, or the share kept.
+        let bytes = if scanned == 0 {
+            0
+        } else {
+            page.bytes / scanned * n
+        };
         if n > 0 {
-            let records = page.records;
             let inner2 = inner.clone();
             tokio::task::spawn_blocking(move || network::append_inbox(&inner2, &records))
                 .await
@@ -550,12 +631,13 @@ async fn fill_round(inner: &Arc<Inner>) -> Result<()> {
         if state.pending == 0 {
             state.pending_since = now_unix();
         }
-        state.pending += page.bytes.saturating_mul(DISK_PER_RECORD_BYTE);
-        room = room.map(|left| left.saturating_sub(page.bytes));
+        state.pending += bytes.saturating_mul(DISK_PER_RECORD_BYTE);
+        room = room.map(|left| left.saturating_sub(bytes));
         site_room = site_room.map(|left| left.saturating_sub(n));
         seed_room = seed_room.map(|left| left.saturating_sub(n));
         state.pending_sites += n;
-        taken += n;
+        // A page read counts against the round whatever was kept of it.
+        taken += scanned;
         state.filled += n;
         state.next = page.next;
         state.total = page.total;
@@ -572,6 +654,8 @@ async fn fill_round(inner: &Arc<Inner>) -> Result<()> {
             "Done: holds the trusted node's crawled sites".to_string()
         } else if state.seed {
             "Setting up: taking in the rest of a trusted node's sites".to_string()
+        } else if focus {
+            "Keeping the sites about this node's topics from a trusted node's crawls".to_string()
         } else {
             "Taking in crawled sites from a trusted node".to_string()
         };
@@ -650,6 +734,22 @@ mod tests {
     }
 
     #[test]
+    fn topics_keep_a_share_of_the_storage_limit() {
+        // 1,000 MB, 600 MB used: no room left for the best sites at 65%,
+        // 300 MB of disk left for topic sites up to 90%.
+        let best = FILL_UP_TO_PERCENT - FOCUS_SHARE_PERCENT;
+        assert!(room_up_to(1_000, best, 650 * MB, 0).is_err());
+        assert_eq!(
+            room_up_to(1_000, best, 600 * MB, 0),
+            Ok(Some(50 * MB / DISK_PER_RECORD_BYTE))
+        );
+        assert_eq!(
+            room(1_000, 650 * MB, 0),
+            Ok(Some(250 * MB / DISK_PER_RECORD_BYTE))
+        );
+    }
+
+    #[test]
     fn stops_before_an_index_build_outgrows_the_memory() {
         const GB: u64 = 1_000_000_000;
         assert_eq!(site_room(None, 5_000_000, 0), Ok(None));
@@ -674,6 +774,8 @@ mod tests {
             filled: 3_000,
             done_at: None,
             seed: true,
+            focus_from: Some(4_000),
+            focus_key: "game".into(),
             pending: 77,
             pending_since: 1,
             pending_sites: 9,
@@ -691,6 +793,10 @@ mod tests {
             (Some("12D3KooW"), 5_000, 3_000, 0)
         );
         assert!(loaded.seed);
+        assert_eq!(
+            (loaded.focus_from, loaded.focus_key.as_str()),
+            (Some(4_000), "game")
+        );
         assert_eq!(state.status().position, 5_000);
     }
 }
