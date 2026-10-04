@@ -64,6 +64,7 @@ use base64::Engine as _;
 use plumb_core::{
     collapse_whitespace, display_url, now_unix, site_initial, truncate_chars, SiteRecord,
 };
+use plumb_index::pages::{place_pages, PageHit};
 use plumb_index::{
     build_index, Hit, RankConfig, SearchOptions, SearchResults, Searcher, SiteSearch, Spelling,
 };
@@ -135,6 +136,7 @@ pub trait SearchBackend: Send + Sync {
         let _ = options;
         Ok(SearchResults {
             hits: self.search(query, limit)?,
+            pages: Vec::new(),
             site_search: None,
             spelling: None,
         })
@@ -732,6 +734,9 @@ async fn search_page(
             if let NetOutcome::Answered(found) = &network {
                 domains.extend(found.hits.iter().map(|result| result.hit.domain.clone()));
             }
+            if !results.pages.is_empty() {
+                domains.push(PAGES_ICON_DOMAIN.to_string());
+            }
             let icons = state.icons(domains).await;
             html_response(
                 StatusCode::OK,
@@ -1318,6 +1323,8 @@ font-size:.85rem;font-weight:600;line-height:1}\
 a.r:hover .t,a.r:focus-visible .t{text-decoration:underline}\
 a.r:visited .t{color:var(--seen)}\
 .d{margin:.3rem 0 0;line-height:1.55;overflow-wrap:anywhere}\
+.sub{margin:.35rem 0 0;font-size:.9rem;line-height:1.5;overflow-wrap:anywhere}\
+.sub a{color:var(--link)}\
 .tag,.m,.s{color:var(--muted)}\
 .m,.s{font-size:.8rem}\
 .m{margin-top:.25rem}\
@@ -1834,7 +1841,24 @@ fn render_results(
             escape_html(&truncate_chars(query, 150))
         );
     }
-    if shown.is_empty() {
+    let shown_hits: Vec<Hit> = shown.iter().map(|item| item.hit.clone()).collect();
+    let pages = place_pages(
+        &shown_hits,
+        results
+            .pages
+            .iter()
+            .map(|placed| placed.hit.clone())
+            .collect(),
+    );
+    let page_icon = icons.get(PAGES_ICON_DOMAIN);
+    let shown_count = shown.len();
+    let pages = &pages;
+    let listed_pages = move |at: usize| {
+        pages.iter().filter(move |p| {
+            p.under.is_none() && (p.at == at || (at == usize::MAX && p.at >= shown_count))
+        })
+    };
+    if shown.is_empty() && pages.is_empty() {
         let _ = writeln!(
             body,
             "<p class=\"none\">No sites match <strong>{}</strong>.</p>",
@@ -1842,7 +1866,10 @@ fn render_results(
         );
     } else {
         body.push_str("<ol>\n");
-        for item in &shown {
+        for (position, item) in shown.iter().enumerate() {
+            for page in listed_pages(position) {
+                render_page(&mut body, &page.hit, page_icon);
+            }
             // `/go` only follows this node's own results, so sites from other
             // nodes link straight to themselves.
             let go = (notes_picks && item.network.is_none())
@@ -1852,14 +1879,27 @@ fn render_results(
                 .history
                 .as_ref()
                 .is_some_and(|history| history.opened.contains(&item.hit.domain));
+            let mut rendered = String::new();
             render_hit(
-                &mut body,
+                &mut rendered,
                 item.hit,
                 item.network,
                 go.as_deref(),
                 icon,
                 opened,
             );
+            if let Some(page) = pages
+                .iter()
+                .find(|p| p.under.as_deref() == Some(item.hit.domain.as_str()))
+            {
+                if let Some(end) = rendered.rfind("</li>") {
+                    rendered.insert_str(end, &page_line(&page.hit));
+                }
+            }
+            body.push_str(&rendered);
+        }
+        for page in listed_pages(usize::MAX) {
+            render_page(&mut body, &page.hit, page_icon);
         }
         body.push_str("</ol>\n");
     }
@@ -2033,6 +2073,61 @@ fn site_badge(domain: &str, icon: Option<&str>) -> String {
 /// tinted and says so. `go` is the `/go` link to send the click through
 /// instead of linking to the site directly; `icon` is the site's icon as a
 /// `data:` URL.
+/// Whose icon page results show: Wikipedia's, for now the one page set.
+const PAGES_ICON_DOMAIN: &str = "wikipedia.org";
+
+/// A single page (a Wikipedia article) listed among the sites.
+fn render_page(out: &mut String, hit: &PageHit, icon: Option<&str>) {
+    let Some(href) = http_url(&hit.page.url) else {
+        return;
+    };
+    let badge = site_badge(PAGES_ICON_DOMAIN, icon);
+    let _ = write!(
+        out,
+        "<li class=\"pg\"><a class=\"r\" href=\"{}\" rel=\"noreferrer\"><span class=\"site\">{badge}\
+         <span class=\"sn\"><span class=\"dn\">{}</span><span class=\"u\">{}</span></span></span>\
+         <span class=\"t\">{}</span></a>",
+        escape_html(&href),
+        escape_html(hit.page.set_name()),
+        escape_html(&display_url(&href)),
+        escape_html(&truncate_chars(&hit.page.title, 150)),
+    );
+    if let Some(description) = hit
+        .page
+        .description
+        .as_deref()
+        .filter(|d| !d.trim().is_empty())
+    {
+        let _ = write!(out, "<p class=\"d\">{}</p>", escape_html(description));
+    }
+    let _ = writeln!(
+        out,
+        "<div class=\"m\"><span title=\"{} views\">score {:.3}</span></div></li>",
+        hit.page.views, hit.score
+    );
+}
+
+/// "Wikipedia: Python (programming language)", under the result for the
+/// site the page is about.
+fn page_line(hit: &PageHit) -> String {
+    let Some(href) = http_url(&hit.page.url) else {
+        return String::new();
+    };
+    let description = hit
+        .page
+        .description
+        .as_deref()
+        .filter(|d| !d.trim().is_empty())
+        .map(|d| format!(" &middot; {}", escape_html(d)))
+        .unwrap_or_default();
+    format!(
+        "<p class=\"sub\">{}: <a href=\"{}\" rel=\"noreferrer\">{}</a>{description}</p>",
+        escape_html(hit.page.set_name()),
+        escape_html(&href),
+        escape_html(&truncate_chars(&hit.page.title, 150)),
+    )
+}
+
 fn render_hit(
     out: &mut String,
     hit: &Hit,
@@ -2171,6 +2266,7 @@ mod tests {
             text_score: 0.8,
             link_score: 0.7,
             country: None,
+            named: false,
         }
     }
 
@@ -3009,6 +3105,7 @@ mod tests {
             let mut github = hit("github.com", "https://github.com/", Some("GitHub"), None);
             github.country = Some("US".into());
             Ok(SearchResults {
+                pages: Vec::new(),
                 hits: vec![github],
                 site_search: Some(SiteSearch {
                     domain: "github.com".into(),
@@ -3209,6 +3306,7 @@ mod tests {
         let mut settings = no_settings();
         settings.network = NetSetting::On;
         let results = SearchResults {
+            pages: Vec::new(),
             hits: local.clone(),
             site_search: None,
             spelling: None,
@@ -3234,6 +3332,7 @@ mod tests {
     #[test]
     fn corrected_typos_are_shown_with_a_way_back() {
         let mut results = SearchResults {
+            pages: Vec::new(),
             hits: vec![scored("amazon.com", 0.9)],
             site_search: None,
             spelling: Some(Spelling {
@@ -3304,6 +3403,7 @@ mod tests {
     #[test]
     fn the_source_line_says_where_results_came_from() {
         let results = SearchResults {
+            pages: Vec::new(),
             hits: vec![scored("a.com", 0.9)],
             site_search: None,
             spelling: None,
@@ -3401,6 +3501,7 @@ mod tests {
     #[test]
     fn results_show_site_icons_inline_and_letters_otherwise() {
         let results = SearchResults {
+            pages: Vec::new(),
             spelling: None,
             hits: vec![
                 hit(
@@ -3444,6 +3545,7 @@ mod tests {
         assert!(page.contains("<span class=\"u\">www.chase.com/personal</span>"));
         // An address that is just the domain is not repeated.
         let results = SearchResults {
+            pages: Vec::new(),
             spelling: None,
             hits: vec![hit("jsr.io", "https://jsr.io/", Some("JSR"), None)],
             site_search: None,

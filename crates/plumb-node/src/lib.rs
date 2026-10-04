@@ -31,6 +31,7 @@ pub mod eval;
 pub mod history;
 pub mod meaning;
 pub mod node;
+pub mod pages;
 pub mod storage;
 pub mod tls;
 pub mod web;
@@ -80,6 +81,7 @@ pub fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Run(args) => run::run(args),
         Command::FetchData(args) => fetch::run(args),
+        Command::FetchPages(args) => fetch::run_pages(args),
         Command::Ingest(args) => ingest::run(args),
         Command::Crawl(args) => crawl::run(args),
         Command::Index(args) => search::run_index(args),

@@ -7,6 +7,7 @@ repository.workspace = true
 
 [dependencies]
 anyhow = "1.0.104"
+bzip2 = "0.6.1"
 flate2 = "1.1.10"
 futures-util = "0.3.34"
 httpdate = "1.0.3"

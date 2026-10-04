@@ -3,11 +3,11 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
-use plumb_ingest::{download, facts, intros, kind_sites};
+use plumb_ingest::{articles, download, facts, intros, kind_sites};
 use tracing::{error, info};
 
 use crate::block_on;
-use crate::cli::FetchDataArgs;
+use crate::cli::{FetchDataArgs, FetchPagesArgs};
 
 /// Where release names for `--cc-release` are listed. We know of no
 /// machine-readable index of releases, so we point people here instead.
@@ -25,6 +25,79 @@ enum Outcome {
     Kept(PathBuf),
     Skipped(String),
     Failed(anyhow::Error),
+}
+
+/// `plumb fetch-pages`: makes a page set file from Wikimedia's dumps.
+pub fn run_pages(args: FetchPagesArgs) -> Result<()> {
+    let Some(set) = crate::pages::SetInfo::find(&args.set) else {
+        bail!(
+            "unknown page set {:?}; there are: {}",
+            args.set,
+            crate::pages::SETS
+                .iter()
+                .map(|s| s.id)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    };
+    let Some(lang) = set.id.strip_prefix("wikipedia-") else {
+        bail!("fetch-pages cannot make {} yet", set.id);
+    };
+    let dest = match (&args.out, &args.data) {
+        (Some(out), _) => out.clone(),
+        (None, Some(data)) => set.file(data),
+        (None, None) => bail!("pass --data DIR or --out PATH"),
+    };
+    let mut dumps = if args.dumps.is_empty() {
+        let client = download::http_client()?;
+        let days = articles::pageview_days(plumb_core::now_unix(), args.pageview_days);
+        block_on(articles::download_article_dumps(
+            &client,
+            &args.work,
+            lang,
+            &days,
+            args.keep_days,
+        ))??
+    } else {
+        let mut files = args.dumps.iter().cloned();
+        articles::ArticleDumps {
+            page: files.next().context("no page dump")?,
+            page_props: files.next().context("no page_props dump")?,
+            redirect: files.next().context("no redirect dump")?,
+            pageviews: files.collect(),
+            official_sites: None,
+        }
+    };
+    dumps.official_sites = args.official_sites.clone();
+    let articles = articles::build_articles(lang, &dumps)?;
+    if articles.is_empty() {
+        bail!("the dumps gave no articles that were read; nothing was written");
+    }
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    articles::write_articles_file(&dest, &articles)?;
+    let size = std::fs::metadata(&dest).map_or(0, |m| m.len());
+    let with_description = articles.iter().filter(|a| a.description.is_some()).count();
+    let with_site = articles.iter().filter(|a| a.site.is_some()).count();
+    let views: u64 = articles.iter().map(|a| a.views).sum();
+    let share = |n: usize| {
+        let top: u64 = articles.iter().take(n).map(|a| a.views).sum();
+        100.0 * top as f64 / views.max(1) as f64
+    };
+    info!(
+        "wrote {} articles to {} ({:.1} MB): {} with a description, {} with an official site; \
+         the top 100,000 have {:.1}% of the views, the top 1,000,000 {:.1}%",
+        articles.len(),
+        dest.display(),
+        size as f64 / 1e6,
+        with_description,
+        with_site,
+        share(100_000),
+        share(1_000_000)
+    );
+    Ok(())
 }
 
 pub fn run(args: FetchDataArgs) -> Result<()> {

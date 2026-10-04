@@ -111,6 +111,7 @@ pub mod features;
 mod fill;
 pub mod journal;
 mod network;
+mod pages;
 pub mod schedule;
 pub(crate) mod store;
 mod worker;
@@ -429,6 +430,9 @@ pub struct NodeSettings {
     /// node starts without it; servers, and settings saved before it
     /// existed, have it.
     pub setup_chosen: bool,
+    /// How much of each page set (Wikipedia articles) to keep; see
+    /// [`crate::pages`].
+    pub page_sets: crate::pages::PageSets,
 }
 
 impl Default for NodeSettings {
@@ -442,6 +446,7 @@ impl Default for NodeSettings {
             paused_until: None,
             fill_from_network: true,
             setup_chosen: true,
+            page_sets: Default::default(),
         }
     }
 }
@@ -619,6 +624,7 @@ pub struct NodeHandle {
     server: JoinHandle<std::io::Result<()>>,
     worker: JoinHandle<()>,
     embedding: Option<JoinHandle<()>>,
+    pages: JoinHandle<()>,
 }
 
 impl NodeHandle {
@@ -669,6 +675,7 @@ impl NodeHandle {
             mut server,
             worker,
             embedding,
+            pages,
             ..
         } = self;
         info!("stopping the node in {}", inner.paths.data.display());
@@ -692,6 +699,9 @@ impl NodeHandle {
             if let Err(err) = embedding.await {
                 warn!("search by meaning failed: {err}");
             }
+        }
+        if let Err(err) = pages.await {
+            warn!("page sets failed: {err}");
         }
         network::stop(&inner).await;
         // Only now may another node take over the data directory.
@@ -823,6 +833,10 @@ pub async fn start(mut config: NodeConfig) -> Result<NodeHandle> {
         let inner = inner.clone();
         tokio::task::spawn_blocking(move || embedding::run(inner))
     });
+    let pages = {
+        let inner = inner.clone();
+        tokio::task::spawn_blocking(move || pages::run(inner))
+    };
     info!(
         "serving http://{addr}/ with data in {}",
         inner.paths.data.display()
@@ -834,6 +848,7 @@ pub async fn start(mut config: NodeConfig) -> Result<NodeHandle> {
         server,
         worker,
         embedding,
+        pages,
     })
 }
 
@@ -963,6 +978,9 @@ struct Inner {
     journal: journal::Journal,
     /// Cuts short search by meaning's wait after a failure.
     meaning_retry: AtomicBool,
+    /// The page index searched next to the sites, and its key; `None`
+    /// while no page set is kept.
+    pages: RwLock<Option<(String, Arc<plumb_index::pages::PageSearcher>)>>,
 }
 
 /// Failed work the panel can have tried again now.
@@ -1161,6 +1179,7 @@ impl Inner {
             restart: RestartSignal::default(),
             journal,
             meaning_retry: AtomicBool::new(false),
+            pages: RwLock::new(None),
         }
     }
 
@@ -1610,18 +1629,24 @@ impl SearchBackend for Inner {
             bail!("the search index is not ready yet");
         };
         let meaning = self.meaning.get();
-        let Some(table) = network::handle(self).map(|net| net.popularity()) else {
-            return index
+        let mut results = match network::handle(self).map(|net| net.popularity()) {
+            None => index
                 .backend()
-                .search_full_with(query, limit, options, meaning.as_deref());
+                .search_full_with(query, limit, options, meaning.as_deref())?,
+            Some(table) => {
+                let candidates = limit.max(network::POPULARITY_CANDIDATES);
+                let mut results = index.backend().search_full_with(
+                    query,
+                    candidates,
+                    options,
+                    meaning.as_deref(),
+                )?;
+                network::apply_popularity(&table, query, &mut results.hits);
+                results.hits.truncate(limit);
+                results
+            }
         };
-        let candidates = limit.max(network::POPULARITY_CANDIDATES);
-        let mut results =
-            index
-                .backend()
-                .search_full_with(query, candidates, options, meaning.as_deref())?;
-        network::apply_popularity(&table, query, &mut results.hits);
-        results.hits.truncate(limit);
+        pages::add_pages(self, query, &mut results);
         Ok(results)
     }
 

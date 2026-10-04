@@ -2,7 +2,11 @@
 //! does the expected official site rank?
 //!
 //! The file has one `query<TAB>expected_domain[,another_ok_domain]` per
-//! line; blank lines and lines starting with `#` are skipped. The metrics
+//! line; blank lines and lines starting with `#` are skipped. An expected
+//! answer can also be a page's address (`https://en.wikipedia.org/wiki/
+//! Marie_Curie`): with `--pages`, pages are listed among the sites as a
+//! node lists them (see [`plumb_index::pages::place_pages`]), and a page
+//! shown under a site's result counts at that site's rank. The metrics
 //! are top-1 and top-3 rates and the mean reciprocal rank within the
 //! results fetched ([`Metrics::from_ranks`]).
 
@@ -10,6 +14,7 @@ use std::fmt::Write as _;
 
 use anyhow::{bail, Context, Result};
 use plumb_core::registrable_domain;
+use plumb_index::pages::{place_pages, Page, PageSearcher, PlacedPage};
 use plumb_index::{Hit, Meaning, SearchOptions, Searcher};
 use tracing::info;
 
@@ -64,6 +69,12 @@ pub fn parse_queries(text: &str) -> Result<Vec<EvalQuery>> {
 }
 
 fn normalize_domain(domain: &str) -> String {
+    // A page's address stays one; a homepage's counts as its site.
+    if let Ok(url) = url::Url::parse(domain) {
+        if matches!(url.scheme(), "http" | "https") && url.path() != "/" {
+            return domain.to_string();
+        }
+    }
     registrable_domain(domain).unwrap_or_else(|| domain.trim_end_matches('.').to_ascii_lowercase())
 }
 
@@ -151,6 +162,27 @@ pub fn run(args: EvalArgs) -> Result<()> {
         cfg.alpha = alpha;
     }
     let meaning = MeaningIndex::from_args(&args.meaning)?;
+    let pages_dir = tempfile::tempdir().context("making a folder for the page index")?;
+    let pages = match &args.pages {
+        None => None,
+        Some(file) => {
+            let reader = plumb_ingest::open_maybe_gz(file)?;
+            let lang = file
+                .file_name()
+                .and_then(|n| n.to_str())
+                .and_then(|n| n.strip_prefix("wikipedia-"))
+                .and_then(|n| n.split('.').next())
+                .unwrap_or("en")
+                .to_string();
+            let articles = plumb_core::article::read_articles(reader, args.pages_top)?;
+            info!("indexing {} pages of {}", articles.len(), file.display());
+            plumb_index::pages::build_page_index(
+                pages_dir.path(),
+                articles.into_iter().map(|a| Page::from_article(&lang, a)),
+            )?;
+            Some(PageSearcher::open(pages_dir.path())?)
+        }
+    };
     info!(
         "evaluating {} queries against {} sites ({cfg:?})",
         queries.len(),
@@ -185,7 +217,19 @@ pub fn run(args: EvalArgs) -> Result<()> {
             .with_context(|| format!("searching for {:?}", q.query))?
             .hits;
         let domains: Vec<&str> = hits.iter().map(|h| h.domain.as_str()).collect();
-        let deep_rank = rank_of(&domains, &q.expected);
+        let deep_rank = match &pages {
+            None => rank_of(&domains, &q.expected),
+            Some(pages) => {
+                let found = pages
+                    .search(&q.query, 10)
+                    .with_context(|| format!("searching pages for {:?}", q.query))?;
+                let listed = listed_with_pages(&hits, place_pages(&hits, found));
+                listed
+                    .iter()
+                    .position(|keys| keys.iter().any(|k| q.expected.contains(k)))
+                    .map(|i| i + 1)
+            }
+        };
         let rank = deep_rank.filter(|&rank| rank <= args.limit);
         if rank != Some(1) {
             println!(
@@ -223,6 +267,37 @@ pub fn run(args: EvalArgs) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// What each position of a results page holds, as a node lists sites and
+/// pages: a page's address, or a site's domain with the addresses of the
+/// pages shown under it.
+fn listed_with_pages(hits: &[Hit], pages: Vec<PlacedPage>) -> Vec<Vec<String>> {
+    let mut listed = Vec::new();
+    let alone = |at: usize| {
+        pages
+            .iter()
+            .filter(move |p| p.under.is_none() && p.at == at)
+            .map(|p| vec![p.hit.page.url.clone()])
+    };
+    for (i, hit) in hits.iter().enumerate() {
+        listed.extend(alone(i));
+        let mut keys = vec![hit.domain.clone()];
+        keys.extend(
+            pages
+                .iter()
+                .filter(|p| p.under.as_deref() == Some(hit.domain.as_str()))
+                .map(|p| p.hit.page.url.clone()),
+        );
+        listed.push(keys);
+    }
+    listed.extend(
+        pages
+            .iter()
+            .filter(|p| p.under.is_none() && p.at >= hits.len())
+            .map(|p| vec![p.hit.page.url.clone()]),
+    );
+    listed
 }
 
 /// How deep `--explain` looks for the expected site.
@@ -278,6 +353,61 @@ fn format_totals(m: &Metrics, limit: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn pages_are_listed_as_a_node_lists_them() {
+        let site = |domain: &str, named: bool| Hit {
+            domain: domain.into(),
+            url: format!("https://{domain}/"),
+            title: None,
+            description: None,
+            score: 1.0,
+            text_score: 1.0,
+            link_score: 1.0,
+            country: None,
+            named,
+        };
+        let page = |title: &str, site: Option<&str>| plumb_index::pages::PageHit {
+            page: Page {
+                site: site.map(str::to_string),
+                ..Page::from_article(
+                    "en",
+                    plumb_core::Article {
+                        title: title.into(),
+                        ..Default::default()
+                    },
+                )
+            },
+            score: 0.9,
+            named: true,
+        };
+        let hits = [site("curie.org", false), site("python.org", false)];
+        let placed = place_pages(
+            &hits,
+            vec![
+                page("Marie Curie", None),
+                page("Python", Some("python.org")),
+            ],
+        );
+        let listed = listed_with_pages(&hits, placed);
+        assert_eq!(
+            listed,
+            [
+                vec!["https://en.wikipedia.org/wiki/Marie_Curie".to_string()],
+                vec!["curie.org".to_string()],
+                vec![
+                    "python.org".to_string(),
+                    "https://en.wikipedia.org/wiki/Python".to_string()
+                ],
+            ]
+        );
+        let queries =
+            parse_queries("marie curie\thttps://en.wikipedia.org/wiki/Marie_Curie\n").unwrap();
+        assert_eq!(
+            queries[0].expected,
+            ["https://en.wikipedia.org/wiki/Marie_Curie"]
+        );
+    }
     use super::*;
 
     fn close(a: f64, b: f64) -> bool {

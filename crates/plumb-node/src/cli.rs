@@ -29,6 +29,9 @@ pub enum Command {
     /// Download the seed datasets: Tranco, Common Crawl domain ranks and
     /// Wikidata official websites.
     FetchData(FetchDataArgs),
+    /// Make a page set file (Wikipedia articles) from Wikimedia's dumps,
+    /// for a node to list single pages with its sites.
+    FetchPages(FetchPagesArgs),
     /// Fold seed data and earlier records into one records file.
     Ingest(IngestArgs),
     /// Fetch the homepages of the best-scored records and merge what they say.
@@ -348,6 +351,41 @@ pub struct FetchDataArgs {
 }
 
 #[derive(Debug, Args)]
+pub struct FetchPagesArgs {
+    /// The page set to make: wikipedia-en (English Wikipedia's articles).
+    #[arg(long, value_name = "SET", default_value = "wikipedia-en")]
+    pub set: String,
+    /// Directory to download the dumps into (created if missing). About
+    /// 3 GB for English, plus about 400 MB per day of page views.
+    #[arg(long, value_name = "DIR")]
+    pub work: PathBuf,
+    /// A node's data directory to put the set's file in, where the node
+    /// picks it up within seconds.
+    #[arg(long, value_name = "DIR", required_unless_present = "out")]
+    pub data: Option<PathBuf>,
+    /// Write the set's file here instead.
+    #[arg(long, value_name = "PATH")]
+    pub out: Option<PathBuf>,
+    /// Days of page views to rank by, ending two days ago.
+    #[arg(long, value_name = "DAYS", default_value_t = 7)]
+    pub pageview_days: u32,
+    /// Keep downloaded dumps younger than this many days instead of fetching
+    /// them again (page views of past days never change, so they are always
+    /// kept).
+    #[arg(long, value_name = "DAYS", default_value_t = 20)]
+    pub keep_days: u64,
+    /// Wikidata's official websites (wikidata-official-sites.tsv from
+    /// fetch-data), so an article about a site's organization is shown
+    /// under that site.
+    #[arg(long, value_name = "PATH")]
+    pub official_sites: Option<PathBuf>,
+    /// Read these files instead of downloading: the page, page_props and
+    /// redirect dumps, then the page view files.
+    #[arg(long, value_name = "PATH", num_args = 4.., conflicts_with = "pageview_days")]
+    pub dumps: Vec<PathBuf>,
+}
+
+#[derive(Debug, Args)]
 #[command(group(
     ArgGroup::new("sources")
         .required(true)
@@ -561,6 +599,13 @@ pub struct EvalArgs {
     /// scored: final score, text match, link score and closeness in meaning.
     #[arg(long)]
     pub explain: bool,
+    /// A page set file (wikipedia-en.tsv.gz from fetch-pages) whose pages
+    /// are listed among the sites, as a node lists them.
+    #[arg(long, value_name = "PATH")]
+    pub pages: Option<PathBuf>,
+    /// How many of the page set's most read pages to keep.
+    #[arg(long, value_name = "N", default_value_t = usize::MAX, hide_default_value = true)]
+    pub pages_top: usize,
     #[command(flatten)]
     pub meaning: MeaningArgs,
 }

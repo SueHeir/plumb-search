@@ -144,6 +144,93 @@ async fn search(addr: SocketAddr, query: &str) -> Vec<Hit> {
     serde_json::from_str(&body).unwrap()
 }
 
+/// Puts an English Wikipedia page set in `data_dir`.
+fn write_page_set(data_dir: &Path, articles: &[plumb_core::Article]) {
+    let file = crate::pages::SetInfo::find("wikipedia-en")
+        .unwrap()
+        .file(data_dir);
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    let mut text = plumb_core::article::ARTICLES_HEADER.as_bytes().to_vec();
+    for article in articles {
+        plumb_core::article::write_article(&mut text, article).unwrap();
+    }
+    std::fs::write(file, text).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lists_wikipedia_articles_with_the_sites() {
+    let dir = seeded_dir();
+    write_page_set(
+        dir.path(),
+        &[
+            plumb_core::Article {
+                title: "Marie Curie".into(),
+                description: Some("Polish-French physicist and chemist".into()),
+                views: 80_000,
+                ..Default::default()
+            },
+            plumb_core::Article {
+                title: "Chase Bank".into(),
+                description: Some("American bank".into()),
+                site: Some("chase.com".into()),
+                views: 9_000,
+                ..Default::default()
+            },
+        ],
+    );
+    let node = start(test_config(dir.path())).await.unwrap();
+    let addr = node.addr();
+    wait_for(addr, "the first index", ready_and_idle).await;
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let body = loop {
+        let (code, _, body) = get(addr, "/search?q=marie+curie").await;
+        assert_eq!(code, 200);
+        if body.contains("Marie_Curie") || Instant::now() > deadline {
+            break body;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert!(
+        body.contains(
+            "<li class=\"pg\"><a class=\"r\" href=\"https://en.wikipedia.org/wiki/Marie_Curie\""
+        ),
+        "{body}"
+    );
+    assert!(
+        body.contains("Polish-French physicist and chemist"),
+        "{body}"
+    );
+
+    // An article about a listed site goes under it, not in a place of its own.
+    let (_, _, body) = get(addr, "/search?q=chase").await;
+    assert!(!body.contains("class=\"pg\""), "{body}");
+    assert!(
+        body.contains(
+            "<p class=\"sub\">Wikipedia: <a href=\"https://en.wikipedia.org/wiki/Chase_Bank\""
+        ),
+        "{body}"
+    );
+    let (_, _, json) = get(addr, "/api/search?q=marie+curie&full=1").await;
+    let results: SearchResults = serde_json::from_str(&json).unwrap();
+    assert_eq!(results.pages[0].hit.page.title, "Marie Curie");
+    assert!(results.pages[0].hit.named);
+
+    // Turned off, the articles go.
+    let mut settings = node.inner.settings();
+    settings.page_sets = crate::pages::PageSets::parse("wikipedia-en=off").unwrap();
+    node.inner.change_settings(settings).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let (_, _, body) = get(addr, "/search?q=marie+curie").await;
+        if !body.contains("Marie_Curie") {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the articles stayed");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    node.shutdown().await.unwrap();
+}
+
 #[test]
 fn profiles() {
     let server = NodeConfig::server(PathBuf::from("/data"));
