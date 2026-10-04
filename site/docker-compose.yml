@@ -82,8 +82,9 @@ services:
       - "4002:4002/udp"
     volumes:
       - plumb-data:/data
-    # Leaves some CPU for Caddy and the relay while sites are being embedded.
-    cpus: 1.5
+    # 3 of the droplet's 4 vCPUs (8 GB since 2026-10-04): leaves one for
+    # Caddy and the relay while sites are being embedded.
+    cpus: 3
     init: true
     restart: unless-stopped
     stop_grace_period: 5m
