@@ -46,10 +46,10 @@
 //!   first. A typed hostname always has full trust.
 //! - A query ending in words that say what someone wants from a site
 //!   rather than which site ("login", "docs", "tracking": `INTENT_WORDS`)
-//!   is ranked by the words before them, so "paypal login" finds paypal.com
-//!   rather than paypal-login.us and "postgres docs" finds postgresql.org
-//!   rather than github.com. A well-known site ([`WELL_KNOWN_LINK_SCORE`])
-//!   named by the whole query keeps it: "read the docs".
+//!   is also ranked by the words before them, each site keeping its better
+//!   score, so "paypal login" finds paypal.com rather than paypal-login.us.
+//!   A well-known site ([`WELL_KNOWN_LINK_SCORE`]) named by the whole
+//!   query keeps it to itself: "read the docs".
 //!
 //! A query that names no site in full is checked for typos, and searched
 //! again corrected when that finds a better match: "amazom" shows
@@ -689,17 +689,41 @@ impl Searcher {
         if options.exact || limit == 0 || named.typed {
             return Ok(results);
         }
-        // "paypal login" is ranked as "paypal", unless a well-known site is
-        // named by all of it (readthedocs.org for "read the docs"). The
-        // link into the named site's own search still uses every word.
+        // "paypal login" is also ranked as "paypal", and each site keeps
+        // the better of its two scores: the name alone puts paypal.com
+        // above paypal-login.us, while the whole query still counts for
+        // sites only it matches ("mdn web docs"). A well-known site named
+        // by all of it keeps the query to itself (readthedocs.org for "read
+        // the docs"). The link into the named site's own search still uses
+        // every word.
         if let Some(name) = without_intent_words(query_text) {
             let named_in_full = named
                 .full_link_score
                 .is_some_and(|score| score >= WELL_KNOWN_LINK_SCORE);
             if !named_in_full {
-                let site_search = results.site_search;
                 let mut found = self.search_meaning(&name, limit, cfg, options, meaning)?;
-                found.site_search = site_search.or(found.site_search);
+                let mut best: HashMap<String, Hit> = HashMap::new();
+                for hit in results.hits.into_iter().chain(found.hits) {
+                    match best.entry(hit.domain.clone()) {
+                        Entry::Occupied(mut kept) if kept.get().score < hit.score => {
+                            kept.insert(hit);
+                        }
+                        Entry::Occupied(_) => {}
+                        Entry::Vacant(slot) => {
+                            slot.insert(hit);
+                        }
+                    }
+                }
+                let mut hits: Vec<Hit> = best.into_values().collect();
+                hits.sort_by(|a, b| {
+                    b.score
+                        .total_cmp(&a.score)
+                        .then_with(|| b.link_score.total_cmp(&a.link_score))
+                        .then_with(|| a.domain.cmp(&b.domain))
+                });
+                hits.truncate(limit);
+                found.hits = hits;
+                found.site_search = results.site_search.or(found.site_search);
                 return Ok(found);
             }
         }
