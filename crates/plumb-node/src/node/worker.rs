@@ -149,11 +149,19 @@ async fn step(inner: &Arc<Inner>) -> Result<Next> {
     let network_rebuild_at =
         (inner.saved().network_pending >= REBUILD_AFTER_RECORDS).then(|| network_rebuild_at(inner));
     if network_rebuild_at.is_some_and(|at| at <= now_unix()) && !inner.saved().index_stale {
-        inner.update_saved(|saved| saved.index_stale = true)?;
+        if inner.saved().crawl_left > 0 {
+            // The round under way builds them in when it ends.
+            inner.update_saved(|saved| saved.index_stale = true)?;
+        } else {
+            // Not a refresh: the next one stays due when it was, or
+            // records arriving every half hour would put it off forever.
+            rebuild(inner, false).await?;
+            return Ok(Next::Continue);
+        }
     }
     let saved = inner.saved();
     if inner.current().is_none() || (saved.index_stale && saved.crawl_left == 0) {
-        rebuild(inner).await?;
+        rebuild(inner, true).await?;
         return Ok(Next::Continue);
     }
     if missing_buckets(inner) {
@@ -161,7 +169,7 @@ async fn step(inner: &Arc<Inner>) -> Result<Next> {
         // in a loop.
         inner.buckets_rebuilt.store(true, Ordering::SeqCst);
         info!("rebuilding the index to add the buckets private search and the network need");
-        rebuild(inner).await?;
+        rebuild(inner, false).await?;
         return Ok(Next::Continue);
     }
     let wikidata_due = saved.wikidata_missing.then(|| inner.wikidata_retry_at());
@@ -247,7 +255,7 @@ async fn set_up(inner: &Arc<Inner>) -> Result<()> {
             build(inner, &records)
         })
         .await?;
-        return put_in_service(inner, built).await;
+        return put_in_service(inner, built, true).await;
     }
     info!(
         "no records in {} yet: setting up from the Tranco list, the rest of the seed data next",
@@ -272,7 +280,7 @@ async fn set_up(inner: &Arc<Inner>) -> Result<()> {
         build(inner, &records)
     })
     .await?;
-    put_in_service(inner, built).await
+    put_in_service(inner, built, true).await
 }
 
 /// Downloads the rest of the seed data, which setup went on without, and
@@ -662,8 +670,9 @@ fn missing_buckets(inner: &Inner) -> bool {
         && inner.current().is_some_and(|index| index.buckets.is_none())
 }
 
-/// Builds a new index of the records file and puts it in service.
-async fn rebuild(inner: &Arc<Inner>) -> Result<()> {
+/// Builds a new index of the records file and puts it in service; see
+/// [`put_in_service`] for `ends_round`.
+async fn rebuild(inner: &Arc<Inner>, ends_round: bool) -> Result<()> {
     let built = blocking(inner, |inner| {
         let _records = inner.hold_records();
         inner.set_step(Step::Indexing, "Reading the site records");
@@ -674,7 +683,7 @@ async fn rebuild(inner: &Arc<Inner>) -> Result<()> {
         build(inner, &sorted_by_link_score(&set))
     })
     .await?;
-    put_in_service(inner, built).await
+    put_in_service(inner, built, ends_round).await
 }
 
 /// Starts a refresh: [`NodeConfig::crawl_per_refresh`] homepages to crawl.
@@ -778,7 +787,7 @@ async fn crawl(inner: &Arc<Inner>) -> Result<()> {
     let handle = Handle::current();
     let built = blocking(inner, move |inner| crawl_and_build(inner, &handle)).await?;
     match built {
-        Some(built) => put_in_service(inner, built).await,
+        Some(built) => put_in_service(inner, built, true).await,
         None => Ok(()),
     }
 }
@@ -1115,19 +1124,20 @@ fn build<R: Borrow<SiteRecord>>(inner: &Inner, records: &[R]) -> Result<ServingI
 }
 
 /// Swaps in a freshly built index and notes that the records file holds no
-/// changes it lacks. A build with no homepages left to crawl ends the round.
-async fn put_in_service(inner: &Arc<Inner>, built: ServingIndex) -> Result<()> {
+/// changes it lacks. A build that `ends_round`, with no homepages left to
+/// crawl, ends the round: the next refresh is due a refresh interval later.
+async fn put_in_service(inner: &Arc<Inner>, built: ServingIndex, ends_round: bool) -> Result<()> {
     inner.install(built);
     let now = now_unix();
     inner.last_build.store(now, Ordering::SeqCst);
     inner.update_saved(|saved| {
         saved.index_stale = false;
         saved.network_pending = 0;
-        if saved.crawl_left == 0 {
+        if ends_round && saved.crawl_left == 0 {
             saved.last_refresh = Some(now);
         }
     })?;
-    if inner.saved().crawl_left == 0 {
+    if ends_round && inner.saved().crawl_left == 0 {
         // Requests made during the round are answered by it.
         inner.refresh_requested.store(false, Ordering::SeqCst);
     }
