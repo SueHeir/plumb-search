@@ -538,6 +538,60 @@ pub(super) fn absorb_inbox(inner: &Inner) -> Result<u64> {
     Ok(n)
 }
 
+/// Most sites [`Inner::kept_found`] remembers before it starts over.
+const MAX_KEPT_FOUND: usize = 10_000;
+
+/// Keeps the signed crawls a network search found of sites the index being
+/// served holds: they go to the inbox like crawls other nodes publish, so
+/// a site this node has without text gets the network's text in its next
+/// index, and is then embedded for search by meaning. Only what
+/// [`plumb_net::FoundSite::shared`] carries is kept, so the trust rules of
+/// published batches apply (text only from trusted crawlers). Sites this
+/// node does not hold are left out: searching never fills its storage.
+pub(super) fn keep_found(inner: &Inner, records: Vec<SiteRecord>) {
+    let Some(index) = inner.current() else {
+        return;
+    };
+    let Some(backend) = index.backend.as_ref() else {
+        return;
+    };
+    let mut kept = inner
+        .kept_found
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let new: Vec<SiteRecord> = records
+        .into_iter()
+        .filter(|record| {
+            let Some(at) = record.crawled_at else {
+                return false;
+            };
+            kept.get(&record.domain).is_none_or(|&had| had < at)
+                && backend.has_domain(&record.domain)
+        })
+        .collect();
+    if new.is_empty() {
+        return;
+    }
+    if kept.len() + new.len() > MAX_KEPT_FOUND {
+        kept.clear();
+    }
+    for record in &new {
+        kept.insert(record.domain.clone(), record.crawled_at.unwrap_or(0));
+    }
+    drop(kept);
+    let n = new.len() as u64;
+    match append_inbox(inner, &new) {
+        Ok(()) => {
+            debug!("kept {n} signed crawls a network search found");
+            let total = inner.inbox_records.fetch_add(n, Ordering::SeqCst) + n;
+            if total >= REBUILD_AFTER_RECORDS {
+                inner.wake.notify_one();
+            }
+        }
+        Err(err) => warn!("cannot keep records a network search found: {err:#}"),
+    }
+}
+
 /// Moves the icon a shared crawl carries into the icon store: icons are
 /// never kept in the records file.
 fn keep_shared_icon(icons: &IconStore, record: &mut SiteRecord) {

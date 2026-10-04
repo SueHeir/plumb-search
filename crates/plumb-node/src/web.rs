@@ -48,6 +48,7 @@
 //! allows no scripts and no external resources. Searches run on Tokio's
 //! blocking thread pool.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::sync::Arc;
@@ -168,6 +169,11 @@ impl IndexBackend {
         self
     }
 
+    /// Whether the index holds `domain`.
+    pub fn has_domain(&self, domain: &str) -> bool {
+        self.searcher.has_domain(domain)
+    }
+
     /// [`SearchBackend::search_full`], ranking by `meaning` too when given.
     pub fn search_full_with(
         &self,
@@ -240,6 +246,12 @@ pub trait StatusSource: Send + Sync {
     /// Notes that `domain` was opened from the results for `query`.
     fn record_pick(&self, query: &str, domain: &str) {
         let _ = (query, domain);
+    }
+    /// Keeps signed crawls a network search found ([`FoundSite::shared`])
+    /// of sites this node already holds, folded into its records as a
+    /// shared crawl is. Blocking.
+    fn keep_from_network(&self, records: Vec<SiteRecord>) {
+        let _ = records;
     }
 
     /// The icon of `domain` as a small PNG, when a crawl found one.
@@ -1002,6 +1014,9 @@ pub struct NetworkResult {
     pub confirmed: bool,
     /// How many answers held the site.
     pub answers: usize,
+    /// The signed crawl this node may keep, see [`FoundSite::shared`].
+    #[serde(skip)]
+    pub shared: Option<SiteRecord>,
 }
 
 /// Fetches the query's buckets from other nodes and ranks the sites that
@@ -1021,9 +1036,24 @@ async fn network_search(
     let found = net.search(query, NETWORK_SEARCH_WAIT).await?;
     let query = query.to_string();
     let options = options.clone();
-    tokio::task::spawn_blocking(move || rank_found(found, &query, limit, &rank, &options))
-        .await
-        .context("the ranking task failed")?
+    let node = state.node.clone();
+    tokio::task::spawn_blocking(move || {
+        // Signed crawls of sites this node holds fill in what its own
+        // records lack, for its next index and search by meaning.
+        if let Some(node) = node {
+            let shared: Vec<SiteRecord> = found
+                .found
+                .iter()
+                .filter_map(|site| site.shared.clone())
+                .collect();
+            if !shared.is_empty() {
+                node.keep_from_network(shared);
+            }
+        }
+        rank_found(found, &query, limit, &rank, &options)
+    })
+    .await
+    .context("the ranking task failed")?
 }
 
 fn rank_found(
@@ -1075,6 +1105,7 @@ fn rank_found(
             crawler: site.crawler.clone(),
             confirmed: site.confirmed,
             answers: site.answers,
+            shared: site.shared.clone(),
             hit,
         });
     }
@@ -1732,7 +1763,7 @@ fn render_spelling(out: &mut String, query: &str, spelling: &Spelling, options: 
 /// One result as shown: a hit, and what the network said about it when only
 /// the network found it.
 struct Shown<'a> {
-    hit: &'a Hit,
+    hit: Cow<'a, Hit>,
     network: Option<&'a NetworkResult>,
 }
 
@@ -1741,10 +1772,30 @@ struct Shown<'a> {
 /// did not find count as from the network. Both lists are ranked with this
 /// node's ranking and the same choices, and scores are normalized per
 /// search, so they compare.
+///
+/// When the network holds a signed crawl of a site both found, that crawl
+/// fills the title and description this node's copy lacks, and the site
+/// keeps the better of the two scores: the network's text may match the
+/// search where this node's copy, without text, barely does.
 fn merge_results<'a>(local: &'a [Hit], network: &'a NetOutcome, limit: usize) -> Vec<Shown<'a>> {
+    let signed: HashMap<&str, &NetworkResult> = match network {
+        NetOutcome::Answered(results) => results
+            .hits
+            .iter()
+            .filter(|result| result.shared.is_some())
+            .map(|result| (result.hit.domain.as_str(), result))
+            .collect(),
+        _ => HashMap::new(),
+    };
     let mut shown: Vec<Shown> = local
         .iter()
-        .map(|hit| Shown { hit, network: None })
+        .map(|hit| Shown {
+            hit: match signed.get(hit.domain.as_str()) {
+                Some(result) => Cow::Owned(fill_from_network(hit, result)),
+                None => Cow::Borrowed(hit),
+            },
+            network: None,
+        })
         .collect();
     if let NetOutcome::Answered(results) = network {
         let seen: HashSet<&str> = local.iter().map(|hit| hit.domain.as_str()).collect();
@@ -1754,7 +1805,7 @@ fn merge_results<'a>(local: &'a [Hit], network: &'a NetOutcome, limit: usize) ->
                 .iter()
                 .filter(|result| !seen.contains(result.hit.domain.as_str()))
                 .map(|result| Shown {
-                    hit: &result.hit,
+                    hit: Cow::Borrowed(&result.hit),
                     network: Some(result),
                 }),
         );
@@ -1763,6 +1814,23 @@ fn merge_results<'a>(local: &'a [Hit], network: &'a NetOutcome, limit: usize) ->
     }
     shown.truncate(limit);
     shown
+}
+
+/// This node's `hit` with what the network's signed crawl of the site adds:
+/// the title and description it lacks, and the network's score when better.
+fn fill_from_network(hit: &Hit, result: &NetworkResult) -> Hit {
+    let mut hit = hit.clone();
+    let blank = |text: &Option<String>| text.as_deref().is_none_or(|t| t.trim().is_empty());
+    if let Some(shared) = &result.shared {
+        if blank(&hit.title) && !blank(&shared.title) {
+            hit.title.clone_from(&shared.title);
+        }
+        if blank(&hit.description) && !blank(&shared.description) {
+            hit.description.clone_from(&shared.description);
+        }
+    }
+    hit.score = hit.score.max(result.hit.score);
+    hit
 }
 
 /// The line above the results that says where they came from.
@@ -1882,7 +1950,10 @@ fn render_results(
             escape_html(&truncate_chars(query, 150))
         );
     }
-    let shown_hits: Vec<Hit> = shown.iter().map(|item| item.hit.clone()).collect();
+    let shown_hits: Vec<Hit> = shown
+        .iter()
+        .map(|item| item.hit.clone().into_owned())
+        .collect();
     let pages = place_pages(
         &shown_hits,
         results
@@ -1919,12 +1990,12 @@ fn render_results(
             let notes = settings
                 .history
                 .as_ref()
-                .map(|history| history.notes(item.hit))
+                .map(|history| history.notes(&item.hit))
                 .unwrap_or_default();
             let mut rendered = String::new();
             render_hit(
                 &mut rendered,
-                item.hit,
+                &item.hit,
                 item.network,
                 go.as_deref(),
                 icon,
@@ -3278,6 +3349,7 @@ mod tests {
             crawler: Some("12D3KooWexample".into()),
             confirmed: false,
             answers: 2,
+            shared: None,
         }
     }
 
@@ -3344,6 +3416,42 @@ mod tests {
         );
         assert!(!on.contains("name=\"private\""));
         assert!(private_toggle(true).contains("href=\"/\" role=\"switch\" aria-checked=\"true\""));
+    }
+
+    #[test]
+    fn a_signed_network_crawl_fills_in_this_nodes_copy() {
+        // This node holds b.com without text; the network has a signed
+        // crawl of it whose text matches the search better.
+        let local = vec![scored("a.com", 0.9), scored("b.com", 0.3)];
+        let mut signed = SiteRecord::new("b.com");
+        signed.title = Some("B Shoes".into());
+        signed.description = Some("Handmade shoes".into());
+        let mut network = from_network(scored("b.com", 0.95));
+        network.shared = Some(signed);
+        let unsigned = from_network(scored("a.com", 1.0));
+        let network = NetOutcome::Answered(NetworkResults {
+            hits: vec![network, unsigned],
+            ..NetworkResults::default()
+        });
+        let shown = merge_results(&local, &network, 10);
+        let order: Vec<(&str, bool)> = shown
+            .iter()
+            .map(|s| (s.hit.domain.as_str(), s.network.is_some()))
+            .collect();
+        // Still this node's, untinted, but with the network's text and
+        // score; a.com has no signed crawl, so it keeps its own score.
+        assert_eq!(order, [("b.com", false), ("a.com", false)]);
+        assert_eq!(shown[0].hit.title.as_deref(), Some("B Shoes"));
+        assert_eq!(shown[0].hit.description.as_deref(), Some("Handmade shoes"));
+        assert!((shown[1].hit.score - 0.9).abs() < f32::EPSILON);
+
+        // Text this node has stays.
+        let mut own = scored("b.com", 0.3);
+        own.description = Some("Our own words".into());
+        let shown = merge_results(std::slice::from_ref(&own), &network, 10);
+        let b = shown.iter().find(|s| s.hit.domain == "b.com").unwrap();
+        assert_eq!(b.hit.description.as_deref(), Some("Our own words"));
+        assert_eq!(b.hit.title.as_deref(), Some("B Shoes"));
     }
 
     #[test]
