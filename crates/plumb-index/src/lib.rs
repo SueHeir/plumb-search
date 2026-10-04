@@ -305,6 +305,10 @@ pub struct Hit {
     /// or its hostname.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub named: bool,
+    /// The site is the official website of something Wikidata describes
+    /// (its index entry has Wikidata's description of it).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub official: bool,
 }
 
 /// Per-search choices of the person searching.
@@ -1176,12 +1180,14 @@ impl Searcher {
         };
         let domain = text(self.fields.domain).unwrap_or_default();
         let url = text(self.fields.url).unwrap_or_else(|| format!("https://{domain}/"));
+        let about = text(self.fields.about);
         Ok(Hit {
             url,
             title: text(self.fields.title),
+            official: about.is_some(),
             // The site's own description, else Wikipedia's, else what
             // Wikidata says it is.
-            description: text(self.fields.description).or_else(|| text(self.fields.about)),
+            description: text(self.fields.description).or(about),
             domain,
             score: ranked.score,
             text_score: ranked.text_score,

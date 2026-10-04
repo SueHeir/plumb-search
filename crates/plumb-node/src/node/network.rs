@@ -640,6 +640,7 @@ mod tests {
             link_score: 0.5,
             country: None,
             named: false,
+            official: false,
         }
     }
 

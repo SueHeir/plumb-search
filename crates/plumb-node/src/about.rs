@@ -404,6 +404,7 @@ mod tests {
             link_score: 0.0,
             country: None,
             named: true,
+            official: false,
         }
     }
 

@@ -124,6 +124,7 @@ mod tests {
             link_score: 0.7,
             country: None,
             named: false,
+            official: false,
         }
     }
 

@@ -381,6 +381,7 @@ mod tests {
             link_score: 0.5,
             country: None,
             named,
+            official: false,
         };
         let page = |title: &str, site: Option<&str>| plumb_index::pages::PageHit {
             page: Page {
