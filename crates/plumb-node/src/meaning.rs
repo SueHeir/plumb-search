@@ -93,8 +93,9 @@ impl MeaningIndex {
     pub fn query(&self, query: &str) -> Option<QueryMeaning<'_>> {
         match self.embedder.embed(query) {
             Ok(vector) => Some(QueryMeaning::new(self.read(), vector)),
-            Err(err) => {
-                warn!("could not embed {query:?}, searching by words only: {err:#}");
+            Err(_) => {
+                // Embedding errors may include input text too.
+                warn!("could not embed a search query; searching by words only");
                 None
             }
         }

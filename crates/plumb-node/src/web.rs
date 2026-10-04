@@ -704,9 +704,9 @@ async fn search_page(
         let network = network_search(&state, asked, limit, &settings.options).await;
         let network = match network {
             Ok(results) => NetOutcome::Answered(results),
-            Err(err) => {
+            Err(_) => {
                 // The page still has this node's own results.
-                error!("network search for {query:?} failed: {err:#}");
+                error!("search page network lookup failed");
                 NetOutcome::Failed
             }
         };
@@ -742,8 +742,8 @@ async fn search_page(
                 ),
             )
         }
-        Err(err) => {
-            error!("search for {query:?} failed: {err:#}");
+        Err(_) => {
+            error!("search page local lookup failed");
             html_response(StatusCode::INTERNAL_SERVER_ERROR, render_error(&query))
         }
     };
@@ -791,8 +791,8 @@ async fn api_search(
     match run_search(&state, &query, params.limit(), &options).await {
         Ok(results) if full => (StatusCode::OK, security_headers(), Json(results)).into_response(),
         Ok(results) => (StatusCode::OK, security_headers(), Json(results.hits)).into_response(),
-        Err(err) => {
-            error!("search for {query:?} failed: {err:#}");
+        Err(_) => {
+            error!("search API local lookup failed");
             let body = serde_json::json!({ "error": "search failed" });
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -847,8 +847,8 @@ async fn go(
         let options = search.options(&state.settings.home, &headers);
         match run_search(&state, &query, MAX_LIMIT, &options).await {
             Ok(results) => results.hits.into_iter().find(|hit| hit.domain == params.d),
-            Err(err) => {
-                error!("search for {query:?} failed: {err:#}");
+            Err(_) => {
+                error!("result redirect search failed");
                 None
             }
         }
@@ -900,8 +900,8 @@ async fn network_page(
             let icons = state.icons(domains).await;
             html_response(StatusCode::OK, render_network(&query, &results, &icons))
         }
-        Err(err) => {
-            error!("network search for {query:?} failed: {err:#}");
+        Err(_) => {
+            error!("network search page lookup failed");
             html_response(StatusCode::INTERNAL_SERVER_ERROR, render_error(&query))
         }
     }
@@ -929,8 +929,8 @@ async fn api_network_search(
     let options = params.options(&state.settings.home, &headers);
     match network_search(&state, &query, params.limit(), &options).await {
         Ok(results) => (StatusCode::OK, security_headers(), Json(results)).into_response(),
-        Err(err) => {
-            error!("network search for {query:?} failed: {err:#}");
+        Err(_) => {
+            error!("network search API lookup failed");
             let body = serde_json::json!({ "error": "network search failed" });
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -1151,6 +1151,8 @@ XfzKXf6+YH0J0VddQVcMXd/cXrP5ClXYj1Hh35T//C3z83jv3KNw9yCF4mP91vcYNadv9VISrAAAAABJ
 
 /// Runs a search on the blocking thread pool, since searching is CPU and
 /// disk work. A panicking backend becomes an error, not a dropped connection.
+/// Callers log only the failed operation: backend error messages can include
+/// search terms, so neither those messages nor queries belong in diagnostics.
 async fn run_search(
     state: &AppState,
     query: &str,
@@ -1168,7 +1170,7 @@ async fn run_search(
     })
     .await
     .context("the search task failed")??;
-    debug!("{query:?}: {} hits", results.hits.len());
+    debug!("local search completed: {} hits", results.hits.len());
     Ok(results)
 }
 

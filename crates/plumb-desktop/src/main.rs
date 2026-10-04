@@ -185,7 +185,7 @@ fn setup(app: &AppHandle) -> Result<()> {
                         false
                     }
                     Destination::Nowhere => {
-                        debug!("blocked a navigation to {url}");
+                        debug!("blocked a navigation to an unsupported destination");
                         false
                     }
                 }
@@ -682,17 +682,19 @@ fn is_add_to_firefox(url: &Url, node: Option<&Url>) -> bool {
 /// Opens `url` in Firefox, or in the default browser when Firefox cannot be
 /// started (most likely, it is not installed).
 fn open_in_firefox(app: &AppHandle, url: &Url) {
-    debug!("opening {url} in Firefox");
-    if let Err(err) = app.opener().open_url(url.as_str(), Some(FIREFOX)) {
-        warn!("could not open {url} in Firefox, so in the default browser: {err}");
+    debug!("opening a page in Firefox");
+    // URLs and opener errors can contain search terms, including private
+    // searches in fragments. Keep them out of the app's persisted log.
+    if app.opener().open_url(url.as_str(), Some(FIREFOX)).is_err() {
+        warn!("could not open a page in Firefox; trying the default browser");
         open_in_browser(app, url);
     }
 }
 
 fn open_in_browser(app: &AppHandle, url: &Url) {
-    debug!("opening {url} in the default browser");
-    if let Err(err) = app.opener().open_url(url.as_str(), None::<&str>) {
-        warn!("could not open {url} in the default browser: {err}");
+    debug!("opening a page in the default browser");
+    if app.opener().open_url(url.as_str(), None::<&str>).is_err() {
+        warn!("could not open a page in the default browser");
     }
 }
 
