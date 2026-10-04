@@ -3,7 +3,9 @@
 //!
 //! - `GET /history` lists this browser's past searches and the sites it
 //!   opened from them, newest first,
-//! - `POST /history/clear` deletes them.
+//! - `POST /history/clear` deletes them,
+//! - `GET /about` shows what the browser told the node about its searcher
+//!   (see [`crate::about`]) and `POST /about` changes it.
 //!
 //! The profile cookie is `SameSite=Lax`, so a page on another site cannot
 //! post to `/history/clear` with it, and `HttpOnly`. The choices (show past
@@ -17,12 +19,15 @@ use axum::extract::State;
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
+use axum::Form;
 use axum::Router;
 use plumb_core::{now_unix, truncate_chars};
 use plumb_index::{Hit, SearchOptions};
+use serde::Deserialize;
 use tracing::warn;
 
 use super::{escape_html, html_response, page, search_link, time_ago, AppState};
+use crate::about::{About, AboutStore, Reason, MAX_INTERESTS, MAX_SITES};
 use crate::history::{new_profile, valid_profile, History, HistoryStore};
 
 /// The cookie holding a browser's profile id.
@@ -38,6 +43,7 @@ pub(super) fn routes(router: Router<AppState>) -> Router<AppState> {
     router
         .route("/history", get(history_page))
         .route("/history/clear", post(clear))
+        .route("/about", get(about_page).post(save_about))
 }
 
 /// What a browser chose to do with its history.
@@ -95,10 +101,13 @@ impl Prefs {
 /// The searcher's history, as the search pages use it.
 pub(super) struct Visitor {
     store: HistoryStore,
-    /// `None` until the browser searches with history on.
+    about_store: AboutStore,
+    /// `None` until the browser searches with history on or saves an About
+    /// profile.
     profile: Option<String>,
     pub prefs: Prefs,
     pub history: History,
+    pub about: About,
     /// Cookies to send with the page.
     set_cookies: Vec<String>,
 }
@@ -123,15 +132,18 @@ impl Visitor {
                 .get(PREFS_COOKIE)
                 .map_or_else(Prefs::default, |v| Prefs::from_cookie(v)),
         };
-        let history = match &profile {
-            Some(profile) => store.load(profile),
-            None => History::default(),
+        let about_store = AboutStore::new(store.dir());
+        let (history, about) = match &profile {
+            Some(profile) => (store.load(profile), about_store.load(profile)),
+            None => (History::default(), About::default()),
         };
         Some(Visitor {
             store,
+            about_store,
             profile,
             prefs,
             history,
+            about,
             set_cookies,
         })
     }
@@ -188,9 +200,15 @@ impl Visitor {
         self.profile.clone()
     }
 
+    /// Applies the browser's About profile to `hits`, then its history.
+    pub fn rank(&self, query: &str, hits: &mut Vec<Hit>) {
+        self.about.apply(hits);
+        self.rank_opened(query, hits);
+    }
+
     /// Moves the sites opened before up `hits`, when the browser asked for
     /// that.
-    pub fn rank(&self, query: &str, hits: &mut [Hit]) {
+    fn rank_opened(&self, query: &str, hits: &mut [Hit]) {
         if !self.prefs.rank || self.history.opened.is_empty() {
             return;
         }
@@ -231,6 +249,7 @@ impl Visitor {
             prefs: self.prefs,
             opened,
             recent,
+            about: self.about.clone(),
         }
     }
 
@@ -253,6 +272,8 @@ pub(super) struct HistoryView {
     pub opened: HashSet<String>,
     /// The latest searches, newest first; empty unless shown.
     pub recent: Vec<String>,
+    /// What the browser told the node about its searcher.
+    pub about: About,
 }
 
 impl HistoryView {
@@ -266,10 +287,31 @@ impl HistoryView {
              <label><input type=\"checkbox\" name=\"hr\" value=\"1\"{}> Put sites I opened \
              before first</label>\
              <p class=\"hint\">Kept on this node for this browser only. \
-             <a href=\"/history\">See or clear my history</a></p>",
+             <a href=\"/history\">See or clear my history</a> \
+             <a href=\"/about\">About you: interests and sites</a></p>",
             checked(self.prefs.show),
             checked(self.prefs.rank)
         )
+    }
+
+    /// The notes under a result about why it is where it is: opened
+    /// before, put first, or matching an interest. HTML, escaped.
+    pub fn notes(&self, hit: &Hit) -> Vec<String> {
+        let mut notes = Vec::new();
+        if self.opened.contains(&hit.domain) {
+            notes.push("<span class=\"op\">You opened this before</span>".to_owned());
+        }
+        match self.about.reason(hit) {
+            Some(Reason::Pinned) => {
+                notes.push("<span class=\"op\">One of your sites</span>".to_owned());
+            }
+            Some(Reason::Interest(interest)) => notes.push(format!(
+                "<span class=\"op\">Matches your interest: {}</span>",
+                escape_html(interest)
+            )),
+            None => {}
+        }
+        notes
     }
 
     /// The home page's list of past searches, if any are shown.
@@ -396,6 +438,115 @@ fn render_history(history: &History, prefs: Prefs, now: u64) -> String {
     page("History - Plumb Search", &body)
 }
 
+/// The About page's form.
+#[derive(Debug, Default, Deserialize)]
+struct AboutForm {
+    #[serde(default)]
+    interests: String,
+    #[serde(default)]
+    pinned: String,
+    #[serde(default)]
+    hidden: String,
+    /// `1`: forget it all.
+    clear: Option<String>,
+}
+
+/// `GET /about`.
+async fn about_page(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let Some(visitor) = Visitor::of(&state, &headers, None) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    no_store(html_response(
+        StatusCode::OK,
+        render_about(&visitor.about, None),
+    ))
+}
+
+/// `POST /about`: saves the form, giving the browser a profile if it has
+/// none yet.
+async fn save_about(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Form(form): Form<AboutForm>,
+) -> Response {
+    let Some(mut visitor) = Visitor::of(&state, &headers, None) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let about = if super::flag(&form.clear) {
+        About::default()
+    } else {
+        About::from_form(&form.interests, &form.pinned, &form.hidden)
+    };
+    let saved = match (&visitor.profile, about.is_empty()) {
+        // Nothing to save, and nothing saved before.
+        (None, true) => Ok(()),
+        _ => match visitor.profile_or_new() {
+            Some(profile) => visitor.about_store.save(&profile, &about),
+            None => Err(anyhow::anyhow!("no profile")),
+        },
+    };
+    let (status, note) = match saved {
+        Ok(()) => (StatusCode::OK, "Saved."),
+        Err(err) => {
+            warn!("could not save an About profile: {err:#}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "This could not be saved. The server log has the details.",
+            )
+        }
+    };
+    let response = no_store(html_response(status, render_about(&about, Some(note))));
+    visitor.send_cookies(response)
+}
+
+fn no_store(mut response: Response) -> Response {
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}
+
+fn render_about(about: &About, note: Option<&str>) -> String {
+    let lines = |items: &[String]| escape_html(&items.join("\n"));
+    let note = note
+        .map(|note| {
+            format!(
+                "<p class=\"s\"><strong>{}</strong></p>\n",
+                escape_html(note)
+            )
+        })
+        .unwrap_or_default();
+    let body = format!(
+        "<div class=\"wrap hist about\">\n<header><a class=\"logo\" href=\"/\">Plumb</a></header>\n<main>\n\
+         <h1>About you</h1>\n\
+         <p class=\"s\">Kept on this node for this browser only, and used only here, after \
+         results are found. It is never part of a search sent to other Plumb nodes. Other \
+         people searching here have their own.</p>\n{note}\
+         <form method=\"post\" action=\"/about\">\n\
+         <label for=\"interests\"><strong>Your interests</strong></label>\n\
+         <p class=\"m\">One per line, such as cooking or rust programming. Sites that match \
+         one move up a little and say so, so a name like \u{201c}rust\u{201d} or \
+         \u{201c}jaguar\u{201d} leans your way. Up to {MAX_INTERESTS}.</p>\n\
+         <textarea id=\"interests\" name=\"interests\" rows=\"5\">{}</textarea>\n\
+         <label for=\"pinned\"><strong>Sites always first</strong></label>\n\
+         <p class=\"m\">One per line, such as seriouseats.com. They come first whenever a \
+         search finds them. Up to {MAX_SITES}.</p>\n\
+         <textarea id=\"pinned\" name=\"pinned\" rows=\"4\">{}</textarea>\n\
+         <label for=\"hidden\"><strong>Sites never shown</strong></label>\n\
+         <p class=\"m\">One per line. They and their subdomains are left out of your \
+         results. Up to {MAX_SITES}.</p>\n\
+         <textarea id=\"hidden\" name=\"hidden\" rows=\"4\">{}</textarea>\n\
+         <p><button type=\"submit\">Save</button></p>\n</form>\n\
+         <form method=\"post\" action=\"/about\"><input type=\"hidden\" name=\"clear\" \
+         value=\"1\"><button type=\"submit\">Forget all of this</button></form>\n\
+         <p class=\"m\"><a href=\"/history\">Your history</a></p>\n</main>\n</div>",
+        lines(&about.interests),
+        lines(&about.pinned),
+        lines(&about.hidden),
+    );
+    page("About you - Plumb Search", &body)
+}
+
 /// The cookies of a request, by name.
 fn cookies(headers: &HeaderMap) -> HashMap<&str, &str> {
     headers
@@ -417,6 +568,44 @@ fn cookie(name: &str, value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_about_page_escapes_what_was_typed() {
+        let about = About::from_form("<script>x</script>", "example.com", "");
+        let page = render_about(&about, Some("Saved."));
+        assert!(page.contains("&lt;script&gt;x&lt;/script&gt;"));
+        assert!(!page.contains("<script>"));
+        assert!(page.contains(">example.com</textarea>"));
+        assert!(page.contains("action=\"/about\""));
+    }
+
+    #[test]
+    fn results_say_why_they_moved() {
+        let view = HistoryView {
+            about: About::from_form("programming", "github.com", ""),
+            ..HistoryView::default()
+        };
+        let mut hit = Hit {
+            domain: "rust-lang.org".into(),
+            url: "https://rust-lang.org/".into(),
+            title: Some("Rust Programming Language".into()),
+            description: None,
+            score: 1.0,
+            text_score: 1.0,
+            link_score: 0.0,
+            country: None,
+            named: true,
+        };
+        assert_eq!(
+            view.notes(&hit),
+            ["<span class=\"op\">Matches your interest: programming</span>"]
+        );
+        hit.domain = "github.com".into();
+        assert_eq!(
+            view.notes(&hit),
+            ["<span class=\"op\">One of your sites</span>"]
+        );
+    }
 
     #[test]
     fn prefs_round_trip_through_their_cookie() {

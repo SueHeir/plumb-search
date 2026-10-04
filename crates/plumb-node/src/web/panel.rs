@@ -1856,7 +1856,7 @@ fn render_features(
     for (name, label, value, running, hint) in [
         ("network", "Join the Plumb network", saved.network, active.network, "Share signed crawls and search other nodes. Uses port 4001 by default, local discovery, and UPnP; existing server flags still configure transport."),
         ("search_by_meaning", "Search by meaning", saved.search_by_meaning, active.search_by_meaning, "Find sites by topic. Downloads a model (about 130 MB) and builds site vectors in the background."),
-        ("private_search", "Private browser search", saved.private_search, active.private_search, "Keep search words in the browser. Requires a build with the private-search module and extra disk space for search buckets."),
+        ("private_search", "Private browser search", saved.private_search, active.private_search, "Adds a Private search switch to the search page\u{2019}s settings gear. Visitors who turn it on search inside their browser, so this node never sees their words. Requires a build with the private-search module and extra disk space for search buckets."),
         ("share_popularity", "Share anonymous popularity", saved.share_popularity, active.share_popularity, "Requires the Plumb network. Reports which results are opened to help improve ranking. Off unless you enable it."),
         ("search_history", "Remember searches", saved.search_history.unwrap_or(active.search_history == Some(true)), active.search_history == Some(true), "Each browser that searches here keeps its own history on this computer: past searches, and the sites opened from them, which come first next time. Nobody sees another browser's history. Turn off on a node strangers can search."),
     ] {

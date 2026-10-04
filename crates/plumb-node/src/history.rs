@@ -160,6 +160,11 @@ impl HistoryStore {
         HistoryStore { dir: dir.into() }
     }
 
+    /// The folder the history files are in.
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
     fn path(&self, profile: &str) -> Option<PathBuf> {
         valid_profile(profile).then(|| self.dir.join(format!("{profile}.json")))
     }

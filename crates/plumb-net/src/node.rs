@@ -1077,7 +1077,6 @@ fn count_round(status: &Mutex<NetStatus>, round: &NetSearch) {
     let rounds = &mut status.rounds;
     rounds.sent += 1;
     rounds.answers += round.answered as u64;
-    rounds.bytes_fetched = rounds.bytes_fetched.saturating_add(round.bytes);
 }
 
 fn build_swarm(key: &Keypair, config: &NetConfig) -> Result<Swarm<Behaviour>> {

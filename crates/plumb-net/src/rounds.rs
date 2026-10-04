@@ -105,10 +105,10 @@ pub struct RoundStatus {
     pub every_secs: Option<u64>,
     /// Rounds sent since the node started.
     pub sent: u64,
-    /// Bucket answers fetched by them, and the size of their records in
-    /// bytes (before padding, which adds up to half).
+    /// Bucket answers fetched by them. Their sizes are left out: on a
+    /// public status page, the record bytes of each round would hint at
+    /// which buckets it fetched.
     pub answers: u64,
-    pub bytes_fetched: u64,
 }
 
 /// `real` (a search's own buckets, at most [`BUCKETS_PER_SEARCH`]) and
