@@ -961,6 +961,9 @@ struct Inner {
     net: std::sync::OnceLock<Arc<plumb_net::NetHandle>>,
     /// Records in the network inbox not yet folded in.
     inbox_records: std::sync::atomic::AtomicU64,
+    /// The crawl time of each site a network search's signed crawl was
+    /// last kept for, so searching again does not keep it again.
+    kept_found: Mutex<std::collections::HashMap<String, u64>>,
     /// How far filling free space with the network's crawls got.
     fill: Mutex<fill::FillState>,
     /// When this node last put an index in service (Unix time; 0 for not
@@ -1182,6 +1185,7 @@ impl Inner {
             }),
             net: std::sync::OnceLock::new(),
             inbox_records: std::sync::atomic::AtomicU64::new(0),
+            kept_found: Mutex::new(std::collections::HashMap::new()),
             fill: Mutex::new(fill_state),
             last_build: std::sync::atomic::AtomicU64::new(0),
             inbox_lock: Mutex::new(()),
@@ -1742,6 +1746,10 @@ impl StatusSource for Inner {
 
     fn record_pick(&self, query: &str, domain: &str) {
         network::record_pick(self, query, domain);
+    }
+
+    fn keep_from_network(&self, records: Vec<plumb_core::SiteRecord>) {
+        network::keep_found(self, records);
     }
 
     fn icon(&self, domain: &str) -> Option<Vec<u8>> {

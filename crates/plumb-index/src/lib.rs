@@ -578,6 +578,12 @@ impl Searcher {
         self.reader.searcher().num_docs()
     }
 
+    /// Whether the index holds `domain`, a canonical domain.
+    pub fn has_domain(&self, domain: &str) -> bool {
+        let term = Term::from_field_text(self.fields.domain, domain);
+        self.reader.searcher().doc_freq(&term).is_ok_and(|n| n > 0)
+    }
+
     /// [`Searcher::search_with`] using [`RankConfig::default`].
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<Hit>> {
         self.search_with(query, limit, &RankConfig::default())
