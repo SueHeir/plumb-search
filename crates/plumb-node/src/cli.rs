@@ -516,8 +516,20 @@ pub struct EvalArgs {
     /// Search for each query exactly as written, without correcting typos.
     #[arg(long)]
     pub exact: bool,
+    /// Ranking knobs to change, as JSON, e.g. '{"exact_label_bonus": 0.1}'.
+    /// The other knobs keep their defaults; --alpha wins over an alpha here.
+    #[arg(long, value_name = "JSON", value_parser = parse_rank_config)]
+    pub rank: Option<plumb_index::RankConfig>,
+    /// For each miss, also show how the first site and the expected one
+    /// scored: final score, text match, link score and closeness in meaning.
+    #[arg(long)]
+    pub explain: bool,
     #[command(flatten)]
     pub meaning: MeaningArgs,
+}
+
+fn parse_rank_config(s: &str) -> Result<plumb_index::RankConfig, String> {
+    serde_json::from_str(s).map_err(|err| format!("expected ranking knobs as JSON: {err}"))
 }
 
 fn parse_positive(s: &str) -> Result<usize, String> {
@@ -660,6 +672,24 @@ mod tests {
         assert_eq!(args.min_top1, Some(0.9));
         assert_eq!(args.limit, 10);
         assert!(parse(&["eval", "--index", "i", "--queries", "q", "--min-top1", "90"]).is_err());
+        assert!(args.rank.is_none() && !args.explain);
+        let cli = parse(&[
+            "eval",
+            "--index",
+            "i",
+            "--queries",
+            "q",
+            "--rank",
+            r#"{"exact_label_bonus": 0.1}"#,
+        ])
+        .unwrap();
+        let Command::Eval(args) = cli.command else {
+            panic!("not eval");
+        };
+        let rank = args.rank.unwrap();
+        assert_eq!(rank.exact_label_bonus, 0.1);
+        assert_eq!(rank.alpha, plumb_index::RankConfig::default().alpha);
+        assert!(parse(&["eval", "--index", "i", "--queries", "q", "--rank", "0.1"]).is_err());
 
         let cli = parse(&["serve", "--index", "idx"]).unwrap();
         let Command::Serve(args) = cli.command else {

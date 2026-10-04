@@ -10,12 +10,11 @@ use std::fmt::Write as _;
 
 use anyhow::{bail, Context, Result};
 use plumb_core::registrable_domain;
-use plumb_index::{SearchOptions, Searcher};
+use plumb_index::{Hit, Meaning, SearchOptions, Searcher};
 use tracing::info;
 
 use crate::cli::EvalArgs;
 use crate::meaning::MeaningIndex;
-use crate::rank_config;
 
 /// One query of a queries file.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -147,14 +146,23 @@ pub fn run(args: EvalArgs) -> Result<()> {
     }
     let searcher = Searcher::open(&args.index)
         .with_context(|| format!("opening the index in {}", args.index.display()))?;
-    let cfg = rank_config(args.alpha);
+    let mut cfg = args.rank.unwrap_or_default();
+    if let Some(alpha) = args.alpha {
+        cfg.alpha = alpha;
+    }
     let meaning = MeaningIndex::from_args(&args.meaning)?;
     info!(
-        "evaluating {} queries against {} sites (alpha {})",
+        "evaluating {} queries against {} sites ({cfg:?})",
         queries.len(),
         searcher.num_docs(),
-        cfg.alpha
     );
+    // With --explain, sites ranked below the limit are fetched too, to show
+    // how far behind the expected one is.
+    let fetched = if args.explain {
+        args.limit.max(EXPLAIN_DEPTH)
+    } else {
+        args.limit
+    };
 
     let mut ranks = Vec::with_capacity(queries.len());
     for q in &queries {
@@ -167,7 +175,7 @@ pub fn run(args: EvalArgs) -> Result<()> {
         let hits = searcher
             .search_meaning(
                 &q.query,
-                args.limit,
+                fetched,
                 &cfg,
                 &options,
                 query_meaning
@@ -177,12 +185,28 @@ pub fn run(args: EvalArgs) -> Result<()> {
             .with_context(|| format!("searching for {:?}", q.query))?
             .hits;
         let domains: Vec<&str> = hits.iter().map(|h| h.domain.as_str()).collect();
-        let rank = rank_of(&domains, &q.expected);
+        let deep_rank = rank_of(&domains, &q.expected);
+        let rank = deep_rank.filter(|&rank| rank <= args.limit);
         if rank != Some(1) {
             println!(
                 "{}",
                 format_miss(q, rank, domains.first().copied(), args.limit)
             );
+            if args.explain {
+                let closeness = |domain: &str| {
+                    query_meaning
+                        .as_ref()
+                        .and_then(|meaning| meaning.closeness(domain))
+                };
+                let shown = [Some(1), deep_rank];
+                for rank in shown.into_iter().flatten() {
+                    let hit = &hits[rank - 1];
+                    println!("{}", explain(rank, hit, closeness(&hit.domain)));
+                }
+                if deep_rank.is_none() {
+                    println!("  expected site not in the first {fetched}");
+                }
+            }
         }
         ranks.push(rank);
     }
@@ -199,6 +223,18 @@ pub fn run(args: EvalArgs) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// How deep `--explain` looks for the expected site.
+const EXPLAIN_DEPTH: usize = 1_000;
+
+/// How the site at `rank` scored, for `--explain`.
+fn explain(rank: usize, hit: &Hit, closeness: Option<f32>) -> String {
+    let closeness = closeness.map_or_else(|| "-".to_string(), |c| format!("{c:.3}"));
+    format!(
+        "  #{rank} {}: score {:.3}, text {:.3}, link {:.3}, closeness {closeness}",
+        hit.domain, hit.score, hit.text_score, hit.link_score
+    )
 }
 
 /// One line describing a query whose expected site did not come first.
