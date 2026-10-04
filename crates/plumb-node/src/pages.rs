@@ -85,6 +85,8 @@ impl SetInfo {
             })
             .filter(|(n, line)| !(*n == 0 && line.starts_with("views\t")) && !line.is_empty())
             .filter_map(move |(n, line)| match parse_article(&line) {
+                // Files made before fetch-pages left it out.
+                Ok(article) if article.title == "Main Page" => None,
                 Ok(article) => Some(Page::from_article(&lang, article)),
                 Err(err) => {
                     bad += 1;

@@ -217,6 +217,8 @@ pub fn run(args: EvalArgs) -> Result<()> {
             .with_context(|| format!("searching for {:?}", q.query))?
             .hits;
         let domains: Vec<&str> = hits.iter().map(|h| h.domain.as_str()).collect();
+        // What came first: a page when one was listed first.
+        let mut first = domains.first().map(|d| d.to_string());
         let deep_rank = match &pages {
             None => rank_of(&domains, &q.expected),
             Some(pages) => {
@@ -224,6 +226,7 @@ pub fn run(args: EvalArgs) -> Result<()> {
                     .search(&q.query, 10)
                     .with_context(|| format!("searching pages for {:?}", q.query))?;
                 let listed = listed_with_pages(&hits, place_pages(&hits, found));
+                first = listed.first().and_then(|keys| keys.first()).cloned();
                 listed
                     .iter()
                     .position(|keys| keys.iter().any(|k| q.expected.contains(k)))
@@ -232,10 +235,7 @@ pub fn run(args: EvalArgs) -> Result<()> {
         };
         let rank = deep_rank.filter(|&rank| rank <= args.limit);
         if rank != Some(1) {
-            println!(
-                "{}",
-                format_miss(q, rank, domains.first().copied(), args.limit)
-            );
+            println!("{}", format_miss(q, rank, first.as_deref(), args.limit));
             if args.explain {
                 let closeness = |domain: &str| {
                     query_meaning
@@ -363,7 +363,7 @@ mod tests {
             description: None,
             score: 1.0,
             text_score: 1.0,
-            link_score: 1.0,
+            link_score: 0.5,
             country: None,
             named,
         };
@@ -380,6 +380,7 @@ mod tests {
             },
             score: 0.9,
             named: true,
+            popularity: 0.9,
         };
         let hits = [site("curie.org", false), site("python.org", false)];
         let placed = place_pages(
