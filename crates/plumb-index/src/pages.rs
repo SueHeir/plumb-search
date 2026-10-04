@@ -152,6 +152,62 @@ fn base_title(title: &str) -> &str {
     }
 }
 
+/// Words of a short description saying a page is about an organization,
+/// a product or a service, which has a website of its own, rather than a
+/// person, place, idea or work.
+const ORGANIZATION_WORDS: &[&str] = &[
+    "agency",
+    "airline",
+    "app",
+    "application",
+    "bank",
+    "brand",
+    "broker",
+    "brokerage",
+    "business",
+    "chain",
+    "company",
+    "conglomerate",
+    "cooperative",
+    "corporation",
+    "exchange",
+    "firm",
+    "foundation",
+    "framework",
+    "insurer",
+    "library",
+    "manufacturer",
+    "marketplace",
+    "nonprofit",
+    "organisation",
+    "organization",
+    "pharmacy",
+    "platform",
+    "protocol",
+    "provider",
+    "retailer",
+    "service",
+    "software",
+    "standard",
+    "startup",
+    "subsidiary",
+    "website",
+];
+
+/// Whether Wikipedia's short description of a page says it is about an
+/// organization, product or service ("American auto insurance company",
+/// "Open-source software framework"), see [`ORGANIZATION_WORDS`].
+fn describes_an_organization(description: Option<&str>) -> bool {
+    description.is_some_and(|text| {
+        text.split(|c: char| !c.is_alphanumeric())
+            .map(str::to_lowercase)
+            .any(|word| {
+                let one = word.strip_suffix('s').unwrap_or(&word);
+                ORGANIZATION_WORDS.contains(&word.as_str()) || ORGANIZATION_WORDS.contains(&one)
+            })
+    })
+}
+
 /// Whether `domain`'s first label spells the page's title without its
 /// qualifier, or that title's first word: cvs.com for "CVS Pharmacy",
 /// capitalone.com for "Capital One", tauri.app for "Tauri (software
@@ -394,25 +450,31 @@ pub struct PlacedPage {
 ///   query names in full, and others scoring at least
 ///   [`MIN_PARTIAL_SCORE`]; only one when the best site is named by the
 ///   query too.
-/// - A named page comes right after the best site when the query names
-///   that site too, the site's name spells the page's title (cvs.com for
-///   "CVS Pharmacy"), it is an official website ([`crate::Hit::official`]),
-///   or it is better known than the page is read ([`PageHit::popularity`]
-///   against [`crate::Hit::link_score`]). Otherwise the page comes first:
-///   "marie curie" lists the article before a little known site that is
-///   only about her. Pages named only in part come after
+/// - A named page comes right after the best site when that site is
+///   probably the website of what the query names: a named page found
+///   for the query is about an organization or product
+///   ([`describes_an_organization`]) and the site is called after it
+///   ("tauri" finds the article "Tauri (software framework)", so tauri.app
+///   stays first; "robinhood" finds "Robinhood Markets", so robinhood.com
+///   stays above the outlaw). It also comes after an official website
+///   ([`crate::Hit::official`]) or one better known than the page is read
+///   ([`PageHit::popularity`] against [`crate::Hit::link_score`]).
+///   Otherwise the page comes first: "marie curie" lists the article
+///   before mariecurie.org. Pages named only in part come after
 ///   [`PARTIAL_AFTER`] sites.
 pub fn place_pages(sites: &[crate::Hit], pages: Vec<PageHit>) -> Vec<PlacedPage> {
     let site_named = sites.first().is_some_and(|hit| hit.named);
+    let organizations_site = sites.first().is_some_and(|site| {
+        pages.iter().any(|page| {
+            page.named
+                && describes_an_organization(page.page.description.as_deref())
+                && site_is_titled(&site.domain, &page.page.title)
+        })
+    });
     // A named page goes first only when the best site may be a namesake.
     let page_first = |page: &PageHit| match sites.first() {
         None => true,
-        Some(site) => {
-            !site.named
-                && !site.official
-                && !site_is_titled(&site.domain, &page.page.title)
-                && page.popularity > site.link_score
-        }
+        Some(site) => !organizations_site && !site.official && page.popularity > site.link_score,
     };
     let most = if site_named { 1 } else { MAX_PAGES_LISTED };
     let mut placed: Vec<PlacedPage> = Vec::new();
@@ -600,29 +662,68 @@ mod tests {
 
     #[test]
     fn sites_the_page_may_be_about_stay_first() {
-        // A much read page comes before a little known site that is
-        // neither named by the query nor called after the page...
+        let described = |title: &str, description: &str, score: f32| {
+            let mut hit = found(title, None, true, score);
+            hit.page.description = Some(description.into());
+            hit
+        };
+        // A much read page comes before a little known namesake...
         let placed = place_pages(
-            &[known_site("radium-history.org", false, 0.4)],
-            vec![found("Marie Curie", None, true, 0.8)],
+            &[known_site("mariecurie.org", true, 0.2)],
+            vec![described("Marie Curie", "Polish-French physicist", 0.8)],
         );
         assert_eq!(placed[0].at, 0);
-        // ...but after a site the query names, one called after the page,
-        // an official website, or a well known site.
-        let named = known_site("tauri.app", true, 0.3);
-        let titled = known_site("geico.com", false, 0.3);
+        // ...but after the website of a company or product it names, even
+        // when the page found first is about something else.
+        let placed = place_pages(
+            &[known_site("robinhood.com", true, 0.47)],
+            vec![
+                described("Robin Hood", "Legendary English outlaw", 0.9),
+                described(
+                    "Robinhood Markets",
+                    "American financial services company",
+                    0.6,
+                ),
+            ],
+        );
+        assert_eq!(placed[0].at, 1);
+        let placed = place_pages(
+            &[known_site("cvs.com", false, 0.43)],
+            vec![described(
+                "CVS Pharmacy",
+                "American retail pharmacy chain",
+                0.6,
+            )],
+        );
+        assert_eq!(placed[0].at, 1);
+        // ...and after an official website or a well known site.
         let mut official = known_site("example.org", false, 0.3);
         official.official = true;
         let known = known_site("example.com", false, 0.9);
-        for (site, title) in [
-            (named, "Tauri (software framework)"),
-            (titled, "GEICO"),
-            (official, "Example"),
-            (known, "Example"),
-        ] {
-            let placed = place_pages(&[site], vec![found(title, None, true, 0.8)]);
-            assert_eq!(placed[0].at, 1, "{title}");
+        for site in [official, known] {
+            let placed = place_pages(&[site], vec![found("Example", None, true, 0.8)]);
+            assert_eq!(placed[0].at, 1);
         }
+    }
+
+    #[test]
+    fn organizations_by_description() {
+        for yes in [
+            "Open-source software framework",
+            "American auto insurance company",
+            "Credit card brand",
+            "Online food ordering services",
+        ] {
+            assert!(describes_an_organization(Some(yes)), "{yes}");
+        }
+        for no in [
+            "Polish-French physicist (1867–1934)",
+            "Region of spacetime",
+            "1889 painting by Vincent van Gogh",
+        ] {
+            assert!(!describes_an_organization(Some(no)), "{no}");
+        }
+        assert!(!describes_an_organization(None));
     }
 
     #[test]
