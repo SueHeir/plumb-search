@@ -318,6 +318,9 @@ fn network_config() -> plumb_net::NetConfig {
     // The Plumb network's first nodes, which the app connects to and learns
     // the others from: the relay on plumbsearch.org, by name and by address.
     net.bootstrap = plumb_net::default_bootstrap();
+    // Fewer background rounds of bucket requests than a server's: they
+    // keep searches from standing out, on home internet.
+    net.round_every = Some(plumb_net::rounds::DESKTOP_ROUND_EVERY);
     net
 }
 

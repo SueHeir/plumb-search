@@ -254,6 +254,11 @@ pub struct RunArgs {
     /// the ones given that crawled in the last day.
     #[arg(long, value_name = "PEER_ID", requires = "crawl_any_site")]
     pub crawl_with: Vec<plumb_net::PeerId>,
+    /// Average minutes between background rounds of bucket requests, which
+    /// make this node's network searches look like the rest of its traffic;
+    /// 0 sends none, so searches stand out [default: 10].
+    #[arg(long, value_name = "MINUTES", requires = "network")]
+    pub round_minutes: Option<u64>,
     /// Days of the network's crawl batches to keep on disk [default: 35].
     #[arg(long, value_name = "DAYS", requires = "network", value_parser = clap::value_parser!(u64).range(1..))]
     pub keep_batches_days: Option<u64>,
