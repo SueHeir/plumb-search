@@ -297,6 +297,11 @@ pub struct FetchDataArgs {
     /// (a notability filter that keeps the query small enough to finish).
     #[arg(long, value_name = "N", default_value_t = 25)]
     pub wikidata_min_sitelinks: u32,
+    /// Keep each file an earlier run saved in --dir within this many days
+    /// instead of fetching it again, so a rerun only fetches what is missing,
+    /// stale or failed. 0 fetches everything.
+    #[arg(long, value_name = "DAYS", default_value_t = 0)]
+    pub keep_days: u64,
 }
 
 #[derive(Debug, Args)]
