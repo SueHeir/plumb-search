@@ -256,6 +256,12 @@ fn two_nodes_exchange_crawls_and_searches() {
     // images whose `plumb run` has them.
     let help = plumb_e2e::docker(&["run", "--rm", &plumb_e2e::image(), "run", "--help"]);
     let mut common = common.to_vec();
+    // This test checks peer transport, not the search-independent scheduler
+    // (covered in plumb-net/tests/network.rs). Its retry window is shorter
+    // than the production 10-minute slot, so explicitly select immediate mode.
+    if help.contains("--round-minutes") {
+        common.extend(["--round-minutes", "0"]);
+    }
     for flag in ["--no-default-bootstrap", "--no-default-trust"] {
         if help.contains(flag) {
             common.push(flag);

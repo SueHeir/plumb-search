@@ -34,6 +34,8 @@ The existing sealed relay hides bucket contents from the relay, but the answerin
 
 Private Information Retrieval is a separate protocol step. A two-server design requires replica operators that do not collude; several machines owned by one operator do not satisfy that assumption. A single-server design instead needs measured cryptographic computation and communication costs. Neither is installed or enabled by this change. A common starter snapshot also needs sizing and versioning before its download path can be implemented.
 
+The subsequent [PIR handoff](reviews/pir-handoff.md) records the direct single-server design, an isolated offline Rust probe, synthetic measurements at 16,384 rows and the production integration checklist. The storage report now estimates equal-row padding from actual bucket metadata; this estimate excludes proof and cryptographic overhead.
+
 See the [privacy review](reviews/privacy-security.md) and [architecture map](reviews/architecture.md) for the source evidence and remaining trust assumptions.
 
 ## Validation

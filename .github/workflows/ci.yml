@@ -24,6 +24,22 @@ jobs:
       - run: cargo clippy --workspace --exclude plumb-desktop --all-targets -- -D warnings
       - run: cargo test --workspace --exclude plumb-desktop
 
+  # Research dependencies stay outside the shipped application's workspace.
+  # Exercise only the small synthetic profile in CI; the full profile uses 4 GiB.
+  pir-probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tools/pir-probe
+      - run: cargo fmt --manifest-path tools/pir-probe/Cargo.toml --check
+      - run: cargo clippy --release --locked --manifest-path tools/pir-probe/Cargo.toml --all-targets -- -D warnings
+      - run: cargo test --release --locked --manifest-path tools/pir-probe/Cargo.toml
+
   # The private search page's WebAssembly: it builds, passes clippy, and
   # wasm-bindgen of the pinned version can read it.
   private-search:

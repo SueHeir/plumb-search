@@ -1,0 +1,45 @@
+{
+  "scheme": "Spiral single-server PIR",
+  "library": "spiral-rs =0.2.1-alpha.2",
+  "profile": "UpstreamSmall",
+  "research_only": true,
+  "database_source": "synthetic",
+  "rows": 256,
+  "row_bytes": 8192,
+  "raw_database_bytes": 2097152,
+  "preprocessed_database_bytes": 16777216,
+  "preprocessing_ms": 47.611083,
+  "client_setup_ms": 54.730458000000006,
+  "setup_bytes": 1966112,
+  "query_bytes": 16416,
+  "request_bytes": 1982528,
+  "response_bytes": 20480,
+  "all_retrievals_correct": true,
+  "measurements": [
+    {
+      "query_ms": 0.463125,
+      "server_ms": 35.963875,
+      "decode_ms": 0.222416
+    },
+    {
+      "query_ms": 0.446042,
+      "server_ms": 34.460417,
+      "decode_ms": 0.21212499999999998
+    },
+    {
+      "query_ms": 0.44708299999999995,
+      "server_ms": 34.45675,
+      "decode_ms": 0.22737500000000002
+    },
+    {
+      "query_ms": 0.455125,
+      "server_ms": 34.675125,
+      "decode_ms": 0.23133299999999998
+    },
+    {
+      "query_ms": 0.438542,
+      "server_ms": 34.173083,
+      "decode_ms": 0.23608400000000002
+    }
+  ]
+}

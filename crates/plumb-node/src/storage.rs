@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 use std::fs::{self, File};
-use std::io::{self, BufRead, BufReader, Read, Write};
+use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{ensure, Context, Result};
@@ -29,6 +29,12 @@ const CATEGORIES: [&str; 8] = [
 const MAX_RECORD_BYTES: usize = 1 << 20;
 const MAX_OMISSIONS: usize = 100;
 const MAX_TABLE_REPORTS: usize = 100;
+// Record-length caching stays at 8 MiB; larger tables fall back to index
+// seeks. Cap metadata input too, so malformed sparse tables cannot force
+// an arbitrarily long scan. The report explicitly marks that omission.
+const MAX_CACHED_RECORD_LENGTHS: usize = 1 << 20;
+const MAX_BUCKET_METADATA_BYTES: u64 = 1 << 30;
+const PIR_LENGTH_PREFIX_BYTES: u64 = 8;
 
 #[derive(Debug, Default, Serialize)]
 pub struct Category {
@@ -87,6 +93,19 @@ pub struct BucketSizing {
     pub empty_buckets: u64,
     pub record_memberships: u64,
     pub records_per_bucket: Distribution,
+    pub object_array_payload: BucketPayloadSizing,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BucketPayloadSizing {
+    /// A prospective layout estimate, not today's HTTP escaped-string
+    /// array, proof envelope, or any selected cryptographic wire format.
+    pub layout: &'static str,
+    pub total_bytes: u64,
+    pub bytes_per_bucket: Distribution,
+    pub pir_length_prefix_bytes: u64,
+    pub pir_padded_row_bytes: u64,
+    pub pir_padded_database_bytes: u64,
 }
 
 pub fn run(args: StorageArgs) -> Result<()> {
@@ -133,6 +152,12 @@ pub fn run(args: StorageArgs) -> Result<()> {
                 table.records_per_bucket.p95,
                 table.records_per_bucket.max
             )?;
+            let payload = &table.object_array_payload;
+            writeln!(out, "Prospective object-array bucket bytes: total {}, median {}, p95 {}, max {}; equal PIR rows {} bytes including {}-byte length prefix, whole database {} bytes",
+                payload.total_bytes, payload.bytes_per_bucket.median, payload.bytes_per_bucket.p95,
+                payload.bytes_per_bucket.max, payload.pir_padded_row_bytes,
+                payload.pir_length_prefix_bytes, payload.pir_padded_database_bytes)?;
+            writeln!(out, "{}", payload.layout)?;
         }
         for omission in &report.omissions {
             writeln!(
@@ -412,9 +437,16 @@ fn read_u64(reader: &mut impl Read) -> Result<u64> {
 
 fn size_buckets(path: &Path, directory: &Path) -> Result<BucketSizing> {
     let mut buckets = BufReader::new(open_regular(&path.join("buckets.idx"))?);
-    let entries = open_regular(&path.join("buckets.dat"))?.metadata()?.len();
+    let mut members = BufReader::new(open_regular(&path.join("buckets.dat"))?);
+    let entries = members.get_ref().metadata()?.len();
     let mut offsets = BufReader::new(open_regular(&path.join("records.idx"))?);
-    let payload = open_regular(&path.join("records.dat"))?.metadata()?.len();
+    // Inspect its length only: sizing does not open or read records.dat.
+    let data_metadata = fs::symlink_metadata(path.join("records.dat"))?;
+    ensure!(
+        data_metadata.is_file(),
+        "records.dat is not a regular file (symlinks excluded)"
+    );
+    let payload = data_metadata.len();
     let index_bytes = offsets.get_ref().metadata()?.len();
     ensure!(
         index_bytes >= 8 && index_bytes % 8 == 0,
@@ -425,15 +457,27 @@ fn size_buckets(path: &Path, directory: &Path) -> Result<BucketSizing> {
         buckets.get_ref().metadata()?.len() == (u64::from(BUCKETS) + 1) * 8,
         "invalid buckets.idx length"
     );
+    let metadata_bytes = entries
+        .checked_add(index_bytes)
+        .and_then(|n| n.checked_add((u64::from(BUCKETS) + 1) * 8))
+        .context("bucket metadata byte count overflows")?;
+    ensure!(
+        metadata_bytes <= MAX_BUCKET_METADATA_BYTES,
+        "bucket metadata exceeds the 1 GiB sizing input limit"
+    );
     let records = index_bytes / 8 - 1;
+    let mut lengths = Vec::with_capacity(records.min(MAX_CACHED_RECORD_LENGTHS as u64) as usize);
     let mut previous = read_u64(&mut offsets)?;
     ensure!(previous == 0, "records.idx does not start at zero");
     for _ in 0..records {
         let next = read_u64(&mut offsets)?;
         ensure!(
-            next >= previous && next <= payload,
+            next > previous && next <= payload,
             "invalid records.idx offsets"
         );
+        if lengths.len() < MAX_CACHED_RECORD_LENGTHS {
+            lengths.push(next - previous);
+        }
         previous = next;
     }
     ensure!(
@@ -443,13 +487,35 @@ fn size_buckets(path: &Path, directory: &Path) -> Result<BucketSizing> {
     let mut previous = read_u64(&mut buckets)?;
     ensure!(previous == 0, "buckets.idx does not start at zero");
     let mut counts = Vec::with_capacity(BUCKETS as usize);
+    let mut row_bytes = Vec::with_capacity(BUCKETS as usize);
+    let mut total_row_bytes = 0u64;
     for _ in 0..BUCKETS {
         let next = read_u64(&mut buckets)?;
         ensure!(
             next >= previous && next <= entries / 4,
             "invalid buckets.idx offsets"
         );
-        counts.push(next - previous);
+        let count = next - previous;
+        counts.push(count);
+        // Raw JSON records need only brackets and separating commas. No
+        // content is read, so this assumes records.dat holds valid JSON.
+        let mut bytes = 2u64
+            .checked_add(count.saturating_sub(1))
+            .context("bucket array framing byte count overflows")?;
+        for _ in 0..count {
+            let mut raw = [0; 4];
+            members.read_exact(&mut raw)?;
+            let id = u64::from(u32::from_le_bytes(raw));
+            ensure!(id < records, "bucket member record ID is out of range");
+            let length = record_length(&mut offsets, &lengths, id, payload)?;
+            bytes = bytes
+                .checked_add(length)
+                .context("bucket payload byte count overflows")?;
+        }
+        row_bytes.push(bytes);
+        total_row_bytes = total_row_bytes
+            .checked_add(bytes)
+            .context("total bucket payload byte count overflows")?;
         previous = next;
     }
     ensure!(
@@ -457,9 +523,14 @@ fn size_buckets(path: &Path, directory: &Path) -> Result<BucketSizing> {
         "buckets.idx does not cover buckets.dat"
     );
     let empty_buckets = counts.iter().filter(|&&n| n == 0).count() as u64;
-    counts.sort_unstable();
-    let percentile =
-        |percent: usize| counts[(counts.len() * percent).div_ceil(100).saturating_sub(1)];
+    let bytes_per_bucket = distribution(row_bytes, total_row_bytes);
+    let pir_padded_row_bytes = bytes_per_bucket
+        .max
+        .checked_add(PIR_LENGTH_PREFIX_BYTES)
+        .context("PIR row byte count overflows")?;
+    let pir_padded_database_bytes = pir_padded_row_bytes
+        .checked_mul(u64::from(BUCKETS))
+        .context("padded PIR database byte count overflows")?;
     Ok(BucketSizing {
         directory: directory.to_path_buf(),
         records,
@@ -467,15 +538,48 @@ fn size_buckets(path: &Path, directory: &Path) -> Result<BucketSizing> {
         buckets: BUCKETS,
         empty_buckets,
         record_memberships: previous,
-        records_per_bucket: Distribution {
-            min: counts[0],
-            median: percentile(50),
-            p95: percentile(95),
-            p99: percentile(99),
-            max: counts[counts.len() - 1],
-            mean: previous as f64 / counts.len() as f64,
+        records_per_bucket: distribution(counts, previous),
+        object_array_payload: BucketPayloadSizing {
+            layout: "Prospective UTF-8 [record_json,...], assuming valid JSON records. Excludes current HTTP string escaping, proof envelopes and cryptographic overhead. PIR estimate uses one equal row size across all 16,384 buckets; no public size classes or shards.",
+            total_bytes: total_row_bytes,
+            bytes_per_bucket,
+            pir_length_prefix_bytes: PIR_LENGTH_PREFIX_BYTES,
+            pir_padded_row_bytes,
+            pir_padded_database_bytes,
         },
     })
+}
+
+fn record_length(
+    reader: &mut BufReader<File>,
+    lengths: &[u64],
+    id: u64,
+    payload: u64,
+) -> Result<u64> {
+    if let Some(&length) = lengths.get(id as usize) {
+        return Ok(length);
+    }
+    reader.seek(SeekFrom::Start(
+        id.checked_mul(8).context("record offset overflows")?,
+    ))?;
+    let start = read_u64(reader)?;
+    let end = read_u64(reader)?;
+    ensure!(start < end && end <= payload, "invalid records.idx offsets");
+    Ok(end - start)
+}
+
+fn distribution(mut values: Vec<u64>, total: u64) -> Distribution {
+    values.sort_unstable();
+    let percentile =
+        |percent: usize| values[(values.len() * percent).div_ceil(100).saturating_sub(1)];
+    Distribution {
+        min: values[0],
+        median: percentile(50),
+        p95: percentile(95),
+        p99: percentile(99),
+        max: values[values.len() - 1],
+        mean: total as f64 / values.len() as f64,
+    }
 }
 
 #[cfg(test)]
@@ -486,6 +590,49 @@ mod tests {
         let path = dir.join(name);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, bytes).unwrap();
+    }
+
+    fn synthetic_table(root: &Path) -> (PathBuf, u64, u64) {
+        let table = fs::canonicalize(root)
+            .unwrap()
+            .join("indexes/000001/buckets");
+        fs::create_dir_all(&table).unwrap();
+        let first = br#"{"domain":"a.com"}"#;
+        let second = br#"{"domain":"b.com","title":"a \"quoted\" title"}"#;
+        let first_len = first.len() as u64;
+        let second_len = second.len() as u64;
+        fs::write(
+            table.join("records.dat"),
+            [first.as_slice(), second.as_slice()].concat(),
+        )
+        .unwrap();
+        fs::write(
+            table.join("records.idx"),
+            [0u64, first_len, first_len + second_len]
+                .into_iter()
+                .flat_map(u64::to_le_bytes)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        fs::write(
+            table.join("buckets.dat"),
+            [0u32, 1, 1]
+                .into_iter()
+                .flat_map(u32::to_le_bytes)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        let mut offsets = vec![0u64, 2];
+        offsets.resize(BUCKETS as usize + 1, 3);
+        fs::write(
+            table.join("buckets.idx"),
+            offsets
+                .into_iter()
+                .flat_map(u64::to_le_bytes)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        (table, first_len, second_len)
     }
 
     #[test]
@@ -539,6 +686,116 @@ mod tests {
         assert_eq!(sizing.records_per_bucket.min, 0);
         assert!(sizing.records_per_bucket.max > 0);
         assert_eq!(report.categories["indexes"].logical_bytes, 0);
+        assert_eq!(sizing.object_array_payload.bytes_per_bucket.min, 2);
+        assert_eq!(
+            sizing.object_array_payload.pir_padded_database_bytes,
+            sizing.object_array_payload.pir_padded_row_bytes * u64::from(BUCKETS)
+        );
+    }
+
+    #[test]
+    fn object_array_rows_include_duplicates_commas_empty_rows_and_length_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, first_len, second_len) = synthetic_table(dir.path());
+        let sizing = size_buckets(&path, Path::new("indexes/000001/buckets")).unwrap();
+        let payload = sizing.object_array_payload;
+        // One [first,second] row, one [second] row and 16,382 [] rows.
+        assert_eq!(
+            payload.total_bytes,
+            u64::from(BUCKETS) * 2 + first_len + second_len * 2 + 1
+        );
+        assert_eq!(payload.bytes_per_bucket.min, 2);
+        assert_eq!(payload.bytes_per_bucket.median, 2);
+        assert_eq!(payload.bytes_per_bucket.max, first_len + second_len + 3);
+        assert_eq!(payload.pir_padded_row_bytes, first_len + second_len + 3 + 8);
+        assert_eq!(
+            payload.pir_padded_database_bytes,
+            payload.pir_padded_row_bytes * u64::from(BUCKETS)
+        );
+        assert_eq!(sizing.record_memberships, 3);
+        assert!(payload.layout.contains("current HTTP string escaping"));
+    }
+
+    #[test]
+    fn out_of_range_bucket_members_and_zero_length_records_are_omissions() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, _, _) = synthetic_table(dir.path());
+        fs::write(
+            path.join("buckets.dat"),
+            [0u32, 2, 1]
+                .into_iter()
+                .flat_map(u32::to_le_bytes)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        let report = inspect(dir.path()).unwrap();
+        assert!(!report.complete);
+        assert!(report.bucket_tables.is_empty());
+        assert!(report.omissions[0]
+            .reason
+            .contains("record ID is out of range"));
+        let (path, first, second) = synthetic_table(dir.path());
+        fs::write(
+            path.join("records.idx"),
+            [0u64, 0, first + second]
+                .into_iter()
+                .flat_map(u64::to_le_bytes)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        let report = inspect(dir.path()).unwrap();
+        assert!(!report.complete);
+        assert!(report.omissions[0]
+            .reason
+            .contains("invalid records.idx offsets"));
+    }
+
+    #[test]
+    fn uncached_record_lengths_use_validated_index_seeks() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, first, second) = synthetic_table(dir.path());
+        let mut offsets = BufReader::new(open_regular(&path.join("records.idx")).unwrap());
+        assert_eq!(
+            record_length(&mut offsets, &[], 1, first + second).unwrap(),
+            second
+        );
+        assert_eq!(
+            record_length(&mut offsets, &[first], 0, first + second).unwrap(),
+            first
+        );
+        assert!(record_length(&mut offsets, &[], 2, first + second).is_err());
+    }
+
+    #[test]
+    fn sparse_metadata_exceeding_input_limit_is_reported_without_scanning() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, _, _) = synthetic_table(dir.path());
+        File::options()
+            .write(true)
+            .open(path.join("records.idx"))
+            .unwrap()
+            .set_len(MAX_BUCKET_METADATA_BYTES + 8)
+            .unwrap();
+        let report = inspect(dir.path()).unwrap();
+        assert!(!report.complete);
+        assert!(report.bucket_tables.is_empty());
+        assert!(report.omissions[0]
+            .reason
+            .contains("1 GiB sizing input limit"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bucket_payload_sizing_does_not_open_record_contents() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let (path, _, _) = synthetic_table(dir.path());
+        let records = path.join("records.dat");
+        fs::set_permissions(&records, fs::Permissions::from_mode(0o0)).unwrap();
+        let report = inspect(dir.path()).unwrap();
+        assert!(report.complete);
+        assert_eq!(report.bucket_tables.len(), 1);
+        fs::set_permissions(records, fs::Permissions::from_mode(0o600)).unwrap();
     }
 
     #[test]
