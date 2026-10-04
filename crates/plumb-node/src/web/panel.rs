@@ -276,6 +276,7 @@ pub(super) struct FeaturesForm {
     search_by_meaning: Option<String>,
     private_search: Option<String>,
     share_popularity: Option<String>,
+    search_history: Option<String>,
     /// Find nodes through the Plumb network's own bootstrap nodes.
     plumb_bootstrap: Option<String>,
     /// Further bootstrap nodes, one per line.
@@ -334,6 +335,7 @@ pub(super) fn apply_features_form(
     if section == "search" {
         features.search_by_meaning = form.search_by_meaning.is_some();
         features.private_search = form.private_search.is_some();
+        features.search_history = Some(form.search_history.is_some());
     } else {
         features.network = form.network.is_some();
         features.share_popularity = form.share_popularity.is_some();
@@ -1800,8 +1802,9 @@ fn render_features(
         ("search_by_meaning", "Search by meaning", saved.search_by_meaning, active.search_by_meaning, "Find sites by topic. Downloads a model (about 130 MB) and builds site vectors in the background."),
         ("private_search", "Private browser search", saved.private_search, active.private_search, "Keep search words in the browser. Requires a build with the private-search module and extra disk space for search buckets."),
         ("share_popularity", "Share anonymous popularity", saved.share_popularity, active.share_popularity, "Requires the Plumb network. Reports which results are opened to help improve ranking. Off unless you enable it."),
+        ("search_history", "Remember searches", saved.search_history.unwrap_or(active.search_history == Some(true)), active.search_history == Some(true), "Each browser that searches here keeps its own history on this computer: past searches, and the sites opened from them, which come first next time. Nobody sees another browser's history. Turn off on a node strangers can search."),
     ] {
-        if (section == "search") != matches!(name, "search_by_meaning" | "private_search") { continue; }
+        if (section == "search") != matches!(name, "search_by_meaning" | "private_search" | "search_history") { continue; }
         body.push_str(&format!("<div class=\"feature\"><label><input type=\"checkbox\" name=\"{name}\" value=\"1\"{}><span>{label} <span class=\"state\">· currently {}</span></span></label><p class=\"hint\">{hint}</p></div>", if value { " checked" } else { "" }, if running { "on" } else { "off" }));
     }
     if section == "network" {

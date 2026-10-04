@@ -12,6 +12,9 @@ pub struct FeatureSettings {
     pub search_by_meaning: bool,
     pub private_search: bool,
     pub share_popularity: bool,
+    /// Keep a search history for each browser; `None` (features saved
+    /// before it existed) keeps the node's default, on for the desktop.
+    pub search_history: Option<bool>,
     pub bootstrap: Vec<String>,
     /// Turns off trusting [`plumb_net::node::DEFAULT_TRUSTED_PEERS`].
     pub no_default_trust: bool,
@@ -26,6 +29,7 @@ impl FeatureSettings {
             search_by_meaning: config.search_by_meaning,
             private_search: config.private_search,
             share_popularity: config.share_popularity,
+            search_history: Some(config.search_history),
             bootstrap: config
                 .network
                 .as_ref()
@@ -160,6 +164,11 @@ impl FeatureSettings {
                 config.share_popularity,
                 self.share_popularity,
             ),
+            (
+                "--search-history",
+                config.search_history,
+                self.search_history.unwrap_or(true),
+            ),
         ] {
             if on_command_line && !saved {
                 tracing::warn!(
@@ -171,6 +180,9 @@ impl FeatureSettings {
         config.search_by_meaning = self.search_by_meaning;
         config.private_search = self.private_search;
         config.share_popularity = self.share_popularity;
+        if let Some(history) = self.search_history {
+            config.search_history = history;
+        }
         if self.network {
             let net = config
                 .network
@@ -205,6 +217,7 @@ mod tests {
             private_search: true,
             search_by_meaning: true,
             share_popularity: true,
+            search_history: Some(false),
             bootstrap: vec!["/ip4/127.0.0.1/tcp/4002".into()],
             no_default_trust: true,
             trusted: vec!["12D3KooWEwYB7PYxRNgvSWiwkLXvwYajSmYn4yoPqmkN7NbNqJjg".into()],
@@ -254,6 +267,7 @@ mod tests {
         let mut config = NodeConfig::desktop(dir.path().into());
         let mut features = FeatureSettings {
             network: true,
+            search_history: Some(false),
             ..Default::default()
         };
         features.apply(&mut config).unwrap();

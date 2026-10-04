@@ -231,6 +231,13 @@ pub struct RunArgs {
     /// disk again as the records file.
     #[arg(long)]
     pub private_search: bool,
+    /// Keep a search history for each browser that searches this node, in
+    /// DIR/history: its past searches and the sites it opened, which the
+    /// search page can show and rank higher. Each browser sees only its
+    /// own. For a node only you and people you live with search; leave it
+    /// off on a public server.
+    #[arg(long)]
+    pub search_history: bool,
     /// Share which result is opened for a search, anonymously: this node
     /// notes the pick (on its own disk, for the current week) and sends a
     /// few threshold-encrypted reports a day, which no node can read until

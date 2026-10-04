@@ -252,8 +252,9 @@ async fn serves_a_records_file_put_there_by_hand() {
     let (code, _, body) = get(addr, "/search?q=us+bank").await;
     assert_eq!(code, 200);
     let first = body.split("<li>").nth(1).expect("a result");
+    // A desktop node keeps search history, so results link through /go.
     assert!(
-        first.contains("href=\"https://www.usbank.com/\""),
+        first.contains("href=\"/go?q=us+bank&amp;d=usbank.com"),
         "{first}"
     );
 
@@ -263,6 +264,8 @@ async fn serves_a_records_file_put_there_by_hand() {
         names(dir.path()),
         [
             "activity.jsonl",
+            // The search above, in its browser's history.
+            "history",
             "indexes",
             "node.lock",
             "records.jsonl",

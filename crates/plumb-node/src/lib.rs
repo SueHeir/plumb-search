@@ -28,6 +28,7 @@ use tracing_subscriber::EnvFilter;
 pub mod cli;
 pub mod country;
 pub mod eval;
+pub mod history;
 pub mod meaning;
 pub mod node;
 pub mod web;
