@@ -23,8 +23,10 @@
 //! storage limit for them: it takes the list's best sites up to the rest,
 //! then reads on down the list keeping only the sites about a topic. It
 //! asks for the same pages either way, so the node it asks learns nothing
-//! of the topics. When the topics change, it reads on from where the best
-//! sites stopped again.
+//! of the topics. When the topics change, it first drops the sites below
+//! the best ones that are about none of the new topics
+//! ([`prune_for_topics`], with an index build), so the share is free for
+//! the new topics, then reads on from where the best sites stopped again.
 //!
 //! # Setting up from the network
 //!
@@ -54,6 +56,7 @@ use tracing::{debug, info, warn};
 use super::network::{self, REBUILD_AFTER_RECORDS};
 use super::{Inner, Step, Stopped, MB};
 use crate::about::Topics;
+use crate::records::sorted_by_link_score;
 
 /// Time between two fill rounds.
 #[cfg(not(test))]
@@ -167,6 +170,12 @@ pub(super) struct FillState {
     /// Where in the list the best sites ran out of room and keeping only
     /// sites about the node's topics began.
     pub focus_from: Option<u64>,
+    /// Sites the node held when keeping only sites about its topics
+    /// began: the best sites, which changing the topics never drops.
+    pub focus_base: Option<u64>,
+    /// The topics changed: the sites kept for the old ones are to be
+    /// dropped before filling goes on.
+    pub prune: bool,
     /// The topics kept last ([`crate::about::Topics::key`]).
     pub focus_key: String,
     /// Bytes of disk the sites taken in since the last index build are
@@ -464,12 +473,20 @@ async fn fill_round(inner: &Arc<Inner>) -> Result<()> {
     };
     let key = topics.key();
     if state.focus_key != key {
-        // New topics: read on from where the best sites stopped again.
+        // New topics: make room, then read on from where the best sites
+        // stopped again.
         if let Some(from) = state.focus_from {
             state.next = from;
             state.done_at = None;
+            state.prune = state.focus_base.is_some();
         }
         state.focus_key = key;
+    }
+    if state.prune {
+        state.detail = "Making room for sites about the new topics".into();
+        inner.set_fill(state.clone());
+        state.save(&inner.paths.net)?;
+        return Ok(());
     }
     if let Some(done) = state.done_at {
         if now < done + FILL_AGAIN_AFTER.as_secs() {
@@ -526,12 +543,17 @@ async fn fill_round(inner: &Arc<Inner>) -> Result<()> {
             if let Some(from) = state.focus_from.take() {
                 state.next = state.next.min(from);
             }
+            state.focus_base = None;
             (room, false)
         }
         Err(_) if !topics.is_empty() => {
             match room(settings.storage_limit_mb, used, state.pending) {
                 Ok(room) => {
-                    state.focus_from.get_or_insert(state.next);
+                    if state.focus_from.is_none() {
+                        state.focus_from = Some(state.next);
+                        let sites = inner.current_summary().map_or(0, |(_, docs)| docs);
+                        state.focus_base = Some(sites + state.pending_sites);
+                    }
                     (room, true)
                 }
                 Err(why) => {
@@ -691,6 +713,47 @@ async fn fill_round(inner: &Arc<Inner>) -> Result<()> {
     Ok(())
 }
 
+/// Drops the sites of `set` below its best `keep_best` (by link score) that
+/// are about none of `topics`: those kept for topics the node no longer
+/// has. Returns how many.
+pub(super) fn prune_for_topics(set: &mut RecordSet, keep_best: usize, topics: &Topics) -> usize {
+    if set.len() <= keep_best {
+        return 0;
+    }
+    let drop: std::collections::HashSet<String> = sorted_by_link_score(set)
+        .into_iter()
+        .skip(keep_best)
+        .filter(|record| !topics.matches(record))
+        .map(|record| record.domain.clone())
+        .collect();
+    set.retain(|record| !drop.contains(&record.domain));
+    drop.len()
+}
+
+impl Inner {
+    /// Drops the sites kept for old topics from `set`, when the topics
+    /// changed ([`FillState::prune`]); the caller saves it and builds the
+    /// index from what is left. Returns how many were dropped.
+    pub(super) fn prune_for_new_topics(&self, set: &mut RecordSet) -> Result<usize> {
+        let mut state = self.fill_state();
+        let dropped = match state.focus_base {
+            Some(base) => prune_for_topics(set, base as usize, &self.keep_topics()),
+            None => 0,
+        };
+        state.prune = false;
+        state.detail = format!("Made room for the new topics: dropped {dropped} sites");
+        state.save(&self.paths.net)?;
+        self.set_fill(state);
+        if dropped > 0 {
+            info!("dropped {dropped} sites kept for topics this node no longer has");
+            self.journal.info(format!(
+                "Dropped {dropped} sites kept for old topics, to make room for the new ones"
+            ));
+        }
+        Ok(dropped)
+    }
+}
+
 /// Waits `wait`; true when the node stopped meanwhile.
 async fn pause(inner: &Inner, wait: Duration) -> bool {
     tokio::select! {
@@ -750,6 +813,39 @@ mod tests {
     }
 
     #[test]
+    fn new_topics_drop_the_sites_kept_for_old_ones_only() {
+        let site = |domain: &str, tranco: u32, title: &str| {
+            let mut r = SiteRecord::new(domain);
+            r.signals.tranco_rank = Some(tranco);
+            r.title = Some(title.into());
+            r
+        };
+        let mut set = RecordSet::new();
+        set.upsert(site("google.com", 1, "Google"));
+        set.upsert(site("youtube.com", 2, "YouTube"));
+        set.upsert(site("chess.com", 5_000, "Play Chess Games"));
+        set.upsert(site("allrecipes.com", 6_000, "Recipes for cooking"));
+        set.upsert(site("seriouseats.com", 7_000, "Serious Eats cooking"));
+        let topics = Topics::new(&["cooking".to_owned()]);
+        assert_eq!(prune_for_topics(&mut set, 2, &topics), 1);
+        let mut left: Vec<&str> = set.iter().map(|r| r.domain.as_str()).collect();
+        left.sort();
+        assert_eq!(
+            left,
+            [
+                "allrecipes.com",
+                "google.com",
+                "seriouseats.com",
+                "youtube.com"
+            ]
+        );
+        // The best sites stay whatever the topics.
+        assert_eq!(prune_for_topics(&mut set, 2, &Topics::default()), 2);
+        assert_eq!(set.len(), 2);
+        assert_eq!(prune_for_topics(&mut set, 5, &Topics::default()), 0);
+    }
+
+    #[test]
     fn stops_before_an_index_build_outgrows_the_memory() {
         const GB: u64 = 1_000_000_000;
         assert_eq!(site_room(None, 5_000_000, 0), Ok(None));
@@ -775,6 +871,8 @@ mod tests {
             done_at: None,
             seed: true,
             focus_from: Some(4_000),
+            focus_base: Some(3_000),
+            prune: true,
             focus_key: "game".into(),
             pending: 77,
             pending_since: 1,
@@ -794,9 +892,14 @@ mod tests {
         );
         assert!(loaded.seed);
         assert_eq!(
-            (loaded.focus_from, loaded.focus_key.as_str()),
-            (Some(4_000), "game")
+            (
+                loaded.focus_from,
+                loaded.focus_base,
+                loaded.focus_key.as_str()
+            ),
+            (Some(4_000), Some(3_000), "game")
         );
+        assert!(loaded.prune);
         assert_eq!(state.status().position, 5_000);
     }
 }

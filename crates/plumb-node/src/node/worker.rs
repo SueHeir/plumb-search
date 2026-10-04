@@ -150,6 +150,23 @@ async fn step(inner: &Arc<Inner>) -> Result<Next> {
             inner.update_saved(|saved| saved.network_pending += absorbed)?;
         }
     }
+    // New topics: the sites kept for the old ones go, and the index is
+    // built without them, before filling takes sites for the new ones.
+    if inner.fill_state().prune && inner.saved().crawl_left == 0 {
+        let built = blocking(inner, |inner| {
+            let _records = inner.hold_records();
+            inner.set_step(Step::Indexing, "Making room for sites about new topics");
+            let mut set = load_records(&inner.paths.records)?;
+            inner.check_stop()?;
+            if inner.prune_for_new_topics(&mut set)? > 0 {
+                replace_records(&inner.paths.records, sorted_by_link_score(&set))?;
+            }
+            build(inner, &sorted_by_link_score(&set))
+        })
+        .await?;
+        put_in_service(inner, built, false).await?;
+        return Ok(Next::Continue);
+    }
     // Enough records from other nodes rebuild the index, but no sooner
     // than NETWORK_REBUILD_GAP after the last build.
     let network_rebuild_at =
