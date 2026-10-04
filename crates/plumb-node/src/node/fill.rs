@@ -610,10 +610,10 @@ async fn fill_round(inner: &Arc<Inner>) -> Result<()> {
         }
         let n = records.len() as u64;
         // The disk the sites kept take: all of the page, or the share kept.
-        let bytes = if scanned == 0 {
-            0
+        let bytes = if focus {
+            page.bytes.checked_div(scanned).unwrap_or(0) * n
         } else {
-            page.bytes / scanned * n
+            page.bytes
         };
         if n > 0 {
             let inner2 = inner.clone();
