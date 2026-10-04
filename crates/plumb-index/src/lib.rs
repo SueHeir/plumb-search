@@ -8,6 +8,8 @@
 //!
 //! `score = alpha * link_score + trust * ((1 - alpha) * text_score + name_bonus) + country`
 //!
+//! - `alpha` is [`RankConfig::described_alpha`] instead, when set, for a
+//!   query no site is named by in full and that names no kind of thing.
 //! - `text_score` is the BM25 score normalized to `0..=1` within the
 //!   candidates of each query.
 //! - `name_bonus` rewards a site whose name the query starts with. A domain
@@ -176,6 +178,15 @@ pub struct RankConfig {
     /// embedding is taken to be as close as its words match, times the
     /// share of the query's words it has.
     pub meaning_weight: f32,
+    /// [`RankConfig::alpha`] for a query that describes what it looks for:
+    /// no site is named by all of it and it names no kind of thing
+    /// ("code hosting"). Small sites that repeat such a query's words match
+    /// it better than the big site it describes. `None` keeps `alpha`.
+    pub described_alpha: Option<f32>,
+    /// [`RankConfig::exact_label_bonus`] for a domain label equal to only
+    /// the first `k` of the query's `n` words, which then gets `k / n` of
+    /// it (code.gov in "code hosting"). `None` keeps the full-name bonus.
+    pub partial_label_bonus: Option<f32>,
 }
 
 impl Default for RankConfig {
@@ -190,6 +201,8 @@ impl Default for RankConfig {
             kind_bonus: 0.25,
             country_boost: 0.06,
             meaning_weight: 0.7,
+            described_alpha: None,
+            partial_label_bonus: None,
         }
     }
 }
@@ -785,7 +798,15 @@ impl Searcher {
         };
 
         let default = RankConfig::default();
-        let alpha = unit_or(cfg.alpha, default.alpha);
+        let named_in_full = !kinds.is_empty()
+            || names
+                .values()
+                .any(|name| name.typed || name.words() >= query.len);
+        let alpha = match cfg.described_alpha {
+            Some(described) if !named_in_full => unit_or(described, default.alpha),
+            _ => unit_or(cfg.alpha, default.alpha),
+        };
+        let partial_label_bonus = cfg.partial_label_bonus.unwrap_or(cfg.exact_label_bonus);
         let untrusted_share = unit_or(cfg.untrusted_share, default.untrusted_share);
         let country_boost = unit_or(cfg.country_boost, default.country_boost);
         let home = options.country.as_deref().and_then(normalize_country);
@@ -862,7 +883,12 @@ impl Searcher {
                     None => words,
                 }
             };
-            let mut name_bonus = (cfg.exact_label_bonus * name.label as f32 / query_words)
+            let label_bonus = if name.label >= query.len {
+                cfg.exact_label_bonus
+            } else {
+                partial_label_bonus
+            };
+            let mut name_bonus = (label_bonus * name.label as f32 / query_words)
                 .max(cfg.exact_alias_bonus * name.alias as f32 / query_words);
             if is_kind {
                 name_bonus = name_bonus.max(cfg.kind_bonus);
@@ -2657,6 +2683,41 @@ mod tests {
         let best_link = hits.iter().map(|hit| hit.link_score).fold(0.0, f32::max);
         assert_eq!(hits[0].link_score, best_link);
         assert_eq!(hits[0].domain, "chase.com");
+    }
+
+    #[test]
+    fn described_alpha_only_applies_when_no_site_is_named_in_full() {
+        let (_dir, searcher) = build(&corpus());
+        let cfg = RankConfig {
+            alpha: 0.0,
+            exact_label_bonus: 0.0,
+            exact_alias_bonus: 0.0,
+            described_alpha: Some(1.0),
+            ..RankConfig::default()
+        };
+        // No site is named "bank": popularity alone decides.
+        let hits = searcher.search_with("bank", 20, &cfg).unwrap();
+        assert_eq!(hits[0].domain, "chase.com");
+        assert_eq!(hits[0].score, hits[0].link_score);
+        // usbank.com is named by all of "us bank": alpha stays 0.
+        let hits = searcher.search_with("us bank", 20, &cfg).unwrap();
+        assert_eq!(hits[0].domain, "usbank.com");
+        assert_eq!(hits[0].score, hits[0].text_score);
+    }
+
+    #[test]
+    fn partial_label_bonus_only_applies_to_part_of_the_query() {
+        let (_dir, searcher) = build(&corpus());
+        let no_partial = RankConfig {
+            partial_label_bonus: Some(0.0),
+            ..RankConfig::default()
+        };
+        let full = searcher
+            .search_with("us bank", 1, &RankConfig::default())
+            .unwrap();
+        let hits = searcher.search_with("us bank", 1, &no_partial).unwrap();
+        assert_eq!(hits[0].domain, "usbank.com");
+        assert!((hits[0].score - full[0].score).abs() < 1e-5);
     }
 
     #[test]
