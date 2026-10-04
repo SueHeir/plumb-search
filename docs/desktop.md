@@ -167,6 +167,24 @@ The window opens with "Starting..." and then shows the panel. On the first
 launch the node sets up its index in the background. **This needs an internet
 connection.**
 
+The app joins the Plumb network, so it sets up from the plumbsearch.org node
+rather than from Tranco and Wikidata: it takes the 50,000 best-known sites,
+with their names, ranks and Wikidata facts, and search is ready within a few
+minutes. The overview then opens with **Set up my node**, which asks how much
+more of the network's crawls to keep on this computer:
+
+| Choice | Storage limit | Holds about |
+| --- | --- | --- |
+| Small | 500 MB | 100,000 sites |
+| Medium (recommended) | 2 GB | 400,000 sites |
+| Large | 8 GB | 1.5 million sites |
+| Everything | none | what the network has, as far as memory allows |
+
+Until you choose, the node takes in nothing more from the network (its own
+crawling goes on). The choice is the storage limit on the Resources page,
+which changes it later. Only when no trusted node answers within two minutes
+does the app set up from the seed downloads instead:
+
 1. It downloads the Tranco list of popular sites (from tranco-list.eu) and
    builds a first index of the best-ranked 250,000 of them. That takes a
    minute or two, and the panel then says "Limited search is ready".
