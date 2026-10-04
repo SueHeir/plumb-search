@@ -40,7 +40,7 @@ A node with no set file, or fewer pages than it is set to keep, takes the file f
 ## How pages and sites are listed together
 
 - An article about a listed site (its Wikidata item's official website) goes under that site's result instead of in a place of its own.
-- At most two other articles are listed, one when the first site is named by the whole query. An article whose title (or another title of it) is the whole query comes right after the first site when that site is an official website (Wikidata lists it as one) or better known than the article is read; otherwise it comes first. So "tauri" and "cvs pharmacy" list tauri.app and cvs.com first, while "leonardo da vinci" lists the article before leonardodavinci.net. Articles named only in part come after three sites.
+- At most two other articles are listed, one when the first site is named by the whole query. An article whose title (or another title of it) is the whole query comes right after the first site when the query names that site, the site's name spells the article's title (cvs.com for "CVS Pharmacy", capitalone.com for "Capital One"), the site is an official website, or it is better known than the article is read. Otherwise the article comes first. Articles named only in part come after three sites.
 - Among articles, a whole-title match beats a partial one, and more read articles beat less read ones.
 
 ## Measuring
