@@ -82,20 +82,14 @@ impl Pace {
     /// in its place.
     pub fn searched(&self) {
         if self.every.is_some() {
-            let _ = self
-                .owed
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
-                    (n < MAX_OWED).then_some(n + 1)
-                });
+            let _ = update(&self.owed, |n| (n < MAX_OWED).then_some(n + 1));
         }
     }
 
     /// Whether the round due now was already sent by a search, and so is
     /// skipped.
     pub fn skip(&self) -> bool {
-        self.owed
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
-            .is_ok()
+        update(&self.owed, |n| n.checked_sub(1)).is_some()
     }
 
     /// How long until the next round: random, `every` on average, as the
@@ -147,6 +141,20 @@ pub fn fill_round(mut real: Vec<u32>, cache: Option<&BucketCache>, now: u64) -> 
     }
     crate::search::shuffle(&mut real);
     real
+}
+
+/// Sets `value` to what `f` makes of it, unless `f` says `None`; returns
+/// the old value when it changed. `fetch_update` written out, as Rust
+/// renamed it (`try_update`) in a release older toolchains don't have.
+fn update(value: &AtomicU32, f: impl Fn(u32) -> Option<u32>) -> Option<u32> {
+    let mut old = value.load(Ordering::Relaxed);
+    loop {
+        let new = f(old)?;
+        match value.compare_exchange_weak(old, new, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(old) => return Some(old),
+            Err(now) => old = now,
+        }
+    }
 }
 
 #[cfg(test)]
