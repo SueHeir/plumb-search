@@ -42,6 +42,7 @@ use crate::popularity::Report;
 pub const BUCKET_PROTOCOL: &str = "/plumb/bucket/1";
 pub const BATCH_PROTOCOL: &str = "/plumb/batch/1";
 pub const FILL_PROTOCOL: &str = "/plumb/fill/1";
+pub const PAGES_PROTOCOL: &str = "/plumb/pages/1";
 pub const REPORT_PROTOCOL: &str = "/plumb/report/1";
 pub const CREDIT_PROTOCOL: &str = "/plumb/credits/1";
 pub const KAD_PROTOCOL: &str = "/plumb/kad/1.0.0";
@@ -158,6 +159,28 @@ pub struct FillResponse {
     /// Sites in the answering node's list, crawled or not.
     pub total: u64,
     /// Turned away for now: it is filling others, or was asked too often.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub busy: bool,
+}
+
+/// Asks for `len` bytes from `offset` of the answering node's file of the
+/// page set `set` (see [`crate::pages`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PagesRequest {
+    pub set: String,
+    pub offset: u64,
+    /// At most [`crate::pages::MAX_PAGES_CHUNK`] are sent.
+    pub len: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PagesResponse {
+    /// The whole file's size; 0 when the node has no such set.
+    pub size: u64,
+    /// When the file was made, Unix seconds.
+    pub modified: u64,
+    pub bytes: ByteBuf,
+    /// Turned away for now: it is serving others, or was asked too often.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub busy: bool,
 }

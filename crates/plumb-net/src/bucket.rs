@@ -52,6 +52,13 @@ pub trait BucketSource: Send + Sync + 'static {
         let _ = (from, count);
         None
     }
+
+    /// The file of the page set `set` (`wikipedia-en`), for nodes asking
+    /// for it (see [`crate::pages`]); `None` when this node has none.
+    fn page_set_file(&self, set: &str) -> Option<std::path::PathBuf> {
+        let _ = set;
+        None
+    }
 }
 
 /// A node's buckets on disk, written next to an index and never changed.
