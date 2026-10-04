@@ -187,6 +187,10 @@ fn fetch_if_needed(inner: &Inner, net: &NetHandle, set: &SetInfo, pages: u64) ->
         decoder
             .write_all(&chunk.bytes)
             .with_context(|| format!("unpacking {} from {}", set.id, chunk.peer))?;
+        // The decoder holds back what it unpacked until flushed.
+        decoder
+            .flush()
+            .with_context(|| format!("unpacking {} from {}", set.id, chunk.peer))?;
         offset += chunk.bytes.len() as u64;
         if decoder.get_ref().full() || offset >= chunk.size || chunk.bytes.is_empty() {
             break;
@@ -211,7 +215,7 @@ fn fetch_if_needed(inner: &Inner, net: &NetHandle, set: &SetInfo, pages: u64) ->
         };
     }
     let cutter = decoder.get_mut();
-    let complete = offset >= chunk.size;
+    let complete = offset >= chunk.size && !cutter.cut();
     let lines = cutter.pages();
     cutter.finish()?;
     drop(decoder);

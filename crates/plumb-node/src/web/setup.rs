@@ -28,10 +28,18 @@ pub(super) const SIZES: [(&str, u64, &str); 4] = [
     (
         "small",
         500,
-        "500 MB: about 100,000 of the best-known sites",
+        "500 MB: about 100,000 of the best-known sites and 100,000 Wikipedia articles",
     ),
-    ("medium", 2_000, "2 GB: about 400,000 sites (recommended)"),
-    ("large", 8_000, "8 GB: about 1.5 million sites"),
+    (
+        "medium",
+        2_000,
+        "2 GB: about 400,000 sites and a million Wikipedia articles (recommended)",
+    ),
+    (
+        "large",
+        8_000,
+        "8 GB: about 1.5 million sites and every Wikipedia article",
+    ),
     (
         "everything",
         0,

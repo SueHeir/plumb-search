@@ -166,6 +166,8 @@ pub struct SetFileCutter {
     limit: u64,
     lines: u64,
     header_done: bool,
+    /// Whether lines past the limit were dropped.
+    cut: bool,
     out: Option<flate2::write::GzEncoder<std::io::BufWriter<std::fs::File>>>,
 }
 
@@ -177,6 +179,7 @@ impl SetFileCutter {
             limit,
             lines: 0,
             header_done: false,
+            cut: false,
             out: Some(flate2::write::GzEncoder::new(
                 std::io::BufWriter::new(file),
                 flate2::Compression::default(),
@@ -192,6 +195,12 @@ impl SetFileCutter {
     /// Whether it has all the pages it wants.
     pub fn full(&self) -> bool {
         self.lines >= self.limit
+    }
+
+    /// Whether pages past the limit were dropped, so the file is not
+    /// the whole set.
+    pub fn cut(&self) -> bool {
+        self.cut
     }
 
     /// Finishes the gzip file.
@@ -224,6 +233,9 @@ impl std::io::Write for SetFileCutter {
             rest = &rest[piece.len()..];
         }
         // What is past the limit is dropped.
+        if !rest.is_empty() {
+            self.cut = true;
+        }
         Ok(buf.len())
     }
 
@@ -526,6 +538,7 @@ mod tests {
             }
         }
         assert_eq!(decoder.get_ref().pages(), 2);
+        assert!(decoder.get_ref().cut());
         decoder.get_mut().finish().unwrap();
         let back =
             plumb_core::article::read_articles(plumb_ingest::open_maybe_gz(&out).unwrap(), 10)
