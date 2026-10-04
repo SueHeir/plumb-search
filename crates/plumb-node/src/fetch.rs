@@ -21,6 +21,8 @@ const SUGGESTED_TOP: usize = 1_000_000;
 #[derive(Debug)]
 enum Outcome {
     Saved(PathBuf),
+    /// Saved by an earlier run within `--keep-days`, so not fetched again.
+    Kept(PathBuf),
     Skipped(String),
     Failed(anyhow::Error),
 }
@@ -30,10 +32,13 @@ pub fn run(args: FetchDataArgs) -> Result<()> {
     std::fs::create_dir_all(&args.dir)
         .with_context(|| format!("creating {}", args.dir.display()))?;
     let client = download::http_client()?;
+    let kept = |name: &str| recent_file(&args.dir.join(name), args.keep_days);
 
     let outcomes = block_on(async {
         let tranco = if args.skip_tranco {
             Outcome::Skipped("--skip-tranco".to_string())
+        } else if let Some(path) = kept(download::TRANCO_FILE_NAME) {
+            Outcome::Kept(path)
         } else {
             info!("downloading the Tranco list");
             outcome(download::download_tranco(&client, &args.dir).await)
@@ -50,6 +55,8 @@ pub fn run(args: FetchDataArgs) -> Result<()> {
         };
         let wikidata = if args.skip_wikidata {
             Outcome::Skipped("--skip-wikidata".to_string())
+        } else if let Some(path) = kept(download::WIKIDATA_FILE_NAME) {
+            Outcome::Kept(path)
         } else {
             info!(
                 "asking Wikidata for official websites of items with at least {} sitelinks",
@@ -66,6 +73,8 @@ pub fn run(args: FetchDataArgs) -> Result<()> {
         };
         let kind_sites = if args.skip_wikidata {
             Outcome::Skipped("--skip-wikidata".to_string())
+        } else if let Some(path) = kept(kind_sites::KIND_SITES_FILE_NAME) {
+            Outcome::Kept(path)
         } else {
             outcome(
                 kind_sites::download_kind_sites(
@@ -80,6 +89,8 @@ pub fn run(args: FetchDataArgs) -> Result<()> {
         let sites_files = facts_sources(&args.dir);
         let facts = if args.skip_wikidata {
             Outcome::Skipped("--skip-wikidata".to_string())
+        } else if let Some(path) = kept(facts::FACTS_FILE_NAME) {
+            Outcome::Kept(path)
         } else if sites_files.is_empty() {
             Outcome::Skipped("needs the official websites, which are missing".to_string())
         } else {
@@ -97,6 +108,8 @@ pub fn run(args: FetchDataArgs) -> Result<()> {
         let facts_file = args.dir.join(facts::FACTS_FILE_NAME);
         let intros = if args.skip_wikidata {
             Outcome::Skipped("--skip-wikidata".to_string())
+        } else if let Some(path) = kept(intros::INTROS_FILE_NAME) {
+            Outcome::Kept(path)
         } else if !facts_file.is_file() {
             Outcome::Skipped("needs the Wikidata facts, which are missing".to_string())
         } else {
@@ -126,6 +139,11 @@ pub fn run(args: FetchDataArgs) -> Result<()> {
     for (name, outcome) in &outcomes {
         match outcome {
             Outcome::Saved(path) => println!("{name:<9} saved {}", path.display()),
+            Outcome::Kept(path) => println!(
+                "{name:<9} kept {} (saved within --keep-days {})",
+                path.display(),
+                args.keep_days
+            ),
             Outcome::Skipped(why) => println!("{name:<9} skipped: {why}"),
             Outcome::Failed(err) => {
                 println!("{name:<9} FAILED: {err:#}");
@@ -155,6 +173,20 @@ fn facts_sources(dir: &Path) -> Vec<PathBuf> {
     .map(|name| dir.join(name))
     .filter(|path| path.is_file())
     .collect()
+}
+
+/// `path` if it is a file saved within the last `days` days (never for 0).
+fn recent_file(path: &Path, days: u64) -> Option<PathBuf> {
+    let modified = std::fs::metadata(path)
+        .ok()
+        .filter(|meta| meta.is_file())?
+        .modified()
+        .ok()?;
+    let age = std::time::SystemTime::now()
+        .duration_since(modified)
+        .unwrap_or_default();
+    (days > 0 && age < std::time::Duration::from_secs(days * 24 * 60 * 60))
+        .then(|| path.to_path_buf())
 }
 
 fn outcome(result: Result<PathBuf>) -> Outcome {
@@ -194,16 +226,18 @@ fn cc_ranks_url(args: &FetchDataArgs) -> Result<Option<String>> {
     Ok(Some(download::cc_domain_ranks_url(release)))
 }
 
-/// The `plumb ingest` command for the files just saved, keeping the best
+/// The `plumb ingest` command for the files just saved or kept, keeping the best
 /// [`SUGGESTED_TOP`] sites.
 fn ingest_hint(outcomes: &[(&str, Outcome)], dir: &Path) -> Option<String> {
-    let wikidata_saved = outcomes
-        .iter()
-        .any(|(name, outcome)| *name == "wikidata" && matches!(outcome, Outcome::Saved(_)));
+    let wikidata_saved = outcomes.iter().any(|(name, outcome)| {
+        *name == "wikidata" && matches!(outcome, Outcome::Saved(_) | Outcome::Kept(_))
+    });
     let flags: Vec<String> = outcomes
         .iter()
         .filter_map(|(name, outcome)| match outcome {
-            Outcome::Saved(path) => Some(format!("--{name} {}", path.display())),
+            Outcome::Saved(path) | Outcome::Kept(path) => {
+                Some(format!("--{name} {}", path.display()))
+            }
             _ => None,
         })
         // Facts, kind sites and intros only go next to the official websites.
@@ -236,6 +270,7 @@ mod tests {
             skip_tranco: false,
             skip_wikidata: false,
             wikidata_min_sitelinks: 25,
+            keep_days: 0,
         }
     }
 
@@ -284,6 +319,17 @@ mod tests {
     }
 
     #[test]
+    fn only_files_saved_within_keep_days_are_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("facts.tsv");
+        assert_eq!(recent_file(&path, 1), None);
+        std::fs::write(&path, "item\n").unwrap();
+        assert_eq!(recent_file(&path, 1), Some(path.clone()));
+        assert_eq!(recent_file(&path, 0), None);
+        assert_eq!(recent_file(dir.path(), 1), None);
+    }
+
+    #[test]
     fn hint_lists_saved_files_only() {
         let outcomes = [
             ("tranco", Outcome::Saved(PathBuf::from("data/tranco.zip"))),
@@ -293,6 +339,20 @@ mod tests {
         assert_eq!(
             ingest_hint(&outcomes, Path::new("data")).as_deref(),
             Some("plumb ingest --tranco data/tranco.zip --top 1000000 --out data/records.jsonl")
+        );
+        let kept = [
+            ("wikidata", Outcome::Kept(PathBuf::from("data/sites.tsv"))),
+            (
+                "wikipedia-intros",
+                Outcome::Saved(PathBuf::from("data/intros.tsv")),
+            ),
+        ];
+        assert_eq!(
+            ingest_hint(&kept, Path::new("data")).as_deref(),
+            Some(
+                "plumb ingest --wikidata data/sites.tsv --wikipedia-intros data/intros.tsv \
+                 --top 1000000 --out data/records.jsonl"
+            )
         );
         let nothing = [("tranco", Outcome::Skipped("--skip-tranco".into()))];
         assert_eq!(ingest_hint(&nothing, Path::new("data")), None);
