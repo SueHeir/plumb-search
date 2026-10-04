@@ -1,0 +1,222 @@
+# Searches an AI assistant or agent would make, for a Plumb MCP server or
+# JSON API: "what is the real site for X?" before it opens a page, fills in
+# a login or cites a source. Phrased the way agents write tool calls, often
+# with a word like "docs", "login" or "tracking" after the name. Those words
+# must not pull a look-alike (chase-login-help.com) above the real site.
+#
+# Run it against an index built from real data, for example:
+#   plumb eval --index data/index --queries eval/ai_queries.tsv
+#
+# Format: query<TAB>expected_domain[,another_ok_domain]. Only registrable
+# domains count, so docs.python.org is python.org and aws.amazon.com is
+# amazon.com.
+
+# Programming languages and runtimes
+rust programming language	rust-lang.org
+rust docs	rust-lang.org,docs.rs
+python documentation	python.org
+python official website	python.org
+go programming language	go.dev,golang.org
+typescript	typescriptlang.org
+node.js	nodejs.org
+deno	deno.com,deno.land
+bun javascript runtime	bun.sh,bun.com
+kotlin	kotlinlang.org
+swift programming language	swift.org
+ruby programming language	ruby-lang.org
+php	php.net
+java download	java.com,oracle.com
+webassembly	webassembly.org
+llvm	llvm.org
+
+# Package registries and library docs
+crates.io	crates.io
+docs.rs	docs.rs
+npm	npmjs.com
+pypi	pypi.org
+python package index	pypi.org
+rubygems	rubygems.org
+maven central	sonatype.com,maven.org
+homebrew	brew.sh
+mdn web docs	mozilla.org
+can i use	caniuse.com
+tokio	tokio.rs
+serde	serde.rs
+react	react.dev,reactjs.org
+next.js	nextjs.org
+vue.js	vuejs.org
+svelte	svelte.dev
+angular	angular.dev,angular.io
+tailwind css	tailwindcss.com
+django	djangoproject.com
+ruby on rails	rubyonrails.org
+laravel	laravel.com
+fastapi	tiangolo.com
+pandas	pydata.org
+numpy	numpy.org
+pytorch	pytorch.org
+tensorflow	tensorflow.org
+scikit-learn	scikit-learn.org
+tauri	tauri.app
+
+# Developer tools and platforms
+git	git-scm.com
+gitlab	gitlab.com
+bitbucket	bitbucket.org
+github docs	github.com
+visual studio code	visualstudio.com
+jetbrains	jetbrains.com
+docker	docker.com
+docker hub	docker.com
+kubernetes	kubernetes.io
+kubernetes documentation	kubernetes.io
+terraform	terraform.io,hashicorp.com
+postgresql	postgresql.org
+postgres docs	postgresql.org
+mysql	mysql.com
+sqlite	sqlite.org
+redis	redis.io
+mongodb	mongodb.com
+nginx	nginx.org,nginx.com
+aws console	amazon.com
+aws documentation	amazon.com
+azure portal	azure.com,microsoft.com
+google cloud console	google.com
+cloudflare	cloudflare.com
+vercel	vercel.com
+netlify	netlify.com
+heroku	heroku.com
+digitalocean	digitalocean.com
+stripe api	stripe.com
+twilio	twilio.com
+sentry	sentry.io
+datadog	datadoghq.com
+github status	githubstatus.com
+regex101	regex101.com
+linux kernel	kernel.org
+ubuntu	ubuntu.com
+debian	debian.org
+arch linux	archlinux.org
+fedora linux	fedoraproject.org
+
+# Standards and security
+rfc editor	rfc-editor.org
+ietf	ietf.org
+w3c	w3.org
+whatwg	whatwg.org
+unicode consortium	unicode.org
+json schema	json-schema.org
+openapi specification	openapis.org,swagger.io
+lets encrypt	letsencrypt.org
+owasp	owasp.org
+cve	cve.org,mitre.org
+nist	nist.gov
+
+# AI companies and tools
+anthropic	anthropic.com
+claude	claude.ai,anthropic.com
+chatgpt	chatgpt.com,openai.com
+openai api	openai.com
+google gemini	google.com
+perplexity	perplexity.ai
+mistral ai	mistral.ai
+hugging face	huggingface.co
+ollama	ollama.com
+deepseek	deepseek.com
+model context protocol	modelcontextprotocol.io
+langchain	langchain.com
+cursor code editor	cursor.com
+midjourney	midjourney.com
+
+# Research, data and reference
+arxiv	arxiv.org
+pubmed	nih.gov
+semantic scholar	semanticscholar.org
+doi	doi.org
+crossref	crossref.org
+orcid	orcid.org
+wikidata	wikidata.org
+wolfram alpha	wolframalpha.com
+openstreetmap	openstreetmap.org
+internet archive	archive.org
+wayback machine	archive.org
+project gutenberg	gutenberg.org
+world bank	worldbank.org
+international monetary fund	imf.org
+bureau of labor statistics	bls.gov
+data.gov	data.gov
+our world in data	ourworldindata.org
+kaggle	kaggle.com
+sec edgar	sec.gov
+federal register	federalregister.gov
+congress.gov	congress.gov
+merriam-webster	merriam-webster.com
+time and date	timeanddate.com
+xe currency converter	xe.com
+
+# Accounts, logins and tracking (look-alike bait)
+chase login	chase.com
+bank of america sign in	bankofamerica.com
+paypal login	paypal.com
+gmail	gmail.com,google.com
+outlook email	outlook.com,live.com,microsoft.com
+icloud	icloud.com,apple.com
+apple id	apple.com
+microsoft account	microsoft.com,live.com
+amazon customer service	amazon.com
+netflix help center	netflix.com
+usps tracking	usps.com
+fedex tracking	fedex.com
+ups tracking	ups.com
+irs refund status	irs.gov
+turbotax	turbotax.com,intuit.com
+annual credit report	annualcreditreport.com
+coinbase	coinbase.com
+robinhood	robinhood.com
+
+# Government services
+passport application	state.gov
+fafsa	studentaid.gov,fafsa.gov
+federal student aid	studentaid.gov
+healthcare.gov	healthcare.gov
+tsa precheck	tsa.gov
+global entry	cbp.gov
+medlineplus	medlineplus.gov
+canada revenue agency	canada.ca
+australian taxation office	ato.gov.au
+european commission	europa.eu
+
+# Health and safety
+webmd	webmd.com
+cleveland clinic	clevelandclinic.org
+drugs.com	drugs.com
+poison control	poison.org
+988 suicide and crisis lifeline	988lifeline.org
+
+# Travel and everyday services
+delta baggage policy	delta.com
+united airlines check in	united.com
+deutsche bahn	bahn.de
+uber	uber.com
+lyft	lyft.com
+doordash	doordash.com
+instacart	instacart.com
+zillow	zillow.com
+indeed	indeed.com
+glassdoor	glassdoor.com
+ticketmaster	ticketmaster.com
+tripadvisor	tripadvisor.com
+yelp	yelp.com
+
+# Companies, careers and investor pages
+apple careers	apple.com
+microsoft careers	microsoft.com
+tesla investor relations	tesla.com
+nvidia investor relations	nvidia.com
+alibaba	alibaba.com
+aliexpress	aliexpress.com
+baidu	baidu.com
+naver	naver.com
+flipkart	flipkart.com
+mercado libre	mercadolibre.com,mercadolibre.com.mx,mercadolivre.com.br
+rakuten	rakuten.com,rakuten.co.jp

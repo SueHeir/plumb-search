@@ -219,18 +219,22 @@ pub fn run(args: EvalArgs) -> Result<()> {
         let domains: Vec<&str> = hits.iter().map(|h| h.domain.as_str()).collect();
         // What came first: a page when one was listed first.
         let mut first = domains.first().map(|d| d.to_string());
+        // With pages, what each listed position holds (pages count as rows).
+        let mut listed = None;
         let deep_rank = match &pages {
             None => rank_of(&domains, &q.expected),
             Some(pages) => {
                 let found = pages
                     .search(&q.query, 10)
                     .with_context(|| format!("searching pages for {:?}", q.query))?;
-                let listed = listed_with_pages(&hits, place_pages(&hits, found));
-                first = listed.first().and_then(|keys| keys.first()).cloned();
-                listed
+                let rows = listed_with_pages(&hits, place_pages(&hits, found));
+                first = rows.first().and_then(|keys| keys.first()).cloned();
+                let rank = rows
                     .iter()
                     .position(|keys| keys.iter().any(|k| q.expected.contains(k)))
-                    .map(|i| i + 1)
+                    .map(|i| i + 1);
+                listed = Some(rows);
+                rank
             }
         };
         let rank = deep_rank.filter(|&rank| rank <= args.limit);
@@ -244,8 +248,19 @@ pub fn run(args: EvalArgs) -> Result<()> {
                 };
                 let shown = [Some(1), deep_rank];
                 for rank in shown.into_iter().flatten() {
-                    let hit = &hits[rank - 1];
-                    println!("{}", explain(rank, hit, closeness(&hit.domain)));
+                    // A listed position is a site's domain or a page's address.
+                    let key = match &listed {
+                        None => hits.get(rank - 1).map(|h| h.domain.as_str()),
+                        Some(rows) => rows
+                            .get(rank - 1)
+                            .and_then(|keys| keys.first())
+                            .map(String::as_str),
+                    };
+                    let Some(key) = key else { continue };
+                    match hits.iter().find(|h| h.domain == key) {
+                        Some(hit) => println!("{}", explain(rank, hit, closeness(&hit.domain))),
+                        None => println!("  #{rank} page {key}"),
+                    }
                 }
                 if deep_rank.is_none() {
                     println!("  expected site not in the first {fetched}");
@@ -511,7 +526,11 @@ mod tests {
     #[test]
     fn repository_query_files_are_valid() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        for file in ["fixtures/brand_queries.tsv", "eval/brand_queries.tsv"] {
+        for file in [
+            "fixtures/brand_queries.tsv",
+            "eval/brand_queries.tsv",
+            "eval/ai_queries.tsv",
+        ] {
             let text = std::fs::read_to_string(root.join(file)).unwrap();
             let queries = parse_queries(&text).unwrap();
             assert!(
