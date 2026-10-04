@@ -81,6 +81,7 @@ use crate::oblivious::{
     seal_response, Gateway, ObliviousRequest, ObliviousResponse, Opened, SignedKeys, MAX_MESSAGE,
     OBLIVIOUS_PROTOCOL, RELAY_KEY_CACHE, REPORT_REQUEST_SIZE,
 };
+use crate::pages::{PagesChunk, MAX_SERVING, PAGES_REQUESTS_PER_MINUTE};
 use crate::popularity::{report_epoch, PopularityTable, Report};
 use crate::proto::*;
 use crate::reports::ReportStore;
@@ -341,6 +342,9 @@ enum Serving {
 /// Where the answer to a fill request goes.
 type FillReply = oneshot::Sender<Result<Option<FillPage>>>;
 
+/// Where the answer to a page set request goes.
+type PagesReply = oneshot::Sender<Result<Option<PagesChunk>>>;
+
 enum Command {
     Publish {
         records: Vec<SiteRecord>,
@@ -363,6 +367,10 @@ enum Command {
         count: u32,
         all: bool,
         reply: FillReply,
+    },
+    Pages {
+        request: PagesRequest,
+        reply: PagesReply,
     },
     Dial(Multiaddr),
     Reconnect,
@@ -677,6 +685,27 @@ impl NetHandle {
         answer.await.context("the network task stopped")?
     }
 
+    /// Asks a connected node this node trusts for `len` bytes from
+    /// `offset` of its file of the page set `set` (see [`crate::pages`]).
+    /// `None` when no trusted node that serves page sets is connected.
+    pub async fn pages_chunk(
+        &self,
+        set: &str,
+        offset: u64,
+        len: u32,
+    ) -> Result<Option<PagesChunk>> {
+        let (reply, answer) = oneshot::channel();
+        self.send(Command::Pages {
+            request: PagesRequest {
+                set: set.to_string(),
+                offset,
+                len,
+            },
+            reply,
+        })?;
+        answer.await.context("the network task stopped")?
+    }
+
     /// Tokens held that `issuer` signed.
     pub fn tokens_held(&self, issuer: &PeerId) -> usize {
         self.wallet
@@ -785,6 +814,7 @@ struct Behaviour {
     oblivious: request_response::cbor::Behaviour<ObliviousRequest, ObliviousResponse>,
     credits: request_response::cbor::Behaviour<CreditRequest, CreditResponse>,
     fill: request_response::cbor::Behaviour<FillRequest, FillResponse>,
+    pages: request_response::cbor::Behaviour<PagesRequest, PagesResponse>,
 }
 
 /// Starts the network side of a node. Returns its handle and the records
@@ -917,6 +947,10 @@ pub async fn start(
         filling: 0,
         fill_asked: HashMap::new(),
         fill_asking: HashMap::new(),
+        pages_peers: HashSet::new(),
+        pages_serving: 0,
+        pages_asked: HashMap::new(),
+        pages_asking: HashMap::new(),
         gateway,
         oblivious_peers: HashSet::new(),
         relay_keys: HashMap::new(),
@@ -1258,6 +1292,15 @@ fn build_swarm(key: &Keypair, config: &NetConfig) -> Result<Swarm<Behaviour>> {
                         .set_request_size_maximum(1024)
                         .set_response_size_maximum(64 * 1024 * 1024),
                     [(StreamProtocol::new(FILL_PROTOCOL), ProtocolSupport::Full)],
+                    request_config.clone(),
+                ),
+                pages: request_response::Behaviour::with_codec(
+                    request_response::cbor::codec::Codec::default()
+                        .set_request_size_maximum(1024)
+                        .set_response_size_maximum(
+                            u64::from(crate::pages::MAX_PAGES_CHUNK) + 64 * 1024,
+                        ),
+                    [(StreamProtocol::new(PAGES_PROTOCOL), ProtocolSupport::Full)],
                     request_config,
                 ),
             })
@@ -1274,6 +1317,7 @@ enum Answer {
     Batch(ResponseChannel<BatchResponse>, BatchResponse),
     Report(ResponseChannel<ReportResponse>, ReportResponse),
     Fill(ResponseChannel<FillResponse>, FillResponse),
+    Pages(ResponseChannel<PagesResponse>, PagesResponse),
     /// Picks counted in a recount of the reports.
     Popularity(usize),
     Sealed(Reply, ObliviousResponse),
@@ -1368,6 +1412,14 @@ struct Task {
     /// Our fill requests not yet answered, and whether each asked for
     /// every site.
     fill_asking: HashMap<OutboundRequestId, (bool, FillReply)>,
+    /// Connected nodes this node trusts that serve page sets.
+    pages_peers: HashSet<PeerId>,
+    /// Page set requests being answered.
+    pages_serving: usize,
+    /// Page set requests answered for each node, and the minute counted.
+    pages_asked: HashMap<PeerId, (u64, u32)>,
+    /// Our page set requests not yet answered.
+    pages_asking: HashMap<OutboundRequestId, PagesReply>,
     /// This node's keys for sealed requests.
     gateway: Gateway,
     /// Connected nodes that relay and answer sealed requests.
@@ -1554,6 +1606,18 @@ impl Task {
                     .send_request(&peer, FillRequest { from, count, all });
                 self.fill_asking.insert(id, (all, reply));
             }
+            Command::Pages { request, reply } => {
+                let Some(peer) = self.pages_peers.iter().next().copied() else {
+                    let _ = reply.send(Ok(None));
+                    return;
+                };
+                let id = self
+                    .swarm
+                    .behaviour_mut()
+                    .pages
+                    .send_request(&peer, request);
+                self.pages_asking.insert(id, reply);
+            }
             Command::Dial(addr) => self.dial(addr),
             Command::Reconnect => {
                 info!("trying the bootstrap nodes again");
@@ -1673,6 +1737,14 @@ impl Task {
                 {
                     self.with_status(|s| s.fill_records_served += sent);
                 }
+            }
+            Answer::Pages(channel, response) => {
+                self.pages_serving = self.pages_serving.saturating_sub(1);
+                let _ = self
+                    .swarm
+                    .behaviour_mut()
+                    .pages
+                    .send_response(channel, response);
             }
             Answer::Popularity(picks) => self.with_status(|s| s.popular_picks = picks),
             Answer::Sealed(reply, response) => {
@@ -1847,6 +1919,8 @@ impl Task {
                     self.oblivious_peers.remove(&peer_id);
                     self.batch_peers.remove(&peer_id);
                     self.fill_peers.remove(&peer_id);
+                    self.pages_peers.remove(&peer_id);
+                    self.pages_asked.remove(&peer_id);
                     self.fill_asked.remove(&peer_id);
                     // Asked again on coming back, for what it sent meanwhile.
                     self.listing.remove(&peer_id);
@@ -1930,6 +2004,7 @@ impl Task {
             BehaviourEvent::Oblivious(event) => self.on_oblivious_event(event),
             BehaviourEvent::Credits(event) => self.on_credit_event(event),
             BehaviourEvent::Fill(event) => self.on_fill_event(event),
+            BehaviourEvent::Pages(event) => self.on_pages_event(event),
             BehaviourEvent::RelayClient(relay::client::Event::ReservationReqAccepted {
                 relay_peer_id,
                 renewal,
@@ -2068,6 +2143,9 @@ impl Task {
         }
         if supports(FILL_PROTOCOL) && self.config.trusted_peers.contains(&peer) {
             self.fill_peers.insert(peer);
+        }
+        if supports(PAGES_PROTOCOL) && self.config.trusted_peers.contains(&peer) {
+            self.pages_peers.insert(peer);
         }
         if supports(BATCH_PROTOCOL) {
             self.batch_peers.insert(peer);
@@ -2804,6 +2882,91 @@ impl Task {
             *asked = (minute, 0);
         }
         if asked.1 >= FILL_REQUESTS_PER_MINUTE {
+            return false;
+        }
+        asked.1 += 1;
+        true
+    }
+
+    fn on_pages_event(&mut self, event: request_response::Event<PagesRequest, PagesResponse>) {
+        match event {
+            request_response::Event::Message {
+                peer,
+                message:
+                    request_response::Message::Request {
+                        request, channel, ..
+                    },
+                ..
+            } => {
+                if !self.admit_pages(peer) {
+                    let _ = self.swarm.behaviour_mut().pages.send_response(
+                        channel,
+                        PagesResponse {
+                            size: 0,
+                            modified: 0,
+                            bytes: serde_bytes::ByteBuf::new(),
+                            busy: true,
+                        },
+                    );
+                    return;
+                }
+                self.pages_serving += 1;
+                let source = self.source.clone();
+                let tx = self.answers_tx.clone();
+                tokio::task::spawn_blocking(move || {
+                    let file = source.page_set_file(&request.set);
+                    let response = crate::pages::answer(file.as_deref(), &request);
+                    let _ = tx.send(Answer::Pages(channel, response));
+                });
+            }
+            request_response::Event::Message {
+                peer,
+                message:
+                    request_response::Message::Response {
+                        request_id,
+                        response,
+                    },
+                ..
+            } => {
+                let Some(reply) = self.pages_asking.remove(&request_id) else {
+                    return;
+                };
+                let _ = reply.send(Ok(Some(PagesChunk {
+                    peer,
+                    size: response.size,
+                    modified: response.modified,
+                    bytes: response.bytes.into_vec(),
+                    busy: response.busy,
+                })));
+            }
+            request_response::Event::OutboundFailure {
+                peer,
+                request_id,
+                error,
+                ..
+            } => {
+                if let Some(reply) = self.pages_asking.remove(&request_id) {
+                    let _ = reply.send(Err(anyhow::anyhow!("{peer} did not answer: {error}")));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Whether to answer a page set request from `peer` now: this node
+    /// serves its index to others, is not answering [`MAX_SERVING`] already,
+    /// and `peer` asked fewer than [`PAGES_REQUESTS_PER_MINUTE`] times this
+    /// minute.
+    fn admit_pages(&mut self, peer: PeerId) -> bool {
+        if !self.config.answer_searches || self.pages_serving >= MAX_SERVING {
+            return false;
+        }
+        let minute = now_unix() / 60;
+        let asked = self.pages_asked.entry(peer).or_insert((minute, 0));
+        if asked.0 != minute {
+            *asked = (minute, 0);
+        }
+        if asked.1 >= PAGES_REQUESTS_PER_MINUTE {
             return false;
         }
         asked.1 += 1;

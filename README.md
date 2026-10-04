@@ -56,11 +56,13 @@ On a desktop or laptop, install the desktop app for Windows, macOS or Linux ([do
 
 ### Private search
 
-`plumb run --private-search` adds a `/private` search page, linked from the settings gear, where the node never sees what people search for: the browser fetches a few buckets of sites, padded with random ones, and ranks them itself in WebAssembly. See [docs/private-search.md](docs/private-search.md).
+Every node in the network (or one started with `--private-search`) offers a `/private` search page, turned on with the Private search switch in the settings gear, where the node never sees what people search for: the browser fetches a few buckets of sites, padded with random ones, and ranks them itself in WebAssembly. See [docs/private-search.md](docs/private-search.md).
 
 The desktop app, and `plumb run --search-history`, keep a search history for each browser that searches the node: the home page lists your past searches, sites you opened before are labelled and come first the next time you search, and `/history` lists and clears it. Each browser gets its own profile (a cookie), so people sharing a node see only their own. Both choices are in the settings gear; the node-wide switch is "Remember searches" on the panel. Leave it off on a public server.
 
 The same nodes have an "About you" page (`/about`, linked from the settings gear) where each browser can list its interests, sites it always wants first, and sites it never wants to see. Results that match an interest move up a little and say which interest they match, so "rust" leans towards the language for a programmer and the game for a gamer. Like the history, it stays on the node for that browser only and is applied after results are found, so it is never part of a search sent to other nodes.
+
+A node with a storage limit keeps a quarter of it for sites about those interests: it fills with the network's best sites up to 65% of the limit, then reads on down a trusted node's list keeping only sites about them, asking for the same pages either way so the trusted node learns nothing of the interests. When the interests change, it drops the sites it kept only for the old ones to make room. Full nodes can also set **Focus topics** on the panel (or `plumb run --focus games`, repeatable): they crawl sites about those topics first and twice as often, so the more nodes focus on a topic, the better the network knows it. Unlike About you interests, focus topics are public in effect, since other nodes see what a node crawls.
 
 ### Use Plumb as your browser's search engine
 

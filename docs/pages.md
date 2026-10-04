@@ -33,6 +33,10 @@ plumb fetch-pages --work /big/disk/dumps --data /path/to/node-data \
 
 This downloads the latest `page`, `page_props` and `redirect` tables of English Wikipedia (about 3 GB) and seven days of `pageview_complete` files (about 400 MB a day), and writes `DIR/pages/sets/wikipedia-en.tsv.gz`, most read first. A running node picks it up and indexes the pages it is set to keep in `DIR/pages/index-<key>/`. Anyone can make the same file from the same dumps.
 
+## Nodes in the network
+
+A node with no set file, or fewer pages than it is set to keep, takes the file from a node it trusts (plumbsearch.org by default) over `/plumb/pages/1`, 1 MiB at a time, and stops once it has the pages it keeps: a node keeping 100,000 articles downloads about 10 MB, not the whole file. It asks again for a newer file after 30 days. A node passes on only whole files, made with `fetch-pages` or taken whole, so a cut file never spreads. Nodes answer at most four such requests at once and 120 a minute from each node.
+
 ## How pages and sites are listed together
 
 - An article about a listed site (its Wikidata item's official website) goes under that site's result instead of in a place of its own.

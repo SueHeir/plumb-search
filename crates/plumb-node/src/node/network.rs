@@ -145,6 +145,9 @@ impl BucketSource for ServedIndex {
             }
         }
     }
+    fn page_set_file(&self, set: &str) -> Option<PathBuf> {
+        crate::pages::SetInfo::find(set)?.servable_file(&self.0.paths.data)
+    }
 }
 
 /// Whether this node's indexes need buckets: it answers other nodes'

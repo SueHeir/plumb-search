@@ -85,6 +85,8 @@ impl SetInfo {
             })
             .filter(|(n, line)| !(*n == 0 && line.starts_with("views\t")) && !line.is_empty())
             .filter_map(move |(n, line)| match parse_article(&line) {
+                // Files made before fetch-pages left it out.
+                Ok(article) if article.title == "Main Page" => None,
                 Ok(article) => Some(Page::from_article(&lang, article)),
                 Err(err) => {
                     bad += 1;
@@ -95,6 +97,152 @@ impl SetInfo {
                 }
             })
             .take(usize::try_from(limit).unwrap_or(usize::MAX)))
+    }
+}
+
+impl SetInfo {
+    /// What is known of the set's file in `data_dir`, `None` when there is
+    /// none. A file with no notes (made by `plumb fetch-pages`) is whole.
+    pub fn file_notes(&self, data_dir: &Path) -> Option<SetFileNotes> {
+        let file = self.file(data_dir);
+        if !file.is_file() {
+            return None;
+        }
+        Some(
+            std::fs::read(notes_path(&file))
+                .ok()
+                .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+                .unwrap_or(SetFileNotes {
+                    lines: u64::MAX,
+                    complete: true,
+                    source_modified: 0,
+                    fetched_at: 0,
+                }),
+        )
+    }
+
+    /// The set's file in `data_dir` when it is whole, so it can be handed
+    /// to other nodes.
+    pub fn servable_file(&self, data_dir: &Path) -> Option<PathBuf> {
+        self.file_notes(data_dir)
+            .filter(|notes| notes.complete)
+            .map(|_| self.file(data_dir))
+    }
+}
+
+/// What a node notes about a set file it took from another node, next to
+/// it as `<file>.json`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetFileNotes {
+    /// Pages in the file.
+    pub lines: u64,
+    /// Every page of the other node's file is in it.
+    pub complete: bool,
+    /// When the other node's file was made (Unix seconds).
+    pub source_modified: u64,
+    /// When it was taken (Unix seconds).
+    pub fetched_at: u64,
+}
+
+/// `<file>.json`, the notes of a set file.
+pub fn notes_path(file: &Path) -> PathBuf {
+    let mut name = file.as_os_str().to_owned();
+    name.push(".json");
+    PathBuf::from(name)
+}
+
+/// The sets to keep under `sets` and a storage limit of
+/// `storage_limit_mb`, and how many pages of each, whether or not the node
+/// has their files yet.
+pub fn wanted_counts(sets: &PageSets, storage_limit_mb: u64) -> Vec<(&'static SetInfo, u64)> {
+    SETS.iter()
+        .map(|set| (set, sets.size(set.id).pages(storage_limit_mb)))
+        .filter(|(_, pages)| *pages > 0)
+        .collect()
+}
+
+/// Writes the first `limit` pages of a set file, as its gzipped bytes are
+/// written to [`SetFileCutter::write`] (gunzipped by the caller), into a
+/// new gzip file.
+pub struct SetFileCutter {
+    limit: u64,
+    lines: u64,
+    header_done: bool,
+    /// Whether lines past the limit were dropped.
+    cut: bool,
+    out: Option<flate2::write::GzEncoder<std::io::BufWriter<std::fs::File>>>,
+}
+
+impl SetFileCutter {
+    pub fn create(path: &Path, limit: u64) -> Result<Self> {
+        let file =
+            std::fs::File::create(path).with_context(|| format!("creating {}", path.display()))?;
+        Ok(SetFileCutter {
+            limit,
+            lines: 0,
+            header_done: false,
+            cut: false,
+            out: Some(flate2::write::GzEncoder::new(
+                std::io::BufWriter::new(file),
+                flate2::Compression::default(),
+            )),
+        })
+    }
+
+    /// Pages written so far.
+    pub fn pages(&self) -> u64 {
+        self.lines
+    }
+
+    /// Whether it has all the pages it wants.
+    pub fn full(&self) -> bool {
+        self.lines >= self.limit
+    }
+
+    /// Whether pages past the limit were dropped, so the file is not
+    /// the whole set.
+    pub fn cut(&self) -> bool {
+        self.cut
+    }
+
+    /// Finishes the gzip file.
+    pub fn finish(&mut self) -> Result<()> {
+        if let Some(out) = self.out.take() {
+            out.finish()?
+                .into_inner()
+                .map_err(|e| e.into_error())?
+                .sync_all()?;
+        }
+        Ok(())
+    }
+}
+
+impl std::io::Write for SetFileCutter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let mut rest = buf;
+        while !rest.is_empty() && !self.full() {
+            let Some(out) = self.out.as_mut() else { break };
+            let end = rest.iter().position(|&b| b == b'\n').map(|i| i + 1);
+            let piece = &rest[..end.unwrap_or(rest.len())];
+            out.write_all(piece)?;
+            if end.is_some() {
+                if self.header_done {
+                    self.lines += 1;
+                } else {
+                    self.header_done = true;
+                }
+            }
+            rest = &rest[piece.len()..];
+        }
+        // What is past the limit is dropped.
+        if !rest.is_empty() {
+            self.cut = true;
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
     }
 }
 
@@ -360,6 +508,45 @@ mod tests {
             .unwrap();
         }
         std::fs::write(file, text).unwrap();
+    }
+
+    #[test]
+    fn cutting_keeps_the_top_pages() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let mut text = ARTICLES_HEADER.as_bytes().to_vec();
+        for (title, views) in [("A", 3u64), ("B", 2), ("C", 1)] {
+            write_article(
+                &mut text,
+                &Article {
+                    title: title.into(),
+                    views,
+                    ..Article::default()
+                },
+            )
+            .unwrap();
+        }
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        gz.write_all(&text).unwrap();
+        let gz = gz.finish().unwrap();
+        let out = dir.path().join("cut.tsv.gz");
+        let mut decoder =
+            flate2::write::MultiGzDecoder::new(SetFileCutter::create(&out, 2).unwrap());
+        // Fed in small pieces, as chunks arrive.
+        for piece in gz.chunks(7) {
+            decoder.write_all(piece).unwrap();
+            if decoder.get_ref().full() {
+                break;
+            }
+        }
+        assert_eq!(decoder.get_ref().pages(), 2);
+        assert!(decoder.get_ref().cut());
+        decoder.get_mut().finish().unwrap();
+        let back =
+            plumb_core::article::read_articles(plumb_ingest::open_maybe_gz(&out).unwrap(), 10)
+                .unwrap();
+        assert_eq!(back.len(), 2);
+        assert_eq!(back[1].title, "B");
     }
 
     #[test]

@@ -1,7 +1,8 @@
 # Private search
 
-A Plumb node started with `--private-search` offers a second search page,
-`/private`, where query text stays in the browser and results are ranked
+Every Plumb node that answers other nodes' searches (any node in the
+network, by default) offers a second search page, `/private`, as does one
+started with `--private-search`. There query text stays in the browser and results are ranked
 there. Bucket numbers can still reveal likely queries; this is not Private
 Information Retrieval or an unconditional anonymity guarantee. The
 browser looks up the results itself:
@@ -100,8 +101,10 @@ plumb run --data DIR --private-search
 Each index build then also writes its buckets (`indexes/NNNNNN/buckets/`,
 about as much disk as the records file). A node whose index has none yet,
 because it was built before the flag was turned on, rebuilds it once on
-start. The settings gear on the search pages links to `/private` once the
-buckets are there.
+start. Nodes in the network already build buckets, so they need no flag.
+Once the buckets are there, the settings gear on the search pages shows a
+Private search switch; it is a link to `/private` (and back), so turning
+it on never sends what was typed.
 
 ## Building the page's script
 

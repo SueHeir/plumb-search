@@ -200,10 +200,10 @@ pub struct NodeConfig {
     /// their searches (see [`network`]). Its `dir` is replaced with
     /// `DIR/net`. `None`, the default for now, keeps the node on its own.
     pub network: Option<plumb_net::NetConfig>,
-    /// Serve private search (`/private`): browsers fetch buckets of sites
-    /// and rank them themselves, so the node never sees their searches.
-    /// Each index build also writes its buckets, which take about as much
-    /// disk as the records file. Off by default.
+    /// Build buckets, and so serve private search (`/private`), even when
+    /// the node answers no other nodes' searches. Nodes that do answer them
+    /// have buckets and serve private search anyway. Buckets take about as
+    /// much disk as the records file. Off by default.
     pub private_search: bool,
     /// In the network, crawl any site instead of only those assigned for
     /// the day: this node's slice of all sites, split with those of
@@ -236,6 +236,9 @@ pub struct NodeConfig {
     /// where the people searching are the people the computer belongs to;
     /// off for servers, which strangers may search.
     pub search_history: bool,
+    /// Topics this node focuses on (`plumb run --focus`), besides the ones
+    /// set on the panel ([`NodeSettings::focus_topics`]).
+    pub focus_topics: Vec<String>,
 }
 
 impl NodeConfig {
@@ -275,6 +278,7 @@ impl NodeConfig {
             settings: NodeSettings::default(),
             manage_other_nodes: false,
             search_history: false,
+            focus_topics: Vec::new(),
         }
     }
 
@@ -433,6 +437,10 @@ pub struct NodeSettings {
     /// How much of each page set (Wikipedia articles) to keep; see
     /// [`crate::pages`].
     pub page_sets: crate::pages::PageSets,
+    /// Topics this node focuses on, such as "games": it crawls their sites
+    /// first and twice as often, and keeps more of them when filling a
+    /// storage limit. Public in effect: other nodes see what it crawls.
+    pub focus_topics: Vec<String>,
 }
 
 impl Default for NodeSettings {
@@ -447,6 +455,7 @@ impl Default for NodeSettings {
             fill_from_network: true,
             setup_chosen: true,
             page_sets: Default::default(),
+            focus_topics: Vec::new(),
         }
     }
 }
@@ -1049,6 +1058,13 @@ fn settings_change_words(old: &NodeSettings, new: &NodeSettings) -> String {
             "filling free space from the network off".to_owned()
         });
     }
+    if old.focus_topics != new.focus_topics {
+        parts.push(if new.focus_topics.is_empty() {
+            "no focus topics".to_owned()
+        } else {
+            format!("focus topics {}", new.focus_topics.join(", "))
+        });
+    }
     if old.crawl_hours != new.crawl_hours {
         parts.push(match new.crawl_hours {
             Some(hours) => format!("crawl hours {}", hours.words()),
@@ -1357,6 +1373,38 @@ impl Inner {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
+    }
+
+    /// The topics this node focuses on: `--focus` and the panel's. They
+    /// steer crawling, which other nodes see.
+    fn focus_topics(&self) -> crate::about::Topics {
+        let settings = self.settings();
+        crate::about::Topics::new(
+            self.config
+                .focus_topics
+                .iter()
+                .chain(&settings.focus_topics),
+        )
+    }
+
+    /// The topics this node keeps more of when filling a storage limit:
+    /// its focus topics and the interests of the About profiles of the
+    /// browsers that search it. Which sites a node keeps is not seen by
+    /// other nodes, so the profiles stay private.
+    fn keep_topics(&self) -> crate::about::Topics {
+        let settings = self.settings();
+        let interests = if self.config.search_history {
+            crate::about::all_interests(&self.paths.data.join("history"))
+        } else {
+            Vec::new()
+        };
+        crate::about::Topics::new(
+            self.config
+                .focus_topics
+                .iter()
+                .chain(&settings.focus_topics)
+                .chain(&interests),
+        )
     }
 
     /// Saves new settings and puts them in force; the background work
@@ -1673,7 +1721,9 @@ impl StatusSource for Inner {
     }
 
     fn bucket_table(&self) -> Option<String> {
-        if !self.config.private_search {
+        // Any node with buckets offers private search: they are already
+        // built for answering other nodes, so it costs only bandwidth.
+        if !network::wants_buckets(self) {
             return None;
         }
         let index = self.current()?;
@@ -1682,7 +1732,7 @@ impl StatusSource for Inner {
     }
 
     fn bucket(&self, table: &str, bucket: u32) -> Option<Result<Vec<String>>> {
-        if !self.config.private_search {
+        if !network::wants_buckets(self) {
             return None;
         }
         let index = self.current()?;
