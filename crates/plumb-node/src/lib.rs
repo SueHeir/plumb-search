@@ -32,6 +32,7 @@ pub mod history;
 pub mod meaning;
 pub mod node;
 pub mod storage;
+pub mod tls;
 pub mod web;
 pub mod websearch;
 

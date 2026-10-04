@@ -188,15 +188,21 @@ apply immediately when saved through a local panel.
 ### Control it from the desktop app
 
 The desktop app can show and change this node's settings from another
-computer. Remote control is off until you turn it on, on the node's host:
+computer. It sends the token only over HTTPS, so first have the node serve
+HTTPS too: add `--https-bind 0.0.0.0:8443` to its `plumb run` flags and
+publish that port (`-p 8443:8443`, or `"8443:8443"` under the compose file's
+`ports`). The node makes its own certificate for it, kept in `/data`.
+Remote control is off until you turn it on, on the node's host:
 
 ```sh
 docker exec plumb plumb remote-control on
 ```
 
-It prints a token, once. In the desktop app, choose **+ Connect to a node**
-above the panel and enter the node's address (such as
-`http://192.168.1.20:8080`) and the token. The app then shows the node next
+It prints a token, once, and the certificate's fingerprint. In the desktop
+app, choose **+ Connect to a node** above the panel and enter the node's
+HTTPS address (such as `https://192.168.1.20:8443`), the token and the
+fingerprint. The app then trusts only that certificate at that address; see
+[remote-control-security.md](remote-control-security.md). The app then shows the node next
 to **This computer**, with the same Overview, Search & browser, Resources and
 Network & privacy sections, and its forms change the node: resource limits at
 once, features after `docker compose restart`.
@@ -213,7 +219,8 @@ in front of the node, since the token is sent with every request.
 
 `plumb remote-control on` again makes a new token and stops the old one
 working; `plumb remote-control off` turns remote control off, and
-`plumb remote-control status` says which it is. Both take effect at once.
+`plumb remote-control status` says which it is, with the fingerprint. Both
+take effect at once.
 
 
 Settings are flags of `plumb run`. The image's default command is

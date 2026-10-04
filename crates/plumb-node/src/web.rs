@@ -315,6 +315,11 @@ pub trait StatusSource: Send + Sync {
         None
     }
 
+    /// Where the node serves HTTPS for remote control, if it does.
+    fn https_bind(&self) -> Option<std::net::SocketAddr> {
+        None
+    }
+
     /// Whether the panel may list and control other nodes.
     fn manages_other_nodes(&self) -> bool {
         false

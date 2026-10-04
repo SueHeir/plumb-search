@@ -53,6 +53,11 @@ pub(super) struct RemoteNode {
     /// The node's origin, such as `https://homelab.example:8080`.
     url: String,
     token: String,
+    /// The SHA-256 fingerprint of the node's own certificate, for a node
+    /// serving HTTPS with `--https-bind` (see [`crate::tls`]): only that
+    /// certificate is trusted at this address, and no authority is asked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fingerprint: Option<String>,
 }
 
 fn nodes_path(dir: &Path) -> PathBuf {
@@ -165,18 +170,58 @@ fn manager(
 #[derive(Debug)]
 struct ClientError(String);
 
+fn client_builder() -> reqwest::ClientBuilder {
+    reqwest::Client::builder()
+        .timeout(REQUEST_TIMEOUT)
+        .connect_timeout(Duration::from_secs(5))
+        // Nodes are on local networks, which a system proxy cannot reach.
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .user_agent(concat!("plumb-desktop/", env!("CARGO_PKG_VERSION")))
+}
+
 fn client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-    CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .timeout(REQUEST_TIMEOUT)
-            .connect_timeout(Duration::from_secs(5))
-            // Nodes are on local networks, which a system proxy cannot reach.
-            .no_proxy()
-            .redirect(reqwest::redirect::Policy::none())
-            .user_agent(concat!("plumb-desktop/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .expect("an HTTP client")
+    CLIENT.get_or_init(|| client_builder().build().expect("an HTTP client"))
+}
+
+/// A client that trusts only the certificate with fingerprint `pin`.
+fn pinned_client(pin: [u8; 32]) -> Result<reqwest::Client> {
+    let tls = crate::tls::pinned_client_config(pin)?;
+    Ok(client_builder().tls_backend_preconfigured(tls).build()?)
+}
+
+/// Every error behind `err`, including the one inside an I/O error, whose
+/// `source` skips it.
+fn causes<'a>(
+    err: &'a (dyn std::error::Error + 'static),
+) -> impl Iterator<Item = &'a (dyn std::error::Error + 'static)> {
+    std::iter::successors(Some(err), |err| {
+        err.downcast_ref::<std::io::Error>()
+            .and_then(|io| io.get_ref())
+            .map(|inner| inner as &(dyn std::error::Error + 'static))
+            .or_else(|| err.source())
+    })
+}
+
+/// Whether `err` comes from a certificate that does not match the pinned
+/// fingerprint.
+fn is_pin_mismatch(err: &(dyn std::error::Error + 'static)) -> bool {
+    causes(err).any(|err| {
+        matches!(
+            err.downcast_ref::<rustls::Error>(),
+            Some(rustls::Error::General(message)) if message == crate::tls::PIN_MISMATCH
+        )
+    })
+}
+
+/// Whether `err` is a certificate the system does not trust.
+fn is_untrusted_certificate(err: &(dyn std::error::Error + 'static)) -> bool {
+    causes(err).any(|err| {
+        matches!(
+            err.downcast_ref::<rustls::Error>(),
+            Some(rustls::Error::InvalidCertificate(_))
+        )
     })
 }
 
@@ -191,19 +236,49 @@ async fn call(
     // plaintext LAN addresses. Refuse before constructing a bearer request.
     let origin = parse_address(&remote.url)
         .map_err(|err| ClientError(format!("Could not connect to this saved node: {err}")))?;
+    let pinned = match &remote.fingerprint {
+        Some(fingerprint) => Some(
+            pin_for(&origin, fingerprint)
+                .and_then(pinned_client)
+                .map_err(|err| {
+                    ClientError(format!("Could not connect to this saved node: {err}"))
+                })?,
+        ),
+        None => None,
+    };
+    let client = pinned.as_ref().unwrap_or_else(|| client());
     let url = format!("{origin}{path}");
     let request = match body {
-        Some(body) => client()
+        Some(body) => client
             .post(&url)
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(body),
-        None => client().get(&url),
+        None => client.get(&url),
     };
     let response = request
         .bearer_auth(&remote.token)
         .send()
         .await
         .map_err(|err| {
+            if is_pin_mismatch(&err) {
+                return ClientError(format!(
+                    "The node at {} did not show the certificate saved for it, so the \
+                     token was not sent. If the node made a new certificate (its \
+                     remote-control-cert.der was deleted), connect again with the \
+                     fingerprint \"plumb remote-control status\" prints there. Otherwise \
+                     something else is answering at that address.",
+                    remote.url
+                ));
+            }
+            if is_untrusted_certificate(&err) {
+                return ClientError(format!(
+                    "The node at {} has a certificate this computer does not trust, so \
+                     the token was not sent. For a node serving HTTPS with --https-bind, \
+                     enter the certificate fingerprint that \"plumb remote-control on\" or \
+                     \"plumb remote-control status\" prints there.",
+                    remote.url
+                ));
+            }
             let why = if err.is_timeout() {
                 "it did not answer in time"
             } else if err.is_connect() {
@@ -320,12 +395,24 @@ fn parse_address(text: &str) -> Result<String> {
     Ok(url.origin().ascii_serialization())
 }
 
+/// The pinned fingerprint for `origin`: only HTTPS addresses take one.
+fn pin_for(origin: &str, fingerprint: &str) -> Result<[u8; 32]> {
+    if !origin.starts_with("https://") {
+        return Err(anyhow!(
+            "A certificate fingerprint is for HTTPS addresses only, such as \
+             https://192.168.1.20:8443."
+        ));
+    }
+    crate::tls::parse_fingerprint(fingerprint)
+}
+
 #[derive(Default, Deserialize)]
 #[serde(default)]
 struct AddForm {
     name: String,
     address: String,
     token: String,
+    fingerprint: String,
 }
 
 async fn new_page(State(state): State<AppState>, request: Request) -> Response {
@@ -359,16 +446,26 @@ fn render_connect(node: &dyn StatusSource, form: &AddForm, error: Option<&str>) 
          <label for=\"address\">Address</label>\
          <input id=\"address\" name=\"address\" required placeholder=\"https://homelab.example:8080\" \
          value=\"{}\" spellcheck=\"false\" autocomplete=\"off\">\
-         <p class=\"hint\">Use HTTPS with a valid certificate, or an SSH tunnel at \
-         http://127.0.0.1:&lt;local-port&gt;. HTTP is allowed only on this computer.</p>\
+         <p class=\"hint\">For a node on your network, its HTTPS port, such as \
+         https://192.168.1.20:8443 (start it with <code>--https-bind 0.0.0.0:8443</code>). \
+         HTTP works only on this computer, such as an SSH tunnel at \
+         http://127.0.0.1:&lt;local-port&gt;.</p>\
          <label for=\"token\">Remote control token</label>\
          <input id=\"token\" name=\"token\" type=\"password\" required \
          placeholder=\"{TOKEN_PREFIX}...\" spellcheck=\"false\" autocomplete=\"off\">\
+         <label for=\"fingerprint\">Certificate fingerprint \
+         <span class=\"state\">· for a node's own HTTPS</span></label>\
+         <input id=\"fingerprint\" name=\"fingerprint\" placeholder=\"SHA256:3F:A1:...\" \
+         value=\"{}\" spellcheck=\"false\" autocomplete=\"off\">\
+         <p class=\"hint\">Printed next to the token. This computer then trusts only that \
+         node's certificate at this address. Leave empty for an address with a certificate \
+         from an authority.</p>\
          <label for=\"name\">Name <span class=\"state\">· optional</span></label>\
          <input id=\"name\" name=\"name\" placeholder=\"Homelab\" value=\"{}\">\
          <button type=\"submit\">Connect</button></form></main>",
         switcher(node, Some("new")),
         escape_html(&form.address),
+        escape_html(&form.fingerprint),
         escape_html(&form.name),
     );
     page(&body, "Connect to a node")
@@ -403,6 +500,13 @@ async fn add(State(state): State<AppState>, request: Request) -> Response {
         Ok(url) => url,
         Err(err) => return again(&err.to_string()),
     };
+    let fingerprint = match form.fingerprint.trim() {
+        "" => None,
+        given => match pin_for(&url, given) {
+            Ok(_) => Some(crate::tls::normalize_fingerprint(given).expect("parsed above")),
+            Err(err) => return again(&err.to_string()),
+        },
+    };
     let token = form.token.trim().to_string();
     if !token.starts_with(TOKEN_PREFIX) {
         return again(&format!(
@@ -426,6 +530,7 @@ async fn add(State(state): State<AppState>, request: Request) -> Response {
         name,
         url,
         token,
+        fingerprint,
     };
     if let Err(ClientError(error)) = fetch_view(&remote).await {
         return again(&error);
@@ -797,6 +902,7 @@ mod tests {
             name: "Homelab".into(),
             url: "https://192.168.1.20:8080".into(),
             token: "plumb_x".into(),
+            fingerprint: None,
         }];
         save(dir.path(), &nodes).unwrap();
         assert_eq!(load(dir.path()).unwrap(), nodes);
@@ -929,6 +1035,27 @@ mod end_to_end {
             .unwrap();
         });
         format!("http://{addr}")
+    }
+
+    /// Serves `node` over HTTPS with its own certificate on a free local
+    /// port, as `--https-bind` does; returns its origin and fingerprint.
+    async fn serve_https(node: Arc<FakeNode>) -> (String, String) {
+        let cert = crate::tls::load_or_create(node.dir.path()).unwrap();
+        let app = node_router(Arc::new(NoSearch), node)
+            .layer(axum::middleware::map_request(crate::tls::copy_peer));
+        let listener = crate::tls::TlsListener::bind("127.0.0.1:0".parse().unwrap(), &cert)
+            .await
+            .unwrap();
+        let addr = axum::serve::Listener::local_addr(&listener).unwrap();
+        tokio::spawn(async move {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<crate::tls::TlsPeer>(),
+            )
+            .await
+            .unwrap();
+        });
+        (format!("https://{addr}"), cert.fingerprint())
     }
 
     /// A request to the control API of `node`, from `peer`.
@@ -1227,6 +1354,85 @@ mod end_to_end {
     }
 
     #[tokio::test]
+    async fn controls_a_node_over_https_by_its_pinned_certificate() {
+        let server = FakeNode::new(false);
+        let token = control::turn_on(server.dir.path(), false).unwrap();
+        let (origin, fingerprint) = serve_https(server.clone()).await;
+        let remote = |fingerprint: Option<String>| RemoteNode {
+            id: "lan".into(),
+            name: "LAN".into(),
+            url: origin.clone(),
+            token: token.clone(),
+            fingerprint,
+        };
+
+        // The right fingerprint, in any pasted form, reaches the node; its
+        // local-network check sees the real peer address.
+        let lower = fingerprint.to_lowercase().replace(':', "");
+        for pin in [fingerprint.clone(), lower] {
+            let view = fetch_view(&remote(Some(pin))).await.unwrap();
+            assert_eq!(view.status.sites, 123_456);
+        }
+
+        // Without it, the system does not trust the certificate.
+        let ClientError(error) = fetch_view(&remote(None)).await.unwrap_err();
+        assert!(error.contains("does not trust"), "{error}");
+        assert!(error.contains("fingerprint"), "{error}");
+
+        // Another certificate's fingerprint is refused before the token goes.
+        let other = crate::tls::fingerprint(b"another certificate");
+        let ClientError(error) = fetch_view(&remote(Some(other))).await.unwrap_err();
+        assert!(
+            error.contains("did not show the certificate saved"),
+            "{error}"
+        );
+        assert!(!error.contains(&token), "{error}");
+
+        // A fingerprint makes no sense for plain HTTP, even on loopback.
+        let plain = RemoteNode {
+            url: "http://127.0.0.1:9".into(),
+            ..remote(Some(fingerprint.clone()))
+        };
+        let ClientError(error) = fetch_view(&plain).await.unwrap_err();
+        assert!(error.contains("HTTPS addresses only"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn connecting_saves_the_fingerprint_it_was_checked_with() {
+        let server = FakeNode::new(false);
+        let token = control::turn_on(server.dir.path(), false).unwrap();
+        let (origin, fingerprint) = serve_https(server.clone()).await;
+        let desktop = FakeNode::new(true);
+        let app = node_router(Arc::new(NoSearch), desktop.clone());
+
+        let wrong = crate::tls::fingerprint(b"another certificate");
+        let attempt = form(&[
+            ("address", &origin),
+            ("token", &token),
+            ("fingerprint", &wrong),
+        ]);
+        let (status, _, page) = panel_request(app.clone(), "POST", "/app/nodes", &attempt).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{page}");
+        assert!(
+            page.contains("did not show the certificate saved"),
+            "{page}"
+        );
+        assert!(load(desktop.dir.path()).unwrap().is_empty());
+
+        let pasted = fingerprint.replace(':', " ").to_lowercase();
+        let connect = form(&[
+            ("address", &origin),
+            ("token", &token),
+            ("fingerprint", &pasted),
+        ]);
+        let (status, _, page) = panel_request(app, "POST", "/app/nodes", &connect).await;
+        assert_eq!(status, StatusCode::SEE_OTHER, "{page}");
+        let saved = load(desktop.dir.path()).unwrap();
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].fingerprint.as_deref(), Some(fingerprint.as_str()));
+    }
+
+    #[tokio::test]
     async fn old_plaintext_entries_are_blocked_before_any_control_request() {
         // localhost. may resolve to loopback, but is intentionally outside the
         // literal-loopback policy. A listener catches any accidental send.
@@ -1238,6 +1444,7 @@ mod end_to_end {
             name: "Old plaintext connection".into(),
             url: format!("http://localhost.:{port}"),
             token: "plumb_secret_from_old_version".into(),
+            fingerprint: None,
         };
         save(desktop.dir.path(), std::slice::from_ref(&remote)).unwrap();
         let app = node_router(Arc::new(NoSearch), desktop.clone());
@@ -1282,6 +1489,7 @@ mod end_to_end {
                 name: "Old connection".into(),
                 url: address.into(),
                 token: "plumb_secret".into(),
+                fingerprint: None,
             };
             for body in [None, Some(b"{}".to_vec())] {
                 let ClientError(error) = call(&remote, "/api/control", body).await.unwrap_err();

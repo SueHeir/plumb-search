@@ -50,6 +50,7 @@ fn node_config(args: RunArgs) -> NodeConfig {
         Profile::Desktop => NodeConfig::desktop(args.data),
     };
     config.bind = args.bind;
+    config.https_bind = args.https_bind;
     if let Some(sites) = args.sites {
         config.sites = sites;
     }
@@ -167,10 +168,17 @@ pub fn remote_control(args: crate::cli::RemoteControlArgs) -> Result<()> {
         RemoteControlAction::On { allow_public } => {
             let token = control::turn_on(dir, allow_public)
                 .with_context(|| format!("turning remote control on in {}", dir.display()))?;
+            let cert = crate::tls::load_or_create(dir)
+                .with_context(|| format!("making the HTTPS certificate in {}", dir.display()))?;
             println!("Remote control is on. The token, shown only this once:\n\n  {token}\n");
             println!(
+                "The fingerprint of this node's HTTPS certificate:\n\n  {}\n",
+                cert.fingerprint()
+            );
+            println!(
                 "In the Plumb Search app on another computer, choose \"Connect to a node\" and \
-                 enter this node's address (such as http://192.168.1.20:8080) and the token."
+                 enter this node's HTTPS address (such as https://192.168.1.20:8443, for a node \
+                 run with --https-bind 0.0.0.0:8443), the token and the fingerprint."
             );
             if allow_public {
                 println!("It works from any address. Keep the node behind HTTPS.");
@@ -185,11 +193,20 @@ pub fn remote_control(args: crate::cli::RemoteControlArgs) -> Result<()> {
                 println!("Remote control was already off.");
             }
         }
-        RemoteControlAction::Status => match control::load(dir)? {
-            None => println!("Remote control is off."),
-            Some(on) if on.allow_public => println!("Remote control is on, from any address."),
-            Some(_) => println!("Remote control is on, from this computer and local networks."),
-        },
+        RemoteControlAction::Status => {
+            match control::load(dir)? {
+                None => println!("Remote control is off."),
+                Some(on) if on.allow_public => {
+                    println!("Remote control is on, from any address.")
+                }
+                Some(_) => {
+                    println!("Remote control is on, from this computer and local networks.")
+                }
+            }
+            if let Some(fingerprint) = crate::tls::existing_fingerprint(dir) {
+                println!("HTTPS certificate fingerprint: {fingerprint}");
+            }
+        }
     }
     Ok(())
 }

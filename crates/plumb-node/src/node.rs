@@ -137,6 +137,11 @@ pub struct NodeConfig {
     pub data_dir: PathBuf,
     /// Where the web page and JSON API listen. Port 0 picks a free port.
     pub bind: SocketAddr,
+    /// Also serve the web page and APIs over HTTPS here, with a certificate
+    /// the node makes for itself (see [`crate::tls`]): for remote control
+    /// from the desktop app on a local network, which pins the
+    /// certificate's fingerprint. `None`, the default, serves HTTP only.
+    pub https_bind: Option<SocketAddr>,
     /// How many of the best-ranked sites to keep from the seed data.
     pub sites: usize,
     /// Homepages to crawl right after the first index is built.
@@ -242,6 +247,7 @@ impl NodeConfig {
         NodeConfig {
             data_dir,
             bind: SocketAddr::from(([127, 0, 0, 1], 8080)),
+            https_bind: None,
             sites: 1_000_000,
             initial_crawl: 10_000,
             refresh_every: Some(Duration::from_secs(60 * 60)),
@@ -300,6 +306,9 @@ impl NodeConfig {
     fn check(&self) -> Result<()> {
         if self.sites == 0 {
             bail!("sites must be at least 1");
+        }
+        if let Some(https_bind) = self.https_bind {
+            crate::tls::check_bind(self.bind, https_bind)?;
         }
         if self.share_popularity && self.network.is_none() {
             bail!("sharing popularity needs the network");
@@ -759,17 +768,51 @@ pub async fn start(mut config: NodeConfig) -> Result<NodeHandle> {
         web_search: inner.config.web_search,
     };
     let app = web::node_router_with(inner.clone(), inner.clone(), settings);
+    let https = match inner.config.https_bind {
+        Some(https_bind) => {
+            let cert = crate::tls::load_or_create(&inner.paths.data)?;
+            let listener = crate::tls::TlsListener::bind(https_bind, &cert).await?;
+            info!(
+                "serving https://{}/ with certificate {}",
+                axum::serve::Listener::local_addr(&listener)?,
+                cert.fingerprint()
+            );
+            let app = app
+                .clone()
+                .layer(axum::middleware::map_request(crate::tls::copy_peer));
+            let mut stopped = stopped.clone();
+            Some(
+                axum::serve(
+                    listener,
+                    app.into_make_service_with_connect_info::<crate::tls::TlsPeer>(),
+                )
+                .with_graceful_shutdown(async move {
+                    let _ = stopped.wait_for(|&stop| stop).await;
+                }),
+            )
+        }
+        None => None,
+    };
     let server = tokio::spawn(async move {
         let mut stopped = stopped;
         // The settings panel takes changes only from this computer.
-        axum::serve(
+        let http = axum::serve(
             listener,
             app.into_make_service_with_connect_info::<SocketAddr>(),
         )
         .with_graceful_shutdown(async move {
             let _ = stopped.wait_for(|&stop| stop).await;
-        })
-        .await
+        });
+        match https {
+            Some(https) => {
+                let (http, https) = tokio::join!(
+                    std::future::IntoFuture::into_future(http),
+                    std::future::IntoFuture::into_future(https)
+                );
+                http.and(https)
+            }
+            None => http.await,
+        }
     });
     if let Err(err) = network::start(&inner).await {
         // The node still searches and crawls on its own.
@@ -1725,6 +1768,10 @@ impl StatusSource for Inner {
 
     fn bind(&self) -> Option<SocketAddr> {
         Some(self.config.bind)
+    }
+
+    fn https_bind(&self) -> Option<SocketAddr> {
+        self.config.https_bind
     }
 
     fn manages_other_nodes(&self) -> bool {
