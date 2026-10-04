@@ -717,6 +717,17 @@ async fn search_page(
                 NetOutcome::Failed
             }
         };
+        // Sites the searcher never wants to see stay out, wherever they
+        // came from.
+        let network = match (network, &visitor) {
+            (NetOutcome::Answered(mut found), Some(visitor)) => {
+                found
+                    .hits
+                    .retain(|result| !visitor.about.hides(&result.hit.domain));
+                NetOutcome::Answered(found)
+            }
+            (network, _) => network,
+        };
         (local, network)
     } else {
         (local, NetOutcome::NotAsked)
@@ -1378,7 +1389,10 @@ border-radius:1rem;color:var(--fg);text-decoration:none}\
 .recent .all{color:var(--muted)}\
 .hist h1{font-size:1.6rem;margin-top:1.25rem}.hist h2{font-size:1.05rem;margin:1.75rem 0 .5rem}\
 .hist ul{padding-left:1.1rem}.hist li{padding:.2rem 0;margin:0}.hist li a{color:var(--link)}\
-.hist form{margin-top:1.5rem}";
+.hist form{margin-top:1.5rem}\
+.about label{display:block;margin-top:1.25rem}.about .m{margin:.2rem 0 .4rem}\
+.about textarea{width:100%;box-sizing:border-box;font:inherit;padding:.4rem;\
+background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:6px}";
 
 /// A whole HTML document; `body` must already be escaped.
 fn page(title: &str, body: &str) -> String {
@@ -1875,10 +1889,11 @@ fn render_results(
             let go = (notes_picks && item.network.is_none())
                 .then(|| go_link(picked_for, &settings.options, &item.hit.domain));
             let icon = icons.get(&item.hit.domain);
-            let opened = settings
+            let notes = settings
                 .history
                 .as_ref()
-                .is_some_and(|history| history.opened.contains(&item.hit.domain));
+                .map(|history| history.notes(item.hit))
+                .unwrap_or_default();
             let mut rendered = String::new();
             render_hit(
                 &mut rendered,
@@ -1886,7 +1901,7 @@ fn render_results(
                 item.network,
                 go.as_deref(),
                 icon,
-                opened,
+                &notes,
             );
             if let Some(page) = pages
                 .iter()
@@ -1996,7 +2011,7 @@ fn render_network(query: &str, results: &NetworkResults, icons: &Icons) -> Strin
         body.push_str("<ol>\n");
         for result in &results.hits {
             let icon = icons.get(&result.hit.domain);
-            render_hit(&mut body, &result.hit, Some(result), None, icon, false);
+            render_hit(&mut body, &result.hit, Some(result), None, icon, &[]);
         }
         body.push_str("</ol>\n");
     }
@@ -2134,7 +2149,7 @@ fn render_hit(
     network: Option<&NetworkResult>,
     go: Option<&str>,
     icon: Option<&str>,
-    opened: bool,
+    notes: &[String],
 ) {
     let name = hit
         .title
@@ -2177,10 +2192,8 @@ fn render_hit(
     if let Some(description) = hit.description.as_deref().filter(|d| !d.trim().is_empty()) {
         let _ = write!(out, "<p class=\"d\">{}</p>", escape_html(description));
     }
-    let mut meta: Vec<String> = Vec::new();
-    if opened {
-        meta.push("<span class=\"op\">You opened this before</span>".to_string());
-    }
+    // Already HTML.
+    let mut meta: Vec<String> = notes.to_vec();
     if let Some(code) = hit.country.as_deref() {
         meta.push(escape_html(country_name(code)));
     }
@@ -3670,6 +3683,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_about_page_moves_and_hides_results_for_this_browser_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let node = Arc::new(HistoryNode(dir.path().join("history")));
+        let fake = backend(bank_hits());
+        let app = || node_router(fake.clone(), node.clone());
+        let post = |cookie: Option<&str>, form: &'static str| {
+            let mut request = Request::builder()
+                .method("POST")
+                .uri("/about")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded");
+            if let Some(cookie) = cookie {
+                request = request.header("cookie", cookie);
+            }
+            app().oneshot(request.body(Body::from(form)).unwrap())
+        };
+
+        let (code, _, page) = send(app(), "/about").await;
+        assert_eq!(code, StatusCode::OK);
+        assert!(page.contains("name=\"interests\""), "{page}");
+
+        // Saving gives the browser a profile.
+        let response = post(None, "pinned=usbank-login-help.com&interests=")
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let profile = set_cookie(response.headers(), "plumb_profile").expect("a profile");
+        let me = [("cookie", profile.as_str())];
+        let (_, _, body) = send_with_headers(app(), "/search?q=us+bank&country=any", &me).await;
+        let first = |body: &str| {
+            body.find("usbank.com</span>").unwrap()
+                < body.find("usbank-login-help.com</span>").unwrap()
+        };
+        assert!(!first(&body), "{body}");
+        assert!(body.contains("One of your sites"), "{body}");
+
+        // Another browser sees none of it.
+        let (_, _, other) = send(app(), "/search?q=us+bank&country=any").await;
+        assert!(first(&other));
+        assert!(!other.contains("One of your sites"), "{other}");
+
+        // Hidden sites are left out; forgetting brings them back.
+        post(Some(&profile), "hidden=www.usbank-login-help.com")
+            .await
+            .unwrap();
+        let (_, _, body) = send_with_headers(app(), "/search?q=us+bank&country=any", &me).await;
+        assert!(!body.contains("usbank-login-help.com</span>"), "{body}");
+        let response = post(Some(&profile), "clear=1").await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let (_, _, body) = send_with_headers(app(), "/search?q=us+bank&country=any", &me).await;
+        assert!(first(&body), "{body}");
+    }
+
+    #[tokio::test]
     async fn nodes_without_history_set_no_cookies() {
         let app = node_router(
             backend(bank_hits()),
@@ -3678,7 +3744,9 @@ mod tests {
         let (_, headers, body) = send(app.clone(), "/search?q=us+bank").await;
         assert!(headers.get(header::SET_COOKIE).is_none());
         assert!(!body.contains("name=\"hist\""), "{body}");
-        let (code, _, _) = send(app, "/history").await;
+        let (code, _, _) = send(app.clone(), "/history").await;
+        assert_eq!(code, StatusCode::NOT_FOUND);
+        let (code, _, _) = send(app, "/about").await;
         assert_eq!(code, StatusCode::NOT_FOUND);
     }
 

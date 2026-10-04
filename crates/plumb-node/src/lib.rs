@@ -25,6 +25,7 @@ use plumb_core::SiteRecord;
 use plumb_index::RankConfig;
 use tracing_subscriber::EnvFilter;
 
+pub mod about;
 pub mod cli;
 pub mod country;
 pub mod eval;
