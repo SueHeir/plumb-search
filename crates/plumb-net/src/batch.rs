@@ -304,6 +304,19 @@ impl RecordProof {
         Ok((record, crawler))
     }
 
+    /// [`RecordProof::verify`] for a crawler this node trusts: the record
+    /// need not be a site the crawler was assigned, and is kept as
+    /// [`accept_trusted_batch`] would keep it, headings and text included.
+    pub fn verify_trusted(&self, now: u64) -> Result<(SiteRecord, PeerId)> {
+        let crawler = self.check_signed(now)?;
+        let h = &self.header.header;
+        let record = parse_record(&self.record)?;
+        let Some(record) = accept_crawled(record, &crawler, h, now, Source::Trusted) else {
+            bail!("the record is not a homepage crawl of the batch's epoch");
+        };
+        Ok((record, crawler))
+    }
+
     /// Checks only that the crawler signed the record, in a batch recent
     /// enough: a proof that passes this but not [`RecordProof::verify`] is
     /// a real crawl the asker's rules do not count (one the crawler was not

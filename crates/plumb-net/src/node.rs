@@ -299,6 +299,9 @@ pub const MAX_PEER_VIEWS: usize = 50;
 pub struct NetHandle {
     peer_id: PeerId,
     share_ppm: u32,
+    /// [`NetConfig::trusted_peers`], whose signed crawls found by a search
+    /// this node keeps whole (see [`NetHandle::search`]).
+    trusted: Vec<PeerId>,
     commands: mpsc::UnboundedSender<Command>,
     status: Arc<Mutex<NetStatus>>,
     popularity: Arc<RwLock<Arc<PopularityTable>>>,
@@ -470,6 +473,7 @@ impl NetHandle {
             }
             found
         };
+        keep_trusted_crawls(&mut found, &self.trusted, now_unix());
         // Two keys of one person can sign the same crawl: a site is
         // confirmed only by crawlers this node counts (see crate::agree).
         let crawlers: Vec<String> = found
@@ -954,6 +958,7 @@ pub async fn start(
         NetHandle {
             peer_id,
             share_ppm: config.share_ppm.min(MAX_SHARE_PPM),
+            trusted: config.trusted_peers.clone(),
             commands,
             status,
             popularity,
@@ -969,6 +974,46 @@ pub async fn start(
         },
         records_rx,
     ))
+}
+
+/// Reads the found sites' signed crawls with this node's trust list: a
+/// crawl a trusted node signed counts whole, as its batches do (any site,
+/// headings and text included), so the site is shown and ranked with that
+/// crawl's text, and [`crate::search::FoundSite::shared`] carries all of it for this node
+/// to keep. Other sites keep what [`crate::search`] checked.
+fn keep_trusted_crawls(found: &mut NetSearch, trusted: &[PeerId], now: u64) {
+    for site in &mut found.found {
+        let Some(proof) = &site.proof else {
+            continue;
+        };
+        let Ok(crawler) = proof.check_signed(now) else {
+            continue;
+        };
+        if !trusted.contains(&crawler) {
+            continue;
+        }
+        let Ok((signed, _)) = proof.verify_trusted(now) else {
+            continue;
+        };
+        if signed.domain != site.record.domain {
+            continue;
+        }
+        let record = &mut site.record;
+        record.url = signed.url.clone();
+        record.title = signed.title.clone();
+        record.description = signed.description.clone();
+        record.headings = signed.headings.clone();
+        record.body_text = signed.body_text.clone();
+        record.crawled_at = signed.crawled_at;
+        if !site.verified {
+            site.verified = true;
+            site.crawler = Some(crawler.to_string());
+            if !site.crawlers.contains(&crawler.to_string()) {
+                site.crawlers.insert(0, crawler.to_string());
+            }
+        }
+        site.shared = Some(signed);
+    }
 }
 
 /// Fixed absolute deadlines, with no query wakeup or catch-up bursts. A slow
@@ -3160,6 +3205,79 @@ fn redial_bootstrap(connected: usize, bootstrap_connected: bool, ticks: u64) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_search_keeps_the_text_of_crawls_only_from_trusted_nodes() {
+        use crate::proto::BucketRecord;
+        let now = 1_790_000_000;
+        let epoch = epoch_of(now);
+        let key = Keypair::generate_ed25519();
+        let crawler = key.public().to_peer_id();
+        let site = |assigned: bool| {
+            (0..)
+                .map(|i| format!("shop{i}.com"))
+                .find(|d| is_assigned(epoch, &crawler, d, MAX_SHARE_PPM) == assigned)
+                .unwrap()
+        };
+        let crawled = |domain: &str| {
+            let mut record = SiteRecord::new(domain);
+            record.title = Some("Shop".into());
+            record.description = Some("Handmade shoes".into());
+            record.body_text = Some("Handmade leather shoes, made to order".into());
+            record.crawled_at = Some(now);
+            record
+        };
+        let (assigned, unassigned) = (site(true), site(false));
+        let batch = Batch::sign(
+            &key,
+            &[crawled(&assigned), crawled(&unassigned)],
+            epoch,
+            MAX_SHARE_PPM,
+            now,
+        )
+        .unwrap()
+        .unwrap();
+        // The node answering holds no text for either site.
+        let answer = || {
+            (0..2)
+                .map(|i| {
+                    let mut bare: SiteRecord = serde_json::from_str(&batch.records[i]).unwrap();
+                    bare.body_text = None;
+                    BucketRecord {
+                        record: serde_json::to_string(&bare).unwrap(),
+                        proof: Some(batch.proof(i)),
+                        also: Vec::new(),
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+        let search = |trusted: &[PeerId]| {
+            let mut found = NetSearch {
+                found: crate::search::check_answer(answer(), now).unwrap(),
+                ..NetSearch::default()
+            };
+            keep_trusted_crawls(&mut found, trusted, now);
+            let by = |d: &str| found.found.iter().find(|s| s.record.domain == d).cloned();
+            (by(&assigned).unwrap(), by(&unassigned).unwrap())
+        };
+
+        // Untrusted: an assigned crawl's homepage facts count, never its
+        // text, and an unassigned crawl counts not at all.
+        let (a, u) = search(&[]);
+        let shared = a.shared.expect("an assigned crawl counts");
+        assert_eq!(shared.description.as_deref(), Some("Handmade shoes"));
+        assert_eq!(shared.body_text, None);
+        assert!(u.shared.is_none() && !u.verified);
+
+        // Trusted: both count whole, text included, and are ranked with it.
+        let (a, u) = search(&[crawler]);
+        for site in [a, u] {
+            assert!(site.verified);
+            let text = Some("Handmade leather shoes, made to order");
+            assert_eq!(site.shared.unwrap().body_text.as_deref(), text);
+            assert_eq!(site.record.body_text.as_deref(), text);
+        }
+    }
 
     #[test]
     fn a_node_goes_back_to_its_bootstrap_nodes_after_losing_them() {

@@ -114,6 +114,17 @@ pub struct FoundSite {
     /// Signed crawls from at least [`QUORUM`] different crawlers agree.
     #[serde(default)]
     pub confirmed: bool,
+    /// What this node may keep of the site in its own records: the signed
+    /// crawl as a batch from its crawler would be kept (homepage facts of
+    /// an assigned site, plus headings and text when this node trusts the
+    /// crawler, see [`crate::NetHandle::search`]). `None` when no signed
+    /// crawl counts here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared: Option<SiteRecord>,
+    /// The first proof the answer held that checked out as signed, for
+    /// [`crate::NetHandle::search`] to read with this node's trust list.
+    #[serde(skip)]
+    pub proof: Option<crate::batch::RecordProof>,
 }
 
 impl FoundSite {
@@ -494,7 +505,10 @@ async fn ask_bucket(
 }
 
 /// The records of one answer, checked, or `None` when a proof in it fails.
-fn check_answer(records: Vec<crate::proto::BucketRecord>, now: u64) -> Option<Vec<FoundSite>> {
+pub(crate) fn check_answer(
+    records: Vec<crate::proto::BucketRecord>,
+    now: u64,
+) -> Option<Vec<FoundSite>> {
     let mut out = Vec::new();
     for item in records.into_iter().take(MAX_BUCKET_RECORDS) {
         if item.record.len() > MAX_RECORD_BYTES {
@@ -524,6 +538,8 @@ fn check_answer(records: Vec<crate::proto::BucketRecord>, now: u64) -> Option<Ve
             answers: 1,
             crawlers: Vec::new(),
             confirmed: false,
+            shared: None,
+            proof: None,
         };
         // A proof only too old to check out says nothing either way (nodes
         // hold crawls longer than proofs last), so the site is just not
@@ -556,10 +572,12 @@ fn check_answer(records: Vec<crate::proto::BucketRecord>, now: u64) -> Option<Ve
                             }
                         }
                     }
-                    site.record.url = signed.url;
-                    site.record.title = signed.title;
-                    site.record.description = signed.description;
+                    site.record.url = signed.url.clone();
+                    site.record.title = signed.title.clone();
+                    site.record.description = signed.description.clone();
                     site.record.crawled_at = signed.crawled_at;
+                    site.shared = Some(signed);
+                    site.proof = Some(proof.clone());
                     site.verified = true;
                     site.crawler = Some(crawler.to_string());
                     site.add_crawler(crawler.to_string());
@@ -572,6 +590,8 @@ fn check_answer(records: Vec<crate::proto::BucketRecord>, now: u64) -> Option<Ve
                         "a signed crawl of {} that does not count here",
                         site.record.domain
                     );
+                    // It may still count for a node that trusts its crawler.
+                    site.proof = Some(proof.clone());
                 }
                 Ok(_) | Err(_) => {
                     warn!("a node answered with a proof that does not check out");
@@ -598,6 +618,11 @@ fn merge_site(existing: &mut FoundSite, other: FoundSite) {
         sitelinks: a.sitelinks.min(b.sitelinks),
     };
     let signals = worse(existing.record.signals.clone(), &other.record.signals);
+    let other_proof = existing
+        .proof
+        .is_none()
+        .then(|| other.proof.clone())
+        .flatten();
     if other.verified && existing.verified && agree(&existing.record, &other.record) {
         for crawler in other.crawlers {
             existing.add_crawler(crawler);
@@ -610,6 +635,9 @@ fn merge_site(existing: &mut FoundSite, other: FoundSite) {
         *existing = FoundSite { answers, ..other };
     }
     existing.record.signals = signals;
+    if existing.proof.is_none() {
+        existing.proof = other_proof;
+    }
 }
 
 /// The larger rank (worse), counting a missing one as the worst.
@@ -936,6 +964,8 @@ mod tests {
             answers: 1,
             crawlers: Vec::new(),
             confirmed: false,
+            shared: None,
+            proof: None,
         };
         let mut merged = site(boosted);
         merge_site(&mut merged, site(honest));

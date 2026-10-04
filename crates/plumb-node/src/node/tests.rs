@@ -1293,6 +1293,110 @@ async fn a_node_in_the_network_takes_in_other_nodes_crawls_and_searches_them() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_network_search_fills_in_text_this_node_lacks() {
+    let dir = seeded_dir();
+    let mut config = test_config(dir.path());
+    let mut net = plumb_net::NetConfig::new(PathBuf::new());
+    net.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+    net.upnp = false;
+    net.local_discovery = false;
+    net.round_every = None;
+    config.network = Some(net);
+    let node = start(config).await.unwrap();
+    let addr = node.addr();
+    let status = wait_for(addr, "the first index", ready_and_idle).await;
+    let net_status = status.network.expect("the node joined the network");
+    let node_addr: plumb_net::Multiaddr = net_status.listening[0].parse().unwrap();
+    let node_addr = node_addr
+        .with_p2p(net_status.peer_id.parse().unwrap())
+        .unwrap();
+    let held = search(addr, "reddit").await;
+    assert_eq!(held[0].domain, "reddit.com");
+    assert_eq!(held[0].description, None, "the fixture has no description");
+
+    // Another node, assigned reddit.com today, crawled it.
+    let now = now_unix();
+    let (peer_dir, peer_id) = loop {
+        let dir = tempfile::tempdir().unwrap();
+        let id = plumb_net::load_or_create_key(&dir.path().join("node.key"))
+            .unwrap()
+            .public()
+            .to_peer_id();
+        if plumb_net::assign::is_assigned(
+            plumb_net::assign::epoch_of(now),
+            &id,
+            "reddit.com",
+            plumb_net::assign::MAX_SHARE_PPM,
+        ) {
+            break (dir, id);
+        }
+    };
+    let _ = peer_id;
+    let mut crawled = SiteRecord::new("reddit.com");
+    crawled.url = Some("https://www.reddit.com/".to_string());
+    crawled.title = Some("Reddit".to_string());
+    crawled.description = Some("Communities for every interest, from news to hobbies".to_string());
+    crawled.crawled_at = Some(now);
+    let mut peer_config = plumb_net::NetConfig::new(peer_dir.path().to_path_buf());
+    peer_config.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+    peer_config.upnp = false;
+    peer_config.local_discovery = false;
+    peer_config.round_every = None;
+    peer_config.bootstrap = vec![node_addr];
+    let table = plumb_net::BucketTable::build(&peer_dir.path().join("buckets"), &[crawled.clone()])
+        .unwrap();
+    let (peer, _records) = plumb_net::start(peer_config, Arc::new(table))
+        .await
+        .unwrap();
+    wait_for(addr, "the peer to connect", |s| {
+        s.network.as_ref().is_some_and(|n| n.connected_peers >= 1)
+    })
+    .await;
+    // Signed, so its answers carry the proof. One crawler is not enough
+    // for the node to take the crawl from gossip.
+    assert!(peer.publish(vec![crawled.clone()]).await.unwrap().is_some());
+
+    // The node's own result shows the network's signed text, untinted.
+    let mut body = String::new();
+    for _ in 0..100 {
+        body = get(addr, "/search?q=reddit&net=1").await.2;
+        if body.contains("Communities for every interest") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(body.contains("Communities for every interest"), "{body}");
+    let results = body.split("<ol>").nth(1).expect("results");
+    let first = results.split("<li").nth(1).expect("a result");
+    assert!(first.starts_with('>'), "untinted: {first}");
+    assert!(first.contains("reddit.com"), "{first}");
+    assert!(first.contains("Communities for every"), "{first}");
+
+    // And the node keeps it: its next index has the text.
+    let inbox = std::fs::read_to_string(dir.path().join("net/inbox.jsonl")).unwrap();
+    assert_eq!(inbox.lines().count(), 1, "{inbox}");
+    assert!(inbox.contains("Communities for every"), "{inbox}");
+    // Searching again keeps nothing more.
+    get(addr, "/search?q=reddit&net=1").await;
+    let again = std::fs::read_to_string(dir.path().join("net/inbox.jsonl")).unwrap();
+    assert_eq!(again, inbox);
+    node.refresh_now();
+    wait_for(addr, "a new index", |s| {
+        ready_and_idle(s) && s.index.as_deref() != Some("000001")
+    })
+    .await;
+    let hits = search(addr, "reddit").await;
+    assert_eq!(hits[0].domain, "reddit.com");
+    assert_eq!(
+        hits[0].description.as_deref(),
+        Some("Communities for every interest, from news to hobbies")
+    );
+
+    peer.shutdown().await;
+    node.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_node_sharing_popularity_reports_picks_and_ranks_with_the_networks() {
     use plumb_net::popularity::{report_epoch, MAX_POPULARITY_BONUS, REPORT_THRESHOLD};
 
