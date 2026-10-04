@@ -235,9 +235,12 @@ pub(crate) fn embed_records(
             }
             let hash = text_hash(&text);
             if vectors.get(&record.domain).map(|(saved, _)| saved) != Some(&hash) {
-                todo.push((record.domain.as_str(), hash, text));
+                todo.push((record.link_score(), record.domain.as_str(), hash, text));
             }
         }
+        // The most popular sites first: a long run (all of them, after
+        // their text changed) gets to the sites most searched for early.
+        todo.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(b.1)));
         info!(
             "{} of {} sites need a vector ({} have one)",
             todo.len(),
@@ -260,7 +263,7 @@ pub(crate) fn embed_records(
                         break;
                     }
                     let i = next.fetch_add(1, Ordering::Relaxed);
-                    let Some((domain, hash, text)) = chunk.get(i) else {
+                    let Some((_, domain, hash, text)) = chunk.get(i) else {
                         break;
                     };
                     match embedder.embed(text) {
@@ -363,6 +366,35 @@ mod tests {
         let mut record = SiteRecord::new(domain);
         record.title = Some(title.into());
         record
+    }
+
+    #[test]
+    fn the_most_popular_sites_are_embedded_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let model = dir.path().join("model");
+        plumb_embed::write_test_model(&model).unwrap();
+        let embedder = Embedder::load(&model).unwrap();
+        let vectors = RwLock::new(Vectors::new(embedder.id(), embedder.dim()));
+        let mut obscure = record("aaa.example", "Some small site");
+        obscure.signals.tranco_rank = Some(900_000);
+        let mut popular = record("zzz.example", "A big site");
+        popular.signals.tranco_rank = Some(10);
+        // Stops after the first site.
+        let asked = AtomicUsize::new(0);
+        let stop = || asked.fetch_add(1, Ordering::Relaxed) >= 1;
+        embed_records(
+            &embedder,
+            &vectors,
+            &[obscure, popular],
+            1,
+            &stop,
+            &mut |_| Ok(()),
+            &mut |_, _| {},
+        )
+        .unwrap();
+        let vectors = vectors.into_inner().unwrap();
+        assert_eq!(vectors.len(), 1);
+        assert!(vectors.get("zzz.example").is_some());
     }
 
     #[test]
