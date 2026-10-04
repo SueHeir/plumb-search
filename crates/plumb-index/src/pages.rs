@@ -165,6 +165,7 @@ const ORGANIZATION_WORDS: &[&str] = &[
     "broker",
     "brokerage",
     "business",
+    "card",
     "chain",
     "company",
     "conglomerate",
@@ -183,11 +184,14 @@ const ORGANIZATION_WORDS: &[&str] = &[
     "organization",
     "pharmacy",
     "platform",
+    "program",
+    "programme",
     "protocol",
     "provider",
     "retailer",
     "service",
     "software",
+    "specification",
     "standard",
     "startup",
     "subsidiary",
@@ -208,19 +212,28 @@ fn describes_an_organization(description: Option<&str>) -> bool {
     })
 }
 
+/// `text` lowercased with only its letters and digits.
+fn squash(text: &str) -> String {
+    text.chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// Whether `domain` is a government's (`.gov`, `.gov.uk`, `.mil`).
+fn is_government(domain: &str) -> bool {
+    domain
+        .split('.')
+        .skip(1)
+        .any(|label| label == "gov" || label == "mil")
+}
+
 /// Whether `domain`'s first label spells the page's title without its
 /// qualifier, or that title's first word: cvs.com for "CVS Pharmacy",
 /// capitalone.com for "Capital One", tauri.app for "Tauri (software
 /// framework)". Such a site is most likely what the page is about.
 fn site_is_titled(domain: &str, title: &str) -> bool {
-    let label = domain.split('.').next().unwrap_or("");
-    let squash = |text: &str| -> String {
-        text.chars()
-            .filter(|c| c.is_alphanumeric())
-            .flat_map(char::to_lowercase)
-            .collect()
-    };
-    let label = squash(label);
+    let label = squash(domain.split('.').next().unwrap_or(""));
     if label.is_empty() {
         return false;
     }
@@ -462,13 +475,22 @@ pub struct PlacedPage {
 ///   Otherwise the page comes first: "marie curie" lists the article
 ///   before mariecurie.org. Pages named only in part come after
 ///   [`PARTIAL_AFTER`] sites.
-pub fn place_pages(sites: &[crate::Hit], pages: Vec<PageHit>) -> Vec<PlacedPage> {
+pub fn place_pages(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) -> Vec<PlacedPage> {
     let site_named = sites.first().is_some_and(|hit| hit.named);
+    let query_word = squash(query);
     let organizations_site = sites.first().is_some_and(|site| {
+        let label = squash(site.domain.split('.').next().unwrap_or(""));
+        // A site of government ("fafsa.gov") called after the page.
+        let government = is_government(&site.domain);
         pages.iter().any(|page| {
             page.named
-                && describes_an_organization(page.page.description.as_deref())
                 && site_is_titled(&site.domain, &page.page.title)
+                && (government
+                    || describes_an_organization(page.page.description.as_deref())
+                    // "robinhood" spells robinhood.com, not "Robin Hood".
+                    || (!query.trim().contains(' ')
+                        && label == query_word
+                        && base_title(&page.page.title).contains(' ')))
         })
     });
     // A named page goes first only when the best site may be a namesake.
@@ -618,6 +640,7 @@ mod tests {
     fn pages_about_a_listed_site_go_under_it() {
         let sites = [site("python.org", true), site("pythonanywhere.com", false)];
         let placed = place_pages(
+            "",
             &sites,
             vec![
                 found(
@@ -645,6 +668,7 @@ mod tests {
             site("b.com", false),
         ];
         let placed = place_pages(
+            "",
             &sites,
             vec![
                 found("Marie Curie", None, true, 0.9),
@@ -657,7 +681,7 @@ mod tests {
             .map(|p| (p.hit.page.title.as_str(), p.at))
             .collect();
         assert_eq!(at, [("Marie Curie", 0), ("Pierre Curie", 3)]);
-        assert!(place_pages(&[], vec![found("Marie Curie", None, true, 0.9)])[0].at == 0);
+        assert!(place_pages("", &[], vec![found("Marie Curie", None, true, 0.9)])[0].at == 0);
     }
 
     #[test]
@@ -669,6 +693,7 @@ mod tests {
         };
         // A much read page comes before a little known namesake...
         let placed = place_pages(
+            "",
             &[known_site("mariecurie.org", true, 0.2)],
             vec![described("Marie Curie", "Polish-French physicist", 0.8)],
         );
@@ -676,6 +701,7 @@ mod tests {
         // ...but after the website of a company or product it names, even
         // when the page found first is about something else.
         let placed = place_pages(
+            "",
             &[known_site("robinhood.com", true, 0.47)],
             vec![
                 described("Robin Hood", "Legendary English outlaw", 0.9),
@@ -688,6 +714,7 @@ mod tests {
         );
         assert_eq!(placed[0].at, 1);
         let placed = place_pages(
+            "",
             &[known_site("cvs.com", false, 0.43)],
             vec![described(
                 "CVS Pharmacy",
@@ -696,12 +723,44 @@ mod tests {
             )],
         );
         assert_eq!(placed[0].at, 1);
+        // A one-word query spelling the site, not the page ("robinhood").
+        let placed = place_pages(
+            "robinhood",
+            &[known_site("robinhood.com", true, 0.47)],
+            vec![described(
+                "Robin Hood",
+                "Heroic outlaw in English folklore",
+                0.9,
+            )],
+        );
+        assert_eq!(placed[0].at, 1);
+        let placed = place_pages(
+            "robin hood",
+            &[known_site("robinhood.com", true, 0.47)],
+            vec![described(
+                "Robin Hood",
+                "Heroic outlaw in English folklore",
+                0.9,
+            )],
+        );
+        assert_eq!(placed[0].at, 0);
+        // A government site called after the page.
+        let placed = place_pages(
+            "fafsa",
+            &[known_site("fafsa.gov", true, 0.34)],
+            vec![described(
+                "FAFSA",
+                "Form to determine eligibility for US student aid",
+                0.7,
+            )],
+        );
+        assert_eq!(placed[0].at, 1);
         // ...and after an official website or a well known site.
         let mut official = known_site("example.org", false, 0.3);
         official.official = true;
         let known = known_site("example.com", false, 0.9);
         for site in [official, known] {
-            let placed = place_pages(&[site], vec![found("Example", None, true, 0.8)]);
+            let placed = place_pages("", &[site], vec![found("Example", None, true, 0.8)]);
             assert_eq!(placed[0].at, 1);
         }
     }
@@ -713,6 +772,8 @@ mod tests {
             "American auto insurance company",
             "Credit card brand",
             "Online food ordering services",
+            "Credit card",
+            "Specification for machine-readable interface files",
         ] {
             assert!(describes_an_organization(Some(yes)), "{yes}");
         }
