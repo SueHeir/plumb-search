@@ -1955,6 +1955,7 @@ fn render_results(
         .map(|item| item.hit.clone().into_owned())
         .collect();
     let pages = place_pages(
+        picked_for,
         &shown_hits,
         results
             .pages

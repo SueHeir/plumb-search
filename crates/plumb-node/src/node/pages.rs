@@ -282,7 +282,7 @@ pub(super) fn add_pages(inner: &Inner, query: &str, results: &mut SearchResults)
         _ => query,
     };
     match searcher.search(query, PAGES_PER_SEARCH) {
-        Ok(found) => results.pages = place_pages(&results.hits, found),
+        Ok(found) => results.pages = place_pages(query, &results.hits, found),
         Err(err) => warn!("searching pages: {err:#}"),
     }
 }

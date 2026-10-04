@@ -227,7 +227,7 @@ pub fn run(args: EvalArgs) -> Result<()> {
                 let found = pages
                     .search(&q.query, 10)
                     .with_context(|| format!("searching pages for {:?}", q.query))?;
-                let rows = listed_with_pages(&hits, place_pages(&hits, found));
+                let rows = listed_with_pages(&hits, place_pages(&q.query, &hits, found));
                 first = rows.first().and_then(|keys| keys.first()).cloned();
                 let rank = rows
                     .iter()
@@ -400,6 +400,7 @@ mod tests {
         };
         let hits = [site("curie.org", false), site("python.org", false)];
         let placed = place_pages(
+            "",
             &hits,
             vec![
                 page("Marie Curie", None),
