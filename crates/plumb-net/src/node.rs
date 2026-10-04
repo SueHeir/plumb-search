@@ -28,7 +28,8 @@
 //!   a record to the receiver returned by [`start`] only once two crawlers
 //!   agree on it (see [`crate::agree`]).
 //!   On meeting a node, it asks for the batches of the last
-//!   [`CATCH_UP_EPOCHS`] epochs it missed.
+//!   [`CATCH_UP_EPOCHS`] epochs it missed, and every [`RELIST_MINUTES`]
+//!   asks the nodes it is connected to again for recent ones.
 //! * Network search: [`NetHandle::search`] never sends the query; it asks
 //!   other nodes for buckets of sites under throwaway identities (see
 //!   [`crate::bucket`] and [`crate::search`]). The node answers other
@@ -89,6 +90,11 @@ use crate::store::{BatchStore, CrawlerView, RETAIN_EPOCHS};
 pub const MAX_RELAYS: usize = 2;
 /// Epochs of batches a node asks for when it meets another.
 pub const CATCH_UP_EPOCHS: u64 = 3;
+/// Minutes between asking connected nodes again for the batches of this
+/// epoch and the last, for any whose announcement or fetch was missed: a
+/// busy node's fetches time out, and a batch heard of while its holders
+/// were out of reach is otherwise never fetched.
+pub const RELIST_MINUTES: u64 = 30;
 /// A node dials more nodes it knows of while it has fewer connections.
 pub const TARGET_PEERS: usize = 8;
 /// Minutes between tries at the bootstrap nodes while a node has other
@@ -1094,7 +1100,7 @@ struct Task {
     /// Batches fetched and found useless or bad, so not fetched again.
     refused: HashSet<Hash>,
     fetching: HashMap<OutboundRequestId, (Hash, Vec<PeerId>)>,
-    /// Nodes asked for their batch headers this session.
+    /// Nodes asked for their batch headers since they last connected.
     listing: HashSet<PeerId>,
     /// Our own headers not yet announced to anyone.
     unannounced: Vec<SignedHeader>,
@@ -1459,6 +1465,16 @@ impl Task {
             // A new week makes last week's count stale.
             self.recount = true;
         }
+        if ticks > 0 && ticks.is_multiple_of(RELIST_MINUTES) {
+            let since = epoch_of(now).saturating_sub(1);
+            let peers: Vec<PeerId> = self.batch_peers.iter().copied().collect();
+            for peer in peers {
+                self.swarm
+                    .behaviour_mut()
+                    .batches
+                    .send_request(&peer, BatchRequest::List { since_epoch: since });
+            }
+        }
         if self.recount && ticks.is_multiple_of(RECOUNT_MINUTES) {
             self.recount = false;
             self.count_reports(None);
@@ -1533,6 +1549,8 @@ impl Task {
                     self.report_peers.remove(&peer_id);
                     self.oblivious_peers.remove(&peer_id);
                     self.batch_peers.remove(&peer_id);
+                    // Asked again on coming back, for what it sent meanwhile.
+                    self.listing.remove(&peer_id);
                     self.remote_addrs.remove(&peer_id);
                     self.reserved.remove(&peer_id);
                     self.nearby.remove(&peer_id);
