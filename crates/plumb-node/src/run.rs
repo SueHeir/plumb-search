@@ -76,6 +76,7 @@ fn node_config(args: RunArgs) -> NodeConfig {
     config.country = args.country;
     config.web_search = args.web_search.0;
     config.search_by_meaning = args.search_by_meaning;
+    config.embed_threads = args.embed_threads.map(usize::from);
     if args.use_system_proxy {
         config.use_system_proxy = true;
     }
@@ -221,6 +222,12 @@ mod tests {
         let mut expected = NodeConfig::desktop("d".into());
         expected.bind = "127.0.0.1:8080".parse().unwrap();
         assert_eq!(desktop, expected);
+
+        let threads = |args: &[&str]| config(args).embed_threads;
+        assert_eq!(threads(&["--data", "d"]), None);
+        assert_eq!(threads(&["--data", "d", "--embed-threads", "3"]), Some(3));
+        let zero = ["plumb", "run", "--data", "d", "--embed-threads", "0"];
+        assert!(Cli::try_parse_from(zero).is_err());
 
         let tuned = config(&[
             "--data",

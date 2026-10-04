@@ -174,6 +174,9 @@ pub struct NodeConfig {
     /// and keeps a vector of each site's text in `DIR/vectors.bin`, made in
     /// the background after each index build, best-ranked sites first.
     pub search_by_meaning: bool,
+    /// Threads that embed sites for search by meaning; `None` for half the
+    /// CPUs this node may use.
+    pub embed_threads: Option<usize>,
     /// On first start in the network, set up from the sites of a node this
     /// one trusts rather than from the seed downloads (Tranco, Common
     /// Crawl, Wikidata, Wikipedia), which are then a fallback for when no
@@ -251,6 +254,7 @@ impl NodeConfig {
             country: HomeCountry::Auto,
             web_search: None,
             search_by_meaning: false,
+            embed_threads: None,
             seed_from_network: true,
             sources: SeedSources::default(),
             retry_wait: Duration::from_secs(10 * 60),
