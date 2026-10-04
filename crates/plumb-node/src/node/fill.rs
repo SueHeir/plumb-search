@@ -446,6 +446,12 @@ async fn fill_round(inner: &Arc<Inner>) -> Result<()> {
         inner.update_fill(|s| s.detail = "Off".into());
         return Ok(());
     }
+    if !settings.setup_chosen {
+        inner.update_fill(|s| {
+            s.detail = "Waiting for you to choose how much to keep (Set up my node)".into()
+        });
+        return Ok(());
+    }
     if !settings.background_updates || settings.paused_until.is_some_and(|until| until > now) {
         inner.update_fill(|s| s.detail = "Paused with crawling".into());
         return Ok(());

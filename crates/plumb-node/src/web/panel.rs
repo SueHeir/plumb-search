@@ -499,6 +499,8 @@ pub(super) fn settings_from_form(
         } else {
             current.fill_from_network
         },
+        // Saving the resources is a choice of how much to keep too.
+        setup_chosen: true,
     };
     settings.set_workload(Workload::from_name(&form.workload).unwrap_or(Workload::Custom));
     Ok(settings)
@@ -1041,6 +1043,8 @@ pub(super) fn render_panel(view: &PanelView<'_>) -> String {
         body.push_str(
             "<p class=\"notice\" role=\"status\">Resource settings saved and applied.</p>",
         );
+    } else if query.saved == "setup" {
+        body.push_str("<p class=\"notice\" role=\"status\">Your node is set up. It takes in the network's crawls in the background, up to the size you chose.</p>");
     } else if query.saved == "backup" {
         body.push_str("<p class=\"notice\" role=\"status\">Backup saved.</p>");
     } else if query.saved == "restored" {
@@ -1062,6 +1066,9 @@ pub(super) fn render_panel(view: &PanelView<'_>) -> String {
     }
     match section {
         "overview" => {
+            if !settings.setup_chosen && writable && base == "/app" {
+                super::setup::render_setup(&mut body, settings);
+            }
             body.push_str("<p class=\"intro\">Search readiness, background work, and the resources your node is using.</p><section class=\"cards\" aria-label=\"Node overview\">");
             render_search_card(&mut body, status, origin, now, base);
             render_storage_card(&mut body, status, settings);

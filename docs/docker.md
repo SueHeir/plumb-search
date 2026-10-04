@@ -249,6 +249,14 @@ docker run -d --name plumb --init --restart unless-stopped --stop-timeout 300 \
 | `--alpha A` | the index's default | Weight of the popularity prior in the ranking, from 0 to 1. |
 | `--use-system-proxy` | off | Crawl homepages through the proxy in `HTTPS_PROXY`, `HTTP_PROXY` or `ALL_PROXY`; see [Behind a proxy](#behind-a-proxy). |
 
+How much a container takes from the network by default: the best
+`--sites` (1,000,000) sites from a trusted node, then the network's crawls
+with no storage limit, until an index build would need more than half the
+machine's memory (about 800,000 sites on a 4 GB server, 1.6 million on 8 GB).
+A container never asks, unlike the desktop app's "Set up my node"; set a
+storage limit on the panel's Resources page, or a smaller `--sites`, to keep
+less.
+
 "First start only" settings take effect when the node sets itself up, that is,
 while `/data/records.jsonl` does not exist yet. To change them later, start
 over with an empty volume.

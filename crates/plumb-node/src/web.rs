@@ -87,6 +87,7 @@ pub use panel::ADD_TO_FIREFOX_PATH;
 
 pub(crate) mod private;
 mod relay;
+mod setup;
 
 /// Results returned when a request does not say how many.
 pub const DEFAULT_LIMIT: usize = 10;
@@ -431,6 +432,7 @@ fn app(state: AppState) -> Router {
             .route("/api/network/search", get(api_network_search))
             .route("/app", get(panel::panel))
             .route("/app/settings", post(panel::save_settings))
+            .route("/app/setup", post(setup::save_setup))
             .route("/app/features", post(panel::save_features))
             .route("/app/refresh", post(panel::refresh))
             .route("/app/network/retry", post(panel::retry_network))

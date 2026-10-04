@@ -62,6 +62,8 @@ fn test_config(dir: &Path) -> NodeConfig {
     config.initial_crawl = 0;
     config.refresh_every = None;
     config.crawl_per_refresh = 0;
+    // As if "Set up my node" was answered, so filling goes ahead.
+    config.settings.setup_chosen = true;
     let nowhere = closed_port();
     config.sources = SeedSources {
         tranco_url: format!("{nowhere}/tranco.csv"),
@@ -1859,6 +1861,7 @@ async fn a_new_node_sets_up_from_a_trusted_node_without_the_seed_downloads() {
     let dir = tempfile::tempdir().unwrap();
     let mut config = test_config(dir.path());
     config.sites = 10;
+    config.settings.setup_chosen = false;
     let mut net = plumb_net::NetConfig::new(PathBuf::new());
     net.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
     net.upnp = false;
@@ -1878,6 +1881,21 @@ async fn a_new_node_sets_up_from_a_trusted_node_without_the_seed_downloads() {
         search(addr, "lighthouses").await[0].domain,
         "lighthouses.org"
     );
+
+    // The rest waits for "Set up my node".
+    wait_for(addr, "the setup question", |s| {
+        s.fill
+            .as_ref()
+            .is_some_and(|f| f.detail.contains("Set up my node"))
+    })
+    .await;
+    node.inner
+        .change_settings(NodeSettings {
+            storage_limit_mb: 500,
+            setup_chosen: true,
+            ..node.inner.settings()
+        })
+        .unwrap();
 
     // Filling takes in the rest, uncrawled sites too.
     let status = wait_for(addr, "the rest of the trusted node's sites", |s| {

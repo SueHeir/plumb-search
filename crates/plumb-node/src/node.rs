@@ -403,6 +403,12 @@ pub struct NodeSettings {
     /// Fill free space with the crawls of nodes this one trusts (see
     /// `node/fill.rs`), in the network.
     pub fill_from_network: bool,
+    /// The person chose how much of the network's crawls to keep, on the
+    /// panel's "Set up my node" step (`web/setup.rs`). Until then filling
+    /// waits, after the first sites a new node sets up with. A new desktop
+    /// node starts without it; servers, and settings saved before it
+    /// existed, have it.
+    pub setup_chosen: bool,
 }
 
 impl Default for NodeSettings {
@@ -415,6 +421,7 @@ impl Default for NodeSettings {
             crawl_hours: None,
             paused_until: None,
             fill_from_network: true,
+            setup_chosen: true,
         }
     }
 }
@@ -426,6 +433,7 @@ impl NodeSettings {
             download_limit_mb_per_day: 500,
             storage_limit_mb: 2_000,
             workload: Workload::Balanced,
+            setup_chosen: false,
             ..NodeSettings::default()
         }
     }
@@ -955,6 +963,9 @@ fn settings_change_words(old: &NodeSettings, new: &NodeSettings) -> String {
             0 => "no storage limit".to_owned(),
             mb => format!("storage limit {mb} MB"),
         });
+    }
+    if new.setup_chosen && !old.setup_chosen {
+        parts.push("node set up".to_owned());
     }
     if old.fill_from_network != new.fill_from_network {
         parts.push(if new.fill_from_network {
