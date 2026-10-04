@@ -46,8 +46,9 @@
 //!   first. A typed hostname always has full trust.
 //! - A query ending in words that say what someone wants from a site
 //!   rather than which site ("login", "docs", "tracking": `INTENT_WORDS`)
-//!   is also ranked by the words before them, each site keeping its better
-//!   score, so "paypal login" finds paypal.com rather than paypal-login.us.
+//!   is also ranked by the words before them, and a well-known site they
+//!   name keeps the better of its two scores, so "paypal login" finds
+//!   paypal.com rather than paypal-login.us.
 //!   A well-known site ([`WELL_KNOWN_LINK_SCORE`]) named by the whole
 //!   query keeps it to itself: "read the docs".
 //!
@@ -693,13 +694,13 @@ impl Searcher {
         if options.exact || limit == 0 || named.typed {
             return Ok(results);
         }
-        // "paypal login" is also ranked as "paypal", and each site keeps
-        // the better of its two scores: the name alone puts paypal.com
-        // above paypal-login.us, while the whole query still counts for
-        // sites only it matches ("mdn web docs"). A well-known site named
-        // by all of it keeps the query to itself (readthedocs.org for "read
-        // the docs"). The link into the named site's own search still uses
-        // every word.
+        // "paypal login" is also ranked as "paypal": a well-known site that
+        // name alone names keeps the better of its two scores, so
+        // paypal.com goes above paypal-login.us. Lesser sites the name
+        // names keep the whole query's score: postgres.ai is not what
+        // "postgres docs" is after. A well-known site named by all of it
+        // keeps the query to itself (readthedocs.org for "read the docs").
+        // The link into the named site's own search still uses every word.
         if let Some(name) = without_intent_words(query_text) {
             let named_in_full = named
                 .full_link_score
@@ -707,7 +708,10 @@ impl Searcher {
             if !named_in_full {
                 let mut found = self.search_meaning(&name, limit, cfg, options, meaning)?;
                 let mut best: HashMap<String, Hit> = HashMap::new();
-                for hit in results.hits.into_iter().chain(found.hits) {
+                let by_name = std::mem::take(&mut found.hits)
+                    .into_iter()
+                    .filter(|hit| hit.named && hit.link_score >= WELL_KNOWN_LINK_SCORE);
+                for hit in results.hits.into_iter().chain(by_name) {
                     match best.entry(hit.domain.clone()) {
                         Entry::Occupied(mut kept) if kept.get().score < hit.score => {
                             kept.insert(hit);
@@ -2839,6 +2843,15 @@ mod tests {
                 &[("Postgres", 2)],
                 popular(9_000, 3),
             ),
+            // Named "postgres", but not what "postgres docs" is after.
+            site(
+                "postgres.ai",
+                Some("Postgres.AI"),
+                None,
+                &[],
+                &[],
+                obscure(5_000_000, 2),
+            ),
             site(
                 "github.com",
                 Some("GitHub: Let's build from here"),
@@ -2859,7 +2872,9 @@ mod tests {
         let (_dir, searcher) = build(&records);
         assert_eq!(top(&searcher, "paypal login"), "paypal.com");
         assert_eq!(top(&searcher, "PayPal sign in"), "paypal.com");
-        assert_eq!(top(&searcher, "postgres docs"), "postgresql.org");
+        let hits = searcher.search("postgres docs", 10).unwrap();
+        let rank = |domain: &str| domains(&hits).iter().position(|&d| d == domain);
+        assert!(rank("postgresql.org") < rank("postgres.ai"), "{hits:#?}");
         // A well-known site named by all of it keeps the query.
         assert_eq!(top(&searcher, "read the docs"), "readthedocs.org");
         // Typing its hostname still goes to the look-alike.
