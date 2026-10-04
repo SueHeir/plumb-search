@@ -32,6 +32,7 @@ pub mod hash;
 pub mod joining;
 pub mod node;
 pub mod oblivious;
+pub mod pir;
 pub mod popularity;
 pub mod proto;
 pub mod reports;
