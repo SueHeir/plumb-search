@@ -96,13 +96,17 @@ them in like any shared crawl (`plumb_net::fill`, `plumb-node`'s
 `node/fill.rs`). It stops at 90% of the storage limit set on the panel,
 so its own crawling keeps room, and at the day's download limit; with no
 storage limit (the server default) it takes the whole list, a full copy
-of the shared index. How far it got is in `DIR/net/fill.json` and in
+of the shared index, unless that index would be too big to rebuild: it
+stops before an index build would need more than half the machine's
+memory (or its container's limit), about 2.5 KB a site, so a 4 GB server
+stops at about 800,000 sites. How far it got is in `DIR/net/fill.json` and in
 `GET /api/status` under `fill`, and the panel's Storage card shows it.
 
 The records come from the trusted node's index, not signed batches, so
 only trusted nodes are asked. A node answers at most 2 fill requests at
 once and 6 a minute from one node, so a new node cannot swamp a small
-server. `--no-fill` turns it off.
+server. The panel's "Fill free space with the network's crawls" box (on
+by default, in the desktop app too) and `--no-fill` turn it off.
 
 ## Network search
 
