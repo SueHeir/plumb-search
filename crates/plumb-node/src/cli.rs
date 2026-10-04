@@ -125,6 +125,12 @@ pub struct RunArgs {
     /// Address to listen on; 0.0.0.0:8080 serves other machines too.
     #[arg(long, value_name = "ADDR", default_value = "127.0.0.1:8080")]
     pub bind: SocketAddr,
+    /// Also serve HTTPS here, such as 0.0.0.0:8443, with a certificate the
+    /// node makes for itself, so the desktop app on another computer can
+    /// use remote control over a local network. The app trusts the
+    /// certificate by the fingerprint `plumb remote-control on` prints.
+    #[arg(long, value_name = "ADDR")]
+    pub https_bind: Option<SocketAddr>,
     /// Defaults to start from. server: 1,000,000 sites, 10,000 homepages
     /// crawled at first and 5,000 more every hour. desktop: 250,000
     /// sites, 2,000 homepages at first and 1,000 more every 12 hours.

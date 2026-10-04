@@ -546,7 +546,15 @@ pub(super) async fn save_remote_control(
     }
     let allow_public = form.allow_public.is_some();
     match control::turn_on(&dir, allow_public) {
-        Ok(token) => panel_page(render_new_token(&token, &origin, node.bind())),
+        Ok(token) => {
+            let https = node.https_bind().map(|https| {
+                let fingerprint = crate::tls::load_or_create(&dir)
+                    .map(|cert| cert.fingerprint())
+                    .unwrap_or_else(|err| format!("unreadable: {err:#}"));
+                (https, fingerprint)
+            });
+            panel_page(render_new_token(&token, &origin, node.bind(), https))
+        }
         Err(err) => panel_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             &format!("Could not turn remote control on: {err:#}"),
@@ -555,19 +563,41 @@ pub(super) async fn save_remote_control(
 }
 
 /// The page that shows a new token, the one time it can be read.
-fn render_new_token(token: &str, origin: &str, bind: Option<SocketAddr>) -> String {
-    let address = match bind {
-        Some(addr) if addr.ip().is_unspecified() => {
+fn render_new_token(
+    token: &str,
+    origin: &str,
+    bind: Option<SocketAddr>,
+    https: Option<(SocketAddr, String)>,
+) -> String {
+    let address = match (&https, bind) {
+        (Some((https, _)), _) => format!(
+            "https://{}:{}",
+            if https.ip().is_unspecified() {
+                "&lt;this computer's address&gt;".to_string()
+            } else {
+                escape_html(&https.ip().to_string())
+            },
+            https.port()
+        ),
+        (None, Some(addr)) if addr.ip().is_unspecified() => {
             format!("http://&lt;this computer's address&gt;:{}", addr.port())
         }
         _ => escape_html(origin),
     };
+    let fingerprint = https
+        .map(|(_, fingerprint)| {
+            format!(
+                "<dt>Certificate fingerprint</dt><dd><code>{}</code></dd>\n",
+                escape_html(&fingerprint)
+            )
+        })
+        .unwrap_or_default();
     let body = format!(
         "<main class=\"wrap node-panel\">\n<h1>Remote control is on</h1>\n\
          <p>On the other computer, open the Plumb Search app, choose \
          <strong>Connect to a node</strong>, and enter this node's address and token:</p>\n\
          <dl><dt>Address</dt><dd><code>{address}</code></dd>\n\
-         <dt>Token</dt><dd><code>{}</code></dd></dl>\n\
+         <dt>Token</dt><dd><code>{}</code></dd>\n{fingerprint}</dl>\n\
          <p class=\"notice\">Copy the token now: this is the only time it is shown. \
          Anyone with it can change this node's settings, so keep it like a password. \
          Making a new token, or turning remote control off, stops the old one working.</p>\n\
