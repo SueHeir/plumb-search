@@ -4,8 +4,9 @@
 //! Each turn of [`run`] looks at what is on disk and in the saved state and
 //! does the next piece of work, so the same code resumes after a restart:
 //!
-//! 1. no records file: download the Tranco list and put a quick first index
-//!    of it in service ([`set_up`]);
+//! 1. no records file: take the best sites of a trusted node in the
+//!    network, or else download the Tranco list, and put a quick first
+//!    index of them in service ([`set_up`]);
 //! 2. no index, or one older than the records: build one ([`rebuild`]);
 //! 3. the rest of the seed data (Wikidata's official websites, Common
 //!    Crawl's ranks) missing and a try due: download it and fold it into
@@ -216,12 +217,31 @@ fn idle_detail(config: &NodeConfig) -> &'static str {
     }
 }
 
-/// First start: downloads the Tranco list alone, keeps its best sites in a
-/// new records file and puts a first index of them in service, so search
-/// works within a minute or two. The rest of the seed data, whose downloads
-/// take many minutes (Wikidata's above all), is folded in right after by
-/// [`complete_seed`].
+/// First start: in the network, takes the best sites of a node it trusts
+/// (see [`super::fill::seed_from_network`]), which carry everything the
+/// seed downloads give, so nothing is downloaded from outside. Otherwise,
+/// or when no trusted node answers, downloads the Tranco list alone, keeps
+/// its best sites in a new records file and puts a first index of them in
+/// service, so search works within a minute or two. The rest of the seed
+/// data, whose downloads take many minutes (Wikidata's above all), is
+/// folded in right after by [`complete_seed`].
 async fn set_up(inner: &Arc<Inner>) -> Result<()> {
+    let from_network = tokio::select! {
+        records = super::fill::seed_from_network(inner) => records?,
+        () = inner.stopped() => return Err(Stopped.into()),
+    };
+    if let Some((records, downloaded)) = from_network {
+        let built = blocking(inner, move |inner| {
+            let mut fresh = SavedState::fresh(inner.config.initial_crawl);
+            fresh.add_downloaded(downloaded, now_unix());
+            inner.update_saved(|saved| *saved = fresh)?;
+            save_seed_records(inner, &records)?;
+            inner.check_stop()?;
+            build(inner, records)
+        })
+        .await?;
+        return put_in_service(inner, built).await;
+    }
     info!(
         "no records in {} yet: setting up from the Tranco list, the rest of the seed data next",
         inner.paths.data.display()

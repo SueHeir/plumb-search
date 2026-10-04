@@ -333,6 +333,9 @@ enum Serving {
     Reports,
 }
 
+/// Where the answer to a fill request goes.
+type FillReply = oneshot::Sender<Result<Option<FillPage>>>;
+
 enum Command {
     Publish {
         records: Vec<SiteRecord>,
@@ -353,7 +356,8 @@ enum Command {
         prefer: Option<PeerId>,
         from: u64,
         count: u32,
-        reply: oneshot::Sender<Result<Option<FillPage>>>,
+        all: bool,
+        reply: FillReply,
     },
     Dial(Multiaddr),
     Reconnect,
@@ -624,18 +628,21 @@ impl NetHandle {
     /// Asks a connected node this node trusts for its crawled sites from
     /// position `from` of its list, at most `count` (see [`crate::fill`]):
     /// `prefer` when it is connected and fills, another one otherwise.
-    /// `None` when no trusted node that fills is connected.
+    /// `None` when no trusted node that fills is connected. With `all`, its
+    /// sites crawled or not, for a node setting up from the network.
     pub async fn fill(
         &self,
         prefer: Option<PeerId>,
         from: u64,
         count: u32,
+        all: bool,
     ) -> Result<Option<FillPage>> {
         let (reply, answer) = oneshot::channel();
         self.send(Command::Fill {
             prefer,
             from,
             count,
+            all,
             reply,
         })?;
         answer.await.context("the network task stopped")?
@@ -1255,8 +1262,9 @@ struct Task {
     filling: usize,
     /// Fill requests answered for each node, and the minute counted.
     fill_asked: HashMap<PeerId, (u64, u32)>,
-    /// Our fill requests not yet answered.
-    fill_asking: HashMap<OutboundRequestId, oneshot::Sender<Result<Option<FillPage>>>>,
+    /// Our fill requests not yet answered, and whether each asked for
+    /// every site.
+    fill_asking: HashMap<OutboundRequestId, (bool, FillReply)>,
     /// This node's keys for sealed requests.
     gateway: Gateway,
     /// Connected nodes that relay and answer sealed requests.
@@ -1426,6 +1434,7 @@ impl Task {
                 prefer,
                 from,
                 count,
+                all,
                 reply,
             } => {
                 let peer = prefer
@@ -1439,8 +1448,8 @@ impl Task {
                     .swarm
                     .behaviour_mut()
                     .fill
-                    .send_request(&peer, FillRequest { from, count });
-                self.fill_asking.insert(id, reply);
+                    .send_request(&peer, FillRequest { from, count, all });
+                self.fill_asking.insert(id, (all, reply));
             }
             Command::Dial(addr) => self.dial(addr),
             Command::Reconnect => {
@@ -2626,7 +2635,8 @@ impl Task {
                 let source = self.source.clone();
                 let tx = self.answers_tx.clone();
                 tokio::task::spawn_blocking(move || {
-                    let response = crate::fill::answer(&*source, request.from, request.count);
+                    let response =
+                        crate::fill::answer(&*source, request.from, request.count, request.all);
                     let _ = tx.send(Answer::Fill(channel, response));
                 });
             }
@@ -2639,15 +2649,20 @@ impl Task {
                     },
                 ..
             } => {
-                let Some(reply) = self.fill_asking.remove(&request_id) else {
+                let Some((all, reply)) = self.fill_asking.remove(&request_id) else {
                     return;
                 };
                 let now = now_unix();
                 let bytes = response.records.iter().map(|r| r.len() as u64).sum();
+                let accept = if all {
+                    crate::fill::accept_seed
+                } else {
+                    crate::fill::accept_filled
+                };
                 let records = response
                     .records
                     .iter()
-                    .filter_map(|line| crate::fill::accept_filled(line, now))
+                    .filter_map(|line| accept(line, now))
                     .collect();
                 let _ = reply.send(Ok(Some(FillPage {
                     peer,
@@ -2664,7 +2679,7 @@ impl Task {
                 error,
                 ..
             } => {
-                if let Some(reply) = self.fill_asking.remove(&request_id) {
+                if let Some((_, reply)) = self.fill_asking.remove(&request_id) {
                     let _ = reply.send(Err(anyhow::anyhow!("{peer} did not answer: {error}")));
                 }
             }

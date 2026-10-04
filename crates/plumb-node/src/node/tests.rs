@@ -1108,7 +1108,7 @@ async fn a_node_in_the_network_takes_in_other_nodes_crawls_and_searches_them() {
 
     // The node hands its sites, best-ranked first, to a node filling up.
     let page = loop {
-        if let Some(page) = peer.fill(None, 0, 50).await.unwrap() {
+        if let Some(page) = peer.fill(None, 0, 50, false).await.unwrap() {
             break page;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1802,5 +1802,130 @@ async fn a_node_fills_its_free_space_with_a_trusted_node_s_crawls() {
     assert_eq!(kept["filled"], 2);
 
     peer.shutdown().await;
+    node.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_new_node_sets_up_from_a_trusted_node_without_the_seed_downloads() {
+    // A trusted node holds five sites, two never crawled, with what the
+    // seed downloads gave it: ranks, names, Wikidata facts.
+    let now = now_unix();
+    let peer_dir = tempfile::tempdir().unwrap();
+    let peer_id = plumb_net::load_or_create_key(&peer_dir.path().join("node.key"))
+        .unwrap()
+        .public()
+        .to_peer_id();
+    let sites: Vec<SiteRecord> = [
+        "lighthouses.org",
+        "uncrawledlanterns.org",
+        "harbourmasters.org",
+        "tidetables.org",
+        "uncrawledbuoys.org",
+    ]
+    .iter()
+    .enumerate()
+    .map(|(i, domain)| {
+        let mut record = SiteRecord::new(*domain);
+        record.signals.tranco_rank = Some(1 + i as u32);
+        record.about = Some(format!("keepers of {domain}"));
+        if !domain.starts_with("uncrawled") {
+            record.url = Some(format!("https://{domain}/"));
+            record.title = Some(format!("Guild of {domain}"));
+            record.crawled_at = Some(now - 600);
+        }
+        record
+    })
+    .collect();
+    let mut peer_config = plumb_net::NetConfig::new(peer_dir.path().to_path_buf());
+    peer_config.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+    peer_config.upnp = false;
+    peer_config.local_discovery = false;
+    peer_config.round_every = None;
+    let table = plumb_net::BucketTable::build(&peer_dir.path().join("buckets"), &sites).unwrap();
+    let (peer, _records) = plumb_net::start(peer_config, Arc::new(table))
+        .await
+        .unwrap();
+    let peer_addr: plumb_net::Multiaddr = loop {
+        if let Some(addr) = peer.status().listening.first() {
+            break addr.parse().unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+
+    // A new node, whose seed sources lead nowhere: setup can only work
+    // from the network.
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = test_config(dir.path());
+    config.sites = 10;
+    let mut net = plumb_net::NetConfig::new(PathBuf::new());
+    net.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+    net.upnp = false;
+    net.local_discovery = false;
+    net.round_every = None;
+    net.trusted_peers = vec![peer_id];
+    net.bootstrap = vec![peer_addr.with_p2p(peer_id).unwrap()];
+    config.network = Some(net);
+    let node = start(config).await.unwrap();
+    let addr = node.addr();
+    let status = wait_for(addr, "the first index", ready_and_idle).await;
+    // The first index holds the best three, crawled or not.
+    assert_eq!(status.sites, 3, "{status:?}");
+    assert!(!status.wikidata_missing);
+    assert!(status.last_error.is_none(), "{status:?}");
+    assert_eq!(
+        search(addr, "lighthouses").await[0].domain,
+        "lighthouses.org"
+    );
+
+    // Filling takes in the rest, uncrawled sites too.
+    let status = wait_for(addr, "the rest of the trusted node's sites", |s| {
+        s.fill
+            .as_ref()
+            .is_some_and(|f| f.filled == 5 && f.detail.starts_with("Done"))
+    })
+    .await;
+    assert_eq!(status.fill.unwrap().total, 5);
+    node.refresh_now();
+    wait_for(addr, "a new index", |s| {
+        ready_and_idle(s) && s.index.as_deref() != Some("000001")
+    })
+    .await;
+    let hits = search(addr, "uncrawledbuoys").await;
+    assert_eq!(hits[0].domain, "uncrawledbuoys.org");
+    let records = crate::records::load_records(&dir.path().join("records.jsonl")).unwrap();
+    assert_eq!(records.len(), 5);
+    let buoys = records.get("uncrawledbuoys.org").unwrap();
+    assert_eq!(buoys.signals.tranco_rank, Some(5));
+    assert_eq!(
+        buoys.about.as_deref(),
+        Some("keepers of uncrawledbuoys.org")
+    );
+    assert!(buoys.crawled_at.is_none());
+    // Nothing came from outside the network.
+    assert!(names(&dir.path().join("seed")).is_empty());
+
+    peer.shutdown().await;
+    node.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_new_node_that_trusts_no_one_still_sets_up_from_the_seed_downloads() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = test_config(dir.path());
+    let mut net = plumb_net::NetConfig::new(PathBuf::new());
+    net.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+    net.upnp = false;
+    net.local_discovery = false;
+    net.round_every = None;
+    net.trusted_peers.clear();
+    config.network = Some(net);
+    let node = start(config).await.unwrap();
+    // The seed sources lead nowhere, so setup goes to them and fails.
+    let status = wait_for(node.addr(), "a try at the seed downloads", |s| {
+        s.last_error.is_some()
+    })
+    .await;
+    let error = status.last_error.unwrap().message;
+    assert!(error.contains("Tranco"), "{error}");
     node.shutdown().await.unwrap();
 }

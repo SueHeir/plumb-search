@@ -15,6 +15,13 @@
 //! the operator vouches for what that node accepted. Every node trusts the
 //! plumbsearch.org node unless told otherwise.
 //!
+//! A node setting up asks for every site of the list, crawled or not
+//! (`all`), and needs no seed downloads (Tranco, Common Crawl, Wikidata,
+//! Wikipedia): each record carries the ranks, names, Wikidata facts and
+//! intro the trusted node's own seed gave it (Liz, 2026-10-04: "new nodes
+//! don't need to pull from wiki or anywhere anymore, we have plenty of
+//! nodes to serve the network now").
+//!
 //! A node answers at most [`MAX_FILLING`] fill requests at once and
 //! [`FILL_REQUESTS_PER_MINUTE`] from one node, so a node filling up cannot
 //! swamp a small server; it is told it is busy and asks again later.
@@ -30,6 +37,10 @@ use crate::proto::FillResponse;
 
 /// Most records sent for one fill request.
 pub const MAX_FILL_RECORDS: u32 = 1_000;
+
+/// Most records sent for one request for every site (`all`): those are
+/// read straight off the list, so a page can be bigger.
+pub const MAX_SEED_RECORDS: u32 = 5_000;
 
 /// Most sites looked at for one fill request, crawled or not.
 pub const MAX_FILL_SCAN: usize = 10_000;
@@ -65,9 +76,14 @@ impl FillPage {
 }
 
 /// The answer to a fill request for `count` records from `from`: the
-/// crawled sites among the next [`MAX_FILL_SCAN`] of the list.
-pub fn answer(source: &dyn BucketSource, from: u64, count: u32) -> FillResponse {
-    let count = count.min(MAX_FILL_RECORDS) as usize;
+/// crawled sites among the next [`MAX_FILL_SCAN`] of the list, or with
+/// `all` the next `count` sites, crawled or not.
+pub fn answer(source: &dyn BucketSource, from: u64, count: u32, all: bool) -> FillResponse {
+    let count = if all {
+        count.min(MAX_SEED_RECORDS)
+    } else {
+        count.min(MAX_FILL_RECORDS)
+    } as usize;
     let mut response = FillResponse {
         records: Vec::new(),
         next: from,
@@ -77,7 +93,8 @@ pub fn answer(source: &dyn BucketSource, from: u64, count: u32) -> FillResponse 
     let Ok(start) = usize::try_from(from) else {
         return response;
     };
-    let Some((lines, total)) = source.ranked(start, MAX_FILL_SCAN) else {
+    let scan = if all { count } else { MAX_FILL_SCAN };
+    let Some((lines, total)) = source.ranked(start, scan) else {
         return response;
     };
     response.total = total as u64;
@@ -89,7 +106,7 @@ pub fn answer(source: &dyn BucketSource, from: u64, count: u32) -> FillResponse 
         }
         // Keys are never escaped in a record's JSON and string values
         // always are, so this is only ever the crawl time's key.
-        if line.len() <= MAX_RECORD_BYTES && line.contains("\"crawled_at\":") {
+        if line.len() <= MAX_RECORD_BYTES && (all || line.contains("\"crawled_at\":")) {
             response.records.push(line);
         }
     }
@@ -102,15 +119,25 @@ pub fn answer(source: &dyn BucketSource, from: u64, count: u32) -> FillResponse 
 /// does not parse, is too long, names no registrable domain, or was never
 /// crawled.
 pub fn accept_filled(line: &str, now: u64) -> Option<SiteRecord> {
-    parse(line, now).ok()
+    parse(line, now, false).ok()
 }
 
-fn parse(line: &str, now: u64) -> Result<SiteRecord> {
+/// As [`accept_filled`], for an answer to a request for every site
+/// (`all`): a site never crawled is kept too, for its ranks and names.
+pub fn accept_seed(line: &str, now: u64) -> Option<SiteRecord> {
+    parse(line, now, true).ok()
+}
+
+fn parse(line: &str, now: u64, uncrawled: bool) -> Result<SiteRecord> {
     ensure!(line.len() <= MAX_RECORD_BYTES, "a record is too long");
     let mut record: SiteRecord = serde_json::from_str(line).context("a record does not parse")?;
     record.domain = canonical_domain(&record.domain).context("not a registrable domain")?;
-    let crawled_at = record.crawled_at.context("never crawled")?;
-    ensure!(crawled_at <= now + EPOCH_SECS / 24, "crawled in the future");
+    match record.crawled_at {
+        Some(crawled_at) => {
+            ensure!(crawled_at <= now + EPOCH_SECS / 24, "crawled in the future");
+        }
+        None => ensure!(uncrawled, "never crawled"),
+    }
     record.crawl_attempted_at = None;
     record.crawl_failures = 0;
     record.redirect = None;
@@ -147,7 +174,7 @@ mod tests {
         assert!(ranked[0].contains("second.com") && ranked[1].contains("third.com"));
         assert!(table.ranked(4, 10).unwrap().is_empty());
 
-        let first = answer(&table, 0, 2);
+        let first = answer(&table, 0, 2, false);
         assert_eq!(first.total, 4);
         let domains: Vec<String> = first
             .records
@@ -158,11 +185,22 @@ mod tests {
         assert_eq!(domains, ["first.com", "third.com"]);
         assert_eq!(first.next, 3);
 
-        let rest = answer(&table, first.next, 2);
+        let rest = answer(&table, first.next, 2, false);
         assert_eq!(rest.records.len(), 1);
         assert!(rest.records[0].contains("fourth.com"));
         assert_eq!(rest.next, 4);
-        assert_eq!(answer(&table, 4, 2).records.len(), 0);
+        assert_eq!(answer(&table, 4, 2, false).records.len(), 0);
+
+        // A node setting up gets every site, crawled or not.
+        let all = answer(&table, 0, 3, true);
+        let domains: Vec<String> = all
+            .records
+            .iter()
+            .map(|line| accept_seed(line, 2_000).unwrap().domain)
+            .collect();
+        assert_eq!(domains, ["first.com", "second.com", "third.com"]);
+        assert_eq!((all.next, all.total), (3, 4));
+        assert_eq!(answer(&table, all.next, 3, true).records.len(), 1);
     }
 
     #[test]
@@ -173,7 +211,7 @@ mod tests {
                 None
             }
         }
-        let response = answer(&Empty, 0, 10);
+        let response = answer(&Empty, 0, 10, true);
         assert!(response.records.is_empty());
         assert_eq!((response.next, response.total), (0, 0));
     }
@@ -196,10 +234,12 @@ mod tests {
 
         let uncrawled = serde_json::to_string(&site("a.com", 1, false)).unwrap();
         assert!(accept_filled(&uncrawled, 2_000).is_none());
+        assert_eq!(accept_seed(&uncrawled, 2_000).unwrap().domain, "a.com");
         let mut future = site("b.com", 1, true);
         future.crawled_at = Some(1_000_000);
         let future = serde_json::to_string(&future).unwrap();
         assert!(accept_filled(&future, 2_000).is_none());
+        assert!(accept_seed(&future, 2_000).is_none());
         assert!(accept_filled("not json", 2_000).is_none());
     }
 }

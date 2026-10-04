@@ -16,8 +16,9 @@
 //!   batch, as JSON. Nodes that want the batch fetch it with
 //!   `/plumb/batch/1` from the node that passed the header on.
 //! * `/plumb/fill/1`: a stretch of a node's crawled sites, best-ranked
-//!   first, for a node filling its free space (see [`crate::fill`]). Only
-//!   taken from nodes the asker trusts.
+//!   first, for a node filling its free space, or every site for a node
+//!   setting up (see [`crate::fill`]). Only taken from nodes the asker
+//!   trusts.
 //! * `/plumb/report/1`: hands a popularity [`Report`] to a node, under a
 //!   throwaway identity, or asks a node for the reports of a week it holds.
 //! * Gossip topic `plumb/reports/1`: every popularity report a node is
@@ -137,13 +138,20 @@ pub enum BatchResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FillRequest {
     pub from: u64,
-    /// At most [`crate::fill::MAX_FILL_RECORDS`] are sent.
+    /// At most [`crate::fill::MAX_FILL_RECORDS`] are sent, or
+    /// [`crate::fill::MAX_SEED_RECORDS`] with `all`.
     pub count: u32,
+    /// Every site from `from` on, crawled or not, for a node setting up
+    /// from the network instead of the seed downloads. Nodes from before
+    /// it ignore it and send crawled sites only.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub all: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FillResponse {
-    /// The crawled sites found, as JSON, best-ranked first.
+    /// The crawled sites found (every site with `all`), as JSON,
+    /// best-ranked first.
     pub records: Vec<String>,
     /// Where to ask from next; `total` once the list is done.
     pub next: u64,
