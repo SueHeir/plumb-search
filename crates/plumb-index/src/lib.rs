@@ -111,6 +111,12 @@ const OTHER_NUMBER_SHARE: f32 = 0.8;
 /// describes a big site ("watch videos online") matches many small ones
 /// that repeat its words.
 const POPULAR_CANDIDATES: usize = 50;
+/// The sites nearest a query in meaning ([`Meaning::nearest`]) that are
+/// ranked, nearest first.
+const NEAREST_RANKED: usize = 50;
+/// The most popular of the other sites [`Meaning::nearest`] gives that are
+/// ranked too.
+const NEAREST_POPULAR: usize = 50;
 /// Most distinct query words used; the rest are ignored.
 const MAX_QUERY_WORDS: usize = 16;
 /// The least link score of a well-known site (roughly the top 30,000).
@@ -193,6 +199,7 @@ impl Default for RankConfig {
 /// ("electric car maker") rather than name it.
 pub trait Meaning {
     /// Domains of the sites nearest the query in meaning, nearest first.
+    /// The first 50 are ranked, and the 50 most popular of the rest.
     fn nearest(&self) -> Vec<String>;
     /// How close the site of `domain` is to the query, in `0..=1`; `None`
     /// for a site with no embedding.
@@ -707,14 +714,26 @@ impl Searcher {
         // Meaning helps with queries that describe a site, not with names.
         let named_in_full = !kinds.is_empty() || names.values().any(|n| n.words() >= query.len);
         let meaning = meaning.filter(|_| !named_in_full);
+        // The nearest sites in meaning, and the most popular of the next
+        // nearest: among hundreds of thousands of sites, small ones whose
+        // text repeats the query's words crowd out the big site it
+        // describes, which may say little about itself.
         let nearest = match meaning {
             Some(meaning) => {
-                let domains = meaning
-                    .nearest()
-                    .into_iter()
-                    .map(|domain| Term::from_field_text(self.fields.domain, &domain))
-                    .collect();
-                matching_docs(&searcher, domains)?
+                let domains = meaning.nearest();
+                let terms = |domains: &[String]| -> Vec<Term> {
+                    domains
+                        .iter()
+                        .map(|domain| Term::from_field_text(self.fields.domain, domain))
+                        .collect()
+                };
+                let split = domains.len().min(NEAREST_RANKED);
+                let mut docs = matching_docs(&searcher, terms(&domains[..split]))?;
+                let next = matching_docs(&searcher, terms(&domains[split..]))?;
+                let mut next = link_scores(&searcher, &next);
+                next.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+                docs.extend(next.into_iter().take(NEAREST_POPULAR).map(|(_, addr)| addr));
+                docs
             }
             None => HashSet::new(),
         };
@@ -1025,9 +1044,17 @@ struct Named {
 
 /// The best link score among `docs`, 0 for none.
 fn best_link_score(searcher: &tantivy::Searcher, docs: &HashSet<DocAddress>) -> f32 {
-    let mut best = 0.0f32;
+    link_scores(searcher, docs)
+        .into_iter()
+        .map(|(score, _)| score)
+        .fold(0.0, f32::max)
+}
+
+/// The link score of each of `docs` that has one.
+fn link_scores(searcher: &tantivy::Searcher, docs: &HashSet<DocAddress>) -> Vec<(f32, DocAddress)> {
     let mut columns: HashMap<u32, Option<tantivy::columnar::Column<f64>>> = HashMap::new();
-    for addr in docs {
+    let mut scores = Vec::with_capacity(docs.len());
+    for &addr in docs {
         let column = columns.entry(addr.segment_ord).or_insert_with(|| {
             searcher
                 .segment_reader(addr.segment_ord)
@@ -1036,10 +1063,10 @@ fn best_link_score(searcher: &tantivy::Searcher, docs: &HashSet<DocAddress>) -> 
                 .ok()
         });
         if let Some(score) = column.as_ref().and_then(|c| c.first(addr.doc_id)) {
-            best = best.max(score as f32);
+            scores.push((score as f32, addr));
         }
     }
-    best
+    scores
 }
 
 /// A candidate with its blended score.
@@ -3550,5 +3577,44 @@ mod tests {
             .search_with("watch videos online", 10, &cfg)
             .unwrap();
         assert!(domains(&hits).contains(&"youtube.com"), "{hits:?}");
+    }
+    #[test]
+    fn popular_sites_a_little_further_in_meaning_are_ranked() {
+        let mut records = vec![site(
+            "tesla.com",
+            Some("Tesla"),
+            None,
+            &[],
+            &[],
+            popular(500, 20_000),
+        )];
+        let mut near = Vec::new();
+        for i in 0..60 {
+            let domain: &'static str = Box::leak(format!("ev{i}.example").into_boxed_str());
+            records.push(site(
+                domain,
+                Some("Electric car maker"),
+                None,
+                &[],
+                &[],
+                obscure(5_000_000 + i, 2),
+            ));
+            near.push((domain, 1.0 - i as f32 / 1_000.0));
+        }
+        // Small sites that repeat the query's words are the 60 nearest;
+        // the big site it describes comes after them, and is ranked.
+        near.push(("tesla.com", 0.85));
+        let (_dir, searcher) = build(&records);
+        let hits = searcher
+            .search_meaning(
+                "electric car maker",
+                100,
+                &RankConfig::default(),
+                &SearchOptions::default(),
+                Some(&FixedMeaning(near)),
+            )
+            .unwrap()
+            .hits;
+        assert!(domains(&hits).contains(&"tesla.com"), "{hits:?}");
     }
 }

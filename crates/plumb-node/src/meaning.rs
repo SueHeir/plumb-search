@@ -20,8 +20,9 @@ use crate::block_on;
 use crate::cli::{EmbedArgs, MeaningArgs};
 use crate::records::load_records;
 
-/// Sites nearest a query in meaning that are ranked with the rest.
-const NEAREST: usize = 50;
+/// Sites nearest a query in meaning: closeness is spread over them, and
+/// the search ranks the nearest of them and the most popular.
+const NEAREST: usize = 1_000;
 /// Vectors made between saves of the vectors file, so a stopped run keeps
 /// most of its work.
 pub(crate) const SAVE_EVERY: usize = 10_000;
@@ -127,7 +128,10 @@ impl SharedMeaning {
 /// The model's cosines bunch up (unrelated texts score around 0.5, close
 /// ones 0.8), which would leave popularity to decide among them. So
 /// closeness is spread over the [`NEAREST`] sites: the nearest gets 1, the
-/// last of them 0, and sites farther away 0 too.
+/// last of them 0, and sites farther away 0 too. A thousand, not fewer:
+/// with hundreds of thousands of sites, a big one the query describes is
+/// often a few hundred places down, behind small sites that repeat the
+/// query's words, and must still count as close.
 pub struct QueryMeaning<'a> {
     vectors: RwLockReadGuard<'a, Vectors>,
     vector: Vec<i8>,
