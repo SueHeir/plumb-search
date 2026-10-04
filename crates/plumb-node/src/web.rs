@@ -1347,7 +1347,17 @@ box-shadow:0 6px 20px rgba(0,0,0,.18)}\
 .panel label.off{color:var(--muted)}\
 .panel button{justify-self:end;padding:.35rem .9rem}\
 .pv{margin:0;padding-top:.5rem;border-top:1px solid var(--line)}\
-.pv a,.src a,.err a{color:var(--link)}\
+.src a,.err a{color:var(--link)}\
+.pv{display:grid;gap:.6rem}\
+.panel .pv .hint{margin-left:2.65rem}\
+.panel a.tg{display:flex;gap:.6rem;align-items:center;color:var(--fg);text-decoration:none}\
+.knob{flex:none;position:relative;width:2rem;height:1.1rem;border-radius:1rem;\
+background:var(--line);transition:background .15s}\
+.knob::after{content:\"\";position:absolute;top:.15rem;left:.15rem;width:.8rem;height:.8rem;\
+border-radius:50%;background:var(--bg);transition:left .15s}\
+.tg[aria-checked=true] .knob{background:var(--accent)}\
+.tg[aria-checked=true] .knob::after{left:1.05rem}\
+.tg:hover .knob,.tg:focus-visible .knob{outline:2px solid var(--accent);outline-offset:1px}\
 .src{margin:.75rem 0 0;font-size:.8rem;color:var(--muted)}\
 .src a{color:var(--link)}\
 .sw{display:inline-block;width:.8em;height:.8em;margin:0 .2em -.1em 0;border-radius:.2em;\
@@ -1466,10 +1476,9 @@ fn settings_form(query: &str, autofocus: bool, settings: &Settings) -> String {
         .map(history::HistoryView::settings_html)
         .unwrap_or_default();
     let private = if settings.private {
-        "<p class=\"pv\"><a href=\"/private\">Search privately</a>: your browser looks up the \
-         results itself, so this site never sees what you search for.</p>"
+        private_toggle(false)
     } else {
-        ""
+        String::new()
     };
     format!(
         "<form action=\"/search\" method=\"get\" role=\"search\">\
@@ -1484,6 +1493,24 @@ fn settings_form(query: &str, autofocus: bool, settings: &Settings) -> String {
         escape_html(query),
         if autofocus { " autofocus" } else { "" },
         if options.only_country { " checked" } else { "" }
+    )
+}
+
+/// The gear's "Private search" switch, shown only where the node serves
+/// private search. It is a link, not a form field, so turning it on never
+/// sends what is typed in the search box: it opens `/private`, and turning
+/// it off there goes back to normal search.
+fn private_toggle(on: bool) -> String {
+    let (href, checked) = if on {
+        ("/", "true")
+    } else {
+        ("/private", "false")
+    };
+    format!(
+        "<div class=\"pv\"><a class=\"tg\" href=\"{href}\" role=\"switch\" \
+         aria-checked=\"{checked}\"><span class=\"knob\" aria-hidden=\"true\"></span>\
+         Private search</a><p class=\"hint\">Your browser looks up the results itself, so \
+         this site never sees what you search for. Needs JavaScript.</p></div>"
     )
 }
 
@@ -3288,6 +3315,22 @@ mod tests {
         assert!(on.contains("name=\"net\" value=\"1\" checked> Use the Plumb network"));
         assert!(on.contains("without sending query text"));
         assert!(on.contains("Missing data may wait for a background download"));
+    }
+
+    #[test]
+    fn the_private_switch_shows_only_where_private_search_runs() {
+        let mut settings = no_settings();
+        let off = settings_form("x", false, &settings);
+        assert!(!off.contains("Private search"), "{off}");
+        settings.private = true;
+        let on = settings_form("x", false, &settings);
+        // A link, so turning it on never submits what was typed.
+        assert!(
+            on.contains("href=\"/private\" role=\"switch\" aria-checked=\"false\""),
+            "{on}"
+        );
+        assert!(!on.contains("name=\"private\""));
+        assert!(private_toggle(true).contains("href=\"/\" role=\"switch\" aria-checked=\"true\""));
     }
 
     #[test]
