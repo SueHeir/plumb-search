@@ -238,7 +238,7 @@ async fn set_up(inner: &Arc<Inner>) -> Result<()> {
             inner.update_saved(|saved| *saved = fresh)?;
             save_seed_records(inner, &records)?;
             inner.check_stop()?;
-            build(inner, records)
+            build(inner, &records)
         })
         .await?;
         return put_in_service(inner, built).await;
