@@ -32,6 +32,7 @@ pub mod hash;
 pub mod joining;
 pub mod node;
 pub mod oblivious;
+pub mod pages;
 pub mod pir;
 pub mod popularity;
 pub mod proto;
@@ -47,6 +48,7 @@ pub use joining::{default_bootstrap, JoinProblem, PeerView, Route, DEFAULT_BOOTS
 pub use libp2p::multiaddr::Protocol;
 pub use libp2p::{Multiaddr, PeerId};
 pub use node::{load_or_create_key, start, CreditsAt, NetConfig, NetHandle, NetStatus};
+pub use pages::PagesChunk;
 pub use popularity::{PickLog, PopularityTable, Report};
 pub use search::{FoundSite, NetSearch};
 pub use store::CrawlerView;
