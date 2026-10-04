@@ -688,3 +688,89 @@ async fn nodes_send_rounds_of_bucket_requests_without_searching() {
     h.handle.shutdown().await;
     r.handle.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_node_fills_its_space_from_a_node_it_trusts_and_no_other() {
+    // S holds crawls of many sites; F trusts S, U trusts nobody.
+    let now = now_unix();
+    let mut local: Vec<SiteRecord> = (0..30u32)
+        .map(|i| {
+            let mut record = SiteRecord::new(format!("filler{i}.com"));
+            record.signals.tranco_rank = Some(i + 1);
+            if i % 3 != 1 {
+                record.title = Some(format!("Filler {i}"));
+                record.crawled_at = Some(now - 3_600);
+            }
+            record
+        })
+        .collect();
+    local.reverse();
+    let s = Node::start(true, vec![], local).await;
+    let s_id = s.handle.peer_id();
+    let s_addr = s.addr().await;
+    let f = Node::start_config(
+        tempfile::tempdir().unwrap(),
+        false,
+        vec![s_addr.clone()],
+        vec![],
+        true,
+        |c| c.trusted_peers = vec![s_id],
+    )
+    .await;
+    let u = Node::start_config(
+        tempfile::tempdir().unwrap(),
+        false,
+        vec![s_addr],
+        vec![],
+        true,
+        |c| c.trusted_peers = vec![],
+    )
+    .await;
+
+    // Best-ranked first, crawled sites only, a stretch at a time.
+    let first = loop {
+        if let Some(page) = f.handle.fill(None, 0, 5).await.unwrap() {
+            break page;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    assert_eq!(first.peer, s_id);
+    assert_eq!(first.total, 30);
+    let domains: Vec<&str> = first.records.iter().map(|r| r.domain.as_str()).collect();
+    assert_eq!(
+        domains,
+        [
+            "filler0.com",
+            "filler2.com",
+            "filler3.com",
+            "filler5.com",
+            "filler6.com"
+        ]
+    );
+    assert!(first.records.iter().all(|r| r.crawled_at.is_some()));
+    let mut filled = first.records.len();
+    let mut from = first.next;
+    loop {
+        let page = f.handle.fill(Some(s_id), from, 5).await.unwrap().unwrap();
+        if page.busy {
+            // Asked too often this minute: S turns F away for now.
+            break;
+        }
+        filled += page.records.len();
+        from = page.next;
+        if page.done() {
+            break;
+        }
+    }
+    assert!(filled >= 10, "filled {filled}");
+    wait_for(|| (s.handle.status().fill_records_served >= 10).then_some(())).await;
+
+    // U is connected to S too, but takes nothing from a node it does not
+    // trust.
+    wait_for(|| (u.handle.status().connected_peers >= 1).then_some(())).await;
+    assert!(u.handle.fill(None, 0, 5).await.unwrap().is_none());
+
+    f.handle.shutdown().await;
+    u.handle.shutdown().await;
+    s.handle.shutdown().await;
+}

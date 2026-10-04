@@ -100,6 +100,7 @@ pub mod backup;
 pub mod control;
 mod embedding;
 pub mod features;
+mod fill;
 pub mod journal;
 mod network;
 pub mod schedule;
@@ -109,6 +110,7 @@ mod worker;
 #[cfg(test)]
 mod tests;
 
+pub use fill::FillStatus;
 pub use journal::{LogEntry, LogLevel};
 pub use schedule::{CrawlHours, Workload};
 use store::{DirLock, Paths, SavedState};
@@ -459,6 +461,10 @@ pub struct Status {
     /// The node's place in the Plumb network, when it has joined it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network: Option<plumb_net::NetStatus>,
+    /// Filling free space with trusted nodes' crawls, when in the network
+    /// with filling on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fill: Option<FillStatus>,
     /// Homepages still to crawl in the round under way (the crawl after
     /// setup or a refresh); 0 when none is under way.
     pub crawl_left: u64,
@@ -850,6 +856,8 @@ struct Inner {
     net: std::sync::OnceLock<Arc<plumb_net::NetHandle>>,
     /// Records in the network inbox not yet folded in.
     inbox_records: std::sync::atomic::AtomicU64,
+    /// How far filling free space with the network's crawls got.
+    fill: Mutex<fill::FillState>,
     /// When this node last put an index in service (Unix time; 0 for not
     /// since it started).
     last_build: std::sync::atomic::AtomicU64,
@@ -1023,6 +1031,7 @@ impl Inner {
     ) -> Self {
         let backoff = worker::Backoff::new(config.retry_wait, config.max_retry_wait);
         let journal = journal::Journal::open(&opened.paths.data);
+        let fill_state = fill::FillState::load(&opened.paths.net);
         Inner {
             config,
             paths: opened.paths,
@@ -1046,6 +1055,7 @@ impl Inner {
             }),
             net: std::sync::OnceLock::new(),
             inbox_records: std::sync::atomic::AtomicU64::new(0),
+            fill: Mutex::new(fill_state),
             last_build: std::sync::atomic::AtomicU64::new(0),
             inbox_lock: Mutex::new(()),
             buckets_rebuilt: AtomicBool::new(false),
@@ -1087,6 +1097,12 @@ impl Inner {
             next_refresh: self.next_refresh(&saved),
             version: env!("CARGO_PKG_VERSION").to_string(),
             network: network::handle(self).map(|net| net.status()),
+            fill: self
+                .config
+                .network
+                .as_ref()
+                .filter(|net| net.fill && network::handle(self).is_some())
+                .map(|_| self.fill_state().status()),
             crawl_left: saved.crawl_left as u64,
             meaning_sites: self.meaning.get().map(|meaning| meaning.len() as u64),
             meaning_work: self.meaning_work(),

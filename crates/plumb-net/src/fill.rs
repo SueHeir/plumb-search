@@ -1,0 +1,205 @@
+//! Filling a node's free space with the network's crawls (Liz,
+//! 2026-10-04: "nodes should have a way to request to fill their available
+//! space with crawler data").
+//!
+//! A node takes in the crawls the network shares as they are made, but one
+//! that just joined holds only the last few days of them, and the network
+//! has crawled far more. So a node with room asks a node it trusts (see
+//! [`crate::NetConfig::trusted_peers`]) for its crawled sites over
+//! `/plumb/fill/1`, a stretch at a time, best-ranked first: the order its
+//! [`crate::BucketTable`] keeps them in. The asker stops once its storage
+//! budget is reached, so it keeps the best-known sites that fit.
+//!
+//! These records come from the answering node's own index, with no crawler
+//! signature behind each one, so they are taken only from trusted nodes:
+//! the operator vouches for what that node accepted. Every node trusts the
+//! plumbsearch.org node unless told otherwise.
+//!
+//! A node answers at most [`MAX_FILLING`] fill requests at once and
+//! [`FILL_REQUESTS_PER_MINUTE`] from one node, so a node filling up cannot
+//! swamp a small server; it is told it is busy and asks again later.
+
+use anyhow::{ensure, Context, Result};
+use libp2p::PeerId;
+use plumb_core::{canonical_domain, SiteRecord};
+
+use crate::assign::EPOCH_SECS;
+use crate::batch::MAX_RECORD_BYTES;
+use crate::bucket::BucketSource;
+use crate::proto::FillResponse;
+
+/// Most records sent for one fill request.
+pub const MAX_FILL_RECORDS: u32 = 1_000;
+
+/// Most sites looked at for one fill request, crawled or not.
+pub const MAX_FILL_SCAN: usize = 10_000;
+
+/// Fill requests a node answers at once; more are told it is busy.
+pub const MAX_FILLING: usize = 2;
+
+/// Fill requests a node answers from one node a minute.
+pub const FILL_REQUESTS_PER_MINUTE: u32 = 6;
+
+/// What a trusted node sent of its crawled sites.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FillPage {
+    /// The node that answered.
+    pub peer: PeerId,
+    /// Its crawled sites, cut down by [`accept_filled`].
+    pub records: Vec<SiteRecord>,
+    /// Where to ask from next; `total` once its list is done.
+    pub next: u64,
+    /// Sites in its list, crawled or not.
+    pub total: u64,
+    /// It was busy and sent nothing; ask again later.
+    pub busy: bool,
+    /// Bytes of records received.
+    pub bytes: u64,
+}
+
+impl FillPage {
+    /// Whether the answering node's list is done.
+    pub fn done(&self) -> bool {
+        !self.busy && self.next >= self.total
+    }
+}
+
+/// The answer to a fill request for `count` records from `from`: the
+/// crawled sites among the next [`MAX_FILL_SCAN`] of the list.
+pub fn answer(source: &dyn BucketSource, from: u64, count: u32) -> FillResponse {
+    let count = count.min(MAX_FILL_RECORDS) as usize;
+    let mut response = FillResponse {
+        records: Vec::new(),
+        next: from,
+        total: 0,
+        busy: false,
+    };
+    let Ok(start) = usize::try_from(from) else {
+        return response;
+    };
+    let Some((lines, total)) = source.ranked(start, MAX_FILL_SCAN) else {
+        return response;
+    };
+    response.total = total as u64;
+    response.next = (start + lines.len()) as u64;
+    for (i, line) in lines.into_iter().enumerate() {
+        if response.records.len() == count {
+            response.next = (start + i) as u64;
+            break;
+        }
+        // Keys are never escaped in a record's JSON and string values
+        // always are, so this is only ever the crawl time's key.
+        if line.len() <= MAX_RECORD_BYTES && line.contains("\"crawled_at\":") {
+            response.records.push(line);
+        }
+    }
+    response
+}
+
+/// A crawled site a trusted node sent, as this node keeps it: its page
+/// fields, names, link text and ranks, without the answering node's own
+/// bookkeeping (crawl tries, redirects, icon). `None` for a record that
+/// does not parse, is too long, names no registrable domain, or was never
+/// crawled.
+pub fn accept_filled(line: &str, now: u64) -> Option<SiteRecord> {
+    parse(line, now).ok()
+}
+
+fn parse(line: &str, now: u64) -> Result<SiteRecord> {
+    ensure!(line.len() <= MAX_RECORD_BYTES, "a record is too long");
+    let mut record: SiteRecord = serde_json::from_str(line).context("a record does not parse")?;
+    record.domain = canonical_domain(&record.domain).context("not a registrable domain")?;
+    let crawled_at = record.crawled_at.context("never crawled")?;
+    ensure!(crawled_at <= now + EPOCH_SECS / 24, "crawled in the future");
+    record.crawl_attempted_at = None;
+    record.crawl_failures = 0;
+    record.redirect = None;
+    record.icon = None;
+    Ok(record)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::BucketTable;
+
+    fn site(domain: &str, tranco: u32, crawled: bool) -> SiteRecord {
+        let mut record = SiteRecord::new(domain);
+        record.signals.tranco_rank = Some(tranco);
+        if crawled {
+            record.title = Some(format!("{domain} home"));
+            record.crawled_at = Some(1_000);
+        }
+        record
+    }
+
+    #[test]
+    fn answers_crawled_sites_best_ranked_first_a_stretch_at_a_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let records = vec![
+            site("third.com", 3, true),
+            site("first.com", 1, true),
+            site("second.com", 2, false),
+            site("fourth.com", 4, true),
+        ];
+        let table = BucketTable::build(&dir.path().join("b"), &records).unwrap();
+        let ranked = table.ranked(1, 2).unwrap();
+        assert!(ranked[0].contains("second.com") && ranked[1].contains("third.com"));
+        assert!(table.ranked(4, 10).unwrap().is_empty());
+
+        let first = answer(&table, 0, 2);
+        assert_eq!(first.total, 4);
+        let domains: Vec<String> = first
+            .records
+            .iter()
+            .map(|line| accept_filled(line, 2_000).unwrap().domain)
+            .collect();
+        // second.com was never crawled, so it is skipped.
+        assert_eq!(domains, ["first.com", "third.com"]);
+        assert_eq!(first.next, 3);
+
+        let rest = answer(&table, first.next, 2);
+        assert_eq!(rest.records.len(), 1);
+        assert!(rest.records[0].contains("fourth.com"));
+        assert_eq!(rest.next, 4);
+        assert_eq!(answer(&table, 4, 2).records.len(), 0);
+    }
+
+    #[test]
+    fn a_node_without_a_table_sends_nothing() {
+        struct Empty;
+        impl BucketSource for Empty {
+            fn bucket(&self, _: u32) -> Option<Vec<String>> {
+                None
+            }
+        }
+        let response = answer(&Empty, 0, 10);
+        assert!(response.records.is_empty());
+        assert_eq!((response.next, response.total), (0, 0));
+    }
+
+    #[test]
+    fn keeps_what_a_crawl_says_but_not_the_senders_bookkeeping() {
+        let mut record = site("Example.COM", 5, true);
+        record.crawl_attempted_at = Some(1_500);
+        record.crawl_failures = 2;
+        record.icon = Some("png".into());
+        let line = serde_json::to_string(&record).unwrap();
+        let kept = accept_filled(&line, 2_000).unwrap();
+        assert_eq!(kept.domain, "example.com");
+        assert_eq!(kept.signals.tranco_rank, Some(5));
+        assert_eq!(kept.title.as_deref(), Some("Example.COM home"));
+        assert_eq!(
+            (kept.crawl_attempted_at, kept.crawl_failures, kept.icon),
+            (None, 0, None)
+        );
+
+        let uncrawled = serde_json::to_string(&site("a.com", 1, false)).unwrap();
+        assert!(accept_filled(&uncrawled, 2_000).is_none());
+        let mut future = site("b.com", 1, true);
+        future.crawled_at = Some(1_000_000);
+        let future = serde_json::to_string(&future).unwrap();
+        assert!(accept_filled(&future, 2_000).is_none());
+        assert!(accept_filled("not json", 2_000).is_none());
+    }
+}

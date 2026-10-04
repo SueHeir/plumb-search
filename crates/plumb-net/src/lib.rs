@@ -27,6 +27,7 @@ pub mod batch;
 pub mod bucket;
 pub mod cache;
 pub mod credits;
+pub mod fill;
 pub mod hash;
 pub mod joining;
 pub mod node;
@@ -40,6 +41,7 @@ pub mod store;
 pub mod throwaway;
 
 pub use bucket::{BucketSource, BucketTable, BUCKETS_PER_SEARCH};
+pub use fill::FillPage;
 pub use joining::{default_bootstrap, JoinProblem, PeerView, Route, DEFAULT_BOOTSTRAP};
 pub use libp2p::multiaddr::Protocol;
 pub use libp2p::{Multiaddr, PeerId};

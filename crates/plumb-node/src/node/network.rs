@@ -22,6 +22,9 @@
 //!   also notes which result its web page's users open ([`record_pick`])
 //!   and sends a few reports of those picks a day, at random times
 //!   ([`report_picks`]).
+//! * A node with free space asks the nodes it trusts for their crawled
+//!   sites, best-ranked first, until its storage limit leaves no room (see
+//!   [`super::fill`]).
 //! * A node started with
 //!   [`NodeConfig::publish_records`](super::NodeConfig::publish_records)
 //!   also shares the homepages crawled into another records file, such as
@@ -40,6 +43,7 @@
 //!   popularity.json    what they say, as last counted
 //!   picks.json         results opened here this week (sharing nodes only)
 //!   published.json     how far publish_records got in its file
+//!   fill.json          how far filling free space got
 //! ```
 
 use std::fs::{self, File, OpenOptions};
@@ -126,6 +130,18 @@ impl BucketSource for ServedIndex {
             }
         }
     }
+
+    fn ranked(&self, from: usize, count: usize) -> Option<(Vec<String>, usize)> {
+        let index = self.0.current()?;
+        let table = index.buckets.as_ref()?;
+        match table.ranked(from, count) {
+            Ok(records) => Some((records, table.len())),
+            Err(err) => {
+                warn!("cannot read the sites from {from}: {err:#}");
+                None
+            }
+        }
+    }
 }
 
 /// Whether this node's indexes need buckets: it answers other nodes'
@@ -192,6 +208,9 @@ pub(super) async fn start(inner: &Arc<Inner>) -> Result<()> {
     }
     if let Some(path) = inner.config.publish_records.clone() {
         tokio::spawn(publish_records(inner.clone(), path));
+    }
+    if inner.config.network.as_ref().is_some_and(|n| n.fill) {
+        tokio::spawn(super::fill::fill_space(inner.clone()));
     }
     let receiver = inner.clone();
     tokio::spawn(async move {
@@ -424,7 +443,7 @@ fn crawl_facts(record: &SiteRecord) -> SiteRecord {
     facts
 }
 
-fn append_inbox(inner: &Inner, records: &[SiteRecord]) -> Result<()> {
+pub(super) fn append_inbox(inner: &Inner, records: &[SiteRecord]) -> Result<()> {
     let path = &inner.paths.inbox;
     let mut lines = Vec::with_capacity(records.len() * 200);
     for record in records {

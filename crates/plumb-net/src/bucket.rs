@@ -42,6 +42,15 @@ pub trait BucketSource: Send + Sync + 'static {
     /// The records of bucket `bucket`, as JSON, or `None` when this node
     /// has no bucket table (yet).
     fn bucket(&self, bucket: u32) -> Option<Vec<String>>;
+
+    /// Records `from..from + count` of all the sites, best-ranked first, as
+    /// JSON, and how many sites there are; `None` when this node has no
+    /// bucket table (yet). For nodes filling their space (see
+    /// [`crate::fill`]).
+    fn ranked(&self, from: usize, count: usize) -> Option<(Vec<String>, usize)> {
+        let _ = (from, count);
+        None
+    }
 }
 
 /// A node's buckets on disk, written next to an index and never changed.
@@ -192,11 +201,43 @@ impl BucketTable {
         }
         Ok(out)
     }
+
+    /// Records `from..from + count` (fewer at the end), best-ranked first,
+    /// as JSON: the table keeps them in that order.
+    pub fn ranked(&self, from: usize, count: usize) -> Result<Vec<String>> {
+        let end = from.saturating_add(count).min(self.records);
+        if from >= end {
+            return Ok(Vec::new());
+        }
+        let mut offsets = File::open(self.dir.join("records.idx"))?;
+        let at = read_u64s(&mut offsets, from as u64, end - from + 1)?;
+        let (start, stop) = (at[0], at[at.len() - 1]);
+        ensure!(
+            at.windows(2).all(|w| w[0] <= w[1]) && stop - start < 1 << 30,
+            "records.idx is damaged"
+        );
+        let mut data = File::open(self.dir.join("records.dat"))?;
+        data.seek(SeekFrom::Start(start))?;
+        let mut raw = vec![0u8; (stop - start) as usize];
+        data.read_exact(&mut raw)?;
+        at.windows(2)
+            .map(|w| {
+                let slice = &raw[(w[0] - start) as usize..(w[1] - start) as usize];
+                String::from_utf8(slice.to_vec()).context("records.dat is damaged")
+            })
+            .collect()
+    }
 }
 
 impl BucketSource for BucketTable {
     fn bucket(&self, bucket: u32) -> Option<Vec<String>> {
         self.get(bucket).ok()
+    }
+
+    fn ranked(&self, from: usize, count: usize) -> Option<(Vec<String>, usize)> {
+        self.ranked(from, count)
+            .ok()
+            .map(|records| (records, self.records))
     }
 }
 

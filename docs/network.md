@@ -86,6 +86,24 @@ A node key costs nothing to make, so one person could run many keys and agree wi
 * When two nodes meet, each asks the other for the headers of the batches it holds from the last 3 epochs, and fetches what it missed. A node that was off for a day catches up this way.
 * Records confirmed by a second crawler (see above) go to `DIR/net/inbox.jsonl` as they arrive. Between two pieces of work, the node folds the inbox into its records file through the same journal crawls use. It rebuilds its index once 2,000 records have come in, or at its next refresh.
 
+## Filling free space
+
+A node takes in crawls as they are shared, but one that just joined
+holds only the last few days of them. So every 10 minutes a node with
+room asks a node it trusts (plumbsearch.org's by default) for its crawled
+sites over `/plumb/fill/1`, 1,000 at a time, best-ranked first, and takes
+them in like any shared crawl (`plumb_net::fill`, `plumb-node`'s
+`node/fill.rs`). It stops at 90% of the storage limit set on the panel,
+so its own crawling keeps room, and at the day's download limit; with no
+storage limit (the server default) it takes the whole list, a full copy
+of the shared index. How far it got is in `DIR/net/fill.json` and in
+`GET /api/status` under `fill`, and the panel's Storage card shows it.
+
+The records come from the trusted node's index, not signed batches, so
+only trusted nodes are asked. A node answers at most 2 fill requests at
+once and 6 a minute from one node, so a new node cannot swamp a small
+server. `--no-fill` turns it off.
+
 ## Network search
 
 The query never leaves the asking node, and the nodes asked cannot tell which node is asking (Liz's choice, 2026-10-03), nor see its IP address.

@@ -111,6 +111,7 @@ fn node_config(args: RunArgs) -> NodeConfig {
         if let Some(days) = args.keep_batches_days {
             net.keep_batches_days = days;
         }
+        net.fill = !args.no_fill;
         if let Some(minutes) = args.round_minutes {
             net.round_every = (minutes > 0).then(|| Duration::from_secs(minutes * 60));
         }

@@ -1291,7 +1291,7 @@ fn render_search_card(body: &mut String, status: &Status, origin: &str, now: u64
 
 fn render_storage_card(body: &mut String, status: &Status, settings: &NodeSettings) {
     let limit = settings.storage_limit_mb.saturating_mul(MB);
-    let rest = if limit == 0 {
+    let mut rest = if limit == 0 {
         "<p>No storage limit.</p>\n".to_string()
     } else {
         format!(
@@ -1300,6 +1300,18 @@ fn render_storage_card(body: &mut String, status: &Status, settings: &NodeSettin
             bytes_words(limit)
         )
     };
+    if let Some(fill) = &status.fill {
+        let detail = fill.detail.trim_end_matches('.');
+        rest.push_str(&format!(
+            "<p>Filled with the network's crawls: {} sites.{}</p>\n",
+            group_thousands(fill.filled),
+            if detail.is_empty() {
+                String::new()
+            } else {
+                format!(" {}.", escape_html(detail))
+            }
+        ));
+    }
     let class = if limit > 0 && status.disk_used >= limit {
         "warn"
     } else {
@@ -2095,6 +2107,7 @@ mod tests {
             can_restart: false,
             paused_until: None,
             network: None,
+            fill: None,
         }
     }
 
@@ -2222,6 +2235,13 @@ mod tests {
         limited.downloaded_total = 1_400_000_000;
         limited.homepages_visited = 3_456;
         limited.crawl_left = 2_000;
+        limited.fill = Some(crate::node::FillStatus {
+            filled: 41_000,
+            position: 60_000,
+            total: 1_190_000,
+            peer: None,
+            detail: "Taking in crawled sites from a trusted node".into(),
+        });
         let (router, node) = app(limited.clone());
         *node.settings.lock().unwrap() = NodeSettings::desktop();
         let body = get_panel(router).await;
@@ -2230,6 +2250,12 @@ mod tests {
             "{body}"
         );
         assert!(body.contains("the 250,000 most popular sites"), "{body}");
+        assert!(
+            body.contains(
+                "Filled with the network's crawls: 41,000 sites. Taking in crawled sites from a trusted node."
+            ),
+            "{body}"
+        );
         assert!(
             body.contains(
                 "href=\"http://127.0.0.1:7586/\" target=\"_blank\">Search in your browser"

@@ -2300,6 +2300,7 @@ mod tests {
             next_refresh: None,
             version: "0.1.0".to_string(),
             network: None,
+            fill: None,
             crawl_left: 0,
             background_updates: true,
             paused: None,

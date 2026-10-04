@@ -74,6 +74,7 @@ use crate::batch::{
 };
 use crate::bucket::{BucketSource, BUCKETS};
 use crate::credits::{CreditStatus, Issuer, Ledger, Pending, Wallet, MAX_ISSUE};
+use crate::fill::{FillPage, FILL_REQUESTS_PER_MINUTE, MAX_FILLING};
 use crate::hash::Hash;
 use crate::joining::{explain_dial_error, peer_of, JoinProblem, PeerView, Route};
 use crate::oblivious::{
@@ -190,6 +191,9 @@ pub struct NetConfig {
     /// that searches look like the rest of the node's traffic (see
     /// [`crate::rounds`]); [`ROUND_EVERY`] unless changed, `None` for none.
     pub round_every: Option<Duration>,
+    /// Ask trusted nodes for their crawls to fill this node's free space
+    /// (see [`crate::fill`]); the node decides how much. On unless changed.
+    pub fill: bool,
 }
 
 impl NetConfig {
@@ -220,6 +224,7 @@ impl NetConfig {
             collect_tokens: true,
             keep_batches_days: RETAIN_EPOCHS,
             round_every: Some(ROUND_EVERY),
+            fill: true,
         }
     }
 }
@@ -246,6 +251,10 @@ pub struct NetStatus {
     pub agreement: AgreementStatus,
     /// Bucket requests from other nodes answered, sealed ones included.
     pub buckets_served: u64,
+    /// Crawled sites sent to nodes filling their space (see
+    /// [`crate::fill`]).
+    #[serde(default)]
+    pub fill_records_served: u64,
     /// Popularity reports held, this week's and last week's.
     pub reports_held: usize,
     /// Popularity reports this node sent.
@@ -340,6 +349,12 @@ enum Command {
         reply: oneshot::Sender<Result<usize>>,
     },
     AskCredits(PeerId, oneshot::Sender<Result<CreditsAt>>),
+    Fill {
+        prefer: Option<PeerId>,
+        from: u64,
+        count: u32,
+        reply: oneshot::Sender<Result<Option<FillPage>>>,
+    },
     Dial(Multiaddr),
     Reconnect,
     Stop,
@@ -606,6 +621,26 @@ impl NetHandle {
         answer.await.context("the network task stopped")?
     }
 
+    /// Asks a connected node this node trusts for its crawled sites from
+    /// position `from` of its list, at most `count` (see [`crate::fill`]):
+    /// `prefer` when it is connected and fills, another one otherwise.
+    /// `None` when no trusted node that fills is connected.
+    pub async fn fill(
+        &self,
+        prefer: Option<PeerId>,
+        from: u64,
+        count: u32,
+    ) -> Result<Option<FillPage>> {
+        let (reply, answer) = oneshot::channel();
+        self.send(Command::Fill {
+            prefer,
+            from,
+            count,
+            reply,
+        })?;
+        answer.await.context("the network task stopped")?
+    }
+
     /// Tokens held that `issuer` signed.
     pub fn tokens_held(&self, issuer: &PeerId) -> usize {
         self.wallet
@@ -713,6 +748,7 @@ struct Behaviour {
     reports: request_response::cbor::Behaviour<ReportRequest, ReportResponse>,
     oblivious: request_response::cbor::Behaviour<ObliviousRequest, ObliviousResponse>,
     credits: request_response::cbor::Behaviour<CreditRequest, CreditResponse>,
+    fill: request_response::cbor::Behaviour<FillRequest, FillResponse>,
 }
 
 /// Starts the network side of a node. Returns its handle and the records
@@ -841,6 +877,10 @@ pub async fn start(
         listing: HashSet::new(),
         unannounced: Vec::new(),
         answering: 0,
+        fill_peers: HashSet::new(),
+        filling: 0,
+        fill_asked: HashMap::new(),
+        fill_asking: HashMap::new(),
         gateway,
         oblivious_peers: HashSet::new(),
         relay_keys: HashMap::new(),
@@ -1101,6 +1141,13 @@ fn build_swarm(key: &Keypair, config: &NetConfig) -> Result<Swarm<Behaviour>> {
                         .set_request_size_maximum(16 * 1024)
                         .set_response_size_maximum(16 * 1024),
                     [(StreamProtocol::new(CREDIT_PROTOCOL), ProtocolSupport::Full)],
+                    request_config.clone(),
+                ),
+                fill: request_response::Behaviour::with_codec(
+                    request_response::cbor::codec::Codec::default()
+                        .set_request_size_maximum(1024)
+                        .set_response_size_maximum(64 * 1024 * 1024),
+                    [(StreamProtocol::new(FILL_PROTOCOL), ProtocolSupport::Full)],
                     request_config,
                 ),
             })
@@ -1116,6 +1163,7 @@ enum Answer {
     Bucket(ResponseChannel<BucketResponse>, BucketResponse),
     Batch(ResponseChannel<BatchResponse>, BatchResponse),
     Report(ResponseChannel<ReportResponse>, ReportResponse),
+    Fill(ResponseChannel<FillResponse>, FillResponse),
     /// Picks counted in a recount of the reports.
     Popularity(usize),
     Sealed(Reply, ObliviousResponse),
@@ -1201,6 +1249,14 @@ struct Task {
     /// Our own headers not yet announced to anyone.
     unannounced: Vec<SignedHeader>,
     answering: usize,
+    /// Connected nodes this node trusts that answer fill requests.
+    fill_peers: HashSet<PeerId>,
+    /// Fill requests being answered.
+    filling: usize,
+    /// Fill requests answered for each node, and the minute counted.
+    fill_asked: HashMap<PeerId, (u64, u32)>,
+    /// Our fill requests not yet answered.
+    fill_asking: HashMap<OutboundRequestId, oneshot::Sender<Result<Option<FillPage>>>>,
     /// This node's keys for sealed requests.
     gateway: Gateway,
     /// Connected nodes that relay and answer sealed requests.
@@ -1366,6 +1422,26 @@ impl Task {
                     .send_request(&peer, CreditRequest::Balance);
                 self.asking.insert(id, Asking::Credits(reply));
             }
+            Command::Fill {
+                prefer,
+                from,
+                count,
+                reply,
+            } => {
+                let peer = prefer
+                    .filter(|peer| self.fill_peers.contains(peer))
+                    .or_else(|| self.fill_peers.iter().next().copied());
+                let Some(peer) = peer else {
+                    let _ = reply.send(Ok(None));
+                    return;
+                };
+                let id = self
+                    .swarm
+                    .behaviour_mut()
+                    .fill
+                    .send_request(&peer, FillRequest { from, count });
+                self.fill_asking.insert(id, reply);
+            }
             Command::Dial(addr) => self.dial(addr),
             Command::Reconnect => {
                 info!("trying the bootstrap nodes again");
@@ -1472,6 +1548,19 @@ impl Task {
                     .behaviour_mut()
                     .reports
                     .send_response(channel, response);
+            }
+            Answer::Fill(channel, response) => {
+                self.filling = self.filling.saturating_sub(1);
+                let sent = response.records.len() as u64;
+                if self
+                    .swarm
+                    .behaviour_mut()
+                    .fill
+                    .send_response(channel, response)
+                    .is_ok()
+                {
+                    self.with_status(|s| s.fill_records_served += sent);
+                }
             }
             Answer::Popularity(picks) => self.with_status(|s| s.popular_picks = picks),
             Answer::Sealed(reply, response) => {
@@ -1645,6 +1734,8 @@ impl Task {
                     self.report_peers.remove(&peer_id);
                     self.oblivious_peers.remove(&peer_id);
                     self.batch_peers.remove(&peer_id);
+                    self.fill_peers.remove(&peer_id);
+                    self.fill_asked.remove(&peer_id);
                     // Asked again on coming back, for what it sent meanwhile.
                     self.listing.remove(&peer_id);
                     self.remote_addrs.remove(&peer_id);
@@ -1726,6 +1817,7 @@ impl Task {
             BehaviourEvent::Reports(event) => self.on_report_event(event),
             BehaviourEvent::Oblivious(event) => self.on_oblivious_event(event),
             BehaviourEvent::Credits(event) => self.on_credit_event(event),
+            BehaviourEvent::Fill(event) => self.on_fill_event(event),
             BehaviourEvent::RelayClient(relay::client::Event::ReservationReqAccepted {
                 relay_peer_id,
                 renewal,
@@ -1861,6 +1953,9 @@ impl Task {
         }
         if supports(OBLIVIOUS_PROTOCOL) {
             self.oblivious_peers.insert(peer);
+        }
+        if supports(FILL_PROTOCOL) && self.config.trusted_peers.contains(&peer) {
+            self.fill_peers.insert(peer);
         }
         if supports(BATCH_PROTOCOL) {
             self.batch_peers.insert(peer);
@@ -2502,6 +2597,99 @@ impl Task {
     fn crawls_count(&self, crawler: &PeerId) -> bool {
         let score = self.agreement.score(crawler);
         self.agreement.vouched(crawler) && score.agreed + score.disagreed >= MIN_JUDGED
+    }
+
+    fn on_fill_event(&mut self, event: request_response::Event<FillRequest, FillResponse>) {
+        match event {
+            request_response::Event::Message {
+                peer,
+                message:
+                    request_response::Message::Request {
+                        request, channel, ..
+                    },
+                ..
+            } => {
+                if !self.admit_fill(peer) {
+                    let _ = self.swarm.behaviour_mut().fill.send_response(
+                        channel,
+                        FillResponse {
+                            records: Vec::new(),
+                            next: request.from,
+                            total: 0,
+                            busy: true,
+                        },
+                    );
+                    return;
+                }
+                debug!("filling {peer} from {}", request.from);
+                self.filling += 1;
+                let source = self.source.clone();
+                let tx = self.answers_tx.clone();
+                tokio::task::spawn_blocking(move || {
+                    let response = crate::fill::answer(&*source, request.from, request.count);
+                    let _ = tx.send(Answer::Fill(channel, response));
+                });
+            }
+            request_response::Event::Message {
+                peer,
+                message:
+                    request_response::Message::Response {
+                        request_id,
+                        response,
+                    },
+                ..
+            } => {
+                let Some(reply) = self.fill_asking.remove(&request_id) else {
+                    return;
+                };
+                let now = now_unix();
+                let bytes = response.records.iter().map(|r| r.len() as u64).sum();
+                let records = response
+                    .records
+                    .iter()
+                    .filter_map(|line| crate::fill::accept_filled(line, now))
+                    .collect();
+                let _ = reply.send(Ok(Some(FillPage {
+                    peer,
+                    records,
+                    next: response.next,
+                    total: response.total,
+                    busy: response.busy,
+                    bytes,
+                })));
+            }
+            request_response::Event::OutboundFailure {
+                peer,
+                request_id,
+                error,
+                ..
+            } => {
+                if let Some(reply) = self.fill_asking.remove(&request_id) {
+                    let _ = reply.send(Err(anyhow::anyhow!("{peer} did not answer: {error}")));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Whether to answer a fill request from `peer` now: this node serves
+    /// its index to others, is not filling [`MAX_FILLING`] nodes already,
+    /// and `peer` asked fewer than [`FILL_REQUESTS_PER_MINUTE`] times this
+    /// minute.
+    fn admit_fill(&mut self, peer: PeerId) -> bool {
+        if !self.config.answer_searches || self.filling >= MAX_FILLING {
+            return false;
+        }
+        let minute = now_unix() / 60;
+        let asked = self.fill_asked.entry(peer).or_insert((minute, 0));
+        if asked.0 != minute {
+            *asked = (minute, 0);
+        }
+        if asked.1 >= FILL_REQUESTS_PER_MINUTE {
+            return false;
+        }
+        asked.1 += 1;
+        true
     }
 
     fn on_credit_event(&mut self, event: request_response::Event<CreditRequest, CreditResponse>) {

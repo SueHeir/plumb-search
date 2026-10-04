@@ -262,6 +262,11 @@ pub struct RunArgs {
     /// Days of the network's crawl batches to keep on disk [default: 35].
     #[arg(long, value_name = "DAYS", requires = "network", value_parser = clap::value_parser!(u64).range(1..))]
     pub keep_batches_days: Option<u64>,
+    /// Don't ask trusted nodes for their crawled sites to fill free space
+    /// (up to 90% of the storage limit set on the panel, or all of their
+    /// sites with no limit).
+    #[arg(long, requires = "network")]
+    pub no_fill: bool,
 }
 
 /// Starting points for `plumb run`.
