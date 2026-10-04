@@ -251,10 +251,12 @@ pub struct RunArgs {
     /// with --trust-peer.
     #[arg(long, requires = "network")]
     pub no_default_trust: bool,
-    /// Offer private search at /private: browsers fetch groups of sites
-    /// (buckets) and rank them themselves. Query text stays in the browser,
-    /// but requested buckets can reveal likely searches. Each index also gets
-    /// its buckets, about as much disk again as the records file.
+    /// Offer private search at /private even off the network. Nodes that
+    /// answer other nodes' searches offer it anyway, since they already
+    /// have the groups of sites (buckets) browsers fetch and rank
+    /// themselves. Query text stays in the browser, but requested buckets
+    /// can reveal likely searches. Buckets take about as much disk again as
+    /// the records file.
     #[arg(long)]
     pub private_search: bool,
     /// Keep a search history for each browser that searches this node, in

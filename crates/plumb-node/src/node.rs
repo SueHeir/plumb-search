@@ -200,10 +200,10 @@ pub struct NodeConfig {
     /// their searches (see [`network`]). Its `dir` is replaced with
     /// `DIR/net`. `None`, the default for now, keeps the node on its own.
     pub network: Option<plumb_net::NetConfig>,
-    /// Serve private search (`/private`): browsers fetch buckets of sites
-    /// and rank them themselves, so the node never sees their searches.
-    /// Each index build also writes its buckets, which take about as much
-    /// disk as the records file. Off by default.
+    /// Build buckets, and so serve private search (`/private`), even when
+    /// the node answers no other nodes' searches. Nodes that do answer them
+    /// have buckets and serve private search anyway. Buckets take about as
+    /// much disk as the records file. Off by default.
     pub private_search: bool,
     /// In the network, crawl any site instead of only those assigned for
     /// the day: this node's slice of all sites, split with those of
@@ -1669,7 +1669,9 @@ impl StatusSource for Inner {
     }
 
     fn bucket_table(&self) -> Option<String> {
-        if !self.config.private_search {
+        // Any node with buckets offers private search: they are already
+        // built for answering other nodes, so it costs only bandwidth.
+        if !network::wants_buckets(self) {
             return None;
         }
         let index = self.current()?;
@@ -1678,7 +1680,7 @@ impl StatusSource for Inner {
     }
 
     fn bucket(&self, table: &str, bucket: u32) -> Option<Result<Vec<String>>> {
-        if !self.config.private_search {
+        if !network::wants_buckets(self) {
             return None;
         }
         let index = self.current()?;
