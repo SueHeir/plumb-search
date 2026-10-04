@@ -137,7 +137,7 @@ fn render_private(available: bool, country: Option<&str>) -> String {
          <form id=\"pq-form\" action=\"/private\" method=\"get\" role=\"search\">\
          <input type=\"search\" id=\"pq-q\" placeholder=\"A site's name, e.g. us bank\" \
          aria-label=\"Search privately\" autocomplete=\"off\" autofocus>\
-         <button type=\"submit\" id=\"pq-go\" disabled>Search</button></form></header>\n\
+         {gear}<button type=\"submit\" id=\"pq-go\" disabled>Search</button></form></header>\n\
          <p class=\"src\"><strong>Private search.</strong> Your browser looks up the results \
          itself: it fetches a few groups of sites from this server, padded with random ones, \
          and picks the matches. Query text stays in your browser. The requested groups \
@@ -145,7 +145,16 @@ fn render_private(available: bool, country: Option<&str>) -> String {
          <a href=\"/\">Normal search</a></p>\n{note}\n\
          <p class=\"s\" id=\"pq-status\" role=\"status\"></p>\n<ol id=\"pq-results\"></ol>\n\
          </main>",
-        escape_html(country.unwrap_or(""))
+        escape_html(country.unwrap_or("")),
+        gear = if available {
+            format!(
+                "<details class=\"gear\"><summary title=\"Settings\" aria-label=\"Settings\">\
+                 &#9881;&#xFE0E;</summary><div class=\"panel\">{}</div></details>",
+                super::private_toggle(true)
+            )
+        } else {
+            String::new()
+        }
     );
     page_with_head("Private search - Plumb Search", &head, &body)
 }
@@ -258,6 +267,10 @@ mod tests {
         let off = render_private(false, None);
         assert!(!off.contains("<script"), "{off}");
         assert!(off.contains("does not offer private search"));
+        // The gear's switch is on here and leads back to normal search.
+        assert!(page.contains("<details class=\"gear\">"));
+        assert!(page.contains("href=\"/\" role=\"switch\" aria-checked=\"true\""));
+        assert!(!off.contains("role=\"switch\""));
     }
 
     #[test]
