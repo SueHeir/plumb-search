@@ -1,0 +1,107 @@
+# Article test for Plumb Search page sets: searches for a Wikipedia
+# article that no site is named, each with the article it should find.
+# The last few name the article and say more.
+#
+# Run it with a page set made by fetch-pages, for example:
+#   plumb eval --index data/index --queries eval/article_queries.tsv \
+#     --pages data/pages/sets/wikipedia-en.tsv.gz
+marie curie	https://en.wikipedia.org/wiki/Marie_Curie
+albert einstein	https://en.wikipedia.org/wiki/Albert_Einstein
+taylor swift	https://en.wikipedia.org/wiki/Taylor_Swift
+barack obama	https://en.wikipedia.org/wiki/Barack_Obama
+abraham lincoln	https://en.wikipedia.org/wiki/Abraham_Lincoln
+leonardo da vinci	https://en.wikipedia.org/wiki/Leonardo_da_Vinci
+shakespeare	https://en.wikipedia.org/wiki/William_Shakespeare
+nikola tesla	https://en.wikipedia.org/wiki/Nikola_Tesla
+frida kahlo	https://en.wikipedia.org/wiki/Frida_Kahlo
+ada lovelace	https://en.wikipedia.org/wiki/Ada_Lovelace
+alan turing	https://en.wikipedia.org/wiki/Alan_Turing
+martin luther king	https://en.wikipedia.org/wiki/Martin_Luther_King_Jr.
+cleopatra	https://en.wikipedia.org/wiki/Cleopatra
+napoleon	https://en.wikipedia.org/wiki/Napoleon
+genghis khan	https://en.wikipedia.org/wiki/Genghis_Khan
+mozart	https://en.wikipedia.org/wiki/Wolfgang_Amadeus_Mozart
+beethoven	https://en.wikipedia.org/wiki/Ludwig_van_Beethoven
+mahatma gandhi	https://en.wikipedia.org/wiki/Mahatma_Gandhi
+queen elizabeth ii	https://en.wikipedia.org/wiki/Elizabeth_II
+serena williams	https://en.wikipedia.org/wiki/Serena_Williams
+michael jordan	https://en.wikipedia.org/wiki/Michael_Jordan
+isaac newton	https://en.wikipedia.org/wiki/Isaac_Newton
+charles darwin	https://en.wikipedia.org/wiki/Charles_Darwin
+galileo	https://en.wikipedia.org/wiki/Galileo_Galilei
+julius caesar	https://en.wikipedia.org/wiki/Julius_Caesar
+photosynthesis	https://en.wikipedia.org/wiki/Photosynthesis
+black hole	https://en.wikipedia.org/wiki/Black_hole
+theory of relativity	https://en.wikipedia.org/wiki/Theory_of_relativity
+quantum mechanics	https://en.wikipedia.org/wiki/Quantum_mechanics
+world war ii	https://en.wikipedia.org/wiki/World_War_II
+world war 1	https://en.wikipedia.org/wiki/World_War_I
+french revolution	https://en.wikipedia.org/wiki/French_Revolution
+cold war	https://en.wikipedia.org/wiki/Cold_War
+renaissance	https://en.wikipedia.org/wiki/Renaissance
+industrial revolution	https://en.wikipedia.org/wiki/Industrial_Revolution
+evolution	https://en.wikipedia.org/wiki/Evolution
+dna	https://en.wikipedia.org/wiki/DNA
+climate change	https://en.wikipedia.org/wiki/Climate_change
+mitochondria	https://en.wikipedia.org/wiki/Mitochondrion
+pythagorean theorem	https://en.wikipedia.org/wiki/Pythagorean_theorem
+fibonacci sequence	https://en.wikipedia.org/wiki/Fibonacci_sequence
+periodic table	https://en.wikipedia.org/wiki/Periodic_table
+big bang	https://en.wikipedia.org/wiki/Big_Bang
+plate tectonics	https://en.wikipedia.org/wiki/Plate_tectonics
+supply and demand	https://en.wikipedia.org/wiki/Supply_and_demand
+stoicism	https://en.wikipedia.org/wiki/Stoicism
+impressionism	https://en.wikipedia.org/wiki/Impressionism
+baroque music	https://en.wikipedia.org/wiki/Baroque_music
+haiku	https://en.wikipedia.org/wiki/Haiku
+sonnet	https://en.wikipedia.org/wiki/Sonnet
+mount everest	https://en.wikipedia.org/wiki/Mount_Everest
+great wall of china	https://en.wikipedia.org/wiki/Great_Wall_of_China
+grand canyon	https://en.wikipedia.org/wiki/Grand_Canyon
+amazon river	https://en.wikipedia.org/wiki/Amazon_River
+sahara	https://en.wikipedia.org/wiki/Sahara
+roman empire	https://en.wikipedia.org/wiki/Roman_Empire
+ottoman empire	https://en.wikipedia.org/wiki/Ottoman_Empire
+byzantine empire	https://en.wikipedia.org/wiki/Byzantine_Empire
+machu picchu	https://en.wikipedia.org/wiki/Machu_Picchu
+stonehenge	https://en.wikipedia.org/wiki/Stonehenge
+antarctica	https://en.wikipedia.org/wiki/Antarctica
+pompeii	https://en.wikipedia.org/wiki/Pompeii
+apollo 11	https://en.wikipedia.org/wiki/Apollo_11
+mona lisa	https://en.wikipedia.org/wiki/Mona_Lisa
+the starry night	https://en.wikipedia.org/wiki/The_Starry_Night
+the great gatsby	https://en.wikipedia.org/wiki/The_Great_Gatsby
+pride and prejudice	https://en.wikipedia.org/wiki/Pride_and_Prejudice
+hamlet	https://en.wikipedia.org/wiki/Hamlet
+the beatles	https://en.wikipedia.org/wiki/The_Beatles
+breaking bad	https://en.wikipedia.org/wiki/Breaking_Bad
+the godfather	https://en.wikipedia.org/wiki/The_Godfather
+covid-19	https://en.wikipedia.org/wiki/COVID-19
+tuberculosis	https://en.wikipedia.org/wiki/Tuberculosis
+penicillin	https://en.wikipedia.org/wiki/Penicillin
+insulin	https://en.wikipedia.org/wiki/Insulin
+turing machine	https://en.wikipedia.org/wiki/Turing_machine
+machine learning	https://en.wikipedia.org/wiki/Machine_learning
+artificial intelligence	https://en.wikipedia.org/wiki/Artificial_intelligence
+blockchain	https://en.wikipedia.org/wiki/Blockchain
+unix	https://en.wikipedia.org/wiki/Unix
+pi	https://en.wikipedia.org/wiki/Pi
+speed of light	https://en.wikipedia.org/wiki/Speed_of_light
+water cycle	https://en.wikipedia.org/wiki/Water_cycle
+human heart	https://en.wikipedia.org/wiki/Heart
+solar system	https://en.wikipedia.org/wiki/Solar_System
+jupiter	https://en.wikipedia.org/wiki/Jupiter
+mars	https://en.wikipedia.org/wiki/Mars
+moon	https://en.wikipedia.org/wiki/Moon
+tyrannosaurus	https://en.wikipedia.org/wiki/Tyrannosaurus
+great barrier reef	https://en.wikipedia.org/wiki/Great_Barrier_Reef
+vincent van gogh	https://en.wikipedia.org/wiki/Vincent_van_Gogh
+pablo picasso	https://en.wikipedia.org/wiki/Pablo_Picasso
+joan of arc	https://en.wikipedia.org/wiki/Joan_of_Arc
+magna carta	https://en.wikipedia.org/wiki/Magna_Carta
+declaration of independence	https://en.wikipedia.org/wiki/United_States_Declaration_of_Independence
+berlin wall	https://en.wikipedia.org/wiki/Berlin_Wall
+chernobyl disaster	https://en.wikipedia.org/wiki/Chernobyl_disaster
+titanic sinking	https://en.wikipedia.org/wiki/Titanic
+photosynthesis equation	https://en.wikipedia.org/wiki/Photosynthesis
+radium discovery marie curie	https://en.wikipedia.org/wiki/Marie_Curie

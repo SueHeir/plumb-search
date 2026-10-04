@@ -5867,6 +5867,7 @@ dependencies = [
  "levenshtein_automata",
  "plumb-core",
  "serde",
+ "serde_json",
  "tantivy",
  "tantivy-fst",
  "tempfile",
@@ -5877,6 +5878,7 @@ name = "plumb-ingest"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bzip2",
  "flate2",
  "futures-util",
  "httpdate",

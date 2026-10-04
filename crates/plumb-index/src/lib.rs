@@ -55,6 +55,7 @@
 //! `us bank` and `US BANK` are the same query and `nestle` finds `Nestlé`.
 
 mod analysis;
+pub mod pages;
 mod replace;
 mod schema;
 mod spell;
@@ -258,6 +259,10 @@ pub struct Hit {
     /// `None` for global sites.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub country: Option<String>,
+    /// The whole query is the site's name (its label or an official name)
+    /// or its hostname.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub named: bool,
 }
 
 /// Per-search choices of the person searching.
@@ -289,6 +294,10 @@ pub struct SiteSearch {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct SearchResults {
     pub hits: Vec<Hit>,
+    /// Single pages (Wikipedia articles) listed with the sites; see
+    /// [`pages::place_pages`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pages: Vec<pages::PlacedPage>,
     /// Offered when the query starts with a site's name and goes on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub site_search: Option<SiteSearch>,
@@ -951,6 +960,7 @@ impl Searcher {
                 text_score,
                 link_score,
                 country,
+                named: name.typed || name.words() >= query.len,
                 tie_break: (addr.segment_ord, domain_ord),
             });
         }
@@ -979,6 +989,7 @@ impl Searcher {
             .collect::<Result<_>>()?;
         let results = SearchResults {
             hits,
+            pages: Vec::new(),
             site_search,
             spelling: None,
         };
@@ -1090,6 +1101,7 @@ impl Searcher {
             text_score: ranked.text_score,
             link_score: ranked.link_score,
             country: ranked.country,
+            named: ranked.named,
         })
     }
 }
@@ -1141,6 +1153,7 @@ struct Ranked {
     text_score: f32,
     link_score: f32,
     country: Option<String>,
+    named: bool,
     tie_break: (u32, u64),
 }
 

@@ -11,6 +11,7 @@ use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+pub mod article;
 mod country;
 pub mod keys;
 mod kinds;
@@ -18,6 +19,7 @@ mod kinds;
 pub mod oblivious;
 mod site_search;
 
+pub use article::{article_url, Article};
 pub use country::{normalize_country, site_country, tld_country};
 pub use kinds::{is_generic_kind, kind_key, other_number, MAX_KINDS};
 pub use site_search::{search_link, search_template_for, SEARCH_TERMS};

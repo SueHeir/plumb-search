@@ -123,6 +123,7 @@ mod tests {
             text_score: 0.8,
             link_score: 0.7,
             country: None,
+            named: false,
         }
     }
 

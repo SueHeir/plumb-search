@@ -582,6 +582,7 @@ mod tests {
             text_score: 0.5,
             link_score: 0.5,
             country: None,
+            named: false,
         }
     }
 

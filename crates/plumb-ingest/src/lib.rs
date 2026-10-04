@@ -18,6 +18,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use flate2::read::MultiGzDecoder;
 
+pub mod articles;
 pub mod builder;
 pub mod ccranks;
 pub mod download;

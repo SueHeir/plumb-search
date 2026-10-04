@@ -48,6 +48,7 @@ use crate::node::features::FeatureSettings;
 use crate::node::{
     CrawlHours, LogEntry, LogLevel, NodeSettings, Phase, Retry, Status, Step, Workload, MB,
 };
+use crate::pages::{thousands, PageSetSize, SETS, SIZE_CHOICES};
 
 /// Seconds between two reloads of the panel while work is under way.
 const BUSY_RELOAD_SECONDS: u32 = 5;
@@ -116,6 +117,12 @@ pub(super) struct SettingsForm {
     /// is kept as it is.
     #[serde(default)]
     fill_shown: Option<String>,
+    /// Sent by forms that show the page sets; without it they are kept.
+    #[serde(default)]
+    page_sets_shown: Option<String>,
+    /// `page_set.<id>`: a [`PageSetSize`] for each page set shown.
+    #[serde(flatten)]
+    other: std::collections::HashMap<String, String>,
 }
 
 /// The retry form: `work`, `wikidata` or `meaning`.
@@ -488,6 +495,24 @@ pub(super) fn settings_from_form(
             }
         },
     };
+    let mut page_sets = current.page_sets.clone();
+    if form.page_sets_shown.is_some() {
+        for set in SETS {
+            let Some(size) = form.other.get(&format!("page_set.{}", set.id)) else {
+                continue;
+            };
+            match size.parse::<PageSetSize>() {
+                Ok(size) => page_sets.set(set.id, size),
+                Err(_) => {
+                    return Err(panel_error(
+                        StatusCode::BAD_REQUEST,
+                        "A page set size is automatic, off, all or a number of pages. Nothing \
+                         was changed.",
+                    ))
+                }
+            }
+        }
+    }
     let mut settings = NodeSettings {
         background_updates: form.background_updates.is_some(),
         download_limit_mb_per_day: download,
@@ -503,6 +528,7 @@ pub(super) fn settings_from_form(
         },
         // Saving the resources is a choice of how much to keep too.
         setup_chosen: true,
+        page_sets,
     };
     settings.set_workload(Workload::from_name(&form.workload).unwrap_or(Workload::Custom));
     Ok(settings)
@@ -2038,17 +2064,62 @@ fn render_settings(body: &mut String, settings: &NodeSettings, base: &str) {
             .collect::<String>()
     };
     let (hour, minute, _) = crate::node::schedule::local_time();
+    let page_sets = render_page_sets(settings);
     body.push_str(&format!(
         "<label><input type=\"checkbox\" name=\"crawl_hours\" value=\"1\"{}>\
          <span>Only crawl between <select name=\"crawl_from\" aria-label=\"From\">{}</select> \
          and <select name=\"crawl_to\" aria-label=\"Until\">{}</select></span></label>\n\
          <p class=\"hint\">On the node\u{2019}s clock, which reads {hour:02}:{minute:02} now. \
          Overnight hours work too, such as 22:00 to 07:00.</p>\n\
-         <button type=\"submit\">Save settings</button>\n</form>\n",
+         {page_sets}<button type=\"submit\">Save settings</button>\n</form>\n",
         checked(settings.crawl_hours.is_some()),
         options(hours.from),
         options(hours.to)
     ));
+}
+
+/// The page sets part of the settings form: how many pages of each set
+/// (Wikipedia articles) to list with the sites.
+fn render_page_sets(settings: &NodeSettings) -> String {
+    let mut out = String::from(
+        "<fieldset class=\"workload\"><legend>Page sets</legend>\n\
+         <input type=\"hidden\" name=\"page_sets_shown\" value=\"1\">\n\
+         <p class=\"hint\">Single pages, such as Wikipedia articles, listed with the sites. \
+         Only each page's title and one-line description are kept, about 100 bytes a page.</p>\n",
+    );
+    for set in SETS {
+        let current = settings.page_sets.size(set.id);
+        let mut choices = vec![PageSetSize::Auto];
+        choices.extend_from_slice(SIZE_CHOICES);
+        if !choices.contains(&current) {
+            choices.push(current);
+        }
+        let options: String = choices
+            .iter()
+            .map(|size| {
+                format!(
+                    "<option value=\"{size}\"{}>{}</option>",
+                    if *size == current { " selected" } else { "" },
+                    escape_html(&size.words())
+                )
+            })
+            .collect();
+        let kept = current.pages(settings.storage_limit_mb).min(set.pages);
+        out.push_str(&format!(
+            "<label>{} <select name=\"page_set.{}\">{options}</select></label>\n\
+             <p class=\"hint\">Keeps {} pages now, about {} MB.</p>\n",
+            escape_html(set.name),
+            escape_html(set.id),
+            if kept == set.pages {
+                format!("all of them, about {}", thousands(set.pages))
+            } else {
+                thousands(kept)
+            },
+            (kept * set.bytes_per_page).div_ceil(1_000_000)
+        ));
+    }
+    out.push_str("</fieldset>\n");
+    out
 }
 
 fn render_browser(body: &mut String, origin: &str) {
