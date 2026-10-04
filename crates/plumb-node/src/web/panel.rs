@@ -287,7 +287,6 @@ pub(super) struct FeaturesForm {
     section: String,
     network: Option<String>,
     search_by_meaning: Option<String>,
-    private_search: Option<String>,
     share_popularity: Option<String>,
     search_history: Option<String>,
     /// Find nodes through the Plumb network's own bootstrap nodes.
@@ -347,7 +346,6 @@ pub(super) fn apply_features_form(
     };
     if section == "search" {
         features.search_by_meaning = form.search_by_meaning.is_some();
-        features.private_search = form.private_search.is_some();
         features.search_history = Some(form.search_history.is_some());
     } else {
         features.network = form.network.is_some();
@@ -1196,10 +1194,10 @@ pub(super) fn render_panel(view: &PanelView<'_>) -> String {
             render_meaning_card(&mut body, status, active, now, base);
             let private = if private_ready {
                 "Ready"
-            } else if !active.private_search {
-                "Off"
             } else if !super::private::in_build() {
                 "Unavailable in this build"
+            } else if !active.network && !active.private_search {
+                "Off until this node joins the Plumb network"
             } else {
                 "Preparing index"
             };
@@ -1213,7 +1211,7 @@ pub(super) fn render_panel(view: &PanelView<'_>) -> String {
                 "",
                 "Private browser search",
                 private,
-                &format!("<p>Rank results in your browser so your query stays there.</p>{link}"),
+                &format!("<p>Rank results in your browser so your query stays there. Visitors turn it on with the Private search switch in the search page’s settings gear. It is on wherever this node has the network’s buckets.</p>{link}"),
             );
             body.push_str("</section>");
             if !writable {
@@ -1867,11 +1865,10 @@ fn render_features(
     for (name, label, value, running, hint) in [
         ("network", "Join the Plumb network", saved.network, active.network, "Share signed crawls and search other nodes. Uses port 4001 by default, local discovery, and UPnP; existing server flags still configure transport."),
         ("search_by_meaning", "Search by meaning", saved.search_by_meaning, active.search_by_meaning, "Find sites by topic. Downloads a model (about 130 MB) and builds site vectors in the background."),
-        ("private_search", "Private browser search", saved.private_search, active.private_search, "Adds a Private search switch to the search page\u{2019}s settings gear. Visitors who turn it on search inside their browser, so this node never sees their words. Requires a build with the private-search module and extra disk space for search buckets."),
         ("share_popularity", "Share anonymous popularity", saved.share_popularity, active.share_popularity, "Requires the Plumb network. Reports which results are opened to help improve ranking. Off unless you enable it."),
         ("search_history", "Remember searches", saved.search_history.unwrap_or(active.search_history == Some(true)), active.search_history == Some(true), "Each browser that searches here keeps its own history on this computer: past searches, and the sites opened from them, which come first next time. Nobody sees another browser's history. Turn off on a node strangers can search."),
     ] {
-        if (section == "search") != matches!(name, "search_by_meaning" | "private_search" | "search_history") { continue; }
+        if (section == "search") != matches!(name, "search_by_meaning" | "search_history") { continue; }
         body.push_str(&format!("<div class=\"feature\"><label><input type=\"checkbox\" name=\"{name}\" value=\"1\"{}><span>{label} <span class=\"state\">· currently {}</span></span></label><p class=\"hint\">{hint}</p></div>", if value { " checked" } else { "" }, if running { "on" } else { "off" }));
     }
     if section == "network" {
@@ -2778,7 +2775,7 @@ mod tests {
         }
         let search = get_section(router.clone(), "search").await;
         assert!(search.contains("name=\"search_by_meaning\""));
-        assert!(search.contains("name=\"private_search\""));
+        assert!(!search.contains("name=\"private_search\""));
         assert!(!search.contains("name=\"network\""));
         assert!(search.contains("class=\"wrap node-panel\""));
         let body = get_section(router, "network").await;
@@ -2820,7 +2817,7 @@ mod tests {
         let response = post(
             router.clone(),
             "/app/features",
-            "network=1&private_search=1&search_by_meaning=1&share_popularity=1",
+            "network=1&search_by_meaning=1&share_popularity=1",
             "127.0.0.1:50000",
             Some("http://127.0.0.1:7586"),
         )
@@ -2846,14 +2843,13 @@ mod tests {
         let response = post(
             router.clone(),
             "/app/features",
-            "section=search&private_search=1",
+            "section=search&search_history=1",
             "127.0.0.1:50000",
             None,
         )
         .await;
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
         assert!(node.features.lock().unwrap().network);
-        assert!(node.features.lock().unwrap().private_search);
         assert!(!node.features.lock().unwrap().search_by_meaning);
         assert!(get_section(router.clone(), "network")
             .await

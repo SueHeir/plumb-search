@@ -20,9 +20,10 @@ when saved choices differ from the running node. Resource and feature forms
 never refresh automatically while you edit them.
 
 Meaning search downloads a model and builds vectors in the background.
-Private browser search needs the bundled WebAssembly module and an index
-with buckets; the panel distinguishes disabled, preparing, and unavailable
-states. Desktop installers build and include that module.
+Private browser search is not a setting: it is on whenever the node is in
+the Plumb network (which builds buckets anyway) and the bundled WebAssembly
+module is there. Visitors turn it on for themselves with the Private search
+switch in the search page's settings gear. Desktop installers build and include that module.
 
 Feature choices are stored in `features.json` in the data folder and take
 precedence over startup feature defaults. Delete that file while stopped to
@@ -211,7 +212,7 @@ keeps crawling to some hours of the computer's clock, such as 22:00 to
 07:00. The Crawling card has "Pause for an hour" and "Pause until tomorrow"
 (06:00), and "Resume now" while paused.
 
-Feature changes (the network, search by meaning, private search) apply when
+Feature changes (the network, search by meaning) apply when
 the node starts. In the app the panel then offers "Restart to apply", which
 stops the node and starts it again without quitting the app; a Docker node
 needs its container restarted. While search by meaning downloads its model
