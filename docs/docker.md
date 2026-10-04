@@ -167,7 +167,6 @@ configure the node on the host with the startup flags below, or place
 {
   "network": true,
   "search_by_meaning": false,
-  "private_search": true,
   "share_popularity": false,
   "bootstrap": [
     "/dns4/plumbsearch.org/tcp/4001/p2p/12D3KooWJ2UWUBsxmPfXTfHa8cBBmzifa6kj5pFZKfJXYNQyJ69a",

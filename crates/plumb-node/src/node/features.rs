@@ -155,11 +155,6 @@ impl FeatureSettings {
                 self.search_by_meaning,
             ),
             (
-                "--private-search",
-                config.private_search,
-                self.private_search,
-            ),
-            (
                 "--share-popularity",
                 config.share_popularity,
                 self.share_popularity,
@@ -178,7 +173,9 @@ impl FeatureSettings {
             }
         }
         config.search_by_meaning = self.search_by_meaning;
-        config.private_search = self.private_search;
+        // No longer a panel choice: private search runs wherever there are
+        // buckets. An older save that turned it on still builds them.
+        config.private_search |= self.private_search;
         config.share_popularity = self.share_popularity;
         if let Some(history) = self.search_history {
             config.search_history = history;
