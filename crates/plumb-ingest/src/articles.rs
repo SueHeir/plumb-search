@@ -65,6 +65,9 @@ impl SqlValue<'_> {
     }
 }
 
+/// English Wikipedia's front page, which is in the article namespace.
+const MAIN_PAGE: &str = "Main Page";
+
 /// Reads the rows of `table` in a MySQL dump (as `mysqldump` writes
 /// Wikimedia's), calling `row` with each row's values and the table's
 /// column names, from its `CREATE TABLE`.
@@ -74,9 +77,12 @@ pub fn for_each_row(
     mut row: impl FnMut(&[String], &[SqlValue<'_>]) -> Result<()>,
 ) -> Result<u64> {
     let create = format!("CREATE TABLE `{table}` (");
-    let insert = format!("INSERT INTO `{table}` VALUES ");
+    // Rows follow on the same line (`VALUES (..),(..);`) or, in newer
+    // dumps, one per line after a bare `VALUES` line, until one ends in `;`.
+    let insert = format!("INSERT INTO `{table}` VALUES");
     let mut columns: Vec<String> = Vec::new();
     let mut in_create = false;
+    let mut in_insert = false;
     let mut rows = 0u64;
     for line in split_lines(reader) {
         let line = line?;
@@ -96,7 +102,12 @@ pub fn for_each_row(
             columns.clear();
             continue;
         }
-        let Some(mut rest) = line.strip_prefix(insert.as_bytes()) else {
+        let mut rest: &[u8] = if let Some(rest) = line.strip_prefix(insert.as_bytes()) {
+            in_insert = true;
+            rest
+        } else if in_insert {
+            &line
+        } else {
             continue;
         };
         if columns.is_empty() {
@@ -107,7 +118,12 @@ pub fn for_each_row(
             rest = rest.trim_ascii_start();
             match rest.first() {
                 Some(b'(') => rest = &rest[1..],
-                Some(b',') | Some(b';') => {
+                Some(b',') => {
+                    rest = &rest[1..];
+                    continue;
+                }
+                Some(b';') => {
+                    in_insert = false;
                     rest = &rest[1..];
                     continue;
                 }
@@ -415,7 +431,8 @@ pub fn build_articles(lang: &str, dumps: &ArticleDumps) -> Result<Vec<Article>> 
 
     let mut articles: Vec<Article> = pages
         .into_values()
-        .filter(|page| page.views > 0 && !page.disambiguation)
+        // The main page is the most read page but no article.
+        .filter(|page| page.views > 0 && !page.disambiguation && &*page.title != MAIN_PAGE)
         .map(|mut page| {
             page.aliases
                 .sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
@@ -706,6 +723,40 @@ de.wikipedia Marie_Curie 1 desktop 70000 A1
         .unwrap();
         assert_eq!(titles.len(), 10);
         assert!(titles.contains(&"O'Brien".to_string()));
+    }
+
+    #[test]
+    fn parses_rows_on_lines_of_their_own() {
+        // The layout of the 2026 dumps.
+        let dump = "CREATE TABLE `page` (
+  `page_id` int(8) unsigned NOT NULL,
+  `page_title` varbinary(255) NOT NULL
+) ENGINE=InnoDB;
+INSERT INTO `page` VALUES
+(10,'AccessibleComputing'),
+(12,'Anarchism'),
+(13,'It\\'s; here');
+INSERT INTO `page` VALUES (14,'Next'),(15,'Last');
+UNLOCK TABLES;
+(99,'Not a row')
+";
+        let mut titles = Vec::new();
+        let rows = for_each_row(dump.as_bytes(), "page", |_, values| {
+            titles.push(values[1].as_str().to_string());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(rows, 5);
+        assert_eq!(
+            titles,
+            [
+                "AccessibleComputing",
+                "Anarchism",
+                "It's; here",
+                "Next",
+                "Last"
+            ]
+        );
     }
 
     #[test]
