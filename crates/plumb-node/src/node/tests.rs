@@ -1055,6 +1055,8 @@ async fn a_node_in_the_network_takes_in_other_nodes_crawls_and_searches_them() {
     peer_config.local_discovery = false;
     peer_config.round_every = None;
     peer_config.bootstrap = vec![node_addr.clone()];
+    // The peer trusts the node, so it may fill its space from it.
+    peer_config.trusted_peers = vec![net_status.peer_id.parse().unwrap()];
     let table = plumb_net::BucketTable::build(&peer_dir.path().join("buckets"), &[crawled.clone()])
         .unwrap();
     let (peer, _records) = plumb_net::start(peer_config, Arc::new(table))
@@ -1103,6 +1105,16 @@ async fn a_node_in_the_network_takes_in_other_nodes_crawls_and_searches_them() {
     // The buckets were kept from the first search: the network was not
     // asked again.
     assert!(body.contains("the network was not asked again"), "{body}");
+
+    // The node hands its sites, best-ranked first, to a node filling up.
+    let page = loop {
+        if let Some(page) = peer.fill(None, 0, 50).await.unwrap() {
+            break page;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert_eq!(page.total, status.sites, "{page:?}");
+    assert!(page.done() && !page.busy, "{page:?}");
 
     // And the other way round: the node serves the buckets of its index.
     assert!(dir
@@ -1707,5 +1719,88 @@ async fn the_activity_log_and_backups_cover_a_node_s_life() {
     let log = StatusSource::activity_log(node.inner.as_ref());
     assert!(log.iter().any(|e| e.message == "Stopped"));
     assert!(log.iter().any(|e| e.message.starts_with("Backup made")));
+    node.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_node_fills_its_free_space_with_a_trusted_node_s_crawls() {
+    // A trusted node has crawled sites this one has never heard of.
+    let peer_dir = tempfile::tempdir().unwrap();
+    let peer_id = plumb_net::load_or_create_key(&peer_dir.path().join("node.key"))
+        .unwrap()
+        .public()
+        .to_peer_id();
+    let now = now_unix();
+    let sites: Vec<SiteRecord> = ["harbourmasters.org", "tidetables.net", "uncrawled.org"]
+        .iter()
+        .enumerate()
+        .map(|(i, domain)| {
+            let mut record = SiteRecord::new(*domain);
+            record.signals.tranco_rank = Some(10 + i as u32);
+            if !domain.starts_with("uncrawled") {
+                record.url = Some(format!("https://{domain}/"));
+                record.title = Some(format!("Guild of {domain}"));
+                record.crawled_at = Some(now - 600);
+            }
+            record
+        })
+        .collect();
+    let mut peer_config = plumb_net::NetConfig::new(peer_dir.path().to_path_buf());
+    peer_config.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+    peer_config.upnp = false;
+    peer_config.local_discovery = false;
+    peer_config.round_every = None;
+    let table = plumb_net::BucketTable::build(&peer_dir.path().join("buckets"), &sites).unwrap();
+    let (peer, _records) = plumb_net::start(peer_config, Arc::new(table))
+        .await
+        .unwrap();
+    let peer_addr: plumb_net::Multiaddr = loop {
+        if let Some(addr) = peer.status().listening.first() {
+            break addr.parse().unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+
+    let dir = seeded_dir();
+    let mut config = test_config(dir.path());
+    let mut net = plumb_net::NetConfig::new(PathBuf::new());
+    net.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+    net.upnp = false;
+    net.local_discovery = false;
+    net.round_every = None;
+    net.trusted_peers = vec![peer_id];
+    net.bootstrap = vec![peer_addr.with_p2p(peer_id).unwrap()];
+    config.network = Some(net);
+    let node = start(config).await.unwrap();
+    let addr = node.addr();
+    wait_for(addr, "the first index", ready_and_idle).await;
+    assert!(search(addr, "harbourmasters").await.is_empty());
+
+    // It asks the trusted node for its crawled sites and keeps them.
+    let status = wait_for(addr, "the trusted node's crawls", |s| {
+        s.fill
+            .as_ref()
+            .is_some_and(|f| f.filled == 2 && f.detail.starts_with("Done"))
+    })
+    .await;
+    assert_eq!(status.fill.unwrap().total, 3);
+    node.refresh_now();
+    wait_for(addr, "a new index", |s| {
+        ready_and_idle(s) && s.index.as_deref() != Some("000001")
+    })
+    .await;
+    let hits = search(addr, "harbourmasters").await;
+    assert_eq!(hits[0].domain, "harbourmasters.org");
+    assert_eq!(
+        hits[0].title.as_deref(),
+        Some("Guild of harbourmasters.org")
+    );
+    assert!(search(addr, "uncrawled").await.is_empty());
+    assert!(peer.status().fill_records_served >= 2);
+    let kept: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.path().join("net/fill.json")).unwrap()).unwrap();
+    assert_eq!(kept["filled"], 2);
+
+    peer.shutdown().await;
     node.shutdown().await.unwrap();
 }

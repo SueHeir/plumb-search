@@ -798,6 +798,7 @@ mod end_to_end {
                 can_restart: false,
                 paused_until: None,
                 network: None,
+                fill: None,
             }
         }
         fn settings(&self) -> Option<NodeSettings> {

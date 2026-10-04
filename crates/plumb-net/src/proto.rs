@@ -15,6 +15,9 @@
 //! * Gossip topic `plumb/batches/1`: the [`SignedHeader`] of every new
 //!   batch, as JSON. Nodes that want the batch fetch it with
 //!   `/plumb/batch/1` from the node that passed the header on.
+//! * `/plumb/fill/1`: a stretch of a node's crawled sites, best-ranked
+//!   first, for a node filling its free space (see [`crate::fill`]). Only
+//!   taken from nodes the asker trusts.
 //! * `/plumb/report/1`: hands a popularity [`Report`] to a node, under a
 //!   throwaway identity, or asks a node for the reports of a week it holds.
 //! * Gossip topic `plumb/reports/1`: every popularity report a node is
@@ -37,6 +40,7 @@ use crate::popularity::Report;
 
 pub const BUCKET_PROTOCOL: &str = "/plumb/bucket/1";
 pub const BATCH_PROTOCOL: &str = "/plumb/batch/1";
+pub const FILL_PROTOCOL: &str = "/plumb/fill/1";
 pub const REPORT_PROTOCOL: &str = "/plumb/report/1";
 pub const CREDIT_PROTOCOL: &str = "/plumb/credits/1";
 pub const KAD_PROTOCOL: &str = "/plumb/kad/1.0.0";
@@ -126,6 +130,28 @@ pub enum BatchRequest {
 pub enum BatchResponse {
     Batch(Option<Batch>),
     Headers(Vec<SignedHeader>),
+}
+
+/// Asks for the crawled sites among positions `from..` of the answering
+/// node's list, best-ranked first (see [`crate::fill`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FillRequest {
+    pub from: u64,
+    /// At most [`crate::fill::MAX_FILL_RECORDS`] are sent.
+    pub count: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FillResponse {
+    /// The crawled sites found, as JSON, best-ranked first.
+    pub records: Vec<String>,
+    /// Where to ask from next; `total` once the list is done.
+    pub next: u64,
+    /// Sites in the answering node's list, crawled or not.
+    pub total: u64,
+    /// Turned away for now: it is filling others, or was asked too often.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub busy: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
