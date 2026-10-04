@@ -27,7 +27,7 @@ use axum::{Form, Router};
 use plumb_core::now_unix;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
-use url::Url;
+use url::{Host, Url};
 
 use super::control::{ControlError, ControlView};
 use super::panel::{
@@ -50,7 +50,7 @@ pub(super) struct RemoteNode {
     /// Names the node in this panel's addresses.
     id: String,
     name: String,
-    /// The node's origin, such as `http://192.168.1.20:8080`.
+    /// The node's origin, such as `https://homelab.example:8080`.
     url: String,
     token: String,
 }
@@ -187,7 +187,11 @@ async fn call(
     path: &str,
     body: Option<Vec<u8>>,
 ) -> Result<Vec<u8>, ClientError> {
-    let url = format!("{}{path}", remote.url);
+    // Check saved entries too: files written by older versions can contain
+    // plaintext LAN addresses. Refuse before constructing a bearer request.
+    let origin = parse_address(&remote.url)
+        .map_err(|err| ClientError(format!("Could not connect to this saved node: {err}")))?;
+    let url = format!("{origin}{path}");
     let request = match body {
         Some(body) => client()
             .post(&url)
@@ -254,28 +258,65 @@ async fn fetch_view(remote: &RemoteNode) -> Result<ControlView, ClientError> {
     })
 }
 
-/// The address typed in, as an origin: `192.168.1.20:8080` becomes
-/// `http://192.168.1.20:8080`.
+/// Whether a URL names an actual loopback address, without consulting DNS.
+/// Only the exact `localhost` name is accepted; names below `.localhost` and
+/// DNS names that happen to resolve locally do not get the HTTP exception.
+fn is_loopback(url: &Url) -> bool {
+    match url.host() {
+        Some(Host::Domain("localhost")) => true,
+        Some(Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(Host::Ipv6(ip)) => ip.is_loopback(),
+        _ => false,
+    }
+}
+
+/// A node origin. Omitted schemes default to HTTPS off-host, HTTP for
+/// loopback. Explicit HTTP is allowed only for loopback (for SSH tunnels).
 fn parse_address(text: &str) -> Result<String> {
     let text = text.trim().trim_end_matches('/');
     if text.is_empty() {
         return Err(anyhow!(
-            "Enter the node's address, such as http://192.168.1.20:8080."
+            "Enter the node's HTTPS address, such as https://homelab.example:8080, \
+             or a local tunnel address such as http://127.0.0.1:8080."
         ));
     }
     let with_scheme = if text.contains("://") {
         text.to_string()
     } else {
-        format!("http://{text}")
+        format!("https://{text}")
     };
-    let url = Url::parse(&with_scheme)
+    let mut url = Url::parse(&with_scheme)
         .ok()
         .filter(|url| matches!(url.scheme(), "http" | "https") && url.host().is_some())
         .filter(|url| url.username().is_empty() && url.password().is_none())
         .filter(|url| url.path() == "/" && url.query().is_none() && url.fragment().is_none())
         .ok_or_else(|| {
-            anyhow!("\"{text}\" is not a node address. Use one like http://192.168.1.20:8080.")
+            anyhow!(
+                "This is not a node address. Use an HTTPS origin such as \
+                     https://homelab.example:8080, without credentials, a path, or a query."
+            )
         })?;
+    let loopback = is_loopback(&url);
+    if !text.contains("://") && loopback {
+        // Reparse so a user-supplied :443 is retained instead of being
+        // discarded as HTTPS's default port before switching to HTTP.
+        url = Url::parse(&format!("http://{text}")).expect("validated node origin");
+    }
+    if url.scheme() == "http" {
+        if !loopback {
+            return Err(anyhow!(
+                "Remote control requires HTTPS outside this computer because the token \
+                 grants control of the node. Use an HTTPS address with a valid certificate, \
+                 or an SSH tunnel and connect to http://127.0.0.1:<local-port>. \
+                 Private-network and VPN addresses also require HTTPS."
+            ));
+        }
+        if url.host() == Some(Host::Domain("localhost")) {
+            // Do not rely on a hosts file or DNS response to keep plaintext
+            // localhost credentials local.
+            url.set_host(Some("127.0.0.1")).expect("a valid IPv4 host");
+        }
+    }
     Ok(url.origin().ascii_serialization())
 }
 
@@ -316,9 +357,10 @@ fn render_connect(node: &dyn StatusSource, form: &AddForm, error: Option<&str>) 
          token.</li><li>Enter the node's address and the token here.</li></ol>\
          <form method=\"post\" action=\"/app/nodes\">\
          <label for=\"address\">Address</label>\
-         <input id=\"address\" name=\"address\" required placeholder=\"http://192.168.1.20:8080\" \
+         <input id=\"address\" name=\"address\" required placeholder=\"https://homelab.example:8080\" \
          value=\"{}\" spellcheck=\"false\" autocomplete=\"off\">\
-         <p class=\"hint\">The address you open its search page at, on your local network.</p>\
+         <p class=\"hint\">Use HTTPS with a valid certificate, or an SSH tunnel at \
+         http://127.0.0.1:&lt;local-port&gt;. HTTP is allowed only on this computer.</p>\
          <label for=\"token\">Remote control token</label>\
          <input id=\"token\" name=\"token\" type=\"password\" required \
          placeholder=\"{TOKEN_PREFIX}...\" spellcheck=\"false\" autocomplete=\"off\">\
@@ -683,11 +725,11 @@ mod tests {
     fn reads_node_addresses() {
         assert_eq!(
             parse_address("192.168.1.20:8080").unwrap(),
-            "http://192.168.1.20:8080"
+            "https://192.168.1.20:8080"
         );
         assert_eq!(
-            parse_address(" http://homelab.local:8080/ ").unwrap(),
-            "http://homelab.local:8080"
+            parse_address(" https://homelab.local:8080/ ").unwrap(),
+            "https://homelab.local:8080"
         );
         assert_eq!(
             parse_address("https://plumb.example").unwrap(),
@@ -695,17 +737,54 @@ mod tests {
         );
         assert_eq!(
             parse_address("[fd00::5]:8080").unwrap(),
-            "http://[fd00::5]:8080"
+            "https://[fd00::5]:8080"
         );
+        for (address, origin) in [
+            ("localhost:8080", "http://127.0.0.1:8080"),
+            ("http://LOCALHOST:8080", "http://127.0.0.1:8080"),
+            ("localhost:443", "http://127.0.0.1:443"),
+            ("127.0.0.1:443", "http://127.0.0.1:443"),
+            ("http://127.0.0.2:8080", "http://127.0.0.2:8080"),
+            ("http://2130706433:8080", "http://127.0.0.1:8080"),
+            ("[::1]:8080", "http://[::1]:8080"),
+            ("https://localhost:8080", "https://localhost:8080"),
+            ("example.localhost:8080", "https://example.localhost:8080"),
+        ] {
+            assert_eq!(parse_address(address).unwrap(), origin, "{address}");
+        }
         for bad in [
             "",
             "ftp://x",
             "http://user:pw@x:1",
             "http://x:1/app",
             "http://x:1/?q=1",
+            "https://x/#fragment",
             "not an address",
         ] {
             assert!(parse_address(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn refuses_plaintext_even_on_private_networks_or_local_looking_names() {
+        for address in [
+            "http://192.168.1.20:8080",
+            "http://homelab.local:8080",
+            "http://10.0.0.1:8080",
+            "http://172.17.0.1:8080",
+            "http://100.100.1.2:8080",
+            "http://[fd00::5]:8080",
+            "http://[::ffff:127.0.0.1]:8080",
+            "http://localhost.:8080",
+            "http://example.localhost:8080",
+            "http://localhost.example:8080",
+            "http://0.0.0.0:8080",
+            "http://[::]:8080",
+            "http://example.com",
+        ] {
+            let error = parse_address(address).unwrap_err().to_string();
+            assert!(error.contains("requires HTTPS"), "{address}: {error}");
+            assert!(error.contains("SSH tunnel"), "{address}: {error}");
         }
     }
 
@@ -716,7 +795,7 @@ mod tests {
         let nodes = vec![RemoteNode {
             id: "a1".into(),
             name: "Homelab".into(),
-            url: "http://192.168.1.20:8080".into(),
+            url: "https://192.168.1.20:8080".into(),
             token: "plumb_x".into(),
         }];
         save(dir.path(), &nodes).unwrap();
@@ -1059,9 +1138,12 @@ mod end_to_end {
         assert!(page.contains("href=\"/app/nodes/new\""), "{page}");
 
         // Remote control is still off there.
-        let address = server_url.trim_start_matches("http://");
+        let address =
+            server_url
+                .trim_start_matches("http://")
+                .replacen("127.0.0.1", "localhost", 1);
         let attempt = form(&[
-            ("address", address),
+            ("address", &address),
             ("token", "plumb_abc"),
             ("name", "Homelab"),
         ]);
@@ -1077,7 +1159,11 @@ mod end_to_end {
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(page.contains("did not accept the token"), "{page}");
 
-        let connect = form(&[("address", address), ("token", &token), ("name", "Homelab")]);
+        let connect = form(&[
+            ("address", &address),
+            ("token", &token),
+            ("name", "Homelab"),
+        ]);
         let (status, location, page) =
             panel_request(app.clone(), "POST", "/app/nodes", &connect).await;
         assert_eq!(status, StatusCode::SEE_OTHER, "{page}");
@@ -1138,6 +1224,75 @@ mod end_to_end {
             panel_request(app.clone(), "POST", &format!("{panel}/remove"), "").await;
         assert_eq!(status, StatusCode::SEE_OTHER);
         assert!(load(desktop.dir.path()).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn old_plaintext_entries_are_blocked_before_any_control_request() {
+        // localhost. may resolve to loopback, but is intentionally outside the
+        // literal-loopback policy. A listener catches any accidental send.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let desktop = FakeNode::new(true);
+        let remote = RemoteNode {
+            id: "old".into(),
+            name: "Old plaintext connection".into(),
+            url: format!("http://localhost.:{port}"),
+            token: "plumb_secret_from_old_version".into(),
+        };
+        save(desktop.dir.path(), std::slice::from_ref(&remote)).unwrap();
+        let app = node_router(Arc::new(NoSearch), desktop.clone());
+
+        for (method, path) in [
+            ("GET", "/app/nodes/old"),
+            ("POST", "/app/nodes/old/refresh"),
+        ] {
+            let (status, _, page) = panel_request(app.clone(), method, path, "").await;
+            assert_eq!(status, StatusCode::BAD_GATEWAY, "{page}");
+            assert!(page.contains("requires HTTPS"), "{page}");
+            assert!(page.contains("SSH tunnel"), "{page}");
+            assert!(!page.contains(&remote.token));
+        }
+
+        // Adding the same insecure address cannot send a validation request,
+        // either, nor does a failed connection replace the saved entry.
+        let attempt = form(&[("address", &remote.url), ("token", &remote.token)]);
+        let (status, _, page) = panel_request(app, "POST", "/app/nodes", &attempt).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{page}");
+        assert!(page.contains("requires HTTPS"), "{page}");
+        assert_eq!(load(desktop.dir.path()).unwrap(), vec![remote]);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), listener.accept())
+                .await
+                .is_err(),
+            "refused plaintext requests must not open a connection"
+        );
+    }
+
+    #[tokio::test]
+    async fn saved_lan_http_and_malformed_origins_cannot_reach_the_bearer_client() {
+        for address in [
+            "http://192.168.1.20:8080",
+            "http://homelab.local:8080",
+            "http://[fd00::5]:8080",
+            "http://user:password@127.0.0.1:8080",
+            "http://127.0.0.1:8080/api/control?token=secret",
+        ] {
+            let remote = RemoteNode {
+                id: "old".into(),
+                name: "Old connection".into(),
+                url: address.into(),
+                token: "plumb_secret".into(),
+            };
+            for body in [None, Some(b"{}".to_vec())] {
+                let ClientError(error) = call(&remote, "/api/control", body).await.unwrap_err();
+                assert!(
+                    error.contains("Could not connect to this saved node"),
+                    "{error}"
+                );
+                assert!(!error.contains("password"), "{error}");
+                assert!(!error.contains("secret"), "{error}");
+            }
+        }
     }
 
     #[tokio::test]
