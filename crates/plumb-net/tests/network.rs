@@ -61,6 +61,9 @@ impl Node {
         config.local_discovery = false;
         config.relay_server = relay;
         config.bootstrap = bootstrap;
+        // Background rounds would make the counts below drift; the test
+        // of them turns them on.
+        config.round_every = None;
         tweak(&mut config);
         let source = table(dir.path(), &local);
         let (handle, records) = plumb_net::start(config, source).await.unwrap();
@@ -632,4 +635,56 @@ async fn a_busy_node_answers_searches_that_spend_its_tokens() {
     assert_eq!(a.handle.tokens_held(&r.peer_id()), 8 - spent);
     wait_for(|| (a.handle.status().credits.tokens_spent == spent as u64).then_some(())).await;
     wait_for(|| (r.status().credits.priority_answered == spent as u64).then_some(())).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn nodes_send_rounds_of_bucket_requests_without_searching() {
+    // Three nodes that answer searches, so every request can go through a
+    // third one; A also sends background rounds, often.
+    let r = Node::start(true, vec![], vec![crawled_for(&[], "quay")]).await;
+    let r_addr = r.addr().await;
+    let h = Node::start(false, vec![r_addr.clone()], vec![]).await;
+    let dir = tempfile::tempdir().unwrap();
+    let a = Node::start_config(dir, false, vec![r_addr], vec![], false, |c| {
+        c.round_every = Some(Duration::from_millis(300));
+    })
+    .await;
+    assert_eq!(a.handle.status().rounds.every_secs, Some(0));
+    assert_eq!(h.handle.status().rounds.every_secs, None);
+    wait_for(|| (a.handle.status().relaying_peers >= 2).then_some(())).await;
+
+    // Nobody searched, yet A asks the others for buckets, a round at a
+    // time, sealed through a relay, as a search would.
+    wait_for(|| {
+        let status = a.handle.status();
+        (status.rounds.sent >= 3 && status.rounds.answers >= 6).then_some(())
+    })
+    .await;
+    assert_eq!(h.handle.status().rounds.sent, 0);
+    wait_for(|| {
+        let served = r.handle.status().buckets_served + h.handle.status().buckets_served;
+        let relayed = r.handle.status().requests_relayed + h.handle.status().requests_relayed;
+        (served >= 6 && relayed >= 6).then_some(())
+    })
+    .await;
+
+    // A search is a round like the others, counted with them.
+    let sent = a.handle.status().rounds.sent;
+    let found = a
+        .handle
+        .search("quay", Duration::from_secs(5))
+        .await
+        .unwrap();
+    if found.asked > 0 {
+        assert_eq!(found.buckets, plumb_net::bucket::BUCKETS_PER_SEARCH);
+        assert!(a.handle.status().rounds.sent > sent);
+    }
+    assert!(found
+        .found
+        .iter()
+        .any(|s| s.record.domain.starts_with("quay")));
+
+    a.handle.shutdown().await;
+    h.handle.shutdown().await;
+    r.handle.shutdown().await;
 }

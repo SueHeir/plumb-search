@@ -111,6 +111,9 @@ fn node_config(args: RunArgs) -> NodeConfig {
         if let Some(days) = args.keep_batches_days {
             net.keep_batches_days = days;
         }
+        if let Some(minutes) = args.round_minutes {
+            net.round_every = (minutes > 0).then(|| Duration::from_secs(minutes * 60));
+        }
         config.network = Some(net);
         config.share_popularity = args.share_popularity;
         config.publish_records = args.publish_records;
@@ -335,6 +338,15 @@ mod tests {
         assert_eq!(any.network.unwrap().keep_batches_days, 10);
         assert_eq!(any.crawl_concurrency, Some(64));
         assert_eq!(net.keep_batches_days, 35);
+        assert_eq!(net.round_every, Some(plumb_net::rounds::ROUND_EVERY));
+        let rounds = |minutes: &str| {
+            config(&["--data", "d", "--network", "--round-minutes", minutes])
+                .network
+                .unwrap()
+                .round_every
+        };
+        assert_eq!(rounds("3"), Some(Duration::from_secs(180)));
+        assert_eq!(rounds("0"), None);
         assert!(parse(&["--data", "d", "--network", "--crawl-with", peer]).is_err());
         assert!(parse(&["--data", "d", "--crawl-any-site"]).is_err());
     }

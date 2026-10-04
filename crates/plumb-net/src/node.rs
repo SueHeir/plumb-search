@@ -83,6 +83,7 @@ use crate::oblivious::{
 use crate::popularity::{report_epoch, PopularityTable, Report};
 use crate::proto::*;
 use crate::reports::ReportStore;
+use crate::rounds::{Pace, RoundStatus, ROUND_EVERY};
 use crate::search::{BucketPeer, NetSearch};
 use crate::store::{BatchStore, CrawlerView, RETAIN_EPOCHS};
 
@@ -185,6 +186,10 @@ pub struct NetConfig {
     /// Days of batches kept, [`RETAIN_EPOCHS`] unless changed; fewer for a
     /// node that crawls a lot on a small disk.
     pub keep_batches_days: u64,
+    /// Average time between two background rounds of bucket requests, so
+    /// that searches look like the rest of the node's traffic (see
+    /// [`crate::rounds`]); [`ROUND_EVERY`] unless changed, `None` for none.
+    pub round_every: Option<Duration>,
 }
 
 impl NetConfig {
@@ -214,6 +219,7 @@ impl NetConfig {
             max_answering: MAX_ANSWERING,
             collect_tokens: true,
             keep_batches_days: RETAIN_EPOCHS,
+            round_every: Some(ROUND_EVERY),
         }
     }
 }
@@ -270,6 +276,10 @@ pub struct NetStatus {
     /// updated every minute.
     #[serde(default)]
     pub crawlers: Vec<CrawlerView>,
+    /// This node's rounds of bucket requests, its searches' included (see
+    /// [`crate::rounds`]).
+    #[serde(default)]
+    pub rounds: RoundStatus,
 }
 
 /// How many connected nodes [`NetStatus::peers`] lists.
@@ -286,8 +296,12 @@ pub struct NetHandle {
     wallet: Arc<Mutex<Wallet>>,
     /// Tokens this node's searches spent.
     tokens_spent: Arc<std::sync::atomic::AtomicU64>,
-    /// Buckets this node's own searches fetched (see [`crate::cache`]).
-    cache: crate::cache::BucketCache,
+    /// Buckets this node's own searches and rounds fetched (see
+    /// [`crate::cache`]).
+    cache: Arc<crate::cache::BucketCache>,
+    /// When background rounds go (see [`crate::rounds`]).
+    pace: Arc<Pace>,
+    rounds: Mutex<Option<JoinHandle<()>>>,
     /// Searches under way, at most [`MAX_SEARCHES`]: each one sends many
     /// requests and may spend tokens, and a public node's search page is
     /// open to anyone.
@@ -413,6 +427,11 @@ impl NetHandle {
         .await;
         self.tokens_spent
             .fetch_add(found.priority as u64, std::sync::atomic::Ordering::Relaxed);
+        if found.asked > 0 {
+            // This search was a round: one background round fewer.
+            self.pace.searched();
+            count_round(&self.status, &found);
+        }
         // Two keys of one person can sign the same crawl: a site is
         // confirmed only by crawlers this node counts (see crate::agree).
         let crawlers: Vec<String> = found
@@ -608,6 +627,14 @@ impl NetHandle {
 
     /// Stops the swarm and waits for it. Later calls do nothing.
     pub async fn shutdown(&self) {
+        if let Some(rounds) = self
+            .rounds
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+        {
+            rounds.abort();
+        }
         let _ = self.commands.send(Command::Stop);
         let task = self
             .task
@@ -827,6 +854,25 @@ pub async fn start(
         task.dial(addr.clone());
     }
     let handle = tokio::spawn(task.run(commands_rx, answers_rx));
+    let cache = Arc::new(crate::cache::BucketCache::open(
+        &config.dir.join("bucket-cache"),
+        now_unix(),
+    ));
+    let pace = Arc::new(Pace::new(config.round_every));
+    status
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .rounds
+        .every_secs = pace.every().map(|e| e.as_secs());
+    let rounds = pace.every().is_some().then(|| {
+        tokio::spawn(background_rounds(
+            pace.clone(),
+            commands.clone(),
+            wallet.clone(),
+            cache.clone(),
+            status.clone(),
+        ))
+    });
     Ok((
         NetHandle {
             peer_id,
@@ -836,12 +882,62 @@ pub async fn start(
             popularity,
             wallet,
             tokens_spent,
-            cache: crate::cache::BucketCache::open(&config.dir.join("bucket-cache"), now_unix()),
+            cache,
+            pace,
+            rounds: Mutex::new(rounds),
             searches: Arc::new(tokio::sync::Semaphore::new(MAX_SEARCHES)),
             task: Mutex::new(Some(handle)),
         },
         records_rx,
     ))
+}
+
+/// Sends a background round of bucket requests at random times, as
+/// [`Pace`] says, skipping those a search already sent in their place (see
+/// [`crate::rounds`]). Stops with the network task.
+async fn background_rounds(
+    pace: Arc<Pace>,
+    commands: mpsc::UnboundedSender<Command>,
+    wallet: Arc<Mutex<Wallet>>,
+    cache: Arc<crate::cache::BucketCache>,
+    status: Arc<Mutex<NetStatus>>,
+) {
+    while let Some(wait) = pace.next_wait() {
+        tokio::time::sleep(wait).await;
+        if pace.skip() {
+            continue;
+        }
+        let (reply, peers) = oneshot::channel();
+        if commands
+            .send(Command::Peers(Serving::Buckets, reply))
+            .is_err()
+        {
+            return;
+        }
+        let Ok(peers) = peers.await else {
+            return;
+        };
+        if peers.is_empty() {
+            continue;
+        }
+        let found =
+            crate::search::background_round(&peers, ROUND_WAIT, now_unix(), Some(&wallet), &cache)
+                .await;
+        count_round(&status, &found);
+    }
+}
+
+/// How long a background round waits for its answers: as long as a
+/// search on a node's web page does, so it holds its connections open as
+/// long.
+const ROUND_WAIT: Duration = Duration::from_secs(4);
+
+fn count_round(status: &Mutex<NetStatus>, round: &NetSearch) {
+    let mut status = status.lock().unwrap_or_else(PoisonError::into_inner);
+    let rounds = &mut status.rounds;
+    rounds.sent += 1;
+    rounds.answers += round.answered as u64;
+    rounds.bytes_fetched = rounds.bytes_fetched.saturating_add(round.bytes);
 }
 
 fn build_swarm(key: &Keypair, config: &NetConfig) -> Result<Swarm<Behaviour>> {

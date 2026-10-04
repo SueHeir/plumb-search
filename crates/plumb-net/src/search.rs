@@ -35,7 +35,7 @@ use tracing::{debug, warn};
 
 use crate::agree::{agree, QUORUM};
 use crate::batch::MAX_RECORD_BYTES;
-use crate::bucket::{bucket_of, matches, search_buckets, BUCKETS, BUCKETS_PER_SEARCH};
+use crate::bucket::{bucket_of, matches, search_buckets};
 use crate::cache::BucketCache;
 use crate::credits::Wallet;
 use crate::oblivious::{
@@ -46,6 +46,7 @@ use crate::popularity::Report;
 use crate::proto::{
     BucketRequest, BucketResponse, ReportResponse, BUCKET_PROTOCOL, MAX_EXTRA_PROOFS,
 };
+use crate::rounds::fill_round;
 
 /// Nodes each bucket is asked of, when there are that many, so that one
 /// node cannot hide a site or boost one's popularity alone.
@@ -84,6 +85,9 @@ pub struct NetSearch {
     pub cached: usize,
     /// The sites that match the query, unranked.
     pub found: Vec<FoundSite>,
+    /// Size of the records fetched, for [`crate::rounds::RoundStatus`].
+    #[serde(skip)]
+    pub bytes: u64,
 }
 
 /// A site another node had, as checked.
@@ -126,7 +130,8 @@ pub struct BucketPeer {
 }
 
 /// Searches `peers` for `query`: asks for the query's buckets (padded with
-/// random ones), each of up to [`NODES_PER_BUCKET`] nodes under a
+/// buckets this node has not fetched lately to a round, see
+/// [`crate::rounds`]), each of up to [`NODES_PER_BUCKET`] nodes under a
 /// throwaway identity, and keeps the sites that match the query. A node
 /// that says it is busy is asked again with one of its tokens from
 /// `wallet`, when it holds one.
@@ -141,9 +146,8 @@ pub async fn search(
     let (mut buckets, keys) = search_buckets(query);
     let mut out = NetSearch::default();
     // The query's own buckets this node fetched lately are used as they
-    // are; only the rest are asked for, padded again to as many buckets as
-    // every search asks for, so a search answered partly from here looks
-    // like any other.
+    // are; only the rest are asked for, filled out again to a whole round,
+    // so a search answered partly from here looks like any other round.
     let mut kept: Vec<Vec<crate::proto::BucketRecord>> = Vec::new();
     if let Some(cache) = cache {
         let mut real: Vec<u32> = keys.iter().map(|k| bucket_of(k)).collect();
@@ -164,9 +168,53 @@ pub async fn search(
         buckets = if missing.is_empty() {
             Vec::new()
         } else {
-            pad_buckets(missing)
+            fill_round(missing, Some(cache), now)
         };
     }
+    round(buckets, &keys, kept, peers, wait, now, wallet, cache, out).await
+}
+
+/// A background round (see [`crate::rounds`]): buckets this node has not
+/// fetched lately, asked for exactly as a search's are, and kept in
+/// `cache`.
+pub async fn background_round(
+    peers: &[BucketPeer],
+    wait: Duration,
+    now: u64,
+    wallet: Option<&Mutex<Wallet>>,
+    cache: &BucketCache,
+) -> NetSearch {
+    let buckets = fill_round(Vec::new(), Some(cache), now);
+    let out = NetSearch::default();
+    round(
+        buckets,
+        &[],
+        Vec::new(),
+        peers,
+        wait,
+        now,
+        wallet,
+        Some(cache),
+        out,
+    )
+    .await
+}
+
+/// Asks `peers` for `buckets` and adds the sites that match `keys`, and
+/// those of `kept` answers, to `out`. Every fetched answer that checks out
+/// goes into `cache`.
+#[allow(clippy::too_many_arguments)]
+async fn round(
+    buckets: Vec<u32>,
+    keys: &[String],
+    kept: Vec<Vec<crate::proto::BucketRecord>>,
+    peers: &[BucketPeer],
+    wait: Duration,
+    now: u64,
+    wallet: Option<&Mutex<Wallet>>,
+    cache: Option<&BucketCache>,
+    mut out: NetSearch,
+) -> NetSearch {
     out.buckets = buckets.len();
     let peers = if buckets.is_empty() { &[][..] } else { peers };
     // Spread the buckets over the nodes so that no node gets two buckets
@@ -249,7 +297,7 @@ pub async fn search(
     let mut merged: HashMap<String, FoundSite> = HashMap::new();
     let mut add = |checked: Vec<FoundSite>| {
         for site in checked {
-            if !matches(&site.record, &keys) {
+            if !matches(&site.record, keys) {
                 continue;
             }
             match merged.get_mut(&site.record.domain) {
@@ -280,6 +328,7 @@ pub async fn search(
             out.priority += 1;
         }
         out.answered += 1;
+        out.bytes += records.iter().map(|r| r.record.len() as u64).sum::<u64>();
         if relayed {
             out.relayed += 1;
         }
@@ -315,21 +364,6 @@ fn holds_match(records: &[crate::proto::BucketRecord], keys: &[String]) -> bool 
     records.iter().any(|item| {
         serde_json::from_str::<SiteRecord>(&item.record).is_ok_and(|r| matches(&r, keys))
     })
-}
-
-/// `buckets` (the query's own) and random ones to make up
-/// [`BUCKETS_PER_SEARCH`], in random order, as [`search_buckets`] picks them.
-fn pad_buckets(mut buckets: Vec<u32>) -> Vec<u32> {
-    let mut rng = rand_core::OsRng;
-    buckets.truncate(BUCKETS_PER_SEARCH);
-    while buckets.len() < BUCKETS_PER_SEARCH {
-        let bucket = (rng.next_u64() % u64::from(BUCKETS)) as u32;
-        if !buckets.contains(&bucket) {
-            buckets.push(bucket);
-        }
-    }
-    shuffle(&mut buckets);
-    buckets
 }
 
 /// Asks `target` for a bucket: through one of `through` (relays, tried in

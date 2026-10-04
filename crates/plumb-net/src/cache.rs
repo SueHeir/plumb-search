@@ -1,11 +1,13 @@
-//! Buckets this node fetched for its own network searches, kept so that
-//! the same search, or another one that needs the same buckets, is answered
-//! here instead of asking the network again.
+//! Buckets this node fetched, for its own network searches or in its
+//! background rounds (see [`crate::rounds`]), kept so that a search that
+//! needs the same buckets is answered here instead of asking the network
+//! again.
 //!
-//! What is kept is whole buckets, padding included, never the query or its
-//! results: a bucket holds the sites of many unrelated keys, and the random
-//! padding buckets of a search are kept just like the real ones, so what is
-//! on disk does not say what was searched any more than the requests did.
+//! What is kept is whole buckets, never the query or its results: a bucket
+//! holds the sites of many unrelated keys, and the buckets that filled out
+//! a search's round are kept just like its own, as are those of background
+//! rounds, so what is on disk does not say what was searched any more than
+//! the requests did.
 //!
 //! Only answers whose proofs checked out are kept, and they are checked
 //! again when read (a proof can expire). A bucket is kept for
@@ -91,6 +93,11 @@ impl BucketCache {
         fetched.remove(&bucket);
         let _ = fs::remove_file(self.path(bucket));
         None
+    }
+
+    /// Whether `bucket` was fetched lately enough to be used at `now`.
+    pub fn is_fresh(&self, bucket: u32, now: u64) -> bool {
+        self.lock().get(&bucket).is_some_and(|&at| fresh(at, now))
     }
 
     /// Keeps `answers` as `bucket`'s, fetched at `now`. Nothing is kept

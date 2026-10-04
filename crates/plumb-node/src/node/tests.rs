@@ -1003,6 +1003,7 @@ async fn a_node_in_the_network_takes_in_other_nodes_crawls_and_searches_them() {
     net.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
     net.upnp = false;
     net.local_discovery = false;
+    net.round_every = None;
     config.network = Some(net);
     let node = start(config).await.unwrap();
     let addr = node.addr();
@@ -1047,6 +1048,7 @@ async fn a_node_in_the_network_takes_in_other_nodes_crawls_and_searches_them() {
     peer_config.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
     peer_config.upnp = false;
     peer_config.local_discovery = false;
+    peer_config.round_every = None;
     peer_config.bootstrap = vec![node_addr.clone()];
     let table = plumb_net::BucketTable::build(&peer_dir.path().join("buckets"), &[crawled.clone()])
         .unwrap();
@@ -1144,6 +1146,7 @@ async fn a_node_in_the_network_takes_in_other_nodes_crawls_and_searches_them() {
         c.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
         c.upnp = false;
         c.local_discovery = false;
+        c.round_every = None;
         c.bootstrap = vec![node_addr.clone()];
         c
     };
@@ -1188,6 +1191,7 @@ async fn a_node_sharing_popularity_reports_picks_and_ranks_with_the_networks() {
     net.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
     net.upnp = false;
     net.local_discovery = false;
+    net.round_every = None;
     config.network = Some(net);
     config.share_popularity = true;
     let node = start(config).await.unwrap();
@@ -1221,6 +1225,7 @@ async fn a_node_sharing_popularity_reports_picks_and_ranks_with_the_networks() {
     peer_config.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
     peer_config.upnp = false;
     peer_config.local_discovery = false;
+    peer_config.round_every = None;
     peer_config.bootstrap = vec![node_addr];
     let source =
         plumb_net::BucketTable::build(&peer_dir.path().join("buckets"), &fixture_records())
