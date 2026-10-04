@@ -1,0 +1,39 @@
+digraph Plumb {
+graph [rankdir=TB, bgcolor="white", pad="0.3", nodesep="0.35", ranksep="0.55", fontname="Helvetica", fontsize=18];
+node [shape=box, style="rounded,filled", fillcolor="#eff6ff", color="#94a3b8", fontname="Helvetica", fontsize=12, margin="0.14,0.10"];
+edge [color="#64748b", fontname="Helvetica", fontsize=10];
+label="Plumb component and data map"; labelloc=t;
+seed [label="Public datasets
+Tranco / Common Crawl / Wikidata / Wikipedia"];
+ingest [label="plumb-ingest
+Parse and merge seed data"];
+web [label="Public websites"];
+crawl [label="plumb-crawl
+DNS filtering / robots / bounded fetches"];
+records [label="SiteRecord + RecordSet
+records.jsonl + journal", fillcolor="#fef3c7"];
+index [label="plumb-index
+Tantivy / spelling / ranking"];
+embed [label="plumb-embed
+Local model + vectors"];
+buckets [label="Name bucket tables
+plumb-core keys / plumb-net"];
+peers [label="Other Plumb nodes", fillcolor="#dcfce7"];
+net [label="plumb-net
+Signed batches / agreement / trusted fill"];
+orchestrator [label="plumb-node
+Worker / scheduling / settings / Axum", fillcolor="#dbeafe"];
+desktop [label="plumb-desktop
+Tauri embeds node / tray / panel"];
+browser [label="Browser
+Normal search / WASM private search", fillcolor="#f3e8ff"];
+seed -> ingest -> records; web -> crawl -> records;
+peers -> net [label="batches + trusted fill"]; net -> records [label="inbox merge"];
+crawl -> net [label="publish signed crawls"]; net -> peers [label="gossip / serve"];
+records -> index; records -> embed; records -> buckets;
+index -> orchestrator [label="query results"]; embed -> orchestrator [label="meaning scores"];
+buckets -> orchestrator [label="browser bucket API"]; buckets -> net [label="peer bucket API"];
+desktop -> orchestrator [label="start in process"]; orchestrator -> crawl [label="scheduled work"];
+browser -> orchestrator [label="HTTP query / bucket fetch / panel"];
+orchestrator -> browser [label="HTML / JSON / WASM"];
+}

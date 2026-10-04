@@ -1,0 +1,18 @@
+digraph Plumb {
+graph [rankdir=LR, bgcolor="white", pad="0.3", nodesep="0.35", ranksep="0.55", fontname="Helvetica", fontsize=18];
+node [shape=box, style="rounded,filled", fillcolor="#eff6ff", color="#94a3b8", fontname="Helvetica", fontsize=12, margin="0.14,0.10"];
+edge [color="#64748b", fontname="Helvetica", fontsize=10];
+label="Desktop and remote node control"; labelloc=t;
+panel [label="Desktop WebView\nLocal /app panel"];
+local [label="Embedded Axum server\nLoopback peer + local Host + Origin checks", fillcolor="#dcfce7"];
+store [label="remote-nodes.json\nBearer tokens; Unix mode 0600", fillcolor="#fef3c7"];
+client [label="Node control HTTP client\nNo proxy / no redirects"];
+transport [label="HTTP or HTTPS\nScheme omitted defaults to HTTP", fillcolor="#fee2e2"];
+remote [label="Remote /api/control\nOff by default; token + peer restrictions"];
+hash [label="remote-control.json\nSHA-256 token hash\nConstant-time comparison"];
+settings [label="Status / settings / features\nRefresh / reconnect / retry"];
+panel -> local [label="local form requests"]; local -> store;
+store -> client [label="token + node address"];
+client -> transport [label="Authorization: Bearer"]; transport -> remote;
+hash -> remote [label="authenticate"]; remote -> settings;
+}

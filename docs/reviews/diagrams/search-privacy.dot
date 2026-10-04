@@ -1,0 +1,30 @@
+digraph Plumb {
+graph [rankdir=LR, bgcolor="white", pad="0.3", nodesep="0.35", ranksep="0.55", fontname="Helvetica", fontsize=18];
+node [shape=box, style="rounded,filled", fillcolor="#eff6ff", color="#94a3b8", fontname="Helvetica", fontsize=12, margin="0.14,0.10"];
+edge [color="#64748b", fontname="Helvetica", fontsize=10];
+label="Search modes and what each participant sees"; labelloc=t;
+subgraph cluster_normal { label="Normal local or hosted search"; color="#cbd5e1";
+normal_browser [label="Browser\nFull query"];
+normal_node [label="Serving node\nSees full query + connection address", fillcolor="#fee2e2"];
+local_index [label="Local Tantivy index\nOptional local embeddings"];
+normal_browser -> normal_node [label="GET /search?q=..."]; normal_node -> local_index;
+}
+subgraph cluster_private { label="Private browser search with successful relaying"; color="#cbd5e1";
+private_browser [label="Browser + WASM\nQuery / keys / padding / local ranking", fillcolor="#f3e8ff"];
+relay [label="Serving site acting as relay\nSees client address + target + timing"];
+target [label="Answering peer\nSees bucket + relay address"];
+private_browser -> relay [label="HPKE sealed bucket request"];
+relay -> target [label="sealed request"];
+target -> relay [label="encrypted answer"];
+relay -> private_browser [label="encrypted answer"];
+fallback [label="Direct fallback to serving site\nSite sees address + all four bucket numbers", fillcolor="#fee2e2"];
+private_browser -> fallback [label="no targets OR any relay error", style=dashed, color="#dc2626"];
+}
+subgraph cluster_peer { label="Network search from a node"; color="#cbd5e1";
+asking [label="Asking node\nSees browser's full query"];
+peer_relay [label="Random relay\nThrowaway requester identity"];
+answering [label="Answering peer\nBucket / relay address"];
+asking -> peer_relay -> answering [label="sealed bucket request"];
+asking -> answering [label="direct when no eligible relay", style=dashed, color="#dc2626"];
+}
+}

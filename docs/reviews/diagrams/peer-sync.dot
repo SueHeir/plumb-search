@@ -1,0 +1,21 @@
+digraph Plumb {
+graph [rankdir=LR, bgcolor="white", pad="0.3", nodesep="0.35", ranksep="0.55", fontname="Helvetica", fontsize=18];
+node [shape=box, style="rounded,filled", fillcolor="#eff6ff", color="#94a3b8", fontname="Helvetica", fontsize=12, margin="0.14,0.10"];
+edge [color="#64748b", fontname="Helvetica", fontsize=10];
+label="Peer data acceptance and trust boundaries"; labelloc=t;
+other [label="Other crawlers"];
+header [label="Gossip announcement\nSigned batch header"];
+fetch [label="Fetch batch\nSignature / Merkle root / age / size"];
+untrusted [label="Untrusted crawler path\nAssignment + field filtering"];
+agreement [label="Agreement\nQuorum + local vouches + dispute rechecks"];
+trusted [label="Trusted crawler path\nSingle signer accepted; assignment exempt", fillcolor="#fef3c7"];
+inbox [label="Network inbox -> records journal"];
+fill [label="Trusted seed / fill pages\nNo per-record crawl proofs", fillcolor="#fef3c7"];
+index [label="Rebuilt local index"];
+search [label="Native network search answers"];
+proof [label="Check supplied proofs\nProofless records still allowed"];
+wasm [label="Browser sealed search answers\nCrawl proofs ignored", fillcolor="#fee2e2"];
+other -> header -> fetch; fetch -> untrusted -> agreement -> inbox;
+fetch -> trusted -> inbox; other -> fill -> inbox; inbox -> index;
+other -> search -> proof; other -> wasm;
+}
