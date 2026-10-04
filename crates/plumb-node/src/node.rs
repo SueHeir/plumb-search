@@ -882,6 +882,8 @@ struct Inner {
     last_build: std::sync::atomic::AtomicU64,
     /// Held while the inbox is appended to or moved aside.
     inbox_lock: Mutex<()>,
+    /// Held while the whole records file is in memory ([`Inner::hold_records`]).
+    records_held: Mutex<()>,
     /// Set once the index was rebuilt to add missing buckets.
     buckets_rebuilt: AtomicBool,
     /// The results opened this week, when sharing popularity.
@@ -1084,6 +1086,7 @@ impl Inner {
             fill: Mutex::new(fill_state),
             last_build: std::sync::atomic::AtomicU64::new(0),
             inbox_lock: Mutex::new(()),
+            records_held: Mutex::new(()),
             buckets_rebuilt: AtomicBool::new(false),
             picks: Mutex::new(None),
             settings: Mutex::new(opened.settings),
@@ -1397,6 +1400,17 @@ impl Inner {
 
     fn stopping(&self) -> bool {
         *self.stopped.borrow()
+    }
+
+    /// Waits for, and returns, the turn to load the whole records file: a
+    /// million sites take over a gigabyte in memory, so the background work
+    /// (a crawl, an index build, folding in the network's records) and
+    /// search by meaning, which both read the file, take turns instead of
+    /// holding two copies at once. Held until the set is dropped.
+    fn hold_records(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.records_held
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// `Err(Stopped)` once the node is shutting down.

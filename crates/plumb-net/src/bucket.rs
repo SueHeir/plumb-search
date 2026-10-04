@@ -16,6 +16,7 @@
 //! a few hundred keys and so by thousands of possible searches. The asking
 //! node then keeps the sites that match its keys and ranks them itself.
 
+use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
@@ -72,8 +73,10 @@ pub struct BucketTable {
 impl BucketTable {
     /// Writes the table of `records` into `dir`, which must not exist yet.
     /// Takes about as much disk as the records file, and memory for about
-    /// 12 bytes per key and 4 per bucket entry while it runs.
-    pub fn build(dir: &Path, records: &[SiteRecord]) -> Result<BucketTable> {
+    /// 12 bytes per key and 4 per bucket entry while it runs. `records` may
+    /// be the records themselves or references to them.
+    pub fn build<R: Borrow<SiteRecord>>(dir: &Path, records: &[R]) -> Result<BucketTable> {
+        let records: Vec<&SiteRecord> = records.iter().map(Borrow::borrow).collect();
         ensure!(!dir.exists(), "{} already exists", dir.display());
         let staging = dir.with_extension("staging");
         let _ = fs::remove_dir_all(&staging);

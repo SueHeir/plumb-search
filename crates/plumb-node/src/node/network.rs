@@ -74,6 +74,9 @@ pub(crate) const REBUILD_AFTER_RECORDS: u64 = 2_000;
 /// memory, and a busy network can send 2,000 records every few minutes.
 pub(crate) const NETWORK_REBUILD_GAP: std::time::Duration = std::time::Duration::from_secs(30 * 60);
 
+/// Records from the inbox saved to the records journal at a time.
+const ABSORB_CHUNK: usize = 1_000;
+
 /// Where an index keeps its buckets, inside its directory.
 pub(super) const BUCKETS_DIR: &str = "buckets";
 
@@ -158,7 +161,11 @@ pub(super) fn wants_buckets(inner: &Inner) -> bool {
 /// Writes the buckets of a new index into its directory, for a node that
 /// [`wants_buckets`]. A failure is logged, not raised: the index still
 /// works, it just serves no buckets.
-pub(super) fn build_buckets(inner: &Inner, index_dir: &Path, records: &[SiteRecord]) {
+pub(super) fn build_buckets<R: std::borrow::Borrow<SiteRecord>>(
+    inner: &Inner,
+    index_dir: &Path,
+    records: &[R],
+) {
     if !wants_buckets(inner) {
         return;
     }
@@ -374,6 +381,7 @@ pub(super) async fn publish_new_records(inner: &Arc<Inner>, path: &Path) -> Resu
     let since = {
         let path = path.to_path_buf();
         let marker = marker.clone();
+        let inner = Arc::clone(inner);
         tokio::task::spawn_blocking(move || {
             let published: Published = fs::read(&marker)
                 .ok()
@@ -385,6 +393,7 @@ pub(super) async fn publish_new_records(inner: &Arc<Inner>, path: &Path) -> Resu
             } else {
                 0
             };
+            let _records = inner.hold_records();
             let set = load_records(&path)?;
             let mut crawled: Vec<SiteRecord> = set
                 .iter()
@@ -491,8 +500,12 @@ pub(super) fn absorb_inbox(inner: &Inner) -> Result<u64> {
     }
     let file = File::open(&paths.absorbing)
         .with_context(|| format!("opening {}", paths.absorbing.display()))?;
-    let mut changes = Vec::new();
     let icons = IconStore::new(&paths.icons);
+    let mut store = RecordStore::open(&paths.records);
+    // Saved a part at a time, so an inbox of many thousand records is never
+    // all in memory.
+    let mut changes = Vec::with_capacity(ABSORB_CHUNK);
+    let mut n = 0;
     for line in BufReader::new(file).lines() {
         let line = line.with_context(|| format!("reading {}", paths.absorbing.display()))?;
         // A crash can cut the last line short.
@@ -500,11 +513,17 @@ pub(super) fn absorb_inbox(inner: &Inner) -> Result<u64> {
             keep_shared_icon(&icons, &mut record);
             changes.push(Change::MergeShared { record });
         }
+        if changes.len() >= ABSORB_CHUNK {
+            store.save(&changes)?;
+            n += changes.len() as u64;
+            changes.clear();
+        }
     }
-    let n = changes.len() as u64;
-    let mut store = RecordStore::open(&paths.records);
     store.save(&changes)?;
+    n += changes.len() as u64;
+    drop(changes);
     if store.wants_compaction() {
+        let _records = inner.hold_records();
         let set = load_records(&paths.records)?;
         store.compact(&set)?;
     }

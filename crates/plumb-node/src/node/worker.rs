@@ -25,6 +25,7 @@
 //! fetches of a crawl are simply dropped. Crawls pick homepages and save
 //! their results as `plumb crawl` does ([`crate::crawl`]).
 
+use std::borrow::Borrow;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
@@ -50,7 +51,7 @@ use crate::crawl::{
     SECONDS_PER_DAY,
 };
 use crate::icons::IconStore;
-use crate::records::{load_records, replace_records, RecordStore};
+use crate::records::{load_records, replace_records, sorted_by_link_score, RecordStore};
 use crate::web::{duration_words, group_thousands};
 
 /// A homepage fetched or answered this recently is not due for a crawl, as
@@ -262,7 +263,7 @@ async fn set_up(inner: &Arc<Inner>) -> Result<()> {
         inner.update_saved(|saved| *saved = fresh)?;
         save_seed_records(inner, &records)?;
         inner.check_stop()?;
-        build(inner, records)
+        build(inner, &records)
     })
     .await?;
     put_in_service(inner, built).await
@@ -317,6 +318,7 @@ async fn complete_seed(inner: &Arc<Inner>) -> Result<()> {
         .map(|err| anyhow::anyhow!("{err:#}"));
     let wikidata_missing = wikidata_err.is_some();
     let built = blocking(inner, move |inner| {
+        let _records = inner.hold_records();
         let seed = seed_records(inner, &files)?;
         inner.set_step(Step::Ingesting, "Reading the site records");
         let mut set = load_records(&inner.paths.records)?;
@@ -330,7 +332,7 @@ async fn complete_seed(inner: &Arc<Inner>) -> Result<()> {
         }
         set.extend(seed);
         inner.check_stop()?;
-        let records = set.into_sorted_vec();
+        let records = sorted_by_link_score(&set);
         inner.set_step(
             Step::Ingesting,
             format!(
@@ -338,7 +340,7 @@ async fn complete_seed(inner: &Arc<Inner>) -> Result<()> {
                 group_thousands(records.len() as u64)
             ),
         );
-        replace_records(&inner.paths.records, &records)?;
+        replace_records(&inner.paths.records, records.iter().copied())?;
         inner.update_saved(|saved| {
             saved.wikidata_missing = wikidata_missing;
             saved.quick_start = false;
@@ -349,7 +351,7 @@ async fn complete_seed(inner: &Arc<Inner>) -> Result<()> {
             records.len(),
         );
         inner.check_stop()?;
-        build(inner, records)
+        build(inner, &records)
     })
     .await?;
     // Not put_in_service: this is no refresh, and a round under way goes on.
@@ -657,10 +659,13 @@ fn missing_buckets(inner: &Inner) -> bool {
 /// Builds a new index of the records file and puts it in service.
 async fn rebuild(inner: &Arc<Inner>) -> Result<()> {
     let built = blocking(inner, |inner| {
+        let _records = inner.hold_records();
         inner.set_step(Step::Indexing, "Reading the site records");
-        let records = load_records(&inner.paths.records)?.into_sorted_vec();
+        let set = load_records(&inner.paths.records)?;
         inner.check_stop()?;
-        build(inner, records)
+        // In order by reference: copying a million records into a list
+        // would hold them twice.
+        build(inner, &sorted_by_link_score(&set))
     })
     .await?;
     put_in_service(inner, built).await
@@ -777,6 +782,7 @@ async fn crawl(inner: &Arc<Inner>) -> Result<()> {
 /// out to be nothing to crawl and nothing new to index.
 fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Option<ServingIndex>> {
     let left = inner.saved().crawl_left;
+    let _records = inner.hold_records();
     inner.set_step(Step::Crawling, "Reading the site records");
     let mut set = load_records(&inner.paths.records)?;
     let mut store = RecordStore::open(&inner.paths.records);
@@ -899,7 +905,7 @@ fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Option<ServingIndex
                     totals.attempted,
                     inner.saved().crawl_left
                 );
-                return build(inner, set.into_sorted_vec()).map(Some);
+                return build(inner, &sorted_by_link_score(&set)).map(Some);
             }
             RunEnd::Stopped => {
                 // Paused by the settings or a limit: index what was crawled
@@ -916,7 +922,7 @@ fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Option<ServingIndex
                 if totals.attempted == 0 {
                     return Ok(None);
                 }
-                return build(inner, set.into_sorted_vec()).map(Some);
+                return build(inner, &sorted_by_link_score(&set)).map(Some);
             }
             RunEnd::Offline(offline) => {
                 let proxy = if inner.config.use_system_proxy {
@@ -958,7 +964,7 @@ fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Option<ServingIndex
         return Ok(None);
     }
     inner.check_stop()?;
-    build(inner, set.into_sorted_vec()).map(Some)
+    build(inner, &sorted_by_link_score(&set)).map(Some)
 }
 
 /// Whether the last try at `record`'s homepage fetched it.
@@ -992,7 +998,7 @@ fn save_icons(icons: &IconStore, results: &[CrawlResult]) {
 }
 
 /// Builds an index of `records` in a new numbered directory and opens it.
-fn build(inner: &Inner, records: Vec<SiteRecord>) -> Result<ServingIndex> {
+fn build<R: Borrow<SiteRecord>>(inner: &Inner, records: &[R]) -> Result<ServingIndex> {
     let id = store::next_index_id(&inner.paths);
     let dir = inner.paths.index(id);
     inner.set_step(
@@ -1006,14 +1012,13 @@ fn build(inner: &Inner, records: Vec<SiteRecord>) -> Result<ServingIndex> {
     let steps = if buckets { 2 } else { 1 };
     inner.set_progress(0, steps, "steps");
     let started = Instant::now();
-    let stats = build_index(&dir, &records)
+    let stats = build_index(&dir, records)
         .with_context(|| format!("building the index in {}", dir.display()))?;
     if buckets {
         inner.set_step(Step::Indexing, "Writing the buckets other nodes search");
         inner.set_progress(1, steps, "steps");
     }
-    network::build_buckets(inner, &dir, &records);
-    drop(records);
+    network::build_buckets(inner, &dir, records);
     let index = match ServingIndex::open(id, &dir, inner.rank) {
         Ok(index) => index,
         Err(err) => {

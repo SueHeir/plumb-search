@@ -1167,7 +1167,9 @@ async fn a_node_in_the_network_takes_in_other_nodes_crawls_and_searches_them() {
         c.bootstrap = vec![node_addr.clone()];
         c
     };
-    let empty = plumb_net::BucketTable::build(&second_dir.path().join("buckets"), &[]).unwrap();
+    let empty =
+        plumb_net::BucketTable::build(&second_dir.path().join("buckets"), &[] as &[SiteRecord])
+            .unwrap();
     let (second, _records) = plumb_net::start(second_config, Arc::new(empty))
         .await
         .unwrap();

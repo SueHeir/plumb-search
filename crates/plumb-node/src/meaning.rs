@@ -230,6 +230,18 @@ pub(crate) fn embed_records(
     save: &mut dyn FnMut(&Vectors) -> Result<()>,
     progress: &mut dyn FnMut(usize, usize),
 ) -> Result<Embedded> {
+    let todo = sites_to_embed(vectors, records);
+    embed_sites(embedder, vectors, todo, threads, stop, save, progress)
+}
+
+/// A site [`embed_records`] makes a vector for: its link score, domain,
+/// text hash and text.
+pub(crate) type ToEmbed = (f32, String, plumb_embed::TextHash, String);
+
+/// The first half of [`embed_records`]: drops the vectors of sites not in
+/// `records` and returns the sites to embed, best first. The records are
+/// freed by the time it returns.
+pub(crate) fn sites_to_embed(vectors: &RwLock<Vectors>, records: RecordSet) -> Vec<ToEmbed> {
     let write = || vectors.write().unwrap_or_else(PoisonError::into_inner);
     {
         let domains: HashSet<&str> = records.iter().map(|r| r.domain.as_str()).collect();
@@ -261,7 +273,20 @@ pub(crate) fn embed_records(
             vectors.len()
         );
     }
+    todo
+}
 
+/// The second half of [`embed_records`]: embeds `todo`.
+pub(crate) fn embed_sites(
+    embedder: &Embedder,
+    vectors: &RwLock<Vectors>,
+    todo: Vec<ToEmbed>,
+    threads: usize,
+    stop: &(dyn Fn() -> bool + Sync),
+    save: &mut dyn FnMut(&Vectors) -> Result<()>,
+    progress: &mut dyn FnMut(usize, usize),
+) -> Result<Embedded> {
+    let write = || vectors.write().unwrap_or_else(PoisonError::into_inner);
     let started = Instant::now();
     let done = AtomicUsize::new(0);
     let failed = AtomicUsize::new(0);
