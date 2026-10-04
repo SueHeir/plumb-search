@@ -373,15 +373,20 @@ pub struct PlacedPage {
 ///   query names in full, and others scoring at least
 ///   [`MIN_PARTIAL_SCORE`]; only one when the best site is named by the
 ///   query too.
-/// - A named page comes before the best site when it is more read than
-///   that site is known ([`PageHit::popularity`] against
-///   [`crate::Hit::link_score`]): "marie curie" lists the article before
-///   mariecurie.org.uk, "cvs pharmacy" lists cvs.com before the article.
-///   Otherwise it comes right after that site. Pages named only in part
-///   come after [`PARTIAL_AFTER`] sites.
+/// - A named page comes right after the best site when that site is an
+///   official website ([`crate::Hit::official`]: "tauri" lists tauri.app,
+///   then the article) or better known than the page is read
+///   ([`PageHit::popularity`] against [`crate::Hit::link_score`]).
+///   Otherwise it comes first: "leonardo da vinci" lists the article
+///   before leonardodavinci.net. Pages named only in part come after
+///   [`PARTIAL_AFTER`] sites.
 pub fn place_pages(sites: &[crate::Hit], pages: Vec<PageHit>) -> Vec<PlacedPage> {
     let site_named = sites.first().is_some_and(|hit| hit.named);
-    let best_known = sites.first().map_or(0.0, |hit| hit.link_score);
+    // A named page goes first only when the best site may be a namesake.
+    let page_first = |page: &PageHit| match sites.first() {
+        None => true,
+        Some(site) => !site.official && page.popularity > site.link_score,
+    };
     let most = if site_named { 1 } else { MAX_PAGES_LISTED };
     let mut placed: Vec<PlacedPage> = Vec::new();
     let mut listed = 0;
@@ -403,7 +408,7 @@ pub fn place_pages(sites: &[crate::Hit], pages: Vec<PageHit>) -> Vec<PlacedPage>
         }
         let at = if !hit.named {
             PARTIAL_AFTER
-        } else if hit.popularity > best_known {
+        } else if page_first(&hit) {
             0
         } else {
             1
@@ -505,6 +510,7 @@ mod tests {
             link_score,
             country: None,
             named,
+            official: false,
         }
     }
 
@@ -574,7 +580,12 @@ mod tests {
             vec![found("Marie Curie", None, true, 0.8)],
         );
         assert_eq!(placed[0].at, 0);
-        // ...and a well known one before it, named or not.
+        // ...but not after an official website, however little known...
+        let mut tauri = known_site("tauri.app", true, 0.3);
+        tauri.official = true;
+        let placed = place_pages(&[tauri], vec![found("Tauri", None, true, 0.8)]);
+        assert_eq!(placed[0].at, 1);
+        // ...and a well known one comes before it, named or not.
         for named in [true, false] {
             let placed = place_pages(
                 &[known_site("cvs.com", named, 0.9), site("a.com", false)],
