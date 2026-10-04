@@ -7,6 +7,8 @@
 //! - Common Crawl WAT files: homepage titles, descriptions and inbound link text ([`wat`])
 //! - Wikidata "official website" (P856) statements ([`wikidata`]), and the
 //!   country and kind of the organizations behind them ([`facts`])
+//! - The first sentences of the best-known ones' English Wikipedia
+//!   articles ([`intros`])
 
 use std::borrow::Cow;
 use std::fs::File;
@@ -20,6 +22,7 @@ pub mod builder;
 pub mod ccranks;
 pub mod download;
 pub mod facts;
+pub mod intros;
 pub mod kind_sites;
 pub mod tranco;
 pub mod wat;
@@ -28,6 +31,7 @@ pub mod wikidata;
 pub use builder::Builder;
 pub use ccranks::{load_cc_domain_ranks, CcRank, DEFAULT_CC_RANKS_LIMIT};
 pub use facts::{attach_facts, load_site_facts, FactsByItem, SiteFacts};
+pub use intros::{attach_intros, load_intros, IntrosByItem};
 pub use tranco::{load_tranco, TrancoEntry};
 pub use wat::{
     parse_wat, HomepageMeta, WarcReader, WarcRecord, WatExtract, WatPage, WatStats, WatWriter,

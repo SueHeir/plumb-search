@@ -999,9 +999,9 @@ impl Searcher {
             self.fields.about,
         ];
         Ok(fields.into_iter().any(|field| {
-            doc.get_first(field)
-                .and_then(|value| value.as_str())
-                .is_some_and(|text| names_kind(text, key, words))
+            doc.get_all(field)
+                .filter_map(|value| value.as_str())
+                .any(|text| names_kind(text, key, words))
         }))
     }
 
@@ -1018,7 +1018,8 @@ impl Searcher {
         Ok(Hit {
             url,
             title: text(self.fields.title),
-            // The site's own description, else what Wikidata says it is.
+            // The site's own description, else Wikipedia's, else what
+            // Wikidata says it is.
             description: text(self.fields.description).or_else(|| text(self.fields.about)),
             domain,
             score: ranked.score,

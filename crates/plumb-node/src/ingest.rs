@@ -21,8 +21,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use plumb_core::SiteRecord;
 use plumb_ingest::{
-    attach_facts, load_cc_domain_ranks, load_site_facts, load_tranco, load_wikidata_official_sites,
-    parse_wat, Builder, WatExtract, WatStats,
+    attach_facts, attach_intros, load_cc_domain_ranks, load_intros, load_site_facts, load_tranco,
+    load_wikidata_official_sites, parse_wat, Builder, WatExtract, WatStats,
 };
 use tracing::info;
 
@@ -128,6 +128,16 @@ pub fn run(args: IngestArgs) -> Result<()> {
                 "facts     {:>9} items           ({})",
                 facts.len(),
                 facts_path.display()
+            );
+        }
+        if let Some(intros_path) = &args.wikipedia_intros {
+            let intros = load_intros(intros_path)
+                .with_context(|| format!("loading Wikipedia intros {}", intros_path.display()))?;
+            attach_intros(&mut sites, &intros);
+            println!(
+                "intros    {:>9} items           ({})",
+                intros.len(),
+                intros_path.display()
             );
         }
         builder.add_official_sites(&sites);
@@ -244,6 +254,7 @@ impl FreshSeeds {
             record.country = None;
             record.kinds.clear();
             record.about = None;
+            record.intro = None;
         }
     }
 
@@ -277,6 +288,7 @@ fn check_inputs_exist(args: &IngestArgs) -> Result<()> {
         .chain(&args.wat)
         .chain(&args.wikidata)
         .chain(&args.wikidata_facts)
+        .chain(&args.wikipedia_intros)
         .chain(&args.wikidata_kinds)
         .chain(&args.records)
         .collect();
@@ -326,6 +338,7 @@ mod tests {
             wat: Vec::new(),
             wikidata: None,
             wikidata_facts: None,
+            wikipedia_intros: None,
             wikidata_kinds: None,
             records: Vec::new(),
             limit_per_source: None,

@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
-use plumb_ingest::{download, facts, kind_sites};
+use plumb_ingest::{download, facts, intros, kind_sites};
 use tracing::{error, info};
 
 use crate::block_on;
@@ -94,12 +94,31 @@ pub fn run(args: FetchDataArgs) -> Result<()> {
                 .await,
             )
         };
+        let facts_file = args.dir.join(facts::FACTS_FILE_NAME);
+        let intros = if args.skip_wikidata {
+            Outcome::Skipped("--skip-wikidata".to_string())
+        } else if !facts_file.is_file() {
+            Outcome::Skipped("needs the Wikidata facts, which are missing".to_string())
+        } else {
+            outcome(
+                intros::download_wikipedia_intros(
+                    &client,
+                    download::WIKIDATA_SPARQL_URL,
+                    intros::WIKIPEDIA_API_URL,
+                    &args.dir,
+                    &facts_file,
+                    download::WikidataPacing::default(),
+                )
+                .await,
+            )
+        };
         [
             ("tranco", tranco),
             ("cc-ranks", cc_ranks),
             ("wikidata", wikidata),
             ("wikidata-kinds", kind_sites),
             ("wikidata-facts", facts),
+            ("wikipedia-intros", intros),
         ]
     })?;
 
@@ -187,9 +206,11 @@ fn ingest_hint(outcomes: &[(&str, Outcome)], dir: &Path) -> Option<String> {
             Outcome::Saved(path) => Some(format!("--{name} {}", path.display())),
             _ => None,
         })
-        // Facts and kind sites only go next to the official websites.
+        // Facts, kind sites and intros only go next to the official websites.
         .filter(|flag| {
-            !(flag.starts_with("--wikidata-facts ") || flag.starts_with("--wikidata-kinds "))
+            !(flag.starts_with("--wikidata-facts ")
+                || flag.starts_with("--wikidata-kinds ")
+                || flag.starts_with("--wikipedia-intros "))
                 || wikidata_saved
         })
         .collect();

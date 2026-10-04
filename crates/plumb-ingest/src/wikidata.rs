@@ -45,6 +45,10 @@ pub struct OfficialSite {
     /// Wikimedia pages), from [`crate::facts`]; 0 when unknown.
     #[serde(default)]
     pub sitelinks: u32,
+    /// The first sentences of the item's English Wikipedia article, from
+    /// [`crate::intros`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intro: Option<String>,
 }
 
 impl OfficialSite {
@@ -68,6 +72,7 @@ impl OfficialSite {
             names: Vec::new(),
             about: None,
             sitelinks: 0,
+            intro: None,
         })
     }
 

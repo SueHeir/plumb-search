@@ -35,8 +35,8 @@ use plumb_core::{now_unix, SiteRecord};
 use plumb_crawl::{CrawlConfig, CrawlOutcome, CrawlResult, CrawlTarget, HomepageCrawler};
 use plumb_index::build_index;
 use plumb_ingest::{
-    attach_facts, download, facts, kind_sites, load_cc_domain_ranks, load_site_facts, load_tranco,
-    load_wikidata_official_sites, Builder,
+    attach_facts, attach_intros, download, facts, intros, kind_sites, load_cc_domain_ranks,
+    load_intros, load_site_facts, load_tranco, load_wikidata_official_sites, Builder,
 };
 use tokio::runtime::Handle;
 use tracing::{info, warn};
@@ -356,6 +356,9 @@ struct SeedFiles {
     /// Official websites of banks, credit unions and other kinds of
     /// organizations, however few sitelinks; used when the file exists.
     kind_sites: PathBuf,
+    /// Wikipedia's first sentences about the best-known of them; used when
+    /// the file exists.
+    intros: PathBuf,
     cc_ranks: Option<PathBuf>,
 }
 
@@ -442,6 +445,27 @@ async fn download_seed(inner: &Inner) -> Result<SeedFiles> {
         }
     }
 
+    let intros = seed.join(intros::INTROS_FILE_NAME);
+    if facts.is_file() && !is_recent(&intros) {
+        inner.set_step(
+            Step::Downloading,
+            "Asking Wikipedia what the best-known of those sites are",
+        );
+        let downloaded = intros::download_wikipedia_intros(
+            &client,
+            &sources.wikidata_sparql_url,
+            &sources.wikipedia_api_url,
+            seed,
+            &facts,
+            sources.wikidata_pacing,
+        )
+        .await;
+        if let Err(err) = downloaded {
+            // They help search by meaning, but are not needed: carry on.
+            warn!("could not get Wikipedia's intros, going on without them: {err:#}");
+        }
+    }
+
     let mut cc_ranks = None;
     if let Some(url) = &cc_url {
         let path = seed.join(download::cc_domain_ranks_top_file_name(url, config.sites)?);
@@ -474,6 +498,7 @@ async fn download_seed(inner: &Inner) -> Result<SeedFiles> {
         wikidata,
         facts,
         kind_sites,
+        intros,
         cc_ranks,
     })
 }
@@ -500,6 +525,7 @@ async fn download_quick_seed(inner: &Inner) -> Result<SeedFiles> {
         wikidata: Err(anyhow::anyhow!("not downloaded yet")),
         facts: seed.join(facts::FACTS_FILE_NAME),
         kind_sites: seed.join(kind_sites::KIND_SITES_FILE_NAME),
+        intros: seed.join(intros::INTROS_FILE_NAME),
         cc_ranks: None,
     })
 }
@@ -560,6 +586,12 @@ fn seed_records(inner: &Inner, files: &SeedFiles) -> Result<Vec<SiteRecord>> {
             match load_site_facts(&files.facts) {
                 Ok(facts) => attach_facts(&mut sites, &facts),
                 Err(err) => warn!("going on without Wikidata's countries and kinds: {err:#}"),
+            }
+        }
+        if files.intros.is_file() {
+            match load_intros(&files.intros) {
+                Ok(intros) => attach_intros(&mut sites, &intros),
+                Err(err) => warn!("going on without Wikipedia's intros: {err:#}"),
             }
         }
         builder.add_official_sites(&sites);

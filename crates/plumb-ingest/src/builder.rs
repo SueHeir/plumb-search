@@ -228,8 +228,13 @@ impl Builder {
             }
             // A description only says what the site is when one item claims
             // it, or one is far better known.
-            if record.about.is_none() && (items.len() == 1 || dominant.is_some()) {
-                record.about.clone_from(&first.about);
+            if items.len() == 1 || dominant.is_some() {
+                if record.about.is_none() {
+                    record.about.clone_from(&first.about);
+                }
+                if record.intro.is_none() {
+                    record.intro.clone_from(&first.intro);
+                }
             }
             for kind in &kinds {
                 record.add_kind(kind);
@@ -763,6 +768,7 @@ mod tests {
             names: Vec::new(),
             about: None,
             sitelinks: 0,
+            intro: None,
         };
         builder.add_official_sites(&[
             junk("mailto:a@b.com", "a@b.com"),
