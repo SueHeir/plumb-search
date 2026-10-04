@@ -174,6 +174,11 @@ pub struct RunArgs {
     /// index build, best-ranked sites first, into DIR/vectors.bin.
     #[arg(long)]
     pub search_by_meaning: bool,
+    /// Threads that embed sites for search by meaning [default: half the
+    /// CPUs this node may use]. A server with CPUs to spare catches up
+    /// faster with more.
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u16).range(1..))]
+    pub embed_threads: Option<u16>,
     /// Crawl homepages through the proxy in HTTP_PROXY, HTTPS_PROXY or
     /// ALL_PROXY (except hosts in NO_PROXY), for machines that reach the
     /// internet only through one. Without it, homepages are fetched directly

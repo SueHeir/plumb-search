@@ -90,8 +90,10 @@ fn work(inner: &Arc<Inner>) -> Result<()> {
             meaning
         }
     };
-    // Leave half the CPUs to searches and crawls.
-    let threads = std::thread::available_parallelism().map_or(1, |n| (n.get() / 2).max(1));
+    // Unless set, leave half the CPUs to searches and crawls.
+    let threads = inner.config.embed_threads.unwrap_or_else(|| {
+        std::thread::available_parallelism().map_or(1, |n| (n.get() / 2).max(1))
+    });
     let mut embedded_for = None;
     while !inner.stopping() {
         let Some((index, _)) = inner.current_summary() else {
