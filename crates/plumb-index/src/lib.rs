@@ -44,6 +44,12 @@
 //!   is 1: a query that is just a name ("us bank") is won by the named site
 //!   anyway, and when no site is named a little-known site still comes
 //!   first. A typed hostname always has full trust.
+//! - A query ending in words that say what someone wants from a site
+//!   rather than which site ("login", "docs", "tracking": `INTENT_WORDS`)
+//!   is ranked by the words before them, so "paypal login" finds paypal.com
+//!   rather than paypal-login.us and "postgres docs" finds postgresql.org
+//!   rather than github.com. A well-known site ([`WELL_KNOWN_LINK_SCORE`])
+//!   named by the whole query keeps it: "read the docs".
 //!
 //! A query that names no site in full is checked for typos, and searched
 //! again corrected when that finds a better match: "amazom" shows
@@ -67,8 +73,9 @@ use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 use plumb_core::{
-    canonical_domain, kind_key, normalize_country, other_number, registrable_domain, search_link,
-    search_template_for, truncate_chars, SiteRecord, MAX_TEXT_CHARS,
+    canonical_domain, kind_key, normalize_country, normalize_text, other_number,
+    registrable_domain, search_link, search_template_for, truncate_chars, SiteRecord,
+    MAX_TEXT_CHARS,
 };
 use serde::{Deserialize, Serialize};
 use tantivy::collector::{DocSetCollector, TopDocs};
@@ -132,6 +139,41 @@ pub const TYPO_POPULARITY_MARGIN: f32 = 0.3;
 /// name even when a far better-known one is a typo away. Typo-squatters
 /// such as twiter.com score below it (0.25 to 0.37 on real data).
 pub const KEEPS_ITS_NAME_LINK_SCORE: f32 = 0.4;
+/// Words that say what someone wants from a site rather than which site:
+/// "paypal login", "postgres docs", "usps tracking". Look-alikes put them
+/// in their domains (paypal-login.us), and big hosts match them in their
+/// link text (github.com for "docs"), so a query ending in them is ranked
+/// by the words before them. Each entry is one or more normalized words.
+const INTENT_WORDS: &[&str] = &[
+    "login",
+    "log in",
+    "logon",
+    "log on",
+    "signin",
+    "sign in",
+    "sign on",
+    "account",
+    "my account",
+    "support",
+    "help",
+    "help center",
+    "customer service",
+    "contact",
+    "docs",
+    "web docs",
+    "documentation",
+    "official site",
+    "official website",
+    "website",
+    "homepage",
+    "home page",
+    "download",
+    "portal",
+    "tracking",
+    "check in",
+    "careers",
+    "investor relations",
+];
 /// Memory budget of the index writer, shared by its threads. Enough for a
 /// million records without flushing tiny segments.
 const WRITER_HEAP_BYTES: usize = 200_000_000;
@@ -647,6 +689,20 @@ impl Searcher {
         if options.exact || limit == 0 || named.typed {
             return Ok(results);
         }
+        // "paypal login" is ranked as "paypal", unless a well-known site is
+        // named by all of it (readthedocs.org for "read the docs"). The
+        // link into the named site's own search still uses every word.
+        if let Some(name) = without_intent_words(query_text) {
+            let named_in_full = named
+                .full_link_score
+                .is_some_and(|score| score >= WELL_KNOWN_LINK_SCORE);
+            if !named_in_full {
+                let site_search = results.site_search;
+                let mut found = self.search_meaning(&name, limit, cfg, options, meaning)?;
+                found.site_search = site_search.or(found.site_search);
+                return Ok(found);
+            }
+        }
         // A site named in full with popularity of its own keeps its name;
         // so does a kind of site.
         match named.full_link_score {
@@ -1123,6 +1179,33 @@ struct Named {
     kind: bool,
     /// The query is a hostname or URL.
     typed: bool,
+}
+
+/// The words of `query` before the [`INTENT_WORDS`] it ends with, if it
+/// ends with any and has other words.
+fn without_intent_words(query: &str) -> Option<String> {
+    let mut words: Vec<String> = normalize_text(query)
+        .split_whitespace()
+        .map(str::to_string)
+        .collect();
+    let all = words.len();
+    loop {
+        // The longest that fits: "web docs" rather than "docs".
+        let cut = INTENT_WORDS
+            .iter()
+            .filter_map(|intent| {
+                let n = intent.split(' ').count();
+                let tail = words.get(words.len().checked_sub(n)?..)?;
+                (n < words.len() && tail.iter().map(String::as_str).eq(intent.split(' ')))
+                    .then_some(n)
+            })
+            .max();
+        match cut {
+            Some(n) => words.truncate(words.len() - n),
+            None => break,
+        }
+    }
+    (words.len() < all).then(|| words.join(" "))
 }
 
 /// The best link score among `docs`, 0 for none.
@@ -2520,9 +2603,9 @@ mod tests {
             cfg.alpha * hit.link_score + (1.0 - cfg.alpha) * hit.text_score + label_bonus(hit, 1.0)
         });
 
-        // "us bank login" goes on past the name: usbank.com gets 2/3 of the
+        // "us bank online" goes on past the name: usbank.com gets 2/3 of the
         // bonus, and sites below the trusted link score lose some of theirs.
-        let hits = searcher.search("us bank login", 10).unwrap();
+        let hits = searcher.search("us bank online", 10).unwrap();
         assert_eq!(hits[0].domain, "usbank.com");
         let trusted = cfg.trusted_link_score.min(usbank.link_score);
         assert!(hits.iter().any(|hit| hit.link_score < trusted));
@@ -2665,14 +2748,20 @@ mod tests {
             "amazon-prime-refund.com"
         );
 
-        // Without the trust rule the stuffed titles win, which is what it is for.
+        // Without the trust rule the stuffed titles win, which is what it is
+        // for ("login" kept, as in an exact search).
         let untrusting = RankConfig {
             trusted_link_score: 0.0,
             ..RankConfig::default()
         };
+        let exact = SearchOptions {
+            exact: true,
+            ..SearchOptions::default()
+        };
         let hits = searcher
-            .search_with("us bank login", 1, &untrusting)
-            .unwrap();
+            .search_full("us bank login", 1, &untrusting, &exact)
+            .unwrap()
+            .hits;
         assert_eq!(hits[0].domain, "usbank-login-help.com");
     }
 
@@ -2690,6 +2779,78 @@ mod tests {
             ["maplestreetbakery.com", "panerabread.com"]
         );
         assert_eq!(hits[0].link_score, 0.0);
+    }
+
+    #[test]
+    fn intent_words_rank_the_site_they_follow() {
+        let records = vec![
+            site(
+                "paypal.com",
+                Some("PayPal: Pay, Send and Save Money"),
+                None,
+                &["PayPal"],
+                &[("PayPal", 3)],
+                popular(20, 3),
+            ),
+            // Some links of its own, so the trust rule alone lets it win.
+            site(
+                "paypal-login.us",
+                Some("PayPal Login | Sign in to your PayPal account"),
+                Some("PayPal login: sign in to PayPal."),
+                &["PayPal Login"],
+                &[("PayPal login", 2)],
+                obscure(1_000_000, 40),
+            ),
+            site(
+                "postgresql.org",
+                Some("PostgreSQL: The world's most advanced open source database"),
+                None,
+                &["PostgreSQL"],
+                &[("Postgres", 2)],
+                popular(9_000, 3),
+            ),
+            site(
+                "github.com",
+                Some("GitHub: Let's build from here"),
+                None,
+                &["GitHub"],
+                &[("docs", 3), ("GitHub", 3)],
+                popular(30, 4),
+            ),
+            site(
+                "readthedocs.org",
+                Some("Read the Docs"),
+                None,
+                &["Read the Docs"],
+                &[("Read the Docs", 2)],
+                popular(3_000, 3),
+            ),
+        ];
+        let (_dir, searcher) = build(&records);
+        assert_eq!(top(&searcher, "paypal login"), "paypal.com");
+        assert_eq!(top(&searcher, "PayPal sign in"), "paypal.com");
+        assert_eq!(top(&searcher, "postgres docs"), "postgresql.org");
+        // A well-known site named by all of it keeps the query.
+        assert_eq!(top(&searcher, "read the docs"), "readthedocs.org");
+        // Typing its hostname still goes to the look-alike.
+        assert_eq!(top(&searcher, "paypal-login.us"), "paypal-login.us");
+    }
+
+    #[test]
+    fn intent_words_are_cut_from_the_end() {
+        for (query, name) in [
+            ("paypal login", Some("paypal")),
+            ("Bank of America sign in", Some("bank of america")),
+            ("us bank login help", Some("us bank")),
+            ("netflix help center", Some("netflix")),
+            ("mdn web docs", Some("mdn")),
+            ("login", None),
+            ("help center", None),
+            ("login help desk", None),
+            ("chase center tickets", None),
+        ] {
+            assert_eq!(without_intent_words(query).as_deref(), name, "{query:?}");
+        }
     }
 
     #[test]
