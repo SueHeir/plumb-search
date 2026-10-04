@@ -327,6 +327,9 @@ pub struct SeedSources {
     pub tranco_url: String,
     /// A SPARQL endpoint that answers Wikidata queries.
     pub wikidata_sparql_url: String,
+    /// English Wikipedia's API, for the first sentences of the articles
+    /// about the best-known official websites' organizations.
+    pub wikipedia_api_url: String,
     /// Only Wikidata items with at least this many Wikipedia sitelinks are
     /// fetched, which keeps the download small enough to finish (see
     /// [`download::download_wikidata_official_sites`]).
@@ -348,6 +351,7 @@ impl Default for SeedSources {
         SeedSources {
             tranco_url: download::TRANCO_LATEST_URL.to_string(),
             wikidata_sparql_url: download::WIKIDATA_SPARQL_URL.to_string(),
+            wikipedia_api_url: plumb_ingest::intros::WIKIPEDIA_API_URL.to_string(),
             wikidata_min_sitelinks: 25,
             wikidata_pacing: download::WikidataPacing::default(),
             cc_ranks_url: None,

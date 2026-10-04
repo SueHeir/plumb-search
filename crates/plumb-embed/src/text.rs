@@ -16,7 +16,7 @@ pub const MAX_LINK_TEXTS: usize = 5;
 pub type TextHash = [u8; 32];
 
 /// The text of `record` to embed: its names, homepage title and
-/// description, what Wikidata says the organization is, the
+/// description, what Wikidata and Wikipedia say the organization is, the
 /// [`MAX_LINK_TEXTS`] words other sites link to it with most, its homepage
 /// headings and the start of its homepage text, in that order, joined by ". " and cut at [`MAX_TEXT_WORDS`]
 /// words. Each part is put in Unicode NFC and its whitespace collapsed, and
@@ -35,6 +35,7 @@ pub fn site_text(record: &SiteRecord) -> String {
         .chain(&record.title)
         .chain(&record.description)
         .chain(&record.about)
+        .chain(&record.intro)
         .chain(link_texts)
         .chain(&record.headings)
         .chain(&record.body_text);

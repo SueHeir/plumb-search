@@ -324,6 +324,11 @@ pub struct IngestArgs {
     /// --wikidata.
     #[arg(long, value_name = "PATH", requires = "wikidata")]
     pub wikidata_facts: Option<PathBuf>,
+    /// The first sentences of the Wikipedia articles about the best-known
+    /// of those organizations (the wikipedia-intros.tsv that fetch-data
+    /// writes); needs --wikidata.
+    #[arg(long, value_name = "PATH", requires = "wikidata")]
+    pub wikipedia_intros: Option<PathBuf>,
     /// Wikidata official websites of banks, credit unions, airlines and other
     /// kinds of organizations, whatever their sitelinks (the
     /// wikidata-kind-sites.tsv that fetch-data writes); needs --wikidata.

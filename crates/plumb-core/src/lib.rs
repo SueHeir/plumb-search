@@ -89,6 +89,11 @@ pub struct SiteRecord {
     /// English description ("American bank holding company").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub about: Option<String>,
+    /// The first sentences of the English Wikipedia article about the
+    /// site's organization, for well-known sites ("GitHub is a proprietary
+    /// developer platform that ...").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intro: Option<String>,
     /// The site's own search address, with `{searchTerms}` where the words
     /// go (see [`search_link`]), read from a search form on its homepage.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -377,6 +382,7 @@ impl SiteRecord {
         }
         self.country = self.country.take().or(other.country);
         self.about = self.about.take().or(other.about);
+        self.intro = self.intro.take().or(other.intro);
         for kind in &other.kinds {
             self.add_kind(kind);
         }

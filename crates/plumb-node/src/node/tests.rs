@@ -66,6 +66,7 @@ fn test_config(dir: &Path) -> NodeConfig {
     config.sources = SeedSources {
         tranco_url: format!("{nowhere}/tranco.csv"),
         wikidata_sparql_url: format!("{nowhere}/sparql"),
+        wikipedia_api_url: format!("{nowhere}/w/api.php"),
         wikidata_min_sitelinks: 25,
         wikidata_pacing: quick_wikidata(),
         cc_ranks_url: None,
@@ -574,6 +575,7 @@ impl SeedHost {
         SeedSources {
             tranco_url: self.url("/tranco.csv"),
             wikidata_sparql_url: self.url("/sparql"),
+            wikipedia_api_url: self.url("/w/api.php"),
             wikidata_min_sitelinks: 25,
             wikidata_pacing: quick_wikidata(),
             cc_ranks_url: None,
@@ -730,6 +732,9 @@ async fn sets_up_from_the_seed_data_and_retries_after_a_failure() {
             "wikidata-kind-sites.tsv",
             "wikidata-official-sites.tsv",
             "wikidata-site-facts.tsv",
+            // Empty: the facts here name no sitelinks, so no item is well
+            // enough known to ask Wikipedia about.
+            "wikipedia-intros.tsv",
             "x-domain-ranks-top50.txt"
         ]
     );

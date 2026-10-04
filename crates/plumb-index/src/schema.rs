@@ -200,6 +200,11 @@ pub(crate) fn document(
     if let Some(description) = non_empty(&record.description) {
         doc.add_text(f.description, truncate_chars(description, MAX_TEXT_CHARS));
     }
+    // Wikipedia's words for the site count like its own description, and
+    // are shown when it has none.
+    if let Some(intro) = non_empty(&record.intro) {
+        doc.add_text(f.description, truncate_chars(intro, MAX_TEXT_CHARS));
+    }
     for heading in record.headings.iter().take(MAX_HEADINGS) {
         doc.add_text(f.headings, truncate_chars(heading, MAX_TEXT_CHARS));
     }
