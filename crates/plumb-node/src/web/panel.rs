@@ -117,6 +117,12 @@ pub(super) struct SettingsForm {
     /// is kept as it is.
     #[serde(default)]
     fill_shown: Option<String>,
+    /// Focus topics, one per line or comma.
+    #[serde(default)]
+    focus_topics: String,
+    /// Sent by forms that show the focus topics; without it they are kept.
+    #[serde(default)]
+    focus_shown: Option<String>,
     /// Sent by forms that show the page sets; without it they are kept.
     #[serde(default)]
     page_sets_shown: Option<String>,
@@ -527,6 +533,11 @@ pub(super) fn settings_from_form(
         // Saving the resources is a choice of how much to keep too.
         setup_chosen: true,
         page_sets,
+        focus_topics: if form.focus_shown.is_some() {
+            crate::about::About::topics_from_text(&form.focus_topics)
+        } else {
+            current.focus_topics.clone()
+        },
     };
     settings.set_workload(Workload::from_name(&form.workload).unwrap_or(Workload::Custom));
     Ok(settings)
@@ -2042,10 +2053,20 @@ fn render_settings(body: &mut String, settings: &NodeSettings, base: &str) {
          <span>Fill free space with the network's crawls</span></label>\n\
          <p class=\"hint\">Asks a node you trust for the sites it has crawled, most popular \
          first, until 90% of the storage limit (or of what this machine's memory can index) \
-         is used. In the network only.</p>\n",
+         is used. In the network only.</p>\n\
+         <input type=\"hidden\" name=\"focus_shown\" value=\"1\">\
+         <label for=\"focus_topics\">Focus topics</label>\n\
+         <textarea id=\"focus_topics\" name=\"focus_topics\" rows=\"3\" \
+         placeholder=\"games\">{}</textarea>\n\
+         <p class=\"hint\">One per line. This node crawls sites about them first and twice as \
+         often, and keeps more of them when the storage limit is tight, so the more nodes \
+         focus on a topic, the better Plumb knows it. Other nodes can tell from what this \
+         node crawls. The interests on a browser\u{2019}s About you page stay private: they \
+         only change which sites this node keeps.</p>\n",
         limit(settings.download_limit_mb_per_day),
         limit(settings.storage_limit_mb),
-        checked(settings.fill_from_network)
+        checked(settings.fill_from_network),
+        escape_html(&settings.focus_topics.join("\n"))
     ));
     let hours = settings
         .crawl_hours
@@ -2524,6 +2545,31 @@ mod tests {
                 ..NodeSettings::default()
             }
         );
+
+        // Focus topics are kept as typed, once each; forms without them
+        // keep them.
+        post(
+            router.clone(),
+            "/app/settings",
+            "focus_shown=1&focus_topics=games%0D%0ARust+programming,games",
+            "127.0.0.1:50000",
+            None,
+        )
+        .await;
+        assert_eq!(
+            node.settings.lock().unwrap().focus_topics,
+            ["games", "Rust programming"]
+        );
+        post(
+            router.clone(),
+            "/app/settings",
+            "storage_limit_mb=",
+            "127.0.0.1:50000",
+            None,
+        )
+        .await;
+        assert_eq!(node.settings.lock().unwrap().focus_topics.len(), 2);
+        node.settings.lock().unwrap().focus_topics.clear();
 
         // A limit that is not a number changes nothing.
         let response = post(

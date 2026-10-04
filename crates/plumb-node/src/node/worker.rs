@@ -47,8 +47,8 @@ use super::network::{self, NETWORK_REBUILD_GAP, REBUILD_AFTER_RECORDS};
 use super::store::{self, SavedState};
 use super::{Inner, NodeConfig, ServingIndex, Step, Stopped};
 use crate::crawl::{
-    crawl_rolling, select_targets_with, target_for, Fetcher, Rolling, RunEnd, CRAWL_BATCH_SIZE,
-    SECONDS_PER_DAY,
+    crawl_rolling, select_targets, select_targets_with, target_for, Fetcher, Rolling, RunEnd,
+    CRAWL_BATCH_SIZE, SECONDS_PER_DAY,
 };
 use crate::icons::IconStore;
 use crate::records::{load_records, replace_records, sorted_by_link_score, RecordStore};
@@ -58,6 +58,12 @@ use crate::web::{duration_words, group_thousands};
 /// with `plumb crawl --skip-crawled-within-days 30`. Sites that could not
 /// be reached are retried sooner (see [`crate::crawl`]).
 const RECRAWL_AFTER_DAYS: u64 = 30;
+
+/// Sites about a node's focus topics get at most one in this many of a
+/// round's homepages...
+const FOCUS_SHARE_OF_ROUND: usize = 2;
+/// ...and are due again this many times as soon as other sites.
+const FOCUS_RECRAWL_FASTER: u64 = 2;
 
 /// Nodes keep site icons from crawls since about this time (Unix seconds,
 /// 2026-10-02). A site crawled before it is due again for its icon.
@@ -841,20 +847,47 @@ fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Option<ServingIndex
             .collect(),
         None => Vec::new(),
     };
-    let candidates =
-        candidates.filter(|record| !rechecks.iter().any(|target| target.domain == record.domain));
+    let candidates: Vec<&SiteRecord> = candidates
+        .filter(|record| !rechecks.iter().any(|target| target.domain == record.domain))
+        .collect();
+    let budget = left.saturating_sub(rechecks.len());
+    // Sites about the node's focus topics come first, up to half the
+    // round, and are due again twice as soon.
+    let topics = inner.focus_topics();
+    let focused = if topics.is_empty() {
+        Vec::new()
+    } else {
+        select_targets(
+            candidates.iter().copied().filter(|r| topics.matches(r)),
+            budget / FOCUS_SHARE_OF_ROUND,
+            now,
+            window / FOCUS_RECRAWL_FASTER,
+        )
+    };
+    if !focused.is_empty() {
+        info!(
+            "{} homepages are about this node's focus topics",
+            focused.len()
+        );
+    }
+    let focused_domains: HashSet<&str> = focused.iter().map(|t| t.domain.as_str()).collect();
     // Sites crawled before nodes kept icons are due again for theirs.
     let icons = IconStore::new(&inner.paths.icons);
     let noted = icons.noted();
     let rest = select_targets_with(
-        candidates,
-        left.saturating_sub(rechecks.len()),
+        candidates
+            .iter()
+            .copied()
+            .filter(|r| !focused_domains.contains(r.domain.as_str())),
+        budget - focused.len(),
         now,
         window,
         |record| due_for_icon(record, &noted),
     );
     drop(noted);
+    drop(focused_domains);
     let mut targets = rechecks;
+    targets.extend(focused);
     targets.extend(rest);
     if targets.is_empty() {
         info!("no homepage is due for a crawl");

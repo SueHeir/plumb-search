@@ -266,6 +266,13 @@ pub struct RunArgs {
     /// off on a public server.
     #[arg(long)]
     pub search_history: bool,
+    /// A topic this node focuses on, such as "games"; may be repeated. The
+    /// node crawls the sites about it first and twice as often, and keeps
+    /// more of them when it fills a storage limit, so the more nodes focus
+    /// on a topic, the better the network knows it. Other nodes can tell
+    /// from what this node crawls. Topics set on the panel are added.
+    #[arg(long, value_name = "TOPIC")]
+    pub focus: Vec<String>,
     /// Share which result is opened for a search, anonymously: this node
     /// notes the pick (on its own disk, for the current week) and sends a
     /// few threshold-encrypted reports a day, which no node can read until
