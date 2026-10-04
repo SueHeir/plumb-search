@@ -59,12 +59,13 @@ services:
       - --no-upnp
       - --no-local-discovery
       # Crawls from Liz's own nodes count as soon as they're signed, without
-      # waiting for a second crawler: plumb-relay on this machine, her
-      # MacBook, elizabeth-hpc, and the rented LA and New York servers.
+      # waiting for a second crawler: plumb-relay on this machine, the desktop
+      # app on her MacBook, elizabeth-hpc, and the rented LA and New York
+      # servers.
       - --trust-peer
       - 12D3KooWJ2UWUBsxmPfXTfHa8cBBmzifa6kj5pFZKfJXYNQyJ69a
       - --trust-peer
-      - 12D3KooWAM8qy5A1q71QZTbdav8PHZ2KetvAc98VRxnB9wqLrLXt
+      - 12D3KooWDegojQ9GFofEwymecV8NzzwEN8oWbgd9mFaPjHkZJ6wb
       - --trust-peer
       - 12D3KooWDHxYtCdqrfk6QM21uNnSYcg38K18rDE4hPv71HKQGUxT
       - --trust-peer
