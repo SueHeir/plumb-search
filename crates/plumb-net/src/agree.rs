@@ -70,6 +70,7 @@
 //! earn its way back.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::sync::Arc;
 
 use libp2p::PeerId;
 use plumb_core::{normalize_text, registrable_domain, LinkText, SiteRecord};
@@ -174,11 +175,72 @@ pub struct AgreementStatus {
     pub trusted_peers: usize,
 }
 
+/// What one crawl saw of a homepage: the homepage facts agreement compares
+/// ([`agree`]) and releases, and nothing else. A node rebuilds its
+/// agreement state from every batch it holds when it starts, so this is
+/// kept small: a whole [`SiteRecord`] for each of hundreds of thousands of
+/// crawls would take gigabytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Facts {
+    url: Option<Box<str>>,
+    title: Option<Box<str>>,
+    description: Option<Box<str>>,
+    aliases: Box<[Box<str>]>,
+}
+
+impl Facts {
+    /// The facts of `record`, leaving the rest of it.
+    fn of(record: SiteRecord) -> Facts {
+        let boxed = |text: Option<String>| text.map(String::into_boxed_str);
+        Facts {
+            url: boxed(record.url),
+            title: boxed(record.title),
+            description: boxed(record.description),
+            aliases: record
+                .aliases
+                .into_iter()
+                .map(String::into_boxed_str)
+                .collect(),
+        }
+    }
+
+    /// [`agree`] for facts.
+    fn agrees(&self, other: &Facts) -> bool {
+        facts_agree(
+            [
+                self.url.as_deref(),
+                self.title.as_deref(),
+                self.description.as_deref(),
+            ],
+            [
+                other.url.as_deref(),
+                other.title.as_deref(),
+                other.description.as_deref(),
+            ],
+        )
+    }
+
+    /// The record of `domain` crawled at `crawled_at` that saw these facts,
+    /// as [`crate::batch::accept_batch`] keeps a crawled homepage.
+    fn record(&self, domain: &str, crawled_at: u64) -> SiteRecord {
+        let text = |text: &Option<Box<str>>| text.as_deref().map(str::to_string);
+        let mut record = SiteRecord::new(domain);
+        record.url = text(&self.url);
+        record.title = text(&self.title);
+        record.description = text(&self.description);
+        record.aliases = self.aliases.iter().map(|a| a.to_string()).collect();
+        record.crawled_at = Some(crawled_at);
+        record
+    }
+}
+
 /// One crawler's latest crawl of a homepage.
 #[derive(Debug, Clone)]
 struct Observation {
     crawler: PeerId,
-    record: SiteRecord,
+    /// Shared with the confirmed facts of the site when it is what was
+    /// released.
+    facts: Arc<Facts>,
     crawled_at: u64,
     /// Already scored for or against its crawler.
     judged: bool,
@@ -197,8 +259,8 @@ struct Mention {
 pub struct Agreement {
     me: PeerId,
     homepages: HashMap<String, Vec<Observation>>,
-    /// The record last released for each confirmed site.
-    confirmed: HashMap<String, SiteRecord>,
+    /// The facts last released for each confirmed site.
+    confirmed: HashMap<String, Arc<Facts>>,
     mentions: HashMap<String, Vec<Mention>>,
     scores: HashMap<PeerId, Score>,
     /// The sites behind each crawler's [`Score::vouched`].
@@ -353,7 +415,7 @@ impl Agreement {
         let held = self.homepages.entry(domain.clone()).or_default();
         let mut observation = Observation {
             crawler,
-            record,
+            facts: Arc::new(Facts::of(record)),
             crawled_at,
             judged: false,
         };
@@ -362,10 +424,13 @@ impl Agreement {
             Some(old) => {
                 // Sending the same crawl again does not earn a second
                 // verdict.
-                observation.judged = old.judged && agree(&old.record, &observation.record);
+                observation.judged = old.judged && old.facts.agrees(&observation.facts);
                 *old = observation;
             }
             None => {
+                // Most sites are held from one or two crawlers: no room
+                // kept for more.
+                held.reserve_exact(1);
                 held.push(observation);
                 if crawler == self.me {
                     self.own += 1;
@@ -378,8 +443,9 @@ impl Agreement {
         self.judge_against_own(&domain);
         if self.trusted.contains(&crawler) {
             let held = &self.homepages[&domain];
-            let mut record = held.iter().find(|o| o.crawler == crawler)?.record.clone();
-            self.confirmed.insert(domain, record.clone());
+            let facts = held.iter().find(|o| o.crawler == crawler)?.facts.clone();
+            let mut record = facts.record(&domain, crawled_at);
+            self.confirmed.insert(domain, facts);
             record.headings = headings;
             record.body_text = body_text;
             record.search_url = search_url;
@@ -390,7 +456,7 @@ impl Agreement {
         let new = held.iter().position(|o| o.crawler == crawler)?;
         // The crawls that match this one, from crawlers that count.
         let group: Vec<usize> = (0..held.len())
-            .filter(|&i| agree(&held[i].record, &held[new].record))
+            .filter(|&i| held[i].facts.agrees(&held[new].facts))
             .collect();
         // A crawl that matches this node's own needs no vouching: that
         // match is the check.
@@ -415,21 +481,19 @@ impl Agreement {
             }
             return None;
         }
-        let mut confirmed = held[newest].record.clone();
+        let mut confirmed = held[newest].facts.record(&domain, held[newest].crawled_at);
         confirmed.aliases.clear();
-        for alias in &held[newest].record.aliases {
+        for alias in &held[newest].facts.aliases {
             let seen_twice = group.iter().any(|&i| {
-                i != newest
-                    && held[i]
-                        .record
-                        .aliases
-                        .iter()
-                        .any(|a| text_matches(a, alias))
+                i != newest && held[i].facts.aliases.iter().any(|a| text_matches(a, alias))
             });
             if seen_twice {
                 confirmed.add_alias(alias);
             }
         }
+        // Only compared later ([`agree`] leaves aliases out), so the crawl's
+        // own facts, shared rather than copied.
+        let released = held[newest].facts.clone();
         // Score whoever has not been yet.
         let near = |o: &Observation| {
             group
@@ -457,7 +521,7 @@ impl Agreement {
         for (i, agreed, witnesses) in verdicts {
             self.judge(&domain, i, agreed, ours, witnesses);
         }
-        self.confirmed.insert(domain, confirmed.clone());
+        self.confirmed.insert(domain, released);
         Some(confirmed)
     }
 
@@ -500,7 +564,7 @@ impl Agreement {
         let overturns = self
             .confirmed
             .get(domain)
-            .is_some_and(|last| !agree(last, &held[newest].record));
+            .is_some_and(|last| !last.agrees(&held[newest].facts));
         if rivals == 0 && !overturns {
             return None;
         }
@@ -523,7 +587,7 @@ impl Agreement {
                     && !o.judged
                     && o.crawled_at.abs_diff(own.crawled_at) <= JUDGE_WINDOW_SECS
             })
-            .map(|(i, o)| (i, agree(&o.record, &own.record)))
+            .map(|(i, o)| (i, o.facts.agrees(&own.facts)))
             .collect();
         for (i, agreed) in verdicts {
             // Compared with this node's own crawl: one witness, this node.
@@ -577,7 +641,10 @@ impl Agreement {
         match held.iter_mut().find(|m| m.crawler == crawler) {
             Some(old) if old.seen_at > seen_at => return None,
             Some(old) => *old = mention,
-            None => held.push(mention),
+            None => {
+                held.reserve_exact(1);
+                held.push(mention);
+            }
         }
         let held = &self.mentions[domain];
         if self.trusted.contains(&crawler) {
@@ -627,10 +694,27 @@ impl Agreement {
 /// Whether two crawls of a homepage saw the same thing: the same host in
 /// the URL, and titles and descriptions whose words mostly match.
 pub fn agree(a: &SiteRecord, b: &SiteRecord) -> bool {
-    let host = |r: &SiteRecord| r.url.as_deref().and_then(registrable_domain);
-    host(a) == host(b)
-        && optional_text_matches(a.title.as_deref(), b.title.as_deref())
-        && optional_text_matches(a.description.as_deref(), b.description.as_deref())
+    facts_agree(
+        [
+            a.url.as_deref(),
+            a.title.as_deref(),
+            a.description.as_deref(),
+        ],
+        [
+            b.url.as_deref(),
+            b.title.as_deref(),
+            b.description.as_deref(),
+        ],
+    )
+}
+
+/// [`agree`] on (URL, title, description).
+fn facts_agree(a: [Option<&str>; 3], b: [Option<&str>; 3]) -> bool {
+    let [a_url, a_title, a_description] = a;
+    let [b_url, b_title, b_description] = b;
+    a_url.and_then(registrable_domain) == b_url.and_then(registrable_domain)
+        && optional_text_matches(a_title, b_title)
+        && optional_text_matches(a_description, b_description)
 }
 
 fn optional_text_matches(a: Option<&str>, b: Option<&str>) -> bool {
@@ -1029,8 +1113,8 @@ mod tests {
         let out = agreement.observe(trusted, vec![texty], NOW);
         assert_eq!(out[0].headings, ["Find a book"]);
         assert_eq!(out[0].body_text.as_deref(), Some("Borrow books and films"));
-        let held = &agreement.homepages["library.org"][0].record;
-        assert!(held.headings.is_empty() && held.body_text.is_none());
+        let held = &agreement.homepages["library.org"][0].facts;
+        assert_eq!(held.title.as_deref(), Some("Library"));
         let mut named = SiteRecord::new("newbank.com");
         named.add_link_text_linkers("New Bank", 0b01);
         let out = agreement.observe(trusted, vec![named], NOW);

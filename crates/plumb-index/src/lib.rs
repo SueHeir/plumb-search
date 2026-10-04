@@ -57,7 +57,7 @@ mod replace;
 mod schema;
 mod spell;
 
-use std::borrow::Cow;
+use std::borrow::Borrow;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -320,7 +320,10 @@ pub struct Spelling {
 /// `dir`. If `dir` is a symlink, the directory it points to is replaced.
 /// Its parent must be writable, and `dir` itself cannot be a mount point
 /// (mount the parent).
-pub fn build_index(dir: &Path, records: &[SiteRecord]) -> Result<IndexStats> {
+///
+/// `records` may be the records themselves or references to them, so a
+/// caller holding a [`plumb_core::RecordSet`] need not copy it into a list.
+pub fn build_index<R: Borrow<SiteRecord>>(dir: &Path, records: &[R]) -> Result<IndexStats> {
     let (sites, mut stats) = merge_by_domain(records);
     let (sites, redirect_names) = fold_redirects(sites);
     stats.redirected = stats.docs - sites.len() as u64;
@@ -331,15 +334,48 @@ pub fn build_index(dir: &Path, records: &[SiteRecord]) -> Result<IndexStats> {
     Ok(stats)
 }
 
+/// A site to index: one of the records given, or a copy where records had
+/// to be merged or their domain changed. Two words, where a
+/// `Cow<SiteRecord>` would take the size of a whole record for each of a
+/// million sites even when it only borrows.
+enum Site<'a> {
+    Borrowed(&'a SiteRecord),
+    Owned(Box<SiteRecord>),
+}
+
+impl Site<'_> {
+    fn to_mut(&mut self) -> &mut SiteRecord {
+        if let Site::Borrowed(record) = *self {
+            *self = Site::Owned(Box::new(record.clone()));
+        }
+        match self {
+            Site::Owned(record) => record,
+            Site::Borrowed(_) => unreachable!("made owned above"),
+        }
+    }
+}
+
+impl std::ops::Deref for Site<'_> {
+    type Target = SiteRecord;
+
+    fn deref(&self) -> &SiteRecord {
+        match self {
+            Site::Borrowed(record) => record,
+            Site::Owned(record) => record,
+        }
+    }
+}
+
 /// One record per canonical domain ([`canonical_domain`]), in the order the
 /// domains first appear: records for the same domain are merged
 /// ([`SiteRecord::merge`]) and records without a valid domain are skipped.
 /// Records that are already canonical and unique are not copied.
-fn merge_by_domain(records: &[SiteRecord]) -> (Vec<Cow<'_, SiteRecord>>, IndexStats) {
-    let mut sites: Vec<Cow<SiteRecord>> = Vec::with_capacity(records.len());
+fn merge_by_domain<R: Borrow<SiteRecord>>(records: &[R]) -> (Vec<Site<'_>>, IndexStats) {
+    let mut sites: Vec<Site> = Vec::with_capacity(records.len());
     let mut positions: HashMap<String, usize> = HashMap::with_capacity(records.len());
     let mut stats = IndexStats::default();
     for record in records {
+        let record: &SiteRecord = record.borrow();
         let Some(domain) = canonical_domain(&record.domain) else {
             stats.skipped += 1;
             continue;
@@ -357,9 +393,9 @@ fn merge_by_domain(records: &[SiteRecord]) -> (Vec<Cow<'_, SiteRecord>>, IndexSt
             }
             Entry::Vacant(entry) => {
                 let site = if record.domain == *entry.key() {
-                    Cow::Borrowed(record)
+                    Site::Borrowed(record)
                 } else {
-                    Cow::Owned(with_domain(entry.key()))
+                    Site::Owned(Box::new(with_domain(entry.key())))
                 };
                 entry.insert(sites.len());
                 sites.push(site);
@@ -374,9 +410,7 @@ fn merge_by_domain(records: &[SiteRecord]) -> (Vec<Cow<'_, SiteRecord>>, IndexSt
 /// `sites` (`pncbank.com` -> `pnc.com`): they are that site under another
 /// name. Their domain labels become names of the site they redirect to,
 /// returned by its position in the sites kept, so "pnc bank" names pnc.com.
-fn fold_redirects(
-    sites: Vec<Cow<'_, SiteRecord>>,
-) -> (Vec<Cow<'_, SiteRecord>>, HashMap<usize, Vec<String>>) {
+fn fold_redirects(sites: Vec<Site<'_>>) -> (Vec<Site<'_>>, HashMap<usize, Vec<String>>) {
     let positions: HashMap<&str, usize> = sites
         .iter()
         .enumerate()
@@ -422,7 +456,7 @@ fn fold_redirects(
 /// site by redirecting to it, by position.
 fn write_index(
     dir: &Path,
-    sites: &[Cow<SiteRecord>],
+    sites: &[Site],
     redirect_names: &HashMap<usize, Vec<String>>,
 ) -> Result<()> {
     let schema = schema::schema();
@@ -2797,7 +2831,7 @@ mod tests {
 
         // A missing directory is created, an empty one is used.
         let missing = root.path().join("a/b/index");
-        assert_eq!(build_index(&missing, &[]).unwrap().docs, 0);
+        assert_eq!(build_index(&missing, &[] as &[SiteRecord]).unwrap().docs, 0);
         assert_eq!(Searcher::open(&missing).unwrap().num_docs(), 0);
         let empty = root.path().join("empty");
         fs::create_dir(&empty).unwrap();

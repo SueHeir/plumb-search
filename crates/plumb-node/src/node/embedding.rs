@@ -11,7 +11,9 @@ use tracing::{info, warn};
 use plumb_core::now_unix;
 
 use super::{Inner, LastError, MeaningWork};
-use crate::meaning::{embed_records, ensure_model, load_embedder, load_vectors_for, MeaningIndex};
+use crate::meaning::{
+    embed_sites, ensure_model, load_embedder, load_vectors_for, sites_to_embed, MeaningIndex,
+};
 use crate::records::load_records;
 
 /// Directory of the model's files in the data directory.
@@ -101,13 +103,23 @@ fn work(inner: &Arc<Inner>) -> Result<()> {
             nap(inner, LOOK_EVERY);
             continue;
         }
-        let records = load_records(&inner.paths.records)
-            .with_context(|| format!("loading {}", inner.paths.records.display()))?;
+        let todo = {
+            // The whole records file is in memory only until the sites to
+            // embed are picked out, and never next to the copy a crawl or
+            // an index build holds.
+            let _records = inner.hold_records();
+            if inner.stopping() {
+                break;
+            }
+            let records = load_records(&inner.paths.records)
+                .with_context(|| format!("loading {}", inner.paths.records.display()))?;
+            sites_to_embed(meaning.vectors(), records)
+        };
         let started = Instant::now();
-        let embedded = embed_records(
+        let embedded = embed_sites(
             meaning.embedder(),
             meaning.vectors(),
-            records,
+            todo,
             threads,
             &|| inner.stopping(),
             &mut |vectors| vectors.save(&vectors_path),

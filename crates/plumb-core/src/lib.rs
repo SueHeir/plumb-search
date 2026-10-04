@@ -433,9 +433,14 @@ fn min_some<T: Ord>(a: Option<T>, b: Option<T>) -> Option<T> {
 }
 
 /// Records keyed by domain; adding a record for a domain already present merges them.
+///
+/// Each record is boxed: a [`SiteRecord`] is several hundred bytes even
+/// when nearly empty, and a hash table keeps room for about twice its
+/// entries, so a million sites held inline would take a gigabyte of table
+/// alone, and twice that while it grows.
 #[derive(Debug, Clone, Default)]
 pub struct RecordSet {
-    map: HashMap<String, SiteRecord>,
+    map: HashMap<String, Box<SiteRecord>>,
 }
 
 impl RecordSet {
@@ -452,7 +457,7 @@ impl RecordSet {
     }
 
     pub fn get(&self, domain: &str) -> Option<&SiteRecord> {
-        self.map.get(domain)
+        self.map.get(domain).map(|record| &**record)
     }
 
     /// The record for `domain`, created empty if it is not there yet.
@@ -460,7 +465,7 @@ impl RecordSet {
     pub fn entry(&mut self, domain: &str) -> &mut SiteRecord {
         self.map
             .entry(domain.to_string())
-            .or_insert_with(|| SiteRecord::new(domain))
+            .or_insert_with(|| Box::new(SiteRecord::new(domain)))
     }
 
     /// Inserts a record, merging it into an existing one for the same domain.
@@ -490,14 +495,14 @@ impl RecordSet {
         match self.map.get_mut(&record.domain) {
             Some(existing) => merge(existing, record),
             None => {
-                self.map.insert(record.domain.clone(), record);
+                self.map.insert(record.domain.clone(), Box::new(record));
             }
         }
         true
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &SiteRecord> {
-        self.map.values()
+        self.map.values().map(|record| &**record)
     }
 
     /// Keeps only the records for which `keep` is true.
@@ -507,7 +512,7 @@ impl RecordSet {
 
     /// All records, best [`link_score`] first, ties broken by domain.
     pub fn into_sorted_vec(self) -> Vec<SiteRecord> {
-        let mut records: Vec<SiteRecord> = self.map.into_values().collect();
+        let mut records: Vec<SiteRecord> = self.into_iter().collect();
         sort_by_link_score(&mut records);
         records
     }
@@ -518,10 +523,13 @@ impl RecordSet {
 /// copies of the set.
 impl IntoIterator for RecordSet {
     type Item = SiteRecord;
-    type IntoIter = std::collections::hash_map::IntoValues<String, SiteRecord>;
+    type IntoIter = std::iter::Map<
+        std::collections::hash_map::IntoValues<String, Box<SiteRecord>>,
+        fn(Box<SiteRecord>) -> SiteRecord,
+    >;
 
     fn into_iter(self) -> Self::IntoIter {
-        self.map.into_values()
+        self.map.into_values().map(|record| *record)
     }
 }
 
