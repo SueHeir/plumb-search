@@ -9,6 +9,9 @@
 //! Given a records file (`records.jsonl`) instead of a buckets directory,
 //! it builds the buckets in a temporary directory first.
 //!
+//! `--write-records VARIANT FILE` instead writes the records file, cut
+//! down, to build an index from and compare search quality.
+//!
 //! With `--probe-db VARIANT FILE` it also writes the buckets of that
 //! variant, compressed, as the fixed rows `tools/pir-probe --database`
 //! reads (16,384 rows of 32 KiB), so the probe can time Spiral on real
@@ -152,6 +155,24 @@ fn main() -> Result<()> {
     );
     let probe = match args.next().as_deref() {
         None => None,
+        Some("--write-records") => {
+            // Records cut down as a PIR table would hold them, to index and
+            // evaluate: `pir_sizing RECORDS.jsonl --write-records lean OUT`.
+            let name = args.next().context("--write-records needs a variant")?;
+            let Some(&(variant, _)) = VARIANTS.iter().find(|(_, n)| *n == name) else {
+                bail!("unknown variant {name}");
+            };
+            let path = PathBuf::from(args.next().context("--write-records needs a file")?);
+            ensure!(!path.exists(), "{} already exists", path.display());
+            let records: Vec<SiteRecord> = plumb_core::read_jsonl(&dir)?;
+            let mut out = BufWriter::new(File::create(&path)?);
+            for record in records {
+                serde_json::to_writer(&mut out, &variant.apply(record))?;
+                out.write_all(b"\n")?;
+            }
+            out.flush()?;
+            return Ok(());
+        }
         Some("--probe-db") => {
             let name = args.next().context("--probe-db needs a variant")?;
             let Some(&(variant, _)) = VARIANTS.iter().find(|(_, n)| *n == name) else {
