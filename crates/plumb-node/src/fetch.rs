@@ -299,11 +299,11 @@ pub fn run_pages(args: FetchPagesArgs) -> Result<()> {
     let Some(lang) = set.id.strip_prefix("wikipedia-") else {
         bail!("fetch-pages cannot make {} yet", set.id);
     };
-    let work = args
-        .work
-        .as_deref()
-        .context("pass --work DIR for Wikipedia's dumps")?;
     let mut dumps = if args.dumps.is_empty() {
+        let work = args
+            .work
+            .as_deref()
+            .context("pass --work DIR for Wikipedia's dumps, or --dumps FILES")?;
         let client = download::http_client()?;
         let days = articles::pageview_days(plumb_core::now_unix(), args.pageview_days);
         block_on(articles::download_article_dumps(
