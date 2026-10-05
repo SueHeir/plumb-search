@@ -1511,7 +1511,7 @@ struct Task {
     recount: bool,
     /// Connected nodes that take reports, and the addresses they listen on.
     report_peers: HashMap<PeerId, Vec<Multiaddr>>,
-    /// Nodes asked for their reports this session.
+    /// Connected nodes asked for their reports.
     report_listing: HashSet<PeerId>,
     /// Those requests not answered yet (see [`MAX_REPORT_LISTS`]).
     report_lists: HashSet<OutboundRequestId>,
@@ -2108,6 +2108,8 @@ impl Task {
                     }
                     self.bucket_peers.remove(&peer_id);
                     self.report_peers.remove(&peer_id);
+                    // Asked again on coming back, for what it took meanwhile.
+                    self.report_listing.remove(&peer_id);
                     self.oblivious_peers.remove(&peer_id);
                     self.batch_peers.remove(&peer_id);
                     self.fill_peers.remove(&peer_id);
@@ -3115,6 +3117,10 @@ impl Task {
     fn ask_balances(&mut self, peers: &[PeerId], now: u64) {
         self.credits_at
             .retain(|peer, _| self.bucket_peers.contains_key(peer));
+        // Asks too old to hold anything back are forgotten.
+        let recent = |at: &mut u64| *at + TOKEN_ASK_MINUTES * 60 > now;
+        self.balance_asks.retain(|_, at| recent(at));
+        self.token_asks.retain(|_, at| recent(at));
         for &peer in peers {
             let recent = self
                 .balance_asks
