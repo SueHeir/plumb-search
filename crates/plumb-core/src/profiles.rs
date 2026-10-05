@@ -1,7 +1,10 @@
 //! Official profiles: the accounts a person, group or company has on
 //! well-known services (a YouTube channel, a Twitch channel, an X account,
 //! an app in the App Store), as Wikidata's external identifiers record
-//! them. Wikipedia articles carry their item's profiles
+//! them. Also listings: where a film, show, game, album or song is listed
+//! (IMDb, Rotten Tomatoes, Letterboxd, Metacritic, MusicBrainz, Genius),
+//! and where it can be watched or heard (Netflix, a Spotify album, its
+//! music video). Wikipedia articles carry their item's profiles
 //! ([`crate::article::Article::profiles`]), so an info box can link them
 //! and "mrbeast youtube" can lead straight to the channel.
 //!
@@ -30,6 +33,9 @@ pub struct Service {
     id: IdShape,
     /// The address, with `{}` for the identifier.
     pattern: &'static str,
+    /// The account is its own (a YouTube channel), rather than a listing
+    /// of it elsewhere (a film's page on IMDb).
+    pub official: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,6 +46,11 @@ enum IdShape {
     Number,
     /// `user@server` (Mastodon).
     Fediverse,
+    /// An IMDb id: `tt` (a title), `nm` (a name) or `co` (a company) and
+    /// digits.
+    Imdb,
+    /// A UUID (MusicBrainz).
+    Uuid,
 }
 
 const fn service(
@@ -59,10 +70,27 @@ const fn service(
         words,
         id,
         pattern,
+        official: true,
     }
 }
 
-use IdShape::{Fediverse, Number, Word};
+/// A [`service`] that lists things rather than holding their own accounts.
+const fn listing(
+    key: &'static str,
+    name: &'static str,
+    property: &'static str,
+    host: &'static str,
+    words: &'static [&'static str],
+    id: IdShape,
+    pattern: &'static str,
+) -> Service {
+    Service {
+        official: false,
+        ..service(key, name, property, host, words, id, pattern)
+    }
+}
+
+use IdShape::{Fediverse, Imdb, Number, Uuid, Word};
 
 /// The services kept, in the order an info box lists them. Two YouTube
 /// properties: a handle (`@MrBeast`), shown when there is one, and the
@@ -85,6 +113,15 @@ pub static SERVICES: &[Service] = &[
         &["youtube", "yt", "youtube channel"],
         Word("_-", 24),
         "https://www.youtube.com/channel/{}",
+    ),
+    listing(
+        "youtube-video",
+        "YouTube",
+        "P1651",
+        "youtube.com",
+        &["youtube", "yt", "music video"],
+        Word("_-", 11),
+        "https://www.youtube.com/watch?v={}",
     ),
     service(
         "twitch",
@@ -203,6 +240,33 @@ pub static SERVICES: &[Service] = &[
         Word("", 22),
         "https://open.spotify.com/artist/{}",
     ),
+    listing(
+        "spotify-album",
+        "Spotify",
+        "P2205",
+        "spotify.com",
+        &["spotify"],
+        Word("", 22),
+        "https://open.spotify.com/album/{}",
+    ),
+    listing(
+        "spotify-track",
+        "Spotify",
+        "P2207",
+        "spotify.com",
+        &["spotify"],
+        Word("", 22),
+        "https://open.spotify.com/track/{}",
+    ),
+    listing(
+        "spotify-show",
+        "Spotify",
+        "P5916",
+        "spotify.com",
+        &["spotify"],
+        Word("", 22),
+        "https://open.spotify.com/show/{}",
+    ),
     service(
         "apple-music",
         "Apple Music",
@@ -211,6 +275,24 @@ pub static SERVICES: &[Service] = &[
         &["apple music", "itunes"],
         Number,
         "https://music.apple.com/artist/{}",
+    ),
+    listing(
+        "apple-music-album",
+        "Apple Music",
+        "P2281",
+        "apple.com",
+        &["apple music", "itunes"],
+        Number,
+        "https://music.apple.com/album/{}",
+    ),
+    listing(
+        "apple-podcasts",
+        "Apple Podcasts",
+        "P5842",
+        "apple.com",
+        &["apple podcasts"],
+        Number,
+        "https://podcasts.apple.com/podcast/id{}",
     ),
     service(
         "soundcloud",
@@ -257,6 +339,132 @@ pub static SERVICES: &[Service] = &[
         Word("_.", 150),
         "https://play.google.com/store/apps/details?id={}",
     ),
+    listing(
+        "netflix",
+        "Netflix",
+        "P1874",
+        "netflix.com",
+        &["netflix"],
+        Number,
+        "https://www.netflix.com/title/{}",
+    ),
+    listing(
+        "imdb",
+        "IMDb",
+        "P345",
+        "imdb.com",
+        &["imdb", "cast"],
+        Imdb,
+        "https://www.imdb.com/{}/",
+    ),
+    listing(
+        "rotten-tomatoes",
+        "Rotten Tomatoes",
+        "P1258",
+        "rottentomatoes.com",
+        &["rotten tomatoes"],
+        Word("_-/", 120),
+        "https://www.rottentomatoes.com/{}",
+    ),
+    listing(
+        "metacritic",
+        "Metacritic",
+        "P1712",
+        "metacritic.com",
+        &["metacritic"],
+        Word("_-/", 120),
+        "https://www.metacritic.com/{}/",
+    ),
+    listing(
+        "letterboxd",
+        "Letterboxd",
+        "P6127",
+        "letterboxd.com",
+        &["letterboxd"],
+        Word("-", 120),
+        "https://letterboxd.com/film/{}/",
+    ),
+    listing(
+        "tmdb-movie",
+        "TMDB",
+        "P4947",
+        "themoviedb.org",
+        &["tmdb"],
+        Number,
+        "https://www.themoviedb.org/movie/{}",
+    ),
+    listing(
+        "tmdb-tv",
+        "TMDB",
+        "P4983",
+        "themoviedb.org",
+        &["tmdb"],
+        Number,
+        "https://www.themoviedb.org/tv/{}",
+    ),
+    listing(
+        "igdb",
+        "IGDB",
+        "P5794",
+        "igdb.com",
+        &["igdb"],
+        Word("-", 120),
+        "https://www.igdb.com/games/{}",
+    ),
+    listing(
+        "myanimelist",
+        "MyAnimeList",
+        "P4086",
+        "myanimelist.net",
+        &["myanimelist"],
+        Number,
+        "https://myanimelist.net/anime/{}",
+    ),
+    listing(
+        "musicbrainz-artist",
+        "MusicBrainz",
+        "P434",
+        "musicbrainz.org",
+        &["musicbrainz"],
+        Uuid,
+        "https://musicbrainz.org/artist/{}",
+    ),
+    listing(
+        "musicbrainz-album",
+        "MusicBrainz",
+        "P436",
+        "musicbrainz.org",
+        &["musicbrainz"],
+        Uuid,
+        "https://musicbrainz.org/release-group/{}",
+    ),
+    listing(
+        "discogs",
+        "Discogs",
+        "P1953",
+        "discogs.com",
+        &["discogs"],
+        Number,
+        "https://www.discogs.com/artist/{}",
+    ),
+    listing(
+        "genius-song",
+        "Genius",
+        "P6218",
+        "genius.com",
+        &["lyrics", "genius"],
+        Word("-", 200),
+        "https://genius.com/{}",
+    ),
+    listing(
+        "genius-artist",
+        "Genius",
+        "P2373",
+        "genius.com",
+        &["lyrics", "genius"],
+        Word("-", 120),
+        "https://genius.com/artists/{}",
+    ),
 ];
 
 /// The service kept as `key`.
@@ -279,6 +487,14 @@ impl Service {
             }
             Number => id.len() <= 20 && id.bytes().all(|b| b.is_ascii_digit()),
             Fediverse => fediverse(id).is_some(),
+            Imdb => imdb_path(id).is_some(),
+            Uuid => {
+                id.len() == 36
+                    && id.char_indices().all(|(i, c)| match i {
+                        8 | 13 | 18 | 23 => c == '-',
+                        _ => c.is_ascii_hexdigit(),
+                    })
+            }
         }
     }
 
@@ -293,9 +509,23 @@ impl Service {
                 let (user, server) = fediverse(id)?;
                 Some(format!("https://{server}/@{user}"))
             }
+            Imdb => Some(self.pattern.replace("{}", &imdb_path(id)?)),
             _ => Some(self.pattern.replace("{}", id)),
         }
     }
+}
+
+/// Where an IMDb id's page is: `title/tt0111161`, `name/nm0000206`.
+fn imdb_path(id: &str) -> Option<String> {
+    let (kind, digits) = id.split_at_checked(2)?;
+    let kind = match kind {
+        "tt" => "title",
+        "nm" => "name",
+        "co" => "company",
+        _ => return None,
+    };
+    let fits = (7..=10).contains(&digits.len()) && digits.bytes().all(|b| b.is_ascii_digit());
+    fits.then(|| format!("{kind}/{id}"))
 }
 
 /// `user@server` of a Mastodon address (`Gargron@mastodon.social`, with or
@@ -440,6 +670,41 @@ mod tests {
     }
 
     #[test]
+    fn builds_listing_addresses() {
+        let link = |s: &str, id: &str| profile(s, id).link().map(|(_, url)| url);
+        assert_eq!(
+            link("imdb", "tt0111161").unwrap(),
+            "https://www.imdb.com/title/tt0111161/"
+        );
+        assert_eq!(
+            link("imdb", "nm0000206").unwrap(),
+            "https://www.imdb.com/name/nm0000206/"
+        );
+        assert_eq!(link("imdb", "xx0111161"), None);
+        assert_eq!(link("imdb", "tt01"), None);
+        assert_eq!(
+            link("rotten-tomatoes", "m/dune_2021").unwrap(),
+            "https://www.rottentomatoes.com/m/dune_2021"
+        );
+        assert_eq!(link("rotten-tomatoes", "m/../evil.com"), None);
+        assert_eq!(
+            link("musicbrainz-artist", "0383dadf-2a4e-4d10-a46a-e9e041da8eb3").unwrap(),
+            "https://musicbrainz.org/artist/0383dadf-2a4e-4d10-a46a-e9e041da8eb3"
+        );
+        assert_eq!(link("musicbrainz-artist", "0383dadf"), None);
+        assert_eq!(
+            link("youtube-video", "fJ9rUzIMcZQ").unwrap(),
+            "https://www.youtube.com/watch?v=fJ9rUzIMcZQ"
+        );
+        assert!(!service_by_key("imdb").unwrap().official);
+        assert!(service_by_key("youtube").unwrap().official);
+        let (services, name) = services_asked("bohemian rhapsody lyrics").unwrap();
+        assert_eq!(name, "bohemian rhapsody");
+        assert_eq!(services[0].name, "Genius");
+        assert_eq!(services_asked("dune imdb").unwrap().0[0].key, "imdb");
+    }
+
+    #[test]
     fn refuses_strange_identifiers() {
         let link = |s: &str, id: &str| profile(s, id).link();
         assert_eq!(link("x", "a/../../evil"), None);
@@ -487,7 +752,7 @@ mod tests {
     fn finds_the_service_a_query_asks_for() {
         let (services, name) = services_asked("MrBeast YouTube").unwrap();
         assert_eq!(name, "mrbeast");
-        assert_eq!(services.len(), 2);
+        assert_eq!(services.len(), 3);
         assert_eq!(services_asked("valve steam").unwrap().1, "valve");
         assert_eq!(
             services_asked("spotify android app").unwrap().0[0].name,
@@ -506,6 +771,12 @@ mod tests {
                 .key
                 .chars()
                 .all(|c| c.is_ascii_lowercase() || c == '-'));
+            assert_eq!(
+                SERVICES.iter().filter(|s| s.key == service.key).count(),
+                1,
+                "{}",
+                service.key
+            );
             if service.id != Fediverse {
                 assert!(service.pattern.starts_with("https://") && service.pattern.contains("{}"));
                 assert!(service.pattern.contains(service.host), "{}", service.key);
