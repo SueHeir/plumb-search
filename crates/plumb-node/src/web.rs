@@ -2206,7 +2206,7 @@ fn render_results(
     render_results_with(
         query,
         results,
-        answer,
+        extras,
         network,
         settings,
         web_search,
@@ -2222,7 +2222,7 @@ fn render_results(
 fn render_results_with(
     query: &str,
     results: &SearchResults,
-    answer: Option<&plumb_answer::Answer>,
+    extras: Option<&answers::Extras>,
     network: &NetOutcome,
     settings: &Settings,
     web_search: Option<Engine>,
