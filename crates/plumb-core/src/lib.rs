@@ -62,6 +62,8 @@ pub fn home_site_record() -> SiteRecord {
 
 /// Most inbound link texts kept per site (the most frequent ones win).
 pub const MAX_LINK_TEXTS: usize = 32;
+/// Most other sites kept per site in [`SiteRecord::links_to`].
+pub const MAX_LINKS_TO: usize = 50;
 /// Most aliases kept per site.
 pub const MAX_ALIASES: usize = 16;
 /// Most homepage headings kept per site.
@@ -141,6 +143,12 @@ pub struct SiteRecord {
     /// [`MAX_KEY_PAGES`]. See [`key_pages::pick_key_pages`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub key_pages: Vec<KeyPage>,
+    /// The other sites the homepage links to, as registrable domains in
+    /// the order of their first link on the page, at most
+    /// [`MAX_LINKS_TO`]: the site's edges in the web's link graph. See
+    /// [`valid_links_to`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub links_to: Vec<String>,
     /// Homepage fetch attempts in a row, up to the one at
     /// `crawl_attempted_at`, that could not reach the site at all (no
     /// connection or no answer); 0 once an attempt gets an answer. Crawlers
@@ -377,6 +385,10 @@ impl SiteRecord {
             .key_pages
             .is_empty()
             .then(|| std::mem::take(&mut self.key_pages));
+        let links_to = other
+            .links_to
+            .is_empty()
+            .then(|| std::mem::take(&mut self.links_to));
         self.merge(other);
         if let Some(mine) = search_url {
             self.search_url = self.search_url.take().or(mine);
@@ -392,6 +404,11 @@ impl SiteRecord {
         if let Some(mine) = key_pages {
             if self.key_pages.is_empty() {
                 self.key_pages = mine;
+            }
+        }
+        if let Some(mine) = links_to {
+            if self.links_to.is_empty() {
+                self.links_to = mine;
             }
         }
     }
@@ -418,6 +435,7 @@ impl SiteRecord {
             self.headings = other.headings;
             self.body_text = other.body_text;
             self.key_pages = other.key_pages;
+            self.links_to = other.links_to;
             self.crawled_at = other.crawled_at;
         } else {
             self.url = self.url.take().or(other.url);
@@ -432,6 +450,9 @@ impl SiteRecord {
                 self.body_text = self.body_text.take().or(other.body_text);
                 if self.key_pages.is_empty() {
                     self.key_pages = other.key_pages;
+                }
+                if self.links_to.is_empty() {
+                    self.links_to = other.links_to;
                 }
             }
         }
@@ -743,6 +764,26 @@ pub fn is_valid_host(host: &str) -> bool {
 pub fn registrable_domain(input: &str) -> Option<String> {
     let host = host_of(input)?;
     psl::domain_str(&host).map(str::to_string)
+}
+
+/// `links` made fit for [`SiteRecord::links_to`] of `domain`: each made a
+/// canonical domain, without `domain` itself, junk or repeats, in their
+/// order, at most [`MAX_LINKS_TO`]. For links read off a homepage and for
+/// links another node sends.
+pub fn valid_links_to(links: Vec<String>, domain: &str) -> Vec<String> {
+    let mut kept: Vec<String> = Vec::new();
+    for link in links {
+        if kept.len() >= MAX_LINKS_TO {
+            break;
+        }
+        let Some(link) = canonical_domain(&link) else {
+            continue;
+        };
+        if link != domain && !kept.contains(&link) {
+            kept.push(link);
+        }
+    }
+    kept
 }
 
 /// The canonical spelling of a site record's domain: the domain itself
@@ -1270,6 +1311,22 @@ mod tests {
     }
 
     #[test]
+    fn links_to_are_canonical_distinct_and_capped() {
+        let links = vec![
+            "WWW.Example.com".into(),
+            "a.com".into(),
+            "example.com".into(),
+            "localhost".into(),
+            "news.bbc.co.uk".into(),
+        ];
+        assert_eq!(valid_links_to(links, "a.com"), ["example.com", "bbc.co.uk"]);
+        let many: Vec<String> = (0..80).map(|i| format!("site{i}.com")).collect();
+        let kept = valid_links_to(many, "a.com");
+        assert_eq!(kept.len(), MAX_LINKS_TO);
+        assert_eq!(kept[0], "site0.com");
+    }
+
+    #[test]
     fn a_shared_crawl_updates_the_page_but_keeps_what_it_leaves_out() {
         let mut mine = SiteRecord {
             domain: "a.com".into(),
@@ -1282,6 +1339,7 @@ mod tests {
                 label: "Sign in".into(),
                 url: "https://a.com/login".into(),
             }],
+            links_to: vec!["b.com".into()],
             ..SiteRecord::default()
         };
         let shared = SiteRecord {
@@ -1294,6 +1352,7 @@ mod tests {
         plain.merge(shared.clone());
         assert!(plain.search_url.is_none() && plain.body_text.is_none());
         assert!(plain.key_pages.is_empty());
+        assert!(plain.links_to.is_empty());
 
         mine.merge_shared(shared);
         assert_eq!(mine.title.as_deref(), Some("New"));
@@ -1305,6 +1364,7 @@ mod tests {
         assert_eq!(mine.headings, ["Welcome"]);
         assert_eq!(mine.body_text.as_deref(), Some("A shop for things"));
         assert_eq!(mine.key_pages.len(), 1);
+        assert_eq!(mine.links_to, ["b.com"]);
 
         // Text a trusted crawler shared does replace it.
         mine.merge_shared(SiteRecord {

@@ -53,7 +53,7 @@ const READ_TIME_LIMIT: Duration = Duration::from_secs(2);
 
 /// The page goes to the tokenizer in pieces of this many bytes, with the
 /// time limit checked between them.
-const READ_CHUNK_BYTES: usize = 4096;
+pub(crate) const READ_CHUNK_BYTES: usize = 4096;
 
 /// Most words of the page's visible text [`extract_page_meta`] keeps.
 pub const MAX_BODY_WORDS: usize = 100;
@@ -69,7 +69,7 @@ const CHROME_ELEMENTS: &[&str] = &[
 ];
 
 /// Elements whose text never shows on the page.
-const HIDDEN_ELEMENTS: &[&str] = &["script", "style", "noscript", "template", "iframe"];
+pub(crate) const HIDDEN_ELEMENTS: &[&str] = &["script", "style", "noscript", "template", "iframe"];
 
 /// Elements that begin a new line or cell on screen, so the text on either
 /// side of them belongs to different words.
@@ -165,7 +165,7 @@ fn read_page(base_url: &Url, html: &str, time_limit: Duration) -> PageMeta {
 
 /// `text` in pieces of `size` bytes (a little more where a character
 /// straddles the cut).
-fn chunks(mut text: &str, size: usize) -> impl Iterator<Item = &str> {
+pub(crate) fn chunks(mut text: &str, size: usize) -> impl Iterator<Item = &str> {
     std::iter::from_fn(move || {
         if text.is_empty() {
             return None;
@@ -233,6 +233,8 @@ struct Page<'a> {
     own_links: Vec<OwnLink>,
     /// How many [`MENU_ELEMENTS`] are open.
     menu: usize,
+    /// The page has a password box: it is a sign-in page.
+    password_field: bool,
     seen: HashSet<(String, String)>,
     /// How many [`HIDDEN_ELEMENTS`] are open.
     hidden: usize,
@@ -324,6 +326,7 @@ impl<'a> Page<'a> {
             links: Vec::new(),
             own_links: Vec::new(),
             menu: 0,
+            password_field: false,
             seen: HashSet::new(),
             hidden: 0,
             foreign: 0,
@@ -364,7 +367,12 @@ impl<'a> Page<'a> {
             "meta" => self.meta(tag),
             "link" if self.foreign == 0 => self.link(tag),
             "form" => self.open_form(tag),
-            "input" => self.input(tag),
+            "input" => {
+                let password = attr(tag, "type")
+                    .is_some_and(|kind| kind.trim().eq_ignore_ascii_case("password"));
+                self.password_field |= password && self.hidden == 0;
+                self.input(tag);
+            }
             "svg" | "math" if !tag.self_closing => self.foreign += 1,
             "h1" | "h2" => {
                 self.close_heading();
@@ -729,7 +737,12 @@ impl<'a> Page<'a> {
             language: self.language,
             icons: best_icons(self.icons),
             key_pages: match &self.own_domain {
-                Some(domain) => pick_key_pages(self.base_url.as_str(), domain, &self.own_links),
+                Some(domain) => pick_key_pages(
+                    self.base_url.as_str(),
+                    domain,
+                    &self.own_links,
+                    self.password_field,
+                ),
                 None => Vec::new(),
             },
             headings: self.headings,
@@ -809,7 +822,7 @@ fn icon_rank(rel: &str, kind: &str, sizes: &str, path: &str) -> Option<u32> {
 /// How the tokenizer must read an element's contents: as text up to the
 /// element's end tag for these elements (the way a browser's parser
 /// switches it), as markup for the rest.
-fn contents_kind(name: &str) -> TokenSinkResult<()> {
+pub(crate) fn contents_kind(name: &str) -> TokenSinkResult<()> {
     match name {
         "script" => TokenSinkResult::RawData(RawKind::ScriptData),
         // `noscript` too, as in a browser with scripting on.
@@ -823,7 +836,7 @@ fn contents_kind(name: &str) -> TokenSinkResult<()> {
 }
 
 /// The value of the tag's attribute `name` (lowercase).
-fn attr<'t>(tag: &'t Tag, name: &str) -> Option<&'t str> {
+pub(crate) fn attr<'t>(tag: &'t Tag, name: &str) -> Option<&'t str> {
     tag.attrs
         .iter()
         .find(|attr| &*attr.name.local == name)
@@ -832,7 +845,7 @@ fn attr<'t>(tag: &'t Tag, name: &str) -> Option<&'t str> {
 
 /// Resolves an `href` to an absolute `http`/`https` URL without fragment or
 /// credentials, or `None` for links that do not lead to a web page.
-fn resolve_link(base_url: &Url, href: &str) -> Option<Url> {
+pub(crate) fn resolve_link(base_url: &Url, href: &str) -> Option<Url> {
     let href = href.trim();
     if href.is_empty() || href.starts_with('#') {
         return None;
@@ -1006,6 +1019,21 @@ mod tests {
             ]
         );
         assert_eq!(meta.links.len(), 1, "other sites' links stay out links");
+    }
+
+    #[test]
+    fn a_sign_in_homepage_gets_a_log_in_key_page() {
+        let meta = extract(
+            "https://www.facebook.com/",
+            r#"<form method="post" action="/login/"><input name="email">
+                <input type="password" name="pass"><button>Log in</button></form>
+                <a href="/recover/initiate/">Forgotten password?</a>
+                <a href="/r.php">Create new account</a>
+                <footer><a href="/help/">Help</a></footer>"#,
+        );
+        let labels: Vec<&str> = meta.key_pages.iter().map(|p| p.label.as_str()).collect();
+        assert_eq!(labels, ["Log in", "Create new account", "Help"]);
+        assert_eq!(meta.key_pages[0].url, "https://www.facebook.com/");
     }
 
     #[test]

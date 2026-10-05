@@ -107,6 +107,9 @@ pub struct WebSettings {
     /// The engine the results page offers to hand each query to; `None`
     /// shows no such link.
     pub web_search: Option<Engine>,
+    /// Whether every client of `/mcp` may use its `read_page` tool. When
+    /// false, only AI apps on this computer may (see [`crate::web`]).
+    pub read_pages_for_all: bool,
 }
 
 impl Default for WebSettings {
@@ -114,6 +117,7 @@ impl Default for WebSettings {
         WebSettings {
             home: HomeCountry::Auto,
             web_search: None,
+            read_pages_for_all: false,
         }
     }
 }

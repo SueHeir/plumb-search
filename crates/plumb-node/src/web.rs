@@ -84,7 +84,7 @@ use crate::news::Recent;
 use crate::node::{NodeSettings, Phase, Status, Step};
 use crate::websearch::{bang_url, Engine, WebSettings};
 
-mod answers;
+pub(crate) mod answers;
 mod control;
 mod history;
 mod nodes;
@@ -97,6 +97,7 @@ pub use panel::ADD_TO_FIREFOX_PATH;
 mod mcp;
 pub(crate) mod private;
 mod relay;
+mod searxng;
 mod setup;
 
 /// Results returned when a request does not say how many.
@@ -431,6 +432,8 @@ struct AppState {
     rates: Arc<answers::RatesCache>,
     /// How many tool calls each client may still make to `/mcp`.
     mcp_limiter: Arc<mcp::Limiter>,
+    /// Fetches pages for `/mcp`'s `read_page`.
+    page_reader: Arc<mcp::SharedReader>,
 }
 
 impl AppState {
@@ -513,6 +516,7 @@ pub fn router_with(backend: Arc<dyn SearchBackend>, settings: impl Into<WebSetti
         settings: settings.into(),
         rates: Arc::default(),
         mcp_limiter: Arc::default(),
+        page_reader: Arc::default(),
     })
 }
 
@@ -535,6 +539,7 @@ pub fn node_router_with(
         settings: settings.into(),
         rates: Arc::default(),
         mcp_limiter: Arc::default(),
+        page_reader: Arc::default(),
     })
 }
 
@@ -543,6 +548,7 @@ fn app(state: AppState) -> Router {
         .route("/", get(home))
         .route("/search", get(search_page))
         .route("/api/search", get(api_search))
+        .route("/api/websearch", post(searxng::external))
         .route("/opensearch.xml", get(opensearch));
     router = mcp::routes(router);
     if state.node.is_some() {
@@ -591,6 +597,7 @@ pub fn run(args: ServeArgs) -> Result<()> {
         WebSettings {
             home: args.country.clone(),
             web_search: args.web_search.0,
+            read_pages_for_all: args.mcp_read_pages,
         },
     );
     block_on(async move {
@@ -599,10 +606,13 @@ pub fn run(args: ServeArgs) -> Result<()> {
             .with_context(|| format!("listening on {}", args.bind))?;
         let addr = listener.local_addr().context("reading the bound address")?;
         info!("serving {docs} sites on http://{addr}/ (Ctrl-C to stop)");
-        axum::serve(listener, app)
-            .with_graceful_shutdown(shutdown_signal())
-            .await
-            .context("serving HTTP")
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .context("serving HTTP")
     })?
 }
 
@@ -661,6 +671,18 @@ struct SearchParams {
     /// The "Recent" headlines: `collapsed` (the default), `expanded` or
     /// `off`.
     news: Option<String>,
+    /// `json`: `/search` answers in SearXNG's JSON format, for AI apps
+    /// that take a SearXNG address (see [`searxng`]).
+    format: Option<String>,
+    /// SearXNG's page of results, from 1.
+    pageno: Option<usize>,
+    /// SearXNG's safe search: 0, 1 or 2.
+    safesearch: Option<String>,
+    /// SearXNG's categories, comma separated: `news` alone asks for
+    /// recent headlines only.
+    categories: Option<String>,
+    /// SearXNG's time range (`day`, `week`, ...): recent headlines first.
+    time_range: Option<String>,
 }
 
 /// Whether a flag parameter is set: `1`, `on`, `true` or `yes`.
@@ -820,6 +842,13 @@ async fn search_page(
     headers: HeaderMap,
     Query(params): Query<SearchParams>,
 ) -> Response {
+    if params
+        .format
+        .as_deref()
+        .is_some_and(|format| format.eq_ignore_ascii_case("json"))
+    {
+        return searxng::search(state, headers, params).await;
+    }
     // A bang leaves Plumb, even while it sets up.
     if let Some(url) = bang_url(&params.q) {
         return (security_headers(), Redirect::to(&url)).into_response();
@@ -1136,6 +1165,11 @@ async fn go(
         safe: params.safe,
         lang: params.lang,
         news: params.news,
+        format: None,
+        pageno: None,
+        safesearch: None,
+        categories: None,
+        time_range: None,
     };
     let query = search.query();
     let back = {
@@ -1586,7 +1620,7 @@ pub(crate) fn duration_words(seconds: u64) -> String {
 }
 
 /// `at` (Unix seconds) seen from `now`: `just now`, `5 minutes ago`.
-fn time_ago(at: u64, now: u64) -> String {
+pub(crate) fn time_ago(at: u64, now: u64) -> String {
     match now.saturating_sub(at) {
         0..=9 => "just now".to_string(),
         age => format!("{} ago", duration_words(age)),
@@ -2452,17 +2486,19 @@ fn render_results_with(
                 icon,
                 &notes,
             );
-            if let Some(page) = pages
+            let carried = pages
                 .iter()
-                .find(|p| p.under.as_deref() == Some(item.hit.domain.as_str()))
-            {
+                .find(|p| p.under.as_deref() == Some(item.hit.domain.as_str()));
+            if let Some(page) = carried {
                 if let Some(end) = rendered.rfind("</li>") {
                     rendered.insert_str(end, &page_line(&page.hit));
                 }
             }
-            if position == 0 {
+            let product = carried.and_then(|page| product_of(&page.hit, &item.hit.domain, query));
+            if position == 0 || product.is_some() {
                 if let Some(end) = rendered.rfind("<div class=\"m\">") {
-                    rendered.insert_str(end, &key_pages_line(&item.hit, query));
+                    let line = key_pages_line(&item.hit, query, product.as_ref());
+                    rendered.insert_str(end, &line);
                 }
             }
             body.push_str(&rendered);
@@ -2769,24 +2805,62 @@ fn render_recent(recent: &Recent, view: RecentNews, now: u64) -> String {
 /// Most key pages listed under a result.
 const SHOWN_KEY_PAGES: usize = 6;
 
+/// The part of the site `domain` that the query names, from the article
+/// carried under its result: YouTube Music's `https://music.youtube.com/`
+/// for "youtube music" or "music youtube", when that article's item has
+/// it as its official website. The query must have the words of the
+/// article's title or one of its other names, in any order.
+fn product_of(page: &PageHit, domain: &str, query: &str) -> Option<KeyPage> {
+    let website = page.page.website.as_deref()?;
+    let href = http_url(website)?;
+    if plumb_core::registrable_domain(&href)? != domain {
+        return None;
+    }
+    let words = |text: &str| {
+        let mut words: Vec<String> = plumb_core::normalize_text(text)
+            .split(' ')
+            .filter(|w| !w.is_empty())
+            .map(str::to_string)
+            .collect();
+        words.sort_unstable();
+        words
+    };
+    let asked = words(query);
+    let title = page.page.title.as_str();
+    let base = match title.rfind(" (") {
+        Some(i) if title.ends_with(')') && i > 0 => &title[..i],
+        _ => title,
+    };
+    let named = std::iter::once(base)
+        .chain(page.page.aliases.iter().map(String::as_str))
+        .any(|name| !asked.is_empty() && words(name) == asked);
+    named.then(|| KeyPage {
+        label: base.to_string(),
+        url: href,
+    })
+}
+
 /// The site's key pages (sign in, docs, pricing) under the top result,
 /// when the query names that site: on its own ("paypal"), or followed by
 /// what is wanted from it ("paypal login"), whose page then comes first,
-/// in bold. Empty otherwise, and when the site has fewer than two key
-/// pages and none for what was asked.
-fn key_pages_line(hit: &Hit, query: &str) -> String {
-    if !hit.named {
+/// in bold. A part of the site the query names (`product`, from
+/// [`product_of`]) comes first, in bold, under any result. Empty
+/// otherwise, and when the site has fewer than two key pages and none for
+/// what was asked.
+fn key_pages_line(hit: &Hit, query: &str, product: Option<&KeyPage>) -> String {
+    if !hit.named && product.is_none() {
         return String::new();
     }
     let mut pages: Vec<(&KeyPage, String)> = hit
         .key_pages
         .iter()
+        .filter(|_| hit.named)
         .filter(|page| page.is_valid_for(&hit.domain))
         .filter_map(|page| Some((page, http_url(&page.url)?)))
         .take(SHOWN_KEY_PAGES)
         .collect();
     let wanted = PageIntent::of_query_end(query).map(|(intent, _)| intent);
-    let matched = wanted.and_then(|wanted| {
+    let mut matched = wanted.and_then(|wanted| {
         pages
             .iter()
             .position(|(page, _)| page.intent() == Some(wanted))
@@ -2794,6 +2868,12 @@ fn key_pages_line(hit: &Hit, query: &str) -> String {
     if let Some(at) = matched {
         let page = pages.remove(at);
         pages.insert(0, page);
+    }
+    if let Some(product) = product {
+        pages.retain(|(_, href)| *href != product.url);
+        pages.insert(0, (product, product.url.clone()));
+        pages.truncate(SHOWN_KEY_PAGES);
+        matched = Some(0);
     }
     if pages.len() < 2 && matched.is_none() {
         return String::new();
@@ -3032,6 +3112,86 @@ mod tests {
         })
     }
 
+    #[tokio::test]
+    async fn answers_searxng_json_for_ai_apps() {
+        let app = router_with(backend(bank_hits()), HomeCountry::Off);
+        let (status, headers, body) = send(
+            app.clone(),
+            "/search?q=us+bank&format=json&pageno=1&safesearch=0",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(headers[header::CONTENT_TYPE]
+            .to_str()
+            .unwrap()
+            .starts_with("application/json"));
+        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(body["query"], "us bank");
+        assert_eq!(body["number_of_results"], 2);
+        let first = &body["results"][0];
+        assert_eq!(first["url"], "https://www.usbank.com/");
+        assert_eq!(first["title"], "U.S. Bank | Personal & Business Banking");
+        assert_eq!(first["content"], "Checking, savings & loans.");
+        assert_eq!(first["engine"], "plumb");
+        assert_eq!(first["parsed_url"][1], "www.usbank.com");
+        // A site without a title goes by its domain.
+        assert_eq!(body["results"][1]["title"], "usbank-login-help.com");
+
+        // The second page.
+        let (_, _, body) = send(
+            app.clone(),
+            "/search?q=us+bank&format=json&pageno=2&limit=1",
+        )
+        .await;
+        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(body["results"].as_array().unwrap().len(), 1);
+        assert_eq!(body["results"][0]["url"], "https://usbank-login-help.com/");
+
+        // Instant answers go where SearXNG puts its own.
+        let (_, _, body) = send(app.clone(), "/search?q=12*7&format=json").await;
+        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(body["answers"][0]["answer"], "12 × 7 = 84");
+        // And leads the first snippet, for apps that read only snippets.
+        assert!(body["results"][0]["content"]
+            .as_str()
+            .unwrap()
+            .starts_with("Answer: 12 × 7 = 84. Checking"));
+
+        // News only: this server keeps no headlines.
+        let (_, _, body) = send(app.clone(), "/search?q=us+bank&format=json&categories=news").await;
+        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(body["results"], serde_json::json!([]));
+
+        // Open WebUI's external search engine.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/api/websearch")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"query":"us bank","count":1}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!([{
+                "link": "https://www.usbank.com/",
+                "title": "U.S. Bank | Personal & Business Banking",
+                "snippet": "Checking, savings & loans.",
+            }])
+        );
+
+        // A bang stays a search: an AI app wants results, not a redirect.
+        let (status, _, _) = send(app, "/search?q=!g+rust&format=json").await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
     #[test]
     fn escapes_html() {
         assert_eq!(
@@ -3194,6 +3354,52 @@ mod tests {
         .await
         .2;
         assert!(!body.contains("class=\"kp\""));
+    }
+
+    #[test]
+    fn the_part_of_a_site_the_query_names_comes_first() {
+        use plumb_index::pages::Page;
+        let article = PageHit {
+            page: Page {
+                set: "wikipedia-en".into(),
+                url: "https://en.wikipedia.org/wiki/YouTube_Music".into(),
+                title: "YouTube Music".into(),
+                description: Some("Music streaming service".into()),
+                site: Some("youtube.com".into()),
+                views: 1000,
+                aliases: vec!["YT Music".into()],
+                item: Some("Q28404534".into()),
+                profiles: Vec::new(),
+                website: Some("https://music.youtube.com/".into()),
+            },
+            score: 1.0,
+            named: true,
+            popularity: 0.5,
+            whole: false,
+        };
+        let youtube = hit(
+            "youtube.com",
+            "https://www.youtube.com/",
+            Some("YouTube"),
+            None,
+        );
+        for query in ["youtube music", "Music YouTube", "yt music"] {
+            let product = product_of(&article, "youtube.com", query).unwrap();
+            assert_eq!(product.url, "https://music.youtube.com/");
+            // Under any result, named in full or not.
+            assert_eq!(
+                key_pages_line(&youtube, query, Some(&product)),
+                "<ul class=\"kp\"><li><a href=\"https://music.youtube.com/\" \
+                 rel=\"noreferrer\"><strong>YouTube Music</strong></a></li></ul>"
+            );
+        }
+        // Not for other words, nor on another site.
+        assert!(product_of(&article, "youtube.com", "youtube").is_none());
+        assert!(product_of(&article, "youtube.com", "youtube music charts").is_none());
+        assert!(product_of(&article, "you-tubemusic.com", "youtube music").is_none());
+        let mut elsewhere = article.clone();
+        elsewhere.page.website = Some("https://youtubemusic.example/".into());
+        assert!(product_of(&elsewhere, "youtube.com", "youtube music").is_none());
     }
 
     #[tokio::test]
@@ -4243,6 +4449,7 @@ mod tests {
                                 service: "youtube-handle".into(),
                                 id: "MrBeast".into(),
                             }],
+                            website: None,
                         },
                         score: 1.0,
                         named: query == "mrbeast",
@@ -4294,6 +4501,7 @@ mod tests {
                 aliases: Vec::new(),
                 item: Some("Q7186".into()),
                 profiles: Vec::new(),
+                website: None,
             },
             score: 1.0,
             named: true,

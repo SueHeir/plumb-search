@@ -870,9 +870,15 @@ impl Searcher {
             .full_link_score
             .or_else(|| results.hits.first().map(|hit| hit.link_score))
             .unwrap_or(0.0);
-        let far_more_popular = fix.name_link_score.is_some_and(|score| {
-            score >= WELL_KNOWN_LINK_SCORE && score >= typed_link_score + TYPO_POPULARITY_MARGIN
-        });
+        // A site the whole query names is not taken for a typo of a name
+        // that only some of its words are a typo of: "linus tech tips" is
+        // linustechtips.com, not "linux" with two more words.
+        let fixes_the_named_name =
+            named.full_link_score.is_none() || fix.name_covers >= named.words;
+        let far_more_popular = fixes_the_named_name
+            && fix.name_link_score.is_some_and(|score| {
+                score >= WELL_KNOWN_LINK_SCORE && score >= typed_link_score + TYPO_POPULARITY_MARGIN
+            });
         if named.full_link_score.is_some() && !far_more_popular {
             return Ok(results);
         }
@@ -1073,6 +1079,35 @@ impl Searcher {
             .fold(0.0, f32::max);
         let trusted_link_score =
             unit_or(cfg.trusted_link_score, default.trusted_link_score).min(named_link_score);
+        // Sites the query names in full that nothing describes: never
+        // crawled, with no title, description or Wikidata words. While the
+        // query also names a site by its first words, such a bare name
+        // (you-tubemusic.com, googlemaps.com) is only a spelling of the
+        // query, so it gets no more trust than a site with no links does,
+        // whatever its link score: youtube.com wins "youtube music".
+        let mut bare: HashSet<DocAddress> = HashSet::new();
+        if trusted_link_score > 0.0 {
+            for (&addr, name) in &names {
+                if name.typed || name.words() < query.len {
+                    continue;
+                }
+                let doc: TantivyDocument = searcher.doc(addr)?;
+                let described = [
+                    self.fields.title,
+                    self.fields.description,
+                    self.fields.about,
+                ]
+                .into_iter()
+                .any(|field| {
+                    doc.get_all(field)
+                        .filter_map(|value| value.as_str())
+                        .any(|text| !text.trim().is_empty())
+                });
+                if !described {
+                    bare.insert(addr);
+                }
+            }
+        }
         let query_words = query.len as f32;
         let meaning_weight = unit_or(cfg.meaning_weight, default.meaning_weight);
 
@@ -1157,6 +1192,8 @@ impl Searcher {
             }
             let trust = if name.typed || trusted_link_score <= 0.0 {
                 1.0
+            } else if bare.contains(&addr) {
+                untrusted_share
             } else {
                 let evidence = (link_score / trusted_link_score).min(1.0);
                 untrusted_share + (1.0 - untrusted_share) * evidence
@@ -2889,6 +2926,47 @@ mod tests {
     }
 
     #[test]
+    fn bare_names_spelling_the_query_lose_to_the_site_it_names() {
+        let records = [
+            site(
+                "youtube.com",
+                Some("YouTube"),
+                Some("Enjoy the videos you love."),
+                &["YouTube"],
+                &[("youtube", 300)],
+                popular(9, 6_000),
+            ),
+            // Never crawled, but well placed in the link graph.
+            site(
+                "you-tubemusic.com",
+                None,
+                None,
+                &[],
+                &[],
+                obscure(300_000, 0),
+            ),
+            site(
+                "ytmusicfans.net",
+                Some("YouTube Music fans | YouTube Music playlists"),
+                Some("The best YouTube Music playlists, picked by YouTube Music fans."),
+                &[],
+                &[("youtube music playlists", 4)],
+                obscure(80_000, 3),
+            ),
+        ];
+        let (_dir, searcher) = build(&records);
+        let hits = searcher.search("youtube music", 10).unwrap();
+        let lookalike = hits
+            .iter()
+            .find(|h| h.domain == "you-tubemusic.com")
+            .unwrap();
+        assert!(lookalike.link_score > RankConfig::default().trusted_link_score);
+        assert_eq!(hits[0].domain, "youtube.com", "{:?}", domains(&hits));
+        // With no other site named, the bare name is the answer.
+        assert_eq!(top(&searcher, "you tubemusic"), "you-tubemusic.com");
+    }
+
+    #[test]
     fn popularity_breaks_equal_name_matches() {
         let (_dir, searcher) = build(&corpus());
         let hits = searcher.search("acme", 10).unwrap();
@@ -4242,6 +4320,45 @@ mod tests {
         let results = search_spelled(&searcher, "hilten");
         assert_eq!(results.spelling, None);
         assert_eq!(results.hits[0].domain, "hilten.com");
+    }
+
+    #[test]
+    fn a_site_named_by_every_word_keeps_its_name() {
+        let mut records = typo_corpus();
+        records.extend([
+            site(
+                "linux.org",
+                Some("Linux"),
+                None,
+                &["Linux"],
+                &[],
+                popular(500, 20_000),
+            ),
+            site(
+                "linustechtips.com",
+                Some("Forums - Linus Tech Tips"),
+                None,
+                &[],
+                &[],
+                obscure(900_000, 30),
+            ),
+        ]);
+        for i in 0..25 {
+            records.push(site(
+                &format!("linux{i}.com"),
+                Some(&format!("Linux tips {i}")),
+                None,
+                &[],
+                &[],
+                obscure(5_000_000 + i, 10),
+            ));
+        }
+        let (_dir, searcher) = build(&records);
+        // "linus" is a letter from the well-known "linux", but the whole
+        // query names a site: only its first word would be corrected.
+        let results = search_spelled(&searcher, "linus tech tips");
+        assert_eq!(results.spelling, None);
+        assert_eq!(results.hits[0].domain, "linustechtips.com");
     }
 
     #[test]

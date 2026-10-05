@@ -4,18 +4,23 @@ AI assistants guess web addresses, and guesses are how they end up on look-alike
 
 Every node serves it at `/mcp` on its web port: `https://plumbsearch.org/mcp`, `http://127.0.0.1:7586/mcp` for the desktop app, port 8080 for the Docker image. `plumb mcp` serves the same over stdin and stdout for apps that start a local command.
 
+Local AI apps (LM Studio, Open WebUI, Ollama front ends) can use it too, and with the desktop app every search stays on your computer. [Local AI apps](local-llms.md) has the setup for each, including Open WebUI's SearXNG setting.
+
 ## Tools
 
-All four only read the index.
+All but `read_page` only read the index.
 
 | Tool | Takes | Returns |
 | --- | --- | --- |
 | `official_site` | `name` ("PayPal", "rust docs", "chase login") | the domain and URL, a confidence (`high`, `medium`, `low`), the reasons (Wikidata lists it as an official website, the name is the site's own, it is well known, other sites share the name) and other candidates |
 | `check_lookalike` | `url` (a URL or a domain) | a verdict (`official`, `known_site`, `little_known`, `lookalike` or `unknown`), the reasons, and the real site a look-alike imitates |
-| `search` | `query`, `limit` (1 to 25, default 10) | the normal results: sites best first, plus pages such as Wikipedia articles with where they are placed. Takes the search page's operators (`site:github.com`, `"exact words"`, `-word`) |
+| `search` | `query`, `limit` (1 to 25, default 10) | the normal results: sites best first, plus pages such as Wikipedia articles and Stack Overflow questions with where they are placed. With them, what the results page shows: the instant answer (`12 * 7`, `10 km in miles`, `100 usd to eur`, `time in tokyo`), the info box about what the query names, an official profile asked for (`mrbeast youtube`) and recent headlines. Takes the search page's operators (`site:github.com`, `"exact words"`, `-word`) |
 | `site_info` | `domain` | the site's title and description, whether Wikidata lists it as official, how well known it is, its country and pages about it |
+| `read_page` | `url`, `start` (default 0), `max_chars` (200 to 30000, default 6000), `find` (words to jump to), `links` (default false) | the page's text, with headings, lists and tables marked in Markdown and menus, footers and scripts left out; where the next part starts on a long page; the page's links if asked; and `check_lookalike`'s verdict on where the page ended up. Only offered to apps on the node's own computer (see below) |
 
 Each also takes an optional `country`, a two-letter code (`US`, `DE`) whose sites rank a little higher, or `any` for none. Without it the node's home country setting decides.
+
+Answers come as short plain text, one line per result with its address, which is what the model reads; small local models have little room, and the same answer as JSON takes three to four times as many tokens. The JSON is in `structuredContent` for programs.
 
 `check_lookalike` reads the names out of the address (`paypal-login.us` spells "paypal login", `wellsfargo.com.account-check.io` contains "wellsfargo") and looks them up. When they lead to a well-known or official site other than this one, and the address spells that site's name out or is a typo of it (`paypa1.com`, `twiter.com`), it is a look-alike. A site that is well known or official in its own right is never called one. `unknown` only means Plumb does not have the site: that proves nothing either way.
 
@@ -70,10 +75,16 @@ curl -s https://plumbsearch.org/mcp -H 'content-type: application/json' -d '{
 }'
 ```
 
+## Reading pages
+
+`read_page` fetches the page from wherever it runs, keeps nothing, and adds nothing to the index: Plumb still crawls homepages only. Like the crawler it stays off private networks, so a page cannot send it to your router or a cloud metadata address, and it reads web pages and plain text only, not PDFs or images. A bot check (Cloudflare's "Just a moment..." and the like) is reported as an error rather than returned as the page.
+
+A node offers it only to AI apps on its own computer: a request from a loopback address (`127.0.0.1`, `::1`) that no proxy passed on. plumbsearch.org and other public nodes never offer it, since anyone could make them fetch pages. `plumb mcp` offers it whichever node it asks, because it fetches pages itself, on your computer. For a home server whose AI apps run on other computers, start the node with `--mcp-read-pages` to offer it to every client; never do that on a node the internet can reach.
+
 ## How it is served
 
 - `POST /mcp` takes one JSON-RPC message and answers it with one JSON object; a notification gets `202 Accepted`. There is no event stream (`GET /mcp` answers 405) and no session.
-- No token: the tools read nothing that the search page doesn't show.
+- No token: the tools read nothing that the search page doesn't show, and `read_page` is only offered as described above.
 - A request from a web page of another site (an `Origin` other than the node's own host) is refused.
 - Tool calls are limited to a burst of 30 per client, then 60 a minute, answered with `429` and `Retry-After` beyond that. Behind a reverse proxy on the same computer (plumbsearch.org's Caddy), the client is the proxy's `X-Forwarded-For`.
 - Like the search page, the node logs no queries.

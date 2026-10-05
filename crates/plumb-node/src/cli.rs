@@ -33,7 +33,8 @@ pub enum Command {
     /// for a node to list single pages with its sites.
     FetchPages(FetchPagesArgs),
     /// Add official profiles (YouTube, Twitch, X, app stores, ...) from
-    /// Wikidata to a Wikipedia articles file made by fetch-pages.
+    /// Wikidata to a Wikipedia articles file made by fetch-pages, and write
+    /// the items with profiles but no article as the wikidata set beside it.
     FetchProfiles(FetchProfilesArgs),
     /// Fold seed data and earlier records into one records file.
     Ingest(IngestArgs),
@@ -215,6 +216,12 @@ pub struct RunArgs {
     /// Bangs such as `!g` work either way.
     #[arg(long, value_name = "ENGINE", default_value = "off", value_parser = parse_web_search)]
     pub web_search: WebSearch,
+    /// Let every client of `/mcp`, not only AI apps on this computer, use
+    /// its `read_page` tool, which fetches a page from this node. For a
+    /// node on a home network whose AI apps run on other computers; never
+    /// on a node the whole internet can reach.
+    #[arg(long)]
+    pub mcp_read_pages: bool,
     /// Also find sites by meaning for searches that name no site ("electric
     /// car maker"). Downloads a small embedding model (about 130 MB) into
     /// DIR/model and embeds each site's text in the background after every
@@ -672,6 +679,12 @@ pub struct ServeArgs {
     /// Bangs such as `!g` work either way.
     #[arg(long, value_name = "ENGINE", default_value = "off", value_parser = parse_web_search)]
     pub web_search: WebSearch,
+    /// Let every client of `/mcp`, not only AI apps on this computer, use
+    /// its `read_page` tool, which fetches a page from this node. For a
+    /// node on a home network whose AI apps run on other computers; never
+    /// on a node the whole internet can reach.
+    #[arg(long)]
+    pub mcp_read_pages: bool,
     /// A places file (places.tsv.gz from `fetch-pages --set places`), so
     /// "pizza in denver" lists places. Indexed next to it on first use.
     #[arg(long, value_name = "PATH")]
