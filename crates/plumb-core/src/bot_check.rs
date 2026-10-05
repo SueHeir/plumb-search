@@ -185,6 +185,7 @@ impl SiteRecord {
         self.body_text = None;
         self.search_url = None;
         self.key_pages.clear();
+        self.links_to.clear();
         self.crawled_at = None;
         true
     }
