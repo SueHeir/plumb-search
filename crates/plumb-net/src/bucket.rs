@@ -53,6 +53,13 @@ pub trait BucketSource: Send + Sync + 'static {
         None
     }
 
+    /// The icon this node holds for `domain`, as base64 PNG, sent with the
+    /// site's record to a node filling its space; `None` when it has none.
+    fn icon(&self, domain: &str) -> Option<String> {
+        let _ = domain;
+        None
+    }
+
     /// The file of the page set `set` (`wikipedia-en`), for nodes asking
     /// for it (see [`crate::pages`]); `None` when this node has none.
     fn page_set_file(&self, set: &str) -> Option<std::path::PathBuf> {
