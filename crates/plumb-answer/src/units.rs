@@ -2,7 +2,7 @@
 //! not understood but `62 inches to cm` is, `how many feet in a mile`.
 
 use crate::format::format_number;
-use crate::{simplify, Answer, Kind};
+use crate::{Answer, Kind};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Dimension {
@@ -133,8 +133,9 @@ static UNITS: &[Unit] = &[
         Mass,
         1.0,
     ),
-    unit(&["g", "gram", "gramme", "gr"], "gram", "grams", Mass, 0.001),
+    unit(&["g", "gram", "gramme"], "gram", "grams", Mass, 0.001),
     unit(&["mg", "milligram"], "milligram", "milligrams", Mass, 1e-6),
+    unit(&["gr", "grain"], "grain", "grains", Mass, 64.798_91e-6),
     unit(
         &["µg", "ug", "mcg", "microgram"],
         "microgram",
@@ -524,6 +525,13 @@ static UNITS: &[Unit] = &[
         Data,
         125_000_000.0,
     ),
+    unit(
+        &["tbit", "terabit"],
+        "terabit",
+        "terabits",
+        Data,
+        125_000_000_000.0,
+    ),
     // Energy, in joules.
     unit(&["j", "joule"], "joule", "joules", Energy, 1.0),
     unit(
@@ -610,6 +618,7 @@ static UNITS: &[Unit] = &[
     ),
     // Power, in watts.
     unit(&["w", "watt"], "watt", "watts", Power, 1.0),
+    unit(&["milliwatt"], "milliwatt", "milliwatts", Power, 0.001),
     unit(&["kw", "kilowatt"], "kilowatt", "kilowatts", Power, 1000.0),
     unit(&["mw", "megawatt"], "megawatt", "megawatts", Power, 1e6),
     unit(
@@ -620,6 +629,30 @@ static UNITS: &[Unit] = &[
         745.699_871_582_270_2,
     ),
 ];
+
+/// Symbols whose case decides the unit, as typed, with the name of the
+/// unit they stand for: "mW" is a milliwatt where "MW" and "mw" are
+/// megawatts, and "Gb" a gigabit where "GB" and "gb" are gigabytes. A
+/// symbol in lowercase keeps its everyday meaning.
+static CASED_SYMBOLS: &[(&str, &str)] = &[
+    ("mW", "milliwatt"),
+    ("Kb", "kilobit"),
+    ("Mb", "megabit"),
+    ("Gb", "gigabit"),
+    ("Tb", "terabit"),
+];
+
+/// The unit `name` names, where `typed` is `name` as typed, before
+/// lowercasing: a symbol whose case matters ([`CASED_SYMBOLS`]) is read
+/// as typed, anything else by [`find`].
+fn find_typed(name: &str, typed: &str) -> Option<&'static Unit> {
+    let typed = typed.trim().trim_end_matches('.');
+    CASED_SYMBOLS
+        .iter()
+        .find(|(symbol, _)| *symbol == typed)
+        .and_then(|(_, unit)| find(unit))
+        .or_else(|| find(name))
+}
 
 /// The unit named `name` (already simplified): its symbol, its name, or
 /// its name in the plural.
@@ -721,8 +754,17 @@ pub(crate) fn sides(text: &str) -> Vec<(&str, &str)> {
 }
 
 pub(crate) fn answer(query: &str) -> Option<Answer> {
-    let text = simplify(query);
-    let text = text.strip_prefix("convert ").unwrap_or(&text);
+    // As [`simplify`], but lowercasing only ASCII, so that `lower` and
+    // `typed` keep the same byte offsets and a unit can be read as typed.
+    let typed = query.trim().trim_end_matches(['?', '!', '.']).trim();
+    let typed = typed.split_whitespace().collect::<Vec<_>>().join(" ");
+    let lower = typed.to_ascii_lowercase();
+    let as_typed = |part: &str| {
+        let at = part.as_ptr() as usize - lower.as_ptr() as usize;
+        &typed[at..at + part.len()]
+    };
+    let conversion = |from: &str, to: &str| conversion(from, to, as_typed);
+    let text = lower.strip_prefix("convert ").unwrap_or(&lower);
     // "how many feet in a mile", "how many cm are in 5 inches"
     if let Some(rest) = text.strip_prefix("how many ") {
         for joiner in [" are in ", " is in ", " in ", " per "] {
@@ -739,10 +781,12 @@ pub(crate) fn answer(query: &str) -> Option<Answer> {
         .find_map(|(from, to)| conversion(from, to))
 }
 
-fn conversion(from: &str, to: &str) -> Option<Answer> {
+/// The conversion of `from` to `to`, parts of the lowercased query that
+/// `typed` gives back as typed.
+fn conversion<'a>(from: &str, to: &str, typed: impl Fn(&str) -> &'a str) -> Option<Answer> {
     let (value, from_name) = amount(from)?;
-    let from_unit = find(from_name)?;
-    let to_unit = find(to)?;
+    let from_unit = find_typed(from_name, typed(from_name))?;
+    let to_unit = find_typed(to, typed(to))?;
     if from_unit.dimension != to_unit.dimension || std::ptr::eq(from_unit, to_unit) {
         return None;
     }
@@ -837,6 +881,41 @@ mod tests {
         assert_eq!(
             convert("6 feet to meters").unwrap(),
             "6 feet = 1.8288 metres"
+        );
+    }
+
+    #[test]
+    fn symbols_keep_their_case() {
+        assert_eq!(convert("5 mW to W").unwrap(), "5 milliwatts = 0.005 watts");
+        assert_eq!(
+            convert("5 MW to W").unwrap(),
+            "5 megawatts = 5,000,000 watts"
+        );
+        assert_eq!(convert("1 Gb to MB").unwrap(), "1 gigabit = 125 megabytes");
+        assert_eq!(
+            convert("1 GB to Mb").unwrap(),
+            "1 gigabyte = 8,000 megabits"
+        );
+        assert_eq!(
+            convert("1 gb to mb").unwrap(),
+            "1 gigabyte = 1,000 megabytes"
+        );
+        assert_eq!(convert("8 Kb to B").unwrap(), "8 kilobits = 1,000 bytes");
+        assert_eq!(
+            convert("Convert 2 KM To Miles").unwrap(),
+            "2 kilometres = 1.24274 miles"
+        );
+    }
+
+    #[test]
+    fn gr_is_a_grain() {
+        assert_eq!(
+            convert("100 gr to g").unwrap(),
+            "100 grains = 6.47989 grams"
+        );
+        assert_eq!(
+            convert("1 grain in mg").unwrap(),
+            "1 grain = 64.7989 milligrams"
         );
     }
 
