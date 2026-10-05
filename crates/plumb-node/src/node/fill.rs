@@ -866,6 +866,25 @@ impl Inner {
     }
 }
 
+impl Inner {
+    /// Has filling rest [`FILL_AGAIN_AFTER`], as after going through the
+    /// whole list: sites were just dropped to make room (see
+    /// [`super::trim`]), and filling on down the list would take lower
+    /// ranked ones in their place.
+    pub(super) fn rest_fill(&self) {
+        let mut state = self.fill_state();
+        if state.seed || self.config.blackhole {
+            return;
+        }
+        state.done_at = Some(now_unix());
+        state.detail = "Resting: sites were dropped to stay under the storage limit".into();
+        if let Err(err) = state.save(&self.paths.net) {
+            warn!("{err:#}");
+        }
+        self.set_fill(state);
+    }
+}
+
 /// Waits `wait`; true when the node stopped meanwhile.
 async fn pause(inner: &Inner, wait: Duration) -> bool {
     tokio::select! {

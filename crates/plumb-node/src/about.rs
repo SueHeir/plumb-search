@@ -306,10 +306,26 @@ fn record_words(record: &SiteRecord) -> HashSet<String> {
 
 /// Every interest of the About profiles in `dir`, a node's history folder.
 pub fn all_interests(dir: &Path) -> Vec<String> {
+    all_profiles(dir)
+        .into_iter()
+        .flat_map(|about| about.interests)
+        .collect()
+}
+
+/// Every site the About profiles in `dir` always put first.
+pub fn all_pinned(dir: &Path) -> Vec<String> {
+    all_profiles(dir)
+        .into_iter()
+        .flat_map(|about| about.pinned)
+        .collect()
+}
+
+/// The About profiles in `dir`, a node's history folder.
+fn all_profiles(dir: &Path) -> Vec<About> {
     let Ok(entries) = fs::read_dir(dir) else {
         return Vec::new();
     };
-    let mut interests = Vec::new();
+    let mut profiles = Vec::new();
     for entry in entries.flatten() {
         let name = entry.file_name();
         let Some(profile) = name.to_str().and_then(|n| n.strip_suffix(".about.json")) else {
@@ -319,10 +335,10 @@ pub fn all_interests(dir: &Path) -> Vec<String> {
             continue;
         }
         if let Some(about) = read(&entry.path()) {
-            interests.extend(about.interests);
+            profiles.push(about);
         }
     }
-    interests
+    profiles
 }
 
 /// The words a result is matched on: its name, description and domain.

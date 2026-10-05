@@ -520,6 +520,9 @@ pub(super) fn absorb_inbox(inner: &Inner) -> Result<u64> {
         .with_context(|| format!("opening {}", paths.absorbing.display()))?;
     let icons = IconStore::new(&paths.icons);
     let mut store = RecordStore::open(&paths.records);
+    // A full node only refreshes the sites it holds, but for those about
+    // its topics and official websites (see super::trim).
+    let topics = (!super::trim::takes_new_sites(inner)).then(|| inner.keep_topics());
     // Saved a part at a time, so an inbox of many thousand records is never
     // all in memory.
     let mut changes = Vec::with_capacity(ABSORB_CHUNK);
@@ -529,7 +532,12 @@ pub(super) fn absorb_inbox(inner: &Inner) -> Result<u64> {
         // A crash can cut the last line short.
         if let Ok(mut record) = serde_json::from_str::<SiteRecord>(&line) {
             keep_shared_icon(&icons, &mut record);
-            changes.push(Change::MergeShared { record });
+            changes.push(match &topics {
+                Some(topics) if !super::trim::keeps_new_site(&record, topics) => {
+                    Change::RefreshShared { record }
+                }
+                _ => Change::MergeShared { record },
+            });
         }
         if changes.len() >= ABSORB_CHUNK {
             store.save(&changes)?;
