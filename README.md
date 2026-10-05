@@ -33,7 +33,7 @@ To make it your browser's search engine, open a Plumb page and add it from the a
 ## What it does
 
 - **Official sites first.** Names outrank text, and look-alike sites stuffed with a brand's keywords are kept below the real one.
-- **Page sets.** English Wikipedia articles, well-starred GitHub repositories, Stack Overflow's most viewed questions, Open Library's most read books and the most cited papers, shown next to sites. Only titles, short descriptions and page views are kept, no article text ([docs/pages.md](docs/pages.md)).
+- **Page sets.** English Wikipedia articles, well-starred GitHub repositories, Stack Overflow's most viewed questions, Open Library's most read books, Podcast Index's most popular podcasts and the most cited papers, shown next to sites. Only titles, short descriptions and page views are kept, no article text ([docs/pages.md](docs/pages.md)).
 - **Instant answers and info boxes**: sums, unit and currency conversions and the time in a place, a box about the person, place or thing searched for, and profiles linking to its official accounts.
 - **Sitelinks**: links to a site's key pages, such as its Log in page, under the official site.
 - **Recent headlines** from the RSS and Atom feeds sites publish, in a folded "Recent" block ([docs/news.md](docs/news.md)).
@@ -285,6 +285,7 @@ Plumb is built from open data. Nodes keep titles, short descriptions and counts,
 | [OpenStreetMap](https://www.openstreetmap.org/copyright) | Places; © OpenStreetMap contributors | [ODbL](https://opendatacommons.org/licenses/odbl/) |
 | [OpenAlex](https://openalex.org/) | The most cited papers | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) |
 | [Open Library](https://openlibrary.org/) | The most read books | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) |
+| [Podcast Index](https://podcastindex.org/) | Titles, authors, categories and popularity of the most popular podcasts | Free for any use |
 | [GitHub](https://github.com/) | Names, descriptions and stars of public repositories, from its API | [GitHub's terms](https://docs.github.com/en/site-policy/github-terms/github-terms-of-service) |
 | [Tranco](https://tranco-list.eu/) | The top million sites, for first ranks | See its site |
 | [Common Crawl](https://commoncrawl.org/) | Web graph domain ranks; optionally titles and link text from WAT files | [Terms of use](https://commoncrawl.org/terms-of-use) |
