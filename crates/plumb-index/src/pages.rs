@@ -859,6 +859,43 @@ pub struct PlacedPage {
     pub at: usize,
 }
 
+/// Most site results looked through by [`lift_named_sites`].
+const LIFTED_FROM: usize = 5;
+
+/// Puts first the official site of the best page the query names, when
+/// it is among the first [`LIFTED_FROM`] sites: what Wikipedia and
+/// Wikidata call exactly what was searched for says which site it is.
+/// "youtube music" names the article YouTube Music, whose site is
+/// youtube.com, so youtube.com goes above youtube.de; "google maps" puts
+/// google.com above googlemaps.com. An official site the whole query
+/// names keeps first place.
+pub fn lift_named_sites(sites: &mut [crate::Hit], pages: &[PageHit]) {
+    let Some(site) = pages
+        .iter()
+        .find(|hit| hit.named && hit.page.item.is_some())
+        .and_then(|hit| hit.page.site.as_deref())
+    else {
+        return;
+    };
+    // An official or well-known site named by all of the query stays
+    // first: google.com for "google", not about.google, Google's own site
+    // in Wikidata; toyota.com for "toyota", not global.toyota.
+    if sites.first().is_some_and(|top| {
+        top.named
+            && (top.official || top.link_score >= crate::WELL_KNOWN_LINK_SCORE)
+            && top.domain != site
+    }) {
+        return;
+    }
+    let shown = sites.len().min(LIFTED_FROM);
+    if let Some(at) = sites[..shown]
+        .iter()
+        .position(|hit| hit.domain == site && hit.official)
+    {
+        sites[..=at].rotate_right(1);
+    }
+}
+
 /// Where `pages` (best first) go among the site results `sites`:
 ///
 /// - A page about one of the sites (its [`Page::site`]) goes under that
@@ -936,12 +973,17 @@ pub fn place_pages(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) -> Ve
             });
         if let Some(site) = hit.page.site.as_deref() {
             if sites.iter().any(|s| s.domain == site) {
-                if !placed.iter().any(|p| p.under.as_deref() == Some(site)) {
-                    placed.push(PlacedPage {
+                // The best page about the site goes under it, unless a
+                // later one is named by the query: "google maps" carries
+                // Google Maps under google.com, not Google.
+                match placed.iter_mut().find(|p| p.under.as_deref() == Some(site)) {
+                    None => placed.push(PlacedPage {
                         under: Some(site.to_string()),
                         at: 0,
                         hit,
-                    });
+                    }),
+                    Some(carried) if hit.named && !carried.hit.named => carried.hit = hit,
+                    Some(_) => {}
                 }
                 continue;
             }
@@ -1336,6 +1378,70 @@ mod tests {
         // under it only after the sites.
         assert_eq!(placed[1].hit.page.title, "Python (genus)");
         assert_eq!((placed[1].under.as_deref(), placed[1].at), (None, 2));
+    }
+
+    #[test]
+    fn the_site_of_the_page_the_query_names_goes_first() {
+        let mut official = known_site("youtube.com", false, 1.0);
+        official.official = true;
+        let mut sites = vec![
+            site("youtube.de", false),
+            site("youtube.nl", false),
+            official,
+            site("a.com", false),
+        ];
+        let mut music = found("YouTube Music", Some("youtube.com"), true, 0.9);
+        music.page.item = Some("Q28404534".into());
+        lift_named_sites(&mut sites, &[music.clone()]);
+        let order: Vec<&str> = sites.iter().map(|s| s.domain.as_str()).collect();
+        assert_eq!(order, ["youtube.com", "youtube.de", "youtube.nl", "a.com"]);
+        // Not for a page named only in part, nor a site Wikidata does
+        // not call official.
+        let mut sites = vec![site("youtube.de", false), site("youtube.com", false)];
+        lift_named_sites(&mut sites, &[music.clone()]);
+        assert_eq!(sites[0].domain, "youtube.de");
+        let mut google = known_site("google.com", true, 1.0);
+        google.official = true;
+        let mut about = known_site("about.google", false, 0.6);
+        about.official = true;
+        let mut sites = vec![google, about];
+        let mut company = found("Google", Some("about.google"), true, 0.9);
+        company.page.item = Some("Q95".into());
+        lift_named_sites(&mut sites, &[company]);
+        assert_eq!(sites[0].domain, "google.com");
+        let toyota = known_site("toyota.com", true, 0.9);
+        let mut global = known_site("global.toyota", false, 0.6);
+        global.official = true;
+        let mut sites = vec![toyota, global];
+        let mut maker = found("Toyota", Some("global.toyota"), true, 0.9);
+        maker.page.item = Some("Q53268".into());
+        lift_named_sites(&mut sites, &[maker]);
+        assert_eq!(sites[0].domain, "toyota.com");
+        music.named = false;
+        let mut sites = vec![
+            site("youtube.de", false),
+            known_site("youtube.com", false, 1.0),
+        ];
+        sites[1].official = true;
+        lift_named_sites(&mut sites, &[music]);
+        assert_eq!(sites[0].domain, "youtube.de");
+    }
+
+    #[test]
+    fn the_page_the_query_names_goes_under_its_site() {
+        let sites = [site("google.com", false), site("a.com", false)];
+        let placed = place_pages(
+            "google maps",
+            &sites,
+            vec![
+                found("Google", Some("google.com"), false, 0.9),
+                found("Google Maps", Some("google.com"), true, 0.8),
+                found("Google Search", Some("google.com"), false, 0.7),
+            ],
+        );
+        assert_eq!(placed.len(), 1);
+        assert_eq!(placed[0].under.as_deref(), Some("google.com"));
+        assert_eq!(placed[0].hit.page.title, "Google Maps");
     }
 
     #[test]

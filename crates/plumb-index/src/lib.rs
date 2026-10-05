@@ -1079,31 +1079,37 @@ impl Searcher {
             .fold(0.0, f32::max);
         let trusted_link_score =
             unit_or(cfg.trusted_link_score, default.trusted_link_score).min(named_link_score);
-        // Sites the query names in full that nothing describes: never
-        // crawled, with no title, description or Wikidata words. While the
-        // query also names a site by its first words, such a bare name
-        // (you-tubemusic.com, googlemaps.com) is only a spelling of the
-        // query, so it gets no more trust than a site with no links does,
-        // whatever its link score: youtube.com wins "youtube music".
+        // Sites the query names in full that nothing else says anything
+        // about: never crawled (no title, description or Wikidata words),
+        // no link text and no other name (from Wikidata or a redirect), and
+        // less linked than the site the query names by its first words.
+        // Such a bare name (you-tubemusic.com) is only a spelling of the
+        // query, so it gets no more trust than a site with no links does:
+        // youtube.com wins "youtube music". A site people link to by name
+        // is not bare, crawled or not (homedepot.com, which turns crawlers
+        // away, for "home depot"), nor is one with pages of its own
+        // (json-schema.org for "json schema").
         let mut bare: HashSet<DocAddress> = HashSet::new();
         if trusted_link_score > 0.0 {
             for (&addr, name) in &names {
-                if name.typed || name.words() < query.len {
+                if name.typed || name.words() < query.len || link_score_of(addr) >= named_link_score
+                {
                     continue;
                 }
-                let doc: TantivyDocument = searcher.doc(addr)?;
-                let described = [
+                let segment = searcher.segment_reader(addr.segment_ord);
+                let mut said = false;
+                for field in [
                     self.fields.title,
                     self.fields.description,
                     self.fields.about,
-                ]
-                .into_iter()
-                .any(|field| {
-                    doc.get_all(field)
-                        .filter_map(|value| value.as_str())
-                        .any(|text| !text.trim().is_empty())
-                });
-                if !described {
+                    self.fields.anchors,
+                    self.fields.aliases,
+                ] {
+                    if let Some(norms) = segment.fieldnorms_readers().get_field(field)? {
+                        said |= norms.fieldnorm(addr.doc_id) > 0;
+                    }
+                }
+                if !said {
                     bare.insert(addr);
                 }
             }
@@ -2964,6 +2970,40 @@ mod tests {
         assert_eq!(hits[0].domain, "youtube.com", "{:?}", domains(&hits));
         // With no other site named, the bare name is the answer.
         assert_eq!(top(&searcher, "you tubemusic"), "you-tubemusic.com");
+    }
+
+    #[test]
+    fn sites_people_link_to_by_name_are_not_bare() {
+        let records = [
+            site(
+                "home.com",
+                Some("Home"),
+                Some("Homes for sale."),
+                &[],
+                &[("home", 40)],
+                obscure(5_000, 40),
+            ),
+            // Turns crawlers away, but people link to it by name.
+            site(
+                "homedepot.com",
+                None,
+                None,
+                &[],
+                &[("home depot", 200), ("the home depot", 80)],
+                popular(60, 3_000),
+            ),
+            site(
+                "homedepot.com.mx",
+                Some("The Home Depot México"),
+                Some("Home Depot: herramientas y materiales."),
+                &[],
+                &[],
+                obscure(40_000, 2),
+            ),
+        ];
+        let (_dir, searcher) = build(&records);
+        let hits = searcher.search("home depot", 10).unwrap();
+        assert_eq!(hits[0].domain, "homedepot.com", "{:?}", domains(&hits));
     }
 
     #[test]
