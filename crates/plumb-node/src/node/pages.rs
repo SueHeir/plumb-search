@@ -74,7 +74,9 @@ pub(super) fn run(inner: Arc<Inner>) {
                     _ => (set, pages),
                 })
                 .collect();
-        for &(set, pages) in &counts {
+        // Only a node with a storage limit cuts its files: a server's are
+        // handed on to other nodes whole.
+        for &(set, pages) in counts.iter().filter(|_| settings.storage_limit_mb > 0) {
             if let Err(err) = cut_if_longer(&inner, set, pages) {
                 warn!("page set {}: {err:#}", set.id);
             }
