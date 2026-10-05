@@ -247,6 +247,16 @@ pub async fn fetch_repos(
         let status = response.status();
         let wait = rate_limit_wait(response.headers(), plumb_core::now_unix());
         if status.as_u16() == 403 || status.as_u16() == 429 {
+            // A 403 without rate limit headers may be a secondary limit
+            // (GitHub says to wait a minute) or a refusal that waiting will
+            // not end (a revoked token, a blocked address), so it counts
+            // toward giving up.
+            if status.as_u16() == 403 && wait.is_none() {
+                failures += 1;
+                if failures > 10 {
+                    bail!("GitHub keeps answering {status} to {q} page {page}");
+                }
+            }
             let wait = wait.unwrap_or(Duration::from_secs(60));
             info!("GitHub asks to wait {}s", wait.as_secs());
             tokio::time::sleep(wait).await;
