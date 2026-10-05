@@ -32,7 +32,7 @@ mod logging;
 use std::net::{SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
@@ -114,8 +114,9 @@ fn main() {
 /// The app's node, from starting it to stopping it.
 #[derive(Default)]
 struct Node {
-    /// The node's page, `http://127.0.0.1:<port>/`, once it listens.
-    url: OnceLock<Url>,
+    /// The node's page, `http://127.0.0.1:<port>/`, once it listens. Set on
+    /// every start: a restart can bring the node up on another port.
+    url: Mutex<Option<Url>>,
     phase: Mutex<Phase>,
     /// Whether the menu bar or notification area icon is up, so that closing
     /// the window can leave the app running there.
@@ -125,6 +126,18 @@ struct Node {
 impl Node {
     fn phase(&self) -> MutexGuard<'_, Phase> {
         self.phase.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The running node's page, as of its latest start.
+    fn url(&self) -> Option<Url> {
+        self.url
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    fn set_url(&self, url: Url) {
+        *self.url.lock().unwrap_or_else(PoisonError::into_inner) = Some(url);
     }
 }
 
@@ -178,7 +191,7 @@ fn setup(app: &AppHandle) -> Result<()> {
             .visible(!started_at_login())
             .on_navigation(move |url| {
                 let node = navigating.state::<Node>();
-                match destination(url, node.url.get(), dev_server.as_ref()) {
+                match destination(url, node.url().as_ref(), dev_server.as_ref()) {
                     Destination::Window => true,
                     Destination::Browser => {
                         open_in_browser(&navigating, url);
@@ -193,7 +206,7 @@ fn setup(app: &AppHandle) -> Result<()> {
             // Ctrl-click, middle-click and `target="_blank"` links.
             .on_new_window(move |url, _features| {
                 let node = opening.state::<Node>();
-                if is_add_to_firefox(&url, node.url.get()) {
+                if is_add_to_firefox(&url, node.url().as_ref()) {
                     open_in_firefox(&opening, &url);
                 } else if is_web_page(&url) {
                     open_in_browser(&opening, &url);
@@ -353,7 +366,7 @@ fn report_other_port(app: &AppHandle, port: u16) {
 fn show_node_page(app: &AppHandle, node: &NodeHandle) -> Result<()> {
     let url: Url = node.url().parse().context("reading the node's address")?;
     // Let the window go to the node's panel before sending it there.
-    let _ = app.state::<Node>().url.set(url.clone());
+    app.state::<Node>().set_url(url.clone());
     let window = app
         .get_webview_window(MAIN_WINDOW)
         .context("the window is closed")?;
