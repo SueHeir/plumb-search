@@ -2824,6 +2824,8 @@ fn render_page(out: &mut String, hit: &PageHit, icon: Option<&str>) {
         match hit.page.set.as_str() {
             plumb_index::pages::GITHUB_SET => "stars",
             plumb_index::pages::BOOKS_SET => "readers",
+            plumb_index::pages::PODCASTS_SET =>
+                "popularity (score, then listing, years and episodes)",
             plumb_index::pages::PAPERS_SET => "citations",
             plumb_index::pages::PACKAGES_SET => "use (share of the registry's most, in billionths)",
             _ => "views",

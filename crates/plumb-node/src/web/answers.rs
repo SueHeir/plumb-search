@@ -140,6 +140,8 @@ pub(crate) struct InfoBox {
 pub(crate) struct ShownProfile {
     pub service: &'static str,
     pub url: String,
+    /// Its own account, rather than a listing (a film on IMDb).
+    pub official: bool,
 }
 
 /// An official profile the query asks for ("mrbeast youtube"), shown first.
@@ -149,6 +151,8 @@ pub(crate) struct ProfileAnswer {
     pub of: String,
     pub service: &'static str,
     pub url: String,
+    /// Its own account, rather than a listing (a film on IMDb).
+    pub official: bool,
     /// The article, for the info box beside it.
     #[serde(skip)]
     pub page: Page,
@@ -238,6 +242,7 @@ pub(crate) fn info_from_page(page: &Page, sites: &[Hit]) -> Option<InfoBox> {
             .map(|(service, url)| ShownProfile {
                 service: service.name,
                 url,
+                official: service.official,
             })
             .collect(),
     })
@@ -264,6 +269,7 @@ pub(crate) fn profile_answer(query: &str, pages: &[PlacedPage]) -> Option<Profil
                 of: page.title.clone(),
                 service: service.name,
                 url,
+                official: service.official,
                 page: page.clone(),
             })
         })
@@ -275,16 +281,21 @@ pub(crate) fn render_profile(out: &mut String, profile: &ProfileAnswer, icon: Op
     let domain = plumb_core::registrable_domain(&profile.url).unwrap_or_default();
     let _ = writeln!(
         out,
-        "<section class=\"pf\" aria-label=\"Official profile\"><a class=\"r\" href=\"{}\" \
+        "<section class=\"pf\" aria-label=\"{kind}\"><a class=\"r\" href=\"{}\" \
          rel=\"noreferrer\"><span class=\"site\">{}<span class=\"sn\"><span class=\"dn\">{}</span>\
          <span class=\"u\">{}</span></span></span><span class=\"t\">{} on {}</span></a>\
-         <p class=\"m\">Official profile, from Wikidata</p></section>",
+         <p class=\"m\">{kind}, from Wikidata</p></section>",
         escape_html(&profile.url),
         super::site_badge(&domain, icon),
         escape_html(profile.service),
         escape_html(&shown),
         escape_html(&truncate_chars(&profile.of, 120)),
         escape_html(profile.service),
+        kind = if profile.official {
+            "Official profile"
+        } else {
+            "Listing"
+        },
     );
 }
 
@@ -318,9 +329,18 @@ pub(crate) fn render_info_box(out: &mut String, info: &InfoBox) {
     if !facts.is_empty() {
         let _ = write!(out, "<dl>{facts}</dl>");
     }
-    if !info.profiles.is_empty() {
-        out.push_str("<ul class=\"ibp\" aria-label=\"Official profiles\">");
-        for profile in &info.profiles {
+    // Its own accounts, then where it is listed (IMDb, MusicBrainz).
+    for (official, label) in [(true, "Official profiles"), (false, "Listed on")] {
+        let shown: Vec<&ShownProfile> = info
+            .profiles
+            .iter()
+            .filter(|p| p.official == official)
+            .collect();
+        if shown.is_empty() {
+            continue;
+        }
+        let _ = write!(out, "<ul class=\"ibp\" aria-label=\"{label}\">");
+        for profile in shown {
             let _ = write!(
                 out,
                 "<li><a href=\"{}\" rel=\"noreferrer\">{}</a></li>",
@@ -523,6 +543,33 @@ mod tests {
             "{html}"
         );
         assert!(html.contains("href=\"https://www.youtube.com/@MrBeast\""));
+        assert!(html.contains("Official profile, from Wikidata"), "{html}");
+    }
+
+    #[test]
+    fn lists_where_a_film_is_listed_apart() {
+        let mut dune = article("Dune: Part Two", "2024 film by Denis Villeneuve", None);
+        dune.page.profiles = vec![
+            profile("x", "dunemovie"),
+            profile("imdb", "tt15239678"),
+            profile("letterboxd", "dune-part-two"),
+        ];
+        let pages = [placed(dune.clone(), None, 0)];
+        let info = info_box(&[], &pages).unwrap();
+        let mut html = String::new();
+        render_info_box(&mut html, &info);
+        assert!(
+            html.contains(
+                "aria-label=\"Official profiles\"><li><a href=\"https://x.com/dunemovie\""
+            ),
+            "{html}"
+        );
+        assert!(html.contains("aria-label=\"Listed on\"><li><a href=\"https://www.imdb.com/title/tt15239678/\" rel=\"noreferrer\">IMDb</a></li>"), "{html}");
+        let found = profile_answer("dune part two imdb", &pages).unwrap();
+        assert_eq!(found.url, "https://www.imdb.com/title/tt15239678/");
+        let mut html = String::new();
+        render_profile(&mut html, &found, None);
+        assert!(html.contains("Listing, from Wikidata"), "{html}");
     }
 
     #[test]

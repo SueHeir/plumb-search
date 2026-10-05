@@ -462,7 +462,8 @@ pub struct FetchPagesArgs {
     /// github (GitHub repositories, from GitHub's search API; set
     /// GITHUB_TOKEN to search three times as fast), stackoverflow (Stack
     /// Overflow's most viewed questions, from Stack Exchange's data dump),
-    /// books (Open Library's most shelved works, from its dumps), papers
+    /// books (Open Library's most shelved works, from its dumps), podcasts
+    /// (Podcast Index's most popular podcasts, from its database), papers
     /// (the most cited works, from OpenAlex's API; set OPENALEX_API_KEY if
     /// it asks for one), packages (the most used packages of eight
     /// registries, from ecosyste.ms) or places (named shops, restaurants,
@@ -529,6 +530,17 @@ pub struct FetchPagesArgs {
     /// Papers: most papers kept, the most cited.
     #[arg(long, value_name = "N", default_value_t = 2_000_000)]
     pub max_papers: usize,
+    /// Podcasts: fewest Podcast Index popularity points (0 to 9) of a
+    /// podcast kept.
+    #[arg(long, value_name = "N", default_value_t = plumb_ingest::podcasts::DEFAULT_MIN_SCORE)]
+    pub min_podcast_score: u32,
+    /// Podcasts: most podcasts kept, the most popular.
+    #[arg(long, value_name = "N", default_value_t = 300_000)]
+    pub max_podcasts: usize,
+    /// Podcasts: read this Podcast Index database (podcastindex_feeds.db)
+    /// instead of downloading it into --work.
+    #[arg(long, value_name = "PATH")]
+    pub podcast_db: Option<PathBuf>,
     /// Packages: the registries to list (npm, pypi, crates, go, gem,
     /// composer, nuget, maven), comma-separated; all when left out.
     #[arg(long, value_name = "KEYS", value_delimiter = ',')]

@@ -161,6 +161,27 @@ fn run_books(args: &FetchPagesArgs, dest: &std::path::Path) -> Result<()> {
     write_set(dest, &books, "books")
 }
 
+/// Makes the podcasts set file `dest` from Podcast Index's database
+/// (about 1.8 GB, 5 GB unpacked).
+fn run_podcasts(args: &FetchPagesArgs, dest: &std::path::Path) -> Result<()> {
+    use plumb_ingest::podcasts;
+    let db = match &args.podcast_db {
+        Some(db) => db.clone(),
+        None => {
+            let tgz = fetch_dump(args, podcasts::FEEDS_URL, "Podcast Index's database")?;
+            let dir = tgz.parent().unwrap_or(std::path::Path::new("."));
+            info!("unpacking {}", tgz.display());
+            podcasts::unpack_feeds(&tgz, dir)?
+        }
+    };
+    let found = podcasts::read_podcasts(&db, args.min_podcast_score, args.max_podcasts)?;
+    let pages: Vec<_> = found
+        .into_iter()
+        .map(podcasts::Podcast::into_article)
+        .collect();
+    write_set(dest, &pages, "podcasts")
+}
+
 /// Makes the papers set file `dest` from OpenAlex's API.
 fn run_papers(args: &FetchPagesArgs, dest: &std::path::Path) -> Result<()> {
     let key = std::env::var("OPENALEX_API_KEY")
@@ -332,6 +353,9 @@ pub fn run_pages(args: FetchPagesArgs) -> Result<()> {
     }
     if set.id == plumb_index::pages::PAPERS_SET {
         return run_papers(&args, &dest);
+    }
+    if set.id == plumb_index::pages::PODCASTS_SET {
+        return run_podcasts(&args, &dest);
     }
     if set.id == plumb_index::pages::PACKAGES_SET {
         return run_packages(&args, &dest);
