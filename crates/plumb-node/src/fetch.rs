@@ -28,6 +28,47 @@ enum Outcome {
 }
 
 /// `plumb fetch-pages`: makes a page set file from Wikimedia's dumps.
+/// Makes the GitHub repositories set file `dest`.
+fn run_github(args: &FetchPagesArgs, dest: &std::path::Path) -> Result<()> {
+    let token = std::env::var("GITHUB_TOKEN")
+        .ok()
+        .filter(|t| !t.trim().is_empty());
+    info!(
+        "searching GitHub for repositories with at least {} stars ({})",
+        args.min_stars,
+        if token.is_some() {
+            "with a token"
+        } else {
+            "without a token: 10 searches a minute"
+        }
+    );
+    let client = download::http_client()?;
+    let repos = block_on(plumb_ingest::github::fetch_repos(
+        &client,
+        args.min_stars,
+        args.max_repos,
+        token.as_deref(),
+    ))??;
+    if repos.is_empty() {
+        bail!("GitHub gave no repositories; nothing was written");
+    }
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    articles::write_articles_file(dest, &repos)?;
+    let size = std::fs::metadata(dest).map_or(0, |m| m.len());
+    info!(
+        "wrote {} repositories to {} ({:.1} MB): {} with a description, {} with a homepage",
+        repos.len(),
+        dest.display(),
+        size as f64 / 1e6,
+        repos.iter().filter(|r| r.description.is_some()).count(),
+        repos.iter().filter(|r| r.site.is_some()).count(),
+    );
+    Ok(())
+}
+
 pub fn run_pages(args: FetchPagesArgs) -> Result<()> {
     let Some(set) = crate::pages::SetInfo::find(&args.set) else {
         bail!(
@@ -40,20 +81,27 @@ pub fn run_pages(args: FetchPagesArgs) -> Result<()> {
                 .join(", ")
         );
     };
-    let Some(lang) = set.id.strip_prefix("wikipedia-") else {
-        bail!("fetch-pages cannot make {} yet", set.id);
-    };
     let dest = match (&args.out, &args.data) {
         (Some(out), _) => out.clone(),
         (None, Some(data)) => set.file(data),
         (None, None) => bail!("pass --data DIR or --out PATH"),
     };
+    if set.id == plumb_index::pages::GITHUB_SET {
+        return run_github(&args, &dest);
+    }
+    let Some(lang) = set.id.strip_prefix("wikipedia-") else {
+        bail!("fetch-pages cannot make {} yet", set.id);
+    };
+    let work = args
+        .work
+        .as_deref()
+        .context("pass --work DIR for Wikipedia's dumps")?;
     let mut dumps = if args.dumps.is_empty() {
         let client = download::http_client()?;
         let days = articles::pageview_days(plumb_core::now_unix(), args.pageview_days);
         block_on(articles::download_article_dumps(
             &client,
-            &args.work,
+            work,
             lang,
             &days,
             args.keep_days,

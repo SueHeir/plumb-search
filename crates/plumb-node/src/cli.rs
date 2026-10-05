@@ -361,13 +361,15 @@ pub struct FetchDataArgs {
 
 #[derive(Debug, Args)]
 pub struct FetchPagesArgs {
-    /// The page set to make: wikipedia-en (English Wikipedia's articles).
+    /// The page set to make: wikipedia-en (English Wikipedia's articles)
+    /// or github (GitHub repositories, from GitHub's search API; set
+    /// GITHUB_TOKEN to search three times as fast).
     #[arg(long, value_name = "SET", default_value = "wikipedia-en")]
     pub set: String,
-    /// Directory to download the dumps into (created if missing). About
-    /// 3 GB for English, plus about 400 MB per day of page views.
+    /// Directory to download Wikipedia's dumps into (created if missing).
+    /// About 3 GB for English, plus about 400 MB per day of page views.
     #[arg(long, value_name = "DIR")]
-    pub work: PathBuf,
+    pub work: Option<PathBuf>,
     /// A node's data directory to put the set's file in, where the node
     /// picks it up within seconds.
     #[arg(long, value_name = "DIR", required_unless_present = "out")]
@@ -392,6 +394,12 @@ pub struct FetchPagesArgs {
     /// redirect dumps, then the page view files.
     #[arg(long, value_name = "PATH", num_args = 4.., conflicts_with = "pageview_days")]
     pub dumps: Vec<PathBuf>,
+    /// GitHub: fewest stars of a repository kept.
+    #[arg(long, value_name = "STARS", default_value_t = plumb_ingest::github::DEFAULT_MIN_STARS)]
+    pub min_stars: u64,
+    /// GitHub: most repositories kept.
+    #[arg(long, value_name = "N", default_value_t = 1_000_000)]
+    pub max_repos: usize,
 }
 
 #[derive(Debug, Args)]
@@ -608,11 +616,12 @@ pub struct EvalArgs {
     /// scored: final score, text match, link score and closeness in meaning.
     #[arg(long)]
     pub explain: bool,
-    /// A page set file (wikipedia-en.tsv.gz from fetch-pages) whose pages
-    /// are listed among the sites, as a node lists them.
+    /// Page set files (wikipedia-en.tsv.gz, github.tsv.gz from fetch-pages)
+    /// whose pages are listed among the sites, as a node lists them. Can be
+    /// given more than once.
     #[arg(long, value_name = "PATH")]
-    pub pages: Option<PathBuf>,
-    /// How many of the page set's most read pages to keep.
+    pub pages: Vec<PathBuf>,
+    /// How many of each page set's most read pages to keep.
     #[arg(long, value_name = "N", default_value_t = usize::MAX, hide_default_value = true)]
     pub pages_top: usize,
     #[command(flatten)]

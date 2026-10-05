@@ -757,8 +757,11 @@ async fn search_page(
             if let NetOutcome::Answered(found) = &network {
                 domains.extend(found.hits.iter().map(|result| result.hit.domain.clone()));
             }
-            if !results.pages.is_empty() {
-                domains.push(PAGES_ICON_DOMAIN.to_string());
+            for placed in &results.pages {
+                let domain = placed.hit.page.set_domain();
+                if !domains.iter().any(|d| d == domain) {
+                    domains.push(domain.to_string());
+                }
             }
             let icons = state.icons(domains).await;
             html_response(
@@ -1963,7 +1966,6 @@ fn render_results(
             .map(|placed| placed.hit.clone())
             .collect(),
     );
-    let page_icon = icons.get(PAGES_ICON_DOMAIN);
     let shown_count = shown.len();
     let pages = &pages;
     let listed_pages = move |at: usize| {
@@ -1981,7 +1983,7 @@ fn render_results(
         body.push_str("<ol>\n");
         for (position, item) in shown.iter().enumerate() {
             for page in listed_pages(position) {
-                render_page(&mut body, &page.hit, page_icon);
+                render_page(&mut body, &page.hit, icons.get(page.hit.page.set_domain()));
             }
             // `/go` only follows this node's own results, so sites from other
             // nodes link straight to themselves.
@@ -2013,7 +2015,7 @@ fn render_results(
             body.push_str(&rendered);
         }
         for page in listed_pages(usize::MAX) {
-            render_page(&mut body, &page.hit, page_icon);
+            render_page(&mut body, &page.hit, icons.get(page.hit.page.set_domain()));
         }
         body.push_str("</ol>\n");
     }
@@ -2187,15 +2189,13 @@ fn site_badge(domain: &str, icon: Option<&str>) -> String {
 /// tinted and says so. `go` is the `/go` link to send the click through
 /// instead of linking to the site directly; `icon` is the site's icon as a
 /// `data:` URL.
-/// Whose icon page results show: Wikipedia's, for now the one page set.
-const PAGES_ICON_DOMAIN: &str = "wikipedia.org";
-
-/// A single page (a Wikipedia article) listed among the sites.
+/// A single page (a Wikipedia article, a GitHub repository) listed among
+/// the sites, with its set's icon.
 fn render_page(out: &mut String, hit: &PageHit, icon: Option<&str>) {
     let Some(href) = http_url(&hit.page.url) else {
         return;
     };
-    let badge = site_badge(PAGES_ICON_DOMAIN, icon);
+    let badge = site_badge(hit.page.set_domain(), icon);
     let _ = write!(
         out,
         "<li class=\"pg\"><a class=\"r\" href=\"{}\" rel=\"noreferrer\"><span class=\"site\">{badge}\
@@ -2216,8 +2216,14 @@ fn render_page(out: &mut String, hit: &PageHit, icon: Option<&str>) {
     }
     let _ = writeln!(
         out,
-        "<div class=\"m\"><span title=\"{} views\">score {:.3}</span></div></li>",
-        hit.page.views, hit.score
+        "<div class=\"m\"><span title=\"{} {}\">score {:.3}</span></div></li>",
+        hit.page.views,
+        if hit.page.set == plumb_index::pages::GITHUB_SET {
+            "stars"
+        } else {
+            "views"
+        },
+        hit.score
     );
 }
 

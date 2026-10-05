@@ -1,6 +1,6 @@
-# Page sets: Wikipedia articles in results
+# Page sets: Wikipedia articles and GitHub repositories in results
 
-Plumb lists single pages next to sites, starting with English Wikipedia's articles. Searching "marie curie" shows the article Marie Curie, and "python" shows python.org with the article on the Python language under it.
+Plumb lists single pages next to sites: English Wikipedia's articles and well-starred GitHub repositories. Searching "marie curie" shows the article Marie Curie, and "python" shows python.org with the article on the Python language under it.
 
 ## What is kept
 
@@ -37,6 +37,16 @@ This downloads the latest `page`, `page_props` and `redirect` tables of English 
 
 A node with no set file, or fewer pages than it is set to keep, takes the file from a node it trusts (plumbsearch.org by default) over `/plumb/pages/1`, 1 MiB at a time, and stops once it has the pages it keeps: a node keeping 100,000 articles downloads about 10 MB, not the whole file. It asks again for a newer file after 30 days. A node passes on only whole files, made with `fetch-pages` or taken whole, so a cut file never spreads. Nodes answer at most four such requests at once and 120 a minute from each node.
 
+## GitHub repositories
+
+The `github` set lists public GitHub repositories with at least 500 stars: "ripgrep" finds BurntSushi/ripgrep. Each keeps only its `owner/name`, its name as another title, its description, its stars (in place of page views) and the domain of its homepage, so tauri-apps/tauri is shown under tauri.app's result. No code or README is kept. It has its own choice under **Page sets**.
+
+```sh
+GITHUB_TOKEN=... plumb fetch-pages --set github --data /path/to/node-data --min-stars 500
+```
+
+This walks GitHub's repository search, most starred first. Without a token GitHub allows 10 searches a minute, about 1,000 repositories, so a few hundred thousand repositories take some hours; a token makes it three times faster. Stars are compared with the most starred repository and page views with the most read article, so neither set crowds out the other.
+
 ## How pages and sites are listed together
 
 - An article about a listed site (its Wikidata item's official website) goes under that site's result instead of in a place of its own.
@@ -48,6 +58,8 @@ A node with no set file, or fewer pages than it is set to keep, takes the file f
 ```sh
 plumb eval --index data/indexes/000123 --queries eval/article_queries.tsv \
   --pages data/pages/sets/wikipedia-en.tsv.gz --pages-top 1000000
+plumb eval --index data/indexes/000123 --queries eval/repo_queries.tsv \
+  --pages data/pages/sets/wikipedia-en.tsv.gz --pages data/pages/sets/github.tsv.gz
 ```
 
 `--pages` also works with the brand and described query files, to check that articles do not push official sites down.

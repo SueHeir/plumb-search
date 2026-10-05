@@ -1,0 +1,27 @@
+# Searches for GitHub repositories that have no website of their own, with
+# the repository expected first. Run with --pages github.tsv.gz.
+ripgrep	https://github.com/BurntSushi/ripgrep
+fzf	https://github.com/junegunn/fzf
+awesome python	https://github.com/vinta/awesome-python
+free programming books	https://github.com/EbookFoundation/free-programming-books
+system design primer	https://github.com/donnemartin/system-design-primer
+public apis	https://github.com/public-apis/public-apis
+the art of command line	https://github.com/jlevy/the-art-of-command-line
+build your own x	https://github.com/codecrafters-io/build-your-own-x
+coding interview university	https://github.com/jwasham/coding-interview-university
+awesome selfhosted	https://github.com/awesome-selfhosted/awesome-selfhosted
+yt-dlp	https://github.com/yt-dlp/yt-dlp
+stable diffusion webui	https://github.com/AUTOMATIC1111/stable-diffusion-webui
+lazygit	https://github.com/jesseduffield/lazygit
+btop	https://github.com/aristocratu02/btop
+zoxide	https://github.com/ajeetdsouza/zoxide
+wezterm	https://github.com/wez/wezterm
+thefuck	https://github.com/nvbn/thefuck
+hyperfine	https://github.com/sharkdp/hyperfine
+lazydocker	https://github.com/jesseduffield/lazydocker
+awesome go	https://github.com/avelino/awesome-go
+javascript algorithms	https://github.com/trekhleb/javascript-algorithms
+the algorithms python	https://github.com/TheAlgorithms/Python
+30 seconds of code	https://github.com/Chalarangelo/30-seconds-of-code
+you dont know js	https://github.com/getify/You-Dont-Know-JS
+every programmer should know	https://github.com/mtdvio/every-programmer-should-know
