@@ -320,9 +320,10 @@ docker compose pull
 docker compose up -d
 ```
 
-The data stays in the volume. `latest` follows the main branch. Every build
-is also tagged `sha-<commit>`, and releases get their version number (`1.2.3`
-and `1.2`). Put one of those tags in `docker-compose.yml` to update only when
+The data stays in the volume. `latest` is the newest release, and releases
+also get their version number (`1.2.3` and `1.2`). `main` follows the main
+branch, unreleased changes included, and every build is also tagged
+`sha-<commit>`. Put a version tag in `docker-compose.yml` to update only when
 you choose. `docker image prune` removes the images that were replaced.
 
 With `docker run`, pull the image, then replace the container:

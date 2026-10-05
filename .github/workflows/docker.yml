@@ -4,9 +4,12 @@
 # - Pull requests: build for linux/amd64 and smoke-test it; nothing is pushed.
 # - Pushes to main and v* tags: build linux/amd64 and linux/arm64 natively on
 #   their own runners, push each by digest, then merge them into one
-#   multi-arch image tagged `latest` (main), the version (v* tags) and
-#   `sha-<commit>`. This is Docker's "distribute build across multiple
-#   runners" pattern: https://docs.docker.com/build/ci/github-actions/multi-platform/
+#   multi-arch image tagged `main` (main), the version (v* tags) and
+#   `sha-<commit>`. `latest` is the newest release: a vX.Y.Z tag gets it only
+#   when no higher release tag exists, so it never moves back to an older
+#   release or ahead to unreleased main. This is Docker's "distribute build
+#   across multiple runners" pattern:
+#   https://docs.docker.com/build/ci/github-actions/multi-platform/
 name: Docker image
 
 on:
@@ -19,16 +22,17 @@ permissions:
   contents: read
 
 # A newer push to a pull request cancels its older run. Runs for main and tags
-# queue instead, so `latest` always ends up at the newest commit.
+# queue instead, so `main` always ends up at the newest commit.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   # docker/metadata-action tag rules, shared by the per-platform labels and the
-  # published tags.
+  # published tags. `latest` is added in the merge job, which knows whether
+  # this is the newest release.
   IMAGE_TAGS: |
-    type=raw,value=latest,enable={{is_default_branch}}
+    type=raw,value=main,enable={{is_default_branch}}
     type=semver,pattern={{version}}
     type=semver,pattern={{major}}.{{minor}}
     type=semver,pattern={{major}},enable=${{ !startsWith(github.ref, 'refs/tags/v0.') }}
@@ -145,6 +149,22 @@ jobs:
       - name: Prepare
         run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
 
+      # `latest` goes to a release tag (vX.Y.Z, no pre-release suffix) only
+      # when it is the highest release tag in the repository.
+      - name: Is this the newest release?
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          newest=false
+          release='^v[0-9]+\.[0-9]+\.[0-9]+$'
+          if [[ $GITHUB_REF_TYPE == tag && $GITHUB_REF_NAME =~ $release ]]; then
+            top=$(gh api --paginate "repos/$GITHUB_REPOSITORY/tags" --jq '.[].name' \
+              | grep -E "$release" | sort -V | tail -n 1)
+            if [[ $top == "$GITHUB_REF_NAME" ]]; then newest=true; fi
+          fi
+          echo "newest release: $newest"
+          echo "NEWEST_RELEASE=$newest" >> "$GITHUB_ENV"
+
       - name: Download digests
         uses: actions/download-artifact@v8
         with:
@@ -168,7 +188,9 @@ jobs:
         with:
           images: ${{ env.IMAGE }}
           flavor: latest=false
-          tags: ${{ env.IMAGE_TAGS }}
+          tags: |
+            ${{ env.IMAGE_TAGS }}
+            type=raw,value=latest,enable=${{ env.NEWEST_RELEASE }}
 
       # The index annotations are what the GHCR package page shows for a
       # multi-arch image.

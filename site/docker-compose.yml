@@ -23,7 +23,9 @@ services:
 
   plumb:
     profiles: ["node"]
-    image: ghcr.io/sueheir/plumb-search:latest
+    # `main` is the newest build of the main branch; `latest` is the newest
+    # release.
+    image: ghcr.io/sueheir/plumb-search:main
     # Used by `docker compose --profile node build`, for when the image isn't
     # published yet or you want another branch. PLUMB_SOURCE is a Git URL with
     # an optional #branch, set in .env next to this file.

@@ -41,8 +41,8 @@ To add the Plumb node:
 docker compose --profile node up -d
 ```
 
-That pulls `ghcr.io/sueheir/plumb-search:latest`, which is published from
-`main`. To build the node from another branch instead, for example before the
+That pulls `ghcr.io/sueheir/plumb-search:main`, which is published from
+every push to `main` (`latest` is the newest release instead). To build the node from another branch instead, for example before the
 image exists, name the branch in `.env` and build it on the server:
 
 ```sh
