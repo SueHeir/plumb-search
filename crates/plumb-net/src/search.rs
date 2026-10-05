@@ -270,6 +270,11 @@ async fn round(
 ) -> NetSearch {
     out.buckets = buckets.len();
     let peers = if buckets.is_empty() { &[][..] } else { peers };
+    // Once requests can go through relays, only nodes that take them
+    // sealed are asked: asking one that does not would show it this
+    // node's IP address with the bucket.
+    let sealed = sealed_targets(peers);
+    let peers = sealed.as_deref().unwrap_or(peers);
     // Spread the buckets over the nodes so that no node gets two buckets
     // of one search while others get none.
     let mut order: Vec<usize> = (0..peers.len()).collect();
@@ -493,6 +498,14 @@ pub(crate) fn bucket_ready(cache: &BucketCache, bucket: u32, now: u64) -> bool {
                 .into_iter()
                 .any(|answer| check_answer(answer, now).is_some())
     })
+}
+
+/// The nodes that take sealed requests, when at least two do, so each of
+/// them has another to relay to it; `None` when requests cannot all be
+/// relayed and any node may be asked.
+fn sealed_targets(peers: &[BucketPeer]) -> Option<Vec<BucketPeer>> {
+    let sealed: Vec<BucketPeer> = peers.iter().filter(|p| p.oblivious).cloned().collect();
+    (sealed.len() >= 2).then_some(sealed)
 }
 
 /// Asks `target` for a bucket: through one of `through` (relays, tried in
@@ -923,6 +936,22 @@ mod tests {
             proof: None,
             also: Vec::new(),
         }
+    }
+
+    #[test]
+    fn with_relays_only_nodes_taking_sealed_requests_are_asked() {
+        let peer = |oblivious| BucketPeer {
+            peer: PeerId::random(),
+            addrs: Vec::new(),
+            oblivious,
+        };
+        let (a, b, plain) = (peer(true), peer(true), peer(false));
+        // Two relays: the plain node would see the asker's address.
+        let all = [a.clone(), plain.clone(), b.clone()];
+        assert_eq!(sealed_targets(&all), Some(vec![a.clone(), b]));
+        // One relay cannot relay to itself: any node may be asked.
+        assert_eq!(sealed_targets(&[a, plain.clone()]), None);
+        assert_eq!(sealed_targets(&[plain]), None);
     }
 
     #[test]
