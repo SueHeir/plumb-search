@@ -7,7 +7,7 @@ use plumb_ingest::{articles, download, facts, intros, kind_sites};
 use tracing::{error, info};
 
 use crate::block_on;
-use crate::cli::{FetchDataArgs, FetchPagesArgs};
+use crate::cli::{FetchDataArgs, FetchPagesArgs, FetchProfilesArgs};
 
 /// Where release names for `--cc-release` are listed. We know of no
 /// machine-readable index of releases, so we point people here instead.
@@ -181,6 +181,40 @@ fn run_papers(args: &FetchPagesArgs, dest: &std::path::Path) -> Result<()> {
     write_set(dest, &papers, "papers")
 }
 
+/// `plumb fetch-profiles`: adds Wikidata's official profiles to the
+/// English Wikipedia articles file.
+pub fn run_profiles(args: FetchProfilesArgs) -> Result<()> {
+    let path = match (&args.articles, &args.data) {
+        (Some(path), _) => path.clone(),
+        (None, Some(data)) => crate::pages::SetInfo::find("wikipedia-en")
+            .context("no English Wikipedia set")?
+            .file(data),
+        (None, None) => bail!("pass --data DIR or --articles PATH"),
+    };
+    if !path.is_file() {
+        bail!(
+            "{} is not there; make it with plumb fetch-pages first",
+            path.display()
+        );
+    }
+    let client = download::http_client()?;
+    let profiles = block_on(plumb_ingest::profiles::fetch_profiles(
+        &client,
+        download::WIKIDATA_SPARQL_URL,
+        download::WikidataPacing::default(),
+    ))??;
+    info!("Wikidata has profiles for {} items", profiles.len());
+    let added = plumb_ingest::profiles::add_profiles_to_file(&path, &profiles)?;
+    info!(
+        "{}: {} of {} articles have profiles, {} in all",
+        path.display(),
+        added.with_profiles,
+        added.articles,
+        added.profiles
+    );
+    Ok(())
+}
+
 /// `plumb fetch-pages`: makes a page set file.
 pub fn run_pages(args: FetchPagesArgs) -> Result<()> {
     let Some(set) = crate::pages::SetInfo::find(&args.set) else {
@@ -266,6 +300,10 @@ pub fn run_pages(args: FetchPagesArgs) -> Result<()> {
         with_site,
         share(100_000),
         share(1_000_000)
+    );
+    info!(
+        "add official profiles to it with: plumb fetch-profiles --articles {}",
+        dest.display()
     );
     Ok(())
 }

@@ -33,6 +33,18 @@ plumb fetch-pages --work /big/disk/dumps --data /path/to/node-data \
 
 This downloads the latest `page`, `page_props` and `redirect` tables of English Wikipedia (about 3 GB) and seven days of `pageview_complete` files (about 400 MB a day), and writes `DIR/pages/sets/wikipedia-en.tsv.gz`, most read first. A running node picks it up and indexes the pages it is set to keep in `DIR/pages/index-<key>/`. Anyone can make the same file from the same dumps.
 
+### Official profiles
+
+Then, to add each article's official profiles (YouTube, Twitch, TikTok, Instagram, X, Bluesky, Mastodon, Threads, Facebook, LinkedIn, GitHub, Reddit, Spotify, Apple Music, SoundCloud, Patreon, Steam, the App Store and Google Play) from Wikidata's external identifiers:
+
+```sh
+plumb fetch-profiles --data /path/to/node-data
+```
+
+It asks Wikidata's query service for each service's property, a page of 200,000 statements at a time, and adds a `profiles` line after each article whose item has any (see `plumb_core::article`). Readers made before profiles skip those lines. Each property's formatter URL is checked first, so a service whose property points elsewhere is left out. Only the identifier is kept; the node builds the address and links only identifiers of the right shape. Run it again after each `fetch-pages`, which writes the file without profiles.
+
+The results page lists an article's profiles in its info box, and a query ending in a service's name ("mrbeast youtube", "valve steam", "spotify android app") shows that profile first when the words before it name an article.
+
 ## Nodes in the network
 
 A node with no set file, or fewer pages than it is set to keep, takes the file from a node it trusts (plumbsearch.org by default) over `/plumb/pages/1`, 1 MiB at a time, and stops once it has the pages it keeps: a node keeping 100,000 articles downloads about 10 MB, not the whole file. It asks again for a newer file after 30 days. A node passes on only whole files, made with `fetch-pages` or taken whole, so a cut file never spreads. Nodes answer at most four such requests at once and 120 a minute from each node.
