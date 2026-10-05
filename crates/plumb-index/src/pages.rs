@@ -26,7 +26,7 @@ use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 use plumb_core::article::{article_url, Article};
-use plumb_core::{host_of, normalize_text, Operators};
+use plumb_core::{adult_level, host_of, normalize_text, AdultLevel, Operators, SafeSearch};
 use serde::{Deserialize, Serialize};
 use tantivy::collector::TopDocs;
 use tantivy::query::{BooleanQuery, Occur, Query, TermQuery};
@@ -208,6 +208,18 @@ impl Page {
             "OpenAlex"
         } else {
             &self.set
+        }
+    }
+
+    /// The language the page is in, when its set says: `en` for
+    /// English Wikipedia, GitHub and Stack Overflow.
+    pub fn language(&self) -> Option<&str> {
+        if let Some(lang) = self.set.strip_prefix("wikipedia-") {
+            Some(lang)
+        } else if self.set == GITHUB_SET || self.set == STACKOVERFLOW_SET {
+            Some("en")
+        } else {
+            None
         }
     }
 
@@ -816,6 +828,27 @@ pub fn operators_allow(ops: &Operators, page: &Page) -> bool {
     ops.allows(&host, texts)
 }
 
+/// Whether the searcher's `options` allow `page`: one in another
+/// language than [`crate::SearchOptions::language`] is left out, and
+/// strict safe search leaves out pages whose title or description is
+/// suggestive.
+pub fn options_allow(options: &crate::SearchOptions, page: &Page) -> bool {
+    if let (Some(wanted), Some(language)) = (&options.language, page.language()) {
+        if wanted != language {
+            return false;
+        }
+    }
+    if options.safe == SafeSearch::Strict {
+        let texts = [page.title.as_str()]
+            .into_iter()
+            .chain(page.description.as_deref());
+        if adult_level("", texts) != AdultLevel::None {
+            return false;
+        }
+    }
+    true
+}
+
 /// [`place_pages`] for a query with search operators `ops`, of the pages
 /// they allow. A `site:` query lists up to [`MAX_SITE_PAGES`] pages on
 /// that site after the sites, best first: "site:wikipedia.org einstein"
@@ -901,6 +934,31 @@ mod tests {
         assert_eq!(titles(&hits)[0], "Marie Curie");
         assert!(hits[0].named);
         assert!(s.search("pythonidae", 1).unwrap()[0].named);
+    }
+
+    #[test]
+    fn pages_follow_the_language_and_strict_safe_search() {
+        let article = page("Einstein", 1, &[]);
+        let mut book = page("Sexy beasts", 1, &[]);
+        book.set = BOOKS_SET.into();
+        let en = crate::SearchOptions {
+            language: Some("en".into()),
+            ..crate::SearchOptions::default()
+        };
+        assert!(options_allow(&en, &article));
+        assert!(options_allow(&en, &book), "books do not say their language");
+        let de = crate::SearchOptions {
+            language: Some("de".into()),
+            ..crate::SearchOptions::default()
+        };
+        assert!(!options_allow(&de, &article));
+        assert!(options_allow(&crate::SearchOptions::default(), &book));
+        let strict = crate::SearchOptions {
+            safe: SafeSearch::Strict,
+            ..crate::SearchOptions::default()
+        };
+        assert!(!options_allow(&strict, &book));
+        assert!(options_allow(&strict, &article));
     }
 
     #[test]

@@ -38,6 +38,7 @@ fn hit(domain: &str, score: f32, link_score: f32, named: bool) -> Hit {
         country: None,
         named,
         official: false,
+        key_pages: Vec::new(),
     }
 }
 

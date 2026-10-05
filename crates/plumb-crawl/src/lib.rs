@@ -160,6 +160,10 @@ pub struct PageMeta {
     /// to the same site.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub search_url: Option<String>,
+    /// The page's language from `<html lang>`, as
+    /// [`plumb_core::language_code`] gives it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
     /// The site's icons from `<link rel="icon">` and Apple touch icon
     /// links, best for a results page first, at most [`MAX_ICONS`]. SVG
     /// icons are left out.

@@ -209,6 +209,9 @@ struct Page<'a> {
     og_description: Option<String>,
     site_name: Option<String>,
     search_url: Option<String>,
+    /// The `<html lang>` of the page, once its `<html>` is read.
+    language: Option<String>,
+    html_seen: bool,
     /// `<link rel="icon">` and the like, with their [`icon_rank`].
     icons: Vec<(u32, String)>,
     /// The text of the `<h1>` or `<h2>` being read, when it is visible.
@@ -306,6 +309,8 @@ impl<'a> Page<'a> {
             og_description: None,
             site_name: None,
             search_url: None,
+            language: None,
+            html_seen: false,
             icons: Vec::new(),
             heading_text: None,
             headings: Vec::new(),
@@ -347,6 +352,10 @@ impl<'a> Page<'a> {
                 self.close_anchor();
                 self.in_page_link = attr(tag, "href").is_some_and(|h| h.trim().starts_with('#'));
                 self.open_anchor(tag);
+            }
+            "html" if !self.html_seen => {
+                self.html_seen = true;
+                self.language = attr(tag, "lang").and_then(plumb_core::language_code);
             }
             "img" => self.image(tag),
             "meta" => self.meta(tag),
@@ -708,6 +717,7 @@ impl<'a> Page<'a> {
             description: self.description.or(self.og_description),
             site_name: self.site_name,
             search_url: self.search_url,
+            language: self.language,
             icons: best_icons(self.icons),
             key_pages: match &self.own_domain {
                 Some(domain) => pick_key_pages(self.base_url.as_str(), domain, &self.own_links),
@@ -873,6 +883,23 @@ mod tests {
             target_domain: target_domain.into(),
             text: text.into(),
         }
+    }
+
+    #[test]
+    fn reads_the_language_of_the_page() {
+        let lang = |html: &str| extract("https://www.example.com/", html).language;
+        assert_eq!(
+            lang("<html lang=\"de-DE\"><title>x</title>").as_deref(),
+            Some("de")
+        );
+        assert_eq!(
+            lang("<html LANG=\"EN\"><title>x</title>").as_deref(),
+            Some("en")
+        );
+        assert_eq!(lang("<html><title>x</title>"), None);
+        assert_eq!(lang("<html lang=\"x-default\">"), None);
+        // Only the page's own <html>.
+        assert_eq!(lang("<html><svg><html lang=\"fr\"></svg>"), None);
     }
 
     #[test]

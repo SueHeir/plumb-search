@@ -262,6 +262,7 @@ mod tests {
             country: country.map(str::to_string),
             named: false,
             official: false,
+            key_pages: Vec::new(),
         }
     }
 

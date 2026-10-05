@@ -37,6 +37,7 @@ pub fn run_search(args: SearchArgs) -> Result<()> {
         country: args.country.clone(),
         only_country: args.only_country,
         exact: args.exact,
+        ..SearchOptions::default()
     };
     let meaning = MeaningIndex::from_args(&args.meaning)?;
     let query_meaning = meaning.as_ref().and_then(|meaning| meaning.query(&query));

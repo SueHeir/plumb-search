@@ -65,8 +65,8 @@ use axum::{Json, Router};
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
 use plumb_core::{
-    collapse_whitespace, display_url, now_unix, site_initial, truncate_chars, KeyPage, PageIntent,
-    SiteRecord,
+    collapse_whitespace, display_url, language_code, now_unix, site_initial, truncate_chars,
+    KeyPage, PageIntent, SafeSearch, SiteRecord,
 };
 use plumb_index::pages::{place_operator_pages, place_pages, PageHit};
 use plumb_index::{
@@ -255,6 +255,12 @@ pub trait StatusSource: Send + Sync {
     /// Keeps signed crawls a network search found ([`FoundSite::shared`])
     /// of sites this node already holds, folded into its records as a
     /// shared crawl is. Blocking.
+    /// Whether safe search leaves out `domain` because it is on the
+    /// node's adult blocklist.
+    fn blocks_adult(&self, _domain: &str) -> bool {
+        false
+    }
+
     fn keep_from_network(&self, records: Vec<SiteRecord>) {
         let _ = records;
     }
@@ -568,6 +574,10 @@ struct SearchParams {
     hs: Option<String>,
     /// `1`: rank sites opened before higher.
     hr: Option<String>,
+    /// Safe search: `off`, `moderate` (the default) or `strict`.
+    safe: Option<String>,
+    /// Only sites in this language (a language code); empty for any.
+    lang: Option<String>,
 }
 
 /// Whether a flag parameter is set: `1`, `on`, `true` or `yes`.
@@ -614,6 +624,12 @@ impl SearchParams {
             only_country: flag(&self.only) && country.is_some(),
             country,
             exact: flag(&self.exact),
+            safe: self
+                .safe
+                .as_deref()
+                .and_then(SafeSearch::parse)
+                .unwrap_or_default(),
+            language: self.lang.as_deref().and_then(language_code),
         }
     }
 }
@@ -910,6 +926,8 @@ struct GoParams {
     country: Option<String>,
     only: Option<String>,
     exact: Option<String>,
+    safe: Option<String>,
+    lang: Option<String>,
 }
 
 /// `GET /go?q=&d=`: notes that `d` was picked for the query, when the node
@@ -931,6 +949,8 @@ async fn go(
         hist: None,
         hs: None,
         hr: None,
+        safe: params.safe,
+        lang: params.lang,
     };
     let query = search.query();
     let back = {
@@ -1105,7 +1125,7 @@ async fn network_search(
     tokio::task::spawn_blocking(move || {
         // Signed crawls of sites this node holds fill in what its own
         // records lack, for its next index and search by meaning.
-        if let Some(node) = node {
+        if let Some(node) = &node {
             let shared: Vec<SiteRecord> = found
                 .found
                 .iter()
@@ -1115,7 +1135,14 @@ async fn network_search(
                 node.keep_from_network(shared);
             }
         }
-        rank_found(found, &query, limit, &rank, &options)
+        let mut results = rank_found(found, &query, limit, &rank, &options)?;
+        // Adult sites stay out of network results too.
+        if let (Some(node), true) = (&node, options.safe != SafeSearch::Off) {
+            results
+                .hits
+                .retain(|result| !node.blocks_adult(&result.hit.domain));
+        }
+        Ok(results)
     })
     .await
     .context("the ranking task failed")?
@@ -1548,6 +1575,27 @@ fn search_form(query: &str, autofocus: bool) -> String {
 /// country, whether to leave out other countries' sites, and whether to
 /// ask the Plumb network too. A `<details>` opens the gear, so it needs no
 /// script; the settings travel with the search as query parameters.
+/// The languages the settings gear offers, by their own names.
+const LANGUAGE_CHOICES: &[(&str, &str)] = &[
+    ("en", "English"),
+    ("de", "Deutsch"),
+    ("es", "Español"),
+    ("fr", "Français"),
+    ("it", "Italiano"),
+    ("nl", "Nederlands"),
+    ("pl", "Polski"),
+    ("pt", "Português"),
+    ("sv", "Svenska"),
+    ("tr", "Türkçe"),
+    ("ru", "Русский"),
+    ("uk", "Українська"),
+    ("ar", "العربية"),
+    ("hi", "हिन्दी"),
+    ("ja", "日本語"),
+    ("ko", "한국어"),
+    ("zh", "中文"),
+];
+
 fn settings_form(query: &str, autofocus: bool, settings: &Settings) -> String {
     let options = &settings.options;
     let current = options.country.as_deref();
@@ -1572,6 +1620,47 @@ fn settings_form(query: &str, autofocus: bool, settings: &Settings) -> String {
         let _ = write!(
             choices,
             "<option value=\"{code}\"{selected}>{name}</option>"
+        );
+    }
+    let safe_choices: String = [
+        (SafeSearch::Off, "Off"),
+        (SafeSearch::Moderate, "Moderate"),
+        (SafeSearch::Strict, "Strict"),
+    ]
+    .into_iter()
+    .map(|(level, name)| {
+        let selected = if options.safe == level {
+            " selected"
+        } else {
+            ""
+        };
+        format!(
+            "<option value=\"{}\"{selected}>{name}</option>",
+            level.as_str()
+        )
+    })
+    .collect();
+    let language = options.language.as_deref();
+    let mut language_choices = format!(
+        "<option value=\"\"{}>Any language</option>",
+        if language.is_none() { " selected" } else { "" }
+    );
+    if let Some(code) = language.filter(|c| !LANGUAGE_CHOICES.iter().any(|(l, _)| l == c)) {
+        let _ = write!(
+            language_choices,
+            "<option value=\"{0}\" selected>{0}</option>",
+            escape_html(code)
+        );
+    }
+    for (code, name) in LANGUAGE_CHOICES {
+        let selected = if language == Some(*code) {
+            " selected"
+        } else {
+            ""
+        };
+        let _ = write!(
+            language_choices,
+            "<option value=\"{code}\" lang=\"{code}\"{selected}>{name}</option>"
         );
     }
     let network = match settings.network {
@@ -1617,6 +1706,8 @@ fn settings_form(query: &str, autofocus: bool, settings: &Settings) -> String {
          &#9881;&#xFE0E;</summary><div class=\"panel\">\
          <label>Country <select name=\"country\">{choices}</select></label>\
          <label><input type=\"checkbox\" name=\"only\" value=\"1\"{}> Only this country</label>\
+         <label>Language <select name=\"lang\">{language_choices}</select></label>\
+         <label>Safe search <select name=\"safe\">{safe_choices}</select></label>\
          {network}{network_hint}{history}{private}<button type=\"submit\">Apply</button></div></details>\
          <button type=\"submit\">Search</button></form>",
         escape_html(query),
@@ -1799,6 +1890,7 @@ fn search_link(path: &str, query: &str, options: &SearchOptions, net: bool) -> S
     if options.exact {
         params.append_pair("exact", "1");
     }
+    append_filters(&mut params, options);
     format!("{path}?{}", params.finish())
 }
 
@@ -2275,7 +2367,19 @@ fn go_link(query: &str, options: &SearchOptions, domain: &str) -> String {
     if options.exact {
         link.append_pair("exact", "1");
     }
+    append_filters(&mut link, options);
     format!("/go?{}", link.finish())
+}
+
+/// Adds safe search, when not the default, and the language filter to a
+/// link's parameters.
+fn append_filters(params: &mut url::form_urlencoded::Serializer<String>, options: &SearchOptions) {
+    if options.safe != SafeSearch::default() {
+        params.append_pair("safe", options.safe.as_str());
+    }
+    if let Some(language) = &options.language {
+        params.append_pair("lang", language);
+    }
 }
 
 /// The round badge before a result: the site's icon, or else the first
@@ -3616,6 +3720,11 @@ mod tests {
             assert!(body.contains("<details class=\"gear\">"), "{uri}: {body}");
             assert!(body.contains("name=\"country\""), "{uri}");
             assert!(body.contains("name=\"only\""), "{uri}");
+            assert!(body.contains("<select name=\"lang\">"), "{uri}");
+            assert!(
+                body.contains("<option value=\"moderate\" selected>Moderate</option>"),
+                "{uri}"
+            );
             // `plumb serve` is in no network: the setting is off, and says why.
             assert!(
                 body.contains("<input type=\"checkbox\" disabled> Use the Plumb network"),
@@ -3627,6 +3736,32 @@ mod tests {
         let (_, _, body) = get(backend(bank_hits()), "/search?q=us+bank&net=1").await;
         assert!(body.contains("<p class=\"src\">From this site's own index.</p>"));
         assert!(!body.contains("class=\"net\""));
+    }
+
+    #[tokio::test]
+    async fn safe_search_and_language_stay_with_the_search() {
+        let (_, _, body) = get(
+            backend(bank_hits()),
+            "/search?q=us+bank&safe=strict&lang=de",
+        )
+        .await;
+        assert!(body.contains("<option value=\"strict\" selected>Strict</option>"));
+        assert!(body.contains("<option value=\"de\" lang=\"de\" selected>Deutsch</option>"));
+        let options = SearchOptions {
+            safe: SafeSearch::Off,
+            language: Some("de".into()),
+            ..SearchOptions::default()
+        };
+        assert_eq!(
+            search_link("/search", "x", &options, false),
+            "/search?q=x&safe=off&lang=de"
+        );
+        assert!(go_link("x", &options, "a.com").ends_with("&safe=off&lang=de"));
+        // The default needs no parameter.
+        assert_eq!(
+            search_link("/search", "x", &SearchOptions::default(), false),
+            "/search?q=x"
+        );
     }
 
     #[test]

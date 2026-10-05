@@ -30,6 +30,7 @@ use axum::routing::get;
 use axum::Router;
 use plumb_core::keys::{slim_record, BUCKETS};
 use plumb_core::SiteRecord;
+use plumb_index::SearchOptions;
 use tracing::warn;
 
 use super::{escape_html, page_with_head, AppState, SearchParams};
@@ -88,12 +89,11 @@ async fn private_page(
 ) -> Response {
     // A query in the address (`/private?q=`) is not read: private searches
     // come from the fragment.
-    let country = SearchParams {
+    let options = SearchParams {
         q: String::new(),
         ..params
     }
-    .options(&state.settings.home, &headers)
-    .country;
+    .options(&state.settings.home, &headers);
     let available = state.private_search();
     let status = if available {
         StatusCode::OK
@@ -108,14 +108,15 @@ async fn private_page(
             (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
             (header::CACHE_CONTROL, "no-cache"),
         ],
-        axum::response::Html(render_private(available, country.as_deref())),
+        axum::response::Html(render_private(available, &options)),
     )
         .into_response()
 }
 
 /// The private search page. `available` says whether its script can run
-/// here; `country` is the home country the ranking favors.
-fn render_private(available: bool, country: Option<&str>) -> String {
+/// here; `options` hold the home country the ranking favors, safe search
+/// and the language filter, which the page's script reads.
+fn render_private(available: bool, options: &SearchOptions) -> String {
     let head = if available {
         format!(
             "<script type=\"module\" src=\"/private/{}/boot.js\"></script>\n",
@@ -132,7 +133,8 @@ fn render_private(available: bool, country: Option<&str>) -> String {
          <a href=\"/\">Search normally</a> instead.</p>"
     };
     let body = format!(
-        "<main class=\"wrap\" id=\"pq\" data-country=\"{}\">\n\
+        "<main class=\"wrap\" id=\"pq\" data-country=\"{}\" data-safe=\"{}\" \
+         data-language=\"{}\">\n\
          <header><a class=\"logo\" href=\"/\">Plumb</a>\
          <form id=\"pq-form\" action=\"/private\" method=\"get\" role=\"search\">\
          <input type=\"search\" id=\"pq-q\" placeholder=\"A site's name, e.g. us bank\" \
@@ -146,7 +148,9 @@ fn render_private(available: bool, country: Option<&str>) -> String {
          <div id=\"pq-answer\"></div>\n\
          <p class=\"s\" id=\"pq-status\" role=\"status\"></p>\n<ol id=\"pq-results\"></ol>\n\
          </main>",
-        escape_html(country.unwrap_or("")),
+        escape_html(options.country.as_deref().unwrap_or("")),
+        options.safe.as_str(),
+        escape_html(options.language.as_deref().unwrap_or("")),
         gear = if available {
             format!(
                 "<details class=\"gear\"><summary title=\"Settings\" aria-label=\"Settings\">\
@@ -258,14 +262,22 @@ mod tests {
 
     #[test]
     fn the_page_never_sends_the_query() {
-        let page = render_private(true, Some("DE"));
+        let page = render_private(
+            true,
+            &SearchOptions {
+                country: Some("DE".into()),
+                safe: plumb_core::SafeSearch::Strict,
+                language: Some("de".into()),
+                ..SearchOptions::default()
+            },
+        );
         // The search box has no name, so the form sends no query.
         assert!(page.contains("id=\"pq-q\""));
         assert!(!page.contains("name=\"q\""), "{page}");
-        assert!(page.contains("data-country=\"DE\""));
+        assert!(page.contains("data-country=\"DE\" data-safe=\"strict\" data-language=\"de\""));
         assert!(page.contains("<button type=\"submit\" id=\"pq-go\" disabled>"));
         assert!(page.contains(&format!("/private/{}/boot.js", *VERSION)));
-        let off = render_private(false, None);
+        let off = render_private(false, &SearchOptions::default());
         assert!(!off.contains("<script"), "{off}");
         assert!(off.contains("does not offer private search"));
         // The gear's switch is on here and leads back to normal search.

@@ -1,5 +1,5 @@
 use plumb_core::keys::{pick_buckets, query_keys, record_keys};
-use plumb_core::{LinkText, Signals, SiteRecord};
+use plumb_core::{LinkText, SafeSearch, Signals, SiteRecord};
 use plumb_index::{build_index, RankConfig, SearchOptions, Searcher};
 
 use super::*;
@@ -126,6 +126,7 @@ fn kinds_and_countries_rank_as_in_the_index() {
                 country: Some(country.into()),
                 only_country: true,
                 exact: false,
+                ..SearchOptions::default()
             },
             3,
         );
@@ -135,6 +136,7 @@ fn kinds_and_countries_rank_as_in_the_index() {
             &Options {
                 country: Some(country.into()),
                 only_country: true,
+                ..Options::default()
             },
             3,
         );
@@ -146,6 +148,7 @@ fn kinds_and_countries_rank_as_in_the_index() {
         &Options {
             country: Some("DE".into()),
             only_country: true,
+            ..Options::default()
         },
         3,
     );
@@ -251,6 +254,56 @@ fn copies_keep_the_less_favorable_popularity() {
     assert_eq!(merged[0].signals.tranco_rank, Some(800_000));
     assert_eq!(merged[0].signals.linking_domains, 2);
     assert!(!merged[0].signals.official_site);
+}
+
+#[test]
+fn safe_search_and_language_filter_as_in_the_index() {
+    let mut records = corpus();
+    records.push(site(
+        "freeporn.example",
+        "Free bank videos",
+        Some(3000),
+        300,
+    ));
+    let mut german = site("bankde.example", "Bank Deutschland", Some(3500), 300);
+    german.language = Some("de".into());
+    records.push(german);
+    let cases = [
+        (SafeSearch::Off, None),
+        (SafeSearch::Moderate, None),
+        (SafeSearch::Strict, Some("en")),
+        (SafeSearch::Moderate, Some("de")),
+    ];
+    for (safe, language) in cases {
+        let language = language.map(str::to_string);
+        let index = index_top(
+            &records,
+            "bank",
+            &SearchOptions {
+                safe,
+                language: language.clone(),
+                ..SearchOptions::default()
+            },
+            10,
+        );
+        let private = private_top(
+            &records,
+            "bank",
+            &Options {
+                safe,
+                language,
+                ..Options::default()
+            },
+            10,
+        );
+        // The simpler text match may order the tail differently.
+        let (mut private, mut index) = (private, index);
+        private.sort();
+        index.sort();
+        assert_eq!(private, index, "{safe:?}");
+    }
+    let o = Options::default();
+    assert!(!private_top(&records, "bank", &o, 10).contains(&"freeporn.example".to_string()));
 }
 
 #[test]
