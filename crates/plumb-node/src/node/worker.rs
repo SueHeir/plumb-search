@@ -162,7 +162,11 @@ async fn step(inner: &Arc<Inner>) -> Result<Next> {
     }
     // New topics: the sites kept for the old ones go, and the index is
     // built without them, before filling takes sites for the new ones.
-    if inner.fill_state().prune && inner.saved().crawl_left == 0 {
+    // Only under a storage limit: a node with none never loses sites.
+    if inner.fill_state().prune
+        && inner.settings().storage_limit_mb > 0
+        && inner.saved().crawl_left == 0
+    {
         let built = blocking(inner, |inner| {
             let _records = inner.hold_records();
             inner.set_step(Step::Indexing, "Making room for sites about new topics");
