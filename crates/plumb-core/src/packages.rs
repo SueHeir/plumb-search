@@ -182,6 +182,15 @@ pub const FILLER_WORDS: &[&str] = &[
     "library",
     "lib",
     "module",
+    "license",
+    "licence",
+    "homepage",
+    "repo",
+    "repository",
+    "source",
+    "github",
+    "download",
+    "downloads",
 ];
 
 /// The registry kept as `key`.
@@ -579,6 +588,10 @@ mod tests {
         assert_eq!(q.name, "lodash");
         assert!(q.wants("npm") && q.wants("crates") && !q.surely);
         assert!(package_query("lodash package").unwrap().surely);
+        assert_eq!(
+            package_query("express npm license").unwrap().name,
+            "express"
+        );
         assert_eq!(
             package_query("@tanstack/react-query npm").unwrap().name,
             "@tanstack/react-query"

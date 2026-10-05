@@ -306,6 +306,11 @@ pub(super) fn add_pages(
         Ok(mut found) => {
             found.retain(|hit| options_allow(options, &hit.page));
             lift_named_sites(&mut results.hits, &found);
+            // A query that names a package is spelled right: "serde crate"
+            // is not "serde create".
+            if found.iter().any(|hit| hit.page.package.is_some()) {
+                results.spelling = None;
+            }
             results.pages = place_pages(query, &results.hits, found);
         }
         Err(err) => warn!("searching pages: {err:#}"),

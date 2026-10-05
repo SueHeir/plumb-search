@@ -371,7 +371,12 @@ impl Mcp {
         let did_you_mean = results.spelling.as_ref().map(|s| s.query.as_str());
         let Some(top) = results.hits.first() else {
             let mut why = vec!["Plumb knows no site by this name.".to_string()];
-            if let Some(fixed) = did_you_mean {
+            let package_home = self.package_home(name, options);
+            if let Some((home, registry)) = &package_home {
+                why.push(format!(
+                    "The {registry} package of this name gives {home} as its home page."
+                ));
+            } else if let Some(fixed) = did_you_mean {
                 why.push(format!("Did you mean {fixed:?}? Look that up instead."));
             }
             return Ok(json!({
@@ -379,6 +384,7 @@ impl Mcp {
                 "found": false,
                 "why": why,
                 "did_you_mean": did_you_mean,
+                "package_home": package_home.map(|(home, _)| home),
             }));
         };
         let mut why = Vec::new();
@@ -407,21 +413,46 @@ impl Mcp {
         let lead = results.hits.get(1).map_or(1.0, |next| {
             (top.score - next.score) / top.score.max(f32::EPSILON)
         });
-        let confidence = if top.named && (top.official || well_known) && lead >= 0.1 {
+        let mut confidence = if top.named && (top.official || well_known) && lead >= 0.1 {
             "high"
         } else if top.named || top.official || (well_known && lead >= 0.2) {
             "medium"
         } else {
+            "low"
+        };
+        let mut url = top.url.clone();
+        let mut did_you_mean = did_you_mean;
+        let mut package_home = None;
+        if confidence != "high" {
+            // A software package of the name says where its home is:
+            // FastAPI's PyPI card names fastapi.tiangolo.com.
+            if let Some((home, registry)) = self.package_home(name, options) {
+                if registrable_domain(&home).as_deref() == Some(top.domain.as_str()) {
+                    why.push(format!(
+                        "The {registry} package of this name gives it as its home page."
+                    ));
+                    url = home;
+                    confidence = "high";
+                    did_you_mean = None;
+                } else {
+                    why.push(format!(
+                        "The {registry} package of this name gives {home} as its home page."
+                    ));
+                    package_home = Some(home);
+                }
+            }
+        }
+        if confidence == "low" {
             why.push(
                 "No site is called exactly this; it is the best match of the words.".to_string(),
             );
-            "low"
-        };
+        }
         Ok(json!({
             "name": name,
             "found": true,
             "domain": top.domain,
-            "url": top.url,
+            "url": url,
+            "package_home": package_home,
             "title": top.title,
             "description": top.description.as_deref().map(short),
             "confidence": confidence,
@@ -429,6 +460,22 @@ impl Mcp {
             "alternatives": results.hits[1..].iter().map(brief).collect::<Vec<_>>(),
             "did_you_mean": did_you_mean,
         }))
+    }
+
+    /// The home page (else the docs) of the most used package called
+    /// `name`, and its registry's name.
+    fn package_home(&self, name: &str, options: &SearchOptions) -> Option<(String, String)> {
+        let found = self.package(name, None, options).ok()?;
+        let card = found["packages"].as_array()?.iter().find(|card| {
+            card["name"]
+                .as_str()
+                .is_some_and(|n| n.eq_ignore_ascii_case(name.trim()))
+        })?;
+        let home = card["homepage"]
+            .as_str()
+            .or_else(|| card["docs"].as_str())?
+            .to_string();
+        Some((home, card["registry"].as_str()?.to_string()))
     }
 
     /// `check_lookalike`: whether `input` is a real site or imitates one.
