@@ -145,6 +145,7 @@ impl Work {
             site: None,
             views: self.cited_by_count,
             aliases: Vec::new(),
+            profiles: Vec::new(),
         })
     }
 }

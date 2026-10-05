@@ -32,6 +32,9 @@ pub enum Command {
     /// Make a page set file (Wikipedia articles) from Wikimedia's dumps,
     /// for a node to list single pages with its sites.
     FetchPages(FetchPagesArgs),
+    /// Add official profiles (YouTube, Twitch, X, app stores, ...) from
+    /// Wikidata to a Wikipedia articles file made by fetch-pages.
+    FetchProfiles(FetchProfilesArgs),
     /// Fold seed data and earlier records into one records file.
     Ingest(IngestArgs),
     /// Fetch the homepages of the best-scored records and merge what they say.
@@ -396,6 +399,17 @@ pub struct FetchDataArgs {
     /// as just saved. 0 fetches everything.
     #[arg(long, value_name = "DAYS", default_value_t = 0)]
     pub keep_days: u64,
+}
+
+#[derive(Debug, Args)]
+pub struct FetchProfilesArgs {
+    /// A node's data directory whose English Wikipedia set gets the
+    /// profiles; the node picks the new file up within seconds.
+    #[arg(long, value_name = "DIR", required_unless_present = "articles")]
+    pub data: Option<PathBuf>,
+    /// The articles file to add them to instead.
+    #[arg(long, value_name = "PATH")]
+    pub articles: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]

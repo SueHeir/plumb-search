@@ -86,6 +86,7 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::Run(args) => run::run(args),
         Command::FetchData(args) => fetch::run(args),
         Command::FetchPages(args) => fetch::run_pages(args),
+        Command::FetchProfiles(args) => fetch::run_profiles(args),
         Command::Ingest(args) => ingest::run(args),
         Command::Crawl(args) => crawl::run(args),
         Command::Index(args) => search::run_index(args),
