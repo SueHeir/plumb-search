@@ -80,6 +80,7 @@ use url::Url;
 use crate::cli::ServeArgs;
 use crate::country::{country_name, HomeCountry, COUNTRY_CHOICES};
 use crate::meaning::{MeaningIndex, SharedMeaning};
+use crate::news::Recent;
 use crate::node::{NodeSettings, Phase, Status, Step};
 use crate::websearch::{bang_url, Engine, WebSettings};
 
@@ -270,6 +271,13 @@ pub trait StatusSource: Send + Sync {
         None
     }
 
+    /// The "Recent" block for `query`, whose best result is `top` (its
+    /// domain, and whether the query names it); see
+    /// [`crate::news::NewsStore::recent`].
+    fn recent(&self, _query: &str, _top: Option<(&str, bool)>) -> Option<crate::news::Recent> {
+        None
+    }
+
     /// Active and next-start feature choices, shared by desktop and Docker.
     fn features(&self) -> crate::node::features::FeatureSettings {
         Default::default()
@@ -388,6 +396,18 @@ impl AppState {
             .is_some_and(|node| node.shares_popularity())
     }
 
+    /// The "Recent" block for `query`, whose results are `results`; `None`
+    /// for `plumb serve`, which keeps no headlines. Headlines are matched
+    /// with the query as typed: spelling corrections come from site names,
+    /// and would turn news words into them.
+    fn recent(&self, query: &str, results: &SearchResults) -> Option<Recent> {
+        let top = results
+            .hits
+            .first()
+            .map(|hit| (hit.domain.as_str(), hit.named));
+        self.node.as_ref()?.recent(query, top)
+    }
+
     /// The icons of `domains` that this node has, for [`render_hit`]. Read
     /// off the async threads: each is a small file.
     async fn icons(&self, domains: Vec<String>) -> Icons {
@@ -476,6 +496,7 @@ fn app(state: AppState) -> Router {
             .route("/go", get(go))
             .route("/network", get(network_page))
             .route("/api/network/search", get(api_network_search))
+            .route("/api/recent", get(api_recent))
             .route("/app", get(panel::panel))
             .route("/app/settings", post(panel::save_settings))
             .route("/app/setup", post(setup::save_setup))
@@ -754,7 +775,10 @@ async fn search_page(
     };
     let limit = params.limit();
     let local = run_search(&state, &query, limit, &settings.options).await;
-    let answer = instant_answer(&state, &query).await;
+    let extras = match &local {
+        Ok(results) => extras(&state, &query, results, &settings.options).await,
+        Err(_) => answers::Extras::default(),
+    };
     let (local, network) = if settings.network == NetSetting::On {
         // The network is asked for what this node's results are for, the
         // corrected query when a typo was corrected.
@@ -805,19 +829,24 @@ async fn search_page(
                     domains.push(domain.to_string());
                 }
             }
+            if let Some(profile) = &extras.profile {
+                domains.extend(plumb_core::registrable_domain(&profile.url));
+            }
             let icons = state.icons(domains).await;
+            let recent = state.recent(&query, &results);
             html_response(
                 StatusCode::OK,
-                render_results(
+                render_results_with(
                     &query,
                     &results,
-                    answer.as_ref(),
+                    Some(&extras),
                     &network,
                     &settings,
                     state.settings.web_search,
                     limit,
                     state.shares_popularity(),
                     &icons,
+                    recent.as_ref(),
                 ),
             )
         }
@@ -869,16 +898,22 @@ async fn api_search(
     let options = params.options(&state.settings.home, &headers);
     match run_search(&state, &query, params.limit(), &options).await {
         Ok(results) if full => {
-            let answer = instant_answer(&state, &query).await;
-            let placed = place_pages(
-                searched_for(&query, &results),
-                &results.hits,
-                results.pages.iter().map(|p| p.hit.clone()).collect(),
-            );
-            let info = answers::info_box(&results.hits, &placed);
+            let extras = extras(&state, &query, &results, &options).await;
+            let info = match &extras.profile {
+                Some(profile) => answers::info_from_page(&profile.page, &results.hits),
+                None => {
+                    let placed = place_pages(
+                        searched_for(&query, &results),
+                        &results.hits,
+                        results.pages.iter().map(|p| p.hit.clone()).collect(),
+                    );
+                    answers::info_box(&results.hits, &placed)
+                }
+            };
             let body = FullResults {
                 results: &results,
-                answer,
+                answer: extras.answer,
+                profile: extras.profile,
                 info,
             };
             (StatusCode::OK, security_headers(), Json(body)).into_response()
@@ -897,6 +932,31 @@ async fn api_search(
     }
 }
 
+/// `GET /api/recent?q=...`: the "Recent" block the results page shows
+/// for the query, as JSON; `{"headlines":[]}` when it shows none.
+async fn api_recent(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(params): Query<SearchParams>,
+) -> Response {
+    let query = params.query();
+    let recent = if query.is_empty() || state.setting_up().is_some() {
+        None
+    } else {
+        let options = params.options(&state.settings.home, &headers);
+        match run_search(&state, &query, params.limit(), &options).await {
+            Ok(results) => state.recent(&query, &results),
+            Err(_) => None,
+        }
+    };
+    (
+        StatusCode::OK,
+        security_headers(),
+        Json(recent.unwrap_or_default()),
+    )
+        .into_response()
+}
+
 /// `/api/search?full=1`: the results, and the instant answer and info box
 /// the results page shows with them.
 #[derive(Serialize)]
@@ -906,8 +966,35 @@ struct FullResults<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     answer: Option<plumb_answer::Answer>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    profile: Option<answers::ProfileAnswer>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     info: Option<answers::InfoBox>,
 }
+
+/// The instant answer and the official profile asked for, for `query`
+/// whose own results are `results`. The profile is looked up by searching
+/// again for the words before the service ("mrbeast" of "mrbeast
+/// youtube"), unless the whole query already names a page.
+async fn extras(
+    state: &AppState,
+    query: &str,
+    results: &SearchResults,
+    options: &SearchOptions,
+) -> answers::Extras {
+    let answer = instant_answer(state, query).await;
+    let names_a_page = results.pages.iter().any(|placed| placed.hit.named);
+    let profile = match plumb_core::profiles::services_asked(query) {
+        Some((_, name)) if !names_a_page => run_search(state, &name, PROFILE_SEARCH_LIMIT, options)
+            .await
+            .ok()
+            .and_then(|found| answers::profile_answer(query, &found.pages)),
+        _ => None,
+    };
+    answers::Extras { answer, profile }
+}
+
+/// Results asked for when looking up whose profile a query asks for.
+const PROFILE_SEARCH_LIMIT: usize = 5;
 
 /// The instant answer to `query`, with currency rates when it needs them.
 async fn instant_answer(state: &AppState, query: &str) -> Option<plumb_answer::Answer> {
@@ -1505,6 +1592,12 @@ background:var(--bg);color:var(--fg)}\
 .ss{margin:1rem 0 .25rem;padding:.6rem .8rem;border:1px solid var(--line);border-radius:.5rem}\
 .ss a{color:var(--link)}\
 .sp{margin:1rem 0 .25rem}.sp a{color:var(--link)}\
+li.news{padding:.6rem .9rem;border:1px solid var(--line);border-radius:.6rem}\
+.news h2{margin:0 0 .2rem;font-size:.875rem;font-weight:600;color:var(--muted)}\
+.news ol li{padding:.3rem 0;margin:0}\
+.news a{color:var(--link);text-decoration:none;overflow-wrap:anywhere}\
+.news a:hover,.news a:focus-visible{text-decoration:underline}\
+.news .m{margin:0}\
 .web{margin:.25rem 0;font-size:.9rem}.web a{color:var(--muted)}\
 .setup{max-width:36rem}\
 .step{margin:2rem 0 .5rem;font-size:1.1rem}\
@@ -1541,6 +1634,12 @@ border-radius:.75rem;overflow-wrap:anywhere}\
 .ib dl{display:grid;grid-template-columns:auto 1fr;gap:.25rem .9rem;margin:.8rem 0 0;font-size:.9rem}\
 .ib dt{color:var(--muted)}.ib dd{margin:0;min-width:0}\
 .ib a{color:var(--link)}.ibl{margin:.8rem 0 0;font-size:.9rem}\
+.pf{margin:1rem 0 .5rem;padding:.85rem 1rem;border:1px solid var(--accent);border-radius:.75rem}\
+.pf .m{margin:.3rem 0 0}\
+.ibp{display:flex;flex-wrap:wrap;gap:.4rem;margin:.8rem 0 0;padding:0;list-style:none;font-size:.85rem}\
+.ibp li{margin:0;padding:0}.ibp a{display:inline-block;padding:.15rem .65rem;\
+border:1px solid var(--line);border-radius:1rem;text-decoration:none}\
+.ibp a:hover{border-color:var(--accent)}.pfirst .ib{order:0}\
 @media (min-width:64rem){.cols{display:grid;grid-template-columns:minmax(0,44rem) minmax(0,22rem);\
 gap:0 3rem;align-items:start}.ib{order:0;margin-top:1.25rem}}";
 
@@ -2090,11 +2189,13 @@ fn render_source(
     let _ = writeln!(out, "<p class=\"src\">{line}</p>");
 }
 
+/// [`render_results_with`] without a "Recent" block.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn render_results(
     query: &str,
     results: &SearchResults,
-    answer: Option<&plumb_answer::Answer>,
+    extras: Option<&answers::Extras>,
     network: &NetOutcome,
     settings: &Settings,
     web_search: Option<Engine>,
@@ -2102,10 +2203,42 @@ fn render_results(
     share_picks: bool,
     icons: &Icons,
 ) -> String {
+    render_results_with(
+        query,
+        results,
+        extras,
+        network,
+        settings,
+        web_search,
+        limit,
+        share_picks,
+        icons,
+        None,
+    )
+}
+
+/// [`render_results`] with a "Recent" block after the first result.
+#[allow(clippy::too_many_arguments)]
+fn render_results_with(
+    query: &str,
+    results: &SearchResults,
+    extras: Option<&answers::Extras>,
+    network: &NetOutcome,
+    settings: &Settings,
+    web_search: Option<Engine>,
+    limit: usize,
+    share_picks: bool,
+    icons: &Icons,
+    recent: Option<&Recent>,
+) -> String {
     let shown = merge_results(&results.hits, network, limit);
     let from_network = shown.iter().filter(|s| s.network.is_some()).count();
     let mut body = String::from("<main>\n");
-    if let Some(answer) = answer {
+    if let Some(profile) = extras.and_then(|e| e.profile.as_ref()) {
+        let domain = plumb_core::registrable_domain(&profile.url).unwrap_or_default();
+        answers::render_profile(&mut body, profile, icons.get(&domain));
+    }
+    if let Some(answer) = extras.and_then(|e| e.answer.as_ref()) {
         answers::render_answer(&mut body, answer);
     }
     render_source(&mut body, query, settings, network, from_network);
@@ -2149,7 +2282,9 @@ fn render_results(
     };
     // An info box is about what the whole query names, which operators
     // ("site:", "-word") change.
-    let info = if ops.any() {
+    let info = if let Some(profile) = extras.and_then(|e| e.profile.as_ref()) {
+        answers::info_from_page(&profile.page, &shown_hits)
+    } else if ops.any() {
         None
     } else {
         answers::info_box(&shown_hits, &pages)
@@ -2161,12 +2296,16 @@ fn render_results(
             p.under.is_none() && (p.at == at || (at == usize::MAX && p.at >= shown_count))
         })
     };
+    let news = recent.map(|recent| render_recent(recent, now_unix()));
     if shown.is_empty() && pages.is_empty() {
         let _ = writeln!(
             body,
             "<p class=\"none\">No sites match <strong>{}</strong>.</p>",
             escape_html(query)
         );
+        if let Some(news) = &news {
+            let _ = writeln!(body, "<ol>\n{news}</ol>");
+        }
     } else {
         body.push_str("<ol>\n");
         for (position, item) in shown.iter().enumerate() {
@@ -2206,6 +2345,16 @@ fn render_results(
                 }
             }
             body.push_str(&rendered);
+            if position == 0 {
+                if let Some(news) = &news {
+                    body.push_str(news);
+                }
+            }
+        }
+        if shown.is_empty() {
+            if let Some(news) = &news {
+                body.push_str(news);
+            }
         }
         for page in listed_pages(usize::MAX) {
             render_page(&mut body, &page.hit, icons.get(page.hit.page.set_domain()));
@@ -2228,13 +2377,18 @@ fn render_results(
     }
     let _ = write!(body, "<p class=\"s\">As JSON: {json}</p>\n</main>\n");
     // With an info box the page is wider, with the box beside the results
-    // (above them on a narrow screen).
+    // (above them on a narrow screen, unless a profile asked for leads).
     let form = results_form(query, settings);
     let body = match &info {
         Some(info) => {
             let mut aside = String::new();
             answers::render_info_box(&mut aside, info);
-            format!("<div class=\"wrap wide\">\n{form}\n<div class=\"cols\">\n{body}{aside}</div>\n</div>")
+            let cols = if extras.is_some_and(|e| e.profile.is_some()) {
+                "cols pfirst"
+            } else {
+                "cols"
+            };
+            format!("<div class=\"wrap wide\">\n{form}\n<div class=\"{cols}\">\n{body}{aside}</div>\n</div>")
         }
         None => format!("<div class=\"wrap\">\n{form}\n{body}</div>"),
     };
@@ -2442,6 +2596,34 @@ fn render_page(out: &mut String, hit: &PageHit, icon: Option<&str>) {
         },
         hit.score
     );
+}
+
+/// The "Recent" block, as an item of the results list: the latest posts
+/// of the site the query names, or recent headlines about its words, each
+/// with its site and age. Feed text is as untrusted as any record's, and
+/// is escaped the same way.
+fn render_recent(recent: &Recent, now: u64) -> String {
+    let heading = match &recent.site {
+        Some(site) => format!("Latest from {}", escape_html(site)),
+        None => "Recent".to_string(),
+    };
+    let mut out =
+        format!("<li class=\"news\"><section aria-label=\"{heading}\"><h2>{heading}</h2><ol>");
+    for headline in &recent.headlines {
+        let Some(href) = http_url(&headline.url) else {
+            continue;
+        };
+        let _ = write!(
+            out,
+            "<li><a href=\"{}\" rel=\"noreferrer\">{}</a><div class=\"m\">{} &middot; {}</div></li>",
+            escape_html(&href),
+            escape_html(&truncate_chars(&headline.title, 150)),
+            escape_html(&headline.domain),
+            time_ago(headline.at, now)
+        );
+    }
+    out.push_str("</ol></section></li>\n");
+    out
 }
 
 /// Most key pages listed under a result.
@@ -3888,6 +4070,75 @@ mod tests {
         assert!(json["hits"].is_array());
     }
 
+    /// Finds the article on MrBeast, named by "mrbeast", with his profiles.
+    struct BeastBackend;
+
+    impl SearchBackend for BeastBackend {
+        fn search(&self, _query: &str, _limit: usize) -> Result<Vec<Hit>> {
+            Ok(Vec::new())
+        }
+
+        fn search_full(
+            &self,
+            query: &str,
+            _limit: usize,
+            _options: &SearchOptions,
+        ) -> Result<SearchResults> {
+            use plumb_core::profiles::Profile;
+            use plumb_index::pages::{Page, PageHit, PlacedPage};
+            let mut results = SearchResults::default();
+            if query.contains("mrbeast") {
+                results.pages.push(PlacedPage {
+                    hit: PageHit {
+                        page: Page {
+                            set: "wikipedia-en".into(),
+                            url: "https://en.wikipedia.org/wiki/MrBeast".into(),
+                            title: "MrBeast".into(),
+                            description: Some("American YouTuber".into()),
+                            site: None,
+                            views: 900_000,
+                            aliases: Vec::new(),
+                            item: Some("Q19897578".into()),
+                            profiles: vec![Profile {
+                                service: "youtube-handle".into(),
+                                id: "MrBeast".into(),
+                            }],
+                        },
+                        score: 1.0,
+                        named: query == "mrbeast",
+                        popularity: 0.9,
+                    },
+                    under: None,
+                    at: 0,
+                });
+            }
+            Ok(results)
+        }
+
+        fn num_docs(&self) -> u64 {
+            1
+        }
+    }
+
+    #[tokio::test]
+    async fn a_profile_asked_for_comes_first() {
+        let app = router_with(Arc::new(BeastBackend), HomeCountry::Off);
+        let (status, _, body) = send(app.clone(), "/search?q=mrbeast+youtube").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("<section class=\"pf\""), "{body}");
+        assert!(body.contains("href=\"https://www.youtube.com/@MrBeast\""));
+        assert!(
+            body.contains("<h2>MrBeast</h2>"),
+            "the info box is about him"
+        );
+        let (_, _, body) = send(app.clone(), "/search?q=mrbeast+twitch").await;
+        assert!(!body.contains("class=\"pf\""), "no Twitch channel known");
+        let (_, _, body) = send(app, "/api/search?q=mrbeast+youtube&full=1").await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["profile"]["url"], "https://www.youtube.com/@MrBeast");
+        assert_eq!(json["info"]["profiles"][0]["service"], "YouTube");
+    }
+
     #[test]
     fn an_article_the_query_names_gets_an_info_box() {
         use plumb_index::pages::{Page, PageHit, PlacedPage};
@@ -3901,6 +4152,7 @@ mod tests {
                 views: 100_000,
                 aliases: Vec::new(),
                 item: Some("Q7186".into()),
+                profiles: Vec::new(),
             },
             score: 1.0,
             named: true,
@@ -4241,6 +4493,62 @@ mod tests {
         // The page loads no image from anywhere: icons ride inside it.
         assert!(!page.contains("src=\"http"));
         assert!(CONTENT_SECURITY_POLICY.contains("img-src data:;"));
+    }
+
+    #[test]
+    fn recent_headlines_follow_the_first_result_escaped() {
+        let results = SearchResults {
+            pages: Vec::new(),
+            spelling: None,
+            hits: vec![
+                hit("news.com", "https://news.com/", Some("News"), None),
+                hit("other.com", "https://other.com/", Some("Other"), None),
+            ],
+            site_search: None,
+        };
+        let now = now_unix();
+        let headline = |title: &str, url: &str| crate::news::RecentHeadline {
+            domain: "news.com".into(),
+            title: title.into(),
+            url: url.into(),
+            at: now - 2 * 3600,
+        };
+        let recent = Recent {
+            site: Some("news.com".into()),
+            headlines: vec![
+                headline(
+                    "<script>alert(1)</script> wins",
+                    "https://news.com/a?x=1&y=2",
+                ),
+                headline("Sneaky", "javascript:alert(1)"),
+            ],
+        };
+        let page = render_results_with(
+            "news",
+            &results,
+            None,
+            &NetOutcome::NotAsked,
+            &no_settings(),
+            None,
+            10,
+            false,
+            &Icons::default(),
+            Some(&recent),
+        );
+        let block = page.find("<li class=\"news\">").expect("a Recent block");
+        assert!(
+            page.find("news.com/").unwrap() < block,
+            "after the first result"
+        );
+        assert!(block < page.find("other.com").unwrap(), "before the second");
+        assert!(page.contains("<h2>Latest from news.com</h2>"));
+        assert!(page.contains(
+            "<a href=\"https://news.com/a?x=1&amp;y=2\" rel=\"noreferrer\">\
+             &lt;script&gt;alert(1)&lt;/script&gt; wins</a>"
+        ));
+        assert!(page.contains("news.com &middot; 2 hours ago"));
+        assert!(!page.contains("Sneaky"));
+        assert!(!page.contains("<script>"));
     }
 
     /// A node that keeps search history in a folder.

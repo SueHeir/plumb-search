@@ -214,6 +214,8 @@ struct Page<'a> {
     html_seen: bool,
     /// `<link rel="icon">` and the like, with their [`icon_rank`].
     icons: Vec<(u32, String)>,
+    /// The first RSS or Atom `<link rel="alternate">`.
+    feed: Option<String>,
     /// The text of the `<h1>` or `<h2>` being read, when it is visible.
     heading_text: Option<String>,
     headings: Vec<String>,
@@ -312,6 +314,7 @@ impl<'a> Page<'a> {
             language: None,
             html_seen: false,
             icons: Vec::new(),
+            feed: None,
             heading_text: None,
             headings: Vec::new(),
             heading_words: 0,
@@ -609,19 +612,25 @@ impl<'a> Page<'a> {
         }
     }
 
-    /// Notes a `<link>` to the site's icon.
+    /// Notes a `<link>` to the site's icon or feed.
     fn link(&mut self, tag: &Tag) {
+        let rel = attr(tag, "rel").unwrap_or_default().to_ascii_lowercase();
+        let kind = attr(tag, "type").unwrap_or_default();
+        if self.feed.is_none() && is_feed_link(&rel, kind) {
+            if let Some(url) = attr(tag, "href").and_then(|href| resolve_link(self.base_url, href))
+            {
+                self.feed = Some(url.into());
+            }
+        }
         if self.icons.len() >= MAX_ICON_LINKS {
             return;
         }
-        let rel = attr(tag, "rel").unwrap_or_default().to_ascii_lowercase();
         let Some(href) = attr(tag, "href") else {
             return;
         };
         let Some(url) = resolve_link(self.base_url, href) else {
             return;
         };
-        let kind = attr(tag, "type").unwrap_or_default();
         let sizes = attr(tag, "sizes").unwrap_or_default();
         if let Some(rank) = icon_rank(&rel, kind, sizes, url.path()) {
             self.icons.push((rank, url.into()));
@@ -724,9 +733,19 @@ impl<'a> Page<'a> {
                 None => Vec::new(),
             },
             headings: self.headings,
+            feed: self.feed,
             links: self.links,
         }
     }
+}
+
+/// Whether a `<link>` with `rel` (lowercased) and `kind` (its `type`)
+/// points to the page's RSS or Atom feed.
+fn is_feed_link(rel: &str, kind: &str) -> bool {
+    let kind = kind.trim();
+    rel.split_ascii_whitespace().any(|word| word == "alternate")
+        && (kind.eq_ignore_ascii_case("application/rss+xml")
+            || kind.eq_ignore_ascii_case("application/atom+xml"))
 }
 
 /// The page's icons, best first, each once, at most [`MAX_ICONS`]. A
@@ -1123,6 +1142,28 @@ mod tests {
                 ..PageMeta::default()
             }
         );
+    }
+
+    #[test]
+    fn notes_the_first_rss_or_atom_feed() {
+        let meta = extract(
+            "https://www.example.com/",
+            r#"<head>
+            <link rel="alternate" hreflang="fr" href="/fr/">
+            <link rel="alternate" type="application/json" href="/feed.json">
+            <link rel="Alternate" type="application/rss+xml" href="/rss.xml">
+            <link rel="alternate" type="application/atom+xml" href="/atom.xml">
+            </head>"#,
+        );
+        assert_eq!(
+            meta.feed.as_deref(),
+            Some("https://www.example.com/rss.xml")
+        );
+        let none = extract(
+            "https://www.example.com/",
+            r#"<link rel="alternate" type="application/rss+xml" href="javascript:x()">"#,
+        );
+        assert_eq!(none.feed, None);
     }
 
     #[test]

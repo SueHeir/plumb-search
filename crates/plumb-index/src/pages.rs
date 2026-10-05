@@ -74,6 +74,9 @@ pub struct Page {
     /// The Wikidata item a Wikipedia article is about (`Q937`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub item: Option<String>,
+    /// The item's official profiles (a YouTube channel, an X account).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub profiles: Vec<plumb_core::profiles::Profile>,
 }
 
 impl Page {
@@ -88,6 +91,7 @@ impl Page {
             views: article.views,
             aliases: article.aliases,
             item: article.item,
+            profiles: article.profiles,
         }
     }
 
@@ -103,6 +107,7 @@ impl Page {
             views: repo.views,
             aliases: repo.aliases,
             item: None,
+            profiles: Vec::new(),
         }
     }
 
@@ -121,6 +126,7 @@ impl Page {
             views: question.views,
             aliases: question.aliases,
             item: None,
+            profiles: Vec::new(),
         }
     }
 
@@ -139,6 +145,7 @@ impl Page {
             views: book.views,
             aliases: book.aliases,
             item: None,
+            profiles: Vec::new(),
         }
     }
 
@@ -160,6 +167,7 @@ impl Page {
             views: paper.views,
             aliases: paper.aliases,
             item: None,
+            profiles: Vec::new(),
         }
     }
 
@@ -604,7 +612,7 @@ impl PageSearcher {
                 continue;
             };
             let page: Page = serde_json::from_str(stored)?;
-            let (mut name, named) = self.name_match(&page, &joined, &query_words);
+            let (mut name, named) = self.name_match(&page, query, &joined, &query_words);
             if !named {
                 name = name.max(self.question_match(&page, &stems));
             }
@@ -661,19 +669,27 @@ impl PageSearcher {
         PARTIAL_MATCH * share
     }
 
-    fn name_match(&self, page: &Page, joined: &str, query: &HashSet<&str>) -> (f32, bool) {
+    fn name_match(
+        &self,
+        page: &Page,
+        raw_query: &str,
+        joined: &str,
+        query: &HashSet<&str>,
+    ) -> (f32, bool) {
         let key = |text: &str| {
             analysis::tokens(&self.joined, text)
                 .pop()
                 .unwrap_or_default()
         };
-        if key(&page.title) == joined {
+        let spelled = |text: &str| plumb_core::collapse_whitespace(text).to_lowercase();
+        if spelled(&page.title) == spelled(raw_query) {
             return (1.0, true);
         }
-        // "Mozart (film)" is no better a match for "mozart" than the
-        // redirect "Mozart" to "Wolfgang Amadeus Mozart": popularity
-        // decides between them.
-        if key(base_title(&page.title)) == joined
+        // "Mozart (film)" and "Mozart!" are no better a match for "mozart"
+        // than the redirect "Mozart" to "Wolfgang Amadeus Mozart":
+        // popularity decides between them.
+        if key(&page.title) == joined
+            || key(base_title(&page.title)) == joined
             || page.aliases.iter().any(|alias| key(alias) == joined)
         {
             return (ALIAS_MATCH, true);
@@ -1043,6 +1059,7 @@ mod tests {
             page("Albert Einstein (album)", 900, &[]),
             page("Wolfgang Amadeus Mozart", 200_000, &["Mozart"]),
             page("Mozart (film)", 3_000, &[]),
+            page("Mozart!", 5_000, &[]),
         ]);
         let hits = s.search("albert einstein", 5).unwrap();
         assert_eq!(titles(&hits)[0], "Albert Einstein");

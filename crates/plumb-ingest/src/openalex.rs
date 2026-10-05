@@ -11,6 +11,8 @@
 //! OpenAlex pages through results with a cursor, 200 works a request. Set
 //! `OPENALEX_API_KEY` if OpenAlex asks for a key.
 
+use std::io::Write;
+use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
@@ -145,31 +147,122 @@ impl Work {
             site: None,
             views: self.cited_by_count,
             aliases: Vec::new(),
+            profiles: Vec::new(),
         })
     }
 }
 
+/// What [`fetch_papers`] got.
+pub struct Fetched {
+    /// The papers, most cited first.
+    pub papers: Vec<Article>,
+    /// Every paper asked for was fetched; otherwise OpenAlex kept refusing
+    /// and `papers` are the most cited of them, and a run with the same
+    /// progress folder carries on where this one stopped.
+    pub complete: bool,
+}
+
+/// Longest wait between refused requests.
+const MAX_WAIT: Duration = Duration::from_secs(30 * 60);
+/// How long OpenAlex may keep refusing before the papers so far are given
+/// back.
+const GIVE_UP_AFTER: Duration = Duration::from_secs(3 * 60 * 60);
+
+/// Where a fetch keeps its progress: the papers so far (an articles file,
+/// one line appended a paper) and the cursor to go on from.
+struct Progress {
+    papers: std::path::PathBuf,
+    state: std::path::PathBuf,
+}
+
+#[derive(Debug, serde::Serialize, Deserialize)]
+struct ProgressState {
+    filter: String,
+    cursor: Option<String>,
+}
+
+impl Progress {
+    fn new(dir: &Path) -> Result<Self> {
+        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+        Ok(Progress {
+            papers: dir.join("papers-so-far.tsv"),
+            state: dir.join("papers-so-far.json"),
+        })
+    }
+
+    /// The papers and cursor of an earlier fetch with `filter`, or a fresh
+    /// start. `None` for the cursor means that fetch got everything.
+    fn resume(&self, filter: &str) -> Result<(Vec<Article>, Option<String>)> {
+        let state: Option<ProgressState> = std::fs::read(&self.state)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok());
+        if let Some(state) = state.filter(|s| s.filter == filter) {
+            if let Ok(file) = std::fs::File::open(&self.papers) {
+                let papers =
+                    plumb_core::article::read_articles(std::io::BufReader::new(file), usize::MAX)?;
+                info!("carrying on from {} papers fetched before", papers.len());
+                return Ok((papers, state.cursor));
+            }
+        }
+        std::fs::write(&self.papers, plumb_core::article::ARTICLES_HEADER)
+            .with_context(|| format!("writing {}", self.papers.display()))?;
+        self.save(filter, Some("*"))?;
+        Ok((Vec::new(), Some("*".to_string())))
+    }
+
+    fn append(&self, papers: &[Article]) -> Result<()> {
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&self.papers)
+            .with_context(|| format!("opening {}", self.papers.display()))?;
+        let mut text = Vec::new();
+        for paper in papers {
+            plumb_core::article::write_article(&mut text, paper)?;
+        }
+        file.write_all(&text)
+            .with_context(|| format!("writing {}", self.papers.display()))
+    }
+
+    fn save(&self, filter: &str, cursor: Option<&str>) -> Result<()> {
+        let state = ProgressState {
+            filter: filter.to_string(),
+            cursor: cursor.map(str::to_string),
+        };
+        std::fs::write(&self.state, serde_json::to_vec(&state)?)
+            .with_context(|| format!("writing {}", self.state.display()))
+    }
+}
+
 /// Fetches works with at least `min_citations` citations, at most `limit`
-/// of them, most cited first.
+/// of them, most cited first. With `progress`, a folder, the papers so far
+/// are kept there as they come and a later fetch carries on from them.
 pub async fn fetch_papers(
     client: &reqwest::Client,
     min_citations: u64,
     limit: usize,
     api_key: Option<&str>,
-) -> Result<Vec<Article>> {
+    progress: Option<&Path>,
+) -> Result<Fetched> {
     let filter = format!(
         "cited_by_count:>{},is_paratext:false",
         min_citations.saturating_sub(1)
     );
-    let mut cursor = "*".to_string();
-    let mut articles = Vec::new();
+    let progress = progress.map(Progress::new).transpose()?;
+    let (mut articles, mut cursor) = match &progress {
+        Some(progress) => progress.resume(&filter)?,
+        None => (Vec::new(), Some("*".to_string())),
+    };
     let mut failures = 0u32;
+    let mut refused_since: Option<std::time::Instant> = None;
+    let mut wait = Duration::from_secs(60);
+    let mut complete = true;
     while articles.len() < limit {
+        let Some(at) = cursor.clone() else { break };
         let mut params = vec![
             ("filter", filter.clone()),
             ("sort", "cited_by_count:desc".to_string()),
             ("per-page", PER_PAGE.to_string()),
-            ("cursor", cursor.clone()),
+            ("cursor", at),
             (
                 "select",
                 "id,doi,display_name,publication_year,cited_by_count,authorships,primary_location"
@@ -194,12 +287,24 @@ pub async fn fetch_papers(
         };
         let status = response.status();
         if status.as_u16() == 429 || status.is_server_error() {
-            failures += 1;
-            if failures > 10 {
-                bail!("OpenAlex answered {status} ten times");
+            let since = *refused_since.get_or_insert_with(std::time::Instant::now);
+            if since.elapsed() > GIVE_UP_AFTER {
+                warn!(
+                    "OpenAlex has refused for {} minutes; keeping the {} papers so far",
+                    since.elapsed().as_secs() / 60,
+                    articles.len()
+                );
+                complete = false;
+                break;
             }
-            warn!("OpenAlex answered {status}; waiting");
-            tokio::time::sleep(Duration::from_secs(60)).await;
+            let asked = retry_after(response.headers());
+            let pause = asked.unwrap_or(wait).min(MAX_WAIT);
+            warn!(
+                "OpenAlex answered {status}; waiting {} seconds",
+                pause.as_secs()
+            );
+            tokio::time::sleep(pause).await;
+            wait = (wait * 2).min(MAX_WAIT);
             continue;
         }
         if !status.is_success() {
@@ -210,6 +315,8 @@ pub async fn fetch_papers(
             );
         }
         failures = 0;
+        refused_since = None;
+        wait = Duration::from_secs(60);
         let bytes = response
             .bytes()
             .await
@@ -217,7 +324,13 @@ pub async fn fetch_papers(
         let page: WorksPage =
             serde_json::from_slice(&bytes).context("reading OpenAlex's answer")?;
         let count = page.results.len();
-        articles.extend(page.results.iter().filter_map(Work::to_article));
+        let new: Vec<Article> = page.results.iter().filter_map(Work::to_article).collect();
+        cursor = page.meta.next_cursor.filter(|_| count > 0);
+        if let Some(progress) = &progress {
+            progress.append(&new)?;
+            progress.save(&filter, cursor.as_deref())?;
+        }
+        articles.extend(new);
         if articles.len() % 20_000 < count {
             info!(
                 "{} papers so far, down to {} citations",
@@ -225,14 +338,25 @@ pub async fn fetch_papers(
                 page.results.last().map_or(0, |w| w.cited_by_count)
             );
         }
-        match page.meta.next_cursor {
-            Some(next) if count > 0 => cursor = next,
-            _ => break,
-        }
         tokio::time::sleep(PAUSE).await;
     }
     articles.truncate(limit);
-    Ok(articles)
+    Ok(Fetched {
+        papers: articles,
+        complete,
+    })
+}
+
+/// The wait a `Retry-After` header asks for, in seconds.
+fn retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+    let seconds: u64 = headers
+        .get("retry-after")?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    Some(Duration::from_secs(seconds.max(1)))
 }
 
 #[cfg(test)]
@@ -267,5 +391,25 @@ mod tests {
         assert_eq!(articles[1].title, "Growth of E. coli");
         assert_eq!(articles[1].item.as_deref(), Some("W1"));
         assert_eq!(articles[1].description.as_deref(), Some("Paper"));
+    }
+
+    #[test]
+    fn progress_carries_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let progress = Progress::new(dir.path()).unwrap();
+        let filter = "cited_by_count:>199";
+        assert_eq!(progress.resume(filter).unwrap(), (vec![], Some("*".into())));
+        let page: WorksPage = serde_json::from_str(PAGE).unwrap();
+        let papers: Vec<Article> = page.results.iter().filter_map(Work::to_article).collect();
+        progress.append(&papers).unwrap();
+        progress.save(filter, Some("abc")).unwrap();
+        let (again, cursor) = progress.resume(filter).unwrap();
+        assert_eq!(again, papers);
+        assert_eq!(cursor.as_deref(), Some("abc"));
+        // Another filter starts over.
+        assert_eq!(
+            progress.resume("cited_by_count:>9").unwrap(),
+            (vec![], Some("*".into()))
+        );
     }
 }

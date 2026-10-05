@@ -792,6 +792,7 @@ impl Fetcher for NodeFetcher<'_> {
                 () = inner.stopped() => return None,
             };
             save_icons(icons, &results);
+            inner.news.note_feeds(&results);
             if let Some(net) = net {
                 // Shared before it is saved here: a batch the offline
                 // check throws away holds few records anyway.
@@ -1176,6 +1177,7 @@ fn build<R: Borrow<SiteRecord>>(inner: &Inner, records: &[R]) -> Result<ServingI
             group_thousands(records.len() as u64)
         ),
     );
+    watch_feeds(inner, records);
     let buckets = network::wants_buckets(inner);
     let steps = if buckets { 2 } else { 1 };
     inner.set_progress(0, steps, "steps");
@@ -1206,6 +1208,30 @@ fn build<R: Borrow<SiteRecord>>(inner: &Inner, records: &[R]) -> Result<ServingI
         started.elapsed().as_secs_f64()
     );
     Ok(index)
+}
+
+/// Has the node watch the feeds of its best-ranked sites, the first of
+/// `records` (see [`NodeConfig::news_feeds`](super::NodeConfig)): sites
+/// that answered their last crawl and redirect nowhere.
+fn watch_feeds<R: Borrow<SiteRecord>>(inner: &Inner, records: &[R]) {
+    let wanted = inner.config.news_feeds;
+    if wanted == 0 {
+        return;
+    }
+    let sites = records
+        .iter()
+        .map(Borrow::borrow)
+        .filter(|r| r.redirect.is_none() && r.crawl_failures == 0)
+        .take(wanted)
+        .map(|r| {
+            let homepage = r
+                .url
+                .clone()
+                .unwrap_or_else(|| format!("https://{}/", r.domain));
+            (r.domain.clone(), homepage)
+        })
+        .collect();
+    inner.news.watch(sites);
 }
 
 /// Swaps in a freshly built index and notes that the records file holds no

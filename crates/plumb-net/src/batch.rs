@@ -161,7 +161,9 @@ impl Batch {
     /// [`MAX_BATCH_RECORDS`] lines are kept, within [`MAX_BATCH_BYTES`];
     /// `None` when none are. A record's icon ([`SiteRecord::icon`]) goes on
     /// a line of its own after the records ([`IconLine`]), while there is
-    /// room, so proofs of the record never carry it.
+    /// room, so proofs of the record never carry it; so do its headlines
+    /// ([`SiteRecord::news`], [`NewsLine`]), after the icons. A record
+    /// that carries nothing but headlines gets only the headlines' line.
     pub fn sign(
         key: &Keypair,
         records: &[SiteRecord],
@@ -171,12 +173,24 @@ impl Batch {
     ) -> Result<Option<Batch>> {
         let mut lines = Vec::new();
         let mut icons = Vec::new();
+        let mut news = Vec::new();
         let mut bytes = 0;
         for record in records.iter().take(MAX_BATCH_RECORDS) {
             if canonical_domain(&record.domain).as_deref() != Some(record.domain.as_str()) {
                 continue;
             }
             let mut record = std::borrow::Cow::Borrowed(record);
+            if !record.news.is_empty() {
+                let items = std::mem::take(&mut record.to_mut().news);
+                news.push(NewsLine {
+                    news_of: record.domain.clone(),
+                    items,
+                });
+                // A feed check alone says nothing else about the site.
+                if *record == SiteRecord::new(record.domain.as_str()) {
+                    continue;
+                }
+            }
             let icon = record.icon.is_some().then(|| record.to_mut().icon.take());
             let line = serde_json::to_string(&*record).context("encoding a record")?;
             if line.len() > MAX_RECORD_BYTES {
@@ -200,6 +214,17 @@ impl Batch {
                 break;
             }
             if bytes + line.len() > MAX_BATCH_BYTES {
+                break;
+            }
+            bytes += line.len();
+            lines.push(line);
+        }
+        for news in news {
+            let line = serde_json::to_string(&news).context("encoding headlines")?;
+            if line.len() > MAX_RECORD_BYTES {
+                continue;
+            }
+            if lines.len() >= MAX_BATCH_RECORDS || bytes + line.len() > MAX_BATCH_BYTES {
                 break;
             }
             bytes += line.len();
@@ -455,6 +480,52 @@ pub struct IconLine {
     pub png: String,
 }
 
+/// A site's recent headlines in a batch, on a line of its own: what its
+/// feed listed when the crawler checked it (see [`plumb_core::news`]).
+/// Nodes that don't know this line skip it, as a record that does not
+/// parse; nodes that do take it only from crawlers they trust
+/// ([`accept_news`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NewsLine {
+    pub news_of: String,
+    pub items: Vec<plumb_core::Headline>,
+}
+
+/// The headlines a batch carries, as records holding only the site's
+/// domain and [`SiteRecord::news`]: each headline checked as a feed's are
+/// ([`plumb_core::Headline::checked`]: on the site, recent, short), at
+/// most [`plumb_core::news::MAX_HEADLINES_PER_SITE`] per site. Whether to
+/// keep them is the caller's choice: a node takes them from its own and
+/// trusted crawlers only, as it does icons.
+pub fn accept_news(batch: &Batch, now: u64) -> Vec<SiteRecord> {
+    let mut out: Vec<SiteRecord> = Vec::new();
+    for line in &batch.records {
+        if line.len() > MAX_RECORD_BYTES || !line.starts_with("{\"news_of\"") {
+            continue;
+        }
+        let Ok(news) = serde_json::from_str::<NewsLine>(line) else {
+            continue;
+        };
+        let Some(domain) = canonical_domain(&news.news_of) else {
+            continue;
+        };
+        let items: Vec<plumb_core::Headline> = news
+            .items
+            .iter()
+            .filter_map(|h| plumb_core::Headline::checked(&domain, &h.title, &h.url, h.at, now))
+            .take(plumb_core::news::MAX_HEADLINES_PER_SITE)
+            .collect();
+        if items.is_empty() {
+            continue;
+        }
+        let mut record = SiteRecord::new(domain);
+        record.news = items;
+        out.push(record);
+    }
+    out
+}
+
 /// Reads one record from another node, with its domain made canonical.
 fn parse_record(line: &str) -> Result<SiteRecord> {
     ensure!(line.len() <= MAX_RECORD_BYTES, "a record is too long");
@@ -649,6 +720,48 @@ mod tests {
         let other = accept_batch(&batch, &peer, NOW);
         assert_eq!(other.len(), 2);
         assert!(other.iter().all(|r| r.icon.is_none()));
+    }
+
+    #[test]
+    fn headlines_travel_on_lines_of_their_own() {
+        let key = Keypair::generate_ed25519();
+        let peer = key.public().to_peer_id();
+        let headline = |url: &str| plumb_core::Headline {
+            title: "Big news".into(),
+            url: url.into(),
+            at: NOW - 600,
+        };
+        let mut checked = SiteRecord::new("news.com");
+        checked.news = vec![
+            headline("https://www.news.com/big"),
+            headline("https://elsewhere.com/x"),
+        ];
+        let batch = sign(&key, &[checked]);
+        // A feed check alone is only its headlines' line.
+        assert_eq!(batch.records.len(), 1);
+        assert!(batch.records[0].starts_with("{\"news_of\""));
+        assert!(batch.check(NOW).is_ok());
+
+        let news = accept_news(&batch, NOW);
+        assert_eq!(news.len(), 1);
+        assert_eq!(news[0].domain, "news.com");
+        // Only headlines on the site itself count.
+        assert_eq!(news[0].news, vec![headline("https://www.news.com/big")]);
+        // Too old by the time it is read.
+        assert!(accept_news(&batch, NOW + 8 * 24 * 3600).is_empty());
+        // Records are never made of it.
+        assert!(accept_trusted_batch(&batch, &peer, NOW).is_empty());
+        assert!(accept_batch(&batch, &peer, NOW).is_empty());
+
+        // A crawled homepage keeps its record line, the headlines go after.
+        let domain = &assigned_domains(&peer, 1)[0];
+        let mut crawled = crawled(domain);
+        crawled.news = vec![headline(&format!("https://{domain}/post"))];
+        let batch = sign(&key, &[crawled]);
+        assert_eq!(batch.records.len(), 2);
+        assert!(!batch.records[0].contains("news"), "{}", batch.records[0]);
+        assert_eq!(accept_news(&batch, NOW)[0].domain, *domain);
+        assert_eq!(accept_trusted_batch(&batch, &peer, NOW).len(), 1);
     }
 
     #[test]
