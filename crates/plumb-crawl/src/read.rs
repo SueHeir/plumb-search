@@ -49,7 +49,7 @@ pub struct ReadConfig {
 impl Default for ReadConfig {
     fn default() -> Self {
         ReadConfig {
-            user_agent: crate::USER_AGENT.to_string(),
+            user_agent: crate::READ_USER_AGENT.to_string(),
             timeout: Duration::from_secs(20),
             max_bytes: 3 * 1024 * 1024,
             max_redirects: 8,
@@ -669,6 +669,14 @@ mod tests {
 
     fn read(html: &str) -> ReadPage {
         page_text(&Url::parse("https://example.com/a/").unwrap(), html)
+    }
+
+    #[test]
+    fn reads_are_not_sent_as_the_crawler() {
+        let agent = ReadConfig::default().user_agent;
+        assert!(agent.starts_with("plumb-mcp/"), "{agent}");
+        assert!(agent.ends_with("(+https://github.com/SueHeir/plumb-search)"));
+        assert!(!agent.contains(crate::ROBOTS_TOKEN), "{agent}");
     }
 
     #[test]

@@ -65,9 +65,11 @@ const ACCEPT_HTML: &str = "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8";
 ///      thousand of them.
 ///    - 4xx other than 429: no rules, everything is allowed.
 ///    - 5xx or 429, or no answer: not crawled, [`CrawlOutcome::Failed`].
-///    - A redirect to another site, or more than `cfg.max_redirects`
-///      redirects: no rules, as RFC 9309 allows for redirects it cannot
-///      follow.
+///    - A redirect, to any host (RFC 9309 says to follow at least five):
+///      followed, and the file it ends at is the origin's. A hop to a
+///      private address gives [`CrawlOutcome::Failed`]; more than
+///      `cfg.max_redirects` redirects, or one without a usable
+///      `Location`, mean no rules.
 ///
 ///    Failed messages about robots.txt start with `robots.txt`.
 /// 2. A request to a host waits until `cfg.per_host_delay` has passed since
@@ -104,7 +106,8 @@ const ACCEPT_HTML: &str = "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8";
 /// `cfg.use_system_proxy` is set: a proxy looks up target names itself.
 ///
 /// Errors never stop the batch; each becomes that target's
-/// [`CrawlOutcome::Failed`]. Must run inside a Tokio runtime.
+/// [`CrawlOutcome::Failed`], and so does a target not done within
+/// `cfg.target_deadline`. Must run inside a Tokio runtime.
 pub async fn crawl_homepages(targets: Vec<CrawlTarget>, cfg: &CrawlConfig) -> Vec<CrawlResult> {
     if targets.is_empty() {
         return Vec::new();
@@ -303,7 +306,8 @@ const ACCEPT_FEED: &str =
 /// asked, per-host delays, at most `cfg.max_redirects` redirects (to any
 /// site, each allowed by its robots.txt), no private addresses. A known
 /// feed is asked for only if changed since the version the target names.
-/// Must run inside a Tokio runtime.
+/// A check not done within `cfg.target_deadline` fails. Must run inside a
+/// Tokio runtime.
 pub async fn check_feeds(targets: Vec<FeedTarget>, cfg: &CrawlConfig) -> Vec<FeedCheck> {
     let cfg = CrawlConfig {
         fetch_icons: false,
@@ -333,7 +337,13 @@ async fn check_feeds_with(
 ) -> Vec<FeedCheck> {
     stream::iter(targets)
         .map(|target| async move {
-            let outcome = check_feed(client, cfg, &target).await;
+            let outcome =
+                match tokio::time::timeout(cfg.target_deadline, check_feed(client, cfg, &target))
+                    .await
+                {
+                    Ok(outcome) => outcome,
+                    Err(_) => FeedOutcome::Failed(past_deadline(cfg)),
+                };
             debug!("{} feed: {outcome:?}", target.homepage.domain);
             FeedCheck {
                 domain: target.homepage.domain,
@@ -463,8 +473,25 @@ fn client_builder(cfg: &CrawlConfig) -> ClientBuilder {
     }
 }
 
+/// Not finished within [`CrawlConfig::target_deadline`].
+fn past_deadline(cfg: &CrawlConfig) -> String {
+    format!(
+        "not done within {} seconds",
+        cfg.target_deadline.as_secs_f32()
+    )
+}
+
 async fn crawl_target(client: &Client, cfg: &CrawlConfig, target: CrawlTarget) -> CrawlResult {
-    let outcome = crawl_outcome(client, cfg, &target).await;
+    let outcome = match tokio::time::timeout(
+        cfg.target_deadline,
+        crawl_outcome(client, cfg, &target),
+    )
+    .await
+    {
+        Ok(outcome) => outcome,
+        // A slow site, not a sign the node is offline.
+        Err(_) => Failure::other(past_deadline(cfg)).into(),
+    };
     debug!("{} ({}): {}", target.domain, target.url, describe(&outcome));
     CrawlResult {
         domain: target.domain,
@@ -625,8 +652,8 @@ fn is_network_error(err: &reqwest::Error) -> bool {
 enum Robots {
     /// A robots.txt was fetched and parsed; obey it.
     Rules(Arc<Robot>),
-    /// There is no usable robots.txt (4xx, or a redirect we do not
-    /// follow), so there are no restrictions.
+    /// There is no usable robots.txt (4xx, or a redirect chain that does
+    /// not end), so there are no restrictions.
     NoRules,
     /// Do not crawl: robots.txt answered 5xx or 429, could not be fetched,
     /// or could not be parsed. The message says which.
@@ -799,11 +826,18 @@ impl<'a> Visit<'a> {
     }
 
     /// Fetches and parses the robots.txt of `url`'s origin, following
-    /// redirects that stay on the site.
+    /// redirects to any host, as RFC 9309 asks; the file the chain ends at
+    /// holds the origin's rules. Hops to private IP addresses are refused
+    /// here (the resolver refuses names that resolve to them).
     async fn fetch_robots(&mut self, url: &Url) -> Robots {
         let first = robots_url(url);
         let mut robots = first.clone();
         for _ in 0..=self.cfg.max_redirects {
+            if !self.cfg.allow_private_addresses && crate::read::names_private_ip(&robots) {
+                return Robots::DoNotCrawl(Failure::other(format!(
+                    "robots.txt: redirects to {robots}, a private address"
+                )));
+            }
             let request = self.client.get(robots.clone());
             let response = match self.send(&robots, self.cfg.per_host_delay, request).await {
                 Ok(response) => response,
@@ -812,13 +846,12 @@ impl<'a> Visit<'a> {
             let status = response.status();
             if status.is_redirection() {
                 match redirect_target(&response) {
-                    Some(next) if same_site(&first, &next) => {
+                    Some(next) => {
                         robots = next;
                         continue;
                     }
-                    to => {
-                        let to = to.map(String::from);
-                        debug!("{robots}: redirects to {to:?}, not followed; no rules apply");
+                    None => {
+                        debug!("{robots}: a redirect without a usable Location; no rules apply");
                         return Robots::NoRules;
                     }
                 }
@@ -1970,6 +2003,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn slow_targets_fail_at_the_deadline() {
+        let slow = || async {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            Html(HOME)
+        };
+        let (port, _) = serve(move |_| Router::new().route("/", get(slow))).await;
+        let cfg = CrawlConfig {
+            target_deadline: Duration::from_millis(300),
+            ..config()
+        };
+        let started = Instant::now();
+        let (error, network) = expect_failure(crawl_one(target(port, "/"), &cfg).await);
+        assert!(error.starts_with("not done within 0.3 seconds"), "{error}");
+        assert!(!network);
+        let feed = FeedTarget {
+            homepage: target(port, "/"),
+            ..FeedTarget::default()
+        };
+        let checks = check_feeds(vec![feed], &cfg).await;
+        assert_eq!(
+            checks[0].outcome,
+            FeedOutcome::Failed("not done within 0.3 seconds".into())
+        );
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[tokio::test]
     async fn too_many_redirects_fail() {
         let (port, hits) = serve(|_| {
             Router::new().route(
@@ -2186,7 +2246,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn robots_txt_redirects_stay_on_the_site() {
+    async fn robots_txt_redirects_are_followed_anywhere() {
         // Same host: followed and obeyed.
         let (port, hits) = serve(|_| {
             home()
@@ -2204,9 +2264,8 @@ mod tests {
         assert_eq!(outcome, CrawlOutcome::RobotsDisallowed);
         assert_eq!(hits.paths(), ["/robots.txt", "/robots-v2.txt"]);
 
-        // Another site: not followed (though allowed to reach this server),
-        // so there are no rules.
-        let (port, hits) = serve(|port| {
+        // Another host: followed too (RFC 9309), and its file obeyed.
+        let elsewhere = |port: u16| {
             home()
                 .route(
                     "/robots.txt",
@@ -2219,10 +2278,38 @@ mod tests {
                     "/elsewhere.txt",
                     get(|| async { "User-agent: *\nDisallow: /\n" }),
                 )
+        };
+        let (port, hits) = serve(elsewhere).await;
+        let outcome = crawl_one(target(port, "/"), &config()).await;
+        assert_eq!(outcome, CrawlOutcome::RobotsDisallowed);
+        assert_eq!(hits.paths(), ["/robots.txt", "/elsewhere.txt"]);
+
+        // A hop to a private address is refused when those are.
+        let (port, hits) = serve(|port| {
+            home().route(
+                "/robots.txt",
+                get(move || async move {
+                    let to = format!("http://127.0.0.1:{port}/elsewhere.txt");
+                    (StatusCode::MOVED_PERMANENTLY, [(header::LOCATION, to)])
+                }),
+            )
         })
         .await;
-        expect_fetched(crawl_one(target(port, "/"), &config()).await);
-        assert_eq!(hits.paths(), ["/robots.txt", "/"]);
+        let start = CrawlTarget {
+            domain: "site.test".into(),
+            url: format!("http://site.test:{port}/"),
+            known_url: None,
+        };
+        let cfg = CrawlConfig {
+            allow_private_addresses: false,
+            ..config()
+        };
+        let outcome = crawl_with_hosts(start, &cfg, &[("site.test", port)]).await;
+        assert!(
+            matches!(&outcome, CrawlOutcome::Failed { error, .. } if error.contains("private address")),
+            "{outcome:?}"
+        );
+        assert_eq!(hits.paths(), ["/robots.txt"]);
 
         // A redirect loop: more than max_redirects also means no rules.
         let (port, _) = serve(|_| {
