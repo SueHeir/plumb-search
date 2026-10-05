@@ -1,0 +1,17 @@
+# Searches for well-known Stack Overflow questions, with the question expected
+# first among pages. Run with --pages stackoverflow.tsv.gz.
+undo last git commit	https://stackoverflow.com/questions/927358
+undo most recent local commits in git	https://stackoverflow.com/questions/927358
+processing a sorted array faster than unsorted array	https://stackoverflow.com/questions/11227809
+delete a git branch locally and remotely	https://stackoverflow.com/questions/2003505
+git pull vs git fetch	https://stackoverflow.com/questions/292357
+difference between git pull and git fetch	https://stackoverflow.com/questions/292357
+force git pull to overwrite local files	https://stackoverflow.com/questions/1125968
+rename a local git branch	https://stackoverflow.com/questions/6591213
+undo git add before commit	https://stackoverflow.com/questions/348170
+javascript string contains substring	https://stackoverflow.com/questions/1789945
+remove a specific item from an array javascript	https://stackoverflow.com/questions/5767325
+what does yield do in python	https://stackoverflow.com/questions/231767
+if __name__ == "__main__" python	https://stackoverflow.com/questions/419163
+check whether a file exists python without exceptions	https://stackoverflow.com/questions/82831
+regex match open tags except xhtml self-contained tags	https://stackoverflow.com/questions/1732348

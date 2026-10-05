@@ -57,6 +57,12 @@ pub const SETS: &[SetInfo] = &[
         pages: 300_000,
         bytes_per_page: 150,
     },
+    SetInfo {
+        id: plumb_index::pages::STACKOVERFLOW_SET,
+        name: "Stack Overflow questions",
+        pages: 2_000_000,
+        bytes_per_page: 120,
+    },
 ];
 
 impl SetInfo {
@@ -77,10 +83,15 @@ impl SetInfo {
     fn read(&self, path: &Path, limit: u64) -> Result<impl Iterator<Item = Page>> {
         // Wikipedia's articles, or GitHub's repositories written as
         // articles (see `plumb_ingest::github`).
-        let lang = match self.id.strip_prefix("wikipedia-") {
+        let id = self.id;
+        let lang = match id.strip_prefix("wikipedia-") {
             Some(lang) => Some(lang.to_string()),
-            None if self.id == plumb_index::pages::GITHUB_SET => None,
-            None => bail!("no reader for the page set {}", self.id),
+            None if id == plumb_index::pages::GITHUB_SET
+                || id == plumb_index::pages::STACKOVERFLOW_SET =>
+            {
+                None
+            }
+            None => bail!("no reader for the page set {id}"),
         };
         let reader = plumb_ingest::open_maybe_gz(path)?;
         let path = path.to_path_buf();
@@ -100,6 +111,9 @@ impl SetInfo {
                 Ok(article) if article.title == "Main Page" => None,
                 Ok(article) => Some(match &lang {
                     Some(lang) => Page::from_article(lang, article),
+                    None if id == plumb_index::pages::STACKOVERFLOW_SET => {
+                        Page::from_question(article)
+                    }
                     None => Page::from_repo(article),
                 }),
                 Err(err) => {
@@ -660,5 +674,39 @@ mod tests {
         let tauri = &searcher.search("tauri", 5).unwrap()[0];
         assert_eq!(tauri.page.site.as_deref(), Some("tauri.app"));
         assert!((tauri.popularity - 1.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn questions_are_searched_by_their_words() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path();
+        write_set(data, &[("Git", 5_000)]);
+        let file = SetInfo::find("stackoverflow").unwrap().file(data);
+        let mut text = ARTICLES_HEADER.as_bytes().to_vec();
+        write_article(
+            &mut text,
+            &Article {
+                title: "How do I undo the most recent local commits in Git?".to_string(),
+                description: Some("git, git-commit, undo".to_string()),
+                item: Some("927358".to_string()),
+                views: 14_000_000,
+                ..Article::default()
+            },
+        )
+        .unwrap();
+        std::fs::write(&file, text).unwrap();
+        let wanted = Wanted::new(data, &PageSets::default(), 0);
+        let (_, searcher) = open_or_build(data, &wanted).unwrap().unwrap();
+        let hits = searcher.search("undo last git commit", 5).unwrap();
+        let question = hits
+            .iter()
+            .find(|h| h.page.set == "stackoverflow")
+            .expect("the question is found");
+        assert_eq!(
+            question.page.url,
+            "https://stackoverflow.com/questions/927358"
+        );
+        assert_eq!(question.page.set_name(), "Stack Overflow");
+        assert_eq!(question.page.set_domain(), "stackoverflow.com");
     }
 }

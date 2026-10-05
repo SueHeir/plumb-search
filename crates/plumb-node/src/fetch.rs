@@ -27,7 +27,6 @@ enum Outcome {
     Failed(anyhow::Error),
 }
 
-/// `plumb fetch-pages`: makes a page set file from Wikimedia's dumps.
 /// Makes the GitHub repositories set file `dest`.
 fn run_github(args: &FetchPagesArgs, dest: &std::path::Path) -> Result<()> {
     let token = std::env::var("GITHUB_TOKEN")
@@ -69,6 +68,69 @@ fn run_github(args: &FetchPagesArgs, dest: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
+/// Makes the Stack Overflow questions set file `dest` from Stack Exchange's
+/// dump of Stack Overflow's posts (about 20 GB), downloaded into --work
+/// unless --posts names it.
+fn run_stackoverflow(args: &FetchPagesArgs, dest: &std::path::Path) -> Result<()> {
+    use plumb_ingest::stackexchange;
+    let posts = match &args.posts {
+        Some(posts) => posts.clone(),
+        None => {
+            let work = args
+                .work
+                .as_deref()
+                .context("pass --work DIR for Stack Overflow's posts, or --posts PATH")?;
+            let posts = work.join("stackoverflow.com-Posts.7z");
+            let fresh = std::fs::metadata(&posts)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .is_some_and(|age| age.as_secs() < args.keep_days * 86_400);
+            if fresh {
+                info!("keeping {}", posts.display());
+            } else {
+                info!(
+                    "downloading {} (about 20 GB)",
+                    stackexchange::STACKOVERFLOW_POSTS_URL
+                );
+                let client = download::http_client()?;
+                let partial = posts.with_extension("7z.part");
+                block_on(download::download_to_file(
+                    &client,
+                    stackexchange::STACKOVERFLOW_POSTS_URL,
+                    &partial,
+                ))??;
+                std::fs::rename(&partial, &posts)
+                    .with_context(|| format!("moving {}", partial.display()))?;
+            }
+            posts
+        }
+    };
+    info!("reading questions from {}", posts.display());
+    let questions = stackexchange::read_questions_7z(&posts, args.min_score, args.max_questions)?;
+    if questions.is_empty() {
+        bail!("{} had no questions; nothing was written", posts.display());
+    }
+    let questions: Vec<_> = questions
+        .into_iter()
+        .map(stackexchange::Question::into_article)
+        .collect();
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    articles::write_articles_file(dest, &questions)?;
+    let size = std::fs::metadata(dest).map_or(0, |m| m.len());
+    info!(
+        "wrote {} questions to {} ({:.1} MB)",
+        questions.len(),
+        dest.display(),
+        size as f64 / 1e6,
+    );
+    Ok(())
+}
+
+/// `plumb fetch-pages`: makes a page set file.
 pub fn run_pages(args: FetchPagesArgs) -> Result<()> {
     let Some(set) = crate::pages::SetInfo::find(&args.set) else {
         bail!(
@@ -88,6 +150,9 @@ pub fn run_pages(args: FetchPagesArgs) -> Result<()> {
     };
     if set.id == plumb_index::pages::GITHUB_SET {
         return run_github(&args, &dest);
+    }
+    if set.id == plumb_index::pages::STACKOVERFLOW_SET {
+        return run_stackoverflow(&args, &dest);
     }
     let Some(lang) = set.id.strip_prefix("wikipedia-") else {
         bail!("fetch-pages cannot make {} yet", set.id);

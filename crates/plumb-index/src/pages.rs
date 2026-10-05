@@ -36,7 +36,7 @@ use tantivy::schema::{
 use tantivy::tokenizer::TextAnalyzer;
 use tantivy::{Index, IndexReader, ReloadPolicy, TantivyDocument, Term};
 
-use crate::analysis::{self, JOINED_ANALYZER, WORDS_ANALYZER};
+use crate::analysis::{self, JOINED_ANALYZER, STEMMED_ANALYZER, WORDS_ANALYZER};
 use crate::replace::Staging;
 
 /// `name` of a page one of whose aliases the query is.
@@ -47,6 +47,11 @@ pub const PARTIAL_MATCH: f32 = 0.6;
 pub const POPULARITY_SHARE: f32 = 0.5;
 /// Pages whose words match that are looked at, most matching first.
 const CANDIDATES: usize = 200;
+/// Fewest words (stemmed, without the most common ones) of a query that
+/// finds questions by their words.
+pub const QUESTION_QUERY_WORDS: usize = 3;
+/// Least share of those words a question's title and tags must have.
+pub const QUESTION_SHARE: f32 = 0.75;
 
 /// A single page that can be a result.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -96,12 +101,40 @@ impl Page {
         }
     }
 
+    /// The Stack Overflow question `question`, written as an article whose
+    /// item is the question's id and whose description is its tags.
+    pub fn from_question(question: Article) -> Self {
+        Page {
+            set: STACKOVERFLOW_SET.to_string(),
+            url: format!(
+                "https://stackoverflow.com/questions/{}",
+                question.item.as_deref().unwrap_or("")
+            ),
+            title: question.title,
+            description: question.description,
+            site: None,
+            views: question.views,
+            aliases: question.aliases,
+        }
+    }
+
+    /// The words a question is found by besides its title: its title and
+    /// tags. `None` for pages of other sets, found by their names only.
+    pub fn topic(&self) -> Option<String> {
+        (self.set == STACKOVERFLOW_SET).then(|| match &self.description {
+            Some(tags) => format!("{} {tags}", self.title),
+            None => self.title.clone(),
+        })
+    }
+
     /// The name of the set people see: "Wikipedia".
     pub fn set_name(&self) -> &str {
         if self.set.starts_with("wikipedia-") {
             "Wikipedia"
         } else if self.set == GITHUB_SET {
             "GitHub"
+        } else if self.set == STACKOVERFLOW_SET {
+            "Stack Overflow"
         } else {
             &self.set
         }
@@ -111,6 +144,8 @@ impl Page {
     pub fn set_domain(&self) -> &str {
         if self.set == GITHUB_SET {
             "github.com"
+        } else if self.set == STACKOVERFLOW_SET {
+            "stackoverflow.com"
         } else {
             "wikipedia.org"
         }
@@ -119,6 +154,8 @@ impl Page {
 
 /// The set of GitHub repositories.
 pub const GITHUB_SET: &str = "github";
+/// The set of Stack Overflow questions.
+pub const STACKOVERFLOW_SET: &str = "stackoverflow";
 
 /// [`PageHit::popularity`] is kept in the index as a whole number of
 /// millionths.
@@ -141,6 +178,8 @@ pub struct PageHit {
 struct Fields {
     words: Field,
     keys: Field,
+    /// Stemmed words of a question's title and tags; empty for other pages.
+    topic: Field,
     popularity: Field,
     page: Field,
 }
@@ -163,6 +202,14 @@ fn schema() -> (Schema, Fields) {
                 .set_index_option(IndexRecordOption::Basic),
         ),
     );
+    let topic = builder.add_text_field(
+        "topic",
+        TextOptions::default().set_indexing_options(
+            TextFieldIndexing::default()
+                .set_tokenizer(STEMMED_ANALYZER)
+                .set_index_option(IndexRecordOption::Basic),
+        ),
+    );
     let popularity = builder.add_u64_field("popularity", FAST | STORED);
     let page = builder.add_text_field("page", STORED);
     (
@@ -170,6 +217,7 @@ fn schema() -> (Schema, Fields) {
         Fields {
             words,
             keys,
+            topic,
             popularity,
             page,
         },
@@ -314,6 +362,9 @@ pub fn build_page_index(
         for alias in &page.aliases {
             document.add_text(fields.words, alias);
         }
+        if let Some(topic) = page.topic() {
+            document.add_text(fields.topic, topic);
+        }
         document.add_text(fields.keys, &page.title);
         let base = base_title(&page.title);
         if base != page.title {
@@ -344,6 +395,7 @@ pub struct PageSearcher {
     fields: Fields,
     words: TextAnalyzer,
     joined: TextAnalyzer,
+    stemmed: TextAnalyzer,
     stats: PageIndexStats,
 }
 
@@ -372,6 +424,7 @@ impl PageSearcher {
             fields,
             words: analysis::words_analyzer(),
             joined: analysis::joined_analyzer(),
+            stemmed: analysis::stemmed_analyzer(),
             stats,
         })
     }
@@ -412,13 +465,43 @@ impl PageSearcher {
             .collect();
         clauses.push((Occur::Should, Box::new(BooleanQuery::new(every_word))));
         let query_words: HashSet<&str> = words.iter().map(String::as_str).collect();
-        let top = searcher.search(
-            &BooleanQuery::new(clauses),
-            &TopDocs::with_limit(CANDIDATES)
-                .order_by_fast_field::<u64>("popularity", tantivy::Order::Desc),
-        )?;
+        let by_popularity = || {
+            TopDocs::with_limit(CANDIDATES)
+                .order_by_fast_field::<u64>("popularity", tantivy::Order::Desc)
+        };
+        let mut addresses: Vec<_> = searcher
+            .search(&BooleanQuery::new(clauses), &by_popularity())?
+            .into_iter()
+            .map(|(_, address)| address)
+            .collect();
+        // Questions with most of the query's words, searched apart so they
+        // never crowd out pages the query names.
+        let stems = self.question_words(query);
+        if stems.len() >= QUESTION_QUERY_WORDS {
+            let needed = (stems.len() as f32 * QUESTION_SHARE).ceil() as usize;
+            let most_words = BooleanQuery::with_minimum_required_clauses(
+                stems
+                    .iter()
+                    .map(|stem| {
+                        (
+                            Occur::Should,
+                            Box::new(TermQuery::new(
+                                Term::from_field_text(self.fields.topic, stem),
+                                IndexRecordOption::Basic,
+                            )) as Box<dyn Query>,
+                        )
+                    })
+                    .collect(),
+                needed,
+            );
+            for (_, address) in searcher.search(&most_words, &by_popularity())? {
+                if !addresses.contains(&address) {
+                    addresses.push(address);
+                }
+            }
+        }
         let mut hits = Vec::new();
-        for (_, address) in top {
+        for address in addresses {
             let document: TantivyDocument = searcher.doc(address)?;
             let Some(stored) = document
                 .get_first(self.fields.page)
@@ -427,7 +510,10 @@ impl PageSearcher {
                 continue;
             };
             let page: Page = serde_json::from_str(stored)?;
-            let (name, named) = self.name_match(&page, &joined, &query_words);
+            let (mut name, named) = self.name_match(&page, &joined, &query_words);
+            if !named {
+                name = name.max(self.question_match(&page, &stems));
+            }
             if name <= 0.0 {
                 continue;
             }
@@ -447,6 +533,35 @@ impl PageSearcher {
         hits.sort_by(|a, b| b.score.total_cmp(&a.score));
         hits.truncate(limit);
         Ok(hits)
+    }
+
+    /// The different stemmed words of `query`, as questions are searched.
+    fn question_words(&self, query: &str) -> Vec<String> {
+        let mut stems = analysis::tokens(&self.stemmed, query);
+        let mut seen = HashSet::new();
+        stems.retain(|stem| seen.insert(stem.clone()));
+        stems
+    }
+
+    /// How well a question's words cover the query's stemmed words
+    /// `stems`: [`PARTIAL_MATCH`] times the share they have, when that is
+    /// at least [`QUESTION_SHARE`] of at least [`QUESTION_QUERY_WORDS`].
+    fn question_match(&self, page: &Page, stems: &[String]) -> f32 {
+        if stems.len() < QUESTION_QUERY_WORDS {
+            return 0.0;
+        }
+        let Some(topic) = page.topic() else {
+            return 0.0;
+        };
+        let words: HashSet<String> = analysis::tokens(&self.stemmed, &topic)
+            .into_iter()
+            .collect();
+        let share =
+            stems.iter().filter(|stem| words.contains(*stem)).count() as f32 / stems.len() as f32;
+        if share < QUESTION_SHARE {
+            return 0.0;
+        }
+        PARTIAL_MATCH * share
     }
 
     fn name_match(&self, page: &Page, joined: &str, query: &HashSet<&str>) -> (f32, bool) {
