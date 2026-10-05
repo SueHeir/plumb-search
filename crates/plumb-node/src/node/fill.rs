@@ -197,6 +197,9 @@ pub(super) struct FillState {
     /// Blackhole: when each trusted node's whole list was last gone
     /// through, in Unix seconds, by node id.
     pub lists_done: BTreeMap<String, u64>,
+    /// Blackhole: where in each trusted node's list reading stopped when
+    /// it moved on to another node's, by node id, so it goes on from there.
+    pub positions: BTreeMap<String, u64>,
     /// Bytes of disk the sites taken in since the last index build are
     /// reckoned to take once indexed, which the disk count does not show
     /// yet, and since when.
@@ -249,6 +252,23 @@ impl FillState {
         fs::write(&tmp, serde_json::to_vec(self)?)
             .and_then(|()| fs::rename(&tmp, &path))
             .with_context(|| format!("saving {}", path.display()))
+    }
+
+    /// Blackhole: reads `peer`'s list next. Another node's list goes on
+    /// from where reading it stopped, or from the top, and the list being
+    /// left keeps its place; the same list once gone through starts over.
+    fn read_list_of(&mut self, peer: String) {
+        if self.peer.as_deref() != Some(peer.as_str()) {
+            if let Some(old) = self.peer.take() {
+                if self.next > 0 && self.next < self.total {
+                    self.positions.insert(old, self.next);
+                }
+            }
+            self.next = self.positions.remove(&peer).unwrap_or(0);
+        } else if self.lists_done.contains_key(&peer) && self.total > 0 && self.next >= self.total {
+            self.next = 0;
+        }
+        self.peer = Some(peer);
     }
 
     pub(super) fn status(&self, blackhole: bool) -> FillStatus {
@@ -566,13 +586,7 @@ async fn fill_round(inner: &Arc<Inner>) -> Result<()> {
             inner.update_fill(|s| s.detail = detail.into());
             return Ok(());
         };
-        // Another node's list, or the same one again: from the top.
-        let again =
-            state.lists_done.contains_key(&peer) && state.total > 0 && state.next >= state.total;
-        if state.peer.as_deref() != Some(peer.as_str()) || again {
-            state.next = 0;
-        }
-        state.peer = Some(peer);
+        state.read_list_of(peer);
         state.done_at = None;
     } else if let Some(done) = state.done_at {
         if now < done + FILL_AGAIN_AFTER.as_secs() {
@@ -699,8 +713,15 @@ async fn fill_round(inner: &Arc<Inner>) -> Result<()> {
             }
             continue;
         }
-        prefer = Some(page.peer);
         let peer = page.peer.to_string();
+        if blackhole && state.peer.as_deref() != Some(&peer) {
+            // The node chosen is gone for now; its list waits, where it
+            // stopped, for the next round rather than another node's
+            // being read in its place.
+            inner.update_fill(|s| s.detail = "Waiting for a trusted node to connect".into());
+            break;
+        }
+        prefer = Some(page.peer);
         if state.peer.as_deref() != Some(&peer) {
             // Another node's list is in another order: start it from the top.
             let restart = state.peer.is_some() && state.next > 0;
@@ -966,6 +987,7 @@ mod tests {
             prune: true,
             focus_key: "game".into(),
             lists_done: BTreeMap::from([("12D3KooW".to_string(), 42)]),
+            positions: BTreeMap::from([("12D3KooX".to_string(), 7_000)]),
             pending: 77,
             pending_since: 1,
             pending_sites: 9,
@@ -993,8 +1015,39 @@ mod tests {
         );
         assert!(loaded.prune);
         assert_eq!(loaded.lists_done, state.lists_done);
+        assert_eq!(loaded.positions, state.positions);
         assert_eq!(state.status(false).position, 5_000);
         assert_eq!(state.status(true).lists_done, 1);
+    }
+
+    #[test]
+    fn blackhole_keeps_each_lists_place_when_it_moves_between_nodes() {
+        let mut state = FillState {
+            peer: Some("ny".into()),
+            next: 113_637,
+            total: 1_575_323,
+            ..FillState::default()
+        };
+        // New York went away part-way: the MacBook's list from the top.
+        state.read_list_of("mac".into());
+        assert_eq!((state.peer.as_deref(), state.next), (Some("mac"), 0));
+        state.next = 2_000;
+        state.total = 575_823;
+        // Back to New York: from where it stopped.
+        state.read_list_of("ny".into());
+        assert_eq!((state.peer.as_deref(), state.next), (Some("ny"), 113_637));
+        assert_eq!(state.positions.get("mac"), Some(&2_000));
+        // The same list again, once gone through: from the top.
+        state.next = 1_575_323;
+        state.total = 1_575_323;
+        state.lists_done.insert("ny".into(), 1);
+        state.read_list_of("ny".into());
+        assert_eq!(state.next, 0);
+        // A list gone through is not kept as a place to go on from.
+        state.next = 1_575_323;
+        state.read_list_of("mac".into());
+        assert_eq!(state.next, 2_000);
+        assert!(!state.positions.contains_key("ny"));
     }
 
     #[test]
