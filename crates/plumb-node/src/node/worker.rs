@@ -69,6 +69,11 @@ const FOCUS_RECRAWL_FASTER: u64 = 2;
 /// 2026-10-02). A site crawled before it is due again for its icon.
 const ICONS_KEPT_SINCE: u64 = 1_791_000_000;
 
+/// Nodes keep sites' key pages (sitelinks) from crawls since about this
+/// time (Unix seconds, 2026-10-05 08:46 UTC). A site crawled before it,
+/// with none, is due again for them, best-known sites first.
+const KEY_PAGES_KEPT_SINCE: u64 = 1_791_190_000;
+
 /// Sites without an icon here that a crawl round fetches just the icon of,
 /// most linked first: crawls that came from the network before nodes shared
 /// icons, or through filling, carry none, and those sites would otherwise
@@ -924,7 +929,8 @@ fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Option<ServingIndex
         );
     }
     let focused_domains: HashSet<&str> = focused.iter().map(|t| t.domain.as_str()).collect();
-    // Sites crawled before nodes kept icons are due again for theirs.
+    // Sites crawled before nodes kept icons or key pages are due again for
+    // them.
     let icons = IconStore::new(&inner.paths.icons);
     let noted = icons.noted();
     let rest = select_targets_with(
@@ -935,7 +941,7 @@ fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Option<ServingIndex
         budget - focused.len(),
         now,
         window,
-        |record| due_for_icon(record, &noted),
+        |record| due_for_icon(record, &noted) || due_for_key_pages(record),
     );
     drop(noted);
     drop(focused_domains);
@@ -1078,6 +1084,16 @@ fn due_for_icon(record: &SiteRecord, noted: &HashSet<String>) -> bool {
     last_crawl_answered(record)
         && record.crawled_at.is_some_and(|at| at < ICONS_KEPT_SINCE)
         && !noted.contains(&record.domain)
+}
+
+/// Whether a site last crawled before nodes kept key pages, and without
+/// any, is due again for them.
+fn due_for_key_pages(record: &SiteRecord) -> bool {
+    last_crawl_answered(record)
+        && record.key_pages.is_empty()
+        && record
+            .crawled_at
+            .is_some_and(|at| at < KEY_PAGES_KEPT_SINCE)
 }
 
 fn last_crawl_answered(record: &SiteRecord) -> bool {
@@ -1432,6 +1448,29 @@ mod tests {
             &noted
         ));
         assert!(!due_for_icon(&SiteRecord::new("never.com"), &noted));
+    }
+
+    #[test]
+    fn sites_crawled_before_key_pages_are_due_for_them_once() {
+        let crawled = |at: u64, pages: bool| {
+            let mut record = SiteRecord::new("facebook.com");
+            record.crawled_at = Some(at);
+            if pages {
+                record.key_pages = vec![plumb_core::KeyPage {
+                    label: "Log in".into(),
+                    url: "https://www.facebook.com/".into(),
+                }];
+            }
+            record
+        };
+        let old = KEY_PAGES_KEPT_SINCE - 1;
+        assert!(due_for_key_pages(&crawled(old, false)));
+        assert!(!due_for_key_pages(&crawled(old, true)));
+        assert!(!due_for_key_pages(&crawled(
+            KEY_PAGES_KEPT_SINCE + 60,
+            false
+        )));
+        assert!(!due_for_key_pages(&SiteRecord::new("never.com")));
     }
 
     #[test]

@@ -102,6 +102,7 @@ const INTENT_PHRASES: &[(PageIntent, &[&str])] = &[
             "register",
             "create account",
             "create an account",
+            "create new account",
             "join",
             "join now",
         ],
@@ -275,8 +276,16 @@ const NAV_NOISE: &[&str] = &[
 /// links it makes to its own site, in page order: first one link for each
 /// [`PageIntent`] the labels name, in that order, then the rest of the
 /// site's main menu, up to [`MAX_KEY_PAGES`]. Links back to the homepage,
-/// to other sites, and with long or empty labels are left out.
-pub fn pick_key_pages(homepage: &str, domain: &str, links: &[OwnLink]) -> Vec<KeyPage> {
+/// to other sites, and with long or empty labels are left out, except
+/// that a homepage that is itself a sign-in form (`signs_in_here`, as
+/// facebook.com is) gets a "Log in" key page to itself when it links to
+/// no other sign-in page.
+pub fn pick_key_pages(
+    homepage: &str,
+    domain: &str,
+    links: &[OwnLink],
+    signs_in_here: bool,
+) -> Vec<KeyPage> {
     let host = |url: &Url| {
         let host = url.host_str().unwrap_or_default();
         host.strip_prefix("www.").unwrap_or(host).to_string()
@@ -343,6 +352,14 @@ pub fn pick_key_pages(homepage: &str, domain: &str, links: &[OwnLink]) -> Vec<Ke
             Some(_) => {}
             None => by_intent.push((intent, page)),
         }
+    }
+    let sign_in = KeyPage {
+        label: "Log in".into(),
+        url: homepage.to_string(),
+    };
+    let has_login = by_intent.iter().any(|(i, _)| *i == PageIntent::Login);
+    if signs_in_here && !has_login && sign_in.is_valid_for(domain) {
+        by_intent.push((PageIntent::Login, &sign_in));
     }
     by_intent.sort_by_key(|(intent, _)| *intent);
     let add = |page: &KeyPage, picked: &mut Vec<KeyPage>| {
@@ -449,7 +466,7 @@ mod tests {
             link("Careers", "https://stripe.com/jobs", false),
             link("Enterprise", "https://stripe.com/enterprise", true),
         ];
-        let pages = pick_key_pages("https://stripe.com/", "stripe.com", &links);
+        let pages = pick_key_pages("https://stripe.com/", "stripe.com", &links, true);
         assert_eq!(
             labels(&pages),
             ["Sign in", "Docs", "Pricing", "Support", "Careers", "Products"]
@@ -466,7 +483,7 @@ mod tests {
             link("Docs", "https://documentation.ubuntu.com/server/", false),
             link("Contact us ›", "https://ubuntu.com/contact-us", false),
         ];
-        let pages = pick_key_pages("https://ubuntu.com/", "ubuntu.com", &links);
+        let pages = pick_key_pages("https://ubuntu.com/", "ubuntu.com", &links, false);
         let urls: Vec<&str> = pages.iter().map(|p| p.url.as_str()).collect();
         assert_eq!(
             urls,
@@ -480,6 +497,41 @@ mod tests {
     }
 
     #[test]
+    fn a_homepage_that_is_a_sign_in_form_gets_a_log_in_page() {
+        let links = [
+            link(
+                "Forgotten password?",
+                "https://www.facebook.com/recover/initiate/",
+                false,
+            ),
+            link(
+                "Create new account",
+                "https://www.facebook.com/r.php",
+                false,
+            ),
+            link(
+                "Marketplace",
+                "https://www.facebook.com/marketplace/",
+                false,
+            ),
+            link("Help", "https://www.facebook.com/help/", false),
+        ];
+        let pages = pick_key_pages("https://www.facebook.com/", "facebook.com", &links, true);
+        let pages: Vec<(&str, &str)> = pages
+            .iter()
+            .map(|p| (p.label.as_str(), p.url.as_str()))
+            .collect();
+        assert_eq!(
+            pages,
+            [
+                ("Log in", "https://www.facebook.com/"),
+                ("Create new account", "https://www.facebook.com/r.php"),
+                ("Help", "https://www.facebook.com/help/"),
+            ]
+        );
+    }
+
+    #[test]
     fn leaves_out_the_homepage_and_bad_links() {
         let links = [
             link("Home", "https://example.com/", true),
@@ -489,7 +541,7 @@ mod tests {
             link("Evil", "javascript:alert(1)", true),
             link("Blog", "https://example.com/blog", false),
         ];
-        let pages = pick_key_pages("https://example.com/", "example.com", &links);
+        let pages = pick_key_pages("https://example.com/", "example.com", &links, false);
         assert_eq!(labels(&pages), ["Blog"]);
     }
 
