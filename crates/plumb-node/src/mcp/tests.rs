@@ -622,3 +622,17 @@ fn findings_are_reported_and_listed_with_the_next_search() {
     );
     assert!(reply["error"].is_object());
 }
+
+#[test]
+fn official_site_falls_back_on_a_packages_home_page() {
+    let mcp = Mcp::new(Arc::new(Packages), None);
+    let reply = call(&mcp, "official_site", json!({ "name": "serde" }));
+    let answer = &reply["result"]["structuredContent"];
+    assert_eq!(answer["found"], false);
+    assert_eq!(answer["package_home"], "https://serde.rs");
+    let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(
+        text.contains("gives https://serde.rs as its home page"),
+        "{text}"
+    );
+}

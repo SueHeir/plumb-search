@@ -125,6 +125,13 @@ impl PageReader {
         if !self.cfg.allow_private_addresses && names_private_ip(&url) {
             return Err(ReadError::Private(url.host_str().unwrap_or("").to_string()));
         }
+        // Stack Exchange's sites turn away programs that read their pages,
+        // but give the same question and answers through their API.
+        if let Some((site, id)) = stack_exchange_question(&url) {
+            if let Some(page) = self.read_stack_exchange(&url, site, id).await {
+                return Ok(page);
+            }
+        }
         let mut response = self
             .client
             .get(url)
@@ -185,6 +192,112 @@ impl PageReader {
         page.cut = cut;
         Ok(page)
     }
+}
+
+/// Answers kept of a Stack Exchange question, the best voted first.
+const STACK_EXCHANGE_ANSWERS: usize = 4;
+const STACK_EXCHANGE_API: &str = "https://api.stackexchange.com/2.3";
+
+/// The Stack Exchange site (its API name) and question number of a
+/// question's address: `stackoverflow`, 927358 for
+/// `https://stackoverflow.com/questions/927358/how-do-i-undo-...`.
+pub fn stack_exchange_question(url: &Url) -> Option<(&'static str, u64)> {
+    let host = url.host_str()?.trim_start_matches("www.");
+    let site = match host {
+        "stackoverflow.com" => "stackoverflow",
+        "superuser.com" => "superuser",
+        "serverfault.com" => "serverfault",
+        "askubuntu.com" => "askubuntu",
+        "mathoverflow.net" => "mathoverflow.net",
+        "unix.stackexchange.com" => "unix",
+        "softwareengineering.stackexchange.com" => "softwareengineering",
+        "dba.stackexchange.com" => "dba",
+        "security.stackexchange.com" => "security",
+        "apple.stackexchange.com" => "apple",
+        _ => return None,
+    };
+    let mut segments = url.path_segments()?;
+    if !matches!(segments.next(), Some("questions" | "q")) {
+        return None;
+    }
+    let id = segments.next()?.parse().ok()?;
+    Some((site, id))
+}
+
+#[derive(serde::Deserialize)]
+struct StackItems {
+    #[serde(default)]
+    items: Vec<StackPost>,
+}
+
+#[derive(serde::Deserialize)]
+struct StackPost {
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    body: String,
+    #[serde(default)]
+    score: i64,
+    #[serde(default)]
+    is_accepted: bool,
+    #[serde(default)]
+    tags: Vec<String>,
+}
+
+impl PageReader {
+    /// The question `id` of the Stack Exchange `site` and its best answers,
+    /// read as one page at `url`; `None` when the API cannot give them.
+    async fn read_stack_exchange(&self, url: &Url, site: &str, id: u64) -> Option<ReadPage> {
+        let get = |path: String| async move {
+            let response = self
+                .client
+                .get(format!("{STACK_EXCHANGE_API}/{path}"))
+                .send()
+                .await
+                .ok()?;
+            if !response.status().is_success() {
+                return None;
+            }
+            let bytes = response.bytes().await.ok()?;
+            serde_json::from_slice::<StackItems>(&bytes).ok()
+        };
+        let question = get(format!("questions/{id}?site={site}&filter=withbody"))
+            .await?
+            .items
+            .into_iter()
+            .next()?;
+        let answers = get(format!(
+            "questions/{id}/answers?site={site}&filter=withbody&sort=votes&order=desc&pagesize={STACK_EXCHANGE_ANSWERS}"
+        ))
+        .await
+        .map(|a| a.items)
+        .unwrap_or_default();
+        Some(stack_exchange_page(url, &question, &answers))
+    }
+}
+
+/// A question and its answers as one page.
+fn stack_exchange_page(url: &Url, question: &StackPost, answers: &[StackPost]) -> ReadPage {
+    let title = question.title.as_deref().unwrap_or("Question");
+    let mut html = format!("<title>{title}</title><h1>{title}</h1>");
+    if !question.tags.is_empty() {
+        html.push_str(&format!("<p>Tags: {}</p>", question.tags.join(", ")));
+    }
+    html.push_str(&question.body);
+    if answers.is_empty() {
+        html.push_str("<h2>No answers yet</h2>");
+    }
+    for answer in answers {
+        html.push_str(&format!(
+            "<h2>Answer{} (score {})</h2>",
+            if answer.is_accepted { ", accepted" } else { "" },
+            answer.score
+        ));
+        html.push_str(&answer.body);
+    }
+    let mut page = page_text(url, &html);
+    page.url = url.to_string();
+    page
 }
 
 fn fetch_error(err: &reqwest::Error) -> ReadError {
@@ -584,6 +697,45 @@ mod tests {
                 "https://example.com/pepper".to_string()
             )]
         );
+    }
+
+    #[test]
+    fn stack_exchange_questions_are_read_from_the_api() {
+        let url = Url::parse("https://stackoverflow.com/questions/927358/how-do-i-undo").unwrap();
+        assert_eq!(
+            stack_exchange_question(&url),
+            Some(("stackoverflow", 927358))
+        );
+        for other in [
+            "https://stackoverflow.com/users/1/x",
+            "https://example.com/questions/1",
+            "https://stackoverflow.com/questions/tagged/rust",
+        ] {
+            assert_eq!(stack_exchange_question(&Url::parse(other).unwrap()), None);
+        }
+        let question = StackPost {
+            title: Some("How do I undo the most recent local commits in Git?".into()),
+            body: "<p>I committed the wrong files.</p>".into(),
+            score: 27000,
+            is_accepted: false,
+            tags: vec!["git".into(), "undo".into()],
+        };
+        let answer = StackPost {
+            title: None,
+            body: "<pre><code>git reset HEAD~\n</code></pre>".into(),
+            score: 30000,
+            is_accepted: true,
+            tags: Vec::new(),
+        };
+        let page = stack_exchange_page(&url, &question, &[answer]);
+        assert_eq!(page.url, url.as_str());
+        assert!(page.text.starts_with("# How do I undo"), "{}", page.text);
+        assert!(
+            page.text.contains("## Answer, accepted (score 30000)"),
+            "{}",
+            page.text
+        );
+        assert!(page.text.contains("git reset HEAD~"), "{}", page.text);
     }
 
     #[test]

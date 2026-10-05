@@ -327,6 +327,7 @@ fn official_site(out: &mut String, answer: &Value) {
     let name = text(answer, "name").unwrap_or("");
     if !flag(answer, "found") {
         let _ = writeln!(out, "Plumb knows no site called \"{name}\".");
+        why(out, answer, "why");
         if let Some(fixed) = text(answer, "did_you_mean") {
             let _ = writeln!(out, "Did you mean \"{fixed}\"?");
         }
