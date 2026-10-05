@@ -75,8 +75,8 @@ use std::path::Path;
 use anyhow::{bail, Context, Result};
 use plumb_core::{
     canonical_domain, kind_key, normalize_country, normalize_text, other_number,
-    registrable_domain, search_link, search_template_for, truncate_chars, KeyPage, SiteRecord,
-    MAX_TEXT_CHARS,
+    registrable_domain, search_link, search_template_for, truncate_chars, KeyPage, Operators,
+    SiteRecord, MAX_TEXT_CHARS,
 };
 use serde::{Deserialize, Serialize};
 use tantivy::collector::{DocSetCollector, TopDocs};
@@ -130,6 +130,10 @@ const NEAREST_RANKED: usize = 50;
 const NEAREST_POPULAR: usize = 50;
 /// Most distinct query words used; the rest are ignored.
 const MAX_QUERY_WORDS: usize = 16;
+/// A query with operators ranks this many times its limit, and at least
+/// [`OPERATOR_CANDIDATES`], before they narrow the hits.
+const OPERATOR_WIDENING: usize = 5;
+const OPERATOR_CANDIDATES: usize = 200;
 /// The least link score of a well-known site (roughly the top 30,000).
 pub const WELL_KNOWN_LINK_SCORE: f32 = 0.5;
 /// How much more link score a well-known site whose name is a typo away
@@ -686,7 +690,74 @@ impl Searcher {
     /// an exact match wins; any other query is searched corrected too, and
     /// its hits replace the query's own when its best hit scores at least
     /// as high, else the correction is only suggested.
+    ///
+    /// Search operators ([`Operators`]) narrow the results: `site:`
+    /// keeps the sites on that host and lists the site itself after them,
+    /// with a link into its own search; `"quotes"` keep the sites whose
+    /// name, title or description has the words in that order; `-word`
+    /// leaves out the sites that have the word. Queries with operators are
+    /// not corrected for typos.
     pub fn search_meaning(
+        &self,
+        query_text: &str,
+        limit: usize,
+        cfg: &RankConfig,
+        options: &SearchOptions,
+        meaning: Option<&dyn Meaning>,
+    ) -> Result<SearchResults> {
+        let ops = Operators::parse(query_text);
+        if !ops.any() {
+            return self.search_words(query_text, limit, cfg, options, meaning);
+        }
+        let mut results = SearchResults::default();
+        if limit == 0 {
+            return Ok(results);
+        }
+        let options = SearchOptions {
+            exact: true,
+            ..options.clone()
+        };
+        if !ops.words.is_empty() {
+            let wider = limit
+                .saturating_mul(OPERATOR_WIDENING)
+                .max(OPERATOR_CANDIDATES);
+            let found = self.search_words(&ops.words, wider, cfg, &options, meaning)?;
+            results.hits = found
+                .hits
+                .into_iter()
+                .filter(|hit| ops.allows(&hit.domain, hit_texts(hit)))
+                .collect();
+            results.site_search = found
+                .site_search
+                .filter(|link| ops.allows_host(&link.domain));
+        }
+        // The sites `site:` names come after what matched in them, even
+        // when their homepage does not have the words: the link into their
+        // own search finds the rest.
+        let fallback = Operators {
+            phrases: Vec::new(),
+            ..ops.clone()
+        };
+        for site in &ops.sites {
+            let Some(domain) = registrable_domain(site) else {
+                continue;
+            };
+            if !results.hits.iter().any(|hit| hit.domain == domain) {
+                let found = self.search_words(&domain, 1, cfg, &options, None)?;
+                results.hits.extend(found.hits.into_iter().filter(|hit| {
+                    hit.domain == domain && fallback.allows(&hit.domain, hit_texts(hit))
+                }));
+            }
+            if results.site_search.is_none() {
+                results.site_search = self.site_search_of(&domain, &ops.site_terms)?;
+            }
+        }
+        results.hits.truncate(limit);
+        Ok(results)
+    }
+
+    /// [`Searcher::search_meaning`] for a query without operators.
+    fn search_words(
         &self,
         query_text: &str,
         limit: usize,
@@ -710,7 +781,7 @@ impl Searcher {
                 .full_link_score
                 .is_some_and(|score| score >= WELL_KNOWN_LINK_SCORE);
             if !named_in_full {
-                let mut found = self.search_meaning(&name, limit, cfg, options, meaning)?;
+                let mut found = self.search_words(&name, limit, cfg, options, meaning)?;
                 let mut best: HashMap<String, Hit> = HashMap::new();
                 let by_name = std::mem::take(&mut found.hits)
                     .into_iter()
@@ -1094,6 +1165,17 @@ impl Searcher {
         Ok((results, named))
     }
 
+    /// A link into the search of the site `domain` for `terms`, if the
+    /// index has the site and it has a search address.
+    fn site_search_of(&self, domain: &str, terms: &str) -> Result<Option<SiteSearch>> {
+        let searcher = self.reader.searcher();
+        let term = Term::from_field_text(self.fields.domain, domain);
+        let Some(addr) = matching_docs(&searcher, vec![term])?.into_iter().next() else {
+            return Ok(None);
+        };
+        self.site_search_link(&searcher, addr, terms.trim().to_string())
+    }
+
     /// A link into the search of the site at `addr` for the words of `query`
     /// after its first `words`, if the site has a search address (its own,
     /// or one Plumb knows for big sites).
@@ -1107,6 +1189,16 @@ impl Searcher {
         let Some(terms) = words_after(&self.words, query, words) else {
             return Ok(None);
         };
+        self.site_search_link(searcher, addr, terms)
+    }
+
+    /// A link into the search of the site at `addr` for `terms`.
+    fn site_search_link(
+        &self,
+        searcher: &tantivy::Searcher,
+        addr: DocAddress,
+        terms: String,
+    ) -> Result<Option<SiteSearch>> {
         let doc: TantivyDocument = searcher.doc(addr)?;
         let text = |field| {
             doc.get_first(field)
@@ -1220,6 +1312,17 @@ struct Named {
     kind: bool,
     /// The query is a hostname or URL.
     typed: bool,
+}
+
+/// The text of `hit` that search operators look at, besides its domain.
+fn hit_texts(hit: &Hit) -> impl Iterator<Item = &str> {
+    [
+        hit.title.as_deref(),
+        hit.description.as_deref(),
+        Some(hit.url.as_str()),
+    ]
+    .into_iter()
+    .flatten()
 }
 
 /// The words of `query` before the [`INTENT_WORDS`] it ends with, if it
@@ -2453,6 +2556,62 @@ mod tests {
         assert_eq!(full("github").site_search, None);
         assert_eq!(full("us bank login").site_search, None);
         assert_eq!(full("liar stuff").site_search, None);
+    }
+
+    #[test]
+    fn search_operators_narrow_the_results() {
+        let mut records = corpus();
+        records.push(site(
+            "github.com",
+            Some("GitHub: where the world builds software"),
+            None,
+            &["GitHub"],
+            &[],
+            popular(30, 100_000),
+        ));
+        records.push(site(
+            "bankrate.com",
+            Some("Bankrate: mortgage rates and bank reviews"),
+            None,
+            &[],
+            &[],
+            ranked(900, 5_000),
+        ));
+        let (_dir, searcher) = build(&records);
+        let full = |q: &str| {
+            searcher
+                .search_full(q, 10, &RankConfig::default(), &SearchOptions::default())
+                .unwrap()
+        };
+        let plain = domains(&full("bank").hits).len();
+        assert!(plain > 2);
+
+        // Only sites under the named host, and the site itself.
+        let on_site = full("bank site:bankrate.com");
+        assert_eq!(domains(&on_site.hits), ["bankrate.com"]);
+        // A site whose homepage lacks the words is still listed, with a
+        // link into its own search.
+        let github = full("site:github.com plumb \"search engine\"");
+        assert_eq!(domains(&github.hits), ["github.com"]);
+        assert_eq!(
+            github.site_search.unwrap().url,
+            "https://github.com/search?q=plumb%20%22search%20engine%22"
+        );
+        assert_eq!(domains(&full("site:github.com").hits), ["github.com"]);
+        assert!(full("site:github.com").site_search.is_none());
+
+        // Excluded words and hosts.
+        let without = full("bank -bankrate");
+        assert!(!domains(&without.hits).contains(&"bankrate.com"));
+        assert!(!domains(&without.hits).is_empty());
+        let not_site = full("bank -site:usbank.com");
+        assert!(!domains(&not_site.hits).contains(&"usbank.com"));
+
+        // A phrase keeps only sites with those words in that order.
+        let phrase = full("\"bank reviews\"");
+        assert!(domains(&phrase.hits).contains(&"bankrate.com"));
+        assert!(!domains(&phrase.hits).contains(&"usbank.com"));
+        assert!(full("-bank").hits.is_empty());
     }
 
     #[test]

@@ -18,7 +18,8 @@ use std::collections::{HashMap, HashSet};
 
 use plumb_core::{
     domain_label, joined, kind_key, normalize_country, normalize_text, other_number,
-    registrable_domain, site_country, truncate_chars, SiteRecord, MAX_ALIASES, MAX_TEXT_CHARS,
+    registrable_domain, site_country, truncate_chars, Operators, SiteRecord, MAX_ALIASES,
+    MAX_TEXT_CHARS,
 };
 use serde::Serialize;
 
@@ -77,8 +78,30 @@ pub struct Ranked {
     pub link_score: f32,
 }
 
-/// The best `limit` of `sites` for `query`, best first.
+/// The best `limit` of `sites` for `query`, best first. Search operators
+/// in the query ([`Operators`]) narrow the sites as on a node.
 pub fn rank(query: &str, sites: &[SiteRecord], options: &Options, limit: usize) -> Vec<Ranked> {
+    let ops = Operators::parse(query);
+    if !ops.any() {
+        return rank_words(query, sites, options, limit);
+    }
+    let kept: Vec<SiteRecord> = sites
+        .iter()
+        .filter(|site| ops.allows_host(&site.domain))
+        .cloned()
+        .collect();
+    rank_words(&ops.lookup_text(), &kept, options, kept.len())
+        .into_iter()
+        .filter(|ranked| {
+            let texts = [ranked.title.as_deref(), ranked.description.as_deref()];
+            ops.allows(&ranked.domain, texts.into_iter().flatten())
+        })
+        .take(limit)
+        .collect()
+}
+
+/// [`rank`] for a query without operators.
+fn rank_words(query: &str, sites: &[SiteRecord], options: &Options, limit: usize) -> Vec<Ranked> {
     let Some(query) = Query::new(query) else {
         return Vec::new();
     };

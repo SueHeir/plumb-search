@@ -13,8 +13,8 @@ use std::time::{Duration, Instant};
 use std::io::Write;
 
 use anyhow::{bail, Context, Result};
-use plumb_core::now_unix;
-use plumb_index::pages::place_pages;
+use plumb_core::{now_unix, Operators};
+use plumb_index::pages::{place_operator_pages, place_pages, OPERATOR_PAGES};
 use plumb_index::SearchResults;
 use plumb_net::pages::MAX_PAGES_CHUNK;
 use plumb_net::NetHandle;
@@ -280,6 +280,17 @@ pub(super) fn add_pages(inner: &Inner, query: &str, results: &mut SearchResults)
     else {
         return;
     };
+    let ops = Operators::parse(query);
+    if ops.any() {
+        if ops.words.is_empty() {
+            return;
+        }
+        match searcher.search(&ops.words, OPERATOR_PAGES) {
+            Ok(found) => results.pages = place_operator_pages(&ops, &results.hits, found),
+            Err(err) => warn!("searching pages: {err:#}"),
+        }
+        return;
+    }
     let query = match &results.spelling {
         Some(spelling) if spelling.applied => spelling.query.as_str(),
         _ => query,

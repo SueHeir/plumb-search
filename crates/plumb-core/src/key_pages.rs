@@ -162,16 +162,32 @@ const INTENT_PHRASES: &[(PageIntent, &[&str])] = &[
 ];
 
 impl PageIntent {
-    /// The intent a link label names: one of its phrases, alone or followed
-    /// by a few more words ("Help center", "Download for Mac", "Sign in to
-    /// your account").
+    /// The intent a link label names: one of its phrases, alone or going
+    /// on with [`LABEL_GOES_ON`] ("Download for Mac", "Sign in to your
+    /// account", but not "Account users").
     pub fn of_label(label: &str) -> Option<PageIntent> {
         let words = normalize_text(label);
         let words: Vec<&str> = words.split_whitespace().collect();
         if words.is_empty() || words.len() > MAX_KEY_PAGE_LABEL_WORDS + 2 {
             return None;
         }
-        best_match(|phrase| words.starts_with(phrase))
+        best_match(|phrase| {
+            words.starts_with(phrase)
+                && words
+                    .get(phrase.len())
+                    .is_none_or(|next| LABEL_GOES_ON.contains(next))
+        })
+    }
+
+    /// Whether a host name or path holds one of the intent's phrases, as
+    /// addresses spell them (`/login`, `/sign-in`, `docs.`, `/help-center`).
+    fn in_address(self, part: &str) -> bool {
+        let part = part.to_ascii_lowercase().replace(['-', '_'], "");
+        INTENT_PHRASES
+            .iter()
+            .filter(|(intent, _)| *intent == self)
+            .flat_map(|(_, phrases)| phrases.iter())
+            .any(|phrase| part.contains(&phrase.replace(' ', "")))
     }
 
     /// The intent the end of a query names ("paypal login", "stripe api
@@ -186,6 +202,9 @@ impl PageIntent {
         Some((intent, n))
     }
 }
+
+/// Words after an intent's phrase that keep a label about that intent.
+const LABEL_GOES_ON: &[&str] = &["to", "for", "now", "here", "free", "with", "and", "us"];
 
 /// The intent whose longest phrase `matches`.
 fn best_match(matches: impl Fn(&[&str]) -> bool) -> Option<PageIntent> {
@@ -276,7 +295,20 @@ pub fn pick_key_pages(homepage: &str, domain: &str, links: &[OwnLink]) -> Vec<Ke
     let candidates: Vec<(KeyPage, Option<PageIntent>, bool)> = links
         .iter()
         .filter_map(|link| {
-            let label = collapse_whitespace(&link.label);
+            // Arrows and bullets around the text ("Contact us ›") go.
+            let label = collapse_whitespace(&link.label)
+                .trim_matches(|c: char| !c.is_alphanumeric() && !"()?!".contains(c))
+                .to_string();
+            // "support" shows as "Support".
+            let label = if label.chars().any(char::is_uppercase) {
+                label
+            } else {
+                let mut chars = label.chars();
+                chars
+                    .next()
+                    .map(|first| first.to_uppercase().chain(chars).collect())
+                    .unwrap_or_default()
+            };
             let page = KeyPage {
                 label,
                 url: link.url.clone(),
@@ -288,12 +320,28 @@ pub fn pick_key_pages(homepage: &str, domain: &str, links: &[OwnLink]) -> Vec<Ke
         })
         .collect();
     let mut picked: Vec<KeyPage> = Vec::new();
+    // For each intent, the link to the page most likely the site's own
+    // for it: an address that says so (`/support`, not a menu toggle),
+    // then the shortest (`/support`, not `/openstack/support`), then the
+    // first on the page.
+    let rank = |page: &KeyPage, intent: PageIntent| {
+        let Ok(url) = Url::parse(&page.url) else {
+            return (true, usize::MAX);
+        };
+        let depth = url.path().split('/').filter(|s| !s.is_empty()).count();
+        let says =
+            intent.in_address(url.host_str().unwrap_or_default()) || intent.in_address(url.path());
+        (!says, depth)
+    };
     let mut by_intent: Vec<(PageIntent, &KeyPage)> = Vec::new();
     for (page, intent, _) in &candidates {
-        if let Some(intent) = intent {
-            if !by_intent.iter().any(|(i, _)| i == intent) {
-                by_intent.push((*intent, page));
-            }
+        let Some(intent) = *intent else {
+            continue;
+        };
+        match by_intent.iter_mut().find(|(i, _)| *i == intent) {
+            Some(best) if rank(page, intent) < rank(best.1, intent) => best.1 = page,
+            Some(_) => {}
+            None => by_intent.push((intent, page)),
         }
     }
     by_intent.sort_by_key(|(intent, _)| *intent);
@@ -352,6 +400,7 @@ mod tests {
             ("Help Center", Some(PageIntent::Support)),
             ("Download for Mac", Some(PageIntent::Download)),
             ("Contact us", Some(PageIntent::Contact)),
+            ("Account users", None),
             ("Products", None),
             ("The best way to log in", None),
             ("", None),
@@ -405,6 +454,29 @@ mod tests {
             labels(&pages),
             ["Sign in", "Docs", "Pricing", "Support", "Careers", "Products"]
         );
+    }
+
+    #[test]
+    fn prefers_the_page_whose_address_names_the_intent() {
+        let links = [
+            link("Support", "https://ubuntu.com/navigation", true),
+            link("Docs", "https://ubuntu.com/ceph/docs", true),
+            link("Support", "https://ubuntu.com/openstack/support", false),
+            link("Support", "https://ubuntu.com/support", false),
+            link("Docs", "https://documentation.ubuntu.com/server/", false),
+            link("Contact us ›", "https://ubuntu.com/contact-us", false),
+        ];
+        let pages = pick_key_pages("https://ubuntu.com/", "ubuntu.com", &links);
+        let urls: Vec<&str> = pages.iter().map(|p| p.url.as_str()).collect();
+        assert_eq!(
+            urls,
+            [
+                "https://documentation.ubuntu.com/server/",
+                "https://ubuntu.com/support",
+                "https://ubuntu.com/contact-us",
+            ]
+        );
+        assert_eq!(pages[2].label, "Contact us");
     }
 
     #[test]
