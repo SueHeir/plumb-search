@@ -165,6 +165,7 @@ pub fn slim_record(mut record: SiteRecord) -> SiteRecord {
     record.icon = None;
     record.news = Vec::new();
     record.key_pages.clear();
+    record.links_to.clear();
     record
 }
 
