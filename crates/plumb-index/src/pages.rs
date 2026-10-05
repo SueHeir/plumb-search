@@ -647,10 +647,15 @@ impl PageSearcher {
                 .pop()
                 .unwrap_or_default()
         };
-        if key(&page.title) == joined || key(base_title(&page.title)) == joined {
+        if key(&page.title) == joined {
             return (1.0, true);
         }
-        if page.aliases.iter().any(|alias| key(alias) == joined) {
+        // "Mozart (film)" is no better a match for "mozart" than the
+        // redirect "Mozart" to "Wolfgang Amadeus Mozart": popularity
+        // decides between them.
+        if key(base_title(&page.title)) == joined
+            || page.aliases.iter().any(|alias| key(alias) == joined)
+        {
             return (ALIAS_MATCH, true);
         }
         let mut best = 0.0f32;
@@ -745,6 +750,15 @@ pub fn place_pages(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) -> Ve
     let mut placed: Vec<PlacedPage> = Vec::new();
     let mut listed = 0;
     for hit in pages {
+        // A page named like a better one already listed is a namesake of
+        // it: once "Eiffel Tower" is under toureiffel.paris, "Eiffel Tower
+        // (Six Flags)" only comes after three sites.
+        let namesake = hit.named
+            && placed.iter().any(|p| {
+                p.hit.named
+                    && page_key(base_title(&p.hit.page.title))
+                        == page_key(base_title(&hit.page.title))
+            });
         if let Some(site) = hit.page.site.as_deref() {
             if sites.iter().any(|s| s.domain == site) {
                 if !placed.iter().any(|p| p.under.as_deref() == Some(site)) {
@@ -760,7 +774,7 @@ pub fn place_pages(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) -> Ve
         if listed == most || !(hit.named || hit.score >= MIN_PARTIAL_SCORE) {
             continue;
         }
-        let at = if !hit.named {
+        let at = if !hit.named || namesake {
             PARTIAL_AFTER
         } else if hit.page.may_lead() && page_first(&hit) {
             0
@@ -880,6 +894,38 @@ mod tests {
     }
 
     #[test]
+    fn main_articles_beat_their_namesakes() {
+        let (_dir, s) = searcher(&[
+            page("Albert Einstein", 400_000, &[]),
+            page("Albert Einstein (album)", 900, &[]),
+            page("Wolfgang Amadeus Mozart", 200_000, &["Mozart"]),
+            page("Mozart (film)", 3_000, &[]),
+        ]);
+        let hits = s.search("albert einstein", 5).unwrap();
+        assert_eq!(titles(&hits)[0], "Albert Einstein");
+        let hits = s.search("mozart", 5).unwrap();
+        assert_eq!(titles(&hits)[0], "Wolfgang Amadeus Mozart");
+        // Once the main article is under its site, a namesake waits until
+        // after the sites.
+        let sites = [
+            known_site("toureiffel.paris", false, 0.5),
+            site("a.com", false),
+            site("b.com", false),
+            site("c.com", false),
+        ];
+        let placed = place_pages(
+            "eiffel tower",
+            &sites,
+            vec![
+                found("Eiffel Tower", Some("toureiffel.paris"), true, 0.9),
+                found("Eiffel Tower (Six Flags)", None, true, 0.6),
+            ],
+        );
+        assert_eq!(placed[0].under.as_deref(), Some("toureiffel.paris"));
+        assert_eq!(placed[1].at, PARTIAL_AFTER);
+    }
+
+    #[test]
     fn pages_about_a_listed_site_go_under_it() {
         let sites = [site("python.org", true), site("pythonanywhere.com", false)];
         let placed = place_pages(
@@ -898,9 +944,10 @@ mod tests {
         );
         assert_eq!(placed.len(), 2);
         assert_eq!(placed[0].under.as_deref(), Some("python.org"));
-        // The site is named, so one page, after it.
+        // The site is named, so one page, and the namesake of the page
+        // under it only after the sites.
         assert_eq!(placed[1].hit.page.title, "Python (genus)");
-        assert_eq!((placed[1].under.as_deref(), placed[1].at), (None, 1));
+        assert_eq!((placed[1].under.as_deref(), placed[1].at), (None, 2));
     }
 
     #[test]
