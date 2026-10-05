@@ -330,7 +330,7 @@ fn web_url(address: &str) -> Result<Url, ReadError> {
 
 /// Whether `url`'s host is an IP address that is not public. Names are
 /// checked when they are looked up ([`dns::Resolver`]).
-fn names_private_ip(url: &Url) -> bool {
+pub(crate) fn names_private_ip(url: &Url) -> bool {
     match url.host() {
         Some(Host::Ipv4(ip)) => !is_global(IpAddr::V4(ip)),
         Some(Host::Ipv6(ip)) => !is_global(IpAddr::V6(ip)),

@@ -781,7 +781,14 @@ impl<'a> Visit<'a> {
     }
 
     /// The robots.txt rules for `url`'s origin, fetched on first use.
+    /// Every URL is asked about here before it is requested, so this is
+    /// also where hosts written as private IP addresses are refused: the
+    /// resolver only checks names, and icons, feeds and redirects can
+    /// point anywhere.
     async fn robots(&mut self, url: &Url) -> Robots {
+        if !self.cfg.allow_private_addresses && crate::read::names_private_ip(url) {
+            return Robots::DoNotCrawl(Failure::other(format!("{url}: a private address")));
+        }
         let origin = url.origin();
         if let Some(robots) = self.robots.get(&origin) {
             return robots.clone();
@@ -1278,16 +1285,9 @@ mod tests {
             // Only the icon tests turn this on, so the others see just the
             // requests for robots.txt and pages.
             fetch_icons: false,
-            ..CrawlConfig::default()
-        }
-    }
-
-    /// [`config`] for tests that reach the local server by the name
-    /// `localhost`, which resolves to a loopback address.
-    fn config_for_localhost() -> CrawlConfig {
-        CrawlConfig {
+            // The test server is on 127.0.0.1 (or `localhost`).
             allow_private_addresses: true,
-            ..config()
+            ..CrawlConfig::default()
         }
     }
 
@@ -1563,6 +1563,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn private_ip_addresses_are_never_requested() {
+        // A public page could name an icon, a feed or a redirect target on
+        // the node's own network; the resolver only checks names.
+        let (port, hits) = serve(|_| {
+            Router::new()
+                .route("/", get(|| async { Html(ICON_HOME) }))
+                .route("/favicon.ico", get(|| async { png_response() }))
+        })
+        .await;
+        let cfg = CrawlConfig {
+            allow_private_addresses: false,
+            ..icon_config()
+        };
+        let outcome = crawl_one(target(port, "/"), &cfg).await;
+        assert!(
+            matches!(&outcome, CrawlOutcome::Failed { error, .. } if error.contains("private address")),
+            "{outcome:?}"
+        );
+        let found = fetch_site_icons(vec![target(port, "/")], &cfg).await;
+        assert!(found.iter().all(|(_, icon)| icon.is_none()));
+        assert!(hits.paths().is_empty());
+    }
+
+    #[tokio::test]
     async fn icons_obey_robots_txt_and_fall_back_to_favicon_ico() {
         let (port, hits) = serve(|_| {
             Router::new()
@@ -1762,8 +1786,7 @@ mod tests {
 
     #[tokio::test]
     async fn private_addresses_are_refused_unless_allowed() {
-        // Unlike the IP address 127.0.0.1 the other tests use, the name
-        // "localhost" is looked up, and it resolves to loopback.
+        // The name "localhost" is looked up, and it resolves to loopback.
         let (port, hits) = serve(|_| home()).await;
         let by_name = CrawlTarget {
             domain: "example.test".into(),
@@ -1772,7 +1795,11 @@ mod tests {
         };
 
         assert!(!CrawlConfig::default().allow_private_addresses);
-        let (error, network) = expect_failure(crawl_one(by_name.clone(), &config()).await);
+        let refusing = CrawlConfig {
+            allow_private_addresses: false,
+            ..config()
+        };
+        let (error, network) = expect_failure(crawl_one(by_name.clone(), &refusing).await);
         assert!(network, "{error}");
         assert!(error.starts_with("robots.txt"), "{error}");
         assert!(
@@ -1781,7 +1808,7 @@ mod tests {
         );
         assert!(hits.paths().is_empty(), "{:?}", hits.paths());
 
-        let page = expect_fetched(crawl_one(by_name, &config_for_localhost()).await);
+        let page = expect_fetched(crawl_one(by_name, &config()).await);
         assert_eq!(page.final_url, format!("http://localhost:{port}/"));
         assert_eq!(hits.paths(), ["/robots.txt", "/"]);
     }
@@ -1874,6 +1901,7 @@ mod tests {
         let (url, use_system_proxy): (String, bool) = serde_json::from_str(&job).unwrap();
         let cfg = CrawlConfig {
             use_system_proxy,
+            allow_private_addresses: false,
             ..config()
         };
         let target = CrawlTarget {
@@ -2110,7 +2138,7 @@ mod tests {
         // domain, so it counts as another site, yet with private addresses
         // allowed it would reach this server: a request for /new would show
         // up in the hits.
-        let cfg = config_for_localhost();
+        let cfg = config();
         let moved = |port: u16| {
             Router::new()
                 .route(
@@ -2193,7 +2221,7 @@ mod tests {
                 )
         })
         .await;
-        expect_fetched(crawl_one(target(port, "/"), &config_for_localhost()).await);
+        expect_fetched(crawl_one(target(port, "/"), &config()).await);
         assert_eq!(hits.paths(), ["/robots.txt", "/"]);
 
         // A redirect loop: more than max_redirects also means no rules.

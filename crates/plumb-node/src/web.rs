@@ -53,12 +53,13 @@
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
+use std::net::IpAddr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use axum::extract::{Query, State};
-use axum::http::{header, HeaderMap, HeaderName, StatusCode, Uri};
+use axum::http::{header, Extensions, HeaderMap, HeaderName, StatusCode, Uri};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -120,6 +121,10 @@ const SETUP_RELOAD_SECONDS: u32 = 5;
 
 /// How long a network search waits for other nodes to answer.
 const NETWORK_SEARCH_WAIT: Duration = Duration::from_secs(4);
+/// Network searches one client may start at once...
+const NET_BURST: f64 = 20.0;
+/// ...and per minute after that.
+const NET_PER_MINUTE: f64 = 20.0;
 
 /// The media type of an OpenSearch description.
 const OPENSEARCH_TYPE: &str = "application/opensearchdescription+xml";
@@ -433,6 +438,9 @@ struct AppState {
     rates: Arc<answers::RatesCache>,
     /// How many tool calls each client may still make to `/mcp`.
     mcp_limiter: Arc<mcp::Limiter>,
+    /// How many network searches each client may still start: a node runs
+    /// only a few at once, so one client must not take them all.
+    net_limiter: Arc<mcp::Limiter>,
     /// Fetches pages for `/mcp`'s `read_page`.
     page_reader: Arc<mcp::SharedReader>,
     /// What agents found, for `/mcp`'s `report_finding`; opened from the
@@ -544,6 +552,7 @@ pub fn router_with(backend: Arc<dyn SearchBackend>, settings: impl Into<WebSetti
         settings: settings.into(),
         rates: Arc::default(),
         mcp_limiter: Arc::default(),
+        net_limiter: Arc::new(mcp::Limiter::new(NET_BURST, NET_PER_MINUTE)),
         page_reader: Arc::default(),
         findings: Arc::default(),
     })
@@ -568,6 +577,7 @@ pub fn node_router_with(
         settings: settings.into(),
         rates: Arc::default(),
         mcp_limiter: Arc::default(),
+        net_limiter: Arc::new(mcp::Limiter::new(NET_BURST, NET_PER_MINUTE)),
         page_reader: Arc::default(),
         findings: Arc::default(),
     })
@@ -874,9 +884,11 @@ enum NetOutcome {
 
 async fn search_page(
     State(state): State<AppState>,
+    extensions: Extensions,
     headers: HeaderMap,
     Query(params): Query<SearchParams>,
 ) -> Response {
+    let client = mcp::client_of(&extensions, &headers);
     if params
         .format
         .as_deref()
@@ -915,7 +927,7 @@ async fn search_page(
     };
     extras.plugins = plugins;
     let (local, network) = if settings.network == NetSetting::On {
-        let network = network_search(&state, &query, limit, &settings.options).await;
+        let network = network_search(&state, client, &query, limit, &settings.options).await;
         let network = match network {
             Ok(results) => NetOutcome::Answered(results),
             Err(_) => {
@@ -1267,9 +1279,11 @@ fn redirect(location: &str) -> Response {
 /// `GET /network?q=`: only what other nodes answer, for a node in the network.
 async fn network_page(
     State(state): State<AppState>,
+    extensions: Extensions,
     headers: HeaderMap,
     Query(params): Query<SearchParams>,
 ) -> Response {
+    let client = mcp::client_of(&extensions, &headers);
     if state.network().is_none() {
         return html_response(StatusCode::NOT_FOUND, render_no_network());
     }
@@ -1278,7 +1292,7 @@ async fn network_page(
         return home_or_setup(&state, &params, &headers);
     }
     let options = params.options(&state.settings.home, &headers);
-    match network_search(&state, &query, params.limit(), &options).await {
+    match network_search(&state, client, &query, params.limit(), &options).await {
         Ok(results) => {
             let domains = results.hits.iter().map(|r| r.hit.domain.clone()).collect();
             let icons = state.icons(domains).await;
@@ -1294,9 +1308,11 @@ async fn network_page(
 /// `GET /api/network/search?q=&limit=`: [`NetworkResults`] as JSON.
 async fn api_network_search(
     State(state): State<AppState>,
+    extensions: Extensions,
     headers: HeaderMap,
     Query(params): Query<SearchParams>,
 ) -> Response {
+    let client = mcp::client_of(&extensions, &headers);
     if state.network().is_none() {
         let body = serde_json::json!({ "error": "this node has not joined the Plumb network" });
         return (StatusCode::NOT_FOUND, security_headers(), Json(body)).into_response();
@@ -1311,7 +1327,7 @@ async fn api_network_search(
             .into_response();
     }
     let options = params.options(&state.settings.home, &headers);
-    match network_search(&state, &query, params.limit(), &options).await {
+    match network_search(&state, client, &query, params.limit(), &options).await {
         Ok(results) => (StatusCode::OK, security_headers(), Json(results)).into_response(),
         Err(_) => {
             error!("network search API lookup failed");
@@ -1375,11 +1391,15 @@ pub struct NetworkResult {
 /// small index built for the purpose and deleted after.
 async fn network_search(
     state: &AppState,
+    client: Option<IpAddr>,
     query: &str,
     limit: usize,
     options: &SearchOptions,
 ) -> Result<NetworkResults> {
     let net = state.network().context("not in the network")?;
+    if state.net_limiter.take(client, Instant::now()).is_err() {
+        anyhow::bail!("too many network searches from this client");
+    }
     let rank = state
         .node
         .as_ref()

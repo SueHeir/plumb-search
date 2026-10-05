@@ -1037,12 +1037,14 @@ impl Reader {
             .as_deref()
             .map(|find| match find_from(&chars, find, start) {
                 Some(at) => {
-                    // From the start of its line, when that is near.
+                    // From the start of its line, when that is near enough
+                    // for the match to stay well inside the text returned.
                     let line = chars[..at]
                         .iter()
                         .rposition(|&c| c == '\n')
                         .map_or(0, |n| n + 1);
-                    start = if at - line <= 300 { line } else { at };
+                    let near = (max_chars / 3).min(300);
+                    start = if at - line <= near { line } else { at };
                     true
                 }
                 None => false,
@@ -1604,7 +1606,13 @@ fn read_here(
         Err((code, why)) => return Some(error(id, code, &why)),
     };
     let answer = reader.read(&read).map(|mut answer| {
-        if let Some(url) = answer["url"].as_str() {
+        // Only the site goes to the node, which may be a public one: the
+        // path and query of a page someone reads can hold anything.
+        let site = answer["url"]
+            .as_str()
+            .and_then(|url| url::Url::parse(url).ok())
+            .and_then(|url| Some(format!("{}://{}/", url.scheme(), url.host_str()?)));
+        if let Some(url) = site.as_deref() {
             let check = json!({
                 "jsonrpc": "2.0",
                 "id": 0,

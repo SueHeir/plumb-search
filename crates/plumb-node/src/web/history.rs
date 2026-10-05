@@ -8,7 +8,8 @@
 //!   (see [`crate::about`]) and `POST /about` changes it.
 //!
 //! The profile cookie is `SameSite=Lax`, so a page on another site cannot
-//! post to `/history/clear` with it, and `HttpOnly`. The choices (show past
+//! post to `/history/clear` with it, and `HttpOnly`; posts that say they
+//! come from another site are refused as well. The choices (show past
 //! searches, rank opened sites higher) are a second cookie, set by the
 //! settings gear's form; both are on until changed.
 
@@ -359,8 +360,52 @@ async fn history_page(State(state): State<AppState>, headers: HeaderMap) -> Resp
     response
 }
 
+/// Whether a page of another site sent the form. Without the profile
+/// cookie (`SameSite=Lax` keeps it off such posts), saving would give the
+/// browser a new profile chosen by that page.
+fn cross_site(headers: &HeaderMap) -> bool {
+    let site = headers
+        .get("sec-fetch-site")
+        .and_then(|site| site.to_str().ok());
+    if site.is_some_and(|site| !matches!(site, "same-origin" | "none")) {
+        return true;
+    }
+    let host = headers
+        .get(header::HOST)
+        .and_then(|host| host.to_str().ok());
+    let origin_host = headers
+        .get(header::ORIGIN)
+        .map(|origin| origin.to_str().ok().and_then(|o| url::Url::parse(o).ok()));
+    match origin_host {
+        None => false,
+        Some(Some(origin)) => {
+            let origin = match (origin.host_str(), origin.port()) {
+                (Some(name), Some(port)) => format!("{name}:{port}"),
+                (Some(name), None) => name.to_string(),
+                (None, _) => return true,
+            };
+            !host.is_some_and(|host| host.eq_ignore_ascii_case(&origin))
+        }
+        Some(None) => true,
+    }
+}
+
+fn refuse_cross_site() -> Response {
+    html_response(
+        StatusCode::FORBIDDEN,
+        page(
+            "About you - Plumb Search",
+            "<main class=\"wrap\"><p class=\"none\">Pages of other sites cannot change \
+             this.</p></main>",
+        ),
+    )
+}
+
 /// `POST /history/clear`.
 async fn clear(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if cross_site(&headers) {
+        return refuse_cross_site();
+    }
     let Some(visitor) = Visitor::of(&state, &headers, None) else {
         return StatusCode::NOT_FOUND.into_response();
     };
@@ -471,6 +516,9 @@ async fn save_about(
     headers: HeaderMap,
     Form(form): Form<AboutForm>,
 ) -> Response {
+    if cross_site(&headers) {
+        return refuse_cross_site();
+    }
     let Some(mut visitor) = Visitor::of(&state, &headers, None) else {
         return StatusCode::NOT_FOUND.into_response();
     };
@@ -575,6 +623,26 @@ fn cookie(name: &str, value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn forms_from_other_sites_are_refused() {
+        let headers = |pairs: &[(&'static str, &str)]| {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::HOST, "127.0.0.1:7586".parse().unwrap());
+            for (name, value) in pairs {
+                headers.insert(*name, value.parse().unwrap());
+            }
+            headers
+        };
+        assert!(!cross_site(&headers(&[])));
+        assert!(!cross_site(&headers(&[
+            ("origin", "http://127.0.0.1:7586"),
+            ("sec-fetch-site", "same-origin"),
+        ])));
+        assert!(cross_site(&headers(&[("sec-fetch-site", "cross-site")])));
+        assert!(cross_site(&headers(&[("origin", "https://evil.example")])));
+        assert!(cross_site(&headers(&[("origin", "null")])));
+    }
 
     #[test]
     fn the_about_page_escapes_what_was_typed() {
