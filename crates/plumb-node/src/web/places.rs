@@ -13,8 +13,8 @@ use super::{escape_html, http_url, Icons};
 /// Countries that measure roads in miles.
 const MILES: &[&str] = &["US", "GB", "LR", "MM"];
 /// The map's size in SVG units.
-const MAP_WIDTH: f64 = 640.0;
-const MAP_HEIGHT: f64 = 240.0;
+const MAP_WIDTH: f64 = 480.0;
+const MAP_HEIGHT: f64 = 260.0;
 /// Room around the pins.
 const MAP_PAD: f64 = 22.0;
 
