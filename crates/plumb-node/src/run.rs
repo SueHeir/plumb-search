@@ -79,6 +79,7 @@ fn node_config(args: RunArgs) -> NodeConfig {
     }
     config.country = args.country;
     config.web_search = args.web_search.0;
+    config.mcp_read_pages = args.mcp_read_pages;
     config.search_by_meaning = args.search_by_meaning;
     config.embed_threads = args.embed_threads.map(usize::from);
     if args.use_system_proxy {

@@ -179,6 +179,8 @@ pub struct NodeConfig {
     pub country: HomeCountry,
     /// The web search engine the results page links to; `None` for no link.
     pub web_search: Option<Engine>,
+    /// Every client of `/mcp` may use `read_page`, not only this computer's.
+    pub mcp_read_pages: bool,
     /// Rank by meaning too, for searches that name no site: the node
     /// downloads a small embedding model into `DIR/model` (about 130 MB)
     /// and keeps a vector of each site's text in `DIR/vectors.bin`, made in
@@ -286,6 +288,7 @@ impl NodeConfig {
             alpha: None,
             country: HomeCountry::Auto,
             web_search: None,
+            mcp_read_pages: false,
             search_by_meaning: false,
             embed_threads: None,
             seed_from_network: true,
@@ -826,6 +829,7 @@ pub async fn start(mut config: NodeConfig) -> Result<NodeHandle> {
     let settings = WebSettings {
         home: inner.config.country.clone(),
         web_search: inner.config.web_search,
+        read_pages_for_all: inner.config.mcp_read_pages,
     };
     let app = web::node_router_with(inner.clone(), inner.clone(), settings);
     let https = match inner.config.https_bind {

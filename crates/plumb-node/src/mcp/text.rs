@@ -1,0 +1,469 @@
+//! Tool answers as short plain text, which is what the model reads: one
+//! line per result with its address, no JSON punctuation, nothing empty.
+//! A small local model has a few thousand tokens to spare, and the same
+//! answer as pretty JSON takes three to four times as many.
+
+use std::fmt::Write as _;
+
+use serde_json::Value;
+
+/// `answer` of tool `tool` as text.
+pub(super) fn render(tool: &str, answer: &Value) -> String {
+    let mut out = String::new();
+    match tool {
+        "official_site" => official_site(&mut out, answer),
+        "check_lookalike" => check_lookalike(&mut out, answer),
+        "search" => search(&mut out, answer),
+        "site_info" => site_info(&mut out, answer),
+        "read_page" => read_page(&mut out, answer),
+        _ => out = serde_json::to_string(answer).unwrap_or_default(),
+    }
+    out.trim_end().to_string()
+}
+
+/// A string field, when present and not empty.
+fn text<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+}
+
+fn flag(value: &Value, key: &str) -> bool {
+    value.get(key).and_then(Value::as_bool).unwrap_or(false)
+}
+
+fn list<'a>(value: &'a Value, key: &str) -> &'a [Value] {
+    value
+        .get(key)
+        .and_then(Value::as_array)
+        .map_or(&[], Vec::as_slice)
+}
+
+/// An instant answer in one line: "12 × 7 = 84", "Time in Tokyo, Japan:
+/// 9:41 PM". A sum's question already ends with "=".
+pub(crate) fn answer_line(question: &str, answer: &str) -> String {
+    if question.ends_with('=') {
+        format!("{question} {answer}")
+    } else {
+        format!("{question}: {answer}")
+    }
+}
+
+/// "PayPal (paypal.com, official) https://www.paypal.com/", and the
+/// description on the next line, indented by `indent`.
+fn site_line(out: &mut String, site: &Value, indent: &str) {
+    let domain = text(site, "domain").unwrap_or("");
+    let mut marks = vec![domain];
+    if flag(site, "official") {
+        marks.push("official");
+    } else if flag(site, "well_known") {
+        marks.push("well known");
+    }
+    match text(site, "title") {
+        Some(title) if title != domain => {
+            let _ = write!(out, "{title} ({})", marks.join(", "));
+        }
+        _ => {
+            let _ = write!(out, "{}", marks.join(", "));
+        }
+    }
+    if let Some(url) = text(site, "url") {
+        let _ = write!(out, " {url}");
+    }
+    out.push('\n');
+    if let Some(description) = text(site, "description") {
+        let _ = writeln!(out, "{indent}{description}");
+    }
+}
+
+/// What kind of page a page set holds, as a label.
+fn set_label(set: &str) -> &str {
+    match set {
+        s if s.starts_with("wikipedia") => "Wikipedia",
+        "wikidata" => "Wikidata",
+        "stackoverflow" => "Stack Overflow",
+        "github" => "GitHub",
+        "books" => "Book",
+        "papers" => "Paper",
+        other => other,
+    }
+}
+
+fn page_line(out: &mut String, page: &Value) {
+    let set = set_label(text(page, "set").unwrap_or("Page"));
+    let _ = write!(
+        out,
+        "[{set}] {}",
+        text(page, "title").unwrap_or("(untitled)")
+    );
+    if let Some(description) = text(page, "description") {
+        let _ = write!(out, ": {description}");
+    }
+    if let Some(url) = text(page, "url") {
+        let _ = write!(out, " {url}");
+    }
+    out.push('\n');
+}
+
+fn search(out: &mut String, answer: &Value) {
+    if let Some(a) = answer.get("answer").filter(|a| a.is_object()) {
+        let _ = write!(
+            out,
+            "Answer: {}",
+            answer_line(
+                text(a, "question").unwrap_or(""),
+                text(a, "answer").unwrap_or("")
+            )
+        );
+        if let Some(note) = text(a, "note") {
+            let _ = write!(out, " ({note})");
+        }
+        out.push('\n');
+    }
+    if let Some(p) = answer.get("profile").filter(|p| p.is_object()) {
+        let _ = writeln!(
+            out,
+            "Official profile: {} on {}: {}",
+            text(p, "of").unwrap_or(""),
+            text(p, "service").unwrap_or(""),
+            text(p, "url").unwrap_or("")
+        );
+    }
+    if let Some(about) = answer.get("about").filter(|a| a.is_object()) {
+        let _ = write!(out, "About {}", text(about, "title").unwrap_or(""));
+        if let Some(description) = text(about, "description") {
+            let _ = write!(out, ": {description}");
+        }
+        out.push('.');
+        if let Some(site) = text(about, "site") {
+            let _ = write!(out, " Official site: {site}");
+            if let Some(country) = text(about, "country") {
+                let _ = write!(out, " ({country})");
+            }
+            out.push('.');
+        }
+        let profiles: Vec<String> = list(about, "profiles")
+            .iter()
+            .filter_map(|p| Some(format!("{} {}", text(p, "service")?, text(p, "url")?)))
+            .collect();
+        if !profiles.is_empty() {
+            let _ = write!(out, " Profiles: {}.", profiles.join(", "));
+        }
+        if let Some(article) = text(about, "article") {
+            let _ = write!(out, " {article}");
+        }
+        out.push('\n');
+    }
+    if let Some(spelling) = answer.get("spelling").filter(|s| s.is_object()) {
+        let query = text(spelling, "query").unwrap_or("");
+        if flag(spelling, "applied") {
+            let _ = writeln!(out, "Showing results for \"{query}\".");
+        } else {
+            let _ = writeln!(out, "Did you mean \"{query}\"?");
+        }
+    }
+
+    let sites = list(answer, "results");
+    let pages = list(answer, "pages");
+    let mut n = 0;
+    let mut numbered = |out: &mut String| {
+        n += 1;
+        let _ = write!(out, "{n}. ");
+    };
+    for (i, site) in sites.iter().enumerate() {
+        for page in pages.iter().filter(|p| {
+            p.get("about_site").is_none_or(Value::is_null)
+                && p.get("position").and_then(Value::as_u64) == Some(i as u64 + 1)
+        }) {
+            numbered(out);
+            page_line(out, page);
+        }
+        numbered(out);
+        site_line(out, site, "   ");
+        let domain = site.get("domain");
+        for page in pages.iter().filter(|p| p.get("about_site") == domain) {
+            out.push_str("   ");
+            page_line(out, page);
+        }
+    }
+    for page in pages.iter().filter(|p| {
+        p.get("about_site").is_none_or(Value::is_null)
+            && p.get("position")
+                .and_then(Value::as_u64)
+                .is_none_or(|at| at > sites.len() as u64)
+    }) {
+        numbered(out);
+        page_line(out, page);
+    }
+    if sites.is_empty() && pages.is_empty() {
+        let _ = writeln!(
+            out,
+            "No results for \"{}\".",
+            text(answer, "query").unwrap_or("")
+        );
+    }
+    if let Some(site_search) = answer.get("site_search").filter(|s| s.is_object()) {
+        let _ = writeln!(
+            out,
+            "Search {} itself for \"{}\": {}",
+            text(site_search, "domain").unwrap_or(""),
+            text(site_search, "terms").unwrap_or(""),
+            text(site_search, "url").unwrap_or("")
+        );
+    }
+    let recent = list(answer, "recent");
+    if !recent.is_empty() {
+        out.push_str("Recent headlines:\n");
+        for headline in recent {
+            let _ = writeln!(
+                out,
+                "- {} ({}, {}) {}",
+                text(headline, "title").unwrap_or(""),
+                text(headline, "site").unwrap_or(""),
+                text(headline, "published").unwrap_or(""),
+                text(headline, "url").unwrap_or("")
+            );
+        }
+    }
+}
+
+fn official_site(out: &mut String, answer: &Value) {
+    let name = text(answer, "name").unwrap_or("");
+    if !flag(answer, "found") {
+        let _ = writeln!(out, "Plumb knows no site called \"{name}\".");
+        return;
+    }
+    let _ = writeln!(
+        out,
+        "Official site for \"{name}\": {} {} (confidence {})",
+        text(answer, "domain").unwrap_or(""),
+        text(answer, "url").unwrap_or(""),
+        text(answer, "confidence").unwrap_or("low")
+    );
+    if let Some(title) = text(answer, "title") {
+        let _ = write!(out, "{title}");
+        if let Some(description) = text(answer, "description") {
+            let _ = write!(out, ": {description}");
+        }
+        out.push('\n');
+    }
+    why(out, answer, "why");
+    let others: Vec<&str> = list(answer, "alternatives")
+        .iter()
+        .filter_map(|site| text(site, "domain"))
+        .collect();
+    if !others.is_empty() {
+        let _ = writeln!(out, "Other candidates: {}", others.join(", "));
+    }
+}
+
+fn why(out: &mut String, answer: &Value, key: &str) {
+    let reasons: Vec<&str> = list(answer, key).iter().filter_map(Value::as_str).collect();
+    if !reasons.is_empty() {
+        let _ = writeln!(out, "Why: {}", reasons.join(" "));
+    }
+}
+
+fn check_lookalike(out: &mut String, answer: &Value) {
+    let input = text(answer, "input").unwrap_or("");
+    match text(answer, "verdict").unwrap_or("unknown") {
+        "lookalike" => {
+            let _ = write!(out, "{input}: LOOK-ALIKE. Do not trust it");
+            if let Some(real) = answer.get("imitates").filter(|r| r.is_object()) {
+                let _ = write!(
+                    out,
+                    "; the real site is {} {}",
+                    text(real, "domain").unwrap_or(""),
+                    text(real, "url").unwrap_or("")
+                );
+            }
+            out.push_str(".\n");
+        }
+        verdict => {
+            let said = match verdict {
+                "official" => "the official site",
+                "known_site" => "a well-known site",
+                "little_known" => "a little-known site, not a known look-alike",
+                _ => "not known to Plumb",
+            };
+            let _ = writeln!(out, "{input}: {said} (verdict {verdict}).");
+        }
+    }
+    why(out, answer, "reasons");
+}
+
+fn site_info(out: &mut String, answer: &Value) {
+    let domain = text(answer, "domain").unwrap_or("");
+    if !flag(answer, "found") {
+        let _ = writeln!(out, "Plumb does not know {domain}.");
+        return;
+    }
+    let _ = write!(out, "{domain}");
+    if let Some(title) = text(answer, "title") {
+        let _ = write!(out, ": {title}");
+    }
+    if let Some(url) = text(answer, "url") {
+        let _ = write!(out, " {url}");
+    }
+    out.push('\n');
+    if let Some(description) = text(answer, "description") {
+        let _ = writeln!(out, "{description}");
+    }
+    let mut facts = Vec::new();
+    if flag(answer, "official") {
+        facts.push("Wikidata lists it as an official website".to_string());
+    }
+    facts.push(if flag(answer, "well_known") {
+        "well known".to_string()
+    } else {
+        "not well known".to_string()
+    });
+    if let Some(country) = text(answer, "country") {
+        facts.push(format!("country {country}"));
+    }
+    let _ = writeln!(out, "{}.", facts.join("; "));
+    for page in list(answer, "pages") {
+        let _ = writeln!(
+            out,
+            "Page: {} {}",
+            text(page, "title").unwrap_or(""),
+            text(page, "url").unwrap_or("")
+        );
+    }
+}
+
+fn read_page(out: &mut String, answer: &Value) {
+    if let Some(title) = text(answer, "title") {
+        let _ = writeln!(out, "{title}");
+    }
+    let _ = writeln!(out, "{}", text(answer, "url").unwrap_or(""));
+    if let Some(site) = answer.get("site").filter(|s| s.is_object()) {
+        if text(site, "verdict") == Some("lookalike") {
+            let _ = write!(out, "WARNING: this site is a look-alike");
+            if let Some(real) = text(site, "imitates") {
+                let _ = write!(out, " of {real}");
+            }
+            out.push_str("; do not trust it.\n");
+        }
+    }
+    out.push('\n');
+    let _ = writeln!(out, "{}", text(answer, "text").unwrap_or("(no text)"));
+    let length = answer.get("length").and_then(Value::as_u64).unwrap_or(0);
+    let start = answer.get("start").and_then(Value::as_u64).unwrap_or(0);
+    let end = answer.get("end").and_then(Value::as_u64).unwrap_or(length);
+    if let Some(next) = answer.get("next_start").and_then(Value::as_u64) {
+        let _ = writeln!(
+            out,
+            "\n[Characters {start} to {end} of {length}. For more, call read_page again with start={next}.]"
+        );
+    } else if start > 0 {
+        let _ = writeln!(out, "\n[Characters {start} to {end} of {length}: the end.]");
+    }
+    if flag(answer, "truncated") {
+        out.push_str("[The page is very long; only its first few megabytes were read.]\n");
+    }
+    let links = list(answer, "links");
+    if !links.is_empty() {
+        out.push_str("\nLinks:\n");
+        for link in links {
+            let _ = writeln!(
+                out,
+                "- {}: {}",
+                text(link, "text").unwrap_or(""),
+                text(link, "url").unwrap_or("")
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn search_lists_one_line_per_result_with_pages_in_place() {
+        let answer = json!({
+            "query": "paypal",
+            "answer": null,
+            "about": {
+                "title": "PayPal", "description": "American payments company",
+                "site": "paypal.com", "country": "United States",
+                "article": "https://en.wikipedia.org/wiki/PayPal",
+            },
+            "results": [
+                { "domain": "paypal.com", "url": "https://www.paypal.com/", "title": "PayPal",
+                  "description": "Send money.", "official": true, "well_known": true },
+                { "domain": "paypal.me", "url": "https://paypal.me/", "title": null,
+                  "description": null, "official": false, "well_known": false },
+            ],
+            "pages": [
+                { "title": "PayPal", "url": "https://en.wikipedia.org/wiki/PayPal",
+                  "description": "American payments company", "set": "wikipedia-en",
+                  "about_site": "paypal.com", "position": 1 },
+                { "title": "How do I refund?", "url": "https://stackoverflow.com/q/1",
+                  "description": null, "set": "stackoverflow", "about_site": null, "position": 2 },
+            ],
+            "site_search": null,
+            "spelling": null,
+            "recent": [{ "title": "PayPal launches X", "url": "https://news.example/a",
+                         "site": "news.example", "published": "2 hours ago" }],
+        });
+        assert_eq!(
+            render("search", &answer),
+            "About PayPal: American payments company. Official site: paypal.com (United \
+             States). https://en.wikipedia.org/wiki/PayPal\n\
+             1. PayPal (paypal.com, official) https://www.paypal.com/\n   Send money.\n   \
+             [Wikipedia] PayPal: American payments company https://en.wikipedia.org/wiki/PayPal\n\
+             2. [Stack Overflow] How do I refund? https://stackoverflow.com/q/1\n\
+             3. paypal.me https://paypal.me/\n\
+             Recent headlines:\n\
+             - PayPal launches X (news.example, 2 hours ago) https://news.example/a"
+        );
+    }
+
+    #[test]
+    fn search_leads_with_the_answer() {
+        let answer = json!({
+            "query": "12*7",
+            "answer": { "kind": "calculation", "question": "12 × 7 =", "answer": "84" },
+            "results": [], "pages": [],
+        });
+        assert_eq!(
+            render("search", &answer),
+            "Answer: 12 × 7 = 84\nNo results for \"12*7\"."
+        );
+    }
+
+    #[test]
+    fn read_page_says_where_the_next_part_starts() {
+        let answer = json!({
+            "url": "https://example.com/", "title": "Example", "text": "Hello",
+            "start": 0, "end": 5, "length": 12, "more": true, "next_start": 5,
+            "truncated": false, "site": { "verdict": "lookalike", "imitates": "paypal.com" },
+        });
+        assert_eq!(
+            render("read_page", &answer),
+            "Example\nhttps://example.com/\nWARNING: this site is a look-alike of paypal.com; do \
+             not trust it.\n\nHello\n\n[Characters 0 to 5 of 12. For more, call read_page again \
+             with start=5.]"
+        );
+    }
+
+    #[test]
+    fn lookalikes_are_spelled_out() {
+        let answer = json!({
+            "input": "paypal-login.us", "verdict": "lookalike",
+            "reasons": ["Its address borrows the name of paypal.com."],
+            "imitates": { "domain": "paypal.com", "url": "https://www.paypal.com/" },
+        });
+        assert_eq!(
+            render("check_lookalike", &answer),
+            "paypal-login.us: LOOK-ALIKE. Do not trust it; the real site is paypal.com \
+             https://www.paypal.com/.\nWhy: Its address borrows the name of paypal.com."
+        );
+    }
+}
