@@ -27,7 +27,7 @@
 //! every alias starting with "The" is also keyed without it.
 
 use anyhow::{Context, Result};
-use plumb_core::key_pages::valid_key_pages;
+use plumb_core::key_pages::{key_pages_or_known, valid_key_pages};
 use plumb_core::{
     domain_label, joined, kind_key, language_code, normalize_text, record_adult_level,
     site_country, truncate_chars, AdultLevel, LinkText, SiteRecord, MAX_ALIASES, MAX_HEADINGS,
@@ -287,7 +287,10 @@ pub(crate) fn document(
         doc.add_text(f.language, language);
     }
     doc.add_u64(f.adult, record_adult_level(record) as u64);
-    let key_pages = valid_key_pages(record.key_pages.clone(), &record.domain);
+    let key_pages = valid_key_pages(
+        key_pages_or_known(&record.key_pages, &record.domain),
+        &record.domain,
+    );
     if !key_pages.is_empty() {
         if let Ok(json) = serde_json::to_string(&key_pages) {
             doc.add_text(f.key_pages, json);

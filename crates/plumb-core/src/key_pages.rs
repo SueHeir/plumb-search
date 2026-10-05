@@ -272,6 +272,63 @@ const NAV_NOISE: &[&str] = &[
     "bag",
 ];
 
+/// Key pages written by hand for well-known sites whose robots.txt turns
+/// away every crawler it does not name, Plumb's included: their homepages
+/// are never read, so their key pages cannot come from a crawl.
+const BLOCKED_SITES: &[(&str, &[(&str, &str)])] = &[
+    (
+        "facebook.com",
+        &[
+            ("Log in", "https://www.facebook.com/login/"),
+            ("Create new account", "https://www.facebook.com/r.php"),
+            (
+                "Forgot password",
+                "https://www.facebook.com/recover/initiate/",
+            ),
+            ("Marketplace", "https://www.facebook.com/marketplace/"),
+            ("Help Center", "https://www.facebook.com/help/"),
+        ],
+    ),
+    (
+        "instagram.com",
+        &[
+            ("Log in", "https://www.instagram.com/accounts/login/"),
+            ("Sign up", "https://www.instagram.com/accounts/emailsignup/"),
+            ("Help", "https://help.instagram.com/"),
+        ],
+    ),
+    (
+        "linkedin.com",
+        &[
+            ("Sign in", "https://www.linkedin.com/login"),
+            ("Join now", "https://www.linkedin.com/signup"),
+            ("Jobs", "https://www.linkedin.com/jobs/"),
+            ("Help", "https://www.linkedin.com/help/linkedin"),
+        ],
+    ),
+];
+
+/// The site's key pages from a crawl, or, when it has none and its
+/// robots.txt keeps crawlers out ([`BLOCKED_SITES`]), the hand-written ones.
+pub fn key_pages_or_known(pages: &[KeyPage], domain: &str) -> Vec<KeyPage> {
+    if !pages.is_empty() {
+        return pages.to_vec();
+    }
+    BLOCKED_SITES
+        .iter()
+        .find(|(site, _)| *site == domain)
+        .map(|(_, pages)| {
+            pages
+                .iter()
+                .map(|(label, url)| KeyPage {
+                    label: (*label).to_owned(),
+                    url: (*url).to_owned(),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// The key pages of the homepage at `homepage` (its final URL), from the
 /// links it makes to its own site, in page order: first one link for each
 /// [`PageIntent`] the labels name, in that order, then the rest of the
@@ -391,6 +448,23 @@ pub fn pick_key_pages(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sites_that_keep_crawlers_out_have_written_key_pages() {
+        for (domain, _) in BLOCKED_SITES {
+            let pages = key_pages_or_known(&[], domain);
+            assert!(!pages.is_empty(), "{domain}");
+            assert_eq!(valid_key_pages(pages.clone(), domain), pages, "{domain}");
+        }
+        let facebook = key_pages_or_known(&[], "facebook.com");
+        assert_eq!(facebook[0].intent(), Some(PageIntent::Login));
+        let crawled = vec![KeyPage {
+            label: "Log in".into(),
+            url: "https://www.facebook.com/".into(),
+        }];
+        assert_eq!(key_pages_or_known(&crawled, "facebook.com"), crawled);
+        assert!(key_pages_or_known(&[], "example.com").is_empty());
+    }
 
     fn link(label: &str, url: &str, in_nav: bool) -> OwnLink {
         OwnLink {
