@@ -150,6 +150,17 @@ fn connection_limits() -> connection_limits::ConnectionLimits {
         .with_max_established_per_peer(Some(MAX_ESTABLISHED_PER_PEER))
 }
 
+/// Largest answer taken on `/plumb/batch/1`: a batch of at most
+/// [`crate::batch::MAX_BATCH_BYTES`] of records, or
+/// [`MAX_LISTED_BATCHES`] headers of a few hundred bytes each.
+const MAX_BATCH_RESPONSE: u64 = crate::batch::MAX_BATCH_BYTES as u64 + 4 * 1024 * 1024;
+/// Largest answer taken on `/plumb/report/1`: [`MAX_LISTED_REPORTS`]
+/// reports, each about 600 bytes and 1.3 KB at the longest pick.
+const MAX_REPORT_RESPONSE: u64 = 64 * 1024 * 1024;
+/// Report lists asked of other nodes at once: one node's two weeks. Nodes
+/// met meanwhile are asked when they next identify themselves.
+const MAX_REPORT_LISTS: usize = 2;
+
 /// Batch and report requests of other nodes answered at once: one can mean
 /// reading a 16 MB batch. More are answered with nothing for now.
 const MAX_LISTS_SERVING: usize = 4;
@@ -1005,6 +1016,7 @@ pub async fn start(
         recount: false,
         report_peers: HashMap::new(),
         report_listing: HashSet::new(),
+        report_lists: HashSet::new(),
         source,
         status: status.clone(),
         records: records_tx,
@@ -1384,14 +1396,14 @@ fn build_swarm(key: &Keypair, config: &NetConfig) -> Result<Swarm<Behaviour>> {
                 batches: request_response::Behaviour::with_codec(
                     request_response::cbor::codec::Codec::default()
                         .set_request_size_maximum(4 * 1024)
-                        .set_response_size_maximum(64 * 1024 * 1024),
+                        .set_response_size_maximum(MAX_BATCH_RESPONSE),
                     [(StreamProtocol::new(BATCH_PROTOCOL), ProtocolSupport::Full)],
                     request_config.clone(),
                 ),
                 reports: request_response::Behaviour::with_codec(
                     request_response::cbor::codec::Codec::default()
                         .set_request_size_maximum(8 * 1024)
-                        .set_response_size_maximum(128 * 1024 * 1024),
+                        .set_response_size_maximum(MAX_REPORT_RESPONSE),
                     [(StreamProtocol::new(REPORT_PROTOCOL), ProtocolSupport::Full)],
                     request_config.clone(),
                 ),
@@ -1501,6 +1513,8 @@ struct Task {
     report_peers: HashMap<PeerId, Vec<Multiaddr>>,
     /// Nodes asked for their reports this session.
     report_listing: HashSet<PeerId>,
+    /// Those requests not answered yet (see [`MAX_REPORT_LISTS`]).
+    report_lists: HashSet<OutboundRequestId>,
     source: Arc<dyn BucketSource>,
     status: Arc<Mutex<NetStatus>>,
     records: mpsc::UnboundedSender<Vec<SiteRecord>>,
@@ -2314,13 +2328,15 @@ impl Task {
                 .cloned()
                 .collect();
             self.report_peers.insert(peer, addrs);
-            if self.report_listing.insert(peer) {
+            if self.report_lists.len() < MAX_REPORT_LISTS && self.report_listing.insert(peer) {
                 let current = report_epoch(now_unix());
                 for epoch in [current.saturating_sub(1), current] {
-                    self.swarm
+                    let id = self
+                        .swarm
                         .behaviour_mut()
                         .reports
                         .send_request(&peer, ReportRequest::List { epoch });
+                    self.report_lists.insert(id);
                 }
             }
         }
@@ -2970,11 +2986,15 @@ impl Task {
                 peer,
                 message:
                     request_response::Message::Response {
-                        response: ReportResponse::Reports(reports),
-                        ..
+                        request_id,
+                        response,
                     },
                 ..
             } => {
+                self.report_lists.remove(&request_id);
+                let ReportResponse::Reports(reports) = response else {
+                    return;
+                };
                 let mut new = 0;
                 for report in reports.iter().take(MAX_LISTED_REPORTS) {
                     if self.take_report(report) == Some(true) {
@@ -2985,7 +3005,13 @@ impl Task {
                     info!("caught up on {new} popularity reports from {peer}");
                 }
             }
-            request_response::Event::OutboundFailure { peer, error, .. } => {
+            request_response::Event::OutboundFailure {
+                peer,
+                request_id,
+                error,
+                ..
+            } => {
+                self.report_lists.remove(&request_id);
                 debug!("report request to {peer} failed: {error}");
             }
             _ => {}
@@ -4033,6 +4059,40 @@ mod tests {
             assert_eq!(site.shared.unwrap().body_text.as_deref(), text);
             assert_eq!(site.record.body_text.as_deref(), text);
         }
+    }
+
+    #[test]
+    fn the_largest_honest_answers_fit_under_the_response_caps() {
+        // A batch of the most records, as many bytes as a batch may hold.
+        let key = Keypair::generate_ed25519();
+        let now = now_unix();
+        let mut batch = Batch::sign(
+            &key,
+            &[SiteRecord::new("a.com")],
+            epoch_of(now),
+            MAX_SHARE_PPM,
+            now,
+        )
+        .unwrap()
+        .unwrap();
+        let line = "x".repeat(crate::batch::MAX_BATCH_BYTES / MAX_BATCH_RECORDS);
+        batch.records = vec![line; MAX_BATCH_RECORDS];
+        assert!(size(&BatchResponse::Batch(Some(batch.clone()))) < MAX_BATCH_RESPONSE);
+        let headers = vec![batch.header; MAX_LISTED_BATCHES];
+        assert!(size(&BatchResponse::Headers(headers)) < MAX_BATCH_RESPONSE);
+        // The most reports listed, of the longest pick there is.
+        let domain = format!("{}.com", "a".repeat(59));
+        let query =
+            crate::popularity::pick_query(&format!("{} {}", "b".repeat(30), "c".repeat(30)))
+                .expect("a query that is reported");
+        let report = Report::new(crate::popularity::report_epoch(now), &query, &domain).unwrap();
+        let reports = vec![report; MAX_LISTED_REPORTS];
+        assert!(size(&ReportResponse::Reports(reports)) < MAX_REPORT_RESPONSE);
+    }
+
+    /// The size of `value` in CBOR, as the request-response codec sends it.
+    fn size<T: Serialize>(value: &T) -> u64 {
+        cbor4ii::serde::to_vec(Vec::new(), value).unwrap().len() as u64
     }
 
     #[test]
