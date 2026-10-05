@@ -86,10 +86,10 @@ plumb fetch-pages --set books --work /big/disk/dumps --data /path/to/node-data
 The `papers` set lists the most cited scholarly works (2,000,000 by default, each cited at least 200 times), from OpenAlex's API (CC0): "attention is all you need" finds the paper. Each keeps only its title, "Paper by AUTHOR et al., YEAR, VENUE" as its description, its DOI (or OpenAlex id) and its citations. Like questions, papers are also found by most of their title's words.
 
 ```sh
-plumb fetch-pages --set papers --data /path/to/node-data --min-citations 200
+plumb fetch-pages --set papers --work /big/disk/dumps --data /path/to/node-data --min-citations 200
 ```
 
-Set `OPENALEX_API_KEY` if OpenAlex asks for a key. `--max-papers` caps how many are kept.
+Set `OPENALEX_API_KEY` if OpenAlex asks for a key. `--max-papers` caps how many are kept. With `--work DIR`, the papers so far are kept in `DIR/openalex/` as they come: when OpenAlex keeps refusing (it limits how much one address may ask for), the run waits as it is told, then writes the most cited papers it has, and running it again with the same `--work` carries on where it stopped.
 
 Book and paper titles are often common words ("Python", "Apple"), so a book or paper is never listed before every site, and an article of the same name comes before it: "dune" lists the article on the novel, then the book.
 
