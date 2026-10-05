@@ -143,6 +143,7 @@ fn render_private(available: bool, country: Option<&str>) -> String {
          and picks the matches. Query text stays in your browser. The requested groups \
          can still reveal likely searches to answering nodes. \
          <a href=\"/\">Normal search</a></p>\n{note}\n\
+         <div id=\"pq-answer\"></div>\n\
          <p class=\"s\" id=\"pq-status\" role=\"status\"></p>\n<ol id=\"pq-results\"></ol>\n\
          </main>",
         escape_html(country.unwrap_or("")),

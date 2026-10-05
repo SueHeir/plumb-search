@@ -3797,6 +3797,7 @@ dependencies = [
  "defmt",
  "jiff-core",
  "jiff-static",
+ "jiff-tzdb",
  "jiff-tzdb-platform",
  "log",
  "portable-atomic",
@@ -5785,6 +5786,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "plumb-answer"
+version = "0.1.0"
+dependencies = [
+ "jiff",
+ "serde",
+]
+
+[[package]]
 name = "plumb-core"
 version = "0.1.0"
 dependencies = [
@@ -5935,6 +5944,7 @@ dependencies = [
  "clap",
  "flate2",
  "getrandom 0.3.4",
+ "plumb-answer",
  "plumb-core",
  "plumb-crawl",
  "plumb-embed",
@@ -5968,6 +5978,7 @@ dependencies = [
  "idna",
  "js-sys",
  "libp2p-identity",
+ "plumb-answer",
  "plumb-core",
  "plumb-index",
  "serde",
