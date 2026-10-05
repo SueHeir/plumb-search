@@ -80,12 +80,24 @@ pub const SETS: &[SetInfo] = &[
     SetInfo {
         id: plumb_index::places::PLACES_SET,
         name: "Places (OpenStreetMap)",
-        pages: 25_000_000,
-        bytes_per_page: 130,
+        pages: 24_000_000,
+        bytes_per_page: 140,
     },
 ];
 
 impl SetInfo {
+    /// How many of the set's pages to keep under `sets` and a storage limit
+    /// of `storage_limit_mb`. Places on Automatic follow their own sizes
+    /// (see [`crate::places::auto_places`]).
+    pub fn kept(&self, sets: &PageSets, storage_limit_mb: u64) -> u64 {
+        match sets.size(self.id) {
+            PageSetSize::Auto if self.id == plumb_index::places::PLACES_SET => {
+                crate::places::auto_places(storage_limit_mb)
+            }
+            size => size.pages(storage_limit_mb),
+        }
+    }
+
     pub fn find(id: &str) -> Option<&'static SetInfo> {
         SETS.iter().find(|set| set.id == id)
     }
@@ -191,7 +203,7 @@ pub fn notes_path(file: &Path) -> PathBuf {
 /// has their files yet.
 pub fn wanted_counts(sets: &PageSets, storage_limit_mb: u64) -> Vec<(&'static SetInfo, u64)> {
     SETS.iter()
-        .map(|set| (set, sets.size(set.id).pages(storage_limit_mb)))
+        .map(|set| (set, set.kept(sets, storage_limit_mb)))
         .filter(|(_, pages)| *pages > 0)
         .collect()
 }
@@ -457,7 +469,7 @@ impl Wanted {
                 .iter()
                 .filter(|set| set.id != plumb_index::places::PLACES_SET)
                 .filter_map(|set| {
-                    let pages = sets.size(set.id).pages(storage_limit_mb);
+                    let pages = set.kept(sets, storage_limit_mb);
                     let file = set.file(data_dir);
                     (pages > 0 && file.is_file()).then_some((set, file, pages))
                 })

@@ -16,7 +16,7 @@ Words like "best", "good" or "cheap" are left out of WHAT. WHAT must be in a pla
 
 WHERE is a town (or village, suburb or neighbourhood) by its name or another name ("nyc"), optionally with its state or country: "portland maine", "paris, france", "denver co". Among towns of one name the bigger wins, and one in the searcher's country a little more. WHERE can also be any named place, such as a stadium or a museum.
 
-Places are listed within a town's size of its centre (12 km for a city, 6 for a town, 3 for a village or around a named place), nearest first, with places that have a website, a brand or a Wikidata item a little ahead. When fewer than three are found, Plumb looks three times as far.
+Places are listed within a town's size of its centre (12 km for a city, 6 for a town, 3 for a village or around a named place). Places of the kind asked for come first, then those that only have the words in their name (for "sushi", sushi bars before an office called Sushi Tech). Within each, nearest first, with places that have a website, a brand or a Wikidata item a little ahead. When fewer than three are found, Plumb looks three times as far.
 
 ## Near me
 
@@ -36,7 +36,17 @@ plumb fetch-pages --set places --osm planet-latest.osm.pbf --data /path/to/node-
 
 `--osm` reads an OpenStreetMap extract (`.osm.pbf`): the whole planet (about 90 GB, from planet.openstreetmap.org) or a country or state from download.geofabrik.de. Without `--osm`, `--work DIR` downloads the planet there. The file, `DIR/pages/sets/places.tsv.gz`, is sorted with cities first, then towns, places with a Wikidata item, suburbs, places with a website or brand, villages and neighbourhoods, and then everything else, so the first N places are the best known N.
 
-Colorado's extract (366 MB) gives 66,102 places in 2 seconds: a 2.7 MB file and a 7 MB index.
+Colorado's extract (366 MB) gives 66,102 places in 2 seconds: a 2.7 MB file and a 7 MB index. The whole planet (October 2026) gives 24,014,360 places, 2.4 million of them towns, in 21 minutes on 32 cores with 18 GB of memory: a 971 MB file and a 2.4 GB index, built in 3 minutes. A search takes 10 to 50 ms.
+
+## How many
+
+| Automatic, by storage limit | Places kept | About |
+| --- | --- | --- |
+| under 1 GB | none | 0 |
+| under 8 GB | the first 1,000,000: every city and town and the places with a Wikidata item (museums, sights, stations, stadiums) | 140 MB |
+| 8 GB or more, or no limit | all of them, every café and shop | 3.4 GB |
+
+The **Page sets** part of the panel can also turn places off or keep a number of them (`places` in `page_sets`, for example `{"places": "off"}`).
 
 ## Nodes
 

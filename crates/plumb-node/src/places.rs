@@ -26,9 +26,25 @@ pub fn set_info() -> &'static SetInfo {
 /// are kept or there is no file yet.
 pub fn wanted(data_dir: &Path, sets: &PageSets, storage_limit_mb: u64) -> Option<(PathBuf, u64)> {
     let set = set_info();
-    let count = sets.size(set.id).pages(storage_limit_mb);
+    let count = set.kept(sets, storage_limit_mb);
     let file = set.file(data_dir);
     (count > 0 && file.is_file()).then_some((file, count))
+}
+
+/// Places kept on Automatic under a storage limit of `storage_limit_mb`
+/// (0 for none). The file starts with every city and town and the places
+/// with a Wikidata item (about a million, 140 MB with the index), then the
+/// rest: under 1 GB none, since towns alone find nothing; under 8 GB that
+/// first million, so museums, sights and stations are found anywhere; with
+/// 8 GB or more, all of them (about 24 million, 3.5 GB), so every café and
+/// shop is.
+pub fn auto_places(storage_limit_mb: u64) -> u64 {
+    match storage_limit_mb {
+        0 => u64::MAX,
+        mb if mb < 1_000 => 0,
+        mb if mb < 8_000 => 1_000_000,
+        _ => u64::MAX,
+    }
 }
 
 /// Names the index of `wanted`: changes when the file (size or time) or
@@ -150,6 +166,21 @@ mod tests {
             write_place(&mut text, place).unwrap();
         }
         std::fs::write(file, text).unwrap();
+    }
+
+    #[test]
+    fn places_follow_their_own_sizes() {
+        let sets = PageSets::default();
+        let kept = |mb| set_info().kept(&sets, mb);
+        assert_eq!(kept(500), 0);
+        assert_eq!(kept(2_000), 1_000_000);
+        assert_eq!(kept(8_000), u64::MAX);
+        assert_eq!(kept(0), u64::MAX);
+        let off = PageSets::parse("places=off").unwrap();
+        assert_eq!(set_info().kept(&off, 0), 0);
+        // Other sets are as they were.
+        let wikipedia = SetInfo::find("wikipedia-en").unwrap();
+        assert_eq!(wikipedia.kept(&sets, 500), 100_000);
     }
 
     #[test]

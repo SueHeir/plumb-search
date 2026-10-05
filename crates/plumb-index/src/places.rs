@@ -15,6 +15,7 @@
 //! nearest first, those with a website, brand or Wikidata item a little
 //! ahead.
 
+use std::collections::HashSet;
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
@@ -477,11 +478,23 @@ impl PlaceSearcher {
         }
         // Nearest first; a place that says more about itself (a website, a
         // brand, a Wikidata item) counts as up to half again as near.
+        // Places of the kind asked for come before those that only have the
+        // words in their name: sushi bars before an office called Sushi
+        // Tech, for "sushi".
+        let is_kind = |place: &Place| {
+            let words: HashSet<String> = analysis::tokens(&self.stemmed, &place.kind_words())
+                .into_iter()
+                .collect();
+            stems.iter().all(|stem| words.contains(stem))
+        };
         let key = |hit: &PlaceHit| {
             let tier = f64::from(hit.place.rank / 1_000_000).clamp(1.0, 6.0);
-            hit.km / (1.0 + 0.1 * (tier - 1.0))
+            let named_only = if is_kind(&hit.place) { 0.0 } else { 1e6 };
+            named_only + hit.km / (1.0 + 0.1 * (tier - 1.0))
         };
-        hits.sort_by(|a, b| key(a).total_cmp(&key(b)));
+        let mut hits: Vec<(f64, PlaceHit)> = hits.into_iter().map(|h| (key(&h), h)).collect();
+        hits.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let hits = hits.into_iter().map(|(_, h)| h);
         let mut kept: Vec<PlaceHit> = Vec::new();
         for hit in hits {
             let twice = kept
@@ -508,6 +521,9 @@ impl PlaceSearcher {
             .filter(|w| !w.is_empty())
             .map(str::to_string)
             .collect();
+        // A town first, however the words split ("boulder co" is Boulder in
+        // Colorado before it is a gym called Boulder & Co.), then any place.
+        let mut other: Option<Place> = None;
         for k in (1..=words.len()).rev() {
             let name = words[..k].join(" ");
             let qualifier = words[k..].join(" ");
@@ -517,11 +533,13 @@ impl PlaceSearcher {
                 .into_iter()
                 .filter(|place| fits(place))
                 .max_by(|a, b| town_score(a, country).total_cmp(&town_score(b, country)));
-            if best.is_some() {
-                return Ok(best);
+            match best {
+                Some(town) if town.is_town() => return Ok(Some(town)),
+                Some(place) if other.is_none() => other = Some(place),
+                _ => {}
             }
         }
-        Ok(None)
+        Ok(other)
     }
 
     /// Places whose name or other name is `name`.
@@ -726,6 +744,14 @@ mod tests {
                 ..city("New York", 8_800_000, "NY", "US", 40.7128, -74.0060)
             },
             at("Hotel Eiffel", "tourism=hotel", 48.857, 2.296),
+            // Named like a hotel, nearer, but a manor.
+            at("Hôtel de Béhague", "historic=manor", 48.8584, 2.2946),
+            // A gym whose name spells a town and its state.
+            Place {
+                country: Some("IT".into()),
+                ..at("Boulder & Co.", "leisure=sports_centre", 45.5, 9.3)
+            },
+            city("Boulder", 108_000, "CO", "US", 40.0150, -105.2705),
         ]
     }
 
@@ -781,6 +807,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(hotels.hits[0].place.name, "Hotel Eiffel");
+        assert_eq!(hotels.hits[1].place.name, "Hôtel de Béhague");
     }
 
     #[test]
@@ -797,6 +824,7 @@ mod tests {
         assert_eq!(locate("paris tx", None).1, "TX");
         assert_eq!(locate("paris france", Some("US")).1, "Île-de-France");
         assert_eq!(locate("nyc", None).0, "New York");
+        assert_eq!(locate("Boulder, CO", None), ("Boulder".into(), "CO".into()));
         assert!(searcher.locate("atlantis", None).unwrap().is_none());
     }
 
