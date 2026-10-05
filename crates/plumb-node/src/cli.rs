@@ -176,6 +176,11 @@ pub struct RunArgs {
     /// workload presets (light, balanced, full) set their own.
     #[arg(long, value_name = "N", value_parser = parse_positive)]
     pub crawl_concurrency: Option<usize>,
+    /// Watch the RSS or Atom feeds of this many of the best-ranked sites
+    /// for the results page's "Recent" block, 0 for none [default: 3000,
+    /// 300 with --profile desktop]. Each feed is checked at most hourly.
+    #[arg(long, value_name = "N")]
+    pub news_feeds: Option<usize>,
     /// Never refresh: keep the index as the initial crawl leaves it.
     #[arg(long, conflicts_with_all = ["refresh_hours", "crawl_per_refresh"])]
     pub no_refresh: bool,

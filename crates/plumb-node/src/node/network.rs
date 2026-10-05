@@ -228,7 +228,17 @@ pub(super) async fn start(inner: &Arc<Inner>) -> Result<()> {
     }
     let receiver = inner.clone();
     tokio::spawn(async move {
-        while let Some(batch) = records.recv().await {
+        while let Some(mut batch) = records.recv().await {
+            // Trusted nodes' feed checks go to the headline store, not the
+            // records (see plumb_net::start).
+            if batch.iter().any(|record| !record.news.is_empty()) {
+                let (news, rest) = batch.into_iter().partition(|r| !r.news.is_empty());
+                receiver.news.put_shared(news, now_unix());
+                batch = rest;
+                if batch.is_empty() {
+                    continue;
+                }
+            }
             let inner = receiver.clone();
             let saved = tokio::task::spawn_blocking(move || {
                 let n = batch.len() as u64;

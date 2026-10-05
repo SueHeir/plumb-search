@@ -69,7 +69,7 @@ use tracing::{debug, info, warn};
 use crate::agree::{Agreement, AgreementStatus, MIN_JUDGED};
 use crate::assign::{epoch_of, is_assigned, MAX_SHARE_PPM};
 use crate::batch::{
-    accept_batch, accept_own_batch, accept_trusted_batch, Batch, SignedHeader,
+    accept_batch, accept_news, accept_own_batch, accept_trusted_batch, Batch, SignedHeader,
     MAX_BATCH_AGE_EPOCHS, MAX_BATCH_RECORDS,
 };
 use crate::bucket::{BucketSource, BUCKETS};
@@ -854,7 +854,9 @@ struct Behaviour {
 }
 
 /// Starts the network side of a node. Returns its handle and the records
-/// accepted from other nodes' batches, one batch at a time.
+/// accepted from other nodes' batches, one batch at a time. Records that
+/// carry headlines ([`SiteRecord::news`]) carry nothing else: they are
+/// trusted crawlers' feed checks, for the node's headline store.
 pub async fn start(
     config: NetConfig,
     source: Arc<dyn BucketSource>,
@@ -2712,6 +2714,15 @@ impl Task {
         if !confirmed.is_empty() {
             let _ = self.records.send(confirmed);
         }
+        // Headlines skip agreement, as icons do: only trusted crawlers'
+        // are taken, and they go to the node's headline store, not its
+        // records (records carrying only headlines; see `accept_news`).
+        if trusted {
+            let news = accept_news(&batch, now);
+            if !news.is_empty() {
+                let _ = self.records.send(news);
+            }
+        }
     }
 
     fn lock_store(&self) -> std::sync::MutexGuard<'_, BatchStore> {
@@ -3396,7 +3407,7 @@ fn batch_chunks(records: &[SiteRecord]) -> Vec<&[SiteRecord]> {
     let mut chunks = Vec::new();
     let (mut start, mut lines) = (0, 0);
     for (i, record) in records.iter().enumerate() {
-        let need = 1 + usize::from(record.icon.is_some());
+        let need = 1 + usize::from(record.icon.is_some()) + usize::from(!record.news.is_empty());
         if lines + need > MAX_BATCH_RECORDS {
             chunks.push(&records[start..i]);
             (start, lines) = (i, 0);

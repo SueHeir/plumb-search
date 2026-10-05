@@ -27,6 +27,8 @@ const INDEXES_DIR: &str = "indexes";
 const NET_DIR: &str = "net";
 /// Site icons for results pages (see [`crate::icons`]).
 const ICONS_DIR: &str = "icons";
+/// Recent headlines and watched feeds (see [`crate::news`]).
+const NEWS_DIR: &str = "news";
 
 /// The files and directories of a data directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,6 +41,8 @@ pub(super) struct Paths {
     pub(super) indexes: PathBuf,
     pub(super) net: PathBuf,
     pub(super) icons: PathBuf,
+    /// Recent headlines and watched feeds (see [`crate::news`]).
+    pub(super) news: PathBuf,
     /// Records from other nodes, not yet folded in.
     pub(super) inbox: PathBuf,
     /// The inbox while it is being folded in.
@@ -56,6 +60,7 @@ impl Paths {
             indexes: data.join(INDEXES_DIR),
             net: data.join(NET_DIR),
             icons: data.join(ICONS_DIR),
+            news: data.join(NEWS_DIR),
             inbox: data.join(NET_DIR).join("inbox.jsonl"),
             absorbing: data.join(NET_DIR).join("inbox.absorbing"),
         }

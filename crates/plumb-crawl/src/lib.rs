@@ -11,6 +11,7 @@
 //! - [`extract_page_meta`] reads names and outbound links out of a page.
 //! - [`to_records`] turns crawl results into [`plumb_core::SiteRecord`]s
 //!   to merge into a [`plumb_core::RecordSet`].
+//! - [`check_feeds`] reads recent headlines from sites' RSS or Atom feeds.
 
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
@@ -21,13 +22,18 @@ use serde::{Deserialize, Serialize};
 mod crawl;
 mod dns;
 mod extract;
+mod feed;
 mod icon;
 mod records;
 #[cfg(test)]
 mod test_alloc;
 
-pub use crawl::{crawl_homepages, fetch_site_icons, log_summary, HomepageCrawler};
+pub use crawl::{
+    check_feeds, crawl_homepages, fetch_site_icons, log_summary, FeedCheck, FeedOutcome,
+    FeedTarget, HomepageCrawler,
+};
 pub use extract::{extract_page_meta, MAX_BODY_WORDS, MAX_ICONS, MAX_OUT_LINKS};
+pub use feed::{parse_date, read_feed};
 pub use icon::{normalize_icon, ICON_SIZE};
 pub use records::to_records;
 
@@ -183,6 +189,10 @@ pub struct PageMeta {
     /// words.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body_text: Option<String>,
+    /// The site's feed: the first `<link rel="alternate">` to an RSS or
+    /// Atom document, as an absolute http(s) URL. See [`check_feeds`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feed: Option<String>,
     /// Links to other registrable domains, in page order.
     pub links: Vec<OutLink>,
 }

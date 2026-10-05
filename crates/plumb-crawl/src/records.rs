@@ -157,6 +157,7 @@ mod tests {
                     key_pages: Vec::new(),
                     headings: Vec::new(),
                     body_text: None,
+                    feed: None,
                     links: links
                         .iter()
                         .map(|&(url, text)| OutLink {
