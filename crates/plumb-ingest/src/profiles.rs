@@ -23,12 +23,16 @@ use tracing::{info, warn};
 use crate::download::{part_path, WikidataPacing};
 use crate::facts::sparql_json;
 use crate::open_maybe_gz;
+use crate::wikidata::{ItemSite, OfficialSite};
 
 /// Statements asked for in one query.
 pub const PROFILES_PAGE: usize = 200_000;
 
 /// Profiles by Wikidata item (`Q19897578`).
 pub type ProfilesByItem = HashMap<String, Vec<Profile>>;
+
+/// Official websites by Wikidata item.
+pub type WebsitesByItem = HashMap<String, ItemSite>;
 
 #[derive(Debug, Deserialize)]
 struct Response {
@@ -182,17 +186,75 @@ pub async fn fetch_profiles(
     Ok(profiles)
 }
 
+/// The query for a page of official website (P856) statements.
+fn websites_page_query(offset: usize) -> String {
+    format!(
+        "SELECT ?item ?url WHERE {{ ?item wdt:P856 ?url . }} LIMIT {PROFILES_PAGE} OFFSET {offset}"
+    )
+}
+
+/// Adds the rows of an answer to [`websites_page_query`] to `websites`;
+/// returns how many rows there were.
+fn add_websites_page(websites: &mut WebsitesByItem, json: &[u8]) -> Result<usize> {
+    let rows = bindings(json)?;
+    for row in &rows {
+        let (Some(item), Some(url)) = (row.get("item"), row.get("url")) else {
+            continue;
+        };
+        let item = entity_id(&item.value);
+        if !item.starts_with('Q') {
+            continue;
+        }
+        if let Some(claim) = OfficialSite::new(item, "", &url.value) {
+            ItemSite::add(websites, &claim);
+        }
+    }
+    Ok(rows.len())
+}
+
+/// Asks Wikidata's query service at `endpoint` for every item's official
+/// websites, to link the ones that are part of another site: YouTube
+/// Music's `https://music.youtube.com/`.
+pub async fn fetch_websites(
+    client: &reqwest::Client,
+    endpoint: &str,
+    pacing: WikidataPacing,
+) -> Result<WebsitesByItem> {
+    let mut websites = WebsitesByItem::new();
+    let mut offset = 0;
+    loop {
+        tokio::time::sleep(pacing.pause).await;
+        let json = sparql_json(client, endpoint, &websites_page_query(offset), pacing)
+            .await
+            .context("asking Wikidata for official websites")?;
+        let rows = add_websites_page(&mut websites, &json)?;
+        info!("official websites (P856): {rows} statements from {offset}");
+        if rows < PROFILES_PAGE {
+            break;
+        }
+        offset += PROFILES_PAGE;
+    }
+    Ok(websites)
+}
+
 /// What [`add_profiles_to_file`] did.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct AddedProfiles {
     pub articles: u64,
     pub with_profiles: u64,
     pub profiles: u64,
+    /// Articles linking their item's official website on another site.
+    pub websites: u64,
 }
 
-/// Rewrites the articles file `path` with `profiles` for its articles'
-/// items, replacing any it had, by way of a part file.
-pub fn add_profiles_to_file(path: &Path, profiles: &ProfilesByItem) -> Result<AddedProfiles> {
+/// Rewrites the articles file `path` with `profiles` and official
+/// `websites` for its articles' items, replacing any it had, by way of a
+/// part file. A website counts only when it is on the article's site.
+pub fn add_profiles_to_file(
+    path: &Path,
+    profiles: &ProfilesByItem,
+    websites: &WebsitesByItem,
+) -> Result<AddedProfiles> {
     let reader = open_maybe_gz(path)?;
     let mut failed = None;
     let lines = std::io::BufRead::lines(reader).map_while(|line| match line {
@@ -219,7 +281,15 @@ pub fn add_profiles_to_file(path: &Path, profiles: &ProfilesByItem) -> Result<Ad
             .and_then(|item| profiles.get(item))
             .cloned()
             .unwrap_or_default();
+        article.website = article
+            .item
+            .as_deref()
+            .and_then(|item| websites.get(item))
+            .filter(|site| article.site.as_deref() == Some(site.domain.as_str()))
+            .and_then(ItemSite::website)
+            .map(str::to_string);
         added.articles += 1;
+        added.websites += u64::from(article.website.is_some());
         if !article.profiles.is_empty() {
             added.with_profiles += 1;
             added.profiles += article.profiles.len() as u64;
@@ -327,6 +397,13 @@ mod tests {
                 views: 1,
                 ..Article::default()
             },
+            Article {
+                title: "YouTube Music".into(),
+                item: Some("Q28404534".into()),
+                site: Some("youtube.com".into()),
+                views: 1,
+                ..Article::default()
+            },
         ];
         crate::articles::write_articles_file(&path, &articles).unwrap();
         let mut profiles = ProfilesByItem::new();
@@ -337,21 +414,51 @@ mod tests {
                 id: "MrBeast".into(),
             }],
         );
-        let added = add_profiles_to_file(&path, &profiles).unwrap();
+        let mut websites = WebsitesByItem::new();
+        let json = answer(&[
+            (
+                "item",
+                "http://www.wikidata.org/entity/Q28404534",
+                "url",
+                "https://music.youtube.com/",
+            ),
+            // MrBeast's own front page: no website to link.
+            (
+                "item",
+                "http://www.wikidata.org/entity/Q19897578",
+                "url",
+                "https://mrbeast.store/collections",
+            ),
+            (
+                "item",
+                "http://www.wikidata.org/entity/Q19897578",
+                "url",
+                "https://www.mrbeast.com/",
+            ),
+        ]);
+        assert_eq!(add_websites_page(&mut websites, &json).unwrap(), 3);
+        let added = add_profiles_to_file(&path, &profiles, &websites).unwrap();
         assert_eq!(
             added,
             AddedProfiles {
-                articles: 2,
+                articles: 3,
                 with_profiles: 1,
-                profiles: 1
+                profiles: 1,
+                websites: 1,
             }
         );
         let back = read_articles(open_maybe_gz(&path).unwrap(), 10).unwrap();
         assert_eq!(back[0].profiles, profiles["Q19897578"]);
         assert!(back[1].profiles.is_empty());
+        assert_eq!(back[0].website, None);
+        assert_eq!(
+            back[2].website.as_deref(),
+            Some("https://music.youtube.com/")
+        );
         // Again, with none: the old ones go.
-        add_profiles_to_file(&path, &ProfilesByItem::new()).unwrap();
+        add_profiles_to_file(&path, &ProfilesByItem::new(), &WebsitesByItem::new()).unwrap();
         let back = read_articles(open_maybe_gz(&path).unwrap(), 10).unwrap();
         assert!(back[0].profiles.is_empty());
+        assert_eq!(back[2].website, None);
     }
 }

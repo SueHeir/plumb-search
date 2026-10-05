@@ -2419,17 +2419,19 @@ fn render_results_with(
                 icon,
                 &notes,
             );
-            if let Some(page) = pages
+            let carried = pages
                 .iter()
-                .find(|p| p.under.as_deref() == Some(item.hit.domain.as_str()))
-            {
+                .find(|p| p.under.as_deref() == Some(item.hit.domain.as_str()));
+            if let Some(page) = carried {
                 if let Some(end) = rendered.rfind("</li>") {
                     rendered.insert_str(end, &page_line(&page.hit));
                 }
             }
-            if position == 0 {
+            let product = carried.and_then(|page| product_of(&page.hit, &item.hit.domain, query));
+            if position == 0 || product.is_some() {
                 if let Some(end) = rendered.rfind("<div class=\"m\">") {
-                    rendered.insert_str(end, &key_pages_line(&item.hit, query));
+                    let line = key_pages_line(&item.hit, query, product.as_ref());
+                    rendered.insert_str(end, &line);
                 }
             }
             body.push_str(&rendered);
@@ -2717,24 +2719,62 @@ fn render_recent(recent: &Recent, now: u64) -> String {
 /// Most key pages listed under a result.
 const SHOWN_KEY_PAGES: usize = 6;
 
+/// The part of the site `domain` that the query names, from the article
+/// carried under its result: YouTube Music's `https://music.youtube.com/`
+/// for "youtube music" or "music youtube", when that article's item has
+/// it as its official website. The query must have the words of the
+/// article's title or one of its other names, in any order.
+fn product_of(page: &PageHit, domain: &str, query: &str) -> Option<KeyPage> {
+    let website = page.page.website.as_deref()?;
+    let href = http_url(website)?;
+    if plumb_core::registrable_domain(&href)? != domain {
+        return None;
+    }
+    let words = |text: &str| {
+        let mut words: Vec<String> = plumb_core::normalize_text(text)
+            .split(' ')
+            .filter(|w| !w.is_empty())
+            .map(str::to_string)
+            .collect();
+        words.sort_unstable();
+        words
+    };
+    let asked = words(query);
+    let title = page.page.title.as_str();
+    let base = match title.rfind(" (") {
+        Some(i) if title.ends_with(')') && i > 0 => &title[..i],
+        _ => title,
+    };
+    let named = std::iter::once(base)
+        .chain(page.page.aliases.iter().map(String::as_str))
+        .any(|name| !asked.is_empty() && words(name) == asked);
+    named.then(|| KeyPage {
+        label: base.to_string(),
+        url: href,
+    })
+}
+
 /// The site's key pages (sign in, docs, pricing) under the top result,
 /// when the query names that site: on its own ("paypal"), or followed by
 /// what is wanted from it ("paypal login"), whose page then comes first,
-/// in bold. Empty otherwise, and when the site has fewer than two key
-/// pages and none for what was asked.
-fn key_pages_line(hit: &Hit, query: &str) -> String {
-    if !hit.named {
+/// in bold. A part of the site the query names (`product`, from
+/// [`product_of`]) comes first, in bold, under any result. Empty
+/// otherwise, and when the site has fewer than two key pages and none for
+/// what was asked.
+fn key_pages_line(hit: &Hit, query: &str, product: Option<&KeyPage>) -> String {
+    if !hit.named && product.is_none() {
         return String::new();
     }
     let mut pages: Vec<(&KeyPage, String)> = hit
         .key_pages
         .iter()
+        .filter(|_| hit.named)
         .filter(|page| page.is_valid_for(&hit.domain))
         .filter_map(|page| Some((page, http_url(&page.url)?)))
         .take(SHOWN_KEY_PAGES)
         .collect();
     let wanted = PageIntent::of_query_end(query).map(|(intent, _)| intent);
-    let matched = wanted.and_then(|wanted| {
+    let mut matched = wanted.and_then(|wanted| {
         pages
             .iter()
             .position(|(page, _)| page.intent() == Some(wanted))
@@ -2742,6 +2782,12 @@ fn key_pages_line(hit: &Hit, query: &str) -> String {
     if let Some(at) = matched {
         let page = pages.remove(at);
         pages.insert(0, page);
+    }
+    if let Some(product) = product {
+        pages.retain(|(_, href)| *href != product.url);
+        pages.insert(0, (product, product.url.clone()));
+        pages.truncate(SHOWN_KEY_PAGES);
+        matched = Some(0);
     }
     if pages.len() < 2 && matched.is_none() {
         return String::new();
@@ -3142,6 +3188,52 @@ mod tests {
         .await
         .2;
         assert!(!body.contains("class=\"kp\""));
+    }
+
+    #[test]
+    fn the_part_of_a_site_the_query_names_comes_first() {
+        use plumb_index::pages::Page;
+        let article = PageHit {
+            page: Page {
+                set: "wikipedia-en".into(),
+                url: "https://en.wikipedia.org/wiki/YouTube_Music".into(),
+                title: "YouTube Music".into(),
+                description: Some("Music streaming service".into()),
+                site: Some("youtube.com".into()),
+                views: 1000,
+                aliases: vec!["YT Music".into()],
+                item: Some("Q28404534".into()),
+                profiles: Vec::new(),
+                website: Some("https://music.youtube.com/".into()),
+            },
+            score: 1.0,
+            named: true,
+            popularity: 0.5,
+            whole: false,
+        };
+        let youtube = hit(
+            "youtube.com",
+            "https://www.youtube.com/",
+            Some("YouTube"),
+            None,
+        );
+        for query in ["youtube music", "Music YouTube", "yt music"] {
+            let product = product_of(&article, "youtube.com", query).unwrap();
+            assert_eq!(product.url, "https://music.youtube.com/");
+            // Under any result, named in full or not.
+            assert_eq!(
+                key_pages_line(&youtube, query, Some(&product)),
+                "<ul class=\"kp\"><li><a href=\"https://music.youtube.com/\" \
+                 rel=\"noreferrer\"><strong>YouTube Music</strong></a></li></ul>"
+            );
+        }
+        // Not for other words, nor on another site.
+        assert!(product_of(&article, "youtube.com", "youtube").is_none());
+        assert!(product_of(&article, "youtube.com", "youtube music charts").is_none());
+        assert!(product_of(&article, "you-tubemusic.com", "youtube music").is_none());
+        let mut elsewhere = article.clone();
+        elsewhere.page.website = Some("https://youtubemusic.example/".into());
+        assert!(product_of(&elsewhere, "youtube.com", "youtube music").is_none());
     }
 
     #[tokio::test]
@@ -4191,6 +4283,7 @@ mod tests {
                                 service: "youtube-handle".into(),
                                 id: "MrBeast".into(),
                             }],
+                            website: None,
                         },
                         score: 1.0,
                         named: query == "mrbeast",
@@ -4242,6 +4335,7 @@ mod tests {
                 aliases: Vec::new(),
                 item: Some("Q7186".into()),
                 profiles: Vec::new(),
+                website: None,
             },
             score: 1.0,
             named: true,

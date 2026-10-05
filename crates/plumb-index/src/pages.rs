@@ -80,6 +80,10 @@ pub struct Page {
     /// The item's official profiles (a YouTube channel, an X account).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub profiles: Vec<plumb_core::profiles::Profile>,
+    /// The item's official website when it is a subdomain or an inner page
+    /// of [`Page::site`]: `https://music.youtube.com/` for YouTube Music.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub website: Option<String>,
 }
 
 impl Page {
@@ -95,6 +99,7 @@ impl Page {
             aliases: article.aliases,
             item: article.item,
             profiles: article.profiles,
+            website: article.website,
         }
     }
 
@@ -111,6 +116,7 @@ impl Page {
             aliases: repo.aliases,
             item: None,
             profiles: Vec::new(),
+            website: None,
         }
     }
 
@@ -130,6 +136,7 @@ impl Page {
             aliases: question.aliases,
             item: None,
             profiles: Vec::new(),
+            website: None,
         }
     }
 
@@ -149,6 +156,7 @@ impl Page {
             aliases: book.aliases,
             item: None,
             profiles: Vec::new(),
+            website: None,
         }
     }
 
@@ -171,6 +179,7 @@ impl Page {
             aliases: paper.aliases,
             item: None,
             profiles: Vec::new(),
+            website: None,
         }
     }
 
