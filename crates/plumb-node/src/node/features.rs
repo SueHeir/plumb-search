@@ -24,6 +24,23 @@ pub struct FeatureSettings {
     /// (`--search-from`, friends of friends unless given).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub search_from: Option<plumb_net::SearchScope>,
+    /// How many network searches the node answers for free a day for other
+    /// nodes; `None` keeps the node's own (`--answer-per-day`, no limit
+    /// unless given).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub answer_limit: Option<AnswerLimit>,
+    /// Spend credits on tokens to be answered by busy nodes; `None` keeps
+    /// the node's own (on unless `--no-spend-credits`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spend_credits: Option<bool>,
+}
+
+/// A daily limit on the network searches answered for free for other nodes
+/// (see [`plumb_net::allowance`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnswerLimit {
+    /// `None` for no limit.
+    pub per_day: Option<u64>,
 }
 
 impl FeatureSettings {
@@ -63,6 +80,17 @@ impl FeatureSettings {
                     .map(|n| n.search_scope)
                     .unwrap_or_default(),
             ),
+            // The defaults read as no choice made.
+            answer_limit: config
+                .network
+                .as_ref()
+                .and_then(|n| n.answer_per_day)
+                .map(|n| AnswerLimit { per_day: Some(n) }),
+            spend_credits: config
+                .network
+                .as_ref()
+                .is_some_and(|n| !n.collect_tokens)
+                .then_some(false),
         }
     }
 
@@ -223,6 +251,12 @@ impl FeatureSettings {
             if let Some(scope) = self.search_from {
                 net.search_scope = scope;
             }
+            if let Some(limit) = self.answer_limit {
+                net.answer_per_day = limit.per_day;
+            }
+            if let Some(spend) = self.spend_credits {
+                net.collect_tokens = spend;
+            }
         } else {
             config.network = None;
         }
@@ -252,6 +286,10 @@ mod tests {
             no_default_trust: true,
             trusted: vec!["12D3KooWEwYB7PYxRNgvSWiwkLXvwYajSmYn4yoPqmkN7NbNqJjg".into()],
             search_from: Some(plumb_net::SearchScope::Trusted),
+            answer_limit: Some(AnswerLimit {
+                per_day: Some(5_000),
+            }),
+            spend_credits: Some(false),
         };
         preferences.save(dir.path()).unwrap();
         FeatureSettings::load(dir.path())

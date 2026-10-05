@@ -60,9 +60,10 @@
 //! agree mostly keeps good crawls out. So a node can name nodes it trusts
 //! (`NetConfig::trusted_peers`, `plumb run --trust-peer`): a crawl signed
 //! by one of them is taken in at once, like the node's own, and counts
-//! towards any quorum. Everyone else goes through the rules above. Being
-//! trusted by a node earns nothing else: a trusted crawler is scored like
-//! any other, and its crawls vouch for no one.
+//! towards any quorum. Everyone else goes through the rules above. Each
+//! new crawl taken in from a trusted node earns it credits here (see
+//! [`crate::credits`]); otherwise a trusted crawler is scored like any
+//! other, and its crawls vouch for no one.
 //!
 //! The state is rebuilt from the batches held on disk at start (see
 //! [`crate::store`]), so it needs no file of its own, and observations older
@@ -151,6 +152,9 @@ pub struct Verdict {
     /// towards a quorum, so fresh keys agreeing with each other earn
     /// nothing however lenient agreement is.
     pub witnesses: usize,
+    /// A crawl taken in at once because this node trusts its crawler:
+    /// it needs no witness to earn.
+    pub trusted: bool,
 }
 
 /// What the agreement step holds, for the status page.
@@ -421,11 +425,14 @@ impl Agreement {
             crawled_at,
             judged: false,
         };
+        // A crawl not seen from this crawler before.
+        let mut fresh = true;
         match held.iter_mut().find(|o| o.crawler == crawler) {
             Some(old) if old.crawled_at > crawled_at => return None,
             Some(old) => {
                 // Sending the same crawl again does not earn a second
                 // verdict.
+                fresh = old.crawled_at < crawled_at;
                 observation.judged = old.judged && old.facts.agrees(&observation.facts);
                 *old = observation;
             }
@@ -444,6 +451,15 @@ impl Agreement {
         }
         self.judge_against_own(&domain);
         if self.trusted.contains(&crawler) {
+            if fresh {
+                self.verdicts.push(Verdict {
+                    crawler,
+                    crawled_at,
+                    agreed: true,
+                    witnesses: 0,
+                    trusted: true,
+                });
+            }
             let held = &self.homepages[&domain];
             let facts = held.iter().find(|o| o.crawler == crawler)?.facts.clone();
             let mut record = facts.record(&domain, crawled_at);
@@ -611,6 +627,7 @@ impl Agreement {
             crawled_at: o.crawled_at,
             agreed,
             witnesses,
+            trusted: false,
         });
         let score = self.scores.entry(crawler).or_default();
         if agreed {
@@ -779,13 +796,20 @@ mod tests {
     }
 
     #[test]
-    fn a_trusted_nodes_lone_crawl_is_taken_in_but_scores_nothing() {
+    fn a_trusted_nodes_lone_crawl_is_taken_in_and_earns_once() {
         let (t, me) = (PeerId::random(), PeerId::random());
         let mut agreement = Agreement::new(me, [t]);
         let out = agreement.observe(t, vec![crawl("usbank.com", "U.S. Bank", NOW)], NOW);
         assert_eq!(out.len(), 1);
-        assert!(agreement.take_verdicts().is_empty(), "no credits for it");
-        assert!(!agreement.vouched(&t));
+        let verdicts = agreement.take_verdicts();
+        assert_eq!(verdicts.len(), 1);
+        assert!(verdicts[0].trusted && verdicts[0].agreed && verdicts[0].crawler == t);
+        assert!(!agreement.vouched(&t), "and vouches for no one");
+        // The same crawl again earns nothing more; a newer one does.
+        agreement.observe(t, vec![crawl("usbank.com", "U.S. Bank", NOW)], NOW);
+        assert!(agreement.take_verdicts().is_empty());
+        agreement.observe(t, vec![crawl("usbank.com", "U.S. Bank", NOW + 9)], NOW + 9);
+        assert_eq!(agreement.take_verdicts().len(), 1);
     }
 
     #[test]

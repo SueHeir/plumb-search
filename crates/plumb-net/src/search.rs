@@ -94,6 +94,10 @@ pub struct NetSearch {
     /// Size of the records fetched, for [`crate::rounds::RoundStatus`].
     #[serde(skip)]
     pub bytes: u64,
+    /// The node behind each answer that checked out, once per answer: they
+    /// earn credits for it here (see [`crate::credits`]).
+    #[serde(skip)]
+    pub answered_by: Vec<libp2p::PeerId>,
 }
 
 /// A site another node had, as checked.
@@ -298,6 +302,7 @@ async fn round(
         .count();
     let answers = futures::future::join_all(routed.into_iter().map(
         |(bucket, target, through)| async move {
+            let answerer = target.peer;
             let deadline = tokio::time::Instant::now() + wait;
             let answer = async {
                 let (response, relayed) =
@@ -322,7 +327,7 @@ async fn round(
                     ask_bucket(&target, &through, paid, deadline, now).await?;
                 Ok::<_, anyhow::Error>((response, relayed, true))
             };
-            (bucket, answer.await)
+            (bucket, answerer, answer.await)
         },
     ))
     .await;
@@ -342,7 +347,7 @@ async fn round(
         }
     };
     let mut fetched: HashMap<u32, Vec<Vec<crate::proto::BucketRecord>>> = HashMap::new();
-    for (bucket, answer) in answers {
+    for (bucket, answerer, answer) in answers {
         let (response, relayed, paid) = match answer {
             Ok(response) => response,
             Err(err) => {
@@ -370,6 +375,7 @@ async fn round(
             out.rejected += 1;
             continue;
         };
+        out.answered_by.push(answerer);
         if let Some(records) = keep {
             fetched.entry(bucket).or_default().push(records);
         }

@@ -10,17 +10,27 @@
 //! ([`crate::agree`]), twice that for crawls made before
 //! [`FIRST_YEAR_ENDS`] (the early-adopter head start), and loses
 //! [`DISAGREE_PENALTY`] for each crawl made close in time to one two such
-//! crawlers made that did not match it. Nothing else earns credits yet. Every node sees
-//! the same signed batches, so their ledgers come out much the same, but
-//! each node only ever goes by its own.
+//! crawlers made that did not match it. A node this one trusts
+//! (`NetConfig::trusted_peers`) earns the same for each crawl it takes in
+//! from it, since those skip agreement. And a node earns
+//! [`CREDITS_PER_ANSWER`] for each bucket request of this node's it
+//! answered: work only the node that asked can vouch for, so only its
+//! ledger counts it. Every node sees the same signed batches, so their
+//! ledgers come out much the same for crawls, but each node only ever goes
+//! by its own.
 //!
-//! **What tokens buy: priority when busy.** A node answers a few bucket
-//! requests at once for free and turns more away as busy. A request that
+//! **What tokens buy: being answered when others are not.** A node shares
+//! out the requests it answers for free (see [`crate::allowance`]): a few
+//! at once, so many a minute from any one address or relay, and as many a
+//! day as its owner allows. Past that it says it is busy. A request that
 //! carries a token of its own still gets in, up to a few more at once, so
-//! the people who crawl are answered first when it is swamped. Free
-//! searches still work, they just wait or try another node. A node keeps a
-//! few tokens from each node it searches, topped up in the background, and
-//! spends one only when a node said it was busy.
+//! the nodes that crawl and answer for the network are answered first when
+//! it is swamped. Bucket requests are sent under throwaway identities, so
+//! a token is the only way a request can show it comes from a node that
+//! did its part, and it shows nothing more. Free searches still work, they
+//! just wait or try another node. A node keeps a few tokens from each node
+//! it searches, topped up in the background, and spends one only when a
+//! node said it was busy.
 //!
 //! **Tokens.** Credits are never sent anywhere. A node asks another node,
 //! the **issuer**, for tokens over its own identity; the issuer checks its
@@ -77,8 +87,13 @@ pub const EARLY_MULTIPLIER: i64 = 2;
 /// Credits lost for a crawl that did not match a confirmed one made close
 /// in time: a made-up page costs more than an honest one earns.
 pub const DISAGREE_PENALTY: i64 = 5;
+/// Credits for answering one bucket request of this node's.
+pub const CREDITS_PER_ANSWER: i64 = 1;
 /// Credits one token costs.
 pub const TOKEN_PRICE: i64 = 1;
+/// Bucket requests of ours a node must have answered before it may have
+/// tokens for that work alone, without crawls that count here.
+pub const MIN_ANSWERS_FOR_TOKENS: u64 = 10;
 /// Most tokens issued for one request.
 pub const MAX_ISSUE: usize = 64;
 /// A token's random input, in bytes.
@@ -101,6 +116,9 @@ pub struct Account {
     /// Crawls confirmed, and crawls that did not match.
     pub confirmed: u64,
     pub mismatched: u64,
+    /// Bucket requests of this node's it answered.
+    #[serde(default)]
+    pub answered: u64,
 }
 
 impl Account {
@@ -169,7 +187,14 @@ impl Ledger {
             // strictly (itself included) made the same crawl, so a lone
             // node, or fresh keys agreeing with each other, mint nothing.
             // A crawl costs only when two such crawlers say otherwise.
-            let needed = if verdict.agreed { 1 } else { 2 };
+            // A trusted node's crawls are taken in without a witness.
+            let needed = if verdict.trusted {
+                0
+            } else if verdict.agreed {
+                1
+            } else {
+                2
+            };
             if verdict.witnesses < needed {
                 continue;
             }
@@ -183,6 +208,22 @@ impl Ledger {
             }
             self.dirty = true;
         }
+    }
+
+    /// Credits each of `peers` for answering one bucket request of ours
+    /// (a peer listed twice answered twice).
+    pub fn record_answers(&mut self, peers: &[PeerId]) {
+        for peer in peers {
+            let account = self.accounts.entry(*peer).or_default();
+            account.earned += CREDITS_PER_ANSWER;
+            account.answered += 1;
+            self.dirty = true;
+        }
+    }
+
+    /// Nodes with credits left here.
+    pub fn in_credit(&self) -> usize {
+        self.accounts.values().filter(|a| a.balance() > 0).count()
     }
 
     pub fn account(&self, peer: &PeerId) -> Account {
@@ -561,6 +602,31 @@ pub struct CreditStatus {
     pub tokens_spent: u64,
     /// Tokens this node holds, from all issuers.
     pub tokens_held: usize,
+    /// Bucket requests answered for free today (UTC) for nodes this node
+    /// does not trust, and the owner's daily limit on them, if any.
+    #[serde(default)]
+    pub free_answers_today: u64,
+    #[serde(default)]
+    pub answer_per_day: Option<u64>,
+    /// Bucket requests turned away as busy since start.
+    #[serde(default)]
+    pub turned_away: u64,
+    /// Nodes with credits left here.
+    #[serde(default)]
+    pub in_credit_here: usize,
+    /// This node's credits at each node it searches, as each last said,
+    /// most first.
+    #[serde(default)]
+    pub at_peers: Vec<CreditsAtPeer>,
+}
+
+/// This node's credits as one other node counts them.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreditsAtPeer {
+    pub peer_id: String,
+    pub credits: i64,
+    /// Its work counts there, so it can have tokens for them.
+    pub counts: bool,
 }
 
 fn write_atomic(path: &Path, bytes: &[u8], private: bool) -> Result<()> {
@@ -599,7 +665,33 @@ mod tests {
             crawled_at,
             agreed,
             witnesses: 2,
+            trusted: false,
         }
+    }
+
+    #[test]
+    fn a_trusted_nodes_crawls_earn_without_witnesses() {
+        let t = peer();
+        let mut ledger = Ledger::in_memory();
+        let mut taken_in = verdict(t, FIRST_YEAR_ENDS + 10, true);
+        taken_in.witnesses = 0;
+        taken_in.trusted = true;
+        ledger.record(&[taken_in]);
+        assert_eq!(ledger.account(&t).balance(), CREDITS_PER_CRAWL);
+        assert_eq!(ledger.account(&t).confirmed, 1);
+    }
+
+    #[test]
+    fn answering_earns_and_buys_tokens() {
+        let a = peer();
+        let mut ledger = Ledger::in_memory();
+        ledger.record_answers(&[a, a, a]);
+        assert_eq!(ledger.account(&a).answered, 3);
+        assert_eq!(ledger.account(&a).balance(), 3 * CREDITS_PER_ANSWER);
+        assert_eq!(ledger.in_credit(), 1);
+        assert_eq!(ledger.issuable(&a, true, 10), 3);
+        ledger.charge(&a, 3);
+        assert_eq!(ledger.in_credit(), 0);
     }
 
     #[test]

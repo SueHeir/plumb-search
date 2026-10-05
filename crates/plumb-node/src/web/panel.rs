@@ -44,7 +44,7 @@ use super::{
 };
 use crate::node::backup::{self, Backup, BackupInfo};
 use crate::node::control;
-use crate::node::features::FeatureSettings;
+use crate::node::features::{AnswerLimit, FeatureSettings};
 use crate::node::{
     CrawlHours, LogEntry, LogLevel, NodeSettings, Phase, Retry, Status, Step, Workload, MB,
 };
@@ -300,6 +300,11 @@ pub(super) struct FeaturesForm {
     trusted: String,
     /// Which nodes network searches ask, from the network section.
     search_from: Option<String>,
+    /// Set by the form that shows the credit choices.
+    credits_shown: Option<String>,
+    /// Free answers a day for other nodes; blank for no limit.
+    answer_per_day: String,
+    spend_credits: Option<String>,
 }
 
 pub(super) async fn save_features(State(state): State<AppState>, request: Request) -> Response {
@@ -365,6 +370,29 @@ pub(super) fn apply_features_form(
                 Ok(scope) => features.search_from = Some(scope),
                 Err(err) => return Err(panel_error(StatusCode::BAD_REQUEST, &err.to_string())),
             }
+        }
+        if form.credits_shown.is_some() {
+            let typed: String = form
+                .answer_per_day
+                .chars()
+                .filter(|c| !matches!(c, ',' | '_' | ' ' | '\u{a0}'))
+                .collect();
+            let per_day = if typed.is_empty() {
+                None
+            } else {
+                match typed.parse::<u64>() {
+                    Ok(n) => Some(n),
+                    Err(_) => {
+                        return Err(panel_error(
+                            StatusCode::BAD_REQUEST,
+                            "The daily limit on searches answered for other nodes must be a \
+                             whole number, or blank for no limit. Nothing was changed.",
+                        ))
+                    }
+                }
+            };
+            features.answer_limit = Some(AnswerLimit { per_day });
+            features.spend_credits = Some(form.spend_credits.is_some());
         }
     }
     if let Err(err) = features.check() {
@@ -1851,6 +1879,7 @@ fn render_network_details(body: &mut String, status: &Status) {
     };
     let agreement = &net.agreement;
     card(body, "", "Crawl agreement", &format!("{} sites confirmed", group_thousands(agreement.confirmed_sites as u64)), &format!("<p>{} waiting for agreement · {} disputed.</p><p class=\"hint\">{} trusted crawlers · {} distrusted.</p>", agreement.pending_sites, agreement.disputed_sites, agreement.vouched_crawlers, agreement.distrusted_crawlers));
+    render_credits(body, &net.credits);
     card(
         body,
         "",
@@ -1914,6 +1943,7 @@ fn render_features(
             saved.search_scope(),
             active.search_scope(),
         ));
+        body.push_str(&credit_choices(saved, active));
         body.push_str(&format!(
             "<details{}><summary>Advanced: more bootstrap and trusted nodes</summary>\
              <label for=\"bootstrap\">Bootstrap nodes</label><p class=\"hint\" \
@@ -1932,6 +1962,88 @@ fn render_features(
         body.push_str(&format!("<label for=\"trusted\">Trusted nodes</label><p class=\"hint\" id=\"trusted-help\">Other node ids whose crawls are taken in at once, one per line. Only add nodes you run or know.</p><textarea id=\"trusted\" name=\"trusted\" aria-describedby=\"trusted-help\" spellcheck=\"false\">{}</textarea></details>", escape_html(&saved.trusted.join("\n"))));
     }
     body.push_str("<button type=\"submit\">Save feature settings</button></form>");
+}
+
+/// What this node earned at other nodes, and what it did for them (see
+/// [`plumb_net::credits`]).
+fn render_credits(body: &mut String, credits: &plumb_net::credits::CreditStatus) {
+    let total: i64 = credits.at_peers.iter().map(|at| at.credits.max(0)).sum();
+    let headline = format!("{} credits at other nodes", group_thousands(total as u64));
+    let mut rest = String::new();
+    if credits.at_peers.is_empty() {
+        rest.push_str(
+            "<p>No node has said yet what this node has earned there. Nodes earn credits \
+             at each other by crawling and by answering each other\u{2019}s searches.</p>",
+        );
+    } else {
+        let mut rows = String::new();
+        for at in credits.at_peers.iter().take(8) {
+            let id = &at.peer_id;
+            let short = id.get(id.len().saturating_sub(8)..).unwrap_or(id);
+            let note = if at.counts {
+                ""
+            } else {
+                " \u{b7} not spendable there yet"
+            };
+            rows.push_str(&format!(
+                "<dt title=\"{}\"><code>\u{2026}{}</code></dt><dd>{} credits{note}</dd>",
+                escape_html(id),
+                escape_html(short),
+                group_thousands(at.credits.max(0) as u64)
+            ));
+        }
+        rest.push_str(&format!("<dl>{rows}</dl>"));
+    }
+    let limit = match credits.answer_per_day {
+        Some(n) => format!(" of {} allowed", group_thousands(n)),
+        None => String::new(),
+    };
+    rest.push_str(&format!(
+        "<p>{} searches answered for other nodes today{limit} \u{b7} {} turned away as busy \
+         \u{b7} {} answered for tokens.</p><p class=\"hint\">{} tokens held \u{b7} {} spent at \
+         busy nodes \u{b7} {} nodes have credits here.</p>",
+        group_thousands(credits.free_answers_today),
+        group_thousands(credits.turned_away),
+        group_thousands(credits.priority_answered),
+        group_thousands(credits.tokens_held as u64),
+        group_thousands(credits.tokens_spent),
+        group_thousands(credits.in_credit_here as u64),
+    ));
+    card(body, "", "Credits", &headline, &rest);
+}
+
+/// How much this node helps other nodes, and whether it spends its credits
+/// (see [`plumb_net::allowance`] and [`plumb_net::credits`]).
+fn credit_choices(saved: &FeatureSettings, active: &FeatureSettings) -> String {
+    let per_day = saved.answer_limit.and_then(|l| l.per_day);
+    let running = match active.answer_limit.and_then(|l| l.per_day) {
+        Some(n) => format!("{} a day", group_thousands(n)),
+        None => "no limit".to_owned(),
+    };
+    let spend = saved.spend_credits.unwrap_or(true);
+    let spending = if active.spend_credits.unwrap_or(true) {
+        "on"
+    } else {
+        "off"
+    };
+    format!(
+        "<input type=\"hidden\" name=\"credits_shown\" value=\"1\">\
+         <div class=\"feature\"><label for=\"answer_per_day\">Searches answered for other \
+         nodes each day <span class=\"state\">\u{b7} currently {running}</span></label>\
+         <input id=\"answer_per_day\" name=\"answer_per_day\" inputmode=\"numeric\" \
+         placeholder=\"No limit\" value=\"{}\" aria-describedby=\"answer-help\">\
+         <p class=\"hint\" id=\"answer-help\">How much this node helps the network. Past \
+         this many a day, it answers only nodes that spend credits they earned here by \
+         crawling or answering. Searches on this node\u{2019}s own page are never limited. \
+         Leave blank for no limit.</p></div>\
+         <div class=\"feature\"><label><input type=\"checkbox\" name=\"spend_credits\" \
+         value=\"1\"{}><span>Spend credits when a node is busy <span class=\"state\">\
+         \u{b7} currently {spending}</span></span></label><p class=\"hint\">This node earns \
+         credits at other nodes by crawling and answering their searches, and spends them to \
+         be answered first when they are busy.</p></div>",
+        per_day.map(|n| n.to_string()).unwrap_or_default(),
+        if spend { " checked" } else { "" },
+    )
 }
 
 /// The choice of which nodes network searches ask (see
@@ -2856,6 +2968,7 @@ mod tests {
             "share_popularity=1",
             "network=1&bootstrap=not-an-address",
             "network=1&trust_shown=1&trusted=not-a-node",
+            "network=1&credits_shown=1&answer_per_day=lots",
         ] {
             let response = post(
                 router.clone(),
@@ -2905,6 +3018,44 @@ mod tests {
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
         assert!(node.features.lock().unwrap().no_default_trust);
         assert_eq!(node.features.lock().unwrap().trusted, [node_id]);
+        assert!(page.contains("name=\"answer_per_day\""));
+        assert!(page.contains("name=\"spend_credits\" value=\"1\" checked"));
+        let response = post(
+            router.clone(),
+            "/app/features",
+            "network=1&credits_shown=1&answer_per_day=20%2C000",
+            "127.0.0.1:50000",
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let saved = node.features.lock().unwrap().clone();
+        assert_eq!(saved.answer_limit.unwrap().per_day, Some(20_000));
+        assert_eq!(saved.spend_credits, Some(false));
+        let page = get_section(router.clone(), "network").await;
+        assert!(page.contains("value=\"20000\""), "{page}");
+        let response = post(
+            router.clone(),
+            "/app/features",
+            "network=1&credits_shown=1&answer_per_day=&spend_credits=1",
+            "127.0.0.1:50000",
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let saved = node.features.lock().unwrap().clone();
+        assert_eq!(saved.answer_limit.unwrap().per_day, None, "blank: no limit");
+        assert_eq!(saved.spend_credits, Some(true));
+        // A form without the credit choices leaves them as they were.
+        post(
+            router.clone(),
+            "/app/features",
+            "network=1",
+            "127.0.0.1:50000",
+            None,
+        )
+        .await;
+        assert_eq!(node.features.lock().unwrap().spend_credits, Some(true));
         let response = post(
             router.clone(),
             "/app/features",
@@ -2929,6 +3080,41 @@ mod tests {
         let body = body_text(router.oneshot(request).await.unwrap()).await;
         assert!(body.contains("Settings are read-only"));
         assert!(body.contains("<fieldset disabled>"));
+    }
+
+    #[tokio::test]
+    async fn the_credits_card_says_what_was_earned_and_given() {
+        let mut status = status(Phase::Ready, Step::Idle);
+        status.network = Some(plumb_net::NetStatus {
+            peer_id: "me".into(),
+            credits: plumb_net::credits::CreditStatus {
+                at_peers: vec![
+                    plumb_net::credits::CreditsAtPeer {
+                        peer_id: "12D3KooWfirst-node-AAAAAAAA".into(),
+                        credits: 1_200,
+                        counts: true,
+                    },
+                    plumb_net::credits::CreditsAtPeer {
+                        peer_id: "12D3KooWsecond-node-<BBBBBB>".into(),
+                        credits: 34,
+                        counts: false,
+                    },
+                ],
+                free_answers_today: 4_000,
+                answer_per_day: Some(10_000),
+                turned_away: 7,
+                tokens_held: 16,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        let (router, _) = app(status);
+        let page = get_section(router, "network").await;
+        assert!(page.contains("1,234 credits at other nodes"), "{page}");
+        assert!(page.contains("AAAAAAAA</code></dt><dd>1,200 credits</dd>"));
+        assert!(page.contains("not spendable there yet"));
+        assert!(!page.contains("<BBBBBB>"), "ids are escaped");
+        assert!(page.contains("4,000 searches answered for other nodes today of 10,000 allowed"));
     }
 
     #[tokio::test]

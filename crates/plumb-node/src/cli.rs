@@ -367,6 +367,16 @@ pub struct RunArgs {
     /// Days of the network's crawl batches to keep on disk [default: 35].
     #[arg(long, value_name = "DAYS", requires = "network", value_parser = clap::value_parser!(u64).range(1..))]
     pub keep_batches_days: Option<u64>,
+    /// Most network searches (bucket requests) to answer for free each day
+    /// for other nodes; past it, only requests that spend this node's
+    /// credit tokens are answered. Searches on this node's own page are
+    /// never limited [default: no limit].
+    #[arg(long, value_name = "REQUESTS", requires = "network")]
+    pub answer_per_day: Option<u64>,
+    /// Do not spend credits: never collect tokens from the nodes this node
+    /// searches, so busy nodes turn its searches away like anyone's.
+    #[arg(long, requires = "network")]
+    pub no_spend_credits: bool,
     /// Don't ask trusted nodes for their crawled sites to fill free space
     /// (up to 90% of the storage limit set on the panel, or all of their
     /// sites with no limit).

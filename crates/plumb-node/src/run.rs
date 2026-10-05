@@ -125,6 +125,8 @@ fn node_config(args: RunArgs) -> NodeConfig {
             net.keep_batches_days = days;
         }
         net.fill = !args.no_fill;
+        net.answer_per_day = args.answer_per_day;
+        net.collect_tokens = !args.no_spend_credits;
         if args.blackhole {
             if args.keep_batches_days.is_none() {
                 net.keep_batches_days = u64::MAX;
