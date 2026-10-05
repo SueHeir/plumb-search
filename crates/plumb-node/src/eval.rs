@@ -172,15 +172,8 @@ pub fn run(args: EvalArgs) -> Result<()> {
             let name = file.file_name().and_then(|n| n.to_str()).unwrap_or("");
             let articles = plumb_core::article::read_articles(reader, args.pages_top)?;
             info!("indexing {} pages of {}", articles.len(), file.display());
-            // Files are named after their set: github.tsv.gz,
-            // wikipedia-en.tsv.gz.
-            let set = name.split('.').next().unwrap_or("");
-            let set = if Page::from_set(set, Default::default()).is_some() {
-                set
-            } else {
-                "wikipedia-en"
-            };
-            all.extend(articles.into_iter().filter_map(|a| Page::from_set(set, a)));
+            let set = set_of_file(name);
+            all.extend(articles.into_iter().filter_map(|a| Page::from_set(&set, a)));
         }
         plumb_index::pages::build_page_index(pages_dir.path(), all)?;
         Some(PageSearcher::open(pages_dir.path())?)
@@ -369,8 +362,41 @@ fn format_totals(m: &Metrics, limit: usize) -> String {
     out
 }
 
+/// The page set a file is of, from its name, which starts with the set's:
+/// github.tsv.gz and github-new.tsv.gz are repositories,
+/// wikipedia-en-old.tsv.gz English Wikipedia; any other is English
+/// Wikipedia.
+fn set_of_file(name: &str) -> String {
+    use plumb_index::pages::{BOOKS_SET, GITHUB_SET, PAPERS_SET, STACKOVERFLOW_SET};
+    let stem = name.split('.').next().unwrap_or("");
+    if let Some(set) = [GITHUB_SET, STACKOVERFLOW_SET, BOOKS_SET, PAPERS_SET]
+        .into_iter()
+        .find(|set| stem.starts_with(set))
+    {
+        return set.to_string();
+    }
+    let lang = stem
+        .strip_prefix("wikipedia-")
+        .and_then(|rest| rest.split('-').next())
+        .filter(|lang| !lang.is_empty())
+        .unwrap_or("en");
+    format!("wikipedia-{lang}")
+}
+
 #[cfg(test)]
 mod tests {
+    use super::set_of_file;
+
+    #[test]
+    fn sets_come_from_file_names() {
+        assert_eq!(set_of_file("github.tsv.gz"), "github");
+        assert_eq!(set_of_file("github-new.tsv.gz"), "github");
+        assert_eq!(set_of_file("stackoverflow.tsv.gz"), "stackoverflow");
+        assert_eq!(set_of_file("books.tsv"), "books");
+        assert_eq!(set_of_file("wikipedia-de.tsv.gz"), "wikipedia-de");
+        assert_eq!(set_of_file("wikipedia-en-before157.tsv.gz"), "wikipedia-en");
+        assert_eq!(set_of_file("articles.tsv.gz"), "wikipedia-en");
+    }
 
     #[test]
     fn pages_are_listed_as_a_node_lists_them() {

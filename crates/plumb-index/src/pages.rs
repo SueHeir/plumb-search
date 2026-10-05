@@ -392,6 +392,7 @@ const ORGANIZATION_WORDS: &[&str] = &[
     "app",
     "application",
     "bank",
+    "banking",
     "brand",
     "broker",
     "brokerage",
@@ -406,6 +407,7 @@ const ORGANIZATION_WORDS: &[&str] = &[
     "firm",
     "foundation",
     "framework",
+    "institution",
     "insurer",
     "library",
     "manufacturer",
@@ -1192,7 +1194,7 @@ mod tests {
     #[test]
     fn sites_called_like_organizations_stay_first() {
         let mut bank = page("U.S. Bancorp", 900_000, &["US Bank"]);
-        bank.description = Some("American bank holding company".into());
+        bank.description = Some("American multinational banking institution".into());
         let repo = Page::from_repo(Article {
             title: "firasdib/Regex101".into(),
             views: 5_000,
