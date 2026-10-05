@@ -1,11 +1,11 @@
 //! A PIR snapshot of a node's buckets, cut down to [`lean_record`]s and
 //! packed by [`PieceMap`] into one row of [`LEAN_ROW_BYTES`] per row group.
 //!
-//! On hpc's 1.36M sites (2026-10-05) the lean pieces came to 425 MB
+//! On a node with 1.36M sites (2026-10-05) the lean pieces came to 425 MB
 //! compressed and packed into rows of at most 28.5 KB, so the table is
 //! 16,384 rows of 32 KiB: 512 MiB, the size Spiral's upstream v1 profile
 //! was measured at (`tools/pir-probe`, about half a second and 4 to 5 GB of
-//! memory per row on hpc). Whole buckets of full records needed 4 GiB.
+//! memory per row on that node). Whole buckets of full records needed 4 GiB.
 //!
 //! The records carry no crawl proofs: a proof covers the full record, which
 //! the table does not hold. A client trusts the node that signs the

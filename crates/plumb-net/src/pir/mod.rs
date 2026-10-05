@@ -1,5 +1,5 @@
 //! Private information retrieval: fetching a bucket from a node without
-//! the node learning which bucket it was. See `docs/reviews/pir-handoff.md`
+//! the node learning which bucket it was. See `docs/cache-first-search.md`
 //! for the direction and what PIR does not hide (the asker's address,
 //! timing and how many requests it makes).
 //!

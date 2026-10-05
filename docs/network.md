@@ -105,9 +105,9 @@ memory (or its container's limit), about 2.5 KB a site, so a 4 GB server
 stops at about 800,000 sites. How far it got is in `DIR/net/fill.json` and in
 `GET /api/status` under `fill`, and the panel's Storage card shows it.
 
-**Staying under the storage limit** (Liz, 2026-10-05: "my macbook seems to
-gone over the limit on storage, maybe we find a interesting way to remove
-data that is not of interest"). Crawls other nodes publish keep arriving
+**Staying under the storage limit** (2026-10-05: a desktop node had gone
+over its storage limit, so find a way to remove data that is not of
+interest). Crawls other nodes publish keep arriving
 after filling stops, and page sets, places and vectors sit next to the
 sites, so a node with a limit also holds itself back (`node/trim.rs`):
 

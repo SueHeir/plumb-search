@@ -192,7 +192,7 @@ pub const LEAN_DESCRIPTION_CHARS: usize = 200;
 
 /// A [`slim_record`] without the homepage's text and headings, the
 /// Wikipedia intro and key pages, and with the description cut to
-/// [`LEAN_DESCRIPTION_CHARS`]: what a PIR table holds. On hpc's 1.3M sites
+/// [`LEAN_DESCRIPTION_CHARS`]: what a PIR table holds. On a node with 1.3M sites
 /// it ranked name and description searches the same as full records
 /// (without vectors), at a third of the size.
 pub fn lean_record(record: SiteRecord) -> SiteRecord {
