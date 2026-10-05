@@ -101,7 +101,36 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::Storage(args) => storage::run(args),
         Command::Mcp(args) => mcp::run(args),
         Command::TryPlugin(args) => plugins::try_plugin(&args.plugin, &args.query.join(" ")),
+        Command::Healthcheck(args) => healthcheck(&args),
     }
+}
+
+/// `plumb healthcheck`: GET `<url>/api/status`, an error unless it answers
+/// with a 2xx status within the timeout.
+fn healthcheck(args: &cli::HealthcheckArgs) -> Result<()> {
+    let url = format!("{}/api/status", args.url.trim_end_matches('/'));
+    let timeout = std::time::Duration::from_secs(args.timeout);
+    let client = reqwest::Client::builder()
+        .timeout(timeout)
+        .connect_timeout(timeout)
+        // The node is on this machine (or in this container), which a proxy
+        // from the environment would not reach.
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .context("making the HTTP client")?;
+    let status = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("starting the async runtime")?
+        // `send` sets its timer up when called, so inside the runtime.
+        .block_on(async { client.get(&url).send().await })
+        .with_context(|| format!("asking {url}"))?
+        .status();
+    if !status.is_success() {
+        anyhow::bail!("{url} answered {status}");
+    }
+    Ok(())
 }
 
 /// A multi-threaded Tokio runtime. Only the commands that do network I/O

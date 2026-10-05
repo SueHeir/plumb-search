@@ -1,9 +1,11 @@
 [package]
 name = "plumb-net"
+description = "Plumb nodes talking to each other: sharing crawls and answering each other's searches."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+publish = false
 
 [dependencies]
 anyhow = "1.0.104"

@@ -18,9 +18,11 @@ FROM rust:${RUST_VERSION}-slim-bookworm AS build
 ARG TARGETPLATFORM
 # The private search page's WebAssembly (crates/plumb-private) needs the
 # wasm32 target and the wasm-bindgen command of the same version as the
-# crate (docs/private-search.md). In a layer of its own, so it is built once.
+# crate (docs/private-search.md). cargo-about writes the notices of the
+# crates built in (about.toml). In a layer of its own, so it is built once.
 RUN rustup target add wasm32-unknown-unknown \
  && cargo install wasm-bindgen-cli --version 0.2.108 --locked \
+ && cargo install cargo-about --version 0.9.2 --locked --features cli \
  && rm -rf /usr/local/cargo/registry
 WORKDIR /src
 # The whole workspace (minus what .dockerignore leaves out): `--locked` checks
@@ -38,6 +40,13 @@ RUN --mount=type=cache,id=plumb-cargo-registry,target=/usr/local/cargo/registry 
         target/wasm32-unknown-unknown/wasm/plumb_private.wasm \
  && PLUMB_PRIVATE_DIR=/src/target/private cargo build --release --locked -p plumb-node \
  && install -D -m 0755 target/release/plumb /out/plumb
+# The licenses and notices of every third-party crate in the binary and the
+# private search page (and the desktop app's, which share Cargo.lock).
+# --fail stops the build on a license about.toml does not accept.
+RUN --mount=type=cache,id=plumb-cargo-registry,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=plumb-cargo-git,target=/usr/local/cargo/git/db \
+    cargo about generate --locked --workspace --fail \
+        -o /out/THIRD-PARTY-NOTICES.html about.hbs
 
 
 FROM debian:bookworm-slim
@@ -64,6 +73,7 @@ RUN groupadd --gid 10001 plumb \
  && chown plumb:plumb /data
 
 COPY --link LICENSE-MIT LICENSE-APACHE /usr/share/doc/plumb-search/
+COPY --link --from=build /out/THIRD-PARTY-NOTICES.html /usr/share/doc/plumb-search/
 COPY --link --from=build /out/plumb /usr/local/bin/plumb
 
 USER 10001:10001
@@ -76,5 +86,9 @@ EXPOSE 8080
 # Node-to-node connections (docs/network.md). The node dials out, so it joins
 # without this port published or forwarded; others reach it directly when it is.
 EXPOSE 4001/tcp 4001/udp
+# Asks the node's /api/status on 127.0.0.1:8080, where the default command
+# serves it (and while it sets itself up). A command that binds another port
+# needs a healthcheck of its own: `plumb healthcheck --url http://127.0.0.1:PORT`.
+HEALTHCHECK --interval=60s --timeout=10s --start-period=120s CMD ["plumb", "healthcheck"]
 ENTRYPOINT ["plumb"]
 CMD ["run", "--data", "/data", "--bind", "0.0.0.0:8080", "--network"]

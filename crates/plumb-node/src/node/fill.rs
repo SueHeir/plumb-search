@@ -1086,7 +1086,7 @@ mod tests {
             total: 1_575_323,
             ..FillState::default()
         };
-        // New York went away part-way: the MacBook's list from the top.
+        // New York went away part-way: the laptop's list from the top.
         state.read_list_of("mac".into());
         assert_eq!((state.peer.as_deref(), state.next), (Some("mac"), 0));
         state.next = 2_000;

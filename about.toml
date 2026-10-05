@@ -1,0 +1,43 @@
+# cargo-about: the licenses of the crates built into Plumb Search, and the
+# THIRD-PARTY-NOTICES.html that ships with the Docker image and the desktop
+# installers. `cargo about generate --fail about.hbs` also fails on any crate
+# whose license is not listed here (the CI workflow's licenses job).
+#
+# The licenses the shipped crates in Cargo.lock use (or that cargo-about picks
+# where a crate offers a choice), all compatible with MIT OR Apache-2.0.
+# Earlier entries are preferred where a crate offers a choice.
+accepted = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "CC0-1.0",
+    "MPL-2.0",
+    "CDLA-Permissive-2.0",
+    "bzip2-1.0.6",
+]
+
+# The platforms the server and the desktop app are built for, and the
+# browser's private search.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "wasm32-unknown-unknown",
+]
+
+# Only what is built into what ships: not test-only crates.
+ignore-dev-dependencies = true
+ignore-build-dependencies = false
+
+# This repository's own crates (all `publish = false`), whose licenses ship
+# as LICENSE-MIT and LICENSE-APACHE.
+private = { ignore = true }
+
+# Crates whose license files cargo-about cannot read on its own.
+workarounds = ["ring", "rustls"]

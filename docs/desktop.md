@@ -50,12 +50,21 @@ Above the panel, **This computer** is the app's own node. **+ Connect to a
 node** adds another one, such as a Docker container or homelab server, so the
 app becomes the control center for all of them:
 
-1. Turn on remote control on that node. In its own panel (opened on its
+1. Have the node serve HTTPS: the app sends the token only over HTTPS to
+   anything but this computer. Add `--https-bind 0.0.0.0:8443` to the node's
+   `plumb run` flags and open that port; the node makes its own certificate
+   (see [Docker](docker.md#control-it-from-the-desktop-app)).
+2. Turn on remote control on that node. In its own panel (opened on its
    computer), go to **Remote control** and click **Turn on and make a token**.
    For Docker, run `docker exec <container> plumb remote-control on` on its
-   host. Either way you get a token, shown once.
-2. In the app, click **+ Connect to a node** and enter the node's address
-   (such as `http://192.168.1.20:8080`) and the token.
+   host. Either way you get a token, shown once, and the fingerprint of the
+   node's certificate.
+3. In the app, click **+ Connect to a node** and enter the node's HTTPS
+   address (such as `https://192.168.1.20:8443`), the token and the
+   fingerprint. The app then trusts only that certificate at that address;
+   see [remote-control-security.md](remote-control-security.md). To reach a
+   node without HTTPS, forward a local port to it over SSH and connect to
+   `http://127.0.0.1:<local-port>`.
 
 The node then has its own tab with the same sections. Its forms change that
 node; if it cannot be reached, or its token was replaced, the tab says why
@@ -70,9 +79,11 @@ control it.
 
 ## Get a test build
 
-Every pull request builds the installers in the **Desktop** workflow:
+The **Desktop** workflow builds the installers for pull requests that change
+the desktop app (`crates/plumb-desktop`), for `v*` tags, and when it is run by
+hand:
 
-1. Open the pull request's **Checks** tab, or the repository's **Actions**
+1. Open such a pull request's **Checks** tab, or the repository's **Actions**
    tab, and pick the latest **Desktop** run.
 2. On the run's **Summary** page, under **Artifacts**, download the one for
    your system. Downloading artifacts needs a signed-in GitHub account.
@@ -370,6 +381,25 @@ needs GUI libraries; build it with `-p plumb-desktop` or with the Tauri CLI.
   [NASM](https://www.nasm.us); without NASM installed, set
   `AWS_LC_SYS_PREBUILT_NASM=1` to use the prebuilt objects it ships with
   (`$env:AWS_LC_SYS_PREBUILT_NASM = "1"` in PowerShell).
+
+### Private search's WebAssembly first
+
+Private browser search runs a WebAssembly module (`crates/plumb-private`)
+that the node embeds when it is compiled. Build it first, from the
+repository root, with the same `wasm-bindgen` version as the crate:
+
+```sh
+rustup target add wasm32-unknown-unknown
+cargo install wasm-bindgen-cli --version 0.2.108 --locked
+cargo build --locked -p plumb-private --target wasm32-unknown-unknown --profile wasm
+wasm-bindgen --target web --no-typescript --out-dir target/private \
+    target/wasm32-unknown-unknown/wasm/plumb_private.wasm
+```
+
+The node takes the files from `target/private/`, or from the folder in
+`PLUMB_PRIVATE_DIR` when that is set. Without them the app still builds, but
+it embeds empty files and private search is not in that build
+([private-search.md](private-search.md)).
 
 ### Run and build
 

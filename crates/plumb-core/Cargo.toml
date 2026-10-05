@@ -1,9 +1,11 @@
 [package]
 name = "plumb-core"
+description = "Shared types and helpers for Plumb Search: site records, keys and link scores."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+publish = false
 
 [dependencies]
 anyhow = "1.0.104"
