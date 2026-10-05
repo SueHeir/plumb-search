@@ -44,8 +44,8 @@
       <p>For each site Plumb keeps its name, homepage title and description, and what other sites call it, plus its country and kind from Wikidata. So “banks” lists real banks, and you can pick your country.</p>
     </article>
     <article>
-      <h2>Coming: a shared network</h2>
-      <p>Next, copies of Plumb will share the work of checking sites and search each other without revealing what you looked for. This is still being tested.</p>
+      <h2>A shared network</h2>
+      <p>Copies of Plumb share the work of checking sites and search each other without sending what you looked for. The desktop app and the Docker image join by default.</p>
     </article>
   </section>
 
@@ -60,15 +60,16 @@
       </article>
       <article>
         <h3>Server or homelab</h3>
-        <p>One container for Linux on x86 or ARM, including a 64-bit Raspberry Pi. The search page is on port 8080.</p>
+        <p>One container for Linux on x86 or ARM, including a 64-bit Raspberry Pi. The search page is on port 8080, and port 4001 is for the Plumb network.</p>
 <pre><code>docker run -d --name plumb --init \
-  --restart unless-stopped \
-  -p 8080:8080 -v plumb-data:/data \
+  --restart unless-stopped --stop-timeout 300 \
+  -p 8080:8080 -p 4001:4001/tcp -p 4001:4001/udp \
+  -v plumb-data:/data \
   ghcr.io/sueheir/plumb-search:latest</code></pre>
         <p class="small"><a href="https://github.com/SueHeir/plumb-search/blob/main/docs/docker.md">Docker guide</a>: settings, updates and backups.</p>
       </article>
     </div>
-    <p class="tip"><strong>Make it your browser's search engine.</strong> Open your Plumb page in Firefox, right-click the address bar and choose “Add Plumb Search”. Other browsers can add it by hand with the search address <code>http://127.0.0.1:7586/search?q=%s</code> for the desktop app, or your server's address followed by <code>/search?q=%s</code>.</p>
+    <p class="tip"><strong>Make it your browser's search engine.</strong> Open your Plumb page in Firefox, right-click the address bar and choose “Add Plumb Search”. Other browsers can add it by hand with the search address <code>https://plumbsearch.org/search?q=%s</code> for this site, <code>http://127.0.0.1:7586/search?q=%s</code> for the desktop app, or your server's address followed by <code>/search?q=%s</code>.</p>
   </section>
 
   <section id="site-owners" class="owners">
@@ -77,8 +78,9 @@
     <ul>
       <li>identifies itself as <code>PlumbSearch/&lt;version&gt; (+https://github.com/SueHeir/plumb-search)</code>,</li>
       <li>obeys robots.txt, including <code>Crawl-delay</code>,</li>
-      <li>fetches one page per site: the homepage.</li>
+      <li>fetches the homepage, robots.txt and the site's icon, and for the best-ranked sites their RSS or Atom feed. Links to key pages, such as Log in, are picked from the homepage, not fetched.</li>
     </ul>
+    <p>Two other kinds of request come from Plumb. When someone's AI assistant asks their own node to read a page, the node fetches that one page as <code>plumb-mcp/&lt;version&gt; (+https://github.com/SueHeir/plumb-search)</code>. And each node downloads the European Central Bank's daily exchange rates for currency conversions.</p>
     <p>Every copy of Plumb does its own crawling, so visits can come from many addresses, all following the same rules. To keep Plumb out, add this to your robots.txt:</p>
 <pre><code>User-agent: PlumbSearch
 Disallow: /</code></pre>
@@ -87,18 +89,19 @@ Disallow: /</code></pre>
 
   <section class="roadmap">
     <h2>Where it's going</h2>
-    <p>Today Plumb is a working prototype: each copy builds and searches its own index. Next, copies will share their index with each other, take turns checking sites in the background, and agree on what's popular without revealing who searched for what. No accounts and no ads.</p>
+    <p>Copies of Plumb share their index with each other and take turns checking sites in the background. Next, they will agree on what's popular without revealing who searched for what. No accounts and no ads.</p>
     <ol>
       <li class="done"><strong>One machine.</strong> Build an index from public data and put the official site first.</li>
-      <li><strong>Shared index.</strong> Copies stay in sync with each other, with no central server needed.</li>
-      <li><strong>Community crawling.</strong> Copies take turns checking sites, so the index stays fresh on its own.</li>
-      <li><strong>Private popularity.</strong> Count what people pick without tracking anyone, and keep bots from gaming it.</li>
+      <li class="done"><strong>Shared index.</strong> Copies stay in sync with each other, with no central server needed.</li>
+      <li class="done"><strong>Community crawling.</strong> Copies take turns checking sites and sign what they crawl, so the index stays fresh on its own.</li>
+      <li><strong>Private popularity.</strong> Count what people pick without tracking anyone, and keep bots from gaming it. It works today but is off unless a node turns it on (<code>--share-popularity</code>, or on the settings panel).</li>
     </ol>
   </section>
 </main>
 
 <footer>
   <p>Plumb Search is open source under the MIT or Apache-2.0 license. <a href="https://github.com/SueHeir/plumb-search">Source code on GitHub</a>.</p>
+  <p><a href="/privacy">Privacy</a> · <a href="/credits">Credits</a> · <a href="https://github.com/SueHeir/plumb-search/blob/main/SECURITY.md">Security</a></p>
 </footer>
 </body>
 </html>
