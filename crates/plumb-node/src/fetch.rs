@@ -218,6 +218,22 @@ pub fn run_profiles(args: FetchProfilesArgs) -> Result<()> {
         download::WikidataPacing::default(),
     ))??;
     info!("Wikidata has profiles for {} items", profiles.len());
+    // The items without an article, as a set of their own beside it.
+    let with_articles = plumb_ingest::profiles::items_in_file(&path)?;
+    let items = block_on(plumb_ingest::profiles::fetch_profile_items(
+        &client,
+        download::WIKIDATA_SPARQL_URL,
+        download::WikidataPacing::default(),
+        &profiles,
+        &with_articles,
+    ))??;
+    let items_path = path.with_file_name(format!("{}.tsv.gz", plumb_index::pages::WIKIDATA_SET));
+    plumb_ingest::articles::write_articles_file(&items_path, &items)?;
+    info!(
+        "wrote {} items with profiles and no article to {}",
+        items.len(),
+        items_path.display()
+    );
     let added = plumb_ingest::profiles::add_profiles_to_file(&path, &profiles)?;
     info!(
         "{}: {} of {} articles have profiles, {} in all",

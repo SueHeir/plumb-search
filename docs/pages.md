@@ -43,6 +43,8 @@ plumb fetch-profiles --data /path/to/node-data
 
 It asks Wikidata's query service for each service's property, a page of 200,000 statements at a time, and adds a `profiles` line after each article whose item has any (see `plumb_core::article`). Readers made before profiles skip those lines. Each property's formatter URL is checked first, so a service whose property points elsewhere is left out. Only the identifier is kept; the node builds the address and links only identifiers of the right shape. Run it again after each `fetch-pages`, which writes the file without profiles.
 
+Some items with profiles have no English article: Linus Tech Tips the YouTube channel is a Wikidata item of its own, apart from the article on Linus Media Group. `fetch-profiles` also writes those that have an English name and an official website of their own (a front page, not a profile on one of the services) as the `wikidata` set, `wikidata.tsv.gz` beside the articles file: each with its name, English aliases ("LTT"), description, website and profiles, its sitelinks counted as its views. A page of that set is only ever listed under its website's result, never on its own, so a channel can't stand in for a namesake.
+
 The results page lists an article's profiles in its info box, and a query ending in a service's name ("mrbeast youtube", "valve steam", "spotify android app") shows that profile first when the words before it name an article.
 
 ## Nodes in the network
