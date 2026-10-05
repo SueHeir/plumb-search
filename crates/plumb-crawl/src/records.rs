@@ -90,6 +90,7 @@ pub fn to_records(results: &[CrawlResult]) -> Vec<SiteRecord> {
             CrawlOutcome::RobotsDisallowed
             | CrawlOutcome::HttpStatus { .. }
             | CrawlOutcome::NotHtml { .. }
+            | CrawlOutcome::BotCheck { .. }
             | CrawlOutcome::Failed { .. } => {}
         }
     }

@@ -599,6 +599,15 @@ pub(crate) fn check_answer(
                 }
             }
         }
+        // A bot check a node crawled in place of the homepage, signed or
+        // not, says nothing about the site: neither shown nor kept.
+        if site.record.drop_bot_check() {
+            site.shared = None;
+            site.proof = None;
+            site.verified = false;
+            site.crawler = None;
+            site.crawlers.clear();
+        }
         out.push(site);
     }
     Some(out)
