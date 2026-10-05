@@ -18,7 +18,9 @@
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
-use plumb_core::place::{distance_km, is_kind_word, normalize_region, town_size, Place};
+use plumb_core::place::{
+    distance_km, is_kind_word, normalize_region, parse_place, town_size, write_place, Place,
+};
 use plumb_core::{country_of_name, joined, normalize_text};
 use serde::{Deserialize, Serialize};
 use tantivy::collector::TopDocs;
@@ -41,7 +43,12 @@ const CANDIDATES: usize = 1_000;
 /// Towns of the same name looked at.
 const TOWN_CANDIDATES: usize = 50;
 /// How far around a named place that is not a town places are looked for.
-const LANDMARK_KM: f64 = 2.0;
+const LANDMARK_KM: f64 = 3.0;
+/// Fewer places than this within a town's size: look farther.
+const FEW: usize = 3;
+/// Places of the same name this close (km) are one place mapped twice: a
+/// shop and the pharmacy in it, a building and a point inside it.
+const SAME_PLACE_KM: f64 = 0.15;
 /// How much a town in the searcher's country counts over a bigger one
 /// elsewhere, in [`plumb_core::place::place_rank`] tiers.
 const HOME_COUNTRY_TIERS: f64 = 0.2;
@@ -296,7 +303,10 @@ pub fn build_place_index(
         document.add_text(fields.kind, &place.kind);
         document.add_text(fields.cell, cell(place.lat, place.lon));
         document.add_u64(fields.rank, u64::from(place.rank));
-        document.add_text(fields.place, serde_json::to_string(&place)?);
+        // Stored as its places file line, half the size of JSON.
+        let mut line = Vec::new();
+        write_place(&mut line, &place)?;
+        document.add_text(fields.place, String::from_utf8(line)?);
         writer.add_document(document)?;
         stats.places += 1;
         if place.is_town() {
@@ -393,7 +403,7 @@ impl PlaceSearcher {
         let radius = town_size(&center.kind).unwrap_or(LANDMARK_KM);
         let mut hits = self.around(&asked.what, &center, radius, limit)?;
         let mut radius_km = radius;
-        if hits.is_empty() {
+        if hits.len() < FEW.min(limit) {
             // A small town: look a little farther.
             radius_km = radius * 3.0;
             hits = self.around(&asked.what, &center, radius_km, limit)?;
@@ -447,11 +457,15 @@ impl PlaceSearcher {
             &TopDocs::with_limit(CANDIDATES)
                 .order_by_fast_field::<u64>("rank", tantivy::Order::Desc),
         )?;
+        // "park" is also the stem of "parking".
+        let parking = ["parking", "garage", "car park"]
+            .iter()
+            .any(|word| what.contains(word));
         let mut hits = Vec::new();
         for (_, address) in found {
             let document: TantivyDocument = searcher.doc(address)?;
             let place = self.stored(&document)?;
-            if place.is_town() {
+            if place.is_town() || (place.kind == "amenity=parking" && !parking) {
                 continue;
             }
             let d = distance_km(center.lat, center.lon, place.lat, place.lon);
@@ -467,8 +481,22 @@ impl PlaceSearcher {
             hit.km / (1.0 + 0.1 * (tier - 1.0))
         };
         hits.sort_by(|a, b| key(a).total_cmp(&key(b)));
-        hits.truncate(limit);
-        Ok(hits)
+        let mut kept: Vec<PlaceHit> = Vec::new();
+        for hit in hits {
+            let twice = kept.iter().any(|other| {
+                let (a, b) = (&hit.place, &other.place);
+                let near = distance_km(a.lat, a.lon, b.lat, b.lon) <= SAME_PLACE_KM;
+                let same_site = a.website.is_some() && a.website == b.website;
+                near && (same_site || joined(&a.name) == joined(&b.name))
+            });
+            if !twice {
+                kept.push(hit);
+            }
+            if kept.len() == limit {
+                break;
+            }
+        }
+        Ok(kept)
     }
 
     /// The town (or else other place) `text` names: "denver",
@@ -523,7 +551,7 @@ impl PlaceSearcher {
             .get_first(self.fields.place)
             .and_then(|v| v.as_str())
             .context("a place without its record")?;
-        Ok(serde_json::from_str(stored)?)
+        parse_place(stored)
     }
 }
 
@@ -653,6 +681,15 @@ mod tests {
                 ..at("Pizza Hut", "amenity=fast_food", 39.70, -104.95)
             },
             at("Huckleberry", "amenity=cafe", 39.76, -104.99),
+            // The same café mapped twice, and a car park.
+            at("Huckleberry", "amenity=cafe", 39.7601, -104.9901),
+            at(
+                "Union Station Park-n-Ride",
+                "amenity=parking",
+                39.75,
+                -104.99,
+            ),
+            at("Commons Park", "leisure=park", 39.755, -105.0),
             // Too far from Denver.
             at("Boulder Pizza", "amenity=restaurant", 40.0150, -105.2705),
             at("Pizza Port", "amenity=restaurant", 45.52, -122.67),
@@ -681,6 +718,18 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(coffee.hits[0].place.name, "Huckleberry");
+        assert_eq!(coffee.hits.len(), 1);
+        let parks = searcher
+            .search("park in denver", None, None, 5)
+            .unwrap()
+            .unwrap();
+        let names: Vec<&str> = parks.hits.iter().map(|h| h.place.name.as_str()).collect();
+        assert_eq!(names, ["Commons Park"]);
+        let parking = searcher
+            .search("parking in denver", None, None, 5)
+            .unwrap()
+            .unwrap();
+        assert_eq!(parking.hits[0].place.name, "Union Station Park-n-Ride");
         // The searcher's own town, for "near me".
         let near = searcher
             .search("coffee near me", Some("Denver, CO"), None, 5)

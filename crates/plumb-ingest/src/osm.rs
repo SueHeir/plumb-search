@@ -144,6 +144,16 @@ fn place_of(tags: &[(&str, &str)], osm: String, node: bool) -> Option<Place> {
             .filter(|v| !v.is_empty())
     };
     let name = get("name")?;
+    // Closed for good, but still mapped.
+    let lower = name.to_lowercase();
+    if lower.starts_with("(closed")
+        || lower.starts_with("closed ")
+        || lower.ends_with("(closed)")
+        || get("opening_hours") == Some("closed")
+        || get("end_date").is_some()
+    {
+        return None;
+    }
     let kind = match get("place") {
         Some(value) if TOWN_VALUES.contains(&value) => {
             if !node {
@@ -255,7 +265,23 @@ fn clean_website(raw: &str) -> Option<String> {
     } else {
         return None;
     };
-    let parsed = url::Url::parse(&url).ok()?;
+    let mut url = url;
+    let mut parsed = url::Url::parse(&url).ok()?;
+    // A link copied from Google's results: the address it leads to.
+    if parsed
+        .host_str()
+        .is_some_and(|h| h.starts_with("google.") || h.contains(".google."))
+    {
+        let target = parsed
+            .query_pairs()
+            .find(|(k, _)| k == "url" || k == "q")
+            .map(|(_, v)| v.into_owned())?;
+        parsed = url::Url::parse(&target).ok()?;
+        if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str()?.contains("google.") {
+            return None;
+        }
+        url = parsed.to_string();
+    }
     if parsed.host_str().is_none_or(|h| !h.contains('.')) || url.len() > MAX_WEBSITE_CHARS {
         return None;
     }
@@ -653,6 +679,12 @@ mod tests {
         )
         .is_none());
         assert!(place_of(&tags(&[("amenity", "cafe")]), "n3".into(), true).is_none());
+        assert!(place_of(
+            &tags(&[("name", "(closed) Lowdown Brewery"), ("craft", "brewery")]),
+            "n5".into(),
+            true
+        )
+        .is_none());
         // Towns come from nodes only.
         let town = tags(&[
             ("name", "New York"),
@@ -718,5 +750,13 @@ mod tests {
         assert!(clean_website("mailto:x@y.z").is_none());
         assert!(clean_website("not a site").is_none());
         assert!(clean_website("localhost").is_none());
+        assert_eq!(
+            clean_website(
+                "https://www.google.com/url?sa=t&source=web&url=https://locations.tacobell.com/co/denver/1.html"
+            )
+            .as_deref(),
+            Some("https://locations.tacobell.com/co/denver/1.html")
+        );
+        assert!(clean_website("https://www.google.com/maps/place/x").is_none());
     }
 }
