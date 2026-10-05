@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use plumb_ingest::{articles, download, facts, intros, kind_sites};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::block_on;
 use crate::cli::{FetchDataArgs, FetchPagesArgs, FetchProfilesArgs};
@@ -109,9 +109,8 @@ fn fetch_dump(args: &FetchPagesArgs, url: &str, what: &str) -> Result<std::path:
     }
     info!("downloading {what} from {url}");
     let client = download::http_client()?;
-    let partial = work.join(format!("{}.part", download::file_name_from_url(url)?));
-    block_on(download::download_to_file(&client, url, &partial))??;
-    std::fs::rename(&partial, &path).with_context(|| format!("moving {}", partial.display()))?;
+    // Downloaded to a part file, renamed when whole.
+    block_on(download::download_to_file(&client, url, &path))??;
     Ok(path)
 }
 
@@ -172,13 +171,28 @@ fn run_papers(args: &FetchPagesArgs, dest: &std::path::Path) -> Result<()> {
         args.min_citations
     );
     let client = download::http_client()?;
-    let papers = block_on(plumb_ingest::openalex::fetch_papers(
+    // With --work, the papers so far are kept there, so a run OpenAlex
+    // stops can be carried on.
+    let progress = args.work.as_deref().map(|w| w.join("openalex"));
+    let fetched = block_on(plumb_ingest::openalex::fetch_papers(
         &client,
         args.min_citations,
         args.max_papers,
         key.as_deref(),
+        progress.as_deref(),
     ))??;
-    write_set(dest, &papers, "papers")
+    if !fetched.complete {
+        warn!(
+            "OpenAlex stopped answering: writing the {} most cited papers; run again{} to carry on",
+            fetched.papers.len(),
+            if progress.is_some() {
+                " with the same --work"
+            } else {
+                " with --work DIR"
+            }
+        );
+    }
+    write_set(dest, &fetched.papers, "papers")
 }
 
 /// `plumb fetch-profiles`: adds Wikidata's official profiles to the
