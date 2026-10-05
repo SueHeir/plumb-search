@@ -7,6 +7,7 @@
 //! again once it is [`REFRESH_AFTER`] old and the other node has a newer
 //! one.
 
+use std::collections::HashSet;
 use std::sync::{Arc, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -53,6 +54,7 @@ pub(super) fn run(inner: Arc<Inner>) {
     let mut failed: Option<(String, Instant)> = None;
     let mut fetch_failed: Option<Instant> = None;
     let mut places_failed: Option<(String, Instant)> = None;
+    let mut kept_whole = HashSet::new();
     while !inner.stopping() {
         let mut settings = inner.settings();
         if inner.config.blackhole {
@@ -80,7 +82,7 @@ pub(super) fn run(inner: Arc<Inner>) {
             if !may_cut(set, pages, near.is_some()) {
                 continue;
             }
-            if let Err(err) = cut_if_longer(&inner, set, pages) {
+            if let Err(err) = cut_if_longer(&inner, set, pages, &mut kept_whole) {
                 warn!("page set {}: {err:#}", set.id);
             }
         }
@@ -276,7 +278,16 @@ fn fetch_if_needed(inner: &Inner, net: &NetHandle, set: &SetInfo, pages: u64) ->
 /// the node keeps no more than that (the storage limit or the panel's
 /// choice went down), and the rest takes room for nothing. Taken again
 /// from a trusted node when more are wanted later.
-fn cut_if_longer(inner: &Inner, set: &SetInfo, pages: u64) -> Result<()> {
+///
+/// A file with no notes is the user's own (made by `plumb fetch-pages`),
+/// not one taken from another node, so it is never cut: it could not be
+/// taken back. `kept_whole` holds the sets already said so, to say it once.
+fn cut_if_longer(
+    inner: &Inner,
+    set: &SetInfo,
+    pages: u64,
+    kept_whole: &mut HashSet<&'static str>,
+) -> Result<()> {
     let data = &inner.paths.data;
     let Some(notes) = set.file_notes(data) else {
         return Ok(());
@@ -285,6 +296,16 @@ fn cut_if_longer(inner: &Inner, set: &SetInfo, pages: u64) -> Result<()> {
         return Ok(());
     }
     let file = set.file(data);
+    if is_own_file(&file) {
+        if kept_whole.insert(set.id) {
+            info!(
+                "page set {}: {} has no notes, so it is yours: kept whole under the storage limit",
+                set.id,
+                file.display()
+            );
+        }
+        return Ok(());
+    }
     let mut part = file.as_os_str().to_owned();
     part.push(".part");
     let part = std::path::PathBuf::from(part);
@@ -335,6 +356,12 @@ fn cut_if_longer(inner: &Inner, set: &SetInfo, pages: u64) -> Result<()> {
 /// again whole once they are found, on every restart.
 fn may_cut(set: &SetInfo, pages: u64, homes_known: bool) -> bool {
     homes_known || pages == 0 || set.id != plumb_index::places::PLACES_SET
+}
+
+/// Whether the set file `file` is one the user made, with no notes of
+/// where it was taken from.
+fn is_own_file(file: &std::path::Path) -> bool {
+    file.is_file() && !notes_path(file).exists()
 }
 
 fn write_notes(file: &std::path::Path, notes: &SetFileNotes) -> Result<()> {
@@ -428,5 +455,26 @@ mod tests {
         assert!(may_cut(places, 0, false));
         // Other sets do not depend on the towns.
         assert!(may_cut(wikipedia, 1_000, false));
+    }
+
+    #[test]
+    fn a_set_file_with_no_notes_is_the_user_s_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = SetInfo::find("wikipedia-en").unwrap().file(dir.path());
+        assert!(!is_own_file(&file), "no file");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, b"").unwrap();
+        assert!(is_own_file(&file), "made by fetch-pages: kept whole");
+        write_notes(
+            &file,
+            &SetFileNotes {
+                lines: 10,
+                complete: true,
+                source_modified: 0,
+                fetched_at: 0,
+            },
+        )
+        .unwrap();
+        assert!(!is_own_file(&file), "taken from another node");
     }
 }
