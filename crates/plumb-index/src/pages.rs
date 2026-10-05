@@ -936,12 +936,17 @@ pub fn place_pages(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) -> Ve
             });
         if let Some(site) = hit.page.site.as_deref() {
             if sites.iter().any(|s| s.domain == site) {
-                if !placed.iter().any(|p| p.under.as_deref() == Some(site)) {
-                    placed.push(PlacedPage {
+                // The best page about the site goes under it, unless a
+                // later one is named by the query: "google maps" carries
+                // Google Maps under google.com, not Google.
+                match placed.iter_mut().find(|p| p.under.as_deref() == Some(site)) {
+                    None => placed.push(PlacedPage {
                         under: Some(site.to_string()),
                         at: 0,
                         hit,
-                    });
+                    }),
+                    Some(carried) if hit.named && !carried.hit.named => carried.hit = hit,
+                    Some(_) => {}
                 }
                 continue;
             }
@@ -1336,6 +1341,23 @@ mod tests {
         // under it only after the sites.
         assert_eq!(placed[1].hit.page.title, "Python (genus)");
         assert_eq!((placed[1].under.as_deref(), placed[1].at), (None, 2));
+    }
+
+    #[test]
+    fn the_page_the_query_names_goes_under_its_site() {
+        let sites = [site("google.com", false), site("a.com", false)];
+        let placed = place_pages(
+            "google maps",
+            &sites,
+            vec![
+                found("Google", Some("google.com"), false, 0.9),
+                found("Google Maps", Some("google.com"), true, 0.8),
+                found("Google Search", Some("google.com"), false, 0.7),
+            ],
+        );
+        assert_eq!(placed.len(), 1);
+        assert_eq!(placed[0].under.as_deref(), Some("google.com"));
+        assert_eq!(placed[0].hit.page.title, "Google Maps");
     }
 
     #[test]

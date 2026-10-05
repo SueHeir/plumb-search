@@ -1077,31 +1077,29 @@ impl Searcher {
             .fold(0.0, f32::max);
         let trusted_link_score =
             unit_or(cfg.trusted_link_score, default.trusted_link_score).min(named_link_score);
-        // Sites the query names in full that nothing describes: never
-        // crawled, with no title, description or Wikidata words. While the
-        // query also names a site by its first words, such a bare name
-        // (you-tubemusic.com, googlemaps.com) is only a spelling of the
-        // query, so it gets no more trust than a site with no links does,
-        // whatever its link score: youtube.com wins "youtube music".
+        // Sites the query names in full that no one else names: no link
+        // text and no other name (from Wikidata or a redirect), less linked
+        // than the site the query names by its first words. Such a bare
+        // name (you-tubemusic.com, applemusic.co.kr, a K-pop shop) is only
+        // a spelling of the query, so it gets no more trust than a site
+        // with no links does: youtube.com wins "youtube music". Sites
+        // people do link to by name keep it, crawled or not (homedepot.com,
+        // which turns crawlers away, for "home depot").
         let mut bare: HashSet<DocAddress> = HashSet::new();
         if trusted_link_score > 0.0 {
             for (&addr, name) in &names {
-                if name.typed || name.words() < query.len {
+                if name.typed || name.words() < query.len || link_score_of(addr) >= named_link_score
+                {
                     continue;
                 }
-                let doc: TantivyDocument = searcher.doc(addr)?;
-                let described = [
-                    self.fields.title,
-                    self.fields.description,
-                    self.fields.about,
-                ]
-                .into_iter()
-                .any(|field| {
-                    doc.get_all(field)
-                        .filter_map(|value| value.as_str())
-                        .any(|text| !text.trim().is_empty())
-                });
-                if !described {
+                let segment = searcher.segment_reader(addr.segment_ord);
+                let mut named_by_others = false;
+                for field in [self.fields.anchors, self.fields.aliases] {
+                    if let Some(norms) = segment.fieldnorms_readers().get_field(field)? {
+                        named_by_others |= norms.fieldnorm(addr.doc_id) > 0;
+                    }
+                }
+                if !named_by_others {
                     bare.insert(addr);
                 }
             }
@@ -2962,6 +2960,70 @@ mod tests {
         assert_eq!(hits[0].domain, "youtube.com", "{:?}", domains(&hits));
         // With no other site named, the bare name is the answer.
         assert_eq!(top(&searcher, "you tubemusic"), "you-tubemusic.com");
+    }
+
+    #[test]
+    fn names_no_one_else_uses_lose_to_the_site_named_first() {
+        let mut korean = obscure(300_000, 0);
+        korean.harmonic_rank = None;
+        korean.tranco_rank = Some(387_099);
+        let records = [
+            site(
+                "apple.com",
+                Some("Apple"),
+                Some("Discover the innovative world of Apple."),
+                &["Apple Inc."],
+                &[("apple", 24), ("apple maps", 9)],
+                popular(10, 2_000),
+            ),
+            // Crawled, but no one links to it or calls it anything.
+            site(
+                "applemusic.co.kr",
+                Some("애플뮤직"),
+                Some("KPOP 앨범, 아이돌 굿즈 applemusic 공식 쇼핑몰"),
+                &[],
+                &[],
+                korean,
+            ),
+            site(
+                "musicfans.net",
+                Some("Apple Music playlists | Apple Music fans"),
+                Some("The best Apple Music playlists, picked by Apple Music fans."),
+                &[],
+                &[("apple music playlists", 4)],
+                obscure(80_000, 3),
+            ),
+            site(
+                "home.com",
+                Some("Home"),
+                Some("Homes for sale."),
+                &[],
+                &[("home", 40)],
+                obscure(5_000, 40),
+            ),
+            // Turns crawlers away, but people link to it by name.
+            site(
+                "homedepot.com",
+                None,
+                None,
+                &[],
+                &[("home depot", 200), ("the home depot", 80)],
+                popular(60, 3_000),
+            ),
+            site(
+                "homedepot.com.mx",
+                Some("The Home Depot México"),
+                Some("Home Depot: herramientas y materiales."),
+                &[],
+                &[],
+                obscure(40_000, 2),
+            ),
+        ];
+        let (_dir, searcher) = build(&records);
+        let hits = searcher.search("apple music", 10).unwrap();
+        assert_eq!(hits[0].domain, "apple.com", "{:?}", domains(&hits));
+        let hits = searcher.search("home depot", 10).unwrap();
+        assert_eq!(hits[0].domain, "homedepot.com", "{:?}", domains(&hits));
     }
 
     #[test]
