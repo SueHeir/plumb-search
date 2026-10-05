@@ -1097,6 +1097,7 @@ async fn a_node_in_the_network_takes_in_other_nodes_crawls_and_searches_them() {
     let dir = seeded_dir();
     let mut config = test_config(dir.path());
     let mut net = plumb_net::NetConfig::new(PathBuf::new());
+    net.search_scope = plumb_net::SearchScope::Anyone;
     net.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
     net.upnp = false;
     net.local_discovery = false;
@@ -1142,6 +1143,7 @@ async fn a_node_in_the_network_takes_in_other_nodes_crawls_and_searches_them() {
     crawled.title = Some("Lighthouse Keepers Guild".to_string());
     crawled.crawled_at = Some(now);
     let mut peer_config = plumb_net::NetConfig::new(peer_dir.path().to_path_buf());
+    peer_config.search_scope = plumb_net::SearchScope::Anyone;
     peer_config.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
     peer_config.upnp = false;
     peer_config.local_discovery = false;
@@ -1252,6 +1254,7 @@ async fn a_node_in_the_network_takes_in_other_nodes_crawls_and_searches_them() {
     );
     let second_config = {
         let mut c = plumb_net::NetConfig::new(second_dir.path().to_path_buf());
+        c.search_scope = plumb_net::SearchScope::Anyone;
         c.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
         c.upnp = false;
         c.local_discovery = false;
@@ -1297,6 +1300,7 @@ async fn a_network_search_fills_in_text_this_node_lacks() {
     let dir = seeded_dir();
     let mut config = test_config(dir.path());
     let mut net = plumb_net::NetConfig::new(PathBuf::new());
+    net.search_scope = plumb_net::SearchScope::Anyone;
     net.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
     net.upnp = false;
     net.local_discovery = false;
@@ -1338,6 +1342,7 @@ async fn a_network_search_fills_in_text_this_node_lacks() {
     crawled.description = Some("Communities for every interest, from news to hobbies".to_string());
     crawled.crawled_at = Some(now);
     let mut peer_config = plumb_net::NetConfig::new(peer_dir.path().to_path_buf());
+    peer_config.search_scope = plumb_net::SearchScope::Anyone;
     peer_config.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
     peer_config.upnp = false;
     peer_config.local_discovery = false;
@@ -1403,6 +1408,7 @@ async fn a_node_sharing_popularity_reports_picks_and_ranks_with_the_networks() {
     let dir = seeded_dir();
     let mut config = test_config(dir.path());
     let mut net = plumb_net::NetConfig::new(PathBuf::new());
+    net.search_scope = plumb_net::SearchScope::Anyone;
     net.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
     net.upnp = false;
     net.local_discovery = false;
@@ -1437,6 +1443,7 @@ async fn a_node_sharing_popularity_reports_picks_and_ranks_with_the_networks() {
     // Another node to hand the report to.
     let peer_dir = tempfile::tempdir().unwrap();
     let mut peer_config = plumb_net::NetConfig::new(peer_dir.path().to_path_buf());
+    peer_config.search_scope = plumb_net::SearchScope::Anyone;
     peer_config.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
     peer_config.upnp = false;
     peer_config.local_discovery = false;
@@ -1944,6 +1951,7 @@ async fn a_node_fills_its_free_space_with_a_trusted_node_s_crawls() {
         })
         .collect();
     let mut peer_config = plumb_net::NetConfig::new(peer_dir.path().to_path_buf());
+    peer_config.search_scope = plumb_net::SearchScope::Anyone;
     peer_config.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
     peer_config.upnp = false;
     peer_config.local_discovery = false;
@@ -1962,6 +1970,7 @@ async fn a_node_fills_its_free_space_with_a_trusted_node_s_crawls() {
     let dir = seeded_dir();
     let mut config = test_config(dir.path());
     let mut net = plumb_net::NetConfig::new(PathBuf::new());
+    net.search_scope = plumb_net::SearchScope::Anyone;
     net.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
     net.upnp = false;
     net.local_discovery = false;
@@ -2044,6 +2053,7 @@ async fn a_node_takes_wikipedia_articles_from_a_trusted_node() {
     )
     .unwrap();
     let mut peer_config = plumb_net::NetConfig::new(peer_dir.path().to_path_buf());
+    peer_config.search_scope = plumb_net::SearchScope::Anyone;
     peer_config.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
     peer_config.upnp = false;
     peer_config.local_discovery = false;
@@ -2063,6 +2073,7 @@ async fn a_node_takes_wikipedia_articles_from_a_trusted_node() {
     let mut config = test_config(dir.path());
     config.settings.page_sets = crate::pages::PageSets::parse("wikipedia-en=2").unwrap();
     let mut net = plumb_net::NetConfig::new(PathBuf::new());
+    net.search_scope = plumb_net::SearchScope::Anyone;
     net.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
     net.upnp = false;
     net.local_discovery = false;
@@ -2128,6 +2139,7 @@ async fn a_new_node_sets_up_from_a_trusted_node_without_the_seed_downloads() {
     })
     .collect();
     let mut peer_config = plumb_net::NetConfig::new(peer_dir.path().to_path_buf());
+    peer_config.search_scope = plumb_net::SearchScope::Anyone;
     peer_config.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
     peer_config.upnp = false;
     peer_config.local_discovery = false;
@@ -2150,6 +2162,7 @@ async fn a_new_node_sets_up_from_a_trusted_node_without_the_seed_downloads() {
     config.sites = 10;
     config.settings.setup_chosen = false;
     let mut net = plumb_net::NetConfig::new(PathBuf::new());
+    net.search_scope = plumb_net::SearchScope::Anyone;
     net.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
     net.upnp = false;
     net.local_discovery = false;
@@ -2220,6 +2233,7 @@ async fn a_new_node_that_trusts_no_one_still_sets_up_from_the_seed_downloads() {
     let dir = tempfile::tempdir().unwrap();
     let mut config = test_config(dir.path());
     let mut net = plumb_net::NetConfig::new(PathBuf::new());
+    net.search_scope = plumb_net::SearchScope::Anyone;
     net.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
     net.upnp = false;
     net.local_discovery = false;

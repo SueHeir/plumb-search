@@ -267,6 +267,10 @@ fn two_nodes_exchange_crawls_and_searches() {
             common.push(flag);
         }
     }
+    // The two nodes trust nobody, so they search each other as strangers.
+    if help.contains("--search-from") {
+        common.extend(["--search-from", "anyone"]);
+    }
     let common = common.as_slice();
     let mut first = Node::new("first", Some(&network), common);
     if !real {

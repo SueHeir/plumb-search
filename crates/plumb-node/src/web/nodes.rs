@@ -532,9 +532,10 @@ async fn add(State(state): State<AppState>, request: Request) -> Response {
         token,
         fingerprint,
     };
-    if let Err(ClientError(error)) = fetch_view(&remote).await {
-        return again(&error);
-    }
+    let view = match fetch_view(&remote).await {
+        Ok(view) => view,
+        Err(ClientError(error)) => return again(&error),
+    };
     let dir = node.data_dir().expect("checked by manager");
     let saved = load(&dir).and_then(|mut nodes| {
         // Connecting to the same node again replaces its token.
@@ -549,7 +550,59 @@ async fn add(State(state): State<AppState>, request: Request) -> Response {
         );
     }
     info!("connected to the node at {}", remote.url);
+    trust_each_other(node.as_ref(), &remote, &view).await;
     Redirect::to(&format!("/app/nodes/{}", remote.id)).into_response()
+}
+
+/// Makes this node and `remote`, just connected with `view`, trust each
+/// other's crawls (Liz, 2026-10-05: "when you add a node via control, that
+/// node should become trusted"). Each saves the other in its trusted nodes,
+/// which apply when it restarts. A node whose network was never on has no
+/// id yet and is left out; nothing here stops the connection.
+async fn trust_each_other(node: &dyn StatusSource, remote: &RemoteNode, view: &ControlView) {
+    let theirs = view.status.network.as_ref().map(|net| net.peer_id.clone());
+    let ours = node
+        .status()
+        .network
+        .map(|net| net.peer_id)
+        .or_else(|| own_peer_id(&node.data_dir()?));
+    if theirs.is_some() && theirs == ours {
+        return;
+    }
+    if let Some(theirs) = &theirs {
+        let saved = node.saved_features().and_then(|mut features| {
+            if features.trust(theirs) {
+                node.change_features(features)?;
+                info!("now trusting {theirs}, the node at {}", remote.url);
+            }
+            Ok(())
+        });
+        if let Err(err) = saved {
+            warn!("could not trust the node at {}: {err:#}", remote.url);
+        }
+    }
+    if let Some(ours) = &ours {
+        let mut features = view.saved_features.clone();
+        if features.trust(ours) {
+            let body = serde_json::to_vec(&features).expect("features as JSON");
+            match call(remote, "/api/control/features", Some(body)).await {
+                Ok(_) => info!("the node at {} now trusts this one", remote.url),
+                Err(ClientError(err)) => {
+                    warn!("the node at {} could not trust this one: {err}", remote.url)
+                }
+            }
+        }
+    }
+}
+
+/// This node's id from its network key, when it has one, without making
+/// one.
+fn own_peer_id(dir: &Path) -> Option<String> {
+    let key = dir.join("net").join("node.key");
+    key.exists()
+        .then(|| plumb_net::load_or_create_key(&key).ok())
+        .flatten()
+        .map(|key| key.public().to_peer_id().to_string())
 }
 
 /// The saved node `id`, or the page to answer with.
@@ -942,6 +995,8 @@ mod end_to_end {
         settings: Mutex<NodeSettings>,
         features: Mutex<FeatureSettings>,
         refreshes: Mutex<usize>,
+        /// Its network id, once it has joined the network.
+        peer: Mutex<Option<String>>,
     }
 
     impl FakeNode {
@@ -952,6 +1007,7 @@ mod end_to_end {
                 settings: Mutex::new(NodeSettings::default()),
                 features: Mutex::new(FeatureSettings::default()),
                 refreshes: Mutex::new(0),
+                peer: Mutex::new(None),
             })
         }
     }
@@ -982,7 +1038,15 @@ mod end_to_end {
                 meaning_work: None,
                 can_restart: false,
                 paused_until: None,
-                network: None,
+                network: self
+                    .peer
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .map(|peer_id| plumb_net::NetStatus {
+                        peer_id,
+                        ..Default::default()
+                    }),
                 fill: None,
             }
         }
@@ -1351,6 +1415,43 @@ mod end_to_end {
             panel_request(app.clone(), "POST", &format!("{panel}/remove"), "").await;
         assert_eq!(status, StatusCode::SEE_OTHER);
         assert!(load(desktop.dir.path()).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn connecting_to_a_node_makes_the_two_trust_each_other() {
+        let server = FakeNode::new(false);
+        let server_url = serve(server.clone()).await;
+        let desktop = FakeNode::new(true);
+        let app = node_router(Arc::new(NoSearch), desktop.clone());
+        let server_id = "12D3KooWEwYB7PYxRNgvSWiwkLXvwYajSmYn4yoPqmkN7NbNqJjg";
+        let desktop_id = plumb_net::PeerId::random().to_string();
+        *server.peer.lock().unwrap() = Some(server_id.into());
+        *desktop.peer.lock().unwrap() = Some(desktop_id.clone());
+        server.features.lock().unwrap().trusted = vec![desktop_id.clone()];
+
+        let token = control::turn_on(server.dir.path(), false).unwrap();
+        let address =
+            server_url
+                .trim_start_matches("http://")
+                .replacen("127.0.0.1", "localhost", 1);
+        let connect = form(&[("address", &address), ("token", &token)]);
+        for _ in 0..2 {
+            let (status, _, page) =
+                panel_request(app.clone(), "POST", "/app/nodes", &connect).await;
+            assert_eq!(status, StatusCode::SEE_OTHER, "{page}");
+        }
+        // Each once, however often it connects.
+        assert_eq!(desktop.features.lock().unwrap().trusted, [server_id]);
+        assert_eq!(server.features.lock().unwrap().trusted, [desktop_id]);
+
+        // A desktop that never joined the network is trusted once it has.
+        let fresh = FakeNode::new(true);
+        let app = node_router(Arc::new(NoSearch), fresh.clone());
+        server.features.lock().unwrap().trusted.clear();
+        let (status, _, _) = panel_request(app, "POST", "/app/nodes", &connect).await;
+        assert_eq!(status, StatusCode::SEE_OTHER);
+        assert_eq!(fresh.features.lock().unwrap().trusted, [server_id]);
+        assert!(server.features.lock().unwrap().trusted.is_empty());
     }
 
     #[tokio::test]

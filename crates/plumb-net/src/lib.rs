@@ -11,6 +11,8 @@
 //!   node answering does not see who asks.
 //! * [`rounds`]: bucket requests sent in the background at random times,
 //!   built like a search's, so searches look like the rest of the traffic.
+//! * [`scope`]: which nodes a search asks: trusted ones, friends of
+//!   friends, or anyone.
 //! * [`joining`]: the default bootstrap nodes, and why a node is not
 //!   connected.
 //! * [`hash`]: hashes and the Merkle tree that proves one record of a batch.
@@ -38,6 +40,7 @@ pub mod popularity;
 pub mod proto;
 pub mod reports;
 pub mod rounds;
+pub mod scope;
 pub mod search;
 pub mod store;
 pub mod throwaway;
@@ -50,5 +53,6 @@ pub use libp2p::{Multiaddr, PeerId};
 pub use node::{load_or_create_key, start, CreditsAt, NetConfig, NetHandle, NetStatus};
 pub use pages::PagesChunk;
 pub use popularity::{PickLog, PopularityTable, Report};
+pub use scope::SearchScope;
 pub use search::{FoundSite, NetSearch};
 pub use store::CrawlerView;

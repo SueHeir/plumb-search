@@ -114,6 +114,9 @@ fn node_config(args: RunArgs) -> NodeConfig {
             net.trusted_peers.clear();
         }
         net.trusted_peers.extend(args.trust_peer);
+        if let Some(scope) = args.search_from {
+            net.search_scope = scope;
+        }
         if let Some(days) = args.keep_batches_days {
             net.keep_batches_days = days;
         }
@@ -311,6 +314,12 @@ mod tests {
         );
         let none = config(&["--data", "d", "--network", "--no-default-trust"]);
         assert!(none.network.unwrap().trusted_peers.is_empty());
+        assert_eq!(net.search_scope, plumb_net::SearchScope::FriendsOfFriends);
+        let anyone = config(&["--data", "d", "--network", "--search-from", "anyone"]);
+        assert_eq!(
+            anyone.network.unwrap().search_scope,
+            plumb_net::SearchScope::Anyone
+        );
         assert_eq!(net.listen[0].to_string(), "/ip4/0.0.0.0/tcp/4100");
         // The network's own first nodes, then the one given.
         assert_eq!(net.bootstrap.len(), plumb_net::DEFAULT_BOOTSTRAP.len() + 1);

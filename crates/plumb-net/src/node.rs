@@ -86,6 +86,7 @@ use crate::popularity::{report_epoch, PopularityTable, Report};
 use crate::proto::*;
 use crate::reports::ReportStore;
 use crate::rounds::{Pace, PendingBuckets, RoundStatus, ROUND_EVERY};
+use crate::scope::{Friends, SearchScope, MAX_SHARED_TRUST};
 use crate::search::{BucketPeer, NetSearch};
 use crate::store::{BatchStore, CrawlerView, RETAIN_EPOCHS};
 
@@ -139,6 +140,10 @@ pub const REPORT_TRIES: usize = 3;
 pub const RECOUNT_MINUTES: u64 = 10;
 /// Where the counted reports are written, for anyone curious.
 const POPULARITY_FILE: &str = "popularity.json";
+/// Where what the trusted nodes trust is kept (see [`crate::scope`]).
+const FRIENDS_FILE: &str = "friends.json";
+/// The scope the bucket cache was filled under.
+const SCOPE_FILE: &str = "search-scope";
 
 /// Nodes every node trusts unless told otherwise (see
 /// [`NetConfig::trusted_peers`]): the plumbsearch.org node, so a new node
@@ -178,6 +183,9 @@ pub struct NetConfig {
     /// of waiting for a second crawler to agree (see `crate::agree`).
     /// [`DEFAULT_TRUSTED_PEERS`] unless changed.
     pub trusted_peers: Vec<PeerId>,
+    /// Which nodes this node's network searches ask (see [`crate::scope`]):
+    /// friends of friends unless changed.
+    pub search_scope: SearchScope,
     /// Bucket requests answered at once for free, [`MAX_ANSWERING`] unless
     /// changed; up to [`PRIORITY_SLOTS`] more for requests that spend a
     /// token.
@@ -221,6 +229,7 @@ impl NetConfig {
                 .iter()
                 .map(|id| id.parse().expect("a valid peer id"))
                 .collect(),
+            search_scope: SearchScope::default(),
             max_answering: MAX_ANSWERING,
             collect_tokens: true,
             keep_batches_days: RETAIN_EPOCHS,
@@ -290,6 +299,16 @@ pub struct NetStatus {
     /// (see [`crate::rounds`]); no separate search or pending-query counters.
     #[serde(default)]
     pub rounds: RoundStatus,
+    /// Which nodes this node's network searches ask.
+    #[serde(default)]
+    pub search_scope: SearchScope,
+    /// Nodes the trusted nodes trust, as far as they told this node.
+    #[serde(default)]
+    pub friends_of_friends: usize,
+    /// Connected nodes that answer searches and that this node's searches
+    /// may ask under [`NetStatus::search_scope`].
+    #[serde(default)]
+    pub search_peers: usize,
 }
 
 /// How many connected nodes [`NetStatus::peers`] lists.
@@ -815,6 +834,7 @@ struct Behaviour {
     credits: request_response::cbor::Behaviour<CreditRequest, CreditResponse>,
     fill: request_response::cbor::Behaviour<FillRequest, FillResponse>,
     pages: request_response::cbor::Behaviour<PagesRequest, PagesResponse>,
+    trust: request_response::cbor::Behaviour<TrustRequest, TrustResponse>,
 }
 
 /// Starts the network side of a node. Returns its handle and the records
@@ -898,6 +918,7 @@ pub async fn start(
         popular_picks: table.picks.len(),
         agreement: agreement.status(),
         crawlers: crawler_views(&store, peer_id, &config.trusted_peers, now_unix()),
+        search_scope: config.search_scope,
         ..NetStatus::default()
     }));
     let popularity = Arc::new(RwLock::new(Arc::new(table)));
@@ -959,6 +980,8 @@ pub async fn start(
         bootstrap_peers: config.bootstrap.iter().filter_map(peer_of).collect(),
         problem: None,
         alone_since: Some(now_unix()),
+        friends: Friends::open(&config.dir.join(FRIENDS_FILE)),
+        trust_listing: HashSet::new(),
     };
     for addr in &config.bootstrap {
         task.dial(addr.clone());
@@ -968,6 +991,26 @@ pub async fn start(
         &config.dir.join("bucket-cache"),
         now_unix(),
     ));
+    // Buckets kept from nodes a narrower scope no longer asks would still
+    // answer searches, so a change of scope starts the cache afresh.
+    let scope_file = config.dir.join(SCOPE_FILE);
+    // Nodes from before scopes asked anyone.
+    let last_scope = std::fs::read_to_string(&scope_file)
+        .ok()
+        .and_then(|text| text.parse().ok())
+        .unwrap_or(SearchScope::Anyone);
+    if last_scope != config.search_scope || !scope_file.exists() {
+        if last_scope != config.search_scope {
+            info!(
+                "searches now ask {}: forgetting fetched buckets",
+                config.search_scope
+            );
+            cache.clear();
+        }
+        if let Err(err) = std::fs::write(&scope_file, config.search_scope.as_str()) {
+            warn!("writing {}: {err}", scope_file.display());
+        }
+    }
     let pace = Arc::new(Pace::new(config.round_every));
     status
         .lock()
@@ -1301,6 +1344,13 @@ fn build_swarm(key: &Keypair, config: &NetConfig) -> Result<Swarm<Behaviour>> {
                             u64::from(crate::pages::MAX_PAGES_CHUNK) + 64 * 1024,
                         ),
                     [(StreamProtocol::new(PAGES_PROTOCOL), ProtocolSupport::Full)],
+                    request_config.clone(),
+                ),
+                trust: request_response::Behaviour::with_codec(
+                    request_response::cbor::codec::Codec::default()
+                        .set_request_size_maximum(64)
+                        .set_response_size_maximum(64 * 1024),
+                    [(StreamProtocol::new(TRUST_PROTOCOL), ProtocolSupport::Full)],
                     request_config,
                 ),
             })
@@ -1414,6 +1464,11 @@ struct Task {
     fill_asking: HashMap<OutboundRequestId, (bool, FillReply)>,
     /// Connected nodes this node trusts that serve page sets.
     pages_peers: HashSet<PeerId>,
+    /// What this node's trusted nodes trust, for searches that ask friends
+    /// of friends (see [`crate::scope`]).
+    friends: Friends,
+    /// Trusted nodes asked what they trust since they last connected.
+    trust_listing: HashSet<PeerId>,
     /// Page set requests being answered.
     pages_serving: usize,
     /// Page set requests answered for each node, and the minute counted.
@@ -1487,12 +1542,13 @@ impl Task {
                 let _ = reply.send(counting);
             }
             Command::Peers(serving, reply) => {
-                let serving = match serving {
-                    Serving::Buckets => &self.bucket_peers,
-                    Serving::Reports => &self.report_peers,
+                let (serving, scoped) = match serving {
+                    Serving::Buckets => (&self.bucket_peers, true),
+                    Serving::Reports => (&self.report_peers, false),
                 };
                 let peers = serving
                     .iter()
+                    .filter(|(peer, _)| !scoped || self.may_search(peer))
                     .map(|(peer, listening)| {
                         let mut addrs = listening.clone();
                         if let Some(addr) = self.remote_addrs.get(peer) {
@@ -1921,6 +1977,7 @@ impl Task {
                     self.fill_peers.remove(&peer_id);
                     self.pages_peers.remove(&peer_id);
                     self.pages_asked.remove(&peer_id);
+                    self.trust_listing.remove(&peer_id);
                     self.fill_asked.remove(&peer_id);
                     // Asked again on coming back, for what it sent meanwhile.
                     self.listing.remove(&peer_id);
@@ -2005,6 +2062,7 @@ impl Task {
             BehaviourEvent::Credits(event) => self.on_credit_event(event),
             BehaviourEvent::Fill(event) => self.on_fill_event(event),
             BehaviourEvent::Pages(event) => self.on_pages_event(event),
+            BehaviourEvent::Trust(event) => self.on_trust_event(event),
             BehaviourEvent::RelayClient(relay::client::Event::ReservationReqAccepted {
                 relay_peer_id,
                 renewal,
@@ -2146,6 +2204,15 @@ impl Task {
         }
         if supports(PAGES_PROTOCOL) && self.config.trusted_peers.contains(&peer) {
             self.pages_peers.insert(peer);
+        }
+        if supports(TRUST_PROTOCOL)
+            && self.config.trusted_peers.contains(&peer)
+            && self.trust_listing.insert(peer)
+        {
+            self.swarm
+                .behaviour_mut()
+                .trust
+                .send_request(&peer, TrustRequest {});
         }
         if supports(BATCH_PROTOCOL) {
             self.batch_peers.insert(peer);
@@ -2789,6 +2856,68 @@ impl Task {
         self.agreement.vouched(crawler) && score.agreed + score.disagreed >= MIN_JUDGED
     }
 
+    /// Whether this node's searches may ask `peer`, under
+    /// [`NetConfig::search_scope`].
+    fn may_search(&self, peer: &PeerId) -> bool {
+        self.friends.allows(
+            self.config.search_scope,
+            self.swarm.local_peer_id(),
+            &self.config.trusted_peers,
+            peer,
+        )
+    }
+
+    /// Any node may ask which nodes this one trusts: node ids are public
+    /// keys, and the list says no more than the crawls this node takes in.
+    /// Only the answers of nodes this node trusts are kept.
+    fn on_trust_event(&mut self, event: request_response::Event<TrustRequest, TrustResponse>) {
+        match event {
+            request_response::Event::Message {
+                message: request_response::Message::Request { channel, .. },
+                ..
+            } => {
+                let trusted = self
+                    .config
+                    .trusted_peers
+                    .iter()
+                    .filter(|peer| *peer != self.swarm.local_peer_id())
+                    .take(MAX_SHARED_TRUST)
+                    .map(ToString::to_string)
+                    .collect();
+                let _ = self
+                    .swarm
+                    .behaviour_mut()
+                    .trust
+                    .send_response(channel, TrustResponse { trusted });
+            }
+            request_response::Event::Message {
+                peer,
+                message: request_response::Message::Response { response, .. },
+                ..
+            } => {
+                if !self.config.trusted_peers.contains(&peer)
+                    || !self.friends.set(peer, &response.trusted)
+                {
+                    return;
+                }
+                debug!("{peer} trusts {} nodes", response.trusted.len());
+                if let Err(err) = self.friends.save(&self.config.trusted_peers) {
+                    warn!("{err:#}");
+                }
+                if self.config.search_scope == SearchScope::FriendsOfFriends {
+                    // Friends of friends are asked only once connected.
+                    let me = *self.swarm.local_peer_id();
+                    for friend in self.friends.of(&me, &self.config.trusted_peers) {
+                        if !self.swarm.is_connected(&friend) {
+                            let _ = self.swarm.dial(friend);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn on_fill_event(&mut self, event: request_response::Event<FillRequest, FillResponse>) {
         match event {
             request_response::Event::Message {
@@ -3124,6 +3253,15 @@ impl Task {
             })
             .collect();
         let nearby_peers = peers.iter().filter(|p| p.route == Route::Nearby).count();
+        let search_peers = self
+            .bucket_peers
+            .keys()
+            .filter(|peer| self.may_search(peer))
+            .count();
+        let friends_of_friends = self
+            .friends
+            .of(self.swarm.local_peer_id(), &self.config.trusted_peers)
+            .len();
         // Bootstrap nodes and relays first, then the nearest.
         peers.sort_by_key(|p| (!p.bootstrap, !p.relay, p.route != Route::Nearby));
         peers.truncate(MAX_PEER_VIEWS);
@@ -3148,6 +3286,8 @@ impl Task {
         self.with_status(|s| {
             s.peers = peers;
             s.nearby_peers = nearby_peers;
+            s.search_peers = search_peers;
+            s.friends_of_friends = friends_of_friends;
             s.problem = problem;
             s.alone_since = alone_since;
             s.credits = credits;

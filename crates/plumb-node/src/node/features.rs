@@ -20,6 +20,10 @@ pub struct FeatureSettings {
     pub no_default_trust: bool,
     /// Node ids whose crawls are taken in at once, besides the default ones.
     pub trusted: Vec<String>,
+    /// Which nodes network searches ask; `None` keeps the node's own
+    /// (`--search-from`, friends of friends unless given).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub search_from: Option<plumb_net::SearchScope>,
 }
 
 impl FeatureSettings {
@@ -52,7 +56,33 @@ impl FeatureSettings {
                         .collect()
                 })
                 .unwrap_or_default(),
+            search_from: Some(
+                config
+                    .network
+                    .as_ref()
+                    .map(|n| n.search_scope)
+                    .unwrap_or_default(),
+            ),
         }
+    }
+
+    /// Which nodes network searches ask under these settings.
+    pub fn search_scope(&self) -> plumb_net::SearchScope {
+        self.search_from.unwrap_or_default()
+    }
+
+    /// Adds `peer` to the trusted nodes, unless it is trusted already.
+    /// Returns whether it was added.
+    pub fn trust(&mut self, peer: &str) -> bool {
+        let Ok(id) = peer.parse::<plumb_net::PeerId>() else {
+            return false;
+        };
+        let by_default = !self.no_default_trust && default_trusted().contains(&id);
+        if by_default || self.trusted.iter().any(|t| t == peer) {
+            return false;
+        }
+        self.trusted.push(peer.to_owned());
+        true
     }
 
     /// Whether the node finds others through the Plumb network's own
@@ -190,6 +220,9 @@ impl FeatureSettings {
                 .map(|s| s.parse())
                 .collect::<Result<_, _>>()?;
             net.trusted_peers = self.trusted_peers()?;
+            if let Some(scope) = self.search_from {
+                net.search_scope = scope;
+            }
         } else {
             config.network = None;
         }
@@ -218,6 +251,7 @@ mod tests {
             bootstrap: vec!["/ip4/127.0.0.1/tcp/4002".into()],
             no_default_trust: true,
             trusted: vec!["12D3KooWEwYB7PYxRNgvSWiwkLXvwYajSmYn4yoPqmkN7NbNqJjg".into()],
+            search_from: Some(plumb_net::SearchScope::Trusted),
         };
         preferences.save(dir.path()).unwrap();
         FeatureSettings::load(dir.path())
@@ -265,6 +299,7 @@ mod tests {
         let mut features = FeatureSettings {
             network: true,
             search_history: Some(false),
+            search_from: Some(plumb_net::SearchScope::FriendsOfFriends),
             ..Default::default()
         };
         features.apply(&mut config).unwrap();
@@ -286,5 +321,43 @@ mod tests {
 
         features.trusted = vec!["not-a-node".into()];
         assert!(features.check().is_err());
+    }
+
+    #[test]
+    fn search_scope_is_friends_of_friends_unless_chosen() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = NodeConfig::desktop(dir.path().into());
+        let mut features = FeatureSettings {
+            network: true,
+            search_history: Some(false),
+            ..Default::default()
+        };
+        features.apply(&mut config).unwrap();
+        let scope = |config: &NodeConfig| config.network.as_ref().unwrap().search_scope;
+        assert_eq!(scope(&config), plumb_net::SearchScope::FriendsOfFriends);
+        features.search_from = Some(plumb_net::SearchScope::Anyone);
+        features.apply(&mut config).unwrap();
+        assert_eq!(scope(&config), plumb_net::SearchScope::Anyone);
+        assert_eq!(FeatureSettings::from_config(&config), features);
+        // Saves from before the choice keep what the node was started with.
+        let old: FeatureSettings =
+            serde_json::from_str(r#"{"network":true,"search_history":false}"#).unwrap();
+        old.apply(&mut config).unwrap();
+        assert_eq!(scope(&config), plumb_net::SearchScope::Anyone);
+    }
+
+    #[test]
+    fn trusting_a_node_adds_it_once() {
+        let mut features = FeatureSettings::default();
+        let id = "12D3KooWEwYB7PYxRNgvSWiwkLXvwYajSmYn4yoPqmkN7NbNqJjg";
+        assert!(features.trust(id));
+        assert!(!features.trust(id));
+        assert!(!features.trust("not-a-node"));
+        // plumbsearch.org is trusted already, unless that was turned off.
+        let default = plumb_net::node::DEFAULT_TRUSTED_PEERS[0];
+        assert!(!features.trust(default));
+        features.no_default_trust = true;
+        assert!(features.trust(default));
+        assert_eq!(features.trusted, [id, default]);
     }
 }

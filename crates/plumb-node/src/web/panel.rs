@@ -298,6 +298,8 @@ pub(super) struct FeaturesForm {
     trust_shown: Option<String>,
     default_trust: Option<String>,
     trusted: String,
+    /// Which nodes network searches ask, from the network section.
+    search_from: Option<String>,
 }
 
 pub(super) async fn save_features(State(state): State<AppState>, request: Request) -> Response {
@@ -357,6 +359,12 @@ pub(super) fn apply_features_form(
         if form.trust_shown.is_some() {
             features.no_default_trust = form.default_trust.is_none();
             features.trusted = form.trusted.split_whitespace().map(str::to_owned).collect();
+        }
+        if let Some(scope) = &form.search_from {
+            match scope.parse() {
+                Ok(scope) => features.search_from = Some(scope),
+                Err(err) => return Err(panel_error(StatusCode::BAD_REQUEST, &err.to_string())),
+            }
         }
     }
     if let Err(err) = features.check() {
@@ -1286,7 +1294,7 @@ pub(super) fn render_panel(view: &PanelView<'_>) -> String {
 }
 
 pub(super) const LAYOUT_STYLE: &str = "
-.node-switch{display:flex;flex-wrap:wrap;gap:.4rem;margin-bottom:1rem}.node-switch a{padding:.4rem .8rem;border:1px solid var(--line);border-radius:999px;text-decoration:none;font-size:.9rem;color:var(--fg)}.node-switch a[aria-current]{border-color:var(--accent);color:var(--accent);font-weight:600}.node-panel{max-width:72rem;padding:2rem 2rem 4rem}.node-heading,.section-heading{display:flex;align-items:center;justify-content:space-between;gap:1rem}.node-heading h1{font-size:1.8rem}.eyebrow{font-size:.7rem;letter-spacing:.13em;color:var(--muted);margin:0 0 .3rem}.node-nav{display:flex;flex-wrap:wrap;gap:.4rem;border-bottom:1px solid var(--line);padding:1.5rem 0 1rem;margin-bottom:1.5rem}.node-panel a{color:var(--accent)}.node-panel a.btn:not(.alt){color:var(--bg)}.node-nav a{padding:.55rem .85rem;text-decoration:none;border-radius:.5rem;color:var(--muted)}.node-nav a[aria-current]{background:var(--accent);color:var(--bg);font-weight:600}.section-heading h2{margin:0;font-size:1.4rem}.section-heading>a{font-size:.85rem}.intro{color:var(--muted);max-width:45rem}.notice{padding:.85rem 1rem;border-left:3px solid var(--accent);background:color-mix(in srgb,var(--accent) 8%,var(--bg));border-radius:.3rem}.node-panel form{max-width:46rem}.node-panel fieldset{border:0;margin:0;padding:0;min-width:0}.node-panel .workload{margin-top:1rem}.log{list-style:none;padding:0;margin:.5rem 0}.log li{display:flex;flex-wrap:wrap;gap:.25rem 1rem;align-items:baseline;padding:.45rem 0;border-bottom:1px solid var(--line)}.log time{flex:none;min-width:7rem;color:var(--muted);font-size:.85rem}.log li span{flex:1 1 20rem;overflow-wrap:anywhere}.log .error span{color:var(--err)}.log.backups li{align-items:center}.log.backups form{margin:0;display:inline}.log.backups .btns{flex:none;margin:0}.node-panel .workload legend{font-weight:600}.node-panel select{font:inherit;background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:.3rem}.cards>fieldset{display:contents}.node-panel details{margin-top:1rem}.node-panel summary{cursor:pointer;color:var(--accent)}.node-panel fieldset:disabled{opacity:.65}.node-panel textarea{display:block;width:100%;min-height:6rem;font:inherit;background:var(--bg);color:var(--fg);padding:.75rem;border:1px solid var(--line);border-radius:.5rem}.node-panel .feature{padding:.8rem 0;border-bottom:1px solid var(--line)}.node-panel .feature label{margin:0}.node-panel .feature p{margin:.35rem 0 0 1.65rem}.node-panel .state{font-size:.8rem;color:var(--muted)}.node-panel :focus-visible{outline:3px solid var(--accent);outline-offset:3px}.node-panel dl{grid-template-columns:minmax(6rem,auto) minmax(0,1fr)}@media(max-width:600px){.node-panel{padding:1rem 1rem 3rem}.node-heading{align-items:flex-start}.node-heading h1{font-size:1.5rem}.node-nav{gap:.2rem}.node-nav a{padding:.5rem .6rem;font-size:.9rem}.cards{grid-template-columns:minmax(0,1fr)}.node-panel label{flex-wrap:wrap}.section-heading{align-items:flex-start}.section-heading>a{white-space:nowrap}}";
+.node-switch{display:flex;flex-wrap:wrap;gap:.4rem;margin-bottom:1rem}.node-switch a{padding:.4rem .8rem;border:1px solid var(--line);border-radius:999px;text-decoration:none;font-size:.9rem;color:var(--fg)}.node-switch a[aria-current]{border-color:var(--accent);color:var(--accent);font-weight:600}.node-panel{max-width:72rem;padding:2rem 2rem 4rem}.node-heading,.section-heading{display:flex;align-items:center;justify-content:space-between;gap:1rem}.node-heading h1{font-size:1.8rem}.eyebrow{font-size:.7rem;letter-spacing:.13em;color:var(--muted);margin:0 0 .3rem}.node-nav{display:flex;flex-wrap:wrap;gap:.4rem;border-bottom:1px solid var(--line);padding:1.5rem 0 1rem;margin-bottom:1.5rem}.node-panel a{color:var(--accent)}.node-panel a.btn:not(.alt){color:var(--bg)}.node-nav a{padding:.55rem .85rem;text-decoration:none;border-radius:.5rem;color:var(--muted)}.node-nav a[aria-current]{background:var(--accent);color:var(--bg);font-weight:600}.section-heading h2{margin:0;font-size:1.4rem}.section-heading>a{font-size:.85rem}.intro{color:var(--muted);max-width:45rem}.notice{padding:.85rem 1rem;border-left:3px solid var(--accent);background:color-mix(in srgb,var(--accent) 8%,var(--bg));border-radius:.3rem}.node-panel form{max-width:46rem}.node-panel fieldset{border:0;margin:0;padding:0;min-width:0}.node-panel .workload{margin-top:1rem}.log{list-style:none;padding:0;margin:.5rem 0}.log li{display:flex;flex-wrap:wrap;gap:.25rem 1rem;align-items:baseline;padding:.45rem 0;border-bottom:1px solid var(--line)}.log time{flex:none;min-width:7rem;color:var(--muted);font-size:.85rem}.log li span{flex:1 1 20rem;overflow-wrap:anywhere}.log .error span{color:var(--err)}.log.backups li{align-items:center}.log.backups form{margin:0;display:inline}.log.backups .btns{flex:none;margin:0}.node-panel .workload legend,.node-panel .scope legend{font-weight:600}.node-panel .scope label{margin-top:.5rem}.node-panel select{font:inherit;background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:.3rem}.cards>fieldset{display:contents}.node-panel details{margin-top:1rem}.node-panel summary{cursor:pointer;color:var(--accent)}.node-panel fieldset:disabled{opacity:.65}.node-panel textarea{display:block;width:100%;min-height:6rem;font:inherit;background:var(--bg);color:var(--fg);padding:.75rem;border:1px solid var(--line);border-radius:.5rem}.node-panel .feature{padding:.8rem 0;border-bottom:1px solid var(--line)}.node-panel .feature label{margin:0}.node-panel .feature p{margin:.35rem 0 0 1.65rem}.node-panel .state{font-size:.8rem;color:var(--muted)}.node-panel :focus-visible{outline:3px solid var(--accent);outline-offset:3px}.node-panel dl{grid-template-columns:minmax(6rem,auto) minmax(0,1fr)}@media(max-width:600px){.node-panel{padding:1rem 1rem 3rem}.node-heading{align-items:flex-start}.node-heading h1{font-size:1.5rem}.node-nav{gap:.2rem}.node-nav a{padding:.5rem .6rem;font-size:.9rem}.cards{grid-template-columns:minmax(0,1fr)}.node-panel label{flex-wrap:wrap}.section-heading{align-items:flex-start}.section-heading>a{white-space:nowrap}}";
 
 /// A card: its class, title, headline and the HTML under them.
 fn card(body: &mut String, class: &str, title: &str, big: &str, rest: &str) {
@@ -1719,9 +1727,17 @@ fn render_network_card(
                 "ready",
                 format!("{n} {}", if n == 1 { "node" } else { "nodes" }),
                 format!(
-                    "<p>Connected: {}.</p><p class=\"hint\">{reach} Shared crawl batches: {} \
-                     received, {} published.</p>",
+                    "<p>Connected: {}.</p><p>Searches ask {}: {} connected{}.</p>\
+                     <p class=\"hint\">{reach} Shared crawl batches: {} received, {} \
+                     published.</p>",
                     parts.join(", "),
+                    net.search_scope.label().to_lowercase(),
+                    net.search_peers,
+                    match net.search_scope {
+                        plumb_net::SearchScope::FriendsOfFriends =>
+                            format!(", {} known through trusted nodes", net.friends_of_friends),
+                        _ => String::new(),
+                    },
                     net.batches_received,
                     net.batches_published
                 ),
@@ -1886,6 +1902,10 @@ fn render_features(
             }
         ));
         body.push_str(&format!("<input type=\"hidden\" name=\"trust_shown\" value=\"1\"><div class=\"feature\"><label><input type=\"checkbox\" name=\"default_trust\" value=\"1\"{}><span>Trust plumbsearch.org's crawler</span></label><p class=\"hint\">Take in crawls from the plumbsearch.org node at once, so a new node fills up while the network is small. Turn off to keep only crawls a second crawler confirms.</p></div>", if saved.no_default_trust { "" } else { " checked" }));
+        body.push_str(&search_scope_choice(
+            saved.search_scope(),
+            active.search_scope(),
+        ));
         body.push_str(&format!(
             "<details{}><summary>Advanced: more bootstrap and trusted nodes</summary>\
              <label for=\"bootstrap\">Bootstrap nodes</label><p class=\"hint\" \
@@ -1904,6 +1924,42 @@ fn render_features(
         body.push_str(&format!("<label for=\"trusted\">Trusted nodes</label><p class=\"hint\" id=\"trusted-help\">Other node ids whose crawls are taken in at once, one per line. Only add nodes you run or know.</p><textarea id=\"trusted\" name=\"trusted\" aria-describedby=\"trusted-help\" spellcheck=\"false\">{}</textarea></details>", escape_html(&saved.trusted.join("\n"))));
     }
     body.push_str("<button type=\"submit\">Save feature settings</button></form>");
+}
+
+/// The choice of which nodes network searches ask (see
+/// [`plumb_net::scope`]), `saved` checked, saying which one is `running`.
+fn search_scope_choice(saved: plumb_net::SearchScope, running: plumb_net::SearchScope) -> String {
+    use plumb_net::SearchScope;
+    let mut html = format!(
+        "<fieldset class=\"feature scope\"><legend>Search the network through \
+         <span class=\"state\">\u{b7} currently {}</span></legend>",
+        running.label().to_lowercase()
+    );
+    for scope in SearchScope::ALL {
+        let hint = match scope {
+            SearchScope::Trusted => {
+                "Only the nodes you trust: plumbsearch.org unless turned off, \
+                                     and the trusted nodes below."
+            }
+            SearchScope::FriendsOfFriends => {
+                "Your trusted nodes and the nodes they trust. The \
+                                              default."
+            }
+            SearchScope::Anyone => {
+                "Any Plumb node. Finds the most, from nodes you know nothing \
+                                    about."
+            }
+        };
+        html.push_str(&format!(
+            "<label><input type=\"radio\" name=\"search_from\" value=\"{}\"{}><span>{}</span>\
+             </label><p class=\"hint\">{hint}</p>",
+            scope.as_str(),
+            if scope == saved { " checked" } else { "" },
+            scope.label()
+        ));
+    }
+    html.push_str("</fieldset>");
+    html
 }
 
 /// One line of the setup steps: done, under way, waiting or to do.

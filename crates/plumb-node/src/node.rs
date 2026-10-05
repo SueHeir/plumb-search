@@ -1761,7 +1761,15 @@ impl StatusSource for Inner {
     }
 
     fn saved_features(&self) -> Result<features::FeatureSettings> {
-        Ok(features::FeatureSettings::load(&self.paths.data)?.unwrap_or_else(|| self.features()))
+        let active = self.features();
+        Ok(match features::FeatureSettings::load(&self.paths.data)? {
+            Some(mut saved) => {
+                // Saved before the choice existed: the node keeps its own.
+                saved.search_from = saved.search_from.or(active.search_from);
+                saved
+            }
+            None => active,
+        })
     }
 
     fn change_features(&self, features: features::FeatureSettings) -> Result<()> {

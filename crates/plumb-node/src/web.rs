@@ -624,6 +624,7 @@ fn home_or_setup(state: &AppState, params: &SearchParams, headers: &HeaderMap) -
             let settings = Settings {
                 options: params.options(&state.settings.home, headers),
                 network: state.net_setting(params),
+                scope: state.search_scope(),
                 private: state.private_search(),
                 history: visitor.as_ref().map(history::Visitor::view),
             };
@@ -662,6 +663,8 @@ enum NetSetting {
 struct Settings {
     options: SearchOptions,
     network: NetSetting,
+    /// Which nodes the network part of a search asks.
+    scope: plumb_net::SearchScope,
     /// This node offers private search (`/private`).
     private: bool,
     /// The searcher's history, on a node that keeps one.
@@ -669,6 +672,13 @@ struct Settings {
 }
 
 impl AppState {
+    /// Which nodes this node's network searches ask, set by its owner.
+    fn search_scope(&self) -> plumb_net::SearchScope {
+        self.network()
+            .map(|net| net.status().search_scope)
+            .unwrap_or_default()
+    }
+
     fn net_setting(&self, params: &SearchParams) -> NetSetting {
         match (self.network().is_some(), flag(&params.net)) {
             (false, _) => NetSetting::Unavailable,
@@ -708,6 +718,7 @@ async fn search_page(
     let mut settings = Settings {
         options: params.options(&state.settings.home, &headers),
         network: state.net_setting(&params),
+        scope: state.search_scope(),
         private: state.private_search(),
         history: None,
     };
@@ -1512,11 +1523,13 @@ fn settings_form(query: &str, autofocus: bool, settings: &Settings) -> String {
         }
     };
     let network_hint = match settings.network {
-        NetSetting::Unavailable => "",
-        NetSetting::Off | NetSetting::On => {
+        NetSetting::Unavailable => String::new(),
+        NetSetting::Off | NetSetting::On => format!(
             "<p class=\"hint\">Uses data from other Plumb nodes without sending query text. \
-             Results only they found are tinted. Missing data may wait for a background download.</p>"
-        }
+             Results only they found are tinted. Missing data may wait for a background \
+             download.</p><p class=\"hint\">{} Set in this node's panel.</p>",
+            settings.scope.explain()
+        ),
     };
     let history = settings
         .history
@@ -1883,7 +1896,9 @@ fn render_source(
             line
         }
         (_, NetOutcome::Answered(results)) if results.asked == 0 => {
-            "From this site's own index: no other Plumb nodes are connected right now.".to_string()
+            "From this site's own index: none of the Plumb nodes it searches are connected right \
+             now."
+                .to_string()
         }
         (_, NetOutcome::Answered(results)) => {
             let mut line = format!(
@@ -2099,8 +2114,8 @@ fn render_network(query: &str, results: &NetworkResults, icons: &Icons) -> Strin
     }
     if results.asked == 0 && results.cached == 0 && results.pending == 0 {
         body.push_str(
-            "<p class=\"none\">No other nodes are connected yet. This node keeps looking \
-             for them.</p>\n",
+            "<p class=\"none\">None of the nodes this node searches are connected yet. It \
+             keeps looking for them.</p>\n",
         );
     } else if results.hits.is_empty() && results.pending == 0 {
         let _ = writeln!(
@@ -3341,6 +3356,7 @@ mod tests {
             history: None,
             options: SearchOptions::default(),
             network: NetSetting::Unavailable,
+            scope: plumb_net::SearchScope::default(),
             private: false,
         }
     }
@@ -3634,7 +3650,7 @@ mod tests {
             false,
             &Icons::default(),
         );
-        assert!(page.contains("no other Plumb nodes are connected right now"));
+        assert!(page.contains("none of the Plumb nodes it searches are connected right"));
     }
 
     #[test]
