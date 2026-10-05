@@ -98,7 +98,7 @@ impl SignedHeader {
     /// Whether the batch is too old for [`SignedHeader::check`] at `now`:
     /// a proof from it no longer checks out, though nothing is wrong with it.
     pub fn expired(&self, now: u64) -> bool {
-        self.header.epoch + MAX_BATCH_AGE_EPOCHS < epoch_of(now)
+        self.header.epoch.saturating_add(MAX_BATCH_AGE_EPOCHS) < epoch_of(now)
     }
 
     /// Identifies the batch: the hash of what was signed.
@@ -673,6 +673,16 @@ mod tests {
         Batch::sign(key, records, epoch_of(NOW), MAX_SHARE_PPM, NOW)
             .unwrap()
             .unwrap()
+    }
+
+    #[test]
+    fn a_header_from_the_far_future_does_not_overflow_when_checked_for_age() {
+        let key = Keypair::generate_ed25519();
+        let peer = key.public().to_peer_id();
+        let mut batch = sign(&key, &[crawled(&assigned_domains(&peer, 1)[0])]);
+        batch.header.header.epoch = u64::MAX;
+        assert!(!batch.header.expired(NOW));
+        assert!(batch.check(NOW).is_err());
     }
 
     #[test]
