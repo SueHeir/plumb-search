@@ -636,3 +636,66 @@ fn official_site_falls_back_on_a_packages_home_page() {
         "{text}"
     );
 }
+
+#[test]
+fn searches_list_few_results_and_fewer_after_a_direct_answer() {
+    let many = |named: bool| {
+        (0..10)
+            .map(|i| {
+                hit(
+                    &format!("site{i}.com"),
+                    10.0 - i as f32,
+                    0.5,
+                    named && i == 0,
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let count = |mcp: &Mcp, arguments: Value| {
+        call(mcp, "search", arguments)["result"]["structuredContent"]["results"]
+            .as_array()
+            .unwrap()
+            .len()
+    };
+    assert_eq!(
+        count(&server(many(false)), json!({ "query": "rust web" })),
+        5
+    );
+    assert_eq!(count(&server(many(true)), json!({ "query": "site0" })), 3);
+    assert_eq!(
+        count(&server(many(true)), json!({ "query": "site0", "limit": 8 })),
+        8
+    );
+}
+
+#[test]
+fn results_are_capped_as_listed_with_their_pages() {
+    let site = |domain: &str| json!({ "domain": domain });
+    let page = |title: &str, position: u64, under: Option<&str>| json!({ "title": title, "position": position, "about_site": under });
+    let mut sites = vec![site("a.com"), site("b.com"), site("c.com")];
+    let mut pages = vec![
+        page("first", 1, None),
+        page("about a", 1, Some("a.com")),
+        page("about c", 3, Some("c.com")),
+        page("last", 9, None),
+    ];
+    cap_results(&mut sites, &mut pages, 3);
+    assert_eq!(sites, vec![site("a.com"), site("b.com")]);
+    let titles: Vec<&str> = pages.iter().map(|p| p["title"].as_str().unwrap()).collect();
+    assert_eq!(titles, ["first", "about a"]);
+}
+
+#[test]
+fn searches_about_a_well_known_package_get_its_card() {
+    let mcp = Mcp::new(Arc::new(Packages), None);
+    let reply = call(&mcp, "search", json!({ "query": "serde derive" }));
+    let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.starts_with("1. [crates.io] serde 1.0.228"), "{text}");
+    let reply = call(
+        &mcp,
+        "search",
+        json!({ "query": "serde derive macro attributes now" }),
+    );
+    let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(!text.contains("crates.io"), "{text}");
+}

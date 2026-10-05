@@ -61,8 +61,13 @@ pub(crate) use text::answer_line;
 /// one of them gets it; any other gets the newest.
 pub const PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
 
-/// Results `search` returns when the caller does not say.
-const DEFAULT_SEARCH_LIMIT: usize = 10;
+/// Results `search` returns when the caller does not say...
+const DEFAULT_SEARCH_LIMIT: usize = 5;
+/// ...and when the search already has a direct answer: an answer found
+/// before, a package's card, an instant answer or a site or page named by
+/// the query. The rest are mostly sites with one of the query's words, and
+/// cost a model tokens for nothing.
+const DIRECT_SEARCH_LIMIT: usize = 3;
 /// Most results `search` returns.
 const MAX_SEARCH_LIMIT: usize = 25;
 /// Other candidates `official_site` lists.
@@ -83,6 +88,12 @@ const MAX_HEADLINES: usize = 5;
 const MAX_PACKAGES: usize = 5;
 /// Results asked for when looking up whose profile a query asks for.
 const PROFILE_SEARCH_LIMIT: usize = 5;
+/// Most words of a search whose package `search` guesses ("lodash
+/// debounce", "numpy release notes")...
+const MAX_GUESS_WORDS: usize = 4;
+/// ...and the least popularity of the guessed package: only the best known
+/// of its registry, so "express delivery" is not about a package.
+const GUESSED_PACKAGE: f32 = 0.75;
 
 /// What the server tells a client about itself when it connects.
 const INSTRUCTIONS: &str = "Plumb Search finds websites by name. Before opening a site you are \
@@ -285,15 +296,17 @@ impl Mcp {
             "search" => {
                 let query = text_arg(args, "query")?;
                 let limit = match args.get("limit") {
-                    None | Some(Value::Null) => DEFAULT_SEARCH_LIMIT,
-                    Some(limit) => limit
-                        .as_u64()
-                        .filter(|&n| n > 0)
-                        .ok_or((
-                            INVALID_PARAMS,
-                            "limit must be a positive whole number".into(),
-                        ))?
-                        .min(MAX_SEARCH_LIMIT as u64) as usize,
+                    None | Some(Value::Null) => None,
+                    Some(limit) => Some(
+                        limit
+                            .as_u64()
+                            .filter(|&n| n > 0)
+                            .ok_or((
+                                INVALID_PARAMS,
+                                "limit must be a positive whole number".into(),
+                            ))?
+                            .min(MAX_SEARCH_LIMIT as u64) as usize,
+                    ),
                 };
                 let options = self.options(args)?;
                 self.search(&query, limit, &options)
@@ -601,9 +614,26 @@ impl Mcp {
     }
 
     /// `search`: the results a person would see, sites and pages, and
-    /// what the results page shows with them.
-    pub fn search(&self, query: &str, limit: usize, options: &SearchOptions) -> Result<Value> {
-        let results = self.lookup(query, limit, options)?;
+    /// what the results page shows with them. Without a `limit`, at most
+    /// [`DEFAULT_SEARCH_LIMIT`] results, or [`DIRECT_SEARCH_LIMIT`] when
+    /// the search has a direct answer. A search for a well-known package's
+    /// docs or one of its functions gets the package's card too.
+    pub fn search(
+        &self,
+        query: &str,
+        limit: Option<usize>,
+        options: &SearchOptions,
+    ) -> Result<Value> {
+        let mut results = self.lookup(query, limit.unwrap_or(DEFAULT_SEARCH_LIMIT), options)?;
+        let guessed = if results.pages.iter().any(|p| p.hit.page.package.is_some()) {
+            None
+        } else {
+            self.guess_package(query, options)
+        };
+        if guessed.is_some() {
+            // "fastapi docs" is not "fastai docs".
+            results.spelling = None;
+        }
         // Placed as the results page places them, which the info box needs.
         let found_pages = results.pages.iter().map(|p| p.hit.clone()).collect();
         let operators = plumb_core::Operators::parse(query);
@@ -652,26 +682,64 @@ impl Mcp {
                 })
             })
             .collect();
-        let pages: Vec<Value> = placed
+        let mut pages: Vec<Value> = guessed
             .iter()
-            .map(|placed| {
-                let mut page = json!({
-                    "title": placed.hit.page.title,
-                    "url": placed.hit.page.url,
-                    "description": placed.hit.page.description.as_deref().map(short),
-                    "set": placed.hit.page.set,
-                    "about_site": placed.under,
-                    "position": placed.at + 1,
-                });
-                if placed.hit.page.package.is_some() {
-                    page["package"] = package_card(&placed.hit.page);
-                }
-                page
+            .map(|page| {
+                json!({
+                    "title": page.title,
+                    "url": page.url,
+                    "description": page.description.as_deref().map(short),
+                    "set": page.set,
+                    "about_site": Value::Null,
+                    "position": 1,
+                    "package": package_card(page),
+                })
             })
             .collect();
+        pages.extend(placed.iter().map(|placed| {
+            let mut page = json!({
+                "title": placed.hit.page.title,
+                "url": placed.hit.page.url,
+                "description": placed.hit.page.description.as_deref().map(short),
+                "set": placed.hit.page.set,
+                "about_site": placed.under,
+                "position": placed.at + 1,
+            });
+            if placed.hit.page.package.is_some() {
+                page["package"] = package_card(&placed.hit.page);
+            }
+            page
+        }));
+        let mut sites: Vec<Value> = results.hits.iter().map(brief).collect();
+        let found_before: Vec<Value> = self
+            .findings
+            .iter()
+            .flat_map(|findings| findings.for_query(query, MAX_FOUND_BEFORE))
+            .map(|finding| {
+                json!({
+                    "query": finding.query,
+                    "url": finding.url,
+                    "why": finding.why,
+                    "answer": finding.answer,
+                    "task": finding.task,
+                    "reported": crate::web::time_ago(finding.at, now),
+                })
+            })
+            .collect();
+        let direct = !found_before.is_empty()
+            || answer.is_some()
+            || pages.iter().any(|page| page.get("package").is_some())
+            || names_a_page
+            || results.hits.iter().any(|hit| hit.named);
+        let cap = match limit {
+            Some(limit) => limit,
+            None if direct => DIRECT_SEARCH_LIMIT,
+            None => DEFAULT_SEARCH_LIMIT,
+        };
+        cap_results(&mut sites, &mut pages, cap);
         let mut answer_json = json!({
             "query": query,
-            "results": results.hits.iter().map(brief).collect::<Vec<_>>(),
+            "results": sites,
             "pages": pages,
             "site_search": results.site_search,
             "spelling": results.spelling,
@@ -712,25 +780,37 @@ impl Mcp {
         if !from_plugins.is_empty() {
             fields.insert("plugins".into(), json!(from_plugins));
         }
-        let found_before: Vec<Value> = self
-            .findings
-            .iter()
-            .flat_map(|findings| findings.for_query(query, MAX_FOUND_BEFORE))
-            .map(|finding| {
-                json!({
-                    "query": finding.query,
-                    "url": finding.url,
-                    "why": finding.why,
-                    "answer": finding.answer,
-                    "task": finding.task,
-                    "reported": crate::web::time_ago(finding.at, now),
-                })
-            })
-            .collect();
         if !found_before.is_empty() {
             fields.insert("found_before".into(), json!(found_before));
         }
         Ok(answer_json)
+    }
+
+    /// The well-known package a search is about when it says no registry:
+    /// its first word other than filler, of a search of a few words
+    /// ("lodash debounce", "numpy release notes", "fastapi docs").
+    fn guess_package(
+        &self,
+        query: &str,
+        options: &SearchOptions,
+    ) -> Option<plumb_index::pages::Page> {
+        if plumb_core::Operators::parse(query).any() {
+            return None;
+        }
+        let words: Vec<&str> = query.split_whitespace().collect();
+        if !(2..=MAX_GUESS_WORDS).contains(&words.len()) {
+            return None;
+        }
+        let name = words.into_iter().find(|word| {
+            !plumb_core::packages::FILLER_WORDS.contains(&word.to_lowercase().as_str())
+        })?;
+        let found = self.lookup(&format!("{name} package"), 1, options).ok()?;
+        found
+            .pages
+            .into_iter()
+            .map(|placed| placed.hit)
+            .find(|hit| hit.page.package.is_some() && hit.popularity >= GUESSED_PACKAGE)
+            .map(|hit| hit.page)
     }
 
     /// `package`: the cards of the packages called `name`, of `registry`
@@ -1087,7 +1167,7 @@ pub fn tools(read_pages: bool, findings: bool) -> Value {
                 "type": "object",
                 "properties": {
                     "query": { "type": "string", "description": "What to search for." },
-                    "limit": { "type": "integer", "minimum": 1, "maximum": MAX_SEARCH_LIMIT, "description": "How many sites to return (default 10)." },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": MAX_SEARCH_LIMIT, "description": "How many results to return (default 5, or 3 when the search has a direct answer such as a package card or an answer found before)." },
                     "country": country,
                 },
                 "required": ["query"],
@@ -1238,6 +1318,49 @@ fn package_card(page: &plumb_index::pages::Page) -> Value {
         "homepage": package.homepage,
         "url": page.url,
     })
+}
+
+/// Leaves the first `cap` results of a search, counted as its text lists
+/// them: the `sites` in order, each after the `pages` placed before it
+/// (`position`), and the pages placed after the last site at the end.
+/// Pages listed under a site (`about_site`) go with it.
+fn cap_results(sites: &mut Vec<Value>, pages: &mut Vec<Value>, cap: usize) {
+    let alone = |page: &Value| page.get("about_site").is_none_or(Value::is_null);
+    let position = |page: &Value| {
+        page.get("position")
+            .and_then(Value::as_u64)
+            .map_or(usize::MAX, |at| at as usize)
+    };
+    let mut left = cap;
+    let mut kept_sites = 0;
+    let mut kept_pages = vec![true; pages.len()];
+    for slot in 1..=sites.len() + 1 {
+        for (kept, page) in kept_pages.iter_mut().zip(pages.iter()) {
+            let here = if slot > sites.len() {
+                position(page) >= slot
+            } else {
+                position(page) == slot
+            };
+            if alone(page) && here {
+                if left == 0 {
+                    *kept = false;
+                } else {
+                    left -= 1;
+                }
+            }
+        }
+        if slot <= sites.len() && left > 0 {
+            left -= 1;
+            kept_sites = slot;
+        }
+    }
+    sites.truncate(kept_sites);
+    let domains: Vec<&Value> = sites.iter().filter_map(|site| site.get("domain")).collect();
+    let mut kept = kept_pages.into_iter();
+    pages.retain(|page| {
+        kept.next().unwrap_or(false)
+            && (alone(page) || page.get("about_site").is_some_and(|d| domains.contains(&d)))
+    });
 }
 
 /// A site in a tool's answer.
