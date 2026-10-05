@@ -17,11 +17,13 @@ pub mod keys;
 mod kinds;
 #[cfg(feature = "oblivious")]
 pub mod oblivious;
+mod operators;
 mod site_search;
 
 pub use article::{article_url, Article};
 pub use country::{normalize_country, site_country, tld_country};
 pub use kinds::{is_generic_kind, kind_key, other_number, MAX_KINDS};
+pub use operators::Operators;
 pub use site_search::{search_link, search_template_for, SEARCH_TERMS};
 
 use anyhow::{Context, Result};

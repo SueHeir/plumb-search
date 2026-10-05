@@ -68,6 +68,14 @@ A node with a storage limit keeps a quarter of it for sites about those interest
 
 Every Plumb page offers Plumb to the browser as a search engine. In Firefox, right-click the address bar on a Plumb page and choose **Add "Plumb Search"**. To add it by hand, use `http://127.0.0.1:8080/search?q=%s`, or `http://127.0.0.1:7586/search?q=%s` for the desktop app.
 
+### Search operators
+
+- `site:github.com plumb` keeps results on that site and its pages (GitHub repositories here), lists the site itself, and links into its own search for the other words. `site:gov` keeps a top-level domain; `-site:example.com` leaves a site out.
+- `"exact words"` keeps results whose name, title or description has those words in that order.
+- `-word` leaves out results that mention the word (or its plural).
+
+They work on the search page, `/api/search`, network search and `/private`, where they never leave the browser: only the other words pick buckets. Queries with operators are not corrected for typos.
+
 ### Use Plumb from AI assistants (MCP)
 
 Every node serves an MCP server at `/mcp`, and `plumb mcp` serves one over stdio, with tools that give an AI assistant the official site for a name, say whether an address is a look-alike, and search. In Claude Code: `claude mcp add --transport http plumb https://plumbsearch.org/mcp`. See [docs/mcp.md](docs/mcp.md) for Claude Desktop and other apps.

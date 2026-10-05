@@ -12,7 +12,7 @@ All four only read the index.
 | --- | --- | --- |
 | `official_site` | `name` ("PayPal", "rust docs", "chase login") | the domain and URL, a confidence (`high`, `medium`, `low`), the reasons (Wikidata lists it as an official website, the name is the site's own, it is well known, other sites share the name) and other candidates |
 | `check_lookalike` | `url` (a URL or a domain) | a verdict (`official`, `known_site`, `little_known`, `lookalike` or `unknown`), the reasons, and the real site a look-alike imitates |
-| `search` | `query`, `limit` (1 to 25, default 10) | the normal results: sites best first, plus pages such as Wikipedia articles with where they are placed |
+| `search` | `query`, `limit` (1 to 25, default 10) | the normal results: sites best first, plus pages such as Wikipedia articles with where they are placed. Takes the search page's operators (`site:github.com`, `"exact words"`, `-word`) |
 | `site_info` | `domain` | the site's title and description, whether Wikidata lists it as official, how well known it is, its country and pages about it |
 
 Each also takes an optional `country`, a two-letter code (`US`, `DE`) whose sites rank a little higher, or `any` for none. Without it the node's home country setting decides.

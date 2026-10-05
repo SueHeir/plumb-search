@@ -67,7 +67,7 @@ use base64::Engine as _;
 use plumb_core::{
     collapse_whitespace, display_url, now_unix, site_initial, truncate_chars, SiteRecord,
 };
-use plumb_index::pages::{place_pages, PageHit};
+use plumb_index::pages::{place_operator_pages, place_pages, PageHit};
 use plumb_index::{
     build_index, Hit, RankConfig, SearchOptions, SearchResults, Searcher, SiteSearch, Spelling,
 };
@@ -1055,7 +1055,9 @@ async fn network_search(
         .node
         .as_ref()
         .map_or_else(RankConfig::default, |node| node.rank());
-    let found = net.search(query, NETWORK_SEARCH_WAIT).await?;
+    // Search operators narrow the ranking below; only words pick buckets.
+    let lookup = plumb_core::Operators::parse(query).lookup_text();
+    let found = net.search(&lookup, NETWORK_SEARCH_WAIT).await?;
     let query = query.to_string();
     let options = options.clone();
     let node = state.node.clone();
@@ -1980,15 +1982,17 @@ fn render_results(
         .iter()
         .map(|item| item.hit.clone().into_owned())
         .collect();
-    let pages = place_pages(
-        picked_for,
-        &shown_hits,
-        results
-            .pages
-            .iter()
-            .map(|placed| placed.hit.clone())
-            .collect(),
-    );
+    let found_pages = results
+        .pages
+        .iter()
+        .map(|placed| placed.hit.clone())
+        .collect();
+    let ops = plumb_core::Operators::parse(query);
+    let pages = if ops.any() {
+        place_operator_pages(&ops, &shown_hits, found_pages)
+    } else {
+        place_pages(picked_for, &shown_hits, found_pages)
+    };
     let shown_count = shown.len();
     let pages = &pages;
     let listed_pages = move |at: usize| {
@@ -3595,6 +3599,49 @@ mod tests {
         );
         assert!(page.contains("&amp;exact=1"), "{page}");
         assert!(!page.contains("class=\"sp\""), "{page}");
+    }
+
+    #[test]
+    fn site_queries_list_every_page_on_the_site() {
+        let pages = ["Albert Einstein", "Einstein family", "Einstein (crater)"]
+            .into_iter()
+            .map(|title| plumb_index::pages::PlacedPage {
+                hit: PageHit {
+                    page: plumb_index::pages::Page::from_article(
+                        "en",
+                        plumb_core::Article {
+                            title: title.into(),
+                            ..Default::default()
+                        },
+                    ),
+                    score: 0.5,
+                    named: false,
+                    popularity: 0.1,
+                },
+                under: None,
+                at: 0,
+            })
+            .collect();
+        let results = SearchResults {
+            pages,
+            hits: Vec::new(),
+            site_search: None,
+            spelling: None,
+        };
+        let page = render_results(
+            "einstein site:wikipedia.org",
+            &results,
+            &NetOutcome::NotAsked,
+            &no_settings(),
+            None,
+            10,
+            false,
+            &Icons::default(),
+        );
+        assert!(!page.contains("No sites match"));
+        for title in ["Albert Einstein", "Einstein family", "Einstein (crater)"] {
+            assert!(page.contains(title), "{title}");
+        }
     }
 
     #[test]
