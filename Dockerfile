@@ -76,5 +76,9 @@ EXPOSE 8080
 # Node-to-node connections (docs/network.md). The node dials out, so it joins
 # without this port published or forwarded; others reach it directly when it is.
 EXPOSE 4001/tcp 4001/udp
+# Asks the node's /api/status on 127.0.0.1:8080, where the default command
+# serves it (and while it sets itself up). A command that binds another port
+# needs a healthcheck of its own: `plumb healthcheck --url http://127.0.0.1:PORT`.
+HEALTHCHECK --interval=60s --timeout=10s --start-period=120s CMD ["plumb", "healthcheck"]
 ENTRYPOINT ["plumb"]
 CMD ["run", "--data", "/data", "--bind", "0.0.0.0:8080", "--network"]

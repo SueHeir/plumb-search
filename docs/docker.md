@@ -58,7 +58,12 @@ to the machine itself, for example behind a reverse proxy, publish it as
 `"127.0.0.1:8080:8080"`.
 
 `http://<server>:8080/api/status` reports what the node is doing as JSON
-(`phase` is `setting_up` or `ready`), which suits uptime monitors.
+(`phase` is `setting_up` or `ready`), which suits uptime monitors. The
+image's health check, `plumb healthcheck`, asks it once a minute on
+`127.0.0.1:8080`, so `docker ps` shows the container as `healthy` while the
+node answers. If your command binds another port, override the check, for
+example in Compose:
+`healthcheck: {test: ["CMD", "plumb", "healthcheck", "--url", "http://127.0.0.1:9090"]}`.
 
 ## Join the Plumb network
 
