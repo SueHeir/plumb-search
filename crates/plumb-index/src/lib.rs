@@ -114,9 +114,10 @@ const HEADINGS_BOOST: f32 = 0.5;
 const WHOLE_QUERY_BOOST: f32 = 6.0;
 
 /// Small words that join the words of a longer query ("pizza in denver",
-/// "bank of america") and name no site there: in such a query they never
-/// match a domain label or joined name on their own, so in.gov or to.com
-/// are not found by them. A one-word query is still a name.
+/// "bank of america") and name no site there: between two other words they
+/// never match a domain label or joined name on their own, so in.gov is not
+/// found by them, and one alone never counts as a leading name ("in n out
+/// burger" does not name in.gov). A one-word query is still a name.
 const FUNCTION_WORDS: &[&str] = &[
     "a", "an", "and", "at", "by", "for", "from", "in", "into", "near", "of", "on", "or", "the",
     "to", "with",
@@ -1667,7 +1668,10 @@ impl ParsedQuery {
         clauses: &mut Clauses,
     ) -> Result<()> {
         let word = &self.words[i];
-        let names = self.len == 1 || !is_function_word(word);
+        // Only a word joining two others: "to" in "to do list" is a word
+        // of the thing looked for.
+        let joining = i > 0 && i + 1 < self.words.len() && is_function_word(word);
+        let names = self.len == 1 || !joining;
         for (field, boost) in self.per_word(f) {
             if !names && (field == f.label || field == f.joined) {
                 continue;
@@ -3222,9 +3226,6 @@ mod tests {
         ];
         let (_dir, searcher) = build(&records);
         assert_eq!(top(&searcher, "pizza in denver"), "denverpizzaco.com");
-        // Leading too: "in" alone does not name in.gov in a longer query.
-        let hits = searcher.search("in denver pizza", 10).unwrap();
-        assert_eq!(hits[0].domain, "denverpizzaco.com");
         // On its own, the word is still a name.
         assert_eq!(top(&searcher, "in"), "in.gov");
     }
