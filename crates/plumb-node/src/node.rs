@@ -98,7 +98,7 @@ use plumb_ingest::download;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{watch, Notify};
 use tokio::task::JoinHandle;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::country::HomeCountry;
 use crate::meaning::SharedMeaning;
@@ -886,15 +886,19 @@ pub async fn start(mut config: NodeConfig) -> Result<NodeHandle> {
     }
     let worker = tokio::spawn(worker::run(inner.clone()));
     let embedding = inner.config.search_by_meaning.then(|| {
-        let inner = inner.clone();
-        tokio::task::spawn_blocking(move || embedding::run(inner))
+        supervise(&inner, "search by meaning", |inner| {
+            tokio::task::spawn_blocking(move || embedding::run(inner))
+        })
     });
-    let pages = {
-        let inner = inner.clone();
+    let pages = supervise(&inner, "page sets", |inner| {
         tokio::task::spawn_blocking(move || pages::run(inner))
-    };
-    let news = tokio::spawn(news::run(inner.clone()));
-    let adult = tokio::spawn(adult::run(inner.clone()));
+    });
+    let news = supervise(&inner, "checking feeds", |inner| {
+        tokio::spawn(news::run(inner))
+    });
+    let adult = supervise(&inner, "the adult blocklist", |inner| {
+        tokio::spawn(adult::run(inner))
+    });
     info!(
         "serving http://{addr}/ with data in {}",
         inner.paths.data.display()
@@ -909,6 +913,44 @@ pub async fn start(mut config: NodeConfig) -> Result<NodeHandle> {
         pages,
         news,
         adult,
+    })
+}
+
+/// First wait before a background task that panicked is started again.
+const RESTART_FIRST_WAIT: Duration = Duration::from_secs(60);
+/// Longest wait between restarts of a task that keeps panicking.
+const RESTART_MAX_WAIT: Duration = Duration::from_secs(3600);
+
+/// Runs the background task `start` spawns, named `what` in the log,
+/// until the node stops or the task ends by itself. One that panics is
+/// logged and started again after a wait that grows with each panic, so a
+/// bug in it does not end its work silently until the node stops.
+fn supervise(
+    inner: &Arc<Inner>,
+    what: &'static str,
+    start: impl Fn(Arc<Inner>) -> JoinHandle<()> + Send + 'static,
+) -> JoinHandle<()> {
+    let inner = inner.clone();
+    tokio::spawn(async move {
+        let mut backoff = worker::Backoff::new(RESTART_FIRST_WAIT, RESTART_MAX_WAIT);
+        loop {
+            let Err(err) = start(inner.clone()).await else {
+                return;
+            };
+            error!("{what} failed: {err}");
+            if inner.stopping() {
+                return;
+            }
+            let wait = backoff.next_delay();
+            inner.journal.warning(format!(
+                "Background work stopped by an error ({what}); starting it again in {}",
+                crate::web::duration_words(wait.as_secs())
+            ));
+            tokio::select! {
+                () = tokio::time::sleep(wait) => {}
+                () = inner.stopped() => return,
+            }
+        }
     })
 }
 

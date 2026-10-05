@@ -12,6 +12,8 @@
 //! * When the data folder is over the limit anyway, the least useful sites
 //!   go ([`pick_drops`]), lowest link score first, until the node is back
 //!   at [`TRIM_TO_PERCENT`] of it, and the index is built without them.
+//!   When the rest of the folder takes that much by itself, no site goes:
+//!   dropping them could not help, and the node says so instead.
 //!   Never dropped: the best [`MIN_SITES_KEPT`] sites, sites about the
 //!   node's topics (its focus and the About pages' interests), sites an
 //!   About page always puts first or a searcher opened from the results,
@@ -76,6 +78,32 @@ pub(super) fn due(inner: &Inner) -> bool {
         since => since,
     };
     now >= since.saturating_add(OVER_FOR)
+}
+
+/// When [`due`] may next say yes, while the node is over its storage
+/// limit, so a node paused by the limit does not wait for the next day
+/// to trim. `None` when it has no limit or is not over it.
+pub(super) fn next_due(inner: &Inner) -> Option<u64> {
+    if inner.settings().storage_limit_mb == 0 {
+        return None;
+    }
+    next_due_at(
+        inner.over_since.load(Ordering::SeqCst),
+        inner.last_trim.load(Ordering::SeqCst),
+    )
+}
+
+/// [`OVER_FOR`] after going over at `over_since` (0 when not over), and
+/// no sooner than [`TRIM_AGAIN_AFTER`] after the last look at `last_trim`.
+fn next_due_at(over_since: u64, last_trim: u64) -> Option<u64> {
+    if over_since == 0 {
+        return None;
+    }
+    let again = match last_trim {
+        0 => 0,
+        last => last.saturating_add(TRIM_AGAIN_AFTER),
+    };
+    Some(over_since.saturating_add(OVER_FOR).max(again))
 }
 
 /// Whether records other nodes share may add sites the node does not hold
@@ -145,10 +173,24 @@ pub(super) fn trim(inner: &Inner) -> Result<Option<super::ServingIndex>> {
     inner.last_trim.store(now_unix(), Ordering::SeqCst);
     let limit = inner.settings().storage_limit_mb.saturating_mul(MB);
     let used = inner.disk_used();
-    let free = used.saturating_sub(share(limit, TRIM_TO_PERCENT));
-    if limit == 0 || free == 0 {
+    let target = share(limit, TRIM_TO_PERCENT);
+    if limit == 0 || used <= target {
         return Ok(None);
     }
+    let sites = site_usage(inner);
+    let Some(free) = bytes_to_free(used, sites, target) else {
+        info!(
+            "over the storage limit ({} MB of {} MB), but sites take only {} MB: none dropped",
+            used / MB,
+            limit / MB,
+            sites / MB
+        );
+        inner.journal.warning(
+            "Over the storage limit, but not because of the sites: page sets, places and \
+             the rest take more than the limit leaves. Lower the page sets or raise the limit",
+        );
+        return Ok(None);
+    };
     let _records = inner.hold_records();
     inner.set_step(
         Step::Indexing,
@@ -156,7 +198,8 @@ pub(super) fn trim(inner: &Inner) -> Result<Option<super::ServingIndex>> {
     );
     let mut set = load_records(&inner.paths.records)?;
     inner.check_stop()?;
-    let drops = pick_drops(&set, free, site_bytes(inner, set.len()), &Keep::of(inner));
+    let per_site = sites / (set.len() as u64).max(1);
+    let drops = pick_drops(&set, free, per_site, &Keep::of(inner));
     if drops.is_empty() {
         inner.journal.warning(
             "Over the storage limit, and every site left is one this node keeps: \
@@ -185,19 +228,28 @@ pub(super) fn trim(inner: &Inner) -> Result<Option<super::ServingIndex>> {
     Ok(Some(built))
 }
 
-/// The bytes a site takes: its record, its share of the index being
-/// served, and its vector.
-fn site_bytes(inner: &Inner, sites: usize) -> u64 {
+/// The bytes to free by dropping sites, with `used` bytes in the data
+/// folder, `sites` of them the sites', to get back to `target`: no more
+/// than the sites take. `None` when the rest of the folder (page sets,
+/// places, the model, batches...) is at `target` by itself, so dropping
+/// sites cannot help.
+fn bytes_to_free(used: u64, sites: u64, target: u64) -> Option<u64> {
+    let other = used.saturating_sub(sites);
+    (other < target).then(|| used.saturating_sub(target).min(sites))
+}
+
+/// The bytes the sites take: their records, the index being served, and
+/// their vectors.
+fn site_usage(inner: &Inner) -> u64 {
     let paths = &inner.paths;
     let file = |path: &std::path::Path| std::fs::metadata(path).map_or(0, |m| m.len());
     let index = inner
         .current_summary()
         .map_or(0, |(id, _)| store::dir_size(&paths.index(id)));
-    let total = file(&paths.records)
+    file(&paths.records)
         + file(&journal_path(&paths.records))
         + index
-        + file(&paths.data.join(plumb_embed::VECTORS_FILE_NAME));
-    total / (sites as u64).max(1)
+        + file(&paths.data.join(plumb_embed::VECTORS_FILE_NAME))
 }
 
 #[cfg(test)]
@@ -252,6 +304,33 @@ mod tests {
         };
         // Only the one unprotected site of the four lowest goes first.
         assert_eq!(pick_drops(&set, 1, 1, &keep), vec![last(3)]);
+    }
+
+    #[test]
+    fn drops_no_more_than_the_sites_can_free() {
+        // 1,000 used, 600 of it sites: 200 over a target of 800.
+        assert_eq!(bytes_to_free(1_000, 600, 800), Some(200));
+        // Most of it is not sites: still only what is over the target.
+        assert_eq!(bytes_to_free(1_000, 300, 800), Some(200));
+        // The rest is at the target by itself: dropping sites cannot help.
+        assert_eq!(bytes_to_free(1_000, 100, 800), None);
+        assert_eq!(bytes_to_free(1_000, 0, 800), None);
+        // Counted at different times, the sites may seem bigger than the
+        // folder: never more than is over.
+        assert_eq!(bytes_to_free(1_000, 5_000, 800), Some(200));
+    }
+
+    #[test]
+    fn a_node_over_the_limit_trims_once_it_has_been_over_long_enough() {
+        assert_eq!(next_due_at(0, 0), None, "not over");
+        assert_eq!(next_due_at(1_000, 0), Some(1_000 + OVER_FOR));
+        // Not again within the hour after the last look.
+        assert_eq!(
+            next_due_at(1_000, 5_000),
+            Some(5_000 + TRIM_AGAIN_AFTER),
+            "after a look"
+        );
+        assert_eq!(next_due_at(10_000, 1), Some(10_000 + OVER_FOR));
     }
 
     #[test]

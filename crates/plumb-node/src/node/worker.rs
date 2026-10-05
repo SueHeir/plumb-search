@@ -162,7 +162,11 @@ async fn step(inner: &Arc<Inner>) -> Result<Next> {
     }
     // New topics: the sites kept for the old ones go, and the index is
     // built without them, before filling takes sites for the new ones.
-    if inner.fill_state().prune && inner.saved().crawl_left == 0 {
+    // Only under a storage limit: a node with none never loses sites.
+    if inner.fill_state().prune
+        && inner.settings().storage_limit_mb > 0
+        && inner.saved().crawl_left == 0
+    {
         let built = blocking(inner, |inner| {
             let _records = inner.hold_records();
             inner.set_step(Step::Indexing, "Making room for sites about new topics");
@@ -229,6 +233,8 @@ async fn step(inner: &Arc<Inner>) -> Result<Next> {
     if let Some(pause) = pause {
         inner.refresh_requested.store(false, Ordering::SeqCst);
         let until = pause.until.unwrap_or_else(|| store::next_day(now_unix()));
+        // Over the storage limit: look again when trimming is due.
+        let until = super::trim::next_due(inner).map_or(until, |due| due.min(until));
         return Ok(Next::IdleUntil(Some(
             wikidata_due.map_or(until, |due| due.min(until)),
         )));

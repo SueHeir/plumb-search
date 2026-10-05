@@ -311,8 +311,9 @@ where
 
 /// Opens a journal for appending. The directory entry of a new journal is
 /// flushed to disk; an old journal whose last line a crash cut short gets a
-/// line break, so that the next change starts on a line of its own.
-fn open_journal(path: &Path) -> Result<File> {
+/// line break, so that the next change starts on a line of its own. Also
+/// opens the network inbox, a journal of the same kind.
+pub(crate) fn open_journal(path: &Path) -> Result<File> {
     let open = || -> io::Result<File> {
         let mut file = OpenOptions::new()
             .read(true)
