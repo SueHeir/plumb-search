@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use plumb_core::{now_unix, SiteRecord};
 use plumb_net::assign::{epoch_of, is_assigned, MAX_SHARE_PPM};
-use plumb_net::{BucketSource, BucketTable, Multiaddr, NetConfig, NetHandle, PeerId};
+use plumb_net::{BucketSource, BucketTable, Multiaddr, NetConfig, NetHandle, PeerId, SearchScope};
 use tempfile::TempDir;
 use tokio::sync::mpsc::UnboundedReceiver;
 
@@ -64,6 +64,8 @@ impl Node {
         // Background rounds would make the counts below drift; the test
         // of them turns them on.
         config.round_every = None;
+        // Most tests are about nodes that do not trust each other.
+        config.search_scope = SearchScope::Anyone;
         tweak(&mut config);
         let source = table(dir.path(), &local);
         let (handle, records) = plumb_net::start(config, source).await.unwrap();
@@ -881,4 +883,82 @@ async fn a_node_fills_its_space_from_a_node_it_trusts_and_no_other() {
     f.handle.shutdown().await;
     u.handle.shutdown().await;
     s.handle.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn searches_ask_trusted_nodes_friends_of_friends_or_anyone() {
+    // A trusts S, S trusts F; nobody trusts X. All meet through S.
+    let f = Node::start(false, vec![], vec![]).await;
+    let f_id = f.handle.peer_id();
+    let s = Node::start_config(
+        tempfile::tempdir().unwrap(),
+        true,
+        vec![],
+        vec![],
+        true,
+        |c| c.trusted_peers = vec![f_id],
+    )
+    .await;
+    let s_id = s.handle.peer_id();
+    let s_addr = s.addr().await;
+    let f_addr = f.addr().await;
+    let x = Node::start(false, vec![s_addr.clone()], vec![]).await;
+    let x_id = x.handle.peer_id();
+    let x_addr = x.addr().await;
+    let start = |scope: SearchScope| {
+        let bootstrap = vec![s_addr.clone(), f_addr.clone(), x_addr.clone()];
+        async move {
+            Node::start_config(
+                tempfile::tempdir().unwrap(),
+                false,
+                bootstrap,
+                vec![],
+                true,
+                |c| {
+                    c.trusted_peers = vec![s_id];
+                    c.search_scope = scope;
+                },
+            )
+            .await
+        }
+    };
+    let sorted = |mut ids: Vec<PeerId>| {
+        ids.sort();
+        ids
+    };
+
+    let fof = start(SearchScope::FriendsOfFriends).await;
+    assert_eq!(asked(&fof.handle, 2).await, sorted(vec![s_id, f_id]));
+    let status = wait_for(|| {
+        let status = fof.handle.status();
+        (status.friends_of_friends == 1 && status.search_peers == 2).then_some(status)
+    })
+    .await;
+    assert_eq!(status.search_scope, SearchScope::FriendsOfFriends);
+    // X is connected too, but never asked.
+    wait_for(|| (fof.handle.status().connected_peers >= 3).then_some(())).await;
+    assert!(!fof.handle.bucket_peers().await.unwrap().contains(&x_id));
+
+    let trusted = start(SearchScope::Trusted).await;
+    wait_for(|| (trusted.handle.status().connected_peers >= 3).then_some(())).await;
+    assert_eq!(asked(&trusted.handle, 1).await, vec![s_id]);
+
+    let anyone = start(SearchScope::Anyone).await;
+    assert_eq!(
+        asked(&anyone.handle, 3).await,
+        sorted(vec![s_id, f_id, x_id])
+    );
+}
+
+/// The nodes `handle`'s searches ask, sorted, once there are `want`.
+async fn asked(handle: &NetHandle, want: usize) -> Vec<PeerId> {
+    for _ in 0..300 {
+        let mut peers = handle.bucket_peers().await.unwrap();
+        if peers.len() >= want {
+            peers.sort();
+            return peers;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("gave up waiting for {want} nodes to ask");
 }

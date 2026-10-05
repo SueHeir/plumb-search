@@ -251,6 +251,11 @@ pub struct RunArgs {
     /// with --trust-peer.
     #[arg(long, requires = "network")]
     pub no_default_trust: bool,
+    /// Which nodes network searches ask: `trusted` (only the nodes this
+    /// node trusts), `friends-of-friends` (those and the nodes they trust)
+    /// or `anyone`. Friends of friends unless given.
+    #[arg(long, value_name = "WHO", requires = "network")]
+    pub search_from: Option<plumb_net::SearchScope>,
     /// Offer private search at /private even off the network. Nodes that
     /// answer other nodes' searches offer it anyway, since they already
     /// have the groups of sites (buckets) browsers fetch and rank
