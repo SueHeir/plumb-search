@@ -2064,8 +2064,10 @@ async fn shows_the_recent_headlines_a_trusted_node_shares() {
     // Headlines are not site records.
     assert!(!dir.path().join("net/inbox.jsonl").exists());
     let (_, _, page) = get(addr, "/search?q=spring+tides").await;
-    assert!(page.contains("<h2>Recent</h2>"), "{page}");
-    assert!(page.contains("Harbour closed for spring tides"), "{page}");
+    assert!(page.contains("<span class=\"nh\">Recent</span>"), "{page}");
+    let (_, _, page) = get(addr, "/search?q=spring+tides&news=off").await;
+    assert!(!page.contains("class=\"nh\""), "{page}");
+    assert!(!page.contains("Harbour closed for spring tides"), "{page}");
     // A topic only one site's headline is about gets no block.
     assert_eq!(
         get(addr, "/api/recent?q=closed").await.2,

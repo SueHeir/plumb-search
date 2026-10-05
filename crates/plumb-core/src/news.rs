@@ -22,6 +22,40 @@ pub const MAX_HEADLINE_CHARS: usize = 200;
 /// Longest headline link, in bytes.
 pub const MAX_HEADLINE_URL_BYTES: usize = 500;
 
+/// How a results page shows its "Recent" block of headlines.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RecentNews {
+    /// Folded: a "Recent" line that opens to the headlines.
+    #[default]
+    Collapsed,
+    /// The headlines shown open.
+    Expanded,
+    /// No block at all.
+    Off,
+}
+
+impl RecentNews {
+    /// Reads `collapsed`, `expanded` or `off` (any case); `None` otherwise.
+    pub fn parse(text: &str) -> Option<Self> {
+        match text.trim().to_ascii_lowercase().as_str() {
+            "collapsed" => Some(RecentNews::Collapsed),
+            "expanded" | "open" => Some(RecentNews::Expanded),
+            "off" | "0" => Some(RecentNews::Off),
+            _ => None,
+        }
+    }
+
+    /// The name used in addresses and settings.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RecentNews::Collapsed => "collapsed",
+            RecentNews::Expanded => "expanded",
+            RecentNews::Off => "off",
+        }
+    }
+}
+
 /// One post from a site's feed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Headline {
