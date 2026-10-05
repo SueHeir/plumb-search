@@ -252,3 +252,26 @@ fn copies_keep_the_less_favorable_popularity() {
     assert_eq!(merged[0].signals.linking_domains, 2);
     assert!(!merged[0].signals.official_site);
 }
+
+#[test]
+fn operators_narrow_as_in_the_index() {
+    let records = corpus();
+    let o = Options::default();
+    for query in [
+        "bank site:usbank.com",
+        "bank -chase",
+        "\"us bank\"",
+        "tax site:gov",
+    ] {
+        assert_eq!(
+            private_top(&records, query, &o, 5),
+            index_top(&records, query, &SearchOptions::default(), 5),
+            "{query}"
+        );
+    }
+    assert_eq!(
+        private_top(&records, "bank site:usbank.com", &o, 5),
+        ["usbank.com"]
+    );
+    assert!(!private_top(&records, "bank -chase", &o, 5).contains(&"chase.com".to_string()));
+}
