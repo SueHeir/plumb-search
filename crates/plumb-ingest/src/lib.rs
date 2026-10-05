@@ -28,6 +28,7 @@ pub mod intros;
 pub mod kind_sites;
 pub mod openalex;
 pub mod openlibrary;
+pub mod osm;
 pub mod profiles;
 pub mod stackexchange;
 pub mod tranco;

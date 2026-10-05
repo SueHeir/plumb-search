@@ -418,9 +418,10 @@ pub struct FetchPagesArgs {
     /// github (GitHub repositories, from GitHub's search API; set
     /// GITHUB_TOKEN to search three times as fast) or stackoverflow (Stack
     /// Overflow's most viewed questions, from Stack Exchange's data dump),
-    /// books (Open Library's most shelved works, from its dumps) or papers
+    /// books (Open Library's most shelved works, from its dumps), papers
     /// (the most cited works, from OpenAlex's API; set OPENALEX_API_KEY if
-    /// it asks for one).
+    /// it asks for one) or places (named shops, restaurants, parks and
+    /// towns from OpenStreetMap).
     #[arg(long, value_name = "SET", default_value = "wikipedia-en")]
     pub set: String,
     /// Directory to download Wikipedia's dumps into (created if missing).
@@ -483,6 +484,10 @@ pub struct FetchPagesArgs {
     /// Papers: most papers kept, the most cited.
     #[arg(long, value_name = "N", default_value_t = 2_000_000)]
     pub max_papers: usize,
+    /// Places: read this OpenStreetMap extract (.osm.pbf) instead of
+    /// downloading the whole planet (about 90 GB) into --work.
+    #[arg(long, value_name = "PATH")]
+    pub osm: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -630,6 +635,13 @@ pub struct SearchArgs {
     pub exact: bool,
     #[command(flatten)]
     pub meaning: MeaningArgs,
+    /// A places file (places.tsv.gz from `fetch-pages --set places`): also
+    /// list the places the query asks for. Indexed next to it on first use.
+    #[arg(long, value_name = "PATH")]
+    pub places: Option<PathBuf>,
+    /// The town "near me" means, with --places.
+    #[arg(long, value_name = "TOWN", requires = "places")]
+    pub town: Option<String>,
     /// What to search for, e.g. `us bank`.
     #[arg(required = true, value_name = "QUERY")]
     pub query: Vec<String>,
@@ -660,6 +672,10 @@ pub struct ServeArgs {
     /// Bangs such as `!g` work either way.
     #[arg(long, value_name = "ENGINE", default_value = "off", value_parser = parse_web_search)]
     pub web_search: WebSearch,
+    /// A places file (places.tsv.gz from `fetch-pages --set places`), so
+    /// "pizza in denver" lists places. Indexed next to it on first use.
+    #[arg(long, value_name = "PATH")]
+    pub places: Option<PathBuf>,
     #[command(flatten)]
     pub meaning: MeaningArgs,
 }

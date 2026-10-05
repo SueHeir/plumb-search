@@ -63,6 +63,7 @@
 
 mod analysis;
 pub mod pages;
+pub mod places;
 mod replace;
 mod schema;
 mod spell;

@@ -21,13 +21,14 @@ pub mod news;
 #[cfg(feature = "oblivious")]
 pub mod oblivious;
 mod operators;
+pub mod place;
 pub mod profiles;
 pub mod safe;
 mod site_search;
 
 pub use article::{article_url, Article};
 pub use bot_check::is_bot_check_page;
-pub use country::{normalize_country, site_country, tld_country};
+pub use country::{country_of_name, normalize_country, site_country, tld_country, COUNTRY_CHOICES};
 pub use key_pages::{KeyPage, PageIntent, MAX_KEY_PAGES};
 pub use kinds::{is_generic_kind, kind_key, other_number, MAX_KINDS};
 pub use news::Headline;

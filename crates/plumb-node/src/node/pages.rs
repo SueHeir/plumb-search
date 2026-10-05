@@ -50,6 +50,7 @@ const FETCH_RETRY_WAIT: Duration = Duration::from_secs(15 * 60);
 pub(super) fn run(inner: Arc<Inner>) {
     let mut failed: Option<(String, Instant)> = None;
     let mut fetch_failed: Option<Instant> = None;
+    let mut places_failed: Option<(String, Instant)> = None;
     while !inner.stopping() {
         let mut settings = inner.settings();
         if inner.config.blackhole {
@@ -106,6 +107,7 @@ pub(super) fn run(inner: Arc<Inner>) {
                 }
             }
         }
+        super::places::refresh(&inner, &settings, &mut places_failed);
         let until = Instant::now() + LOOK_EVERY;
         while !inner.stopping() && Instant::now() < until {
             std::thread::sleep(TICK);

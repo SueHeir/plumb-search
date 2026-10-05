@@ -50,6 +50,20 @@ pub fn run_search(args: SearchArgs) -> Result<()> {
             .as_ref()
             .map(|m| m as &dyn plumb_index::Meaning),
     )?;
+    let places = match &args.places {
+        Some(file) => crate::places::open_file(file)?.search(
+            &query,
+            args.town.as_deref(),
+            args.country.as_deref(),
+            8,
+        )?,
+        None => None,
+    };
+    if args.json && args.places.is_some() {
+        let both = serde_json::json!({ "hits": results.hits, "places": places });
+        println!("{}", serde_json::to_string_pretty(&both)?);
+        return Ok(());
+    }
     if args.json {
         println!("{}", serde_json::to_string_pretty(&results.hits)?);
     } else {
@@ -67,6 +81,32 @@ pub fn run_search(args: SearchArgs) -> Result<()> {
             );
         }
         print!("{}", format_hits(&query, &results.hits));
+    }
+    if args.places.is_some() {
+        match places {
+            None => println!("no places asked for"),
+            Some(found) => {
+                match &found.center {
+                    Some(c) => println!(
+                        "places: {:?} around {} ({}, {:?} {:?}), within {} km",
+                        found.what, c.name, c.kind, c.region, c.country, found.radius_km
+                    ),
+                    None => println!("places: {:?} near an unknown town", found.what),
+                }
+                for (i, hit) in found.hits.iter().enumerate() {
+                    let p = &hit.place;
+                    println!(
+                        "{:>2}. {} [{}] {:.1} km {} {}",
+                        i + 1,
+                        p.name,
+                        p.label(),
+                        hit.km,
+                        p.address.as_deref().unwrap_or(""),
+                        p.website.as_deref().unwrap_or("")
+                    );
+                }
+            }
+        }
     }
     Ok(())
 }
