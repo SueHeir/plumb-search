@@ -1998,7 +1998,10 @@ impl Task {
                 if !is_global(&addr) {
                     self.nearby.insert(peer_id);
                 }
-                if !addr.iter().any(|p| p == Protocol::P2pCircuit) {
+                // A connection through a relay comes from a bare `/p2p/...`,
+                // which nobody can dial.
+                let dialable = addr.iter().any(|p| !matches!(p, Protocol::P2p(_)));
+                if dialable && !addr.iter().any(|p| p == Protocol::P2pCircuit) {
                     self.remote_addrs.insert(peer_id, addr);
                 }
             }
@@ -2196,8 +2199,13 @@ impl Task {
             return;
         }
         // Home network addresses only help nodes on the same network.
-        let nearby = self.nearby.contains(&peer);
-        let usable = |addr: &Multiaddr| is_specific(addr) && (nearby || is_global(addr));
+        // A circuit address is as reachable as its relay: one on our
+        // network relays for nodes we could not otherwise reach.
+        let nearby = |addr: &Multiaddr| {
+            let through = relay_of(addr);
+            self.nearby.contains(through.as_ref().unwrap_or(&peer))
+        };
+        let usable = |addr: &Multiaddr| is_specific(addr) && (nearby(addr) || is_global(addr));
         // Relayed addresses go in too: for a node behind NAT they are the
         // only way others can find it.
         if supports(KAD_PROTOCOL) {
@@ -3606,18 +3614,23 @@ fn is_loopback(addr: &Multiaddr) -> bool {
 }
 
 /// A relayed address whose relay is `relay`.
-fn is_circuit_through(addr: &Multiaddr, relay: &PeerId) -> bool {
+/// The relay a circuit address goes through, if it is one.
+fn relay_of(addr: &Multiaddr) -> Option<PeerId> {
     let mut previous = None;
     for p in addr.iter() {
         if p == Protocol::P2pCircuit {
-            return previous == Some(*relay);
+            return previous;
         }
         previous = match p {
             Protocol::P2p(id) => Some(id),
             _ => None,
         };
     }
-    false
+    None
+}
+
+fn is_circuit_through(addr: &Multiaddr, relay: &PeerId) -> bool {
+    relay_of(addr) == Some(*relay)
 }
 
 fn without_p2p(addr: Multiaddr) -> Multiaddr {
