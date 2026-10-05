@@ -44,7 +44,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::num::NonZeroU32;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::Duration;
 
@@ -142,6 +142,10 @@ pub const RECOUNT_MINUTES: u64 = 10;
 const POPULARITY_FILE: &str = "popularity.json";
 /// Where what the trusted nodes trust is kept (see [`crate::scope`]).
 const FRIENDS_FILE: &str = "friends.json";
+/// Between two batches sent again by [`resend_trusted`].
+const RESEND_PAUSE: Duration = Duration::from_millis(10);
+/// The trusted nodes whose held batches were taken in as trusted.
+const TRUST_APPLIED_FILE: &str = "trusted-applied";
 /// The scope the bucket cache was filled under.
 const SCOPE_FILE: &str = "search-scope";
 
@@ -875,13 +879,18 @@ pub async fn start(
         .bootstrap
         .retain(|addr| peer_of(addr) != Some(peer_id));
     let gateway = Gateway::new(&key, now_unix())?;
-    let (store, agreement) = {
+    // Crawlers trusted since the last start: the batches held from them
+    // were taken in without their text, so they are sent again whole.
+    let trust_file = config.dir.join(TRUST_APPLIED_FILE);
+    let newly_trusted = newly_trusted(&trust_file, peer_id, &config.trusted_peers);
+    let (store, agreement, replay) = {
         let dir = config.dir.join("batches");
         let trusted = config.trusted_peers.clone();
+        let newly = newly_trusted.clone();
         tokio::task::spawn_blocking(move || -> Result<_> {
             let store = BatchStore::open(&dir)?;
-            let agreement = replay_agreement(&store, peer_id, &trusted);
-            Ok((store, agreement))
+            let (agreement, replay) = replay_agreement(&store, peer_id, &trusted, &newly);
+            Ok((store, agreement, replay))
         })
         .await
         .context("opening the batch store")??
@@ -936,6 +945,17 @@ pub async fn start(
     let popularity = Arc::new(RwLock::new(Arc::new(table)));
     let (commands, commands_rx) = mpsc::unbounded_channel();
     let (records_tx, records_rx) = mpsc::unbounded_channel();
+    let store = Arc::new(Mutex::new(store));
+    {
+        let (store, records, trusted) = (
+            store.clone(),
+            records_tx.clone(),
+            config.trusted_peers.clone(),
+        );
+        tokio::task::spawn_blocking(move || {
+            resend_trusted(&store, &replay, &records, &trust_file, &trusted)
+        });
+    }
     let (answers_tx, answers_rx) = mpsc::unbounded_channel();
     info!("network node {peer_id} starting");
     let mut task = Task {
@@ -944,7 +964,7 @@ pub async fn start(
         config: config.clone(),
         topic,
         report_topic,
-        store: Arc::new(Mutex::new(store)),
+        store: store.clone(),
         reports: Arc::new(Mutex::new(reports)),
         popularity: popularity.clone(),
         recount: false,
@@ -3402,8 +3422,15 @@ fn crawler_views(store: &BatchStore, me: PeerId, trusted: &[PeerId], now: u64) -
     crawlers
 }
 
-fn replay_agreement(store: &BatchStore, me: PeerId, trusted: &[PeerId]) -> Agreement {
+/// Also returns the batches of `newly_trusted` crawlers, oldest first.
+fn replay_agreement(
+    store: &BatchStore,
+    me: PeerId,
+    trusted: &[PeerId],
+    newly_trusted: &[PeerId],
+) -> (Agreement, Vec<Hash>) {
     let now = now_unix();
+    let mut replay = Vec::new();
     let mut agreement = Agreement::new(me, trusted.iter().copied());
     for id in store.ids_oldest_first() {
         let batch = match store.get(&id) {
@@ -3426,12 +3453,85 @@ fn replay_agreement(store: &BatchStore, me: PeerId, trusted: &[PeerId]) -> Agree
         } else {
             accept_batch(&batch, &crawler, made)
         };
+        if newly_trusted.contains(&crawler) {
+            replay.push(id);
+        }
         agreement.observe(crawler, records, made);
     }
     agreement.prune(now);
     // These were credited when the batches first came in.
     agreement.take_verdicts();
-    agreement
+    (agreement, replay)
+}
+
+/// The nodes in `trusted` that were not when [`TRUST_APPLIED_FILE`] was
+/// last written: all of them on a node that never wrote it.
+fn newly_trusted(file: &Path, me: PeerId, trusted: &[PeerId]) -> Vec<PeerId> {
+    let applied: HashSet<PeerId> = std::fs::read_to_string(file)
+        .unwrap_or_default()
+        .split_whitespace()
+        .filter_map(|id| id.parse().ok())
+        .collect();
+    trusted
+        .iter()
+        .filter(|peer| **peer != me && !applied.contains(peer))
+        .copied()
+        .collect()
+}
+
+/// Sends the homepages of the held batches `ids`, as a trusted crawler's
+/// count (text included), to `records`, one batch at a time; then notes
+/// `trusted` as applied in `file`. Agreement has seen them already: a
+/// homepage taken in before without its text is filled in, and a newer
+/// crawl of the same site still wins.
+fn resend_trusted(
+    store: &Mutex<BatchStore>,
+    ids: &[Hash],
+    records: &mpsc::UnboundedSender<Vec<SiteRecord>>,
+    file: &Path,
+    trusted: &[PeerId],
+) {
+    let mut sent = 0;
+    for id in ids {
+        let batch = match store.lock().unwrap_or_else(PoisonError::into_inner).get(id) {
+            Ok(Some(batch)) => batch,
+            Ok(None) => continue,
+            Err(err) => {
+                warn!("cannot read batch {id}: {err:#}");
+                continue;
+            }
+        };
+        let made = batch.header.header.created_at;
+        let Ok(crawler) = batch.check(made) else {
+            continue;
+        };
+        let homepages: Vec<SiteRecord> = accept_trusted_batch(&batch, &crawler, made)
+            .into_iter()
+            .filter(|record| record.crawled_at.is_some())
+            .collect();
+        if homepages.is_empty() {
+            continue;
+        }
+        sent += homepages.len();
+        if records.send(homepages).is_err() {
+            return;
+        }
+        // The channel is unbounded: a node with weeks of batches would
+        // otherwise read them into memory faster than they are folded in.
+        if ids.len() > 1 {
+            std::thread::sleep(RESEND_PAUSE);
+        }
+    }
+    if !ids.is_empty() {
+        info!(
+            "took in {sent} homepages again, with their text, from {} batches of newly trusted nodes",
+            ids.len()
+        );
+    }
+    let list: Vec<String> = trusted.iter().map(ToString::to_string).collect();
+    if let Err(err) = std::fs::write(file, list.join("\n")) {
+        warn!("writing {}: {err}", file.display());
+    }
 }
 
 /// `records` by the epoch their homepage was crawled in (records not
@@ -3525,6 +3625,44 @@ fn redial_bootstrap(connected: usize, bootstrap_connected: bool, ticks: u64) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn held_batches_of_a_newly_trusted_crawler_are_taken_in_again_with_their_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = now_unix();
+        let key = Keypair::generate_ed25519();
+        let crawler = key.public().to_peer_id();
+        let me = PeerId::random();
+        let mut record = SiteRecord::new("shoes.example");
+        record.title = Some("Shoes".into());
+        record.body_text = Some("Handmade leather shoes".into());
+        record.crawled_at = Some(now);
+        let batch = Batch::sign(&key, &[record], epoch_of(now), MAX_SHARE_PPM, now)
+            .unwrap()
+            .unwrap();
+        let mut store = BatchStore::open(&dir.path().join("batches")).unwrap();
+        store.insert(&batch).unwrap();
+        let file = dir.path().join(TRUST_APPLIED_FILE);
+
+        // Trusted since the last start (or never noted): sent again whole.
+        let newly = newly_trusted(&file, me, &[me, crawler]);
+        assert_eq!(newly, [crawler]);
+        let (_, replay) = replay_agreement(&store, me, &[crawler], &newly);
+        assert_eq!(replay, [batch.id()]);
+        let store = Mutex::new(store);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        resend_trusted(&store, &replay, &tx, &file, &[crawler]);
+        let sent = rx.try_recv().unwrap();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].body_text.as_deref(), Some("Handmade leather shoes"));
+
+        // Noted: the next start sends nothing again.
+        let newly = newly_trusted(&file, me, &[crawler]);
+        assert!(newly.is_empty());
+        let store = store.into_inner().unwrap();
+        let (_, replay) = replay_agreement(&store, me, &[crawler], &newly);
+        assert!(replay.is_empty());
+    }
 
     #[test]
     fn a_search_keeps_the_text_of_crawls_only_from_trusted_nodes() {
