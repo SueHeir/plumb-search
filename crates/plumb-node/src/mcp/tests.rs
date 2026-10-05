@@ -699,3 +699,38 @@ fn searches_about_a_well_known_package_get_its_card() {
     let text = reply["result"]["content"][0]["text"].as_str().unwrap();
     assert!(!text.contains("crates.io"), "{text}");
 }
+
+/// [`Packages`], with a site that only matches the words of every query.
+struct PackagesAndAGuess;
+
+impl SearchBackend for PackagesAndAGuess {
+    fn search(&self, _query: &str, _limit: usize) -> Result<Vec<Hit>> {
+        Ok(vec![hit("xapo.com", 0.4, 0.2, false)])
+    }
+
+    fn search_full(
+        &self,
+        query: &str,
+        limit: usize,
+        options: &SearchOptions,
+    ) -> Result<SearchResults> {
+        let mut results = Packages.search_full(query, limit, options)?;
+        results.hits = self.search(query, limit)?;
+        Ok(results)
+    }
+
+    fn num_docs(&self) -> u64 {
+        1
+    }
+}
+
+#[test]
+fn official_site_prefers_a_packages_home_page_to_a_guess() {
+    let mcp = Mcp::new(Arc::new(PackagesAndAGuess), None);
+    let answer =
+        &call(&mcp, "official_site", json!({ "name": "serde" }))["result"]["structuredContent"];
+    assert_eq!(answer["url"], "https://serde.rs");
+    assert_eq!(answer["domain"], "serde.rs");
+    assert_eq!(answer["confidence"], "medium");
+    assert_eq!(answer["alternatives"][0]["domain"], "xapo.com");
+}
