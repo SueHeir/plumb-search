@@ -153,7 +153,7 @@ pub fn read_podcasts(db: &Path, min_score: u32, keep: usize) -> Result<Vec<Podca
     let mut statement = conn.prepare(
         "SELECT id, title, itunesAuthor, link, itunesId, popularityScore, episodeCount, \
          category1 FROM podcasts WHERE popularityScore >= ?1 AND popularityScore <= ?2 \
-         AND lastHttpStatus = 200 AND title != '' AND (duplicateOf IS NULL OR duplicateOf = 0)",
+         AND lastHttpStatus = 200 AND title != '' AND COALESCE(NULLIF(duplicateOf, ''), 0) = 0",
     )?;
     let rows = statement.query_map([min_score, MAX_SCORE], |row| {
         let text = |i: usize| -> rusqlite::Result<String> {
@@ -239,7 +239,7 @@ mod tests {
              INSERT INTO podcasts VALUES
               (1, 'a', 'Dan Carlin''s Hardcore History', 'https://www.dancarlin.com/', 200, 173001861,
                'Dan Carlin', 70, 9, 'History', NULL),
-              (2, 'b', 'Small Show', 'https://small.libsyn.com/', 200, 0, 'Someone', 500, 4, '', NULL),
+              (2, 'b', 'Small Show', 'https://small.libsyn.com/', 200, 0, 'Someone', 500, 4, '', ''),
               (3, 'c', 'Gone', 'https://gone.example/', 404, 1, 'X', 9, 9, '', NULL),
               (4, 'd', '', 'https://empty.example/', 200, 1, 'X', 9, 9, '', NULL),
               (5, 'e', 'Copy', 'https://copy.example/', 200, 1, 'X', 9, 9, '', 1),
