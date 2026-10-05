@@ -14,6 +14,8 @@
 //! reads (16,384 rows of 32 KiB), so the probe can time Spiral on real
 //! rows. A bucket too large for one row fails it; nothing is cut off.
 
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
@@ -21,11 +23,12 @@ use std::path::PathBuf;
 use anyhow::{bail, ensure, Context, Result};
 use flate2::write::DeflateEncoder;
 use flate2::Compression;
-use plumb_core::keys::slim_record;
+use plumb_core::keys::{bucket_of, record_keys, slim_record};
 use plumb_core::SiteRecord;
 use plumb_net::pir::snapshot::Layout;
 use plumb_net::BucketTable;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 
 /// Rows the probe's `upstream-16k` profile takes, and their size.
 const PROBE_ROWS: u32 = 16_384;
@@ -34,6 +37,9 @@ const PROBE_PREFIX: usize = 8;
 
 /// Characters of a description the lean variants keep.
 const LEAN_DESCRIPTION_CHARS: usize = 200;
+
+/// Pieces each bucket is cut into, by key, for the even-rows estimate.
+const SUB_BUCKETS: u32 = 4;
 
 const ROW_SIZES: [u32; 5] = [4_096, 8_192, 16_384, 32_768, 65_536];
 
@@ -98,6 +104,32 @@ fn distribution(mut values: Vec<u64>) -> serde_json::Value {
     })
 }
 
+/// Which piece of its bucket `key` falls in, for the even-rows estimate.
+fn sub_bucket(key: &str) -> u32 {
+    let hash = Sha256::digest([b"plumb-sub-bucket-v0\0".as_slice(), key.as_bytes()].concat());
+    u32::from_be_bytes(hash[..4].try_into().expect("4 bytes")) % SUB_BUCKETS
+}
+
+/// Packs pieces of these sizes into [`BUCKETS`] rows, largest first, each
+/// into the emptiest row, and reports how full rows get. A row's size is
+/// taken as the sum of its pieces compressed one by one, which overstates
+/// it a little (pieces compressed together come out smaller).
+fn packed_rows(mut pieces: Vec<u64>, buckets: u32) -> serde_json::Value {
+    pieces.sort_unstable_by(|a, b| b.cmp(a));
+    let mut rows: BinaryHeap<Reverse<u64>> = (0..buckets).map(|_| Reverse(0)).collect();
+    for piece in &pieces {
+        let Reverse(fill) = rows.pop().expect("there are rows");
+        rows.push(Reverse(fill + piece));
+    }
+    let fills: Vec<u64> = rows.into_iter().map(|Reverse(f)| f).collect();
+    json!({
+        "pieces": pieces.len(),
+        "largest_piece": pieces.first().copied().unwrap_or(0),
+        "row_fill": distribution(fills.clone()),
+        "layouts": layouts(*fills.iter().max().unwrap_or(&0)),
+    })
+}
+
 fn layouts(largest: u64) -> Vec<serde_json::Value> {
     ROW_SIZES
         .iter()
@@ -150,6 +182,9 @@ fn main() -> Result<()> {
         Some((_, path)) => Some(BufWriter::new(File::create(path)?)),
         None => None,
     };
+    // Deflated sizes of every bucket's pieces, for the lean and names cuts.
+    let even_variants = [Variant::Lean, Variant::Names];
+    let mut pieces: Vec<Vec<u64>> = vec![Vec::new(); even_variants.len()];
     let mut memberships = 0u64;
     for bucket in 0..buckets {
         let records: Vec<SiteRecord> = table
@@ -159,6 +194,28 @@ fn main() -> Result<()> {
             .collect::<Result<_, _>>()
             .context("records.dat holds a record that does not parse")?;
         memberships += records.len() as u64;
+        let mut by_piece: Vec<Vec<&SiteRecord>> = vec![Vec::new(); SUB_BUCKETS as usize];
+        for record in &records {
+            let mut wanted = [false; SUB_BUCKETS as usize];
+            for key in record_keys(record) {
+                if bucket_of(&key) == bucket {
+                    wanted[sub_bucket(&key) as usize] = true;
+                }
+            }
+            for (piece, _) in wanted.iter().enumerate().filter(|(_, w)| **w) {
+                by_piece[piece].push(record);
+            }
+        }
+        for (i, &variant) in even_variants.iter().enumerate() {
+            for piece in &by_piece {
+                if piece.is_empty() {
+                    continue;
+                }
+                let cut: Vec<SiteRecord> =
+                    piece.iter().map(|&r| variant.apply(r.clone())).collect();
+                pieces[i].push(deflate(&serde_json::to_vec(&cut)?)?.len() as u64);
+            }
+        }
         for (i, &(variant, _)) in VARIANTS.iter().enumerate() {
             let cut: Vec<SiteRecord> = records.iter().cloned().map(|r| variant.apply(r)).collect();
             let bytes = serde_json::to_vec(&cut)?;
@@ -200,12 +257,31 @@ fn main() -> Result<()> {
             })
         })
         .collect();
+    let even: Vec<serde_json::Value> = even_variants
+        .iter()
+        .zip(pieces)
+        .map(|(&variant, sizes)| {
+            let name = VARIANTS
+                .iter()
+                .find(|(v, _)| *v == variant)
+                .expect("listed")
+                .1;
+            let mut packed = packed_rows(sizes, buckets);
+            packed["variant"] = json!(name);
+            packed
+        })
+        .collect();
     let report = json!({
         "records": table.len(),
         "buckets": buckets,
         "memberships": memberships,
         "note": "Bucket payloads without crawl proofs. Layouts are the snapshot's equal pages per bucket (row header and Merkle path included).",
         "variants": variants,
+        "even_rows": {
+            "sub_buckets_per_bucket": SUB_BUCKETS,
+            "note": "Each bucket cut in pieces by key, the pieces packed into equal rows; a public map of piece to row (2 bytes per piece) would come with the snapshot.",
+            "variants": even,
+        },
     });
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
