@@ -738,13 +738,18 @@ impl PageSearcher {
             .map(|d| d.rsplit_once(", ").map_or(d, |(name, _)| name))
             .unwrap_or("");
         let author: HashSet<String> = analysis::tokens(&self.words, author).into_iter().collect();
-        let title = analysis::tokens(&self.words, &page.title);
-        let rest = match words.strip_prefix(title.as_slice()) {
-            Some(rest) if !title.is_empty() && !rest.is_empty() => rest,
-            _ => return false,
-        };
-        rest.iter().all(|word| author.contains(word))
-            || matches!(rest, [word] if word == "book" || word == "novel")
+        // The title, or the title without its subtitle: "Frankenstein" for
+        // "Frankenstein; or, The Modern Prometheus".
+        let short = page.title.split([':', ';']).next().unwrap_or("");
+        [page.title.as_str(), short].into_iter().any(|title| {
+            let title = analysis::tokens(&self.words, title);
+            let rest = match words.strip_prefix(title.as_slice()) {
+                Some(rest) if !title.is_empty() && !rest.is_empty() => rest,
+                _ => return false,
+            };
+            rest.iter().all(|word| author.contains(word))
+                || matches!(rest, [word] if word == "book" || word == "novel")
+        })
     }
 
     fn name_match(
@@ -1452,6 +1457,7 @@ mod tests {
         assert_eq!(paper.set_name(), "OpenAlex");
         let (_dir, s) = searcher(&[
             book("Dune", "Frank Herbert"),
+            book("Frankenstein; or, The Modern Prometheus", "Mary Shelley"),
             page("Dune (novel)", 1_000, &[]),
             paper,
         ]);
@@ -1465,7 +1471,12 @@ mod tests {
         assert_eq!(placed[1].at, 1);
         // With its author or "book" it is the book that is searched for,
         // before any site the query does not name.
-        for query in ["dune frank herbert", "dune herbert", "Dune book"] {
+        for query in [
+            "dune frank herbert",
+            "dune herbert",
+            "Dune book",
+            "frankenstein mary shelley",
+        ] {
             let hits = s.search(query, 5).unwrap();
             assert!(hits[0].whole && hits[0].page.set == BOOKS_SET, "{query}");
             let placed = place_pages(query, &[known_site("dunebook.com", false, 0.9)], hits);
