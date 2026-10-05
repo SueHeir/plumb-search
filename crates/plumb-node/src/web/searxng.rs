@@ -51,6 +51,8 @@ struct Entry {
     category: &'static str,
     /// When it was published (Unix seconds), for headlines.
     published: Option<u64>,
+    /// `plumb`, or the plugin that found it.
+    engine: String,
 }
 
 impl Entry {
@@ -61,6 +63,7 @@ impl Entry {
             content: hit.description.clone().unwrap_or_default(),
             category: "general",
             published: None,
+            engine: "plumb".into(),
         }
     }
 
@@ -72,6 +75,7 @@ impl Entry {
             content: page.description.clone().unwrap_or_default(),
             category: "general",
             published: None,
+            engine: "plumb".into(),
         }
     }
 
@@ -95,8 +99,8 @@ impl Entry {
             "url": self.url,
             "title": self.title,
             "content": self.content,
-            "engine": "plumb",
-            "engines": ["plumb"],
+            "engine": self.engine,
+            "engines": [self.engine],
             "positions": [position],
             "score": 1.0 / position as f64,
             "category": self.category,
@@ -175,7 +179,11 @@ async fn collect(
     options: &plumb_index::SearchOptions,
     wanted: Wanted,
 ) -> anyhow::Result<Collected> {
-    let results = run_search(state, query, limit, options).await?;
+    let (results, plugins) = tokio::join!(
+        run_search(state, query, limit, options),
+        state.plugin_results(query, options)
+    );
+    let results = results?;
     let extras = extras(state, query, &results, options).await;
     let found_pages = results.pages.iter().map(|p| p.hit.clone()).collect();
     let operators = plumb_core::Operators::parse(query);
@@ -199,6 +207,7 @@ async fn collect(
             content: "Official profile, from Wikidata".to_string(),
             category: "general",
             published: None,
+            engine: "plumb".into(),
         });
     }
     let hits = &results.hits;
@@ -230,16 +239,33 @@ async fn collect(
             content: format!("{}, {}", headline.domain, super::time_ago(headline.at, now)),
             category: "news",
             published: Some(headline.at),
+            engine: "plumb".into(),
+        })
+        .collect();
+    // Plugin results follow the best result, as on the results page.
+    let from_plugins: Vec<Entry> = plugins
+        .iter()
+        .flat_map(|found| {
+            found.results.iter().map(|item| Entry {
+                url: item.url.clone(),
+                title: item.title.clone(),
+                content: item.snippet.clone().unwrap_or_default(),
+                category: "general",
+                published: item.published,
+                engine: found.plugin.clone(),
+            })
         })
         .collect();
     match wanted {
         Wanted::NewsOnly => entries = headlines,
         Wanted::RecentFirst => {
+            let at = entries.len().min(1);
+            entries.splice(at..at, from_plugins);
             entries.splice(0..0, headlines);
         }
         Wanted::Everything => {
             let at = entries.len().min(1);
-            entries.splice(at..at, headlines);
+            entries.splice(at..at, headlines.into_iter().chain(from_plugins));
         }
     }
     // Apps that only read snippets still get the answer.

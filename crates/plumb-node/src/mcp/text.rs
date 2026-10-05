@@ -223,6 +223,28 @@ fn search(out: &mut String, answer: &Value) {
             );
         }
     }
+    for found in list(answer, "plugins") {
+        let _ = writeln!(
+            out,
+            "From the {} plugin on this node (not Plumb's index):",
+            text(found, "plugin").unwrap_or("")
+        );
+        for item in list(found, "results") {
+            let mut about = text(item, "site").unwrap_or("").to_string();
+            if let Some(published) = text(item, "published") {
+                about = format!("{about}, {published}");
+            }
+            let _ = writeln!(
+                out,
+                "- {} ({about}) {}",
+                text(item, "title").unwrap_or(""),
+                text(item, "url").unwrap_or("")
+            );
+            if let Some(snippet) = text(item, "snippet") {
+                let _ = writeln!(out, "  {snippet}");
+            }
+        }
+    }
 }
 
 fn official_site(out: &mut String, answer: &Value) {

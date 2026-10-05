@@ -60,6 +60,20 @@ pub enum Command {
     /// Plumb for official sites and look-alikes: an MCP server over stdin
     /// and stdout.
     Mcp(McpArgs),
+    /// Run a plugin on one search and print its results as JSON, to try a
+    /// plugin before installing it (see docs/plugins.md).
+    TryPlugin(TryPluginArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct TryPluginArgs {
+    /// The plugin's folder: plugin.json, plugin.wasm and optionally
+    /// config.json.
+    #[arg(long, value_name = "DIR")]
+    pub plugin: PathBuf,
+    /// What to search for, keyword included or not.
+    #[arg(required = true, num_args = 1..)]
+    pub query: Vec<String>,
 }
 
 #[derive(Debug, Args)]
@@ -689,6 +703,11 @@ pub struct ServeArgs {
     /// "pizza in denver" lists places. Indexed next to it on first use.
     #[arg(long, value_name = "PATH")]
     pub places: Option<PathBuf>,
+    /// A folder of plugins, one folder each, whose results show with the
+    /// node's own (see docs/plugins.md). A node started with `run` uses
+    /// DIR/plugins.
+    #[arg(long, value_name = "DIR")]
+    pub plugins: Option<PathBuf>,
     #[command(flatten)]
     pub meaning: MeaningArgs,
 }

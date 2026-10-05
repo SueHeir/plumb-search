@@ -159,6 +159,8 @@ pub(crate) struct ProfileAnswer {
 pub(crate) struct Extras {
     pub answer: Option<Answer>,
     pub profile: Option<ProfileAnswer>,
+    /// What the node's plugins found.
+    pub plugins: Vec<crate::plugins::PluginResults>,
 }
 
 /// Whether a Wikipedia article lists the pages a name could mean rather

@@ -212,6 +212,34 @@ fn search_and_site_info_return_plain_entries() {
 }
 
 #[test]
+fn search_lists_what_plugins_found_apart_from_plumbs_results() {
+    let found = crate::plugins::PluginResults {
+        plugin: "hacker-news".into(),
+        name: "Hacker News".into(),
+        results: vec![crate::plugins::PluginItem {
+            title: "Rust 2.0".into(),
+            url: "https://blog.rust-lang.org/x".into(),
+            site: "rust-lang.org".into(),
+            snippet: Some("120 points".into()),
+            published: None,
+        }],
+    };
+    let mcp = server(vec![hit("rust-lang.org", 2.0, 0.8, true)]).with_plugin_results(vec![found]);
+    let result = &call(&mcp, "search", json!({ "query": "hn rust" }))["result"];
+    let answer = &result["structuredContent"];
+    assert_eq!(answer["plugins"][0]["plugin"], "Hacker News");
+    assert_eq!(
+        answer["plugins"][0]["results"][0]["url"],
+        "https://blog.rust-lang.org/x"
+    );
+    let text = result["content"][0]["text"].as_str().unwrap();
+    assert!(
+        text.contains("From the Hacker News plugin on this node (not Plumb's index):\n- Rust 2.0 (rust-lang.org) https://blog.rust-lang.org/x\n  120 points"),
+        "{text}"
+    );
+}
+
+#[test]
 fn name_queries_read_the_brand_out_of_a_host() {
     assert_eq!(
         name_queries("usbank-login-help.com", "usbank-login-help.com"),
