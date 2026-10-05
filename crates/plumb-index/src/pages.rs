@@ -168,6 +168,28 @@ impl Page {
         }
     }
 
+    /// The podcast `podcast`, written as an article whose item is its
+    /// Podcast Index id and whose site is its website's, when it has one
+    /// of its own.
+    pub fn from_podcast(podcast: Article) -> Self {
+        Page {
+            set: PODCASTS_SET.to_string(),
+            url: format!(
+                "https://podcastindex.org/podcast/{}",
+                podcast.item.as_deref().unwrap_or("")
+            ),
+            title: podcast.title,
+            description: podcast.description,
+            site: podcast.site,
+            views: podcast.views,
+            aliases: podcast.aliases,
+            item: None,
+            profiles: podcast.profiles,
+            website: None,
+            package: None,
+        }
+    }
+
     /// The paper `paper`, written as an article whose item is its DOI or
     /// else its OpenAlex id, and whose views are its citations.
     pub fn from_paper(paper: Article) -> Self {
@@ -249,6 +271,7 @@ impl Page {
             GITHUB_SET => Page::from_repo(article),
             STACKOVERFLOW_SET => Page::from_question(article),
             BOOKS_SET => Page::from_book(article),
+            PODCASTS_SET => Page::from_podcast(article),
             PAPERS_SET => Page::from_paper(article),
             WIKIDATA_SET => Page::from_item(article),
             PACKAGES_SET => Page::from_package(article)?,
@@ -269,10 +292,10 @@ impl Page {
         })
     }
 
-    /// Whether the page may be listed before every site. Books and papers
-    /// share their titles with too much ("Python", "Apple") to.
+    /// Whether the page may be listed before every site. Books, podcasts
+    /// and papers share their titles with too much ("Python", "Apple") to.
     pub fn may_lead(&self) -> bool {
-        self.set != BOOKS_SET && self.set != PAPERS_SET
+        self.set != BOOKS_SET && self.set != PAPERS_SET && self.set != PODCASTS_SET
     }
 
     /// The name of the set people see: "Wikipedia".
@@ -285,6 +308,8 @@ impl Page {
             "Stack Overflow"
         } else if self.set == BOOKS_SET {
             "Open Library"
+        } else if self.set == PODCASTS_SET {
+            "Podcast Index"
         } else if self.set == PAPERS_SET {
             "OpenAlex"
         } else if self.set == WIKIDATA_SET {
@@ -321,6 +346,8 @@ impl Page {
             "stackoverflow.com"
         } else if self.set == BOOKS_SET {
             "openlibrary.org"
+        } else if self.set == PODCASTS_SET {
+            "podcastindex.org"
         } else if self.set == PAPERS_SET {
             "openalex.org"
         } else if let Some(registry) = self.registry() {
@@ -337,6 +364,8 @@ pub const GITHUB_SET: &str = "github";
 pub const STACKOVERFLOW_SET: &str = "stackoverflow";
 /// The set of books, from Open Library.
 pub const BOOKS_SET: &str = "books";
+/// The set of podcasts, from Podcast Index.
+pub const PODCASTS_SET: &str = "podcasts";
 /// The set of software packages (npm, PyPI, crates.io and others).
 pub const PACKAGES_SET: &str = "packages";
 /// Least popularity of a package found by a query that names only its
@@ -689,9 +718,26 @@ impl PageSearcher {
             })
             .collect();
         clauses.push((Occur::Should, Box::new(BooleanQuery::new(every_word))));
-        // Books named by their title and "book": "dune book".
+        // Books and podcasts named by their title and what they are: "dune
+        // book", "hardcore history podcast".
         if let Some((title, last)) = query.trim().rsplit_once(char::is_whitespace) {
-            if matches!(last.to_lowercase().as_str(), "book" | "novel") {
+            if matches!(last.to_lowercase().as_str(), "book" | "novel" | "podcast") {
+                let title_words: Vec<(Occur, Box<dyn Query>)> =
+                    analysis::tokens(&self.words, title)
+                        .iter()
+                        .map(|word| {
+                            (
+                                Occur::Must,
+                                Box::new(TermQuery::new(
+                                    Term::from_field_text(self.fields.words, word),
+                                    IndexRecordOption::Basic,
+                                )) as Box<dyn Query>,
+                            )
+                        })
+                        .collect();
+                if !title_words.is_empty() {
+                    clauses.push((Occur::Should, Box::new(BooleanQuery::new(title_words))));
+                }
                 if let Some(key) = analysis::tokens(&self.joined, title).pop() {
                     clauses.push((
                         Occur::Should,
@@ -883,17 +929,22 @@ impl PageSearcher {
         (PARTIAL_MATCH * share, asked)
     }
 
-    /// Whether the query `words` are a book's title followed by words of
-    /// its author's name or by "book" or "novel": "dune frank herbert",
-    /// "the great gatsby book".
+    /// Whether the query `words` are a book's or podcast's title followed by
+    /// words of its author's name or by what it is ("book", "novel",
+    /// "podcast"): "dune frank herbert", "the great gatsby book",
+    /// "hardcore history podcast".
     fn book_match(&self, page: &Page, words: &[String]) -> bool {
-        if page.set != BOOKS_SET {
-            return false;
-        }
+        let (byline, kinds): (&str, &[&str]) = match page.set.as_str() {
+            BOOKS_SET => ("Book by ", &["book", "novel"]),
+            PODCASTS_SET => ("Podcast by ", &["podcast"]),
+            _ => return false,
+        };
+        // "Book by AUTHOR, YEAR", "Podcast by AUTHOR · CATEGORY".
         let author = page
             .description
             .as_deref()
-            .and_then(|d| d.strip_prefix("Book by "))
+            .and_then(|d| d.strip_prefix(byline))
+            .map(|d| d.split(" · ").next().unwrap_or(d))
             .map(|d| d.rsplit_once(", ").map_or(d, |(name, _)| name))
             .unwrap_or("");
         let author: HashSet<String> = analysis::tokens(&self.words, author).into_iter().collect();
@@ -907,8 +958,19 @@ impl PageSearcher {
                 _ => return false,
             };
             rest.iter().all(|word| author.contains(word))
-                || matches!(rest, [word] if word == "book" || word == "novel")
-        })
+                || matches!(rest, [word] if kinds.contains(&word.as_str()))
+        }) || (page.set == PODCASTS_SET && self.podcast_named(page, words))
+    }
+
+    /// Whether `words` are the end of a podcast's title, two words or more,
+    /// and "podcast": "hardcore history podcast" for "Dan Carlin's Hardcore
+    /// History".
+    fn podcast_named(&self, page: &Page, words: &[String]) -> bool {
+        let Some((last, named)) = words.split_last() else {
+            return false;
+        };
+        let title = analysis::tokens(&self.words, &page.title);
+        last == "podcast" && named.len() >= 2 && title.ends_with(named)
     }
 
     fn name_match(
@@ -1809,6 +1871,41 @@ mod tests {
             "Navy Federal Credit Union"
         ));
         assert!(!site_is_titled("navyfed.org", "Navy Federal Credit Union"));
+    }
+
+    #[test]
+    fn podcasts_are_found_by_their_name_and_podcast() {
+        let podcast = Page::from_podcast(Article {
+            title: "Dan Carlin's Hardcore History".into(),
+            description: Some("Podcast by Dan Carlin · History".into()),
+            item: Some("1".into()),
+            site: Some("dancarlin.com".into()),
+            views: 90_070,
+            aliases: vec!["Dan Carlin podcast".into()],
+            ..Article::default()
+        });
+        assert_eq!(podcast.url, "https://podcastindex.org/podcast/1");
+        assert_eq!(podcast.set_name(), "Podcast Index");
+        let (_dir, s) = searcher(&[podcast, page("History", 500_000, &[])]);
+        for query in [
+            "hardcore history podcast",
+            "dan carlin's hardcore history podcast",
+            "dan carlin's hardcore history dan carlin",
+        ] {
+            let hits = s.search(query, 5).unwrap();
+            assert!(
+                hits[0].whole && hits[0].page.set == PODCASTS_SET,
+                "{query}: {hits:?}"
+            );
+        }
+        let hits = s.search("dan carlin podcast", 5).unwrap();
+        assert!(hits[0].named && hits[0].page.set == PODCASTS_SET);
+        // Alone, a title of the end of another is no podcast's.
+        assert!(!s
+            .search("history podcast", 5)
+            .unwrap()
+            .iter()
+            .any(|hit| hit.whole));
     }
 
     #[test]

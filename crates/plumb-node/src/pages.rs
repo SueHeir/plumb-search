@@ -70,6 +70,12 @@ pub const SETS: &[SetInfo] = &[
         bytes_per_page: 110,
     },
     SetInfo {
+        id: plumb_index::pages::PODCASTS_SET,
+        name: "Podcasts (Podcast Index)",
+        pages: 300_000,
+        bytes_per_page: 140,
+    },
+    SetInfo {
         id: plumb_index::pages::PAPERS_SET,
         name: "Papers (OpenAlex)",
         pages: 2_000_000,
