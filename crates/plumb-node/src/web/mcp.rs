@@ -218,9 +218,15 @@ async fn mcp(State(state): State<AppState>, request: Request) -> Response {
         }
     }
     let country = state.settings.home.resolve(None);
-    let rates = match Mcp::search_query(&message) {
-        Some(query) => state.rates.for_query(query).await,
-        None => None,
+    let (rates, plugins) = match Mcp::search_query(&message) {
+        Some(query) => {
+            let options = plumb_index::SearchOptions::default();
+            tokio::join!(
+                state.rates.for_query(query),
+                state.plugin_results(query, &options)
+            )
+        }
+        None => (None, Vec::new()),
     };
     let reader = if reads_pages {
         state.page_reader.get()
@@ -231,7 +237,8 @@ async fn mcp(State(state): State<AppState>, request: Request) -> Response {
         .with_reader(reader)
         .with_rates(rates)
         .with_node(state.node.clone())
-        .with_findings(if here { state.findings() } else { None });
+        .with_findings(if here { state.findings() } else { None })
+        .with_plugin_results(plugins);
     let reply = tokio::task::spawn_blocking(move || server.handle(&message)).await;
     match reply {
         Ok(Some(reply)) => answer(StatusCode::OK, reply),

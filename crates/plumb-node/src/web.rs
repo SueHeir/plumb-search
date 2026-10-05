@@ -82,6 +82,7 @@ use crate::country::{country_name, HomeCountry, COUNTRY_CHOICES};
 use crate::meaning::{MeaningIndex, SharedMeaning};
 use crate::news::Recent;
 use crate::node::{NodeSettings, Phase, Status, Step};
+use crate::plugins::PluginResults;
 use crate::websearch::{bang_url, Engine, WebSettings};
 
 pub(crate) mod answers;
@@ -485,6 +486,14 @@ impl AppState {
         self.node.as_ref()?.recent(query, top)
     }
 
+    /// What the node's plugins find for `query`.
+    async fn plugin_results(&self, query: &str, options: &SearchOptions) -> Vec<PluginResults> {
+        self.settings
+            .plugins
+            .search(query, options.safe, options.language.as_deref())
+            .await
+    }
+
     /// The icons of `domains` that this node has, for [`render_hit`]. Read
     /// off the async threads: each is a small file.
     async fn icons(&self, domains: Vec<String>) -> Icons {
@@ -619,6 +628,11 @@ pub fn run(args: ServeArgs) -> Result<()> {
             home: args.country.clone(),
             web_search: args.web_search.0,
             read_pages_for_all: args.mcp_read_pages,
+            plugins: args
+                .plugins
+                .as_deref()
+                .map(crate::plugins::Plugins::load_dir)
+                .unwrap_or_default(),
         },
     );
     block_on(async move {
@@ -891,11 +905,15 @@ async fn search_page(
         history: None,
     };
     let limit = params.limit();
-    let local = run_search(&state, &query, limit, &settings.options).await;
-    let extras = match &local {
+    let (local, plugins) = tokio::join!(
+        run_search(&state, &query, limit, &settings.options),
+        state.plugin_results(&query, &settings.options)
+    );
+    let mut extras = match &local {
         Ok(results) => extras(&state, &query, results, &settings.options).await,
         Err(_) => answers::Extras::default(),
     };
+    extras.plugins = plugins;
     let (local, network) = if settings.network == NetSetting::On {
         let network = network_search(&state, &query, limit, &settings.options).await;
         let network = match network {
@@ -1030,7 +1048,17 @@ async fn api_search(
         };
     }
     let options = params.options(&state.settings.home, &headers);
-    match run_search(&state, &query, params.limit(), &options).await {
+    let (found, plugins) = tokio::join!(
+        run_search(&state, &query, params.limit(), &options),
+        async {
+            if full {
+                state.plugin_results(&query, &options).await
+            } else {
+                Vec::new()
+            }
+        }
+    );
+    match found {
         Ok(results) if full => {
             let extras = extras(&state, &query, &results, &options).await;
             let info = match &extras.profile {
@@ -1051,6 +1079,7 @@ async fn api_search(
                 profile: extras.profile,
                 info,
                 places,
+                plugins,
             };
             (StatusCode::OK, security_headers(), Json(body)).into_response()
         }
@@ -1107,6 +1136,9 @@ struct FullResults<'a> {
     info: Option<answers::InfoBox>,
     #[serde(skip_serializing_if = "Option::is_none")]
     places: Option<plumb_index::places::PlaceResults>,
+    /// What the node's plugins found; never from other nodes.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    plugins: Vec<PluginResults>,
 }
 
 /// The instant answer and the official profile asked for, for `query`
@@ -1128,7 +1160,11 @@ async fn extras(
             .and_then(|found| answers::profile_answer(query, &found.pages)),
         _ => None,
     };
-    answers::Extras { answer, profile }
+    answers::Extras {
+        answer,
+        profile,
+        plugins: Vec::new(),
+    }
 }
 
 /// Results asked for when looking up whose profile a query asks for.
@@ -1747,6 +1783,8 @@ li.news{padding:.6rem .9rem;border:1px solid var(--line);border-radius:.6rem}\
 .news a{color:var(--link);text-decoration:none;overflow-wrap:anywhere}\
 .news a:hover,.news a:focus-visible{text-decoration:underline}\
 .news .m{margin:0}\
+.plugin .nh{margin:0 0 .2rem}\
+.plugin .d{margin:.1rem 0;font-size:.875rem}\
 .web{margin:.25rem 0;font-size:.9rem}.web a{color:var(--muted)}\
 .setup{max-width:36rem}\
 .step{margin:2rem 0 .5rem;font-size:1.1rem}\
@@ -2444,6 +2482,14 @@ fn render_results_with(
     let news = recent
         .filter(|_| settings.options.recent != RecentNews::Off)
         .map(|recent| render_recent(recent, settings.options.recent, now_unix()));
+    let now = now_unix();
+    let from_plugins: String = extras
+        .map(|e| e.plugins.iter().map(|p| render_plugin(p, now)).collect())
+        .unwrap_or_default();
+    let news = match (news, from_plugins.is_empty()) {
+        (news, true) => news,
+        (news, false) => Some(news.unwrap_or_default() + &from_plugins),
+    };
     if shown.is_empty() && pages.is_empty() {
         let _ = writeln!(
             body,
@@ -2832,6 +2878,42 @@ fn render_recent(recent: &Recent, view: RecentNews, now: u64) -> String {
     )
 }
 
+/// What one of the node's plugins found, as an item of the results
+/// list after the first result, named for the plugin so that nobody
+/// takes it for Plumb's own. Plugin text is as untrusted as any record's,
+/// and is escaped the same way.
+fn render_plugin(found: &PluginResults, now: u64) -> String {
+    let mut items = String::new();
+    for item in &found.results {
+        let Some(href) = http_url(&item.url) else {
+            continue;
+        };
+        let mut meta = escape_html(&item.site);
+        if let Some(at) = item.published {
+            let _ = write!(meta, " &middot; {}", time_ago(at, now));
+        }
+        let snippet = item
+            .snippet
+            .as_deref()
+            .map(|s| format!("<p class=\"d\">{}</p>", escape_html(s)))
+            .unwrap_or_default();
+        let _ = write!(
+            items,
+            "<li><a href=\"{}\" rel=\"noreferrer\">{}</a>{snippet}<div class=\"m\">{meta}</div></li>",
+            escape_html(&href),
+            escape_html(&item.title),
+        );
+    }
+    if items.is_empty() {
+        return String::new();
+    }
+    format!(
+        "<li class=\"news plugin\"><p class=\"nh\">From {} <span class=\"m\">plugin on this node</span></p>\
+         <ol>{items}</ol></li>\n",
+        escape_html(&found.name)
+    )
+}
+
 /// Most key pages listed under a result.
 const SHOWN_KEY_PAGES: usize = 6;
 
@@ -3140,6 +3222,49 @@ mod tests {
             hits,
             ..FakeBackend::default()
         })
+    }
+
+    #[tokio::test]
+    async fn plugin_results_show_on_the_page_and_in_json_but_only_when_asked() {
+        let plugins = crate::plugins::answering_plugins(
+            "Test News",
+            "tn",
+            r#"{"results":[{"title":"Story <b>","url":"https://news.example.com/1","snippet":"Hot take"}]}"#,
+        );
+        let app = router_with(
+            backend(bank_hits()),
+            WebSettings {
+                home: HomeCountry::Off,
+                plugins,
+                ..WebSettings::default()
+            },
+        );
+        let (_, _, page) = send(app.clone(), "/search?q=tn+us+bank").await;
+        let block = page
+            .find("<li class=\"news plugin\">")
+            .expect("the plugin's block");
+        assert!(
+            page[..block].contains("usbank.com"),
+            "after the first result"
+        );
+        assert!(page[block..].contains("From Test News"));
+        assert!(page[block..].contains("Story &lt;b&gt;"));
+        assert!(page[block..].contains("href=\"https://news.example.com/1\""));
+        // Its keyword picks it.
+        let (_, _, page) = send(app.clone(), "/search?q=us+bank").await;
+        assert!(!page.contains("From Test News"));
+
+        let (_, _, body) = send(app.clone(), "/api/search?q=tn+us+bank&full=1").await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["plugins"][0]["name"], "Test News");
+        assert_eq!(json["plugins"][0]["results"][0]["site"], "example.com");
+
+        let (_, _, body) = send(app, "/search?q=tn+us+bank&format=json").await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let results = json["results"].as_array().unwrap();
+        assert_eq!(results[1]["url"], "https://news.example.com/1");
+        assert_eq!(results[1]["engine"], "test-news");
+        assert_eq!(results[0]["engine"], "plumb");
     }
 
     #[tokio::test]

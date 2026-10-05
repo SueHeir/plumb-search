@@ -1,0 +1,11 @@
+[package]
+name = "plumb-plugin"
+description = "Write Plumb Search plugins in Rust: results from sources Plumb does not crawl, run in a sandbox on the node that installs them."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"

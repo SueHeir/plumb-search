@@ -67,13 +67,16 @@ use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
 use crate::agree::{Agreement, AgreementStatus, MIN_JUDGED};
+use crate::allowance::{Allowance, Source};
 use crate::assign::{epoch_of, is_assigned, MAX_SHARE_PPM};
 use crate::batch::{
     accept_batch, accept_news, accept_own_batch, accept_trusted_batch, Batch, SignedHeader,
     MAX_BATCH_AGE_EPOCHS, MAX_BATCH_RECORDS,
 };
 use crate::bucket::{BucketSource, BUCKETS};
-use crate::credits::{CreditStatus, Issuer, Ledger, Pending, Wallet, MAX_ISSUE};
+use crate::credits::{
+    CreditStatus, CreditsAtPeer, Issuer, Ledger, Pending, Wallet, MAX_ISSUE, MIN_ANSWERS_FOR_TOKENS,
+};
 use crate::fill::{FillPage, FILL_REQUESTS_PER_MINUTE, MAX_FILLING};
 use crate::hash::Hash;
 use crate::joining::{explain_dial_error, peer_of, JoinProblem, PeerView, Route};
@@ -197,6 +200,10 @@ pub struct NetConfig {
     /// Keep a few tokens from each node it searches, bought with this
     /// node's credits, to be answered when that node is busy.
     pub collect_tokens: bool,
+    /// Most bucket requests answered for free a day for nodes this node
+    /// does not trust (see [`crate::allowance`]); `None` for no daily
+    /// limit. Requests that pay with credits are still answered past it.
+    pub answer_per_day: Option<u64>,
     /// Days of batches kept, [`RETAIN_EPOCHS`] unless changed; fewer for a
     /// node that crawls a lot on a small disk.
     pub keep_batches_days: u64,
@@ -239,6 +246,7 @@ impl NetConfig {
             search_scope: SearchScope::default(),
             max_answering: MAX_ANSWERING,
             collect_tokens: true,
+            answer_per_day: None,
             keep_batches_days: RETAIN_EPOCHS,
             round_every: Some(ROUND_EVERY),
             fill: true,
@@ -388,6 +396,8 @@ enum Command {
         reply: oneshot::Sender<Result<usize>>,
     },
     AskCredits(PeerId, oneshot::Sender<Result<CreditsAt>>),
+    /// Nodes that answered bucket requests of ours, once per answer.
+    Answered(Vec<PeerId>),
     FillPeers(oneshot::Sender<Vec<PeerId>>),
     Fill {
         prefer: Option<PeerId>,
@@ -504,6 +514,9 @@ impl NetHandle {
             .await;
             self.tokens_spent
                 .fetch_add(found.priority as u64, std::sync::atomic::Ordering::Relaxed);
+            if !found.answered_by.is_empty() {
+                self.send(Command::Answered(found.answered_by.clone()))?;
+            }
             if found.asked > 0 {
                 count_round(&self.status, &found);
             }
@@ -982,6 +995,9 @@ pub async fn start(
         tokens_spent: tokens_spent.clone(),
         tokens_issued: 0,
         priority_answered: 0,
+        allowance: Allowance::new(config.answer_per_day),
+        credits_at: HashMap::new(),
+        balance_asks: HashMap::new(),
         token_asks: HashMap::new(),
         asking: HashMap::new(),
         answers_tx,
@@ -1178,6 +1194,9 @@ async fn background_rounds(
                         &peers, ROUND_WAIT, now_unix(), Some(&wallet), &cache, queued.clone()
                     ).await;
                     tokens_spent.fetch_add(found.priority as u64, std::sync::atomic::Ordering::Relaxed);
+                    if !found.answered_by.is_empty() {
+                        let _ = commands.send(Command::Answered(found.answered_by.clone()));
+                    }
                     count_round(&status, &found);
                     let now = now_unix();
                     let retry = queued.iter().copied()
@@ -1416,11 +1435,24 @@ enum Reply {
     Local(oneshot::Sender<ObliviousResponse>),
 }
 
+/// Who a bucket request comes from, as far as this node can tell.
+#[derive(Debug, Clone, Copy)]
+enum Asker {
+    /// This node's own front end, for its own searchers.
+    Own,
+    /// A relay passing on a sealed request: could be anyone's.
+    Relay(PeerId),
+    /// The one who asks, by address when known.
+    From(Option<Source>),
+}
+
 /// What this node asked another for on `/plumb/credits/1`.
 enum Asking {
     /// For tokens; `None` when the node tops up its own wallet.
     Tokens(PeerId, Pending, Option<oneshot::Sender<Result<usize>>>),
     Credits(oneshot::Sender<Result<CreditsAt>>),
+    /// For our balance there, for the status page.
+    Balance(PeerId),
 }
 
 /// A request this node passed on as a relay.
@@ -1460,6 +1492,12 @@ struct Task {
     tokens_issued: u64,
     /// Bucket requests answered while busy because they spent a token.
     priority_answered: u64,
+    /// What this node answers for free (see [`crate::allowance`]).
+    allowance: Allowance,
+    /// Our credits at each node we search, as it last told us, and when we
+    /// last asked.
+    credits_at: HashMap<PeerId, CreditsAt>,
+    balance_asks: HashMap<PeerId, u64>,
     /// When we last asked each node for tokens.
     token_asks: HashMap<PeerId, u64>,
     /// Our requests on `/plumb/credits/1` not yet answered.
@@ -1644,7 +1682,7 @@ impl Task {
             }
             Command::Recount(reply) => self.count_reports(Some(reply)),
             Command::Oblivious(request, reply) => {
-                self.on_oblivious_request(request, Reply::Local(reply));
+                self.on_oblivious_request(request, Reply::Local(reply), None);
             }
             Command::AskTokens {
                 issuer,
@@ -1669,6 +1707,7 @@ impl Task {
                 self.asking
                     .insert(id, Asking::Tokens(issuer, pending, Some(reply)));
             }
+            Command::Answered(peers) => self.ledger.record_answers(&peers),
             Command::AskCredits(peer, reply) => {
                 let id = self
                     .swarm
@@ -2357,7 +2396,8 @@ impl Task {
         else {
             return;
         };
-        let busy = !self.admit(&request);
+        let asker = self.source_of(&peer);
+        let busy = !self.admit(&request, asker);
         if busy || request.bucket >= BUCKETS {
             let _ = self.swarm.behaviour_mut().buckets.send_response(
                 channel,
@@ -2385,12 +2425,13 @@ impl Task {
     ) {
         match event {
             request_response::Event::Message {
+                peer,
                 message:
                     request_response::Message::Request {
                         request, channel, ..
                     },
                 ..
-            } => self.on_oblivious_request(request, Reply::Remote(channel)),
+            } => self.on_oblivious_request(request, Reply::Remote(channel), Some(peer)),
             request_response::Event::Message {
                 message:
                     request_response::Message::Response {
@@ -2411,7 +2452,12 @@ impl Task {
 
     /// A request on `/plumb/oblivious/1`, from another node or our own
     /// handle (see [`crate::oblivious`]).
-    fn on_oblivious_request(&mut self, request: ObliviousRequest, reply: Reply) {
+    fn on_oblivious_request(
+        &mut self,
+        request: ObliviousRequest,
+        reply: Reply,
+        from: Option<PeerId>,
+    ) {
         let me = *self.swarm.local_peer_id();
         match request {
             ObliviousRequest::OwnKeys => {
@@ -2448,9 +2494,26 @@ impl Task {
                 self.relaying.insert(id, Relayed::Keys(target));
                 self.waiting_keys.insert(target, vec![reply]);
             }
-            ObliviousRequest::Deliver { message } => self.open_sealed(message.into_vec(), reply),
+            ObliviousRequest::Deliver { message } => {
+                // Passed on by a relay for whoever sealed it. One we do not
+                // know as a relay may be a throwaway identity posing as
+                // one: it goes by its address.
+                let asker = match (&reply, from) {
+                    (Reply::Local(_), _) | (_, None) => Asker::Own,
+                    (Reply::Remote(_), Some(relay)) if self.oblivious_peers.contains(&relay) => {
+                        Asker::Relay(relay)
+                    }
+                    (Reply::Remote(_), Some(peer)) => self.source_of(&peer),
+                };
+                self.open_sealed(message.into_vec(), reply, asker);
+            }
             ObliviousRequest::Forward { target, message } if target == me => {
-                self.open_sealed(message.into_vec(), reply);
+                // Sealed, but handed to us by the one who sealed it.
+                let asker = match (&reply, from) {
+                    (Reply::Local(_), _) | (_, None) => Asker::Own,
+                    (Reply::Remote(_), Some(peer)) => self.source_of(&peer),
+                };
+                self.open_sealed(message.into_vec(), reply, asker);
             }
             ObliviousRequest::Forward { target, message } => {
                 if self.relaying.len() >= MAX_RELAYING || message.len() > MAX_MESSAGE {
@@ -2471,7 +2534,7 @@ impl Task {
 
     /// As the target: opens a sealed bucket request or report, and answers
     /// it sealed.
-    fn open_sealed(&mut self, message: Vec<u8>, reply: Reply) {
+    fn open_sealed(&mut self, message: Vec<u8>, reply: Reply, asker: Asker) {
         let (request, sealer) = match self.gateway.open(&message) {
             Ok((Opened::Bucket(request), sealer)) => (request, sealer),
             Ok((Opened::Report(report), sealer)) => {
@@ -2496,7 +2559,7 @@ impl Task {
             self.reply(reply, ObliviousResponse::Sealed(None));
             return;
         }
-        if !self.admit(&request) {
+        if !self.admit(&request, asker) {
             let busy = BucketResponse {
                 records: None,
                 busy: true,
@@ -2836,33 +2899,64 @@ impl Task {
         }
     }
 
-    /// Whether to answer a bucket request now: for free while fewer than
-    /// `max_answering` are being answered, and for a token of ours up to
-    /// [`PRIORITY_SLOTS`] more. A token sent along is spent either way: it
-    /// is only sent after this node said it was busy.
-    fn admit(&mut self, request: &BucketRequest) -> bool {
+    /// Whether to answer a bucket request now. Requests from this node's
+    /// own front end get in while fewer than `max_answering` plus
+    /// [`PRIORITY_SLOTS`] are being answered. Anyone else's get in for free
+    /// while fewer than `max_answering` are, and the address or relay it
+    /// came from has free answers left (see [`crate::allowance`]); past
+    /// that, up to [`PRIORITY_SLOTS`] more, for a token of ours. A token
+    /// sent along is spent either way: it is only sent after this node said
+    /// it was busy.
+    fn admit(&mut self, request: &BucketRequest, asker: Asker) -> bool {
         let paid = request
             .token
             .as_ref()
             .is_some_and(|token| self.issuer.redeem(token));
-        if self.answering < self.config.max_answering {
+        let ceiling = self.config.max_answering + PRIORITY_SLOTS;
+        let free = match asker {
+            Asker::Own => return self.answering < ceiling,
+            // A relay this node trusts may pass on as much as it likes,
+            // within the day's limit.
+            Asker::Relay(relay) if self.config.trusted_peers.contains(&relay) => None,
+            Asker::Relay(relay) => Some(Source::Peer(relay)),
+            Asker::From(source) => source,
+        };
+        if self.answering < self.config.max_answering
+            && self.allowance.take(free.as_ref(), now_millis())
+        {
             return true;
         }
-        if paid && self.answering < self.config.max_answering + PRIORITY_SLOTS {
+        if paid && self.answering < ceiling {
             self.priority_answered += 1;
             return true;
         }
+        self.allowance.turn_away();
         false
+    }
+
+    /// Where a request from `peer`, a throwaway identity most likely, comes
+    /// from: its IP address, unless it came through a relay circuit, whose
+    /// address would be the relay's.
+    fn source_of(&self, peer: &PeerId) -> Asker {
+        let ip = self.remote_addrs.get(peer).and_then(|addr| {
+            addr.iter().find_map(|p| match p {
+                Protocol::Ip4(ip) => Some(std::net::IpAddr::V4(ip)),
+                Protocol::Ip6(ip) => Some(std::net::IpAddr::V6(ip)),
+                _ => None,
+            })
+        });
+        Asker::From(ip.map(Source::Ip))
     }
 
     /// Asks the nodes this node searches for tokens, when it holds few of
     /// theirs, at most every [`TOKEN_ASK_MINUTES`] each. Nodes whose
     /// ledger has no credits for us say no, and we ask again later.
     fn collect_tokens(&mut self, now: u64) {
+        let peers: Vec<PeerId> = self.bucket_peers.keys().copied().collect();
+        self.ask_balances(&peers, now);
         if !self.config.collect_tokens {
             return;
         }
-        let peers: Vec<PeerId> = self.bucket_peers.keys().copied().collect();
         for peer in peers {
             let held = self
                 .wallet
@@ -2892,6 +2986,29 @@ impl Task {
         }
     }
 
+    /// Asks the connected nodes among `peers` for our balance there, at
+    /// most every [`TOKEN_ASK_MINUTES`] each, for the status page.
+    fn ask_balances(&mut self, peers: &[PeerId], now: u64) {
+        self.credits_at
+            .retain(|peer, _| self.bucket_peers.contains_key(peer));
+        for &peer in peers {
+            let recent = self
+                .balance_asks
+                .get(&peer)
+                .is_some_and(|at| at + TOKEN_ASK_MINUTES * 60 > now);
+            if recent || !self.swarm.is_connected(&peer) {
+                continue;
+            }
+            self.balance_asks.insert(peer, now);
+            let id = self
+                .swarm
+                .behaviour_mut()
+                .credits
+                .send_request(&peer, CreditRequest::Balance);
+            self.asking.insert(id, Asking::Balance(peer));
+        }
+    }
+
     /// Credits the crawls agreement just scored.
     fn count_credits(&mut self) {
         let verdicts = self.agreement.take_verdicts();
@@ -2904,6 +3021,15 @@ impl Task {
     fn crawls_count(&self, crawler: &PeerId) -> bool {
         let score = self.agreement.score(crawler);
         self.agreement.vouched(crawler) && score.agreed + score.disagreed >= MIN_JUDGED
+    }
+
+    /// Whether `peer` can have tokens for its credits here: its crawls
+    /// count, this node trusts it, or it answered enough of our requests
+    /// for that work to be real.
+    fn may_have_tokens(&self, peer: &PeerId) -> bool {
+        self.crawls_count(peer)
+            || self.config.trusted_peers.contains(peer)
+            || self.ledger.account(peer).answered >= MIN_ANSWERS_FOR_TOKENS
     }
 
     /// Whether this node's searches may ask `peer`, under
@@ -3190,7 +3316,7 @@ impl Task {
 
     /// As the issuer: tokens for `peer`, paid from its credits here.
     fn answer_credits(&mut self, peer: PeerId, request: CreditRequest) -> CreditResponse {
-        let counts = self.crawls_count(&peer);
+        let counts = self.may_have_tokens(&peer);
         match request {
             CreditRequest::Balance => CreditResponse::Balance {
                 credits: self.ledger.account(&peer).balance(),
@@ -3202,7 +3328,7 @@ impl Task {
                     let why = if counts {
                         "no credits left here"
                     } else {
-                        "your crawls do not count here yet"
+                        "your work does not count here yet"
                     };
                     return CreditResponse::Refused(why.into());
                 }
@@ -3248,6 +3374,12 @@ impl Task {
             }
             (Some(Asking::Credits(reply)), Ok(CreditResponse::Balance { credits, counts })) => {
                 let _ = reply.send(Ok(CreditsAt { credits, counts }));
+            }
+            (Some(Asking::Balance(at)), Ok(CreditResponse::Balance { credits, counts })) => {
+                self.credits_at.insert(at, CreditsAt { credits, counts });
+            }
+            (Some(Asking::Balance(at)), answer) => {
+                debug!("no balance from {at}: {:#}", refusal(peer, answer));
             }
             (Some(Asking::Tokens(_, _, reply)), answer) => {
                 let err = refusal(peer, answer);
@@ -3326,6 +3458,23 @@ impl Task {
             tokens_issued: self.tokens_issued,
             tokens_redeemed: self.issuer.redeemed(),
             priority_answered: self.priority_answered,
+            free_answers_today: self.allowance.today(),
+            answer_per_day: self.allowance.per_day(),
+            turned_away: self.allowance.turned_away(),
+            in_credit_here: self.ledger.in_credit(),
+            at_peers: {
+                let mut at: Vec<CreditsAtPeer> = self
+                    .credits_at
+                    .iter()
+                    .map(|(peer, at)| CreditsAtPeer {
+                        peer_id: peer.to_string(),
+                        credits: at.credits,
+                        counts: at.counts,
+                    })
+                    .collect();
+                at.sort_by(|a, b| b.credits.cmp(&a.credits).then(a.peer_id.cmp(&b.peer_id)));
+                at
+            },
             tokens_spent: self.tokens_spent.load(std::sync::atomic::Ordering::Relaxed),
             tokens_held: self
                 .wallet
@@ -3633,6 +3782,13 @@ fn without_p2p(addr: Multiaddr) -> Multiaddr {
 /// nodes kept it company was never reachable again.
 fn redial_bootstrap(connected: usize, bootstrap_connected: bool, ticks: u64) -> bool {
     connected == 0 || (!bootstrap_connected && ticks.is_multiple_of(BOOTSTRAP_REDIAL_MINUTES))
+}
+
+/// Now, in Unix milliseconds.
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
 }
 
 #[cfg(test)]

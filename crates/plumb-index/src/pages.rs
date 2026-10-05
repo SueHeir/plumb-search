@@ -236,8 +236,14 @@ impl Page {
         })
     }
 
+    /// Whether [`Page::from_set`] can read pages of the set `set`. A
+    /// package's line needs its card, so an empty article can't tell.
+    pub fn has_reader(set: &str) -> bool {
+        set == PACKAGES_SET || Page::from_set(set, Article::default()).is_some()
+    }
+
     /// The page of the set `set` written as `article` in its articles
-    /// file, `None` for a set without a reader.
+    /// file, `None` for a set without a reader (or a package without a card).
     pub fn from_set(set: &str, article: Article) -> Option<Self> {
         Some(match set {
             GITHUB_SET => Page::from_repo(article),

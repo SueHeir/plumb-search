@@ -60,6 +60,20 @@ pub enum Command {
     /// Plumb for official sites and look-alikes: an MCP server over stdin
     /// and stdout.
     Mcp(McpArgs),
+    /// Run a plugin on one search and print its results as JSON, to try a
+    /// plugin before installing it (see docs/plugins.md).
+    TryPlugin(TryPluginArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct TryPluginArgs {
+    /// The plugin's folder: plugin.json, plugin.wasm and optionally
+    /// config.json.
+    #[arg(long, value_name = "DIR")]
+    pub plugin: PathBuf,
+    /// What to search for, keyword included or not.
+    #[arg(required = true, num_args = 1..)]
+    pub query: Vec<String>,
 }
 
 #[derive(Debug, Args)]
@@ -353,6 +367,16 @@ pub struct RunArgs {
     /// Days of the network's crawl batches to keep on disk [default: 35].
     #[arg(long, value_name = "DAYS", requires = "network", value_parser = clap::value_parser!(u64).range(1..))]
     pub keep_batches_days: Option<u64>,
+    /// Most network searches (bucket requests) to answer for free each day
+    /// for other nodes; past it, only requests that spend this node's
+    /// credit tokens are answered. Searches on this node's own page are
+    /// never limited [default: no limit].
+    #[arg(long, value_name = "REQUESTS", requires = "network")]
+    pub answer_per_day: Option<u64>,
+    /// Do not spend credits: never collect tokens from the nodes this node
+    /// searches, so busy nodes turn its searches away like anyone's.
+    #[arg(long, requires = "network")]
+    pub no_spend_credits: bool,
     /// Don't ask trusted nodes for their crawled sites to fill free space
     /// (up to 90% of the storage limit set on the panel, or all of their
     /// sites with no limit).
@@ -696,6 +720,11 @@ pub struct ServeArgs {
     /// "pizza in denver" lists places. Indexed next to it on first use.
     #[arg(long, value_name = "PATH")]
     pub places: Option<PathBuf>,
+    /// A folder of plugins, one folder each, whose results show with the
+    /// node's own (see docs/plugins.md). A node started with `run` uses
+    /// DIR/plugins.
+    #[arg(long, value_name = "DIR")]
+    pub plugins: Option<PathBuf>,
     #[command(flatten)]
     pub meaning: MeaningArgs,
 }

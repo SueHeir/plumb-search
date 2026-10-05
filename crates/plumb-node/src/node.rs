@@ -830,6 +830,7 @@ pub async fn start(mut config: NodeConfig) -> Result<NodeHandle> {
         home: inner.config.country.clone(),
         web_search: inner.config.web_search,
         read_pages_for_all: inner.config.mcp_read_pages,
+        plugins: load_plugins(&inner),
     };
     let app = web::node_router_with(inner.clone(), inner.clone(), settings);
     let https = match inner.config.https_bind {
@@ -924,6 +925,21 @@ struct Opened {
 /// Creates and locks the data directory, clears leftovers, reads the saved
 /// state and opens the newest index that opens. Older indexes, and newer
 /// ones that do not open, are deleted.
+/// The plugins the owner put in the data folder's `plugins/`, each noted
+/// in the activity log with the hosts it may reach.
+fn load_plugins(inner: &Inner) -> crate::plugins::Plugins {
+    let plugins =
+        crate::plugins::Plugins::load_dir(&inner.config.data_dir.join(crate::plugins::PLUGINS_DIR));
+    for plugin in plugins.list() {
+        inner.journal.info(format!(
+            "Plugin {} is on; it may fetch from {}",
+            plugin.manifest.name,
+            plugin.manifest.hosts.join(", ")
+        ));
+    }
+    plugins
+}
+
 fn open_data_dir(config: &NodeConfig, rank: RankConfig) -> Result<Opened> {
     let paths = Paths::new(&config.data_dir);
     std::fs::create_dir_all(&paths.indexes)
@@ -1854,6 +1870,8 @@ impl StatusSource for Inner {
             Some(mut saved) => {
                 // Saved before the choice existed: the node keeps its own.
                 saved.search_from = saved.search_from.or(active.search_from);
+                saved.answer_limit = saved.answer_limit.or(active.answer_limit);
+                saved.spend_credits = saved.spend_credits.or(active.spend_credits);
                 saved
             }
             None => active,

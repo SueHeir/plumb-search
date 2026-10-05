@@ -37,6 +37,7 @@ pub mod meaning;
 pub mod node;
 pub mod pages;
 pub mod places;
+pub mod plugins;
 pub mod storage;
 pub mod tls;
 pub mod web;
@@ -99,6 +100,7 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::RemoteControl(args) => run::remote_control(args),
         Command::Storage(args) => storage::run(args),
         Command::Mcp(args) => mcp::run(args),
+        Command::TryPlugin(args) => plugins::try_plugin(&args.plugin, &args.query.join(" ")),
     }
 }
 
