@@ -1,0 +1,280 @@
+//! Telling bot checks apart from homepages.
+//!
+//! Many sites sit behind a service that answers crawlers with a check
+//! instead of the site: Cloudflare's "Just a moment...", DDoS-Guard,
+//! Sucuri, Imperva's "Pardon Our Interruption", PerimeterX's "Access to
+//! this page has been denied", and KillBot-style "verification" pages
+//! (KillBot is also what phishing kits use to hide from scanners). Such a
+//! page says nothing about the site, so its title, description and links
+//! must not become the site's facts or travel to other nodes.
+
+use crate::{normalize_text, SiteRecord};
+
+/// Whole titles, after [`normalize_text`], that only a bot check has.
+const CHECK_TITLES: &[&str] = &[
+    "403 forbidden",
+    "access denied",
+    "are you a robot",
+    "are you human",
+    "attention required",
+    "bot check",
+    "bot verification",
+    "browser check",
+    "captcha",
+    "captcha verification",
+    "checking your browser",
+    "ddos protection",
+    "forbidden",
+    "human check",
+    "human verification",
+    "just a moment",
+    "one moment please",
+    "one more step",
+    "please verify you are a human",
+    "please wait",
+    "request blocked",
+    "request rejected",
+    "robot check",
+    "robot or human",
+    "security check",
+    "security checkpoint",
+    "security verification",
+    "verification",
+    "verification required",
+    "verify you are human",
+    "verifying",
+    "verifying you are human",
+    "you have been blocked",
+];
+
+/// Title beginnings, after [`normalize_text`], that only a bot check has
+/// ("Just a moment...", "Checking your browser before accessing example.com",
+/// "Bot Verification | Example Council").
+const CHECK_TITLE_STARTS: &[&str] = &[
+    "attention required",
+    "bot verification",
+    "checking your browser",
+    "human verification",
+    "just a moment",
+    "one moment please",
+    "please wait",
+    "security check",
+];
+
+/// Phrases, after [`normalize_text`], that mark a bot check wherever they
+/// appear in a title, description, heading or the page text.
+const CHECK_PHRASES: &[&str] = &[
+    "killbot",
+    "killbot user verification",
+    // This crawler's own User-Agent, which only a page that echoes the
+    // request back (as KillBot's check does) shows.
+    "github com sueheir plumb search",
+    "ddos guard",
+    "link11 captcha",
+    "checking your browser",
+    "attention required cloudflare",
+    "just a moment cloudflare",
+    "checking if the site connection is secure",
+    "verifying you are human",
+    "verify you are human by completing",
+    "needs to review the security of your connection",
+    "enable javascript and cookies to continue",
+    "performance security by cloudflare",
+    "ddos protection by cloudflare",
+    "sucuri website firewall",
+    "pardon our interruption",
+    "access to this page has been denied",
+    "vercel security checkpoint",
+    "please complete the security check",
+    "press hold to confirm you are a human",
+    "this website is using a security service to protect itself",
+];
+
+/// Vendors whose own homepages talk about their checks.
+const CHECK_VENDORS: &[&str] = &[
+    "captcha",
+    "cloudflare",
+    "ddos-guard",
+    "imperva",
+    "killbot",
+    "perimeterx",
+    "plumbsearch",
+    "sucuri",
+    "vercel",
+];
+
+/// Whether a page with this title, description, headings and text is a
+/// bot check rather than the site at `domain`. A vendor's own site (a
+/// domain that names the vendor) is never one.
+pub fn is_bot_check_page(
+    domain: &str,
+    title: Option<&str>,
+    description: Option<&str>,
+    headings: &[String],
+    body_text: Option<&str>,
+) -> bool {
+    if CHECK_VENDORS.iter().any(|vendor| domain.contains(vendor)) {
+        return false;
+    }
+    if let Some(title) = title.map(normalize_text) {
+        let starts = |start: &&str| {
+            title
+                .strip_prefix(start)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with(' '))
+        };
+        if CHECK_TITLES.contains(&title.as_str()) || CHECK_TITLE_STARTS.iter().any(starts) {
+            return true;
+        }
+    }
+    let texts = title
+        .into_iter()
+        .chain(description)
+        .chain(headings.iter().map(String::as_str))
+        .chain(body_text);
+    texts.into_iter().any(|text| {
+        let text = format!(" {} ", normalize_text(text));
+        CHECK_PHRASES
+            .iter()
+            .any(|phrase| text.contains(&format!(" {phrase} ")))
+    })
+}
+
+impl SiteRecord {
+    /// Whether the record's page fields came from a bot check
+    /// ([`is_bot_check_page`]) rather than the site's homepage.
+    pub fn is_bot_check(&self) -> bool {
+        is_bot_check_page(
+            &self.domain,
+            self.title.as_deref(),
+            self.description.as_deref(),
+            &self.headings,
+            self.body_text.as_deref(),
+        )
+    }
+
+    /// Clears what a bot check put in the record: url, title, description,
+    /// headings, page text, search box, key pages and `crawled_at`, so the
+    /// record no longer counts as crawled. Merged into another record, it
+    /// then leaves that record's page fields alone. Returns whether it did.
+    pub fn drop_bot_check(&mut self) -> bool {
+        if !self.is_bot_check() {
+            return false;
+        }
+        self.url = None;
+        self.title = None;
+        self.description = None;
+        self.headings.clear();
+        self.body_text = None;
+        self.search_url = None;
+        self.key_pages.clear();
+        self.crawled_at = None;
+        true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn check(domain: &str, title: &str) -> bool {
+        is_bot_check_page(domain, Some(title), None, &[], None)
+    }
+
+    #[test]
+    fn known_checks_are_caught() {
+        for title in [
+            "Just a moment...",
+            "Attention Required! | Cloudflare",
+            "DDoS-Guard",
+            "KillBot Verification",
+            "Verifying you are human",
+            "Robot or human?",
+            "Pardon Our Interruption",
+            "Access to this page has been denied",
+            "Sucuri WebSite Firewall - Access Denied",
+            "Vercel Security Checkpoint",
+            "Human Verification",
+            "Security Check",
+            "KillBot user verification [172.98.218.140] [PlumbSearch/0.1.0 (+https://github.com/SueHeir/plumb-search)]",
+            "Checking your browser before accessing anandtech.com",
+            "Bot Verification | North Lincolnshire Council",
+            "One moment, please...",
+            "Captcha",
+            "Link11 - CAPTCHA",
+            "Access Denied",
+            "Verification",
+        ] {
+            assert!(check("example.com", title), "{title}");
+        }
+    }
+
+    #[test]
+    fn page_text_catches_checks_with_plain_titles() {
+        assert!(is_bot_check_page(
+            "example.com",
+            Some("example.com"),
+            None,
+            &[],
+            Some("example.com needs to review the security of your connection before proceeding. Ray ID: 8c1f"),
+        ));
+        assert!(is_bot_check_page(
+            "example.com",
+            Some("Loading"),
+            Some("Protected by KillBot"),
+            &[],
+            None,
+        ));
+        assert!(is_bot_check_page(
+            "example.ru",
+            Some("Your browser: PlumbSearch/0.1.0 (+https://github.com/SueHeir/plumb-search)"),
+            None,
+            &[],
+            None,
+        ));
+    }
+
+    #[test]
+    fn real_homepages_are_kept() {
+        for (domain, title) in [
+            ("usbank.com", "Personal Banking | U.S. Bank"),
+            (
+                "cloudflare.com",
+                "Connect, Protect, and Build Everywhere | Cloudflare",
+            ),
+            ("hcaptcha.com", "hCaptcha - captcha"),
+            ("captcha.com", "Captcha - BotDetect CAPTCHA Generator"),
+            ("ddos-guard.net", "DDoS-Guard: DDoS protection and CDN"),
+            ("killbot.ru", "KillBot user verification"),
+            ("github.com", "GitHub - SueHeir/plumb-search: Find websites"),
+            ("accessdenied.org", "Access Denied Productions"),
+            ("pleasewaitwhileweload.com", "Pleased to meet you"),
+            (
+                "security.org",
+                "Security.org: Home Security, Safety and Privacy",
+            ),
+            ("verificationacademy.com", "Verification Academy"),
+            ("waitbutwhy.com", "Wait But Why"),
+        ] {
+            assert!(!check(domain, title), "{title}");
+        }
+    }
+
+    #[test]
+    fn dropping_a_check_keeps_the_last_good_crawl() {
+        let mut good = SiteRecord::new("example.com");
+        good.title = Some("Example Shop".into());
+        good.crawled_at = Some(100);
+        let mut check = SiteRecord::new("example.com");
+        check.url = Some("https://example.com/verify".into());
+        check.title = Some("KillBot Verification".into());
+        check.crawled_at = Some(200);
+        assert!(check.drop_bot_check());
+        good.merge(check);
+        assert_eq!(good.title.as_deref(), Some("Example Shop"));
+        assert_eq!(good.crawled_at, Some(100));
+
+        let mut kept = good.clone();
+        assert!(!kept.drop_bot_check());
+        assert_eq!(kept, good);
+    }
+}

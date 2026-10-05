@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use futures::future::BoxFuture;
 use futures::stream::{self, FuturesUnordered, StreamExt};
-use plumb_core::{now_unix, registrable_domain};
+use plumb_core::{is_bot_check_page, now_unix, registrable_domain};
 use reqwest::header::{
     ACCEPT, CONTENT_TYPE, ETAG, IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED, LOCATION,
 };
@@ -82,7 +82,9 @@ const ACCEPT_HTML: &str = "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8";
 /// 4. The final response must be a 2xx ([`CrawlOutcome::HttpStatus`]
 ///    otherwise) and HTML or of no stated type ([`CrawlOutcome::NotHtml`]
 ///    otherwise). At most `cfg.max_bytes` of its body are read and parsed
-///    with [`extract_page_meta`] into [`CrawlOutcome::Fetched`].
+///    with [`extract_page_meta`] into [`CrawlOutcome::Fetched`], or into
+///    [`CrawlOutcome::BotCheck`] when the page is a bot check standing in
+///    for the homepage.
 ///
 /// When the start URL gets no answer at all (a failure with `network` set,
 /// such as a name that does not resolve or a certificate that does not
@@ -879,6 +881,18 @@ impl<'a> Visit<'a> {
             tokio::task::spawn_blocking(move || extract_page_meta(&base_url, &decode_html(&body)))
                 .await;
         match parsed {
+            Ok(meta)
+                if is_bot_check_page(
+                    domain,
+                    meta.title.as_deref(),
+                    meta.description.as_deref(),
+                    &meta.headings,
+                    meta.body_text.as_deref(),
+                ) =>
+            {
+                debug!("{final_url}: a bot check, not the homepage");
+                CrawlOutcome::BotCheck { title: meta.title }
+            }
             Ok(meta) => CrawlOutcome::Fetched(CrawledPage {
                 domain: domain.to_string(),
                 final_url: final_url.into(),
@@ -1136,6 +1150,9 @@ fn describe(outcome: &CrawlOutcome) -> String {
         }
         CrawlOutcome::HttpStatus { status } => format!("HTTP {status}"),
         CrawlOutcome::NotHtml { content_type } => format!("not HTML ({content_type})"),
+        CrawlOutcome::BotCheck { title } => {
+            format!("a bot check ({})", title.as_deref().unwrap_or("no title"))
+        }
         CrawlOutcome::Failed {
             error,
             network: true,
@@ -1147,7 +1164,7 @@ fn describe(outcome: &CrawlOutcome) -> String {
 /// Logs how many of `results` ended which way, as one "crawled N homepages:" line.
 pub fn log_summary(results: &[CrawlResult]) {
     let (mut fetched, mut disallowed, mut offsite, mut http, mut not_html) = (0, 0, 0, 0, 0);
-    let (mut failed, mut no_answer) = (0, 0);
+    let (mut bot_checks, mut failed, mut no_answer) = (0, 0, 0);
     for result in results {
         match result.outcome {
             CrawlOutcome::Fetched(_) => fetched += 1,
@@ -1155,6 +1172,7 @@ pub fn log_summary(results: &[CrawlResult]) {
             CrawlOutcome::OffsiteRedirect { .. } => offsite += 1,
             CrawlOutcome::HttpStatus { .. } => http += 1,
             CrawlOutcome::NotHtml { .. } => not_html += 1,
+            CrawlOutcome::BotCheck { .. } => bot_checks += 1,
             CrawlOutcome::Failed { network, .. } => {
                 failed += 1;
                 no_answer += usize::from(network);
@@ -1164,7 +1182,7 @@ pub fn log_summary(results: &[CrawlResult]) {
     info!(
         "crawled {} homepages: {fetched} fetched, {disallowed} disallowed by robots.txt, \
          {offsite} redirected to other sites, {http} HTTP errors, {not_html} not HTML, \
-         {failed} failed ({no_answer} with no answer)",
+         {bot_checks} bot checks, {failed} failed ({no_answer} with no answer)",
         results.len()
     );
 }
@@ -2255,6 +2273,26 @@ mod tests {
             serve(|_| Router::new().route("/", get(|| async { StatusCode::FOUND }))).await;
         let outcome = crawl_one(target(port, "/"), &config()).await;
         assert_eq!(outcome, CrawlOutcome::HttpStatus { status: 302 });
+    }
+
+    #[tokio::test]
+    async fn bot_checks_are_not_homepages() {
+        let check = r#"<html><head><title>KillBot Verification</title></head><body>
+            <a href="https://killbot.example.net/">Protected by KillBot</a></body></html>"#;
+        let (port, _) =
+            serve(|_| Router::new().route("/", get(move || async move { Html(check) }))).await;
+        let outcome = crawl_one(target(port, "/"), &config()).await;
+        assert_eq!(
+            outcome,
+            CrawlOutcome::BotCheck {
+                title: Some("KillBot Verification".into())
+            }
+        );
+        let records = to_records(&[CrawlResult {
+            domain: "example.test".into(),
+            outcome,
+        }]);
+        assert!(records.is_empty(), "{records:?}");
     }
 
     #[tokio::test]
