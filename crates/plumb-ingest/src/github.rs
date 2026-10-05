@@ -52,6 +52,10 @@ struct SearchPage {
     /// out on big star ranges), so a short page does not mean the end.
     #[serde(default)]
     incomplete_results: bool,
+    /// Repositories GitHub counts for the search, of which it gives at
+    /// most a thousand.
+    #[serde(default)]
+    total_count: Option<u64>,
     #[serde(default)]
     items: Vec<Repo>,
 }
@@ -108,6 +112,8 @@ pub struct Bands {
     page: usize,
     /// Stars of the last repository seen in the current band.
     last_stars: Option<u64>,
+    /// Repositories the current band has given so far.
+    given: usize,
     done: bool,
 }
 
@@ -118,6 +124,7 @@ impl Bands {
             high: None,
             page: 1,
             last_stars: None,
+            given: 0,
             done: false,
         }
     }
@@ -141,12 +148,24 @@ impl Bands {
         self.record(PER_PAGE, last_stars);
     }
 
+    /// Whether a page of `count` repositories, for a search GitHub counts
+    /// `total` for, stops before the band was given all it can give: a
+    /// short page like that is not the end of the stars.
+    pub fn stops_early(&self, count: usize, total: Option<u64>) -> bool {
+        let Some(total) = total else {
+            return false;
+        };
+        let can_give = total.min((PER_PAGE * PAGES_PER_SEARCH) as u64);
+        count < PER_PAGE && ((self.given + count) as u64) < can_give
+    }
+
     /// Takes in what the last search gave: `count` repositories, the last
     /// of them with `last_stars`.
     pub fn record(&mut self, count: usize, last_stars: Option<u64>) {
         if last_stars.is_some() {
             self.last_stars = last_stars;
         }
+        self.given += count;
         if count < PER_PAGE {
             // The band had no more, so neither has anything below it.
             self.done = true;
@@ -159,7 +178,8 @@ impl Bands {
         // The band is used up: the next one ends where it stopped. When a
         // whole band had the same stars, skip past them rather than ask
         // again forever.
-        let last = self.last_stars.unwrap_or(0);
+        // A band that gave nothing at all is stepped past by one star.
+        let last = self.last_stars.or(self.high).unwrap_or(self.min_stars);
         let high = if Some(last) == self.high {
             last.saturating_sub(1)
         } else {
@@ -168,6 +188,7 @@ impl Bands {
         self.high = Some(high);
         self.page = 1;
         self.last_stars = None;
+        self.given = 0;
         if high < self.min_stars {
             self.done = true;
         }
@@ -229,9 +250,10 @@ pub async fn fetch_repos(
             tokio::time::sleep(wait).await;
             continue;
         }
-        if status.as_u16() == 422 {
+        if status.as_u16() == 422 && page > 1 {
             // Past the last page GitHub allows; the band is used up.
-            bands.record(PER_PAGE, None);
+            warn!("GitHub has no page {page} of {q}; going on below it");
+            bands.end_band(None);
             continue;
         }
         if !status.is_success() {
@@ -252,7 +274,9 @@ pub async fn fetch_repos(
             .with_context(|| format!("reading GitHub's answer to {q} page {page}"))?;
         let count = body.items.len();
         let last_stars = body.items.last().map(|repo| repo.stargazers_count);
-        let cut_short = body.incomplete_results && count < PER_PAGE;
+        // A short page is the end only when GitHub gave all it counts.
+        let cut_short = count < PER_PAGE
+            && (body.incomplete_results || bands.stops_early(count, body.total_count));
         for repo in body.items {
             if repo.fork || !seen.insert(repo.full_name.to_lowercase()) {
                 continue;
@@ -262,7 +286,10 @@ pub async fn fetch_repos(
         if cut_short {
             incomplete += 1;
             if incomplete <= INCOMPLETE_RETRIES {
-                warn!("GitHub gave up on {q} page {page} after {count}; asking again");
+                warn!(
+                    "GitHub gave {count} on {q} page {page} of {:?} (incomplete: {}); asking again",
+                    body.total_count, body.incomplete_results
+                );
                 tokio::time::sleep(Duration::from_secs(10)).await;
                 continue;
             }
@@ -272,6 +299,12 @@ pub async fn fetch_repos(
             continue;
         }
         incomplete = 0;
+        if count < PER_PAGE {
+            info!(
+                "GitHub has no more after {q} page {page} ({count} on the page, {:?} counted)",
+                body.total_count
+            );
+        }
         bands.record(count, last_stars);
         if articles.len() % 10_000 < count {
             info!(
@@ -355,9 +388,28 @@ mod tests {
         // A band GitHub keeps giving up on ends where it got to.
         bands.end_band(Some(20_000));
         assert_eq!(bands.next(), Some(("stars:500..20000".to_string(), 1)));
+        // A band that gave nothing steps past its top star.
+        bands.end_band(None);
+        assert_eq!(bands.next(), Some(("stars:500..19999".to_string(), 1)));
         // A short page ends it all.
         bands.record(40, Some(510));
         assert_eq!(bands.next(), None);
+    }
+
+    #[test]
+    fn short_pages_short_of_the_count_are_not_the_end() {
+        let mut bands = Bands::new(500);
+        // GitHub counts plenty but gives nothing: not the end.
+        assert!(bands.stops_early(0, Some(91_320)));
+        assert!(!bands.stops_early(PER_PAGE, Some(91_320)));
+        for _ in 0..3 {
+            bands.record(PER_PAGE, Some(2_100));
+        }
+        // 340 of 340: the band is done.
+        assert!(!bands.stops_early(40, Some(340)));
+        assert!(bands.stops_early(40, Some(341)));
+        // No count, no telling.
+        assert!(!bands.stops_early(0, None));
     }
 
     #[test]
