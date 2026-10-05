@@ -6,8 +6,11 @@
 //! podcast feed, "available for free, for any use", and publishes it whole
 //! as a SQLite database. Its `podcasts` table gives each feed a title, the
 //! iTunes author, the podcast's website, its Apple Podcasts id and a
-//! popularity score from 0 to 9, which many shows share, so the number of
-//! episodes breaks ties. They are written as an articles file
+//! popularity score from 0 to 9, which many shows share (160,000 have 9),
+//! so ties are broken by having an Apple Podcasts listing, then the years
+//! the show has run, then its episodes (capped, so a feed posting
+//! thousands of generated episodes doesn't lead). A show listed twice
+//! under one title and site (or author) is kept once. They are written as an articles file
 //! ([`plumb_core::article`]): the title is the podcast's title, the
 //! description "Podcast by AUTHOR" and its first category, the item its
 //! Podcast Index id (from which the address is made), the site its
@@ -38,7 +41,13 @@ pub const DEFAULT_MIN_SCORE: u32 = 4;
 const MAX_SCORE: u32 = 9;
 
 /// Most episodes counted towards popularity.
-const MAX_EPISODES: u64 = 9_999;
+const MAX_EPISODES: u64 = 999;
+
+/// Most years of running counted towards popularity.
+const MAX_YEARS: u64 = 20;
+
+/// Seconds in a year, for the years a show has run.
+const YEAR_SECS: i64 = 365 * 24 * 60 * 60;
 
 /// Hosts whose front page is the host's, not a podcast's: a podcast whose
 /// website is one of them has no site of its own.
@@ -81,13 +90,29 @@ pub struct Podcast {
     pub itunes_id: Option<u64>,
     pub score: u32,
     pub episodes: u64,
+    /// Whole years between its oldest and newest episodes.
+    pub years: u64,
     pub category: String,
 }
 
 impl Podcast {
-    /// Its popularity as views: the score, then the episodes.
+    /// Its popularity as views: the score, then an Apple Podcasts listing,
+    /// then the years it has run, then the episodes.
     fn views(&self) -> u64 {
-        u64::from(self.score) * (MAX_EPISODES + 1) + self.episodes.min(MAX_EPISODES)
+        let episodes = self.episodes.min(MAX_EPISODES);
+        let years = self.years.min(MAX_YEARS) * (MAX_EPISODES + 1);
+        let listed = u64::from(self.itunes_id.is_some()) * (MAX_YEARS + 1) * (MAX_EPISODES + 1);
+        let score = u64::from(self.score) * 2 * (MAX_YEARS + 1) * (MAX_EPISODES + 1);
+        score + listed + years + episodes
+    }
+
+    /// What makes two rows the same show: the title and the site, or the
+    /// author when it has no site of its own.
+    fn show(&self) -> (String, String) {
+        let by = self
+            .own_site()
+            .unwrap_or_else(|| plumb_core::normalize_text(&self.author));
+        (plumb_core::normalize_text(&self.title), by)
     }
 
     /// The domain of its website when that is the front page of a site of
@@ -153,7 +178,7 @@ pub fn read_podcasts(db: &Path, min_score: u32, keep: usize) -> Result<Vec<Podca
     .with_context(|| format!("opening {}", db.display()))?;
     let mut statement = conn.prepare(
         "SELECT id, title, itunesAuthor, link, itunesId, popularityScore, episodeCount, \
-         category1 FROM podcasts WHERE popularityScore >= ?1 AND popularityScore <= ?2 \
+         category1, oldestItemPubdate, newestItemPubdate FROM podcasts WHERE popularityScore >= ?1 AND popularityScore <= ?2 \
          AND lastHttpStatus = 200 AND title != '' AND COALESCE(NULLIF(duplicateOf, ''), 0) = 0",
     )?;
     let rows = statement.query_map([min_score, MAX_SCORE], |row| {
@@ -183,6 +208,12 @@ pub fn read_podcasts(db: &Path, min_score: u32, keep: usize) -> Result<Vec<Podca
                 .filter(|&id| id > 0),
             score: number(5)?.and_then(|n| u32::try_from(n).ok()).unwrap_or(0),
             episodes: number(6)?.and_then(|n| u64::try_from(n).ok()).unwrap_or(0),
+            years: match (number(8)?, number(9)?) {
+                (Some(oldest), Some(newest)) if oldest > 0 && newest > oldest => {
+                    u64::try_from((newest - oldest) / YEAR_SECS).unwrap_or(0)
+                }
+                _ => 0,
+            },
             category: plumb_core::collapse_whitespace(&text(7)?),
         })
     })?;
@@ -193,11 +224,17 @@ pub fn read_podcasts(db: &Path, min_score: u32, keep: usize) -> Result<Vec<Podca
             podcasts.push(podcast);
         }
     }
-    info!(
-        "{} podcasts with a score of at least {min_score}",
-        podcasts.len()
-    );
+    // Keep one row per show: the most popular, which prefers the one with
+    // an Apple Podcasts listing.
     podcasts.sort_by(|a, b| b.views().cmp(&a.views()).then(a.id.cmp(&b.id)));
+    let read = podcasts.len();
+    let mut seen = std::collections::HashSet::new();
+    podcasts.retain(|podcast| seen.insert(podcast.show()));
+    info!(
+        "{} podcasts with a score of at least {min_score} ({} repeats left out)",
+        podcasts.len(),
+        read - podcasts.len()
+    );
     podcasts.truncate(keep);
     Ok(podcasts)
 }
@@ -245,16 +282,22 @@ mod tests {
         conn.execute_batch(
             "CREATE TABLE podcasts (id INTEGER PRIMARY KEY, url TEXT, title TEXT, link TEXT, \
              lastHttpStatus INTEGER, itunesId INTEGER, itunesAuthor TEXT, episodeCount INTEGER, \
-             popularityScore INTEGER, category1 TEXT, duplicateOf INTEGER);
+             popularityScore INTEGER, category1 TEXT, duplicateOf INTEGER, \
+             oldestItemPubdate INTEGER, newestItemPubdate INTEGER);
              INSERT INTO podcasts VALUES
               (1, 'a', 'Dan Carlin''s Hardcore History', 'https://www.dancarlin.com/', 200, 173001861,
-               'Dan Carlin', 70, 9, 'History', NULL),
-              (2, 'b', 'Small Show', 'https://small.libsyn.com/', 200, '', 'Someone', 500, 4, '', ''),
-              (3, 'c', 'Gone', 'https://gone.example/', 404, 1, 'X', 9, 9, '', NULL),
-              (4, 'd', '', 'https://empty.example/', 200, 1, 'X', 9, 9, '', NULL),
-              (5, 'e', 'Copy', 'https://copy.example/', 200, 1, 'X', 9, 9, '', 1),
-              (6, 'f', 'Broken', '', 200, 1, '', 0, 29, '', NULL),
-              (7, 'g', 'Unpopular', '', 200, 1, '', 0, 1, '', NULL);",
+               'Dan Carlin', 70, 9, 'History', NULL, 1136073600, 1735689600),
+              (2, 'b', 'Small Show', 'https://small.libsyn.com/', 200, '', 'Someone', 500, 4, '', '',
+               '', ''),
+              (3, 'c', 'Gone', 'https://gone.example/', 404, 1, 'X', 9, 9, '', NULL, 0, 0),
+              (4, 'd', '', 'https://empty.example/', 200, 1, 'X', 9, 9, '', NULL, 0, 0),
+              (5, 'e', 'Copy', 'https://copy.example/', 200, 1, 'X', 9, 9, '', 1, 0, 0),
+              (6, 'f', 'Broken', '', 200, 1, '', 0, 29, '', NULL, 0, 0),
+              (7, 'g', 'Unpopular', '', 200, 1, '', 0, 1, '', NULL, 0, 0),
+              (8, 'h', 'Dan Carlin''s Hardcore History', 'https://www.dancarlin.com/', 200, '',
+               'Dan Carlin', 75, 9, 'History', '', 1136073600, 1735689600),
+              (9, 'i', 'Endless Generated Show', 'https://generated.example/', 200, 5, 'Bot',
+               9000, 9, '', '', 1640995200, 1735689600);",
         )
         .unwrap();
         db
@@ -266,7 +309,17 @@ mod tests {
         let db = feeds(dir.path());
         let podcasts = read_podcasts(&db, 4, 10).unwrap();
         let titles: Vec<&str> = podcasts.iter().map(|p| p.title.as_str()).collect();
-        assert_eq!(titles, ["Dan Carlin's Hardcore History", "Small Show"]);
+        // The show listed twice is kept once, with its Apple Podcasts
+        // listing; years running outrank thousands of episodes.
+        assert_eq!(
+            titles,
+            [
+                "Dan Carlin's Hardcore History",
+                "Endless Generated Show",
+                "Small Show"
+            ]
+        );
+        assert_eq!(podcasts[0].years, 19);
         let history = podcasts[0].clone().into_article();
         assert_eq!(history.item.as_deref(), Some("1"));
         assert_eq!(history.site.as_deref(), Some("dancarlin.com"));
@@ -278,7 +331,7 @@ mod tests {
         assert_eq!(history.profiles[0].service, "apple-podcasts");
         assert_eq!(history.profiles[0].id, "173001861");
         assert!(history.views > podcasts[1].views());
-        let small = podcasts[1].clone().into_article();
+        let small = podcasts[2].clone().into_article();
         assert_eq!(small.site, None);
         assert!(small.profiles.is_empty());
         assert_eq!(read_podcasts(&db, 4, 1).unwrap().len(), 1);
@@ -309,6 +362,6 @@ mod tests {
         builder.into_inner().unwrap().finish().unwrap();
         let out = tempfile::tempdir().unwrap();
         let unpacked = unpack_feeds(&tgz, out.path()).unwrap();
-        assert_eq!(read_podcasts(&unpacked, 4, 10).unwrap().len(), 2);
+        assert_eq!(read_podcasts(&unpacked, 4, 10).unwrap().len(), 3);
     }
 }

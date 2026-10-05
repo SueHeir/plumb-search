@@ -93,7 +93,7 @@ The `podcasts` set lists the podcasts Podcast Index rates most popular (300,000 
 plumb fetch-pages --set podcasts --work /big/disk/dumps --data /path/to/node-data
 ```
 
-Each podcast keeps its title, "Podcast by AUTHOR · CATEGORY" as its description, "AUTHOR podcast" as another title, its Podcast Index id (its page at podcastindex.org lists its episodes and the apps that play it), its Apple Podcasts id, and its website's domain when that is a site of its own, so it goes under that site's result. Many podcasts share Podcast Index's popularity score, so the number of episodes breaks ties. Like a book, a podcast is never listed before every site by its title alone, but its title or the end of it followed by "podcast", or by its author's name, asks for it. `--min-podcast-score`, `--max-podcasts` and `--podcast-db` (an unpacked database) change what is read and kept.
+Each podcast keeps its title, "Podcast by AUTHOR · CATEGORY" as its description, "AUTHOR podcast" as another title, its Podcast Index id (its page at podcastindex.org lists its episodes and the apps that play it), its Apple Podcasts id, and its website's domain when that is a site of its own, so it goes under that site's result. Many podcasts share Podcast Index's popularity score, so an Apple Podcasts listing, then the years a show has run, then its episodes (counted up to 999) break ties, and a show listed twice under one title and site (or author) is kept once. Like a book, a podcast is never listed before every site by its title alone, but its title or the end of it followed by "podcast", or by its author's name, asks for it. `--min-podcast-score`, `--max-podcasts` and `--podcast-db` (an unpacked database) change what is read and kept.
 
 ## Papers
 
