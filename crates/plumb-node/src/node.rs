@@ -213,6 +213,10 @@ pub struct NodeConfig {
     /// this one take the crawls of sites it was not assigned. Needs
     /// `network`.
     pub crawl_any_site: bool,
+    /// Keep a record of the network's own site ([`plumb_core::HOME_SITE`])
+    /// and crawl it every round it is due, assigned or not, so searching
+    /// its name finds it. On by default.
+    pub crawl_home_site: bool,
     /// The nodes that share the sites with this one under `crawl_any_site`;
     /// they should crawl with it on and name this node in turn.
     pub crawl_with: Vec<plumb_net::PeerId>,
@@ -284,6 +288,7 @@ impl NodeConfig {
             private_search: false,
             share_popularity: false,
             crawl_any_site: false,
+            crawl_home_site: true,
             crawl_with: Vec::new(),
             blackhole: false,
             publish_records: None,

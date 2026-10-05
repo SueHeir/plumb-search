@@ -24,7 +24,7 @@ pub mod safe;
 mod site_search;
 
 pub use article::{article_url, Article};
-pub use bot_check::is_bot_check_page;
+pub use bot_check::{echoes_the_request, is_bot_check_page};
 pub use country::{normalize_country, site_country, tld_country};
 pub use key_pages::{KeyPage, PageIntent, MAX_KEY_PAGES};
 pub use kinds::{is_generic_kind, kind_key, other_number, MAX_KINDS};
@@ -35,6 +35,26 @@ pub use site_search::{search_link, search_template_for, SEARCH_TERMS};
 use anyhow::{Context, Result};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+
+/// The network's own public site. Few sites link to it yet and no ranking
+/// list has it, so every node keeps a record of it ([`home_site_record`])
+/// and crawls it, rather than waiting for a link to bring it in.
+pub const HOME_SITE: &str = "plumbsearch.org";
+
+/// The record every node starts [`HOME_SITE`] with, until a crawl of the
+/// site replaces its url, title and description.
+pub fn home_site_record() -> SiteRecord {
+    let mut record = SiteRecord::new(HOME_SITE);
+    record.url = Some(format!("https://{HOME_SITE}/"));
+    record.title = Some("Plumb Search".into());
+    record.description = Some(
+        "Free, open-source search engine run by a peer-to-peer network of nodes anyone can host."
+            .into(),
+    );
+    record.add_alias("Plumb Search");
+    record.signals.official_site = true;
+    record
+}
 
 /// Most inbound link texts kept per site (the most frequent ones win).
 pub const MAX_LINK_TEXTS: usize = 32;

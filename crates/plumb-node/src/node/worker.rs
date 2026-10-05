@@ -47,11 +47,11 @@ use super::network::{self, NETWORK_REBUILD_GAP, REBUILD_AFTER_RECORDS};
 use super::store::{self, SavedState};
 use super::{Inner, NodeConfig, ServingIndex, Step, Stopped};
 use crate::crawl::{
-    crawl_rolling, select_targets, select_targets_with, target_for, Fetcher, Rolling, RunEnd,
-    CRAWL_BATCH_SIZE, SECONDS_PER_DAY,
+    crawl_rolling, due_at, select_targets, select_targets_with, target_for, Fetcher, Rolling,
+    RunEnd, CRAWL_BATCH_SIZE, SECONDS_PER_DAY,
 };
 use crate::icons::IconStore;
-use crate::records::{load_records, replace_records, sorted_by_link_score, RecordStore};
+use crate::records::{load_records, replace_records, sorted_by_link_score, Change, RecordStore};
 use crate::web::{duration_words, group_thousands};
 
 /// A homepage fetched or answered this recently is not due for a crawl, as
@@ -368,6 +368,9 @@ async fn complete_seed(inner: &Arc<Inner>) -> Result<()> {
             });
         }
         set.extend(seed);
+        if let Some(change) = home_site_change(inner, &set) {
+            change.apply(&mut set);
+        }
         inner.check_stop()?;
         let records = sorted_by_link_score(&set);
         inner.set_step(
@@ -815,6 +818,21 @@ async fn crawl(inner: &Arc<Inner>) -> Result<()> {
     }
 }
 
+/// The change that gives `set` the network's own site
+/// ([`plumb_core::home_site_record`]) while it has no title for it: never
+/// crawled, or only through a bot check. `None` unless
+/// [`super::NodeConfig::crawl_home_site`].
+fn home_site_change(inner: &Inner, set: &RecordSet) -> Option<Change> {
+    if !inner.config.crawl_home_site {
+        return None;
+    }
+    set.get(plumb_core::HOME_SITE)
+        .is_none_or(|home| home.title.is_none())
+        .then(|| Change::Merge {
+            record: plumb_core::home_site_record(),
+        })
+}
+
 /// Crawls the homepages left in the round, saving each batch as it goes
 /// (see [`crate::crawl`]), then builds an index. `None` when there turned
 /// out to be nothing to crawl and nothing new to index.
@@ -825,6 +843,10 @@ fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Option<ServingIndex
     let mut set = load_records(&inner.paths.records)?;
     let mut store = RecordStore::open(&inner.paths.records);
     inner.check_stop()?;
+    if let Some(change) = home_site_change(inner, &set) {
+        store.save(std::slice::from_ref(&change))?;
+        change.apply(&mut set);
+    }
 
     let window = RECRAWL_AFTER_DAYS * SECONDS_PER_DAY;
     let net = network::handle(inner).cloned();
@@ -864,6 +886,19 @@ fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Option<ServingIndex
             .collect(),
         None => Vec::new(),
     };
+    let mut rechecks = rechecks;
+    // The network's own site, on every node whatever is assigned, so it is
+    // crawled even where its own server cannot reach itself.
+    let home = set
+        .get(plumb_core::HOME_SITE)
+        .filter(|_| inner.config.crawl_home_site);
+    if let Some(home) = home {
+        if due_at(home, window).is_none_or(|due| due <= now)
+            && !rechecks.iter().any(|target| target.domain == home.domain)
+        {
+            rechecks.push(target_for(home));
+        }
+    }
     let candidates: Vec<&SiteRecord> = candidates
         .filter(|record| !rechecks.iter().any(|target| target.domain == record.domain))
         .collect();

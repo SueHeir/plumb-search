@@ -62,6 +62,7 @@ fn test_config(dir: &Path) -> NodeConfig {
     config.initial_crawl = 0;
     config.refresh_every = None;
     config.crawl_per_refresh = 0;
+    config.crawl_home_site = false;
     // As if "Set up my node" was answered, so filling goes ahead.
     config.settings.setup_chosen = true;
     let nowhere = closed_port();
