@@ -94,6 +94,11 @@ const EXPLICIT_WORDS: &[&str] = &[
 /// words together (`freeporn`, `xxxvideos`).
 const EXPLICIT_LABEL_PARTS: &[&str] = &["porn", "xxx", "hentai", "sexcam", "camgirl"];
 
+/// Innocent words that hold an [`EXPLICIT_LABEL_PARTS`] part, taken out of
+/// a label before looking for one: the XXXLutz furniture chain, the towns
+/// of Pornic and Pornichet, and English counties (`sussexcamping`).
+const INNOCENT_LABEL_PARTS: &[&str] = &["xxxlutz", "pornic", "essex", "sussex", "middlesex"];
+
 /// Words that are only suggestive.
 const SUGGESTIVE_WORDS: &[&str] = &[
     "sex",
@@ -144,7 +149,11 @@ pub fn is_adult_kind(kind: &str) -> bool {
 /// description, Wikidata's description, other names).
 pub fn adult_level<'a>(domain: &str, texts: impl IntoIterator<Item = &'a str>) -> AdultLevel {
     let label = domain_label(domain);
-    if EXPLICIT_LABEL_PARTS.iter().any(|part| label.contains(part)) {
+    let mut parts = label.clone();
+    for innocent in INNOCENT_LABEL_PARTS {
+        parts = parts.replace(innocent, "-");
+    }
+    if EXPLICIT_LABEL_PARTS.iter().any(|part| parts.contains(part)) {
         return AdultLevel::Explicit;
     }
     let mut level = text_level(&label);
@@ -240,6 +249,24 @@ mod tests {
             adult_level("chase.com", ["Credit cards, mortgages"]),
             AdultLevel::None
         );
+        for domain in [
+            "xxxlutz.de",
+            "ville-pornic.fr",
+            "pornichet.fr",
+            "sussexcamping.co.uk",
+        ] {
+            assert_eq!(adult_level(domain, []), AdultLevel::None, "{domain}");
+        }
+        for domain in [
+            "pornhub.com",
+            "youporn.com",
+            "xxxvideos.example",
+            "pornic-porn.example",
+            "xxxlutzxxx.example",
+            "sexcams.example",
+        ] {
+            assert_eq!(adult_level(domain, []), AdultLevel::Explicit, "{domain}");
+        }
         assert!(is_adult_kind("Pornographic websites"));
         assert!(!is_adult_kind("bank"));
     }
