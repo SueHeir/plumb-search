@@ -1077,14 +1077,16 @@ impl Searcher {
             .fold(0.0, f32::max);
         let trusted_link_score =
             unit_or(cfg.trusted_link_score, default.trusted_link_score).min(named_link_score);
-        // Sites the query names in full that no one else names: no link
-        // text and no other name (from Wikidata or a redirect), less linked
-        // than the site the query names by its first words. Such a bare
-        // name (you-tubemusic.com, applemusic.co.kr, a K-pop shop) is only
-        // a spelling of the query, so it gets no more trust than a site
-        // with no links does: youtube.com wins "youtube music". Sites
-        // people do link to by name keep it, crawled or not (homedepot.com,
-        // which turns crawlers away, for "home depot").
+        // Sites the query names in full that nothing else says anything
+        // about: never crawled (no title, description or Wikidata words),
+        // no link text and no other name (from Wikidata or a redirect), and
+        // less linked than the site the query names by its first words.
+        // Such a bare name (you-tubemusic.com) is only a spelling of the
+        // query, so it gets no more trust than a site with no links does:
+        // youtube.com wins "youtube music". A site people link to by name
+        // is not bare, crawled or not (homedepot.com, which turns crawlers
+        // away, for "home depot"), nor is one with pages of its own
+        // (json-schema.org for "json schema").
         let mut bare: HashSet<DocAddress> = HashSet::new();
         if trusted_link_score > 0.0 {
             for (&addr, name) in &names {
@@ -1093,13 +1095,19 @@ impl Searcher {
                     continue;
                 }
                 let segment = searcher.segment_reader(addr.segment_ord);
-                let mut named_by_others = false;
-                for field in [self.fields.anchors, self.fields.aliases] {
+                let mut said = false;
+                for field in [
+                    self.fields.title,
+                    self.fields.description,
+                    self.fields.about,
+                    self.fields.anchors,
+                    self.fields.aliases,
+                ] {
                     if let Some(norms) = segment.fieldnorms_readers().get_field(field)? {
-                        named_by_others |= norms.fieldnorm(addr.doc_id) > 0;
+                        said |= norms.fieldnorm(addr.doc_id) > 0;
                     }
                 }
-                if !named_by_others {
+                if !said {
                     bare.insert(addr);
                 }
             }
@@ -2963,36 +2971,8 @@ mod tests {
     }
 
     #[test]
-    fn names_no_one_else_uses_lose_to_the_site_named_first() {
-        let mut korean = obscure(300_000, 0);
-        korean.harmonic_rank = None;
-        korean.tranco_rank = Some(387_099);
+    fn sites_people_link_to_by_name_are_not_bare() {
         let records = [
-            site(
-                "apple.com",
-                Some("Apple"),
-                Some("Discover the innovative world of Apple."),
-                &["Apple Inc."],
-                &[("apple", 24), ("apple maps", 9)],
-                popular(10, 2_000),
-            ),
-            // Crawled, but no one links to it or calls it anything.
-            site(
-                "applemusic.co.kr",
-                Some("애플뮤직"),
-                Some("KPOP 앨범, 아이돌 굿즈 applemusic 공식 쇼핑몰"),
-                &[],
-                &[],
-                korean,
-            ),
-            site(
-                "musicfans.net",
-                Some("Apple Music playlists | Apple Music fans"),
-                Some("The best Apple Music playlists, picked by Apple Music fans."),
-                &[],
-                &[("apple music playlists", 4)],
-                obscure(80_000, 3),
-            ),
             site(
                 "home.com",
                 Some("Home"),
@@ -3020,8 +3000,6 @@ mod tests {
             ),
         ];
         let (_dir, searcher) = build(&records);
-        let hits = searcher.search("apple music", 10).unwrap();
-        assert_eq!(hits[0].domain, "apple.com", "{:?}", domains(&hits));
         let hits = searcher.search("home depot", 10).unwrap();
         assert_eq!(hits[0].domain, "homedepot.com", "{:?}", domains(&hits));
     }

@@ -867,7 +867,8 @@ const LIFTED_FROM: usize = 5;
 /// Wikidata call exactly what was searched for says which site it is.
 /// "youtube music" names the article YouTube Music, whose site is
 /// youtube.com, so youtube.com goes above youtube.de; "google maps" puts
-/// google.com above googlemaps.com.
+/// google.com above googlemaps.com. An official site the whole query
+/// names keeps first place.
 pub fn lift_named_sites(sites: &mut [crate::Hit], pages: &[PageHit]) {
     let Some(site) = pages
         .iter()
@@ -876,6 +877,14 @@ pub fn lift_named_sites(sites: &mut [crate::Hit], pages: &[PageHit]) {
     else {
         return;
     };
+    // An official site named by all of the query stays first: google.com
+    // for "google", not about.google, Google's own site in Wikidata.
+    if sites
+        .first()
+        .is_some_and(|top| top.named && top.official && top.domain != site)
+    {
+        return;
+    }
     let shown = sites.len().min(LIFTED_FROM);
     if let Some(at) = sites[..shown]
         .iter()
@@ -1389,6 +1398,15 @@ mod tests {
         let mut sites = vec![site("youtube.de", false), site("youtube.com", false)];
         lift_named_sites(&mut sites, &[music.clone()]);
         assert_eq!(sites[0].domain, "youtube.de");
+        let mut google = known_site("google.com", true, 1.0);
+        google.official = true;
+        let mut about = known_site("about.google", false, 0.6);
+        about.official = true;
+        let mut sites = vec![google, about];
+        let mut company = found("Google", Some("about.google"), true, 0.9);
+        company.page.item = Some("Q95".into());
+        lift_named_sites(&mut sites, &[company]);
+        assert_eq!(sites[0].domain, "google.com");
         music.named = false;
         let mut sites = vec![
             site("youtube.de", false),
