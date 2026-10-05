@@ -86,6 +86,7 @@ A node key costs nothing to make, so one person could run many keys and agree wi
 
 * A new batch's signed header is announced on the gossipsub topic `plumb/batches/1`. Gossip messages are validated before they are passed on, so a bad header stops at the first honest node.
 * A node that hears of a batch it lacks fetches it with `/plumb/batch/1` from the node that passed the header on, or from the crawler, at most 16 at a time. It holds a batch from a crawler it does not trust only when at least half the batch's lines are about sites it keeps from it (a homepage it was assigned, a site one links to, or their icons and headlines, each counted once a site), so a few such records cannot bring up to 16 MB of other lines onto its disk.
+* A node answers at most 4 batch and report requests of other nodes at once (more get an empty answer for now), reads a batch it hands out with its store unlocked, and accepts at most 1,024 incoming connections (256 still opening) and 8 with any one node.
 * When two nodes meet, each asks the other for the headers of the batches it holds from the last 3 epochs, and fetches what it missed. A node that was off for a day catches up this way.
 * Records confirmed by a second crawler (see above) go to `DIR/net/inbox.jsonl` as they arrive. Between two pieces of work, the node folds the inbox into its records file through the same journal crawls use. It rebuilds its index once 2,000 records have come in, or at its next refresh.
 

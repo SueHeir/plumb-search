@@ -57,8 +57,8 @@ use libp2p::request_response::{self, OutboundRequestId, ProtocolSupport, Respons
 use libp2p::swarm::behaviour::toggle::Toggle;
 use libp2p::swarm::{NetworkBehaviour, SwarmEvent};
 use libp2p::{
-    autonat, dcutr, gossipsub, identify, kad, mdns, noise, ping, relay, tcp, upnp, yamux,
-    Multiaddr, PeerId, StreamProtocol, Swarm,
+    autonat, connection_limits, dcutr, gossipsub, identify, kad, mdns, noise, ping, relay, tcp,
+    upnp, yamux, Multiaddr, PeerId, StreamProtocol, Swarm,
 };
 use plumb_core::{now_unix, SiteRecord};
 use serde::{Deserialize, Serialize};
@@ -91,7 +91,7 @@ use crate::reports::ReportStore;
 use crate::rounds::{Pace, PendingBuckets, RoundStatus, ROUND_EVERY};
 use crate::scope::{Friends, SearchScope, MAX_SHARED_TRUST};
 use crate::search::{BucketPeer, NetSearch};
-use crate::store::{BatchStore, CrawlerView, RETAIN_EPOCHS};
+use crate::store::{read_held, BatchStore, CrawlerView, RETAIN_EPOCHS};
 
 /// Relays a node behind NAT takes reservations on.
 pub const MAX_RELAYS: usize = 2;
@@ -136,6 +136,23 @@ pub const TOKEN_REFILL: usize = 16;
 const TOKEN_ASK_MINUTES: u64 = 30;
 /// Requests passed on for others at once (see [`crate::oblivious`]).
 const MAX_RELAYING: usize = 32;
+/// Connections a node accepts: every bucket request of a search comes on
+/// a connection of its own, so this is generous, but bounded.
+const MAX_PENDING_INCOMING: u32 = 256;
+const MAX_ESTABLISHED_INCOMING: u32 = 1024;
+/// Connections with one node at once (TCP, QUIC, through relays).
+const MAX_ESTABLISHED_PER_PEER: u32 = 8;
+
+fn connection_limits() -> connection_limits::ConnectionLimits {
+    connection_limits::ConnectionLimits::default()
+        .with_max_pending_incoming(Some(MAX_PENDING_INCOMING))
+        .with_max_established_incoming(Some(MAX_ESTABLISHED_INCOMING))
+        .with_max_established_per_peer(Some(MAX_ESTABLISHED_PER_PEER))
+}
+
+/// Batch and report requests of other nodes answered at once: one can mean
+/// reading a 16 MB batch. More are answered with nothing for now.
+const MAX_LISTS_SERVING: usize = 4;
 const RELAY_HOP_PROTOCOL: &str = "/libp2p/circuit/relay/0.2.0/hop";
 /// Nodes a report is offered to, one after the other, until one takes it.
 pub const REPORT_TRIES: usize = 3;
@@ -846,6 +863,9 @@ fn write_private(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
 
 #[derive(NetworkBehaviour)]
 struct Behaviour {
+    /// First, so a connection past the limits is turned away before any
+    /// other behaviour sees it.
+    limits: connection_limits::Behaviour,
     relay_client: relay::client::Behaviour,
     relay: Toggle<relay::Behaviour>,
     dcutr: dcutr::Behaviour,
@@ -1020,6 +1040,7 @@ pub async fn start(
         fill_asking: HashMap::new(),
         pages_peers: HashSet::new(),
         pages_serving: 0,
+        lists_serving: 0,
         pages_asked: HashMap::new(),
         pages_asking: HashMap::new(),
         gateway,
@@ -1324,6 +1345,7 @@ fn build_swarm(key: &Keypair, config: &NetConfig) -> Result<Swarm<Behaviour>> {
             let request_config =
                 request_response::Config::default().with_request_timeout(Duration::from_secs(20));
             Ok(Behaviour {
+                limits: connection_limits::Behaviour::new(connection_limits()),
                 relay_client,
                 relay: relay.into(),
                 dcutr: dcutr::Behaviour::new(peer_id),
@@ -1546,6 +1568,8 @@ struct Task {
     trust_listing: HashSet<PeerId>,
     /// Page set requests being answered.
     pages_serving: usize,
+    /// Batch and report requests being answered (see [`MAX_LISTS_SERVING`]).
+    lists_serving: usize,
     /// Page set requests answered for each node, and the minute counted.
     pages_asked: HashMap<PeerId, (u64, u32)>,
     /// Our page set requests not yet answered.
@@ -1849,6 +1873,7 @@ impl Task {
                 self.with_status(|s| s.buckets_served += 1);
             }
             Answer::Batch(channel, response) => {
+                self.lists_serving = self.lists_serving.saturating_sub(1);
                 let _ = self
                     .swarm
                     .behaviour_mut()
@@ -1856,6 +1881,7 @@ impl Task {
                     .send_response(channel, response);
             }
             Answer::Report(channel, response) => {
+                self.lists_serving = self.lists_serving.saturating_sub(1);
                 let _ = self
                     .swarm
                     .behaviour_mut()
@@ -1995,10 +2021,12 @@ impl Task {
         let path = self.config.dir.join(POPULARITY_FILE);
         let tx = self.answers_tx.clone();
         tokio::task::spawn_blocking(move || {
-            let table = reports
+            // Counted with the store let go: STAR counting takes a while.
+            let held = reports
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
-                .table(now_unix());
+                .snapshots(now_unix());
+            let table = crate::reports::count(held);
             if let Err(err) = table.save(&path) {
                 warn!("cannot save the popularity table: {err:#}");
             }
@@ -2660,22 +2688,43 @@ impl Task {
                     },
                 ..
             } => {
+                if self.lists_serving >= MAX_LISTS_SERVING {
+                    let response = match request {
+                        BatchRequest::Get(_) => BatchResponse::Batch(None),
+                        BatchRequest::List { .. } => BatchResponse::Headers(Vec::new()),
+                    };
+                    let _ = self
+                        .swarm
+                        .behaviour_mut()
+                        .batches
+                        .send_response(channel, response);
+                    return;
+                }
+                self.lists_serving += 1;
                 let store = self.store.clone();
                 let tx = self.answers_tx.clone();
                 tokio::task::spawn_blocking(move || {
-                    let store = store.lock().unwrap_or_else(PoisonError::into_inner);
                     let response = match request {
+                        // Read and parsed with the store let go: a batch
+                        // can be 16 MB.
                         BatchRequest::Get(id) => {
-                            BatchResponse::Batch(store.get(&id).unwrap_or_else(|err| {
+                            let held = store
+                                .lock()
+                                .unwrap_or_else(PoisonError::into_inner)
+                                .located(&id);
+                            let batch = held.map_or(Ok(None), |path| read_held(&path));
+                            BatchResponse::Batch(batch.unwrap_or_else(|err| {
                                 warn!("cannot read a batch: {err:#}");
                                 None
                             }))
                         }
                         BatchRequest::List { since_epoch } => BatchResponse::Headers(
-                            store.headers_since(since_epoch, MAX_LISTED_BATCHES),
+                            store
+                                .lock()
+                                .unwrap_or_else(PoisonError::into_inner)
+                                .headers_since(since_epoch, MAX_LISTED_BATCHES),
                         ),
                     };
-                    drop(store);
                     let _ = tx.send(Answer::Batch(channel, response));
                 });
             }
@@ -2875,13 +2924,24 @@ impl Task {
                         .send_response(channel, ReportResponse::Taken(taken));
                 }
                 ReportRequest::List { epoch } => {
+                    if self.lists_serving >= MAX_LISTS_SERVING {
+                        let _ = self
+                            .swarm
+                            .behaviour_mut()
+                            .reports
+                            .send_response(channel, ReportResponse::Reports(Vec::new()));
+                        return;
+                    }
+                    self.lists_serving += 1;
                     let reports = self.reports.clone();
                     let tx = self.answers_tx.clone();
                     tokio::task::spawn_blocking(move || {
-                        let list = reports
+                        // Copied out with the store let go.
+                        let held = reports
                             .lock()
                             .unwrap_or_else(PoisonError::into_inner)
-                            .list(epoch, MAX_LISTED_REPORTS);
+                            .snapshot(epoch);
+                        let list = crate::reports::list(held, MAX_LISTED_REPORTS);
                         let _ = tx.send(Answer::Report(channel, ReportResponse::Reports(list)));
                     });
                 }
