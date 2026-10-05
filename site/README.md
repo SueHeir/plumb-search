@@ -2,8 +2,9 @@
 
 The website at https://plumbsearch.org and the server setup behind it.
 
-- `public/` is the static site: one page about Plumb Search, with links to the
-  code and to the desktop installers on GitHub Releases.
+- `public/` is the static site: a page about Plumb Search, with links to the
+  code and to the desktop installers on GitHub Releases, plus privacy and
+  credits pages.
 - `Caddyfile` serves it with HTTPS (Caddy gets and renews the certificates),
   redirects `www.plumbsearch.org` and plain HTTP to `https://plumbsearch.org`,
   and passes the node's public pages (`/search`, `/api/search`, `/api/status`,
@@ -14,18 +15,22 @@ The website at https://plumbsearch.org and the server setup behind it.
 - `docker-compose.yml` runs Caddy, and with the `node` profile, the Plumb node.
 
 No access log is configured, so the server keeps no record of visitors or
-searches.
+searches. Requests that fail, such as searches while the node is down, are
+left out of Caddy's log as well, since they would carry the visitor's
+address and search.
 
 ## The server
 
 A DigitalOcean droplet (Ubuntu 24.04, 4 vCPUs, 8 GB RAM, 160 GB SSD) with
 Docker, automatic security updates, a 2 GB swap file and a ufw firewall that
-allows only 22, 80 and 443 (TCP, plus UDP 443 for HTTP/3). DNS has A and AAAA
+allows 22, 80 and 443 (TCP, plus UDP 443 for HTTP/3). DNS has A and AAAA
 records for `plumbsearch.org` and `www.plumbsearch.org` pointing at it.
 
 Caddy uses host networking, so ufw applies to it as usual. The node publishes
 port 8080 on 127.0.0.1 only, so it is reachable from the internet only through
-Caddy.
+Caddy. Its Plumb network port, 4002 (TCP and UDP), is public: Docker opens
+published ports itself, past ufw. The network's relay, plumb-relay, runs
+separately on the same machine and has port 4001.
 
 ## Deploy
 
@@ -42,11 +47,12 @@ docker compose --profile node up -d
 ```
 
 That pulls `ghcr.io/sueheir/plumb-search:latest`, which is published from
-`main`. To build the node from another branch instead, for example before the
-image exists, name the branch in `.env` and build it on the server:
+`main`. To build the node from source on the server instead, name the
+repository and branch in `.env` (put another branch in place of `main` to
+try it):
 
 ```sh
-echo 'PLUMB_SOURCE=https://github.com/SueHeir/plumb-search.git#packaging' > .env
+echo 'PLUMB_SOURCE=https://github.com/SueHeir/plumb-search.git#main' > .env
 docker compose --profile node build plumb
 docker compose --profile node up -d
 ```

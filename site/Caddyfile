@@ -7,6 +7,15 @@
 # No access log is configured, so Caddy keeps no record of visitors or of
 # what they search for.
 
+{
+	# Caddy logs a request that fails, such as a search while the node is
+	# down, with the visitor's address and the search in it. Leave those
+	# out, along with the proxy's own messages about failed requests.
+	log default {
+		exclude http.log.error http.handlers.reverse_proxy
+	}
+}
+
 www.plumbsearch.org {
 	redir https://plumbsearch.org{uri} permanent
 }
@@ -35,6 +44,8 @@ plumbsearch.org {
 	handle {
 		header Content-Security-Policy "default-src 'none'; style-src 'self'; img-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
 		root * /site/public
+		# /privacy serves privacy.html, and so on.
+		try_files {path} {path}.html
 		file_server
 	}
 
