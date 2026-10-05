@@ -859,6 +859,32 @@ pub struct PlacedPage {
     pub at: usize,
 }
 
+/// Most site results looked through by [`lift_named_sites`].
+const LIFTED_FROM: usize = 5;
+
+/// Puts first the official site of the best page the query names, when
+/// it is among the first [`LIFTED_FROM`] sites: what Wikipedia and
+/// Wikidata call exactly what was searched for says which site it is.
+/// "youtube music" names the article YouTube Music, whose site is
+/// youtube.com, so youtube.com goes above youtube.de; "google maps" puts
+/// google.com above googlemaps.com.
+pub fn lift_named_sites(sites: &mut [crate::Hit], pages: &[PageHit]) {
+    let Some(site) = pages
+        .iter()
+        .find(|hit| hit.named && hit.page.item.is_some())
+        .and_then(|hit| hit.page.site.as_deref())
+    else {
+        return;
+    };
+    let shown = sites.len().min(LIFTED_FROM);
+    if let Some(at) = sites[..shown]
+        .iter()
+        .position(|hit| hit.domain == site && hit.official)
+    {
+        sites[..=at].rotate_right(1);
+    }
+}
+
 /// Where `pages` (best first) go among the site results `sites`:
 ///
 /// - A page about one of the sites (its [`Page::site`]) goes under that
@@ -1341,6 +1367,36 @@ mod tests {
         // under it only after the sites.
         assert_eq!(placed[1].hit.page.title, "Python (genus)");
         assert_eq!((placed[1].under.as_deref(), placed[1].at), (None, 2));
+    }
+
+    #[test]
+    fn the_site_of_the_page_the_query_names_goes_first() {
+        let mut official = known_site("youtube.com", false, 1.0);
+        official.official = true;
+        let mut sites = vec![
+            site("youtube.de", false),
+            site("youtube.nl", false),
+            official,
+            site("a.com", false),
+        ];
+        let mut music = found("YouTube Music", Some("youtube.com"), true, 0.9);
+        music.page.item = Some("Q28404534".into());
+        lift_named_sites(&mut sites, &[music.clone()]);
+        let order: Vec<&str> = sites.iter().map(|s| s.domain.as_str()).collect();
+        assert_eq!(order, ["youtube.com", "youtube.de", "youtube.nl", "a.com"]);
+        // Not for a page named only in part, nor a site Wikidata does
+        // not call official.
+        let mut sites = vec![site("youtube.de", false), site("youtube.com", false)];
+        lift_named_sites(&mut sites, &[music.clone()]);
+        assert_eq!(sites[0].domain, "youtube.de");
+        music.named = false;
+        let mut sites = vec![
+            site("youtube.de", false),
+            known_site("youtube.com", false, 1.0),
+        ];
+        sites[1].official = true;
+        lift_named_sites(&mut sites, &[music]);
+        assert_eq!(sites[0].domain, "youtube.de");
     }
 
     #[test]

@@ -14,7 +14,7 @@ use std::fmt::Write as _;
 
 use anyhow::{bail, Context, Result};
 use plumb_core::registrable_domain;
-use plumb_index::pages::{place_pages, Page, PageSearcher, PlacedPage};
+use plumb_index::pages::{lift_named_sites, place_pages, Page, PageSearcher, PlacedPage};
 use plumb_index::{Hit, Meaning, SearchOptions, Searcher};
 use tracing::info;
 
@@ -223,7 +223,9 @@ pub fn run(args: EvalArgs) -> Result<()> {
                 let found = pages
                     .search(&q.query, 10)
                     .with_context(|| format!("searching pages for {:?}", q.query))?;
-                let rows = listed_with_pages(&hits, place_pages(&q.query, &hits, found));
+                let mut lifted = hits.clone();
+                lift_named_sites(&mut lifted, &found);
+                let rows = listed_with_pages(&lifted, place_pages(&q.query, &lifted, found));
                 first = rows.first().and_then(|keys| keys.first()).cloned();
                 let rank = rows
                     .iter()

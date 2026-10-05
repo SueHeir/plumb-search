@@ -14,7 +14,9 @@ use std::io::Write;
 
 use anyhow::{bail, Context, Result};
 use plumb_core::{now_unix, Operators};
-use plumb_index::pages::{options_allow, place_operator_pages, place_pages, OPERATOR_PAGES};
+use plumb_index::pages::{
+    lift_named_sites, options_allow, place_operator_pages, place_pages, OPERATOR_PAGES,
+};
 use plumb_index::{SearchOptions, SearchResults};
 use plumb_net::pages::MAX_PAGES_CHUNK;
 use plumb_net::NetHandle;
@@ -308,6 +310,7 @@ pub(super) fn add_pages(
     match searcher.search(query, PAGES_PER_SEARCH) {
         Ok(mut found) => {
             found.retain(|hit| options_allow(options, &hit.page));
+            lift_named_sites(&mut results.hits, &found);
             results.pages = place_pages(query, &results.hits, found);
         }
         Err(err) => warn!("searching pages: {err:#}"),
