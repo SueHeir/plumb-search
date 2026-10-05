@@ -46,9 +46,10 @@ const TOWN_CANDIDATES: usize = 50;
 const LANDMARK_KM: f64 = 3.0;
 /// Fewer places than this within a town's size: look farther.
 const FEW: usize = 3;
-/// Places of the same name this close (km) are one place mapped twice: a
-/// shop and the pharmacy in it, a building and a point inside it.
-const SAME_PLACE_KM: f64 = 0.15;
+/// Places this close (km) with the same name, address or website are one
+/// place mapped twice: a shop and the pharmacy in it, a building and a
+/// point inside it.
+const SAME_PLACE_KM: f64 = 0.3;
 /// How much a town in the searcher's country counts over a bigger one
 /// elsewhere, in [`plumb_core::place::place_rank`] tiers.
 const HOME_COUNTRY_TIERS: f64 = 0.2;
@@ -483,12 +484,9 @@ impl PlaceSearcher {
         hits.sort_by(|a, b| key(a).total_cmp(&key(b)));
         let mut kept: Vec<PlaceHit> = Vec::new();
         for hit in hits {
-            let twice = kept.iter().any(|other| {
-                let (a, b) = (&hit.place, &other.place);
-                let near = distance_km(a.lat, a.lon, b.lat, b.lon) <= SAME_PLACE_KM;
-                let same_site = a.website.is_some() && a.website == b.website;
-                near && (same_site || joined(&a.name) == joined(&b.name))
-            });
+            let twice = kept
+                .iter()
+                .any(|other| same_place(&hit.place, &other.place));
             if !twice {
                 kept.push(hit);
             }
@@ -553,6 +551,32 @@ impl PlaceSearcher {
             .context("a place without its record")?;
         parse_place(stored)
     }
+}
+
+/// Whether `a` and `b` are one place mapped twice: close together, and
+/// with the same name ("&" and "and" alike), address or website.
+fn same_place(a: &Place, b: &Place) -> bool {
+    if distance_km(a.lat, a.lon, b.lat, b.lon) > SAME_PLACE_KM {
+        return false;
+    }
+    let name = |p: &Place| {
+        normalize_text(&p.name)
+            .split(' ')
+            .filter(|w| *w != "and")
+            .collect::<String>()
+    };
+    let site = |p: &Place| {
+        p.website
+            .as_deref()
+            .and_then(|w| w.split("://").nth(1))
+            .and_then(|rest| rest.split('/').next())
+            .map(|host| host.trim_start_matches("www.").to_ascii_lowercase())
+    };
+    name(a) == name(b)
+        || (a.address.is_some()
+            && joined(a.address.as_deref().unwrap_or_default())
+                == joined(b.address.as_deref().unwrap_or_default()))
+        || (site(a).is_some() && site(a) == site(b))
 }
 
 /// How likely `place` is the one a searcher in `country` means by its
@@ -680,9 +704,12 @@ mod tests {
                 rank: place_rank("amenity=fast_food", 0, false, true, 9),
                 ..at("Pizza Hut", "amenity=fast_food", 39.70, -104.95)
             },
-            at("Huckleberry", "amenity=cafe", 39.76, -104.99),
+            at("Huckleberry and Co", "amenity=cafe", 39.76, -104.99),
             // The same café mapped twice, and a car park.
-            at("Huckleberry", "amenity=cafe", 39.7601, -104.9901),
+            Place {
+                name: "Huckleberry & Co".into(),
+                ..at("Huckleberry and Co", "amenity=cafe", 39.7601, -104.9901)
+            },
             at(
                 "Union Station Park-n-Ride",
                 "amenity=parking",
@@ -717,7 +744,7 @@ mod tests {
             .search("coffee shop in denver", None, None, 5)
             .unwrap()
             .unwrap();
-        assert_eq!(coffee.hits[0].place.name, "Huckleberry");
+        assert_eq!(coffee.hits[0].place.name, "Huckleberry and Co");
         assert_eq!(coffee.hits.len(), 1);
         let parks = searcher
             .search("park in denver", None, None, 5)
