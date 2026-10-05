@@ -361,6 +361,8 @@ pub struct SearchOptions {
     /// Leave out sites whose homepage is in another language than this
     /// one (a language code, `en`). Sites that do not say stay.
     pub language: Option<String>,
+    /// How the results page shows recent headlines; the index ignores it.
+    pub recent: plumb_core::RecentNews,
 }
 
 /// A link into a site's own search for the words after its name:

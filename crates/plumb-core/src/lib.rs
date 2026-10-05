@@ -31,7 +31,7 @@ pub use bot_check::{echoes_the_request, is_bot_check_page};
 pub use country::{country_of_name, normalize_country, site_country, tld_country, COUNTRY_CHOICES};
 pub use key_pages::{KeyPage, PageIntent, MAX_KEY_PAGES};
 pub use kinds::{is_generic_kind, kind_key, other_number, MAX_KINDS};
-pub use news::Headline;
+pub use news::{Headline, RecentNews};
 pub use operators::Operators;
 pub use safe::{adult_level, record_adult_level, AdultLevel, SafeSearch};
 pub use site_search::{search_link, search_template_for, SEARCH_TERMS};

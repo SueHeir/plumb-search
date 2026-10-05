@@ -66,7 +66,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
 use plumb_core::{
     collapse_whitespace, display_url, language_code, now_unix, site_initial, truncate_chars,
-    KeyPage, PageIntent, SafeSearch, SiteRecord,
+    KeyPage, PageIntent, RecentNews, SafeSearch, SiteRecord,
 };
 use plumb_index::pages::{place_operator_pages, place_pages, PageHit};
 use plumb_index::{
@@ -658,6 +658,9 @@ struct SearchParams {
     safe: Option<String>,
     /// Only sites in this language (a language code); empty for any.
     lang: Option<String>,
+    /// The "Recent" headlines: `collapsed` (the default), `expanded` or
+    /// `off`.
+    news: Option<String>,
 }
 
 /// Whether a flag parameter is set: `1`, `on`, `true` or `yes`.
@@ -710,6 +713,11 @@ impl SearchParams {
                 .and_then(SafeSearch::parse)
                 .unwrap_or_default(),
             language: self.lang.as_deref().and_then(language_code),
+            recent: self
+                .news
+                .as_deref()
+                .and_then(RecentNews::parse)
+                .unwrap_or_default(),
         }
     }
 }
@@ -1103,6 +1111,7 @@ struct GoParams {
     exact: Option<String>,
     safe: Option<String>,
     lang: Option<String>,
+    news: Option<String>,
 }
 
 /// `GET /go?q=&d=`: notes that `d` was picked for the query, when the node
@@ -1126,6 +1135,7 @@ async fn go(
         hr: None,
         safe: params.safe,
         lang: params.lang,
+        news: params.news,
     };
     let query = search.query();
     let back = {
@@ -1681,7 +1691,9 @@ background:var(--bg);color:var(--fg)}\
 .ss a{color:var(--link)}\
 .sp{margin:1rem 0 .25rem}.sp a{color:var(--link)}\
 li.news{padding:.6rem .9rem;border:1px solid var(--line);border-radius:.6rem}\
-.news h2{margin:0 0 .2rem;font-size:.875rem;font-weight:600;color:var(--muted)}\
+.news summary{cursor:pointer}\
+.news .nh{font-size:.875rem;font-weight:600}\
+.news details[open] summary{margin-bottom:.2rem}\
 .news ol li{padding:.3rem 0;margin:0}\
 .news a{color:var(--link);text-decoration:none;overflow-wrap:anywhere}\
 .news a:hover,.news a:focus-visible{text-decoration:underline}\
@@ -1827,6 +1839,24 @@ fn settings_form(query: &str, autofocus: bool, settings: &Settings) -> String {
         )
     })
     .collect();
+    let news_choices: String = [
+        (RecentNews::Collapsed, "Folded"),
+        (RecentNews::Expanded, "Open"),
+        (RecentNews::Off, "Off"),
+    ]
+    .into_iter()
+    .map(|(view, name)| {
+        let selected = if options.recent == view {
+            " selected"
+        } else {
+            ""
+        };
+        format!(
+            "<option value=\"{}\"{selected}>{name}</option>",
+            view.as_str()
+        )
+    })
+    .collect();
     let language = options.language.as_deref();
     let mut language_choices = format!(
         "<option value=\"\"{}>Any language</option>",
@@ -1895,6 +1925,7 @@ fn settings_form(query: &str, autofocus: bool, settings: &Settings) -> String {
          <label><input type=\"checkbox\" name=\"only\" value=\"1\"{}> Only this country</label>\
          <label>Language <select name=\"lang\">{language_choices}</select></label>\
          <label>Safe search <select name=\"safe\">{safe_choices}</select></label>\
+         <label>Recent news <select name=\"news\">{news_choices}</select></label>\
          {network}{network_hint}{history}{private}<button type=\"submit\">Apply</button></div></details>\
          <button type=\"submit\">Search</button></form>",
         escape_html(query),
@@ -2384,7 +2415,9 @@ fn render_results_with(
             p.under.is_none() && (p.at == at || (at == usize::MAX && p.at >= shown_count))
         })
     };
-    let news = recent.map(|recent| render_recent(recent, now_unix()));
+    let news = recent
+        .filter(|_| settings.options.recent != RecentNews::Off)
+        .map(|recent| render_recent(recent, settings.options.recent, now_unix()));
     if shown.is_empty() && pages.is_empty() {
         let _ = writeln!(
             body,
@@ -2622,6 +2655,9 @@ fn append_filters(params: &mut url::form_urlencoded::Serializer<String>, options
     if let Some(language) = &options.language {
         params.append_pair("lang", language);
     }
+    if options.recent != RecentNews::default() {
+        params.append_pair("news", options.recent.as_str());
+    }
 }
 
 /// The round badge before a result: the site's icon, or else the first
@@ -2688,21 +2724,23 @@ fn render_page(out: &mut String, hit: &PageHit, icon: Option<&str>) {
 
 /// The "Recent" block, as an item of the results list: the latest posts
 /// of the site the query names, or recent headlines about its words, each
-/// with its site and age. Feed text is as untrusted as any record's, and
-/// is escaped the same way.
-fn render_recent(recent: &Recent, now: u64) -> String {
+/// with its site and age, folded behind a one-line summary unless `view`
+/// says open (no script needed: `<details>`). Feed text is as untrusted
+/// as any record's, and is escaped the same way.
+fn render_recent(recent: &Recent, view: RecentNews, now: u64) -> String {
     let heading = match &recent.site {
         Some(site) => format!("Latest from {}", escape_html(site)),
         None => "Recent".to_string(),
     };
-    let mut out =
-        format!("<li class=\"news\"><section aria-label=\"{heading}\"><h2>{heading}</h2><ol>");
+    let mut items = String::new();
+    let mut shown = 0;
     for headline in &recent.headlines {
         let Some(href) = http_url(&headline.url) else {
             continue;
         };
+        shown += 1;
         let _ = write!(
-            out,
+            items,
             "<li><a href=\"{}\" rel=\"noreferrer\">{}</a><div class=\"m\">{} &middot; {}</div></li>",
             escape_html(&href),
             escape_html(&truncate_chars(&headline.title, 150)),
@@ -2710,8 +2748,22 @@ fn render_recent(recent: &Recent, now: u64) -> String {
             time_ago(headline.at, now)
         );
     }
-    out.push_str("</ol></section></li>\n");
-    out
+    let newest = recent.headlines.iter().map(|h| h.at).max().unwrap_or(now);
+    let count = if shown == 1 {
+        "1 headline".to_string()
+    } else {
+        format!("{shown} headlines")
+    };
+    format!(
+        "<li class=\"news\"><details{}><summary><span class=\"nh\">{heading}</span> \
+         <span class=\"m\">{count}, newest {}</span></summary><ol>{items}</ol></details></li>\n",
+        if view == RecentNews::Expanded {
+            " open"
+        } else {
+            ""
+        },
+        time_ago(newest, now)
+    )
 }
 
 /// Most key pages listed under a result.
@@ -4632,7 +4684,11 @@ mod tests {
             "after the first result"
         );
         assert!(block < page.find("other.com").unwrap(), "before the second");
-        assert!(page.contains("<h2>Latest from news.com</h2>"));
+        // Folded by default, behind a one-line summary.
+        assert!(page.contains(
+            "<details><summary><span class=\"nh\">Latest from news.com</span> \
+             <span class=\"m\">1 headline, newest 2 hours ago</span></summary>"
+        ));
         assert!(page.contains(
             "<a href=\"https://news.com/a?x=1&amp;y=2\" rel=\"noreferrer\">\
              &lt;script&gt;alert(1)&lt;/script&gt; wins</a>"
@@ -4640,6 +4696,33 @@ mod tests {
         assert!(page.contains("news.com &middot; 2 hours ago"));
         assert!(!page.contains("Sneaky"));
         assert!(!page.contains("<script>"));
+
+        // The gear's "Recent news" choice opens it, or leaves it out.
+        let render = |view: RecentNews| {
+            let mut settings = no_settings();
+            settings.options.recent = view;
+            render_results_with(
+                "news",
+                &results,
+                None,
+                &NetOutcome::NotAsked,
+                &settings,
+                None,
+                10,
+                false,
+                &Icons::default(),
+                Some(&recent),
+            )
+        };
+        let open = render(RecentNews::Expanded);
+        assert!(open.contains("<li class=\"news\"><details open>"));
+        assert!(open.contains("<option value=\"expanded\" selected>Open</option>"));
+        assert!(!render(RecentNews::Off).contains("class=\"news\""));
+        // The choice rides along in the page's links, unless it is the default.
+        let mut options = SearchOptions::default();
+        assert!(!search_link("/search", "x", &options, false).contains("news="));
+        options.recent = RecentNews::Off;
+        assert!(search_link("/search", "x", &options, false).ends_with("&news=off"));
     }
 
     /// A node that keeps search history in a folder.

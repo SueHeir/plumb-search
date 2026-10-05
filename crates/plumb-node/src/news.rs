@@ -387,8 +387,33 @@ impl NewsStore {
         if topical.is_some() || !wants_news {
             return topical;
         }
-        let (domain, _) = top?;
-        site_block(&self.read(), domain)
+        if let Some(block) = top.and_then(|(domain, _)| site_block(&self.read(), domain)) {
+            return Some(block);
+        }
+        // Only news words ("news", "latest news"): the newest headlines,
+        // one per site.
+        topic.is_empty().then(|| self.latest_block(now)).flatten()
+    }
+
+    fn latest_block(&self, now: u64) -> Option<Recent> {
+        let state = self.read();
+        let mut found: Vec<RecentHeadline> = state
+            .headlines
+            .iter()
+            .filter_map(|(domain, kept)| {
+                let newest = kept.iter().max_by_key(|h| h.at)?;
+                (newest.at + TOPIC_WINDOW_SECS >= now).then(|| shown(domain, newest))
+            })
+            .collect();
+        if found.is_empty() {
+            return None;
+        }
+        found.sort_by(|a, b| b.at.cmp(&a.at).then_with(|| a.url.cmp(&b.url)));
+        found.truncate(MAX_SHOWN);
+        Some(Recent {
+            site: None,
+            headlines: found,
+        })
     }
 
     fn topic_block(&self, topic: &[String], wants_news: bool, now: u64) -> Option<Recent> {
@@ -622,6 +647,25 @@ mod tests {
             1
         );
         assert_eq!(store.recent("tips", None, NOW), None);
+    }
+
+    #[test]
+    fn news_alone_shows_the_newest_headline_of_each_site() {
+        let (_dir, store) = store();
+        for query in ["news", "latest news today"] {
+            let recent = store.recent(query, Some(("cnn.com", false)), NOW).unwrap();
+            assert_eq!(recent.site, None);
+            assert_eq!(
+                titles(&recent),
+                [
+                    "Elections in France tomorrow",
+                    "French election: what to know",
+                    "Why I like Rust"
+                ],
+                "{query}"
+            );
+        }
+        assert_eq!(store.recent("news", None, NOW + 3 * 24 * HOUR), None);
     }
 
     #[test]
