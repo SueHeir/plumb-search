@@ -390,8 +390,12 @@ fn is_name_like(text: &str) -> bool {
 pub(crate) fn answer(query: &str) -> Option<Answer> {
     let mut text = query.trim();
     for prefix in ["calculate ", "calc ", "what is ", "what's ", "whats ", "="] {
-        if let Some(rest) = text.to_lowercase().strip_prefix(prefix) {
-            text = text[text.len() - rest.len()..].trim();
+        // Matched on the text itself: lowercasing can change byte lengths.
+        if text
+            .get(..prefix.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+        {
+            text = text[prefix.len()..].trim();
         }
     }
     let text = text.trim_end_matches(['=', '?']).trim();
@@ -461,6 +465,17 @@ mod tests {
     fn writes_the_sum_back() {
         assert_eq!(answer("12*(3+4)").unwrap().question, "12 × (3 + 4) =");
         assert_eq!(answer("sqrt 2").unwrap().question, "√(2) =");
+    }
+
+    #[test]
+    fn prefixes_whose_lowercase_changes_length_do_not_panic() {
+        assert_eq!(answer("what is \u{1E9E}"), None);
+        assert_eq!(
+            answer("calc \u{130}\u{130}\u{130}\u{130}\u{130}\u{130}\u{130}\u{130}"),
+            None
+        );
+        assert_eq!(answer("\u{130}\u{130}\u{130}\u{130}\u{130}"), None);
+        assert_eq!(calc("WHAT IS 6*7").unwrap(), "42");
     }
 
     #[test]
