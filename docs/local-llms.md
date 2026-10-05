@@ -30,18 +30,39 @@ LM Studio asks before each tool call until you allow Plumb's tools for good.
 
 As MCP tools: **Settings**, **External Tools**, add a server of type **MCP (Streamable HTTP)** with the URL `http://127.0.0.1:7586/mcp`. Open WebUI in Docker reaches the host as `http://host.docker.internal:7586/mcp`; requests from there do not come from `127.0.0.1`, so start the node with `--mcp-read-pages` if you want `read_page`, and only on a computer the internet cannot reach.
 
-As its web search: **Admin Panel**, **Settings**, **Web Search**, engine **searxng**, query URL `http://127.0.0.1:7586/search?q=<query>`. Open WebUI then fetches the pages of the results itself.
+As its web search: **Admin Panel**, **Settings**, **Web Search**, engine **searxng**, query URL `http://127.0.0.1:7586/search?q=<query>`. Or engine **external**, URL `http://127.0.0.1:7586/api/websearch` (no API key needed). Open WebUI then fetches the result pages itself, unless "Bypass web loader" is on; then the model sees only each result's snippet, which is why an instant answer leads the first snippet.
+
+## Jan
+
+**Settings**, **MCP Servers**, add a server with the JSON from LM Studio's step 2 (`"plumb": { "url": "http://127.0.0.1:7586/mcp" }`), turn it on, and use a model with tool calling enabled.
+
+## LibreChat
+
+In `librechat.yaml`:
+
+```yaml
+mcpServers:
+  plumb:
+    type: streamable-http
+    url: http://127.0.0.1:7586/mcp
+```
+
+LibreChat in Docker reaches the host as `http://host.docker.internal:7586/mcp` (see the note on `read_page` under Open WebUI).
+
+## AnythingLLM
+
+**Agent Skills**, **Web Search**, provider **SearXNG**, base URL `http://127.0.0.1:7586`. Its agent then searches Plumb with `@agent`.
 
 ## Other SearXNG clients
 
-Perplexica, LibreChat and others that take a SearXNG address work the same way: give them the node's address, such as `http://127.0.0.1:7586`. A node answers `/search?q=...&format=json` in SearXNG's format:
+Perplexica (now Vane) and others that take a SearXNG address work the same way: give them the node's address, such as `http://127.0.0.1:7586`. A node answers `/search?q=...&format=json` in SearXNG's format:
 
 - `results`: what the results page lists, in its order, each with `url`, `title` and `content` (the description); Wikipedia articles, Stack Overflow questions and other pages sit where the page puts them, and recent headlines come after the best result, with `category` `news`;
 - `answers`: the instant answer, such as `12 × 7 = 84`;
 - `infoboxes`: the info box about what the query names, with its official site and profiles;
 - `corrections` and `suggestions`: a corrected or suggested spelling.
 
-It takes SearXNG's `pageno` and `safesearch` (0, 1 or 2) and Plumb's own `limit`, `country`, `safe` and `lang`. Other SearXNG parameters are ignored.
+It takes SearXNG's `pageno`, `safesearch` (0, 1 or 2), `categories` (`news` alone lists only recent headlines, with `publishedDate`) and `time_range` (any value puts recent headlines first), and Plumb's own `limit`, `country`, `safe` and `lang`. Other SearXNG parameters are ignored. Unlike SearXNG, JSON needs no setting turned on.
 
 ## Claude Desktop, Ollama front ends and anything that starts a command
 

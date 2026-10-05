@@ -349,6 +349,9 @@ fn read_page(out: &mut String, answer: &Value) {
         }
     }
     out.push('\n');
+    if answer.get("found").and_then(Value::as_bool) == Some(false) {
+        out.push_str("[The words to find are not on the page; this part starts where asked.]\n\n");
+    }
     let _ = writeln!(out, "{}", text(answer, "text").unwrap_or("(no text)"));
     let length = answer.get("length").and_then(Value::as_u64).unwrap_or(0);
     let start = answer.get("start").and_then(Value::as_u64).unwrap_or(0);
