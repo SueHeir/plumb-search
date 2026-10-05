@@ -52,6 +52,9 @@ const CANDIDATES: usize = 200;
 pub const QUESTION_QUERY_WORDS: usize = 3;
 /// Least share of those words a question's title and tags must have.
 pub const QUESTION_SHARE: f32 = 0.75;
+/// Least share of a question title's stemmed words a query that has all of
+/// the question's own must have to ask the question as a whole.
+pub const QUESTION_TITLE_SHARE: f32 = 0.5;
 
 /// A single page that can be a result.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -258,6 +261,9 @@ pub const PAPERS_SET: &str = "papers";
 /// How much a book's or paper's score counts against an article's of the
 /// same name: "dune" lists the article on the novel before the book.
 pub const SHELF_WEIGHT: f32 = 0.8;
+/// What a repository's score is weighed by, so that the article named like
+/// it comes first ("sonnet", "apollo 11").
+pub const REPO_WEIGHT: f32 = 0.8;
 
 /// [`PageHit::popularity`] is kept in the index as a whole number of
 /// millionths.
@@ -275,6 +281,12 @@ pub struct PageHit {
     /// [`crate::Hit::link_score`].
     #[serde(default)]
     pub popularity: f32,
+    /// The query asks for this page and nothing else: it holds all of a
+    /// question's main words ("undo last git commit"), or a book's title
+    /// with its author or the word "book" ("dune frank herbert"). Such a
+    /// page may come before the sites.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub whole: bool,
 }
 
 struct Fields {
@@ -378,6 +390,7 @@ const ORGANIZATION_WORDS: &[&str] = &[
     "standard",
     "startup",
     "subsidiary",
+    "union",
     "website",
 ];
 
@@ -412,17 +425,27 @@ fn is_government(domain: &str) -> bool {
 }
 
 /// Whether `domain`'s first label spells the page's title without its
-/// qualifier, or that title's first word: cvs.com for "CVS Pharmacy",
+/// qualifier, or that title's first words: cvs.com for "CVS Pharmacy",
 /// capitalone.com for "Capital One", tauri.app for "Tauri (software
-/// framework)". Such a site is most likely what the page is about.
+/// framework)", navyfederal.org for "Navy Federal Credit Union". Such a site is most likely what the page is about.
 fn site_is_titled(domain: &str, title: &str) -> bool {
     let label = squash(domain.split('.').next().unwrap_or(""));
     if label.is_empty() {
         return false;
     }
-    let base = base_title(title);
-    let first = base.split_whitespace().next().unwrap_or("");
-    label == squash(base) || label == squash(first)
+    // The title's first words: "navyfederal" for "Navy Federal Credit
+    // Union".
+    let mut lead = String::new();
+    for word in base_title(title).split_whitespace() {
+        lead.push_str(&squash(word));
+        if lead == label {
+            return true;
+        }
+        if lead.len() >= label.len() {
+            return false;
+        }
+    }
+    false
 }
 
 /// What [`build_page_index`] did.
@@ -566,6 +589,20 @@ impl PageSearcher {
             })
             .collect();
         clauses.push((Occur::Should, Box::new(BooleanQuery::new(every_word))));
+        // Books named by their title and "book": "dune book".
+        if let Some((title, last)) = query.trim().rsplit_once(char::is_whitespace) {
+            if matches!(last.to_lowercase().as_str(), "book" | "novel") {
+                if let Some(key) = analysis::tokens(&self.joined, title).pop() {
+                    clauses.push((
+                        Occur::Should,
+                        Box::new(TermQuery::new(
+                            Term::from_field_text(self.fields.keys, &key),
+                            IndexRecordOption::Basic,
+                        )),
+                    ));
+                }
+            }
+        }
         let query_words: HashSet<&str> = words.iter().map(String::as_str).collect();
         let by_popularity = || {
             TopDocs::with_limit(CANDIDATES)
@@ -612,9 +649,14 @@ impl PageSearcher {
                 continue;
             };
             let page: Page = serde_json::from_str(stored)?;
-            let (mut name, named) = self.name_match(&page, query, &joined, &query_words);
-            if !named {
-                name = name.max(self.question_match(&page, &stems));
+            let (mut name, mut named) = self.name_match(&page, query, &joined, &query_words);
+            let mut whole = false;
+            if self.book_match(&page, &words) {
+                (name, named, whole) = (name.max(ALIAS_MATCH), true, true);
+            } else if !named {
+                let (question, asked) = self.question_match(&page, &stems);
+                name = name.max(question);
+                whole = asked;
             }
             if name <= 0.0 {
                 continue;
@@ -627,12 +669,15 @@ impl PageSearcher {
             let mut score = name * (1.0 - POPULARITY_SHARE + POPULARITY_SHARE * popularity);
             if !page.may_lead() {
                 score *= SHELF_WEIGHT;
+            } else if page.set == GITHUB_SET {
+                score *= REPO_WEIGHT;
             }
             hits.push(PageHit {
                 page,
                 score,
                 named,
                 popularity,
+                whole,
             });
         }
         hits.sort_by(|a, b| b.score.total_cmp(&a.score));
@@ -651,12 +696,15 @@ impl PageSearcher {
     /// How well a question's words cover the query's stemmed words
     /// `stems`: [`PARTIAL_MATCH`] times the share they have, when that is
     /// at least [`QUESTION_SHARE`] of at least [`QUESTION_QUERY_WORDS`].
-    fn question_match(&self, page: &Page, stems: &[String]) -> f32 {
+    /// And whether the query asks the question as a whole: it has all of
+    /// the query's words, and the query at least [`QUESTION_TITLE_SHARE`]
+    /// of its title's.
+    fn question_match(&self, page: &Page, stems: &[String]) -> (f32, bool) {
         if stems.len() < QUESTION_QUERY_WORDS {
-            return 0.0;
+            return (0.0, false);
         }
         let Some(topic) = page.topic() else {
-            return 0.0;
+            return (0.0, false);
         };
         let words: HashSet<String> = analysis::tokens(&self.stemmed, &topic)
             .into_iter()
@@ -664,9 +712,39 @@ impl PageSearcher {
         let share =
             stems.iter().filter(|stem| words.contains(*stem)).count() as f32 / stems.len() as f32;
         if share < QUESTION_SHARE {
-            return 0.0;
+            return (0.0, false);
         }
-        PARTIAL_MATCH * share
+        let title: HashSet<String> = analysis::tokens(&self.stemmed, &page.title)
+            .into_iter()
+            .collect();
+        let asked = share >= 1.0
+            && !title.is_empty()
+            && title.iter().filter(|word| stems.contains(word)).count() as f32
+                >= QUESTION_TITLE_SHARE * title.len() as f32;
+        (PARTIAL_MATCH * share, asked)
+    }
+
+    /// Whether the query `words` are a book's title followed by words of
+    /// its author's name or by "book" or "novel": "dune frank herbert",
+    /// "the great gatsby book".
+    fn book_match(&self, page: &Page, words: &[String]) -> bool {
+        if page.set != BOOKS_SET {
+            return false;
+        }
+        let author = page
+            .description
+            .as_deref()
+            .and_then(|d| d.strip_prefix("Book by "))
+            .map(|d| d.rsplit_once(", ").map_or(d, |(name, _)| name))
+            .unwrap_or("");
+        let author: HashSet<String> = analysis::tokens(&self.words, author).into_iter().collect();
+        let title = analysis::tokens(&self.words, &page.title);
+        let rest = match words.strip_prefix(title.as_slice()) {
+            Some(rest) if !title.is_empty() && !rest.is_empty() => rest,
+            _ => return false,
+        };
+        rest.iter().all(|word| author.contains(word))
+            || matches!(rest, [word] if word == "book" || word == "novel")
     }
 
     fn name_match(
@@ -758,7 +836,14 @@ pub struct PlacedPage {
 ///   ([`PageHit::popularity`] against [`crate::Hit::link_score`]).
 ///   Otherwise the page comes first: "marie curie" lists the article
 ///   before mariecurie.org. Pages named only in part come after
-///   [`PARTIAL_AFTER`] sites.
+///   [`PARTIAL_AFTER`] sites, questions and papers with most of the
+///   query's words after the best site.
+/// - A page the query asks for as a whole ([`PageHit::whole`]: a question,
+///   or a book with its author) comes first, unless the best site is
+///   named by the query.
+/// - A site called exactly what was searched for stays first when the
+///   best page named so is an organization or a repository: "us bank"
+///   lists usbank.com before the article "U.S. Bancorp".
 pub fn place_pages(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) -> Vec<PlacedPage> {
     let site_named = sites.first().is_some_and(|hit| hit.named);
     let query_word = squash(query);
@@ -766,16 +851,26 @@ pub fn place_pages(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) -> Ve
         let label = squash(site.domain.split('.').next().unwrap_or(""));
         // A site of government ("fafsa.gov") called after the page.
         let government = is_government(&site.domain);
-        pages.iter().any(|page| {
-            page.named
-                && site_is_titled(&site.domain, &page.page.title)
-                && (government
+        // The site is called what was searched for, and the best page
+        // named so is an organization or a project: usbank.com for "us
+        // bank" (the article "U.S. Bancorp"), regex101.com for the
+        // repository firasdib/Regex101.
+        let called = label == query_word
+            && pages.iter().find(|page| page.named).is_some_and(|page| {
+                page.page.set == GITHUB_SET
+                    || describes_an_organization(page.page.description.as_deref())
+            });
+        called
+            || pages.iter().any(|page| {
+                page.named
+                    && site_is_titled(&site.domain, &page.page.title)
+                    && (government
                     || describes_an_organization(page.page.description.as_deref())
                     // "robinhood" spells robinhood.com, not "Robin Hood".
                     || (!query.trim().contains(' ')
                         && label == query_word
                         && base_title(&page.page.title).contains(' ')))
-        })
+            })
     });
     // A named page goes first only when the best site may be a namesake.
     let page_first = |page: &PageHit| match sites.first() {
@@ -786,12 +881,13 @@ pub fn place_pages(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) -> Ve
     let mut placed: Vec<PlacedPage> = Vec::new();
     let mut listed = 0;
     for hit in pages {
-        // A page named like a better one already listed is a namesake of
-        // it: once "Eiffel Tower" is under toureiffel.paris, "Eiffel Tower
+        // A page named like a better one of its set already listed is a
+        // namesake of it: once "Eiffel Tower" is under toureiffel.paris, "Eiffel Tower
         // (Six Flags)" only comes after three sites.
         let namesake = hit.named
             && placed.iter().any(|p| {
                 p.hit.named
+                    && p.hit.page.set == hit.page.set
                     && page_key(base_title(&p.hit.page.title))
                         == page_key(base_title(&hit.page.title))
             });
@@ -810,7 +906,12 @@ pub fn place_pages(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) -> Ve
         if listed == most || !(hit.named || hit.score >= MIN_PARTIAL_SCORE) {
             continue;
         }
-        let at = if !hit.named || namesake {
+        let at = if hit.whole {
+            usize::from(site_named)
+        } else if !hit.named && hit.page.topic().is_some() {
+            // A question or paper with most of the query's words.
+            1
+        } else if !hit.named || namesake {
             PARTIAL_AFTER
         } else if hit.page.may_lead() && page_first(&hit) {
             0
@@ -1012,6 +1113,81 @@ mod tests {
     }
 
     #[test]
+    fn whole_questions_lead() {
+        let question = Page::from_question(Article {
+            title: "How do I delete a Git branch locally and remotely?".into(),
+            description: Some("git, version-control, git-branch".into()),
+            item: Some("2003505".into()),
+            views: 12_000_000,
+            ..Article::default()
+        });
+        let (_dir, s) = searcher(&[question]);
+        let sites = [known_site("git-scm.com", false, 0.9)];
+        let hits = s
+            .search("delete a git branch locally and remotely", 5)
+            .unwrap();
+        assert!(hits[0].whole);
+        assert_eq!(
+            place_pages("delete a git branch locally and remotely", &sites, hits)[0].at,
+            0
+        );
+        // Most of the query's words: after the best site.
+        let hits = s.search("delete git branch remotely fast", 5).unwrap();
+        assert!(!hits[0].whole);
+        assert_eq!(
+            place_pages("delete git branch remotely fast", &sites, hits)[0].at,
+            1
+        );
+    }
+
+    #[test]
+    fn sites_called_like_organizations_stay_first() {
+        let mut bank = page("U.S. Bancorp", 900_000, &["US Bank"]);
+        bank.description = Some("American bank holding company".into());
+        let repo = Page::from_repo(Article {
+            title: "firasdib/Regex101".into(),
+            views: 5_000,
+            aliases: vec!["Regex101".into()],
+            ..Article::default()
+        });
+        let (_dir, s) = searcher(&[bank, repo, page("Sonnet", 300_000, &[])]);
+        for (query, site) in [("us bank", "usbank.com"), ("regex101", "regex101.com")] {
+            let hits = s.search(query, 5).unwrap();
+            assert!(hits[0].named, "{query}");
+            let placed = place_pages(query, &[known_site(site, false, 0.0)], hits);
+            assert_eq!(placed[0].at, 1, "{query}");
+        }
+        // A site called like a person or a work is not first for it.
+        let mut curie = page("Marie Curie", 900_000, &[]);
+        curie.description = Some("Polish-French physicist and chemist".into());
+        let placed = place_pages(
+            "marie curie",
+            &[known_site("mariecurie.org", false, 0.0)],
+            vec![PageHit {
+                page: curie,
+                score: 1.0,
+                named: true,
+                popularity: 0.9,
+                whole: false,
+            }],
+        );
+        assert_eq!(placed[0].at, 0);
+    }
+
+    #[test]
+    fn articles_come_before_repositories_named_alike() {
+        let repo = Page::from_repo(Article {
+            title: "google-deepmind/sonnet".into(),
+            views: 9_000,
+            aliases: vec!["sonnet".into()],
+            ..Article::default()
+        });
+        let (_dir, s) = searcher(&[repo, page("Sonnet", 30_000, &[])]);
+        let hits = s.search("sonnet", 5).unwrap();
+        assert_eq!(titles(&hits), ["Sonnet", "google-deepmind/sonnet"]);
+    }
+
+    #[test]
     fn partial_names_score_lower() {
         let (_dir, s) = searcher(&[page("Marie Curie", 80_000, &[])]);
         let hit = &s.search("curie", 1).unwrap()[0];
@@ -1049,6 +1225,7 @@ mod tests {
             score,
             named,
             popularity: score,
+            whole: false,
         }
     }
 
@@ -1246,6 +1423,11 @@ mod tests {
         assert!(site_is_titled("tauri.app", "Tauri (software framework)"));
         assert!(!site_is_titled("leonardodavinci.net", "Marie Curie"));
         assert!(!site_is_titled("curie.fr", "Marie Curie"));
+        assert!(site_is_titled(
+            "navyfederal.org",
+            "Navy Federal Credit Union"
+        ));
+        assert!(!site_is_titled("navyfed.org", "Navy Federal Credit Union"));
     }
 
     #[test]
@@ -1277,15 +1459,30 @@ mod tests {
         let hits = s.search("dune", 5).unwrap();
         assert_eq!(titles(&hits), ["Dune (novel)", "Dune"]);
         assert_eq!(hits[1].page.url, "https://openlibrary.org/works/OL893415W");
+        // Alone the title may be anything: the book never comes before
+        // every site.
+        let placed = place_pages("dune", &[known_site("dunebook.com", false, 0.0)], hits);
+        assert_eq!(placed[1].at, 1);
+        // With its author or "book" it is the book that is searched for,
+        // before any site the query does not name.
+        for query in ["dune frank herbert", "dune herbert", "Dune book"] {
+            let hits = s.search(query, 5).unwrap();
+            assert!(hits[0].whole && hits[0].page.set == BOOKS_SET, "{query}");
+            let placed = place_pages(query, &[known_site("dunebook.com", false, 0.9)], hits);
+            assert_eq!(placed[0].at, 0, "{query}");
+        }
         let hits = s.search("dune frank herbert", 5).unwrap();
-        assert!(hits[0].named && hits[0].page.set == BOOKS_SET);
-        // Never ahead of every site, even an unknown one.
         let placed = place_pages(
             "dune frank herbert",
-            &[known_site("dunefrankherbert.com", false, 0.0)],
+            &[known_site("dunefrankherbert.com", true, 0.0)],
             hits,
         );
         assert_eq!(placed[0].at, 1);
+        assert!(!s
+            .search("dune movie", 5)
+            .unwrap()
+            .iter()
+            .any(|hit| hit.whole));
         // Papers are found by most of their words too.
         let hits = s.search("attention all you need paper", 5).unwrap();
         assert_eq!(titles(&hits), ["Attention Is All You Need"]);
