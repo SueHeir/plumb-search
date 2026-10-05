@@ -91,7 +91,7 @@ plumb fetch-pages --set papers --work /big/disk/dumps --data /path/to/node-data 
 
 Set `OPENALEX_API_KEY` if OpenAlex asks for a key. `--max-papers` caps how many are kept. With `--work DIR`, the papers so far are kept in `DIR/openalex/` as they come: when OpenAlex keeps refusing (it limits how much one address may ask for), the run waits as it is told, then writes the most cited papers it has, and running it again with the same `--work` carries on where it stopped.
 
-Book and paper titles are often common words ("Python", "Apple"), so a book or paper named by its title alone is never listed before every site, and an article of the same name comes before it: "dune" lists the article on the novel, then the book. A query of a book's title followed by words of its author's name or by "book" or "novel" ("dune frank herbert", "dune book") asks for the book, which then comes first unless the first site is named by the whole query.
+Book and paper titles are often common words ("Python", "Apple"), so a book or paper named by its title alone is never listed before every site, and an article of the same name comes before it: "dune" lists the article on the novel, then the book. A query of a book's title followed by words of its author's name or by "book" or "novel" ("dune frank herbert", "dune book") asks for the book, which then comes first unless the first site is named by the whole query; other editions come after the best site.
 
 ## How pages and sites are listed together
 
