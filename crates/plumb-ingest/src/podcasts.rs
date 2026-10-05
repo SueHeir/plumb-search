@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use plumb_core::article::{Article, MAX_ARTICLE_DESCRIPTION_CHARS};
 use plumb_core::profiles::Profile;
+use rusqlite::types::ValueRef;
 use tracing::info;
 
 /// Podcast Index's database, a gzipped tar of one SQLite file. It answers
@@ -156,23 +157,32 @@ pub fn read_podcasts(db: &Path, min_score: u32, keep: usize) -> Result<Vec<Podca
          AND lastHttpStatus = 200 AND title != '' AND COALESCE(NULLIF(duplicateOf, ''), 0) = 0",
     )?;
     let rows = statement.query_map([min_score, MAX_SCORE], |row| {
+        // The dump stores a missing number as '' rather than NULL, so take
+        // integers only and anything else as missing; likewise for text.
         let text = |i: usize| -> rusqlite::Result<String> {
-            Ok(row.get::<_, Option<String>>(i)?.unwrap_or_default())
+            Ok(match row.get_ref(i)? {
+                ValueRef::Text(t) => String::from_utf8_lossy(t).into_owned(),
+                _ => String::new(),
+            })
+        };
+        let number = |i: usize| -> rusqlite::Result<Option<i64>> {
+            Ok(match row.get_ref(i)? {
+                ValueRef::Integer(n) => Some(n),
+                _ => None,
+            })
         };
         Ok(Podcast {
-            id: row.get::<_, i64>(0)?.try_into().unwrap_or(0),
+            id: number(0)?
+                .and_then(|id| u64::try_from(id).ok())
+                .unwrap_or(0),
             title: plumb_core::collapse_whitespace(&text(1)?),
             author: plumb_core::collapse_whitespace(&text(2)?),
             link: text(3)?,
-            itunes_id: row
-                .get::<_, Option<i64>>(4)?
+            itunes_id: number(4)?
                 .and_then(|id| u64::try_from(id).ok())
                 .filter(|&id| id > 0),
-            score: row.get::<_, Option<u32>>(5)?.unwrap_or(0),
-            episodes: row
-                .get::<_, Option<i64>>(6)?
-                .and_then(|n| u64::try_from(n).ok())
-                .unwrap_or(0),
+            score: number(5)?.and_then(|n| u32::try_from(n).ok()).unwrap_or(0),
+            episodes: number(6)?.and_then(|n| u64::try_from(n).ok()).unwrap_or(0),
             category: plumb_core::collapse_whitespace(&text(7)?),
         })
     })?;
@@ -239,7 +249,7 @@ mod tests {
              INSERT INTO podcasts VALUES
               (1, 'a', 'Dan Carlin''s Hardcore History', 'https://www.dancarlin.com/', 200, 173001861,
                'Dan Carlin', 70, 9, 'History', NULL),
-              (2, 'b', 'Small Show', 'https://small.libsyn.com/', 200, 0, 'Someone', 500, 4, '', ''),
+              (2, 'b', 'Small Show', 'https://small.libsyn.com/', 200, '', 'Someone', 500, 4, '', ''),
               (3, 'c', 'Gone', 'https://gone.example/', 404, 1, 'X', 9, 9, '', NULL),
               (4, 'd', '', 'https://empty.example/', 200, 1, 'X', 9, 9, '', NULL),
               (5, 'e', 'Copy', 'https://copy.example/', 200, 1, 'X', 9, 9, '', 1),
