@@ -5,7 +5,12 @@
 //! Each service's property is asked for whole, a page of
 //! [`PROFILES_PAGE`] statements at a time: a query for one property and
 //! nothing else is a scan of one index, which the query service answers in
-//! seconds. Before that, each property's formatter URL (P1630) is checked
+//! seconds. The pages have no `ORDER BY`: sorting would make the service
+//! gather and sort every statement of the property for each page, giving
+//! up the index scan, and the rows already come in that index's order.
+//! An edit made between two pages can still shift a row across the page
+//! boundary (ordering would not prevent that either); rows met twice are
+//! kept once. Before that, each property's formatter URL (P1630) is checked
 //! to point at the service's site, so a mistaken property number in
 //! [`plumb_core::profiles::SERVICES`] leaves that service out rather than
 //! linking somewhere wrong.
