@@ -447,12 +447,13 @@ pub struct FetchProfilesArgs {
 pub struct FetchPagesArgs {
     /// The page set to make: wikipedia-en (English Wikipedia's articles),
     /// github (GitHub repositories, from GitHub's search API; set
-    /// GITHUB_TOKEN to search three times as fast) or stackoverflow (Stack
+    /// GITHUB_TOKEN to search three times as fast), stackoverflow (Stack
     /// Overflow's most viewed questions, from Stack Exchange's data dump),
     /// books (Open Library's most shelved works, from its dumps), papers
     /// (the most cited works, from OpenAlex's API; set OPENALEX_API_KEY if
-    /// it asks for one) or places (named shops, restaurants, parks and
-    /// towns from OpenStreetMap).
+    /// it asks for one), packages (the most used packages of eight
+    /// registries, from ecosyste.ms) or places (named shops, restaurants,
+    /// parks and towns from OpenStreetMap).
     #[arg(long, value_name = "SET", default_value = "wikipedia-en")]
     pub set: String,
     /// Directory to download Wikipedia's dumps into (created if missing).

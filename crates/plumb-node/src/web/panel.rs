@@ -1306,7 +1306,7 @@ pub(super) fn render_panel(view: &PanelView<'_>) -> String {
         }
         _ => {
             render_about(&mut body, status, data_dir, now);
-            body.push_str(&format!("<p>Desktop and Docker run the same node and settings panel.</p><p><a href=\"https://github.com/SueHeir/plumb-search\" target=\"_blank\">Source code &amp; documentation ↗</a> · <a href=\"{site}/api/status\" target=\"_blank\">Diagnostic status ↗</a></p><p class=\"hint\">Desktop: use the tray or menu bar for Start at login and Quit Plumb Search.</p>"));
+            body.push_str(&format!("<p>Desktop and Docker run the same node and settings panel.</p><p>Its data comes from Wikipedia, Stack Overflow and ecosyste.ms (CC BY-SA 4.0), OpenStreetMap (ODbL), Wikidata, OpenAlex and Open Library (CC0), GitHub, Tranco, Common Crawl and the Block List Project.</p><p><a href=\"https://github.com/SueHeir/plumb-search\" target=\"_blank\">Source code &amp; documentation ↗</a> · <a href=\"https://github.com/SueHeir/plumb-search#data-sources\" target=\"_blank\">Data sources &amp; licences ↗</a> · <a href=\"{site}/api/status\" target=\"_blank\">Diagnostic status ↗</a></p><p class=\"hint\">Desktop: use the tray or menu bar for Start at login and Quit Plumb Search.</p>"));
         }
     }
     body.push_str("</main>");

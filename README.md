@@ -1,8 +1,16 @@
 # Plumb Search
 
-Plumb Search is a free, open-source search engine that anyone can run, on a homelab server, a desktop, or not at all: you can just search at **[plumbsearch.org](https://plumbsearch.org)**. Nodes share their crawling with each other over a peer-to-peer network, so nobody has to crawl the whole web alone.
+Plumb Search is a free, open-source search engine, and free web search for AI apps and local models. It needs no API key and has no quota. It doesn't scrape Google, Bing or anyone else: it answers from its own index, so there is no engine upstream to block or throttle it. It speaks SearXNG's JSON API and MCP, so it drops into the setup you already have:
 
-Type "us bank" and usbank.com comes first. Plumb indexes names, not pages: for each site it keeps the homepage title and description, the words other sites use when they link to it, and a few aliases, about 1 KB per site, so a million sites fit in roughly a gigabyte. Next to sites it lists single pages from open page sets (Wikipedia, GitHub, Stack Overflow, books and papers) and places from OpenStreetMap.
+```sh
+claude mcp add --transport http plumb https://plumbsearch.org/mcp
+```
+
+or give any app that takes a SearXNG address `https://plumbsearch.org` (`/search?q=<query>&format=json`).
+
+Search at **[plumbsearch.org](https://plumbsearch.org)**, or run your own node on a homelab server or a desktop so your searches stay with you. Nodes share their crawling with each other over a peer-to-peer network, so nobody has to crawl the whole web alone.
+
+Type "us bank" and usbank.com comes first. Plumb indexes names, not pages: for each site it keeps the homepage title and description, the words other sites use when they link to it, and a few aliases, about 1 KB per site, so a million sites fit in roughly a gigabyte. Next to sites it lists single pages from open page sets (Wikipedia, GitHub, Stack Overflow, software packages, books and papers) and places from OpenStreetMap.
 
 ![Plumb Search results for "package registry"](docs/images/results.png)
 
@@ -13,6 +21,7 @@ Type "us bank" and usbank.com comes first. Plumb indexes names, not pages: for e
 - [How it works](#how-it-works)
 - [Status](#status)
 - [Contributing](#contributing)
+- [Data sources](#data-sources)
 - [License](#license)
 
 ## Try it
@@ -35,7 +44,7 @@ To make it your browser's search engine, open a Plumb page and add it from the a
 - **Plugins** (optional): a node's owner can add results from sources Plumb does not crawl, such as a site's own search API, with plugins written in Rust and run in a WebAssembly sandbox. Nodes come with none ([docs/plugins.md](docs/plugins.md)).
 - **About you**: each browser can list interests, sites it always wants first and sites it never wants to see, kept on its own node and never sent with a search.
 
-There are no ads and no tracking. Plumb does not crawl the full text of the web: it fetches one homepage per site (plus a few key pages for sitelinks), and obeys robots.txt.
+There are no ads and no tracking. Plumb does not crawl the full text of the web: for each site it fetches the homepage, robots.txt and the site's icon, and for the best-ranked sites their RSS or Atom feed. Key pages for sitelinks are picked from the homepage's links, not fetched. It obeys robots.txt.
 
 ## Run your own node
 
@@ -60,11 +69,21 @@ cargo build --release -p plumb-node
 
 Then open http://127.0.0.1:8080. `plumb run --help` lists the settings; [More about running a node](#more-about-running-a-node) below covers the details.
 
+### Upgrading
+
+A new version keeps the data folder (the Docker volume, the desktop app's data folder, or `--data`), so the index and settings carry over.
+
+- **Docker**: `docker compose pull && docker compose up -d`, or with `docker run`, pull the image and start a new container with the same volume ([docs/docker.md](docs/docker.md#updating)).
+- **Desktop**: install the new version over the old one.
+- **From source**: pull, build again and restart `plumb run`.
+
 ## Use it from an AI
 
-Search APIs that AI apps used to rely on are closing or going paid. Plumb is free, needs no key, and with your own node the searches never leave your computer.
+Search APIs that AI apps used to rely on are closing, going paid or capping their free tiers, and SearXNG gets throttled and blocked by the engines it scrapes. Plumb is free, needs no key, has no quota, and scrapes no one, and with your own node the searches never leave your computer. A per-client limit keeps shared nodes fair: a burst of 30 MCP tool calls, then 60 a minute.
 
-- **MCP**: every node serves an MCP server at `/mcp`, and `plumb mcp` serves one over stdio. Tools: `search`, `official_site`, `check_lookalike`, `site_info`, and `read_page` (reads a page as text; offered by your own node, not by plumbsearch.org). In Claude Code:
+It is good at what agents look up most: the official site ("chase login"), a package's latest version and docs ("serde crate"), the well-known Stack Overflow question ("undo last git commit"), the Wikipedia fact ("albert einstein") and instant answers ("100 usd to eur"). It indexes homepages and those page sets, not the full text of the web, so the long tail (a blog post, a forum thread) is weaker than Google's. [docs/local-llms.md](docs/local-llms.md) shows what results look like.
+
+- **MCP**: every node serves an MCP server at `/mcp`, and `plumb mcp` serves one over stdio. Tools: `search`, `official_site`, `check_lookalike`, `site_info`, `package` (a package's latest version, install command and docs), and two offered only to AI apps on the node's own computer, not by plumbsearch.org: `read_page` (reads a page as text) and `report_finding` (keeps what an agent found for the next search). In Claude Code:
 
   ```sh
   claude mcp add --transport http plumb https://plumbsearch.org/mcp
@@ -86,11 +105,11 @@ Search APIs that AI apps used to rely on are closing or going paid. Plumb is fre
 
 ## Status
 
-Plumb is young and moving fast. plumbsearch.org runs on `main`, which also publishes the Docker image. There is no tagged release yet. The peer-to-peer network works but is still a prototype, and private information retrieval (PIR), which would let a node fetch results without learning which ones it asked for, is in progress and off by default.
+Plumb is young and moving fast. plumbsearch.org runs on `main`, which also publishes the Docker image. There is no tagged release yet. The peer-to-peer network works but is young. Private information retrieval (PIR), which would let a node fetch results without learning which ones it asked for, is research in progress: the first pieces are in `crates/plumb-net/src/pir`, but no search uses them and there is no setting for it.
 
 ## Contributing
 
-Issues and pull requests are welcome. Before opening a pull request, run:
+Issues and pull requests are welcome; [CONTRIBUTING.md](CONTRIBUTING.md) has the details. To report a security problem, see [SECURITY.md](SECURITY.md). Before opening a pull request, run:
 
 ```sh
 cargo fmt --all --check
@@ -206,7 +225,7 @@ plumb eval --index data/index --queries eval/brand_queries.tsv
 
 To refresh the seed data later, run steps 1 and 3 again with `--records data/records.jsonl` added to step 3. Titles, link text and crawl times carry over, while ranks and official-site marks come only from the new files, so a domain that has expired and changed hands does not keep the trust it had.
 
-The crawler identifies itself as `PlumbSearch/<version> (+https://github.com/SueHeir/plumb-search)`, obeys robots.txt (including `Crawl-delay`), and fetches one page per site, plus the site's icon for results pages. Icons are redrawn as small PNGs and served inside the results page, so a searcher's browser never contacts the sites or any icon service.
+The crawler identifies itself as `PlumbSearch/<version> (+https://github.com/SueHeir/plumb-search)`, obeys robots.txt (including `Crawl-delay`), and fetches the homepage, robots.txt and the site's icon for results pages, plus the RSS or Atom feed of the best-ranked sites ([docs/news.md](docs/news.md)). Pages an AI app asks its own node to read with `read_page` are fetched as `plumb-mcp/<version> (+https://github.com/SueHeir/plumb-search)`. Icons are redrawn as small PNGs and served inside the results page, so a searcher's browser never contacts the sites or any icon service.
 
 ## How ranking works
 
@@ -252,6 +271,28 @@ A node does this on its own with `plumb run --search-by-meaning`: it downloads t
 | `crates/plumb-e2e` | End-to-end tests that run the Docker image, kill containers mid-work and restart them |
 
 `fixtures/` holds the synthetic test data and `eval/brand_queries.tsv` the brand-name test list for real data.
+
+## Data sources
+
+Plumb is built from open data. Nodes keep titles, short descriptions and counts, not whole pages.
+
+| Source | What Plumb takes from it | Licence |
+| --- | --- | --- |
+| [Wikipedia](https://en.wikipedia.org/) (English) | Article titles and short descriptions, from Wikimedia's dumps; page views | Text [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/); page views CC0 |
+| [Wikidata](https://www.wikidata.org/) | Official websites, names, countries, kinds of site, descriptions and official profiles | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) |
+| [Stack Overflow](https://stackoverflow.com/) | Question titles, tags and views, from Stack Exchange's data dump | [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/) |
+| [ecosyste.ms](https://packages.ecosyste.ms/) | Package names, versions, licences and links for eight registries | [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/) |
+| [OpenStreetMap](https://www.openstreetmap.org/copyright) | Places; © OpenStreetMap contributors | [ODbL](https://opendatacommons.org/licenses/odbl/) |
+| [OpenAlex](https://openalex.org/) | The most cited papers | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) |
+| [Open Library](https://openlibrary.org/) | The most read books | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) |
+| [GitHub](https://github.com/) | Names, descriptions and stars of public repositories, from its API | [GitHub's terms](https://docs.github.com/en/site-policy/github-terms/github-terms-of-service) |
+| [Tranco](https://tranco-list.eu/) | The top million sites, for first ranks | See its site |
+| [Common Crawl](https://commoncrawl.org/) | Web graph domain ranks; optionally titles and link text from WAT files | [Terms of use](https://commoncrawl.org/terms-of-use) |
+| [The Block List Project](https://github.com/blocklistproject/Lists) | The adult sites list for safe search | Public domain ([Unlicense](https://unlicense.org/)) |
+| [European Central Bank](https://www.ecb.europa.eu/stats/policy_and_exchange_rates/euro_reference_exchange_rates/html/index.en.html) | Daily euro reference rates for currency conversions | Free to reuse with the source named |
+| [BAAI/bge-small-en-v1.5](https://huggingface.co/BAAI/bge-small-en-v1.5) | The embedding model for search by meaning | MIT |
+
+Site titles, descriptions and icons come from the sites' own homepages. The info box credits Wikipedia under each description it takes from an article, and lists of places credit OpenStreetMap.
 
 ## License
 

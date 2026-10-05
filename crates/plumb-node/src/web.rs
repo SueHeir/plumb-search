@@ -1756,6 +1756,7 @@ a.r:visited .t{color:var(--seen)}\
 .m,.s{font-size:.8rem}\
 .m{margin-top:.25rem}\
 .s{margin-top:1.5rem}\
+.ft{margin:2.5rem 0 0;font-size:.8rem;color:var(--muted)}.ft a{color:inherit}\
 .none{margin:1.5rem 0}\
 header form{flex-wrap:wrap}\
 form[role=search]{position:relative}\
@@ -1849,6 +1850,14 @@ border:1px solid var(--line);border-radius:1rem;text-decoration:none}\
 .ibp a:hover{border-color:var(--accent)}.pfirst .ib{order:0}\
 @media (min-width:64rem){.cols{display:grid;grid-template-columns:minmax(0,44rem) minmax(0,22rem);\
 gap:0 3rem;align-items:start}.ib{order:0;margin-top:1.25rem}}";
+
+/// The foot of the home and results pages: the code, and where the data
+/// comes from and under which licences. A node does not serve the
+/// website's pages, so both point to GitHub.
+const FOOTER: &str = "<p class=\"ft\"><a href=\"https://github.com/SueHeir/plumb-search\" \
+     rel=\"noreferrer\">Source code</a> &middot; <a \
+     href=\"https://github.com/SueHeir/plumb-search#data-sources\" rel=\"noreferrer\">Data \
+     sources and licences</a></p>";
 
 /// A whole HTML document; `body` must already be escaped.
 fn page(title: &str, body: &str) -> String {
@@ -2075,10 +2084,10 @@ fn render_home(docs: u64, status: Option<&Status>, now: u64, settings: &Settings
         .map(|history| history.recent_html(&settings.options))
         .unwrap_or_default();
     let body = format!(
-        "<main class=\"wrap home\">\n<h1>Plumb</h1>\n\
+        "<main class=\"wrap home\">\n<h1>Plumb Search</h1>\n\
          {}{recent}\n<p class=\"s\">{} sites indexed{note}</p>{wikidata}\n\
          <p class=\"s\">Not looking for a site? Add !g, !ddg or !b to search Google, \
-         DuckDuckGo or Bing.</p>\n</main>",
+         DuckDuckGo or Bing.</p>\n{FOOTER}\n</main>",
         settings_form("", true, settings),
         group_thousands(docs)
     );
@@ -2131,7 +2140,7 @@ fn wikidata_note(status: &Status, now: u64) -> Option<String> {
 /// error. It reloads itself, since the page allows no script.
 fn render_setup(status: &Status, now: u64) -> String {
     let mut body = String::from(
-        "<main class=\"wrap home setup\">\n<h1>Plumb</h1>\n\
+        "<main class=\"wrap home setup\">\n<h1>Plumb Search</h1>\n\
          <p class=\"tag\">Setting up your search engine</p>\n",
     );
     let _ = writeln!(
@@ -2590,7 +2599,10 @@ fn render_results_with(
         let api = escape_html(&search_link("/api/network/search", query, options, false));
         let _ = write!(json, " and <a href=\"{api}\">{api}</a>");
     }
-    let _ = write!(body, "<p class=\"s\">As JSON: {json}</p>\n</main>\n");
+    let _ = write!(
+        body,
+        "<p class=\"s\">As JSON: {json}</p>\n{FOOTER}\n</main>\n"
+    );
     // With an info box the page is wider, with the box beside the results
     // (above them on a narrow screen, unless a profile asked for leads).
     let form = results_form(query, settings);
@@ -2695,9 +2707,9 @@ fn render_network(query: &str, results: &NetworkResults, icons: &Icons) -> Strin
     let _ = write!(
         body,
         "<p class=\"s\"><a href=\"{local}\">Back to this node's results</a> &middot; \
-         As JSON: <a href=\"{api}\">{api}</a></p>\n</main>\n</div>"
+         As JSON: <a href=\"{api}\">{api}</a></p>\n{FOOTER}\n</main>\n</div>"
     );
-    page(&format!("{query} - Plumb network"), &body)
+    page(&format!("{query} (network) - Plumb Search"), &body)
 }
 
 fn render_no_network() -> String {
@@ -2707,7 +2719,7 @@ fn render_no_network() -> String {
          nodes.</p>\n</main>\n</div>",
         results_header("")
     );
-    page("Plumb network", &body)
+    page("Network search - Plumb Search", &body)
 }
 
 /// "Search github.com for sueheir plumb-search", above the results.

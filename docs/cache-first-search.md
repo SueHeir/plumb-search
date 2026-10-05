@@ -24,9 +24,9 @@ The read-only sizing command separates useful record payload from indexes, model
 plumb storage --data /path/to/plumb-data --json > storage-report.json
 ```
 
-Claude can run this on the HPC after updating the binary. It does not reconfigure, refresh or delete the node. The report contains aggregate byte counts, full/slim main-record sizes and bucket membership distributions. It excludes symlinks and special files, bounds malformed input, and does not open identity, token or history files. It measures logical lengths, not allocated blocks; records are sized without replaying their journal. A live directory is not an atomic snapshot, and an incomplete report exits with an error after showing its omissions.
+It is safe to run on a live node. It does not reconfigure, refresh or delete the node. The report contains aggregate byte counts, full/slim main-record sizes and bucket membership distributions. It excludes symlinks and special files, bounds malformed input, and does not open identity, token or history files. It measures logical lengths, not allocated blocks; records are sized without replaying their journal. A live directory is not an atomic snapshot, and an incomplete report exits with an error after showing its omissions.
 
-These measurements will tell us what starter dataset and cache budget are practical. No claim that the reported 2 GB is all searchable client payload is made, and no HPC data was inspected from this workspace.
+These measurements show what starter dataset and cache budget are practical. Not all of the data folder is searchable payload; the report separates the two.
 
 ## Remaining bucket-privacy work
 
@@ -37,7 +37,3 @@ Private Information Retrieval is a separate protocol step. A two-server design r
 The subsequent [PIR handoff](reviews/pir-handoff.md) records the direct single-server design, an isolated offline Rust probe, synthetic measurements at 16,384 rows and the production integration checklist. The storage report now estimates equal-row padding from actual bucket metadata; this estimate excludes proof and cryptographic overhead.
 
 See the [privacy review](reviews/privacy-security.md) and [architecture map](reviews/architecture.md) for the source evidence and remaining trust assumptions.
-
-## Validation
-
-On macOS, 666 workspace tests passed with three existing ignored tests, plus 13 desktop tests. Network integration tests exercised connected-peer misses sending no requests before a due slot, scheduled completion, retained stale data, empty-answer reuse, and normal proof expiry/forgery rejection. Formatting and clippy passed with warnings denied. The browser module passed WASM clippy, an optimized build and pinned wasm-bindgen processing; five matching node tests passed with the built script embedded. A synthetic CLI smoke check produced valid aggregate JSON without exposing record or history contents. No HPC or other deployed node was changed or scanned.

@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Privacy - Plumb Search</title>
+<meta name="description" content="What plumbsearch.org keeps, what it doesn't, and what leaves the server when you search.">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="/"><img src="/favicon.svg" alt="" width="28" height="28">Plumb Search</a>
+  <nav>
+    <a href="/#get">Download</a>
+    <a href="https://github.com/SueHeir/plumb-search">GitHub</a>
+  </nav>
+</header>
+
+<main class="page">
+  <h1>Privacy</h1>
+  <p>This page covers plumbsearch.org. A Plumb node you run yourself keeps what you search on your own computer, and works the same way otherwise.</p>
+
+  <h2>What the server keeps</h2>
+  <ul>
+    <li>There is no access log. The web server keeps no record of who visits or what they search for, and requests that fail (for example while the search node restarts) are not logged with your address or search either.</li>
+    <li>The search node logs no queries. Search history is off on this server.</li>
+    <li>There are no cookies for tracking, no analytics, and no ads. Pages load nothing from other servers: site icons are served by Plumb itself, and maps are drawn from coordinates rather than map tiles.</li>
+    <li>To stop one client from using up the server, the AI assistant endpoint (<code>/mcp</code>) and network search count requests per address. The counts are kept in memory only, never written to disk, and gone when the node restarts.</li>
+  </ul>
+
+  <h2>When your search leaves the server</h2>
+  <ul>
+    <li><strong>Bangs.</strong> A search with <code>!g</code>, <code>!ddg</code>, <code>!b</code> or another bang is sent straight to that site (Google, DuckDuckGo, Bing and so on), which then sees it.</li>
+    <li><strong>“Search the web with…” links.</strong> A node can show a link that hands your search to another search engine. It is off on this server; if you click one elsewhere, that engine sees your search.</li>
+    <li><strong>Results you open.</strong> Clicking a result takes you to that site. The address you came from is not passed on, so the site doesn't see your search.</li>
+    <li><strong>Network search.</strong> When this node searches the Plumb network, it never sends your words. It asks other nodes for a few numbered buckets of sites, padded with random ones, through another node that relays the request when there is one. The nodes that answer see the bucket numbers, and from those they could guess likely searches.</li>
+    <li><strong>Private search</strong> (<a href="/private">/private</a>). Your search stays in your browser, which fetches buckets and ranks them itself. The server, or the other nodes it relays to, still see which buckets were asked for, so this is not a guarantee of anonymity.</li>
+  </ul>
+
+  <h2>What the server fetches by itself</h2>
+  <ul>
+    <li>Currency conversions use the European Central Bank's daily reference rates. The server downloads them itself, so the ECB never sees your search.</li>
+    <li>The crawler fetches homepages, robots.txt, site icons and news feeds. None of it is tied to anyone's search.</li>
+  </ul>
+
+  <p class="small">More detail is in the <a href="https://github.com/SueHeir/plumb-search/blob/main/docs/network.md">network design</a> and <a href="https://github.com/SueHeir/plumb-search/blob/main/docs/private-search.md">private search</a> docs. Questions? <a href="https://github.com/SueHeir/plumb-search/issues">Open an issue on GitHub</a>.</p>
+</main>
+
+<footer>
+  <p><a href="/">Home</a> · <a href="/credits">Credits</a> · <a href="https://github.com/SueHeir/plumb-search/blob/main/SECURITY.md">Security</a> · <a href="https://github.com/SueHeir/plumb-search">Source code</a></p>
+</footer>
+</body>
+</html>
