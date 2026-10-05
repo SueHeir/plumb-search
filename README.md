@@ -1,8 +1,16 @@
 # Plumb Search
 
-Plumb Search is a free, open-source search engine that anyone can run, on a homelab server, a desktop, or not at all: you can just search at **[plumbsearch.org](https://plumbsearch.org)**. Nodes share their crawling with each other over a peer-to-peer network, so nobody has to crawl the whole web alone.
+Plumb Search is a free, open-source search engine, and free web search for AI apps and local models. It needs no API key and has no quota. It doesn't scrape Google, Bing or anyone else: it answers from its own index, so there is no engine upstream to block or throttle it. It speaks SearXNG's JSON API and MCP, so it drops into the setup you already have:
 
-Type "us bank" and usbank.com comes first. Plumb indexes names, not pages: for each site it keeps the homepage title and description, the words other sites use when they link to it, and a few aliases, about 1 KB per site, so a million sites fit in roughly a gigabyte. Next to sites it lists single pages from open page sets (Wikipedia, GitHub, Stack Overflow, books and papers) and places from OpenStreetMap.
+```sh
+claude mcp add --transport http plumb https://plumbsearch.org/mcp
+```
+
+or give any app that takes a SearXNG address `https://plumbsearch.org` (`/search?q=<query>&format=json`).
+
+Search at **[plumbsearch.org](https://plumbsearch.org)**, or run your own node on a homelab server or a desktop so your searches stay with you. Nodes share their crawling with each other over a peer-to-peer network, so nobody has to crawl the whole web alone.
+
+Type "us bank" and usbank.com comes first. Plumb indexes names, not pages: for each site it keeps the homepage title and description, the words other sites use when they link to it, and a few aliases, about 1 KB per site, so a million sites fit in roughly a gigabyte. Next to sites it lists single pages from open page sets (Wikipedia, GitHub, Stack Overflow, software packages, books and papers) and places from OpenStreetMap.
 
 ![Plumb Search results for "package registry"](docs/images/results.png)
 
@@ -71,7 +79,9 @@ A new version keeps the data folder (the Docker volume, the desktop app's data f
 
 ## Use it from an AI
 
-Search APIs that AI apps used to rely on are closing or going paid. Plumb is free, needs no key, and with your own node the searches never leave your computer.
+Search APIs that AI apps used to rely on are closing, going paid or capping their free tiers, and SearXNG gets throttled and blocked by the engines it scrapes. Plumb is free, needs no key, has no quota, and scrapes no one, and with your own node the searches never leave your computer. A per-client limit keeps shared nodes fair: a burst of 30 MCP tool calls, then 60 a minute.
+
+It is good at what agents look up most: the official site ("chase login"), a package's latest version and docs ("serde crate"), the well-known Stack Overflow question ("undo last git commit"), the Wikipedia fact ("albert einstein") and instant answers ("100 usd to eur"). It indexes homepages and those page sets, not the full text of the web, so the long tail (a blog post, a forum thread) is weaker than Google's. [docs/local-llms.md](docs/local-llms.md) shows what results look like.
 
 - **MCP**: every node serves an MCP server at `/mcp`, and `plumb mcp` serves one over stdio. Tools: `search`, `official_site`, `check_lookalike`, `site_info`, `package` (a package's latest version, install command and docs), and two offered only to AI apps on the node's own computer, not by plumbsearch.org: `read_page` (reads a page as text) and `report_finding` (keeps what an agent found for the next search). In Claude Code:
 

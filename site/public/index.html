@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Plumb Search</title>
-<meta name="description" content="Plumb Search is a free, open-source search engine for finding websites. Run it on your own computer or home server.">
+<meta name="description" content="Plumb Search is a free, open-source search engine, and free web search for AI apps and local models: no API key, no quota, and no other engine behind it.">
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/style.css">
 <link rel="search" type="application/opensearchdescription+xml" title="Plumb Search" href="/opensearch.xml">
@@ -13,6 +13,7 @@
 <header class="top">
   <a class="brand" href="/"><img src="/favicon.svg" alt="" width="28" height="28">Plumb Search</a>
   <nav>
+    <a href="#ai">AI apps</a>
     <a href="#get">Download</a>
     <a href="https://github.com/SueHeir/plumb-search">GitHub</a>
   </nav>
@@ -21,7 +22,7 @@
 <main>
   <section class="hero">
     <h1>Plumb Search</h1>
-    <p class="lede">Plumb is a free, open-source search engine for finding websites. Use it here, or run it on your own computer so your searches stay with you.</p>
+    <p class="lede">Plumb is a free, open-source search engine for finding websites, and free web search for AI apps and local models. Use it here, or run it on your own computer so your searches stay with you.</p>
     <form class="try" action="/search" method="get" role="search">
       <label for="q" class="visually-hidden">Search for a website</label>
       <input id="q" name="q" type="search" placeholder="Try “irs” or “bank of america”" autocomplete="off" required>
@@ -32,6 +33,15 @@
       <a class="button primary" href="#get">Get Plumb</a>
       <a class="button" href="https://github.com/SueHeir/plumb-search">View the code</a>
     </div>
+  </section>
+
+  <section id="ai" class="ai">
+    <h2>Web search for AI apps</h2>
+    <p>No API key, no quota, and Plumb doesn't scrape Google, Bing or anyone else: it answers from its own index, so nothing upstream can block or throttle it. It speaks MCP and SearXNG's JSON API, so it drops into the setup you already have.</p>
+<pre><code>claude mcp add --transport http plumb https://plumbsearch.org/mcp</code></pre>
+    <p>Apps that take a SearXNG address (Open WebUI, LibreChat, AnythingLLM and others) can use <code>https://plumbsearch.org</code>, which answers <code>/search?q=&lt;query&gt;&amp;format=json</code>.</p>
+    <p>It is good at what agents look up most: official sites, packages and their docs, well-known Stack Overflow questions, Wikipedia facts and instant answers. It indexes homepages and those page sets, not the full text of the web, so the long tail is weaker than Google's. Each client gets a burst of 30 MCP tool calls, then 60 a minute.</p>
+    <p class="small"><a href="https://github.com/SueHeir/plumb-search/blob/main/docs/local-llms.md">Setup for LM Studio, Open WebUI, Jan and more</a> · <a href="https://github.com/SueHeir/plumb-search/blob/main/docs/mcp.md">MCP tools</a></p>
   </section>
 
   <section class="features">
