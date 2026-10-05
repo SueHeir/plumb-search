@@ -13,6 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 pub mod article;
 mod country;
+pub mod key_pages;
 pub mod keys;
 mod kinds;
 #[cfg(feature = "oblivious")]
@@ -22,6 +23,7 @@ mod site_search;
 
 pub use article::{article_url, Article};
 pub use country::{normalize_country, site_country, tld_country};
+pub use key_pages::{KeyPage, PageIntent, MAX_KEY_PAGES};
 pub use kinds::{is_generic_kind, kind_key, other_number, MAX_KINDS};
 pub use operators::Operators;
 pub use site_search::{search_link, search_template_for, SEARCH_TERMS};
@@ -102,6 +104,11 @@ pub struct SiteRecord {
     /// go (see [`search_link`]), read from a search form on its homepage.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub search_url: Option<String>,
+    /// The site's key pages ("sitelinks": sign in, docs, pricing), from
+    /// the links its homepage makes to the site itself, at most
+    /// [`MAX_KEY_PAGES`]. See [`key_pages::pick_key_pages`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub key_pages: Vec<KeyPage>,
     /// Homepage fetch attempts in a row, up to the one at
     /// `crawl_attempted_at`, that could not reach the site at all (no
     /// connection or no answer); 0 once an attempt gets an answer. Crawlers
@@ -328,6 +335,10 @@ impl SiteRecord {
             .is_empty()
             .then(|| std::mem::take(&mut self.headings));
         let body_text = other.body_text.is_none().then(|| self.body_text.take());
+        let key_pages = other
+            .key_pages
+            .is_empty()
+            .then(|| std::mem::take(&mut self.key_pages));
         self.merge(other);
         if let Some(mine) = search_url {
             self.search_url = self.search_url.take().or(mine);
@@ -339,6 +350,11 @@ impl SiteRecord {
         }
         if let Some(mine) = body_text {
             self.body_text = self.body_text.take().or(mine);
+        }
+        if let Some(mine) = key_pages {
+            if self.key_pages.is_empty() {
+                self.key_pages = mine;
+            }
         }
     }
 
@@ -360,6 +376,7 @@ impl SiteRecord {
             self.search_url = other.search_url;
             self.headings = other.headings;
             self.body_text = other.body_text;
+            self.key_pages = other.key_pages;
             self.crawled_at = other.crawled_at;
         } else {
             self.url = self.url.take().or(other.url);
@@ -371,6 +388,9 @@ impl SiteRecord {
                     self.headings = other.headings;
                 }
                 self.body_text = self.body_text.take().or(other.body_text);
+                if self.key_pages.is_empty() {
+                    self.key_pages = other.key_pages;
+                }
             }
         }
         // The latest crawl decides: a redirect seen after the last
@@ -1181,6 +1201,10 @@ mod tests {
             search_url: Some("https://a.com/search?q={q}".into()),
             headings: vec!["Welcome".into()],
             body_text: Some("A shop for things".into()),
+            key_pages: vec![KeyPage {
+                label: "Sign in".into(),
+                url: "https://a.com/login".into(),
+            }],
             ..SiteRecord::default()
         };
         let shared = SiteRecord {
@@ -1192,6 +1216,7 @@ mod tests {
         let mut plain = mine.clone();
         plain.merge(shared.clone());
         assert!(plain.search_url.is_none() && plain.body_text.is_none());
+        assert!(plain.key_pages.is_empty());
 
         mine.merge_shared(shared);
         assert_eq!(mine.title.as_deref(), Some("New"));
@@ -1202,6 +1227,7 @@ mod tests {
         );
         assert_eq!(mine.headings, ["Welcome"]);
         assert_eq!(mine.body_text.as_deref(), Some("A shop for things"));
+        assert_eq!(mine.key_pages.len(), 1);
 
         // Text a trusted crawler shared does replace it.
         mine.merge_shared(SiteRecord {

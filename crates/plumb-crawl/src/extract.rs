@@ -20,6 +20,7 @@ use html5ever::tokenizer::states::RawKind;
 use html5ever::tokenizer::{
     BufferQueue, Tag, TagKind, Token, TokenSink, TokenSinkResult, Tokenizer, TokenizerOpts,
 };
+use plumb_core::key_pages::{pick_key_pages, OwnLink};
 use plumb_core::{
     collapse_whitespace, normalize_text, registrable_domain, truncate_chars, MAX_HEADINGS,
     MAX_HEADING_WORDS, MAX_TEXT_CHARS, SEARCH_TERMS,
@@ -37,6 +38,13 @@ const MAX_ICON_LINKS: usize = 64;
 
 /// Most outbound links [`extract_page_meta`] keeps from one page.
 pub const MAX_OUT_LINKS: usize = 500;
+
+/// Most links to the page's own site read for its key pages.
+const MAX_OWN_LINKS: usize = 300;
+
+/// Elements that hold a site's main menu, whose links can be key pages
+/// without naming a [`plumb_core::PageIntent`].
+const MENU_ELEMENTS: &[&str] = &["header", "nav"];
 
 /// How long [`extract_page_meta`] keeps reading a page. Half a megabyte of
 /// ordinary or merely messy HTML takes milliseconds; only markup built to be
@@ -216,6 +224,10 @@ struct Page<'a> {
     /// The link being read, when it is one to keep.
     anchor: Option<Anchor>,
     links: Vec<OutLink>,
+    /// Links to the page's own site, for its key pages.
+    own_links: Vec<OwnLink>,
+    /// How many [`MENU_ELEMENTS`] are open.
+    menu: usize,
     seen: HashSet<(String, String)>,
     /// How many [`HIDDEN_ELEMENTS`] are open.
     hidden: usize,
@@ -267,6 +279,10 @@ const MAX_SEARCH_URL_BYTES: usize = 500;
 struct Anchor {
     url: String,
     target_domain: String,
+    /// A link to the page's own site, kept for its key pages instead.
+    own: bool,
+    /// Inside the site's main menu ([`MENU_ELEMENTS`]).
+    in_menu: bool,
     /// The visible text so far.
     text: String,
     /// The first image `alt` with any text in it, normalized.
@@ -298,6 +314,8 @@ impl<'a> Page<'a> {
             form: None,
             anchor: None,
             links: Vec::new(),
+            own_links: Vec::new(),
+            menu: 0,
             seen: HashSet::new(),
             hidden: 0,
             foreign: 0,
@@ -363,6 +381,9 @@ impl<'a> Page<'a> {
         if CHROME_ELEMENTS.contains(&name) {
             self.chrome += 1;
         }
+        if MENU_ELEMENTS.contains(&name) {
+            self.menu += 1;
+        }
         contents_kind(name)
     }
 
@@ -384,6 +405,9 @@ impl<'a> Page<'a> {
         }
         if CHROME_ELEMENTS.contains(&name) {
             self.chrome = self.chrome.saturating_sub(1);
+        }
+        if MENU_ELEMENTS.contains(&name) {
+            self.menu = self.menu.saturating_sub(1);
         }
         if WORD_BREAK_ELEMENTS.contains(&name) {
             self.word_break();
@@ -469,7 +493,7 @@ impl<'a> Page<'a> {
     }
 
     fn open_anchor(&mut self, tag: &Tag) {
-        if self.links.len() >= MAX_OUT_LINKS {
+        if self.links.len() >= MAX_OUT_LINKS && self.own_links.len() >= MAX_OWN_LINKS {
             return;
         }
         let Some(url) = attr(tag, "href").and_then(|href| resolve_link(self.base_url, href)) else {
@@ -478,12 +502,20 @@ impl<'a> Page<'a> {
         let Some(target_domain) = registrable_domain(url.as_str()) else {
             return;
         };
-        if self.own_domain.as_deref() == Some(target_domain.as_str()) {
+        let own = self.own_domain.as_deref() == Some(target_domain.as_str());
+        let full = if own {
+            self.own_links.len() >= MAX_OWN_LINKS
+        } else {
+            self.links.len() >= MAX_OUT_LINKS
+        };
+        if full {
             return;
         }
         self.anchor = Some(Anchor {
             url: url.into(),
             target_domain,
+            own,
+            in_menu: self.menu > 0,
             text: String::new(),
             alt: None,
             aria_label: attr(tag, "aria-label").map(str::to_string),
@@ -496,6 +528,25 @@ impl<'a> Page<'a> {
         let Some(anchor) = self.anchor.take() else {
             return;
         };
+        if anchor.own {
+            let label = [
+                Some(&anchor.text),
+                anchor.aria_label.as_ref(),
+                anchor.title.as_ref(),
+            ]
+            .into_iter()
+            .flatten()
+            .map(|text| collapse_whitespace(text))
+            .find(|text| !text.is_empty());
+            if let Some(label) = label {
+                self.own_links.push(OwnLink {
+                    label,
+                    url: anchor.url,
+                    in_nav: anchor.in_menu,
+                });
+            }
+            return;
+        }
         let link = OutLink {
             text: link_text(&anchor),
             url: anchor.url,
@@ -658,6 +709,10 @@ impl<'a> Page<'a> {
             site_name: self.site_name,
             search_url: self.search_url,
             icons: best_icons(self.icons),
+            key_pages: match &self.own_domain {
+                Some(domain) => pick_key_pages(self.base_url.as_str(), domain, &self.own_links),
+                None => Vec::new(),
+            },
             headings: self.headings,
             links: self.links,
         }
@@ -865,6 +920,46 @@ mod tests {
             meta.body_text.as_deref(),
             Some("Checking accounts, savings and loans. Open an account today.")
         );
+    }
+
+    #[test]
+    fn reads_key_pages_from_links_to_the_site_itself() {
+        let meta = extract(
+            "https://www.paypal.com/us/home",
+            r##"<html><body>
+                <header><a href="/us/home">PayPal</a>
+                    <nav><a href="/us/business">Business</a>
+                    <a href="#menu">Menu</a>
+                    <a href="https://developer.paypal.com/">Developer</a></nav>
+                    <a href="/signin"> Log
+                        In </a>
+                    <a href="/us/webapps/mpp/account-selection">Sign Up</a></header>
+                <main><a href="/us/cshelp/personal">Help</a>
+                    <a href="https://paypal-login.example/">Log in here</a>
+                    <a href="/story">Read how millions of people pay with PayPal every day</a></main>
+                <footer><a href="/us/smarthelp/contact-us">Contact</a></footer>
+            </body></html>"##,
+        );
+        let pages: Vec<(&str, &str)> = meta
+            .key_pages
+            .iter()
+            .map(|p| (p.label.as_str(), p.url.as_str()))
+            .collect();
+        assert_eq!(
+            pages,
+            [
+                ("Log In", "https://www.paypal.com/signin"),
+                (
+                    "Sign Up",
+                    "https://www.paypal.com/us/webapps/mpp/account-selection"
+                ),
+                ("Developer", "https://developer.paypal.com/"),
+                ("Help", "https://www.paypal.com/us/cshelp/personal"),
+                ("Contact", "https://www.paypal.com/us/smarthelp/contact-us"),
+                ("Business", "https://www.paypal.com/us/business"),
+            ]
+        );
+        assert_eq!(meta.links.len(), 1, "other sites' links stay out links");
     }
 
     #[test]

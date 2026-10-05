@@ -1113,6 +1113,7 @@ fn keep_trusted_crawls(found: &mut NetSearch, trusted: &[PeerId], now: u64) {
         record.description = signed.description.clone();
         record.headings = signed.headings.clone();
         record.body_text = signed.body_text.clone();
+        record.key_pages = signed.key_pages.clone();
         record.crawled_at = signed.crawled_at;
         if !site.verified {
             site.verified = true;

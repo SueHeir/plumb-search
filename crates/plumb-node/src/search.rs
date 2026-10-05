@@ -125,6 +125,7 @@ mod tests {
             country: None,
             named: false,
             official: false,
+            key_pages: Vec::new(),
         }
     }
 

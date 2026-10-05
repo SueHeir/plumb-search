@@ -405,6 +405,7 @@ mod tests {
             country: None,
             named: true,
             official: false,
+            key_pages: Vec::new(),
         }
     }
 

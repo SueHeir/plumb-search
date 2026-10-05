@@ -165,6 +165,10 @@ pub struct PageMeta {
     /// icons are left out.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub icons: Vec<String>,
+    /// The site's key pages ("sitelinks") among the page's links to its
+    /// own site, picked by [`plumb_core::key_pages::pick_key_pages`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub key_pages: Vec<plumb_core::KeyPage>,
     /// Visible `<h1>` and `<h2>` texts, in page order, each once, at most
     /// [`plumb_core::MAX_HEADINGS`] and [`plumb_core::MAX_HEADING_WORDS`]
     /// words in all.
