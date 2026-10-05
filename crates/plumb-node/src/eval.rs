@@ -204,6 +204,7 @@ pub fn run(args: EvalArgs) -> Result<()> {
             country: args.country.clone(),
             only_country: false,
             exact: args.exact,
+            ..SearchOptions::default()
         };
         let query_meaning = meaning.as_ref().and_then(|meaning| meaning.query(&q.query));
         let hits = searcher

@@ -14,8 +14,8 @@ use std::io::Write;
 
 use anyhow::{bail, Context, Result};
 use plumb_core::{now_unix, Operators};
-use plumb_index::pages::{place_operator_pages, place_pages, OPERATOR_PAGES};
-use plumb_index::SearchResults;
+use plumb_index::pages::{options_allow, place_operator_pages, place_pages, OPERATOR_PAGES};
+use plumb_index::{SearchOptions, SearchResults};
 use plumb_net::pages::MAX_PAGES_CHUNK;
 use plumb_net::NetHandle;
 use tracing::{debug, info, warn};
@@ -270,7 +270,12 @@ impl Inner {
 
 /// Adds the pages found for `query` (as corrected, when the results are
 /// for a corrected spelling) to `results`.
-pub(super) fn add_pages(inner: &Inner, query: &str, results: &mut SearchResults) {
+pub(super) fn add_pages(
+    inner: &Inner,
+    query: &str,
+    options: &SearchOptions,
+    results: &mut SearchResults,
+) {
     let Some(searcher) = inner
         .pages
         .read()
@@ -286,7 +291,10 @@ pub(super) fn add_pages(inner: &Inner, query: &str, results: &mut SearchResults)
             return;
         }
         match searcher.search(&ops.words, OPERATOR_PAGES) {
-            Ok(found) => results.pages = place_operator_pages(&ops, &results.hits, found),
+            Ok(mut found) => {
+                found.retain(|hit| options_allow(options, &hit.page));
+                results.pages = place_operator_pages(&ops, &results.hits, found);
+            }
             Err(err) => warn!("searching pages: {err:#}"),
         }
         return;
@@ -296,7 +304,10 @@ pub(super) fn add_pages(inner: &Inner, query: &str, results: &mut SearchResults)
         _ => query,
     };
     match searcher.search(query, PAGES_PER_SEARCH) {
-        Ok(found) => results.pages = place_pages(query, &results.hits, found),
+        Ok(mut found) => {
+            found.retain(|hit| options_allow(options, &hit.page));
+            results.pages = place_pages(query, &results.hits, found);
+        }
         Err(err) => warn!("searching pages: {err:#}"),
     }
 }

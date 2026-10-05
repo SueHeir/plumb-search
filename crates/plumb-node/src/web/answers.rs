@@ -1,0 +1,358 @@
+//! What a results page shows besides the results: an instant answer above
+//! them ([`plumb_answer`]: sums, conversions, the time somewhere) and an
+//! info box beside them, about the one thing the query names.
+//!
+//! Both are built from what the node holds. The only thing fetched for
+//! them is the European Central Bank's daily currency rates, once a
+//! currency conversion is asked for and then at most every few hours; the
+//! request carries nothing of the query.
+//!
+//! The info box is about the Wikipedia article the results already list
+//! for the query (see [`plumb_index::pages::place_pages`]), when the query
+//! names it in full and it is listed first, right after the best site, or
+//! under it as the article about that site: "albert einstein", "eiffel
+//! tower", "github". It shows the article's short description, the
+//! official site with the country this node knows it for, and links to
+//! Wikipedia and Wikidata. Nothing in it is loaded from elsewhere.
+
+use std::fmt::Write as _;
+use std::time::{Duration, Instant};
+
+use plumb_answer::{Answer, Rates, ECB_RATES_URL};
+use plumb_core::truncate_chars;
+use plumb_index::pages::PlacedPage;
+use plumb_index::Hit;
+use serde::Serialize;
+use tokio::sync::Mutex;
+use tracing::{debug, warn};
+
+use super::{escape_html, homepage_url, http_url};
+use crate::country::country_name;
+
+/// Rates older than this are fetched again when next needed.
+const RATES_FRESH: Duration = Duration::from_secs(6 * 3600);
+/// After a failed fetch, how long to answer without rates.
+const RATES_RETRY: Duration = Duration::from_secs(10 * 60);
+/// Longest wait for the rates while a results page waits on them.
+const RATES_TIMEOUT: Duration = Duration::from_secs(4);
+
+/// The day's currency rates, fetched when first needed.
+#[derive(Default)]
+pub(crate) struct RatesCache {
+    state: Mutex<RatesState>,
+}
+
+#[derive(Default)]
+struct RatesState {
+    rates: Option<(Rates, Instant)>,
+    failed: Option<Instant>,
+}
+
+impl RatesCache {
+    /// The rates, if `query` may need them and they can be had.
+    pub(crate) async fn for_query(&self, query: &str) -> Option<Rates> {
+        if !plumb_answer::may_need_rates(query) {
+            return None;
+        }
+        let mut state = self.state.lock().await;
+        let fresh = |at: &Instant| at.elapsed() < RATES_FRESH;
+        match &state.rates {
+            Some((rates, at)) if fresh(at) => return Some(rates.clone()),
+            _ => {}
+        }
+        if state.failed.is_some_and(|at| at.elapsed() < RATES_RETRY) {
+            return state.rates.as_ref().map(|(rates, _)| rates.clone());
+        }
+        match fetch_rates().await {
+            Ok(rates) => {
+                debug!("currency rates of {} fetched", rates.date);
+                state.rates = Some((rates.clone(), Instant::now()));
+                state.failed = None;
+                Some(rates)
+            }
+            Err(err) => {
+                warn!("could not fetch currency rates: {err}");
+                state.failed = Some(Instant::now());
+                // Older rates beat none; the answer says what day they are of.
+                state.rates.as_ref().map(|(rates, _)| rates.clone())
+            }
+        }
+    }
+}
+
+async fn fetch_rates() -> anyhow::Result<Rates> {
+    let client = reqwest::Client::builder()
+        .timeout(RATES_TIMEOUT)
+        .user_agent(concat!("plumb/", env!("CARGO_PKG_VERSION")))
+        .build()?;
+    let text = client
+        .get(ECB_RATES_URL)
+        .send()
+        .await?
+        .error_for_status()?
+        .text()
+        .await?;
+    Rates::parse_ecb(&text).ok_or_else(|| anyhow::anyhow!("the rates file did not read"))
+}
+
+/// An instant answer, as a block above the results.
+pub(crate) fn render_answer(out: &mut String, answer: &Answer) {
+    let _ = write!(
+        out,
+        "<section class=\"ia\" aria-label=\"Answer\"><p class=\"iaq\">{}</p>\
+         <p class=\"iaa\">{}</p>",
+        escape_html(&answer.question),
+        escape_html(&answer.answer)
+    );
+    if let Some(note) = &answer.note {
+        let _ = write!(out, "<p class=\"m\">{}</p>", escape_html(note));
+    }
+    out.push_str("</section>\n");
+}
+
+/// What an info box shows, also given by `/api/search?full=1`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub(crate) struct InfoBox {
+    pub title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// The Wikipedia article.
+    pub article: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wikidata: Option<String>,
+    /// The official site's domain.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub site: Option<String>,
+    /// The official site's country, when this node knows it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub country: Option<String>,
+}
+
+/// Whether a Wikipedia article lists the pages a name could mean rather
+/// than being about one thing.
+fn is_disambiguation(title: &str, description: Option<&str>) -> bool {
+    title.ends_with("(disambiguation)")
+        || description.is_some_and(|d| {
+            let d = d.to_lowercase();
+            d.contains("disambiguation") || d.contains("topics referred to by the same term")
+        })
+}
+
+/// The info box for results `sites` and `pages` (as placed among them),
+/// if one article is clearly what the query is about.
+pub(crate) fn info_box(sites: &[Hit], pages: &[PlacedPage]) -> Option<InfoBox> {
+    let top_site = sites.first().map(|hit| hit.domain.as_str());
+    let placed = pages.iter().find(|placed| {
+        let page = &placed.hit.page;
+        placed.hit.named
+            && page.set.starts_with("wikipedia-")
+            && !is_disambiguation(&page.title, page.description.as_deref())
+            && match &placed.under {
+                Some(under) => Some(under.as_str()) == top_site,
+                None => placed.at <= 1,
+            }
+    })?;
+    let page = &placed.hit.page;
+    let article = http_url(&page.url)?;
+    let site = page
+        .site
+        .clone()
+        .filter(|site| homepage_url(site).is_some());
+    let country = site.as_deref().and_then(|site| {
+        sites
+            .iter()
+            .find(|hit| hit.domain == site)?
+            .country
+            .as_deref()
+            .map(|code| country_name(code).to_string())
+    });
+    Some(InfoBox {
+        title: page.title.clone(),
+        description: page.description.clone().filter(|d| !d.trim().is_empty()),
+        article,
+        wikidata: page
+            .item
+            .as_deref()
+            .filter(|item| {
+                item.starts_with('Q')
+                    && item.len() > 1
+                    && item[1..].bytes().all(|b| b.is_ascii_digit())
+            })
+            .map(|item| format!("https://www.wikidata.org/wiki/{item}")),
+        site,
+        country,
+    })
+}
+
+/// The info box, as an `<aside>` beside the results.
+pub(crate) fn render_info_box(out: &mut String, info: &InfoBox) {
+    let _ = write!(
+        out,
+        "<aside class=\"ib\" aria-label=\"About {title}\"><h2>{title}</h2>",
+        title = escape_html(&truncate_chars(&info.title, 120))
+    );
+    if let Some(description) = &info.description {
+        let _ = write!(out, "<p class=\"ibd\">{}</p>", escape_html(description));
+    }
+    let mut facts = String::new();
+    if let Some(site) = &info.site {
+        if let Some(href) = homepage_url(site) {
+            let _ = write!(
+                facts,
+                "<dt>Official site</dt><dd><a href=\"{}\" rel=\"noreferrer\">{}</a></dd>",
+                escape_html(&href),
+                escape_html(site)
+            );
+        }
+    }
+    if let Some(country) = &info.country {
+        let _ = write!(facts, "<dt>Country</dt><dd>{}</dd>", escape_html(country));
+    }
+    if !facts.is_empty() {
+        let _ = write!(out, "<dl>{facts}</dl>");
+    }
+    let _ = write!(
+        out,
+        "<p class=\"ibl\"><a href=\"{}\" rel=\"noreferrer\">Wikipedia</a>",
+        escape_html(&info.article)
+    );
+    if let Some(wikidata) = &info.wikidata {
+        let _ = write!(
+            out,
+            " &middot; <a href=\"{}\" rel=\"noreferrer\">Wikidata</a>",
+            escape_html(wikidata)
+        );
+    }
+    out.push_str("</p></aside>\n");
+}
+
+#[cfg(test)]
+mod tests {
+    use plumb_index::pages::{Page, PageHit};
+
+    use super::*;
+
+    fn article(title: &str, description: &str, site: Option<&str>) -> PageHit {
+        PageHit {
+            page: Page {
+                set: "wikipedia-en".to_string(),
+                url: format!("https://en.wikipedia.org/wiki/{}", title.replace(' ', "_")),
+                title: title.to_string(),
+                description: Some(description.to_string()),
+                site: site.map(str::to_string),
+                views: 1000,
+                aliases: Vec::new(),
+                item: Some("Q937".to_string()),
+            },
+            score: 1.0,
+            named: true,
+            popularity: 0.9,
+        }
+    }
+
+    fn site(domain: &str, country: Option<&str>) -> Hit {
+        Hit {
+            domain: domain.to_string(),
+            url: format!("https://{domain}/"),
+            title: None,
+            description: None,
+            score: 1.0,
+            text_score: 1.0,
+            link_score: 0.5,
+            country: country.map(str::to_string),
+            named: false,
+            official: false,
+            key_pages: Vec::new(),
+        }
+    }
+
+    fn placed(hit: PageHit, under: Option<&str>, at: usize) -> PlacedPage {
+        PlacedPage {
+            hit,
+            under: under.map(str::to_string),
+            at,
+        }
+    }
+
+    #[test]
+    fn boxes_the_article_listed_first() {
+        let pages = [placed(
+            article("Albert Einstein", "German-born physicist", None),
+            None,
+            0,
+        )];
+        let info = info_box(&[site("einstein.org", None)], &pages).unwrap();
+        assert_eq!(info.title, "Albert Einstein");
+        assert_eq!(
+            info.wikidata.as_deref(),
+            Some("https://www.wikidata.org/wiki/Q937")
+        );
+        let mut html = String::new();
+        render_info_box(&mut html, &info);
+        assert!(html.contains("<h2>Albert Einstein</h2>"));
+        assert!(html.contains("German-born physicist"));
+        assert!(html.contains("href=\"https://en.wikipedia.org/wiki/Albert_Einstein\""));
+    }
+
+    #[test]
+    fn boxes_the_article_about_the_top_site() {
+        let pages = [placed(
+            article(
+                "GitHub",
+                "Software development platform",
+                Some("github.com"),
+            ),
+            Some("github.com"),
+            0,
+        )];
+        let info = info_box(&[site("github.com", Some("US"))], &pages).unwrap();
+        assert_eq!(info.site.as_deref(), Some("github.com"));
+        assert_eq!(info.country.as_deref(), Some("United States"));
+        let mut html = String::new();
+        render_info_box(&mut html, &info);
+        assert!(html.contains("<dt>Official site</dt><dd><a href=\"https://github.com/\""));
+    }
+
+    #[test]
+    fn leaves_out_unclear_articles() {
+        let sites = [site("a.com", None), site("b.com", None)];
+        // Listed after three sites: a namesake or a partial match.
+        let late = [placed(
+            article("Eiffel Tower (Six Flags)", "Ride", None),
+            None,
+            3,
+        )];
+        assert_eq!(info_box(&sites, &late), None);
+        // About a site further down.
+        let lower = [placed(
+            article("B", "Company", Some("b.com")),
+            Some("b.com"),
+            0,
+        )];
+        assert_eq!(info_box(&sites, &lower), None);
+        let mut partial = article("Mercury", "Topics referred to by the same term", None);
+        assert_eq!(info_box(&sites, &[placed(partial.clone(), None, 0)]), None);
+        partial.page.description = Some("Planet".to_string());
+        partial.named = false;
+        assert_eq!(info_box(&sites, &[placed(partial, None, 0)]), None);
+    }
+
+    #[test]
+    fn escapes_what_it_shows() {
+        let pages = [placed(article("<b>", "\"x\" & <script>", None), None, 0)];
+        let mut html = String::new();
+        render_info_box(&mut html, &info_box(&[], &pages).unwrap());
+        assert!(!html.contains("<b>") && !html.contains("<script>"));
+        let mut html = String::new();
+        render_answer(
+            &mut html,
+            &Answer {
+                kind: plumb_answer::Kind::Calculation,
+                question: "<i>".to_string(),
+                answer: "&".to_string(),
+                note: None,
+            },
+        );
+        assert!(html.contains("&lt;i&gt;") && html.contains("&amp;"));
+    }
+}

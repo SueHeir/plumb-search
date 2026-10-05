@@ -488,6 +488,10 @@ fn accept_crawled(
     kept.url = url;
     kept.title = record.title;
     kept.description = record.description;
+    kept.language = record
+        .language
+        .as_deref()
+        .and_then(plumb_core::language_code);
     for alias in &record.aliases {
         kept.add_alias(alias);
     }
