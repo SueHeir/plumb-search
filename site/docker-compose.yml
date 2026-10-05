@@ -62,6 +62,10 @@ services:
       - --no-default-bootstrap
       - --no-upnp
       - --no-local-discovery
+      # The public page's network searches may ask any node, not only
+      # trusted ones and the nodes they trust (Liz, 2026-10-05).
+      - --search-from
+      - anyone
       # Crawls from Liz's own nodes count as soon as they're signed, without
       # waiting for a second crawler: plumb-relay on this machine, the desktop
       # app on her MacBook, elizabeth-hpc, and the rented LA and New York
