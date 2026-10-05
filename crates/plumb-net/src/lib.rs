@@ -3,7 +3,9 @@
 //!
 //! * [`assign`]: which sites a node crawls each day.
 //! * [`agree`]: records count only once two crawlers agree on them.
-//! * [`credits`]: what crawling earns, and anonymous one-time tokens.
+//! * [`credits`]: what crawling and answering earn, and anonymous one-time
+//!   tokens.
+//! * [`allowance`]: how a node shares out the requests it answers for free.
 //! * [`batch`]: signed crawl batches and what a node accepts from them.
 //! * [`bucket`] and [`search`]: searching other nodes without sending the
 //!   query.
@@ -24,6 +26,7 @@
 //! * [`node`]: the libp2p swarm and the [`NetHandle`] that drives it.
 
 pub mod agree;
+pub mod allowance;
 pub mod assign;
 pub mod batch;
 pub mod bucket;

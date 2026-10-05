@@ -1870,6 +1870,8 @@ impl StatusSource for Inner {
             Some(mut saved) => {
                 // Saved before the choice existed: the node keeps its own.
                 saved.search_from = saved.search_from.or(active.search_from);
+                saved.answer_limit = saved.answer_limit.or(active.answer_limit);
+                saved.spend_credits = saved.spend_credits.or(active.spend_credits);
                 saved
             }
             None => active,

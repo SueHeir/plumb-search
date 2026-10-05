@@ -644,6 +644,60 @@ async fn a_busy_node_answers_searches_that_spend_its_tokens() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn answering_earns_credits_and_a_node_keeps_to_its_daily_limit() {
+    use plumb_net::credits::{CREDITS_PER_ANSWER, MIN_ANSWERS_FOR_TOKENS};
+
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("plumb_net=debug")
+        .with_test_writer()
+        .try_init();
+
+    let site = crawled_for(&[], "fairx");
+    // R answers one search's worth of requests a day for free.
+    let per_day = plumb_net::bucket::BUCKETS_PER_SEARCH as u64;
+    let r = Node::start_config(
+        tempfile::tempdir().unwrap(),
+        true,
+        vec![],
+        vec![site.clone()],
+        true,
+        |c| c.answer_per_day = Some(per_day),
+    )
+    .await;
+    let a = Node::start(false, vec![r.addr().await], vec![]).await;
+    wait_for(|| (a.handle.status().connected_peers >= 1).then_some(())).await;
+
+    let wait = Duration::from_secs(10);
+    let found = a.handle.search("fairx", wait).await.unwrap();
+    assert_eq!(found.answered as u64, per_day, "{found:?}");
+    assert!(found.found.iter().any(|s| s.record.domain == site.domain));
+
+    // A counts credits for R for each answer: R can ask A what it has
+    // there. Too few answers yet to buy tokens with.
+    let earned = found.answered as i64 * CREDITS_PER_ANSWER;
+    let mut at_a = r.handle.credits_at(a.handle.peer_id()).await.unwrap();
+    for _ in 0..100 {
+        if at_a.credits == earned {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        at_a = r.handle.credits_at(a.handle.peer_id()).await.unwrap();
+    }
+    assert_eq!(at_a.credits, earned);
+    assert_eq!(at_a.counts, per_day >= MIN_ANSWERS_FOR_TOKENS);
+
+    // The day's free answers are used up: R turns the next search away.
+    a.handle.clear_search_cache();
+    let turned = a.handle.search("fairx", wait).await.unwrap();
+    assert_eq!(turned.answered, 0, "{turned:?}");
+    assert!(turned.busy > 0, "{turned:?}");
+    let status = r.handle.status().credits;
+    assert_eq!(status.free_answers_today, per_day);
+    assert_eq!(status.answer_per_day, Some(per_day));
+    assert!(status.turned_away > 0, "{status:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn nodes_send_rounds_of_bucket_requests_without_searching() {
     // Three nodes that answer searches, so every request can go through a
     // third one; A also sends background rounds, often.
