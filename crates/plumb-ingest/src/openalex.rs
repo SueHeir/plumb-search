@@ -149,6 +149,7 @@ impl Work {
             aliases: Vec::new(),
             profiles: Vec::new(),
             website: None,
+            package: None,
         })
     }
 }

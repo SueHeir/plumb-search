@@ -99,6 +99,7 @@ impl Repo {
             aliases,
             profiles: Vec::new(),
             website: None,
+            package: None,
         }
     }
 }

@@ -13,6 +13,10 @@
 //! address that no proxy forwarded), unless the node runs with
 //! `--mcp-read-pages`. A public node offering it to everyone would be an
 //! open proxy.
+//!
+//! `report_finding`, and the findings listed with search results, are
+//! offered only to apps on the node's own computer, always: they hold
+//! what its agents searched for (see [`crate::findings`]).
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
@@ -171,7 +175,8 @@ async fn mcp(State(state): State<AppState>, request: Request) -> Response {
         );
     }
     let client = client(&request);
-    let reads_pages = state.settings.read_pages_for_all || from_this_computer(&request);
+    let here = from_this_computer(&request);
+    let reads_pages = state.settings.read_pages_for_all || here;
     let Ok(body) = axum::body::to_bytes(request.into_body(), MAX_BODY_BYTES).await else {
         return answer(
             StatusCode::PAYLOAD_TOO_LARGE,
@@ -232,6 +237,7 @@ async fn mcp(State(state): State<AppState>, request: Request) -> Response {
         .with_reader(reader)
         .with_rates(rates)
         .with_node(state.node.clone())
+        .with_findings(if here { state.findings() } else { None })
         .with_plugin_results(plugins);
     let reply = tokio::task::spawn_blocking(move || server.handle(&message)).await;
     match reply {

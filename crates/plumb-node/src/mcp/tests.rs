@@ -97,7 +97,7 @@ fn notifications_get_no_answer_and_unknown_methods_an_error() {
 }
 
 #[test]
-fn lists_four_read_only_tools_with_schemas() {
+fn lists_five_read_only_tools_with_schemas() {
     let reply = server(Vec::new())
         .handle(&json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }))
         .unwrap();
@@ -105,7 +105,13 @@ fn lists_four_read_only_tools_with_schemas() {
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     assert_eq!(
         names,
-        ["official_site", "check_lookalike", "search", "site_info"]
+        [
+            "official_site",
+            "check_lookalike",
+            "search",
+            "package",
+            "site_info"
+        ]
     );
     for tool in tools {
         assert_eq!(tool["inputSchema"]["type"], "object", "{tool}");
@@ -451,4 +457,168 @@ fn plumb_mcp_node_reads_pages_itself() {
         json!({ "jsonrpc": "2.0", "id": 1, "result": { "tools": [{ "name": "search" }] } });
     offer_read_page(&json!({ "method": "tools/list" }), &mut listed);
     assert_eq!(listed["result"]["tools"][1]["name"], "read_page");
+}
+
+/// Finds the crate serde for queries that ask for a package, and no site.
+struct Packages;
+
+impl SearchBackend for Packages {
+    fn search(&self, _query: &str, _limit: usize) -> Result<Vec<Hit>> {
+        Ok(Vec::new())
+    }
+
+    fn search_full(
+        &self,
+        query: &str,
+        _limit: usize,
+        _options: &SearchOptions,
+    ) -> Result<SearchResults> {
+        let mut pages = Vec::new();
+        if plumb_core::packages::package_query(query).is_some_and(|asked| asked.wants("crates")) {
+            let page = plumb_index::pages::Page::from_package(plumb_core::article::Article {
+                title: "serde".into(),
+                description: Some("A generic serialization/deserialization framework".into()),
+                item: Some("crates:serde".into()),
+                views: 1_000_000_000,
+                package: Some(plumb_core::packages::PackageInfo {
+                    registry: "crates".into(),
+                    name: "serde".into(),
+                    version: Some("1.0.228".into()),
+                    released: Some("2025-09-27".into()),
+                    license: Some("MIT OR Apache-2.0".into()),
+                    repo: Some("https://github.com/serde-rs/serde".into()),
+                    homepage: Some("https://serde.rs".into()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+            .unwrap();
+            pages.push(plumb_index::pages::PlacedPage {
+                hit: plumb_index::pages::PageHit {
+                    page,
+                    score: 0.9,
+                    named: true,
+                    popularity: 1.0,
+                    whole: false,
+                },
+                under: None,
+                at: 0,
+            });
+        }
+        Ok(SearchResults {
+            hits: Vec::new(),
+            pages,
+            site_search: None,
+            spelling: None,
+        })
+    }
+
+    fn num_docs(&self) -> u64 {
+        0
+    }
+}
+
+#[test]
+fn package_cards_say_version_install_and_docs() {
+    let mcp = Mcp::new(Arc::new(Packages), None);
+    let reply = call(
+        &mcp,
+        "package",
+        json!({ "name": "serde", "registry": "crates" }),
+    );
+    let result = &reply["result"];
+    assert_eq!(result["structuredContent"]["found"], true);
+    let card = &result["structuredContent"]["packages"][0];
+    assert_eq!(card["version"], "1.0.228");
+    assert_eq!(card["install"], "cargo add serde");
+    assert_eq!(card["docs"], "https://docs.rs/serde");
+    assert_eq!(
+        result["content"][0]["text"],
+        "[crates.io] serde 1.0.228 (2025-09-27, MIT OR Apache-2.0): A generic \
+         serialization/deserialization framework Install: cargo add serde. Docs: \
+         https://docs.rs/serde Code: https://github.com/serde-rs/serde Home: https://serde.rs \
+         https://crates.io/crates/serde"
+    );
+    // Search carries the same card.
+    let reply = call(&mcp, "search", json!({ "query": "serde crate" }));
+    let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.starts_with("1. [crates.io] serde 1.0.228"), "{text}");
+    // Another registry's package of the name is not there.
+    let reply = call(
+        &mcp,
+        "package",
+        json!({ "name": "serde", "registry": "npm" }),
+    );
+    assert_eq!(reply["result"]["structuredContent"]["found"], false);
+    let reply = call(
+        &mcp,
+        "package",
+        json!({ "name": "serde", "registry": "cpan" }),
+    );
+    assert!(reply["error"].is_object());
+}
+
+#[test]
+fn findings_are_reported_and_listed_with_the_next_search() {
+    let dir = tempfile::tempdir().unwrap();
+    let findings = Arc::new(crate::findings::Findings::in_dir(dir.path()).unwrap());
+    let mut paypal = hit("paypal.com", 2.0, 0.9, true);
+    paypal.official = true;
+    let mcp = server(vec![paypal]).with_findings(Some(Arc::clone(&findings)));
+    let reply = mcp
+        .handle(&json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }))
+        .unwrap();
+    let names: Vec<&str> = reply["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"report_finding"));
+    let reply = call(
+        &mcp,
+        "report_finding",
+        json!({
+            "query": "tokio latest version",
+            "url": "https://crates.io/crates/tokio",
+            "why": "crates.io lists the newest release",
+            "answer": "1.47.1",
+            "task": "upgrading a web server",
+        }),
+    );
+    assert_eq!(reply["result"]["isError"], false, "{reply}");
+    assert_eq!(findings.len(), 1);
+    let reply = call(
+        &mcp,
+        "search",
+        json!({ "query": "latest version of tokio" }),
+    );
+    let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(
+        text.starts_with(
+            "Found before (searched \"tokio latest version\", just now): 1.47.1 Source: \
+             https://crates.io/crates/tokio (crates.io lists the newest release)"
+        ),
+        "{text}"
+    );
+    // A look-alike's page is not kept.
+    let reply = call(
+        &mcp,
+        "report_finding",
+        json!({
+            "query": "paypal login",
+            "url": "https://paypal-login.us/",
+            "why": "it has the form",
+            "answer": "log in there",
+        }),
+    );
+    assert_eq!(reply["result"]["isError"], true, "{reply}");
+    assert_eq!(findings.len(), 1);
+    // Without findings the tool is not there.
+    let reply = call(
+        &server(Vec::new()),
+        "report_finding",
+        json!({ "query": "x" }),
+    );
+    assert!(reply["error"].is_object());
 }

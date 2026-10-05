@@ -30,6 +30,7 @@ pub mod about;
 pub mod cli;
 pub mod country;
 pub mod eval;
+pub mod findings;
 pub mod history;
 pub mod mcp;
 pub mod meaning;

@@ -26,6 +26,7 @@ use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 use plumb_core::article::{article_url, Article};
+use plumb_core::packages::PackageInfo;
 use plumb_core::{adult_level, host_of, normalize_text, AdultLevel, Operators, SafeSearch};
 use serde::{Deserialize, Serialize};
 use tantivy::collector::TopDocs;
@@ -84,6 +85,9 @@ pub struct Page {
     /// of [`Page::site`]: `https://music.youtube.com/` for YouTube Music.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub website: Option<String>,
+    /// A software package's card: its version, install command, docs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package: Option<PackageInfo>,
 }
 
 impl Page {
@@ -100,6 +104,7 @@ impl Page {
             item: article.item,
             profiles: article.profiles,
             website: article.website,
+            package: None,
         }
     }
 
@@ -117,6 +122,7 @@ impl Page {
             item: None,
             profiles: Vec::new(),
             website: None,
+            package: None,
         }
     }
 
@@ -137,6 +143,7 @@ impl Page {
             item: None,
             profiles: Vec::new(),
             website: None,
+            package: None,
         }
     }
 
@@ -157,6 +164,7 @@ impl Page {
             item: None,
             profiles: Vec::new(),
             website: None,
+            package: None,
         }
     }
 
@@ -180,6 +188,7 @@ impl Page {
             item: None,
             profiles: Vec::new(),
             website: None,
+            package: None,
         }
     }
 
@@ -200,7 +209,31 @@ impl Page {
             item: item.item,
             profiles: item.profiles,
             website: None,
+            package: None,
         }
+    }
+
+    /// The software package `package`, written as an article whose item is
+    /// `registry:name` and whose views are its share of its registry's
+    /// most used package's downloads (see [`plumb_core::packages`]).
+    /// `None` when it has no card, or one whose registry or name does not
+    /// read.
+    pub fn from_package(package: Article) -> Option<Self> {
+        let info = package.package?;
+        let url = info.page_url()?;
+        Some(Page {
+            set: PACKAGES_SET.to_string(),
+            url,
+            title: package.title,
+            description: package.description,
+            site: None,
+            views: package.views,
+            aliases: package.aliases,
+            item: None,
+            profiles: Vec::new(),
+            website: None,
+            package: Some(info),
+        })
     }
 
     /// The page of the set `set` written as `article` in its articles
@@ -212,6 +245,7 @@ impl Page {
             BOOKS_SET => Page::from_book(article),
             PAPERS_SET => Page::from_paper(article),
             WIKIDATA_SET => Page::from_item(article),
+            PACKAGES_SET => Page::from_package(article)?,
             _ => Page::from_article(set.strip_prefix("wikipedia-")?, article),
         })
     }
@@ -249,9 +283,16 @@ impl Page {
             "OpenAlex"
         } else if self.set == WIKIDATA_SET {
             "Wikidata"
+        } else if let Some(registry) = self.registry() {
+            registry.name
         } else {
             &self.set
         }
+    }
+
+    /// The registry of a package.
+    pub fn registry(&self) -> Option<&'static plumb_core::packages::Registry> {
+        self.package.as_ref()?.registry()
     }
 
     /// The language the page is in, when its set says: `en` for
@@ -276,6 +317,8 @@ impl Page {
             "openlibrary.org"
         } else if self.set == PAPERS_SET {
             "openalex.org"
+        } else if let Some(registry) = self.registry() {
+            registry.domain
         } else {
             "wikipedia.org"
         }
@@ -288,6 +331,11 @@ pub const GITHUB_SET: &str = "github";
 pub const STACKOVERFLOW_SET: &str = "stackoverflow";
 /// The set of books, from Open Library.
 pub const BOOKS_SET: &str = "books";
+/// The set of software packages (npm, PyPI, crates.io and others).
+pub const PACKAGES_SET: &str = "packages";
+/// Least popularity of a package found by a query that names only its
+/// language or asks for a version ("rust book" is not the crate `book`).
+pub const WELL_KNOWN_PACKAGE: f32 = 0.6;
 /// The set of scholarly papers, from OpenAlex.
 pub const PAPERS_SET: &str = "papers";
 /// The set of Wikidata items with official profiles but no English
@@ -533,6 +581,12 @@ pub fn build_page_index(
         if base != page.title {
             document.add_text(fields.keys, base);
         }
+        // A package is asked for by its short name too: "gin golang".
+        if page.package.is_some() {
+            for alias in &page.aliases {
+                document.add_text(fields.keys, alias);
+            }
+        }
         document.add_u64(
             fields.popularity,
             (popularity * POPULARITY_SCALE).round() as u64,
@@ -658,6 +712,23 @@ impl PageSearcher {
                 addresses.push(address);
             }
         }
+        // Packages, only ever found when the query asks for one: "serde
+        // crate", "latest version of requests python".
+        let package_query = plumb_core::packages::package_query(query);
+        let package_key = package_query
+            .as_ref()
+            .and_then(|asked| analysis::tokens(&self.joined, &asked.name).pop());
+        if let Some(key) = &package_key {
+            let named = TermQuery::new(
+                Term::from_field_text(self.fields.keys, key),
+                IndexRecordOption::Basic,
+            );
+            for (_, address) in searcher.search(&named, &by_popularity())? {
+                if !addresses.contains(&address) {
+                    addresses.push(address);
+                }
+            }
+        }
         // Questions with most of the query's words, searched apart so they
         // never crowd out pages the query names.
         let stems = self.question_words(query);
@@ -694,6 +765,28 @@ impl PageSearcher {
                 continue;
             };
             let page: Page = serde_json::from_str(stored)?;
+            let popularity = document
+                .get_first(self.fields.popularity)
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as f32
+                / POPULARITY_SCALE;
+            if page.set == PACKAGES_SET {
+                let asked = match (&package_query, &package_key) {
+                    (Some(asked), Some(key)) => self.package_match(&page, asked, key, popularity),
+                    _ => false,
+                };
+                if asked {
+                    hits.push(PageHit {
+                        score: ALIAS_MATCH
+                            * (1.0 - POPULARITY_SHARE + POPULARITY_SHARE * popularity),
+                        page,
+                        named: true,
+                        popularity,
+                        whole: false,
+                    });
+                }
+                continue;
+            }
             let (mut name, mut named) = self.name_match(&page, query, &joined, &query_words);
             let mut whole = false;
             if self.book_match(&page, &words) {
@@ -706,11 +799,6 @@ impl PageSearcher {
             if name <= 0.0 {
                 continue;
             }
-            let popularity = document
-                .get_first(self.fields.popularity)
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as f32
-                / POPULARITY_SCALE;
             let mut score = name * (1.0 - POPULARITY_SHARE + POPULARITY_SHARE * popularity);
             if !page.may_lead() {
                 score *= SHELF_WEIGHT;
@@ -728,6 +816,26 @@ impl PageSearcher {
         hits.sort_by(|a, b| b.score.total_cmp(&a.score));
         hits.truncate(limit);
         Ok(hits)
+    }
+
+    /// Whether the package `page` is the one `asked` for, whose name's key
+    /// is `key`: it is called so (or so for short: "gin" for
+    /// github.com/gin-gonic/gin), on a registry the query names, and well
+    /// known unless the query names a registry rather than a language.
+    fn package_match(
+        &self,
+        page: &Page,
+        asked: &plumb_core::packages::PackageQuery,
+        key: &str,
+        popularity: f32,
+    ) -> bool {
+        let Some(registry) = page.registry() else {
+            return false;
+        };
+        let called = std::iter::once(&page.title)
+            .chain(&page.aliases)
+            .any(|name| analysis::tokens(&self.joined, name).pop().as_deref() == Some(key));
+        called && asked.wants(registry.key) && (asked.surely || popularity >= WELL_KNOWN_PACKAGE)
     }
 
     /// The different stemmed words of `query`, as questions are searched.
@@ -1122,6 +1230,78 @@ mod tests {
 
     fn titles(hits: &[PageHit]) -> Vec<&str> {
         hits.iter().map(|h| h.page.title.as_str()).collect()
+    }
+
+    fn package(registry: &str, name: &str, views: u64) -> Page {
+        let registry = plumb_core::packages::registry(registry).unwrap();
+        Page::from_package(Article {
+            title: name.into(),
+            item: Some(plumb_core::packages::package_item(registry.key, name)),
+            views,
+            aliases: registry
+                .short_name(name)
+                .map(str::to_string)
+                .into_iter()
+                .collect(),
+            package: Some(PackageInfo {
+                registry: registry.key.into(),
+                name: name.into(),
+                version: Some("1.0.0".into()),
+                ..PackageInfo::default()
+            }),
+            ..Article::default()
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn packages_are_found_only_when_asked_for() {
+        let (_dir, searcher) = searcher(&[
+            page("Serde", 5_000, &[]),
+            page("Requests", 900, &[]),
+            package("crates", "serde", 1_000_000_000),
+            package("crates", "book", 20),
+            package("pypi", "requests", 1_000_000_000),
+            package("npm", "requests", 2_000),
+            package("go", "github.com/gin-gonic/gin", 1_000_000_000),
+        ]);
+        let urls = |query: &str| -> Vec<String> {
+            searcher
+                .search(query, 10)
+                .unwrap()
+                .into_iter()
+                .filter(|hit| hit.page.package.is_some())
+                .map(|hit| hit.page.url)
+                .collect()
+        };
+        assert!(urls("serde").is_empty());
+        assert!(urls("requests").is_empty());
+        assert_eq!(urls("serde crate"), ["https://crates.io/crates/serde"]);
+        assert_eq!(
+            urls("latest version of requests python"),
+            ["https://pypi.org/project/requests/"]
+        );
+        assert_eq!(
+            urls("requests npm"),
+            ["https://www.npmjs.com/package/requests"]
+        );
+        // Either registry's, the most used first.
+        assert_eq!(
+            urls("requests package"),
+            [
+                "https://pypi.org/project/requests/",
+                "https://www.npmjs.com/package/requests"
+            ]
+        );
+        // A language alone asks only for well-known packages.
+        assert!(urls("rust book").is_empty());
+        assert_eq!(urls("book crate"), ["https://crates.io/crates/book"]);
+        assert_eq!(
+            urls("gin golang"),
+            ["https://pkg.go.dev/github.com/gin-gonic/gin"]
+        );
+        let hit = searcher.search("serde crate", 10).unwrap().remove(0);
+        assert!(hit.named && hit.page.set_name() == "crates.io");
     }
 
     #[test]

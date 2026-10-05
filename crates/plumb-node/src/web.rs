@@ -435,6 +435,9 @@ struct AppState {
     mcp_limiter: Arc<mcp::Limiter>,
     /// Fetches pages for `/mcp`'s `read_page`.
     page_reader: Arc<mcp::SharedReader>,
+    /// What agents found, for `/mcp`'s `report_finding`; opened from the
+    /// node's data directory when first needed.
+    findings: Arc<std::sync::OnceLock<Option<Arc<crate::findings::Findings>>>>,
 }
 
 impl AppState {
@@ -443,6 +446,22 @@ impl AppState {
     fn setting_up(&self) -> Option<Status> {
         let status = self.node.as_ref()?.status();
         (status.phase != Phase::Ready).then_some(status)
+    }
+
+    /// The node's findings; `None` for `plumb serve`, which keeps no data.
+    fn findings(&self) -> Option<Arc<crate::findings::Findings>> {
+        self.findings
+            .get_or_init(|| {
+                let dir = self.node.as_ref()?.data_dir()?;
+                match crate::findings::Findings::in_dir(&dir) {
+                    Ok(findings) => Some(Arc::new(findings)),
+                    Err(err) => {
+                        error!("opening findings: {err:#}");
+                        None
+                    }
+                }
+            })
+            .clone()
     }
 
     fn network(&self) -> Option<Arc<NetHandle>> {
@@ -526,6 +545,7 @@ pub fn router_with(backend: Arc<dyn SearchBackend>, settings: impl Into<WebSetti
         rates: Arc::default(),
         mcp_limiter: Arc::default(),
         page_reader: Arc::default(),
+        findings: Arc::default(),
     })
 }
 
@@ -549,6 +569,7 @@ pub fn node_router_with(
         rates: Arc::default(),
         mcp_limiter: Arc::default(),
         page_reader: Arc::default(),
+        findings: Arc::default(),
     })
 }
 
@@ -1704,6 +1725,8 @@ font-size:.85rem;font-weight:600;line-height:1}\
 a.r:hover .t,a.r:focus-visible .t{text-decoration:underline}\
 a.r:visited .t{color:var(--seen)}\
 .d{margin:.3rem 0 0;line-height:1.55;overflow-wrap:anywhere}\
+.pk code{font-size:.85em;padding:0 .3em;border-radius:4px;background:rgba(127,127,127,.15)}\
+.pk a{color:var(--link)}\
 .sub{margin:.35rem 0 0;font-size:.9rem;line-height:1.5;overflow-wrap:anywhere}\
 .sub a{color:var(--link)}\
 .kp{display:flex;flex-wrap:wrap;gap:.3rem 1.25rem;margin:.45rem 0 0;font-size:.9rem}\
@@ -2759,6 +2782,9 @@ fn render_page(out: &mut String, hit: &PageHit, icon: Option<&str>) {
     {
         let _ = write!(out, "<p class=\"d\">{}</p>", escape_html(description));
     }
+    if let Some(package) = &hit.page.package {
+        render_package(out, package);
+    }
     let _ = writeln!(
         out,
         "<div class=\"m\"><span title=\"{} {}\">score {:.3}</span></div></li>",
@@ -2767,10 +2793,45 @@ fn render_page(out: &mut String, hit: &PageHit, icon: Option<&str>) {
             plumb_index::pages::GITHUB_SET => "stars",
             plumb_index::pages::BOOKS_SET => "readers",
             plumb_index::pages::PAPERS_SET => "citations",
+            plumb_index::pages::PACKAGES_SET => "use (share of the registry's most, in billionths)",
             _ => "views",
         },
         hit.score
     );
+}
+
+/// A package's card under its result: its latest version, the command
+/// that installs it, and links to its docs and code.
+fn render_package(out: &mut String, package: &plumb_core::packages::PackageInfo) {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(version) = &package.version {
+        let mut latest = format!("Latest {}", escape_html(version));
+        if let Some(released) = &package.released {
+            let _ = write!(latest, " ({})", escape_html(released));
+        }
+        parts.push(latest);
+    }
+    if let Some(license) = &package.license {
+        parts.push(escape_html(license));
+    }
+    if let Some(install) = package.install() {
+        parts.push(format!("<code>{}</code>", escape_html(&install)));
+    }
+    for (label, url) in [
+        ("Docs", package.docs()),
+        ("Code", package.repo.clone()),
+        ("Home", package.homepage.clone()),
+    ] {
+        if let Some(href) = url.as_deref().and_then(http_url) {
+            parts.push(format!(
+                "<a href=\"{}\" rel=\"noreferrer\">{label}</a>",
+                escape_html(&href)
+            ));
+        }
+    }
+    if !parts.is_empty() {
+        let _ = write!(out, "<p class=\"d pk\">{}</p>", parts.join(" &middot; "));
+    }
 }
 
 /// The "Recent" block, as an item of the results list: the latest posts
@@ -3465,6 +3526,7 @@ mod tests {
                 item: Some("Q28404534".into()),
                 profiles: Vec::new(),
                 website: Some("https://music.youtube.com/".into()),
+                package: None,
             },
             score: 1.0,
             named: true,
@@ -4544,6 +4606,7 @@ mod tests {
                                 id: "MrBeast".into(),
                             }],
                             website: None,
+                            package: None,
                         },
                         score: 1.0,
                         named: query == "mrbeast",
@@ -4596,6 +4659,7 @@ mod tests {
                 item: Some("Q7186".into()),
                 profiles: Vec::new(),
                 website: None,
+                package: None,
             },
             score: 1.0,
             named: true,

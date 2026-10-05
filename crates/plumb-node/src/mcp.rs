@@ -48,6 +48,7 @@ use plumb_index::{
 use serde_json::{json, Map, Value};
 
 use crate::cli::McpArgs;
+use crate::findings::{Finding, Findings};
 use crate::rank_config;
 use crate::web::answers;
 use crate::web::{IndexBackend, SearchBackend, StatusSource, MAX_QUERY_CHARS};
@@ -78,6 +79,8 @@ const MAX_READ_CHARS: usize = 30_000;
 const MAX_LINKS_RETURNED: usize = 60;
 /// Headlines `search` returns.
 const MAX_HEADLINES: usize = 5;
+/// Most packages the `package` tool lists.
+const MAX_PACKAGES: usize = 5;
 /// Results asked for when looking up whose profile a query asks for.
 const PROFILE_SEARCH_LIMIT: usize = 5;
 
@@ -92,6 +95,15 @@ const INSTRUCTIONS: &str = "Plumb Search finds websites by name. Before opening 
      query names, and recent headlines. site_info describes one site. Plumb knows homepages \
      and names, not the full text of pages, so search by name or topic rather than by \
      question.";
+
+/// Added to [`INSTRUCTIONS`] when `report_finding` is offered.
+const FINDINGS_INSTRUCTIONS: &str = " Whenever a search led you to an answer, call \
+     report_finding with what you searched for, the page that answered it, why it helped and \
+     the answer itself: the next search for it on this computer starts with that answer, so it \
+     need not be worked out again. search lists such answers first, as found_before.";
+
+/// Findings listed with a search's results.
+const MAX_FOUND_BEFORE: usize = 3;
 
 /// Added to [`INSTRUCTIONS`] when `read_page` is offered.
 const READ_INSTRUCTIONS: &str = " To learn what a page says, call read_page with its URL: \
@@ -111,6 +123,9 @@ pub struct Mcp {
     node: Option<Arc<dyn StatusSource>>,
     /// What the node's plugins found for the `search` call's query.
     plugins: Vec<crate::plugins::PluginResults>,
+    /// What agents found before; without them `report_finding` is not
+    /// offered.
+    findings: Option<Arc<Findings>>,
 }
 
 /// What `read_page` fetches pages with: a reader, and the runtime its
@@ -148,7 +163,15 @@ impl Mcp {
             rates: None,
             node: None,
             plugins: Vec::new(),
+            findings: None,
         }
+    }
+
+    /// Offers `report_finding`, keeping findings in `findings`, and lists
+    /// those that match a search with its results.
+    pub fn with_findings(mut self, findings: Option<Arc<Findings>>) -> Self {
+        self.findings = findings;
+        self
     }
 
     /// Offers `read_page`, fetching pages with `reader`.
@@ -207,9 +230,15 @@ impl Mcp {
         let id = id?;
         let params = object.get("params").cloned().unwrap_or(Value::Null);
         let result = match method {
-            "initialize" => Ok(initialize(&params, self.reader.is_some())),
+            "initialize" => Ok(initialize(
+                &params,
+                self.reader.is_some(),
+                self.findings.is_some(),
+            )),
             "ping" => Ok(json!({})),
-            "tools/list" => Ok(json!({ "tools": tools(self.reader.is_some()) })),
+            "tools/list" => Ok(json!({
+                "tools": tools(self.reader.is_some(), self.findings.is_some())
+            })),
             "tools/call" => self.call(&params),
             "resources/list" => Ok(json!({ "resources": [] })),
             "resources/templates/list" => Ok(json!({ "resourceTemplates": [] })),
@@ -273,6 +302,47 @@ impl Mcp {
                 let domain = text_arg(args, "domain")?;
                 let options = self.options(args)?;
                 self.site_info(&domain, &options)
+            }
+            "package" => {
+                let name = text_arg(args, "name")?;
+                let registry = args
+                    .get("registry")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|r| !r.is_empty());
+                let registry = match registry {
+                    None => None,
+                    Some(key) => {
+                        Some(plumb_core::packages::registry(&key.to_lowercase()).ok_or((
+                            INVALID_PARAMS,
+                            format!(
+                            "registry must be one of {}; got {key:?}",
+                            plumb_core::packages::REGISTRIES
+                                .iter()
+                                .map(|r| r.key)
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ),
+                        ))?)
+                    }
+                };
+                let options = self.options(args)?;
+                self.package(&name, registry, &options)
+            }
+            "report_finding" if self.findings.is_some() => {
+                let query = text_arg(args, "query")?;
+                let url = text_arg(args, "url")?;
+                let why = text_arg(args, "why")?;
+                let answer = args
+                    .get("answer")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|a| !a.is_empty())
+                    .ok_or((INVALID_PARAMS, "answer is required".to_string()))?
+                    .to_string();
+                let task = args.get("task").and_then(Value::as_str);
+                let options = self.options(args)?;
+                self.report_finding(&query, &url, &why, &answer, task, &options)
             }
             "read_page" if self.reader.is_some() => {
                 let read = ReadArgs::of(args)?;
@@ -538,14 +608,18 @@ impl Mcp {
         let pages: Vec<Value> = placed
             .iter()
             .map(|placed| {
-                json!({
+                let mut page = json!({
                     "title": placed.hit.page.title,
                     "url": placed.hit.page.url,
                     "description": placed.hit.page.description.as_deref().map(short),
                     "set": placed.hit.page.set,
                     "about_site": placed.under,
                     "position": placed.at + 1,
-                })
+                });
+                if placed.hit.page.package.is_some() {
+                    page["package"] = package_card(&placed.hit.page);
+                }
+                page
             })
             .collect();
         let mut answer_json = json!({
@@ -591,7 +665,87 @@ impl Mcp {
         if !from_plugins.is_empty() {
             fields.insert("plugins".into(), json!(from_plugins));
         }
+        let found_before: Vec<Value> = self
+            .findings
+            .iter()
+            .flat_map(|findings| findings.for_query(query, MAX_FOUND_BEFORE))
+            .map(|finding| {
+                json!({
+                    "query": finding.query,
+                    "url": finding.url,
+                    "why": finding.why,
+                    "answer": finding.answer,
+                    "task": finding.task,
+                    "reported": crate::web::time_ago(finding.at, now),
+                })
+            })
+            .collect();
+        if !found_before.is_empty() {
+            fields.insert("found_before".into(), json!(found_before));
+        }
         Ok(answer_json)
+    }
+
+    /// `package`: the cards of the packages called `name`, of `registry`
+    /// or of any, the most used first.
+    pub fn package(
+        &self,
+        name: &str,
+        registry: Option<&plumb_core::packages::Registry>,
+        options: &SearchOptions,
+    ) -> Result<Value> {
+        // "package" asks for any package of the name, the registry's
+        // word or language for its own.
+        let mut query = format!("{name} package");
+        if let Some(word) = registry.and_then(|r| r.words.first().or(r.languages.first())) {
+            query.push(' ');
+            query.push_str(word);
+        }
+        let results = self.lookup(&query, 1, options)?;
+        let packages: Vec<Value> = results
+            .pages
+            .iter()
+            .map(|placed| &placed.hit.page)
+            .filter(|page| page.package.is_some())
+            .take(MAX_PACKAGES)
+            .map(package_card)
+            .collect();
+        Ok(json!({
+            "name": name,
+            "found": !packages.is_empty(),
+            "packages": packages,
+        }))
+    }
+
+    /// `report_finding`: keeps what an agent found, unless its page is a
+    /// look-alike of another site.
+    pub fn report_finding(
+        &self,
+        query: &str,
+        url: &str,
+        why: &str,
+        answer: &str,
+        task: Option<&str>,
+        options: &SearchOptions,
+    ) -> Result<Value> {
+        let Some(findings) = &self.findings else {
+            bail!("this node keeps no findings");
+        };
+        let finding = Finding::new(query, url, why, answer, task, plumb_core::now_unix())?;
+        let check = self.check_lookalike(&finding.url, options)?;
+        if check["verdict"] == "lookalike" {
+            bail!(
+                "{} looks like a look-alike of another site, so it was not kept",
+                finding.url
+            );
+        }
+        findings.add(finding.clone())?;
+        Ok(json!({
+            "kept": true,
+            "query": finding.query,
+            "url": finding.url,
+            "findings": findings.len(),
+        }))
     }
 
     /// `site_info`: one site's entry.
@@ -807,7 +961,7 @@ pub fn parse_error() -> Value {
     error(Value::Null, PARSE_ERROR, "the message is not JSON")
 }
 
-fn initialize(params: &Value, read_pages: bool) -> Value {
+fn initialize(params: &Value, read_pages: bool, findings: bool) -> Value {
     let asked = params.get("protocolVersion").and_then(Value::as_str);
     let version = asked
         .and_then(|asked| PROTOCOL_VERSIONS.iter().find(|v| **v == asked))
@@ -820,17 +974,17 @@ fn initialize(params: &Value, read_pages: bool) -> Value {
             "title": "Plumb Search",
             "version": env!("CARGO_PKG_VERSION"),
         },
-        "instructions": if read_pages {
-            format!("{INSTRUCTIONS}{READ_INSTRUCTIONS}")
-        } else {
-            INSTRUCTIONS.to_string()
-        },
+        "instructions": format!(
+            "{INSTRUCTIONS}{}{}",
+            if read_pages { READ_INSTRUCTIONS } else { "" },
+            if findings { FINDINGS_INSTRUCTIONS } else { "" },
+        ),
     })
 }
 
 /// The tools' descriptions, as `tools/list` returns them; `read_pages`
-/// adds `read_page`.
-pub fn tools(read_pages: bool) -> Value {
+/// adds `read_page`, `findings` `report_finding`.
+pub fn tools(read_pages: bool, findings: bool) -> Value {
     let country = json!({
         "type": "string",
         "description": "Optional home country, a two-letter code such as US or DE: its sites \
@@ -877,7 +1031,8 @@ pub fn tools(read_pages: bool) -> Value {
             "title": "Search",
             "description": "Search the web (web_search) with Plumb Search: sites by name, best \
                  first, plus Wikipedia articles, Stack Overflow questions, books and other pages \
-                 placed among them, a direct answer for sums, unit and currency conversions and \
+                 placed among them, package cards (version, install command, docs) when the query \
+                 says npm, crate, pip, python or another registry or language, a direct answer for sums, unit and currency conversions and \
                  the time somewhere, facts about what the query names, and recent headlines. \
                  Plumb indexes homepages and names, not the full text of the web, so search for \
                  names and topics, then read a page with read_page.",
@@ -889,6 +1044,27 @@ pub fn tools(read_pages: bool) -> Value {
                     "country": country,
                 },
                 "required": ["query"],
+            },
+            "annotations": read_only,
+        },
+        {
+            "name": "package",
+            "title": "Package",
+            "description": "A software package's card from npm, PyPI, crates.io, Go, RubyGems, \
+                 Packagist, NuGet or Maven Central, by name: its latest version and release \
+                 date, license, install command, and where its docs and code are. Use it \
+                 instead of opening the registry's page.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "The package's name, as installed (\"serde\", \"@types/node\", \"requests\")." },
+                    "registry": {
+                        "type": "string",
+                        "enum": plumb_core::packages::REGISTRIES.iter().map(|r| r.key).collect::<Vec<_>>(),
+                        "description": "Optional: only this registry's package.",
+                    },
+                },
+                "required": ["name"],
             },
             "annotations": read_only,
         },
@@ -915,7 +1091,37 @@ pub fn tools(read_pages: bool) -> Value {
             .expect("an array")
             .push(read_page_tool());
     }
+    if findings {
+        tools
+            .as_array_mut()
+            .expect("an array")
+            .push(report_finding_tool());
+    }
     tools
+}
+
+/// `report_finding`'s description.
+fn report_finding_tool() -> Value {
+    json!({
+        "name": "report_finding",
+        "title": "Report what a search found",
+        "description": "Whenever a search led you to an answer, report it: what you searched \
+             for, the page that answered it, why that page helped, and the answer itself. The \
+             next search for the same thing on this computer lists it first (found_before), \
+             so no agent has to work it out again. Kept on this node only, never shared.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": { "type": "string", "description": "What you searched for, as you searched it." },
+                "url": { "type": "string", "description": "The page that had the answer." },
+                "why": { "type": "string", "description": "Why that page helped (\"the changelog lists each release with its date\")." },
+                "answer": { "type": "string", "description": "The answer you found, in a few sentences, with any version numbers, commands or code it needs." },
+                "task": { "type": "string", "description": "Optional: what you were doing (\"upgrading tokio in a web server\")." },
+            },
+            "required": ["query", "url", "why", "answer"],
+        },
+        "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false },
+    })
 }
 
 /// `read_page`'s description.
@@ -965,6 +1171,26 @@ fn whole_number(args: &Map<String, Value>, name: &str) -> Result<Option<usize>, 
             .map(|n| Some(usize::try_from(n).unwrap_or(usize::MAX)))
             .ok_or((INVALID_PARAMS, format!("{name} must be a whole number"))),
     }
+}
+
+/// A package's card in a tool's answer.
+fn package_card(page: &plumb_index::pages::Page) -> Value {
+    let Some(package) = &page.package else {
+        return Value::Null;
+    };
+    json!({
+        "name": package.name,
+        "registry": page.set_name(),
+        "description": page.description.as_deref().map(short),
+        "version": package.version,
+        "released": package.released,
+        "license": package.license,
+        "install": package.install(),
+        "docs": package.docs(),
+        "repo": package.repo,
+        "homepage": package.homepage,
+        "url": page.url,
+    })
 }
 
 /// A site in a tool's answer.
