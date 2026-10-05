@@ -1,6 +1,6 @@
-# Page sets: Wikipedia articles, GitHub repositories and Stack Overflow questions in results
+# Page sets: articles, repositories, questions, books and papers in results
 
-Plumb lists single pages next to sites: English Wikipedia's articles, well-starred GitHub repositories and Stack Overflow's most viewed questions. Searching "marie curie" shows the article Marie Curie, and "python" shows python.org with the article on the Python language under it.
+Plumb lists single pages next to sites: English Wikipedia's articles, well-starred GitHub repositories, Stack Overflow's most viewed questions, Open Library's most read books and the most cited papers. Searching "marie curie" shows the article Marie Curie, and "python" shows python.org with the article on the Python language under it.
 
 ## What is kept
 
@@ -58,6 +58,28 @@ plumb fetch-pages --set stackoverflow --work /big/disk/dumps --data /path/to/nod
 `--posts PATH` reads a downloaded posts 7z instead; `--min-score` and `--max-questions` change what is kept.
 
 Questions are also found by their words, since nobody types a question's title exactly: a query of three or more words (common words like "the" left out, "commits" counted as "commit") finds a question whose title and tags have at least three quarters of them. Such questions are listed like articles named only in part, after three sites.
+
+## Books
+
+The `books` set lists Open Library's works that readers shelve or rate most (1,000,000 by default, each on a reading log or rated at least 3 times): "dune frank herbert" finds Dune. Each keeps only its title, "Book by AUTHOR, YEAR" as its description, "TITLE AUTHOR" as another title, its work id and how many readers shelved or rated it. Open Library's dumps are CC0; the works, authors, reading log and ratings dumps are about 4 GB together:
+
+```sh
+plumb fetch-pages --set books --work /big/disk/dumps --data /path/to/node-data
+```
+
+`--min-shelvings` and `--max-books` change what is kept.
+
+## Papers
+
+The `papers` set lists the most cited scholarly works (2,000,000 by default, each cited at least 200 times), from OpenAlex's API (CC0): "attention is all you need" finds the paper. Each keeps only its title, "Paper by AUTHOR et al., YEAR, VENUE" as its description, its DOI (or OpenAlex id) and its citations. Like questions, papers are also found by most of their title's words.
+
+```sh
+plumb fetch-pages --set papers --data /path/to/node-data --min-citations 200
+```
+
+Set `OPENALEX_API_KEY` if OpenAlex asks for a key. `--max-papers` caps how many are kept.
+
+Book and paper titles are often common words ("Python", "Apple"), so a book or paper is never listed before every site, and an article of the same name comes before it: "dune" lists the article on the novel, then the book.
 
 ## How pages and sites are listed together
 

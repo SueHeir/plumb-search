@@ -1,0 +1,15 @@
+# Searches for well-known books, with the Open Library work expected among
+# the first results. Run with --pages books.tsv.gz (and wikipedia-en.tsv.gz
+# to see the books next to the articles). Work ids were picked by hand; a
+# miss that finds another edition of the same book is a wrong id here.
+dune frank herbert	https://openlibrary.org/works/OL893415W
+dune book	https://openlibrary.org/works/OL893415W
+the hobbit tolkien	https://openlibrary.org/works/OL27482W
+the lord of the rings book	https://openlibrary.org/works/OL27448W
+harry potter and the philosopher's stone	https://openlibrary.org/works/OL82563W
+pride and prejudice jane austen	https://openlibrary.org/works/OL66554W
+1984 george orwell	https://openlibrary.org/works/OL1168083W
+the great gatsby book	https://openlibrary.org/works/OL468431W
+moby dick herman melville	https://openlibrary.org/works/OL102749W
+frankenstein mary shelley	https://openlibrary.org/works/OL450063W
+fahrenheit 451 ray bradbury	https://openlibrary.org/works/OL103123W

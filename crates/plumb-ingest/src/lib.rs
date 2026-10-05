@@ -26,6 +26,8 @@ pub mod facts;
 pub mod github;
 pub mod intros;
 pub mod kind_sites;
+pub mod openalex;
+pub mod openlibrary;
 pub mod stackexchange;
 pub mod tranco;
 pub mod wat;

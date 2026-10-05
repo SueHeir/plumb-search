@@ -172,18 +172,15 @@ pub fn run(args: EvalArgs) -> Result<()> {
             let name = file.file_name().and_then(|n| n.to_str()).unwrap_or("");
             let articles = plumb_core::article::read_articles(reader, args.pages_top)?;
             info!("indexing {} pages of {}", articles.len(), file.display());
-            if name.starts_with(plumb_index::pages::GITHUB_SET) {
-                all.extend(articles.into_iter().map(Page::from_repo));
-            } else if name.starts_with(plumb_index::pages::STACKOVERFLOW_SET) {
-                all.extend(articles.into_iter().map(Page::from_question));
+            // Files are named after their set: github.tsv.gz,
+            // wikipedia-en.tsv.gz.
+            let set = name.split('.').next().unwrap_or("");
+            let set = if Page::from_set(set, Default::default()).is_some() {
+                set
             } else {
-                let lang = name
-                    .strip_prefix("wikipedia-")
-                    .and_then(|n| n.split('.').next())
-                    .unwrap_or("en")
-                    .to_string();
-                all.extend(articles.into_iter().map(|a| Page::from_article(&lang, a)));
-            }
+                "wikipedia-en"
+            };
+            all.extend(articles.into_iter().filter_map(|a| Page::from_set(set, a)));
         }
         plumb_index::pages::build_page_index(pages_dir.path(), all)?;
         Some(PageSearcher::open(pages_dir.path())?)

@@ -75,59 +75,110 @@ fn run_stackoverflow(args: &FetchPagesArgs, dest: &std::path::Path) -> Result<()
     use plumb_ingest::stackexchange;
     let posts = match &args.posts {
         Some(posts) => posts.clone(),
-        None => {
-            let work = args
-                .work
-                .as_deref()
-                .context("pass --work DIR for Stack Overflow's posts, or --posts PATH")?;
-            let posts = work.join("stackoverflow.com-Posts.7z");
-            let fresh = std::fs::metadata(&posts)
-                .and_then(|m| m.modified())
-                .ok()
-                .and_then(|t| t.elapsed().ok())
-                .is_some_and(|age| age.as_secs() < args.keep_days * 86_400);
-            if fresh {
-                info!("keeping {}", posts.display());
-            } else {
-                info!(
-                    "downloading {} (about 20 GB)",
-                    stackexchange::STACKOVERFLOW_POSTS_URL
-                );
-                let client = download::http_client()?;
-                let partial = posts.with_extension("7z.part");
-                block_on(download::download_to_file(
-                    &client,
-                    stackexchange::STACKOVERFLOW_POSTS_URL,
-                    &partial,
-                ))??;
-                std::fs::rename(&partial, &posts)
-                    .with_context(|| format!("moving {}", partial.display()))?;
-            }
-            posts
-        }
+        None => fetch_dump(
+            args,
+            stackexchange::STACKOVERFLOW_POSTS_URL,
+            "Stack Overflow's posts",
+        )?,
     };
     info!("reading questions from {}", posts.display());
     let questions = stackexchange::read_questions_7z(&posts, args.min_score, args.max_questions)?;
-    if questions.is_empty() {
-        bail!("{} had no questions; nothing was written", posts.display());
-    }
     let questions: Vec<_> = questions
         .into_iter()
         .map(stackexchange::Question::into_article)
         .collect();
+    write_set(dest, &questions, "questions")
+}
+
+/// Downloads `url` into --work, unless a copy there is younger than
+/// --keep-days, and gives its path.
+fn fetch_dump(args: &FetchPagesArgs, url: &str, what: &str) -> Result<std::path::PathBuf> {
+    let work = args
+        .work
+        .as_deref()
+        .with_context(|| format!("pass --work DIR to download {what} into"))?;
+    let path = work.join(download::file_name_from_url(url)?);
+    let fresh = std::fs::metadata(&path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .is_some_and(|age| age.as_secs() < args.keep_days * 86_400);
+    if fresh {
+        info!("keeping {}", path.display());
+        return Ok(path);
+    }
+    info!("downloading {what} from {url}");
+    let client = download::http_client()?;
+    let partial = work.join(format!("{}.part", download::file_name_from_url(url)?));
+    block_on(download::download_to_file(&client, url, &partial))??;
+    std::fs::rename(&partial, &path).with_context(|| format!("moving {}", partial.display()))?;
+    Ok(path)
+}
+
+/// Writes `pages` (articles) to `dest` and says how many there were.
+fn write_set(
+    dest: &std::path::Path,
+    pages: &[plumb_core::article::Article],
+    what: &str,
+) -> Result<()> {
+    if pages.is_empty() {
+        bail!("no {what} were found; nothing was written");
+    }
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating {}", parent.display()))?;
     }
-    articles::write_articles_file(dest, &questions)?;
+    articles::write_articles_file(dest, pages)?;
     let size = std::fs::metadata(dest).map_or(0, |m| m.len());
     info!(
-        "wrote {} questions to {} ({:.1} MB)",
-        questions.len(),
+        "wrote {} {what} to {} ({:.1} MB)",
+        pages.len(),
         dest.display(),
         size as f64 / 1e6,
     );
     Ok(())
+}
+
+/// Makes the books set file `dest` from Open Library's dumps (about 4 GB).
+fn run_books(args: &FetchPagesArgs, dest: &std::path::Path) -> Result<()> {
+    use plumb_ingest::openlibrary;
+    let works = fetch_dump(args, openlibrary::WORKS_URL, "Open Library's works")?;
+    let authors = fetch_dump(args, openlibrary::AUTHORS_URL, "Open Library's authors")?;
+    let log = fetch_dump(
+        args,
+        openlibrary::READING_LOG_URL,
+        "Open Library's reading log",
+    )?;
+    let ratings = fetch_dump(args, openlibrary::RATINGS_URL, "Open Library's ratings")?;
+    let books = openlibrary::build_books(
+        &openlibrary::BookDumps {
+            works: &works,
+            authors: &authors,
+            shelvings: &[&log, &ratings],
+        },
+        args.min_shelvings,
+        args.max_books,
+    )?;
+    write_set(dest, &books, "books")
+}
+
+/// Makes the papers set file `dest` from OpenAlex's API.
+fn run_papers(args: &FetchPagesArgs, dest: &std::path::Path) -> Result<()> {
+    let key = std::env::var("OPENALEX_API_KEY")
+        .ok()
+        .filter(|k| !k.trim().is_empty());
+    info!(
+        "asking OpenAlex for works cited at least {} times",
+        args.min_citations
+    );
+    let client = download::http_client()?;
+    let papers = block_on(plumb_ingest::openalex::fetch_papers(
+        &client,
+        args.min_citations,
+        args.max_papers,
+        key.as_deref(),
+    ))??;
+    write_set(dest, &papers, "papers")
 }
 
 /// `plumb fetch-pages`: makes a page set file.
@@ -153,6 +204,12 @@ pub fn run_pages(args: FetchPagesArgs) -> Result<()> {
     }
     if set.id == plumb_index::pages::STACKOVERFLOW_SET {
         return run_stackoverflow(&args, &dest);
+    }
+    if set.id == plumb_index::pages::BOOKS_SET {
+        return run_books(&args, &dest);
+    }
+    if set.id == plumb_index::pages::PAPERS_SET {
+        return run_papers(&args, &dest);
     }
     let Some(lang) = set.id.strip_prefix("wikipedia-") else {
         bail!("fetch-pages cannot make {} yet", set.id);

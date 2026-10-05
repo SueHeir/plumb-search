@@ -1,0 +1,12 @@
+# Searches for well-known papers, with the paper (its DOI, as OpenAlex
+# writes it, lowercased) expected among the first results. Run with
+# --pages papers.tsv.gz.
+attention is all you need	https://doi.org/10.48550/arxiv.1706.03762
+deep residual learning for image recognition	https://doi.org/10.1109/cvpr.2016.90
+resnet paper	https://doi.org/10.1109/cvpr.2016.90
+adam a method for stochastic optimization	https://doi.org/10.48550/arxiv.1412.6980
+imagenet classification with deep convolutional neural networks	https://doi.org/10.1145/3065386
+random forests breiman	https://doi.org/10.1023/a:1010933404324
+deep learning lecun bengio hinton nature	https://doi.org/10.1038/nature14539
+u-net convolutional networks for biomedical image segmentation	https://doi.org/10.1007/978-3-319-24574-4_28
+basic local alignment search tool	https://doi.org/10.1016/s0022-2836(05)80360-2

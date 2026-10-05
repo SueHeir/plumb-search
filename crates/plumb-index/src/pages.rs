@@ -118,13 +118,72 @@ impl Page {
         }
     }
 
-    /// The words a question is found by besides its title: its title and
-    /// tags. `None` for pages of other sets, found by their names only.
+    /// The Open Library work `book`, written as an article whose item is
+    /// the work id (`OL45804W`).
+    pub fn from_book(book: Article) -> Self {
+        Page {
+            set: BOOKS_SET.to_string(),
+            url: format!(
+                "https://openlibrary.org/works/{}",
+                book.item.as_deref().unwrap_or("")
+            ),
+            title: book.title,
+            description: book.description,
+            site: None,
+            views: book.views,
+            aliases: book.aliases,
+        }
+    }
+
+    /// The paper `paper`, written as an article whose item is its DOI or
+    /// else its OpenAlex id, and whose views are its citations.
+    pub fn from_paper(paper: Article) -> Self {
+        let item = paper.item.as_deref().unwrap_or("");
+        let url = if item.starts_with("10.") {
+            format!("https://doi.org/{item}")
+        } else {
+            format!("https://openalex.org/{item}")
+        };
+        Page {
+            set: PAPERS_SET.to_string(),
+            url,
+            title: paper.title,
+            description: paper.description,
+            site: None,
+            views: paper.views,
+            aliases: paper.aliases,
+        }
+    }
+
+    /// The page of the set `set` written as `article` in its articles
+    /// file, `None` for a set without a reader.
+    pub fn from_set(set: &str, article: Article) -> Option<Self> {
+        Some(match set {
+            GITHUB_SET => Page::from_repo(article),
+            STACKOVERFLOW_SET => Page::from_question(article),
+            BOOKS_SET => Page::from_book(article),
+            PAPERS_SET => Page::from_paper(article),
+            _ => Page::from_article(set.strip_prefix("wikipedia-")?, article),
+        })
+    }
+
+    /// The words a question or paper is found by besides its title: its
+    /// title, and a question's tags. `None` for pages of other sets, found
+    /// by their names only.
     pub fn topic(&self) -> Option<String> {
+        if self.set == PAPERS_SET {
+            return Some(self.title.clone());
+        }
         (self.set == STACKOVERFLOW_SET).then(|| match &self.description {
             Some(tags) => format!("{} {tags}", self.title),
             None => self.title.clone(),
         })
+    }
+
+    /// Whether the page may be listed before every site. Books and papers
+    /// share their titles with too much ("Python", "Apple") to.
+    pub fn may_lead(&self) -> bool {
+        self.set != BOOKS_SET && self.set != PAPERS_SET
     }
 
     /// The name of the set people see: "Wikipedia".
@@ -135,6 +194,10 @@ impl Page {
             "GitHub"
         } else if self.set == STACKOVERFLOW_SET {
             "Stack Overflow"
+        } else if self.set == BOOKS_SET {
+            "Open Library"
+        } else if self.set == PAPERS_SET {
+            "OpenAlex"
         } else {
             &self.set
         }
@@ -146,6 +209,10 @@ impl Page {
             "github.com"
         } else if self.set == STACKOVERFLOW_SET {
             "stackoverflow.com"
+        } else if self.set == BOOKS_SET {
+            "openlibrary.org"
+        } else if self.set == PAPERS_SET {
+            "openalex.org"
         } else {
             "wikipedia.org"
         }
@@ -156,6 +223,13 @@ impl Page {
 pub const GITHUB_SET: &str = "github";
 /// The set of Stack Overflow questions.
 pub const STACKOVERFLOW_SET: &str = "stackoverflow";
+/// The set of books, from Open Library.
+pub const BOOKS_SET: &str = "books";
+/// The set of scholarly papers, from OpenAlex.
+pub const PAPERS_SET: &str = "papers";
+/// How much a book's or paper's score counts against an article's of the
+/// same name: "dune" lists the article on the novel before the book.
+pub const SHELF_WEIGHT: f32 = 0.8;
 
 /// [`PageHit::popularity`] is kept in the index as a whole number of
 /// millionths.
@@ -522,7 +596,10 @@ impl PageSearcher {
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0) as f32
                 / POPULARITY_SCALE;
-            let score = name * (1.0 - POPULARITY_SHARE + POPULARITY_SHARE * popularity);
+            let mut score = name * (1.0 - POPULARITY_SHARE + POPULARITY_SHARE * popularity);
+            if !page.may_lead() {
+                score *= SHELF_WEIGHT;
+            }
             hits.push(PageHit {
                 page,
                 score,
@@ -685,7 +762,7 @@ pub fn place_pages(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) -> Ve
         }
         let at = if !hit.named {
             PARTIAL_AFTER
-        } else if page_first(&hit) {
+        } else if hit.page.may_lead() && page_first(&hit) {
             0
         } else {
             1
@@ -962,6 +1039,49 @@ mod tests {
         assert!(site_is_titled("tauri.app", "Tauri (software framework)"));
         assert!(!site_is_titled("leonardodavinci.net", "Marie Curie"));
         assert!(!site_is_titled("curie.fr", "Marie Curie"));
+    }
+
+    #[test]
+    fn books_and_papers_follow_articles_and_sites() {
+        let book = |title: &str, author: &str| {
+            Page::from_book(Article {
+                title: title.into(),
+                description: Some(format!("Book by {author}")),
+                item: Some("OL893415W".into()),
+                views: 5_000,
+                aliases: vec![format!("{title} {author}")],
+                ..Article::default()
+            })
+        };
+        let paper = Page::from_paper(Article {
+            title: "Attention Is All You Need".into(),
+            item: Some("10.48550/arxiv.1706.03762".into()),
+            views: 90_000,
+            ..Article::default()
+        });
+        assert_eq!(paper.url, "https://doi.org/10.48550/arxiv.1706.03762");
+        assert_eq!(paper.set_name(), "OpenAlex");
+        let (_dir, s) = searcher(&[
+            book("Dune", "Frank Herbert"),
+            page("Dune (novel)", 1_000, &[]),
+            paper,
+        ]);
+        // The article on the novel before the book of the same name.
+        let hits = s.search("dune", 5).unwrap();
+        assert_eq!(titles(&hits), ["Dune (novel)", "Dune"]);
+        assert_eq!(hits[1].page.url, "https://openlibrary.org/works/OL893415W");
+        let hits = s.search("dune frank herbert", 5).unwrap();
+        assert!(hits[0].named && hits[0].page.set == BOOKS_SET);
+        // Never ahead of every site, even an unknown one.
+        let placed = place_pages(
+            "dune frank herbert",
+            &[known_site("dunefrankherbert.com", false, 0.0)],
+            hits,
+        );
+        assert_eq!(placed[0].at, 1);
+        // Papers are found by most of their words too.
+        let hits = s.search("attention all you need paper", 5).unwrap();
+        assert_eq!(titles(&hits), ["Attention Is All You Need"]);
     }
 
     #[test]
