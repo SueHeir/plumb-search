@@ -199,19 +199,31 @@ pub fn run(args: EvalArgs) -> Result<()> {
             exact: args.exact,
             ..SearchOptions::default()
         };
-        let query_meaning = meaning.as_ref().and_then(|meaning| meaning.query(&q.query));
-        let hits = searcher
-            .search_meaning(
-                &q.query,
-                fetched,
-                &cfg,
-                &options,
-                query_meaning
-                    .as_ref()
-                    .map(|m| m as &dyn plumb_index::Meaning),
-            )
-            .with_context(|| format!("searching for {:?}", q.query))?
-            .hits;
+        let search = |query: &str| {
+            let query_meaning = meaning.as_ref().and_then(|meaning| meaning.query(query));
+            let results = searcher
+                .search_meaning(
+                    query,
+                    fetched,
+                    &cfg,
+                    &options,
+                    query_meaning
+                        .as_ref()
+                        .map(|m| m as &dyn plumb_index::Meaning),
+                )
+                .with_context(|| format!("searching for {query:?}"));
+            results.map(|results| (results, query_meaning))
+        };
+        let (mut results, mut query_meaning) = search(&q.query)?;
+        // What one click on "Did you mean" finds.
+        let mut searched = q.query.clone();
+        if args.follow_suggestions {
+            if let Some(spelling) = results.spelling.take() {
+                searched = spelling.query;
+                (results, query_meaning) = search(&searched)?;
+            }
+        }
+        let hits = results.hits;
         let domains: Vec<&str> = hits.iter().map(|h| h.domain.as_str()).collect();
         // What came first: a page when one was listed first.
         let mut first = domains.first().map(|d| d.to_string());
@@ -221,11 +233,11 @@ pub fn run(args: EvalArgs) -> Result<()> {
             None => rank_of(&domains, &q.expected),
             Some(pages) => {
                 let found = pages
-                    .search(&q.query, 10)
-                    .with_context(|| format!("searching pages for {:?}", q.query))?;
+                    .search(&searched, 10)
+                    .with_context(|| format!("searching pages for {searched:?}"))?;
                 let mut lifted = hits.clone();
                 lift_named_sites(&mut lifted, &found);
-                let rows = listed_with_pages(&lifted, place_pages(&q.query, &lifted, found));
+                let rows = listed_with_pages(&lifted, place_pages(&searched, &lifted, found));
                 first = rows.first().and_then(|keys| keys.first()).cloned();
                 let rank = rows
                     .iter()

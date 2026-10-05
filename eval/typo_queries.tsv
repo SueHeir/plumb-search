@@ -1,9 +1,12 @@
-# Misspelled versions of eval/brand_queries.tsv, for typo correction.
+# Misspelled versions of eval/brand_queries.tsv, for typo suggestions.
 # Hand-made: dropped, doubled, swapped and neighbouring-key letters, plus
 # common misspellings ("craiglist", "marriot", "world health organisation").
 # Each typo's expected sites are the brand query's.
 #
-#   plumb eval --index data/index --queries eval/typo_queries.tsv
+#   plumb eval --index data/index --queries eval/typo_queries.tsv --follow-suggestions
+#
+# Searches are always for the query as typed; --follow-suggestions measures
+# what clicking "Did you mean" finds.
 #
 # Format: query<TAB>expected_domain[,another_ok_domain].
 

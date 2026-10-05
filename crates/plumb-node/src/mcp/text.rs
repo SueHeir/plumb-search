@@ -158,11 +158,7 @@ fn search(out: &mut String, answer: &Value) {
     }
     if let Some(spelling) = answer.get("spelling").filter(|s| s.is_object()) {
         let query = text(spelling, "query").unwrap_or("");
-        if flag(spelling, "applied") {
-            let _ = writeln!(out, "Showing results for \"{query}\".");
-        } else {
-            let _ = writeln!(out, "Did you mean \"{query}\"?");
-        }
+        let _ = writeln!(out, "Did you mean \"{query}\"?");
     }
 
     let sites = list(answer, "results");
@@ -233,6 +229,9 @@ fn official_site(out: &mut String, answer: &Value) {
     let name = text(answer, "name").unwrap_or("");
     if !flag(answer, "found") {
         let _ = writeln!(out, "Plumb knows no site called \"{name}\".");
+        if let Some(fixed) = text(answer, "did_you_mean") {
+            let _ = writeln!(out, "Did you mean \"{fixed}\"?");
+        }
         return;
     }
     let _ = writeln!(
@@ -256,6 +255,9 @@ fn official_site(out: &mut String, answer: &Value) {
         .collect();
     if !others.is_empty() {
         let _ = writeln!(out, "Other candidates: {}", others.join(", "));
+    }
+    if let Some(fixed) = text(answer, "did_you_mean") {
+        let _ = writeln!(out, "Did you mean \"{fixed}\"?");
     }
 }
 

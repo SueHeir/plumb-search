@@ -36,7 +36,7 @@ use url::Url;
 
 use super::answers::InfoBox;
 use super::{
-    answers, extras, run_search, searched_for, security_headers, AppState, SearchParams, MAX_LIMIT,
+    answers, extras, run_search, security_headers, AppState, SearchParams, MAX_LIMIT,
     MAX_QUERY_CHARS, SETUP_RELOAD_SECONDS,
 };
 
@@ -182,7 +182,7 @@ async fn collect(
     let placed = if operators.any() {
         place_operator_pages(&operators, &results.hits, found_pages)
     } else {
-        place_pages(searched_for(query, &results), &results.hits, found_pages)
+        place_pages(query, &results.hits, found_pages)
     };
     let info = match &extras.profile {
         Some(profile) => answers::info_from_page(&profile.page, &results.hits),
@@ -344,12 +344,7 @@ pub(super) async fn search(state: AppState, headers: HeaderMap, params: SearchPa
         );
     }
     if let Some(spelling) = &collected.spelling {
-        let key = if spelling.applied {
-            "corrections"
-        } else {
-            "suggestions"
-        };
-        fields.insert(key.into(), json!([spelling.query]));
+        fields.insert("suggestions".into(), json!([spelling.query]));
     }
     if let Some(info) = collected.info {
         let mut urls = Vec::new();

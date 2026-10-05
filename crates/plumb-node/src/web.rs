@@ -876,13 +876,7 @@ async fn search_page(
         Err(_) => answers::Extras::default(),
     };
     let (local, network) = if settings.network == NetSetting::On {
-        // The network is asked for what this node's results are for, the
-        // corrected query when a typo was corrected.
-        let asked = match &local {
-            Ok(results) => searched_for(&query, results),
-            Err(_) => &query,
-        };
-        let network = network_search(&state, asked, limit, &settings.options).await;
+        let network = network_search(&state, &query, limit, &settings.options).await;
         let network = match network {
             Ok(results) => NetOutcome::Answered(results),
             Err(_) => {
@@ -906,8 +900,7 @@ async fn search_page(
     } else {
         (local, NetOutcome::NotAsked)
     };
-    // As typed: spelling is corrected for site names, not towns. "Near me"
-    // goes by the town the searcher gave.
+    // "Near me" goes by the town the searcher gave.
     let found_places = run_places(
         &state,
         &query,
@@ -918,8 +911,7 @@ async fn search_page(
     let response = match local {
         Ok(mut results) => {
             if let Some(visitor) = &mut visitor {
-                let searched = searched_for(&query, &results).to_owned();
-                visitor.rank(&searched, &mut results.hits);
+                visitor.rank(&query, &mut results.hits);
                 visitor.note_search(&query);
                 settings.history = Some(visitor.view());
             }
@@ -1024,7 +1016,7 @@ async fn api_search(
                 Some(profile) => answers::info_from_page(&profile.page, &results.hits),
                 None => {
                     let placed = place_pages(
-                        searched_for(&query, &results),
+                        &query,
                         &results.hits,
                         results.pages.iter().map(|p| p.hit.clone()).collect(),
                     );
@@ -2146,18 +2138,9 @@ fn search_link(path: &str, query: &str, options: &SearchOptions, net: bool) -> S
     format!("{path}?{}", params.finish())
 }
 
-/// What `results` are for: the corrected query when a typo was corrected,
-/// else `query`.
-fn searched_for<'a>(query: &'a str, results: &'a SearchResults) -> &'a str {
-    match &results.spelling {
-        Some(spelling) if spelling.applied => &spelling.query,
-        _ => query,
-    }
-}
-
-/// "Showing results for amazon. Search instead for amazom", or "Did you
-/// mean amazon?", above the results.
-fn render_spelling(out: &mut String, query: &str, spelling: &Spelling, options: &SearchOptions) {
+/// "Did you mean amazon?" above the results, which are for the query as
+/// typed.
+fn render_spelling(out: &mut String, spelling: &Spelling, options: &SearchOptions) {
     let fixed_options = SearchOptions {
         exact: false,
         ..options.clone()
@@ -2172,20 +2155,7 @@ fn render_spelling(out: &mut String, query: &str, spelling: &Spelling, options: 
         )),
         escape_html(&truncate_chars(&spelling.query, 150))
     );
-    if spelling.applied {
-        let typed_options = SearchOptions {
-            exact: true,
-            ..options.clone()
-        };
-        let _ = writeln!(
-            out,
-            "<p class=\"sp\">Showing results for {fixed}. Search instead for <a href=\"{}\">{}</a></p>",
-            escape_html(&search_link("/search", query, &typed_options, false)),
-            escape_html(&truncate_chars(query, 150))
-        );
-    } else {
-        let _ = writeln!(out, "<p class=\"sp\">Did you mean {fixed}?</p>");
-    }
+    let _ = writeln!(out, "<p class=\"sp\">Did you mean {fixed}?</p>");
 }
 
 /// One result as shown: a hit, and what the network said about it when only
@@ -2396,11 +2366,10 @@ fn render_results_with(
     }
     render_source(&mut body, query, settings, network, from_network);
     if let Some(spelling) = &results.spelling {
-        render_spelling(&mut body, query, spelling, &settings.options);
+        render_spelling(&mut body, spelling, &settings.options);
     }
-    // Picks are noted for what the results are for: shared, or kept in the
-    // searcher's history.
-    let picked_for = searched_for(query, results);
+    // Picks are noted for the query: shared, or kept in the searcher's
+    // history.
     let notes_picks = share_picks
         || settings
             .history
@@ -2431,7 +2400,7 @@ fn render_results_with(
     let pages = if ops.any() {
         place_operator_pages(&ops, &shown_hits, found_pages)
     } else {
-        place_pages(picked_for, &shown_hits, found_pages)
+        place_pages(query, &shown_hits, found_pages)
     };
     // An info box is about what the whole query names, which operators
     // ("site:", "-word") change.
@@ -2470,7 +2439,7 @@ fn render_results_with(
             // `/go` only follows this node's own results, so sites from other
             // nodes link straight to themselves.
             let go = (notes_picks && item.network.is_none())
-                .then(|| go_link(picked_for, &settings.options, &item.hit.domain));
+                .then(|| go_link(query, &settings.options, &item.hit.domain));
             let icon = icons.get(&item.hit.domain);
             let notes = settings
                 .history
@@ -4553,14 +4522,13 @@ mod tests {
     }
 
     #[test]
-    fn corrected_typos_are_shown_with_a_way_back() {
+    fn typos_are_searched_as_typed_with_a_suggestion() {
         let mut results = SearchResults {
             pages: Vec::new(),
-            hits: vec![scored("amazon.com", 0.9)],
+            hits: vec![scored("amazom.com", 0.9)],
             site_search: None,
             spelling: Some(Spelling {
                 query: "amazon".into(),
-                applied: true,
             }),
         };
         let mut settings = no_settings();
@@ -4578,34 +4546,14 @@ mod tests {
         );
         assert!(
             page.contains(
-                "<p class=\"sp\">Showing results for <a href=\"/search?q=amazon&amp;country=DE\">\
-             <strong>amazon</strong></a>. Search instead for \
-             <a href=\"/search?q=amazom&amp;country=DE&amp;exact=1\">amazom</a></p>"
+                "<p class=\"sp\">Did you mean <a href=\"/search?q=amazon&amp;country=DE\">\
+             <strong>amazon</strong></a>?</p>"
             ),
             "{page}"
         );
-        // Picks are noted for the corrected query.
-        assert!(page.contains("/go?q=amazon&amp;d=amazon.com"), "{page}");
-
-        results.spelling = Some(Spelling {
-            query: "google".into(),
-            applied: false,
-        });
-        let page = render_results(
-            "gogle",
-            &results,
-            None,
-            &NetOutcome::NotAsked,
-            &no_settings(),
-            None,
-            10,
-            true,
-            &Icons::default(),
-        );
-        assert!(page.contains(
-            "<p class=\"sp\">Did you mean <a href=\"/search?q=google\"><strong>google</strong></a>?</p>"
-        ), "{page}");
-        assert!(page.contains("/go?q=gogle&amp;d=amazon.com"), "{page}");
+        assert!(!page.contains("Showing results for"), "{page}");
+        // Picks are noted for the query as typed.
+        assert!(page.contains("/go?q=amazom&amp;d=amazom.com"), "{page}");
 
         // Searching as typed carries on through the picks.
         let mut settings = no_settings();

@@ -298,17 +298,20 @@ impl Mcp {
     /// `official_site`: the site the name names, best first.
     pub fn official_site(&self, name: &str, options: &SearchOptions) -> Result<Value> {
         let results = self.lookup(name, 1 + ALTERNATIVES, options)?;
+        let did_you_mean = results.spelling.as_ref().map(|s| s.query.as_str());
         let Some(top) = results.hits.first() else {
+            let mut why = vec!["Plumb knows no site by this name.".to_string()];
+            if let Some(fixed) = did_you_mean {
+                why.push(format!("Did you mean {fixed:?}? Look that up instead."));
+            }
             return Ok(json!({
                 "name": name,
                 "found": false,
-                "why": ["Plumb knows no site by this name."],
+                "why": why,
+                "did_you_mean": did_you_mean,
             }));
         };
         let mut why = Vec::new();
-        if let Some(spelling) = results.spelling.as_ref().filter(|s| s.applied) {
-            why.push(format!("Read as {:?}, a likely typo.", spelling.query));
-        }
         if top.official {
             why.push("Wikidata lists it as an official website.".to_string());
         }
@@ -354,6 +357,7 @@ impl Mcp {
             "confidence": confidence,
             "why": why,
             "alternatives": results.hits[1..].iter().map(brief).collect::<Vec<_>>(),
+            "did_you_mean": did_you_mean,
         }))
     }
 
@@ -379,12 +383,19 @@ impl Mcp {
         // ("paypal.com.secure-check.io" -> "paypal").
         let mut imitated: Option<Hit> = None;
         let squashed_host = squash(&host);
-        for query in name_queries(&host, &domain) {
+        let mut queries: std::collections::VecDeque<String> =
+            name_queries(&host, &domain).into_iter().collect();
+        while let Some(query) = queries.pop_front() {
             if searches >= MAX_LOOKALIKE_SEARCHES {
                 break;
             }
             searches += 1;
             let results = self.lookup(&query, 1, options)?;
+            // A typo of a name ("twiter") is searched as typed; the name
+            // it is a typo of is looked up next.
+            if let Some(spelling) = results.spelling {
+                queries.push_front(spelling.query);
+            }
             let Some(top) = results.hits.into_iter().next() else {
                 continue;
             };
@@ -472,11 +483,7 @@ impl Mcp {
         let placed = if operators.any() {
             place_operator_pages(&operators, &results.hits, found_pages)
         } else {
-            let searched_for = match &results.spelling {
-                Some(spelling) if spelling.applied => spelling.query.as_str(),
-                _ => query,
-            };
-            place_pages(searched_for, &results.hits, found_pages)
+            place_pages(query, &results.hits, found_pages)
         };
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
