@@ -877,12 +877,14 @@ pub fn lift_named_sites(sites: &mut [crate::Hit], pages: &[PageHit]) {
     else {
         return;
     };
-    // An official site named by all of the query stays first: google.com
-    // for "google", not about.google, Google's own site in Wikidata.
-    if sites
-        .first()
-        .is_some_and(|top| top.named && top.official && top.domain != site)
-    {
+    // An official or well-known site named by all of the query stays
+    // first: google.com for "google", not about.google, Google's own site
+    // in Wikidata; toyota.com for "toyota", not global.toyota.
+    if sites.first().is_some_and(|top| {
+        top.named
+            && (top.official || top.link_score >= crate::WELL_KNOWN_LINK_SCORE)
+            && top.domain != site
+    }) {
         return;
     }
     let shown = sites.len().min(LIFTED_FROM);
@@ -1407,6 +1409,14 @@ mod tests {
         company.page.item = Some("Q95".into());
         lift_named_sites(&mut sites, &[company]);
         assert_eq!(sites[0].domain, "google.com");
+        let toyota = known_site("toyota.com", true, 0.9);
+        let mut global = known_site("global.toyota", false, 0.6);
+        global.official = true;
+        let mut sites = vec![toyota, global];
+        let mut maker = found("Toyota", Some("global.toyota"), true, 0.9);
+        maker.page.item = Some("Q53268".into());
+        lift_named_sites(&mut sites, &[maker]);
+        assert_eq!(sites[0].domain, "toyota.com");
         music.named = false;
         let mut sites = vec![
             site("youtube.de", false),
