@@ -7,7 +7,7 @@ The website at https://plumbsearch.org and the server setup behind it.
 - `Caddyfile` serves it with HTTPS (Caddy gets and renews the certificates),
   redirects `www.plumbsearch.org` and plain HTTP to `https://plumbsearch.org`,
   and passes the node's public pages (`/search`, `/api/search`, `/api/status`,
-  `/opensearch.xml`, private search under `/private` and `/api/buckets`, and
+  `/opensearch.xml`, the MCP server at `/mcp`, private search under `/private` and `/api/buckets`, and
   network search) to a Plumb node on the same machine. Its dashboard, `/app`,
   is not passed on. While no node is running, those addresses
   show a "search isn't available" page instead.
@@ -18,7 +18,7 @@ searches.
 
 ## The server
 
-A DigitalOcean droplet (Ubuntu 24.04, 2 vCPUs, 4 GB RAM, 80 GB SSD) with
+A DigitalOcean droplet (Ubuntu 24.04, 4 vCPUs, 8 GB RAM, 160 GB SSD) with
 Docker, automatic security updates, a 2 GB swap file and a ufw firewall that
 allows only 22, 80 and 443 (TCP, plus UDP 443 for HTTP/3). DNS has A and AAAA
 records for `plumbsearch.org` and `www.plumbsearch.org` pointing at it.

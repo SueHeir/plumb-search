@@ -1,12 +1,148 @@
 # Plumb Search
 
-Plumb Search is a free, open-source search engine built to run on your own machine. Type "us bank" and usbank.com comes first.
+Plumb Search is a free, open-source search engine that anyone can run, on a homelab server, a desktop, or not at all: you can just search at **[plumbsearch.org](https://plumbsearch.org)**. Nodes share their crawling with each other over a peer-to-peer network, so nobody has to crawl the whole web alone.
 
-It indexes names, not pages. For each site it keeps the homepage title and description, the words other sites use when they link to it, and a few aliases. That is about 1 KB per site, so a million sites fit in roughly a gigabyte on a homelab server or a desktop.
+Type "us bank" and usbank.com comes first. Plumb indexes names, not pages: for each site it keeps the homepage title and description, the words other sites use when they link to it, and a few aliases, about 1 KB per site, so a million sites fit in roughly a gigabyte. Next to sites it lists single pages from open page sets (Wikipedia, GitHub, Stack Overflow, books and papers) and places from OpenStreetMap.
 
-This repository holds the **Phase 1 prototype**: a single node that builds its own index from public seed data plus its own homepage crawls, searches it locally, and measures how often the official site comes first. Sharing the index between nodes, community crawling and private popularity counts come in later phases (see [Roadmap](#roadmap)).
+![Plumb Search results for "package registry"](docs/images/results.png)
 
-## Quick start with the bundled test data
+- [Try it](#try-it)
+- [What it does](#what-it-does)
+- [Run your own node](#run-your-own-node)
+- [Use it from an AI](#use-it-from-an-ai)
+- [How it works](#how-it-works)
+- [Status](#status)
+- [Contributing](#contributing)
+- [License](#license)
+
+## Try it
+
+Search at https://plumbsearch.org. It keeps no access log, and its results pages load nothing from other servers: site icons are served by Plumb itself, and maps are drawn from coordinates rather than map tiles.
+
+To make it your browser's search engine, open a Plumb page and add it from the address bar (in Firefox, right-click the address bar and choose **Add "Plumb Search"**), or add `https://plumbsearch.org/search?q=%s` by hand.
+
+## What it does
+
+- **Official sites first.** Names outrank text, and look-alike sites stuffed with a brand's keywords are kept below the real one.
+- **Page sets.** English Wikipedia articles, well-starred GitHub repositories, Stack Overflow's most viewed questions, Open Library's most read books and the most cited papers, shown next to sites. Only titles, short descriptions and page views are kept, no article text ([docs/pages.md](docs/pages.md)).
+- **Instant answers and info boxes**: sums, unit and currency conversions and the time in a place, a box about the person, place or thing searched for, and profiles linking to its official accounts.
+- **Sitelinks**: links to a site's key pages, such as its Log in page, under the official site.
+- **Recent headlines** from the RSS and Atom feeds sites publish, in a folded "Recent" block ([docs/news.md](docs/news.md)).
+- **Places**: "pizza in denver" or "coffee near me" lists places from OpenStreetMap with a small map ([docs/places.md](docs/places.md)).
+- **Search operators** (`site:`, `-site:`, `"exact words"`, `-word`), **safe search** and **language** filters, and pages that are only a bot check left out of results.
+- **Search by meaning** (optional): "electric car maker" finds sites that never use those words.
+- **Private search**: a `/private` page where the browser fetches padded buckets of sites and ranks them itself, so the node never sees the query ([docs/private-search.md](docs/private-search.md)).
+- **About you**: each browser can list interests, sites it always wants first and sites it never wants to see, kept on its own node and never sent with a search.
+
+There are no ads and no tracking. Plumb does not crawl the full text of the web: it fetches one homepage per site (plus a few key pages for sitelinks), and obeys robots.txt.
+
+## Run your own node
+
+A node serves the same search page, keeps crawling homepages, and joins the Plumb network by default. A new node copies the best sites of a node it trusts (plumbsearch.org by default) and is searchable within a few minutes. No port forwarding is needed.
+
+**Server or homelab** ([docs/docker.md](docs/docker.md)): the image is published as `ghcr.io/sueheir/plumb-search`.
+
+```sh
+git clone https://github.com/SueHeir/plumb-search.git
+cd plumb-search
+docker compose up -d        # then open http://<this machine>:8080
+```
+
+**Desktop or laptop** ([docs/desktop.md](docs/desktop.md)): the desktop app for Windows, macOS and Linux runs the same node with a control panel, and search opens in your browser at http://127.0.0.1:7586. There is no published release yet; test builds of the installers come from the repository's **Desktop** workflow.
+
+**From source** (Rust, stable toolchain):
+
+```sh
+cargo build --release -p plumb-node
+./target/release/plumb run --data plumb-data --network
+```
+
+Then open http://127.0.0.1:8080. `plumb run --help` lists the settings; [More about running a node](#more-about-running-a-node) below covers the details.
+
+## Use it from an AI
+
+Search APIs that AI apps used to rely on are closing or going paid. Plumb is free, needs no key, and with your own node the searches never leave your computer.
+
+- **MCP**: every node serves an MCP server at `/mcp`, and `plumb mcp` serves one over stdio. Tools: `search`, `official_site`, `check_lookalike`, `site_info`, and `read_page` (reads a page as text; offered by your own node, not by plumbsearch.org). In Claude Code:
+
+  ```sh
+  claude mcp add --transport http plumb https://plumbsearch.org/mcp
+  ```
+
+  [docs/mcp.md](docs/mcp.md) covers Claude Desktop and other apps.
+- **Local models**: LM Studio, Open WebUI, Jan, LibreChat, AnythingLLM, and anything that takes a SearXNG address (`/search?format=json`). Setup for each is in [docs/local-llms.md](docs/local-llms.md).
+- **JSON API**: `/api/search?q=...` on any node.
+
+## How it works
+
+1. **Seeding.** A new network started from public lists: the [Tranco](https://tranco-list.eu/) top million, the [Common Crawl web graph](https://commoncrawl.org/web-graphs) ranks, and Wikidata's official websites. After that the index grows from its own crawls and the links they find.
+2. **Shared crawling.** Each day every node is assigned a random share of all sites. It crawls those homepages, signs each batch of results, and passes it to the network. Other nodes check the signature and that the sites were really that node's to crawl, then fold the results into their own index.
+3. **Trust.** Each node keeps a list of the crawlers it trusts (plumbsearch.org's by default) and takes page text only from them.
+4. **Connecting.** Nodes behind home routers only dial out and reach each other through relays and hole punching.
+5. **Searching.** Each node searches its own index. It can also search the network without sending its query: it fetches a few hashed buckets of sites, padded with random ones, and checks a Merkle proof on every result.
+
+[docs/network.md](docs/network.md) has the full design and [How ranking works](#how-ranking-works) below has the scoring. Everything is written in Rust; the browser side of private search is Rust compiled to WebAssembly.
+
+## Status
+
+Plumb is young and moving fast. plumbsearch.org runs on `main`, which also publishes the Docker image. There is no tagged release yet. The peer-to-peer network works but is still a prototype, and private information retrieval (PIR), which would let a node fetch results without learning which ones it asked for, is in progress and off by default.
+
+## Contributing
+
+Issues and pull requests are welcome. Before opening a pull request, run:
+
+```sh
+cargo fmt --all --check
+cargo clippy --workspace --exclude plumb-desktop --all-targets -- -D warnings
+cargo test --workspace --exclude plumb-desktop
+```
+
+All code in the repository is Rust. The desktop app (`crates/plumb-desktop`) is left out of a plain workspace build; see [docs/desktop.md](docs/desktop.md) to build it.
+
+---
+
+## More about running a node
+
+`plumb run` does the work of [Building an index from real data](#building-an-index-from-real-data) by itself, apart from the optional WAT files, and keeps going. It serves the search page at once, downloads the Tranco list and builds a quick first index of it (searchable within a minute or two), then adds Wikidata's official websites and the other seed data, which take longer to download, then crawls homepages and builds the index again, and from then on crawls more homepages and rebuilds the index on a schedule. With `--network`, a new node sets up from the sites of a node it trusts instead (the plumbsearch.org node by default), with their ranks, names and Wikidata facts, and downloads the seed data only when none answers or with `--seed-from-outside`.
+
+```sh
+cargo build --release -p plumb-node
+./target/release/plumb run --data plumb-data
+```
+
+Then open http://127.0.0.1:8080. Until the first index is ready, the page shows what the node is doing, and `/api/status` reports the same as JSON. Setup and crawling need internet access; searching works offline.
+
+By default a node keeps the best million sites, crawls 10,000 of their homepages once its first index is built, and crawls 5,000 more every hour, which keeps an always-on machine crawling most of the day. `--profile desktop` starts smaller (250,000 sites, 2,000 homepages at first and 1,000 more every 12 hours). `--cc-release <release-name>` also takes ranks from a Common Crawl web graph release on first start (release names are listed at https://commoncrawl.org/web-graphs; only the top rows are downloaded). `--bind 0.0.0.0:8080` serves other machines too, and since the page has no login, anyone who can reach the port can search. `plumb run --help` lists the other settings.
+
+Everything the node keeps is in its `--data` folder. `records.jsonl` holds what it has learned. Crawls add their results to `records.jsonl.journal` as they go, and the node folds that journal into `records.jsonl` once it has grown, so back up both files together. A node started with a `records.jsonl` already in its folder skips the seed downloads.
+
+The seed downloads go through a proxy set in the usual variables (`HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`, `NO_PROXY`), but homepages are fetched directly, which lets the crawler refuse sites whose names lead into private networks. If the machine reaches the internet only through a proxy, add `--use-system-proxy` to crawl through it too. Without it, every crawl fails and the node reports that the network seems to be down.
+
+### Search history and About you
+
+The desktop app, and `plumb run --search-history`, keep a search history for each browser that searches the node: the home page lists your past searches, sites you opened before are labelled and come first the next time you search, and `/history` lists and clears it. Each browser gets its own profile (a cookie), so people sharing a node see only their own. Both choices are in the settings gear; the node-wide switch is "Remember searches" on the panel. Leave it off on a public server.
+
+The same nodes have an "About you" page (`/about`, linked from the settings gear) where each browser can list its interests, sites it always wants first, and sites it never wants to see. Results that match an interest move up a little and say which interest they match, so "rust" leans towards the language for a programmer and the game for a gamer. Like the history, it stays on the node for that browser only and is applied after results are found, so it is never part of a search sent to other nodes.
+
+A node with a storage limit keeps a quarter of it for sites about those interests: it fills with the network's best sites up to 65% of the limit, then reads on down a trusted node's list keeping only sites about them, asking for the same pages either way so the trusted node learns nothing of the interests. When the interests change, it drops the sites it kept only for the old ones to make room. Full nodes can also set **Focus topics** on the panel (or `plumb run --focus games`, repeatable): they crawl sites about those topics first and twice as often, so the more nodes focus on a topic, the better the network knows it. Unlike About you interests, focus topics are public in effect, since other nodes see what a node crawls.
+
+### Search operators
+
+- `site:github.com plumb` keeps results on that site and its pages (GitHub repositories here), lists the site itself, and links into its own search for the other words. `site:gov` keeps a top-level domain; `-site:example.com` leaves a site out.
+- `"exact words"` keeps results whose name, title or description has those words in that order.
+- `-word` leaves out results that mention the word (or its plural).
+
+They work on the search page, `/api/search`, network search and `/private`, where they never leave the browser: only the other words pick buckets. Queries with operators are not corrected for typos.
+
+### Safe search and language
+
+The settings gear has **Safe search** (off, moderate or strict; `safe=` in the address) and **Language** (`lang=de`).
+
+- Moderate, the default, leaves out sites on the [Block List Project](https://github.com/blocklistproject/Lists) adult list (public domain; each node downloads it weekly into `DATA/safe/`), sites Wikidata calls pornographic, and sites whose name, title or description is plainly adult. Strict also leaves out suggestive ones ("sexy", "nude", "escort") and such pages. Private search applies the same rules except for the blocklist, which stays on the node.
+- Language keeps sites whose homepage says it is in that language (`<html lang>`, read when the homepage is crawled) and sites that do not say, and page sets in that language (English Wikipedia, GitHub and Stack Overflow are English).
+
+
+### Try it on the bundled test data
 
 The `fixtures/` folder holds a small, made-up dataset in the same formats as the real sources, so the whole pipeline runs offline.
 
@@ -25,69 +161,7 @@ plumb eval --index data/index --queries fixtures/brand_queries.tsv
 plumb serve --index data/index        # then open http://127.0.0.1:8080
 ```
 
-## Run a node
-
-`plumb run` does the work of the next section by itself, apart from the optional WAT files, and keeps going. It serves the search page at once, downloads the Tranco list and builds a quick first index of it (searchable within a minute or two), then adds Wikidata's official websites and the other seed data, which take longer to download, then crawls homepages and builds the index again, and from then on crawls more homepages and rebuilds the index on a schedule. With `--network`, a new node sets up from the sites of a node it trusts instead (the plumbsearch.org node by default), with their ranks, names and Wikidata facts, and downloads the seed data only when none answers or with `--seed-from-outside`.
-
-```sh
-cargo build --release -p plumb-node
-./target/release/plumb run --data plumb-data
-```
-
-Then open http://127.0.0.1:8080. Until the first index is ready, the page shows what the node is doing, and `/api/status` reports the same as JSON. Setup and crawling need internet access; searching works offline.
-
-By default a node keeps the best million sites, crawls 10,000 of their homepages once its first index is built, and crawls 5,000 more every hour, which keeps an always-on machine crawling most of the day. `--profile desktop` starts smaller (250,000 sites, 2,000 homepages at first and 1,000 more every 12 hours). `--cc-release <release-name>` also takes ranks from a Common Crawl web graph release on first start (release names are listed at https://commoncrawl.org/web-graphs; only the top rows are downloaded). `--bind 0.0.0.0:8080` serves other machines too, and since the page has no login, anyone who can reach the port can search. `plumb run --help` lists the other settings.
-
-Everything the node keeps is in its `--data` folder. `records.jsonl` holds what it has learned. Crawls add their results to `records.jsonl.journal` as they go, and the node folds that journal into `records.jsonl` once it has grown, so back up both files together. A node started with a `records.jsonl` already in its folder skips the seed downloads.
-
-The seed downloads go through a proxy set in the usual variables (`HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`, `NO_PROXY`), but homepages are fetched directly, which lets the crawler refuse sites whose names lead into private networks. If the machine reaches the internet only through a proxy, add `--use-system-proxy` to crawl through it too. Without it, every crawl fails and the node reports that the network seems to be down.
-
-On a server or homelab machine, run the Docker image instead ([docs/docker.md](docs/docker.md)):
-
-```sh
-docker compose up -d
-```
-
-On a desktop or laptop, install the desktop app for Windows, macOS or Linux ([docs/desktop.md](docs/desktop.md)). It runs the same node in a window of its own, at http://127.0.0.1:7586.
-
-### Join the Plumb network (prototype)
-
-`plumb run --network` connects a node to other Plumb nodes, starting from plumbsearch.org (the Docker image and the desktop app do this by default; a plain `plumb run` stays on its own unless given `--network`): it crawls only the sites the network assigns it each day, shares signed crawl results with the others, takes in theirs, and can search other nodes without sending them the query (`/network?q=`, or the "Use the Plumb network too" link on a results page). No port forwarding is needed. See [docs/network.md](docs/network.md) for the design, the flags and what is not done yet.
-
-### Private search
-
-Every node in the network (or one started with `--private-search`) offers a `/private` search page, turned on with the Private search switch in the settings gear, where the node never sees what people search for: the browser fetches a few buckets of sites, padded with random ones, and ranks them itself in WebAssembly. See [docs/private-search.md](docs/private-search.md).
-
-The desktop app, and `plumb run --search-history`, keep a search history for each browser that searches the node: the home page lists your past searches, sites you opened before are labelled and come first the next time you search, and `/history` lists and clears it. Each browser gets its own profile (a cookie), so people sharing a node see only their own. Both choices are in the settings gear; the node-wide switch is "Remember searches" on the panel. Leave it off on a public server.
-
-The same nodes have an "About you" page (`/about`, linked from the settings gear) where each browser can list its interests, sites it always wants first, and sites it never wants to see. Results that match an interest move up a little and say which interest they match, so "rust" leans towards the language for a programmer and the game for a gamer. Like the history, it stays on the node for that browser only and is applied after results are found, so it is never part of a search sent to other nodes.
-
-A node with a storage limit keeps a quarter of it for sites about those interests: it fills with the network's best sites up to 65% of the limit, then reads on down a trusted node's list keeping only sites about them, asking for the same pages either way so the trusted node learns nothing of the interests. When the interests change, it drops the sites it kept only for the old ones to make room. Full nodes can also set **Focus topics** on the panel (or `plumb run --focus games`, repeatable): they crawl sites about those topics first and twice as often, so the more nodes focus on a topic, the better the network knows it. Unlike About you interests, focus topics are public in effect, since other nodes see what a node crawls.
-
-### Use Plumb as your browser's search engine
-
-Every Plumb page offers Plumb to the browser as a search engine. In Firefox, right-click the address bar on a Plumb page and choose **Add "Plumb Search"**. To add it by hand, use `http://127.0.0.1:8080/search?q=%s`, or `http://127.0.0.1:7586/search?q=%s` for the desktop app.
-
-### Search operators
-
-- `site:github.com plumb` keeps results on that site and its pages (GitHub repositories here), lists the site itself, and links into its own search for the other words. `site:gov` keeps a top-level domain; `-site:example.com` leaves a site out.
-- `"exact words"` keeps results whose name, title or description has those words in that order.
-- `-word` leaves out results that mention the word (or its plural).
-
-They work on the search page, `/api/search`, network search and `/private`, where they never leave the browser: only the other words pick buckets. Queries with operators are not corrected for typos.
-
-### Safe search and language
-
-The settings gear has **Safe search** (off, moderate or strict; `safe=` in the address) and **Language** (`lang=de`).
-
-- Moderate, the default, leaves out sites on the [Block List Project](https://github.com/blocklistproject/Lists) adult list (public domain; each node downloads it weekly into `DATA/safe/`), sites Wikidata calls pornographic, and sites whose name, title or description is plainly adult. Strict also leaves out suggestive ones ("sexy", "nude", "escort") and such pages. Private search applies the same rules except for the blocklist, which stays on the node.
-- Language keeps sites whose homepage says it is in that language (`<html lang>`, read when the homepage is crawled) and sites that do not say, and page sets in that language (English Wikipedia, GitHub and Stack Overflow are English).
-
-### Use Plumb from AI assistants (MCP)
-
-Every node serves an MCP server at `/mcp`, and `plumb mcp` serves one over stdio, with tools that give an AI assistant the official site for a name, say whether an address is a look-alike, and search. In Claude Code: `claude mcp add --transport http plumb https://plumbsearch.org/mcp`. See [docs/mcp.md](docs/mcp.md) for Claude Desktop and other apps, and [docs/local-llms.md](docs/local-llms.md) for models on your own computer (LM Studio, Open WebUI, and anything that takes a SearXNG address), which can also read the pages they find.
-
-## Building an index from real data
+### Building an index from real data
 
 The seed data comes from four public sources. They are only needed to get started; after that the index grows from its own crawls.
 
@@ -169,21 +243,13 @@ A node does this on its own with `plumb run --search-by-meaning`: it downloads t
 | `crates/plumb-index` | Tantivy index and navigational ranking |
 | `crates/plumb-embed` | Site text, the embedding model and the vectors file, for search by meaning |
 | `crates/plumb-net` | The Plumb network: daily crawl assignments, signed crawl batches with Merkle proofs, and the libp2p node (relays, hole punching, gossip, bucket-based network search) |
+| `crates/plumb-answer` | Instant answers worked out from the query alone: sums, unit and currency conversions, the time in a place |
 | `crates/plumb-node` | The `plumb` command line tool, the long-running node behind `plumb run`, and the web page |
 | `crates/plumb-private` | Private search in the browser: fetches buckets and ranks them, compiled to WebAssembly; see [docs/private-search.md](docs/private-search.md) |
 | `crates/plumb-desktop` | The desktop app: a [Tauri](https://v2.tauri.app) window around a node running inside it. A plain `cargo build` leaves it out; see [docs/desktop.md](docs/desktop.md) |
+| `crates/plumb-e2e` | End-to-end tests that run the Docker image, kill containers mid-work and restart them |
 
 `fixtures/` holds the synthetic test data and `eval/brand_queries.tsv` the brand-name test list for real data.
-
-## Roadmap
-
-Each phase ends at a gate that proves it works before the next begins.
-
-1. **Prototype on one machine** (this repository). Gate: brand names on a test list return the official site first.
-2. **Shared index.** Signed records synced between full and light nodes by Merkle root and daily changes; storage settings; optional network search through an Oblivious HTTP relay. Gate: two nodes stay identical using daily changes alone.
-3. **Community crawling.** Random site assignments, receipts on homepage fetches, spot checks; growth from crawled links, Certificate Transparency logs and owner submissions. Gate: the list stays fresh with no new Common Crawl data.
-4. **Private popularity.** Blind tokens for verified crawls, capped reports through a relay, threshold counting of what people search for and pick. Gate: a simulated bot farm cannot move a ranking without matching crawl work.
-5. **Hardening.** Zero-knowledge membership if token issuers become a weak point, and a process for deciding protocol changes.
 
 ## License
 
