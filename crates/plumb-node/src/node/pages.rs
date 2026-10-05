@@ -51,7 +51,10 @@ pub(super) fn run(inner: Arc<Inner>) {
     let mut failed: Option<(String, Instant)> = None;
     let mut fetch_failed: Option<Instant> = None;
     while !inner.stopping() {
-        let settings = inner.settings();
+        let mut settings = inner.settings();
+        if inner.config.blackhole {
+            settings.page_sets = settings.page_sets.all_unless_set();
+        }
         if fetch_failed.is_none_or(|at| at.elapsed() >= FETCH_RETRY_WAIT) {
             fetch_failed = None;
             if let Some(net) = super::network::handle(&inner).cloned() {

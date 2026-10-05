@@ -1397,7 +1397,15 @@ fn render_storage_card(body: &mut String, status: &Status, settings: &NodeSettin
     if let Some(fill) = &status.fill {
         let detail = fill.detail.trim_end_matches('.');
         rest.push_str(&format!(
-            "<p>Filled with the network's crawls: {} sites.{}</p>\n",
+            "<p>{}Filled with the network's crawls: {} sites.{}</p>\n",
+            if fill.blackhole {
+                format!(
+                    "Blackhole: taking all the network's data ({} of the trusted nodes' lists held). ",
+                    fill.lists_done
+                )
+            } else {
+                String::new()
+            },
             group_thousands(fill.filled),
             if detail.is_empty() {
                 String::new()
@@ -2445,6 +2453,7 @@ mod tests {
             total: 1_190_000,
             peer: None,
             detail: "Taking in crawled sites from a trusted node".into(),
+            ..Default::default()
         });
         let (router, node) = app(limited.clone());
         *node.settings.lock().unwrap() = NodeSettings::desktop();

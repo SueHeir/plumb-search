@@ -121,6 +121,12 @@ fn node_config(args: RunArgs) -> NodeConfig {
             net.keep_batches_days = days;
         }
         net.fill = !args.no_fill;
+        if args.blackhole {
+            if args.keep_batches_days.is_none() {
+                net.keep_batches_days = u64::MAX;
+            }
+            net.catch_up_epochs = plumb_net::batch::MAX_BATCH_AGE_EPOCHS;
+        }
         if let Some(minutes) = args.round_minutes {
             net.round_every = (minutes > 0).then(|| Duration::from_secs(minutes * 60));
         }
@@ -129,6 +135,7 @@ fn node_config(args: RunArgs) -> NodeConfig {
         config.publish_records = args.publish_records;
         config.crawl_any_site = args.crawl_any_site;
         config.crawl_with = args.crawl_with;
+        config.blackhole = args.blackhole;
     }
     config
 }
@@ -376,6 +383,29 @@ mod tests {
         assert_eq!(any.network.unwrap().keep_batches_days, 10);
         assert_eq!(any.crawl_concurrency, Some(64));
         assert_eq!(net.keep_batches_days, 35);
+        assert!(!node.blackhole);
+        let hole = config(&["--data", "d", "--network", "--blackhole"]);
+        assert!(hole.blackhole);
+        let hole_net = hole.network.unwrap();
+        assert_eq!(hole_net.keep_batches_days, u64::MAX);
+        assert_eq!(
+            hole_net.catch_up_epochs,
+            plumb_net::batch::MAX_BATCH_AGE_EPOCHS
+        );
+        let kept = config(&[
+            "--data",
+            "d",
+            "--network",
+            "--blackhole",
+            "--keep-batches-days",
+            "90",
+        ]);
+        assert_eq!(kept.network.unwrap().keep_batches_days, 90);
+        assert!(
+            parse(&["--data", "d", "--blackhole"]).is_err(),
+            "--blackhole needs --network"
+        );
+        assert!(parse(&["--data", "d", "--network", "--blackhole", "--no-fill"]).is_err());
         assert_eq!(net.round_every, Some(plumb_net::rounds::ROUND_EVERY));
         let rounds = |minutes: &str| {
             config(&["--data", "d", "--network", "--round-minutes", minutes])

@@ -401,6 +401,19 @@ impl PageSets {
         }
     }
 
+    /// These sets with every one left on Automatic kept in full, for a
+    /// node collecting all it can (`NodeConfig::blackhole`); sets turned
+    /// off or cut to a number stay so.
+    pub fn all_unless_set(&self) -> Self {
+        let mut sets = self.clone();
+        for set in SETS {
+            if sets.size(set.id) == PageSetSize::Auto {
+                sets.0.insert(set.id.to_string(), PageSetSize::All);
+            }
+        }
+        sets
+    }
+
     /// Parses `--pages wikipedia-en=1000000,github=off`.
     pub fn parse(text: &str) -> Result<Self> {
         let mut sets = PageSets::default();
@@ -707,5 +720,17 @@ mod tests {
         );
         assert_eq!(question.page.set_name(), "Stack Overflow");
         assert_eq!(question.page.set_domain(), "stackoverflow.com");
+    }
+
+    #[test]
+    fn a_blackhole_keeps_every_set_left_on_automatic_in_full() {
+        let mut sets = PageSets::default();
+        sets.set("github", PageSetSize::Off);
+        sets.set("stackoverflow", PageSetSize::Top(1_000));
+        let all = sets.all_unless_set();
+        assert_eq!(all.size("wikipedia-en"), PageSetSize::All);
+        assert_eq!(all.size("github"), PageSetSize::Off);
+        assert_eq!(all.size("stackoverflow"), PageSetSize::Top(1_000));
+        assert!(SETS.iter().all(|set| all.size(set.id) != PageSetSize::Auto));
     }
 }

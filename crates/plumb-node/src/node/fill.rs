@@ -28,6 +28,16 @@
 //! ([`prune_for_topics`], with an index build), so the share is free for
 //! the new topics, then reads on from where the best sites stopped again.
 //!
+//! # Blackhole
+//!
+//! A node started with [`super::NodeConfig::blackhole`] takes every trusted
+//! node's list, not just one: once through one node's list it goes on to
+//! the next connected trusted node it has not gone through in the last
+//! [`BLACKHOLE_AGAIN_AFTER`], and comes back to each after that
+//! ([`blackhole_peer`]). Each node's list is in its own order, so each is
+//! read from the top. When it holds every connected trusted node's list,
+//! it waits for one to come due again or a new one to connect.
+//!
 //! # Setting up from the network
 //!
 //! A new node in the network that trusts a node sets up from it rather than
@@ -42,6 +52,7 @@
 //! [`SEED_PEER_WAIT`], or it sends too few sites (a network just started),
 //! the node downloads the seed data as before.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 use std::sync::atomic::Ordering;
@@ -139,6 +150,11 @@ pub(super) const DISK_PER_RECORD_BYTE: u64 = 4;
 /// Rest after going through a trusted node's whole list.
 pub(super) const FILL_AGAIN_AFTER: Duration = Duration::from_secs(7 * 24 * 3600);
 
+/// Rest before a blackhole node goes through a trusted node's whole list
+/// again: crawls shared since arrive anyway, so this only catches what
+/// was missed.
+pub(super) const BLACKHOLE_AGAIN_AFTER: Duration = Duration::from_secs(24 * 3600);
+
 /// Peak memory an index build takes per site: a build of a million
 /// sites peaks at about 2.2 GB, rounded up.
 pub(super) const BUILD_BYTES_PER_SITE: u64 = 2_500;
@@ -178,6 +194,9 @@ pub(super) struct FillState {
     pub prune: bool,
     /// The topics kept last ([`crate::about::Topics::key`]).
     pub focus_key: String,
+    /// Blackhole: when each trusted node's whole list was last gone
+    /// through, in Unix seconds, by node id.
+    pub lists_done: BTreeMap<String, u64>,
     /// Bytes of disk the sites taken in since the last index build are
     /// reckoned to take once indexed, which the disk count does not show
     /// yet, and since when.
@@ -207,6 +226,13 @@ pub struct FillStatus {
     pub peer: Option<String>,
     /// What filling is doing, in words.
     pub detail: String,
+    /// The node collects all the data the network offers
+    /// ([`super::NodeConfig::blackhole`]).
+    #[serde(default)]
+    pub blackhole: bool,
+    /// Trusted nodes whose whole list it went through, in blackhole mode.
+    #[serde(default)]
+    pub lists_done: usize,
 }
 
 impl FillState {
@@ -225,15 +251,46 @@ impl FillState {
             .with_context(|| format!("saving {}", path.display()))
     }
 
-    pub(super) fn status(&self) -> FillStatus {
+    pub(super) fn status(&self, blackhole: bool) -> FillStatus {
         FillStatus {
             filled: self.filled,
             position: self.next.min(self.total),
             total: self.total,
             peer: self.peer.clone(),
             detail: self.detail.clone(),
+            blackhole,
+            lists_done: self.lists_done.len(),
         }
     }
+}
+
+/// Blackhole: the trusted node to fill from next among the `connected`
+/// ones: `reading`, the one whose list is part read, otherwise
+/// the one gone through longest ago (first one never gone through),
+/// leaving out those gone through in the last [`BLACKHOLE_AGAIN_AFTER`].
+/// `None` when every connected one is done.
+pub(super) fn blackhole_peer(
+    reading: Option<&str>,
+    connected: &[String],
+    lists_done: &BTreeMap<String, u64>,
+    now: u64,
+) -> Option<String> {
+    let due = |peer: &String| {
+        lists_done
+            .get(peer)
+            .is_none_or(|done| now >= done.saturating_add(BLACKHOLE_AGAIN_AFTER.as_secs()))
+    };
+    if let Some(peer) = connected
+        .iter()
+        .find(|peer| Some(peer.as_str()) == reading && due(peer))
+    {
+        return Some(peer.clone());
+    }
+    connected
+        .iter()
+        .filter(|peer| due(peer))
+        .min_by_key(|peer| lists_done.get(*peer).copied().unwrap_or(0))
+        .cloned()
 }
 
 /// How many bytes of records a fill round may take in now (each byte of a
@@ -488,7 +545,36 @@ async fn fill_round(inner: &Arc<Inner>) -> Result<()> {
         state.save(&inner.paths.net)?;
         return Ok(());
     }
-    if let Some(done) = state.done_at {
+    let blackhole = inner.config.blackhole && !seed;
+    if blackhole {
+        let connected: Vec<String> = net
+            .fill_peers()
+            .await?
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        let reading = state
+            .peer
+            .as_deref()
+            .filter(|_| state.next > 0 && state.next < state.total);
+        let Some(peer) = blackhole_peer(reading, &connected, &state.lists_done, now) else {
+            let detail = if connected.is_empty() {
+                "Waiting for a trusted node to connect"
+            } else {
+                "Done: holds every connected trusted node's crawled sites"
+            };
+            inner.update_fill(|s| s.detail = detail.into());
+            return Ok(());
+        };
+        // Another node's list, or the same one again: from the top.
+        let again =
+            state.lists_done.contains_key(&peer) && state.total > 0 && state.next >= state.total;
+        if state.peer.as_deref() != Some(peer.as_str()) || again {
+            state.next = 0;
+        }
+        state.peer = Some(peer);
+        state.done_at = None;
+    } else if let Some(done) = state.done_at {
         if now < done + FILL_AGAIN_AFTER.as_secs() {
             inner.update_fill(|s| s.detail = "Done: holds the trusted node's crawled sites".into());
             return Ok(());
@@ -665,12 +751,17 @@ async fn fill_round(inner: &Arc<Inner>) -> Result<()> {
         state.total = page.total;
         if done {
             state.done_at = Some(now_unix());
+            if let Some(peer) = state.peer.clone().filter(|_| blackhole) {
+                state.lists_done.insert(peer, now_unix());
+            }
         }
         if done || seed_room == Some(0) {
             // Set up: from here on, crawled sites only.
             state.seed = false;
         }
-        let detail = if done && seed {
+        let detail = if done && blackhole {
+            "Done with this trusted node's crawled sites; the next one follows".to_string()
+        } else if done && seed {
             "Done: holds the trusted node's sites".to_string()
         } else if done {
             "Done: holds the trusted node's crawled sites".to_string()
@@ -874,6 +965,7 @@ mod tests {
             focus_base: Some(3_000),
             prune: true,
             focus_key: "game".into(),
+            lists_done: BTreeMap::from([("12D3KooW".to_string(), 42)]),
             pending: 77,
             pending_since: 1,
             pending_sites: 9,
@@ -900,6 +992,53 @@ mod tests {
             (Some(4_000), Some(3_000), "game")
         );
         assert!(loaded.prune);
-        assert_eq!(state.status().position, 5_000);
+        assert_eq!(loaded.lists_done, state.lists_done);
+        assert_eq!(state.status(false).position, 5_000);
+        assert_eq!(state.status(true).lists_done, 1);
+    }
+
+    #[test]
+    fn blackhole_goes_through_every_trusted_node_in_turn() {
+        let day = BLACKHOLE_AGAIN_AFTER.as_secs();
+        let now = 10 * day;
+        let peers: Vec<String> = ["a", "b", "c"].iter().map(|p| p.to_string()).collect();
+        let mut done = BTreeMap::new();
+        // Nothing done yet: the one part read, else the first.
+        assert_eq!(
+            blackhole_peer(Some("b"), &peers, &done, now).as_deref(),
+            Some("b")
+        );
+        assert_eq!(
+            blackhole_peer(None, &peers, &done, now).as_deref(),
+            Some("a")
+        );
+        assert_eq!(
+            blackhole_peer(Some("gone"), &peers, &done, now).as_deref(),
+            Some("a")
+        );
+        // "a" just done: on to one never gone through.
+        done.insert("a".to_string(), now);
+        assert_eq!(
+            blackhole_peer(None, &peers, &done, now).as_deref(),
+            Some("b")
+        );
+        done.insert("b".to_string(), now - 1);
+        done.insert("c".to_string(), now - 2);
+        // All done within the day: wait.
+        assert_eq!(blackhole_peer(None, &peers, &done, now), None);
+        // A day on, the one gone through longest ago comes first.
+        assert_eq!(
+            blackhole_peer(None, &peers, &done, now + day).as_deref(),
+            Some("c")
+        );
+        // A new trusted node connecting is taken at once.
+        let mut more = peers.clone();
+        more.push("d".to_string());
+        assert_eq!(
+            blackhole_peer(None, &more, &done, now).as_deref(),
+            Some("d")
+        );
+        // None connected: none.
+        assert_eq!(blackhole_peer(None, &[], &done, now), None);
     }
 }

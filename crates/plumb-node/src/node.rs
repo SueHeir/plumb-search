@@ -214,6 +214,15 @@ pub struct NodeConfig {
     /// The nodes that share the sites with this one under `crawl_any_site`;
     /// they should crawl with it on and name this node in turn.
     pub crawl_with: Vec<plumb_net::PeerId>,
+    /// Collect all the data the network offers (Liz, 2026-10-05: "a
+    /// blackhole setting for docker nodes that just tries to get all the
+    /// data possible"): fill free space from every trusted node's list in
+    /// turn, not just one, going through them again every day; keep every
+    /// page set in full; and (set up in `run.rs`) keep crawl batches for
+    /// good and catch up on every batch still taken. The storage limit, the
+    /// day's download limit, the memory an index build may take and the
+    /// trust rules still hold. Needs `network`.
+    pub blackhole: bool,
     /// Also share the homepages crawled into this records file (with its
     /// journal), such as one a `plumb crawl` is filling, and fold them into
     /// this node's records: every half hour, those crawled since the last
@@ -274,6 +283,7 @@ impl NodeConfig {
             share_popularity: false,
             crawl_any_site: false,
             crawl_with: Vec::new(),
+            blackhole: false,
             publish_records: None,
             settings: NodeSettings::default(),
             manage_other_nodes: false,
@@ -1235,7 +1245,7 @@ impl Inner {
                 .network
                 .as_ref()
                 .filter(|net| net.fill && network::handle(self).is_some())
-                .map(|_| self.fill_state().status()),
+                .map(|_| self.fill_state().status(self.config.blackhole)),
             crawl_left: saved.crawl_left as u64,
             meaning_sites: self.meaning.get().map(|meaning| meaning.len() as u64),
             meaning_work: self.meaning_work(),

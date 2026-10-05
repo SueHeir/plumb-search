@@ -301,6 +301,17 @@ pub struct RunArgs {
     /// the ones given that crawled in the last day.
     #[arg(long, value_name = "PEER_ID", requires = "crawl_any_site")]
     pub crawl_with: Vec<plumb_net::PeerId>,
+    /// Collect all the data the network offers, for a server with disk and
+    /// memory to spare: take the crawled sites of every trusted node, not
+    /// just one, and go through their lists again every day; keep every
+    /// page set (Wikipedia, GitHub, Stack Overflow, books, papers) in full;
+    /// keep the network's crawl batches for good (unless
+    /// --keep-batches-days is given) and ask each node met for all the
+    /// batches still taken. The storage limit, the day's download limit and
+    /// the memory an index build may take still hold, and only trusted
+    /// nodes' sites are taken.
+    #[arg(long, requires = "network", conflicts_with = "no_fill")]
+    pub blackhole: bool,
     /// Minutes between scheduled background rounds of bucket requests.
     /// Searches queue missing buckets for these rounds; 0 disables them and
     /// fetches immediately when searching [default: 10].

@@ -2012,6 +2012,108 @@ async fn a_node_fills_its_free_space_with_a_trusted_node_s_crawls() {
     node.shutdown().await.unwrap();
 }
 
+/// A node in the network holding `domains`, crawled, for others to fill
+/// from: its id, address and handle, and the folder to keep alive.
+async fn crawled_peer(
+    domains: &[&str],
+) -> (
+    plumb_net::PeerId,
+    plumb_net::Multiaddr,
+    plumb_net::NetHandle,
+    tempfile::TempDir,
+) {
+    let peer_dir = tempfile::tempdir().unwrap();
+    let peer_id = plumb_net::load_or_create_key(&peer_dir.path().join("node.key"))
+        .unwrap()
+        .public()
+        .to_peer_id();
+    let now = now_unix();
+    let sites: Vec<SiteRecord> = domains
+        .iter()
+        .enumerate()
+        .map(|(i, domain)| {
+            let mut record = SiteRecord::new(*domain);
+            record.signals.tranco_rank = Some(10 + i as u32);
+            record.url = Some(format!("https://{domain}/"));
+            record.title = Some(format!("Guild of {domain}"));
+            record.crawled_at = Some(now - 600);
+            record
+        })
+        .collect();
+    let mut peer_config = plumb_net::NetConfig::new(peer_dir.path().to_path_buf());
+    peer_config.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+    peer_config.upnp = false;
+    peer_config.local_discovery = false;
+    peer_config.round_every = None;
+    let table = plumb_net::BucketTable::build(&peer_dir.path().join("buckets"), &sites).unwrap();
+    let (peer, _records) = plumb_net::start(peer_config, Arc::new(table))
+        .await
+        .unwrap();
+    let peer_addr: plumb_net::Multiaddr = loop {
+        if let Some(addr) = peer.status().listening.first() {
+            break addr.parse().unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    (
+        peer_id,
+        peer_addr.with_p2p(peer_id).unwrap(),
+        peer,
+        peer_dir,
+    )
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_blackhole_node_fills_from_every_trusted_node() {
+    // Two trusted nodes, each with crawled sites the other lacks.
+    let (a_id, a_addr, a, _a_dir) = crawled_peer(&["harbourmasters.org", "tidetables.net"]).await;
+    let (b_id, b_addr, b, _b_dir) = crawled_peer(&["lighthousekeepers.org"]).await;
+
+    let dir = seeded_dir();
+    let mut config = test_config(dir.path());
+    let mut net = plumb_net::NetConfig::new(PathBuf::new());
+    net.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+    net.upnp = false;
+    net.local_discovery = false;
+    net.round_every = None;
+    net.trusted_peers = vec![a_id, b_id];
+    net.bootstrap = vec![a_addr, b_addr];
+    config.network = Some(net);
+    config.blackhole = true;
+    let node = start(config).await.unwrap();
+    let addr = node.addr();
+    wait_for(addr, "the first index", ready_and_idle).await;
+
+    // It goes through both trusted nodes' lists, not just one.
+    let status = wait_for(addr, "both trusted nodes' crawls", |s| {
+        s.fill
+            .as_ref()
+            .is_some_and(|f| f.filled == 3 && f.lists_done == 2)
+    })
+    .await;
+    let fill = status.fill.unwrap();
+    assert!(fill.blackhole);
+    node.refresh_now();
+    wait_for(addr, "a new index", |s| {
+        ready_and_idle(s) && s.index.as_deref() != Some("000001")
+    })
+    .await;
+    assert_eq!(
+        search(addr, "harbourmasters").await[0].domain,
+        "harbourmasters.org"
+    );
+    assert_eq!(
+        search(addr, "lighthousekeepers").await[0].domain,
+        "lighthousekeepers.org"
+    );
+    let (_, _, panel) = get(addr, "/app").await;
+    assert!(panel.contains("Blackhole"), "{panel}");
+
+    a.shutdown().await;
+    b.shutdown().await;
+    node.shutdown().await.unwrap();
+}
+
 /// A trusted node's buckets plus its page set file.
 struct WithPages(plumb_net::BucketTable, PathBuf);
 
