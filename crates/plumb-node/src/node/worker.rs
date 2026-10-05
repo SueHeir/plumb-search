@@ -74,6 +74,11 @@ const ICONS_KEPT_SINCE: u64 = 1_791_000_000;
 /// with none, is due again for them, best-known sites first.
 const KEY_PAGES_KEPT_SINCE: u64 = 1_791_190_000;
 
+/// The best-known sites due for key pages that a round crawls whether or not
+/// they are this node's to crawl today: a site outside its share would
+/// otherwise keep no sitelinks here until another node's regular recrawl.
+const KEY_PAGES_CATCH_UP_PER_ROUND: usize = 200;
+
 /// Sites without an icon here that a crawl round fetches just the icon of,
 /// most linked first: crawls that came from the network before nodes shared
 /// icons, or through filling, carry none, and those sites would otherwise
@@ -905,6 +910,11 @@ fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Option<ServingIndex
             rechecks.push(target_for(home));
         }
     }
+    for record in key_page_catch_up(&set) {
+        if !rechecks.iter().any(|target| target.domain == record.domain) {
+            rechecks.push(target_for(record));
+        }
+    }
     let candidates: Vec<&SiteRecord> = candidates
         .filter(|record| !rechecks.iter().any(|target| target.domain == record.domain))
         .collect();
@@ -1094,6 +1104,16 @@ fn due_for_key_pages(record: &SiteRecord) -> bool {
         && record
             .crawled_at
             .is_some_and(|at| at < KEY_PAGES_KEPT_SINCE)
+}
+
+/// The best-linked sites, up to [`KEY_PAGES_CATCH_UP_PER_ROUND`], due for
+/// key pages ([`due_for_key_pages`]), assigned to this node or not.
+fn key_page_catch_up(set: &RecordSet) -> Vec<&SiteRecord> {
+    sorted_by_link_score(set)
+        .into_iter()
+        .filter(|record| due_for_key_pages(record))
+        .take(KEY_PAGES_CATCH_UP_PER_ROUND)
+        .collect()
 }
 
 fn last_crawl_answered(record: &SiteRecord) -> bool {
@@ -1471,6 +1491,29 @@ mod tests {
             false
         )));
         assert!(!due_for_key_pages(&SiteRecord::new("never.com")));
+    }
+
+    #[test]
+    fn key_pages_are_caught_up_for_the_best_linked_sites_due() {
+        let site = |domain: &str, rank: u32, at: u64| {
+            let mut record = SiteRecord::new(domain);
+            record.signals.tranco_rank = Some(rank);
+            record.crawled_at = Some(at);
+            record
+        };
+        let old = KEY_PAGES_KEPT_SINCE - 1;
+        let set: RecordSet = [
+            site("paypal.com", 20, old),
+            site("facebook.com", 1, old),
+            site("recent.com", 2, KEY_PAGES_KEPT_SINCE + 60),
+        ]
+        .into_iter()
+        .collect();
+        let domains: Vec<&str> = key_page_catch_up(&set)
+            .iter()
+            .map(|r| r.domain.as_str())
+            .collect();
+        assert_eq!(domains, ["facebook.com", "paypal.com"]);
     }
 
     #[test]
