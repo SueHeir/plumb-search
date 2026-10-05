@@ -451,6 +451,7 @@ fn crawl_facts(record: &SiteRecord) -> SiteRecord {
     facts.aliases = record.aliases.clone();
     facts.headings = record.headings.clone();
     facts.body_text = record.body_text.clone();
+    facts.key_pages = record.key_pages.clone();
     facts.crawled_at = record.crawled_at;
     facts
 }
@@ -641,6 +642,7 @@ mod tests {
             country: None,
             named: false,
             official: false,
+            key_pages: Vec::new(),
         }
     }
 

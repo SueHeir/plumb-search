@@ -18,12 +18,14 @@
 //! | `country`     | [`plumb_core::site_country`], untokenized            | stored, fast                |
 //! | `kind_key`    | [`plumb_core::kind_key`] of each kind                | kind queries ("banks")      |
 //! | `search_url`  | the site's search address                            | stored, site search links   |
+//! | `key_pages`   | the site's key pages, as JSON                        | stored, sitelinks           |
 //!
 //! An official website's aliases (its Wikidata names) also go into
 //! `label_key`, so they name the site as strongly as its domain does, and
 //! every alias starting with "The" is also keyed without it.
 
 use anyhow::{Context, Result};
+use plumb_core::key_pages::valid_key_pages;
 use plumb_core::{
     domain_label, joined, kind_key, normalize_text, site_country, truncate_chars, LinkText,
     SiteRecord, MAX_ALIASES, MAX_HEADINGS, MAX_KINDS, MAX_LINK_TEXTS, MAX_TEXT_CHARS,
@@ -51,6 +53,7 @@ pub(crate) const LINK_SCORE: &str = "link_score";
 pub(crate) const COUNTRY: &str = "country";
 pub(crate) const KIND_KEY: &str = "kind_key";
 pub(crate) const SEARCH_URL: &str = "search_url";
+pub(crate) const KEY_PAGES: &str = "key_pages";
 
 /// How many link texts (most frequent first) also get a joined form.
 const JOINED_LINK_TEXTS: usize = 8;
@@ -82,6 +85,7 @@ pub(crate) struct Fields {
     pub(crate) country: Field,
     pub(crate) kind_key: Field,
     pub(crate) search_url: Field,
+    pub(crate) key_pages: Field,
 }
 
 impl Fields {
@@ -109,6 +113,7 @@ impl Fields {
             country: field(COUNTRY)?,
             kind_key: field(KIND_KEY)?,
             search_url: field(SEARCH_URL)?,
+            key_pages: field(KEY_PAGES)?,
         })
     }
 }
@@ -134,6 +139,7 @@ pub(crate) fn schema() -> Schema {
     builder.add_text_field(COUNTRY, STRING | STORED | FAST);
     builder.add_text_field(KIND_KEY, keys(IndexRecordOption::Basic));
     builder.add_text_field(SEARCH_URL, STORED);
+    builder.add_text_field(KEY_PAGES, STORED);
     builder.build()
 }
 
@@ -256,6 +262,12 @@ pub(crate) fn document(
     }
     if let Some(search_url) = non_empty(&record.search_url) {
         doc.add_text(f.search_url, search_url.trim());
+    }
+    let key_pages = valid_key_pages(record.key_pages.clone(), &record.domain);
+    if !key_pages.is_empty() {
+        if let Ok(json) = serde_json::to_string(&key_pages) {
+            doc.add_text(f.key_pages, json);
+        }
     }
     doc
 }

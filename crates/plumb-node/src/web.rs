@@ -63,7 +63,8 @@ use axum::{Json, Router};
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
 use plumb_core::{
-    collapse_whitespace, display_url, now_unix, site_initial, truncate_chars, SiteRecord,
+    collapse_whitespace, display_url, now_unix, site_initial, truncate_chars, KeyPage, PageIntent,
+    SiteRecord,
 };
 use plumb_index::pages::{place_pages, PageHit};
 use plumb_index::{
@@ -1381,6 +1382,9 @@ a.r:visited .t{color:var(--seen)}\
 .d{margin:.3rem 0 0;line-height:1.55;overflow-wrap:anywhere}\
 .sub{margin:.35rem 0 0;font-size:.9rem;line-height:1.5;overflow-wrap:anywhere}\
 .sub a{color:var(--link)}\
+.kp{display:flex;flex-wrap:wrap;gap:.3rem 1.25rem;margin:.45rem 0 0;font-size:.9rem}\
+.kp li{padding:0;margin:0}\
+.kp a{color:var(--link)}\
 .tag,.m,.s{color:var(--muted)}\
 .m,.s{font-size:.8rem}\
 .m{margin-top:.25rem}\
@@ -1844,6 +1848,9 @@ fn fill_from_network(hit: &Hit, result: &NetworkResult) -> Hit {
         if blank(&hit.description) && !blank(&shared.description) {
             hit.description.clone_from(&shared.description);
         }
+        if hit.key_pages.is_empty() {
+            hit.key_pages.clone_from(&shared.key_pages);
+        }
     }
     hit.score = hit.score.max(result.hit.score);
     hit
@@ -2025,6 +2032,11 @@ fn render_results(
             {
                 if let Some(end) = rendered.rfind("</li>") {
                     rendered.insert_str(end, &page_line(&page.hit));
+                }
+            }
+            if position == 0 {
+                if let Some(end) = rendered.rfind("<div class=\"m\">") {
+                    rendered.insert_str(end, &key_pages_line(&item.hit, query));
                 }
             }
             body.push_str(&rendered);
@@ -2243,6 +2255,56 @@ fn render_page(out: &mut String, hit: &PageHit, icon: Option<&str>) {
     );
 }
 
+/// Most key pages listed under a result.
+const SHOWN_KEY_PAGES: usize = 6;
+
+/// The site's key pages (sign in, docs, pricing) under the top result,
+/// when the query names that site: on its own ("paypal"), or followed by
+/// what is wanted from it ("paypal login"), whose page then comes first,
+/// in bold. Empty otherwise, and when the site has fewer than two key
+/// pages and none for what was asked.
+fn key_pages_line(hit: &Hit, query: &str) -> String {
+    if !hit.named {
+        return String::new();
+    }
+    let mut pages: Vec<(&KeyPage, String)> = hit
+        .key_pages
+        .iter()
+        .filter(|page| page.is_valid_for(&hit.domain))
+        .filter_map(|page| Some((page, http_url(&page.url)?)))
+        .take(SHOWN_KEY_PAGES)
+        .collect();
+    let wanted = PageIntent::of_query_end(query).map(|(intent, _)| intent);
+    let matched = wanted.and_then(|wanted| {
+        pages
+            .iter()
+            .position(|(page, _)| page.intent() == Some(wanted))
+    });
+    if let Some(at) = matched {
+        let page = pages.remove(at);
+        pages.insert(0, page);
+    }
+    if pages.len() < 2 && matched.is_none() {
+        return String::new();
+    }
+    let mut line = String::from("<ul class=\"kp\">");
+    for (i, (page, href)) in pages.iter().enumerate() {
+        let label = escape_html(&truncate_chars(&page.label, 40));
+        let label = if i == 0 && matched.is_some() {
+            format!("<strong>{label}</strong>")
+        } else {
+            label
+        };
+        let _ = write!(
+            line,
+            "<li><a href=\"{}\" rel=\"noreferrer\">{label}</a></li>",
+            escape_html(href)
+        );
+    }
+    line.push_str("</ul>");
+    line
+}
+
 /// "Wikipedia: Python (programming language)", under the result for the
 /// site the page is about.
 fn page_line(hit: &PageHit) -> String {
@@ -2402,6 +2464,7 @@ mod tests {
             country: None,
             named: false,
             official: false,
+            key_pages: Vec::new(),
         }
     }
 
@@ -2553,6 +2616,73 @@ mod tests {
             *fake.calls.lock().unwrap(),
             vec![("us bank".to_string(), DEFAULT_LIMIT)]
         );
+    }
+
+    #[tokio::test]
+    async fn the_site_searched_for_lists_its_key_pages() {
+        let page = |label: &str, url: &str| KeyPage {
+            label: label.into(),
+            url: url.into(),
+        };
+        let mut paypal = hit(
+            "paypal.com",
+            "https://www.paypal.com/",
+            Some("PayPal"),
+            None,
+        );
+        paypal.named = true;
+        paypal.key_pages = vec![
+            page("Sign Up", "https://www.paypal.com/signup"),
+            page("Log In", "https://www.paypal.com/signin"),
+            page("Help", "https://www.paypal.com/help"),
+            page("Phish", "https://paypal-login.example/"),
+        ];
+        let mut other = hit(
+            "paypal-login.example",
+            "https://paypal-login.example/",
+            None,
+            None,
+        );
+        other.key_pages = paypal.key_pages.clone();
+        let fake = backend(vec![paypal.clone(), other]);
+        let search = |q: &'static str| {
+            let fake = fake.clone();
+            async move { send(router_with(fake, HomeCountry::Off), q).await.2 }
+        };
+
+        let body = search("/search?q=paypal").await;
+        assert!(
+            body.contains(
+                "<ul class=\"kp\"><li><a href=\"https://www.paypal.com/signup\" \
+                 rel=\"noreferrer\">Sign Up</a></li><li><a href=\"https://www.paypal.com/signin\" \
+                 rel=\"noreferrer\">Log In</a></li><li><a href=\"https://www.paypal.com/help\" \
+                 rel=\"noreferrer\">Help</a></li></ul>"
+            ),
+            "{body}"
+        );
+        assert_eq!(
+            body.matches("class=\"kp\"").count(),
+            1,
+            "only the top result"
+        );
+        assert!(!body.contains("paypal-login.example/\" rel=\"noreferrer\">Phish"));
+
+        // What the query asks for comes first.
+        let body = search("/search?q=paypal+login").await;
+        assert!(body.contains(
+            "<ul class=\"kp\"><li><a href=\"https://www.paypal.com/signin\" \
+             rel=\"noreferrer\"><strong>Log In</strong></a></li>"
+        ));
+
+        // Not for a top result the query does not name.
+        paypal.named = false;
+        let body = send(
+            router_with(backend(vec![paypal]), HomeCountry::Off),
+            "/search?q=pay",
+        )
+        .await
+        .2;
+        assert!(!body.contains("class=\"kp\""));
     }
 
     #[tokio::test]

@@ -384,6 +384,7 @@ mod tests {
             country: None,
             named,
             official: false,
+            key_pages: Vec::new(),
         };
         let page = |title: &str, site: Option<&str>| plumb_index::pages::PageHit {
             page: Page {

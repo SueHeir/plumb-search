@@ -145,6 +145,10 @@ fn parse(line: &str, now: u64, uncrawled: bool) -> Result<SiteRecord> {
     record.search_url = record
         .search_url
         .filter(|template| search_link(template, &record.domain, "x").is_some());
+    record.key_pages = plumb_core::key_pages::valid_key_pages(
+        std::mem::take(&mut record.key_pages),
+        &record.domain,
+    );
     match record.crawled_at {
         Some(crawled_at) => {
             ensure!(crawled_at <= now + EPOCH_SECS / 24, "crawled in the future");
