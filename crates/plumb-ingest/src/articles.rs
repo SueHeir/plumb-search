@@ -33,6 +33,7 @@ use tracing::info;
 
 use crate::download::{download_to_file, part_path};
 use crate::open_maybe_gz;
+use crate::wikidata::ItemSite;
 
 /// Where Wikimedia's dumps are.
 pub const DUMPS_URL: &str = "https://dumps.wikimedia.org";
@@ -455,19 +456,16 @@ pub fn build_articles(lang: &str, dumps: &ArticleDumps) -> Result<Vec<Article>> 
                 }
                 aliases.push(alias.into());
             }
-            let site = page
-                .item
-                .as_deref()
-                .and_then(|item| sites.get(item))
-                .cloned();
+            let site = page.item.as_deref().and_then(|item| sites.get(item));
             Article {
                 title: page.title.into(),
                 description: page.description.map(Into::into),
                 item: page.item.map(Into::into),
-                site,
+                site: site.map(|site| site.domain.clone()),
                 views: page.views,
                 aliases,
                 profiles: Vec::new(),
+                website: site.and_then(ItemSite::website).map(str::to_string),
             }
         })
         .collect();
@@ -526,12 +524,11 @@ fn open_pageviews(path: &Path) -> Result<Box<dyn BufRead>> {
     }
 }
 
-/// Official websites' registrable domains by Wikidata item. An item with
-/// several keeps the first.
-fn official_site_by_item(path: &Path) -> Result<HashMap<String, String>> {
+/// Official websites by Wikidata item ([`ItemSite`]).
+fn official_site_by_item(path: &Path) -> Result<HashMap<String, ItemSite>> {
     let mut sites = HashMap::new();
-    for site in crate::load_wikidata_official_sites(path)? {
-        sites.entry(site.item).or_insert(site.domain);
+    for claim in crate::load_wikidata_official_sites(path)? {
+        ItemSite::add(&mut sites, &claim);
     }
     Ok(sites)
 }
@@ -707,7 +704,8 @@ de.wikipedia Marie_Curie 1 desktop 70000 A1
         };
         let sites = write(
             "sites.tsv",
-            "item\tlabel\twebsite\nQ28865\tPython\thttps://www.python.org/\n",
+            "item\tlabel\twebsite\nQ28865\tPython\thttps://www.python.org/\n\
+             Q7186\tMarie Curie\thttps://curie.example.org/\n",
         );
         ArticleDumps {
             page: write("page.sql", PAGE),
@@ -794,9 +792,12 @@ UNLOCK TABLES;
             curie.aliases,
             ["Madame Curie", "Sklodowska", "Maria Sklodowska-Curie"]
         );
-        assert_eq!(curie.site, None);
+        // Her site is a part of example.org, so its address is kept.
+        assert_eq!(curie.site.as_deref(), Some("example.org"));
+        assert_eq!(curie.website.as_deref(), Some("https://curie.example.org/"));
         let python = &articles[0];
         assert_eq!(python.site.as_deref(), Some("python.org"));
+        assert_eq!(python.website, None);
         // A redirect to a section is not an alias.
         assert!(python.aliases.is_empty());
     }

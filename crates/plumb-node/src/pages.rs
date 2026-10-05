@@ -75,6 +75,12 @@ pub const SETS: &[SetInfo] = &[
         pages: 2_000_000,
         bytes_per_page: 160,
     },
+    SetInfo {
+        id: plumb_index::pages::WIKIDATA_SET,
+        name: "Official profiles without an article (Wikidata)",
+        pages: 100_000,
+        bytes_per_page: 200,
+    },
     // Searched apart from the pages, by where they are (see
     // `crate::places`).
     SetInfo {

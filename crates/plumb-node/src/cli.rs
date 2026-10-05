@@ -33,7 +33,8 @@ pub enum Command {
     /// for a node to list single pages with its sites.
     FetchPages(FetchPagesArgs),
     /// Add official profiles (YouTube, Twitch, X, app stores, ...) from
-    /// Wikidata to a Wikipedia articles file made by fetch-pages.
+    /// Wikidata to a Wikipedia articles file made by fetch-pages, and write
+    /// the items with profiles but no article as the wikidata set beside it.
     FetchProfiles(FetchProfilesArgs),
     /// Fold seed data and earlier records into one records file.
     Ingest(IngestArgs),

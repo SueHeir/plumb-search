@@ -27,6 +27,11 @@
 //!
 //! Such lines are not pages: the top `N` articles are the first `N` lines
 //! that are not.
+//!
+//! The same line carries the item's official website when that is not
+//! the front page of a site of its own: `website=https://music.youtube.com/`
+//! for YouTube Music, whose site is youtube.com. Readers made before it
+//! leave it out as a service they do not know.
 
 use std::io::{BufRead, Write};
 
@@ -75,7 +80,15 @@ pub struct Article {
     /// The item's official profiles (a YouTube channel, an X account).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub profiles: Vec<Profile>,
+    /// The item's official website when it is a subdomain or an inner
+    /// page of [`Article::site`] rather than its front page:
+    /// `https://music.youtube.com/` for YouTube Music.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub website: Option<String>,
 }
+
+/// The key of an official website on a line of profiles.
+pub const WEBSITE_KEY: &str = "website";
 
 /// What starts a line of profiles in an articles file.
 pub const PROFILES_LINE: &str = "profiles\t";
@@ -86,13 +99,25 @@ pub fn is_profiles_line(line: &[u8]) -> bool {
     line.starts_with(PROFILES_LINE.as_bytes())
 }
 
-/// The item and profiles of a line of profiles, `None` for another line.
-pub fn parse_profiles_line(line: &str) -> Option<(&str, Vec<Profile>)> {
+/// The item, profiles and official website of a line of profiles, `None`
+/// for another line.
+pub fn parse_profiles_line(line: &str) -> Option<(&str, Vec<Profile>, Option<String>)> {
     let rest = line
         .trim_end_matches(['\n', '\r'])
         .strip_prefix(PROFILES_LINE)?;
     let (item, profiles) = rest.split_once('\t')?;
-    Some((item.trim(), parse_profiles(profiles)))
+    let website = profiles.split('|').find_map(|pair| {
+        let (key, url) = pair.split_once('=')?;
+        let url = url.trim();
+        (key.trim() == WEBSITE_KEY && is_web_address(url)).then(|| url.to_string())
+    });
+    Some((item.trim(), parse_profiles(profiles), website))
+}
+
+/// Whether `url` is an `http` or `https` address that fits a field.
+fn is_web_address(url: &str) -> bool {
+    (url.starts_with("https://") || url.starts_with("http://"))
+        && !url.contains(['\t', '\n', '\r', '|', ' '])
 }
 
 /// The address of the article `title` on Wikipedia in `lang`.
@@ -147,7 +172,15 @@ pub fn write_article(out: &mut impl Write, article: &Article) -> std::io::Result
         field(article.site.as_deref().unwrap_or("")),
         aliases.join("|"),
     )?;
-    let profiles = write_profiles(&article.profiles);
+    let mut profiles = write_profiles(&article.profiles);
+    if let Some(website) = article.website.as_deref().filter(|url| is_web_address(url)) {
+        if !profiles.is_empty() {
+            profiles.push('|');
+        }
+        profiles.push_str(WEBSITE_KEY);
+        profiles.push('=');
+        profiles.push_str(website);
+    }
     if !profiles.is_empty() {
         write!(out, "{PROFILES_LINE}")?;
         writeln!(
@@ -200,10 +233,11 @@ impl<I: Iterator<Item = String>> Iterator for ArticleLines<I> {
             if (self.number == 1 && line.starts_with("views\t")) || line.trim().is_empty() {
                 continue;
             }
-            if let Some((item, profiles)) = parse_profiles_line(&line) {
+            if let Some((item, profiles, website)) = parse_profiles_line(&line) {
                 if let Some((_, article)) = &mut self.pending {
                     if article.item.as_deref() == Some(item) {
                         article.profiles = profiles;
+                        article.website = website;
                     }
                 }
                 continue;
@@ -259,6 +293,7 @@ pub fn parse_article(line: &str) -> Result<Article> {
             .map(str::to_string)
             .collect(),
         profiles: Vec::new(),
+        website: None,
     })
 }
 
@@ -316,6 +351,7 @@ mod tests {
             views: 81234,
             aliases: vec!["Maria Curie".into(), "Madame Curie".into()],
             profiles: Vec::new(),
+            website: None,
         };
         let mut out = Vec::new();
         out.extend_from_slice(ARTICLES_HEADER.as_bytes());
@@ -366,6 +402,26 @@ mod tests {
         assert_eq!(read_articles(&out[..], 1).unwrap(), [beast]);
         // A reader made before profiles finds no article in their line.
         assert!(parse_article("profiles\tQ1\tx=a").is_err());
+    }
+
+    #[test]
+    fn websites_ride_on_the_line_of_profiles() {
+        let music = Article {
+            title: "YouTube Music".into(),
+            item: Some("Q28404534".into()),
+            site: Some("youtube.com".into()),
+            views: 700,
+            website: Some("https://music.youtube.com/".into()),
+            ..Article::default()
+        };
+        let mut out = Vec::new();
+        out.extend_from_slice(ARTICLES_HEADER.as_bytes());
+        write_article(&mut out, &music).unwrap();
+        let text = String::from_utf8(out.clone()).unwrap();
+        assert!(text.contains("\nprofiles\tQ28404534\twebsite=https://music.youtube.com/\n"));
+        assert_eq!(read_articles(&out[..], 10).unwrap(), [music]);
+        // Readers made before websites see no profile in it.
+        assert!(parse_profiles("website=https://music.youtube.com/").is_empty());
     }
 
     #[test]
