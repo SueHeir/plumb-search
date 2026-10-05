@@ -529,3 +529,68 @@ fn package_cards_say_version_install_and_docs() {
     );
     assert!(reply["error"].is_object());
 }
+
+#[test]
+fn findings_are_reported_and_listed_with_the_next_search() {
+    let dir = tempfile::tempdir().unwrap();
+    let findings = Arc::new(crate::findings::Findings::in_dir(dir.path()).unwrap());
+    let mut paypal = hit("paypal.com", 2.0, 0.9, true);
+    paypal.official = true;
+    let mcp = server(vec![paypal]).with_findings(Some(Arc::clone(&findings)));
+    let reply = mcp
+        .handle(&json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }))
+        .unwrap();
+    let names: Vec<&str> = reply["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"report_finding"));
+    let reply = call(
+        &mcp,
+        "report_finding",
+        json!({
+            "query": "tokio latest version",
+            "url": "https://crates.io/crates/tokio",
+            "why": "crates.io lists the newest release",
+            "answer": "1.47.1",
+            "task": "upgrading a web server",
+        }),
+    );
+    assert_eq!(reply["result"]["isError"], false, "{reply}");
+    assert_eq!(findings.len(), 1);
+    let reply = call(
+        &mcp,
+        "search",
+        json!({ "query": "latest version of tokio" }),
+    );
+    let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(
+        text.starts_with(
+            "Found before (searched \"tokio latest version\", just now): 1.47.1 Source: \
+             https://crates.io/crates/tokio (crates.io lists the newest release)"
+        ),
+        "{text}"
+    );
+    // A look-alike's page is not kept.
+    let reply = call(
+        &mcp,
+        "report_finding",
+        json!({
+            "query": "paypal login",
+            "url": "https://paypal-login.us/",
+            "why": "it has the form",
+            "answer": "log in there",
+        }),
+    );
+    assert_eq!(reply["result"]["isError"], true, "{reply}");
+    assert_eq!(findings.len(), 1);
+    // Without findings the tool is not there.
+    let reply = call(
+        &server(Vec::new()),
+        "report_finding",
+        json!({ "query": "x" }),
+    );
+    assert!(reply["error"].is_object());
+}

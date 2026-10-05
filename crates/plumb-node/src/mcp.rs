@@ -48,6 +48,7 @@ use plumb_index::{
 use serde_json::{json, Map, Value};
 
 use crate::cli::McpArgs;
+use crate::findings::{Finding, Findings};
 use crate::rank_config;
 use crate::web::answers;
 use crate::web::{IndexBackend, SearchBackend, StatusSource, MAX_QUERY_CHARS};
@@ -95,6 +96,15 @@ const INSTRUCTIONS: &str = "Plumb Search finds websites by name. Before opening 
      and names, not the full text of pages, so search by name or topic rather than by \
      question.";
 
+/// Added to [`INSTRUCTIONS`] when `report_finding` is offered.
+const FINDINGS_INSTRUCTIONS: &str = " Whenever a search led you to an answer, call \
+     report_finding with what you searched for, the page that answered it, why it helped and \
+     the answer itself: the next search for it on this computer starts with that answer, so it \
+     need not be worked out again. search lists such answers first, as found_before.";
+
+/// Findings listed with a search's results.
+const MAX_FOUND_BEFORE: usize = 3;
+
 /// Added to [`INSTRUCTIONS`] when `read_page` is offered.
 const READ_INSTRUCTIONS: &str = " To learn what a page says, call read_page with its URL: \
      search to find the right site or page, then read it.";
@@ -111,6 +121,9 @@ pub struct Mcp {
     rates: Option<Rates>,
     /// The node, for recent headlines; `None` answers without them.
     node: Option<Arc<dyn StatusSource>>,
+    /// What agents found before; without them `report_finding` is not
+    /// offered.
+    findings: Option<Arc<Findings>>,
 }
 
 /// What `read_page` fetches pages with: a reader, and the runtime its
@@ -147,7 +160,15 @@ impl Mcp {
             reader: None,
             rates: None,
             node: None,
+            findings: None,
         }
+    }
+
+    /// Offers `report_finding`, keeping findings in `findings`, and lists
+    /// those that match a search with its results.
+    pub fn with_findings(mut self, findings: Option<Arc<Findings>>) -> Self {
+        self.findings = findings;
+        self
     }
 
     /// Offers `read_page`, fetching pages with `reader`.
@@ -199,9 +220,15 @@ impl Mcp {
         let id = id?;
         let params = object.get("params").cloned().unwrap_or(Value::Null);
         let result = match method {
-            "initialize" => Ok(initialize(&params, self.reader.is_some())),
+            "initialize" => Ok(initialize(
+                &params,
+                self.reader.is_some(),
+                self.findings.is_some(),
+            )),
             "ping" => Ok(json!({})),
-            "tools/list" => Ok(json!({ "tools": tools(self.reader.is_some()) })),
+            "tools/list" => Ok(json!({
+                "tools": tools(self.reader.is_some(), self.findings.is_some())
+            })),
             "tools/call" => self.call(&params),
             "resources/list" => Ok(json!({ "resources": [] })),
             "resources/templates/list" => Ok(json!({ "resourceTemplates": [] })),
@@ -291,6 +318,21 @@ impl Mcp {
                 };
                 let options = self.options(args)?;
                 self.package(&name, registry, &options)
+            }
+            "report_finding" if self.findings.is_some() => {
+                let query = text_arg(args, "query")?;
+                let url = text_arg(args, "url")?;
+                let why = text_arg(args, "why")?;
+                let answer = args
+                    .get("answer")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|a| !a.is_empty())
+                    .ok_or((INVALID_PARAMS, "answer is required".to_string()))?
+                    .to_string();
+                let task = args.get("task").and_then(Value::as_str);
+                let options = self.options(args)?;
+                self.report_finding(&query, &url, &why, &answer, task, &options)
             }
             "read_page" if self.reader.is_some() => {
                 let read = ReadArgs::of(args)?;
@@ -590,6 +632,24 @@ impl Mcp {
         if !headlines.is_empty() {
             fields.insert("recent".into(), json!(headlines));
         }
+        let found_before: Vec<Value> = self
+            .findings
+            .iter()
+            .flat_map(|findings| findings.for_query(query, MAX_FOUND_BEFORE))
+            .map(|finding| {
+                json!({
+                    "query": finding.query,
+                    "url": finding.url,
+                    "why": finding.why,
+                    "answer": finding.answer,
+                    "task": finding.task,
+                    "reported": crate::web::time_ago(finding.at, now),
+                })
+            })
+            .collect();
+        if !found_before.is_empty() {
+            fields.insert("found_before".into(), json!(found_before));
+        }
         Ok(answer_json)
     }
 
@@ -621,6 +681,37 @@ impl Mcp {
             "name": name,
             "found": !packages.is_empty(),
             "packages": packages,
+        }))
+    }
+
+    /// `report_finding`: keeps what an agent found, unless its page is a
+    /// look-alike of another site.
+    pub fn report_finding(
+        &self,
+        query: &str,
+        url: &str,
+        why: &str,
+        answer: &str,
+        task: Option<&str>,
+        options: &SearchOptions,
+    ) -> Result<Value> {
+        let Some(findings) = &self.findings else {
+            bail!("this node keeps no findings");
+        };
+        let finding = Finding::new(query, url, why, answer, task, plumb_core::now_unix())?;
+        let check = self.check_lookalike(&finding.url, options)?;
+        if check["verdict"] == "lookalike" {
+            bail!(
+                "{} looks like a look-alike of another site, so it was not kept",
+                finding.url
+            );
+        }
+        findings.add(finding.clone())?;
+        Ok(json!({
+            "kept": true,
+            "query": finding.query,
+            "url": finding.url,
+            "findings": findings.len(),
         }))
     }
 
@@ -837,7 +928,7 @@ pub fn parse_error() -> Value {
     error(Value::Null, PARSE_ERROR, "the message is not JSON")
 }
 
-fn initialize(params: &Value, read_pages: bool) -> Value {
+fn initialize(params: &Value, read_pages: bool, findings: bool) -> Value {
     let asked = params.get("protocolVersion").and_then(Value::as_str);
     let version = asked
         .and_then(|asked| PROTOCOL_VERSIONS.iter().find(|v| **v == asked))
@@ -850,17 +941,17 @@ fn initialize(params: &Value, read_pages: bool) -> Value {
             "title": "Plumb Search",
             "version": env!("CARGO_PKG_VERSION"),
         },
-        "instructions": if read_pages {
-            format!("{INSTRUCTIONS}{READ_INSTRUCTIONS}")
-        } else {
-            INSTRUCTIONS.to_string()
-        },
+        "instructions": format!(
+            "{INSTRUCTIONS}{}{}",
+            if read_pages { READ_INSTRUCTIONS } else { "" },
+            if findings { FINDINGS_INSTRUCTIONS } else { "" },
+        ),
     })
 }
 
 /// The tools' descriptions, as `tools/list` returns them; `read_pages`
-/// adds `read_page`.
-pub fn tools(read_pages: bool) -> Value {
+/// adds `read_page`, `findings` `report_finding`.
+pub fn tools(read_pages: bool, findings: bool) -> Value {
     let country = json!({
         "type": "string",
         "description": "Optional home country, a two-letter code such as US or DE: its sites \
@@ -967,7 +1058,37 @@ pub fn tools(read_pages: bool) -> Value {
             .expect("an array")
             .push(read_page_tool());
     }
+    if findings {
+        tools
+            .as_array_mut()
+            .expect("an array")
+            .push(report_finding_tool());
+    }
     tools
+}
+
+/// `report_finding`'s description.
+fn report_finding_tool() -> Value {
+    json!({
+        "name": "report_finding",
+        "title": "Report what a search found",
+        "description": "Whenever a search led you to an answer, report it: what you searched \
+             for, the page that answered it, why that page helped, and the answer itself. The \
+             next search for the same thing on this computer lists it first (found_before), \
+             so no agent has to work it out again. Kept on this node only, never shared.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": { "type": "string", "description": "What you searched for, as you searched it." },
+                "url": { "type": "string", "description": "The page that had the answer." },
+                "why": { "type": "string", "description": "Why that page helped (\"the changelog lists each release with its date\")." },
+                "answer": { "type": "string", "description": "The answer you found, in a few sentences, with any version numbers, commands or code it needs." },
+                "task": { "type": "string", "description": "Optional: what you were doing (\"upgrading tokio in a web server\")." },
+            },
+            "required": ["query", "url", "why", "answer"],
+        },
+        "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false },
+    })
 }
 
 /// `read_page`'s description.
