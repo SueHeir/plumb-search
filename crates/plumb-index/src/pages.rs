@@ -912,7 +912,10 @@ pub fn place_pages(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) -> Ve
             continue;
         }
         let at = if hit.whole {
-            usize::from(site_named)
+            // Only the best of them leads: another edition of the book
+            // comes after the best site.
+            let led = placed.iter().any(|p| p.hit.whole);
+            usize::from(site_named || led)
         } else if !hit.named && hit.page.topic().is_some() {
             // A question or paper with most of the query's words.
             1
