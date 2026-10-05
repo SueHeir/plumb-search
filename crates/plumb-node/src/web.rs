@@ -434,6 +434,9 @@ struct AppState {
     mcp_limiter: Arc<mcp::Limiter>,
     /// Fetches pages for `/mcp`'s `read_page`.
     page_reader: Arc<mcp::SharedReader>,
+    /// What agents found, for `/mcp`'s `report_finding`; opened from the
+    /// node's data directory when first needed.
+    findings: Arc<std::sync::OnceLock<Option<Arc<crate::findings::Findings>>>>,
 }
 
 impl AppState {
@@ -442,6 +445,22 @@ impl AppState {
     fn setting_up(&self) -> Option<Status> {
         let status = self.node.as_ref()?.status();
         (status.phase != Phase::Ready).then_some(status)
+    }
+
+    /// The node's findings; `None` for `plumb serve`, which keeps no data.
+    fn findings(&self) -> Option<Arc<crate::findings::Findings>> {
+        self.findings
+            .get_or_init(|| {
+                let dir = self.node.as_ref()?.data_dir()?;
+                match crate::findings::Findings::in_dir(&dir) {
+                    Ok(findings) => Some(Arc::new(findings)),
+                    Err(err) => {
+                        error!("opening findings: {err:#}");
+                        None
+                    }
+                }
+            })
+            .clone()
     }
 
     fn network(&self) -> Option<Arc<NetHandle>> {
@@ -517,6 +536,7 @@ pub fn router_with(backend: Arc<dyn SearchBackend>, settings: impl Into<WebSetti
         rates: Arc::default(),
         mcp_limiter: Arc::default(),
         page_reader: Arc::default(),
+        findings: Arc::default(),
     })
 }
 
@@ -540,6 +560,7 @@ pub fn node_router_with(
         rates: Arc::default(),
         mcp_limiter: Arc::default(),
         page_reader: Arc::default(),
+        findings: Arc::default(),
     })
 }
 

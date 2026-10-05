@@ -17,6 +17,7 @@ All but `read_page` only read the index.
 | `search` | `query`, `limit` (1 to 25, default 10) | the normal results: sites best first, plus pages such as Wikipedia articles and Stack Overflow questions with where they are placed. With them, what the results page shows: the instant answer (`12 * 7`, `10 km in miles`, `100 usd to eur`, `time in tokyo`), the info box about what the query names, an official profile asked for (`mrbeast youtube`), a package's card when the query asks for one (`serde crate`, `requests python`, `latest version of lodash`) and recent headlines. Takes the search page's operators (`site:github.com`, `"exact words"`, `-word`) |
 | `package` | `name` ("serde", "@types/node"), `registry` (optional: `npm`, `pypi`, `crates`, `go`, `gem`, `composer`, `nuget`, `maven`) | the package's card: latest version and its date, license, install command, and where its docs, code and homepage are, from the `packages` page set (see [pages.md](pages.md#software-packages)). One line, so an agent need not open the registry's page |
 | `site_info` | `domain` | the site's title and description, whether Wikidata lists it as official, how well known it is, its country and pages about it |
+| `report_finding` | `query`, `url`, `why`, `answer`, `task` (optional) | keeps what an agent found: what it searched for, the page that answered it, why that page helped, and the answer. The next `search` for the same words (in any order, or most of them) lists it first as `found_before`, so no agent has to work it out again. Only offered to apps on the node's own computer (see [Findings](#findings)) |
 | `read_page` | `url`, `start` (default 0), `max_chars` (200 to 30000, default 6000), `find` (words to jump to), `links` (default false) | the page's text, with headings, lists and tables marked in Markdown and menus, footers and scripts left out; where the next part starts on a long page; the page's links if asked; and `check_lookalike`'s verdict on where the page ended up. Only offered to apps on the node's own computer (see below) |
 
 Each also takes an optional `country`, a two-letter code (`US`, `DE`) whose sites rank a little higher, or `any` for none. Without it the node's home country setting decides.
@@ -81,6 +82,16 @@ curl -s https://plumbsearch.org/mcp -H 'content-type: application/json' -d '{
 `read_page` fetches the page from wherever it runs, keeps nothing, and adds nothing to the index: Plumb still crawls homepages only. Like the crawler it stays off private networks, so a page cannot send it to your router or a cloud metadata address, and it reads web pages and plain text only, not PDFs or images. A bot check (Cloudflare's "Just a moment..." and the like) is reported as an error rather than returned as the page.
 
 A node offers it only to AI apps on its own computer: a request from a loopback address (`127.0.0.1`, `::1`) that no proxy passed on. plumbsearch.org and other public nodes never offer it, since anyone could make them fetch pages. `plumb mcp` offers it whichever node it asks, because it fetches pages itself, on your computer. For a home server whose AI apps run on other computers, start the node with `--mcp-read-pages` to offer it to every client; never do that on a node the internet can reach.
+
+## Findings
+
+Agents search for the same things again and again: the latest version of a library, the flag that fixes an error, the page with the API they need. `report_finding` lets an agent leave what it found for the next one. A finding is the search, the page, why the page helped and the answer itself; `search` lists up to three that match the query before the results:
+
+```text
+Found before (searched "tokio latest version", 2 days ago): 1.47.1 Source: https://crates.io/crates/tokio (crates.io lists the newest release)
+```
+
+Searches say a lot about whoever makes them, so findings never leave the node. They are kept in `findings.jsonl` in its data folder (the newest 5,000), and only apps on the node's own computer can report them or see them, even on a node run with `--mcp-read-pages`. A page that `check_lookalike` calls a look-alike is not kept. `plumb serve` keeps no findings. Delete the file to forget them all.
 
 ## How it is served
 

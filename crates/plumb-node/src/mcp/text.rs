@@ -16,6 +16,13 @@ pub(super) fn render(tool: &str, answer: &Value) -> String {
         "search" => search(&mut out, answer),
         "site_info" => site_info(&mut out, answer),
         "package" => package(&mut out, answer),
+        "report_finding" => {
+            let _ = write!(
+                out,
+                "Kept. The next search for \"{}\" on this computer starts with this answer.",
+                text(answer, "query").unwrap_or("")
+            );
+        }
         "read_page" => read_page(&mut out, answer),
         _ => out = serde_json::to_string(answer).unwrap_or_default(),
     }
@@ -164,6 +171,19 @@ fn package(out: &mut String, answer: &Value) {
 }
 
 fn search(out: &mut String, answer: &Value) {
+    for found in list(answer, "found_before") {
+        let _ = write!(
+            out,
+            "Found before (searched \"{}\", {}): {}",
+            text(found, "query").unwrap_or(""),
+            text(found, "reported").unwrap_or(""),
+            text(found, "answer").unwrap_or("")
+        );
+        if let Some(why) = text(found, "why") {
+            let _ = write!(out, " Source: {} ({why})", text(found, "url").unwrap_or(""));
+        }
+        out.push('\n');
+    }
     if let Some(a) = answer.get("answer").filter(|a| a.is_object()) {
         let _ = write!(
             out,
