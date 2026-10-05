@@ -9,6 +9,9 @@
 //! Given a records file (`records.jsonl`) instead of a buckets directory,
 //! it builds the buckets in a temporary directory first.
 //!
+//! `--build-lean OUT` instead builds the lean PIR snapshot itself
+//! ([`plumb_net::pir::lean`]) in `OUT`, a 512 MiB table.
+//!
 //! `--write-records VARIANT FILE` instead writes the records file, cut
 //! down, to build an index from and compare search quality.
 //!
@@ -26,23 +29,18 @@ use std::path::PathBuf;
 use anyhow::{bail, ensure, Context, Result};
 use flate2::write::DeflateEncoder;
 use flate2::Compression;
-use plumb_core::keys::{bucket_of, record_keys, slim_record};
+use plumb_core::keys::{
+    bucket_of, lean_record, piece_of, record_keys, slim_record, PIECES_PER_BUCKET,
+};
 use plumb_core::SiteRecord;
 use plumb_net::pir::snapshot::Layout;
 use plumb_net::BucketTable;
 use serde_json::json;
-use sha2::{Digest, Sha256};
 
 /// Rows the probe's `upstream-16k` profile takes, and their size.
 const PROBE_ROWS: u32 = 16_384;
 const PROBE_ROW_BYTES: usize = 32_768;
 const PROBE_PREFIX: usize = 8;
-
-/// Characters of a description the lean variants keep.
-const LEAN_DESCRIPTION_CHARS: usize = 200;
-
-/// Pieces each bucket is cut into, by key, for the even-rows estimate.
-const SUB_BUCKETS: u32 = 4;
 
 const ROW_SIZES: [u32; 5] = [4_096, 8_192, 16_384, 32_768, 65_536];
 
@@ -52,8 +50,7 @@ enum Variant {
     Full,
     /// [`slim_record`]: what a browser downloads for private search.
     Slim,
-    /// Slim without the homepage text, headings, Wikipedia intro and key
-    /// pages, and a description cut to [`LEAN_DESCRIPTION_CHARS`].
+    /// [`lean_record`]: what a PIR table holds.
     Lean,
     /// Lean without description, about and intro: names, links, signals.
     Names,
@@ -71,17 +68,10 @@ impl Variant {
         if self == Variant::Full {
             return record;
         }
-        let mut record = slim_record(record);
         if self == Variant::Slim {
-            return record;
+            return slim_record(record);
         }
-        record.body_text = None;
-        record.headings.clear();
-        record.intro = None;
-        record.key_pages.clear();
-        record.description = record
-            .description
-            .map(|d| d.chars().take(LEAN_DESCRIPTION_CHARS).collect());
+        let mut record = lean_record(record);
         if self == Variant::Names {
             record.description = None;
             record.about = None;
@@ -105,12 +95,6 @@ fn distribution(mut values: Vec<u64>) -> serde_json::Value {
         "p99": at(0.99),
         "max": at(1.0),
     })
-}
-
-/// Which piece of its bucket `key` falls in, for the even-rows estimate.
-fn sub_bucket(key: &str) -> u32 {
-    let hash = Sha256::digest([b"plumb-sub-bucket-v0\0".as_slice(), key.as_bytes()].concat());
-    u32::from_be_bytes(hash[..4].try_into().expect("4 bytes")) % SUB_BUCKETS
 }
 
 /// Packs pieces of these sizes into [`BUCKETS`] rows, largest first, each
@@ -155,6 +139,33 @@ fn main() -> Result<()> {
     );
     let probe = match args.next().as_deref() {
         None => None,
+        Some("--build-lean") => {
+            // The real lean PIR snapshot, to check that it builds and fits:
+            // `pir_sizing BUCKETS_DIR --build-lean OUT`.
+            let out = PathBuf::from(args.next().context("--build-lean needs a directory")?);
+            let scratch = tempfile::tempdir()?;
+            let table = if dir.is_file() {
+                let records: Vec<SiteRecord> = plumb_core::read_jsonl(&dir)?;
+                BucketTable::build(&scratch.path().join("buckets"), &records)?
+            } else {
+                BucketTable::open(&dir)?
+            };
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_secs();
+            let (snapshot, report) = plumb_net::pir::lean::build(&out, &table, now, 7 * 86_400)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "pieces": report.pieces,
+                    "largest_row": report.largest_row,
+                    "total_bytes": report.total_bytes,
+                    "layout": snapshot.manifest().layout,
+                    "profile": snapshot.manifest().profile,
+                }))?
+            );
+            return Ok(());
+        }
         Some("--write-records") => {
             // Records cut down as a PIR table would hold them, to index and
             // evaluate: `pir_sizing RECORDS.jsonl --write-records lean OUT`.
@@ -215,12 +226,12 @@ fn main() -> Result<()> {
             .collect::<Result<_, _>>()
             .context("records.dat holds a record that does not parse")?;
         memberships += records.len() as u64;
-        let mut by_piece: Vec<Vec<&SiteRecord>> = vec![Vec::new(); SUB_BUCKETS as usize];
+        let mut by_piece: Vec<Vec<&SiteRecord>> = vec![Vec::new(); PIECES_PER_BUCKET as usize];
         for record in &records {
-            let mut wanted = [false; SUB_BUCKETS as usize];
+            let mut wanted = [false; PIECES_PER_BUCKET as usize];
             for key in record_keys(record) {
                 if bucket_of(&key) == bucket {
-                    wanted[sub_bucket(&key) as usize] = true;
+                    wanted[(piece_of(&key) % PIECES_PER_BUCKET) as usize] = true;
                 }
             }
             for (piece, _) in wanted.iter().enumerate().filter(|(_, w)| **w) {
@@ -299,7 +310,7 @@ fn main() -> Result<()> {
         "note": "Bucket payloads without crawl proofs. Layouts are the snapshot's equal pages per bucket (row header and Merkle path included).",
         "variants": variants,
         "even_rows": {
-            "sub_buckets_per_bucket": SUB_BUCKETS,
+            "sub_buckets_per_bucket": PIECES_PER_BUCKET,
             "note": "Each bucket cut in pieces by key, the pieces packed into equal rows; a public map of piece to row (2 bytes per piece) would come with the snapshot.",
             "variants": even,
         },

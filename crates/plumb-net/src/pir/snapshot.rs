@@ -16,8 +16,11 @@
 //! - each row ends with its own path in a Merkle tree over all rows, of a
 //!   fixed depth, so a retrieved row is checked against the root in the
 //!   [`Manifest`] with nothing else fetched (no row-specific proof URL).
-//! - the manifest commits to the format, the bucket mapping, the layout,
-//!   the root and the validity window; its hash is the snapshot's identity,
+//! - "bucket" below is a row group of the table: one bucket, or the
+//!   pieces of buckets a [`PieceMap`] packs together. The map comes with
+//!   the snapshot (`pieces.bin`).
+//! - the manifest commits to the format, the bucket mapping, the piece
+//!   map, the layout, the root and the validity window; its hash is the snapshot's identity,
 //!   and the serving node signs it.
 //!
 //! ```text
@@ -30,7 +33,7 @@
 //! ```
 //!
 //! Rows sit in `rows.bin` in index order (bucket `b`, page `p` is row
-//! `b * pages_per_bucket + p`), next to `manifest.json`.
+//! `b * pages_per_bucket + p`), next to `manifest.json` and `pieces.bin`.
 
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
@@ -45,8 +48,10 @@ use crate::bucket::BUCKETS;
 use crate::hash::Hash;
 use crate::proto::BucketRecord;
 
+use super::pieces::PieceMap;
+
 /// The row format and leaf/manifest hashing described above.
-pub const FORMAT_VERSION: u32 = 1;
+pub const FORMAT_VERSION: u32 = 2;
 
 /// Which keys fall in which bucket: [`plumb_core::keys`] as of this
 /// format. A change to the key rules must change this, so old snapshots
@@ -69,6 +74,7 @@ const HEADER_BYTES: usize = 8;
 
 const ROWS_FILE: &str = "rows.bin";
 const MANIFEST_FILE: &str = "manifest.json";
+const PIECES_FILE: &str = "pieces.bin";
 
 /// How buckets become rows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -142,6 +148,8 @@ impl Layout {
 pub struct Manifest {
     pub format: u32,
     pub key_mapping: u32,
+    /// [`PieceMap::hash`] of the map of pieces to row groups.
+    pub pieces: Hash,
     pub buckets: u32,
     pub layout: Layout,
     /// The PIR scheme and parameters the server answers with, such as
@@ -280,13 +288,15 @@ pub struct BuildReport {
 
 impl Snapshot {
     /// Builds a snapshot in `dir`, which must not exist yet, from
-    /// `payload(b)` for every bucket `b` (see [`encode_bucket`]), with rows
+    /// `payload(b)` for every row group `b` of `pieces` (see
+    /// [`encode_bucket`]), with rows
     /// of `row_bytes` and as few pages per bucket as the largest needs.
     /// Fails, writing nothing, when a bucket needs more than
     /// [`MAX_PAGES_PER_BUCKET`] pages.
     pub fn build(
         dir: &Path,
         row_bytes: u32,
+        pieces: &PieceMap,
         profile: &str,
         created: u64,
         valid_for: u64,
@@ -326,6 +336,7 @@ impl Snapshot {
             let manifest = Manifest {
                 format: FORMAT_VERSION,
                 key_mapping: KEY_MAPPING_VERSION,
+                pieces: pieces.hash(),
                 buckets: BUCKETS,
                 layout,
                 profile: profile.to_string(),
@@ -333,6 +344,9 @@ impl Snapshot {
                 created,
                 valid_until: created.saturating_add(valid_for),
             };
+            let mut file = create(&staging.join(PIECES_FILE))?;
+            file.write_all(&pieces.to_bytes())?;
+            file.sync_all()?;
             let mut file = create(&staging.join(MANIFEST_FILE))?;
             file.write_all(&manifest.canonical())?;
             file.sync_all()?;
@@ -375,10 +389,24 @@ impl Snapshot {
             len == manifest.layout.rows() * u64::from(manifest.layout.row_bytes),
             "{ROWS_FILE} does not match the manifest"
         );
-        Ok(Snapshot {
+        let snapshot = Snapshot {
             dir: dir.to_path_buf(),
             manifest,
-        })
+        };
+        snapshot.pieces()?;
+        Ok(snapshot)
+    }
+
+    /// The map of pieces to row groups, checked against the manifest.
+    pub fn pieces(&self) -> Result<PieceMap> {
+        let path = self.dir.join(PIECES_FILE);
+        let bytes = fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+        let map = PieceMap::from_bytes(&bytes)?;
+        ensure!(
+            map.hash() == self.manifest.pieces,
+            "{PIECES_FILE} does not match the manifest"
+        );
+        Ok(map)
     }
 
     pub fn manifest(&self) -> &Manifest {
@@ -603,7 +631,15 @@ mod tests {
     }
 
     fn build(dir: &Path, row_bytes: u32) -> Result<(Snapshot, BuildReport)> {
-        Snapshot::build(dir, row_bytes, "test", NOW, DAY, payloads)
+        Snapshot::build(
+            dir,
+            row_bytes,
+            &PieceMap::by_bucket(),
+            "test",
+            NOW,
+            DAY,
+            payloads,
+        )
     }
 
     fn rows_of(snapshot: &Snapshot, bucket: u32) -> Vec<Vec<u8>> {
@@ -689,7 +725,8 @@ mod tests {
             let bytes = if bucket == 2 { 2_000_000 } else { 10 };
             encode_bucket(&[record(0, bytes)])
         };
-        let err = Snapshot::build(&path, 2048, "test", NOW, DAY, huge).unwrap_err();
+        let err = Snapshot::build(&path, 2048, &PieceMap::by_bucket(), "test", NOW, DAY, huge)
+            .unwrap_err();
         assert!(err.to_string().contains("nothing is cut off"), "{err}");
         assert!(!path.exists());
         assert!(!path.with_extension("staging").exists());
@@ -757,6 +794,11 @@ mod tests {
             ..manifest.clone()
         };
         assert_ne!(changed.id(), manifest.id());
+        let other_pieces = Manifest {
+            pieces: Hash::of(&[b"other"]),
+            ..manifest.clone()
+        };
+        assert_ne!(other_pieces.id(), manifest.id());
         let wrong_mapping = Manifest {
             key_mapping: KEY_MAPPING_VERSION + 1,
             ..manifest.clone()
