@@ -85,7 +85,8 @@ Book and paper titles are often common words ("Python", "Apple"), so a book or p
 
 - An article about a listed site (its Wikidata item's official website) goes under that site's result instead of in a place of its own.
 - At most two other articles are listed, one when the first site is named by the whole query. An article whose title (or another title of it) is the whole query comes first, unless the first site is probably the website of what the query names: an article found for the query is about a company, product or service (its Wikipedia description says so), or the site is a government's, and the site is called after the article. A one-word query that spells the site but not the article ("robinhood", not "Robin Hood") also keeps the site first. So "tauri", "geico" and "robinhood" list tauri.app, geico.com and robinhood.com first, while "marie curie" lists the article before mariecurie.org. An official website, or a site better known than the article is read, also stays first. Articles named only in part come after three sites.
-- Among articles, a whole-title match beats a partial one, and more read articles beat less read ones.
+- Among articles, a whole-title match beats a partial one, and more read articles beat less read ones. A title that matches only without its bracketed qualifier ("Mozart (film)") counts no more than another title of an article (the redirect "Mozart" to "Wolfgang Amadeus Mozart"), so the more read one wins, and an exact title ("Albert Einstein") beats both.
+- Once an article is listed, a namesake of it ("Eiffel Tower (Six Flags)" after "Eiffel Tower" under toureiffel.paris) only comes after three sites.
 
 ## Measuring
 
