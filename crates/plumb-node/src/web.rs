@@ -2218,10 +2218,11 @@ fn render_page(out: &mut String, hit: &PageHit, icon: Option<&str>) {
         out,
         "<div class=\"m\"><span title=\"{} {}\">score {:.3}</span></div></li>",
         hit.page.views,
-        if hit.page.set == plumb_index::pages::GITHUB_SET {
-            "stars"
-        } else {
-            "views"
+        match hit.page.set.as_str() {
+            plumb_index::pages::GITHUB_SET => "stars",
+            plumb_index::pages::BOOKS_SET => "readers",
+            plumb_index::pages::PAPERS_SET => "citations",
+            _ => "views",
         },
         hit.score
     );

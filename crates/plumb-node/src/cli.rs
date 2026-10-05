@@ -364,7 +364,10 @@ pub struct FetchPagesArgs {
     /// The page set to make: wikipedia-en (English Wikipedia's articles),
     /// github (GitHub repositories, from GitHub's search API; set
     /// GITHUB_TOKEN to search three times as fast) or stackoverflow (Stack
-    /// Overflow's most viewed questions, from Stack Exchange's data dump).
+    /// Overflow's most viewed questions, from Stack Exchange's data dump),
+    /// books (Open Library's most shelved works, from its dumps) or papers
+    /// (the most cited works, from OpenAlex's API; set OPENALEX_API_KEY if
+    /// it asks for one).
     #[arg(long, value_name = "SET", default_value = "wikipedia-en")]
     pub set: String,
     /// Directory to download Wikipedia's dumps into (created if missing).
@@ -415,6 +418,18 @@ pub struct FetchPagesArgs {
     /// Stack Overflow: most questions kept, the most viewed.
     #[arg(long, value_name = "N", default_value_t = 2_000_000)]
     pub max_questions: usize,
+    /// Books: fewest reading log entries and ratings of a book kept.
+    #[arg(long, value_name = "N", default_value_t = 3)]
+    pub min_shelvings: u32,
+    /// Books: most books kept, the most shelved.
+    #[arg(long, value_name = "N", default_value_t = 1_000_000)]
+    pub max_books: usize,
+    /// Papers: fewest citations of a paper kept.
+    #[arg(long, value_name = "N", default_value_t = plumb_ingest::openalex::DEFAULT_MIN_CITATIONS)]
+    pub min_citations: u64,
+    /// Papers: most papers kept, the most cited.
+    #[arg(long, value_name = "N", default_value_t = 2_000_000)]
+    pub max_papers: usize,
 }
 
 #[derive(Debug, Args)]

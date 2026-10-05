@@ -63,6 +63,18 @@ pub const SETS: &[SetInfo] = &[
         pages: 2_000_000,
         bytes_per_page: 120,
     },
+    SetInfo {
+        id: plumb_index::pages::BOOKS_SET,
+        name: "Books (Open Library)",
+        pages: 1_000_000,
+        bytes_per_page: 110,
+    },
+    SetInfo {
+        id: plumb_index::pages::PAPERS_SET,
+        name: "Papers (OpenAlex)",
+        pages: 2_000_000,
+        bytes_per_page: 160,
+    },
 ];
 
 impl SetInfo {
@@ -81,18 +93,11 @@ impl SetInfo {
 
     /// Reads up to `limit` pages of the set's file `path`, most read first.
     fn read(&self, path: &Path, limit: u64) -> Result<impl Iterator<Item = Page>> {
-        // Wikipedia's articles, or GitHub's repositories written as
-        // articles (see `plumb_ingest::github`).
+        // Every set's file is an articles file (see `Page::from_set`).
         let id = self.id;
-        let lang = match id.strip_prefix("wikipedia-") {
-            Some(lang) => Some(lang.to_string()),
-            None if id == plumb_index::pages::GITHUB_SET
-                || id == plumb_index::pages::STACKOVERFLOW_SET =>
-            {
-                None
-            }
-            None => bail!("no reader for the page set {id}"),
-        };
+        if Page::from_set(id, Default::default()).is_none() {
+            bail!("no reader for the page set {id}");
+        }
         let reader = plumb_ingest::open_maybe_gz(path)?;
         let path = path.to_path_buf();
         let mut bad = 0u64;
@@ -109,13 +114,7 @@ impl SetInfo {
             .filter_map(move |(n, line)| match parse_article(&line) {
                 // Files made before fetch-pages left it out.
                 Ok(article) if article.title == "Main Page" => None,
-                Ok(article) => Some(match &lang {
-                    Some(lang) => Page::from_article(lang, article),
-                    None if id == plumb_index::pages::STACKOVERFLOW_SET => {
-                        Page::from_question(article)
-                    }
-                    None => Page::from_repo(article),
-                }),
+                Ok(article) => Page::from_set(id, article),
                 Err(err) => {
                     bad += 1;
                     if bad <= 3 {
