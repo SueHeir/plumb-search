@@ -43,8 +43,10 @@ Colorado's extract (366 MB) gives 66,102 places in 2 seconds: a 2.7 MB file and 
 | Automatic, by storage limit | Places kept | About |
 | --- | --- | --- |
 | under 1 GB | none | 0 |
-| under 8 GB | the first 1,000,000: every city and town and the places with a Wikidata item (museums, sights, stations, stadiums) | 140 MB |
-| 8 GB or more, or no limit | all of them, every café and shop | 3.4 GB |
+| 1 GB or more | the first 1,000,000: every city and town and the places with a Wikidata item (museums, sights, stations, stadiums), plus every place within 100 km of a town given on one of the node's About pages | 140 MB, plus the places near you and the whole file (950 MB) to pick them from |
+| no limit | all of them, every café and shop | 4.2 GB with the file |
+
+Until 2026-10-05, 8 GB or more kept all of them; Liz's 8 GB MacBook went over its limit with 4.2 GB of places, most of them nowhere near her.
 
 The **Page sets** part of the panel can also turn places off or keep a number of them (`places` in `page_sets`, for example `{"places": "off"}`).
 

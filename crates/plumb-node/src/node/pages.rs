@@ -58,10 +58,31 @@ pub(super) fn run(inner: Arc<Inner>) {
         if inner.config.blackhole {
             settings.page_sets = settings.page_sets.all_unless_set();
         }
+        let near = super::places::homes(&inner);
+        let counts: Vec<(&SetInfo, u64)> =
+            wanted_counts(&settings.page_sets, settings.storage_limit_mb)
+                .into_iter()
+                .map(|(set, pages)| match set.id {
+                    plumb_index::places::PLACES_SET => (
+                        set,
+                        crate::places::file_pages(
+                            &settings.page_sets,
+                            settings.storage_limit_mb,
+                            &near,
+                        ),
+                    ),
+                    _ => (set, pages),
+                })
+                .collect();
+        for &(set, pages) in &counts {
+            if let Err(err) = cut_if_longer(&inner, set, pages) {
+                warn!("page set {}: {err:#}", set.id);
+            }
+        }
         if fetch_failed.is_none_or(|at| at.elapsed() >= FETCH_RETRY_WAIT) {
             fetch_failed = None;
             if let Some(net) = super::network::handle(&inner).cloned() {
-                for (set, pages) in wanted_counts(&settings.page_sets, settings.storage_limit_mb) {
+                for &(set, pages) in &counts {
                     if inner.stopping() {
                         break;
                     }
@@ -242,6 +263,62 @@ fn fetch_if_needed(inner: &Inner, net: &NetHandle, set: &SetInfo, pages: u64) ->
         set.name,
         thousands(lines),
         offset.div_ceil(1_000_000)
+    ));
+    Ok(())
+}
+
+/// Cuts the file of `set` to its first `pages` pages when it holds more:
+/// the node keeps no more than that (the storage limit or the panel's
+/// choice went down), and the rest takes room for nothing. Taken again
+/// from a trusted node when more are wanted later.
+fn cut_if_longer(inner: &Inner, set: &SetInfo, pages: u64) -> Result<()> {
+    let data = &inner.paths.data;
+    let Some(notes) = set.file_notes(data) else {
+        return Ok(());
+    };
+    if pages == u64::MAX || notes.lines <= pages || inner.stopping() {
+        return Ok(());
+    }
+    let file = set.file(data);
+    let mut part = file.as_os_str().to_owned();
+    part.push(".part");
+    let part = std::path::PathBuf::from(part);
+    let before = std::fs::metadata(&file).map_or(0, |m| m.len());
+    let mut reader = plumb_ingest::open_maybe_gz(&file)?;
+    let mut cutter = SetFileCutter::create(&part, pages)?;
+    let mut buf = vec![0u8; 1 << 16];
+    while !cutter.full() {
+        let n = std::io::Read::read(&mut reader, &mut buf)
+            .with_context(|| format!("reading {}", file.display()))?;
+        if n == 0 {
+            break;
+        }
+        cutter.write_all(&buf[..n])?;
+    }
+    let lines = cutter.pages();
+    cutter.finish()?;
+    drop(reader);
+    std::fs::rename(&part, &file)
+        .with_context(|| format!("renaming {} to {}", part.display(), file.display()))?;
+    write_notes(
+        &file,
+        &SetFileNotes {
+            lines,
+            complete: false,
+            ..notes
+        },
+    )?;
+    let after = std::fs::metadata(&file).map_or(0, |m| m.len());
+    inner.recount_disk();
+    info!(
+        "page set {}: kept the first {lines} pages of its file",
+        set.id
+    );
+    inner.journal.info(format!(
+        "{}: kept the first {} pages, freeing {} MB",
+        set.name,
+        thousands(lines),
+        before.saturating_sub(after) / 1_000_000
     ));
     Ok(())
 }

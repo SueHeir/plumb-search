@@ -105,6 +105,40 @@ memory (or its container's limit), about 2.5 KB a site, so a 4 GB server
 stops at about 800,000 sites. How far it got is in `DIR/net/fill.json` and in
 `GET /api/status` under `fill`, and the panel's Storage card shows it.
 
+**Staying under the storage limit** (Liz, 2026-10-05: "my macbook seems to
+gone over the limit on storage, maybe we find a interesting way to remove
+data that is not of interest"). Crawls other nodes publish keep arriving
+after filling stops, and page sets, places and vectors sit next to the
+sites, so a node with a limit also holds itself back (`node/trim.rs`):
+
+- At 90% of the limit, a shared crawl only refreshes a site the node
+  already holds. A new site is taken in only when it is about one of the
+  node's topics (its focus topics and the interests on its About pages) or
+  is an official website (Wikidata).
+- Still over the limit half an hour later (after the page sets and places
+  below are cut), the least useful sites go, lowest link score first, until
+  the data folder is back at 85%, and the index is built without them.
+  Never dropped: the best 100,000 sites, sites about the node's topics,
+  sites an About page always puts first or a searcher opened from the
+  results, official websites, and plumbsearch.org. Filling then rests a
+  week, so it does not take lower-ranked sites in their place. The node's
+  journal says how many went; it looks again an hour later.
+
+- Page set files hold no more pages than the node keeps: a file taken
+  whole when the limit was higher is cut to the pages kept, and taken again
+  from a trusted node if more are wanted later.
+- Places past the first million (every city, town and place with a
+  Wikidata item) are kept only within 100 km of a town given on one of the
+  node's About pages; only a node with no limit keeps every café and shop
+  everywhere (see [places.md](places.md#how-many)).
+- Signed batches are kept 14 days (as long as crawls are checked against
+  each other) rather than 35, unless `--keep-batches-days` says otherwise.
+  Other nodes take none older than a week.
+
+Dropping a site only takes it out of that node's index: the batches the
+node signed and published stay in `net/batches/` for those 14 days, so the
+network loses none of the crawls it still uses.
+
 The records come from the trusted node's index, not signed batches, so
 only trusted nodes are asked. A node answers at most 2 fill requests at
 once and 6 a minute from one node, so a new node cannot swamp a small

@@ -177,6 +177,14 @@ async fn step(inner: &Arc<Inner>) -> Result<Next> {
         put_in_service(inner, built, false).await?;
         return Ok(Next::Continue);
     }
+    // Over the storage limit: the least useful sites go, before the limit
+    // pauses crawling (see super::trim).
+    if super::trim::due(inner) {
+        if let Some(built) = blocking(inner, super::trim::trim).await? {
+            put_in_service(inner, built, false).await?;
+        }
+        return Ok(Next::Continue);
+    }
     // Enough records from other nodes rebuild the index, but no sooner
     // than NETWORK_REBUILD_GAP after the last build.
     let network_rebuild_at =
@@ -1203,7 +1211,7 @@ fn save_icons(icons: &IconStore, results: &[CrawlResult]) {
 }
 
 /// Builds an index of `records` in a new numbered directory and opens it.
-fn build<R: Borrow<SiteRecord>>(inner: &Inner, records: &[R]) -> Result<ServingIndex> {
+pub(super) fn build<R: Borrow<SiteRecord>>(inner: &Inner, records: &[R]) -> Result<ServingIndex> {
     let id = store::next_index_id(&inner.paths);
     let dir = inner.paths.index(id);
     inner.set_step(

@@ -118,6 +118,7 @@ mod pages;
 mod places;
 pub mod schedule;
 pub(crate) mod store;
+mod trim;
 mod worker;
 
 #[cfg(test)]
@@ -1034,6 +1035,12 @@ struct Inner {
     /// When this node last put an index in service (Unix time; 0 for not
     /// since it started).
     last_build: std::sync::atomic::AtomicU64,
+    /// When this node last looked for sites to drop to get back under its
+    /// storage limit (Unix time; 0 for not since it started).
+    last_trim: std::sync::atomic::AtomicU64,
+    /// Since when the data folder has been over the storage limit (Unix
+    /// time; 0 for not over).
+    over_since: std::sync::atomic::AtomicU64,
     /// Held while the inbox is appended to or moved aside.
     inbox_lock: Mutex<()>,
     /// Held while the whole records file is in memory ([`Inner::hold_records`]).
@@ -1260,6 +1267,8 @@ impl Inner {
             kept_found: Mutex::new(std::collections::HashMap::new()),
             fill: Mutex::new(fill_state),
             last_build: std::sync::atomic::AtomicU64::new(0),
+            last_trim: std::sync::atomic::AtomicU64::new(0),
+            over_since: std::sync::atomic::AtomicU64::new(0),
             inbox_lock: Mutex::new(()),
             records_held: Mutex::new(()),
             buckets_rebuilt: AtomicBool::new(false),

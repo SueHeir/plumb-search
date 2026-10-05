@@ -45,6 +45,10 @@ pub(crate) enum Change {
     /// Merges a crawl another node shared, as [`RecordSet::upsert_shared`]
     /// does: what it leaves out (search box, page text) is kept, not cleared.
     MergeShared { record: SiteRecord },
+    /// Merges a crawl another node shared into a site the set already
+    /// holds; a site it does not hold is left out. For a node with no room
+    /// for more sites (see `crate::node::trim`).
+    RefreshShared { record: SiteRecord },
     /// Sets when a site's homepage was last tried and how many tries in a
     /// row failed to reach it ([`SiteRecord::crawl_failures`]).
     Mark {
@@ -64,6 +68,13 @@ impl Change {
             }
             Change::MergeShared { record } => {
                 set.upsert_shared(record);
+            }
+            Change::RefreshShared { record } => {
+                let held = plumb_core::canonical_domain(&record.domain)
+                    .is_some_and(|domain| set.get(&domain).is_some());
+                if held {
+                    set.upsert_shared(record);
+                }
             }
             Change::Mark {
                 domain,
@@ -377,6 +388,25 @@ mod tests {
 
     fn sorted(set: RecordSet) -> Vec<SiteRecord> {
         set.into_sorted_vec()
+    }
+
+    #[test]
+    fn a_refresh_updates_held_sites_and_adds_none() {
+        let mut set = RecordSet::new();
+        set.upsert(record("held.com", 1));
+        let shared = |domain: &str| {
+            let mut record = SiteRecord::new(domain);
+            record.title = Some("Fresh".into());
+            Change::RefreshShared { record }
+        };
+        shared("HELD.com").apply(&mut set);
+        shared("new.com").apply(&mut set);
+        assert_eq!(set.len(), 1);
+        assert_eq!(set.get("held.com").unwrap().title.as_deref(), Some("Fresh"));
+        assert_eq!(
+            serde_json::to_string(&shared("a.com")).unwrap(),
+            r#"{"op":"refresh_shared","record":{"domain":"a.com","title":"Fresh","signals":{}}}"#
+        );
     }
 
     #[test]

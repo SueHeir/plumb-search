@@ -202,6 +202,15 @@ pub(super) async fn start(inner: &Arc<Inner>) -> Result<()> {
         return Ok(());
     };
     config.dir = inner.paths.net.clone();
+    // A node with a storage limit keeps the batches it holds for as long as
+    // crawls are checked against each other, not the default five weeks:
+    // other nodes take none older than a week, and the rest takes room
+    // (see super::trim).
+    if inner.settings().storage_limit_mb > 0
+        && config.keep_batches_days == plumb_net::store::RETAIN_EPOCHS
+    {
+        config.keep_batches_days = plumb_net::agree::WINDOW_EPOCHS;
+    }
     let (handle, mut records) = plumb_net::start(config, Arc::new(ServedIndex(inner.clone())))
         .await
         .context("joining the Plumb network")?;
@@ -520,6 +529,9 @@ pub(super) fn absorb_inbox(inner: &Inner) -> Result<u64> {
         .with_context(|| format!("opening {}", paths.absorbing.display()))?;
     let icons = IconStore::new(&paths.icons);
     let mut store = RecordStore::open(&paths.records);
+    // A full node only refreshes the sites it holds, but for those about
+    // its topics and official websites (see super::trim).
+    let topics = (!super::trim::takes_new_sites(inner)).then(|| inner.keep_topics());
     // Saved a part at a time, so an inbox of many thousand records is never
     // all in memory.
     let mut changes = Vec::with_capacity(ABSORB_CHUNK);
@@ -529,7 +541,12 @@ pub(super) fn absorb_inbox(inner: &Inner) -> Result<u64> {
         // A crash can cut the last line short.
         if let Ok(mut record) = serde_json::from_str::<SiteRecord>(&line) {
             keep_shared_icon(&icons, &mut record);
-            changes.push(Change::MergeShared { record });
+            changes.push(match &topics {
+                Some(topics) if !super::trim::keeps_new_site(&record, topics) => {
+                    Change::RefreshShared { record }
+                }
+                _ => Change::MergeShared { record },
+            });
         }
         if changes.len() >= ABSORB_CHUNK {
             store.save(&changes)?;

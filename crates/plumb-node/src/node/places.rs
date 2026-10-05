@@ -25,10 +25,12 @@ pub(super) fn refresh(
     settings: &super::NodeSettings,
     failed: &mut Option<(String, Instant)>,
 ) {
+    let near = homes(inner);
     let wanted = wanted(
         &inner.paths.data,
         &settings.page_sets,
         settings.storage_limit_mb,
+        &near,
     );
     let key = wanted.as_ref().map(crate::places::key);
     let current = inner
@@ -74,6 +76,34 @@ pub(super) fn refresh(
         inner.journal.info("Places turned off");
     }
     *failed = None;
+}
+
+/// Where the towns on the node's About pages are, found in the place
+/// index being served: a node with a storage limit keeps every place
+/// near them (see [`crate::places::WantedPlaces`]). Empty until there is a
+/// place index, or when no About page gives a town.
+pub(super) fn homes(inner: &Inner) -> Vec<(f64, f64)> {
+    let towns = crate::about::all_towns(&inner.paths.data.join("history"));
+    if towns.is_empty() {
+        return Vec::new();
+    }
+    let Some(searcher) = inner
+        .places
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .as_ref()
+        .map(|(_, s)| s.clone())
+    else {
+        return Vec::new();
+    };
+    let mut homes: Vec<(f64, f64)> = towns
+        .iter()
+        .filter_map(|town| searcher.locate(town, None).ok().flatten())
+        .map(|place| (place.lat, place.lon))
+        .collect();
+    homes.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
+    homes.dedup();
+    homes
 }
 
 /// The places `query` asks for, around `home` for "near me".

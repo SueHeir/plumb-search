@@ -205,6 +205,27 @@ impl HistoryStore {
     }
 }
 
+/// Every site opened from a search in the history files in `dir`.
+pub fn all_opened(dir: &Path) -> Vec<String> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut opened = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(profile) = name.to_str().and_then(|n| n.strip_suffix(".json")) else {
+            continue;
+        };
+        if !valid_profile(profile) {
+            continue;
+        }
+        if let Some(history) = read(&entry.path()) {
+            opened.extend(history.opened.into_iter().map(|o| o.domain));
+        }
+    }
+    opened
+}
+
 fn read(path: &Path) -> Option<History> {
     let bytes = fs::read(path).ok()?;
     serde_json::from_slice(&bytes).ok()
