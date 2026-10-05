@@ -444,6 +444,10 @@ impl Mcp {
             "low"
         };
         let mut url = top.url.clone();
+        let mut domain = top.domain.clone();
+        let mut title = top.title.clone();
+        let mut description = top.description.as_deref().map(short);
+        let mut alternatives: Vec<Value> = results.hits[1..].iter().map(brief).collect();
         let mut did_you_mean = did_you_mean;
         let mut package_home = None;
         if confidence != "high" {
@@ -456,6 +460,22 @@ impl Mcp {
                     ));
                     url = home;
                     confidence = "high";
+                    did_you_mean = None;
+                } else if let (Some(home_domain), "low") = (registrable_domain(&home), confidence) {
+                    // The best match of the words is a guess; the
+                    // package's own home page is not: "FastAPI" is not
+                    // xapo.com.
+                    why.push(format!(
+                        "No site is called exactly this, but the {registry} package of this \
+                         name gives it as its home page."
+                    ));
+                    alternatives.insert(0, brief(top));
+                    alternatives.truncate(ALTERNATIVES);
+                    url = home;
+                    domain = home_domain;
+                    title = None;
+                    description = None;
+                    confidence = "medium";
                     did_you_mean = None;
                 } else {
                     why.push(format!(
@@ -473,14 +493,14 @@ impl Mcp {
         Ok(json!({
             "name": name,
             "found": true,
-            "domain": top.domain,
+            "domain": domain,
             "url": url,
             "package_home": package_home,
-            "title": top.title,
-            "description": top.description.as_deref().map(short),
+            "title": title,
+            "description": description,
             "confidence": confidence,
             "why": why,
-            "alternatives": results.hits[1..].iter().map(brief).collect::<Vec<_>>(),
+            "alternatives": alternatives,
             "did_you_mean": did_you_mean,
         }))
     }
@@ -754,7 +774,9 @@ impl Mcp {
         if let Some(info) = info {
             fields.insert("about".into(), json!(info));
         }
-        if !headlines.is_empty() {
+        // Headlines with a package's name are rarely about the package:
+        // "react latest" is not footballers' kids reacting to a new kit.
+        if !headlines.is_empty() && !pages.iter().any(|page| page.get("package").is_some()) {
             fields.insert("recent".into(), json!(headlines));
         }
         let from_plugins: Vec<Value> = self
