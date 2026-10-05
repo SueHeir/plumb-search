@@ -35,7 +35,7 @@ This downloads the latest `page`, `page_props` and `redirect` tables of English 
 
 ### Official profiles
 
-Then, to add each article's official profiles (YouTube, Twitch, TikTok, Instagram, X, Bluesky, Mastodon, Threads, Facebook, LinkedIn, GitHub, Reddit, Spotify, Apple Music, SoundCloud, Patreon, Steam, the App Store and Google Play) from Wikidata's external identifiers:
+Then, to add each article's official profiles (YouTube, Twitch, TikTok, Instagram, X, Bluesky, Mastodon, Threads, Facebook, LinkedIn, GitHub, Reddit, Spotify, Apple Music, SoundCloud, Patreon, Steam, the App Store and Google Play) from Wikidata's external identifiers, and where a film, show, game, album, song or podcast is listed or can be watched or heard (IMDb, Rotten Tomatoes, Metacritic, Letterboxd, TMDB, IGDB, MyAnimeList, Netflix, MusicBrainz, Discogs, Genius, Spotify and Apple Music albums and songs, Apple Podcasts and a song's music video on YouTube):
 
 ```sh
 plumb fetch-profiles --data /path/to/node-data
@@ -47,7 +47,7 @@ It also asks for every item's official website (P856) and keeps it for an articl
 
 Some items with profiles have no English article: Linus Tech Tips the YouTube channel is a Wikidata item of its own, apart from the article on Linus Media Group. `fetch-profiles` also writes those that have an English name and an official website of their own (a front page, not a profile on one of the services) as the `wikidata` set, `wikidata.tsv.gz` beside the articles file: each with its name, English aliases ("LTT"), description, website and profiles, its sitelinks counted as its views. A page of that set is only ever listed under its website's result, never on its own, so a channel can't stand in for a namesake.
 
-The results page lists an article's profiles in its info box, and a query ending in a service's name ("mrbeast youtube", "valve steam", "spotify android app") shows that profile first when the words before it name an article.
+The results page lists an article's profiles in its info box, its own accounts apart from the places it is listed, and a query ending in a service's name ("mrbeast youtube", "valve steam", "spotify android app", "dune part two imdb", "bohemian rhapsody lyrics") shows that profile or listing first when the words before it name an article.
 
 ## Nodes in the network
 
