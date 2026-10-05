@@ -5955,6 +5955,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "cbor4ii",
+ "flate2",
  "futures",
  "libp2p",
  "ohttp",
