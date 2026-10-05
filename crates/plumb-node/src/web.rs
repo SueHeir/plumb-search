@@ -83,6 +83,7 @@ use crate::meaning::{MeaningIndex, SharedMeaning};
 use crate::node::{NodeSettings, Phase, Status, Step};
 use crate::websearch::{bang_url, Engine, WebSettings};
 
+mod answers;
 mod control;
 mod history;
 mod nodes;
@@ -357,6 +358,8 @@ struct AppState {
     node: Option<Arc<dyn StatusSource>>,
     /// The home country and the web search link.
     settings: WebSettings,
+    /// Currency rates for instant answers.
+    rates: Arc<answers::RatesCache>,
     /// How many tool calls each client may still make to `/mcp`.
     mcp_limiter: Arc<mcp::Limiter>,
 }
@@ -427,6 +430,7 @@ pub fn router_with(backend: Arc<dyn SearchBackend>, settings: impl Into<WebSetti
         backend,
         node: None,
         settings: settings.into(),
+        rates: Arc::default(),
         mcp_limiter: Arc::default(),
     })
 }
@@ -448,6 +452,7 @@ pub fn node_router_with(
         backend,
         node: Some(status),
         settings: settings.into(),
+        rates: Arc::default(),
         mcp_limiter: Arc::default(),
     })
 }
@@ -733,6 +738,7 @@ async fn search_page(
     };
     let limit = params.limit();
     let local = run_search(&state, &query, limit, &settings.options).await;
+    let answer = instant_answer(&state, &query).await;
     let (local, network) = if settings.network == NetSetting::On {
         // The network is asked for what this node's results are for, the
         // corrected query when a typo was corrected.
@@ -789,6 +795,7 @@ async fn search_page(
                 render_results(
                     &query,
                     &results,
+                    answer.as_ref(),
                     &network,
                     &settings,
                     state.settings.web_search,
@@ -845,7 +852,21 @@ async fn api_search(
     }
     let options = params.options(&state.settings.home, &headers);
     match run_search(&state, &query, params.limit(), &options).await {
-        Ok(results) if full => (StatusCode::OK, security_headers(), Json(results)).into_response(),
+        Ok(results) if full => {
+            let answer = instant_answer(&state, &query).await;
+            let placed = place_pages(
+                searched_for(&query, &results),
+                &results.hits,
+                results.pages.iter().map(|p| p.hit.clone()).collect(),
+            );
+            let info = answers::info_box(&results.hits, &placed);
+            let body = FullResults {
+                results: &results,
+                answer,
+                info,
+            };
+            (StatusCode::OK, security_headers(), Json(body)).into_response()
+        }
         Ok(results) => (StatusCode::OK, security_headers(), Json(results.hits)).into_response(),
         Err(_) => {
             error!("search API local lookup failed");
@@ -858,6 +879,25 @@ async fn api_search(
                 .into_response()
         }
     }
+}
+
+/// `/api/search?full=1`: the results, and the instant answer and info box
+/// the results page shows with them.
+#[derive(Serialize)]
+struct FullResults<'a> {
+    #[serde(flatten)]
+    results: &'a SearchResults,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    answer: Option<plumb_answer::Answer>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    info: Option<answers::InfoBox>,
+}
+
+/// The instant answer to `query`, with currency rates when it needs them.
+async fn instant_answer(state: &AppState, query: &str) -> Option<plumb_answer::Answer> {
+    let rates = state.rates.for_query(query).await;
+    let now = i64::try_from(now_unix()).unwrap_or(i64::MAX);
+    plumb_answer::answer(query, now, rates.as_ref())
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1461,7 +1501,21 @@ border-radius:1rem;color:var(--fg);text-decoration:none}\
 .hist form{margin-top:1.5rem}\
 .about label{display:block;margin-top:1.25rem}.about .m{margin:.2rem 0 .4rem}\
 .about textarea{width:100%;box-sizing:border-box;font:inherit;padding:.4rem;\
-background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:6px}";
+background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:6px}\
+.ia{margin:1rem 0 .5rem;padding:.85rem 1rem;border:1px solid var(--line);border-radius:.75rem}\
+.ia p{margin:0}.iaq{color:var(--muted);font-size:.9rem;overflow-wrap:anywhere}\
+.iaa{font-size:1.75rem;line-height:1.3;overflow-wrap:anywhere}.ia .m{margin-top:.2rem}\
+.wide{max-width:74rem}.wide header form{max-width:42rem}\
+.cols{display:flex;flex-direction:column}.cols>main{min-width:0}\
+.ib{order:-1;margin:1rem 0 .25rem;padding:1rem 1.1rem;border:1px solid var(--line);\
+border-radius:.75rem;overflow-wrap:anywhere}\
+.ib h2{margin:0;font-size:1.35rem;line-height:1.3}\
+.ibd{margin:.2rem 0 0;color:var(--muted)}\
+.ib dl{display:grid;grid-template-columns:auto 1fr;gap:.25rem .9rem;margin:.8rem 0 0;font-size:.9rem}\
+.ib dt{color:var(--muted)}.ib dd{margin:0;min-width:0}\
+.ib a{color:var(--link)}.ibl{margin:.8rem 0 0;font-size:.9rem}\
+@media (min-width:64rem){.cols{display:grid;grid-template-columns:minmax(0,44rem) minmax(0,22rem);\
+gap:0 3rem;align-items:start}.ib{order:0;margin-top:1.25rem}}";
 
 /// A whole HTML document; `body` must already be escaped.
 fn page(title: &str, body: &str) -> String {
@@ -1948,6 +2002,7 @@ fn render_source(
 fn render_results(
     query: &str,
     results: &SearchResults,
+    answer: Option<&plumb_answer::Answer>,
     network: &NetOutcome,
     settings: &Settings,
     web_search: Option<Engine>,
@@ -1957,10 +2012,10 @@ fn render_results(
 ) -> String {
     let shown = merge_results(&results.hits, network, limit);
     let from_network = shown.iter().filter(|s| s.network.is_some()).count();
-    let mut body = format!(
-        "<div class=\"wrap\">\n{}\n<main>\n",
-        results_form(query, settings)
-    );
+    let mut body = String::from("<main>\n");
+    if let Some(answer) = answer {
+        answers::render_answer(&mut body, answer);
+    }
     render_source(&mut body, query, settings, network, from_network);
     if let Some(spelling) = &results.spelling {
         render_spelling(&mut body, query, spelling, &settings.options);
@@ -1999,6 +2054,13 @@ fn render_results(
         place_operator_pages(&ops, &shown_hits, found_pages)
     } else {
         place_pages(picked_for, &shown_hits, found_pages)
+    };
+    // An info box is about what the whole query names, which operators
+    // ("site:", "-word") change.
+    let info = if ops.any() {
+        None
+    } else {
+        answers::info_box(&shown_hits, &pages)
     };
     let shown_count = shown.len();
     let pages = &pages;
@@ -2072,7 +2134,18 @@ fn render_results(
         let api = escape_html(&search_link("/api/network/search", query, options, false));
         let _ = write!(json, " and <a href=\"{api}\">{api}</a>");
     }
-    let _ = write!(body, "<p class=\"s\">As JSON: {json}</p>\n</main>\n</div>");
+    let _ = write!(body, "<p class=\"s\">As JSON: {json}</p>\n</main>\n");
+    // With an info box the page is wider, with the box beside the results
+    // (above them on a narrow screen).
+    let form = results_form(query, settings);
+    let body = match &info {
+        Some(info) => {
+            let mut aside = String::new();
+            answers::render_info_box(&mut aside, info);
+            format!("<div class=\"wrap wide\">\n{form}\n<div class=\"cols\">\n{body}{aside}</div>\n</div>")
+        }
+        None => format!("<div class=\"wrap\">\n{form}\n{body}</div>"),
+    };
     page(&format!("{query} - Plumb Search"), &body)
 }
 
@@ -3645,6 +3718,7 @@ mod tests {
         let page = render_results(
             "q",
             &results,
+            None,
             &network,
             &settings,
             None,
@@ -3658,6 +3732,87 @@ mod tests {
         assert!(page.contains("Tinted results came only from the network."));
         assert!(page.contains("from the Plumb network (signed crawl, checked, in 2 answers)"));
         assert!(page.contains("/api/network/search?q=q"));
+    }
+
+    #[tokio::test]
+    async fn instant_answers_go_above_the_results() {
+        let fake = backend(bank_hits());
+        let (status, _, body) = get(fake.clone(), "/search?q=12*(3%2B4)").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            body.contains("<p class=\"iaq\">12 × (3 + 4) =</p><p class=\"iaa\">84</p>"),
+            "{body}"
+        );
+        let (_, _, body) = get(fake.clone(), "/search?q=10+km+in+miles").await;
+        assert!(body.contains("6.21371 miles"), "{body}");
+        let (_, _, body) = get(fake.clone(), "/search?q=us+bank").await;
+        assert!(!body.contains("class=\"ia\""));
+        let (_, _, body) = get(fake, "/api/search?q=2%2B2&full=1").await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["answer"]["answer"], "4");
+        assert!(json["hits"].is_array());
+    }
+
+    #[test]
+    fn an_article_the_query_names_gets_an_info_box() {
+        use plumb_index::pages::{Page, PageHit, PlacedPage};
+        let article = PageHit {
+            page: Page {
+                set: "wikipedia-en".into(),
+                url: "https://en.wikipedia.org/wiki/Marie_Curie".into(),
+                title: "Marie Curie".into(),
+                description: Some("Polish-French physicist and chemist (1867–1934)".into()),
+                site: None,
+                views: 100_000,
+                aliases: Vec::new(),
+                item: Some("Q7186".into()),
+            },
+            score: 1.0,
+            named: true,
+            popularity: 0.9,
+        };
+        let results = SearchResults {
+            pages: vec![PlacedPage {
+                hit: article,
+                under: None,
+                at: 0,
+            }],
+            hits: vec![scored("mariecurie.org.uk", 0.5)],
+            site_search: None,
+            spelling: None,
+        };
+        let page = render_results(
+            "marie curie",
+            &results,
+            None,
+            &NetOutcome::NotAsked,
+            &no_settings(),
+            None,
+            10,
+            false,
+            &Icons::default(),
+        );
+        assert!(page.contains("<div class=\"wrap wide\">"), "{page}");
+        assert!(page
+            .contains("<aside class=\"ib\" aria-label=\"About Marie Curie\"><h2>Marie Curie</h2>"));
+        assert!(page.contains("href=\"https://www.wikidata.org/wiki/Q7186\""));
+        // The article is still listed with the results.
+        assert!(page.contains("<li class=\"pg\">"));
+
+        let mut plain = results.clone();
+        plain.pages.clear();
+        let page = render_results(
+            "marie curie",
+            &plain,
+            None,
+            &NetOutcome::NotAsked,
+            &no_settings(),
+            None,
+            10,
+            false,
+            &Icons::default(),
+        );
+        assert!(!page.contains("class=\"ib\"") && !page.contains("wrap wide"));
     }
 
     #[test]
@@ -3676,6 +3831,7 @@ mod tests {
         let page = render_results(
             "amazom",
             &results,
+            None,
             &NetOutcome::NotAsked,
             &settings,
             None,
@@ -3701,6 +3857,7 @@ mod tests {
         let page = render_results(
             "gogle",
             &results,
+            None,
             &NetOutcome::NotAsked,
             &no_settings(),
             None,
@@ -3720,6 +3877,7 @@ mod tests {
         let page = render_results(
             "gogle",
             &results,
+            None,
             &NetOutcome::NotAsked,
             &settings,
             None,
@@ -3761,6 +3919,7 @@ mod tests {
         let page = render_results(
             "einstein site:wikipedia.org",
             &results,
+            None,
             &NetOutcome::NotAsked,
             &no_settings(),
             None,
@@ -3788,6 +3947,7 @@ mod tests {
         let page = render_results(
             "q",
             &results,
+            None,
             &NetOutcome::NotAsked,
             &settings,
             None,
@@ -3803,6 +3963,7 @@ mod tests {
         let page = render_results(
             "q",
             &results,
+            None,
             &NetOutcome::Failed,
             &settings,
             None,
@@ -3816,6 +3977,7 @@ mod tests {
         let page = render_results(
             "q",
             &results,
+            None,
             &answered(Vec::new()),
             &settings,
             None,
@@ -3828,6 +3990,7 @@ mod tests {
         let page = render_results(
             "q",
             &results,
+            None,
             &none,
             &settings,
             None,
@@ -3900,6 +4063,7 @@ mod tests {
         let page = render_results(
             "bank",
             &results,
+            None,
             &NetOutcome::NotAsked,
             &no_settings(),
             None,
@@ -3927,6 +4091,7 @@ mod tests {
         let page = render_results(
             "jsr",
             &results,
+            None,
             &NetOutcome::NotAsked,
             &no_settings(),
             None,

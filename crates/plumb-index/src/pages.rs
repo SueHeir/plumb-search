@@ -71,6 +71,9 @@ pub struct Page {
     pub views: u64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub aliases: Vec<String>,
+    /// The Wikidata item a Wikipedia article is about (`Q937`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item: Option<String>,
 }
 
 impl Page {
@@ -84,6 +87,7 @@ impl Page {
             site: article.site,
             views: article.views,
             aliases: article.aliases,
+            item: article.item,
         }
     }
 
@@ -98,6 +102,7 @@ impl Page {
             site: repo.site,
             views: repo.views,
             aliases: repo.aliases,
+            item: None,
         }
     }
 
@@ -115,6 +120,7 @@ impl Page {
             site: None,
             views: question.views,
             aliases: question.aliases,
+            item: None,
         }
     }
 
@@ -132,6 +138,7 @@ impl Page {
             site: None,
             views: book.views,
             aliases: book.aliases,
+            item: None,
         }
     }
 
@@ -152,6 +159,7 @@ impl Page {
             site: None,
             views: paper.views,
             aliases: paper.aliases,
+            item: None,
         }
     }
 
