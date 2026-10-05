@@ -195,6 +195,18 @@ fn run_papers(args: &FetchPagesArgs, dest: &std::path::Path) -> Result<()> {
     write_set(dest, &fetched.papers, "papers")
 }
 
+/// Makes the packages set file `dest` from ecosyste.ms's lists of the
+/// registries' packages.
+fn run_packages(args: &FetchPagesArgs, dest: &std::path::Path) -> Result<()> {
+    let client = download::http_client()?;
+    let packages = block_on(plumb_ingest::packages::fetch_packages(
+        &client,
+        &args.registries,
+        args.max_per_registry,
+    ))??;
+    write_set(dest, &packages, "packages")
+}
+
 /// `plumb fetch-profiles`: adds Wikidata's official profiles, and official
 /// websites that are part of another site, to the English Wikipedia
 /// articles file.
@@ -320,6 +332,9 @@ pub fn run_pages(args: FetchPagesArgs) -> Result<()> {
     }
     if set.id == plumb_index::pages::PAPERS_SET {
         return run_papers(&args, &dest);
+    }
+    if set.id == plumb_index::pages::PACKAGES_SET {
+        return run_packages(&args, &dest);
     }
     if set.id == plumb_index::places::PLACES_SET {
         return run_places(&args, &dest);

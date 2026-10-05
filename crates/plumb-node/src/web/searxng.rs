@@ -69,7 +69,16 @@ impl Entry {
         Entry {
             url: page.url.clone(),
             title: page.title.clone(),
-            content: page.description.clone().unwrap_or_default(),
+            content: match (&page.description, &page.package) {
+                (description, Some(package)) => {
+                    let card = package.summary();
+                    match description {
+                        Some(d) if !d.is_empty() => format!("{d} {card}"),
+                        _ => card,
+                    }
+                }
+                (description, None) => description.clone().unwrap_or_default(),
+            },
             category: "general",
             published: None,
         }

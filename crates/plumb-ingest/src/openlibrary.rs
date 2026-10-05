@@ -227,6 +227,7 @@ impl Book {
             title: self.title,
             profiles: Vec::new(),
             website: None,
+            package: None,
         }
     }
 }

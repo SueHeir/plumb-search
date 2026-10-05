@@ -15,6 +15,7 @@ pub(super) fn render(tool: &str, answer: &Value) -> String {
         "check_lookalike" => check_lookalike(&mut out, answer),
         "search" => search(&mut out, answer),
         "site_info" => site_info(&mut out, answer),
+        "package" => package(&mut out, answer),
         "read_page" => read_page(&mut out, answer),
         _ => out = serde_json::to_string(answer).unwrap_or_default(),
     }
@@ -92,6 +93,10 @@ fn set_label(set: &str) -> &str {
 }
 
 fn page_line(out: &mut String, page: &Value) {
+    if let Some(card) = page.get("package").filter(|p| p.is_object()) {
+        package_line(out, card);
+        return;
+    }
     let set = set_label(text(page, "set").unwrap_or("Page"));
     let _ = write!(
         out,
@@ -105,6 +110,57 @@ fn page_line(out: &mut String, page: &Value) {
         let _ = write!(out, " {url}");
     }
     out.push('\n');
+}
+
+/// "[crates.io] serde 1.0.228 (2025-09-27, MIT OR Apache-2.0): A generic
+/// serialization framework. Install: cargo add serde. Docs: … Code: …
+/// https://crates.io/crates/serde"
+fn package_line(out: &mut String, card: &Value) {
+    let _ = write!(
+        out,
+        "[{}] {}",
+        text(card, "registry").unwrap_or("Package"),
+        text(card, "name").unwrap_or("")
+    );
+    if let Some(version) = text(card, "version") {
+        let _ = write!(out, " {version}");
+    }
+    let when: Vec<&str> = [text(card, "released"), text(card, "license")]
+        .into_iter()
+        .flatten()
+        .collect();
+    if !when.is_empty() {
+        let _ = write!(out, " ({})", when.join(", "));
+    }
+    if let Some(description) = text(card, "description") {
+        let _ = write!(out, ": {description}");
+    }
+    if let Some(install) = text(card, "install") {
+        let _ = write!(out, " Install: {install}.");
+    }
+    for (label, key) in [("Docs", "docs"), ("Code", "repo"), ("Home", "homepage")] {
+        if let Some(url) = text(card, key) {
+            let _ = write!(out, " {label}: {url}");
+        }
+    }
+    if let Some(url) = text(card, "url") {
+        let _ = write!(out, " {url}");
+    }
+    out.push('\n');
+}
+
+fn package(out: &mut String, answer: &Value) {
+    let packages = list(answer, "packages");
+    if packages.is_empty() {
+        let _ = writeln!(
+            out,
+            "No package called \"{}\" among the packages Plumb knows (the most used of each registry).",
+            text(answer, "name").unwrap_or("")
+        );
+    }
+    for card in packages {
+        package_line(out, card);
+    }
 }
 
 fn search(out: &mut String, answer: &Value) {

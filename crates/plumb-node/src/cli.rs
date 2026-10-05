@@ -491,6 +491,13 @@ pub struct FetchPagesArgs {
     /// Papers: most papers kept, the most cited.
     #[arg(long, value_name = "N", default_value_t = 2_000_000)]
     pub max_papers: usize,
+    /// Packages: the registries to list (npm, pypi, crates, go, gem,
+    /// composer, nuget, maven), comma-separated; all when left out.
+    #[arg(long, value_name = "KEYS", value_delimiter = ',')]
+    pub registries: Vec<String>,
+    /// Packages: most packages kept of each registry, the most used.
+    #[arg(long, value_name = "N", default_value_t = plumb_ingest::packages::DEFAULT_MAX_PER_REGISTRY)]
+    pub max_per_registry: usize,
     /// Places: read this OpenStreetMap extract (.osm.pbf) instead of
     /// downloading the whole planet (about 90 GB) into --work.
     #[arg(long, value_name = "PATH")]
