@@ -243,6 +243,14 @@ pub enum CrawlOutcome {
     NotHtml {
         content_type: String,
     },
+    /// The page was a bot check standing in for the homepage (Cloudflare's
+    /// "Just a moment...", a KillBot verification and the like; see
+    /// [`plumb_core::is_bot_check_page`]). It says nothing about the site,
+    /// so nothing on it is kept: no title, no links.
+    BotCheck {
+        /// The check's title.
+        title: Option<String>,
+    },
     /// Not crawled because of an error. The message says what went wrong,
     /// and starts with `robots.txt` when that is where it went wrong.
     ///
