@@ -23,3 +23,7 @@ url = "2.5.8"
 
 [dev-dependencies]
 axum = "0.8.9"
+# The node turns on regex-automata's full DFAs (through tracing-subscriber's
+# env-filter), which make robots.txt rules take more memory. Turn them on
+# here too, so the robots.txt memory test measures what the node runs.
+regex-automata = { version = "0.4.18", default-features = false, features = ["dfa-build", "dfa-search"] }

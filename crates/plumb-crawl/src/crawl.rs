@@ -2621,9 +2621,11 @@ mod tests {
         }
         let (parsed, peak, took) = check(robots_txt(&big, 0));
         let robot = parsed.unwrap();
-        // 16.6 MB, of which about 3 MB for the wildcard rules.
+        // 19 to 21 MB, depending on the machine, of which about 3 MB for
+        // the wildcard rules and some for regex-automata's full DFAs (see
+        // the dev-dependency on it).
         assert!(
-            peak < MAX_ROBOTS_REGEX_BYTES + (4 << 20),
+            peak < MAX_ROBOTS_REGEX_BYTES + (8 << 20),
             "{peak} bytes at peak"
         );
         // About 1 s in a debug build.
