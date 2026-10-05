@@ -70,8 +70,8 @@ use crate::agree::{Agreement, AgreementStatus, MIN_JUDGED};
 use crate::allowance::{Allowance, Source};
 use crate::assign::{epoch_of, is_assigned, MAX_SHARE_PPM};
 use crate::batch::{
-    accept_batch, accept_news, accept_own_batch, accept_trusted_batch, Batch, SignedHeader,
-    MAX_BATCH_AGE_EPOCHS, MAX_BATCH_RECORDS,
+    accept_batch, accept_news, accept_own_batch, accept_trusted_batch, mostly_kept, Batch,
+    SignedHeader, MAX_BATCH_AGE_EPOCHS, MAX_BATCH_RECORDS,
 };
 use crate::bucket::{BucketSource, BUCKETS};
 use crate::credits::{
@@ -2755,8 +2755,12 @@ impl Task {
         };
         // A batch none of whose records count here is not kept: anyone can
         // make keys and sign batches, and they would otherwise fill the disk.
-        if accepted.is_empty() && !trusted {
-            debug!("batch {id} from {from} has no record this node keeps; not holding it");
+        // Nor is one mostly of lines that do not count, held whole for the
+        // few that do.
+        if !trusted && (accepted.is_empty() || !mostly_kept(&batch, &accepted)) {
+            debug!(
+                "batch {id} from {from} is mostly records this node does not keep; not holding it"
+            );
             self.refuse(id);
             return;
         }
@@ -3913,7 +3917,10 @@ mod tests {
         assert_eq!(shared.body_text, None);
         assert!(u.shared.is_none() && !u.verified);
         // Confirmed by crawlers this node counts, it is.
-        let confirmed = crate::search::FoundSite { confirmed: true, ..a };
+        let confirmed = crate::search::FoundSite {
+            confirmed: true,
+            ..a
+        };
         assert_eq!(confirmed.keeps(), Some(&shared));
 
         // Trusted: both count whole, text included, and are ranked with it.

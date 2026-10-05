@@ -469,6 +469,43 @@ fn accept(batch: &Batch, crawler: &PeerId, now: u64, source: Source) -> Vec<Site
     kept
 }
 
+/// Whether a batch from a crawler this node does not trust is worth
+/// holding, given what [`accept_batch`] kept of it: at least half its lines
+/// are about a site it kept (the record, its icon or its headlines, each
+/// counted once a site). Otherwise one record it keeps would get a batch of
+/// up to [`MAX_BATCH_BYTES`] of lines it does not keep onto its disk.
+pub fn mostly_kept(batch: &Batch, kept: &[SiteRecord]) -> bool {
+    /// The field naming the site, whatever the line is.
+    #[derive(Deserialize)]
+    struct Line {
+        domain: Option<String>,
+        icon_of: Option<String>,
+        news_of: Option<String>,
+    }
+    let kept_domains: HashSet<&str> = kept.iter().map(|r| r.domain.as_str()).collect();
+    let mut counted: HashSet<(u8, String)> = HashSet::new();
+    for line in &batch.records {
+        if line.len() > MAX_RECORD_BYTES {
+            continue;
+        }
+        let Ok(line) = serde_json::from_str::<Line>(line) else {
+            continue;
+        };
+        let (kind, name) = match (line.domain, line.icon_of, line.news_of) {
+            (Some(domain), None, None) => (0, domain),
+            (None, Some(domain), None) => (1, domain),
+            (None, None, Some(domain)) => (2, domain),
+            _ => continue,
+        };
+        if let Some(domain) = canonical_domain(&name) {
+            if kept_domains.contains(domain.as_str()) {
+                counted.insert((kind, domain));
+            }
+        }
+    }
+    counted.len() * 2 >= batch.records.len()
+}
+
 /// A site's icon in a batch, on a line of its own: a 32-pixel PNG, base64,
 /// of a homepage crawled in the same batch. Nodes that don't know this
 /// line skip it, as a record that does not parse. Only icons from this
@@ -698,6 +735,35 @@ mod tests {
         let back: Batch = serde_json::from_str(&json).unwrap();
         assert_eq!(back.check(NOW).unwrap(), peer);
         assert_eq!(back.id(), batch.id());
+    }
+
+    #[test]
+    fn a_batch_mostly_of_lines_not_kept_is_not_held() {
+        let key = Keypair::generate_ed25519();
+        let peer = key.public().to_peer_id();
+        let domains = assigned_domains(&peer, 2);
+        // An honest batch: homepages and their icons.
+        let mut with_icon = crawled(&domains[0]);
+        with_icon.icon = Some("iVBORw0KGgo=".into());
+        let honest = sign(&key, &[with_icon, crawled(&domains[1])]);
+        assert!(mostly_kept(&honest, &accept_batch(&honest, &peer, NOW)));
+        // One assigned homepage, padded with sites not assigned and copies
+        // of the one that is.
+        let mut padded = vec![crawled(&domains[0])];
+        padded.extend(
+            (0..)
+                .map(|i| format!("other{i}.com"))
+                .filter(|d| !is_assigned(epoch_of(NOW), &peer, d, MAX_SHARE_PPM))
+                .take(3)
+                .map(|d| crawled(&d)),
+        );
+        let mut copy = crawled(&domains[0]);
+        copy.description = Some("x".repeat(1000));
+        padded.push(copy);
+        let padded = sign(&key, &padded);
+        let kept = accept_batch(&padded, &peer, NOW);
+        assert!(kept.iter().all(|r| r.domain == domains[0]));
+        assert!(!mostly_kept(&padded, &kept));
     }
 
     #[test]
