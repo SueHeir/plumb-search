@@ -94,9 +94,11 @@ impl Func {
         match self {
             Func::Sqrt => x.sqrt(),
             Func::Cbrt => x.cbrt(),
-            Func::Sin => x.sin(),
-            Func::Cos => x.cos(),
-            Func::Tan => x.tan(),
+            Func::Sin => snap(x.sin(), x),
+            Func::Cos => snap(x.cos(), x),
+            // Undefined at odd multiples of π/2, not 1.6 × 10¹⁶.
+            Func::Tan if snap(x.cos(), x) == 0.0 => f64::NAN,
+            Func::Tan => snap(x.tan(), x),
             Func::Asin => x.asin(),
             Func::Acos => x.acos(),
             Func::Atan => x.atan(),
@@ -109,6 +111,17 @@ impl Func {
             Func::Floor => x.floor(),
             Func::Ceil => x.ceil(),
         }
+    }
+}
+
+/// `result`, a sine, cosine or tangent of `x`, as 0 when it is only float
+/// noise: sin(π) is 0, not 1.2 × 10⁻¹⁶. The noise grows with `x`, as π
+/// itself is off by about `x` × 10⁻¹⁶.
+fn snap(result: f64, x: f64) -> f64 {
+    if result.abs() < 1e-12 * x.abs() {
+        0.0
+    } else {
+        result
     }
 }
 
@@ -459,6 +472,24 @@ mod tests {
         assert_eq!(calc("(1+2").unwrap(), "3");
         assert_eq!(calc("log(1000)").unwrap(), "3");
         assert_eq!(calc("5²").unwrap(), "25");
+    }
+
+    #[test]
+    fn trig_drops_float_noise() {
+        assert_eq!(calc("cos(90°)").unwrap(), "0");
+        assert_eq!(calc("sin(pi)").unwrap(), "0");
+        assert_eq!(calc("sin(180°)").unwrap(), "0");
+        assert_eq!(calc("tan(180°)").unwrap(), "0");
+        assert_eq!(calc("tan(45°)").unwrap(), "1");
+        assert_eq!(calc("sin(1e-13) * 1").unwrap(), "1 × 10⁻¹³");
+        assert_eq!(answer("tan(90°)"), None);
+        assert_eq!(answer("tan(pi/2)"), None);
+        assert_eq!(answer("tan(270°)"), None);
+    }
+
+    #[test]
+    fn subnormals_are_written_out() {
+        assert_eq!(calc("1e-320 * 1").unwrap(), "9.99988867 × 10⁻³²¹");
     }
 
     #[test]
