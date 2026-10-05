@@ -62,6 +62,8 @@ fn test_config(dir: &Path) -> NodeConfig {
     config.initial_crawl = 0;
     config.refresh_every = None;
     config.crawl_per_refresh = 0;
+    // No feed of a test site is ever fetched.
+    config.news_feeds = 0;
     // As if "Set up my node" was answered, so filling goes ahead.
     config.settings.setup_chosen = true;
     let nowhere = closed_port();
@@ -2010,6 +2012,66 @@ async fn a_node_fills_its_free_space_with_a_trusted_node_s_crawls() {
 
     peer.shutdown().await;
     node.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn shows_the_recent_headlines_a_trusted_node_shares() {
+    let (peer_id, peer_addr, peer, _peer_dir) = crawled_peer(&["harbourmasters.org"]).await;
+    let dir = seeded_dir();
+    let mut config = test_config(dir.path());
+    let mut net = plumb_net::NetConfig::new(PathBuf::new());
+    net.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+    net.upnp = false;
+    net.local_discovery = false;
+    net.round_every = None;
+    net.fill = false;
+    net.trusted_peers = vec![peer_id];
+    net.bootstrap = vec![peer_addr];
+    config.network = Some(net);
+    let node = start(config).await.unwrap();
+    let addr = node.addr();
+    wait_for(addr, "the first index", ready_and_idle).await;
+
+    let now = now_unix();
+    let checked = |domain: &str, title: &str| {
+        let mut record = SiteRecord::new(domain);
+        record.news = vec![plumb_core::Headline {
+            title: title.into(),
+            url: format!("https://www.{domain}/story"),
+            at: now - 600,
+        }];
+        record
+    };
+    let shared = vec![
+        checked("tidetables.net", "Spring tides flood the harbour"),
+        checked("harbourmasters.org", "Harbour closed for spring tides"),
+    ];
+    let mut body = String::new();
+    for _ in 0..100 {
+        peer.publish(shared.clone()).await.unwrap();
+        body = get(addr, "/api/recent?q=spring+tides").await.2;
+        if body.contains("tidetables.net") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let recent: crate::news::Recent = serde_json::from_str(&body).unwrap();
+    assert_eq!(recent.site, None);
+    assert_eq!(recent.headlines.len(), 2, "{recent:?}");
+    // Headlines are not site records.
+    assert!(!dir.path().join("net/inbox.jsonl").exists());
+    let (_, _, page) = get(addr, "/search?q=spring+tides").await;
+    assert!(page.contains("<h2>Recent</h2>"), "{page}");
+    assert!(page.contains("Harbour closed for spring tides"), "{page}");
+    // A topic only one site's headline is about gets no block.
+    assert_eq!(
+        get(addr, "/api/recent?q=closed").await.2,
+        "{\"headlines\":[]}"
+    );
+
+    peer.shutdown().await;
+    node.shutdown().await.unwrap();
+    assert!(dir.path().join("news/headlines.json").is_file());
 }
 
 /// A node in the network holding `domains`, crawled, for others to fill

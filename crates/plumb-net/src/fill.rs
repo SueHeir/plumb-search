@@ -155,6 +155,7 @@ fn parse(line: &str, now: u64, uncrawled: bool) -> Result<SiteRecord> {
     record.crawl_failures = 0;
     record.redirect = None;
     record.icon = None;
+    record.news = Vec::new();
     Ok(record)
 }
 

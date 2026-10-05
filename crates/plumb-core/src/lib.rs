@@ -15,6 +15,7 @@ pub mod article;
 mod country;
 pub mod keys;
 mod kinds;
+pub mod news;
 #[cfg(feature = "oblivious")]
 pub mod oblivious;
 mod site_search;
@@ -22,6 +23,7 @@ mod site_search;
 pub use article::{article_url, Article};
 pub use country::{normalize_country, site_country, tld_country};
 pub use kinds::{is_generic_kind, kind_key, other_number, MAX_KINDS};
+pub use news::Headline;
 pub use site_search::{search_link, search_template_for, SEARCH_TERMS};
 
 use anyhow::{Context, Result};
@@ -118,6 +120,12 @@ pub struct SiteRecord {
     /// icons in a store of their own, and [`SiteRecord::merge`] ignores it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
+    /// Recent headlines from the site's feed (see [`news`]), only while a
+    /// feed check travels between nodes, like [`SiteRecord::icon`]. Never
+    /// kept in a records file: a node keeps headlines in a store of their
+    /// own, and [`SiteRecord::merge`] ignores them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub news: Vec<Headline>,
 }
 
 /// A homepage's redirect to another registrable domain.

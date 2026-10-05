@@ -77,6 +77,7 @@ use url::Url;
 use crate::cli::ServeArgs;
 use crate::country::{country_name, HomeCountry, COUNTRY_CHOICES};
 use crate::meaning::{MeaningIndex, SharedMeaning};
+use crate::news::Recent;
 use crate::node::{NodeSettings, Phase, Status, Step};
 use crate::websearch::{bang_url, Engine, WebSettings};
 
@@ -259,6 +260,13 @@ pub trait StatusSource: Send + Sync {
         None
     }
 
+    /// The "Recent" block for `query`, whose best result is `top` (its
+    /// domain, and whether the query names it); see
+    /// [`crate::news::NewsStore::recent`].
+    fn recent(&self, _query: &str, _top: Option<(&str, bool)>) -> Option<crate::news::Recent> {
+        None
+    }
+
     /// Active and next-start feature choices, shared by desktop and Docker.
     fn features(&self) -> crate::node::features::FeatureSettings {
         Default::default()
@@ -373,6 +381,18 @@ impl AppState {
             .is_some_and(|node| node.shares_popularity())
     }
 
+    /// The "Recent" block for `query`, whose results are `results`; `None`
+    /// for `plumb serve`, which keeps no headlines. Headlines are matched
+    /// with the query as typed: spelling corrections come from site names,
+    /// and would turn news words into them.
+    fn recent(&self, query: &str, results: &SearchResults) -> Option<Recent> {
+        let top = results
+            .hits
+            .first()
+            .map(|hit| (hit.domain.as_str(), hit.named));
+        self.node.as_ref()?.recent(query, top)
+    }
+
     /// The icons of `domains` that this node has, for [`render_hit`]. Read
     /// off the async threads: each is a small file.
     async fn icons(&self, domains: Vec<String>) -> Icons {
@@ -456,6 +476,7 @@ fn app(state: AppState) -> Router {
             .route("/go", get(go))
             .route("/network", get(network_page))
             .route("/api/network/search", get(api_network_search))
+            .route("/api/recent", get(api_recent))
             .route("/app", get(panel::panel))
             .route("/app/settings", post(panel::save_settings))
             .route("/app/setup", post(setup::save_setup))
@@ -775,9 +796,10 @@ async fn search_page(
                 }
             }
             let icons = state.icons(domains).await;
+            let recent = state.recent(&query, &results);
             html_response(
                 StatusCode::OK,
-                render_results(
+                render_results_with(
                     &query,
                     &results,
                     &network,
@@ -786,6 +808,7 @@ async fn search_page(
                     limit,
                     state.shares_popularity(),
                     &icons,
+                    recent.as_ref(),
                 ),
             )
         }
@@ -849,6 +872,31 @@ async fn api_search(
                 .into_response()
         }
     }
+}
+
+/// `GET /api/recent?q=...`: the "Recent" block the results page shows
+/// for the query, as JSON; `{"headlines":[]}` when it shows none.
+async fn api_recent(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(params): Query<SearchParams>,
+) -> Response {
+    let query = params.query();
+    let recent = if query.is_empty() || state.setting_up().is_some() {
+        None
+    } else {
+        let options = params.options(&state.settings.home, &headers);
+        match run_search(&state, &query, params.limit(), &options).await {
+            Ok(results) => state.recent(&query, &results),
+            Err(_) => None,
+        }
+    };
+    (
+        StatusCode::OK,
+        security_headers(),
+        Json(recent.unwrap_or_default()),
+    )
+        .into_response()
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1424,6 +1472,12 @@ background:var(--bg);color:var(--fg)}\
 .ss{margin:1rem 0 .25rem;padding:.6rem .8rem;border:1px solid var(--line);border-radius:.5rem}\
 .ss a{color:var(--link)}\
 .sp{margin:1rem 0 .25rem}.sp a{color:var(--link)}\
+li.news{padding:.6rem .9rem;border:1px solid var(--line);border-radius:.6rem}\
+.news h2{margin:0 0 .2rem;font-size:.875rem;font-weight:600;color:var(--muted)}\
+.news ol li{padding:.3rem 0;margin:0}\
+.news a{color:var(--link);text-decoration:none;overflow-wrap:anywhere}\
+.news a:hover,.news a:focus-visible{text-decoration:underline}\
+.news .m{margin:0}\
 .web{margin:.25rem 0;font-size:.9rem}.web a{color:var(--muted)}\
 .setup{max-width:36rem}\
 .step{margin:2rem 0 .5rem;font-size:1.1rem}\
@@ -1927,6 +1981,8 @@ fn render_source(
     let _ = writeln!(out, "<p class=\"src\">{line}</p>");
 }
 
+/// [`render_results_with`] without a "Recent" block.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn render_results(
     query: &str,
@@ -1937,6 +1993,32 @@ fn render_results(
     limit: usize,
     share_picks: bool,
     icons: &Icons,
+) -> String {
+    render_results_with(
+        query,
+        results,
+        network,
+        settings,
+        web_search,
+        limit,
+        share_picks,
+        icons,
+        None,
+    )
+}
+
+/// [`render_results`] with a "Recent" block after the first result.
+#[allow(clippy::too_many_arguments)]
+fn render_results_with(
+    query: &str,
+    results: &SearchResults,
+    network: &NetOutcome,
+    settings: &Settings,
+    web_search: Option<Engine>,
+    limit: usize,
+    share_picks: bool,
+    icons: &Icons,
+    recent: Option<&Recent>,
 ) -> String {
     let shown = merge_results(&results.hits, network, limit);
     let from_network = shown.iter().filter(|s| s.network.is_some()).count();
@@ -1988,12 +2070,16 @@ fn render_results(
             p.under.is_none() && (p.at == at || (at == usize::MAX && p.at >= shown_count))
         })
     };
+    let news = recent.map(|recent| render_recent(recent, now_unix()));
     if shown.is_empty() && pages.is_empty() {
         let _ = writeln!(
             body,
             "<p class=\"none\">No sites match <strong>{}</strong>.</p>",
             escape_html(query)
         );
+        if let Some(news) = &news {
+            let _ = writeln!(body, "<ol>\n{news}</ol>");
+        }
     } else {
         body.push_str("<ol>\n");
         for (position, item) in shown.iter().enumerate() {
@@ -2028,6 +2114,16 @@ fn render_results(
                 }
             }
             body.push_str(&rendered);
+            if position == 0 {
+                if let Some(news) = &news {
+                    body.push_str(news);
+                }
+            }
+        }
+        if shown.is_empty() {
+            if let Some(news) = &news {
+                body.push_str(news);
+            }
         }
         for page in listed_pages(usize::MAX) {
             render_page(&mut body, &page.hit, icons.get(page.hit.page.set_domain()));
@@ -2241,6 +2337,34 @@ fn render_page(out: &mut String, hit: &PageHit, icon: Option<&str>) {
         },
         hit.score
     );
+}
+
+/// The "Recent" block, as an item of the results list: the latest posts
+/// of the site the query names, or recent headlines about its words, each
+/// with its site and age. Feed text is as untrusted as any record's, and
+/// is escaped the same way.
+fn render_recent(recent: &Recent, now: u64) -> String {
+    let heading = match &recent.site {
+        Some(site) => format!("Latest from {}", escape_html(site)),
+        None => "Recent".to_string(),
+    };
+    let mut out =
+        format!("<li class=\"news\"><section aria-label=\"{heading}\"><h2>{heading}</h2><ol>");
+    for headline in &recent.headlines {
+        let Some(href) = http_url(&headline.url) else {
+            continue;
+        };
+        let _ = write!(
+            out,
+            "<li><a href=\"{}\" rel=\"noreferrer\">{}</a><div class=\"m\">{} &middot; {}</div></li>",
+            escape_html(&href),
+            escape_html(&truncate_chars(&headline.title, 150)),
+            escape_html(&headline.domain),
+            time_ago(headline.at, now)
+        );
+    }
+    out.push_str("</ol></section></li>\n");
+    out
 }
 
 /// "Wikipedia: Python (programming language)", under the result for the
@@ -3756,6 +3880,61 @@ mod tests {
         // The page loads no image from anywhere: icons ride inside it.
         assert!(!page.contains("src=\"http"));
         assert!(CONTENT_SECURITY_POLICY.contains("img-src data:;"));
+    }
+
+    #[test]
+    fn recent_headlines_follow_the_first_result_escaped() {
+        let results = SearchResults {
+            pages: Vec::new(),
+            spelling: None,
+            hits: vec![
+                hit("news.com", "https://news.com/", Some("News"), None),
+                hit("other.com", "https://other.com/", Some("Other"), None),
+            ],
+            site_search: None,
+        };
+        let now = now_unix();
+        let headline = |title: &str, url: &str| crate::news::RecentHeadline {
+            domain: "news.com".into(),
+            title: title.into(),
+            url: url.into(),
+            at: now - 2 * 3600,
+        };
+        let recent = Recent {
+            site: Some("news.com".into()),
+            headlines: vec![
+                headline(
+                    "<script>alert(1)</script> wins",
+                    "https://news.com/a?x=1&y=2",
+                ),
+                headline("Sneaky", "javascript:alert(1)"),
+            ],
+        };
+        let page = render_results_with(
+            "news",
+            &results,
+            &NetOutcome::NotAsked,
+            &no_settings(),
+            None,
+            10,
+            false,
+            &Icons::default(),
+            Some(&recent),
+        );
+        let block = page.find("<li class=\"news\">").expect("a Recent block");
+        assert!(
+            page.find("news.com/").unwrap() < block,
+            "after the first result"
+        );
+        assert!(block < page.find("other.com").unwrap(), "before the second");
+        assert!(page.contains("<h2>Latest from news.com</h2>"));
+        assert!(page.contains(
+            "<a href=\"https://news.com/a?x=1&amp;y=2\" rel=\"noreferrer\">\
+             &lt;script&gt;alert(1)&lt;/script&gt; wins</a>"
+        ));
+        assert!(page.contains("news.com &middot; 2 hours ago"));
+        assert!(!page.contains("Sneaky"));
+        assert!(!page.contains("<script>"));
     }
 
     /// A node that keeps search history in a folder.

@@ -111,6 +111,7 @@ pub mod features;
 mod fill;
 pub mod journal;
 mod network;
+mod news;
 mod pages;
 pub mod schedule;
 pub(crate) mod store;
@@ -248,6 +249,12 @@ pub struct NodeConfig {
     /// Topics this node focuses on (`plumb run --focus`), besides the ones
     /// set on the panel ([`NodeSettings::focus_topics`]).
     pub focus_topics: Vec<String>,
+    /// Watch the RSS or Atom feeds of this many of the best-ranked sites
+    /// for the results page's "Recent" block (see [`crate::news`]): each
+    /// feed is checked at most hourly, less often while it is quiet, and a
+    /// week of headlines is kept. 0 checks none; headlines trusted nodes
+    /// share are still kept and shown.
+    pub news_feeds: usize,
 }
 
 impl NodeConfig {
@@ -289,6 +296,7 @@ impl NodeConfig {
             manage_other_nodes: false,
             search_history: false,
             focus_topics: Vec::new(),
+            news_feeds: 3_000,
         }
     }
 
@@ -304,6 +312,7 @@ impl NodeConfig {
             settings: NodeSettings::desktop(),
             manage_other_nodes: true,
             search_history: true,
+            news_feeds: 300,
             ..NodeConfig::server(data_dir)
         }
     }
@@ -644,6 +653,7 @@ pub struct NodeHandle {
     worker: JoinHandle<()>,
     embedding: Option<JoinHandle<()>>,
     pages: JoinHandle<()>,
+    news: JoinHandle<()>,
 }
 
 impl NodeHandle {
@@ -695,6 +705,7 @@ impl NodeHandle {
             worker,
             embedding,
             pages,
+            news,
             ..
         } = self;
         info!("stopping the node in {}", inner.paths.data.display());
@@ -721,6 +732,9 @@ impl NodeHandle {
         }
         if let Err(err) = pages.await {
             warn!("page sets failed: {err}");
+        }
+        if let Err(err) = news.await {
+            warn!("checking feeds failed: {err}");
         }
         network::stop(&inner).await;
         // Only now may another node take over the data directory.
@@ -856,6 +870,7 @@ pub async fn start(mut config: NodeConfig) -> Result<NodeHandle> {
         let inner = inner.clone();
         tokio::task::spawn_blocking(move || pages::run(inner))
     };
+    let news = tokio::spawn(news::run(inner.clone()));
     info!(
         "serving http://{addr}/ with data in {}",
         inner.paths.data.display()
@@ -868,6 +883,7 @@ pub async fn start(mut config: NodeConfig) -> Result<NodeHandle> {
         worker,
         embedding,
         pages,
+        news,
     })
 }
 
@@ -1003,6 +1019,8 @@ struct Inner {
     /// The page index searched next to the sites, and its key; `None`
     /// while no page set is kept.
     pages: RwLock<Option<(String, Arc<plumb_index::pages::PageSearcher>)>>,
+    /// Recent headlines and the feeds watched for them.
+    news: crate::news::NewsStore,
 }
 
 /// Failed work the panel can have tried again now.
@@ -1172,6 +1190,7 @@ impl Inner {
         let backoff = worker::Backoff::new(config.retry_wait, config.max_retry_wait);
         let journal = journal::Journal::open(&opened.paths.data);
         let fill_state = fill::FillState::load(&opened.paths.net);
+        let news = crate::news::NewsStore::open(&opened.paths.news);
         Inner {
             config,
             paths: opened.paths,
@@ -1210,6 +1229,7 @@ impl Inner {
             journal,
             meaning_retry: AtomicBool::new(false),
             pages: RwLock::new(None),
+            news,
         }
     }
 
@@ -1764,6 +1784,10 @@ impl StatusSource for Inner {
 
     fn icon(&self, domain: &str) -> Option<Vec<u8>> {
         crate::icons::IconStore::new(&self.paths.icons).get(domain)
+    }
+
+    fn recent(&self, query: &str, top: Option<(&str, bool)>) -> Option<crate::news::Recent> {
+        self.news.recent(query, top, now_unix())
     }
 
     fn features(&self) -> features::FeatureSettings {
