@@ -97,6 +97,23 @@ Set `OPENALEX_API_KEY` if OpenAlex asks for a key. `--max-papers` caps how many 
 
 Book and paper titles are often common words ("Python", "Apple"), so a book or paper named by its title alone is never listed before every site, and an article of the same name comes before it: "dune" lists the article on the novel, then the book. A query of a book's title followed by words of its author's name or by "book" or "novel" ("dune frank herbert", "dune book") asks for the book, which then comes first unless the first site is named by the whole query; other editions come after the best site.
 
+## Software packages
+
+The `packages` set lists the most used packages of eight registries: npm, PyPI, crates.io, Go modules, RubyGems, Packagist, NuGet and Maven Central (20,000 of each by default). It is for coding agents, which mostly search to look up a library: its latest version, how to install it and where its docs are. Each package keeps its name, its description, its latest version and when that came out, its license, and the addresses of its docs, code and homepage. The install command (`cargo add serde`) and the registry page are made from the registry and the name, and docs.rs, pkg.go.dev, rubydoc.info and javadoc.io stand in for docs a crate, module, gem or Maven package names none of.
+
+```sh
+plumb fetch-pages --set packages --data /path/to/node-data
+```
+
+The lists come from [ecosyste.ms](https://packages.ecosyste.ms)'s open API (CC BY-SA 4.0), most downloaded first, or most depended on for Go and Maven, which count no downloads. It allows 5,000 requests an hour, and the whole set takes about 650. `--registries npm,pypi,crates` lists only some registries, and `--max-per-registry` changes how many of each are kept. Registries count downloads in very different numbers, so a package's popularity is its downloads as a share of its registry's most downloaded package: the top crate weighs as much as the top npm package.
+
+A package is listed only when the query asks for one, so "react" is still the site and the article. The query asks by naming a registry ("serde crate", "react npm", "requests pip", "lodash package") or a language ("requests python", "gin golang", "tokio rust"), or by asking for a version ("lodash version", "latest version of tokio"). Words like "latest", "docs" and "install" are left out of the name. A language or "version" alone only finds well-known packages, so "rust book" does not find a crate called `book`. Such a package comes first unless the best site is official or better known, with its card under its title:
+
+> serde · crates.io: A generic serialization/deserialization framework
+> Latest 1.0.228 (2025-09-27) · MIT OR Apache-2.0 · `cargo add serde` · Docs · Code · Home
+
+The MCP server's `package` tool returns the same card by name ([mcp.md](mcp.md)). In the SearXNG-style JSON it follows the description in `content`.
+
 ## How pages and sites are listed together
 
 - An article about a listed site (its Wikidata item's official website) goes under that site's result instead of in a place of its own.

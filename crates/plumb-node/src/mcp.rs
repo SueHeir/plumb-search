@@ -78,6 +78,8 @@ const MAX_READ_CHARS: usize = 30_000;
 const MAX_LINKS_RETURNED: usize = 60;
 /// Headlines `search` returns.
 const MAX_HEADLINES: usize = 5;
+/// Most packages the `package` tool lists.
+const MAX_PACKAGES: usize = 5;
 /// Results asked for when looking up whose profile a query asks for.
 const PROFILE_SEARCH_LIMIT: usize = 5;
 
@@ -263,6 +265,32 @@ impl Mcp {
                 let domain = text_arg(args, "domain")?;
                 let options = self.options(args)?;
                 self.site_info(&domain, &options)
+            }
+            "package" => {
+                let name = text_arg(args, "name")?;
+                let registry = args
+                    .get("registry")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|r| !r.is_empty());
+                let registry = match registry {
+                    None => None,
+                    Some(key) => {
+                        Some(plumb_core::packages::registry(&key.to_lowercase()).ok_or((
+                            INVALID_PARAMS,
+                            format!(
+                            "registry must be one of {}; got {key:?}",
+                            plumb_core::packages::REGISTRIES
+                                .iter()
+                                .map(|r| r.key)
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ),
+                        ))?)
+                    }
+                };
+                let options = self.options(args)?;
+                self.package(&name, registry, &options)
             }
             "read_page" if self.reader.is_some() => {
                 let read = ReadArgs::of(args)?;
@@ -528,14 +556,18 @@ impl Mcp {
         let pages: Vec<Value> = placed
             .iter()
             .map(|placed| {
-                json!({
+                let mut page = json!({
                     "title": placed.hit.page.title,
                     "url": placed.hit.page.url,
                     "description": placed.hit.page.description.as_deref().map(short),
                     "set": placed.hit.page.set,
                     "about_site": placed.under,
                     "position": placed.at + 1,
-                })
+                });
+                if placed.hit.page.package.is_some() {
+                    page["package"] = package_card(&placed.hit.page);
+                }
+                page
             })
             .collect();
         let mut answer_json = json!({
@@ -559,6 +591,37 @@ impl Mcp {
             fields.insert("recent".into(), json!(headlines));
         }
         Ok(answer_json)
+    }
+
+    /// `package`: the cards of the packages called `name`, of `registry`
+    /// or of any, the most used first.
+    pub fn package(
+        &self,
+        name: &str,
+        registry: Option<&plumb_core::packages::Registry>,
+        options: &SearchOptions,
+    ) -> Result<Value> {
+        // "package" asks for any package of the name, the registry's
+        // word or language for its own.
+        let mut query = format!("{name} package");
+        if let Some(word) = registry.and_then(|r| r.words.first().or(r.languages.first())) {
+            query.push(' ');
+            query.push_str(word);
+        }
+        let results = self.lookup(&query, 1, options)?;
+        let packages: Vec<Value> = results
+            .pages
+            .iter()
+            .map(|placed| &placed.hit.page)
+            .filter(|page| page.package.is_some())
+            .take(MAX_PACKAGES)
+            .map(package_card)
+            .collect();
+        Ok(json!({
+            "name": name,
+            "found": !packages.is_empty(),
+            "packages": packages,
+        }))
     }
 
     /// `site_info`: one site's entry.
@@ -844,7 +907,8 @@ pub fn tools(read_pages: bool) -> Value {
             "title": "Search",
             "description": "Search the web (web_search) with Plumb Search: sites by name, best \
                  first, plus Wikipedia articles, Stack Overflow questions, books and other pages \
-                 placed among them, a direct answer for sums, unit and currency conversions and \
+                 placed among them, package cards (version, install command, docs) when the query \
+                 says npm, crate, pip, python or another registry or language, a direct answer for sums, unit and currency conversions and \
                  the time somewhere, facts about what the query names, and recent headlines. \
                  Plumb indexes homepages and names, not the full text of the web, so search for \
                  names and topics, then read a page with read_page.",
@@ -856,6 +920,27 @@ pub fn tools(read_pages: bool) -> Value {
                     "country": country,
                 },
                 "required": ["query"],
+            },
+            "annotations": read_only,
+        },
+        {
+            "name": "package",
+            "title": "Package",
+            "description": "A software package's card from npm, PyPI, crates.io, Go, RubyGems, \
+                 Packagist, NuGet or Maven Central, by name: its latest version and release \
+                 date, license, install command, and where its docs and code are. Use it \
+                 instead of opening the registry's page.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "The package's name, as installed (\"serde\", \"@types/node\", \"requests\")." },
+                    "registry": {
+                        "type": "string",
+                        "enum": plumb_core::packages::REGISTRIES.iter().map(|r| r.key).collect::<Vec<_>>(),
+                        "description": "Optional: only this registry's package.",
+                    },
+                },
+                "required": ["name"],
             },
             "annotations": read_only,
         },
@@ -932,6 +1017,26 @@ fn whole_number(args: &Map<String, Value>, name: &str) -> Result<Option<usize>, 
             .map(|n| Some(usize::try_from(n).unwrap_or(usize::MAX)))
             .ok_or((INVALID_PARAMS, format!("{name} must be a whole number"))),
     }
+}
+
+/// A package's card in a tool's answer.
+fn package_card(page: &plumb_index::pages::Page) -> Value {
+    let Some(package) = &page.package else {
+        return Value::Null;
+    };
+    json!({
+        "name": package.name,
+        "registry": page.set_name(),
+        "description": page.description.as_deref().map(short),
+        "version": package.version,
+        "released": package.released,
+        "license": package.license,
+        "install": package.install(),
+        "docs": package.docs(),
+        "repo": package.repo,
+        "homepage": package.homepage,
+        "url": page.url,
+    })
 }
 
 /// A site in a tool's answer.

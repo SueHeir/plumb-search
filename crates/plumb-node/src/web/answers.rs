@@ -362,6 +362,7 @@ mod tests {
                 item: Some("Q937".to_string()),
                 profiles: Vec::new(),
                 website: None,
+                package: None,
             },
             score: 1.0,
             named: true,

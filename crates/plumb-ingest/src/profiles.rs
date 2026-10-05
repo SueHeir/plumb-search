@@ -377,6 +377,7 @@ fn profile_items(
                 aliases,
                 item: Some(item),
                 website: None,
+                package: None,
             })
         })
         .collect();

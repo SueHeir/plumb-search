@@ -21,6 +21,7 @@ pub mod news;
 #[cfg(feature = "oblivious")]
 pub mod oblivious;
 mod operators;
+pub mod packages;
 pub mod place;
 pub mod profiles;
 pub mod safe;

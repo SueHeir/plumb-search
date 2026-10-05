@@ -76,6 +76,12 @@ pub const SETS: &[SetInfo] = &[
         bytes_per_page: 160,
     },
     SetInfo {
+        id: plumb_index::pages::PACKAGES_SET,
+        name: "Software packages (npm, PyPI, crates.io and more)",
+        pages: 160_000,
+        bytes_per_page: 300,
+    },
+    SetInfo {
         id: plumb_index::pages::WIKIDATA_SET,
         name: "Official profiles without an article (Wikidata)",
         pages: 100_000,

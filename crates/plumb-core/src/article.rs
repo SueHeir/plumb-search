@@ -38,6 +38,7 @@ use std::io::{BufRead, Write};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::packages::{PackageInfo, PACKAGE_LINE};
 use crate::profiles::{parse_profiles, write_profiles, Profile};
 
 /// The articles file's first line.
@@ -85,6 +86,10 @@ pub struct Article {
     /// `https://music.youtube.com/` for YouTube Music.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub website: Option<String>,
+    /// A software package's card (see [`crate::packages`]), on the line
+    /// after it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package: Option<PackageInfo>,
 }
 
 /// The key of an official website on a line of profiles.
@@ -189,6 +194,9 @@ pub fn write_article(out: &mut impl Write, article: &Article) -> std::io::Result
             field(article.item.as_deref().unwrap_or(""))
         )?;
     }
+    if let (Some(package), Some(item)) = (&article.package, article.item.as_deref()) {
+        writeln!(out, "{PACKAGE_LINE}{}\t{}", field(item), package.write())?;
+    }
     Ok(())
 }
 
@@ -238,6 +246,16 @@ impl<I: Iterator<Item = String>> Iterator for ArticleLines<I> {
                     if article.item.as_deref() == Some(item) {
                         article.profiles = profiles;
                         article.website = website;
+                    }
+                }
+                continue;
+            }
+            if line.starts_with(PACKAGE_LINE) {
+                if let (Some((item, package)), Some((_, article))) =
+                    (PackageInfo::parse_line(&line), &mut self.pending)
+                {
+                    if article.item.as_deref() == Some(item.as_str()) {
+                        article.package = Some(package);
                     }
                 }
                 continue;
@@ -294,6 +312,7 @@ pub fn parse_article(line: &str) -> Result<Article> {
             .collect(),
         profiles: Vec::new(),
         website: None,
+        package: None,
     })
 }
 
@@ -352,6 +371,7 @@ mod tests {
             aliases: vec!["Maria Curie".into(), "Madame Curie".into()],
             profiles: Vec::new(),
             website: None,
+            package: None,
         };
         let mut out = Vec::new();
         out.extend_from_slice(ARTICLES_HEADER.as_bytes());
