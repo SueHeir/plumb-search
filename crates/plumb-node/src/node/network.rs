@@ -577,8 +577,9 @@ const MAX_KEPT_FOUND: usize = 10_000;
 /// served holds: they go to the inbox like crawls other nodes publish, so
 /// a site this node has without text gets the network's text in its next
 /// index, and is then embedded for search by meaning. Only what
-/// [`plumb_net::FoundSite::shared`] carries is kept, so the trust rules of
-/// published batches apply (text only from trusted crawlers). Sites this
+/// [`plumb_net::FoundSite::keeps`] gives is passed here, so the trust rules
+/// of published batches apply (a crawl is kept only from a trusted crawler
+/// or once confirmed, text only from trusted crawlers). Sites this
 /// node does not hold are left out: searching never fills its storage.
 pub(super) fn keep_found(inner: &Inner, records: Vec<SiteRecord>) {
     let Some(index) = inner.current() else {

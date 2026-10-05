@@ -118,11 +118,16 @@ pub struct FoundSite {
     /// Signed crawls from at least [`QUORUM`] different crawlers agree.
     #[serde(default)]
     pub confirmed: bool,
+    /// The crawl in `shared` was signed by a node this node trusts (set by
+    /// [`crate::NetHandle::search`]).
+    #[serde(default)]
+    pub trusted: bool,
     /// What this node may keep of the site in its own records: the signed
     /// crawl as a batch from its crawler would be kept (homepage facts of
     /// an assigned site, plus headings and text when this node trusts the
     /// crawler, see [`crate::NetHandle::search`]). `None` when no signed
-    /// crawl counts here.
+    /// crawl counts here. One crawler alone can be anyone with a fresh key,
+    /// so a node keeps it only when [`FoundSite::keeps`] says so.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shared: Option<SiteRecord>,
     /// The first proof the answer held that checked out as signed, for
@@ -132,6 +137,17 @@ pub struct FoundSite {
 }
 
 impl FoundSite {
+    /// What of the site this node may keep in its own records: `shared`,
+    /// but only when its crawler is trusted here or crawlers this node
+    /// counts confirmed it, as a published batch's crawls are only folded
+    /// in once confirmed (see [`crate::agree`]). Otherwise one throwaway
+    /// key assigned the site could rewrite its title for good.
+    pub fn keeps(&self) -> Option<&SiteRecord> {
+        self.shared
+            .as_ref()
+            .filter(|_| self.trusted || self.confirmed)
+    }
+
     fn add_crawler(&mut self, crawler: String) {
         if !self.crawlers.contains(&crawler) {
             self.crawlers.push(crawler);
@@ -544,6 +560,7 @@ pub(crate) fn check_answer(
             answers: 1,
             crawlers: Vec::new(),
             confirmed: false,
+            trusted: false,
             shared: None,
             proof: None,
         };
@@ -979,6 +996,7 @@ mod tests {
             answers: 1,
             crawlers: Vec::new(),
             confirmed: false,
+            trusted: false,
             shared: None,
             proof: None,
         };

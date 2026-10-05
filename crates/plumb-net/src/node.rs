@@ -1142,6 +1142,7 @@ fn keep_trusted_crawls(found: &mut NetSearch, trusted: &[PeerId], now: u64) {
             }
         }
         site.shared = Some(signed);
+        site.trusted = true;
     }
 }
 
@@ -3904,15 +3905,22 @@ mod tests {
         // Untrusted: an assigned crawl's homepage facts count, never its
         // text, and an unassigned crawl counts not at all.
         let (a, u) = search(&[]);
-        let shared = a.shared.expect("an assigned crawl counts");
+        // One untrusted crawler alone is not kept: anyone can make a key
+        // assigned the site.
+        assert!(a.keeps().is_none());
+        let shared = a.shared.clone().expect("an assigned crawl counts");
         assert_eq!(shared.description.as_deref(), Some("Handmade shoes"));
         assert_eq!(shared.body_text, None);
         assert!(u.shared.is_none() && !u.verified);
+        // Confirmed by crawlers this node counts, it is.
+        let confirmed = crate::search::FoundSite { confirmed: true, ..a };
+        assert_eq!(confirmed.keeps(), Some(&shared));
 
         // Trusted: both count whole, text included, and are ranked with it.
         let (a, u) = search(&[crawler]);
         for site in [a, u] {
             assert!(site.verified);
+            assert!(site.keeps().is_some());
             let text = Some("Handmade leather shoes, made to order");
             assert_eq!(site.shared.unwrap().body_text.as_deref(), text);
             assert_eq!(site.record.body_text.as_deref(), text);
