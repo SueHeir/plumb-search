@@ -88,7 +88,7 @@ const SKIPPED_LEISURE: &[&str] = &[
     "sports_hall",
 ];
 /// Values of `tourism` that are not places people search for by name.
-const SKIPPED_TOURISM: &[&str] = &["information", "artwork", "picnic_site", "yes"];
+const SKIPPED_TOURISM: &[&str] = &["information", "artwork", "picnic_site", "camp_pitch", "yes"];
 /// Values of `historic` that are kept.
 const KEPT_HISTORIC: &[&str] = &[
     "castle",

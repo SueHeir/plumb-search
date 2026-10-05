@@ -183,6 +183,7 @@ pub struct IndexBackend {
     searcher: Searcher,
     rank: RankConfig,
     meaning: SharedMeaning,
+    places: Option<plumb_index::places::PlaceSearcher>,
 }
 
 impl IndexBackend {
@@ -191,7 +192,14 @@ impl IndexBackend {
             searcher,
             rank,
             meaning: SharedMeaning::default(),
+            places: None,
         }
+    }
+
+    /// Also lists the places of `places` for queries that ask for them.
+    pub fn with_places(mut self, places: plumb_index::places::PlaceSearcher) -> Self {
+        self.places = Some(places);
+        self
     }
 
     /// Also ranks by meaning, for queries that name no site, once
@@ -244,6 +252,21 @@ impl SearchBackend for IndexBackend {
 
     fn num_docs(&self) -> u64 {
         self.searcher.num_docs()
+    }
+
+    fn places(
+        &self,
+        query: &str,
+        home: Option<&str>,
+        country: Option<&str>,
+    ) -> Option<plumb_index::places::PlaceResults> {
+        let places = self.places.as_ref()?;
+        places
+            .search(query, home, country, 8)
+            .unwrap_or_else(|err| {
+                error!("searching places: {err:#}");
+                None
+            })
     }
 }
 
@@ -518,8 +541,12 @@ pub fn run(args: ServeArgs) -> Result<()> {
         .with_context(|| format!("opening the index in {}", args.index.display()))?;
     let docs = searcher.num_docs();
     let meaning = SharedMeaning::new(MeaningIndex::from_args(&args.meaning)?);
+    let mut backend = IndexBackend::new(searcher, rank_config(args.alpha)).with_meaning(meaning);
+    if let Some(places) = &args.places {
+        backend = backend.with_places(crate::places::open_file(places)?);
+    }
     let app = router_with(
-        Arc::new(IndexBackend::new(searcher, rank_config(args.alpha)).with_meaning(meaning)),
+        Arc::new(backend),
         WebSettings {
             home: args.country.clone(),
             web_search: args.web_search.0,

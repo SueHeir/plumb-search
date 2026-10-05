@@ -102,6 +102,25 @@ pub fn open_or_build(data_dir: &Path, wanted: &(PathBuf, u64)) -> Result<(String
     Ok((key, PlaceSearcher::open(&dir)?))
 }
 
+/// Opens the index of the places file `file` (all of it), built next to
+/// it on first use: for `plumb serve` and `plumb search`.
+pub fn open_file(file: &Path) -> Result<PlaceSearcher> {
+    let key = key(&(file.to_path_buf(), u64::MAX));
+    let mut name = file.file_name().unwrap_or_default().to_owned();
+    name.push(format!(".index-{key}"));
+    let dir = file.with_file_name(name);
+    if let Ok(searcher) = PlaceSearcher::open(&dir) {
+        return Ok(searcher);
+    }
+    info!(
+        "indexing places from {} into {}",
+        file.display(),
+        dir.display()
+    );
+    build_place_index(&dir, read_places(file, u64::MAX)?)?;
+    PlaceSearcher::open(&dir)
+}
+
 /// Deletes place indexes other than `keep`.
 pub fn remove_other_indexes(data_dir: &Path, keep: Option<&str>) {
     let Ok(entries) = std::fs::read_dir(data_dir.join(PAGES_DIR)) else {

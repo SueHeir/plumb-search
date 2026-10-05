@@ -67,6 +67,34 @@ pub fn run_search(args: SearchArgs) -> Result<()> {
         }
         print!("{}", format_hits(&query, &results.hits));
     }
+    if let Some(file) = &args.places {
+        let places = crate::places::open_file(file)?;
+        match places.search(&query, args.town.as_deref(), args.country.as_deref(), 8)? {
+            None => println!("no places asked for"),
+            Some(found) if args.json => println!("{}", serde_json::to_string_pretty(&found)?),
+            Some(found) => {
+                match &found.center {
+                    Some(c) => println!(
+                        "places: {:?} around {} ({}, {:?} {:?}), within {} km",
+                        found.what, c.name, c.kind, c.region, c.country, found.radius_km
+                    ),
+                    None => println!("places: {:?} near an unknown town", found.what),
+                }
+                for (i, hit) in found.hits.iter().enumerate() {
+                    let p = &hit.place;
+                    println!(
+                        "{:>2}. {} [{}] {:.1} km {} {}",
+                        i + 1,
+                        p.name,
+                        p.label(),
+                        hit.km,
+                        p.address.as_deref().unwrap_or(""),
+                        p.website.as_deref().unwrap_or("")
+                    );
+                }
+            }
+        }
+    }
     Ok(())
 }
 

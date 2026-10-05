@@ -598,6 +598,13 @@ pub struct SearchArgs {
     pub exact: bool,
     #[command(flatten)]
     pub meaning: MeaningArgs,
+    /// A places file (places.tsv.gz from `fetch-pages --set places`): also
+    /// list the places the query asks for. Indexed next to it on first use.
+    #[arg(long, value_name = "PATH")]
+    pub places: Option<PathBuf>,
+    /// The town "near me" means, with --places.
+    #[arg(long, value_name = "TOWN", requires = "places")]
+    pub town: Option<String>,
     /// What to search for, e.g. `us bank`.
     #[arg(required = true, value_name = "QUERY")]
     pub query: Vec<String>,
@@ -628,6 +635,10 @@ pub struct ServeArgs {
     /// Bangs such as `!g` work either way.
     #[arg(long, value_name = "ENGINE", default_value = "off", value_parser = parse_web_search)]
     pub web_search: WebSearch,
+    /// A places file (places.tsv.gz from `fetch-pages --set places`), so
+    /// "pizza in denver" lists places. Indexed next to it on first use.
+    #[arg(long, value_name = "PATH")]
+    pub places: Option<PathBuf>,
     #[command(flatten)]
     pub meaning: MeaningArgs,
 }
