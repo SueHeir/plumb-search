@@ -78,6 +78,11 @@ pub struct CrawlConfig {
     pub per_host_delay: Duration,
     /// Timeout for each request, including reading the body.
     pub timeout: Duration,
+    /// Time limit for everything done for one target (robots.txt files,
+    /// redirects, waits, the page and its icon, or a feed), after which it
+    /// fails. Keeps a site that answers slowly at every step from holding a
+    /// fetch slot for many minutes.
+    pub target_deadline: Duration,
     /// Bodies are cut off after this many bytes.
     pub max_bytes: usize,
     /// Redirects followed per request.
@@ -121,6 +126,7 @@ impl Default for CrawlConfig {
             dns_lookups: 32,
             per_host_delay: Duration::from_secs(1),
             timeout: Duration::from_secs(15),
+            target_deadline: Duration::from_secs(120),
             max_bytes: 512 * 1024,
             max_redirects: 5,
             fetch_icons: true,

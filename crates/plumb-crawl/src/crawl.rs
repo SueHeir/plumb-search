@@ -106,7 +106,8 @@ const ACCEPT_HTML: &str = "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8";
 /// `cfg.use_system_proxy` is set: a proxy looks up target names itself.
 ///
 /// Errors never stop the batch; each becomes that target's
-/// [`CrawlOutcome::Failed`]. Must run inside a Tokio runtime.
+/// [`CrawlOutcome::Failed`], and so does a target not done within
+/// `cfg.target_deadline`. Must run inside a Tokio runtime.
 pub async fn crawl_homepages(targets: Vec<CrawlTarget>, cfg: &CrawlConfig) -> Vec<CrawlResult> {
     if targets.is_empty() {
         return Vec::new();
@@ -305,7 +306,8 @@ const ACCEPT_FEED: &str =
 /// asked, per-host delays, at most `cfg.max_redirects` redirects (to any
 /// site, each allowed by its robots.txt), no private addresses. A known
 /// feed is asked for only if changed since the version the target names.
-/// Must run inside a Tokio runtime.
+/// A check not done within `cfg.target_deadline` fails. Must run inside a
+/// Tokio runtime.
 pub async fn check_feeds(targets: Vec<FeedTarget>, cfg: &CrawlConfig) -> Vec<FeedCheck> {
     let cfg = CrawlConfig {
         fetch_icons: false,
@@ -335,7 +337,13 @@ async fn check_feeds_with(
 ) -> Vec<FeedCheck> {
     stream::iter(targets)
         .map(|target| async move {
-            let outcome = check_feed(client, cfg, &target).await;
+            let outcome =
+                match tokio::time::timeout(cfg.target_deadline, check_feed(client, cfg, &target))
+                    .await
+                {
+                    Ok(outcome) => outcome,
+                    Err(_) => FeedOutcome::Failed(past_deadline(cfg)),
+                };
             debug!("{} feed: {outcome:?}", target.homepage.domain);
             FeedCheck {
                 domain: target.homepage.domain,
@@ -465,8 +473,25 @@ fn client_builder(cfg: &CrawlConfig) -> ClientBuilder {
     }
 }
 
+/// Not finished within [`CrawlConfig::target_deadline`].
+fn past_deadline(cfg: &CrawlConfig) -> String {
+    format!(
+        "not done within {} seconds",
+        cfg.target_deadline.as_secs_f32()
+    )
+}
+
 async fn crawl_target(client: &Client, cfg: &CrawlConfig, target: CrawlTarget) -> CrawlResult {
-    let outcome = crawl_outcome(client, cfg, &target).await;
+    let outcome = match tokio::time::timeout(
+        cfg.target_deadline,
+        crawl_outcome(client, cfg, &target),
+    )
+    .await
+    {
+        Ok(outcome) => outcome,
+        // A slow site, not a sign the node is offline.
+        Err(_) => Failure::other(past_deadline(cfg)).into(),
+    };
     debug!("{} ({}): {}", target.domain, target.url, describe(&outcome));
     CrawlResult {
         domain: target.domain,
@@ -1975,6 +2000,33 @@ mod tests {
         assert_eq!(page.final_url, format!("http://127.0.0.1:{port}/home"));
         assert_eq!(page.meta.title.as_deref(), Some("Example Bank | Home"));
         assert_eq!(hits.paths(), ["/robots.txt", "/", "/home"]);
+    }
+
+    #[tokio::test]
+    async fn slow_targets_fail_at_the_deadline() {
+        let slow = || async {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            Html(HOME)
+        };
+        let (port, _) = serve(move |_| Router::new().route("/", get(slow))).await;
+        let cfg = CrawlConfig {
+            target_deadline: Duration::from_millis(300),
+            ..config()
+        };
+        let started = Instant::now();
+        let (error, network) = expect_failure(crawl_one(target(port, "/"), &cfg).await);
+        assert!(error.starts_with("not done within 0.3 seconds"), "{error}");
+        assert!(!network);
+        let feed = FeedTarget {
+            homepage: target(port, "/"),
+            ..FeedTarget::default()
+        };
+        let checks = check_feeds(vec![feed], &cfg).await;
+        assert_eq!(
+            checks[0].outcome,
+            FeedOutcome::Failed("not done within 0.3 seconds".into())
+        );
+        assert!(started.elapsed() < Duration::from_secs(2));
     }
 
     #[tokio::test]
