@@ -48,6 +48,15 @@ pub const USER_AGENT: &str = concat!(
     " (+https://github.com/SueHeir/plumb-search)"
 );
 
+/// Sent when reading a page an AI assistant asked for ([`PageReader`]). It
+/// differs from [`USER_AGENT`] so site owners can tell a reader acting for
+/// a person, like a browser (robots.txt is not asked), from the crawler.
+pub const READ_USER_AGENT: &str = concat!(
+    "plumb-mcp/",
+    env!("CARGO_PKG_VERSION"),
+    " (+https://github.com/SueHeir/plumb-search)"
+);
+
 /// The product token matched against robots.txt `User-agent` lines.
 pub const ROBOTS_TOKEN: &str = "PlumbSearch";
 
