@@ -112,6 +112,20 @@ const HEADINGS_BOOST: f32 = 0.5;
 /// BM25 boost of the whole query, joined (`us bank` -> `usbank`), matching a
 /// joined name or a label word.
 const WHOLE_QUERY_BOOST: f32 = 6.0;
+
+/// Small words that join the words of a longer query ("pizza in denver",
+/// "bank of america") and name no site there: between two other words they
+/// never match a domain label or joined name on their own, so in.gov is not
+/// found by them, and one alone never counts as a leading name ("in n out
+/// burger" does not name in.gov). A one-word query is still a name.
+const FUNCTION_WORDS: &[&str] = &[
+    "a", "an", "and", "at", "by", "for", "from", "in", "into", "near", "of", "on", "or", "the",
+    "to", "with",
+];
+
+fn is_function_word(word: &str) -> bool {
+    FUNCTION_WORDS.contains(&word)
+}
 /// BM25 boost of a query that is the hostname or URL of an indexed domain.
 const DOMAIN_BOOST: f32 = 10.0;
 /// The share of a word's boost its other number gets ("video" for
@@ -1596,7 +1610,9 @@ impl ParsedQuery {
                 .enumerate()
                 .map(move |(i, key)| (key, skip + i + 1))
         };
-        let mut leading: Vec<(String, usize)> = prefixes(0).collect();
+        let mut leading: Vec<(String, usize)> = prefixes(0)
+            .filter(|(key, words)| tokens.len() == 1 || *words > 1 || !is_function_word(key))
+            .collect();
         if tokens.len() > 1 && tokens[0] == "the" {
             leading.extend(prefixes(1));
         }
@@ -1652,7 +1668,14 @@ impl ParsedQuery {
         clauses: &mut Clauses,
     ) -> Result<()> {
         let word = &self.words[i];
+        // Only a word joining two others: "to" in "to do list" is a word
+        // of the thing looked for.
+        let joining = i > 0 && i + 1 < self.words.len() && is_function_word(word);
+        let names = self.len == 1 || !joining;
         for (field, boost) in self.per_word(f) {
+            if !names && (field == f.label || field == f.joined) {
+                continue;
+            }
             clauses.add(Term::from_field_text(field, word), boost);
         }
         let Some(other) = &self.others[i] else {
@@ -3179,6 +3202,32 @@ mod tests {
         ] {
             assert_eq!(without_intent_words(query).as_deref(), name, "{query:?}");
         }
+    }
+
+    #[test]
+    fn small_joining_words_name_no_site_in_a_longer_query() {
+        let records = vec![
+            site(
+                "in.gov",
+                Some("IN.gov | The Official Website of the State of Indiana"),
+                None,
+                &["Indiana"],
+                &[("IN.gov", 3)],
+                popular(300, 5_000),
+            ),
+            site(
+                "denverpizzaco.com",
+                Some("Denver Pizza Company | Pizza in Denver"),
+                Some("Wood-fired pizza in Denver, Colorado."),
+                &[],
+                &[("Denver Pizza", 1)],
+                obscure(10_000_000, 0),
+            ),
+        ];
+        let (_dir, searcher) = build(&records);
+        assert_eq!(top(&searcher, "pizza in denver"), "denverpizzaco.com");
+        // On its own, the word is still a name.
+        assert_eq!(top(&searcher, "in"), "in.gov");
     }
 
     #[test]
