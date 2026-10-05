@@ -68,11 +68,7 @@ pub fn run_search(args: SearchArgs) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&results.hits)?);
     } else {
         if let Some(spelling) = &results.spelling {
-            if spelling.applied {
-                println!("showing results for {:?}", spelling.query);
-            } else {
-                println!("did you mean {:?}?", spelling.query);
-            }
+            println!("did you mean {:?}?", spelling.query);
         }
         if let Some(site_search) = &results.site_search {
             println!(

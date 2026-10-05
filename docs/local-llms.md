@@ -60,7 +60,7 @@ Perplexica (now Vane) and others that take a SearXNG address work the same way: 
 - `results`: what the results page lists, in its order, each with `url`, `title` and `content` (the description); Wikipedia articles, Stack Overflow questions and other pages sit where the page puts them, and recent headlines come after the best result, with `category` `news`;
 - `answers`: the instant answer, such as `12 × 7 = 84`;
 - `infoboxes`: the info box about what the query names, with its official site and profiles;
-- `corrections` and `suggestions`: a corrected or suggested spelling.
+- `suggestions`: a suggested spelling ("Did you mean ..."). Results are always for the query as typed.
 
 It takes SearXNG's `pageno`, `safesearch` (0, 1 or 2), `categories` (`news` alone lists only recent headlines, with `publishedDate`) and `time_range` (any value puts recent headlines first), and Plumb's own `limit`, `country`, `safe` and `lang`. Other SearXNG parameters are ignored. Unlike SearXNG, JSON needs no setting turned on.
 

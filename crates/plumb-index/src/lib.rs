@@ -52,10 +52,10 @@
 //!   A well-known site ([`WELL_KNOWN_LINK_SCORE`]) named by the whole
 //!   query keeps it to itself: "read the docs".
 //!
-//! A query that names no site in full is checked for typos, and searched
-//! again corrected when that finds a better match: "amazom" shows
-//! amazon.com, with a note that the results are for "amazon". See
-//! [`Searcher::search_meaning`] and the [`spell`] module.
+//! A query that names no site in full is checked for typos. It is always
+//! searched as typed; a correction is only suggested: "amazom" asks "Did
+//! you mean amazon?". See [`Searcher::search_meaning`] and the [`spell`]
+//! module.
 //!
 //! All text, at index and at query time, goes through
 //! [`plumb_core::normalize_text`] and is then ASCII-folded, so `U.S. Bank`,
@@ -392,15 +392,13 @@ pub struct SearchResults {
     pub spelling: Option<Spelling>,
 }
 
-/// A corrected spelling of a query: "amazom" -> "amazon".
+/// A suggested spelling of a query: "amazom" -> "amazon".
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Spelling {
-    /// The corrected query, in lowercase words without punctuation.
+    /// The corrected query, in lowercase words without punctuation. The
+    /// hits are always for the query as typed; this is only a suggestion
+    /// ("Did you mean ...?").
     pub query: String,
-    /// The hits are for [`Spelling::query`] ("Showing results for ...");
-    /// when false they are for the query as typed and this is only a
-    /// suggestion ("Did you mean ...?").
-    pub applied: bool,
 }
 
 /// Builds a fresh index of `records` in `dir`, replacing any index already
@@ -708,19 +706,17 @@ impl Searcher {
     /// [`RankConfig::meaning_weight`] of every text match is how close the
     /// site is in meaning. Queries that name a site rank as without it.
     ///
-    /// Typos are corrected (see [`spell`]) unless [`SearchOptions::exact`]
-    /// is set or the query is a hostname. When the query's first words are
-    /// a typo away from the name of a well-known site
+    /// The results are always for the query as typed. Typos get a suggested
+    /// correction ([`SearchResults::spelling`], see [`spell`]) unless
+    /// [`SearchOptions::exact`] is set or the query is a hostname. A query
+    /// that names a site in full gets one only when its first words are a
+    /// typo away from the name of a well-known site
     /// ([`WELL_KNOWN_LINK_SCORE`]) with [`TYPO_POPULARITY_MARGIN`] more
     /// link score than what the query finds as typed (the sites it names
-    /// in full, if below [`KEEPS_ITS_NAME_LINK_SCORE`], else its best hit),
-    /// the results are for the corrected query
-    /// ([`Spelling::applied`]): "twiter" shows twitter.com, not the
-    /// typo-squatter twiter.com, and "Search instead for" keeps the way
-    /// back. Otherwise a query that names a site in full is left alone, so
-    /// an exact match wins; any other query is searched corrected too, and
-    /// its hits replace the query's own when its best hit scores at least
-    /// as high, else the correction is only suggested.
+    /// in full, if below [`KEEPS_ITS_NAME_LINK_SCORE`], else its best hit):
+    /// "twiter" lists the typo-squatter twiter.com and asks "Did you mean
+    /// twitter?". Any other query gets one when the correction finds
+    /// something.
     ///
     /// Search operators ([`Operators`]) narrow the results: `site:`
     /// keeps the sites on that host and lists the site itself after them,
@@ -838,6 +834,18 @@ impl Searcher {
                 hits.truncate(limit);
                 found.hits = hits;
                 found.site_search = results.site_search.or(found.site_search);
+                // A suggested spelling of the name keeps the words after it:
+                // "postgres docs" suggests "postgresql docs".
+                if let Some(spelling) = &mut found.spelling {
+                    let words = normalize_text(query_text);
+                    let after = words
+                        .split_whitespace()
+                        .skip(name.split_whitespace().count());
+                    for word in after {
+                        spelling.query.push(' ');
+                        spelling.query.push_str(word);
+                    }
+                }
                 return Ok(found);
             }
         }
@@ -882,29 +890,15 @@ impl Searcher {
         if named.full_link_score.is_some() && !far_more_popular {
             return Ok(results);
         }
-        let (fixed, _) = self.rank(&fix.query, limit, cfg, options, meaning)?;
-        let Some(fixed_best) = fixed.hits.first() else {
+        // The results stay those of the query as typed; the correction is
+        // only offered ("Did you mean ...?"), and only when it finds
+        // something.
+        let (fixed, _) = self.rank(&fix.query, 1, cfg, options, meaning)?;
+        if fixed.hits.is_empty() {
             return Ok(results);
-        };
-        let better = far_more_popular
-            || results
-                .hits
-                .first()
-                .is_none_or(|best| fixed_best.score >= best.score);
-        if better {
-            return Ok(SearchResults {
-                spelling: Some(Spelling {
-                    query: fix.query,
-                    applied: true,
-                }),
-                ..fixed
-            });
         }
         Ok(SearchResults {
-            spelling: Some(Spelling {
-                query: fix.query,
-                applied: false,
-            }),
+            spelling: Some(Spelling { query: fix.query }),
             ..results
         })
     }
@@ -3356,9 +3350,24 @@ mod tests {
         let (_dir, searcher) = build(&records);
         assert_eq!(top(&searcher, "paypal login"), "paypal.com");
         assert_eq!(top(&searcher, "PayPal sign in"), "paypal.com");
-        let hits = searcher.search("postgres docs", 10).unwrap();
+        // "postgres" is searched as typed, with a suggestion that finds
+        // postgresql.org above postgres.ai.
+        let results = searcher
+            .search_full(
+                "postgres docs",
+                10,
+                &RankConfig::default(),
+                &SearchOptions::default(),
+            )
+            .unwrap();
+        let fixed = results.spelling.expect("a suggestion").query;
+        let hits = searcher.search(&fixed, 10).unwrap();
         let rank = |domain: &str| domains(&hits).iter().position(|&d| d == domain);
-        assert!(rank("postgresql.org") < rank("postgres.ai"), "{hits:#?}");
+        let official = rank("postgresql.org").expect("postgresql.org");
+        assert!(
+            rank("postgres.ai").is_none_or(|other| official < other),
+            "{fixed}: {hits:#?}"
+        );
         // A well-known site named by all of it keeps the query.
         assert_eq!(top(&searcher, "read the docs"), "readthedocs.org");
         // Typing its hostname still goes to the look-alike.
@@ -4292,10 +4301,9 @@ mod tests {
             .unwrap()
     }
 
-    fn applied(query: &str) -> Option<Spelling> {
+    fn suggested(query: &str) -> Option<Spelling> {
         Some(Spelling {
             query: query.to_string(),
-            applied: true,
         })
     }
 
@@ -4311,8 +4319,10 @@ mod tests {
             ("weather forcast", "weather forecast", "weather.com"),
         ] {
             let results = search_spelled(&searcher, typed);
-            assert_eq!(results.spelling, applied(fixed), "{typed}");
-            assert_eq!(results.hits[0].domain, domain, "{typed}");
+            assert_eq!(results.spelling, suggested(fixed), "{typed}");
+            // The suggestion finds the site.
+            let fixed_hits = search_spelled(&searcher, fixed).hits;
+            assert_eq!(fixed_hits[0].domain, domain, "{typed}");
         }
     }
 
@@ -4322,8 +4332,9 @@ mod tests {
         // amazen.com is as near "amazn" as amazon.com, but has nothing to
         // show for itself.
         let results = search_spelled(&searcher, "amazn");
-        assert_eq!(results.spelling, applied("amazon"));
-        assert_eq!(domains(&results.hits)[0], "amazon.com");
+        assert_eq!(results.spelling, suggested("amazon"));
+        let fixed_hits = search_spelled(&searcher, "amazon").hits;
+        assert_eq!(domains(&fixed_hits)[0], "amazon.com");
     }
 
     #[test]
@@ -4339,13 +4350,12 @@ mod tests {
             let results = search_spelled(&searcher, query);
             assert_eq!(results.spelling, None, "{query}");
         }
-        // A little-known site named exactly is taken as a typo of the
-        // far better-known site a letter away: the typo-squatter gogle.com
-        // does not get the searches meant for google.com.
+        // A little-known site named exactly is searched as typed, with
+        // the far better-known site a letter away offered instead.
         let results = search_spelled(&searcher, "gogle");
-        assert_eq!(results.spelling, applied("google"));
-        assert_eq!(results.hits[0].domain, "google.com");
-        // Searching as typed still finds it.
+        assert_eq!(results.spelling, suggested("google"));
+        assert_eq!(results.hits[0].domain, "gogle.com");
+        // Searching exactly finds it with no suggestion.
         let options = SearchOptions {
             exact: true,
             ..SearchOptions::default()
@@ -4414,8 +4424,10 @@ mod tests {
             ("fedx", "fedex", "fedex.com"),
         ] {
             let results = search_spelled(&searcher, typed);
-            assert_eq!(results.spelling, applied(fixed), "{typed}");
-            assert_eq!(results.hits[0].domain, domain, "{typed}");
+            assert_eq!(results.spelling, suggested(fixed), "{typed}");
+            // The suggestion finds the site.
+            let fixed_hits = search_spelled(&searcher, fixed).hits;
+            assert_eq!(fixed_hits[0].domain, domain, "{typed}");
         }
     }
 

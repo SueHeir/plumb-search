@@ -272,8 +272,7 @@ impl Inner {
     }
 }
 
-/// Adds the pages found for `query` (as corrected, when the results are
-/// for a corrected spelling) to `results`.
+/// Adds the pages found for `query` to `results`.
 pub(super) fn add_pages(
     inner: &Inner,
     query: &str,
@@ -303,10 +302,6 @@ pub(super) fn add_pages(
         }
         return;
     }
-    let query = match &results.spelling {
-        Some(spelling) if spelling.applied => spelling.query.as_str(),
-        _ => query,
-    };
     match searcher.search(query, PAGES_PER_SEARCH) {
         Ok(mut found) => {
             found.retain(|hit| options_allow(options, &hit.page));

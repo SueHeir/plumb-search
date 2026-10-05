@@ -637,7 +637,7 @@ pub struct SearchArgs {
     /// Leave out other countries' sites (needs --country).
     #[arg(long, requires = "country")]
     pub only_country: bool,
-    /// Search for the query exactly as typed, without correcting typos.
+    /// Search for the query without suggesting a spelling.
     #[arg(long)]
     pub exact: bool,
     #[command(flatten)]
@@ -717,9 +717,14 @@ pub struct EvalArgs {
     /// [default: none].
     #[arg(long, value_name = "CODE", value_parser = parse_country)]
     pub country: Option<String>,
-    /// Search for each query exactly as written, without correcting typos.
-    #[arg(long)]
+    /// Search for each query without suggesting a spelling.
+    #[arg(long, conflicts_with = "follow_suggestions")]
     pub exact: bool,
+    /// When a query gets a "Did you mean" suggestion, measure the
+    /// suggestion's results instead: what one click finds
+    /// (eval/typo_queries.tsv).
+    #[arg(long)]
+    pub follow_suggestions: bool,
     /// Ranking knobs to change, as JSON, e.g. '{"exact_label_bonus": 0.1}'.
     /// The other knobs keep their defaults; --alpha wins over an alpha here.
     #[arg(long, value_name = "JSON", value_parser = parse_rank_config)]
