@@ -202,6 +202,15 @@ pub(super) async fn start(inner: &Arc<Inner>) -> Result<()> {
         return Ok(());
     };
     config.dir = inner.paths.net.clone();
+    // A node with a storage limit keeps the batches it holds for as long as
+    // crawls are checked against each other, not the default five weeks:
+    // other nodes take none older than a week, and the rest takes room
+    // (see super::trim).
+    if inner.settings().storage_limit_mb > 0
+        && config.keep_batches_days == plumb_net::store::RETAIN_EPOCHS
+    {
+        config.keep_batches_days = plumb_net::agree::WINDOW_EPOCHS;
+    }
     let (handle, mut records) = plumb_net::start(config, Arc::new(ServedIndex(inner.clone())))
         .await
         .context("joining the Plumb network")?;

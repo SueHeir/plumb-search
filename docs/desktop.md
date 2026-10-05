@@ -200,7 +200,9 @@ does the app set up from the seed downloads instead:
 The app starts with a download limit of 500 MB a day and a storage limit of
 2,000 MB, which the panel's settings change (empty for no limit). Once a
 day's downloads reach the limit, crawling pauses until the next day (UTC);
-while the data folder is over its limit, the app drops its least-known sites
+while the data folder is over its limit, the app first cuts page sets and places
+to what it keeps (cafés and shops only near the town on your About page), then
+drops its least-known sites
 (never ones about your interests or ones you opened) until it is back at 85%,
 see [network.md](network.md#filling-free-space). Setup's own
 downloads count toward the day but are never held back, and search keeps

@@ -46,6 +46,9 @@ pub(super) const MIN_SITES_KEPT: usize = 100_000;
 /// Time between two looks for sites to drop: the data folder is counted
 /// again only once the index without them is in service.
 const TRIM_AGAIN_AFTER: u64 = 3600;
+/// Sites go only once the node has been over the limit this long, so the
+/// page sets and places cut to what is kept go first.
+const OVER_FOR: u64 = 1800;
 
 /// Whether the node should look for sites to drop now: it has a storage
 /// limit, is over it, and has not looked in the last [`TRIM_AGAIN_AFTER`].
@@ -54,11 +57,25 @@ pub(super) fn due(inner: &Inner) -> bool {
     if limit == 0 || inner.current().is_none() {
         return false;
     }
+    let now = now_unix();
     let last = inner.last_trim.load(Ordering::SeqCst);
-    if last > 0 && now_unix() < last.saturating_add(TRIM_AGAIN_AFTER) {
+    if last > 0 && now < last.saturating_add(TRIM_AGAIN_AFTER) {
         return false;
     }
-    inner.disk_used() > share(limit, TRIM_ABOVE_PERCENT)
+    if inner.disk_used() <= share(limit, TRIM_ABOVE_PERCENT) {
+        inner.over_since.store(0, Ordering::SeqCst);
+        return false;
+    }
+    // Page set files and places past what is kept go first, by themselves
+    // (see super::pages): sites go only if that was not enough.
+    let since = match inner.over_since.load(Ordering::SeqCst) {
+        0 => {
+            inner.over_since.store(now, Ordering::SeqCst);
+            now
+        }
+        since => since,
+    };
+    now >= since.saturating_add(OVER_FOR)
 }
 
 /// Whether records other nodes share may add sites the node does not hold

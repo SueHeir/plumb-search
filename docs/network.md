@@ -115,7 +115,8 @@ sites, so a node with a limit also holds itself back (`node/trim.rs`):
   already holds. A new site is taken in only when it is about one of the
   node's topics (its focus topics and the interests on its About pages) or
   is an official website (Wikidata).
-- Over the limit, the least useful sites go, lowest link score first, until
+- Still over the limit half an hour later (after the page sets and places
+  below are cut), the least useful sites go, lowest link score first, until
   the data folder is back at 85%, and the index is built without them.
   Never dropped: the best 100,000 sites, sites about the node's topics,
   sites an About page always puts first or a searcher opened from the
@@ -123,9 +124,20 @@ sites, so a node with a limit also holds itself back (`node/trim.rs`):
   week, so it does not take lower-ranked sites in their place. The node's
   journal says how many went; it looks again an hour later.
 
+- Page set files hold no more pages than the node keeps: a file taken
+  whole when the limit was higher is cut to the pages kept, and taken again
+  from a trusted node if more are wanted later.
+- Places past the first million (every city, town and place with a
+  Wikidata item) are kept only within 100 km of a town given on one of the
+  node's About pages; only a node with no limit keeps every café and shop
+  everywhere (see [places.md](places.md#how-many)).
+- Signed batches are kept 14 days (as long as crawls are checked against
+  each other) rather than 35, unless `--keep-batches-days` says otherwise.
+  Other nodes take none older than a week.
+
 Dropping a site only takes it out of that node's index: the batches the
-node signed and published stay in `net/batches/` as long as ever, so the
-network loses none of its crawls.
+node signed and published stay in `net/batches/` for those 14 days, so the
+network loses none of the crawls it still uses.
 
 The records come from the trusted node's index, not signed batches, so
 only trusted nodes are asked. A node answers at most 2 fill requests at

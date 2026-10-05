@@ -320,6 +320,17 @@ pub fn all_pinned(dir: &Path) -> Vec<String> {
         .collect()
 }
 
+/// Every town the About profiles in `dir` give, once each.
+pub fn all_towns(dir: &Path) -> Vec<String> {
+    let mut towns: Vec<String> = all_profiles(dir)
+        .iter()
+        .filter_map(|about| about.town().map(str::to_owned))
+        .collect();
+    towns.sort();
+    towns.dedup();
+    towns
+}
+
 /// The About profiles in `dir`, a node's history folder.
 fn all_profiles(dir: &Path) -> Vec<About> {
     let Ok(entries) = fs::read_dir(dir) else {

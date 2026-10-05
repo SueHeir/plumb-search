@@ -22,43 +22,88 @@ pub fn set_info() -> &'static SetInfo {
     SetInfo::find(PLACES_SET).expect("the places set is listed")
 }
 
-/// The places file to index and how many of its places, `None` when none
-/// are kept or there is no file yet.
-pub fn wanted(data_dir: &Path, sets: &PageSets, storage_limit_mb: u64) -> Option<(PathBuf, u64)> {
+/// The places a node indexes: the first `count` of `file`, plus the ones
+/// within [`NEAR_KM`] of `near` (the towns on its About pages, as
+/// latitude and longitude) past them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WantedPlaces {
+    pub file: PathBuf,
+    pub count: u64,
+    pub near: Vec<(f64, f64)>,
+}
+
+/// The places to index under `sets` and a storage limit of
+/// `storage_limit_mb`, around `near`; `None` when none are kept or there
+/// is no file yet.
+pub fn wanted(
+    data_dir: &Path,
+    sets: &PageSets,
+    storage_limit_mb: u64,
+    near: &[(f64, f64)],
+) -> Option<WantedPlaces> {
     let set = set_info();
     let count = set.kept(sets, storage_limit_mb);
     let file = set.file(data_dir);
-    (count > 0 && file.is_file()).then_some((file, count))
+    (count > 0 && file.is_file()).then(|| WantedPlaces {
+        file,
+        count,
+        near: if count == u64::MAX {
+            Vec::new()
+        } else {
+            near.to_vec()
+        },
+    })
 }
 
-/// Places kept on Automatic under a storage limit of `storage_limit_mb`
-/// (0 for none). The file starts with every city and town and the places
-/// with a Wikidata item (about a million, 140 MB with the index), then the
-/// rest: under 1 GB none, since towns alone find nothing; under 8 GB that
-/// first million, so museums, sights and stations are found anywhere; with
-/// 8 GB or more, all of them (about 24 million, 3.5 GB), so every café and
-/// shop is.
+/// How many of the places file's places to keep, under `sets` and a
+/// storage limit of `storage_limit_mb`: with towns to keep places `near`,
+/// the whole file, so the places around them can be picked out of it.
+pub fn file_pages(sets: &PageSets, storage_limit_mb: u64, near: &[(f64, f64)]) -> u64 {
+    match set_info().kept(sets, storage_limit_mb) {
+        0 => 0,
+        _ if !near.is_empty() => u64::MAX,
+        count => count,
+    }
+}
+
+/// Places on Automatic are kept everywhere up to this many: every city
+/// and town and the places with a Wikidata item (140 MB with the index).
+pub const EVERYWHERE: u64 = 1_000_000;
+
+/// Past the first [`EVERYWHERE`], a node with a storage limit keeps the
+/// places this close to a town on one of its About pages.
+pub const NEAR_KM: f64 = 100.0;
+
+/// Places kept everywhere on Automatic under a storage limit of
+/// `storage_limit_mb` (0 for none). The file starts with every city and
+/// town and the places with a Wikidata item (about a million, 140 MB with
+/// the index), then the rest: under 1 GB none, since towns alone find
+/// nothing; with a limit, that first million, so museums, sights and
+/// stations are found anywhere, and every café and shop only near the
+/// towns on the node's About pages ([`WantedPlaces::near`]); with no limit,
+/// all of them (about 24 million, 4 GB with the file).
 pub fn auto_places(storage_limit_mb: u64) -> u64 {
     match storage_limit_mb {
         0 => u64::MAX,
         mb if mb < 1_000 => 0,
-        mb if mb < 8_000 => 1_000_000,
-        _ => u64::MAX,
+        _ => EVERYWHERE,
     }
 }
 
-/// Names the index of `wanted`: changes when the file (size or time) or
-/// the count changes.
-pub fn key(wanted: &(PathBuf, u64)) -> String {
-    let (file, count) = wanted;
-    let meta = std::fs::metadata(file).ok();
+/// Names the index of `wanted`: changes when the file (size or time), the
+/// count or the towns changes.
+pub fn key(wanted: &WantedPlaces) -> String {
+    let meta = std::fs::metadata(&wanted.file).ok();
     let modified = meta
         .as_ref()
         .and_then(|m| m.modified().ok())
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map_or(0, |d| d.as_secs());
     let len = meta.map_or(0, |m| m.len());
-    let text = format!("v1|{len}:{modified}:{count}");
+    let mut text = format!("v1|{len}:{modified}:{}", wanted.count);
+    for (lat, lon) in &wanted.near {
+        text.push_str(&format!("|{lat:.2},{lon:.2}"));
+    }
     use sha2::{Digest, Sha256};
     let digest = Sha256::digest(text.as_bytes());
     digest[..8].iter().map(|b| format!("{b:02x}")).collect()
@@ -72,9 +117,20 @@ pub fn index_dir(data_dir: &Path, key: &str) -> PathBuf {
 /// Reads up to `limit` places of the places file `path`, most notable
 /// first.
 pub fn read_places(path: &Path, limit: u64) -> Result<impl Iterator<Item = Place>> {
+    read_places_near(path, limit, Vec::new())
+}
+
+/// Reads the first `limit` places of the places file `path`, most notable
+/// first, then the ones within [`NEAR_KM`] of a point of `near`.
+pub fn read_places_near(
+    path: &Path,
+    limit: u64,
+    near: Vec<(f64, f64)>,
+) -> Result<impl Iterator<Item = Place>> {
     let reader = plumb_ingest::open_maybe_gz(path)?;
     let path = path.to_path_buf();
     let mut bad = 0u64;
+    let near_empty = near.is_empty();
     Ok(std::io::BufRead::lines(reader)
         .enumerate()
         .map_while(move |(n, line)| match line {
@@ -95,20 +151,31 @@ pub fn read_places(path: &Path, limit: u64) -> Result<impl Iterator<Item = Place
                 None
             }
         })
-        .take(usize::try_from(limit).unwrap_or(usize::MAX)))
+        .enumerate()
+        .take_while(move |(n, _)| (*n as u64) < limit || !near_empty)
+        .filter(move |(n, place)| (*n as u64) < limit || is_near(place, &near))
+        .map(|(_, place)| place))
+}
+
+/// Whether `place` is within [`NEAR_KM`] of a point of `near`.
+fn is_near(place: &Place, near: &[(f64, f64)]) -> bool {
+    near.iter().any(|&(lat, lon)| {
+        plumb_core::place::distance_km(place.lat, place.lon, lat, lon) <= NEAR_KM
+    })
 }
 
 /// Opens the place index for `wanted`, building it first when there is
 /// none.
-pub fn open_or_build(data_dir: &Path, wanted: &(PathBuf, u64)) -> Result<(String, PlaceSearcher)> {
+pub fn open_or_build(data_dir: &Path, wanted: &WantedPlaces) -> Result<(String, PlaceSearcher)> {
     let key = key(wanted);
     let dir = index_dir(data_dir, &key);
     if let Ok(searcher) = PlaceSearcher::open(&dir) {
         return Ok((key, searcher));
     }
     let started = std::time::Instant::now();
-    info!("indexing places from {}", wanted.0.display());
-    let stats = build_place_index(&dir, read_places(&wanted.0, wanted.1)?)?;
+    info!("indexing places from {}", wanted.file.display());
+    let places = read_places_near(&wanted.file, wanted.count, wanted.near.clone())?;
+    let stats = build_place_index(&dir, places)?;
     info!(
         "built the place index of {} places ({} towns) in {:.1}s",
         stats.places,
@@ -121,7 +188,11 @@ pub fn open_or_build(data_dir: &Path, wanted: &(PathBuf, u64)) -> Result<(String
 /// Opens the index of the places file `file` (all of it), built next to
 /// it on first use: for `plumb serve` and `plumb search`.
 pub fn open_file(file: &Path) -> Result<PlaceSearcher> {
-    let key = key(&(file.to_path_buf(), u64::MAX));
+    let key = key(&WantedPlaces {
+        file: file.to_path_buf(),
+        count: u64::MAX,
+        near: Vec::new(),
+    });
     let mut name = file.file_name().unwrap_or_default().to_owned();
     name.push(format!(".index-{key}"));
     let dir = file.with_file_name(name);
@@ -174,7 +245,8 @@ mod tests {
         let kept = |mb| set_info().kept(&sets, mb);
         assert_eq!(kept(500), 0);
         assert_eq!(kept(2_000), 1_000_000);
-        assert_eq!(kept(8_000), u64::MAX);
+        assert_eq!(kept(8_000), 1_000_000);
+        assert_eq!(kept(100_000), 1_000_000);
         assert_eq!(kept(0), u64::MAX);
         let off = PageSets::parse("places=off").unwrap();
         assert_eq!(set_info().kept(&off, 0), 0);
@@ -188,7 +260,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let data = dir.path();
         let sets = PageSets::default();
-        assert!(wanted(data, &sets, 0).is_none());
+        assert!(wanted(data, &sets, 0, &[]).is_none());
         write_places(
             data,
             &[
@@ -214,7 +286,7 @@ mod tests {
         );
         // The page index leaves the places file alone.
         assert!(crate::pages::Wanted::new(data, &sets, 0).key().is_none());
-        let wanted = wanted(data, &sets, 0).unwrap();
+        let wanted = wanted(data, &sets, 0, &[]).unwrap();
         let (key, searcher) = open_or_build(data, &wanted).unwrap();
         assert_eq!(searcher.num_places(), 2);
         let found = searcher
@@ -224,7 +296,10 @@ mod tests {
         assert_eq!(found.hits[0].place.name, "Huckleberry");
         // Opened again, not rebuilt; other keys are cleared away.
         assert_eq!(open_or_build(data, &wanted).unwrap().0, key);
-        let one = (wanted.0.clone(), 1);
+        let one = WantedPlaces {
+            count: 1,
+            ..wanted.clone()
+        };
         let (other, searcher) = open_or_build(data, &one).unwrap();
         assert_eq!(searcher.num_places(), 1);
         remove_other_indexes(data, Some(&other));
@@ -233,5 +308,46 @@ mod tests {
         // Page indexes are not place indexes.
         crate::pages::remove_other_indexes(data, None);
         assert!(index_dir(data, &other).exists());
+    }
+
+    #[test]
+    fn past_the_first_places_only_those_near_your_towns_are_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path();
+        let place = |name: &str, kind: &str, lat: f64, lon: f64, osm: &str| Place {
+            rank: place_rank(kind, 0, false, false, 3),
+            name: name.into(),
+            kind: kind.into(),
+            lat,
+            lon,
+            osm: osm.into(),
+            ..Place::default()
+        };
+        write_places(
+            data,
+            &[
+                place("Denver", "place=city", 39.7392, -104.9903, "n1"),
+                place("Paris cafe", "amenity=cafe", 48.85, 2.35, "n2"),
+                place("Denver cafe", "amenity=cafe", 39.76, -104.99, "n3"),
+            ],
+        );
+        let sets = PageSets::parse("places=1").unwrap();
+        let denver = [(39.74, -104.99)];
+        // With a town, the whole file is wanted, to pick places out of it.
+        assert_eq!(file_pages(&sets, 2_000, &denver), u64::MAX);
+        assert_eq!(file_pages(&sets, 2_000, &[]), 1);
+        let near = wanted(data, &sets, 2_000, &denver).unwrap();
+        let names: Vec<String> = read_places_near(&near.file, near.count, near.near.clone())
+            .unwrap()
+            .map(|p| p.name)
+            .collect();
+        assert_eq!(names, ["Denver", "Denver cafe"]);
+        let far = wanted(data, &sets, 2_000, &[]).unwrap();
+        assert_ne!(key(&near), key(&far));
+        // Keeping everything needs no towns.
+        assert!(wanted(data, &PageSets::default(), 0, &denver)
+            .unwrap()
+            .near
+            .is_empty());
     }
 }
