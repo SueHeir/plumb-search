@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Plumb Search: third-party notices</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 60rem; margin: 2rem auto; padding: 0 1rem; line-height: 1.5; }
+  pre { white-space: pre-wrap; background: #f4f4f4; padding: 1rem; border-radius: 4px; font-size: 0.85rem; }
+  ul.crates { columns: 3 14rem; }
+  @media (prefers-color-scheme: dark) {
+    body { background: #111; color: #ddd; }
+    pre { background: #222; }
+    a { color: #8ab4f8; }
+  }
+</style>
+</head>
+<body>
+<h1>Third-party notices</h1>
+<p>Plumb Search is licensed under MIT OR Apache-2.0. It is built with the
+following open source crates, each under the license shown with it.</p>
+
+<h2>Licenses used</h2>
+<ul>
+{{#each overview}}
+  <li><a href="#{{id}}">{{name}}</a> ({{count}})</li>
+{{/each}}
+</ul>
+
+<h2>License texts</h2>
+{{#each licenses}}
+<section>
+  <h3 id="{{id}}">{{name}}</h3>
+  <p>Used by:</p>
+  <ul class="crates">
+  {{#each used_by}}
+    <li><a href="{{#if crate.repository}}{{crate.repository}}{{else}}https://crates.io/crates/{{crate.name}}{{/if}}">{{crate.name}} {{crate.version}}</a></li>
+  {{/each}}
+  </ul>
+  <pre>{{text}}</pre>
+</section>
+{{/each}}
+</body>
+</html>
