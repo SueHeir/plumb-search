@@ -7,10 +7,16 @@
 //! are refused, and tool calls are limited per client ([`Limiter`]), since
 //! each costs a few searches; on a node behind a reverse proxy on the same
 //! computer, the client is the proxy's `X-Forwarded-For`.
+//!
+//! `read_page` fetches pages from wherever the node runs, so it is offered
+//! only to AI apps on the node's own computer (a request from a loopback
+//! address that no proxy forwarded), unless the node runs with
+//! `--mcp-read-pages`. A public node offering it to everyone would be an
+//! open proxy.
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 use axum::extract::{ConnectInfo, DefaultBodyLimit, Request, State};
@@ -22,7 +28,7 @@ use serde_json::{json, Value};
 use tracing::error;
 
 use super::{security_headers, AppState};
-use crate::mcp::{parse_error, Mcp};
+use crate::mcp::{parse_error, Mcp, Reader};
 
 /// The largest message taken.
 const MAX_BODY_BYTES: usize = 64 * 1024;
@@ -69,6 +75,34 @@ impl Limiter {
             Err(((1.0 - *tokens) * 60.0 / PER_MINUTE).ceil() as u64)
         }
     }
+}
+
+/// The page reader `read_page` uses, made on first use and shared.
+#[derive(Default)]
+pub(crate) struct SharedReader(OnceLock<Option<Reader>>);
+
+impl SharedReader {
+    fn get(&self) -> Option<Reader> {
+        self.0
+            .get_or_init(|| {
+                Reader::standard(tokio::runtime::Handle::current())
+                    .map_err(|err| error!("{err:#}"))
+                    .ok()
+            })
+            .clone()
+    }
+}
+
+/// Whether the request comes from this computer and no proxy passed it on.
+fn from_this_computer(request: &Request) -> bool {
+    let headers = request.headers();
+    if headers.contains_key("x-forwarded-for") || headers.contains_key(header::FORWARDED) {
+        return false;
+    }
+    request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .is_some_and(|ConnectInfo(peer)| peer.ip().to_canonical().is_loopback())
 }
 
 /// Who is asking: the peer, or for a proxy on this computer the address
@@ -137,6 +171,7 @@ async fn mcp(State(state): State<AppState>, request: Request) -> Response {
         );
     }
     let client = client(&request);
+    let reads_pages = state.settings.read_pages_for_all || from_this_computer(&request);
     let Ok(body) = axum::body::to_bytes(request.into_body(), MAX_BODY_BYTES).await else {
         return answer(
             StatusCode::PAYLOAD_TOO_LARGE,
@@ -178,7 +213,19 @@ async fn mcp(State(state): State<AppState>, request: Request) -> Response {
         }
     }
     let country = state.settings.home.resolve(None);
-    let server = Mcp::new(Arc::clone(&state.backend), country);
+    let rates = match Mcp::search_query(&message) {
+        Some(query) => state.rates.for_query(query).await,
+        None => None,
+    };
+    let reader = if reads_pages {
+        state.page_reader.get()
+    } else {
+        None
+    };
+    let server = Mcp::new(Arc::clone(&state.backend), country)
+        .with_reader(reader)
+        .with_rates(rates)
+        .with_node(state.node.clone());
     let reply = tokio::task::spawn_blocking(move || server.handle(&message)).await;
     match reply {
         Ok(Some(reply)) => answer(StatusCode::OK, reply),
@@ -214,6 +261,32 @@ mod tests {
         // One call a second comes back.
         assert!(limiter.take(a, start + Duration::from_secs(1)).is_ok());
         assert!(limiter.take(a, start + Duration::from_secs(1)).is_err());
+    }
+
+    #[test]
+    fn only_this_computer_reads_pages() {
+        let request = |peer: Option<&str>, forwarded: bool| {
+            let mut request = Request::builder().uri("/mcp");
+            if forwarded {
+                request = request.header("x-forwarded-for", "203.0.113.9");
+            }
+            let mut request = request.body(axum::body::Body::empty()).unwrap();
+            if let Some(peer) = peer {
+                request
+                    .extensions_mut()
+                    .insert(ConnectInfo(peer.parse::<SocketAddr>().unwrap()));
+            }
+            request
+        };
+        assert!(from_this_computer(&request(Some("127.0.0.1:5000"), false)));
+        assert!(from_this_computer(&request(Some("[::1]:5000"), false)));
+        // Caddy on the same computer, passing on someone else's request.
+        assert!(!from_this_computer(&request(Some("127.0.0.1:5000"), true)));
+        assert!(!from_this_computer(&request(
+            Some("192.168.1.20:5000"),
+            false
+        )));
+        assert!(!from_this_computer(&request(None, false)));
     }
 
     #[test]

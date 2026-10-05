@@ -128,9 +128,18 @@ fn official_site_says_how_sure_it_is_and_why() {
     let why = answer["why"].to_string();
     assert!(why.contains("Wikidata"), "{why}");
     assert_eq!(answer["alternatives"][0]["domain"], "paypal-login.us");
-    // The text for the model holds the same answer.
+    // The text for the model is the same answer, short.
     let text = reply["result"]["content"][0]["text"].as_str().unwrap();
-    assert_eq!(serde_json::from_str::<Value>(text).unwrap(), *answer);
+    assert!(
+        text.starts_with(
+            "Official site for \"PayPal\": paypal.com https://www.paypal.com/ (confidence high)\n"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.ends_with("Other candidates: paypal-login.us"),
+        "{text}"
+    );
 
     // Two sites by the same name, neither ahead: not sure.
     let mcp = server(vec![
@@ -276,4 +285,126 @@ fn node_addresses_become_their_mcp_endpoint() {
     }
     assert!(mcp_endpoint("ftp://plumbsearch.org").is_err());
     assert!(mcp_endpoint("plumbsearch.org").is_err());
+}
+
+#[test]
+fn search_answers_what_it_can_work_out() {
+    let mcp = server(vec![hit("calculator.net", 1.0, 0.5, false)]);
+    let reply = call(&mcp, "search", json!({ "query": "12 * 7" }));
+    let answer = &reply["result"]["structuredContent"];
+    assert_eq!(answer["answer"]["answer"], "84");
+    let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(
+        text.starts_with("Answer: 12 × 7 = 84\n1. calculator.net"),
+        "{text}"
+    );
+    // Nothing to work out: no answer.
+    let reply = call(&mcp, "search", json!({ "query": "calculator" }));
+    assert!(reply["result"]["structuredContent"].get("answer").is_none());
+}
+
+fn local_reader() -> (tokio::runtime::Runtime, Reader) {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let pages = PageReader::new(ReadConfig {
+        allow_private_addresses: true,
+        ..ReadConfig::default()
+    })
+    .unwrap();
+    let reader = Reader::new(pages, runtime.handle().clone());
+    (runtime, reader)
+}
+
+/// Serves `html` at `/` on this computer; returns the address.
+fn serve_page(runtime: &tokio::runtime::Runtime, html: &'static str) -> String {
+    runtime.block_on(async move {
+        let app = axum::Router::new().route(
+            "/",
+            axum::routing::get(move || async move { axum::response::Html(html) }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        format!("http://{addr}/")
+    })
+}
+
+#[test]
+fn read_page_is_offered_only_with_a_reader() {
+    let list = |mcp: &Mcp| {
+        let reply = mcp
+            .handle(&json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }))
+            .unwrap();
+        reply["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>()
+    };
+    let without = server(Vec::new());
+    assert!(!list(&without).contains(&"read_page".to_string()));
+    let reply = without.handle(&json!({
+        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": { "name": "read_page", "arguments": { "url": "https://example.com/" } },
+    }));
+    assert_eq!(reply.unwrap()["error"]["code"], INVALID_PARAMS);
+
+    let (runtime, reader) = local_reader();
+    let url = serve_page(
+        &runtime,
+        "<title>T</title><main><h1>Hi</h1><p>One two three.</p></main>",
+    );
+    let with = server(Vec::new()).with_reader(Some(reader));
+    assert!(list(&with).contains(&"read_page".to_string()));
+    let reply = call(&with, "read_page", json!({ "url": url }));
+    assert_eq!(reply["result"]["isError"], false, "{reply}");
+    let answer = &reply["result"]["structuredContent"];
+    assert_eq!(answer["title"], "T");
+    assert_eq!(answer["text"], "# Hi\n\nOne two three.");
+    assert_eq!(answer["more"], false);
+    // An IP address has no site to check.
+    assert!(answer.get("site").is_none());
+
+    // In parts.
+    let reply = call(
+        &with,
+        "read_page",
+        json!({ "url": url, "max_chars": 200, "start": 6 }),
+    );
+    let answer = &reply["result"]["structuredContent"];
+    assert_eq!(answer["text"], "One two three.");
+    assert_eq!(answer["start"], 6);
+}
+
+#[test]
+fn plumb_mcp_node_reads_pages_itself() {
+    let (runtime, reader) = local_reader();
+    let url = serve_page(&runtime, "<p>Hello</p>");
+    let message = json!({
+        "jsonrpc": "2.0", "id": 4, "method": "tools/call",
+        "params": { "name": "read_page", "arguments": { "url": url } },
+    });
+    let answer = read_here(&reader, &message, |check| {
+        assert_eq!(check["params"]["name"], "check_lookalike");
+        Ok(Some(json!({ "result": { "structuredContent": {
+            "verdict": "lookalike", "imitates": { "domain": "paypal.com" },
+        } } })))
+    })
+    .unwrap();
+    assert_eq!(answer["id"], 4);
+    let text = answer["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(
+        text.contains("WARNING: this site is a look-alike of paypal.com"),
+        "{text}"
+    );
+    assert!(text.contains("\nHello"), "{text}");
+    // Other calls go to the node.
+    let search = json!({ "jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": { "name": "search" } });
+    assert!(read_here(&reader, &search, |_| unreachable!()).is_none());
+
+    // The node's list gains read_page.
+    let mut listed =
+        json!({ "jsonrpc": "2.0", "id": 1, "result": { "tools": [{ "name": "search" }] } });
+    offer_read_page(&json!({ "method": "tools/list" }), &mut listed);
+    assert_eq!(listed["result"]["tools"][1]["name"], "read_page");
 }

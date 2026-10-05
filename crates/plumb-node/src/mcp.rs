@@ -2,8 +2,8 @@
 //! "what is the real site for X?" before they open a page, fill in a login
 //! or cite a source.
 //!
-//! It answers JSON-RPC 2.0 messages ([`Mcp::handle`]) with four read-only
-//! tools:
+//! It answers JSON-RPC 2.0 messages ([`Mcp::handle`]) with these
+//! read-only tools:
 //!
 //! - `official_site(name)`: the official site for a name, with how sure
 //!   Plumb is and why (Wikidata lists it, the name is the site's own, it is
@@ -11,8 +11,19 @@
 //! - `check_lookalike(url)`: whether an address is the real site or one
 //!   made to look like another (paypal-login.us, twiter.com), and which
 //!   site it imitates;
-//! - `search(query, limit)`: the normal results, sites and pages, as JSON;
-//! - `site_info(domain)`: what Plumb knows about one site.
+//! - `search(query, limit)`: the normal results, sites and pages, with
+//!   what the results page shows above and beside them: an instant answer
+//!   (sums, conversions, the time somewhere), the info box, an official
+//!   profile and recent headlines;
+//! - `site_info(domain)`: what Plumb knows about one site;
+//! - `read_page(url)`: a page as plain text, fetched by this node when an
+//!   AI app picks it from the results. Only offered to AI apps on the
+//!   node's own computer, or to every client with `--mcp-read-pages`: on a
+//!   public node it would make an open proxy. Nothing read is kept.
+//!
+//! Each tool's answer comes twice: as short plain text, one line per
+//! result, for the model to read (small local models have little room),
+//! and as JSON in `structuredContent` for programs.
 //!
 //! Two transports carry it:
 //!
@@ -27,7 +38,10 @@ use std::io::{BufRead, Write};
 use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
+use plumb_answer::Rates;
 use plumb_core::{domain_label, host_of, registrable_domain, search_template_for, truncate_chars};
+use plumb_crawl::{PageReader, ReadConfig};
+use plumb_index::pages::{place_operator_pages, place_pages};
 use plumb_index::{
     without_intent_words, Hit, SearchOptions, SearchResults, Searcher, WELL_KNOWN_LINK_SCORE,
 };
@@ -35,7 +49,12 @@ use serde_json::{json, Map, Value};
 
 use crate::cli::McpArgs;
 use crate::rank_config;
-use crate::web::{IndexBackend, SearchBackend, MAX_QUERY_CHARS};
+use crate::web::answers;
+use crate::web::{IndexBackend, SearchBackend, StatusSource, MAX_QUERY_CHARS};
+
+mod text;
+
+pub(crate) use text::answer_line;
 
 /// Protocol versions this server speaks, newest first. A client asking for
 /// one of them gets it; any other gets the newest.
@@ -51,15 +70,32 @@ const ALTERNATIVES: usize = 3;
 const MAX_LOOKALIKE_SEARCHES: usize = 6;
 /// Longest description returned, in characters.
 const MAX_DESCRIPTION_CHARS: usize = 300;
+/// Characters of a page `read_page` returns when the caller does not say...
+const DEFAULT_READ_CHARS: usize = 6_000;
+/// ...and the most it returns at once.
+const MAX_READ_CHARS: usize = 30_000;
+/// Links `read_page` lists when asked for them.
+const MAX_LINKS_RETURNED: usize = 60;
+/// Headlines `search` returns.
+const MAX_HEADLINES: usize = 5;
+/// Results asked for when looking up whose profile a query asks for.
+const PROFILE_SEARCH_LIMIT: usize = 5;
 
 /// What the server tells a client about itself when it connects.
 const INSTRUCTIONS: &str = "Plumb Search finds websites by name. Before opening a site you are \
      not sure of, call official_site with the name of the company, project or service to get \
      its real address. Before entering credentials or trusting a link, call check_lookalike \
      with the address: it says whether it is the real site or one built to look like another. \
-     search returns ordinary results (sites, plus Wikipedia articles and other pages) and \
-     site_info describes one site. Plumb knows homepages and names, not the full text of \
-     pages, so search by name rather than by question.";
+     search returns ordinary results (sites, plus Wikipedia articles, Stack Overflow \
+     questions, books and other pages), and with them a direct answer when it can work one \
+     out (sums, unit and currency conversions, the time somewhere), facts about what the \
+     query names, and recent headlines. site_info describes one site. Plumb knows homepages \
+     and names, not the full text of pages, so search by name or topic rather than by \
+     question.";
+
+/// Added to [`INSTRUCTIONS`] when `read_page` is offered.
+const READ_INSTRUCTIONS: &str = " To learn what a page says, call read_page with its URL: \
+     search to find the right site or page, then read it.";
 
 /// The tools' JSON-RPC server over a [`SearchBackend`]. Blocking: run it
 /// off async threads.
@@ -67,6 +103,32 @@ pub struct Mcp {
     backend: Arc<dyn SearchBackend>,
     /// The home country searches use unless a call names one.
     country: Option<String>,
+    /// Fetches pages for `read_page`; without it the tool is not offered.
+    reader: Option<Reader>,
+    /// Currency rates for instant answers, when the caller has them.
+    rates: Option<Rates>,
+    /// The node, for recent headlines; `None` answers without them.
+    node: Option<Arc<dyn StatusSource>>,
+}
+
+/// What `read_page` fetches pages with: a reader, and the runtime its
+/// requests run on (the tools themselves run on a blocking thread).
+#[derive(Clone)]
+pub struct Reader {
+    pages: PageReader,
+    runtime: tokio::runtime::Handle,
+}
+
+impl Reader {
+    pub fn new(pages: PageReader, runtime: tokio::runtime::Handle) -> Self {
+        Reader { pages, runtime }
+    }
+
+    /// A reader with the usual settings, running on `runtime`.
+    pub fn standard(runtime: tokio::runtime::Handle) -> Result<Self> {
+        let pages = PageReader::new(ReadConfig::default()).context("making the page reader")?;
+        Ok(Reader::new(pages, runtime))
+    }
 }
 
 /// JSON-RPC error codes.
@@ -77,7 +139,43 @@ const INVALID_PARAMS: i64 = -32602;
 
 impl Mcp {
     pub fn new(backend: Arc<dyn SearchBackend>, country: Option<String>) -> Self {
-        Mcp { backend, country }
+        Mcp {
+            backend,
+            country,
+            reader: None,
+            rates: None,
+            node: None,
+        }
+    }
+
+    /// Offers `read_page`, fetching pages with `reader`.
+    pub fn with_reader(mut self, reader: Option<Reader>) -> Self {
+        self.reader = reader;
+        self
+    }
+
+    /// Answers currency conversions with `rates`.
+    pub fn with_rates(mut self, rates: Option<Rates>) -> Self {
+        self.rates = rates;
+        self
+    }
+
+    /// Lists the node's recent headlines with search results.
+    pub fn with_node(mut self, node: Option<Arc<dyn StatusSource>>) -> Self {
+        self.node = node;
+        self
+    }
+
+    /// The query of a `search` call, for a caller that fetches currency
+    /// rates before handling it.
+    pub fn search_query(message: &Value) -> Option<&str> {
+        let params = message.get("params")?;
+        if message.get("method")?.as_str()? != "tools/call"
+            || params.get("name")?.as_str()? != "search"
+        {
+            return None;
+        }
+        params.get("arguments")?.get("query")?.as_str()
     }
 
     /// Answers one JSON-RPC message; `None` for a notification or a
@@ -99,9 +197,9 @@ impl Mcp {
         let id = id?;
         let params = object.get("params").cloned().unwrap_or(Value::Null);
         let result = match method {
-            "initialize" => Ok(initialize(&params)),
+            "initialize" => Ok(initialize(&params, self.reader.is_some())),
             "ping" => Ok(json!({})),
-            "tools/list" => Ok(json!({ "tools": tools() })),
+            "tools/list" => Ok(json!({ "tools": tools(self.reader.is_some()) })),
             "tools/call" => self.call(&params),
             "resources/list" => Ok(json!({ "resources": [] })),
             "resources/templates/list" => Ok(json!({ "resourceTemplates": [] })),
@@ -166,22 +264,14 @@ impl Mcp {
                 let options = self.options(args)?;
                 self.site_info(&domain, &options)
             }
+            "read_page" if self.reader.is_some() => {
+                let read = ReadArgs::of(args)?;
+                let options = self.options(args)?;
+                self.read_page(&read, &options)
+            }
             _ => return Err((INVALID_PARAMS, format!("unknown tool {name:?}"))),
         };
-        Ok(match answer {
-            Ok(answer) => json!({
-                "content": [{
-                    "type": "text",
-                    "text": serde_json::to_string_pretty(&answer).unwrap_or_default(),
-                }],
-                "structuredContent": answer,
-                "isError": false,
-            }),
-            Err(err) => json!({
-                "content": [{ "type": "text", "text": format!("Plumb could not answer: {err:#}") }],
-                "isError": true,
-            }),
-        })
+        Ok(tool_result(name, answer))
     }
 
     /// The search choices of a call: its `country` (a two-letter code, or
@@ -372,11 +462,63 @@ impl Mcp {
         }))
     }
 
-    /// `search`: the results a person would see, sites and pages.
+    /// `search`: the results a person would see, sites and pages, and
+    /// what the results page shows with them.
     pub fn search(&self, query: &str, limit: usize, options: &SearchOptions) -> Result<Value> {
         let results = self.lookup(query, limit, options)?;
-        let pages: Vec<Value> = results
-            .pages
+        // Placed as the results page places them, which the info box needs.
+        let found_pages = results.pages.iter().map(|p| p.hit.clone()).collect();
+        let operators = plumb_core::Operators::parse(query);
+        let placed = if operators.any() {
+            place_operator_pages(&operators, &results.hits, found_pages)
+        } else {
+            let searched_for = match &results.spelling {
+                Some(spelling) if spelling.applied => spelling.query.as_str(),
+                _ => query,
+            };
+            place_pages(searched_for, &results.hits, found_pages)
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        let answer = plumb_answer::answer(
+            query,
+            i64::try_from(now).unwrap_or(i64::MAX),
+            self.rates.as_ref(),
+        );
+        let names_a_page = placed.iter().any(|placed| placed.hit.named);
+        let profile = match plumb_core::profiles::services_asked(query) {
+            Some((_, name)) if !names_a_page => self
+                .lookup(&name, PROFILE_SEARCH_LIMIT, options)
+                .ok()
+                .and_then(|found| answers::profile_answer(query, &found.pages)),
+            _ => None,
+        };
+        let info = match &profile {
+            Some(profile) => answers::info_from_page(&profile.page, &results.hits),
+            None if operators.any() => None,
+            None => answers::info_box(&results.hits, &placed),
+        };
+        let recent = self.node.as_ref().and_then(|node| {
+            let top = results
+                .hits
+                .first()
+                .map(|hit| (hit.domain.as_str(), hit.named));
+            node.recent(query, top)
+        });
+        let headlines: Vec<Value> = recent
+            .iter()
+            .flat_map(|recent| recent.headlines.iter().take(MAX_HEADLINES))
+            .map(|headline| {
+                json!({
+                    "title": headline.title,
+                    "url": headline.url,
+                    "site": headline.domain,
+                    "published": crate::web::time_ago(headline.at, now),
+                })
+            })
+            .collect();
+        let pages: Vec<Value> = placed
             .iter()
             .map(|placed| {
                 json!({
@@ -389,13 +531,27 @@ impl Mcp {
                 })
             })
             .collect();
-        Ok(json!({
+        let mut answer_json = json!({
             "query": query,
             "results": results.hits.iter().map(brief).collect::<Vec<_>>(),
             "pages": pages,
             "site_search": results.site_search,
             "spelling": results.spelling,
-        }))
+        });
+        let fields = answer_json.as_object_mut().expect("an object");
+        if let Some(answer) = answer {
+            fields.insert("answer".into(), json!(answer));
+        }
+        if let Some(profile) = profile {
+            fields.insert("profile".into(), json!(profile));
+        }
+        if let Some(info) = info {
+            fields.insert("about".into(), json!(info));
+        }
+        if !headlines.is_empty() {
+            fields.insert("recent".into(), json!(headlines));
+        }
+        Ok(answer_json)
     }
 
     /// `site_info`: one site's entry.
@@ -427,6 +583,115 @@ impl Mcp {
             "pages": pages,
         }))
     }
+
+    /// `read_page`: the page's text, and whether its address (after
+    /// redirects) is a look-alike.
+    pub fn read_page(&self, args: &ReadArgs, options: &SearchOptions) -> Result<Value> {
+        let Some(reader) = &self.reader else {
+            bail!("this node does not read pages");
+        };
+        let mut answer = reader.read(args)?;
+        if let Some(url) = answer["url"].as_str() {
+            if let Ok(check) = self.check_lookalike(url, options) {
+                add_site_check(&mut answer, &check);
+            }
+        }
+        Ok(answer)
+    }
+}
+
+/// `read_page`'s arguments.
+#[derive(Debug, Clone)]
+pub struct ReadArgs {
+    url: String,
+    start: usize,
+    max_chars: usize,
+    links: bool,
+}
+
+impl ReadArgs {
+    fn of(args: &Map<String, Value>) -> Result<Self, (i64, String)> {
+        Ok(ReadArgs {
+            url: text_arg(args, "url")?,
+            start: whole_number(args, "start")?.unwrap_or(0),
+            max_chars: whole_number(args, "max_chars")?
+                .unwrap_or(DEFAULT_READ_CHARS)
+                .clamp(200, MAX_READ_CHARS),
+            links: args.get("links").and_then(Value::as_bool).unwrap_or(false),
+        })
+    }
+}
+
+/// Adds `check_lookalike`'s verdict to a `read_page` answer.
+fn add_site_check(answer: &mut Value, check: &Value) {
+    if let Some(fields) = answer.as_object_mut() {
+        fields.insert(
+            "site".into(),
+            json!({ "verdict": check["verdict"], "imitates": check["imitates"]["domain"] }),
+        );
+    }
+}
+
+/// A tool's answer as `tools/call` returns it: short text for the model and
+/// the JSON for programs. A failed search is a tool error the model can read.
+fn tool_result(name: &str, answer: Result<Value>) -> Value {
+    match answer {
+        Ok(answer) => json!({
+            "content": [{ "type": "text", "text": text::render(name, &answer) }],
+            "structuredContent": answer,
+            "isError": false,
+        }),
+        Err(err) => json!({
+            "content": [{ "type": "text", "text": format!("Plumb could not answer: {err:#}") }],
+            "isError": true,
+        }),
+    }
+}
+
+impl Reader {
+    /// Fetches the page and cuts out the part asked for.
+    fn read(&self, args: &ReadArgs) -> Result<Value> {
+        let page = self
+            .runtime
+            .block_on(self.pages.read(&args.url))
+            .map_err(anyhow::Error::from)?;
+        let (start, max_chars, links) = (args.start, args.max_chars, args.links);
+        let total = page.text.chars().count();
+        let start = start.min(total);
+        let mut end = (start + max_chars).min(total);
+        let mut text: String = page.text.chars().skip(start).take(end - start).collect();
+        if end < total {
+            // End at a line break when one is in the second half.
+            if let Some(cut) = text.rfind('\n').filter(|&cut| cut > text.len() / 2) {
+                text.truncate(cut);
+                end = start + text.chars().count();
+            }
+        }
+        let mut answer = json!({
+            "url": page.url,
+            "title": page.title,
+            "text": text.trim_end(),
+            "start": start,
+            "end": end,
+            "length": total,
+            "more": end < total,
+            "truncated": page.cut,
+        });
+        let fields = answer.as_object_mut().expect("an object");
+        if end < total {
+            fields.insert("next_start".into(), json!(end));
+        }
+        if links {
+            let links: Vec<Value> = page
+                .links
+                .iter()
+                .take(MAX_LINKS_RETURNED)
+                .map(|(text, url)| json!({ "text": truncate_chars(text, 100), "url": url }))
+                .collect();
+            fields.insert("links".into(), json!(links));
+        }
+        Ok(answer)
+    }
 }
 
 fn error(id: Value, code: i64, message: &str) -> Value {
@@ -438,7 +703,7 @@ pub fn parse_error() -> Value {
     error(Value::Null, PARSE_ERROR, "the message is not JSON")
 }
 
-fn initialize(params: &Value) -> Value {
+fn initialize(params: &Value, read_pages: bool) -> Value {
     let asked = params.get("protocolVersion").and_then(Value::as_str);
     let version = asked
         .and_then(|asked| PROTOCOL_VERSIONS.iter().find(|v| **v == asked))
@@ -451,19 +716,24 @@ fn initialize(params: &Value) -> Value {
             "title": "Plumb Search",
             "version": env!("CARGO_PKG_VERSION"),
         },
-        "instructions": INSTRUCTIONS,
+        "instructions": if read_pages {
+            format!("{INSTRUCTIONS}{READ_INSTRUCTIONS}")
+        } else {
+            INSTRUCTIONS.to_string()
+        },
     })
 }
 
-/// The tools' descriptions, as `tools/list` returns them.
-pub fn tools() -> Value {
+/// The tools' descriptions, as `tools/list` returns them; `read_pages`
+/// adds `read_page`.
+pub fn tools(read_pages: bool) -> Value {
     let country = json!({
         "type": "string",
         "description": "Optional home country, a two-letter code such as US or DE: its sites \
              rank a little higher. \"any\" for none.",
     });
     let read_only = json!({ "readOnlyHint": true, "idempotentHint": true, "openWorldHint": false });
-    json!([
+    let mut tools = json!([
         {
             "name": "official_site",
             "title": "Official site",
@@ -532,7 +802,37 @@ pub fn tools() -> Value {
             },
             "annotations": read_only,
         },
-    ])
+    ]);
+    if read_pages {
+        tools
+            .as_array_mut()
+            .expect("an array")
+            .push(read_page_tool());
+    }
+    tools
+}
+
+/// `read_page`'s description.
+fn read_page_tool() -> Value {
+    json!({
+        "name": "read_page",
+        "title": "Read a page",
+        "description": "Fetches a web page and returns its text (with headings and lists marked \
+             in Markdown), without menus, ads or scripts. Use it after search or official_site \
+             to read what a page says. Long pages come in parts: call again with start set to \
+             next_start. Also says whether the address is a look-alike of a better-known site.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "url": { "type": "string", "description": "The page's address." },
+                "start": { "type": "integer", "minimum": 0, "description": "Character to start at, for the next part of a long page (default 0)." },
+                "max_chars": { "type": "integer", "minimum": 200, "maximum": MAX_READ_CHARS, "description": "Most characters to return (default 6000)." },
+                "links": { "type": "boolean", "description": "Also list the page's links (default false)." },
+            },
+            "required": ["url"],
+        },
+        "annotations": { "readOnlyHint": true, "idempotentHint": true, "openWorldHint": true },
+    })
 }
 
 /// A required, non-empty text argument, cut to [`MAX_QUERY_CHARS`].
@@ -546,6 +846,17 @@ fn text_arg(args: &Map<String, Value>, name: &str) -> Result<String, (i64, Strin
         return Err((INVALID_PARAMS, format!("{name} is required")));
     }
     Ok(text)
+}
+
+/// An optional whole-number argument.
+fn whole_number(args: &Map<String, Value>, name: &str) -> Result<Option<usize>, (i64, String)> {
+    match args.get(name) {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => value
+            .as_u64()
+            .map(|n| Some(usize::try_from(n).unwrap_or(usize::MAX)))
+            .ok_or((INVALID_PARAMS, format!("{name} must be a whole number"))),
+    }
 }
 
 /// A site in a tool's answer.
@@ -700,13 +1011,24 @@ fn edit_distance(a: &str, b: &str) -> usize {
 pub fn run(args: McpArgs) -> Result<()> {
     let stdin = std::io::stdin().lock();
     let stdout = std::io::stdout().lock();
+    let runtime = crate::runtime()?;
+    // Pages are fetched from this computer, whichever node answers the rest.
+    let reader = Reader::standard(runtime.handle().clone())?;
     match &args.index {
         Some(index) => {
             let searcher = Searcher::open(index)
                 .with_context(|| format!("opening the index in {}", index.display()))?;
-            let backend = IndexBackend::new(searcher, rank_config(None));
-            let mcp = Mcp::new(Arc::new(backend), args.country.clone());
-            serve_lines(stdin, stdout, |message| Ok(mcp.handle(message)))
+            let backend: Arc<dyn SearchBackend> =
+                Arc::new(IndexBackend::new(searcher, rank_config(None)));
+            let rates = answers::RatesCache::default();
+            serve_lines(stdin, stdout, |message| {
+                let rates = Mcp::search_query(message)
+                    .and_then(|query| runtime.block_on(rates.for_query(query)));
+                let mcp = Mcp::new(Arc::clone(&backend), args.country.clone())
+                    .with_reader(Some(reader.clone()))
+                    .with_rates(rates);
+                Ok(mcp.handle(message))
+            })
         }
         None => {
             let endpoint = mcp_endpoint(&args.node)?;
@@ -715,11 +1037,89 @@ pub fn run(args: McpArgs) -> Result<()> {
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
                 .context("making the HTTP client")?;
-            let runtime = crate::runtime()?;
             serve_lines(stdin, stdout, |message| {
-                runtime.block_on(forward(&client, &endpoint, message))
+                if let Some(answer) = read_here(&reader, message, |check| {
+                    runtime.block_on(forward(&client, &endpoint, check))
+                }) {
+                    return Ok(Some(answer));
+                }
+                let mut answer = runtime.block_on(forward(&client, &endpoint, message))?;
+                if let Some(answer) = &mut answer {
+                    offer_read_page(message, answer);
+                }
+                Ok(answer)
             })
         }
+    }
+}
+
+/// For `plumb mcp --node`: answers a `read_page` call here, asking the node
+/// (through `ask`) only whether the page's site is a look-alike. `None`
+/// for any other message.
+fn read_here(
+    reader: &Reader,
+    message: &Value,
+    ask: impl FnOnce(&Value) -> Result<Option<Value>>,
+) -> Option<Value> {
+    let params = message.get("params")?;
+    if message.get("method")?.as_str()? != "tools/call"
+        || params.get("name")?.as_str()? != "read_page"
+    {
+        return None;
+    }
+    let id = message.get("id")?.clone();
+    let empty = Map::new();
+    let args = params
+        .get("arguments")
+        .and_then(Value::as_object)
+        .unwrap_or(&empty);
+    let read = match ReadArgs::of(args) {
+        Ok(read) => read,
+        Err((code, why)) => return Some(error(id, code, &why)),
+    };
+    let answer = reader.read(&read).map(|mut answer| {
+        if let Some(url) = answer["url"].as_str() {
+            let check = json!({
+                "jsonrpc": "2.0",
+                "id": 0,
+                "method": "tools/call",
+                "params": { "name": "check_lookalike", "arguments": { "url": url } },
+            });
+            if let Ok(Some(reply)) = ask(&check) {
+                let check = &reply["result"]["structuredContent"];
+                if check.is_object() {
+                    add_site_check(&mut answer, check);
+                }
+            }
+        }
+        answer
+    });
+    Some(json!({ "jsonrpc": "2.0", "id": id, "result": tool_result("read_page", answer) }))
+}
+
+/// For `plumb mcp --node`: adds `read_page`, answered here, to what the node
+/// says it offers.
+fn offer_read_page(message: &Value, answer: &mut Value) {
+    let method = message.get("method").and_then(Value::as_str);
+    let Some(result) = answer.get_mut("result").and_then(Value::as_object_mut) else {
+        return;
+    };
+    match method {
+        Some("tools/list") => {
+            if let Some(tools) = result.get_mut("tools").and_then(Value::as_array_mut) {
+                if !tools.iter().any(|tool| tool["name"] == "read_page") {
+                    tools.push(read_page_tool());
+                }
+            }
+        }
+        Some("initialize") => {
+            if let Some(Value::String(instructions)) = result.get_mut("instructions") {
+                if !instructions.contains("read_page") {
+                    instructions.push_str(READ_INSTRUCTIONS);
+                }
+            }
+        }
+        _ => {}
     }
 }
 

@@ -84,7 +84,7 @@ use crate::news::Recent;
 use crate::node::{NodeSettings, Phase, Status, Step};
 use crate::websearch::{bang_url, Engine, WebSettings};
 
-mod answers;
+pub(crate) mod answers;
 mod control;
 mod history;
 mod nodes;
@@ -97,6 +97,7 @@ pub use panel::ADD_TO_FIREFOX_PATH;
 mod mcp;
 pub(crate) mod private;
 mod relay;
+mod searxng;
 mod setup;
 
 /// Results returned when a request does not say how many.
@@ -431,6 +432,8 @@ struct AppState {
     rates: Arc<answers::RatesCache>,
     /// How many tool calls each client may still make to `/mcp`.
     mcp_limiter: Arc<mcp::Limiter>,
+    /// Fetches pages for `/mcp`'s `read_page`.
+    page_reader: Arc<mcp::SharedReader>,
 }
 
 impl AppState {
@@ -513,6 +516,7 @@ pub fn router_with(backend: Arc<dyn SearchBackend>, settings: impl Into<WebSetti
         settings: settings.into(),
         rates: Arc::default(),
         mcp_limiter: Arc::default(),
+        page_reader: Arc::default(),
     })
 }
 
@@ -535,6 +539,7 @@ pub fn node_router_with(
         settings: settings.into(),
         rates: Arc::default(),
         mcp_limiter: Arc::default(),
+        page_reader: Arc::default(),
     })
 }
 
@@ -591,6 +596,7 @@ pub fn run(args: ServeArgs) -> Result<()> {
         WebSettings {
             home: args.country.clone(),
             web_search: args.web_search.0,
+            read_pages_for_all: args.mcp_read_pages,
         },
     );
     block_on(async move {
@@ -599,10 +605,13 @@ pub fn run(args: ServeArgs) -> Result<()> {
             .with_context(|| format!("listening on {}", args.bind))?;
         let addr = listener.local_addr().context("reading the bound address")?;
         info!("serving {docs} sites on http://{addr}/ (Ctrl-C to stop)");
-        axum::serve(listener, app)
-            .with_graceful_shutdown(shutdown_signal())
-            .await
-            .context("serving HTTP")
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .context("serving HTTP")
     })?
 }
 
@@ -658,6 +667,13 @@ struct SearchParams {
     safe: Option<String>,
     /// Only sites in this language (a language code); empty for any.
     lang: Option<String>,
+    /// `json`: `/search` answers in SearXNG's JSON format, for AI apps
+    /// that take a SearXNG address (see [`searxng`]).
+    format: Option<String>,
+    /// SearXNG's page of results, from 1.
+    pageno: Option<usize>,
+    /// SearXNG's safe search: 0, 1 or 2.
+    safesearch: Option<String>,
 }
 
 /// Whether a flag parameter is set: `1`, `on`, `true` or `yes`.
@@ -812,6 +828,13 @@ async fn search_page(
     headers: HeaderMap,
     Query(params): Query<SearchParams>,
 ) -> Response {
+    if params
+        .format
+        .as_deref()
+        .is_some_and(|format| format.eq_ignore_ascii_case("json"))
+    {
+        return searxng::search(state, headers, params).await;
+    }
     // A bang leaves Plumb, even while it sets up.
     if let Some(url) = bang_url(&params.q) {
         return (security_headers(), Redirect::to(&url)).into_response();
@@ -1126,6 +1149,9 @@ async fn go(
         hr: None,
         safe: params.safe,
         lang: params.lang,
+        format: None,
+        pageno: None,
+        safesearch: None,
     };
     let query = search.query();
     let back = {
@@ -1576,7 +1602,7 @@ pub(crate) fn duration_words(seconds: u64) -> String {
 }
 
 /// `at` (Unix seconds) seen from `now`: `just now`, `5 minutes ago`.
-fn time_ago(at: u64, now: u64) -> String {
+pub(crate) fn time_ago(at: u64, now: u64) -> String {
     match now.saturating_sub(at) {
         0..=9 => "just now".to_string(),
         age => format!("{} ago", duration_words(age)),
@@ -3024,6 +3050,51 @@ mod tests {
             hits,
             ..FakeBackend::default()
         })
+    }
+
+    #[tokio::test]
+    async fn answers_searxng_json_for_ai_apps() {
+        let app = router_with(backend(bank_hits()), HomeCountry::Off);
+        let (status, headers, body) = send(
+            app.clone(),
+            "/search?q=us+bank&format=json&pageno=1&safesearch=0",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(headers[header::CONTENT_TYPE]
+            .to_str()
+            .unwrap()
+            .starts_with("application/json"));
+        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(body["query"], "us bank");
+        assert_eq!(body["number_of_results"], 2);
+        let first = &body["results"][0];
+        assert_eq!(first["url"], "https://www.usbank.com/");
+        assert_eq!(first["title"], "U.S. Bank | Personal & Business Banking");
+        assert_eq!(first["content"], "Checking, savings & loans.");
+        assert_eq!(first["engine"], "plumb");
+        assert_eq!(first["parsed_url"][1], "www.usbank.com");
+        // A site without a title goes by its domain.
+        assert_eq!(body["results"][1]["title"], "usbank-login-help.com");
+
+        // The second page.
+        let (_, _, body) = send(
+            app.clone(),
+            "/search?q=us+bank&format=json&pageno=2&limit=1",
+        )
+        .await;
+        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(body["results"].as_array().unwrap().len(), 1);
+        assert_eq!(body["results"][0]["url"], "https://usbank-login-help.com/");
+
+        // Instant answers go where SearXNG puts its own.
+        let (_, _, body) = send(app.clone(), "/search?q=12*7&format=json").await;
+        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(body["answers"][0]["answer"], "12 × 7 = 84");
+
+        // A bang stays a search: an AI app wants results, not a redirect.
+        let (status, _, _) = send(app, "/search?q=!g+rust&format=json").await;
+        assert_eq!(status, StatusCode::OK);
     }
 
     #[test]
