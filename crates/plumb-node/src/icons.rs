@@ -108,6 +108,16 @@ impl IconStore {
 /// [`plumb_net::batch::MAX_RECORD_BYTES`].
 const MAX_SHARED_ICON_CHARS: usize = 8 * 1024;
 
+/// A stored icon as another node takes it ([`from_shared`]); `None` for
+/// an empty marker or one too big to share.
+pub(crate) fn to_shared(icon: &[u8]) -> Option<String> {
+    if icon.is_empty() {
+        return None;
+    }
+    let text = BASE64.encode(icon);
+    (text.len() <= MAX_SHARED_ICON_CHARS).then_some(text)
+}
+
 /// Puts each fetched homepage's icon on its record, for sharing a crawl
 /// with the network (see [`SiteRecord::icon`]).
 pub(crate) fn attach(records: &mut [SiteRecord], results: &[CrawlResult]) {
@@ -120,10 +130,7 @@ pub(crate) fn attach(records: &mut [SiteRecord], results: &[CrawlResult]) {
         .collect();
     for record in records {
         if let Some(icon) = icons.get(record.domain.as_str()) {
-            let text = BASE64.encode(icon);
-            if text.len() <= MAX_SHARED_ICON_CHARS {
-                record.icon = Some(text);
-            }
+            record.icon = to_shared(icon);
         }
     }
 }

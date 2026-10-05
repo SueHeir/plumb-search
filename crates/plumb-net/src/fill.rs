@@ -106,16 +106,52 @@ pub fn answer(source: &dyn BucketSource, from: u64, count: u32, all: bool) -> Fi
         }
         // Keys are never escaped in a record's JSON and string values
         // always are, so this is only ever the crawl time's key.
-        if line.len() <= MAX_RECORD_BYTES && (all || line.contains("\"crawled_at\":")) {
-            response.records.push(line);
+        if all {
+            if line.len() <= MAX_RECORD_BYTES {
+                response.records.push(line);
+            }
+        } else if line.len() <= MAX_RECORD_BYTES && line.contains("\"crawled_at\":") {
+            response.records.push(with_icon(source, line));
         }
     }
     response
 }
 
+/// `line` with the icon `source` holds for its site, as a crawl shared in a
+/// batch carries it, so a filled site shows its icon too. Left as it is
+/// when there is no icon or the record would grow past
+/// [`MAX_RECORD_BYTES`].
+fn with_icon(source: &dyn BucketSource, line: String) -> String {
+    #[derive(serde::Deserialize)]
+    struct Site {
+        domain: String,
+    }
+    if line.contains("\"icon\":") || !line.ends_with('}') {
+        return line;
+    }
+    let Some(icon) = serde_json::from_str::<Site>(&line)
+        .ok()
+        .and_then(|site| source.icon(&site.domain))
+    else {
+        return line;
+    };
+    let Ok(icon) = serde_json::to_string(&icon) else {
+        return line;
+    };
+    if line.len() + icon.len() + 8 > MAX_RECORD_BYTES {
+        return line;
+    }
+    let mut out = String::with_capacity(line.len() + icon.len() + 8);
+    out.push_str(&line[..line.len() - 1]);
+    out.push_str(",\"icon\":");
+    out.push_str(&icon);
+    out.push('}');
+    out
+}
+
 /// A crawled site a trusted node sent, as this node keeps it: its page
-/// fields, names, link text and ranks, without the answering node's own
-/// bookkeeping (crawl tries, redirects, icon). `None` for a record that
+/// fields, names, link text, ranks and icon, without the answering node's
+/// own bookkeeping (crawl tries, redirects). `None` for a record that
 /// does not parse, is too long, names no registrable domain, or was never
 /// crawled. Unsafe homepage URLs and site-search templates are stripped
 /// without discarding the rest of the record.
@@ -158,7 +194,11 @@ fn parse(line: &str, now: u64, uncrawled: bool) -> Result<SiteRecord> {
     record.crawl_attempted_at = None;
     record.crawl_failures = 0;
     record.redirect = None;
-    record.icon = None;
+    // Only filled sites carry icons, to the inbox's icon store; a node
+    // setting up writes its records straight to the records file.
+    if uncrawled {
+        record.icon = None;
+    }
     Ok(record)
 }
 
@@ -221,6 +261,44 @@ mod tests {
     }
 
     #[test]
+    fn filled_sites_carry_the_icons_the_answering_node_holds() {
+        struct WithIcons(BucketTable);
+        impl BucketSource for WithIcons {
+            fn bucket(&self, bucket: u32) -> Option<Vec<String>> {
+                BucketSource::bucket(&self.0, bucket)
+            }
+            fn ranked(&self, from: usize, count: usize) -> Option<(Vec<String>, usize)> {
+                BucketSource::ranked(&self.0, from, count)
+            }
+            fn icon(&self, domain: &str) -> Option<String> {
+                match domain {
+                    "first.com" => Some("cG5n".into()),
+                    "second.com" => Some("x".repeat(MAX_RECORD_BYTES)),
+                    _ => None,
+                }
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let records = vec![
+            site("first.com", 1, true),
+            site("second.com", 2, true),
+            site("third.com", 3, true),
+        ];
+        let source = WithIcons(BucketTable::build(&dir.path().join("b"), &records).unwrap());
+        let icons: Vec<Option<String>> = answer(&source, 0, 10, false)
+            .records
+            .iter()
+            .map(|line| accept_filled(line, 2_000).unwrap().icon)
+            .collect();
+        // second.com's icon would make its record too long to send.
+        assert_eq!(icons, [Some("cG5n".to_string()), None, None]);
+        // A node setting up writes records straight to its records file,
+        // where icons are never kept.
+        let seed = answer(&source, 0, 10, true);
+        assert!(seed.records.iter().all(|line| !line.contains("\"icon\"")));
+    }
+
+    #[test]
     fn a_node_without_a_table_sends_nothing() {
         struct Empty;
         impl BucketSource for Empty {
@@ -245,9 +323,14 @@ mod tests {
         assert_eq!(kept.signals.tranco_rank, Some(5));
         assert_eq!(kept.title.as_deref(), Some("Example.COM home"));
         assert_eq!(
-            (kept.crawl_attempted_at, kept.crawl_failures, kept.icon),
-            (None, 0, None)
+            (
+                kept.crawl_attempted_at,
+                kept.crawl_failures,
+                kept.icon.as_deref()
+            ),
+            (None, 0, Some("png"))
         );
+        assert_eq!(accept_seed(&line, 2_000).unwrap().icon, None);
 
         let uncrawled = serde_json::to_string(&site("a.com", 1, false)).unwrap();
         assert!(accept_filled(&uncrawled, 2_000).is_none());
