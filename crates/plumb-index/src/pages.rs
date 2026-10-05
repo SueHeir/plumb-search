@@ -1497,6 +1497,14 @@ mod tests {
             .unwrap()
             .iter()
             .any(|hit| hit.whole));
+        // Only one edition leads.
+        let best = s.search("dune frank herbert", 5).unwrap().remove(0);
+        let placed = place_pages(
+            "dune frank herbert",
+            &[known_site("dunebook.com", false, 0.9)],
+            vec![best.clone(), best],
+        );
+        assert_eq!(placed.iter().map(|p| p.at).collect::<Vec<_>>(), [0, 1]);
         // Papers are found by most of their words too.
         let hits = s.search("attention all you need paper", 5).unwrap();
         assert_eq!(titles(&hits), ["Attention Is All You Need"]);
