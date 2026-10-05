@@ -91,6 +91,7 @@ pub fn to_records(results: &[CrawlResult]) -> Vec<SiteRecord> {
             CrawlOutcome::RobotsDisallowed
             | CrawlOutcome::HttpStatus { .. }
             | CrawlOutcome::NotHtml { .. }
+            | CrawlOutcome::BotCheck { .. }
             | CrawlOutcome::Failed { .. } => {}
         }
     }
@@ -156,6 +157,7 @@ mod tests {
                     key_pages: Vec::new(),
                     headings: Vec::new(),
                     body_text: None,
+                    feed: None,
                     links: links
                         .iter()
                         .map(|&(url, text)| OutLink {

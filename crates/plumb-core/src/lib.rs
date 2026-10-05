@@ -12,10 +12,12 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub mod article;
+mod bot_check;
 mod country;
 pub mod key_pages;
 pub mod keys;
 mod kinds;
+pub mod news;
 #[cfg(feature = "oblivious")]
 pub mod oblivious;
 mod operators;
@@ -24,9 +26,11 @@ pub mod safe;
 mod site_search;
 
 pub use article::{article_url, Article};
+pub use bot_check::is_bot_check_page;
 pub use country::{normalize_country, site_country, tld_country};
 pub use key_pages::{KeyPage, PageIntent, MAX_KEY_PAGES};
 pub use kinds::{is_generic_kind, kind_key, other_number, MAX_KINDS};
+pub use news::Headline;
 pub use operators::Operators;
 pub use safe::{adult_level, record_adult_level, AdultLevel, SafeSearch};
 pub use site_search::{search_link, search_template_for, SEARCH_TERMS};
@@ -134,6 +138,12 @@ pub struct SiteRecord {
     /// icons in a store of their own, and [`SiteRecord::merge`] ignores it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
+    /// Recent headlines from the site's feed (see [`news`]), only while a
+    /// feed check travels between nodes, like [`SiteRecord::icon`]. Never
+    /// kept in a records file: a node keeps headlines in a store of their
+    /// own, and [`SiteRecord::merge`] ignores them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub news: Vec<Headline>,
 }
 
 /// A homepage's redirect to another registrable domain.
@@ -506,7 +516,8 @@ impl RecordSet {
     /// Inserts a record, merging it into an existing one for the same domain.
     /// The domain is made canonical first ([`canonical_domain`]), so
     /// `Example.COM` and `münchen.de` land on `example.com` and
-    /// `xn--mnchen-3ya.de`. Returns false, dropping the record, when the
+    /// `xn--mnchen-3ya.de`, and page fields read off a bot check are dropped
+    /// ([`SiteRecord::drop_bot_check`]). Returns false, dropping the record, when the
     /// domain is not a valid registrable domain.
     pub fn upsert(&mut self, record: SiteRecord) -> bool {
         self.upsert_with(record, SiteRecord::merge)
@@ -527,6 +538,9 @@ impl RecordSet {
             Some(domain) => record.domain = domain,
             None => return false,
         }
+        // A bot check crawled in place of the homepage, by this node or by
+        // one whose crawl it took, before crawlers knew to skip them.
+        record.drop_bot_check();
         match self.map.get_mut(&record.domain) {
             Some(existing) => merge(existing, record),
             None => {

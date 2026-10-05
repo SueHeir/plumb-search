@@ -45,6 +45,7 @@ mod fetch;
 mod icons;
 mod ingest;
 mod limits;
+pub mod news;
 mod records;
 mod run;
 mod search;
