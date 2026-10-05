@@ -1,9 +1,11 @@
 [package]
 name = "plumb-node"
+description = "The Plumb Search node: the `plumb` command-line tool and its web server."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+publish = false
 
 [[bin]]
 name = "plumb"
