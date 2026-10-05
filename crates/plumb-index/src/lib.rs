@@ -1216,8 +1216,8 @@ struct Named {
 }
 
 /// The words of `query` before the [`INTENT_WORDS`] it ends with, if it
-/// ends with any and has other words.
-fn without_intent_words(query: &str) -> Option<String> {
+/// ends with any and has other words: "paypal login" -> "paypal".
+pub fn without_intent_words(query: &str) -> Option<String> {
     let mut words: Vec<String> = normalize_text(query)
         .split_whitespace()
         .map(str::to_string)

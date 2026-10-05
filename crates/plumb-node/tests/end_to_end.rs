@@ -277,3 +277,172 @@ async fn web_app_escapes_text_from_the_web() {
     assert!(!body.contains("<script"), "{body}");
     assert!(body.contains("value=\"&quot;&gt;&lt;script&gt;alert(1)&lt;/script&gt;\""));
 }
+
+/// Sends `messages` to `plumb mcp --index <index>`, one per line, and
+/// returns its answers.
+fn mcp_over_stdio(index: &Path, messages: &[serde_json::Value]) -> Vec<serde_json::Value> {
+    use std::io::Write;
+    use std::process::Stdio;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_plumb"))
+        .arg("mcp")
+        .arg("--index")
+        .arg(index)
+        .env("RUST_LOG", "warn")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("running plumb mcp");
+    {
+        let mut stdin = child.stdin.take().unwrap();
+        for message in messages {
+            writeln!(stdin, "{message}").unwrap();
+        }
+    }
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "plumb mcp failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+fn tool_call(id: u64, tool: &str, arguments: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": "tools/call",
+        "params": { "name": tool, "arguments": arguments },
+    })
+}
+
+#[test]
+fn mcp_command_finds_official_sites_and_lookalikes_in_the_fixtures() {
+    use serde_json::json;
+    let tmp = tempfile::tempdir().unwrap();
+    let (index, _) = build_fixture_index(tmp.path());
+    let lookalikes = [
+        ("usbank-login-help.com", "usbank.com"),
+        ("https://paypal-account-verify.com/signin", "paypal.com"),
+        ("irs-tax-refund-help.com", "irs.gov"),
+        ("wellsfargo-secure-online.com", "wellsfargo.com"),
+        ("usps-package-redelivery.com", "usps.com"),
+        ("microsoft-support-helpline.com", "microsoft.com"),
+        ("facebook-login-recover.com", "facebook.com"),
+        ("amazon-prime-refund.com", "amazon.com"),
+        ("paypa1.com", "paypal.com"),
+        ("wellsfargo.com.account-check.io", "wellsfargo.com"),
+    ];
+    let names = [
+        ("us bank", "usbank.com"),
+        ("PayPal", "paypal.com"),
+        ("chase login", "chase.com"),
+        ("irs", "irs.gov"),
+    ];
+    let real = [
+        "https://www.usbank.com/login",
+        "chase.com",
+        "chasecenter.com",
+        "deltafaucet.com",
+    ];
+    let mut messages = vec![
+        json!({ "jsonrpc": "2.0", "id": 0, "method": "initialize",
+                "params": { "protocolVersion": "2025-06-18", "capabilities": {},
+                            "clientInfo": { "name": "test", "version": "1" } } }),
+        json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
+    ];
+    let mut id = 0;
+    for (url, _) in lookalikes {
+        id += 1;
+        messages.push(tool_call(id, "check_lookalike", json!({ "url": url })));
+    }
+    for (name, _) in names {
+        id += 1;
+        messages.push(tool_call(id, "official_site", json!({ "name": name })));
+    }
+    for url in real {
+        id += 1;
+        messages.push(tool_call(id, "check_lookalike", json!({ "url": url })));
+    }
+    let answers = mcp_over_stdio(&index, &messages);
+    assert_eq!(answers.len(), messages.len() - 1, "{answers:?}");
+    assert_eq!(answers[0]["result"]["serverInfo"]["name"], "plumb-search");
+    let mut answers = answers[1..]
+        .iter()
+        .map(|answer| answer["result"]["structuredContent"].clone());
+
+    for (url, imitated) in lookalikes {
+        let answer = answers.next().unwrap();
+        assert_eq!(answer["verdict"], "lookalike", "{url}: {answer}");
+        assert_eq!(answer["imitates"]["domain"], imitated, "{url}: {answer}");
+    }
+    for (name, domain) in names {
+        let answer = answers.next().unwrap();
+        assert_eq!(answer["domain"], domain, "{name}: {answer}");
+        assert_eq!(answer["confidence"], "high", "{name}: {answer}");
+    }
+    for url in real {
+        let answer = answers.next().unwrap();
+        assert_eq!(answer["lookalike"], false, "{url}: {answer}");
+        assert_ne!(answer["verdict"], "unknown", "{url}: {answer}");
+    }
+}
+
+#[tokio::test]
+async fn web_app_serves_mcp() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (index, _) = build_fixture_index(tmp.path());
+    let app = app_for(&index);
+    let post = |body: String, origin: Option<&str>| {
+        let mut request = Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header(header::HOST, "plumb.test")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::ACCEPT, "application/json, text/event-stream");
+        if let Some(origin) = origin {
+            request = request.header(header::ORIGIN, origin);
+        }
+        let request = request.body(Body::from(body)).unwrap();
+        let app = app.clone();
+        async move {
+            let response = app.oneshot(request).await.unwrap();
+            let status = response.status();
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            (status, String::from_utf8(body.to_vec()).unwrap())
+        }
+    };
+
+    let call = tool_call(1, "official_site", serde_json::json!({ "name": "us bank" }));
+    let (status, body) = post(call.to_string(), None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let answer: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(answer["id"], 1);
+    assert_eq!(
+        answer["result"]["structuredContent"]["domain"],
+        "usbank.com"
+    );
+
+    let note = r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#;
+    let (status, body) = post(note.to_string(), None).await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert!(body.is_empty());
+
+    let (status, _) = post("{not json".to_string(), None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let (status, _) = post(call.to_string(), Some("https://evil.example")).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = post(call.to_string(), Some("http://plumb.test")).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, _, _) = get(&app, "/mcp").await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+}

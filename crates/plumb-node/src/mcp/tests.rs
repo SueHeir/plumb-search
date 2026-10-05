@@ -1,0 +1,278 @@
+use super::*;
+
+/// Answers every query with the same hits.
+struct Fixed(Vec<Hit>);
+
+impl SearchBackend for Fixed {
+    fn search(&self, _query: &str, limit: usize) -> Result<Vec<Hit>> {
+        Ok(self.0.iter().take(limit).cloned().collect())
+    }
+
+    fn num_docs(&self) -> u64 {
+        self.0.len() as u64
+    }
+}
+
+/// Fails every search.
+struct Broken;
+
+impl SearchBackend for Broken {
+    fn search(&self, _query: &str, _limit: usize) -> Result<Vec<Hit>> {
+        bail!("index is broken")
+    }
+
+    fn num_docs(&self) -> u64 {
+        0
+    }
+}
+
+fn hit(domain: &str, score: f32, link_score: f32, named: bool) -> Hit {
+    Hit {
+        domain: domain.to_string(),
+        url: format!("https://www.{domain}/"),
+        title: Some(domain.to_string()),
+        description: None,
+        score,
+        text_score: 1.0,
+        link_score,
+        country: None,
+        named,
+        official: false,
+    }
+}
+
+fn server(hits: Vec<Hit>) -> Mcp {
+    Mcp::new(Arc::new(Fixed(hits)), None)
+}
+
+fn call(mcp: &Mcp, tool: &str, arguments: Value) -> Value {
+    mcp.handle(&json!({
+        "jsonrpc": "2.0",
+        "id": 7,
+        "method": "tools/call",
+        "params": { "name": tool, "arguments": arguments },
+    }))
+    .expect("a call gets an answer")
+}
+
+#[test]
+fn initialize_agrees_on_a_protocol_version() {
+    let mcp = server(Vec::new());
+    let answer = |version: &str| {
+        mcp.handle(&json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": { "protocolVersion": version, "capabilities": {} },
+        }))
+        .unwrap()
+    };
+    let reply = answer("2025-03-26");
+    assert_eq!(reply["id"], 1);
+    assert_eq!(reply["result"]["protocolVersion"], "2025-03-26");
+    assert_eq!(reply["result"]["serverInfo"]["name"], "plumb-search");
+    assert!(reply["result"]["capabilities"]["tools"].is_object());
+    // An unknown version gets the newest.
+    assert_eq!(
+        answer("2099-01-01")["result"]["protocolVersion"],
+        PROTOCOL_VERSIONS[0]
+    );
+}
+
+#[test]
+fn notifications_get_no_answer_and_unknown_methods_an_error() {
+    let mcp = server(Vec::new());
+    let note = json!({ "jsonrpc": "2.0", "method": "notifications/initialized" });
+    assert_eq!(mcp.handle(&note), None);
+    let reply = mcp
+        .handle(&json!({ "jsonrpc": "2.0", "id": "a", "method": "sampling/createMessage" }))
+        .unwrap();
+    assert_eq!(reply["id"], "a");
+    assert_eq!(reply["error"]["code"], METHOD_NOT_FOUND);
+    let reply = mcp.handle(&json!([1, 2])).unwrap();
+    assert_eq!(reply["error"]["code"], INVALID_REQUEST);
+    let reply = mcp
+        .handle(&json!({ "jsonrpc": "2.0", "id": 2, "method": "ping" }))
+        .unwrap();
+    assert_eq!(reply["result"], json!({}));
+}
+
+#[test]
+fn lists_four_read_only_tools_with_schemas() {
+    let reply = server(Vec::new())
+        .handle(&json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }))
+        .unwrap();
+    let tools = reply["result"]["tools"].as_array().unwrap();
+    let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+    assert_eq!(
+        names,
+        ["official_site", "check_lookalike", "search", "site_info"]
+    );
+    for tool in tools {
+        assert_eq!(tool["inputSchema"]["type"], "object", "{tool}");
+        assert_eq!(tool["annotations"]["readOnlyHint"], true, "{tool}");
+        assert!(tool["description"].as_str().unwrap().len() > 40, "{tool}");
+    }
+}
+
+#[test]
+fn official_site_says_how_sure_it_is_and_why() {
+    let mut top = hit("paypal.com", 2.0, 0.9, true);
+    top.official = true;
+    let mcp = server(vec![top, hit("paypal-login.us", 0.8, 0.1, false)]);
+    let reply = call(&mcp, "official_site", json!({ "name": "PayPal" }));
+    let answer = &reply["result"]["structuredContent"];
+    assert_eq!(reply["result"]["isError"], false);
+    assert_eq!(answer["domain"], "paypal.com");
+    assert_eq!(answer["url"], "https://www.paypal.com/");
+    assert_eq!(answer["confidence"], "high");
+    let why = answer["why"].to_string();
+    assert!(why.contains("Wikidata"), "{why}");
+    assert_eq!(answer["alternatives"][0]["domain"], "paypal-login.us");
+    // The text for the model holds the same answer.
+    let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+    assert_eq!(serde_json::from_str::<Value>(text).unwrap(), *answer);
+
+    // Two sites by the same name, neither ahead: not sure.
+    let mcp = server(vec![
+        hit("delta.com", 1.0, 0.3, true),
+        hit("deltafaucet.com", 0.98, 0.3, true),
+    ]);
+    let answer =
+        &call(&mcp, "official_site", json!({ "name": "delta" }))["result"]["structuredContent"];
+    assert_eq!(answer["confidence"], "medium");
+    assert!(answer["why"].to_string().contains("deltafaucet.com"));
+
+    // Only words in common.
+    let mcp = server(vec![hit("example.org", 1.0, 0.1, false)]);
+    let answer = &call(&mcp, "official_site", json!({ "name": "some thing" }))["result"]
+        ["structuredContent"];
+    assert_eq!(answer["confidence"], "low");
+
+    let answer = &call(
+        &server(Vec::new()),
+        "official_site",
+        json!({ "name": "zzqx" }),
+    )["result"]["structuredContent"];
+    assert_eq!(answer["found"], false);
+}
+
+#[test]
+fn bad_arguments_are_protocol_errors_and_failed_searches_tool_errors() {
+    let mcp = server(Vec::new());
+    for (tool, arguments) in [
+        ("official_site", json!({})),
+        ("official_site", json!({ "name": "  " })),
+        ("search", json!({ "query": "x", "limit": 0 })),
+        ("search", json!({ "query": "x", "country": "Narnia" })),
+        ("teleport", json!({})),
+    ] {
+        let reply = call(&mcp, tool, arguments.clone());
+        assert_eq!(reply["error"]["code"], INVALID_PARAMS, "{tool} {arguments}");
+    }
+    let mcp = Mcp::new(Arc::new(Broken), None);
+    let reply = call(&mcp, "search", json!({ "query": "x" }));
+    assert_eq!(reply["result"]["isError"], true);
+    let reply = call(&mcp, "check_lookalike", json!({ "url": "mailto:a@b.com" }));
+    assert_eq!(reply["result"]["isError"], true);
+}
+
+#[test]
+fn search_and_site_info_return_plain_entries() {
+    let mcp = server(vec![
+        hit("python.org", 2.0, 0.8, true),
+        hit("pypi.org", 1.0, 0.7, false),
+    ]);
+    let answer = &call(&mcp, "search", json!({ "query": "python", "limit": 1 }))["result"]
+        ["structuredContent"];
+    assert_eq!(answer["results"].as_array().unwrap().len(), 1);
+    assert_eq!(answer["results"][0]["domain"], "python.org");
+    assert_eq!(answer["results"][0]["well_known"], true);
+    assert!(answer["results"][0].get("score").is_none());
+
+    let answer = &call(
+        &mcp,
+        "site_info",
+        json!({ "domain": "https://docs.python.org/3/" }),
+    )["result"]["structuredContent"];
+    assert_eq!(answer["domain"], "python.org");
+    assert_eq!(answer["found"], true);
+    assert_eq!(answer["popularity"], 0.8);
+    let answer = &call(&mcp, "site_info", json!({ "domain": "nowhere.example" }))["result"]
+        ["structuredContent"];
+    assert_eq!(answer["found"], false);
+}
+
+#[test]
+fn name_queries_read_the_brand_out_of_a_host() {
+    assert_eq!(
+        name_queries("usbank-login-help.com", "usbank-login-help.com"),
+        ["usbank"]
+    );
+    assert_eq!(
+        name_queries("paypal.com.secure-check.io", "secure-check.io"),
+        ["secure check", "paypal", "check"]
+    );
+    assert_eq!(
+        name_queries(
+            "www.microsoft-support-helpline.com",
+            "microsoft-support-helpline.com"
+        ),
+        ["microsoft support helpline", "microsoft", "helpline"]
+    );
+}
+
+#[test]
+fn resembles_spelled_out_names_and_typos() {
+    let check = |host: &str, real: &str| {
+        let domain = registrable_domain(host).unwrap();
+        resembles(&squash(host), &squash(&domain_label(&domain)), real)
+    };
+    assert!(check("paypal-login.us", "paypal.com"));
+    assert!(check("paypa1.com", "paypal.com"));
+    assert!(check("twiter.com", "twitter.com"));
+    assert!(check("rnicrosoft.com", "microsoft.com"));
+    assert!(check("wellsfargo.com.account-check.io", "wellsfargo.com"));
+    assert!(check("amazno.com", "amazon.com"));
+    assert!(!check("deltafaucet.com", "united.com"));
+    assert!(!check("bing.com", "ebay.com"));
+    // Two-letter names match too much to count.
+    assert!(!check("aardvark.com", "aa.com"));
+    assert_eq!(edit_distance("kitten", "sitting"), 3);
+    assert_eq!(edit_distance("ab", "ba"), 1);
+}
+
+#[test]
+fn stdio_answers_line_by_line_and_skips_notifications() {
+    let mcp = server(vec![hit("python.org", 2.0, 0.8, true)]);
+    let input = concat!(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}\n",
+        "\n",
+        "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n",
+        "not json\n",
+        "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}\n",
+    );
+    let mut output = Vec::new();
+    serve_lines(input.as_bytes(), &mut output, |m| Ok(mcp.handle(m))).unwrap();
+    let lines: Vec<Value> = String::from_utf8(output)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(lines.len(), 3);
+    assert_eq!(lines[0]["id"], 1);
+    assert_eq!(lines[1]["error"]["code"], PARSE_ERROR);
+    assert_eq!(lines[2]["id"], 2);
+}
+
+#[test]
+fn node_addresses_become_their_mcp_endpoint() {
+    for (node, endpoint) in [
+        ("https://plumbsearch.org", "https://plumbsearch.org/mcp"),
+        ("https://plumbsearch.org/", "https://plumbsearch.org/mcp"),
+        ("http://127.0.0.1:7586/mcp", "http://127.0.0.1:7586/mcp"),
+        ("http://homelab.lan/plumb/", "http://homelab.lan/plumb/mcp"),
+    ] {
+        assert_eq!(mcp_endpoint(node).unwrap().as_str(), endpoint);
+    }
+    assert!(mcp_endpoint("ftp://plumbsearch.org").is_err());
+    assert!(mcp_endpoint("plumbsearch.org").is_err());
+}

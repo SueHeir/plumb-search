@@ -9,6 +9,8 @@
 //! and `only=1` (leave out other countries' sites). Without `country`, the
 //! server's [`HomeCountry`] setting decides, by default from the browser's
 //! `Accept-Language` and then this computer's region settings.
+//! - `POST /mcp` answers AI apps over the Model Context Protocol (see
+//!   [`crate::mcp`]),
 //! - `GET /opensearch.xml` describes the search engine to browsers
 //!   (OpenSearch 1.1), so that they can offer to add it; every page links to
 //!   it.
@@ -88,6 +90,7 @@ mod panel;
 use crate::{block_on, rank_config};
 pub use panel::ADD_TO_FIREFOX_PATH;
 
+mod mcp;
 pub(crate) mod private;
 mod relay;
 mod setup;
@@ -353,6 +356,8 @@ struct AppState {
     node: Option<Arc<dyn StatusSource>>,
     /// The home country and the web search link.
     settings: WebSettings,
+    /// How many tool calls each client may still make to `/mcp`.
+    mcp_limiter: Arc<mcp::Limiter>,
 }
 
 impl AppState {
@@ -421,6 +426,7 @@ pub fn router_with(backend: Arc<dyn SearchBackend>, settings: impl Into<WebSetti
         backend,
         node: None,
         settings: settings.into(),
+        mcp_limiter: Arc::default(),
     })
 }
 
@@ -441,6 +447,7 @@ pub fn node_router_with(
         backend,
         node: Some(status),
         settings: settings.into(),
+        mcp_limiter: Arc::default(),
     })
 }
 
@@ -450,6 +457,7 @@ fn app(state: AppState) -> Router {
         .route("/search", get(search_page))
         .route("/api/search", get(api_search))
         .route("/opensearch.xml", get(opensearch));
+    router = mcp::routes(router);
     if state.node.is_some() {
         router = router
             .route("/api/status", get(api_status))

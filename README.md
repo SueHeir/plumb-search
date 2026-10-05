@@ -68,6 +68,10 @@ A node with a storage limit keeps a quarter of it for sites about those interest
 
 Every Plumb page offers Plumb to the browser as a search engine. In Firefox, right-click the address bar on a Plumb page and choose **Add "Plumb Search"**. To add it by hand, use `http://127.0.0.1:8080/search?q=%s`, or `http://127.0.0.1:7586/search?q=%s` for the desktop app.
 
+### Use Plumb from AI assistants (MCP)
+
+Every node serves an MCP server at `/mcp`, and `plumb mcp` serves one over stdio, with tools that give an AI assistant the official site for a name, say whether an address is a look-alike, and search. In Claude Code: `claude mcp add --transport http plumb https://plumbsearch.org/mcp`. See [docs/mcp.md](docs/mcp.md) for Claude Desktop and other apps.
+
 ## Building an index from real data
 
 The seed data comes from four public sources. They are only needed to get started; after that the index grows from its own crawls.
