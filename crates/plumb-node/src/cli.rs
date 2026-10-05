@@ -361,9 +361,10 @@ pub struct FetchDataArgs {
 
 #[derive(Debug, Args)]
 pub struct FetchPagesArgs {
-    /// The page set to make: wikipedia-en (English Wikipedia's articles)
-    /// or github (GitHub repositories, from GitHub's search API; set
-    /// GITHUB_TOKEN to search three times as fast).
+    /// The page set to make: wikipedia-en (English Wikipedia's articles),
+    /// github (GitHub repositories, from GitHub's search API; set
+    /// GITHUB_TOKEN to search three times as fast) or stackoverflow (Stack
+    /// Overflow's most viewed questions, from Stack Exchange's data dump).
     #[arg(long, value_name = "SET", default_value = "wikipedia-en")]
     pub set: String,
     /// Directory to download Wikipedia's dumps into (created if missing).
@@ -400,6 +401,20 @@ pub struct FetchPagesArgs {
     /// GitHub: most repositories kept.
     #[arg(long, value_name = "N", default_value_t = 1_000_000)]
     pub max_repos: usize,
+    /// Stack Overflow: read this Posts .7z instead of downloading it.
+    #[arg(long, value_name = "PATH")]
+    pub posts: Option<PathBuf>,
+    /// Stack Overflow: lowest score of a question kept.
+    #[arg(
+        long,
+        value_name = "SCORE",
+        default_value_t = 1,
+        allow_negative_numbers = true
+    )]
+    pub min_score: i64,
+    /// Stack Overflow: most questions kept, the most viewed.
+    #[arg(long, value_name = "N", default_value_t = 2_000_000)]
+    pub max_questions: usize,
 }
 
 #[derive(Debug, Args)]

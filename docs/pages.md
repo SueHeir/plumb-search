@@ -1,6 +1,6 @@
-# Page sets: Wikipedia articles and GitHub repositories in results
+# Page sets: Wikipedia articles, GitHub repositories and Stack Overflow questions in results
 
-Plumb lists single pages next to sites: English Wikipedia's articles and well-starred GitHub repositories. Searching "marie curie" shows the article Marie Curie, and "python" shows python.org with the article on the Python language under it.
+Plumb lists single pages next to sites: English Wikipedia's articles, well-starred GitHub repositories and Stack Overflow's most viewed questions. Searching "marie curie" shows the article Marie Curie, and "python" shows python.org with the article on the Python language under it.
 
 ## What is kept
 
@@ -46,6 +46,18 @@ GITHUB_TOKEN=... plumb fetch-pages --set github --data /path/to/node-data --min-
 ```
 
 This walks GitHub's repository search, most starred first. Without a token GitHub allows 10 searches a minute, about 1,000 repositories, so a few hundred thousand repositories take some hours; a token makes it three times faster. Stars are compared with the most starred repository and page views with the most read article, so neither set crowds out the other.
+
+## Stack Overflow questions
+
+The `stackoverflow` set lists Stack Overflow's most viewed questions (2,000,000 by default, each with a score of at least 1): "undo last git commit" finds "How do I undo the most recent local commits in Git?". Each keeps only its title, its tags (shown as its description), its question number and its views. No question or answer text is kept. The questions come from Stack Exchange's public data dump on the Internet Archive (CC BY-SA 4.0), the 7z of Stack Overflow's posts, about 20 GB:
+
+```sh
+plumb fetch-pages --set stackoverflow --work /big/disk/dumps --data /path/to/node-data
+```
+
+`--posts PATH` reads a downloaded posts 7z instead; `--min-score` and `--max-questions` change what is kept.
+
+Questions are also found by their words, since nobody types a question's title exactly: a query of three or more words (common words like "the" left out, "commits" counted as "commit") finds a question whose title and tags have at least three quarters of them. Such questions are listed like articles named only in part, after three sites.
 
 ## How pages and sites are listed together
 

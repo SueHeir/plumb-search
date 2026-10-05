@@ -174,6 +174,8 @@ pub fn run(args: EvalArgs) -> Result<()> {
             info!("indexing {} pages of {}", articles.len(), file.display());
             if name.starts_with(plumb_index::pages::GITHUB_SET) {
                 all.extend(articles.into_iter().map(Page::from_repo));
+            } else if name.starts_with(plumb_index::pages::STACKOVERFLOW_SET) {
+                all.extend(articles.into_iter().map(Page::from_question));
             } else {
                 let lang = name
                     .strip_prefix("wikipedia-")

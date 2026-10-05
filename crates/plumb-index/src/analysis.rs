@@ -11,8 +11,8 @@
 
 use plumb_core::{joined, normalize_text};
 use tantivy::tokenizer::{
-    AsciiFoldingFilter, LowerCaser, RemoveLongFilter, TextAnalyzer, Token, TokenStream, Tokenizer,
-    TokenizerManager,
+    AsciiFoldingFilter, Language, LowerCaser, RemoveLongFilter, Stemmer, StopWordFilter,
+    TextAnalyzer, Token, TokenStream, Tokenizer, TokenizerManager,
 };
 
 /// Analyzer for word fields: one token per word of the normalized text,
@@ -21,6 +21,10 @@ pub(crate) const WORDS_ANALYZER: &str = "plumb_words";
 /// Analyzer for joined fields: the whole value becomes a single token with
 /// the spaces removed, `U.S. Bank` -> `usbank`.
 pub(crate) const JOINED_ANALYZER: &str = "plumb_joined";
+/// Analyzer for the words of a question: English stems without the most
+/// common words, `How do I undo commits?` -> `how`, `do`, `i`, `undo`,
+/// `commit`.
+pub(crate) const STEMMED_ANALYZER: &str = "plumb_stemmed";
 
 /// Tokens of this many bytes or more are dropped. Names are far shorter.
 const TOKEN_BYTES_LIMIT: usize = 256;
@@ -29,6 +33,18 @@ const TOKEN_BYTES_LIMIT: usize = 256;
 pub(crate) fn register(manager: &TokenizerManager) {
     manager.register(WORDS_ANALYZER, words_analyzer());
     manager.register(JOINED_ANALYZER, joined_analyzer());
+    manager.register(STEMMED_ANALYZER, stemmed_analyzer());
+}
+
+/// The analyzer registered as [`STEMMED_ANALYZER`].
+pub(crate) fn stemmed_analyzer() -> TextAnalyzer {
+    TextAnalyzer::builder(WordTokenizer::default())
+        .filter(AsciiFoldingFilter)
+        .filter(LowerCaser)
+        .filter(RemoveLongFilter::limit(TOKEN_BYTES_LIMIT))
+        .filter(StopWordFilter::new(Language::English).expect("English stop words"))
+        .filter(Stemmer::new(Language::English))
+        .build()
 }
 
 /// The analyzer registered as [`WORDS_ANALYZER`].
@@ -187,6 +203,17 @@ mod tests {
         assert_eq!(words("STRASSE straße"), ["strasse", "strasse"]);
         assert!(words("  --- ... !!! ").is_empty());
         assert!(words("").is_empty());
+    }
+
+    #[test]
+    fn stems_drop_common_words() {
+        assert_eq!(
+            tokens(
+                &stemmed_analyzer(),
+                "How do I undo the most recent commits?"
+            ),
+            ["how", "do", "i", "undo", "most", "recent", "commit"]
+        );
     }
 
     #[test]
