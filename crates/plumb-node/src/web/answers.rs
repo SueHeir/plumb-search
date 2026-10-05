@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 use plumb_answer::{Answer, Rates, ECB_RATES_URL};
 use plumb_core::profiles::{services_asked, shown_profiles};
 use plumb_core::truncate_chars;
-use plumb_index::pages::{Page, PlacedPage};
+use plumb_index::pages::{Page, PlacedPage, WIKIDATA_SET};
 use plumb_index::Hit;
 use serde::Serialize;
 use tokio::sync::Mutex;
@@ -117,8 +117,10 @@ pub(crate) struct InfoBox {
     pub title: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    /// The Wikipedia article.
-    pub article: String,
+    /// The Wikipedia article, if it is about one (an item of the
+    /// `wikidata` set has none).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub article: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wikidata: Option<String>,
     /// The official site's domain.
@@ -169,6 +171,12 @@ fn is_disambiguation(title: &str, description: Option<&str>) -> bool {
         })
 }
 
+/// Whether an info box can be about `page`: a Wikipedia article, or a
+/// Wikidata item with profiles and no article.
+fn is_about_one_thing(page: &Page) -> bool {
+    page.set.starts_with("wikipedia-") || page.set == WIKIDATA_SET
+}
+
 /// The info box for results `sites` and `pages` (as placed among them),
 /// if one article is clearly what the query is about.
 pub(crate) fn info_box(sites: &[Hit], pages: &[PlacedPage]) -> Option<InfoBox> {
@@ -176,7 +184,7 @@ pub(crate) fn info_box(sites: &[Hit], pages: &[PlacedPage]) -> Option<InfoBox> {
     let placed = pages.iter().find(|placed| {
         let page = &placed.hit.page;
         placed.hit.named
-            && page.set.starts_with("wikipedia-")
+            && is_about_one_thing(page)
             && !is_disambiguation(&page.title, page.description.as_deref())
             && match &placed.under {
                 Some(under) => Some(under.as_str()) == top_site,
@@ -186,12 +194,16 @@ pub(crate) fn info_box(sites: &[Hit], pages: &[PlacedPage]) -> Option<InfoBox> {
     info_from_page(&placed.hit.page, sites)
 }
 
-/// The info box about the Wikipedia article `page`.
+/// The info box about the Wikipedia article or Wikidata item `page`.
 pub(crate) fn info_from_page(page: &Page, sites: &[Hit]) -> Option<InfoBox> {
-    if !page.set.starts_with("wikipedia-") {
+    if !is_about_one_thing(page) {
         return None;
     }
-    let article = http_url(&page.url)?;
+    let article = if page.set == WIKIDATA_SET {
+        None
+    } else {
+        Some(http_url(&page.url)?)
+    };
     let site = page
         .site
         .clone()
@@ -236,7 +248,7 @@ pub(crate) fn profile_answer(query: &str, pages: &[PlacedPage]) -> Option<Profil
     let (services, _) = services_asked(query)?;
     pages
         .iter()
-        .filter(|placed| placed.hit.named && placed.hit.page.set.starts_with("wikipedia-"))
+        .filter(|placed| placed.hit.named && is_about_one_thing(&placed.hit.page))
         .find_map(|placed| {
             let page = &placed.hit.page;
             // A handle before a channel id: services come in that order.
@@ -313,19 +325,22 @@ pub(crate) fn render_info_box(out: &mut String, info: &InfoBox) {
         }
         out.push_str("</ul>");
     }
-    let _ = write!(
-        out,
-        "<p class=\"ibl\"><a href=\"{}\" rel=\"noreferrer\">Wikipedia</a>",
-        escape_html(&info.article)
-    );
-    if let Some(wikidata) = &info.wikidata {
-        let _ = write!(
-            out,
-            " &middot; <a href=\"{}\" rel=\"noreferrer\">Wikidata</a>",
-            escape_html(wikidata)
-        );
+    let links: Vec<String> = [
+        (info.article.as_deref(), "Wikipedia"),
+        (info.wikidata.as_deref(), "Wikidata"),
+    ]
+    .into_iter()
+    .filter_map(|(href, name)| {
+        Some(format!(
+            "<a href=\"{}\" rel=\"noreferrer\">{name}</a>",
+            escape_html(href?)
+        ))
+    })
+    .collect();
+    if !links.is_empty() {
+        let _ = write!(out, "<p class=\"ibl\">{}</p>", links.join(" &middot; "));
     }
-    out.push_str("</p></aside>\n");
+    out.push_str("</aside>\n");
 }
 
 #[cfg(test)]
@@ -493,6 +508,37 @@ mod tests {
             "{html}"
         );
         assert!(html.contains("href=\"https://www.youtube.com/@MrBeast\""));
+    }
+
+    #[test]
+    fn boxes_an_item_without_an_article_under_its_site() {
+        let item = PageHit {
+            page: Page::from_item(plumb_core::article::Article {
+                title: "Linus Tech Tips".into(),
+                description: Some("Canadian YouTube channel".into()),
+                item: Some("Q111862397".into()),
+                site: Some("linustechtips.com".into()),
+                aliases: vec!["LTT".into()],
+                profiles: vec![profile("youtube-handle", "linustechtips")],
+                ..Default::default()
+            }),
+            ..article("x", "x", None)
+        };
+        let sites = [site("linustechtips.com", None)];
+        let pages = [placed(item, Some("linustechtips.com"), 0)];
+        let info = info_box(&sites, &pages).unwrap();
+        assert_eq!(info.article, None);
+        assert_eq!(info.site.as_deref(), Some("linustechtips.com"));
+        let mut html = String::new();
+        render_info_box(&mut html, &info);
+        assert!(
+            html.contains("https://www.youtube.com/@linustechtips"),
+            "{html}"
+        );
+        assert!(!html.contains(">Wikipedia<"), "{html}");
+        assert!(html.contains("href=\"https://www.wikidata.org/wiki/Q111862397\""));
+        let found = profile_answer("linus tech tips youtube", &pages).unwrap();
+        assert_eq!(found.url, "https://www.youtube.com/@linustechtips");
     }
 
     #[test]

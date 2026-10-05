@@ -9,13 +9,19 @@
 //! to point at the service's site, so a mistaken property number in
 //! [`plumb_core::profiles::SERVICES`] leaves that service out rather than
 //! linking somewhere wrong.
+//!
+//! Some items with profiles have no English article: Linus Tech Tips the
+//! YouTube channel is an item of its own, apart from Linus Media Group's
+//! article. Those with an English name and an official website of their
+//! own become the `wikidata` page set ([`fetch_profile_items`]), each listed
+//! under its website.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
-use plumb_core::article::{articles_of, write_article, ARTICLES_HEADER};
+use plumb_core::article::{articles_of, write_article, Article, ARTICLES_HEADER, MAX_ALIASES};
 use plumb_core::profiles::{Profile, Service, SERVICES};
 use serde::Deserialize;
 use tracing::{info, warn};
@@ -27,6 +33,9 @@ use crate::wikidata::{ItemSite, OfficialSite};
 
 /// Statements asked for in one query.
 pub const PROFILES_PAGE: usize = 200_000;
+
+/// Items asked about in one query for their names.
+pub const NAMES_BATCH: usize = 400;
 
 /// Profiles by Wikidata item (`Q19897578`).
 pub type ProfilesByItem = HashMap<String, Vec<Profile>>;
@@ -237,6 +246,157 @@ pub async fn fetch_websites(
     Ok(websites)
 }
 
+/// The registrable domains of the items in `wanted` whose official website
+/// is the front page of a site of their own, and not of a profile's
+/// service (a channel's "website" is often its channel).
+fn own_sites(websites: &WebsitesByItem, wanted: &HashSet<&str>) -> HashMap<String, String> {
+    wanted
+        .iter()
+        .filter_map(|item| {
+            let site = websites.get(*item).filter(|site| site.front_page())?;
+            let a_service = SERVICES.iter().any(|service| {
+                !service.host.is_empty()
+                    && (site.domain == service.host
+                        || service.host.ends_with(&format!(".{}", site.domain)))
+            });
+            (!a_service).then(|| (item.to_string(), site.domain.clone()))
+        })
+        .collect()
+}
+
+fn names_query(items: &[&str]) -> String {
+    let values: Vec<String> = items.iter().map(|item| format!("wd:{item}")).collect();
+    format!(
+        "SELECT ?item ?label ?lang ?about ?alias ?links WHERE {{ VALUES ?item {{ {} }} \
+         ?item rdfs:label ?label . BIND(LANG(?label) AS ?lang) FILTER(?lang IN (\"en\", \"mul\")) \
+         OPTIONAL {{ ?item schema:description ?about . FILTER(LANG(?about) = \"en\") }} \
+         OPTIONAL {{ ?item skos:altLabel ?alias . FILTER(LANG(?alias) = \"en\") }} \
+         OPTIONAL {{ ?item wikibase:sitelinks ?links . }} }}",
+        values.join(" ")
+    )
+}
+
+/// The English names of an item, read from answers to [`names_query`].
+#[derive(Debug, Default)]
+struct Names {
+    label: Option<String>,
+    /// The label in no language in particular (`mul`), for want of an
+    /// English one.
+    any_label: Option<String>,
+    about: Option<String>,
+    aliases: Vec<String>,
+    links: u64,
+}
+
+fn add_names(names: &mut HashMap<String, Names>, json: &[u8]) -> Result<()> {
+    for row in bindings(json)? {
+        let Some(item) = row.get("item") else {
+            continue;
+        };
+        let kept = names.entry(entity_id(&item.value).to_string()).or_default();
+        let text = |key: &str| {
+            row.get(key)
+                .map(|term| term.value.split_whitespace().collect::<Vec<_>>().join(" "))
+                .filter(|text| !text.is_empty())
+        };
+        if let Some(label) = text("label") {
+            match row.get("lang").map(|lang| lang.value.as_str()) {
+                Some("en") => kept.label = Some(label),
+                _ => kept.any_label = Some(label),
+            }
+        }
+        if let Some(about) = text("about") {
+            kept.about = Some(about);
+        }
+        if let Some(alias) = text("alias") {
+            if !kept.aliases.contains(&alias) {
+                kept.aliases.push(alias);
+            }
+        }
+        if let Some(links) = text("links").and_then(|links| links.parse().ok()) {
+            kept.links = links;
+        }
+    }
+    Ok(())
+}
+
+/// The pages of the `wikidata` set: the items in `profiles` without an
+/// article (their ids are not in `with_articles`) that have an official
+/// website of their own (in `websites`) and an English name, as articles
+/// whose views are their sitelinks, the most first.
+pub async fn fetch_profile_items(
+    client: &reqwest::Client,
+    endpoint: &str,
+    pacing: WikidataPacing,
+    profiles: &ProfilesByItem,
+    websites: &WebsitesByItem,
+    with_articles: &HashSet<String>,
+) -> Result<Vec<Article>> {
+    let wanted: HashSet<&str> = profiles
+        .keys()
+        .map(String::as_str)
+        .filter(|item| !with_articles.contains(*item))
+        .collect();
+    info!("{} items with profiles have no article", wanted.len());
+    let sites = own_sites(websites, &wanted);
+    let mut items: Vec<&str> = sites.keys().map(String::as_str).collect();
+    items.sort_unstable();
+    info!("{} of them have a website of their own", items.len());
+    let mut names = HashMap::new();
+    for (n, batch) in items.chunks(NAMES_BATCH).enumerate() {
+        tokio::time::sleep(pacing.pause).await;
+        let json = sparql_json(client, endpoint, &names_query(batch), pacing)
+            .await
+            .context("asking Wikidata for names")?;
+        add_names(&mut names, &json)?;
+        if n % 50 == 0 {
+            info!("names: {} of {} items", (n + 1) * NAMES_BATCH, items.len());
+        }
+    }
+    Ok(profile_items(profiles, &sites, names))
+}
+
+fn profile_items(
+    profiles: &ProfilesByItem,
+    sites: &HashMap<String, String>,
+    names: HashMap<String, Names>,
+) -> Vec<Article> {
+    let mut articles: Vec<Article> = names
+        .into_iter()
+        .filter_map(|(item, names)| {
+            let title = names.label.or(names.any_label)?;
+            let mut aliases = names.aliases;
+            aliases.retain(|alias| alias != &title);
+            aliases.truncate(MAX_ALIASES);
+            Some(Article {
+                site: Some(sites.get(&item)?.clone()),
+                profiles: profiles.get(&item)?.clone(),
+                title,
+                description: names.about,
+                views: names.links,
+                aliases,
+                item: Some(item),
+                website: None,
+            })
+        })
+        .collect();
+    articles.sort_by(|a, b| b.views.cmp(&a.views).then_with(|| a.item.cmp(&b.item)));
+    articles
+}
+
+/// The Wikidata items of the articles in the articles file `path`.
+pub fn items_in_file(path: &Path) -> Result<HashSet<String>> {
+    let reader = open_maybe_gz(path)?;
+    let mut items = HashSet::new();
+    let lines = std::io::BufRead::lines(reader).map_while(Result::ok);
+    for (_, article) in articles_of(lines) {
+        if let Some(item) = article.ok().and_then(|article| article.item) {
+            items.insert(item);
+        }
+    }
+    Ok(items)
+}
+
 /// What [`add_profiles_to_file`] did.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct AddedProfiles {
@@ -378,6 +538,92 @@ mod tests {
             }]
         );
         assert!(!profiles.contains_key("Q2"));
+    }
+
+    #[test]
+    fn items_without_articles_need_a_site_of_their_own_and_a_name() {
+        let wanted: HashSet<&str> = ["Q1", "Q2", "Q3", "Q4", "Q5"].into();
+        let mut websites = WebsitesByItem::new();
+        let json = answer(&[
+            (
+                "item",
+                "http://www.wikidata.org/entity/Q1",
+                "url",
+                "https://linustechtips.com/",
+            ),
+            (
+                "item",
+                "http://www.wikidata.org/entity/Q2",
+                "url",
+                "https://www.youtube.com/@someone",
+            ),
+            (
+                "item",
+                "http://www.wikidata.org/entity/Q3",
+                "url",
+                "https://example.org/about/team",
+            ),
+            (
+                "item",
+                "http://www.wikidata.org/entity/Q4",
+                "url",
+                "https://www.instagram.com/",
+            ),
+            (
+                "item",
+                "http://www.wikidata.org/entity/Q5",
+                "url",
+                "https://nameless.org/",
+            ),
+            (
+                "item",
+                "http://www.wikidata.org/entity/Q9",
+                "url",
+                "https://other.org/",
+            ),
+        ]);
+        add_websites_page(&mut websites, &json).unwrap();
+        let sites = own_sites(&websites, &wanted);
+        assert_eq!(sites.len(), 2, "{sites:?}");
+        assert_eq!(sites["Q1"], "linustechtips.com");
+
+        let mut names = HashMap::new();
+        let rows: Vec<serde_json::Value> = vec![
+            serde_json::json!({
+                "item": { "value": "http://www.wikidata.org/entity/Q1" },
+                "label": { "value": "Linus Tech Tips" }, "lang": { "value": "en" },
+                "about": { "value": "Canadian YouTube channel" },
+                "alias": { "value": "LTT" }, "links": { "value": "0" }
+            }),
+            serde_json::json!({
+                "item": { "value": "http://www.wikidata.org/entity/Q1" },
+                "label": { "value": "Linus Tech Tips" }, "lang": { "value": "mul" },
+                "alias": { "value": "LinusTechTips" }, "links": { "value": "0" }
+            }),
+        ];
+        let json =
+            serde_json::to_vec(&serde_json::json!({ "results": { "bindings": rows } })).unwrap();
+        add_names(&mut names, &json).unwrap();
+        let mut profiles = ProfilesByItem::new();
+        for item in ["Q1", "Q5"] {
+            profiles.insert(
+                item.into(),
+                vec![Profile {
+                    service: "youtube-handle".into(),
+                    id: "linustechtips".into(),
+                }],
+            );
+        }
+        let items = profile_items(&profiles, &sites, names);
+        assert_eq!(items.len(), 1, "Q5 has no name");
+        let ltt = &items[0];
+        assert_eq!(ltt.title, "Linus Tech Tips");
+        assert_eq!(ltt.item.as_deref(), Some("Q1"));
+        assert_eq!(ltt.site.as_deref(), Some("linustechtips.com"));
+        assert_eq!(ltt.description.as_deref(), Some("Canadian YouTube channel"));
+        assert_eq!(ltt.aliases, ["LTT", "LinusTechTips"]);
+        assert_eq!(ltt.profiles, profiles["Q1"]);
+        assert!(names_query(&["Q1", "Q2"]).contains("VALUES ?item { wd:Q1 wd:Q2 }"));
     }
 
     #[test]

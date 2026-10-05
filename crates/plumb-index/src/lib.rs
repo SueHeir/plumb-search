@@ -868,9 +868,15 @@ impl Searcher {
             .full_link_score
             .or_else(|| results.hits.first().map(|hit| hit.link_score))
             .unwrap_or(0.0);
-        let far_more_popular = fix.name_link_score.is_some_and(|score| {
-            score >= WELL_KNOWN_LINK_SCORE && score >= typed_link_score + TYPO_POPULARITY_MARGIN
-        });
+        // A site the whole query names is not taken for a typo of a name
+        // that only some of its words are a typo of: "linus tech tips" is
+        // linustechtips.com, not "linux" with two more words.
+        let fixes_the_named_name =
+            named.full_link_score.is_none() || fix.name_covers >= named.words;
+        let far_more_popular = fixes_the_named_name
+            && fix.name_link_score.is_some_and(|score| {
+                score >= WELL_KNOWN_LINK_SCORE && score >= typed_link_score + TYPO_POPULARITY_MARGIN
+            });
         if named.full_link_score.is_some() && !far_more_popular {
             return Ok(results);
         }
@@ -4312,6 +4318,45 @@ mod tests {
         let results = search_spelled(&searcher, "hilten");
         assert_eq!(results.spelling, None);
         assert_eq!(results.hits[0].domain, "hilten.com");
+    }
+
+    #[test]
+    fn a_site_named_by_every_word_keeps_its_name() {
+        let mut records = typo_corpus();
+        records.extend([
+            site(
+                "linux.org",
+                Some("Linux"),
+                None,
+                &["Linux"],
+                &[],
+                popular(500, 20_000),
+            ),
+            site(
+                "linustechtips.com",
+                Some("Forums - Linus Tech Tips"),
+                None,
+                &[],
+                &[],
+                obscure(900_000, 30),
+            ),
+        ]);
+        for i in 0..25 {
+            records.push(site(
+                &format!("linux{i}.com"),
+                Some(&format!("Linux tips {i}")),
+                None,
+                &[],
+                &[],
+                obscure(5_000_000 + i, 10),
+            ));
+        }
+        let (_dir, searcher) = build(&records);
+        // "linus" is a letter from the well-known "linux", but the whole
+        // query names a site: only its first word would be corrected.
+        let results = search_spelled(&searcher, "linus tech tips");
+        assert_eq!(results.spelling, None);
+        assert_eq!(results.hits[0].domain, "linustechtips.com");
     }
 
     #[test]

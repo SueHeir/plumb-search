@@ -120,6 +120,12 @@ impl ItemSite {
         }
     }
 
+    /// Whether one of the item's official websites is the front page of
+    /// [`ItemSite::domain`].
+    pub fn front_page(&self) -> bool {
+        self.front_page
+    }
+
     /// The item's official website when it is a subdomain or an inner
     /// page of [`ItemSite::domain`].
     pub fn website(&self) -> Option<&str> {
