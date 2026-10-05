@@ -53,6 +53,7 @@ pub fn to_records(results: &[CrawlResult]) -> Vec<SiteRecord> {
                     record.add_alias(site_name);
                 }
                 record.search_url = page.meta.search_url.clone();
+                record.language = page.meta.language.clone();
                 record.headings = page.meta.headings.clone();
                 record.body_text = page.meta.body_text.clone();
                 record.crawled_at = Some(page.fetched_at);
@@ -149,6 +150,7 @@ mod tests {
                     description: Some("About us".into()),
                     site_name: Some(format!("{domain} site")),
                     search_url: None,
+                    language: Some("en".into()),
                     icons: Vec::new(),
                     headings: Vec::new(),
                     body_text: None,

@@ -123,6 +123,13 @@ async fn try_show() -> Result<(), JsValue> {
                     .and_then(|tag| language_country(&tag))
             }),
         only_country: false,
+        safe: page
+            .get_attribute("data-safe")
+            .and_then(|safe| plumb_core::SafeSearch::parse(&safe))
+            .unwrap_or_default(),
+        language: page
+            .get_attribute("data-language")
+            .and_then(|tag| plumb_core::language_code(&tag)),
     };
 
     let info: TableInfo = serde_json::from_str(&fetch_text(&window, "/api/buckets").await?)

@@ -17,9 +17,9 @@
 use std::collections::{HashMap, HashSet};
 
 use plumb_core::{
-    domain_label, joined, kind_key, normalize_country, normalize_text, other_number,
-    registrable_domain, site_country, truncate_chars, Operators, SiteRecord, MAX_ALIASES,
-    MAX_TEXT_CHARS,
+    domain_label, joined, kind_key, language_code, normalize_country, normalize_text, other_number,
+    record_adult_level, registrable_domain, site_country, truncate_chars, Operators, SafeSearch,
+    SiteRecord, MAX_ALIASES, MAX_TEXT_CHARS,
 };
 use serde::Serialize;
 
@@ -63,6 +63,11 @@ pub struct Options {
     pub country: Option<String>,
     /// Leave out other countries' sites.
     pub only_country: bool,
+    /// What safe search leaves out, as on a node (without its blocklist).
+    pub safe: SafeSearch,
+    /// Leave out sites whose homepage is in another language (a language
+    /// code); sites that do not say stay.
+    pub language: Option<String>,
 }
 
 /// One result.
@@ -124,7 +129,17 @@ fn rank_words(query: &str, sites: &[SiteRecord], options: &Options, limit: usize
     let words = query.len as f32;
 
     let mut ranked = Vec::new();
+    let language = options.language.as_deref().and_then(language_code);
     for (i, site) in sites.iter().enumerate() {
+        if options.safe.hides(record_adult_level(site)) {
+            continue;
+        }
+        let site_language = site.language.as_deref().and_then(language_code);
+        if let (Some(wanted), Some(site)) = (&language, &site_language) {
+            if wanted != site {
+                continue;
+            }
+        }
         let name = names[i];
         let is_kind = query
             .kind

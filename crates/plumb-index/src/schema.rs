@@ -18,6 +18,8 @@
 //! | `country`     | [`plumb_core::site_country`], untokenized            | stored, fast                |
 //! | `kind_key`    | [`plumb_core::kind_key`] of each kind                | kind queries ("banks")      |
 //! | `search_url`  | the site's search address                            | stored, site search links   |
+//! | `language`    | the homepage's language code, untokenized            | stored, fast, language filter |
+//! | `adult`       | [`plumb_core::AdultLevel`] as 0, 1 or 2              | fast, safe search           |
 //!
 //! An official website's aliases (its Wikidata names) also go into
 //! `label_key`, so they name the site as strongly as its domain does, and
@@ -25,8 +27,9 @@
 
 use anyhow::{Context, Result};
 use plumb_core::{
-    domain_label, joined, kind_key, normalize_text, site_country, truncate_chars, LinkText,
-    SiteRecord, MAX_ALIASES, MAX_HEADINGS, MAX_KINDS, MAX_LINK_TEXTS, MAX_TEXT_CHARS,
+    domain_label, joined, kind_key, language_code, normalize_text, record_adult_level,
+    site_country, truncate_chars, AdultLevel, LinkText, SiteRecord, MAX_ALIASES, MAX_HEADINGS,
+    MAX_KINDS, MAX_LINK_TEXTS, MAX_TEXT_CHARS,
 };
 use tantivy::schema::{
     Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, FAST, STORED, STRING,
@@ -51,6 +54,8 @@ pub(crate) const LINK_SCORE: &str = "link_score";
 pub(crate) const COUNTRY: &str = "country";
 pub(crate) const KIND_KEY: &str = "kind_key";
 pub(crate) const SEARCH_URL: &str = "search_url";
+pub(crate) const LANGUAGE: &str = "language";
+pub(crate) const ADULT: &str = "adult";
 
 /// How many link texts (most frequent first) also get a joined form.
 const JOINED_LINK_TEXTS: usize = 8;
@@ -82,6 +87,8 @@ pub(crate) struct Fields {
     pub(crate) country: Field,
     pub(crate) kind_key: Field,
     pub(crate) search_url: Field,
+    pub(crate) language: Field,
+    pub(crate) adult: Field,
 }
 
 impl Fields {
@@ -109,6 +116,8 @@ impl Fields {
             country: field(COUNTRY)?,
             kind_key: field(KIND_KEY)?,
             search_url: field(SEARCH_URL)?,
+            language: field(LANGUAGE)?,
+            adult: field(ADULT)?,
         })
     }
 }
@@ -134,7 +143,18 @@ pub(crate) fn schema() -> Schema {
     builder.add_text_field(COUNTRY, STRING | STORED | FAST);
     builder.add_text_field(KIND_KEY, keys(IndexRecordOption::Basic));
     builder.add_text_field(SEARCH_URL, STORED);
+    builder.add_text_field(LANGUAGE, STRING | STORED | FAST);
+    builder.add_u64_field(ADULT, FAST);
     builder.build()
+}
+
+/// The [`AdultLevel`] an `adult` field value stands for.
+pub(crate) fn adult_from(value: u64) -> AdultLevel {
+    match value {
+        0 => AdultLevel::None,
+        1 => AdultLevel::Suggestive,
+        _ => AdultLevel::Explicit,
+    }
 }
 
 /// Word-tokenized text scored with BM25 (term frequencies, no positions).
@@ -257,6 +277,10 @@ pub(crate) fn document(
     if let Some(search_url) = non_empty(&record.search_url) {
         doc.add_text(f.search_url, search_url.trim());
     }
+    if let Some(language) = record.language.as_deref().and_then(language_code) {
+        doc.add_text(f.language, language);
+    }
+    doc.add_u64(f.adult, record_adult_level(record) as u64);
     doc
 }
 

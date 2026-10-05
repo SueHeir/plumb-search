@@ -76,6 +76,13 @@ Every Plumb page offers Plumb to the browser as a search engine. In Firefox, rig
 
 They work on the search page, `/api/search`, network search and `/private`, where they never leave the browser: only the other words pick buckets. Queries with operators are not corrected for typos.
 
+### Safe search and language
+
+The settings gear has **Safe search** (off, moderate or strict; `safe=` in the address) and **Language** (`lang=de`).
+
+- Moderate, the default, leaves out sites on the [Block List Project](https://github.com/blocklistproject/Lists) adult list (public domain; each node downloads it weekly into `DATA/safe/`), sites Wikidata calls pornographic, and sites whose name, title or description is plainly adult. Strict also leaves out suggestive ones ("sexy", "nude", "escort") and such pages. Private search applies the same rules except for the blocklist, which stays on the node.
+- Language keeps sites whose homepage says it is in that language (`<html lang>`, read when the homepage is crawled) and sites that do not say, and page sets in that language (English Wikipedia, GitHub and Stack Overflow are English).
+
 ## Building an index from real data
 
 The seed data comes from four public sources. They are only needed to get started; after that the index grows from its own crawls.

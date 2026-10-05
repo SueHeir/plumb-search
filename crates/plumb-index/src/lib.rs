@@ -74,9 +74,9 @@ use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 use plumb_core::{
-    canonical_domain, kind_key, normalize_country, normalize_text, other_number,
-    registrable_domain, search_link, search_template_for, truncate_chars, Operators, SiteRecord,
-    MAX_TEXT_CHARS,
+    canonical_domain, kind_key, language_code, normalize_country, normalize_text, other_number,
+    registrable_domain, search_link, search_template_for, truncate_chars, AdultLevel, Operators,
+    SafeSearch, SiteRecord, MAX_TEXT_CHARS,
 };
 use serde::{Deserialize, Serialize};
 use tantivy::collector::{DocSetCollector, TopDocs};
@@ -328,6 +328,11 @@ pub struct SearchOptions {
     pub only_country: bool,
     /// Search for the query exactly as typed, without correcting typos.
     pub exact: bool,
+    /// What safe search leaves out; see [`plumb_core::safe`].
+    pub safe: SafeSearch,
+    /// Leave out sites whose homepage is in another language than this
+    /// one (a language code, `en`). Sites that do not say stay.
+    pub language: Option<String>,
 }
 
 /// A link into a site's own search for the words after its name:
@@ -995,6 +1000,8 @@ impl Searcher {
                     link_scores: fast.f64(schema::LINK_SCORE)?,
                     domains: fast.str(schema::DOMAIN)?,
                     countries: fast.str(schema::COUNTRY)?,
+                    languages: fast.str(schema::LANGUAGE)?,
+                    adult: fast.u64(schema::ADULT)?,
                 })
             })
             .collect::<tantivy::Result<Vec<_>>>()?;
@@ -1061,8 +1068,18 @@ impl Searcher {
 
         let max_bm25 = candidates.iter().map(|&(bm25, _)| bm25).fold(0.0, f32::max);
         let mut ranked: Vec<Ranked> = Vec::with_capacity(candidates.len());
+        let language = options.language.as_deref().and_then(language_code);
         for (bm25, addr) in candidates {
             let column = &columns[addr.segment_ord as usize];
+            if options.safe.hides(column.adult(addr.doc_id)) {
+                continue;
+            }
+            let site_language = column.language(addr.doc_id);
+            if let (Some(wanted), Some(site)) = (&language, &site_language) {
+                if wanted != site {
+                    continue;
+                }
+            }
             let country = column.country(addr.doc_id);
             let country_bonus = match (&home, &country) {
                 (Some(home), Some(country)) if home == country => country_boost,
@@ -1388,6 +1405,8 @@ struct Columns {
     link_scores: tantivy::columnar::Column<f64>,
     domains: Option<tantivy::columnar::StrColumn>,
     countries: Option<tantivy::columnar::StrColumn>,
+    languages: Option<tantivy::columnar::StrColumn>,
+    adult: tantivy::columnar::Column<u64>,
 }
 
 impl Columns {
@@ -1405,6 +1424,18 @@ impl Columns {
         let mut country = String::new();
         countries.ord_to_str(ord, &mut country).ok()?;
         (!country.is_empty()).then_some(country)
+    }
+
+    fn language(&self, doc: tantivy::DocId) -> Option<String> {
+        let languages = self.languages.as_ref()?;
+        let ord = languages.term_ords(doc).next()?;
+        let mut language = String::new();
+        languages.ord_to_str(ord, &mut language).ok()?;
+        (!language.is_empty()).then_some(language)
+    }
+
+    fn adult(&self, doc: tantivy::DocId) -> AdultLevel {
+        schema::adult_from(self.adult.first(doc).unwrap_or(0))
     }
 }
 
@@ -2318,6 +2349,7 @@ mod tests {
             country: Some(country.to_string()),
             only_country,
             exact: false,
+            ..SearchOptions::default()
         }
     }
 
@@ -2460,6 +2492,7 @@ mod tests {
                     country: None,
                     only_country: true,
                     exact: false,
+                    ..SearchOptions::default()
                 },
             )
             .unwrap()
@@ -2549,6 +2582,90 @@ mod tests {
         assert_eq!(full("github").site_search, None);
         assert_eq!(full("us bank login").site_search, None);
         assert_eq!(full("liar stuff").site_search, None);
+    }
+
+    #[test]
+    fn safe_search_and_language_leave_sites_out() {
+        let mut records = corpus();
+        records.push(site(
+            "bankporn.example",
+            Some("Bank vault videos"),
+            None,
+            &[],
+            &[],
+            ranked(800, 5_000),
+        ));
+        let mut studio = site(
+            "studio.example",
+            Some("Bank Studio"),
+            None,
+            &[],
+            &[],
+            ranked(700, 5_000),
+        );
+        studio.kinds = vec!["pornographic film studio".into()];
+        records.push(studio);
+        records.push(site(
+            "banklingerie.example",
+            Some("Bank lingerie, sexy and simple"),
+            None,
+            &[],
+            &[],
+            ranked(750, 5_000),
+        ));
+        let mut german = site(
+            "bankde.example",
+            Some("Bank Deutschland"),
+            None,
+            &[],
+            &[],
+            ranked(760, 5_000),
+        );
+        german.language = Some("de".into());
+        records.push(german);
+        let (_dir, searcher) = build(&records);
+        let with = |options: SearchOptions| {
+            let hits = searcher
+                .search_full("bank", 50, &RankConfig::default(), &options)
+                .unwrap()
+                .hits;
+            domains(&hits)
+                .into_iter()
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        };
+        let has = |found: &[String], domain: &str| found.iter().any(|d| d == domain);
+
+        let off = with(SearchOptions {
+            safe: SafeSearch::Off,
+            ..SearchOptions::default()
+        });
+        for domain in ["bankporn.example", "studio.example", "banklingerie.example"] {
+            assert!(has(&off, domain), "{domain}");
+        }
+        let moderate = with(SearchOptions::default());
+        assert!(!has(&moderate, "bankporn.example"));
+        assert!(!has(&moderate, "studio.example"));
+        assert!(has(&moderate, "banklingerie.example"));
+        let strict = with(SearchOptions {
+            safe: SafeSearch::Strict,
+            ..SearchOptions::default()
+        });
+        assert!(!has(&strict, "banklingerie.example"));
+        assert!(has(&strict, "usbank.com"));
+
+        // Sites that say another language go; sites that say nothing stay.
+        let english = with(SearchOptions {
+            language: Some("en".into()),
+            ..SearchOptions::default()
+        });
+        assert!(!has(&english, "bankde.example"));
+        assert!(has(&english, "usbank.com"));
+        let german = with(SearchOptions {
+            language: Some("de".into()),
+            ..SearchOptions::default()
+        });
+        assert!(has(&german, "bankde.example"));
     }
 
     #[test]
