@@ -175,6 +175,11 @@ configure the node on the host with the startup flags below, or place
 }
 ```
 
+To have a node collect all the data the network offers (every trusted
+node's crawled sites, every page set in full, all crawl batches), add
+`--blackhole` to its `command:` line; [network.md](network.md) says what it
+does.
+
 Feature choices in this file override startup feature flags and take effect
 on the next start (`docker compose restart`). Network transport, public
 addresses, relay, UPnP, and discovery flags are preserved. The two bootstrap

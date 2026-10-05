@@ -195,6 +195,9 @@ pub struct NetConfig {
     /// Ask trusted nodes for their crawls to fill this node's free space
     /// (see [`crate::fill`]); the node decides how much. On unless changed.
     pub fill: bool,
+    /// Epochs of batches asked for on meeting a node, [`CATCH_UP_EPOCHS`]
+    /// unless changed; at most [`MAX_BATCH_AGE_EPOCHS`] are taken.
+    pub catch_up_epochs: u64,
 }
 
 impl NetConfig {
@@ -226,6 +229,7 @@ impl NetConfig {
             keep_batches_days: RETAIN_EPOCHS,
             round_every: Some(ROUND_EVERY),
             fill: true,
+            catch_up_epochs: CATCH_UP_EPOCHS,
         }
     }
 }
@@ -361,6 +365,7 @@ enum Command {
         reply: oneshot::Sender<Result<usize>>,
     },
     AskCredits(PeerId, oneshot::Sender<Result<CreditsAt>>),
+    FillPeers(oneshot::Sender<Vec<PeerId>>),
     Fill {
         prefer: Option<PeerId>,
         from: u64,
@@ -683,6 +688,13 @@ impl NetHandle {
             reply,
         })?;
         answer.await.context("the network task stopped")?
+    }
+
+    /// The connected nodes this node trusts that answer fill requests.
+    pub async fn fill_peers(&self) -> Result<Vec<PeerId>> {
+        let (reply, peers) = oneshot::channel();
+        self.send(Command::FillPeers(reply))?;
+        peers.await.context("the network task stopped")
     }
 
     /// Asks a connected node this node trusts for `len` bytes from
@@ -1585,6 +1597,11 @@ impl Task {
                     .send_request(&peer, CreditRequest::Balance);
                 self.asking.insert(id, Asking::Credits(reply));
             }
+            Command::FillPeers(reply) => {
+                let mut peers: Vec<PeerId> = self.fill_peers.iter().copied().collect();
+                peers.sort();
+                let _ = reply.send(peers);
+            }
             Command::Fill {
                 prefer,
                 from,
@@ -2150,7 +2167,7 @@ impl Task {
         if supports(BATCH_PROTOCOL) {
             self.batch_peers.insert(peer);
             if self.listing.insert(peer) {
-                let since = epoch_of(now_unix()).saturating_sub(CATCH_UP_EPOCHS);
+                let since = epoch_of(now_unix()).saturating_sub(self.config.catch_up_epochs);
                 self.swarm
                     .behaviour_mut()
                     .batches
