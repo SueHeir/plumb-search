@@ -8,6 +8,9 @@
 //!   about.
 //! - Sites always first: these come first whenever a search finds them.
 //! - Sites never shown: these are left out of every result list.
+//! - Your town: where "coffee near me" looks for places (see
+//!   [`crate::places`]). Plumb never works it out from the searcher's
+//!   address.
 //!
 //! The profile is used only after results are found, on the node itself.
 //! It is never part of a search sent to other nodes, so nothing of it
@@ -34,6 +37,8 @@ pub const MAX_SITES: usize = 100;
 const MAX_INTEREST_CHARS: usize = 60;
 /// Longest domain kept.
 const MAX_DOMAIN_CHARS: usize = 253;
+/// Longest town kept, in characters.
+pub const MAX_TOWN_CHARS: usize = 80;
 
 /// Score added to a site the searcher put first: more than a site opened
 /// before for the same search, so their own choice wins.
@@ -56,6 +61,10 @@ pub struct About {
     pub pinned: Vec<String>,
     /// Domains never shown.
     pub hidden: Vec<String>,
+    /// The searcher's town as they typed it ("Denver, CO"), for places
+    /// "near me"; empty when not given.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub town: String,
 }
 
 /// Why a result was moved, for its label.
@@ -80,6 +89,7 @@ impl About {
             hidden: items(hidden)
                 .filter_map(|item| clean_domain(&item))
                 .collect(),
+            town: String::new(),
         };
         dedup_by_key(&mut about.interests, |i| i.to_lowercase());
         dedup_by_key(&mut about.pinned, Clone::clone);
@@ -92,6 +102,22 @@ impl About {
         about
     }
 
+    /// This profile with the town `town` as typed, cleaned.
+    pub fn with_town(mut self, town: &str) -> About {
+        let town: String = town
+            .chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .take(MAX_TOWN_CHARS)
+            .collect();
+        self.town = collapse_whitespace(&town);
+        self
+    }
+
+    /// The searcher's town, when they gave one.
+    pub fn town(&self) -> Option<&str> {
+        (!self.town.is_empty()).then_some(self.town.as_str())
+    }
+
     /// Topics as typed in a form, one per line or comma, cleaned, once
     /// each, at most [`MAX_INTERESTS`].
     pub fn topics_from_text(text: &str) -> Vec<String> {
@@ -100,7 +126,10 @@ impl About {
 
     /// Whether nothing is set.
     pub fn is_empty(&self) -> bool {
-        self.interests.is_empty() && self.pinned.is_empty() && self.hidden.is_empty()
+        self.interests.is_empty()
+            && self.pinned.is_empty()
+            && self.hidden.is_empty()
+            && self.town.is_empty()
     }
 
     /// Whether `domain`, or a site it belongs to, is never shown.
