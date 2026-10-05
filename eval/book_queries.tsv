@@ -2,8 +2,8 @@
 # the first results. Run with --pages books.tsv.gz (and wikipedia-en.tsv.gz
 # to see the books next to the articles). Work ids were picked by hand; a
 # miss that finds another edition of the same book is a wrong id here.
-dune frank herbert	https://openlibrary.org/works/OL893415W
-dune book	https://openlibrary.org/works/OL893415W
+dune frank herbert	https://openlibrary.org/works/OL893414W
+dune book	https://openlibrary.org/works/OL893414W
 the hobbit tolkien	https://openlibrary.org/works/OL27482W
 the lord of the rings book	https://openlibrary.org/works/OL27448W
 harry potter and the philosopher's stone	https://openlibrary.org/works/OL82563W
