@@ -570,6 +570,7 @@ fn accept_crawled(
         kept.headings = record.headings;
         kept.body_text = record.body_text;
         kept.key_pages = plumb_core::key_pages::valid_key_pages(record.key_pages, &kept.domain);
+        kept.links_to = plumb_core::valid_links_to(record.links_to, &kept.domain);
     }
     kept.crawled_at = Some(crawled_at);
     Some(kept)
@@ -883,6 +884,13 @@ mod tests {
                     url: "https://phish.example/login".into(),
                 },
             ];
+            record.links_to = vec![
+                "www.partner.org".into(),
+                record.domain.clone(),
+                "partner.org".into(),
+                "not a domain".into(),
+                "news.example".into(),
+            ];
         }
         let batch = sign(&key, &records);
         let crawler = batch.check(NOW).unwrap();
@@ -896,6 +904,9 @@ mod tests {
         assert!(trusted
             .iter()
             .all(|r| r.key_pages.len() == 1 && r.key_pages[0].label == "Sign in"));
+        assert!(trusted
+            .iter()
+            .all(|r| r.links_to == ["partner.org", "news.example"]));
         assert_eq!(trusted[0].signals, Default::default());
         assert_eq!(trusted[0].crawl_failures, 0);
 
@@ -907,6 +918,7 @@ mod tests {
             (None, 0)
         );
         assert!(other[0].key_pages.is_empty());
+        assert!(other[0].links_to.is_empty());
     }
 
     #[test]

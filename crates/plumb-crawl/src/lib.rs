@@ -12,6 +12,8 @@
 //! - [`to_records`] turns crawl results into [`plumb_core::SiteRecord`]s
 //!   to merge into a [`plumb_core::RecordSet`].
 //! - [`check_feeds`] reads recent headlines from sites' RSS or Atom feeds.
+//! - [`PageReader`] reads one page as text for an AI assistant, without
+//!   keeping it.
 
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
@@ -24,6 +26,7 @@ mod dns;
 mod extract;
 mod feed;
 mod icon;
+mod read;
 mod records;
 #[cfg(test)]
 mod test_alloc;
@@ -35,6 +38,7 @@ pub use crawl::{
 pub use extract::{extract_page_meta, MAX_BODY_WORDS, MAX_ICONS, MAX_OUT_LINKS};
 pub use feed::{parse_date, read_feed};
 pub use icon::{normalize_icon, ICON_SIZE};
+pub use read::{page_text, PageReader, ReadConfig, ReadError, ReadPage, MAX_READ_LINKS};
 pub use records::to_records;
 
 /// Sent with every request so site owners can see who is crawling and why.

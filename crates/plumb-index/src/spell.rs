@@ -58,6 +58,9 @@ pub(crate) struct Fix {
     /// The best link score among the sites the corrected name names, when
     /// a name was corrected.
     pub(crate) name_link_score: Option<f32>,
+    /// How many of the query's first words the corrected name replaces (0
+    /// when no name was corrected).
+    pub(crate) name_covers: usize,
 }
 
 /// Edits allowed in a word or name of `chars` characters.
@@ -90,10 +93,12 @@ pub(crate) fn correct(
     let mut fixed: Vec<String> = Vec::with_capacity(tokens.len());
     let mut changed = false;
     let mut name_link_score = None;
+    let mut name_covers = 0;
     let rest = match speller.fix_name(&tokens, named_words + 1, link_score)? {
         Some(name) => {
             fixed.extend(name.words);
             name_link_score = Some(name.link_score);
+            name_covers = name.covers;
             changed = true;
             name.covers
         }
@@ -114,6 +119,7 @@ pub(crate) fn correct(
     Ok(changed.then(|| Fix {
         query: fixed.join(" "),
         name_link_score,
+        name_covers,
     }))
 }
 

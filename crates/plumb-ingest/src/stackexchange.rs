@@ -47,6 +47,7 @@ impl Question {
             views: self.views,
             aliases: Vec::new(),
             profiles: Vec::new(),
+            website: None,
         }
     }
 }

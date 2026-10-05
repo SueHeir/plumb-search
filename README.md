@@ -85,7 +85,7 @@ The settings gear has **Safe search** (off, moderate or strict; `safe=` in the a
 
 ### Use Plumb from AI assistants (MCP)
 
-Every node serves an MCP server at `/mcp`, and `plumb mcp` serves one over stdio, with tools that give an AI assistant the official site for a name, say whether an address is a look-alike, and search. In Claude Code: `claude mcp add --transport http plumb https://plumbsearch.org/mcp`. See [docs/mcp.md](docs/mcp.md) for Claude Desktop and other apps.
+Every node serves an MCP server at `/mcp`, and `plumb mcp` serves one over stdio, with tools that give an AI assistant the official site for a name, say whether an address is a look-alike, and search. In Claude Code: `claude mcp add --transport http plumb https://plumbsearch.org/mcp`. See [docs/mcp.md](docs/mcp.md) for Claude Desktop and other apps, and [docs/local-llms.md](docs/local-llms.md) for models on your own computer (LM Studio, Open WebUI, and anything that takes a SearXNG address), which can also read the pages they find.
 
 ## Building an index from real data
 

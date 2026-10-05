@@ -1,6 +1,7 @@
 //! Wikidata "official website" (P856) statements, used to tell an
 //! organization's real site apart from look-alikes.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
@@ -86,6 +87,49 @@ impl OfficialSite {
         let canonical_host = self.host == self.domain
             || self.host.strip_prefix("www.") == Some(self.domain.as_str());
         canonical_host && is_homepage_path(&self.path)
+    }
+}
+
+/// The site of a Wikidata item, from its official website claims: the
+/// registrable domain of its first claim and, when no claim is a front
+/// page of a domain ([`OfficialSite::is_root_homepage`]), the first
+/// address on that domain, such as `https://music.youtube.com/` for
+/// YouTube Music: a part of youtube.com rather than a site of its own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ItemSite {
+    pub domain: String,
+    inner: Option<String>,
+    front_page: bool,
+}
+
+impl ItemSite {
+    /// Takes in `claim`, one of the item's official website claims.
+    pub fn add(sites: &mut HashMap<String, ItemSite>, claim: &OfficialSite) {
+        let front_page = claim.is_root_homepage();
+        let site = sites.entry(claim.item.clone()).or_insert_with(|| ItemSite {
+            domain: claim.domain.clone(),
+            inner: None,
+            front_page: false,
+        });
+        site.front_page |= front_page;
+        if !front_page && site.inner.is_none() && claim.domain == site.domain {
+            let url = claim.url.trim();
+            if url.starts_with("https://") || url.starts_with("http://") {
+                site.inner = Some(url.to_string());
+            }
+        }
+    }
+
+    /// Whether one of the item's official websites is the front page of
+    /// [`ItemSite::domain`].
+    pub fn front_page(&self) -> bool {
+        self.front_page
+    }
+
+    /// The item's official website when it is a subdomain or an inner
+    /// page of [`ItemSite::domain`].
+    pub fn website(&self) -> Option<&str> {
+        self.inner.as_deref().filter(|_| !self.front_page)
     }
 }
 

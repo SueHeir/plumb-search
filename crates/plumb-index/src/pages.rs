@@ -80,6 +80,10 @@ pub struct Page {
     /// The item's official profiles (a YouTube channel, an X account).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub profiles: Vec<plumb_core::profiles::Profile>,
+    /// The item's official website when it is a subdomain or an inner page
+    /// of [`Page::site`]: `https://music.youtube.com/` for YouTube Music.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub website: Option<String>,
 }
 
 impl Page {
@@ -95,6 +99,7 @@ impl Page {
             aliases: article.aliases,
             item: article.item,
             profiles: article.profiles,
+            website: article.website,
         }
     }
 
@@ -111,6 +116,7 @@ impl Page {
             aliases: repo.aliases,
             item: None,
             profiles: Vec::new(),
+            website: None,
         }
     }
 
@@ -130,6 +136,7 @@ impl Page {
             aliases: question.aliases,
             item: None,
             profiles: Vec::new(),
+            website: None,
         }
     }
 
@@ -149,6 +156,7 @@ impl Page {
             aliases: book.aliases,
             item: None,
             profiles: Vec::new(),
+            website: None,
         }
     }
 
@@ -171,6 +179,27 @@ impl Page {
             aliases: paper.aliases,
             item: None,
             profiles: Vec::new(),
+            website: None,
+        }
+    }
+
+    /// The Wikidata item `item`, written as an article whose title is its
+    /// English name and whose views are its sitelinks.
+    pub fn from_item(item: Article) -> Self {
+        Page {
+            set: WIKIDATA_SET.to_string(),
+            url: format!(
+                "https://www.wikidata.org/wiki/{}",
+                item.item.as_deref().unwrap_or("")
+            ),
+            title: item.title,
+            description: item.description,
+            site: item.site,
+            views: item.views,
+            aliases: item.aliases,
+            item: item.item,
+            profiles: item.profiles,
+            website: None,
         }
     }
 
@@ -182,6 +211,7 @@ impl Page {
             STACKOVERFLOW_SET => Page::from_question(article),
             BOOKS_SET => Page::from_book(article),
             PAPERS_SET => Page::from_paper(article),
+            WIKIDATA_SET => Page::from_item(article),
             _ => Page::from_article(set.strip_prefix("wikipedia-")?, article),
         })
     }
@@ -217,6 +247,8 @@ impl Page {
             "Open Library"
         } else if self.set == PAPERS_SET {
             "OpenAlex"
+        } else if self.set == WIKIDATA_SET {
+            "Wikidata"
         } else {
             &self.set
         }
@@ -258,6 +290,10 @@ pub const STACKOVERFLOW_SET: &str = "stackoverflow";
 pub const BOOKS_SET: &str = "books";
 /// The set of scholarly papers, from OpenAlex.
 pub const PAPERS_SET: &str = "papers";
+/// The set of Wikidata items with official profiles but no English
+/// Wikipedia article (Linus Tech Tips the channel), each only ever listed
+/// under its own website.
+pub const WIKIDATA_SET: &str = "wikidata";
 /// How much a book's or paper's score counts against an article's of the
 /// same name: "dune" lists the article on the novel before the book.
 pub const SHELF_WEIGHT: f32 = 0.8;
@@ -356,6 +392,7 @@ const ORGANIZATION_WORDS: &[&str] = &[
     "app",
     "application",
     "bank",
+    "banking",
     "brand",
     "broker",
     "brokerage",
@@ -370,6 +407,7 @@ const ORGANIZATION_WORDS: &[&str] = &[
     "firm",
     "foundation",
     "framework",
+    "institution",
     "insurer",
     "library",
     "manufacturer",
@@ -908,6 +946,11 @@ pub fn place_pages(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) -> Ve
                 continue;
             }
         }
+        // An item without an article is only told apart from its
+        // namesakes by its website.
+        if hit.page.set == WIKIDATA_SET {
+            continue;
+        }
         if listed == most || !(hit.named || hit.score >= MIN_PARTIAL_SCORE) {
             continue;
         }
@@ -1151,7 +1194,7 @@ mod tests {
     #[test]
     fn sites_called_like_organizations_stay_first() {
         let mut bank = page("U.S. Bancorp", 900_000, &["US Bank"]);
-        bank.description = Some("American bank holding company".into());
+        bank.description = Some("American multinational banking institution".into());
         let repo = Page::from_repo(Article {
             title: "firasdib/Regex101".into(),
             views: 5_000,
@@ -1293,6 +1336,19 @@ mod tests {
         // under it only after the sites.
         assert_eq!(placed[1].hit.page.title, "Python (genus)");
         assert_eq!((placed[1].under.as_deref(), placed[1].at), (None, 2));
+    }
+
+    #[test]
+    fn items_without_articles_only_go_under_their_site() {
+        let item = |site: &str| {
+            let mut hit = found("Linus Tech Tips", Some(site), true, 0.9);
+            hit.page.set = WIKIDATA_SET.into();
+            hit
+        };
+        let sites = [site("linustechtips.com", false), site("a.com", false)];
+        let placed = place_pages("", &sites, vec![item("linustechtips.com")]);
+        assert_eq!(placed[0].under.as_deref(), Some("linustechtips.com"));
+        assert!(place_pages("", &sites, vec![item("elsewhere.com")]).is_empty());
     }
 
     #[test]

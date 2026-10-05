@@ -53,7 +53,7 @@ const READ_TIME_LIMIT: Duration = Duration::from_secs(2);
 
 /// The page goes to the tokenizer in pieces of this many bytes, with the
 /// time limit checked between them.
-const READ_CHUNK_BYTES: usize = 4096;
+pub(crate) const READ_CHUNK_BYTES: usize = 4096;
 
 /// Most words of the page's visible text [`extract_page_meta`] keeps.
 pub const MAX_BODY_WORDS: usize = 100;
@@ -69,7 +69,7 @@ const CHROME_ELEMENTS: &[&str] = &[
 ];
 
 /// Elements whose text never shows on the page.
-const HIDDEN_ELEMENTS: &[&str] = &["script", "style", "noscript", "template", "iframe"];
+pub(crate) const HIDDEN_ELEMENTS: &[&str] = &["script", "style", "noscript", "template", "iframe"];
 
 /// Elements that begin a new line or cell on screen, so the text on either
 /// side of them belongs to different words.
@@ -165,7 +165,7 @@ fn read_page(base_url: &Url, html: &str, time_limit: Duration) -> PageMeta {
 
 /// `text` in pieces of `size` bytes (a little more where a character
 /// straddles the cut).
-fn chunks(mut text: &str, size: usize) -> impl Iterator<Item = &str> {
+pub(crate) fn chunks(mut text: &str, size: usize) -> impl Iterator<Item = &str> {
     std::iter::from_fn(move || {
         if text.is_empty() {
             return None;
@@ -822,7 +822,7 @@ fn icon_rank(rel: &str, kind: &str, sizes: &str, path: &str) -> Option<u32> {
 /// How the tokenizer must read an element's contents: as text up to the
 /// element's end tag for these elements (the way a browser's parser
 /// switches it), as markup for the rest.
-fn contents_kind(name: &str) -> TokenSinkResult<()> {
+pub(crate) fn contents_kind(name: &str) -> TokenSinkResult<()> {
     match name {
         "script" => TokenSinkResult::RawData(RawKind::ScriptData),
         // `noscript` too, as in a browser with scripting on.
@@ -836,7 +836,7 @@ fn contents_kind(name: &str) -> TokenSinkResult<()> {
 }
 
 /// The value of the tag's attribute `name` (lowercase).
-fn attr<'t>(tag: &'t Tag, name: &str) -> Option<&'t str> {
+pub(crate) fn attr<'t>(tag: &'t Tag, name: &str) -> Option<&'t str> {
     tag.attrs
         .iter()
         .find(|attr| &*attr.name.local == name)
@@ -845,7 +845,7 @@ fn attr<'t>(tag: &'t Tag, name: &str) -> Option<&'t str> {
 
 /// Resolves an `href` to an absolute `http`/`https` URL without fragment or
 /// credentials, or `None` for links that do not lead to a web page.
-fn resolve_link(base_url: &Url, href: &str) -> Option<Url> {
+pub(crate) fn resolve_link(base_url: &Url, href: &str) -> Option<Url> {
     let href = href.trim();
     if href.is_empty() || href.starts_with('#') {
         return None;

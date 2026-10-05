@@ -3,8 +3,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use plumb_core::{
-    is_homepage_path, is_useful_anchor, linker_bit, now_unix, registrable_domain, Redirect,
-    SiteRecord,
+    is_homepage_path, is_useful_anchor, linker_bit, now_unix, registrable_domain, valid_links_to,
+    Redirect, SiteRecord,
 };
 use url::Url;
 
@@ -12,7 +12,8 @@ use crate::{CrawlOutcome, CrawlResult};
 
 /// Turns crawl results into records to merge into a
 /// [`plumb_core::RecordSet`]: one record per fetched homepage (url, title,
-/// description, `site_name` as an alias, `crawled_at`), plus one record per
+/// description, `site_name` as an alias, `crawled_at`, the first
+/// [`plumb_core::MAX_LINKS_TO`] other sites it links to), plus one record per
 /// linked domain carrying the texts of links to its front page and
 /// `signals.linking_domains` = the number of distinct crawled domains
 /// linking to it. Domains seen only as link targets are new discoveries.
@@ -57,6 +58,14 @@ pub fn to_records(results: &[CrawlResult]) -> Vec<SiteRecord> {
                 record.headings = page.meta.headings.clone();
                 record.body_text = page.meta.body_text.clone();
                 record.key_pages = page.meta.key_pages.clone();
+                record.links_to = valid_links_to(
+                    page.meta
+                        .links
+                        .iter()
+                        .map(|link| link.target_domain.clone())
+                        .collect(),
+                    &page.domain,
+                );
                 record.crawled_at = Some(page.fetched_at);
                 upsert(&mut records, record);
 
@@ -243,6 +252,11 @@ mod tests {
         let a = &records[0];
         assert!(a.link_texts.is_empty());
         assert_eq!(a.signals.linking_domains, 0);
+
+        // Each homepage keeps the sites it links to, once each, in page order.
+        assert_eq!(a.links_to, ["target.org", "b.com"]);
+        assert_eq!(b.links_to, ["target.org"]);
+        assert!(target.links_to.is_empty());
     }
 
     #[test]
