@@ -181,6 +181,8 @@ pub const FILLER_WORDS: &[&str] = &[
     "install",
     "library",
     "lib",
+    "framework",
+    "frameworks",
     "module",
     "license",
     "licence",
@@ -596,6 +598,7 @@ mod tests {
             package_query("@tanstack/react-query npm").unwrap().name,
             "@tanstack/react-query"
         );
+        assert_eq!(package_query("gin go framework docs").unwrap().name, "gin");
         for query in ["react", "react docs", "python", "latest version", "crate"] {
             assert_eq!(package_query(query), None, "{query}");
         }
