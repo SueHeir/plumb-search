@@ -114,7 +114,7 @@ edition = "2021"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-plumb-plugin = { git = "https://github.com/SueHeir/plumb-search" }
+plumb-plugin = { git = "https://github.com/SueHeir/plumb-search", tag = "v0.1.0" }
 serde = { version = "1", features = ["derive"] }
 ```
 

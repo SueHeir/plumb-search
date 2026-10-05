@@ -65,8 +65,8 @@
       <article>
         <h3>Desktop app</h3>
         <p>For Windows, macOS (Apple silicon and Intel) and Linux (.deb, .rpm and AppImage). It shows the search page in its own window and opens results in your usual browser.</p>
-        <p><a class="button primary" href="https://github.com/SueHeir/plumb-search/releases">Releases on GitHub</a></p>
-        <p class="small">No release is out yet; the installers arrive with the first one. They won't be code-signed at first, so your computer will warn you the first time you open the app.</p>
+        <p><a class="button primary" href="https://github.com/SueHeir/plumb-search/releases/latest">Download the latest release</a></p>
+        <p class="small">The installers aren't code-signed yet, so your computer will warn you the first time you open the app.</p>
       </article>
       <article>
         <h3>Server or homelab</h3>
@@ -76,6 +76,7 @@
   -p 8080:8080 -p 4001:4001/tcp -p 4001:4001/udp \
   -v plumb-data:/data \
   ghcr.io/sueheir/plumb-search:latest</code></pre>
+        <p class="small"><code>:latest</code> follows each new release; <code>:0.1</code> stays on this one.</p>
         <p class="small"><a href="https://github.com/SueHeir/plumb-search/blob/main/docs/docker.md">Docker guide</a>: settings, updates and backups.</p>
       </article>
     </div>
