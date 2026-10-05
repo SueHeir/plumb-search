@@ -4195,6 +4195,7 @@ mod tests {
                         score: 1.0,
                         named: query == "mrbeast",
                         popularity: 0.9,
+                        whole: false,
                     },
                     under: None,
                     at: 0,
@@ -4245,6 +4246,7 @@ mod tests {
             score: 1.0,
             named: true,
             popularity: 0.9,
+            whole: false,
         };
         let results = SearchResults {
             pages: vec![PlacedPage {
@@ -4380,6 +4382,7 @@ mod tests {
                     score: 0.5,
                     named: false,
                     popularity: 0.1,
+                    whole: false,
                 },
                 under: None,
                 at: 0,

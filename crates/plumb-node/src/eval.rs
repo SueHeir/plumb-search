@@ -401,6 +401,7 @@ mod tests {
             score: 0.9,
             named: true,
             popularity: 0.9,
+            whole: false,
         };
         let hits = [site("curie.org", false), site("python.org", false)];
         let placed = place_pages(

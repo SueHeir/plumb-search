@@ -69,7 +69,7 @@ plumb fetch-pages --set stackoverflow --work /big/disk/dumps --data /path/to/nod
 
 `--posts PATH` reads a downloaded posts 7z instead; `--min-score` and `--max-questions` change what is kept.
 
-Questions are also found by their words, since nobody types a question's title exactly: a query of three or more words (common words like "the" left out, "commits" counted as "commit") finds a question whose title and tags have at least three quarters of them. Such questions are listed like articles named only in part, after three sites.
+Questions are also found by their words, since nobody types a question's title exactly: a query of three or more words (common words like "the" left out, "commits" counted as "commit") finds a question whose title and tags have at least three quarters of them. Such questions come after the best site. A question with every word of the query, which in turn has at least half of the question title's, is what was asked ("delete a git branch locally and remotely") and comes first, unless the first site is named by the whole query.
 
 ## Books
 
@@ -91,14 +91,14 @@ plumb fetch-pages --set papers --work /big/disk/dumps --data /path/to/node-data 
 
 Set `OPENALEX_API_KEY` if OpenAlex asks for a key. `--max-papers` caps how many are kept. With `--work DIR`, the papers so far are kept in `DIR/openalex/` as they come: when OpenAlex keeps refusing (it limits how much one address may ask for), the run waits as it is told, then writes the most cited papers it has, and running it again with the same `--work` carries on where it stopped.
 
-Book and paper titles are often common words ("Python", "Apple"), so a book or paper is never listed before every site, and an article of the same name comes before it: "dune" lists the article on the novel, then the book.
+Book and paper titles are often common words ("Python", "Apple"), so a book or paper named by its title alone is never listed before every site, and an article of the same name comes before it: "dune" lists the article on the novel, then the book. A query of a book's title followed by words of its author's name or by "book" or "novel" ("dune frank herbert", "dune book") asks for the book, which then comes first unless the first site is named by the whole query.
 
 ## How pages and sites are listed together
 
 - An article about a listed site (its Wikidata item's official website) goes under that site's result instead of in a place of its own.
-- At most two other articles are listed, one when the first site is named by the whole query. An article whose title (or another title of it) is the whole query comes first, unless the first site is probably the website of what the query names: an article found for the query is about a company, product or service (its Wikipedia description says so), or the site is a government's, and the site is called after the article. A one-word query that spells the site but not the article ("robinhood", not "Robin Hood") also keeps the site first. So "tauri", "geico" and "robinhood" list tauri.app, geico.com and robinhood.com first, while "marie curie" lists the article before mariecurie.org. An official website, or a site better known than the article is read, also stays first. Articles named only in part come after three sites.
+- At most two other articles are listed, one when the first site is named by the whole query. An article whose title (or another title of it) is the whole query comes first, unless the first site is probably the website of what the query names: an article found for the query is about a company, product or service (its Wikipedia description says so), or the site is a government's, and the site is called after the article. A one-word query that spells the site but not the article ("robinhood", not "Robin Hood") also keeps the site first. So "tauri", "geico" and "robinhood" list tauri.app, geico.com and robinhood.com first, while "marie curie" lists the article before mariecurie.org. An official website, or a site better known than the article is read, also stays first, and so does a site called exactly what was searched for when the best page named so is about an organization or is a repository ("us bank" lists usbank.com before the article "U.S. Bancorp", "regex101" regex101.com before its repository). Repositories count a fifth less than articles, so "sonnet" lists the article on the poem before google-deepmind/sonnet. Articles named only in part come after three sites.
 - Among articles, a whole-title match beats a partial one, and more read articles beat less read ones. A title that matches only without its bracketed qualifier or its punctuation ("Mozart (film)", "Mozart!") counts no more than another title of an article (the redirect "Mozart" to "Wolfgang Amadeus Mozart"), so the more read one wins, and an exact title ("Albert Einstein") beats both.
-- Once an article is listed, a namesake of it ("Eiffel Tower (Six Flags)" after "Eiffel Tower" under toureiffel.paris) only comes after three sites.
+- Once an article is listed, a namesake of it in the same set ("Eiffel Tower (Six Flags)" after "Eiffel Tower" under toureiffel.paris) only comes after three sites.
 
 ## Measuring
 

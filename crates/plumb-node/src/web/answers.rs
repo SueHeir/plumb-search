@@ -350,6 +350,7 @@ mod tests {
             score: 1.0,
             named: true,
             popularity: 0.9,
+            whole: false,
         }
     }
 
