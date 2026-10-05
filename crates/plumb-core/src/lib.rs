@@ -19,6 +19,7 @@ mod kinds;
 #[cfg(feature = "oblivious")]
 pub mod oblivious;
 mod operators;
+pub mod profiles;
 pub mod safe;
 mod site_search;
 

@@ -754,7 +754,10 @@ async fn search_page(
     };
     let limit = params.limit();
     let local = run_search(&state, &query, limit, &settings.options).await;
-    let answer = instant_answer(&state, &query).await;
+    let extras = match &local {
+        Ok(results) => extras(&state, &query, results, &settings.options).await,
+        Err(_) => answers::Extras::default(),
+    };
     let (local, network) = if settings.network == NetSetting::On {
         // The network is asked for what this node's results are for, the
         // corrected query when a typo was corrected.
@@ -805,13 +808,16 @@ async fn search_page(
                     domains.push(domain.to_string());
                 }
             }
+            if let Some(profile) = &extras.profile {
+                domains.extend(plumb_core::registrable_domain(&profile.url));
+            }
             let icons = state.icons(domains).await;
             html_response(
                 StatusCode::OK,
                 render_results(
                     &query,
                     &results,
-                    answer.as_ref(),
+                    Some(&extras),
                     &network,
                     &settings,
                     state.settings.web_search,
@@ -869,16 +875,22 @@ async fn api_search(
     let options = params.options(&state.settings.home, &headers);
     match run_search(&state, &query, params.limit(), &options).await {
         Ok(results) if full => {
-            let answer = instant_answer(&state, &query).await;
-            let placed = place_pages(
-                searched_for(&query, &results),
-                &results.hits,
-                results.pages.iter().map(|p| p.hit.clone()).collect(),
-            );
-            let info = answers::info_box(&results.hits, &placed);
+            let extras = extras(&state, &query, &results, &options).await;
+            let info = match &extras.profile {
+                Some(profile) => answers::info_from_page(&profile.page, &results.hits),
+                None => {
+                    let placed = place_pages(
+                        searched_for(&query, &results),
+                        &results.hits,
+                        results.pages.iter().map(|p| p.hit.clone()).collect(),
+                    );
+                    answers::info_box(&results.hits, &placed)
+                }
+            };
             let body = FullResults {
                 results: &results,
-                answer,
+                answer: extras.answer,
+                profile: extras.profile,
                 info,
             };
             (StatusCode::OK, security_headers(), Json(body)).into_response()
@@ -906,8 +918,35 @@ struct FullResults<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     answer: Option<plumb_answer::Answer>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    profile: Option<answers::ProfileAnswer>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     info: Option<answers::InfoBox>,
 }
+
+/// The instant answer and the official profile asked for, for `query`
+/// whose own results are `results`. The profile is looked up by searching
+/// again for the words before the service ("mrbeast" of "mrbeast
+/// youtube"), unless the whole query already names a page.
+async fn extras(
+    state: &AppState,
+    query: &str,
+    results: &SearchResults,
+    options: &SearchOptions,
+) -> answers::Extras {
+    let answer = instant_answer(state, query).await;
+    let names_a_page = results.pages.iter().any(|placed| placed.hit.named);
+    let profile = match plumb_core::profiles::services_asked(query) {
+        Some((_, name)) if !names_a_page => run_search(state, &name, PROFILE_SEARCH_LIMIT, options)
+            .await
+            .ok()
+            .and_then(|found| answers::profile_answer(query, &found.pages)),
+        _ => None,
+    };
+    answers::Extras { answer, profile }
+}
+
+/// Results asked for when looking up whose profile a query asks for.
+const PROFILE_SEARCH_LIMIT: usize = 5;
 
 /// The instant answer to `query`, with currency rates when it needs them.
 async fn instant_answer(state: &AppState, query: &str) -> Option<plumb_answer::Answer> {
@@ -1541,6 +1580,12 @@ border-radius:.75rem;overflow-wrap:anywhere}\
 .ib dl{display:grid;grid-template-columns:auto 1fr;gap:.25rem .9rem;margin:.8rem 0 0;font-size:.9rem}\
 .ib dt{color:var(--muted)}.ib dd{margin:0;min-width:0}\
 .ib a{color:var(--link)}.ibl{margin:.8rem 0 0;font-size:.9rem}\
+.pf{margin:1rem 0 .5rem;padding:.85rem 1rem;border:1px solid var(--accent);border-radius:.75rem}\
+.pf .m{margin:.3rem 0 0}\
+.ibp{display:flex;flex-wrap:wrap;gap:.4rem;margin:.8rem 0 0;padding:0;list-style:none;font-size:.85rem}\
+.ibp li{margin:0;padding:0}.ibp a{display:inline-block;padding:.15rem .65rem;\
+border:1px solid var(--line);border-radius:1rem;text-decoration:none}\
+.ibp a:hover{border-color:var(--accent)}.pfirst .ib{order:0}\
 @media (min-width:64rem){.cols{display:grid;grid-template-columns:minmax(0,44rem) minmax(0,22rem);\
 gap:0 3rem;align-items:start}.ib{order:0;margin-top:1.25rem}}";
 
@@ -2094,7 +2139,7 @@ fn render_source(
 fn render_results(
     query: &str,
     results: &SearchResults,
-    answer: Option<&plumb_answer::Answer>,
+    extras: Option<&answers::Extras>,
     network: &NetOutcome,
     settings: &Settings,
     web_search: Option<Engine>,
@@ -2105,7 +2150,11 @@ fn render_results(
     let shown = merge_results(&results.hits, network, limit);
     let from_network = shown.iter().filter(|s| s.network.is_some()).count();
     let mut body = String::from("<main>\n");
-    if let Some(answer) = answer {
+    if let Some(profile) = extras.and_then(|e| e.profile.as_ref()) {
+        let domain = plumb_core::registrable_domain(&profile.url).unwrap_or_default();
+        answers::render_profile(&mut body, profile, icons.get(&domain));
+    }
+    if let Some(answer) = extras.and_then(|e| e.answer.as_ref()) {
         answers::render_answer(&mut body, answer);
     }
     render_source(&mut body, query, settings, network, from_network);
@@ -2149,7 +2198,9 @@ fn render_results(
     };
     // An info box is about what the whole query names, which operators
     // ("site:", "-word") change.
-    let info = if ops.any() {
+    let info = if let Some(profile) = extras.and_then(|e| e.profile.as_ref()) {
+        answers::info_from_page(&profile.page, &shown_hits)
+    } else if ops.any() {
         None
     } else {
         answers::info_box(&shown_hits, &pages)
@@ -2228,13 +2279,18 @@ fn render_results(
     }
     let _ = write!(body, "<p class=\"s\">As JSON: {json}</p>\n</main>\n");
     // With an info box the page is wider, with the box beside the results
-    // (above them on a narrow screen).
+    // (above them on a narrow screen, unless a profile asked for leads).
     let form = results_form(query, settings);
     let body = match &info {
         Some(info) => {
             let mut aside = String::new();
             answers::render_info_box(&mut aside, info);
-            format!("<div class=\"wrap wide\">\n{form}\n<div class=\"cols\">\n{body}{aside}</div>\n</div>")
+            let cols = if extras.is_some_and(|e| e.profile.is_some()) {
+                "cols pfirst"
+            } else {
+                "cols"
+            };
+            format!("<div class=\"wrap wide\">\n{form}\n<div class=\"{cols}\">\n{body}{aside}</div>\n</div>")
         }
         None => format!("<div class=\"wrap\">\n{form}\n{body}</div>"),
     };
@@ -3888,6 +3944,75 @@ mod tests {
         assert!(json["hits"].is_array());
     }
 
+    /// Finds the article on MrBeast, named by "mrbeast", with his profiles.
+    struct BeastBackend;
+
+    impl SearchBackend for BeastBackend {
+        fn search(&self, _query: &str, _limit: usize) -> Result<Vec<Hit>> {
+            Ok(Vec::new())
+        }
+
+        fn search_full(
+            &self,
+            query: &str,
+            _limit: usize,
+            _options: &SearchOptions,
+        ) -> Result<SearchResults> {
+            use plumb_core::profiles::Profile;
+            use plumb_index::pages::{Page, PageHit, PlacedPage};
+            let mut results = SearchResults::default();
+            if query.contains("mrbeast") {
+                results.pages.push(PlacedPage {
+                    hit: PageHit {
+                        page: Page {
+                            set: "wikipedia-en".into(),
+                            url: "https://en.wikipedia.org/wiki/MrBeast".into(),
+                            title: "MrBeast".into(),
+                            description: Some("American YouTuber".into()),
+                            site: None,
+                            views: 900_000,
+                            aliases: Vec::new(),
+                            item: Some("Q19897578".into()),
+                            profiles: vec![Profile {
+                                service: "youtube-handle".into(),
+                                id: "MrBeast".into(),
+                            }],
+                        },
+                        score: 1.0,
+                        named: query == "mrbeast",
+                        popularity: 0.9,
+                    },
+                    under: None,
+                    at: 0,
+                });
+            }
+            Ok(results)
+        }
+
+        fn num_docs(&self) -> u64 {
+            1
+        }
+    }
+
+    #[tokio::test]
+    async fn a_profile_asked_for_comes_first() {
+        let app = router_with(Arc::new(BeastBackend), HomeCountry::Off);
+        let (status, _, body) = send(app.clone(), "/search?q=mrbeast+youtube").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("<section class=\"pf\""), "{body}");
+        assert!(body.contains("href=\"https://www.youtube.com/@MrBeast\""));
+        assert!(
+            body.contains("<h2>MrBeast</h2>"),
+            "the info box is about him"
+        );
+        let (_, _, body) = send(app.clone(), "/search?q=mrbeast+twitch").await;
+        assert!(!body.contains("class=\"pf\""), "no Twitch channel known");
+        let (_, _, body) = send(app, "/api/search?q=mrbeast+youtube&full=1").await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["profile"]["url"], "https://www.youtube.com/@MrBeast");
+        assert_eq!(json["info"]["profiles"][0]["service"], "YouTube");
+    }
+
     #[test]
     fn an_article_the_query_names_gets_an_info_box() {
         use plumb_index::pages::{Page, PageHit, PlacedPage};
@@ -3901,6 +4026,7 @@ mod tests {
                 views: 100_000,
                 aliases: Vec::new(),
                 item: Some("Q7186".into()),
+                profiles: Vec::new(),
             },
             score: 1.0,
             named: true,

@@ -462,6 +462,7 @@ pub fn build_articles(lang: &str, dumps: &ArticleDumps) -> Result<Vec<Article>> 
                 site,
                 views: page.views,
                 aliases,
+                profiles: Vec::new(),
             }
         })
         .collect();

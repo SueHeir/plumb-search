@@ -19,8 +19,9 @@ use std::fmt::Write as _;
 use std::time::{Duration, Instant};
 
 use plumb_answer::{Answer, Rates, ECB_RATES_URL};
+use plumb_core::profiles::{services_asked, shown_profiles};
 use plumb_core::truncate_chars;
-use plumb_index::pages::PlacedPage;
+use plumb_index::pages::{Page, PlacedPage};
 use plumb_index::Hit;
 use serde::Serialize;
 use tokio::sync::Mutex;
@@ -126,6 +127,36 @@ pub(crate) struct InfoBox {
     /// The official site's country, when this node knows it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub country: Option<String>,
+    /// Official profiles, one per service: the service's name and the
+    /// address.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub profiles: Vec<ShownProfile>,
+}
+
+/// An official profile as shown: "YouTube" and its address.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub(crate) struct ShownProfile {
+    pub service: &'static str,
+    pub url: String,
+}
+
+/// An official profile the query asks for ("mrbeast youtube"), shown first.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub(crate) struct ProfileAnswer {
+    /// Whose it is: the article's title.
+    pub of: String,
+    pub service: &'static str,
+    pub url: String,
+    /// The article, for the info box beside it.
+    #[serde(skip)]
+    pub page: Page,
+}
+
+/// What a results page shows besides the results.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Extras {
+    pub answer: Option<Answer>,
+    pub profile: Option<ProfileAnswer>,
 }
 
 /// Whether a Wikipedia article lists the pages a name could mean rather
@@ -152,7 +183,14 @@ pub(crate) fn info_box(sites: &[Hit], pages: &[PlacedPage]) -> Option<InfoBox> {
                 None => placed.at <= 1,
             }
     })?;
-    let page = &placed.hit.page;
+    info_from_page(&placed.hit.page, sites)
+}
+
+/// The info box about the Wikipedia article `page`.
+pub(crate) fn info_from_page(page: &Page, sites: &[Hit]) -> Option<InfoBox> {
+    if !page.set.starts_with("wikipedia-") {
+        return None;
+    }
     let article = http_url(&page.url)?;
     let site = page
         .site
@@ -181,7 +219,59 @@ pub(crate) fn info_box(sites: &[Hit], pages: &[PlacedPage]) -> Option<InfoBox> {
             .map(|item| format!("https://www.wikidata.org/wiki/{item}")),
         site,
         country,
+        profiles: shown_profiles(&page.profiles)
+            .into_iter()
+            .map(|(service, url)| ShownProfile {
+                service: service.name,
+                url,
+            })
+            .collect(),
     })
+}
+
+/// The official profile `query` asks for ("mrbeast youtube", "valve
+/// steam"), when the words before the service name a Wikipedia article in
+/// `pages` (found for those words) whose item has a profile there.
+pub(crate) fn profile_answer(query: &str, pages: &[PlacedPage]) -> Option<ProfileAnswer> {
+    let (services, _) = services_asked(query)?;
+    pages
+        .iter()
+        .filter(|placed| placed.hit.named && placed.hit.page.set.starts_with("wikipedia-"))
+        .find_map(|placed| {
+            let page = &placed.hit.page;
+            // A handle before a channel id: services come in that order.
+            let (service, url) = services.iter().find_map(|service| {
+                page.profiles
+                    .iter()
+                    .filter(|p| p.service == service.key)
+                    .find_map(|p| Some((*service, service.url(&p.id)?)))
+            })?;
+            Some(ProfileAnswer {
+                of: page.title.clone(),
+                service: service.name,
+                url,
+                page: page.clone(),
+            })
+        })
+}
+
+/// The profile asked for, as the first thing on the page.
+pub(crate) fn render_profile(out: &mut String, profile: &ProfileAnswer, icon: Option<&str>) {
+    let shown = plumb_core::display_url(&profile.url);
+    let domain = plumb_core::registrable_domain(&profile.url).unwrap_or_default();
+    let _ = writeln!(
+        out,
+        "<section class=\"pf\" aria-label=\"Official profile\"><a class=\"r\" href=\"{}\" \
+         rel=\"noreferrer\"><span class=\"site\">{}<span class=\"sn\"><span class=\"dn\">{}</span>\
+         <span class=\"u\">{}</span></span></span><span class=\"t\">{} on {}</span></a>\
+         <p class=\"m\">Official profile, from Wikidata</p></section>",
+        escape_html(&profile.url),
+        super::site_badge(&domain, icon),
+        escape_html(profile.service),
+        escape_html(&shown),
+        escape_html(&truncate_chars(&profile.of, 120)),
+        escape_html(profile.service),
+    );
 }
 
 /// The info box, as an `<aside>` beside the results.
@@ -210,6 +300,18 @@ pub(crate) fn render_info_box(out: &mut String, info: &InfoBox) {
     }
     if !facts.is_empty() {
         let _ = write!(out, "<dl>{facts}</dl>");
+    }
+    if !info.profiles.is_empty() {
+        out.push_str("<ul class=\"ibp\" aria-label=\"Official profiles\">");
+        for profile in &info.profiles {
+            let _ = write!(
+                out,
+                "<li><a href=\"{}\" rel=\"noreferrer\">{}</a></li>",
+                escape_html(&profile.url),
+                escape_html(profile.service)
+            );
+        }
+        out.push_str("</ul>");
     }
     let _ = write!(
         out,
@@ -243,6 +345,7 @@ mod tests {
                 views: 1000,
                 aliases: Vec::new(),
                 item: Some("Q937".to_string()),
+                profiles: Vec::new(),
             },
             score: 1.0,
             named: true,
@@ -335,6 +438,59 @@ mod tests {
         partial.page.description = Some("Planet".to_string());
         partial.named = false;
         assert_eq!(info_box(&sites, &[placed(partial, None, 0)]), None);
+    }
+
+    fn profile(service: &str, id: &str) -> plumb_core::profiles::Profile {
+        plumb_core::profiles::Profile {
+            service: service.into(),
+            id: id.into(),
+        }
+    }
+
+    #[test]
+    fn lists_official_profiles() {
+        let mut beast = article("MrBeast", "American YouTuber", None);
+        beast.page.profiles = vec![
+            profile("youtube", "UCX6OQ3DkcsbYNE6H8uQQuVA"),
+            profile("youtube-handle", "MrBeast"),
+            profile("x", "MrBeast"),
+        ];
+        let info = info_box(&[], &[placed(beast.clone(), None, 0)]).unwrap();
+        let shown: Vec<(&str, &str)> = info
+            .profiles
+            .iter()
+            .map(|p| (p.service, p.url.as_str()))
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                ("YouTube", "https://www.youtube.com/@MrBeast"),
+                ("X", "https://x.com/MrBeast")
+            ]
+        );
+        let mut html = String::new();
+        render_info_box(&mut html, &info);
+        assert!(html.contains(
+            "<li><a href=\"https://www.youtube.com/@MrBeast\" rel=\"noreferrer\">YouTube</a></li>"
+        ));
+
+        let pages = [placed(beast, None, 0)];
+        let found = profile_answer("MrBeast YouTube", &pages).unwrap();
+        assert_eq!(found.url, "https://www.youtube.com/@MrBeast");
+        assert_eq!(found.of, "MrBeast");
+        assert_eq!(
+            profile_answer("mrbeast x", &pages).unwrap().url,
+            "https://x.com/MrBeast"
+        );
+        assert_eq!(profile_answer("mrbeast twitch", &pages), None);
+        assert_eq!(profile_answer("mrbeast", &pages), None);
+        let mut html = String::new();
+        render_profile(&mut html, &found, None);
+        assert!(
+            html.contains("<span class=\"t\">MrBeast on YouTube</span>"),
+            "{html}"
+        );
+        assert!(html.contains("href=\"https://www.youtube.com/@MrBeast\""));
     }
 
     #[test]
