@@ -73,7 +73,7 @@ also stays on that server's loopback interface.
 For a direct HTTPS connection, choose a hostname matching the certificate. A
 plain HTTP listener does not gain TLS just because its address is typed with
 `https://`; an HTTPS endpoint must already be provided by the operator. Existing
-HPC/LAN HTTP control entries must be reconnected using one of these options.
+plain HTTP control entries for other computers must be reconnected using one of these options.
 
 ## Scope
 
