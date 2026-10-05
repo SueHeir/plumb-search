@@ -1382,14 +1382,20 @@ async fn a_network_search_fills_in_text_this_node_lacks() {
     assert!(first.contains("reddit.com"), "{first}");
     assert!(first.contains("Communities for every"), "{first}");
 
-    // And the node keeps it: its next index has the text.
-    let inbox = std::fs::read_to_string(dir.path().join("net/inbox.jsonl")).unwrap();
-    assert_eq!(inbox.lines().count(), 1, "{inbox}");
-    assert!(inbox.contains("Communities for every"), "{inbox}");
-    // Searching again keeps nothing more.
-    get(addr, "/search?q=reddit&net=1").await;
-    let again = std::fs::read_to_string(dir.path().join("net/inbox.jsonl")).unwrap();
-    assert_eq!(again, inbox);
+    // But one crawler alone, neither trusted nor confirmed, is not kept:
+    // anyone can make a key assigned the site.
+    let inbox = || std::fs::read_to_string(dir.path().join("net/inbox.jsonl")).unwrap_or_default();
+    assert!(!inbox().contains("Communities for every"), "{}", inbox());
+
+    // A crawl the search may keep (trusted or confirmed, see
+    // plumb_net::FoundSite::keeps) goes to the inbox once, and the node's
+    // next index has the text.
+    network::keep_found(&node.inner, vec![crawled.clone()]);
+    let kept = inbox();
+    assert_eq!(kept.lines().count(), 1, "{kept}");
+    assert!(kept.contains("Communities for every"), "{kept}");
+    network::keep_found(&node.inner, vec![crawled.clone()]);
+    assert_eq!(inbox(), kept, "kept once");
     node.refresh_now();
     wait_for(addr, "a new index", |s| {
         ready_and_idle(s) && s.index.as_deref() != Some("000001")

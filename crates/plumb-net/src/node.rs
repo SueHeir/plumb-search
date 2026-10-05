@@ -57,8 +57,8 @@ use libp2p::request_response::{self, OutboundRequestId, ProtocolSupport, Respons
 use libp2p::swarm::behaviour::toggle::Toggle;
 use libp2p::swarm::{NetworkBehaviour, SwarmEvent};
 use libp2p::{
-    autonat, dcutr, gossipsub, identify, kad, mdns, noise, ping, relay, tcp, upnp, yamux,
-    Multiaddr, PeerId, StreamProtocol, Swarm,
+    autonat, connection_limits, dcutr, gossipsub, identify, kad, mdns, noise, ping, relay, tcp,
+    upnp, yamux, Multiaddr, PeerId, StreamProtocol, Swarm,
 };
 use plumb_core::{now_unix, SiteRecord};
 use serde::{Deserialize, Serialize};
@@ -70,8 +70,8 @@ use crate::agree::{Agreement, AgreementStatus, MIN_JUDGED};
 use crate::allowance::{Allowance, Source};
 use crate::assign::{epoch_of, is_assigned, MAX_SHARE_PPM};
 use crate::batch::{
-    accept_batch, accept_news, accept_own_batch, accept_trusted_batch, Batch, SignedHeader,
-    MAX_BATCH_AGE_EPOCHS, MAX_BATCH_RECORDS,
+    accept_batch, accept_news, accept_own_batch, accept_trusted_batch, mostly_kept, Batch,
+    SignedHeader, MAX_BATCH_AGE_EPOCHS, MAX_BATCH_RECORDS,
 };
 use crate::bucket::{BucketSource, BUCKETS};
 use crate::credits::{
@@ -91,7 +91,7 @@ use crate::reports::ReportStore;
 use crate::rounds::{Pace, PendingBuckets, RoundStatus, ROUND_EVERY};
 use crate::scope::{Friends, SearchScope, MAX_SHARED_TRUST};
 use crate::search::{BucketPeer, NetSearch};
-use crate::store::{BatchStore, CrawlerView, RETAIN_EPOCHS};
+use crate::store::{read_held, BatchStore, CrawlerView, RETAIN_EPOCHS};
 
 /// Relays a node behind NAT takes reservations on.
 pub const MAX_RELAYS: usize = 2;
@@ -136,6 +136,34 @@ pub const TOKEN_REFILL: usize = 16;
 const TOKEN_ASK_MINUTES: u64 = 30;
 /// Requests passed on for others at once (see [`crate::oblivious`]).
 const MAX_RELAYING: usize = 32;
+/// Connections a node accepts: every bucket request of a search comes on
+/// a connection of its own, so this is generous, but bounded.
+const MAX_PENDING_INCOMING: u32 = 256;
+const MAX_ESTABLISHED_INCOMING: u32 = 1024;
+/// Connections with one node at once (TCP, QUIC, through relays).
+const MAX_ESTABLISHED_PER_PEER: u32 = 8;
+
+fn connection_limits() -> connection_limits::ConnectionLimits {
+    connection_limits::ConnectionLimits::default()
+        .with_max_pending_incoming(Some(MAX_PENDING_INCOMING))
+        .with_max_established_incoming(Some(MAX_ESTABLISHED_INCOMING))
+        .with_max_established_per_peer(Some(MAX_ESTABLISHED_PER_PEER))
+}
+
+/// Largest answer taken on `/plumb/batch/1`: a batch of at most
+/// [`crate::batch::MAX_BATCH_BYTES`] of records, or
+/// [`MAX_LISTED_BATCHES`] headers of a few hundred bytes each.
+const MAX_BATCH_RESPONSE: u64 = crate::batch::MAX_BATCH_BYTES as u64 + 4 * 1024 * 1024;
+/// Largest answer taken on `/plumb/report/1`: [`MAX_LISTED_REPORTS`]
+/// reports, each about 600 bytes and 1.3 KB at the longest pick.
+const MAX_REPORT_RESPONSE: u64 = 64 * 1024 * 1024;
+/// Report lists asked of other nodes at once: one node's two weeks. Nodes
+/// met meanwhile are asked when they next identify themselves.
+const MAX_REPORT_LISTS: usize = 2;
+
+/// Batch and report requests of other nodes answered at once: one can mean
+/// reading a 16 MB batch. More are answered with nothing for now.
+const MAX_LISTS_SERVING: usize = 4;
 const RELAY_HOP_PROTOCOL: &str = "/libp2p/circuit/relay/0.2.0/hop";
 /// Nodes a report is offered to, one after the other, until one takes it.
 pub const REPORT_TRIES: usize = 3;
@@ -846,6 +874,9 @@ fn write_private(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
 
 #[derive(NetworkBehaviour)]
 struct Behaviour {
+    /// First, so a connection past the limits is turned away before any
+    /// other behaviour sees it.
+    limits: connection_limits::Behaviour,
     relay_client: relay::client::Behaviour,
     relay: Toggle<relay::Behaviour>,
     dcutr: dcutr::Behaviour,
@@ -985,6 +1016,7 @@ pub async fn start(
         recount: false,
         report_peers: HashMap::new(),
         report_listing: HashSet::new(),
+        report_lists: HashSet::new(),
         source,
         status: status.clone(),
         records: records_tx,
@@ -1005,6 +1037,7 @@ pub async fn start(
         batch_peers: HashSet::new(),
         relays: HashMap::new(),
         remote_addrs: HashMap::new(),
+        circuits: HashMap::new(),
         reserved: HashSet::new(),
         nearby: HashSet::new(),
         wanted: VecDeque::new(),
@@ -1020,6 +1053,7 @@ pub async fn start(
         fill_asking: HashMap::new(),
         pages_peers: HashSet::new(),
         pages_serving: 0,
+        lists_serving: 0,
         pages_asked: HashMap::new(),
         pages_asking: HashMap::new(),
         gateway,
@@ -1142,6 +1176,7 @@ fn keep_trusted_crawls(found: &mut NetSearch, trusted: &[PeerId], now: u64) {
             }
         }
         site.shared = Some(signed);
+        site.trusted = true;
     }
 }
 
@@ -1323,6 +1358,7 @@ fn build_swarm(key: &Keypair, config: &NetConfig) -> Result<Swarm<Behaviour>> {
             let request_config =
                 request_response::Config::default().with_request_timeout(Duration::from_secs(20));
             Ok(Behaviour {
+                limits: connection_limits::Behaviour::new(connection_limits()),
                 relay_client,
                 relay: relay.into(),
                 dcutr: dcutr::Behaviour::new(peer_id),
@@ -1360,14 +1396,14 @@ fn build_swarm(key: &Keypair, config: &NetConfig) -> Result<Swarm<Behaviour>> {
                 batches: request_response::Behaviour::with_codec(
                     request_response::cbor::codec::Codec::default()
                         .set_request_size_maximum(4 * 1024)
-                        .set_response_size_maximum(64 * 1024 * 1024),
+                        .set_response_size_maximum(MAX_BATCH_RESPONSE),
                     [(StreamProtocol::new(BATCH_PROTOCOL), ProtocolSupport::Full)],
                     request_config.clone(),
                 ),
                 reports: request_response::Behaviour::with_codec(
                     request_response::cbor::codec::Codec::default()
                         .set_request_size_maximum(8 * 1024)
-                        .set_response_size_maximum(128 * 1024 * 1024),
+                        .set_response_size_maximum(MAX_REPORT_RESPONSE),
                     [(StreamProtocol::new(REPORT_PROTOCOL), ProtocolSupport::Full)],
                     request_config.clone(),
                 ),
@@ -1475,8 +1511,10 @@ struct Task {
     recount: bool,
     /// Connected nodes that take reports, and the addresses they listen on.
     report_peers: HashMap<PeerId, Vec<Multiaddr>>,
-    /// Nodes asked for their reports this session.
+    /// Connected nodes asked for their reports.
     report_listing: HashSet<PeerId>,
+    /// Those requests not answered yet (see [`MAX_REPORT_LISTS`]).
+    report_lists: HashSet<OutboundRequestId>,
     source: Arc<dyn BucketSource>,
     status: Arc<Mutex<NetStatus>>,
     records: mpsc::UnboundedSender<Vec<SiteRecord>>,
@@ -1511,6 +1549,8 @@ struct Task {
     relays: HashMap<PeerId, bool>,
     /// The address of each connected node, as we reached it or it reached us.
     remote_addrs: HashMap<PeerId, Multiaddr>,
+    /// Connected nodes reached through a relay, and that relay.
+    circuits: HashMap<PeerId, PeerId>,
     /// Nodes that hold a reservation with us (when we are a relay).
     reserved: HashSet<PeerId>,
     /// Nodes we reached over a home-network or loopback address (directly
@@ -1545,6 +1585,8 @@ struct Task {
     trust_listing: HashSet<PeerId>,
     /// Page set requests being answered.
     pages_serving: usize,
+    /// Batch and report requests being answered (see [`MAX_LISTS_SERVING`]).
+    lists_serving: usize,
     /// Page set requests answered for each node, and the minute counted.
     pages_asked: HashMap<PeerId, (u64, u32)>,
     /// Our page set requests not yet answered.
@@ -1848,6 +1890,7 @@ impl Task {
                 self.with_status(|s| s.buckets_served += 1);
             }
             Answer::Batch(channel, response) => {
+                self.lists_serving = self.lists_serving.saturating_sub(1);
                 let _ = self
                     .swarm
                     .behaviour_mut()
@@ -1855,6 +1898,7 @@ impl Task {
                     .send_response(channel, response);
             }
             Answer::Report(channel, response) => {
+                self.lists_serving = self.lists_serving.saturating_sub(1);
                 let _ = self
                     .swarm
                     .behaviour_mut()
@@ -1994,10 +2038,12 @@ impl Task {
         let path = self.config.dir.join(POPULARITY_FILE);
         let tx = self.answers_tx.clone();
         tokio::task::spawn_blocking(move || {
-            let table = reports
+            // Counted with the store let go: STAR counting takes a while.
+            let held = reports
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
-                .table(now_unix());
+                .snapshots(now_unix());
+            let table = crate::reports::count(held);
             if let Err(err) = table.save(&path) {
                 warn!("cannot save the popularity table: {err:#}");
             }
@@ -2043,6 +2089,13 @@ impl Task {
                 if dialable && !addr.iter().any(|p| p == Protocol::P2pCircuit) {
                     self.remote_addrs.insert(peer_id, addr);
                 }
+                let through = match &endpoint {
+                    ConnectedPoint::Dialer { address, .. } => relay_of(address),
+                    ConnectedPoint::Listener { local_addr, .. } => relay_of(local_addr),
+                };
+                if let Some(relay) = through {
+                    self.circuits.insert(peer_id, relay);
+                }
             }
             SwarmEvent::ConnectionClosed {
                 peer_id,
@@ -2055,6 +2108,8 @@ impl Task {
                     }
                     self.bucket_peers.remove(&peer_id);
                     self.report_peers.remove(&peer_id);
+                    // Asked again on coming back, for what it took meanwhile.
+                    self.report_listing.remove(&peer_id);
                     self.oblivious_peers.remove(&peer_id);
                     self.batch_peers.remove(&peer_id);
                     self.fill_peers.remove(&peer_id);
@@ -2065,6 +2120,7 @@ impl Task {
                     // Asked again on coming back, for what it sent meanwhile.
                     self.listing.remove(&peer_id);
                     self.remote_addrs.remove(&peer_id);
+                    self.circuits.remove(&peer_id);
                     self.reserved.remove(&peer_id);
                     self.nearby.remove(&peer_id);
                     if self.relays.remove(&peer_id).is_some() {
@@ -2274,13 +2330,15 @@ impl Task {
                 .cloned()
                 .collect();
             self.report_peers.insert(peer, addrs);
-            if self.report_listing.insert(peer) {
+            if self.report_lists.len() < MAX_REPORT_LISTS && self.report_listing.insert(peer) {
                 let current = report_epoch(now_unix());
                 for epoch in [current.saturating_sub(1), current] {
-                    self.swarm
+                    let id = self
+                        .swarm
                         .behaviour_mut()
                         .reports
                         .send_request(&peer, ReportRequest::List { epoch });
+                    self.report_lists.insert(id);
                 }
             }
         }
@@ -2659,22 +2717,43 @@ impl Task {
                     },
                 ..
             } => {
+                if self.lists_serving >= MAX_LISTS_SERVING {
+                    let response = match request {
+                        BatchRequest::Get(_) => BatchResponse::Batch(None),
+                        BatchRequest::List { .. } => BatchResponse::Headers(Vec::new()),
+                    };
+                    let _ = self
+                        .swarm
+                        .behaviour_mut()
+                        .batches
+                        .send_response(channel, response);
+                    return;
+                }
+                self.lists_serving += 1;
                 let store = self.store.clone();
                 let tx = self.answers_tx.clone();
                 tokio::task::spawn_blocking(move || {
-                    let store = store.lock().unwrap_or_else(PoisonError::into_inner);
                     let response = match request {
+                        // Read and parsed with the store let go: a batch
+                        // can be 16 MB.
                         BatchRequest::Get(id) => {
-                            BatchResponse::Batch(store.get(&id).unwrap_or_else(|err| {
+                            let held = store
+                                .lock()
+                                .unwrap_or_else(PoisonError::into_inner)
+                                .located(&id);
+                            let batch = held.map_or(Ok(None), |path| read_held(&path));
+                            BatchResponse::Batch(batch.unwrap_or_else(|err| {
                                 warn!("cannot read a batch: {err:#}");
                                 None
                             }))
                         }
                         BatchRequest::List { since_epoch } => BatchResponse::Headers(
-                            store.headers_since(since_epoch, MAX_LISTED_BATCHES),
+                            store
+                                .lock()
+                                .unwrap_or_else(PoisonError::into_inner)
+                                .headers_since(since_epoch, MAX_LISTED_BATCHES),
                         ),
                     };
-                    drop(store);
                     let _ = tx.send(Answer::Batch(channel, response));
                 });
             }
@@ -2754,46 +2833,59 @@ impl Task {
         };
         // A batch none of whose records count here is not kept: anyone can
         // make keys and sign batches, and they would otherwise fill the disk.
-        if accepted.is_empty() && !trusted {
-            debug!("batch {id} from {from} has no record this node keeps; not holding it");
+        // Nor is one mostly of lines that do not count, held whole for the
+        // few that do.
+        if !trusted && (accepted.is_empty() || !mostly_kept(&batch, &accepted)) {
+            debug!(
+                "batch {id} from {from} is mostly records this node does not keep; not holding it"
+            );
             self.refuse(id);
             return;
         }
-        let held = {
-            let mut store = self.lock_store();
-            if let Err(err) = store.insert(&batch) {
-                warn!("cannot keep batch {id}: {err:#}");
-                return;
-            }
-            store.len()
+        // Headlines skip agreement, as icons do: only trusted crawlers'
+        // are taken, and they go to the node's headline store, not its
+        // records (records carrying only headlines; see `accept_news`).
+        let news = if trusted {
+            accept_news(&batch, now)
+        } else {
+            Vec::new()
         };
+        let lines = batch.records.len();
+        let made = batch.header.header.created_at;
+        // Written and synced off the swarm task.
+        let store = self.store.clone();
+        let status = self.status.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut store = store.lock().unwrap_or_else(PoisonError::into_inner);
+            match store.insert(&batch) {
+                Ok(()) => {
+                    let held = store.len();
+                    drop(store);
+                    status
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .batches_held = held;
+                }
+                Err(err) => warn!("cannot keep batch {id}: {err:#}"),
+            }
+        });
         let kept = accepted.len();
-        let confirmed = self
-            .agreement
-            .observe(crawler, accepted, batch.header.header.created_at);
+        let confirmed = self.agreement.observe(crawler, accepted, made);
         self.count_credits();
         info!(
-            "received batch {id} from {from}: kept {kept} of {} records crawled by {crawler}, {} now confirmed by a second crawler",
-            batch.records.len(),
+            "received batch {id} from {from}: kept {kept} of {lines} records crawled by {crawler}, {} now confirmed by a second crawler",
             confirmed.len()
         );
         let agreement = self.agreement.status();
         self.with_status(|s| {
             s.batches_received += 1;
-            s.batches_held = held;
             s.agreement = agreement;
         });
         if !confirmed.is_empty() {
             let _ = self.records.send(confirmed);
         }
-        // Headlines skip agreement, as icons do: only trusted crawlers'
-        // are taken, and they go to the node's headline store, not its
-        // records (records carrying only headlines; see `accept_news`).
-        if trusted {
-            let news = accept_news(&batch, now);
-            if !news.is_empty() {
-                let _ = self.records.send(news);
-            }
+        if !news.is_empty() {
+            let _ = self.records.send(news);
         }
     }
 
@@ -2870,13 +2962,24 @@ impl Task {
                         .send_response(channel, ReportResponse::Taken(taken));
                 }
                 ReportRequest::List { epoch } => {
+                    if self.lists_serving >= MAX_LISTS_SERVING {
+                        let _ = self
+                            .swarm
+                            .behaviour_mut()
+                            .reports
+                            .send_response(channel, ReportResponse::Reports(Vec::new()));
+                        return;
+                    }
+                    self.lists_serving += 1;
                     let reports = self.reports.clone();
                     let tx = self.answers_tx.clone();
                     tokio::task::spawn_blocking(move || {
-                        let list = reports
+                        // Copied out with the store let go.
+                        let held = reports
                             .lock()
                             .unwrap_or_else(PoisonError::into_inner)
-                            .list(epoch, MAX_LISTED_REPORTS);
+                            .snapshot(epoch);
+                        let list = crate::reports::list(held, MAX_LISTED_REPORTS);
                         let _ = tx.send(Answer::Report(channel, ReportResponse::Reports(list)));
                     });
                 }
@@ -2885,11 +2988,15 @@ impl Task {
                 peer,
                 message:
                     request_response::Message::Response {
-                        response: ReportResponse::Reports(reports),
-                        ..
+                        request_id,
+                        response,
                     },
                 ..
             } => {
+                self.report_lists.remove(&request_id);
+                let ReportResponse::Reports(reports) = response else {
+                    return;
+                };
                 let mut new = 0;
                 for report in reports.iter().take(MAX_LISTED_REPORTS) {
                     if self.take_report(report) == Some(true) {
@@ -2900,7 +3007,13 @@ impl Task {
                     info!("caught up on {new} popularity reports from {peer}");
                 }
             }
-            request_response::Event::OutboundFailure { peer, error, .. } => {
+            request_response::Event::OutboundFailure {
+                peer,
+                request_id,
+                error,
+                ..
+            } => {
+                self.report_lists.remove(&request_id);
                 debug!("report request to {peer} failed: {error}");
             }
             _ => {}
@@ -2926,7 +3039,11 @@ impl Task {
             // A relay this node trusts may pass on as much as it likes,
             // within the day's limit.
             Asker::Relay(relay) if self.config.trusted_peers.contains(&relay) => None,
-            Asker::Relay(relay) => Some(Source::Peer(relay)),
+            // By its address: anyone can make keys and say they relay.
+            Asker::Relay(relay) => match self.source_of(&relay) {
+                Asker::From(Some(source)) => Some(source),
+                _ => Some(Source::Peer(relay)),
+            },
             Asker::From(source) => source,
         };
         if self.answering < self.config.max_answering
@@ -2943,8 +3060,8 @@ impl Task {
     }
 
     /// Where a request from `peer`, a throwaway identity most likely, comes
-    /// from: its IP address, unless it came through a relay circuit, whose
-    /// address would be the relay's.
+    /// from: its IP address (see [`Source::ip`]), or when it came through a
+    /// relay circuit, that relay.
     fn source_of(&self, peer: &PeerId) -> Asker {
         let ip = self.remote_addrs.get(peer).and_then(|addr| {
             addr.iter().find_map(|p| match p {
@@ -2953,7 +3070,8 @@ impl Task {
                 _ => None,
             })
         });
-        Asker::From(ip.map(Source::Ip))
+        let through = || self.circuits.get(peer).map(|relay| Source::Peer(*relay));
+        Asker::From(ip.map(Source::ip).or_else(through))
     }
 
     /// Asks the nodes this node searches for tokens, when it holds few of
@@ -2999,6 +3117,10 @@ impl Task {
     fn ask_balances(&mut self, peers: &[PeerId], now: u64) {
         self.credits_at
             .retain(|peer, _| self.bucket_peers.contains_key(peer));
+        // Asks too old to hold anything back are forgotten.
+        let recent = |at: &mut u64| *at + TOKEN_ASK_MINUTES * 60 > now;
+        self.balance_asks.retain(|_, at| recent(at));
+        self.token_asks.retain(|_, at| recent(at));
         for &peer in peers {
             let recent = self
                 .balance_asks
@@ -3424,8 +3546,11 @@ impl Task {
             .filter(|(_, granted)| **granted)
             .map(|(peer, _)| peer.to_string())
             .collect();
-        let held = self.lock_store().len();
-        let reports_held = self.lock_reports().len();
+        // Not waited for: a lock held by work off the swarm task keeps the
+        // last count instead.
+        let held = peek(&self.store, BatchStore::len);
+        let reports_held = peek(&self.reports, ReportStore::len);
+        let tokens_held = peek(&self.wallet, Wallet::total);
         let mut peers: Vec<PeerView> = self
             .swarm
             .connected_peers()
@@ -3484,11 +3609,7 @@ impl Task {
                 at
             },
             tokens_spent: self.tokens_spent.load(std::sync::atomic::Ordering::Relaxed),
-            tokens_held: self
-                .wallet
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .total(),
+            tokens_held: 0,
         };
         self.with_status(|s| {
             s.peers = peers;
@@ -3497,15 +3618,32 @@ impl Task {
             s.friends_of_friends = friends_of_friends;
             s.problem = problem;
             s.alone_since = alone_since;
-            s.credits = credits;
+            let tokens_held = tokens_held.unwrap_or(s.credits.tokens_held);
+            s.credits = CreditStatus {
+                tokens_held,
+                ..credits
+            };
             s.listening = listening;
             s.reachable_at = reachable_at;
             s.connected_peers = connected_peers;
             s.relaying_peers = relaying_peers;
             s.relays = relays;
-            s.batches_held = held;
-            s.reports_held = reports_held;
+            if let Some(held) = held {
+                s.batches_held = held;
+            }
+            if let Some(reports_held) = reports_held {
+                s.reports_held = reports_held;
+            }
         });
+    }
+}
+
+/// `read` of what `lock` guards, unless another thread holds it now.
+fn peek<T, R>(lock: &Mutex<T>, read: impl FnOnce(&T) -> R) -> Option<R> {
+    match lock.try_lock() {
+        Ok(guard) => Some(read(&guard)),
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => Some(read(&poisoned.into_inner())),
+        Err(std::sync::TryLockError::WouldBlock) => None,
     }
 }
 
@@ -3904,19 +4042,63 @@ mod tests {
         // Untrusted: an assigned crawl's homepage facts count, never its
         // text, and an unassigned crawl counts not at all.
         let (a, u) = search(&[]);
-        let shared = a.shared.expect("an assigned crawl counts");
+        // One untrusted crawler alone is not kept: anyone can make a key
+        // assigned the site.
+        assert!(a.keeps().is_none());
+        let shared = a.shared.clone().expect("an assigned crawl counts");
         assert_eq!(shared.description.as_deref(), Some("Handmade shoes"));
         assert_eq!(shared.body_text, None);
         assert!(u.shared.is_none() && !u.verified);
+        // Confirmed by crawlers this node counts, it is.
+        let confirmed = crate::search::FoundSite {
+            confirmed: true,
+            ..a
+        };
+        assert_eq!(confirmed.keeps(), Some(&shared));
 
         // Trusted: both count whole, text included, and are ranked with it.
         let (a, u) = search(&[crawler]);
         for site in [a, u] {
             assert!(site.verified);
+            assert!(site.keeps().is_some());
             let text = Some("Handmade leather shoes, made to order");
             assert_eq!(site.shared.unwrap().body_text.as_deref(), text);
             assert_eq!(site.record.body_text.as_deref(), text);
         }
+    }
+
+    #[test]
+    fn the_largest_honest_answers_fit_under_the_response_caps() {
+        // A batch of the most records, as many bytes as a batch may hold.
+        let key = Keypair::generate_ed25519();
+        let now = now_unix();
+        let mut batch = Batch::sign(
+            &key,
+            &[SiteRecord::new("a.com")],
+            epoch_of(now),
+            MAX_SHARE_PPM,
+            now,
+        )
+        .unwrap()
+        .unwrap();
+        let line = "x".repeat(crate::batch::MAX_BATCH_BYTES / MAX_BATCH_RECORDS);
+        batch.records = vec![line; MAX_BATCH_RECORDS];
+        assert!(size(&BatchResponse::Batch(Some(batch.clone()))) < MAX_BATCH_RESPONSE);
+        let headers = vec![batch.header; MAX_LISTED_BATCHES];
+        assert!(size(&BatchResponse::Headers(headers)) < MAX_BATCH_RESPONSE);
+        // The most reports listed, of the longest pick there is.
+        let domain = format!("{}.com", "a".repeat(59));
+        let query =
+            crate::popularity::pick_query(&format!("{} {}", "b".repeat(30), "c".repeat(30)))
+                .expect("a query that is reported");
+        let report = Report::new(crate::popularity::report_epoch(now), &query, &domain).unwrap();
+        let reports = vec![report; MAX_LISTED_REPORTS];
+        assert!(size(&ReportResponse::Reports(reports)) < MAX_REPORT_RESPONSE);
+    }
+
+    /// The size of `value` in CBOR, as the request-response codec sends it.
+    fn size<T: Serialize>(value: &T) -> u64 {
+        cbor4ii::serde::to_vec(Vec::new(), value).unwrap().len() as u64
     }
 
     #[test]

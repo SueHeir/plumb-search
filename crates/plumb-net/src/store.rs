@@ -205,14 +205,13 @@ impl BatchStore {
 
     /// The batch with id `id`, if held.
     pub fn get(&self, id: &Hash) -> Result<Option<Batch>> {
-        if !self.ids.contains(id) {
-            return Ok(None);
-        }
-        match read_batch(&self.path(id)) {
-            Ok(batch) => Ok(Some(batch)),
-            Err(err) if is_not_found(&err) => Ok(None),
-            Err(err) => Err(err),
-        }
+        self.located(id).map_or(Ok(None), |path| read_held(&path))
+    }
+
+    /// Where batch `id` is, if held: for [`read_held`] once the store's
+    /// lock is let go.
+    pub fn located(&self, id: &Hash) -> Option<PathBuf> {
+        self.ids.contains(id).then(|| self.path(id))
     }
 
     /// The proof of the newest crawled record held for `domain`.
@@ -401,6 +400,16 @@ impl BatchStore {
         }
         self.ids.insert(id);
         self.headers.insert(id, batch.header.clone());
+    }
+}
+
+/// The batch at a path [`BatchStore::located`] gave; `None` when it was
+/// deleted meanwhile.
+pub fn read_held(path: &Path) -> Result<Option<Batch>> {
+    match read_batch(path) {
+        Ok(batch) => Ok(Some(batch)),
+        Err(err) if is_not_found(&err) => Ok(None),
+        Err(err) => Err(err),
     }
 }
 

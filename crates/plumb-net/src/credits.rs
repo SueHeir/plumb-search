@@ -393,7 +393,8 @@ impl Issuer {
     }
 
     /// Whether `token` is one of ours and not spent yet; marks it spent
-    /// when it is.
+    /// when it is. A token that cannot be noted as spent on disk is
+    /// refused: taken, it could be spent again after a restart.
     pub fn redeem(&mut self, token: &Token) -> bool {
         if token.input.len() != TOKEN_INPUT_LEN {
             return false;
@@ -416,6 +417,8 @@ impl Issuer {
                 .and_then(|mut f| f.write_all(&id));
             if let Err(err) = written {
                 tracing::warn!("cannot note a spent token in {}: {err}", path.display());
+                self.spent.remove(&id);
+                return false;
             }
         }
         true
@@ -819,6 +822,21 @@ mod tests {
         assert_eq!(issuer.public_key(), key);
         assert!(!issuer.redeem(&tokens[0]), "spent before the restart");
         assert!(issuer.redeem(&tokens[1]));
+    }
+
+    #[test]
+    fn a_token_that_cannot_be_noted_as_spent_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut issuer = Issuer::open(dir.path()).unwrap();
+        let pending = Pending::new(1).unwrap();
+        let issued = issuer.issue(&pending.blinded).unwrap();
+        let tokens = pending.finish(&issued).unwrap();
+        // The spent list cannot be appended to.
+        fs::create_dir(dir.path().join(SPENT_FILE)).unwrap();
+        assert!(!issuer.redeem(&tokens[0]));
+        assert_eq!(issuer.redeemed(), 0);
+        fs::remove_dir(dir.path().join(SPENT_FILE)).unwrap();
+        assert!(issuer.redeem(&tokens[0]));
     }
 
     #[test]

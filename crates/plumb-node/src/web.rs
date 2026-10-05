@@ -315,8 +315,8 @@ pub trait StatusSource: Send + Sync {
     fn record_pick(&self, query: &str, domain: &str) {
         let _ = (query, domain);
     }
-    /// Keeps signed crawls a network search found ([`FoundSite::shared`])
-    /// of sites this node already holds, folded into its records as a
+    /// Keeps signed crawls a network search found ([`FoundSite::keeps`]:
+    /// trusted or confirmed ones) of sites this node already holds, folded into its records as a
     /// shared crawl is. Blocking.
     /// Whether safe search leaves out `domain` because it is on the
     /// node's adult blocklist.
@@ -1417,7 +1417,7 @@ async fn network_search(
             let shared: Vec<SiteRecord> = found
                 .found
                 .iter()
-                .filter_map(|site| site.shared.clone())
+                .filter_map(|site| site.keeps().cloned())
                 .collect();
             if !shared.is_empty() {
                 node.keep_from_network(shared);
