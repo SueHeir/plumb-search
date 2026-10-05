@@ -20,12 +20,14 @@
 //! | `search_url`  | the site's search address                            | stored, site search links   |
 //! | `language`    | the homepage's language code, untokenized            | stored, fast, language filter |
 //! | `adult`       | [`plumb_core::AdultLevel`] as 0, 1 or 2              | fast, safe search           |
+//! | `key_pages`   | the site's key pages, as JSON                        | stored, sitelinks           |
 //!
 //! An official website's aliases (its Wikidata names) also go into
 //! `label_key`, so they name the site as strongly as its domain does, and
 //! every alias starting with "The" is also keyed without it.
 
 use anyhow::{Context, Result};
+use plumb_core::key_pages::valid_key_pages;
 use plumb_core::{
     domain_label, joined, kind_key, language_code, normalize_text, record_adult_level,
     site_country, truncate_chars, AdultLevel, LinkText, SiteRecord, MAX_ALIASES, MAX_HEADINGS,
@@ -56,6 +58,7 @@ pub(crate) const KIND_KEY: &str = "kind_key";
 pub(crate) const SEARCH_URL: &str = "search_url";
 pub(crate) const LANGUAGE: &str = "language";
 pub(crate) const ADULT: &str = "adult";
+pub(crate) const KEY_PAGES: &str = "key_pages";
 
 /// How many link texts (most frequent first) also get a joined form.
 const JOINED_LINK_TEXTS: usize = 8;
@@ -89,6 +92,7 @@ pub(crate) struct Fields {
     pub(crate) search_url: Field,
     pub(crate) language: Field,
     pub(crate) adult: Field,
+    pub(crate) key_pages: Field,
 }
 
 impl Fields {
@@ -118,6 +122,7 @@ impl Fields {
             search_url: field(SEARCH_URL)?,
             language: field(LANGUAGE)?,
             adult: field(ADULT)?,
+            key_pages: field(KEY_PAGES)?,
         })
     }
 }
@@ -145,6 +150,7 @@ pub(crate) fn schema() -> Schema {
     builder.add_text_field(SEARCH_URL, STORED);
     builder.add_text_field(LANGUAGE, STRING | STORED | FAST);
     builder.add_u64_field(ADULT, FAST);
+    builder.add_text_field(KEY_PAGES, STORED);
     builder.build()
 }
 
@@ -281,6 +287,12 @@ pub(crate) fn document(
         doc.add_text(f.language, language);
     }
     doc.add_u64(f.adult, record_adult_level(record) as u64);
+    let key_pages = valid_key_pages(record.key_pages.clone(), &record.domain);
+    if !key_pages.is_empty() {
+        if let Ok(json) = serde_json::to_string(&key_pages) {
+            doc.add_text(f.key_pages, json);
+        }
+    }
     doc
 }
 

@@ -83,6 +83,10 @@ The settings gear has **Safe search** (off, moderate or strict; `safe=` in the a
 - Moderate, the default, leaves out sites on the [Block List Project](https://github.com/blocklistproject/Lists) adult list (public domain; each node downloads it weekly into `DATA/safe/`), sites Wikidata calls pornographic, and sites whose name, title or description is plainly adult. Strict also leaves out suggestive ones ("sexy", "nude", "escort") and such pages. Private search applies the same rules except for the blocklist, which stays on the node.
 - Language keeps sites whose homepage says it is in that language (`<html lang>`, read when the homepage is crawled) and sites that do not say, and page sets in that language (English Wikipedia, GitHub and Stack Overflow are English).
 
+### Use Plumb from AI assistants (MCP)
+
+Every node serves an MCP server at `/mcp`, and `plumb mcp` serves one over stdio, with tools that give an AI assistant the official site for a name, say whether an address is a look-alike, and search. In Claude Code: `claude mcp add --transport http plumb https://plumbsearch.org/mcp`. See [docs/mcp.md](docs/mcp.md) for Claude Desktop and other apps.
+
 ## Building an index from real data
 
 The seed data comes from four public sources. They are only needed to get started; after that the index grows from its own crawls.

@@ -75,8 +75,8 @@ use std::path::Path;
 use anyhow::{bail, Context, Result};
 use plumb_core::{
     canonical_domain, kind_key, language_code, normalize_country, normalize_text, other_number,
-    registrable_domain, search_link, search_template_for, truncate_chars, AdultLevel, Operators,
-    SafeSearch, SiteRecord, MAX_TEXT_CHARS,
+    registrable_domain, search_link, search_template_for, truncate_chars, AdultLevel, KeyPage,
+    Operators, SafeSearch, SiteRecord, MAX_TEXT_CHARS,
 };
 use serde::{Deserialize, Serialize};
 use tantivy::collector::{DocSetCollector, TopDocs};
@@ -314,6 +314,10 @@ pub struct Hit {
     /// (its index entry has Wikidata's description of it).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub official: bool,
+    /// The site's key pages ("sitelinks": sign in, docs, pricing), for
+    /// listing under it when it is the site searched for.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub key_pages: Vec<KeyPage>,
 }
 
 /// Per-search choices of the person searching.
@@ -1307,6 +1311,9 @@ impl Searcher {
             link_score: ranked.link_score,
             country: ranked.country,
             named: ranked.named,
+            key_pages: text(self.fields.key_pages)
+                .and_then(|json| serde_json::from_str(&json).ok())
+                .unwrap_or_default(),
         })
     }
 }
@@ -1336,8 +1343,8 @@ fn hit_texts(hit: &Hit) -> impl Iterator<Item = &str> {
 }
 
 /// The words of `query` before the [`INTENT_WORDS`] it ends with, if it
-/// ends with any and has other words.
-fn without_intent_words(query: &str) -> Option<String> {
+/// ends with any and has other words: "paypal login" -> "paypal".
+pub fn without_intent_words(query: &str) -> Option<String> {
     let mut words: Vec<String> = normalize_text(query)
         .split_whitespace()
         .map(str::to_string)
@@ -3318,6 +3325,28 @@ mod tests {
             &[],
             Signals::default(),
         )
+    }
+
+    #[test]
+    fn hits_carry_the_site_key_pages() {
+        let root = TempDir::new().unwrap();
+        let dir = root.path().join("index");
+        let mut site = example_site();
+        site.key_pages = vec![
+            KeyPage {
+                label: "Docs".into(),
+                url: "https://docs.example.com/".into(),
+            },
+            KeyPage {
+                label: "Elsewhere".into(),
+                url: "https://other.example/".into(),
+            },
+        ];
+        build_index(&dir, &[site]).unwrap();
+        let searcher = Searcher::open(&dir).unwrap();
+        let hits = searcher.search("example", 10).unwrap();
+        let labels: Vec<&str> = hits[0].key_pages.iter().map(|p| p.label.as_str()).collect();
+        assert_eq!(labels, ["Docs"], "only pages on the site itself");
     }
 
     /// Makes builds on this thread fail at `step` while it lives.

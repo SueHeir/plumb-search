@@ -56,6 +56,7 @@ pub fn to_records(results: &[CrawlResult]) -> Vec<SiteRecord> {
                 record.language = page.meta.language.clone();
                 record.headings = page.meta.headings.clone();
                 record.body_text = page.meta.body_text.clone();
+                record.key_pages = page.meta.key_pages.clone();
                 record.crawled_at = Some(page.fetched_at);
                 upsert(&mut records, record);
 
@@ -152,6 +153,7 @@ mod tests {
                     search_url: None,
                     language: Some("en".into()),
                     icons: Vec::new(),
+                    key_pages: Vec::new(),
                     headings: Vec::new(),
                     body_text: None,
                     links: links
