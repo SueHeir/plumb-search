@@ -163,25 +163,28 @@ pub fn run(args: EvalArgs) -> Result<()> {
     }
     let meaning = MeaningIndex::from_args(&args.meaning)?;
     let pages_dir = tempfile::tempdir().context("making a folder for the page index")?;
-    let pages = match &args.pages {
-        None => None,
-        Some(file) => {
+    let pages = if args.pages.is_empty() {
+        None
+    } else {
+        let mut all: Vec<Page> = Vec::new();
+        for file in &args.pages {
             let reader = plumb_ingest::open_maybe_gz(file)?;
-            let lang = file
-                .file_name()
-                .and_then(|n| n.to_str())
-                .and_then(|n| n.strip_prefix("wikipedia-"))
-                .and_then(|n| n.split('.').next())
-                .unwrap_or("en")
-                .to_string();
+            let name = file.file_name().and_then(|n| n.to_str()).unwrap_or("");
             let articles = plumb_core::article::read_articles(reader, args.pages_top)?;
             info!("indexing {} pages of {}", articles.len(), file.display());
-            plumb_index::pages::build_page_index(
-                pages_dir.path(),
-                articles.into_iter().map(|a| Page::from_article(&lang, a)),
-            )?;
-            Some(PageSearcher::open(pages_dir.path())?)
+            if name.starts_with(plumb_index::pages::GITHUB_SET) {
+                all.extend(articles.into_iter().map(Page::from_repo));
+            } else {
+                let lang = name
+                    .strip_prefix("wikipedia-")
+                    .and_then(|n| n.split('.').next())
+                    .unwrap_or("en")
+                    .to_string();
+                all.extend(articles.into_iter().map(|a| Page::from_article(&lang, a)));
+            }
         }
+        plumb_index::pages::build_page_index(pages_dir.path(), all)?;
+        Some(PageSearcher::open(pages_dir.path())?)
     };
     info!(
         "evaluating {} queries against {} sites ({cfg:?})",

@@ -14,8 +14,9 @@
 //!   share of the title's words the query has, times [`PARTIAL_MATCH`],
 //!   when the query has every word of the title, or of an alias, or the
 //!   title has every word of the query.
-//! - `popularity` is `ln(1 + views) / ln(1 + most views)`, the views of the
-//!   most read page in the index.
+//! - `popularity` is `ln(1 + views) / ln(1 + most views)`, against the
+//!   most read page of the same set, so sets that count differently
+//!   (Wikipedia's page views, GitHub's stars) compare fairly.
 //!
 //! How pages and sites are listed together is up to the caller; see
 //! [`PageHit::named`].
@@ -81,15 +82,47 @@ impl Page {
         }
     }
 
+    /// The GitHub repository `repo`, written as an article: its title is
+    /// `owner/name`, its views its stars, its site its homepage's domain.
+    pub fn from_repo(repo: Article) -> Self {
+        Page {
+            set: GITHUB_SET.to_string(),
+            url: format!("https://github.com/{}", repo.title),
+            title: repo.title,
+            description: repo.description,
+            site: repo.site,
+            views: repo.views,
+            aliases: repo.aliases,
+        }
+    }
+
     /// The name of the set people see: "Wikipedia".
     pub fn set_name(&self) -> &str {
         if self.set.starts_with("wikipedia-") {
             "Wikipedia"
+        } else if self.set == GITHUB_SET {
+            "GitHub"
         } else {
             &self.set
         }
     }
+
+    /// The site whose icon marks the page: wikipedia.org, github.com.
+    pub fn set_domain(&self) -> &str {
+        if self.set == GITHUB_SET {
+            "github.com"
+        } else {
+            "wikipedia.org"
+        }
+    }
 }
+
+/// The set of GitHub repositories.
+pub const GITHUB_SET: &str = "github";
+
+/// [`PageHit::popularity`] is kept in the index as a whole number of
+/// millionths.
+const POPULARITY_SCALE: f32 = 1_000_000.0;
 
 /// A page found for a query.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -99,7 +132,7 @@ pub struct PageHit {
     /// The whole query is the page's title or one of its aliases.
     pub named: bool,
     /// How read the page is, in `0..=1` on a log scale where the most read
-    /// page of the index is 1, to weigh against a site's
+    /// page of its set is 1, to weigh against a site's
     /// [`crate::Hit::link_score`].
     #[serde(default)]
     pub popularity: f32,
@@ -108,7 +141,7 @@ pub struct PageHit {
 struct Fields {
     words: Field,
     keys: Field,
-    views: Field,
+    popularity: Field,
     page: Field,
 }
 
@@ -130,14 +163,14 @@ fn schema() -> (Schema, Fields) {
                 .set_index_option(IndexRecordOption::Basic),
         ),
     );
-    let views = builder.add_u64_field("views", FAST | STORED);
+    let popularity = builder.add_u64_field("popularity", FAST | STORED);
     let page = builder.add_text_field("page", STORED);
     (
         builder.build(),
         Fields {
             words,
             keys,
-            views,
+            popularity,
             page,
         },
     )
@@ -263,7 +296,19 @@ pub fn build_page_index(
         .writer_with_num_threads(1, 64 << 20)
         .context("opening the page index for writing")?;
     let mut stats = PageIndexStats::default();
+    // Sets come most read first, so the first page of a set is its most
+    // read.
+    let mut most_by_set: std::collections::HashMap<String, u64> = Default::default();
     for page in pages {
+        let most = most_by_set
+            .entry(page.set.clone())
+            .and_modify(|most| *most = (*most).max(page.views))
+            .or_insert(page.views);
+        let popularity = if *most == 0 {
+            0.0
+        } else {
+            ((page.views as f32).ln_1p() / (*most as f32).ln_1p()).min(1.0)
+        };
         let mut document = TantivyDocument::default();
         document.add_text(fields.words, &page.title);
         for alias in &page.aliases {
@@ -274,7 +319,10 @@ pub fn build_page_index(
         if base != page.title {
             document.add_text(fields.keys, base);
         }
-        document.add_u64(fields.views, page.views);
+        document.add_u64(
+            fields.popularity,
+            (popularity * POPULARITY_SCALE).round() as u64,
+        );
         document.add_text(fields.page, serde_json::to_string(&page)?);
         writer.add_document(document)?;
         stats.pages += 1;
@@ -367,9 +415,8 @@ impl PageSearcher {
         let top = searcher.search(
             &BooleanQuery::new(clauses),
             &TopDocs::with_limit(CANDIDATES)
-                .order_by_fast_field::<u64>("views", tantivy::Order::Desc),
+                .order_by_fast_field::<u64>("popularity", tantivy::Order::Desc),
         )?;
-        let most = (self.stats.most_views.max(1) as f32).ln_1p();
         let mut hits = Vec::new();
         for (_, address) in top {
             let document: TantivyDocument = searcher.doc(address)?;
@@ -384,7 +431,11 @@ impl PageSearcher {
             if name <= 0.0 {
                 continue;
             }
-            let popularity = (page.views as f32).ln_1p() / most;
+            let popularity = document
+                .get_first(self.fields.popularity)
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as f32
+                / POPULARITY_SCALE;
             let score = name * (1.0 - POPULARITY_SHARE + POPULARITY_SHARE * popularity);
             hits.push(PageHit {
                 page,

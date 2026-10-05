@@ -44,12 +44,20 @@ pub struct SetInfo {
 }
 
 /// The page sets there are.
-pub const SETS: &[SetInfo] = &[SetInfo {
-    id: "wikipedia-en",
-    name: "English Wikipedia articles",
-    pages: 7_000_000,
-    bytes_per_page: 100,
-}];
+pub const SETS: &[SetInfo] = &[
+    SetInfo {
+        id: "wikipedia-en",
+        name: "English Wikipedia articles",
+        pages: 7_000_000,
+        bytes_per_page: 100,
+    },
+    SetInfo {
+        id: plumb_index::pages::GITHUB_SET,
+        name: "GitHub repositories",
+        pages: 300_000,
+        bytes_per_page: 150,
+    },
+];
 
 impl SetInfo {
     pub fn find(id: &str) -> Option<&'static SetInfo> {
@@ -67,10 +75,13 @@ impl SetInfo {
 
     /// Reads up to `limit` pages of the set's file `path`, most read first.
     fn read(&self, path: &Path, limit: u64) -> Result<impl Iterator<Item = Page>> {
-        let Some(lang) = self.id.strip_prefix("wikipedia-") else {
-            bail!("no reader for the page set {}", self.id);
+        // Wikipedia's articles, or GitHub's repositories written as
+        // articles (see `plumb_ingest::github`).
+        let lang = match self.id.strip_prefix("wikipedia-") {
+            Some(lang) => Some(lang.to_string()),
+            None if self.id == plumb_index::pages::GITHUB_SET => None,
+            None => bail!("no reader for the page set {}", self.id),
         };
-        let lang = lang.to_string();
         let reader = plumb_ingest::open_maybe_gz(path)?;
         let path = path.to_path_buf();
         let mut bad = 0u64;
@@ -87,7 +98,10 @@ impl SetInfo {
             .filter_map(move |(n, line)| match parse_article(&line) {
                 // Files made before fetch-pages left it out.
                 Ok(article) if article.title == "Main Page" => None,
-                Ok(article) => Some(Page::from_article(&lang, article)),
+                Ok(article) => Some(match &lang {
+                    Some(lang) => Page::from_article(lang, article),
+                    None => Page::from_repo(article),
+                }),
                 Err(err) => {
                     bad += 1;
                     if bad <= 3 {
@@ -600,5 +614,51 @@ mod tests {
         assert!(index_dir(data, &other).exists());
         let off = Wanted::new(data, &PageSets::parse("wikipedia-en=off").unwrap(), 0);
         assert!(open_or_build(data, &off).unwrap().is_none());
+    }
+
+    #[test]
+    fn repositories_are_searched_with_the_articles() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path();
+        write_set(
+            data,
+            &[("Ripgrep (disambiguation)", 5_000_000), ("Grep", 40)],
+        );
+        let file = SetInfo::find("github").unwrap().file(data);
+        let mut text = ARTICLES_HEADER.as_bytes().to_vec();
+        for (title, stars, site) in [
+            ("tauri-apps/tauri", 90_000, Some("tauri.app")),
+            ("BurntSushi/ripgrep", 50_000, None),
+        ] {
+            write_article(
+                &mut text,
+                &Article {
+                    title: title.to_string(),
+                    views: stars,
+                    site: site.map(str::to_string),
+                    aliases: vec![title.split('/').nth(1).unwrap().to_string()],
+                    ..Article::default()
+                },
+            )
+            .unwrap();
+        }
+        std::fs::write(&file, text).unwrap();
+        let wanted = Wanted::new(data, &PageSets::default(), 0);
+        let (_, searcher) = open_or_build(data, &wanted).unwrap().unwrap();
+        assert_eq!(searcher.num_pages(), 4);
+        let hits = searcher.search("ripgrep", 5).unwrap();
+        let repo = hits
+            .iter()
+            .find(|h| h.page.title == "BurntSushi/ripgrep")
+            .unwrap();
+        assert!(repo.named);
+        assert_eq!(repo.page.url, "https://github.com/BurntSushi/ripgrep");
+        assert_eq!(repo.page.set_name(), "GitHub");
+        // Stars count against the most starred repository, not against
+        // Wikipedia's page views.
+        assert!(repo.popularity > 0.9, "{}", repo.popularity);
+        let tauri = &searcher.search("tauri", 5).unwrap()[0];
+        assert_eq!(tauri.page.site.as_deref(), Some("tauri.app"));
+        assert!((tauri.popularity - 1.0).abs() < 1e-3);
     }
 }
