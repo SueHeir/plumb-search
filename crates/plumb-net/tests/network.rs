@@ -943,11 +943,17 @@ async fn searches_ask_trusted_nodes_friends_of_friends_or_anyone() {
     wait_for(|| (trusted.handle.status().connected_peers >= 3).then_some(())).await;
     assert_eq!(asked(&trusted.handle, 1).await, vec![s_id]);
 
+    // Anyone means anyone: the nodes started above may be asked too.
     let anyone = start(SearchScope::Anyone).await;
-    assert_eq!(
-        asked(&anyone.handle, 3).await,
-        sorted(vec![s_id, f_id, x_id])
-    );
+    let wanted = [s_id, f_id, x_id];
+    for _ in 0..300 {
+        let peers = anyone.handle.bucket_peers().await.unwrap();
+        if wanted.iter().all(|p| peers.contains(p)) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("anyone-scoped search never asked S, F and X");
 }
 
 /// The nodes `handle`'s searches ask, sorted, once there are `want`.
