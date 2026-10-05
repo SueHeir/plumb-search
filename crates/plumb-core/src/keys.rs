@@ -29,6 +29,12 @@ pub const BUCKETS: u32 = 16_384;
 pub const KEY_CAP: usize = 32;
 /// Buckets fetched for every search, real ones padded with random ones.
 pub const BUCKETS_PER_SEARCH: usize = 4;
+/// Pieces each bucket is cut into, by key, for private retrieval (PIR): a
+/// PIR table packs pieces into rows of nearly equal size, where whole
+/// buckets would differ several times over.
+pub const PIECES_PER_BUCKET: u32 = 4;
+/// Pieces in all.
+pub const PIECES: u32 = BUCKETS * PIECES_PER_BUCKET;
 /// Link texts, most used first, whose keys count.
 pub const KEY_LINK_TEXTS: usize = 8;
 /// Keys shorter than this are skipped: one- and two-letter words would put
@@ -47,6 +53,18 @@ pub fn bucket_of(key: &str) -> u32 {
     let hash: [u8; 32] = hasher.finalize().into();
     let prefix = u64::from_be_bytes(hash[..8].try_into().expect("8 bytes"));
     (prefix % u64::from(BUCKETS)) as u32
+}
+
+/// The piece of `key`: one of its bucket's [`PIECES_PER_BUCKET`], by a
+/// second hash. Like [`bucket_of`], the same everywhere and in every
+/// version.
+pub fn piece_of(key: &str) -> u32 {
+    let mut hasher = Sha256::new();
+    hasher.update(b"plumb-piece-v1\0");
+    hasher.update(key.as_bytes());
+    let hash: [u8; 32] = hasher.finalize().into();
+    let sub = u32::from_be_bytes(hash[..4].try_into().expect("4 bytes")) % PIECES_PER_BUCKET;
+    bucket_of(key) * PIECES_PER_BUCKET + sub
 }
 
 /// The keys of the names in `text`: its words and the whole text joined.
@@ -169,6 +187,26 @@ pub fn slim_record(mut record: SiteRecord) -> SiteRecord {
     record
 }
 
+/// Characters of a description a [`lean_record`] keeps.
+pub const LEAN_DESCRIPTION_CHARS: usize = 200;
+
+/// A [`slim_record`] without the homepage's text and headings, the
+/// Wikipedia intro and key pages, and with the description cut to
+/// [`LEAN_DESCRIPTION_CHARS`]: what a PIR table holds. On hpc's 1.3M sites
+/// it ranked name and description searches the same as full records
+/// (without vectors), at a third of the size.
+pub fn lean_record(record: SiteRecord) -> SiteRecord {
+    let mut record = slim_record(record);
+    record.body_text = None;
+    record.headings.clear();
+    record.intro = None;
+    record.key_pages.clear();
+    record.description = record
+        .description
+        .map(|d| d.chars().take(LEAN_DESCRIPTION_CHARS).collect());
+    record
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -188,6 +226,24 @@ mod tests {
 
     /// `bucket_of` of `usbank`, `bank`, `us` and `chase`, as first shipped.
     const KNOWN_BUCKETS: [u32; 4] = [5691, 2985, 15898, 14277];
+
+    #[test]
+    fn pieces_never_change_and_stay_in_their_bucket() {
+        for key in ["usbank", "bank", "us", "chase"] {
+            let piece = piece_of(key);
+            assert!(piece < PIECES);
+            assert_eq!(piece / PIECES_PER_BUCKET, bucket_of(key));
+        }
+        let known: Vec<u32> = ["usbank", "bank", "us", "chase"]
+            .iter()
+            .map(|k| piece_of(k) % PIECES_PER_BUCKET)
+            .collect();
+        assert_eq!(known, KNOWN_PIECES);
+    }
+
+    /// `piece_of(..) % PIECES_PER_BUCKET` of `usbank`, `bank`, `us` and
+    /// `chase`, as first shipped.
+    const KNOWN_PIECES: [u32; 4] = [1, 1, 3, 2];
 
     #[test]
     fn padding_comes_from_the_random_source() {

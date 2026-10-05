@@ -5,7 +5,9 @@ Plumb keeps no article text, so it cannot search the news the way a full-text en
 ## What a search shows
 
 * **A site's latest posts.** When the search names a site ("bbc", "theverge.com"), or asks for its news ("verge news") and no headline is about the other words, the block is "Latest from *site*": its four newest posts.
-* **Headlines about the words.** Otherwise the block lists the five newest headlines (at most two per site) that hold every word of the search in their title, plurals folded ("election" finds "Elections"). It shows only when two or more sites published such a headline in the last three days, or when the search asks for news ("election news", "latest rust"), which looks back the whole week.
+* **Headlines about the words.** Otherwise the block lists the five newest headlines (at most two per site) that hold every word of the search in their title, plurals folded ("election" finds "Elections"). It shows only when two or more sites published such a headline in the last three days, or when the search asks for news ("election news", "latest rust"), which looks back the whole week. A search of news words alone ("news", "latest news") lists the newest headline of each site from the last three days.
+
+The block comes folded: one line naming it, how many headlines it holds and how new the newest is, opened with a click. The **Recent news** setting in the results page's gear changes that: *Folded* (the default), *Open* to show the headlines unfolded, or *Off* to never show the block. Like the other search settings it rides in the page's links, as `news=expanded` or `news=off`.
 
 `GET /api/recent?q=...` returns the same block as JSON.
 
