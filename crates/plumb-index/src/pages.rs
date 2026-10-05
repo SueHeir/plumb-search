@@ -606,13 +606,15 @@ impl PageSearcher {
             return Ok(Vec::new());
         }
         let searcher = self.reader.searcher();
-        let mut clauses: Vec<(Occur, Box<dyn Query>)> = vec![(
-            Occur::Should,
-            Box::new(TermQuery::new(
-                Term::from_field_text(self.fields.keys, &joined),
-                IndexRecordOption::Basic,
-            )),
-        )];
+        // Pages named by the whole query are searched apart, so pages that
+        // merely have its words never crowd them out: the many Stack
+        // Overflow questions on "google maps" are more read than the
+        // article Google Maps.
+        let named_by_query = TermQuery::new(
+            Term::from_field_text(self.fields.keys, &joined),
+            IndexRecordOption::Basic,
+        );
+        let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
         // Pages with every word of the query.
         let every_word: Vec<(Occur, Box<dyn Query>)> = words
             .iter()
@@ -647,10 +649,15 @@ impl PageSearcher {
                 .order_by_fast_field::<u64>("popularity", tantivy::Order::Desc)
         };
         let mut addresses: Vec<_> = searcher
-            .search(&BooleanQuery::new(clauses), &by_popularity())?
+            .search(&named_by_query, &by_popularity())?
             .into_iter()
             .map(|(_, address)| address)
             .collect();
+        for (_, address) in searcher.search(&BooleanQuery::new(clauses), &by_popularity())? {
+            if !addresses.contains(&address) {
+                addresses.push(address);
+            }
+        }
         // Questions with most of the query's words, searched apart so they
         // never crowd out pages the query names.
         let stems = self.question_words(query);
@@ -1320,6 +1327,24 @@ mod tests {
             popularity: score,
             whole: false,
         }
+    }
+
+    #[test]
+    fn pages_with_the_words_never_crowd_out_the_page_named() {
+        let mut pages: Vec<Page> = (0..2 * CANDIDATES)
+            .map(|i| {
+                page(
+                    &format!("How do I zoom Google Maps to marker {i}"),
+                    900_000,
+                    &[],
+                )
+            })
+            .collect();
+        pages.push(page("Google Maps", 22_902, &["Gmaps"]));
+        let (_dir, s) = searcher(&pages);
+        let hits = s.search("google maps", 10).unwrap();
+        assert_eq!(titles(&hits)[0], "Google Maps");
+        assert!(hits[0].named);
     }
 
     #[test]
