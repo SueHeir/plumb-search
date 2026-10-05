@@ -249,6 +249,12 @@ pub struct RankConfig {
     /// the first `k` of the query's `n` words, which then gets `k / n` of
     /// it (code.gov in "code hosting"). `None` keeps the full-name bonus.
     pub partial_label_bonus: Option<f32>,
+    /// For a query that describes what it looks for, the text match (words
+    /// and meaning together) a site needs for its popularity to count in
+    /// full; below it, popularity counts in proportion. Keeps the most
+    /// popular sites, which match "to do list" or "map of the world" not
+    /// at all, from outranking every site that does. `None` turns it off.
+    pub described_relevance: Option<f32>,
 }
 
 impl Default for RankConfig {
@@ -265,6 +271,7 @@ impl Default for RankConfig {
             meaning_weight: 0.7,
             described_alpha: Some(0.5),
             partial_label_bonus: None,
+            described_relevance: Some(0.25),
         }
     }
 }
@@ -1043,6 +1050,9 @@ impl Searcher {
             Some(described) if !navigational => unit_or(described, default.alpha),
             _ => unit_or(cfg.alpha, default.alpha),
         };
+        let relevance_floor = cfg
+            .described_relevance
+            .filter(|floor| !navigational && *floor > 0.0);
         let partial_label_bonus = cfg.partial_label_bonus.unwrap_or(cfg.exact_label_bonus);
         let untrusted_share = unit_or(cfg.untrusted_share, default.untrusted_share);
         let country_boost = unit_or(cfg.country_boost, default.country_boost);
@@ -1152,9 +1162,15 @@ impl Searcher {
                 .as_ref()
                 .and_then(|domains| domains.term_ords(addr.doc_id).next())
                 .unwrap_or(u64::MAX);
+            let prior = match relevance_floor {
+                Some(floor) if !is_kind && name.words() == 0 => {
+                    link_score * (text_score / floor).min(1.0)
+                }
+                _ => link_score,
+            };
             ranked.push(Ranked {
                 addr,
-                score: alpha * link_score
+                score: alpha * prior
                     + trust * ((1.0 - alpha) * text_score + name_bonus)
                     + country_bonus,
                 text_score,
@@ -2919,11 +2935,14 @@ mod tests {
         };
 
         // No site is named "online" or "online banking": a plain blend, at
-        // the popularity weight of queries that describe what they look for.
+        // the popularity weight of queries that describe what they look for,
+        // with popularity counting in proportion below the relevance floor.
         let alpha = cfg.described_alpha.unwrap();
+        let floor = cfg.described_relevance.unwrap();
         let hits = searcher.search("online banking", 10).unwrap();
         check(&hits, &|hit| {
-            alpha * hit.link_score + (1.0 - alpha) * hit.text_score
+            let prior = hit.link_score * (hit.text_score / floor).min(1.0);
+            alpha * prior + (1.0 - alpha) * hit.text_score
         });
 
         // "us bank" is usbank.com's whole name: the label bonus, full trust.
@@ -3301,6 +3320,42 @@ mod tests {
         let hits = searcher.search_with("us bank", 20, &cfg).unwrap();
         assert_eq!(hits[0].domain, "usbank.com");
         assert_eq!(hits[0].score, hits[0].text_score);
+    }
+
+    #[test]
+    fn described_queries_need_some_match_for_popularity_to_count() {
+        let records = vec![
+            site(
+                "youtube.com",
+                Some("YouTube"),
+                Some("Enjoy the videos and music you love, and keep a watch list."),
+                &["YouTube"],
+                &[("YouTube", 50)],
+                popular(1, 50),
+            ),
+            site(
+                "checklist.com",
+                Some("Checklist.com | To do list and checklists"),
+                Some("Make a to do list and share checklists."),
+                &[],
+                &[("checklist", 1)],
+                obscure(500_000, 2),
+            ),
+        ];
+        let (_dir, searcher) = build(&records);
+        // Popularity weighing heavily, as among a million sites.
+        let on = RankConfig {
+            described_alpha: Some(0.9),
+            ..RankConfig::default()
+        };
+        let hits = searcher.search_with("to do list", 2, &on).unwrap();
+        assert_eq!(hits[0].domain, "checklist.com");
+        let off = RankConfig {
+            described_relevance: None,
+            ..on
+        };
+        let hits = searcher.search_with("to do list", 2, &off).unwrap();
+        assert_eq!(hits[0].domain, "youtube.com");
     }
 
     #[test]
