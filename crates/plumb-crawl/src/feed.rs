@@ -4,6 +4,8 @@
 //! full text) are skipped. Posts without a date the reader understands are
 //! left out, since nothing says they are recent.
 
+use std::borrow::Cow;
+
 use plumb_core::Headline;
 use url::Url;
 
@@ -17,12 +19,16 @@ const MAX_FEED_NODES: u32 = 200_000;
 /// when the body is not one of those.
 pub fn read_feed(domain: &str, feed_url: &Url, body: &str, now: u64) -> Option<Vec<Headline>> {
     let body = body.trim_start_matches('\u{feff}');
+    // A DTD can define entities that expand without bound (a "billion
+    // laughs" feed), so the DOCTYPE is cut out and DTDs are refused. A feed
+    // that used an entity of its own then fails to parse, and is not read.
+    let body = without_doctype(body);
     let options = roxmltree::ParsingOptions {
-        allow_dtd: true,
+        allow_dtd: false,
         nodes_limit: MAX_FEED_NODES,
         ..roxmltree::ParsingOptions::default()
     };
-    let doc = roxmltree::Document::parse_with_options(body, options).ok()?;
+    let doc = roxmltree::Document::parse_with_options(&body, options).ok()?;
     let root = doc.root_element();
     let items: Vec<roxmltree::Node> = match root.tag_name().name() {
         "rss" => root
@@ -49,6 +55,56 @@ pub fn read_feed(domain: &str, feed_url: &Url, body: &str, now: u64) -> Option<V
     headlines.sort_by_key(|h| std::cmp::Reverse(h.at));
     headlines.dedup_by(|a, b| a.url == b.url);
     Some(headlines)
+}
+
+/// `body` with the DOCTYPE declaration in its prolog (internal subset and
+/// all) cut out. A body without one, or whose declaration does not end,
+/// comes back unchanged (and a DOCTYPE left in it is refused by the parser).
+fn without_doctype(body: &str) -> Cow<'_, str> {
+    let Some(start) = body.find("<!DOCTYPE") else {
+        return Cow::Borrowed(body);
+    };
+    // Only a DOCTYPE in the prolog, before the root element, is a DOCTYPE.
+    if !prolog_is_markup_only(&body[..start]) {
+        return Cow::Borrowed(body);
+    }
+    let mut depth = 0usize;
+    let mut quote = None;
+    for (i, c) in body[start..].char_indices() {
+        match (quote, c) {
+            (Some(q), c) if c == q => quote = None,
+            (Some(_), _) => {}
+            (None, '"' | '\'') => quote = Some(c),
+            (None, '[') => depth += 1,
+            (None, ']') => depth = depth.saturating_sub(1),
+            (None, '>') if depth == 0 => {
+                let end = start + i + 1;
+                return Cow::Owned(format!("{}{}", &body[..start], &body[end..]));
+            }
+            _ => {}
+        }
+    }
+    Cow::Borrowed(body)
+}
+
+/// Whether `prolog` holds only the XML declaration, comments and
+/// processing instructions (no element has started before it ends).
+fn prolog_is_markup_only(prolog: &str) -> bool {
+    let mut rest = prolog.trim_start();
+    while !rest.is_empty() {
+        let end = if rest.starts_with("<?") {
+            rest.find("?>").map(|i| i + 2)
+        } else if rest.starts_with("<!--") {
+            rest.find("-->").map(|i| i + 3)
+        } else {
+            None
+        };
+        match end {
+            Some(end) => rest = rest[end..].trim_start(),
+            None => return false,
+        }
+    }
+    true
 }
 
 /// An item's (or entry's) title, link and date.
@@ -296,5 +352,46 @@ mod tests {
         assert_eq!(items[0].title, "An RDF post");
         assert!(read_feed("example.com", &feed, "<html><body>hi</body></html>", NOW).is_none());
         assert!(read_feed("example.com", &feed, "not xml", NOW).is_none());
+    }
+
+    #[test]
+    fn drops_doctypes_and_refuses_entity_expansion() {
+        let feed = Url::parse("https://www.example.com/rss").unwrap();
+        // RSS 0.91 feeds carry a DOCTYPE; they still read.
+        let rss091 = r#"<?xml version="1.0"?>
+            <!-- generated -->
+            <!DOCTYPE rss PUBLIC "-//Netscape Communications//DTD RSS 0.91//EN"
+              "http://my.netscape.com/publish/formats/rss-0.91.dtd">
+            <rss version="0.91"><channel><title>Old</title>
+              <item><title>Still here</title><link>https://www.example.com/a</link>
+                <pubDate>Sun, 04 Oct 2026 12:00:00 GMT</pubDate></item>
+            </channel></rss>"#;
+        let items = read_feed("example.com", &feed, rss091, NOW).unwrap();
+        assert_eq!(items[0].title, "Still here");
+        // Entities defined in an internal subset are never expanded: the
+        // feed does not parse rather than growing without bound.
+        let laughs = r#"<?xml version="1.0"?>
+            <!DOCTYPE rss [
+              <!ENTITY a "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa">
+              <!ENTITY b "&a;&a;&a;&a;&a;&a;&a;&a;&a;&a;">
+              <!ENTITY c "&b;&b;&b;&b;&b;&b;&b;&b;&b;&b;">
+            ]>
+            <rss version="2.0"><channel><title>&c;&c;&c;</title>
+              <item><title>&c;</title><link>https://www.example.com/a</link>
+                <pubDate>Sun, 04 Oct 2026 12:00:00 GMT</pubDate></item>
+            </channel></rss>"#;
+        assert!(read_feed("example.com", &feed, laughs, NOW).is_none());
+        // A subset with `]` and `>` inside quoted values is cut whole.
+        let quoted = r#"<!DOCTYPE feed [ <!ENTITY x "]>"> ]>
+            <feed xmlns="http://www.w3.org/2005/Atom">
+              <entry><title>Q</title><link href="https://www.example.com/q"/>
+                <updated>2026-10-04T10:00:00Z</updated></entry></feed>"#;
+        assert_eq!(
+            read_feed("example.com", &feed, quoted, NOW).unwrap().len(),
+            1
+        );
+        // A DOCTYPE string inside the document is left alone.
+        let inside = "<a><![CDATA[<!DOCTYPE x>]]></a>";
+        assert_eq!(without_doctype(inside), inside);
     }
 }

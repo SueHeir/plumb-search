@@ -63,6 +63,19 @@ pub enum Command {
     /// Run a plugin on one search and print its results as JSON, to try a
     /// plugin before installing it (see docs/plugins.md).
     TryPlugin(TryPluginArgs),
+    /// Check that a running node answers: exits 0 when its /api/status
+    /// answers with success, 1 otherwise. The Docker image's HEALTHCHECK.
+    Healthcheck(HealthcheckArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct HealthcheckArgs {
+    /// The node's web address, as served by `plumb run --bind`.
+    #[arg(long, value_name = "URL", default_value = "http://127.0.0.1:8080")]
+    pub url: String,
+    /// How long to wait for the answer, in seconds.
+    #[arg(long, value_name = "SECONDS", default_value_t = 5)]
+    pub timeout: u64,
 }
 
 #[derive(Debug, Args)]
@@ -447,13 +460,14 @@ pub struct FetchProfilesArgs {
 pub struct FetchPagesArgs {
     /// The page set to make: wikipedia-en (English Wikipedia's articles),
     /// github (GitHub repositories, from GitHub's search API; set
-    /// GITHUB_TOKEN to search three times as fast) or stackoverflow (Stack
+    /// GITHUB_TOKEN to search three times as fast), stackoverflow (Stack
     /// Overflow's most viewed questions, from Stack Exchange's data dump),
     /// books (Open Library's most shelved works, from its dumps), podcasts
     /// (Podcast Index's most popular podcasts, from its database), papers
     /// (the most cited works, from OpenAlex's API; set OPENALEX_API_KEY if
-    /// it asks for one) or places (named shops, restaurants, parks and
-    /// towns from OpenStreetMap).
+    /// it asks for one), packages (the most used packages of eight
+    /// registries, from ecosyste.ms) or places (named shops, restaurants,
+    /// parks and towns from OpenStreetMap).
     #[arg(long, value_name = "SET", default_value = "wikipedia-en")]
     pub set: String,
     /// Directory to download Wikipedia's dumps into (created if missing).
@@ -865,6 +879,22 @@ mod tests {
         };
         assert_eq!(args.data, PathBuf::from("/data"));
         assert!(args.json);
+    }
+
+    #[test]
+    fn healthcheck_defaults_to_the_images_port() {
+        let Command::Healthcheck(args) = parse(&["healthcheck"]).unwrap().command else {
+            panic!("not healthcheck")
+        };
+        assert_eq!(args.url, "http://127.0.0.1:8080");
+        assert_eq!(args.timeout, 5);
+        let Command::Healthcheck(args) = parse(&["healthcheck", "--url", "http://[::1]:7586"])
+            .unwrap()
+            .command
+        else {
+            panic!("not healthcheck")
+        };
+        assert_eq!(args.url, "http://[::1]:7586");
     }
 
     #[test]

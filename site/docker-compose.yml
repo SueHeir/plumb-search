@@ -23,7 +23,9 @@ services:
 
   plumb:
     profiles: ["node"]
-    image: ghcr.io/sueheir/plumb-search:latest
+    # `main` is the newest build of the main branch; `latest` is the newest
+    # release.
+    image: ghcr.io/sueheir/plumb-search:main
     # Used by `docker compose --profile node build`, for when the image isn't
     # published yet or you want another branch. PLUMB_SOURCE is a Git URL with
     # an optional #branch, set in .env next to this file.
@@ -63,13 +65,12 @@ services:
       - --no-upnp
       - --no-local-discovery
       # The public page's network searches may ask any node, not only
-      # trusted ones and the nodes they trust (Liz, 2026-10-05).
+      # trusted ones and the nodes they trust (2026-10-05).
       - --search-from
       - anyone
-      # Crawls from Liz's own nodes count as soon as they're signed, without
-      # waiting for a second crawler: plumb-relay on this machine, the desktop
-      # app on her MacBook, elizabeth-hpc, and the rented LA and New York
-      # servers.
+      # Crawls from trusted nodes run by the project count as soon as they're
+      # signed, without waiting for a second crawler; the first is plumb-relay
+      # on this machine.
       - --trust-peer
       - 12D3KooWJ2UWUBsxmPfXTfHa8cBBmzifa6kj5pFZKfJXYNQyJ69a
       - --trust-peer

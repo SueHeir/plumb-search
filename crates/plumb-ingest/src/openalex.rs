@@ -230,8 +230,13 @@ impl Progress {
             filter: filter.to_string(),
             cursor: cursor.map(str::to_string),
         };
-        std::fs::write(&self.state, serde_json::to_vec(&state)?)
-            .with_context(|| format!("writing {}", self.state.display()))
+        // Written aside and renamed over, so a crash mid-write leaves the
+        // last state whole.
+        let tmp = self.state.with_extension("json.tmp");
+        std::fs::write(&tmp, serde_json::to_vec(&state)?)
+            .with_context(|| format!("writing {}", tmp.display()))?;
+        std::fs::rename(&tmp, &self.state)
+            .with_context(|| format!("saving {}", self.state.display()))
     }
 }
 
@@ -275,9 +280,11 @@ pub async fn fetch_papers(
             params.push(("api_key", key.to_string()));
         }
         let url = reqwest::Url::parse_with_params(WORKS_URL, &params)?;
+        // The URL carries the API key, so it is left out of errors.
         let response = match client.get(url).send().await {
             Ok(response) => response,
             Err(err) => {
+                let err = err.without_url();
                 failures += 1;
                 if failures > 10 {
                     return Err(err).context("asking OpenAlex");
@@ -322,6 +329,7 @@ pub async fn fetch_papers(
         let bytes = response
             .bytes()
             .await
+            .map_err(reqwest::Error::without_url)
             .context("reading OpenAlex's answer")?;
         let page: WorksPage =
             serde_json::from_slice(&bytes).context("reading OpenAlex's answer")?;
@@ -408,6 +416,13 @@ mod tests {
         let (again, cursor) = progress.resume(filter).unwrap();
         assert_eq!(again, papers);
         assert_eq!(cursor.as_deref(), Some("abc"));
+        // The state is saved by renaming, which leaves nothing beside it.
+        let mut names: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["papers-so-far.json", "papers-so-far.tsv"]);
         // Another filter starts over.
         assert_eq!(
             progress.resume("cited_by_count:>9").unwrap(),

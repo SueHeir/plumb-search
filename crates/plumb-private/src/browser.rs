@@ -238,7 +238,7 @@ async fn fetch_sealed(window: &Window, buckets: &[u32]) -> Result<Vec<Vec<SiteRe
     }
     let crypto = window.crypto()?;
     for i in (1..targets.len()).rev() {
-        let j = (random_u64(&crypto) % (i as u64 + 1)) as usize;
+        let j = (random_u64(&crypto)? % (i as u64 + 1)) as usize;
         targets.swap(i, j);
     }
     let now = (js_sys::Date::now() / 1000.0) as u64;
@@ -296,11 +296,12 @@ async fn fetch_sealed(window: &Window, buckets: &[u32]) -> Result<Vec<Vec<SiteRe
         .collect()
 }
 
-/// A random number from the browser's cryptographic generator.
-fn random_u64(crypto: &web_sys::Crypto) -> u64 {
+/// A random number from the browser's cryptographic generator; an error
+/// when it fails, rather than a predictable number.
+fn random_u64(crypto: &web_sys::Crypto) -> Result<u64, JsValue> {
     let mut bytes = [0u8; 8];
-    let _ = crypto.get_random_values_with_u8_array(&mut bytes);
-    u64::from_le_bytes(bytes)
+    crypto.get_random_values_with_u8_array(&mut bytes)?;
+    Ok(u64::from_le_bytes(bytes))
 }
 
 async fn fetch_text(window: &Window, url: &str) -> Result<String, JsValue> {

@@ -41,8 +41,11 @@ impl Operators {
                 rest.starts_with('-') && rest[1..].starts_with(|c: char| !c.is_whitespace());
             let body = if negated { &rest[1..] } else { rest };
             if let Some(quoted) = body.strip_prefix(['"', '\u{201C}', '\u{201D}']) {
-                let (phrase, after) = match quoted.find(['"', '\u{201C}', '\u{201D}']) {
-                    Some(end) => (&quoted[..end], &quoted[end + 1..]),
+                let close = quoted
+                    .char_indices()
+                    .find(|&(_, c)| matches!(c, '"' | '\u{201C}' | '\u{201D}'));
+                let (phrase, after) = match close {
+                    Some((end, c)) => (&quoted[..end], &quoted[end + c.len_utf8()..]),
                     None => (quoted, ""),
                 };
                 let normal = normalize_text(phrase);
@@ -239,6 +242,19 @@ mod tests {
         let ops = Operators::parse("\u{201C}to be or not");
         assert_eq!(ops.phrases, ["to be or not"]);
         assert_eq!(ops.words, "to be or not");
+    }
+
+    #[test]
+    fn a_curly_closing_quote_ends_the_phrase() {
+        let ops = Operators::parse("\u{201C}new york\u{201D} pizza");
+        assert_eq!(ops.phrases, ["new york"]);
+        assert_eq!(ops.words, "new york pizza");
+        let ops = Operators::parse("\"foo\u{201D} bar");
+        assert_eq!(ops.phrases, ["foo"]);
+        assert_eq!(ops.words, "foo bar");
+        let ops = Operators::parse("-\u{201C}foo\u{201D} bar");
+        assert_eq!(ops.excluded, ["foo"]);
+        assert_eq!(ops.words, "bar");
     }
 
     #[test]

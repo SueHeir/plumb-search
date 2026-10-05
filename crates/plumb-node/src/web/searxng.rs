@@ -331,7 +331,12 @@ pub(super) async fn search(state: AppState, headers: HeaderMap, params: SearchPa
         return reply(StatusCode::OK, body);
     }
     let per_page = params.limit();
-    let pageno = params.pageno.unwrap_or(1).clamp(1, MAX_PAGENO);
+    // Later pages cost as much as one search of MAX_LIMIT results at most.
+    let pageno = params
+        .pageno
+        .unwrap_or(1)
+        .clamp(1, MAX_PAGENO)
+        .min((MAX_LIMIT / per_page.max(1)).max(1));
     let mut options = params.options(&state.settings.home, &headers);
     if params.safe.is_none() {
         if let Some(level) = params.safesearch.as_deref().and_then(safesearch) {

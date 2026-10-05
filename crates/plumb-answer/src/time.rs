@@ -54,9 +54,16 @@ fn place(name: &str) -> Option<Place> {
                 _ => return None,
             };
             let rest = &rest[first.len_utf8()..];
+            // Bare digits only: "utc+-2000000" is not an offset.
+            let number = |text: &str| {
+                let text = text.trim();
+                (!text.is_empty() && text.len() <= 2 && text.bytes().all(|b| b.is_ascii_digit()))
+                    .then(|| text.parse::<i32>().ok())
+                    .flatten()
+            };
             let (hours, minutes) = match rest.split_once(':') {
-                Some((h, m)) => (h.trim().parse::<i32>().ok()?, m.trim().parse::<i32>().ok()?),
-                None => (rest.trim().parse::<i32>().ok()?, 0),
+                Some((h, m)) => (number(h)?, number(m)?),
+                None => (number(rest)?, 0),
             };
             if hours > 14 || minutes >= 60 {
                 return None;
@@ -261,6 +268,7 @@ mod tests {
             "Monday, October 5, 2026 · IST, UTC+5:30"
         );
         assert_eq!(answer("time in utc+3", NOW).unwrap().answer, "6:45 AM");
+        assert_eq!(answer("time in utc-14", NOW).unwrap().answer, "1:45 PM");
         assert_eq!(
             answer("time in europe/berlin", NOW).unwrap().question,
             "Time in Europe/Berlin"
@@ -299,6 +307,11 @@ mod tests {
             "3 in to cm",
             "time out london",
             "times new roman",
+            "time in utc+-2000000",
+            "time in utc-+3",
+            "time in utc+15",
+            "time in utc+5:60",
+            "time in gmt+99999999999",
         ] {
             assert_eq!(answer(query, NOW), None, "{query:?}");
         }

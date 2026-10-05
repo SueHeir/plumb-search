@@ -1,8 +1,8 @@
-# The Plumb network (Phase 2 design and first prototype)
+# The Plumb network
 
-Plumb nodes can join a peer-to-peer network to split the crawling between them, pass each other what they crawled, and search each other. This page describes the design and what the first prototype (`crates/plumb-net`, switched on with `plumb run --network`) does and does not do yet.
+Plumb nodes can join a peer-to-peer network to split the crawling between them, pass each other what they crawled, and search each other. This page describes the design and what the code (`crates/plumb-net`) does and does not do yet.
 
-Everything here is opt-in for now. A node started without `--network` works exactly as before.
+The Docker image and the desktop app join the network by default; `plumb run` joins with `--network`. A node started without it works on its own.
 
 ## In one paragraph
 
@@ -10,10 +10,8 @@ Every day each node is assigned a random eighth of all sites, picked by a hash o
 
 ## Getting connected without port forwarding
 
-This follows the plan agreed on 2026-10-03.
-
 * **Most nodes only dial out**, like a browser. Fetching batches, announcing them, fetching buckets and serving them all work over connections a node opened itself.
-* **Reachable nodes** (a server, a VPS, a homelab with a forwarded port) run with `--public-addr` and `--relay`. They accept connections and relay small messages for nodes behind NAT. `plumbsearch.org` is meant to be the first one.
+* **Reachable nodes** (a server, a VPS, a homelab with a forwarded port) run with `--public-addr` and `--relay`. They accept connections and relay small messages for nodes behind NAT. `plumbsearch.org` runs one, and new nodes connect to it first.
 * **A node behind NAT** takes a reservation on up to two relays it is connected to (circuit relay v2). Other nodes can then reach it at `<relay address>/p2p-circuit/p2p/<its id>`.
 * **Hole punching** (DCUtR): when two nodes meet over a relay, they try to open a direct connection through both NATs and move their traffic there. libp2p's own measurements put success at about 70%; the rest stay on the relay, which is fine for searches and announcements (rust-libp2p caps a relayed circuit at 2 minutes and 128 KiB by default).
 * **Finding nodes behind NAT**: a node behind a router is known only by its relayed address. Those addresses go into the routing table like any other, so a node that only knows the relay still finds the others and meets them over the relay.
@@ -65,8 +63,8 @@ Batches older than 7 days or dated in the future are refused. A node keeps the b
 * **How soon a site is confirmed.** Assignment stays independent per node (a site is crawled by about one node in eight each day), so with N nodes a site gets about N/8 crawls a day. Over the 14-day window a site is assigned to two nodes with about 72% odds in a network of 2 nodes, 94% with 3, and almost surely with 5 or more. In a network of one, nothing from the network is ever taken in, which is the point.
 * **Own crawls judge straight away.** A crawl made within 2 days of one of the node's own crawls of the same site is scored against it at once, confirmed or not.
 
-* **Trusted nodes.** While the network is a handful of nodes, waiting for two crawlers mostly keeps good crawls out. So a node keeps a list of nodes it trusts (Liz, 2026-10-03): `plumb run --network --trust-peer 12D3Koo...` (repeatable). Every node trusts the plumbsearch.org node (`12D3KooWEDPBv4sacn42shoToAwu62CreVC89QFiAA31HrWv3xrg`) by default (Liz, 2026-10-03), so a new node takes in crawls from the start; `--no-default-trust` turns that off. A crawl signed by a trusted node is taken in at once, like the node's own, and counts towards any quorum. Like the node's own, it is not held to the daily assignment (Liz, 2026-10-03), so one of a person's machines can crawl far more than its share for their other nodes, and its homepages' headings and text are kept too, for search by meaning; every other crawler goes through the rules in this section. Being trusted earns a crawler nothing else: it is scored like any other, and matching its crawls vouches for no one. `GET /api/status` shows `network.agreement.trusted_peers`. When a node starts with a crawler it did not trust at its last start, it takes in that crawler's held batches again as trusted, so their homepages' text is kept too (`DIR/net/trusted-applied` notes which were); a newer crawl of a site still wins.
-* **Who a search asks.** A node's network searches, background rounds and the sealed requests it relays for private search in the browser ask only the nodes in its search scope (Liz, 2026-10-05): `trusted` (its trusted nodes), `friends-of-friends` (those and the nodes they trust, the default) or `anyone`. Set with `plumb run --search-from <who>`, in the panel under Network & privacy, or from the desktop app for a connected node. A node asks each trusted node what it trusts on `/plumb/trust/1` when they connect, keeps the answers in `DIR/net/friends.json` and dials those nodes; only one hop is followed. Changing the scope empties the bucket cache. `GET /api/status` shows `network.search_scope`, `network.search_peers` and `network.friends_of_friends`. Connecting a node in the desktop app ("+ Connect to a node") makes the two trust each other: each saves the other's id in its trusted nodes, applied when it restarts.
+* **Trusted nodes.** While the network is a handful of nodes, waiting for two crawlers mostly keeps good crawls out. So a node keeps a list of nodes it trusts: `plumb run --network --trust-peer 12D3Koo...` (repeatable). Every node trusts the plumbsearch.org node (`12D3KooWEDPBv4sacn42shoToAwu62CreVC89QFiAA31HrWv3xrg`) by default, so a new node takes in crawls from the start; `--no-default-trust` turns that off. A crawl signed by a trusted node is taken in at once, like the node's own, and counts towards any quorum. Like the node's own, it is not held to the daily assignment, so one of a person's machines can crawl far more than its share for their other nodes, and its homepages' headings and text are kept too, for search by meaning; every other crawler goes through the rules in this section. Being trusted earns a crawler nothing else: it is scored like any other, and matching its crawls vouches for no one. `GET /api/status` shows `network.agreement.trusted_peers`. When a node starts with a crawler it did not trust at its last start, it takes in that crawler's held batches again as trusted, so their homepages' text is kept too (`DIR/net/trusted-applied` notes which were); a newer crawl of a site still wins.
+* **Who a search asks.** A node's network searches, background rounds and the sealed requests it relays for private search in the browser ask only the nodes in its search scope: `trusted` (its trusted nodes), `friends-of-friends` (those and the nodes they trust, the default) or `anyone`. Set with `plumb run --search-from <who>`, in the panel under Network & privacy, or from the desktop app for a connected node. A node asks each trusted node what it trusts on `/plumb/trust/1` when they connect, keeps the answers in `DIR/net/friends.json` and dials those nodes; only one hop is followed. Changing the scope empties the bucket cache. `GET /api/status` shows `network.search_scope`, `network.search_peers` and `network.friends_of_friends`. Connecting a node in the desktop app ("+ Connect to a node") makes the two trust each other: each saves the other's id in its trusted nodes, applied when it restarts.
 
 ### One person, many keys
 
@@ -105,9 +103,7 @@ memory (or its container's limit), about 2.5 KB a site, so a 4 GB server
 stops at about 800,000 sites. How far it got is in `DIR/net/fill.json` and in
 `GET /api/status` under `fill`, and the panel's Storage card shows it.
 
-**Staying under the storage limit** (Liz, 2026-10-05: "my macbook seems to
-gone over the limit on storage, maybe we find a interesting way to remove
-data that is not of interest"). Crawls other nodes publish keep arriving
+**Staying under the storage limit.** Crawls other nodes publish keep arriving
 after filling stops, and page sets, places and vectors sit next to the
 sites, so a node with a limit also holds itself back (`node/trim.rs`):
 
@@ -145,8 +141,7 @@ once and 6 a minute from one node, so a new node cannot swamp a small
 server. The panel's "Fill free space with the network's crawls" box (on
 by default, in the desktop app too) and `--no-fill` turn it off.
 
-**Blackhole** (Liz, 2026-10-05: "a blackhole setting for docker nodes that
-just tries to get all the data possible"). `plumb run --network
+**Blackhole.** `plumb run --network
 --blackhole` is for a server with disk and memory to spare. It:
 
 - fills from every connected trusted node, not just one: once through one
@@ -165,8 +160,7 @@ may take still hold, and it follows the node's trust rules: fill records and
 page set files only come from trusted nodes, and other crawls still need a
 second crawler to agree.
 
-**Setting up from the network** (Liz, 2026-10-04: "new nodes don't need
-to pull from wiki or anywhere anymore"). A new node in the network that
+**Setting up from the network.** A new node in the network that
 trusts a node sets up from it instead of downloading the seed data: it asks
 with `all` set, and the trusted node sends every site of its list, crawled
 or not, up to 5,000 a page. Each record carries what the trusted node's own
@@ -231,13 +225,13 @@ Tested on one machine (`cargo test -p plumb-net popularity`, `cargo test -p plum
 
 ## Crawl credits
 
-`plumb_net::credits`, on for every network node. Crawling for the network earns credits, and a node turns them into anonymous one-time tokens it can spend at the node that issued them. This follows the credits design Liz approved on 2026-10-03: credits cannot be given away or sold, early adopters get a head start, and people who only search on a website never see any of it.
+`plumb_net::credits`, on for every network node. Crawling for the network earns credits, and a node turns them into anonymous one-time tokens it can spend at the node that issued them. By design, credits cannot be given away or sold, early adopters get a head start, and people who only search on a website never see any of it.
 
 **Earning.** Each node keeps its own ledger of every crawler it hears from (`DIR/net/credits/ledger.json`). A crawler earns 1 credit for each homepage crawl that a crawler the node trusts strictly also made: the node itself, or one vouched for by matching the node's own crawls of 3 sites. A crawl that counted on its own, or that only fresh keys agree with, earns nothing, whatever agreement's quorum rules are. Crawls earn 2 for crawls made before 2027-10-01, the network's first year. A crawl made close in time to one two such crawlers made that does not match it costs 5, so making pages up loses more than honest crawling earns. A node the ledger's node trusts (`--trust-peer`, plumbsearch.org by default) earns 1 for each new crawl taken in from it (2 in the first year), since trusted crawls skip agreement and would otherwise earn nothing. And a node earns 1 for each bucket request of the ledger's node it answered with records that checked out: only the node that asked can vouch for that work, so only its ledger counts it. Every node sees the same signed batches, so ledgers come out much the same, but each node goes only by its own. Credits counted while rebuilding agreement at start are not counted twice.
 
 **Tokens.** A node asks another node, the issuer, for tokens over `/plumb/credits/1`, under its own node id, since its balance pays. The issuer gives tokens only to a node whose work counts there: a crawler vouched for by matching its own crawls of 3 sites (whatever agreement's quorum rules) and judged at least 10 times, a node it trusts, or a node that answered at least 10 of its bucket requests, at most as many as its balance pays for, 1 credit each and at most 64 a request. Tokens are signed blind with a VOPRF over ristretto255 (the [`voprf`](https://crates.io/crates/voprf) crate, as in Privacy Pass, RFC 9578): the issuer never sees the token it signs. Handed back later under a throwaway identity, a token shows the issuer it is one of its own and not yet spent, but not which node it went to. Each issuer proves every batch was signed with the same key, and the wallet (`DIR/net/credits/wallet.json`) keeps the first key it sees for each issuer and refuses tokens under another, so an issuer cannot give one node a key of its own to recognize it by. The issuer's key is `DIR/net/credits/token.key`, and the tokens handed back to it are in `DIR/net/credits/spent`.
 
-**What tokens buy: priority when busy** (Liz's pick, 2026-10-03). A node answers 8 bucket requests at once for free (`NetConfig::max_answering`) and turns more away as busy (`busy` in the answer). It also shares out its free answers (`plumb_net::allowance`, 2026-10-05): any one address, or any one relay passing on sealed requests, gets 120 a minute on average with bursts of 240 (a relay the node trusts is not held to a rate), and the owner can cap free answers a day with `--answer-per-day` or on the panel (no cap by default). Bucket requests come under throwaway identities, so an address is all a node can go by, and a token is the only way a request can show it comes from a node that did its part. Searches through the node's own front end are never limited. A request that carries one of its tokens still gets in, up to 8 more at once, and the token is spent. A searching node asks again with a token only after a node said it was busy, so tokens go only where they help, and a free search of a busy node simply comes back without that node's answer. Sealed requests that carry a token are padded to 256 bytes rather than 64: the relay can tell a paid request from a free one, but not the bucket. A node keeps at least 4 tokens from each node it searches, asking for 16 more at most every 30 minutes (`NetConfig::collect_tokens`, on by default, off with `--no-spend-credits` or on the panel); a node whose ledger has nothing for it says no. Nodes that predate tokens ignore them. Nobody who searches on a website ever deals with tokens: the site's own node spends them.
+**What tokens buy: priority when busy.** A node answers 8 bucket requests at once for free (`NetConfig::max_answering`) and turns more away as busy (`busy` in the answer). It also shares out its free answers (`plumb_net::allowance`, 2026-10-05): any one address, or any one relay passing on sealed requests, gets 120 a minute on average with bursts of 240 (a relay the node trusts is not held to a rate), and the owner can cap free answers a day with `--answer-per-day` or on the panel (no cap by default). Bucket requests come under throwaway identities, so an address is all a node can go by, and a token is the only way a request can show it comes from a node that did its part. Searches through the node's own front end are never limited. A request that carries one of its tokens still gets in, up to 8 more at once, and the token is spent. A searching node asks again with a token only after a node said it was busy, so tokens go only where they help, and a free search of a busy node simply comes back without that node's answer. Sealed requests that carry a token are padded to 256 bytes rather than 64: the relay can tell a paid request from a free one, but not the bucket. A node keeps at least 4 tokens from each node it searches, asking for 16 more at most every 30 minutes (`NetConfig::collect_tokens`, on by default, off with `--no-spend-credits` or on the panel); a node whose ledger has nothing for it says no. Nodes that predate tokens ignore them. Nobody who searches on a website ever deals with tokens: the site's own node spends them.
 
 **Limits now.**
 

@@ -416,11 +416,13 @@ fn linker(engine: &Engine) -> Result<Linker<Host>> {
             "log",
             |caller: Caller<'_, Host>, ptr: i32, len: i32| -> Result<(), wasmi::Error> {
                 let line = read(&caller, ptr, len.min(4096))?;
-                info!(
-                    "plugin {}: {}",
-                    caller.data().id,
-                    String::from_utf8_lossy(&line)
-                );
+                // At debug level, on one line: a plugin sees the query, and
+                // the node logs no queries by default.
+                let line: String = String::from_utf8_lossy(&line)
+                    .chars()
+                    .map(|c| if c.is_control() { ' ' } else { c })
+                    .collect();
+                debug!("plugin {}: {line}", caller.data().id);
                 Ok(())
             },
         )?;

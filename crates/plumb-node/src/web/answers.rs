@@ -299,6 +299,9 @@ pub(crate) fn render_profile(out: &mut String, profile: &ProfileAnswer, icon: Op
     );
 }
 
+/// The licence of Wikipedia's text, linked under a description taken from it.
+const WIKIPEDIA_LICENCE: &str = "https://creativecommons.org/licenses/by-sa/4.0/";
+
 /// The info box, as an `<aside>` beside the results.
 pub(crate) fn render_info_box(out: &mut String, info: &InfoBox) {
     let _ = write!(
@@ -347,8 +350,13 @@ pub(crate) fn render_info_box(out: &mut String, info: &InfoBox) {
         }
         out.push_str("</ul>");
     }
+    // A description from a Wikipedia article is under its licence, which
+    // asks for credit; Wikidata's are CC0.
+    let licence =
+        (info.article.is_some() && info.description.is_some()).then_some(WIKIPEDIA_LICENCE);
     let links: Vec<String> = [
         (info.article.as_deref(), "Wikipedia"),
+        (licence, "CC BY-SA"),
         (info.wikidata.as_deref(), "Wikidata"),
     ]
     .into_iter()
@@ -435,6 +443,10 @@ mod tests {
         assert!(html.contains("<h2>Albert Einstein</h2>"));
         assert!(html.contains("German-born physicist"));
         assert!(html.contains("href=\"https://en.wikipedia.org/wiki/Albert_Einstein\""));
+        assert!(html.contains(
+            "Wikipedia</a> &middot; <a href=\"https://creativecommons.org/licenses/by-sa/4.0/\" \
+             rel=\"noreferrer\">CC BY-SA</a>"
+        ));
     }
 
     #[test]

@@ -103,6 +103,15 @@ pub fn load_or_create(dir: &Path) -> Result<NodeCert> {
         {
             create(dir)
         }
+        // The key is written first, so a key alone is a pair a crash cut
+        // short: no fingerprint of it was ever shown. Made again.
+        (Err(cert), Ok(_)) if cert.kind() == std::io::ErrorKind::NotFound => {
+            warn!(
+                "{KEY_FILE} in {} has no {CERT_FILE}; making a new pair",
+                dir.display()
+            );
+            create(dir)
+        }
         (Err(err), _) | (_, Err(err)) => Err(err).with_context(|| {
             format!(
                 "reading {CERT_FILE} and {KEY_FILE} in {}; delete both to make a new \
@@ -148,6 +157,8 @@ fn write_new(path: &Path, bytes: &[u8], private: bool) -> Result<()> {
         let _ = std::fs::remove_file(&tmp);
         return Err(err).with_context(|| format!("writing {}", path.display()));
     }
+    // So the key is on disk before the certificate, after a power cut too.
+    crate::sync_parent_dir(path);
     Ok(())
 }
 
@@ -465,10 +476,22 @@ mod tests {
                 .mode();
             assert_eq!(mode & 0o777, 0o600);
         }
-        // Half a pair is not silently replaced.
+        // A certificate without its key is not silently replaced.
         std::fs::remove_file(dir.path().join(KEY_FILE)).unwrap();
         assert!(load_or_create(dir.path()).is_err());
         assert_eq!(existing_fingerprint(dir.path()), None);
+    }
+
+    #[test]
+    fn a_key_left_alone_by_a_crash_is_made_again_with_its_certificate() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = load_or_create(dir.path()).unwrap();
+        std::fs::remove_file(dir.path().join(CERT_FILE)).unwrap();
+        let made = load_or_create(dir.path()).unwrap();
+        assert_ne!(made.fingerprint(), first.fingerprint());
+        assert_eq!(existing_fingerprint(dir.path()), Some(made.fingerprint()));
+        let again = load_or_create(dir.path()).unwrap();
+        assert_eq!(again.fingerprint(), made.fingerprint());
     }
 
     #[test]

@@ -254,6 +254,26 @@ impl FillState {
             .with_context(|| format!("saving {}", path.display()))
     }
 
+    /// Notes the topics kept now (`key`). New topics make room (`prune`)
+    /// and read on from where the best sites stopped again. With no
+    /// storage limit (`storage_limit_mb` 0) nothing is dropped to make
+    /// room: the best sites' count is forgotten, and a prune not yet done
+    /// is called off.
+    fn set_topics(&mut self, key: String, storage_limit_mb: u64) {
+        if storage_limit_mb == 0 {
+            self.focus_base = None;
+            self.prune = false;
+        }
+        if self.focus_key != key {
+            if let Some(from) = self.focus_from {
+                self.next = from;
+                self.done_at = None;
+                self.prune = self.focus_base.is_some();
+            }
+            self.focus_key = key;
+        }
+    }
+
     /// Blackhole: reads `peer`'s list next. Another node's list goes on
     /// from where reading it stopped, or from the top, and the list being
     /// left keeps its place; the same list once gone through starts over.
@@ -548,17 +568,7 @@ async fn fill_round(inner: &Arc<Inner>) -> Result<()> {
     } else {
         inner.keep_topics()
     };
-    let key = topics.key();
-    if state.focus_key != key {
-        // New topics: make room, then read on from where the best sites
-        // stopped again.
-        if let Some(from) = state.focus_from {
-            state.next = from;
-            state.done_at = None;
-            state.prune = state.focus_base.is_some();
-        }
-        state.focus_key = key;
-    }
+    state.set_topics(topics.key(), inner.settings().storage_limit_mb);
     if state.prune {
         state.detail = "Making room for sites about the new topics".into();
         inner.set_fill(state.clone());
@@ -848,9 +858,12 @@ impl Inner {
     /// index from what is left. Returns how many were dropped.
     pub(super) fn prune_for_new_topics(&self, set: &mut RecordSet) -> Result<usize> {
         let mut state = self.fill_state();
+        // A node with no storage limit never loses sites to make room.
         let dropped = match state.focus_base {
-            Some(base) => prune_for_topics(set, base as usize, &self.keep_topics()),
-            None => 0,
+            Some(base) if self.settings().storage_limit_mb > 0 => {
+                prune_for_topics(set, base as usize, &self.keep_topics())
+            }
+            _ => 0,
         };
         state.prune = false;
         state.detail = format!("Made room for the new topics: dropped {dropped} sites");
@@ -925,6 +938,32 @@ mod tests {
         assert_eq!(room(1_000, 500 * MB, 200 * MB), Ok(Some(50 * MB)));
         assert!(room(1_000, 900 * MB, 0).is_err());
         assert!(room(1_000, 800 * MB, 100 * MB).is_err());
+    }
+
+    #[test]
+    fn new_topics_drop_sites_only_under_a_storage_limit() {
+        let focused = || FillState {
+            next: 9_000,
+            focus_from: Some(4_000),
+            focus_base: Some(3_000),
+            focus_key: "chess".into(),
+            ..FillState::default()
+        };
+        // Under a limit, new topics make room and read on from the best.
+        let mut state = focused();
+        state.set_topics("go".into(), 1_000);
+        assert!(state.prune);
+        assert_eq!((state.next, state.focus_key.as_str()), (4_000, "go"));
+        // With none (the limit was taken off), nothing is dropped.
+        let mut state = focused();
+        state.set_topics("go".into(), 0);
+        assert!(!state.prune);
+        assert_eq!(state.focus_base, None);
+        // A prune not yet done when the limit is taken off is called off.
+        let mut state = focused();
+        state.prune = true;
+        state.set_topics("chess".into(), 0);
+        assert!(!state.prune);
     }
 
     #[test]
@@ -1047,7 +1086,7 @@ mod tests {
             total: 1_575_323,
             ..FillState::default()
         };
-        // New York went away part-way: the MacBook's list from the top.
+        // New York went away part-way: the laptop's list from the top.
         state.read_list_of("mac".into());
         assert_eq!((state.peer.as_deref(), state.next), (Some("mac"), 0));
         state.next = 2_000;

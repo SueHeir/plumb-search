@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 use axum::extract::{ConnectInfo, DefaultBodyLimit, Request, State};
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::{header, Extensions, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
@@ -53,30 +53,49 @@ pub(super) fn routes(router: Router<AppState>) -> Router<AppState> {
     )
 }
 
-/// Token buckets of tool calls, per client address.
-#[derive(Debug, Default)]
+/// Token buckets of requests, per client address: tool calls to `/mcp`
+/// by default.
+#[derive(Debug)]
 pub(crate) struct Limiter {
+    burst: f64,
+    per_minute: f64,
     clients: Mutex<HashMap<Option<IpAddr>, (f64, Instant)>>,
 }
 
+impl Default for Limiter {
+    fn default() -> Self {
+        Limiter::new(BURST, PER_MINUTE)
+    }
+}
+
 impl Limiter {
-    /// Takes one call for `client`, or says how many seconds until it may.
-    fn take(&self, client: Option<IpAddr>, now: Instant) -> Result<(), u64> {
+    /// `burst` requests at once, then `per_minute`.
+    pub(crate) fn new(burst: f64, per_minute: f64) -> Self {
+        Limiter {
+            burst,
+            per_minute,
+            clients: Mutex::default(),
+        }
+    }
+
+    /// Takes one request for `client`, or says how many seconds until it may.
+    pub(crate) fn take(&self, client: Option<IpAddr>, now: Instant) -> Result<(), u64> {
+        let (burst, rate) = (self.burst, self.per_minute / 60.0);
         let mut clients = self.clients.lock().unwrap_or_else(|e| e.into_inner());
         if clients.len() >= MAX_CLIENTS && !clients.contains_key(&client) {
             // Forget the clients whose buckets have filled up again.
             clients.retain(|_, (tokens, at)| {
-                *tokens + now.duration_since(*at).as_secs_f64() * PER_MINUTE / 60.0 < BURST
+                *tokens + now.duration_since(*at).as_secs_f64() * rate < burst
             });
         }
-        let (tokens, at) = clients.entry(client).or_insert((BURST, now));
-        *tokens = (*tokens + now.duration_since(*at).as_secs_f64() * PER_MINUTE / 60.0).min(BURST);
+        let (tokens, at) = clients.entry(client).or_insert((burst, now));
+        *tokens = (*tokens + now.duration_since(*at).as_secs_f64() * rate).min(burst);
         *at = now;
         if *tokens >= 1.0 {
             *tokens -= 1.0;
             Ok(())
         } else {
-            Err(((1.0 - *tokens) * 60.0 / PER_MINUTE).ceil() as u64)
+            Err(((1.0 - *tokens) / rate).ceil() as u64)
         }
     }
 }
@@ -98,9 +117,19 @@ impl SharedReader {
 }
 
 /// Whether the request comes from this computer and no proxy passed it on.
+/// The address it was sent to must be a local name as well: a web page
+/// whose DNS name was rebound to 127.0.0.1 also connects from loopback.
 fn from_this_computer(request: &Request) -> bool {
     let headers = request.headers();
-    if headers.contains_key("x-forwarded-for") || headers.contains_key(header::FORWARDED) {
+    if super::control::FORWARDED_HEADERS
+        .iter()
+        .any(|name| headers.contains_key(*name))
+    {
+        return false;
+    }
+    if !super::request_origin(headers, request.uri())
+        .is_some_and(|own| super::panel::local_origin(&own))
+    {
         return false;
     }
     request
@@ -109,23 +138,44 @@ fn from_this_computer(request: &Request) -> bool {
         .is_some_and(|ConnectInfo(peer)| peer.ip().to_canonical().is_loopback())
 }
 
-/// Who is asking: the peer, or for a proxy on this computer the address
-/// it forwards for.
+/// Who is asking, for the rate limit: the peer, or for a proxy on this
+/// computer or a private network (Caddy in front of a Docker container)
+/// the address it forwards for. An IPv6 client is its /64 network, which
+/// is what one home or server gets.
 fn client(request: &Request) -> Option<IpAddr> {
-    let peer = request
-        .extensions()
+    client_of(request.extensions(), request.headers())
+}
+
+/// [`client`] from a request's parts.
+pub(super) fn client_of(extensions: &Extensions, headers: &HeaderMap) -> Option<IpAddr> {
+    let peer = extensions
         .get::<ConnectInfo<SocketAddr>>()
         .map(|ConnectInfo(peer)| peer.ip().to_canonical())?;
-    if !peer.is_loopback() {
-        return Some(peer);
+    let forwarded = || {
+        headers
+            .get("x-forwarded-for")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.rsplit(',').next())
+            .and_then(|last| last.trim().parse::<IpAddr>().ok())
+            .map(|ip| ip.to_canonical())
+    };
+    let client = match is_private(peer).then(forwarded).flatten() {
+        Some(forwarded) => forwarded,
+        None => peer,
+    };
+    Some(match client {
+        IpAddr::V6(ip) => IpAddr::V6((u128::from(ip) & !((1u128 << 64) - 1)).into()),
+        ip => ip,
+    })
+}
+
+/// Whether `ip` is this computer or on a private network, where a proxy
+/// may stand in front of the node.
+fn is_private(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => ip.is_loopback() || ip.is_private(),
+        IpAddr::V6(ip) => ip.is_loopback() || (ip.segments()[0] & 0xfe00) == 0xfc00,
     }
-    let forwarded = request
-        .headers()
-        .get("x-forwarded-for")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.rsplit(',').next())
-        .and_then(|last| last.trim().parse::<IpAddr>().ok());
-    Some(forwarded.unwrap_or(peer))
 }
 
 /// Whether the request came from a web page of another site.
@@ -279,7 +329,9 @@ mod tests {
     #[test]
     fn only_this_computer_reads_pages() {
         let request = |peer: Option<&str>, forwarded: bool| {
-            let mut request = Request::builder().uri("/mcp");
+            let mut request = Request::builder()
+                .uri("/mcp")
+                .header(header::HOST, "127.0.0.1:7586");
             if forwarded {
                 request = request.header("x-forwarded-for", "203.0.113.9");
             }
@@ -300,6 +352,52 @@ mod tests {
             false
         )));
         assert!(!from_this_computer(&request(None, false)));
+        // A web page whose name was rebound to 127.0.0.1.
+        let mut rebound = request(Some("127.0.0.1:5000"), false);
+        rebound
+            .headers_mut()
+            .insert(header::HOST, "evil.example:7586".parse().unwrap());
+        assert!(!from_this_computer(&rebound));
+        let mut by_name = request(Some("127.0.0.1:5000"), false);
+        by_name
+            .headers_mut()
+            .insert(header::HOST, "localhost:7586".parse().unwrap());
+        assert!(from_this_computer(&by_name));
+    }
+
+    #[test]
+    fn clients_behind_a_proxy_are_told_apart() {
+        let request = |peer: &str, forwarded: Option<&str>| {
+            let mut request = Request::builder().uri("/mcp");
+            if let Some(forwarded) = forwarded {
+                request = request.header("x-forwarded-for", forwarded);
+            }
+            let mut request = request.body(axum::body::Body::empty()).unwrap();
+            request
+                .extensions_mut()
+                .insert(ConnectInfo(peer.parse::<SocketAddr>().unwrap()));
+            request
+        };
+        let ip = |text: &str| Some(text.parse::<IpAddr>().unwrap());
+        // Caddy on this computer, or in front of a Docker container.
+        assert_eq!(
+            client(&request("127.0.0.1:5000", Some("203.0.113.9"))),
+            ip("203.0.113.9")
+        );
+        assert_eq!(
+            client(&request("172.18.0.1:5000", Some("203.0.113.9"))),
+            ip("203.0.113.9")
+        );
+        // Someone on the internet cannot pick their own address.
+        assert_eq!(
+            client(&request("198.51.100.7:5000", Some("203.0.113.9"))),
+            ip("198.51.100.7")
+        );
+        // An IPv6 network counts as one client.
+        assert_eq!(
+            client(&request("[2001:db8:1:2:3:4:5:6]:5000", None)),
+            ip("2001:db8:1:2::")
+        );
     }
 
     #[test]

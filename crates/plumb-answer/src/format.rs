@@ -13,14 +13,12 @@ pub fn format_number(x: f64, digits: usize) -> Option<String> {
     }
     let magnitude = x.abs().log10().floor() as i32;
     if !(-6..15).contains(&magnitude) {
-        let mantissa = x / 10f64.powi(magnitude);
-        let mantissa = trim(&format!("{:.*}", digits.saturating_sub(1).min(8), mantissa));
-        // 9.9999999 can round up to 10.
-        let (mantissa, magnitude) = if mantissa.trim_start_matches('-') == "10" {
-            (mantissa.replace("10", "1"), magnitude + 1)
-        } else {
-            (mantissa, magnitude)
-        };
+        // Rust's own exponent form: dividing by 10^magnitude overflows to
+        // infinity for subnormals, and its rounding carries 9.99… to 1e+1.
+        let sci = format!("{:.*e}", digits.saturating_sub(1).min(8), x);
+        let (mantissa, exponent) = sci.split_once('e')?;
+        let magnitude: i32 = exponent.parse().ok()?;
+        let mantissa = trim(mantissa);
         return Some(format!("{mantissa} × 10{}", superscript(magnitude)));
     }
     let decimals = (digits as i32 - 1 - magnitude).clamp(0, 15) as usize;
@@ -97,5 +95,13 @@ mod tests {
         assert_eq!(f(0.0, 12).unwrap(), "0");
         assert_eq!(f(f64::INFINITY, 12), None);
         assert_eq!(f(0.000123, 6).unwrap(), "0.000123");
+        assert_eq!(f(9.9999999999e20, 6).unwrap(), "1 × 10²¹");
+    }
+
+    #[test]
+    fn formats_subnormals() {
+        // Subnormals keep few bits, so 1e-320 is really 9.99988867e-321.
+        assert_eq!(f(1e-320, 12).unwrap(), "9.99988867 × 10⁻³²¹");
+        assert_eq!(f(-5e-324, 3).unwrap(), "-4.94 × 10⁻³²⁴");
     }
 }

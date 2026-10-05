@@ -4,9 +4,12 @@
 # - Pull requests: build for linux/amd64 and smoke-test it; nothing is pushed.
 # - Pushes to main and v* tags: build linux/amd64 and linux/arm64 natively on
 #   their own runners, push each by digest, then merge them into one
-#   multi-arch image tagged `latest` (main), the version (v* tags) and
-#   `sha-<commit>`. This is Docker's "distribute build across multiple
-#   runners" pattern: https://docs.docker.com/build/ci/github-actions/multi-platform/
+#   multi-arch image tagged `main` (main), the version (v* tags) and
+#   `sha-<commit>`. `latest` is the newest release: a vX.Y.Z tag gets it only
+#   when no higher release tag exists, so it never moves back to an older
+#   release or ahead to unreleased main. This is Docker's "distribute build
+#   across multiple runners" pattern:
+#   https://docs.docker.com/build/ci/github-actions/multi-platform/
 name: Docker image
 
 on:
@@ -19,16 +22,17 @@ permissions:
   contents: read
 
 # A newer push to a pull request cancels its older run. Runs for main and tags
-# queue instead, so `latest` always ends up at the newest commit.
+# queue instead, so `main` always ends up at the newest commit.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   # docker/metadata-action tag rules, shared by the per-platform labels and the
-  # published tags.
+  # published tags. `latest` is added in the merge job, which knows whether
+  # this is the newest release.
   IMAGE_TAGS: |
-    type=raw,value=latest,enable={{is_default_branch}}
+    type=raw,value=main,enable={{is_default_branch}}
     type=semver,pattern={{version}}
     type=semver,pattern={{major}}.{{minor}}
     type=semver,pattern={{major}},enable=${{ !startsWith(github.ref, 'refs/tags/v0.') }}
@@ -46,10 +50,10 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Build
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           platforms: linux/amd64
           load: true
@@ -63,9 +67,31 @@ jobs:
           # The flags of the image's default command must exist in this build.
           read -ra cmd < <(docker image inspect --format '{{join .Config.Cmd " "}}' plumb-search:ci)
           docker run --rm plumb-search:ci "${cmd[@]}" --help > /dev/null
+          docker run --rm plumb-search:ci healthcheck --help > /dev/null
+          docker run --rm --entrypoint test plumb-search:ci \
+            -s /usr/share/doc/plumb-search/THIRD-PARTY-NOTICES.html
+
+  # A v* tag must name the version in Cargo.toml, which the binary reports.
+  # Runs for every push so the builds can depend on it; only tags are checked.
+  version:
+    name: Check the tag's version
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        if: github.ref_type == 'tag'
+      - name: Compare the tag with Cargo.toml
+        if: github.ref_type == 'tag'
+        run: |
+          version=$(sed -n '/^\[workspace\.package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' Cargo.toml)
+          if [[ ${GITHUB_REF_NAME#v} != "$version" ]]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match version \"$version\" in Cargo.toml"
+            exit 1
+          fi
 
   build:
     name: Build ${{ matrix.platform }}
+    needs: version
     if: github.event_name == 'push'
     strategy:
       fail-fast: false
@@ -89,7 +115,7 @@ jobs:
 
       - name: Docker metadata
         id: meta
-        uses: docker/metadata-action@v6
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ${{ env.IMAGE }}
           flavor: latest=false
@@ -99,18 +125,18 @@ jobs:
             org.opencontainers.image.description=${{ env.IMAGE_DESCRIPTION }}
 
       - name: Log in to GHCR
-        uses: docker/login-action@v4
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Build and push by digest
         id: build
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -127,7 +153,7 @@ jobs:
           touch "$RUNNER_TEMP/digests/${DIGEST#sha256:}"
 
       - name: Upload digest
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: digests-${{ env.PLATFORM_PAIR }}
           path: ${{ runner.temp }}/digests/*
@@ -145,30 +171,48 @@ jobs:
       - name: Prepare
         run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
 
+      # `latest` goes to a release tag (vX.Y.Z, no pre-release suffix) only
+      # when it is the highest release tag in the repository.
+      - name: Is this the newest release?
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          newest=false
+          release='^v[0-9]+\.[0-9]+\.[0-9]+$'
+          if [[ $GITHUB_REF_TYPE == tag && $GITHUB_REF_NAME =~ $release ]]; then
+            top=$(gh api --paginate "repos/$GITHUB_REPOSITORY/tags" --jq '.[].name' \
+              | grep -E "$release" | sort -V | tail -n 1)
+            if [[ $top == "$GITHUB_REF_NAME" ]]; then newest=true; fi
+          fi
+          echo "newest release: $newest"
+          echo "NEWEST_RELEASE=$newest" >> "$GITHUB_ENV"
+
       - name: Download digests
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: ${{ runner.temp }}/digests
           pattern: digests-*
           merge-multiple: true
 
       - name: Log in to GHCR
-        uses: docker/login-action@v4
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Docker metadata
         id: meta
-        uses: docker/metadata-action@v6
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ${{ env.IMAGE }}
           flavor: latest=false
-          tags: ${{ env.IMAGE_TAGS }}
+          tags: |
+            ${{ env.IMAGE_TAGS }}
+            type=raw,value=latest,enable=${{ env.NEWEST_RELEASE }}
 
       # The index annotations are what the GHCR package page shows for a
       # multi-arch image.

@@ -24,7 +24,7 @@ use plumb_ingest::{
     attach_facts, attach_intros, load_cc_domain_ranks, load_intros, load_site_facts, load_tranco,
     load_wikidata_official_sites, parse_wat, Builder, WatExtract, WatStats,
 };
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::cli::IngestArgs;
 use crate::records::{load_records, replace_records};
@@ -80,9 +80,19 @@ pub fn run(args: IngestArgs) -> Result<()> {
     if !args.wat.is_empty() {
         let mut extract = WatExtract::new();
         let mut stats = WatStats::default();
+        // One corrupt or truncated file (common in a large download) does
+        // not throw away the others: it is skipped, with what it gave before
+        // failing kept, and counted.
+        let mut failed_files = 0;
         for path in &args.wat {
-            let file_stats = parse_wat(path, &mut extract)
-                .with_context(|| format!("reading WAT file {}", path.display()))?;
+            let file_stats = match parse_wat(path, &mut extract) {
+                Ok(file_stats) => file_stats,
+                Err(err) => {
+                    warn!("skipping WAT file {}: {err:#}", path.display());
+                    failed_files += 1;
+                    continue;
+                }
+            };
             info!(
                 "{}: {} records, {} pages, {} homepages, {} links",
                 path.display(),
@@ -93,15 +103,19 @@ pub fn run(args: IngestArgs) -> Result<()> {
             );
             stats.add(&file_stats);
         }
+        if failed_files == args.wat.len() {
+            bail!("none of the {failed_files} WAT files could be read");
+        }
         builder.add_wat(&extract);
         println!(
-            "wat       {:>9} homepages       ({} files: {} pages, {} cross-site links to {} domains, {} bad records)",
+            "wat       {:>9} homepages       ({} files: {} pages, {} cross-site links to {} domains, {} bad records, {} unreadable files)",
             extract.homepages.len(),
             args.wat.len(),
             stats.responses,
             stats.links,
             extract.linking_domains.len(),
-            stats.bad_records
+            stats.bad_records,
+            failed_files
         );
     }
 
@@ -406,6 +420,25 @@ mod tests {
         let err = check_inputs_exist(&args_with(&[present, gone_a, gone_b])).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("a.wat") && msg.contains("b.wat"), "{msg}");
+    }
+
+    #[test]
+    fn an_unreadable_wat_file_is_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let empty = file(dir.path(), "empty.wat", "");
+        let broken = file(dir.path(), "broken.wat", "not a WARC file\r\n\r\n");
+        let records = ingest(IngestArgs {
+            wat: vec![broken.clone(), empty],
+            ..writing_to(dir.path().join("out.jsonl"))
+        });
+        assert!(records.is_empty());
+        // With nothing readable, the ingest fails.
+        let err = run(IngestArgs {
+            wat: vec![broken],
+            ..writing_to(dir.path().join("none.jsonl"))
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("none of the 1 WAT files"), "{err}");
     }
 
     #[test]

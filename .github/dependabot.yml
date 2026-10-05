@@ -1,0 +1,11 @@
+# The workflows pin third-party actions to commit SHAs, with the version as a
+# comment; Dependabot proposes newer ones, updating both, once a week.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      github-actions:
+        patterns: ["*"]

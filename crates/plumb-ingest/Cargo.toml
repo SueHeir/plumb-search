@@ -1,9 +1,11 @@
 [package]
 name = "plumb-ingest"
+description = "Loads the public seed datasets (Tranco, Common Crawl, Wikidata) into Plumb Search site records."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+publish = false
 
 [dependencies]
 anyhow = "1.0.104"

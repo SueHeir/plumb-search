@@ -24,6 +24,6 @@ Requests concatenate a fixed-size setup object and encrypted query. Setup is inc
 
 Tests cover binary/empty rows, oversized/malformed framing, input file types, allocation refusal, actual retrievals across the database, constant request/response sizes and fresh randomness for repeated selectors. These are integration and correctness checks, not proofs of selector privacy. CI runs the small profile only.
 
-Measurements and the production integration checklist are in [the handoff](../../docs/reviews/pir-handoff.md).
+Measurements are in [docs/reviews/measurements](../../docs/reviews/measurements); the design direction is in [cache-first-search.md](../../docs/cache-first-search.md).
 
 Primary sources: [published crate](https://crates.io/crates/spiral-rs/0.2.1-alpha.2), [SDK and security-review status](https://github.com/blyssprivacy/sdk), [official v1 profile](https://github.com/blyssprivacy/sdk/blob/fdb7206517c249603b0c91b65f1f29f95272107c/e2e-tests/params/v1.json), [Spiral paper](https://eprint.iacr.org/2022/368).

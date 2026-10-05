@@ -46,7 +46,7 @@
 //!   fill.json          how far filling free space got
 //! ```
 
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
@@ -490,11 +490,9 @@ pub(super) fn append_inbox(inner: &Inner, records: &[SiteRecord]) -> Result<()> 
         .inbox_lock
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .with_context(|| format!("opening {}", path.display()))?;
+    // A last line a crash cut short gets a line break first, so the next
+    // record is not lost with it.
+    let mut file = crate::records::open_journal(path)?;
     file.write_all(&lines)
         .and_then(|()| file.sync_data())
         .with_context(|| format!("writing {}", path.display()))
@@ -536,24 +534,22 @@ pub(super) fn absorb_inbox(inner: &Inner) -> Result<u64> {
     // all in memory.
     let mut changes = Vec::with_capacity(ABSORB_CHUNK);
     let mut n = 0;
-    for line in BufReader::new(file).lines() {
-        let line = line.with_context(|| format!("reading {}", paths.absorbing.display()))?;
-        // A crash can cut the last line short.
-        if let Ok(mut record) = serde_json::from_str::<SiteRecord>(&line) {
-            keep_shared_icon(&icons, &mut record);
-            changes.push(match &topics {
-                Some(topics) if !super::trim::keeps_new_site(&record, topics) => {
-                    Change::RefreshShared { record }
-                }
-                _ => Change::MergeShared { record },
-            });
-        }
+    read_inbox(BufReader::new(file), |mut record| {
+        keep_shared_icon(&icons, &mut record);
+        changes.push(match &topics {
+            Some(topics) if !super::trim::keeps_new_site(&record, topics) => {
+                Change::RefreshShared { record }
+            }
+            _ => Change::MergeShared { record },
+        });
         if changes.len() >= ABSORB_CHUNK {
             store.save(&changes)?;
             n += changes.len() as u64;
             changes.clear();
         }
-    }
+        Ok(())
+    })
+    .with_context(|| format!("reading {}", paths.absorbing.display()))?;
     store.save(&changes)?;
     n += changes.len() as u64;
     drop(changes);
@@ -568,6 +564,33 @@ pub(super) fn absorb_inbox(inner: &Inner) -> Result<u64> {
         info!("folded {n} records from the network into the records file");
     }
     Ok(n)
+}
+
+/// Calls `each` with every record in the inbox `reader` reads, one a
+/// line. A line that is not one (cut short by a crash, or not even UTF-8)
+/// is skipped, so it never holds up the records after it.
+fn read_inbox(
+    mut reader: impl BufRead,
+    mut each: impl FnMut(SiteRecord) -> Result<()>,
+) -> Result<()> {
+    let (mut damaged, mut line) = (0usize, Vec::new());
+    loop {
+        line.clear();
+        if reader.read_until(b'\n', &mut line)? == 0 {
+            break;
+        }
+        if line.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        match serde_json::from_slice::<SiteRecord>(&line) {
+            Ok(record) => each(record)?,
+            Err(_) => damaged += 1,
+        }
+    }
+    if damaged > 0 {
+        warn!("the network inbox had {damaged} damaged lines, skipped");
+    }
+    Ok(())
 }
 
 /// Most sites [`Inner::kept_found`] remembers before it starts over.
@@ -659,6 +682,44 @@ mod tests {
         keep_shared_icon(&icons, &mut record);
         assert!(record.icon.is_none());
         assert!(icons.get("a.com").unwrap().starts_with(b"\x89PNG"));
+    }
+
+    #[test]
+    fn a_damaged_inbox_line_is_skipped_not_fatal() {
+        let line = |domain: &str| {
+            let mut line = serde_json::to_vec(&SiteRecord::new(domain)).unwrap();
+            line.push(b'\n');
+            line
+        };
+        let mut inbox = line("a.com");
+        // Not UTF-8, then a record a crash cut short, given a line break
+        // by the next append.
+        inbox.extend_from_slice(b"\xff\xfe{\"domain\"\n");
+        inbox.extend_from_slice(b"{\"domain\":\"cut.co\n");
+        inbox.extend(line("b.com"));
+        inbox.extend_from_slice(b"\n");
+        let mut domains = Vec::new();
+        read_inbox(inbox.as_slice(), |record| {
+            domains.push(record.domain);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(domains, ["a.com", "b.com"]);
+    }
+
+    #[test]
+    fn appending_to_an_inbox_cut_short_starts_a_new_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("inbox.jsonl");
+        std::fs::write(&path, b"{\"domain\":\"cut.co").unwrap();
+        crate::records::open_journal(&path)
+            .unwrap()
+            .write_all(b"{}\n")
+            .unwrap();
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"{\"domain\":\"cut.co\n{}\n".to_vec()
+        );
     }
 
     fn hit(domain: &str, score: f32) -> Hit {

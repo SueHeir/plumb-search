@@ -6,10 +6,9 @@
 //! [`Resolver`] drops every address that is not globally routable before
 //! reqwest connects, and since reqwest connects only to the addresses it
 //! returns, a second DNS answer cannot slip a private address past the
-//! check. Hosts written as IP addresses are not looked up and so are not
-//! checked; the crawler only requests one when a target URL names it,
-//! because a redirect to another site (which an IP address always is, for a
-//! domain's homepage) is never followed. Names sent through a proxy are not
+//! check. Hosts written as IP addresses are not looked up, so the crawler
+//! checks those itself before each request (icons, feeds and their
+//! redirects can point anywhere). Names sent through a proxy are not
 //! checked either, since the proxy looks them up, which is why the crawler
 //! connects directly unless `CrawlConfig::use_system_proxy` is set.
 

@@ -89,7 +89,7 @@ fn error(status: StatusCode, message: &str) -> Response {
 }
 
 /// Headers that say a request came through a reverse proxy.
-const FORWARDED_HEADERS: [&str; 3] = ["forwarded", "x-forwarded-for", "x-real-ip"];
+pub(super) const FORWARDED_HEADERS: [&str; 3] = ["forwarded", "x-forwarded-for", "x-real-ip"];
 
 /// Lets the request through, or says why not.
 // A response is big, but these run once per request.

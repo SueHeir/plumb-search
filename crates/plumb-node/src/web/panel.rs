@@ -962,10 +962,15 @@ pub(super) fn refusal(request: &Request) -> Option<&'static str> {
         .get::<ConnectInfo<SocketAddr>>()
         // A dual-stack `[::]` listener sees IPv4 peers as `::ffff:127.0.0.1`.
         .is_some_and(|ConnectInfo(peer)| peer.ip().to_canonical().is_loopback());
-    if !local {
+    let headers = request.headers();
+    // A reverse proxy on this computer connects from loopback too, and may
+    // name 127.0.0.1 as the host: what it passes on came from elsewhere.
+    let proxied = super::control::FORWARDED_HEADERS
+        .iter()
+        .any(|name| headers.contains_key(*name));
+    if !local || proxied {
         return Some("Settings can only be changed on the computer Plumb runs on.");
     }
-    let headers = request.headers();
     let own = request_origin(headers, request.uri());
     // A page whose DNS name was rebound to 127.0.0.1 is same-origin with
     // itself, so the Origin check alone would let it through: the page must
@@ -985,7 +990,7 @@ pub(super) fn refusal(request: &Request) -> Option<&'static str> {
 }
 
 /// Whether `origin` names this computer: `localhost` or a loopback address.
-fn local_origin(origin: &str) -> bool {
+pub(super) fn local_origin(origin: &str) -> bool {
     match Url::parse(origin)
         .ok()
         .and_then(|url| url.host().map(|h| h.to_owned()))
@@ -1138,7 +1143,8 @@ pub(super) fn render_panel(view: &PanelView<'_>) -> String {
         ));
     }
     body.push_str(&format!("</nav><div class=\"section-heading\"><h2>{}</h2><a href=\"{base}?section={section}\">Refresh status</a></div>", escape_html(title)));
-    if active != saved && status.can_restart && writable {
+    // Only this node's own panel has a restart route; remote nodes do not.
+    if active != saved && status.can_restart && writable && base == "/app" {
         body.push_str(&format!("<form method=\"post\" action=\"{base}/restart\" class=\"notice\" role=\"status\"><p>Feature changes saved. They apply once the node restarts, which takes a few seconds; search pauses meanwhile.</p><button type=\"submit\">Restart to apply</button></form>"));
     } else if active != saved {
         body.push_str("<p class=\"notice\" role=\"status\">Feature changes saved. Quit and reopen the desktop app, or restart the Docker container, to apply them. Closing the desktop window does not quit the app.</p>");
@@ -1300,7 +1306,7 @@ pub(super) fn render_panel(view: &PanelView<'_>) -> String {
         }
         _ => {
             render_about(&mut body, status, data_dir, now);
-            body.push_str(&format!("<p>Desktop and Docker run the same node and settings panel.</p><p><a href=\"https://github.com/SueHeir/plumb-search\" target=\"_blank\">Source code &amp; documentation ↗</a> · <a href=\"{site}/api/status\" target=\"_blank\">Diagnostic status ↗</a></p><p class=\"hint\">Desktop: use the tray or menu bar for Start at login and Quit Plumb Search.</p>"));
+            body.push_str(&format!("<p>Desktop and Docker run the same node and settings panel.</p><p>Its data comes from Wikipedia, Stack Overflow and ecosyste.ms (CC BY-SA 4.0), OpenStreetMap (ODbL), Wikidata, OpenAlex and Open Library (CC0), GitHub, Tranco, Common Crawl and the Block List Project.</p><p><a href=\"https://github.com/SueHeir/plumb-search\" target=\"_blank\">Source code &amp; documentation ↗</a> · <a href=\"https://github.com/SueHeir/plumb-search#data-sources\" target=\"_blank\">Data sources &amp; licences ↗</a> · <a href=\"{site}/api/status\" target=\"_blank\">Diagnostic status ↗</a></p><p class=\"hint\">Desktop: use the tray or menu bar for Start at login and Quit Plumb Search.</p>"));
         }
     }
     body.push_str("</main>");
