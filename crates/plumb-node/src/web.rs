@@ -144,6 +144,18 @@ pub trait SearchBackend: Send + Sync {
     }
     /// Number of sites that can be found.
     fn num_docs(&self) -> u64;
+    /// The places `query` asks for, when it asks for places somewhere
+    /// ("pizza in denver"), around `home`, the searcher's own town, for
+    /// "near me"; see [`plumb_index::places`]. By default there are none.
+    fn places(
+        &self,
+        query: &str,
+        home: Option<&str>,
+        country: Option<&str>,
+    ) -> Option<plumb_index::places::PlaceResults> {
+        let _ = (query, home, country);
+        None
+    }
 }
 
 /// A [`Searcher`] with fixed ranking settings.

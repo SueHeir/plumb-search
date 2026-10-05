@@ -75,6 +75,14 @@ pub const SETS: &[SetInfo] = &[
         pages: 2_000_000,
         bytes_per_page: 160,
     },
+    // Searched apart from the pages, by where they are (see
+    // `crate::places`).
+    SetInfo {
+        id: plumb_index::places::PLACES_SET,
+        name: "Places (OpenStreetMap)",
+        pages: 25_000_000,
+        bytes_per_page: 130,
+    },
 ];
 
 impl SetInfo {
@@ -447,6 +455,7 @@ impl Wanted {
         Wanted {
             sets: SETS
                 .iter()
+                .filter(|set| set.id != plumb_index::places::PLACES_SET)
                 .filter_map(|set| {
                     let pages = sets.size(set.id).pages(storage_limit_mb);
                     let file = set.file(data_dir);

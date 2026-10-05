@@ -112,6 +112,7 @@ mod fill;
 pub mod journal;
 mod network;
 mod pages;
+mod places;
 pub mod schedule;
 pub(crate) mod store;
 mod worker;
@@ -1003,6 +1004,8 @@ struct Inner {
     /// The page index searched next to the sites, and its key; `None`
     /// while no page set is kept.
     pages: RwLock<Option<(String, Arc<plumb_index::pages::PageSearcher>)>>,
+    /// The place index and its key; `None` while no places are kept.
+    places: RwLock<Option<(String, Arc<plumb_index::places::PlaceSearcher>)>>,
 }
 
 /// Failed work the panel can have tried again now.
@@ -1210,6 +1213,7 @@ impl Inner {
             journal,
             meaning_retry: AtomicBool::new(false),
             pages: RwLock::new(None),
+            places: RwLock::new(None),
         }
     }
 
@@ -1710,6 +1714,15 @@ impl SearchBackend for Inner {
         };
         pages::add_pages(self, query, &mut results);
         Ok(results)
+    }
+
+    fn places(
+        &self,
+        query: &str,
+        home: Option<&str>,
+        country: Option<&str>,
+    ) -> Option<plumb_index::places::PlaceResults> {
+        places::search(self, query, home, country)
     }
 
     fn num_docs(&self) -> u64 {
