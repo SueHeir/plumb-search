@@ -229,6 +229,8 @@ async fn step(inner: &Arc<Inner>) -> Result<Next> {
     if let Some(pause) = pause {
         inner.refresh_requested.store(false, Ordering::SeqCst);
         let until = pause.until.unwrap_or_else(|| store::next_day(now_unix()));
+        // Over the storage limit: look again when trimming is due.
+        let until = super::trim::next_due(inner).map_or(until, |due| due.min(until));
         return Ok(Next::IdleUntil(Some(
             wikidata_due.map_or(until, |due| due.min(until)),
         )));

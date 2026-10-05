@@ -78,6 +78,32 @@ pub(super) fn due(inner: &Inner) -> bool {
     now >= since.saturating_add(OVER_FOR)
 }
 
+/// When [`due`] may next say yes, while the node is over its storage
+/// limit, so a node paused by the limit does not wait for the next day
+/// to trim. `None` when it has no limit or is not over it.
+pub(super) fn next_due(inner: &Inner) -> Option<u64> {
+    if inner.settings().storage_limit_mb == 0 {
+        return None;
+    }
+    next_due_at(
+        inner.over_since.load(Ordering::SeqCst),
+        inner.last_trim.load(Ordering::SeqCst),
+    )
+}
+
+/// [`OVER_FOR`] after going over at `over_since` (0 when not over), and
+/// no sooner than [`TRIM_AGAIN_AFTER`] after the last look at `last_trim`.
+fn next_due_at(over_since: u64, last_trim: u64) -> Option<u64> {
+    if over_since == 0 {
+        return None;
+    }
+    let again = match last_trim {
+        0 => 0,
+        last => last.saturating_add(TRIM_AGAIN_AFTER),
+    };
+    Some(over_since.saturating_add(OVER_FOR).max(again))
+}
+
 /// Whether records other nodes share may add sites the node does not hold
 /// yet: not once the data folder is at [`FILL_UP_TO_PERCENT`] of the limit.
 pub(super) fn takes_new_sites(inner: &Inner) -> bool {
@@ -252,6 +278,19 @@ mod tests {
         };
         // Only the one unprotected site of the four lowest goes first.
         assert_eq!(pick_drops(&set, 1, 1, &keep), vec![last(3)]);
+    }
+
+    #[test]
+    fn a_node_over_the_limit_trims_once_it_has_been_over_long_enough() {
+        assert_eq!(next_due_at(0, 0), None, "not over");
+        assert_eq!(next_due_at(1_000, 0), Some(1_000 + OVER_FOR));
+        // Not again within the hour after the last look.
+        assert_eq!(
+            next_due_at(1_000, 5_000),
+            Some(5_000 + TRIM_AGAIN_AFTER),
+            "after a look"
+        );
+        assert_eq!(next_due_at(10_000, 1), Some(10_000 + OVER_FOR));
     }
 
     #[test]
