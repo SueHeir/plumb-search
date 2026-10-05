@@ -108,6 +108,26 @@ once and 6 a minute from one node, so a new node cannot swamp a small
 server. The panel's "Fill free space with the network's crawls" box (on
 by default, in the desktop app too) and `--no-fill` turn it off.
 
+**Blackhole** (Liz, 2026-10-05: "a blackhole setting for docker nodes that
+just tries to get all the data possible"). `plumb run --network
+--blackhole` is for a server with disk and memory to spare. It:
+
+- fills from every connected trusted node, not just one: once through one
+  node's list it goes on to the next, and goes through each again a day
+  after it last did (`blackhole_peer` in `node/fill.rs`; the panel's Storage
+  card and `fill.lists_done` in `/api/status` show how many lists it holds);
+- keeps every page set left on Automatic in full (Wikipedia, GitHub, Stack
+  Overflow, books, papers), whatever the storage limit; sets turned off or
+  cut to a number on the panel stay so;
+- keeps the network's crawl batches for good, unless `--keep-batches-days`
+  is given, and asks each node it meets for all the batches still taken
+  (the last 7 days) rather than the last 3.
+
+The storage limit, the day's download limit and the memory an index build
+may take still hold, and it follows the node's trust rules: fill records and
+page set files only come from trusted nodes, and other crawls still need a
+second crawler to agree.
+
 **Setting up from the network** (Liz, 2026-10-04: "new nodes don't need
 to pull from wiki or anywhere anymore"). A new node in the network that
 trusts a node sets up from it instead of downloading the seed data: it asks
