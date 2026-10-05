@@ -145,6 +145,10 @@ impl BucketSource for ServedIndex {
             }
         }
     }
+    fn icon(&self, domain: &str) -> Option<String> {
+        icons::to_shared(&IconStore::new(&self.0.paths.icons).get(domain)?)
+    }
+
     fn page_set_file(&self, set: &str) -> Option<PathBuf> {
         crate::pages::SetInfo::find(set)?.servable_file(&self.0.paths.data)
     }
