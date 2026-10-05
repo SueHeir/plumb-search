@@ -2813,41 +2813,50 @@ impl Task {
             self.refuse(id);
             return;
         }
-        let held = {
-            let mut store = self.lock_store();
-            if let Err(err) = store.insert(&batch) {
-                warn!("cannot keep batch {id}: {err:#}");
-                return;
-            }
-            store.len()
+        // Headlines skip agreement, as icons do: only trusted crawlers'
+        // are taken, and they go to the node's headline store, not its
+        // records (records carrying only headlines; see `accept_news`).
+        let news = if trusted {
+            accept_news(&batch, now)
+        } else {
+            Vec::new()
         };
+        let lines = batch.records.len();
+        let made = batch.header.header.created_at;
+        // Written and synced off the swarm task.
+        let store = self.store.clone();
+        let status = self.status.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut store = store.lock().unwrap_or_else(PoisonError::into_inner);
+            match store.insert(&batch) {
+                Ok(()) => {
+                    let held = store.len();
+                    drop(store);
+                    status
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .batches_held = held;
+                }
+                Err(err) => warn!("cannot keep batch {id}: {err:#}"),
+            }
+        });
         let kept = accepted.len();
-        let confirmed = self
-            .agreement
-            .observe(crawler, accepted, batch.header.header.created_at);
+        let confirmed = self.agreement.observe(crawler, accepted, made);
         self.count_credits();
         info!(
-            "received batch {id} from {from}: kept {kept} of {} records crawled by {crawler}, {} now confirmed by a second crawler",
-            batch.records.len(),
+            "received batch {id} from {from}: kept {kept} of {lines} records crawled by {crawler}, {} now confirmed by a second crawler",
             confirmed.len()
         );
         let agreement = self.agreement.status();
         self.with_status(|s| {
             s.batches_received += 1;
-            s.batches_held = held;
             s.agreement = agreement;
         });
         if !confirmed.is_empty() {
             let _ = self.records.send(confirmed);
         }
-        // Headlines skip agreement, as icons do: only trusted crawlers'
-        // are taken, and they go to the node's headline store, not its
-        // records (records carrying only headlines; see `accept_news`).
-        if trusted {
-            let news = accept_news(&batch, now);
-            if !news.is_empty() {
-                let _ = self.records.send(news);
-            }
+        if !news.is_empty() {
+            let _ = self.records.send(news);
         }
     }
 
@@ -3489,8 +3498,11 @@ impl Task {
             .filter(|(_, granted)| **granted)
             .map(|(peer, _)| peer.to_string())
             .collect();
-        let held = self.lock_store().len();
-        let reports_held = self.lock_reports().len();
+        // Not waited for: a lock held by work off the swarm task keeps the
+        // last count instead.
+        let held = peek(&self.store, BatchStore::len);
+        let reports_held = peek(&self.reports, ReportStore::len);
+        let tokens_held = peek(&self.wallet, Wallet::total);
         let mut peers: Vec<PeerView> = self
             .swarm
             .connected_peers()
@@ -3549,11 +3561,7 @@ impl Task {
                 at
             },
             tokens_spent: self.tokens_spent.load(std::sync::atomic::Ordering::Relaxed),
-            tokens_held: self
-                .wallet
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .total(),
+            tokens_held: 0,
         };
         self.with_status(|s| {
             s.peers = peers;
@@ -3562,15 +3570,32 @@ impl Task {
             s.friends_of_friends = friends_of_friends;
             s.problem = problem;
             s.alone_since = alone_since;
-            s.credits = credits;
+            let tokens_held = tokens_held.unwrap_or(s.credits.tokens_held);
+            s.credits = CreditStatus {
+                tokens_held,
+                ..credits
+            };
             s.listening = listening;
             s.reachable_at = reachable_at;
             s.connected_peers = connected_peers;
             s.relaying_peers = relaying_peers;
             s.relays = relays;
-            s.batches_held = held;
-            s.reports_held = reports_held;
+            if let Some(held) = held {
+                s.batches_held = held;
+            }
+            if let Some(reports_held) = reports_held {
+                s.reports_held = reports_held;
+            }
         });
+    }
+}
+
+/// `read` of what `lock` guards, unless another thread holds it now.
+fn peek<T, R>(lock: &Mutex<T>, read: impl FnOnce(&T) -> R) -> Option<R> {
+    match lock.try_lock() {
+        Ok(guard) => Some(read(&guard)),
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => Some(read(&poisoned.into_inner())),
+        Err(std::sync::TryLockError::WouldBlock) => None,
     }
 }
 
