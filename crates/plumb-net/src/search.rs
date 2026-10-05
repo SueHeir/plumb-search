@@ -396,7 +396,9 @@ async fn round(
             out.rejected += 1;
             continue;
         };
-        out.answered_by.push(answerer);
+        if earns(&checked) {
+            out.answered_by.push(answerer);
+        }
         if let Some(records) = keep {
             fetched.entry(bucket).or_default().push(records);
         }
@@ -417,6 +419,13 @@ async fn round(
     found.sort_by(|a, b| a.record.domain.cmp(&b.record.domain));
     out.found = found;
     out
+}
+
+/// Whether an answer earns its node credits here (see
+/// [`crate::credits`]): only one holding a signed crawl that checked out,
+/// so a node cannot earn by answering every request with nothing.
+fn earns(checked: &[FoundSite]) -> bool {
+    checked.iter().any(|site| site.verified)
 }
 
 /// Search retained buckets locally, including stale and valid empty answers.
@@ -1009,6 +1018,16 @@ mod tests {
         let checked = check_answer(vec![honest], now).unwrap();
         assert!(checked[0].verified);
         assert_eq!(checked[0].record.title.as_deref(), Some("Real Bank"));
+    }
+
+    #[test]
+    fn only_an_answer_with_a_signed_crawl_earns_credits() {
+        assert!(!earns(&check_answer(Vec::new(), 0).unwrap()));
+        let unsigned = check_answer(vec![item(&SiteRecord::new("a.com"))], 0).unwrap();
+        assert!(!earns(&unsigned));
+        let mut signed = unsigned;
+        signed[0].verified = true;
+        assert!(earns(&signed));
     }
 
     #[test]
