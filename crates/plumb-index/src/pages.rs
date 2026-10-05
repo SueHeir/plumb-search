@@ -26,7 +26,7 @@ use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 use plumb_core::article::{article_url, Article};
-use plumb_core::normalize_text;
+use plumb_core::{adult_level, host_of, normalize_text, AdultLevel, Operators, SafeSearch};
 use serde::{Deserialize, Serialize};
 use tantivy::collector::TopDocs;
 use tantivy::query::{BooleanQuery, Occur, Query, TermQuery};
@@ -71,6 +71,9 @@ pub struct Page {
     pub views: u64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub aliases: Vec<String>,
+    /// The Wikidata item a Wikipedia article is about (`Q937`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item: Option<String>,
 }
 
 impl Page {
@@ -84,6 +87,7 @@ impl Page {
             site: article.site,
             views: article.views,
             aliases: article.aliases,
+            item: article.item,
         }
     }
 
@@ -98,6 +102,7 @@ impl Page {
             site: repo.site,
             views: repo.views,
             aliases: repo.aliases,
+            item: None,
         }
     }
 
@@ -115,6 +120,7 @@ impl Page {
             site: None,
             views: question.views,
             aliases: question.aliases,
+            item: None,
         }
     }
 
@@ -132,6 +138,7 @@ impl Page {
             site: None,
             views: book.views,
             aliases: book.aliases,
+            item: None,
         }
     }
 
@@ -152,6 +159,7 @@ impl Page {
             site: None,
             views: paper.views,
             aliases: paper.aliases,
+            item: None,
         }
     }
 
@@ -200,6 +208,18 @@ impl Page {
             "OpenAlex"
         } else {
             &self.set
+        }
+    }
+
+    /// The language the page is in, when its set says: `en` for
+    /// English Wikipedia, GitHub and Stack Overflow.
+    pub fn language(&self) -> Option<&str> {
+        if let Some(lang) = self.set.strip_prefix("wikipedia-") {
+            Some(lang)
+        } else if self.set == GITHUB_SET || self.set == STACKOVERFLOW_SET {
+            Some("en")
+        } else {
+            None
         }
     }
 
@@ -584,7 +604,7 @@ impl PageSearcher {
                 continue;
             };
             let page: Page = serde_json::from_str(stored)?;
-            let (mut name, named) = self.name_match(&page, &joined, &query_words);
+            let (mut name, named) = self.name_match(&page, query, &joined, &query_words);
             if !named {
                 name = name.max(self.question_match(&page, &stems));
             }
@@ -641,19 +661,27 @@ impl PageSearcher {
         PARTIAL_MATCH * share
     }
 
-    fn name_match(&self, page: &Page, joined: &str, query: &HashSet<&str>) -> (f32, bool) {
+    fn name_match(
+        &self,
+        page: &Page,
+        raw_query: &str,
+        joined: &str,
+        query: &HashSet<&str>,
+    ) -> (f32, bool) {
         let key = |text: &str| {
             analysis::tokens(&self.joined, text)
                 .pop()
                 .unwrap_or_default()
         };
-        if key(&page.title) == joined {
+        let spelled = |text: &str| plumb_core::collapse_whitespace(text).to_lowercase();
+        if spelled(&page.title) == spelled(raw_query) {
             return (1.0, true);
         }
-        // "Mozart (film)" is no better a match for "mozart" than the
-        // redirect "Mozart" to "Wolfgang Amadeus Mozart": popularity
-        // decides between them.
-        if key(base_title(&page.title)) == joined
+        // "Mozart (film)" and "Mozart!" are no better a match for "mozart"
+        // than the redirect "Mozart" to "Wolfgang Amadeus Mozart":
+        // popularity decides between them.
+        if key(&page.title) == joined
+            || key(base_title(&page.title)) == joined
             || page.aliases.iter().any(|alias| key(alias) == joined)
         {
             return (ALIAS_MATCH, true);
@@ -791,6 +819,69 @@ pub fn place_pages(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) -> Ve
     placed
 }
 
+/// Pages looked at for a query with search operators, before they narrow
+/// them.
+pub const OPERATOR_PAGES: usize = 100;
+/// Most pages listed for a `site:` query.
+pub const MAX_SITE_PAGES: usize = 10;
+
+/// Whether the search operators `ops` allow `page`: its address's host
+/// and its title, description and other names.
+pub fn operators_allow(ops: &Operators, page: &Page) -> bool {
+    let host = host_of(&page.url).unwrap_or_default();
+    let texts = [page.title.as_str()]
+        .into_iter()
+        .chain(page.description.as_deref())
+        .chain(page.aliases.iter().map(String::as_str));
+    ops.allows(&host, texts)
+}
+
+/// Whether the searcher's `options` allow `page`: one in another
+/// language than [`crate::SearchOptions::language`] is left out, and
+/// strict safe search leaves out pages whose title or description is
+/// suggestive.
+pub fn options_allow(options: &crate::SearchOptions, page: &Page) -> bool {
+    if let (Some(wanted), Some(language)) = (&options.language, page.language()) {
+        if wanted != language {
+            return false;
+        }
+    }
+    if options.safe == SafeSearch::Strict {
+        let texts = [page.title.as_str()]
+            .into_iter()
+            .chain(page.description.as_deref());
+        if adult_level("", texts) != AdultLevel::None {
+            return false;
+        }
+    }
+    true
+}
+
+/// [`place_pages`] for a query with search operators `ops`, of the pages
+/// they allow. A `site:` query lists up to [`MAX_SITE_PAGES`] pages on
+/// that site after the sites, best first: "site:wikipedia.org einstein"
+/// lists the articles.
+pub fn place_operator_pages(
+    ops: &Operators,
+    sites: &[crate::Hit],
+    pages: Vec<PageHit>,
+) -> Vec<PlacedPage> {
+    let pages = pages
+        .into_iter()
+        .filter(|hit| operators_allow(ops, &hit.page));
+    if ops.sites.is_empty() {
+        return place_pages(&ops.words, sites, pages.collect());
+    }
+    pages
+        .take(MAX_SITE_PAGES)
+        .map(|hit| PlacedPage {
+            hit,
+            under: None,
+            at: sites.len(),
+        })
+        .collect()
+}
+
 /// Normalized form of `text` as page keys compare it, for tests and tools.
 pub fn page_key(text: &str) -> String {
     normalize_text(text).replace(' ', "")
@@ -854,6 +945,65 @@ mod tests {
     }
 
     #[test]
+    fn pages_follow_the_language_and_strict_safe_search() {
+        let article = page("Einstein", 1, &[]);
+        let mut book = page("Sexy beasts", 1, &[]);
+        book.set = BOOKS_SET.into();
+        let en = crate::SearchOptions {
+            language: Some("en".into()),
+            ..crate::SearchOptions::default()
+        };
+        assert!(options_allow(&en, &article));
+        assert!(options_allow(&en, &book), "books do not say their language");
+        let de = crate::SearchOptions {
+            language: Some("de".into()),
+            ..crate::SearchOptions::default()
+        };
+        assert!(!options_allow(&de, &article));
+        assert!(options_allow(&crate::SearchOptions::default(), &book));
+        let strict = crate::SearchOptions {
+            safe: SafeSearch::Strict,
+            ..crate::SearchOptions::default()
+        };
+        assert!(!options_allow(&strict, &book));
+        assert!(options_allow(&strict, &article));
+    }
+
+    #[test]
+    fn operators_pick_and_list_pages() {
+        let mut repo = Page::from_repo(Article {
+            title: "python/cpython".into(),
+            views: 60_000,
+            ..Article::default()
+        });
+        repo.description = Some("The Python programming language".into());
+        let (_dir, s) = searcher(&[
+            page("Python (programming language)", 900_000, &[]),
+            page("Python (genus)", 20_000, &["Pythonidae"]),
+            page("Monty Python", 200_000, &[]),
+            repo,
+        ]);
+        let place = |query: &str| {
+            let ops = Operators::parse(query);
+            let found = s.search(&ops.words, OPERATOR_PAGES).unwrap();
+            let placed = place_operator_pages(&ops, &[site("python.org", false)], found);
+            placed
+                .into_iter()
+                .map(|p| (p.hit.page.title, p.at))
+                .collect::<Vec<_>>()
+        };
+        let on_github = place("python site:github.com");
+        assert_eq!(on_github, [("python/cpython".to_string(), 1)]);
+        let on_wikipedia = place("python site:en.wikipedia.org");
+        assert_eq!(on_wikipedia.len(), 3);
+        assert!(on_wikipedia.iter().all(|(_, at)| *at == 1));
+        let without = place("python -monty -site:github.com");
+        assert!(without
+            .iter()
+            .all(|(t, _)| t != "Monty Python" && t != "python/cpython"));
+    }
+
+    #[test]
     fn partial_names_score_lower() {
         let (_dir, s) = searcher(&[page("Marie Curie", 80_000, &[])]);
         let hit = &s.search("curie", 1).unwrap()[0];
@@ -879,6 +1029,7 @@ mod tests {
             country: None,
             named,
             official: false,
+            key_pages: Vec::new(),
         }
     }
 
@@ -900,6 +1051,7 @@ mod tests {
             page("Albert Einstein (album)", 900, &[]),
             page("Wolfgang Amadeus Mozart", 200_000, &["Mozart"]),
             page("Mozart (film)", 3_000, &[]),
+            page("Mozart!", 5_000, &[]),
         ]);
         let hits = s.search("albert einstein", 5).unwrap();
         assert_eq!(titles(&hits)[0], "Albert Einstein");

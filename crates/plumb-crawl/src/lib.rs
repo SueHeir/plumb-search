@@ -160,11 +160,19 @@ pub struct PageMeta {
     /// to the same site.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub search_url: Option<String>,
+    /// The page's language from `<html lang>`, as
+    /// [`plumb_core::language_code`] gives it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
     /// The site's icons from `<link rel="icon">` and Apple touch icon
     /// links, best for a results page first, at most [`MAX_ICONS`]. SVG
     /// icons are left out.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub icons: Vec<String>,
+    /// The site's key pages ("sitelinks") among the page's links to its
+    /// own site, picked by [`plumb_core::key_pages::pick_key_pages`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub key_pages: Vec<plumb_core::KeyPage>,
     /// Visible `<h1>` and `<h2>` texts, in page order, each once, at most
     /// [`plumb_core::MAX_HEADINGS`] and [`plumb_core::MAX_HEADING_WORDS`]
     /// words in all.
@@ -234,6 +242,14 @@ pub enum CrawlOutcome {
     /// The final response was not HTML.
     NotHtml {
         content_type: String,
+    },
+    /// The page was a bot check standing in for the homepage (Cloudflare's
+    /// "Just a moment...", a KillBot verification and the like; see
+    /// [`plumb_core::is_bot_check_page`]). It says nothing about the site,
+    /// so nothing on it is kept: no title, no links.
+    BotCheck {
+        /// The check's title.
+        title: Option<String>,
     },
     /// Not crawled because of an error. The message says what went wrong,
     /// and starts with `robots.txt` when that is where it went wrong.

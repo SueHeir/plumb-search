@@ -68,6 +68,25 @@ A node with a storage limit keeps a quarter of it for sites about those interest
 
 Every Plumb page offers Plumb to the browser as a search engine. In Firefox, right-click the address bar on a Plumb page and choose **Add "Plumb Search"**. To add it by hand, use `http://127.0.0.1:8080/search?q=%s`, or `http://127.0.0.1:7586/search?q=%s` for the desktop app.
 
+### Search operators
+
+- `site:github.com plumb` keeps results on that site and its pages (GitHub repositories here), lists the site itself, and links into its own search for the other words. `site:gov` keeps a top-level domain; `-site:example.com` leaves a site out.
+- `"exact words"` keeps results whose name, title or description has those words in that order.
+- `-word` leaves out results that mention the word (or its plural).
+
+They work on the search page, `/api/search`, network search and `/private`, where they never leave the browser: only the other words pick buckets. Queries with operators are not corrected for typos.
+
+### Safe search and language
+
+The settings gear has **Safe search** (off, moderate or strict; `safe=` in the address) and **Language** (`lang=de`).
+
+- Moderate, the default, leaves out sites on the [Block List Project](https://github.com/blocklistproject/Lists) adult list (public domain; each node downloads it weekly into `DATA/safe/`), sites Wikidata calls pornographic, and sites whose name, title or description is plainly adult. Strict also leaves out suggestive ones ("sexy", "nude", "escort") and such pages. Private search applies the same rules except for the blocklist, which stays on the node.
+- Language keeps sites whose homepage says it is in that language (`<html lang>`, read when the homepage is crawled) and sites that do not say, and page sets in that language (English Wikipedia, GitHub and Stack Overflow are English).
+
+### Use Plumb from AI assistants (MCP)
+
+Every node serves an MCP server at `/mcp`, and `plumb mcp` serves one over stdio, with tools that give an AI assistant the official site for a name, say whether an address is a look-alike, and search. In Claude Code: `claude mcp add --transport http plumb https://plumbsearch.org/mcp`. See [docs/mcp.md](docs/mcp.md) for Claude Desktop and other apps.
+
 ## Building an index from real data
 
 The seed data comes from four public sources. They are only needed to get started; after that the index grows from its own crawls.

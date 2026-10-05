@@ -944,6 +944,7 @@ fn counts_outcomes() {
             robots_disallowed: 1,
             http_status: 1,
             not_html: 1,
+            bot_check: 0,
             offsite_redirect: 1,
             failed: 3,
             unreachable: 2,

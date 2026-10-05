@@ -52,6 +52,24 @@ pub enum Command {
     RemoteControl(RemoteControlArgs),
     /// Measure node storage and private-search bucket sizes without changing data.
     Storage(StorageArgs),
+    /// Let AI apps on this computer (Claude Desktop, Claude Code, ...) ask
+    /// Plumb for official sites and look-alikes: an MCP server over stdin
+    /// and stdout.
+    Mcp(McpArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct McpArgs {
+    /// The Plumb node to ask: its web address. Its `/mcp` answers.
+    #[arg(long, value_name = "URL", default_value = "https://plumbsearch.org")]
+    pub node: String,
+    /// Answer from this index directory instead of asking a node.
+    #[arg(long, value_name = "DIR", conflicts_with = "node")]
+    pub index: Option<PathBuf>,
+    /// Home country for answers from --index, a two-letter code such as US
+    /// [default: none].
+    #[arg(long, value_name = "CODE", value_parser = parse_country, requires = "index")]
+    pub country: Option<String>,
 }
 
 #[derive(Debug, Args)]

@@ -17,8 +17,9 @@
 use std::collections::{HashMap, HashSet};
 
 use plumb_core::{
-    domain_label, joined, kind_key, normalize_country, normalize_text, other_number,
-    registrable_domain, site_country, truncate_chars, SiteRecord, MAX_ALIASES, MAX_TEXT_CHARS,
+    domain_label, joined, kind_key, language_code, normalize_country, normalize_text, other_number,
+    record_adult_level, registrable_domain, site_country, truncate_chars, Operators, SafeSearch,
+    SiteRecord, MAX_ALIASES, MAX_TEXT_CHARS,
 };
 use serde::Serialize;
 
@@ -62,6 +63,11 @@ pub struct Options {
     pub country: Option<String>,
     /// Leave out other countries' sites.
     pub only_country: bool,
+    /// What safe search leaves out, as on a node (without its blocklist).
+    pub safe: SafeSearch,
+    /// Leave out sites whose homepage is in another language (a language
+    /// code); sites that do not say stay.
+    pub language: Option<String>,
 }
 
 /// One result.
@@ -77,8 +83,30 @@ pub struct Ranked {
     pub link_score: f32,
 }
 
-/// The best `limit` of `sites` for `query`, best first.
+/// The best `limit` of `sites` for `query`, best first. Search operators
+/// in the query ([`Operators`]) narrow the sites as on a node.
 pub fn rank(query: &str, sites: &[SiteRecord], options: &Options, limit: usize) -> Vec<Ranked> {
+    let ops = Operators::parse(query);
+    if !ops.any() {
+        return rank_words(query, sites, options, limit);
+    }
+    let kept: Vec<SiteRecord> = sites
+        .iter()
+        .filter(|site| ops.allows_host(&site.domain))
+        .cloned()
+        .collect();
+    rank_words(&ops.lookup_text(), &kept, options, kept.len())
+        .into_iter()
+        .filter(|ranked| {
+            let texts = [ranked.title.as_deref(), ranked.description.as_deref()];
+            ops.allows(&ranked.domain, texts.into_iter().flatten())
+        })
+        .take(limit)
+        .collect()
+}
+
+/// [`rank`] for a query without operators.
+fn rank_words(query: &str, sites: &[SiteRecord], options: &Options, limit: usize) -> Vec<Ranked> {
     let Some(query) = Query::new(query) else {
         return Vec::new();
     };
@@ -101,7 +129,17 @@ pub fn rank(query: &str, sites: &[SiteRecord], options: &Options, limit: usize) 
     let words = query.len as f32;
 
     let mut ranked = Vec::new();
+    let language = options.language.as_deref().and_then(language_code);
     for (i, site) in sites.iter().enumerate() {
+        if options.safe.hides(record_adult_level(site)) {
+            continue;
+        }
+        let site_language = site.language.as_deref().and_then(language_code);
+        if let (Some(wanted), Some(site)) = (&language, &site_language) {
+            if wanted != site {
+                continue;
+            }
+        }
         let name = names[i];
         let is_kind = query
             .kind

@@ -171,9 +171,9 @@ fn crawl_file_with(
     );
     if o.errors() > 0 {
         println!(
-            "  errors: {} HTTP status, {} not HTML, {} redirected off-site, {} failed \
-             ({} could not be reached)",
-            o.http_status, o.not_html, o.offsite_redirect, o.failed, o.unreachable
+            "  errors: {} HTTP status, {} not HTML, {} bot checks, {} redirected off-site, \
+             {} failed ({} could not be reached)",
+            o.http_status, o.not_html, o.bot_check, o.offsite_redirect, o.failed, o.unreachable
         );
     }
     println!("discovered {} new domains", totals.discovered);
@@ -711,6 +711,8 @@ pub(crate) struct CrawlSummary {
     pub(crate) robots_disallowed: usize,
     pub(crate) http_status: usize,
     pub(crate) not_html: usize,
+    /// Bot checks standing in for the homepage.
+    pub(crate) bot_check: usize,
     pub(crate) offsite_redirect: usize,
     pub(crate) failed: usize,
     /// Of `failed`, the homepages that could not be reached at all
@@ -727,6 +729,7 @@ impl CrawlSummary {
                 CrawlOutcome::RobotsDisallowed => s.robots_disallowed += 1,
                 CrawlOutcome::HttpStatus { .. } => s.http_status += 1,
                 CrawlOutcome::NotHtml { .. } => s.not_html += 1,
+                CrawlOutcome::BotCheck { .. } => s.bot_check += 1,
                 CrawlOutcome::OffsiteRedirect { .. } => s.offsite_redirect += 1,
                 CrawlOutcome::Failed { .. } => {
                     s.failed += 1;
@@ -742,6 +745,7 @@ impl CrawlSummary {
         self.robots_disallowed += other.robots_disallowed;
         self.http_status += other.http_status;
         self.not_html += other.not_html;
+        self.bot_check += other.bot_check;
         self.offsite_redirect += other.offsite_redirect;
         self.failed += other.failed;
         self.unreachable += other.unreachable;
@@ -749,7 +753,7 @@ impl CrawlSummary {
 
     /// Everything that was neither fetched nor blocked by robots.txt.
     pub(crate) fn errors(&self) -> usize {
-        self.http_status + self.not_html + self.offsite_redirect + self.failed
+        self.http_status + self.not_html + self.bot_check + self.offsite_redirect + self.failed
     }
 }
 

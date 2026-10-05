@@ -471,7 +471,8 @@ impl Wanted {
         if self.sets.is_empty() {
             return None;
         }
-        let mut text = String::from("v1");
+        // v2: pages keep their Wikidata item.
+        let mut text = String::from("v2");
         for (set, file, pages) in &self.sets {
             let meta = std::fs::metadata(file).ok();
             let modified = meta

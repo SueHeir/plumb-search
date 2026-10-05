@@ -1,0 +1,19 @@
+[package]
+name = "plumb-answer"
+description = "Instant answers worked out from the query alone: sums, unit and currency conversions, the time in a place."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# The time zone database is built in, so answers are the same on every node,
+# whatever the computer has installed.
+jiff = { version = "0.2.37", default-features = false, features = ["std", "tzdb-bundle-always"], optional = true }
+serde = { version = "1.0.229", features = ["derive"] }
+
+[features]
+default = ["zones"]
+# The time in places. Its time zone database makes up most of the crate's
+# size, so the browser's private search leaves it out.
+zones = ["dep:jiff"]

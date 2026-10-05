@@ -97,6 +97,7 @@ pub(crate) fn load_records(path: &Path) -> Result<RecordSet> {
     let mut reader = BufReader::with_capacity(1 << 20, file);
     let mut set = RecordSet::new();
     let (mut read, mut dropped, mut line_no) = (0usize, 0usize, 0usize);
+    let mut bot_checks = 0usize;
     let mut line = String::new();
     loop {
         line.clear();
@@ -114,6 +115,7 @@ pub(crate) fn load_records(path: &Path) -> Result<RecordSet> {
         let record: SiteRecord = serde_json::from_str(text)
             .with_context(|| format!("{}:{line_no}: invalid JSON line", path.display()))?;
         read += 1;
+        bot_checks += usize::from(record.is_bot_check());
         if !set.upsert(record) {
             dropped += 1;
         }
@@ -122,6 +124,13 @@ pub(crate) fn load_records(path: &Path) -> Result<RecordSet> {
     if merged > 0 {
         info!(
             "merged {merged} duplicate records for the same domain in {}",
+            path.display()
+        );
+    }
+    if bot_checks > 0 {
+        info!(
+            "left out the page text of {bot_checks} records of {} read off bot checks \
+             rather than homepages",
             path.display()
         );
     }

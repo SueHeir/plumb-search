@@ -75,9 +75,9 @@ use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 use plumb_core::{
-    canonical_domain, kind_key, normalize_country, normalize_text, other_number,
-    registrable_domain, search_link, search_template_for, truncate_chars, SiteRecord,
-    MAX_TEXT_CHARS,
+    canonical_domain, kind_key, language_code, normalize_country, normalize_text, other_number,
+    registrable_domain, search_link, search_template_for, truncate_chars, AdultLevel, KeyPage,
+    Operators, SafeSearch, SiteRecord, MAX_TEXT_CHARS,
 };
 use serde::{Deserialize, Serialize};
 use tantivy::collector::{DocSetCollector, TopDocs};
@@ -131,6 +131,10 @@ const NEAREST_RANKED: usize = 50;
 const NEAREST_POPULAR: usize = 50;
 /// Most distinct query words used; the rest are ignored.
 const MAX_QUERY_WORDS: usize = 16;
+/// A query with operators ranks this many times its limit, and at least
+/// [`OPERATOR_CANDIDATES`], before they narrow the hits.
+const OPERATOR_WIDENING: usize = 5;
+const OPERATOR_CANDIDATES: usize = 200;
 /// The least link score of a well-known site (roughly the top 30,000).
 pub const WELL_KNOWN_LINK_SCORE: f32 = 0.5;
 /// How much more link score a well-known site whose name is a typo away
@@ -311,6 +315,10 @@ pub struct Hit {
     /// (its index entry has Wikidata's description of it).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub official: bool,
+    /// The site's key pages ("sitelinks": sign in, docs, pricing), for
+    /// listing under it when it is the site searched for.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub key_pages: Vec<KeyPage>,
 }
 
 /// Per-search choices of the person searching.
@@ -325,6 +333,11 @@ pub struct SearchOptions {
     pub only_country: bool,
     /// Search for the query exactly as typed, without correcting typos.
     pub exact: bool,
+    /// What safe search leaves out; see [`plumb_core::safe`].
+    pub safe: SafeSearch,
+    /// Leave out sites whose homepage is in another language than this
+    /// one (a language code, `en`). Sites that do not say stay.
+    pub language: Option<String>,
 }
 
 /// A link into a site's own search for the words after its name:
@@ -683,7 +696,74 @@ impl Searcher {
     /// an exact match wins; any other query is searched corrected too, and
     /// its hits replace the query's own when its best hit scores at least
     /// as high, else the correction is only suggested.
+    ///
+    /// Search operators ([`Operators`]) narrow the results: `site:`
+    /// keeps the sites on that host and lists the site itself after them,
+    /// with a link into its own search; `"quotes"` keep the sites whose
+    /// name, title or description has the words in that order; `-word`
+    /// leaves out the sites that have the word. Queries with operators are
+    /// not corrected for typos.
     pub fn search_meaning(
+        &self,
+        query_text: &str,
+        limit: usize,
+        cfg: &RankConfig,
+        options: &SearchOptions,
+        meaning: Option<&dyn Meaning>,
+    ) -> Result<SearchResults> {
+        let ops = Operators::parse(query_text);
+        if !ops.any() {
+            return self.search_words(query_text, limit, cfg, options, meaning);
+        }
+        let mut results = SearchResults::default();
+        if limit == 0 {
+            return Ok(results);
+        }
+        let options = SearchOptions {
+            exact: true,
+            ..options.clone()
+        };
+        if !ops.words.is_empty() {
+            let wider = limit
+                .saturating_mul(OPERATOR_WIDENING)
+                .max(OPERATOR_CANDIDATES);
+            let found = self.search_words(&ops.words, wider, cfg, &options, meaning)?;
+            results.hits = found
+                .hits
+                .into_iter()
+                .filter(|hit| ops.allows(&hit.domain, hit_texts(hit)))
+                .collect();
+            results.site_search = found
+                .site_search
+                .filter(|link| ops.allows_host(&link.domain));
+        }
+        // The sites `site:` names come after what matched in them, even
+        // when their homepage does not have the words: the link into their
+        // own search finds the rest.
+        let fallback = Operators {
+            phrases: Vec::new(),
+            ..ops.clone()
+        };
+        for site in &ops.sites {
+            let Some(domain) = registrable_domain(site) else {
+                continue;
+            };
+            if !results.hits.iter().any(|hit| hit.domain == domain) {
+                let found = self.search_words(&domain, 1, cfg, &options, None)?;
+                results.hits.extend(found.hits.into_iter().filter(|hit| {
+                    hit.domain == domain && fallback.allows(&hit.domain, hit_texts(hit))
+                }));
+            }
+            if results.site_search.is_none() {
+                results.site_search = self.site_search_of(&domain, &ops.site_terms)?;
+            }
+        }
+        results.hits.truncate(limit);
+        Ok(results)
+    }
+
+    /// [`Searcher::search_meaning`] for a query without operators.
+    fn search_words(
         &self,
         query_text: &str,
         limit: usize,
@@ -707,7 +787,7 @@ impl Searcher {
                 .full_link_score
                 .is_some_and(|score| score >= WELL_KNOWN_LINK_SCORE);
             if !named_in_full {
-                let mut found = self.search_meaning(&name, limit, cfg, options, meaning)?;
+                let mut found = self.search_words(&name, limit, cfg, options, meaning)?;
                 let mut best: HashMap<String, Hit> = HashMap::new();
                 let by_name = std::mem::take(&mut found.hits)
                     .into_iter()
@@ -925,6 +1005,8 @@ impl Searcher {
                     link_scores: fast.f64(schema::LINK_SCORE)?,
                     domains: fast.str(schema::DOMAIN)?,
                     countries: fast.str(schema::COUNTRY)?,
+                    languages: fast.str(schema::LANGUAGE)?,
+                    adult: fast.u64(schema::ADULT)?,
                 })
             })
             .collect::<tantivy::Result<Vec<_>>>()?;
@@ -991,8 +1073,18 @@ impl Searcher {
 
         let max_bm25 = candidates.iter().map(|&(bm25, _)| bm25).fold(0.0, f32::max);
         let mut ranked: Vec<Ranked> = Vec::with_capacity(candidates.len());
+        let language = options.language.as_deref().and_then(language_code);
         for (bm25, addr) in candidates {
             let column = &columns[addr.segment_ord as usize];
+            if options.safe.hides(column.adult(addr.doc_id)) {
+                continue;
+            }
+            let site_language = column.language(addr.doc_id);
+            if let (Some(wanted), Some(site)) = (&language, &site_language) {
+                if wanted != site {
+                    continue;
+                }
+            }
             let country = column.country(addr.doc_id);
             let country_bonus = match (&home, &country) {
                 (Some(home), Some(country)) if home == country => country_boost,
@@ -1091,6 +1183,17 @@ impl Searcher {
         Ok((results, named))
     }
 
+    /// A link into the search of the site `domain` for `terms`, if the
+    /// index has the site and it has a search address.
+    fn site_search_of(&self, domain: &str, terms: &str) -> Result<Option<SiteSearch>> {
+        let searcher = self.reader.searcher();
+        let term = Term::from_field_text(self.fields.domain, domain);
+        let Some(addr) = matching_docs(&searcher, vec![term])?.into_iter().next() else {
+            return Ok(None);
+        };
+        self.site_search_link(&searcher, addr, terms.trim().to_string())
+    }
+
     /// A link into the search of the site at `addr` for the words of `query`
     /// after its first `words`, if the site has a search address (its own,
     /// or one Plumb knows for big sites).
@@ -1104,6 +1207,16 @@ impl Searcher {
         let Some(terms) = words_after(&self.words, query, words) else {
             return Ok(None);
         };
+        self.site_search_link(searcher, addr, terms)
+    }
+
+    /// A link into the search of the site at `addr` for `terms`.
+    fn site_search_link(
+        &self,
+        searcher: &tantivy::Searcher,
+        addr: DocAddress,
+        terms: String,
+    ) -> Result<Option<SiteSearch>> {
         let doc: TantivyDocument = searcher.doc(addr)?;
         let text = |field| {
             doc.get_first(field)
@@ -1199,6 +1312,9 @@ impl Searcher {
             link_score: ranked.link_score,
             country: ranked.country,
             named: ranked.named,
+            key_pages: text(self.fields.key_pages)
+                .and_then(|json| serde_json::from_str(&json).ok())
+                .unwrap_or_default(),
         })
     }
 }
@@ -1216,9 +1332,20 @@ struct Named {
     typed: bool,
 }
 
+/// The text of `hit` that search operators look at, besides its domain.
+fn hit_texts(hit: &Hit) -> impl Iterator<Item = &str> {
+    [
+        hit.title.as_deref(),
+        hit.description.as_deref(),
+        Some(hit.url.as_str()),
+    ]
+    .into_iter()
+    .flatten()
+}
+
 /// The words of `query` before the [`INTENT_WORDS`] it ends with, if it
-/// ends with any and has other words.
-fn without_intent_words(query: &str) -> Option<String> {
+/// ends with any and has other words: "paypal login" -> "paypal".
+pub fn without_intent_words(query: &str) -> Option<String> {
     let mut words: Vec<String> = normalize_text(query)
         .split_whitespace()
         .map(str::to_string)
@@ -1286,6 +1413,8 @@ struct Columns {
     link_scores: tantivy::columnar::Column<f64>,
     domains: Option<tantivy::columnar::StrColumn>,
     countries: Option<tantivy::columnar::StrColumn>,
+    languages: Option<tantivy::columnar::StrColumn>,
+    adult: tantivy::columnar::Column<u64>,
 }
 
 impl Columns {
@@ -1303,6 +1432,18 @@ impl Columns {
         let mut country = String::new();
         countries.ord_to_str(ord, &mut country).ok()?;
         (!country.is_empty()).then_some(country)
+    }
+
+    fn language(&self, doc: tantivy::DocId) -> Option<String> {
+        let languages = self.languages.as_ref()?;
+        let ord = languages.term_ords(doc).next()?;
+        let mut language = String::new();
+        languages.ord_to_str(ord, &mut language).ok()?;
+        (!language.is_empty()).then_some(language)
+    }
+
+    fn adult(&self, doc: tantivy::DocId) -> AdultLevel {
+        schema::adult_from(self.adult.first(doc).unwrap_or(0))
     }
 }
 
@@ -2216,6 +2357,7 @@ mod tests {
             country: Some(country.to_string()),
             only_country,
             exact: false,
+            ..SearchOptions::default()
         }
     }
 
@@ -2358,6 +2500,7 @@ mod tests {
                     country: None,
                     only_country: true,
                     exact: false,
+                    ..SearchOptions::default()
                 },
             )
             .unwrap()
@@ -2447,6 +2590,146 @@ mod tests {
         assert_eq!(full("github").site_search, None);
         assert_eq!(full("us bank login").site_search, None);
         assert_eq!(full("liar stuff").site_search, None);
+    }
+
+    #[test]
+    fn safe_search_and_language_leave_sites_out() {
+        let mut records = corpus();
+        records.push(site(
+            "bankporn.example",
+            Some("Bank vault videos"),
+            None,
+            &[],
+            &[],
+            ranked(800, 5_000),
+        ));
+        let mut studio = site(
+            "studio.example",
+            Some("Bank Studio"),
+            None,
+            &[],
+            &[],
+            ranked(700, 5_000),
+        );
+        studio.kinds = vec!["pornographic film studio".into()];
+        records.push(studio);
+        records.push(site(
+            "banklingerie.example",
+            Some("Bank lingerie, sexy and simple"),
+            None,
+            &[],
+            &[],
+            ranked(750, 5_000),
+        ));
+        let mut german = site(
+            "bankde.example",
+            Some("Bank Deutschland"),
+            None,
+            &[],
+            &[],
+            ranked(760, 5_000),
+        );
+        german.language = Some("de".into());
+        records.push(german);
+        let (_dir, searcher) = build(&records);
+        let with = |options: SearchOptions| {
+            let hits = searcher
+                .search_full("bank", 50, &RankConfig::default(), &options)
+                .unwrap()
+                .hits;
+            domains(&hits)
+                .into_iter()
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        };
+        let has = |found: &[String], domain: &str| found.iter().any(|d| d == domain);
+
+        let off = with(SearchOptions {
+            safe: SafeSearch::Off,
+            ..SearchOptions::default()
+        });
+        for domain in ["bankporn.example", "studio.example", "banklingerie.example"] {
+            assert!(has(&off, domain), "{domain}");
+        }
+        let moderate = with(SearchOptions::default());
+        assert!(!has(&moderate, "bankporn.example"));
+        assert!(!has(&moderate, "studio.example"));
+        assert!(has(&moderate, "banklingerie.example"));
+        let strict = with(SearchOptions {
+            safe: SafeSearch::Strict,
+            ..SearchOptions::default()
+        });
+        assert!(!has(&strict, "banklingerie.example"));
+        assert!(has(&strict, "usbank.com"));
+
+        // Sites that say another language go; sites that say nothing stay.
+        let english = with(SearchOptions {
+            language: Some("en".into()),
+            ..SearchOptions::default()
+        });
+        assert!(!has(&english, "bankde.example"));
+        assert!(has(&english, "usbank.com"));
+        let german = with(SearchOptions {
+            language: Some("de".into()),
+            ..SearchOptions::default()
+        });
+        assert!(has(&german, "bankde.example"));
+    }
+
+    #[test]
+    fn search_operators_narrow_the_results() {
+        let mut records = corpus();
+        records.push(site(
+            "github.com",
+            Some("GitHub: where the world builds software"),
+            None,
+            &["GitHub"],
+            &[],
+            popular(30, 100_000),
+        ));
+        records.push(site(
+            "bankrate.com",
+            Some("Bankrate: mortgage rates and bank reviews"),
+            None,
+            &[],
+            &[],
+            ranked(900, 5_000),
+        ));
+        let (_dir, searcher) = build(&records);
+        let full = |q: &str| {
+            searcher
+                .search_full(q, 10, &RankConfig::default(), &SearchOptions::default())
+                .unwrap()
+        };
+        let plain = domains(&full("bank").hits).len();
+        assert!(plain > 2);
+
+        // Only sites under the named host, and the site itself.
+        let on_site = full("bank site:bankrate.com");
+        assert_eq!(domains(&on_site.hits), ["bankrate.com"]);
+        // A site whose homepage lacks the words is still listed, with a
+        // link into its own search.
+        let github = full("site:github.com plumb \"search engine\"");
+        assert_eq!(domains(&github.hits), ["github.com"]);
+        assert_eq!(
+            github.site_search.unwrap().url,
+            "https://github.com/search?q=plumb%20%22search%20engine%22"
+        );
+        assert_eq!(domains(&full("site:github.com").hits), ["github.com"]);
+        assert!(full("site:github.com").site_search.is_none());
+
+        // Excluded words and hosts.
+        let without = full("bank -bankrate");
+        assert!(!domains(&without.hits).contains(&"bankrate.com"));
+        assert!(!domains(&without.hits).is_empty());
+        let not_site = full("bank -site:usbank.com");
+        assert!(!domains(&not_site.hits).contains(&"usbank.com"));
+
+        // A phrase keeps only sites with those words in that order.
+        let phrase = full("\"bank reviews\"");
+        assert!(domains(&phrase.hits).contains(&"bankrate.com"));
+        assert!(!domains(&phrase.hits).contains(&"usbank.com"));
+        assert!(full("-bank").hits.is_empty());
     }
 
     #[test]
@@ -3043,6 +3326,28 @@ mod tests {
             &[],
             Signals::default(),
         )
+    }
+
+    #[test]
+    fn hits_carry_the_site_key_pages() {
+        let root = TempDir::new().unwrap();
+        let dir = root.path().join("index");
+        let mut site = example_site();
+        site.key_pages = vec![
+            KeyPage {
+                label: "Docs".into(),
+                url: "https://docs.example.com/".into(),
+            },
+            KeyPage {
+                label: "Elsewhere".into(),
+                url: "https://other.example/".into(),
+            },
+        ];
+        build_index(&dir, &[site]).unwrap();
+        let searcher = Searcher::open(&dir).unwrap();
+        let hits = searcher.search("example", 10).unwrap();
+        let labels: Vec<&str> = hits[0].key_pages.iter().map(|p| p.label.as_str()).collect();
+        assert_eq!(labels, ["Docs"], "only pages on the site itself");
     }
 
     /// Makes builds on this thread fail at `step` while it lives.
