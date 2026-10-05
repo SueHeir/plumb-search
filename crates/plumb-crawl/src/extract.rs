@@ -233,6 +233,8 @@ struct Page<'a> {
     own_links: Vec<OwnLink>,
     /// How many [`MENU_ELEMENTS`] are open.
     menu: usize,
+    /// The page has a password box: it is a sign-in page.
+    password_field: bool,
     seen: HashSet<(String, String)>,
     /// How many [`HIDDEN_ELEMENTS`] are open.
     hidden: usize,
@@ -324,6 +326,7 @@ impl<'a> Page<'a> {
             links: Vec::new(),
             own_links: Vec::new(),
             menu: 0,
+            password_field: false,
             seen: HashSet::new(),
             hidden: 0,
             foreign: 0,
@@ -364,7 +367,12 @@ impl<'a> Page<'a> {
             "meta" => self.meta(tag),
             "link" if self.foreign == 0 => self.link(tag),
             "form" => self.open_form(tag),
-            "input" => self.input(tag),
+            "input" => {
+                let password = attr(tag, "type")
+                    .is_some_and(|kind| kind.trim().eq_ignore_ascii_case("password"));
+                self.password_field |= password && self.hidden == 0;
+                self.input(tag);
+            }
             "svg" | "math" if !tag.self_closing => self.foreign += 1,
             "h1" | "h2" => {
                 self.close_heading();
@@ -729,7 +737,12 @@ impl<'a> Page<'a> {
             language: self.language,
             icons: best_icons(self.icons),
             key_pages: match &self.own_domain {
-                Some(domain) => pick_key_pages(self.base_url.as_str(), domain, &self.own_links),
+                Some(domain) => pick_key_pages(
+                    self.base_url.as_str(),
+                    domain,
+                    &self.own_links,
+                    self.password_field,
+                ),
                 None => Vec::new(),
             },
             headings: self.headings,
@@ -1006,6 +1019,21 @@ mod tests {
             ]
         );
         assert_eq!(meta.links.len(), 1, "other sites' links stay out links");
+    }
+
+    #[test]
+    fn a_sign_in_homepage_gets_a_log_in_key_page() {
+        let meta = extract(
+            "https://www.facebook.com/",
+            r#"<form method="post" action="/login/"><input name="email">
+                <input type="password" name="pass"><button>Log in</button></form>
+                <a href="/recover/initiate/">Forgotten password?</a>
+                <a href="/r.php">Create new account</a>
+                <footer><a href="/help/">Help</a></footer>"#,
+        );
+        let labels: Vec<&str> = meta.key_pages.iter().map(|p| p.label.as_str()).collect();
+        assert_eq!(labels, ["Log in", "Create new account", "Help"]);
+        assert_eq!(meta.key_pages[0].url, "https://www.facebook.com/");
     }
 
     #[test]
