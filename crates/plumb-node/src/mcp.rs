@@ -121,6 +121,8 @@ pub struct Mcp {
     rates: Option<Rates>,
     /// The node, for recent headlines; `None` answers without them.
     node: Option<Arc<dyn StatusSource>>,
+    /// What the node's plugins found for the `search` call's query.
+    plugins: Vec<crate::plugins::PluginResults>,
     /// What agents found before; without them `report_finding` is not
     /// offered.
     findings: Option<Arc<Findings>>,
@@ -160,6 +162,7 @@ impl Mcp {
             reader: None,
             rates: None,
             node: None,
+            plugins: Vec::new(),
             findings: None,
         }
     }
@@ -186,6 +189,13 @@ impl Mcp {
     /// Lists the node's recent headlines with search results.
     pub fn with_node(mut self, node: Option<Arc<dyn StatusSource>>) -> Self {
         self.node = node;
+        self
+    }
+
+    /// Lists what the node's plugins found with `search`'s results; the
+    /// caller runs them for [`Mcp::search_query`].
+    pub fn with_plugin_results(mut self, plugins: Vec<crate::plugins::PluginResults>) -> Self {
+        self.plugins = plugins;
         self
     }
 
@@ -631,6 +641,29 @@ impl Mcp {
         }
         if !headlines.is_empty() {
             fields.insert("recent".into(), json!(headlines));
+        }
+        let from_plugins: Vec<Value> = self
+            .plugins
+            .iter()
+            .map(|found| {
+                let results: Vec<Value> = found
+                    .results
+                    .iter()
+                    .map(|item| {
+                        json!({
+                            "title": item.title,
+                            "url": item.url,
+                            "site": item.site,
+                            "snippet": item.snippet,
+                            "published": item.published.map(|at| crate::web::time_ago(at, now)),
+                        })
+                    })
+                    .collect();
+                json!({ "plugin": found.name, "results": results })
+            })
+            .collect();
+        if !from_plugins.is_empty() {
+            fields.insert("plugins".into(), json!(from_plugins));
         }
         let found_before: Vec<Value> = self
             .findings

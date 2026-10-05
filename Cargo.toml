@@ -12,6 +12,8 @@ members = [
     "crates/plumb-private",
     "crates/plumb-e2e",
     "crates/plumb-desktop",
+    "crates/plumb-plugin",
+    "plugins/hacker-news",
 ]
 # Plain `cargo build` and `cargo test` leave out the desktop app, which needs
 # GUI libraries (WebKitGTK on Linux); build it with `-p plumb-desktop`.
@@ -26,6 +28,8 @@ default-members = [
     "crates/plumb-node",
     "crates/plumb-private",
     "crates/plumb-e2e",
+    "crates/plumb-plugin",
+    "plugins/hacker-news",
 ]
 
 [workspace.package]

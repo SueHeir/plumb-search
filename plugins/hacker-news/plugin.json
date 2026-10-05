@@ -1,0 +1,6 @@
+{
+  "name": "Hacker News",
+  "about": "Stories from Hacker News, through its public search API at hn.algolia.com.",
+  "hosts": ["hn.algolia.com"],
+  "keywords": ["hn", "hacker news"]
+}

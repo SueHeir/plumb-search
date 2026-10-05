@@ -22,6 +22,7 @@ plumb-embed = { version = "0.1.0", path = "../plumb-embed" }
 plumb-index = { version = "0.1.0", path = "../plumb-index" }
 plumb-net = { version = "0.1.0", path = "../plumb-net" }
 plumb-ingest = { version = "0.1.0", path = "../plumb-ingest" }
+plumb-plugin = { version = "0.1.0", path = "../plumb-plugin" }
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls"] }
 rcgen = "0.13.2"
 rustls = { version = "0.23.45", default-features = false, features = ["aws_lc_rs", "std", "tls12", "logging"] }
@@ -37,6 +38,7 @@ tokio-rustls = { version = "0.26.6", default-features = false, features = ["aws_
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 url = "2.5.8"
+wasmi = "2.0.0"
 base64 = "0.22"
 
 [target.'cfg(unix)'.dependencies]

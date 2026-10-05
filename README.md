@@ -32,6 +32,7 @@ To make it your browser's search engine, open a Plumb page and add it from the a
 - **Search operators** (`site:`, `-site:`, `"exact words"`, `-word`), **safe search** and **language** filters, and pages that are only a bot check left out of results.
 - **Search by meaning** (optional): "electric car maker" finds sites that never use those words.
 - **Private search**: a `/private` page where the browser fetches padded buckets of sites and ranks them itself, so the node never sees the query ([docs/private-search.md](docs/private-search.md)).
+- **Plugins** (optional): a node's owner can add results from sources Plumb does not crawl, such as a site's own search API, with plugins written in Rust and run in a WebAssembly sandbox. Nodes come with none ([docs/plugins.md](docs/plugins.md)).
 - **About you**: each browser can list interests, sites it always wants first and sites it never wants to see, kept on its own node and never sent with a search.
 
 There are no ads and no tracking. Plumb does not crawl the full text of the web: it fetches one homepage per site (plus a few key pages for sitelinks), and obeys robots.txt.
@@ -246,6 +247,7 @@ A node does this on its own with `plumb run --search-by-meaning`: it downloads t
 | `crates/plumb-answer` | Instant answers worked out from the query alone: sums, unit and currency conversions, the time in a place |
 | `crates/plumb-node` | The `plumb` command line tool, the long-running node behind `plumb run`, and the web page |
 | `crates/plumb-private` | Private search in the browser: fetches buckets and ranks them, compiled to WebAssembly; see [docs/private-search.md](docs/private-search.md) |
+| `crates/plumb-plugin` | The kit for writing plugins in Rust; `plugins/hacker-news` is an example. See [docs/plugins.md](docs/plugins.md) |
 | `crates/plumb-desktop` | The desktop app: a [Tauri](https://v2.tauri.app) window around a node running inside it. A plain `cargo build` leaves it out; see [docs/desktop.md](docs/desktop.md) |
 | `crates/plumb-e2e` | End-to-end tests that run the Docker image, kill containers mid-work and restart them |
 
