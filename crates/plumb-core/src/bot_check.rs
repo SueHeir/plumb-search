@@ -102,8 +102,11 @@ const CHECK_VENDORS: &[&str] = &[
 
 /// Whether a page with this title, description, headings and text is a
 /// bot check rather than the site at `domain`. A page that echoes the
-/// request back ([`echoes_the_request`]) always is; otherwise a vendor's
-/// own site (a domain that names the vendor) never is.
+/// request back ([`echoes_the_request`]) in its title or description, or
+/// shows this crawler's User-Agent anywhere, always is; otherwise a
+/// vendor's own site (a domain that names the vendor) never is. A
+/// bracketed address further down is not enough: "Download version
+/// [4.8.0.1]" reads as one.
 pub fn is_bot_check_page(
     domain: &str,
     title: Option<&str>,
@@ -118,7 +121,10 @@ pub fn is_bot_check_page(
             .chain(headings.iter().map(String::as_str))
             .chain(body_text)
     };
-    if domain != crate::HOME_SITE && all().any(echoes_the_request) {
+    if domain != crate::HOME_SITE
+        && (title.into_iter().chain(description).any(echoes_the_request)
+            || all().any(shows_the_user_agent))
+    {
         return true;
     }
     if CHECK_VENDORS.iter().any(|vendor| domain.contains(vendor)) {
@@ -148,13 +154,18 @@ pub fn is_bot_check_page(
 /// puts it ("KillBot user verification [203.0.113.7] [PlumbSearch/...]").
 /// Such text would also publish the crawler's address.
 pub fn echoes_the_request(text: &str) -> bool {
-    if text.to_ascii_lowercase().contains("plumbsearch/") {
+    if shows_the_user_agent(text) {
         return true;
     }
     text.split('[')
         .skip(1)
         .filter_map(|after| after.split_once(']'))
         .any(|(inside, _)| inside.trim().parse::<std::net::Ipv4Addr>().is_ok())
+}
+
+/// Whether `text` shows this crawler's User-Agent.
+fn shows_the_user_agent(text: &str) -> bool {
+    text.to_ascii_lowercase().contains("plumbsearch/")
 }
 
 impl SiteRecord {
@@ -268,6 +279,25 @@ mod tests {
             None,
             &[],
             None,
+        ));
+    }
+
+    #[test]
+    fn version_numbers_in_page_text_are_not_echoed_addresses() {
+        let headings = ["Download version [4.8.0.1]".to_string()];
+        assert!(!is_bot_check_page(
+            "example.org",
+            Some("Example Tool"),
+            Some("A tool for examples."),
+            &headings,
+            Some("Download version [4.8.0.1] now. Release notes [4.8.0.0]."),
+        ));
+        assert!(is_bot_check_page(
+            "example.org",
+            Some("Example Tool"),
+            None,
+            &[],
+            Some("You are PlumbSearch/0.1.0 (+https://github.com/SueHeir/plumb-search)"),
         ));
     }
 

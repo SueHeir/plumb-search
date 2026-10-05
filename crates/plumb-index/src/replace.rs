@@ -152,6 +152,9 @@ fn swap(new: &Path, dir: &Path) -> Result<()> {
         }
         return Err(err);
     }
+    // The renames are entries of the parent: sync it before deleting the
+    // old index, so a crash cannot bring the old name back without it.
+    sync_dir(parent_of(dir));
     if let Some(old) = old {
         fs::remove_dir_all(&old).with_context(|| {
             format!(
@@ -193,6 +196,7 @@ fn tidy(dir: &Path) -> Result<()> {
         if let Some((_, old)) = old {
             fs::rename(old, dir)
                 .with_context(|| format!("moving the old index back from {}", old.display()))?;
+            sync_dir(parent_of(dir));
         }
     }
     for (_, path) in leftovers {
@@ -324,6 +328,17 @@ fn strays(dir: &Path) -> Result<Option<Vec<String>>> {
     Ok(Some(strays))
 }
 
+/// Syncs the entries of `dir` (renames into or out of it) to disk. Best
+/// effort: some file systems cannot sync a directory, and elsewhere than
+/// Unix a directory does not open as a file.
+fn sync_dir(dir: &Path) {
+    if cfg!(unix) {
+        if let Ok(dir) = fs::File::open(dir) {
+            let _ = dir.sync_all();
+        }
+    }
+}
+
 fn dir_name(dir: &Path) -> Result<&OsStr> {
     dir.file_name()
         .with_context(|| format!("{} does not name a directory", dir.display()))
@@ -392,6 +407,14 @@ mod tests {
             Ok(_) => panic!("{} was accepted", dir.display()),
             Err(err) => format!("{err:#}"),
         }
+    }
+
+    #[test]
+    fn syncing_a_directory_is_best_effort() {
+        let root = TempDir::new().unwrap();
+        sync_dir(root.path());
+        sync_dir(&root.path().join("missing"));
+        sync_dir(parent_of(Path::new("index")));
     }
 
     #[test]
