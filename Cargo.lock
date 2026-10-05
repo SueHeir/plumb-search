@@ -5858,6 +5858,7 @@ dependencies = [
  "image",
  "plumb-core",
  "reqwest",
+ "roxmltree",
  "serde",
  "serde_json",
  "texting_robots",

@@ -10,8 +10,11 @@ use std::time::Duration;
 use futures::future::BoxFuture;
 use futures::stream::{self, FuturesUnordered, StreamExt};
 use plumb_core::{is_bot_check_page, now_unix, registrable_domain};
-use reqwest::header::{ACCEPT, CONTENT_TYPE, LOCATION};
+use reqwest::header::{
+    ACCEPT, CONTENT_TYPE, ETAG, IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED, LOCATION,
+};
 use reqwest::{redirect, Client, ClientBuilder, RequestBuilder, Response, StatusCode};
+use serde::{Deserialize, Serialize};
 use texting_robots::Robot;
 use tokio::time::Instant;
 use tracing::{debug, info, warn};
@@ -240,6 +243,198 @@ pub async fn fetch_site_icons(
         .buffer_unordered(cfg.concurrency.max(1))
         .collect()
         .await
+}
+
+/// A site whose feed to check ([`check_feeds`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FeedTarget {
+    /// The site's homepage, which names its feed when `feed` is unknown.
+    pub homepage: CrawlTarget,
+    /// The feed's address, when a crawl found it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feed: Option<String>,
+    /// What the feed's last answer said about its version (`ETag` and
+    /// `Last-Modified`), sent back so an unchanged feed is not sent again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub etag: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_modified: Option<String>,
+}
+
+/// What a check of one site's feed found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FeedCheck {
+    pub domain: String,
+    pub outcome: FeedOutcome,
+}
+
+/// See [`check_feeds`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FeedOutcome {
+    /// The feed's recent posts on the site, newest first (maybe none), with
+    /// its address and version.
+    Read {
+        feed: String,
+        headlines: Vec<plumb_core::Headline>,
+        etag: Option<String>,
+        last_modified: Option<String>,
+    },
+    /// The feed has not changed since the version the target named.
+    NotModified,
+    /// The site has no feed this crawler may read: its homepage names
+    /// none, robots.txt keeps the crawler out, or the feed is gone (404 or
+    /// 410) or is not RSS or Atom.
+    NoFeed,
+    /// No answer, or an error worth trying again later.
+    Failed(String),
+}
+
+/// Feeds are read up to this size; most are under 200 KB.
+const FEED_MAX_BYTES: usize = 2 * 1024 * 1024;
+/// `Accept` header for feed requests.
+const ACCEPT_FEED: &str =
+    "application/rss+xml,application/atom+xml,application/xml;q=0.9,text/xml;q=0.9,*/*;q=0.5";
+
+/// Checks each target's feed, at most `cfg.concurrency` at a time, for its
+/// posts of the last week ([`crate::read_feed`]). A target with no known
+/// feed has its homepage fetched first, as [`crawl_homepages`] would (no
+/// icon, no fallback URLs), for the feed it names ([`crate::PageMeta::feed`]). The feed is
+/// fetched with the same rules as a homepage: robots.txt of each origin
+/// asked, per-host delays, at most `cfg.max_redirects` redirects (to any
+/// site, each allowed by its robots.txt), no private addresses. A known
+/// feed is asked for only if changed since the version the target names.
+/// Must run inside a Tokio runtime.
+pub async fn check_feeds(targets: Vec<FeedTarget>, cfg: &CrawlConfig) -> Vec<FeedCheck> {
+    let cfg = CrawlConfig {
+        fetch_icons: false,
+        ..cfg.clone()
+    };
+    let client = match build_client(&cfg) {
+        Ok(client) => client,
+        Err(err) => {
+            let error = format!("building the HTTP client: {}", error_text(err));
+            return targets
+                .into_iter()
+                .map(|target| FeedCheck {
+                    domain: target.homepage.domain,
+                    outcome: FeedOutcome::Failed(error.clone()),
+                })
+                .collect();
+        }
+    };
+    check_feeds_with(&client, targets, &cfg).await
+}
+
+/// [`check_feeds`] with the client built.
+async fn check_feeds_with(
+    client: &Client,
+    targets: Vec<FeedTarget>,
+    cfg: &CrawlConfig,
+) -> Vec<FeedCheck> {
+    stream::iter(targets)
+        .map(|target| async move {
+            let outcome = check_feed(client, cfg, &target).await;
+            debug!("{} feed: {outcome:?}", target.homepage.domain);
+            FeedCheck {
+                domain: target.homepage.domain,
+                outcome,
+            }
+        })
+        .buffer_unordered(cfg.concurrency.max(1))
+        .collect()
+        .await
+}
+
+async fn check_feed(client: &Client, cfg: &CrawlConfig, target: &FeedTarget) -> FeedOutcome {
+    let domain = &target.homepage.domain;
+    let mut visit = Visit::new(client, cfg);
+    let (feed, known) = match target.feed.as_deref().map(http_url) {
+        Some(Ok(feed)) => (feed, true),
+        _ => {
+            let start = match start_url(&target.homepage) {
+                Ok(start) => start,
+                Err(error) => return FeedOutcome::Failed(error),
+            };
+            match visit.fetch_homepage(domain, &start).await {
+                CrawlOutcome::Fetched(page) => match page.meta.feed.as_deref().map(http_url) {
+                    Some(Ok(feed)) => (feed, false),
+                    _ => return FeedOutcome::NoFeed,
+                },
+                CrawlOutcome::Failed { error, .. } => return FeedOutcome::Failed(error),
+                _ => return FeedOutcome::NoFeed,
+            }
+        }
+    };
+    let mut url = feed.clone();
+    for _ in 0..=cfg.max_redirects {
+        let crawl_delay = match visit.robots(&url).await {
+            Robots::DoNotCrawl(failure) => return FeedOutcome::Failed(failure.error),
+            Robots::NoRules => None,
+            Robots::Rules(robot) => {
+                if !allowed(&robot, &url).await {
+                    return FeedOutcome::NoFeed;
+                }
+                robot.delay
+            }
+        };
+        let delay = page_delay(cfg.per_host_delay, crawl_delay);
+        let mut request = client.get(url.clone()).header(ACCEPT, ACCEPT_FEED);
+        if known {
+            if let Some(etag) = &target.etag {
+                request = request.header(IF_NONE_MATCH, etag);
+            }
+            if let Some(modified) = &target.last_modified {
+                request = request.header(IF_MODIFIED_SINCE, modified);
+            }
+        }
+        let response = match visit.send(&url, delay, request).await {
+            Ok(response) => response,
+            Err(err) => return FeedOutcome::Failed(error_text(err)),
+        };
+        if let Some(next) = redirect_target(&response) {
+            url = next;
+            continue;
+        }
+        let status = response.status();
+        if status == StatusCode::NOT_MODIFIED {
+            return FeedOutcome::NotModified;
+        }
+        if matches!(status.as_u16(), 404 | 410) {
+            return FeedOutcome::NoFeed;
+        }
+        if !status.is_success() {
+            return FeedOutcome::Failed(format!("{url}: HTTP {status}"));
+        }
+        let header = |name| {
+            response
+                .headers()
+                .get(name)
+                .and_then(|v: &reqwest::header::HeaderValue| v.to_str().ok())
+                .filter(|v| !v.is_empty() && v.len() <= 200)
+                .map(str::to_string)
+        };
+        let (etag, last_modified) = (header(ETAG), header(LAST_MODIFIED));
+        let body = match read_body(response, FEED_MAX_BYTES, &cfg.downloaded).await {
+            Ok(body) => body,
+            Err(err) => return FeedOutcome::Failed(error_text(err)),
+        };
+        let (domain, base) = (domain.clone(), url.clone());
+        let read = tokio::task::spawn_blocking(move || {
+            crate::read_feed(&domain, &base, &decode_html(&body), now_unix())
+        })
+        .await;
+        return match read {
+            Ok(Some(headlines)) => FeedOutcome::Read {
+                feed: feed.into(),
+                headlines,
+                etag,
+                last_modified,
+            },
+            Ok(None) => FeedOutcome::NoFeed,
+            Err(err) => FeedOutcome::Failed(format!("reading the feed: {err}")),
+        };
+    }
+    FeedOutcome::Failed(format!("{feed}: more than {} redirects", cfg.max_redirects))
 }
 
 /// One client for the whole batch, so connections are reused.
@@ -1162,6 +1357,113 @@ mod tests {
             CrawlOutcome::Failed { error, network } => (error, network),
             other => panic!("expected a failure, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn checks_a_feed_the_homepage_names() {
+        let (port, hits) = serve(|_| {
+            Router::new()
+                .route(
+                    "/",
+                    get(|| async {
+                        Html(r#"<link rel="alternate" type="application/rss+xml" href="/rss">"#)
+                    }),
+                )
+                .route(
+                    "/rss",
+                    get(|request: Request| async move {
+                        if request.headers().get(header::IF_NONE_MATCH).is_some() {
+                            return Response::builder()
+                                .status(StatusCode::NOT_MODIFIED)
+                                .body(axum::body::Body::empty())
+                                .unwrap();
+                        }
+                        let now = now_unix();
+                        let body = format!(
+                            "<rss><channel><item><title>Fresh</title>\
+                             <link>http://news.example.com/fresh</link>\
+                             <pubDate>{}</pubDate></item></channel></rss>",
+                            rfc2822(now - 60)
+                        );
+                        Response::builder()
+                            .header(header::ETAG, "\"v1\"")
+                            .body(axum::body::Body::from(body))
+                            .unwrap()
+                    }),
+                )
+                .route(
+                    "/robots.txt",
+                    get(|| async { "User-agent: *\nDisallow: /private\n" }),
+                )
+        })
+        .await;
+        let cfg = config();
+        let client = client_builder(&cfg)
+            .resolve("news.example.com", ([127, 0, 0, 1], port).into())
+            .build()
+            .unwrap();
+        let mut target = FeedTarget {
+            homepage: CrawlTarget {
+                domain: "example.com".into(),
+                url: format!("http://news.example.com:{port}/"),
+                known_url: None,
+            },
+            ..FeedTarget::default()
+        };
+        let checks = check_feeds_with(&client, vec![target.clone()], &cfg).await;
+        let FeedOutcome::Read {
+            feed,
+            headlines,
+            etag,
+            ..
+        } = checks[0].outcome.clone()
+        else {
+            panic!("expected the feed read, got {:?}", checks[0].outcome);
+        };
+        assert_eq!(feed, format!("http://news.example.com:{port}/rss"));
+        assert_eq!(headlines.len(), 1);
+        assert_eq!(headlines[0].title, "Fresh");
+        assert_eq!(etag.as_deref(), Some("\"v1\""));
+        assert_eq!(hits.paths(), ["/robots.txt", "/", "/rss"]);
+
+        // Known now: straight to the feed, which has not changed.
+        target.feed = Some(feed);
+        target.etag = etag;
+        let checks = check_feeds_with(&client, vec![target.clone()], &cfg).await;
+        assert_eq!(checks[0].outcome, FeedOutcome::NotModified);
+
+        // A feed robots.txt keeps the crawler out of is no feed for it.
+        target.feed = Some(format!("http://news.example.com:{port}/private/rss"));
+        let checks = check_feeds_with(&client, vec![target], &cfg).await;
+        assert_eq!(checks[0].outcome, FeedOutcome::NoFeed);
+    }
+
+    /// `at` as an RSS date, in UTC.
+    fn rfc2822(at: u64) -> String {
+        const DAYS: [&str; 7] = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"];
+        const MONTHS: [&str; 12] = [
+            "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+        ];
+        let days = (at / 86_400) as i64;
+        // Howard Hinnant's civil_from_days.
+        let z = days + 719_468;
+        let era = z.div_euclid(146_097);
+        let doe = z - era * 146_097;
+        let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let day = doy - (153 * mp + 2) / 5 + 1;
+        let month = if mp < 10 { mp + 3 } else { mp - 9 };
+        let year = yoe + era * 400 + i64::from(month <= 2);
+        let secs = at % 86_400;
+        format!(
+            "{}, {day:02} {} {year} {:02}:{:02}:{:02} GMT",
+            DAYS[(days % 7) as usize],
+            MONTHS[(month - 1) as usize],
+            secs / 3600,
+            secs / 60 % 60,
+            secs % 60
+        )
     }
 
     const HOME: &str = r#"<!doctype html>

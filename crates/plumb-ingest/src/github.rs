@@ -93,6 +93,7 @@ impl Repo {
             site,
             views: self.stargazers_count,
             aliases,
+            profiles: Vec::new(),
         }
     }
 }

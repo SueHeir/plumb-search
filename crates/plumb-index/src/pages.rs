@@ -74,6 +74,9 @@ pub struct Page {
     /// The Wikidata item a Wikipedia article is about (`Q937`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub item: Option<String>,
+    /// The item's official profiles (a YouTube channel, an X account).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub profiles: Vec<plumb_core::profiles::Profile>,
 }
 
 impl Page {
@@ -88,6 +91,7 @@ impl Page {
             views: article.views,
             aliases: article.aliases,
             item: article.item,
+            profiles: article.profiles,
         }
     }
 
@@ -103,6 +107,7 @@ impl Page {
             views: repo.views,
             aliases: repo.aliases,
             item: None,
+            profiles: Vec::new(),
         }
     }
 
@@ -121,6 +126,7 @@ impl Page {
             views: question.views,
             aliases: question.aliases,
             item: None,
+            profiles: Vec::new(),
         }
     }
 
@@ -139,6 +145,7 @@ impl Page {
             views: book.views,
             aliases: book.aliases,
             item: None,
+            profiles: Vec::new(),
         }
     }
 
@@ -160,6 +167,7 @@ impl Page {
             views: paper.views,
             aliases: paper.aliases,
             item: None,
+            profiles: Vec::new(),
         }
     }
 

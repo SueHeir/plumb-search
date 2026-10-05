@@ -113,6 +113,20 @@ const HEADINGS_BOOST: f32 = 0.5;
 /// BM25 boost of the whole query, joined (`us bank` -> `usbank`), matching a
 /// joined name or a label word.
 const WHOLE_QUERY_BOOST: f32 = 6.0;
+
+/// Small words that join the words of a longer query ("pizza in denver",
+/// "bank of america") and name no site there: between two other words they
+/// never match a domain label or joined name on their own, so in.gov is not
+/// found by them, and one alone never counts as a leading name ("in n out
+/// burger" does not name in.gov). A one-word query is still a name.
+const FUNCTION_WORDS: &[&str] = &[
+    "a", "an", "and", "at", "by", "for", "from", "in", "into", "near", "of", "on", "or", "the",
+    "to", "with",
+];
+
+fn is_function_word(word: &str) -> bool {
+    FUNCTION_WORDS.contains(&word)
+}
 /// BM25 boost of a query that is the hostname or URL of an indexed domain.
 const DOMAIN_BOOST: f32 = 10.0;
 /// The share of a word's boost its other number gets ("video" for
@@ -236,6 +250,14 @@ pub struct RankConfig {
     /// the first `k` of the query's `n` words, which then gets `k / n` of
     /// it (code.gov in "code hosting"). `None` keeps the full-name bonus.
     pub partial_label_bonus: Option<f32>,
+    /// For a query that describes what it looks for, the text match (words
+    /// and meaning together) a site needs for its popularity to count in
+    /// full; below it, popularity counts in proportion. Keeps the most
+    /// popular sites, which match "to do list" or "map of the world" not
+    /// at all (under 0.01 on a million sites), from outranking every site
+    /// that does, while youtube.com ("video sharing site") and spotify.com
+    /// ("music streaming"), at about 0.04, keep theirs. `None` turns it off.
+    pub described_relevance: Option<f32>,
 }
 
 impl Default for RankConfig {
@@ -252,6 +274,7 @@ impl Default for RankConfig {
             meaning_weight: 0.7,
             described_alpha: Some(0.5),
             partial_label_bonus: None,
+            described_relevance: Some(0.04),
         }
     }
 }
@@ -1030,6 +1053,9 @@ impl Searcher {
             Some(described) if !navigational => unit_or(described, default.alpha),
             _ => unit_or(cfg.alpha, default.alpha),
         };
+        let relevance_floor = cfg
+            .described_relevance
+            .filter(|floor| !navigational && *floor > 0.0);
         let partial_label_bonus = cfg.partial_label_bonus.unwrap_or(cfg.exact_label_bonus);
         let untrusted_share = unit_or(cfg.untrusted_share, default.untrusted_share);
         let country_boost = unit_or(cfg.country_boost, default.country_boost);
@@ -1139,9 +1165,15 @@ impl Searcher {
                 .as_ref()
                 .and_then(|domains| domains.term_ords(addr.doc_id).next())
                 .unwrap_or(u64::MAX);
+            let prior = match relevance_floor {
+                Some(floor) if !is_kind && name.words() == 0 => {
+                    link_score * (text_score / floor).min(1.0)
+                }
+                _ => link_score,
+            };
             ranked.push(Ranked {
                 addr,
-                score: alpha * link_score
+                score: alpha * prior
                     + trust * ((1.0 - alpha) * text_score + name_bonus)
                     + country_bonus,
                 text_score,
@@ -1597,7 +1629,9 @@ impl ParsedQuery {
                 .enumerate()
                 .map(move |(i, key)| (key, skip + i + 1))
         };
-        let mut leading: Vec<(String, usize)> = prefixes(0).collect();
+        let mut leading: Vec<(String, usize)> = prefixes(0)
+            .filter(|(key, words)| tokens.len() == 1 || *words > 1 || !is_function_word(key))
+            .collect();
         if tokens.len() > 1 && tokens[0] == "the" {
             leading.extend(prefixes(1));
         }
@@ -1653,7 +1687,14 @@ impl ParsedQuery {
         clauses: &mut Clauses,
     ) -> Result<()> {
         let word = &self.words[i];
+        // Only a word joining two others: "to" in "to do list" is a word
+        // of the thing looked for.
+        let joining = i > 0 && i + 1 < self.words.len() && is_function_word(word);
+        let names = self.len == 1 || !joining;
         for (field, boost) in self.per_word(f) {
+            if !names && (field == f.label || field == f.joined) {
+                continue;
+            }
             clauses.add(Term::from_field_text(field, word), boost);
         }
         let Some(other) = &self.others[i] else {
@@ -2897,11 +2938,14 @@ mod tests {
         };
 
         // No site is named "online" or "online banking": a plain blend, at
-        // the popularity weight of queries that describe what they look for.
+        // the popularity weight of queries that describe what they look for,
+        // with popularity counting in proportion below the relevance floor.
         let alpha = cfg.described_alpha.unwrap();
+        let floor = cfg.described_relevance.unwrap();
         let hits = searcher.search("online banking", 10).unwrap();
         check(&hits, &|hit| {
-            alpha * hit.link_score + (1.0 - alpha) * hit.text_score
+            let prior = hit.link_score * (hit.text_score / floor).min(1.0);
+            alpha * prior + (1.0 - alpha) * hit.text_score
         });
 
         // "us bank" is usbank.com's whole name: the label bonus, full trust.
@@ -3183,6 +3227,32 @@ mod tests {
     }
 
     #[test]
+    fn small_joining_words_name_no_site_in_a_longer_query() {
+        let records = vec![
+            site(
+                "in.gov",
+                Some("IN.gov | The Official Website of the State of Indiana"),
+                None,
+                &["Indiana"],
+                &[("IN.gov", 3)],
+                popular(300, 5_000),
+            ),
+            site(
+                "denverpizzaco.com",
+                Some("Denver Pizza Company | Pizza in Denver"),
+                Some("Wood-fired pizza in Denver, Colorado."),
+                &[],
+                &[("Denver Pizza", 1)],
+                obscure(10_000_000, 0),
+            ),
+        ];
+        let (_dir, searcher) = build(&records);
+        assert_eq!(top(&searcher, "pizza in denver"), "denverpizzaco.com");
+        // On its own, the word is still a name.
+        assert_eq!(top(&searcher, "in"), "in.gov");
+    }
+
+    #[test]
     fn longer_leading_names_win() {
         let (_dir, searcher) = build(&lookalike_corpus());
         // chasecenter.com covers "chase center", chase.com only "chase".
@@ -3253,6 +3323,44 @@ mod tests {
         let hits = searcher.search_with("us bank", 20, &cfg).unwrap();
         assert_eq!(hits[0].domain, "usbank.com");
         assert_eq!(hits[0].score, hits[0].text_score);
+    }
+
+    #[test]
+    fn described_queries_need_some_match_for_popularity_to_count() {
+        let records = vec![
+            site(
+                "youtube.com",
+                Some("YouTube"),
+                Some("Enjoy the videos and music you love, and keep a watch list."),
+                &["YouTube"],
+                &[("YouTube", 50)],
+                popular(1, 50),
+            ),
+            site(
+                "checklist.com",
+                Some("Checklist.com | To do list and checklists"),
+                Some("Make a to do list and share checklists."),
+                &[],
+                &[("checklist", 1)],
+                obscure(500_000, 2),
+            ),
+        ];
+        let (_dir, searcher) = build(&records);
+        // Popularity weighing heavily, as among a million sites, where
+        // youtube.com matches "to do list" far less than here.
+        let on = RankConfig {
+            described_alpha: Some(0.9),
+            described_relevance: Some(0.25),
+            ..RankConfig::default()
+        };
+        let hits = searcher.search_with("to do list", 2, &on).unwrap();
+        assert_eq!(hits[0].domain, "checklist.com");
+        let off = RankConfig {
+            described_relevance: None,
+            ..on
+        };
+        let hits = searcher.search_with("to do list", 2, &off).unwrap();
+        assert_eq!(hits[0].domain, "youtube.com");
     }
 
     #[test]

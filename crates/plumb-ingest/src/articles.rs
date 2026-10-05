@@ -401,12 +401,12 @@ pub fn build_articles(lang: &str, dumps: &ArticleDumps) -> Result<Vec<Article>> 
             else {
                 return Ok(());
             };
+            // Unread redirects are kept too, after the read ones: views of
+            // a redirect are often counted for its article, so "Mozart"
+            // shows none though it is how most find Wolfgang Amadeus Mozart.
             let Some((name, views)) = redirects.remove(&from) else {
                 return Ok(());
             };
-            if views == 0 {
-                return Ok(());
-            }
             let target = values
                 .get(title)
                 .map_or("", SqlValue::as_str)
@@ -434,8 +434,13 @@ pub fn build_articles(lang: &str, dumps: &ArticleDumps) -> Result<Vec<Article>> 
         // The main page is the most read page but no article.
         .filter(|page| page.views > 0 && !page.disambiguation && &*page.title != MAIN_PAGE)
         .map(|mut page| {
-            page.aliases
-                .sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+            // The most read first, then the shortest: a short other name
+            // ("Mozart") is more likely the one people type than a long one.
+            page.aliases.sort_by(|a, b| {
+                b.0.cmp(&a.0)
+                    .then_with(|| a.1.chars().count().cmp(&b.1.chars().count()))
+                    .then_with(|| a.1.cmp(&b.1))
+            });
             let title_key = plumb_core::normalize_text(&page.title);
             let mut aliases: Vec<String> = Vec::new();
             for (_, alias) in page.aliases {
@@ -462,6 +467,7 @@ pub fn build_articles(lang: &str, dumps: &ArticleDumps) -> Result<Vec<Article>> 
                 site,
                 views: page.views,
                 aliases,
+                profiles: Vec::new(),
             }
         })
         .collect();
@@ -655,7 +661,7 @@ CREATE TABLE `page` (
   PRIMARY KEY (`page_id`)
 ) ENGINE=InnoDB;
 INSERT INTO `page` VALUES (1,0,'Marie_Curie',0,100),(2,0,'Madame_Curie',1,10),(3,0,'Marie_curie',1,10),(4,1,'Marie_Curie',0,5),(5,0,'Curie',0,9),(6,0,'Python_(programming_language)',0,99);
-INSERT INTO `page` VALUES (7,0,'Pierre_Curie',0,50),(8,0,'O\\'Brien',0,7),(9,0,'Unread',0,1),(10,0,'Python_language',1,3);
+INSERT INTO `page` VALUES (7,0,'Pierre_Curie',0,50),(8,0,'O\\'Brien',0,7),(9,0,'Unread',0,1),(10,0,'Python_language',1,3),(11,0,'Maria_Sklodowska-Curie',1,3),(12,0,'Sklodowska',1,3);
 ";
 
     const PROPS: &str = "\
@@ -676,7 +682,7 @@ CREATE TABLE `redirect` (
   `rd_interwiki` varbinary(32) DEFAULT NULL,
   `rd_fragment` varbinary(255) DEFAULT NULL
 ) ENGINE=InnoDB;
-INSERT INTO `redirect` VALUES (2,0,'Marie_Curie','',''),(3,0,'Marie_Curie','',''),(10,0,'Python_(programming_language)','','Syntax');
+INSERT INTO `redirect` VALUES (2,0,'Marie_Curie','',''),(3,0,'Marie_Curie','',''),(10,0,'Python_(programming_language)','','Syntax'),(11,0,'Marie_Curie','',''),(12,0,'Marie_Curie','','');
 ";
 
     const VIEWS: &str = "\
@@ -721,7 +727,7 @@ de.wikipedia Marie_Curie 1 desktop 70000 A1
             Ok(())
         })
         .unwrap();
-        assert_eq!(titles.len(), 10);
+        assert_eq!(titles.len(), 12);
         assert!(titles.contains(&"O'Brien".to_string()));
     }
 
@@ -782,8 +788,12 @@ UNLOCK TABLES;
             curie.description.as_deref(),
             Some("Polish-French physicist and chemist (1867–1934)")
         );
-        // "Marie curie" only differs in case, so only Madame Curie is kept.
-        assert_eq!(curie.aliases, ["Madame Curie"]);
+        // "Marie curie" only differs in case, so is left out; unread
+        // redirects come after read ones, the shortest first.
+        assert_eq!(
+            curie.aliases,
+            ["Madame Curie", "Sklodowska", "Maria Sklodowska-Curie"]
+        );
         assert_eq!(curie.site, None);
         let python = &articles[0];
         assert_eq!(python.site.as_deref(), Some("python.org"));

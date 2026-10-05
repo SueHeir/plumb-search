@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use anyhow::{bail, Context, Result};
-use plumb_core::article::{articles_file_name, parse_article};
+use plumb_core::article::{articles_file_name, articles_of, is_profiles_line, PROFILES_LINE};
 use plumb_index::pages::{build_page_index, Page, PageSearcher};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
@@ -120,25 +120,23 @@ impl SetInfo {
         }
         let reader = plumb_ingest::open_maybe_gz(path)?;
         let path = path.to_path_buf();
+        let lines = std::io::BufRead::lines(reader).map_while(move |line| match line {
+            Ok(line) => Some(line),
+            Err(err) => {
+                warn!("reading {}: {err}", path.display());
+                None
+            }
+        });
         let mut bad = 0u64;
-        Ok(std::io::BufRead::lines(reader)
-            .enumerate()
-            .map_while(move |(n, line)| match line {
-                Ok(line) => Some((n, line)),
-                Err(err) => {
-                    warn!("reading {}: {err}", path.display());
-                    None
-                }
-            })
-            .filter(|(n, line)| !(*n == 0 && line.starts_with("views\t")) && !line.is_empty())
-            .filter_map(move |(n, line)| match parse_article(&line) {
+        Ok(articles_of(lines)
+            .filter_map(move |(n, article)| match article {
                 // Files made before fetch-pages left it out.
                 Ok(article) if article.title == "Main Page" => None,
                 Ok(article) => Page::from_set(id, article),
                 Err(err) => {
                     bad += 1;
                     if bad <= 3 {
-                        warn!("page set line {}: {err:#}", n + 1);
+                        warn!("page set line {n}: {err:#}");
                     }
                     None
                 }
@@ -214,6 +212,8 @@ pub fn wanted_counts(sets: &PageSets, storage_limit_mb: u64) -> Vec<(&'static Se
 pub struct SetFileCutter {
     limit: u64,
     lines: u64,
+    /// The first bytes of the line being written.
+    line_start: Vec<u8>,
     header_done: bool,
     /// Whether lines past the limit were dropped.
     cut: bool,
@@ -227,6 +227,7 @@ impl SetFileCutter {
         Ok(SetFileCutter {
             limit,
             lines: 0,
+            line_start: Vec::new(),
             header_done: false,
             cut: false,
             out: Some(flate2::write::GzEncoder::new(
@@ -272,12 +273,18 @@ impl std::io::Write for SetFileCutter {
             let end = rest.iter().position(|&b| b == b'\n').map(|i| i + 1);
             let piece = &rest[..end.unwrap_or(rest.len())];
             out.write_all(piece)?;
+            // A line of profiles is not a page (see `plumb_core::article`).
+            // Lines can come in pieces, so their starts are kept.
+            let wanted = PROFILES_LINE.len().saturating_sub(self.line_start.len());
+            self.line_start
+                .extend_from_slice(&piece[..wanted.min(piece.len())]);
             if end.is_some() {
-                if self.header_done {
-                    self.lines += 1;
-                } else {
+                if !self.header_done {
                     self.header_done = true;
+                } else if !is_profiles_line(&self.line_start) {
+                    self.lines += 1;
                 }
+                self.line_start.clear();
             }
             rest = &rest[piece.len()..];
         }
@@ -578,11 +585,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut text = ARTICLES_HEADER.as_bytes().to_vec();
         for (title, views) in [("A", 3u64), ("B", 2), ("C", 1)] {
+            // A line of profiles after an article is not a page.
+            let profiles = vec![plumb_core::profiles::Profile {
+                service: "x".into(),
+                id: format!("account{title}"),
+            }];
             write_article(
                 &mut text,
                 &Article {
                     title: title.into(),
+                    item: Some(format!("Q{views}")),
                     views,
+                    profiles,
                     ..Article::default()
                 },
             )
@@ -609,6 +623,7 @@ mod tests {
                 .unwrap();
         assert_eq!(back.len(), 2);
         assert_eq!(back[1].title, "B");
+        assert_eq!(back[0].profiles[0].id, "accountA");
     }
 
     #[test]

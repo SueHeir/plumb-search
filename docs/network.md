@@ -49,6 +49,8 @@ What a node keeps from another node's batch (`accept_batch`):
 | New domains the homepages linked to | at most 100 per crawled homepage |
 | Popularity ranks, Wikidata status, crawl attempts and failures | never: those come from public seed data or local bookkeeping |
 
+A batch may also carry a site's recent headlines from its feed, each site's on a line of its own; a node takes those only from its own and trusted crawlers (see [news.md](news.md)).
+
 Batches older than 7 days or dated in the future are refused. A node keeps the batches it holds for 35 days (`DIR/net/batches/`), serves them to others, and uses them to prove its search answers.
 
 ## Agreement between crawlers

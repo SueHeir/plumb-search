@@ -225,6 +225,7 @@ impl Book {
             views: self.shelvings.into(),
             aliases,
             title: self.title,
+            profiles: Vec::new(),
         }
     }
 }

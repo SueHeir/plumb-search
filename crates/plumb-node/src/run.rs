@@ -68,6 +68,9 @@ fn node_config(args: RunArgs) -> NodeConfig {
     if args.crawl_concurrency.is_some() {
         config.crawl_concurrency = args.crawl_concurrency;
     }
+    if let Some(feeds) = args.news_feeds {
+        config.news_feeds = feeds;
+    }
     if args.cc_release.is_some() {
         config.cc_release = args.cc_release;
     }
