@@ -98,6 +98,7 @@ impl Repo {
             views: self.stargazers_count,
             aliases,
             profiles: Vec::new(),
+            website: None,
         }
     }
 }

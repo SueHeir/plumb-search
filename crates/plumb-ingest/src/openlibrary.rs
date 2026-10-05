@@ -226,6 +226,7 @@ impl Book {
             aliases,
             title: self.title,
             profiles: Vec::new(),
+            website: None,
         }
     }
 }

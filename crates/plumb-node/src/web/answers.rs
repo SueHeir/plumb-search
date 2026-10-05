@@ -361,6 +361,7 @@ mod tests {
                 aliases: Vec::new(),
                 item: Some("Q937".to_string()),
                 profiles: Vec::new(),
+                website: None,
             },
             score: 1.0,
             named: true,

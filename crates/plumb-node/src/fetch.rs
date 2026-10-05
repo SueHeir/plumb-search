@@ -195,8 +195,9 @@ fn run_papers(args: &FetchPagesArgs, dest: &std::path::Path) -> Result<()> {
     write_set(dest, &fetched.papers, "papers")
 }
 
-/// `plumb fetch-profiles`: adds Wikidata's official profiles to the
-/// English Wikipedia articles file.
+/// `plumb fetch-profiles`: adds Wikidata's official profiles, and official
+/// websites that are part of another site, to the English Wikipedia
+/// articles file.
 pub fn run_profiles(args: FetchProfilesArgs) -> Result<()> {
     let path = match (&args.articles, &args.data) {
         (Some(path), _) => path.clone(),
@@ -218,6 +219,15 @@ pub fn run_profiles(args: FetchProfilesArgs) -> Result<()> {
         download::WikidataPacing::default(),
     ))??;
     info!("Wikidata has profiles for {} items", profiles.len());
+    let websites = block_on(plumb_ingest::profiles::fetch_websites(
+        &client,
+        download::WIKIDATA_SPARQL_URL,
+        download::WikidataPacing::default(),
+    ))??;
+    info!(
+        "Wikidata has official websites for {} items",
+        websites.len()
+    );
     // The items without an article, as a set of their own beside it.
     let with_articles = plumb_ingest::profiles::items_in_file(&path)?;
     let items = block_on(plumb_ingest::profiles::fetch_profile_items(
@@ -225,6 +235,7 @@ pub fn run_profiles(args: FetchProfilesArgs) -> Result<()> {
         download::WIKIDATA_SPARQL_URL,
         download::WikidataPacing::default(),
         &profiles,
+        &websites,
         &with_articles,
     ))??;
     let items_path = path.with_file_name(format!("{}.tsv.gz", plumb_index::pages::WIKIDATA_SET));
@@ -234,13 +245,14 @@ pub fn run_profiles(args: FetchProfilesArgs) -> Result<()> {
         items.len(),
         items_path.display()
     );
-    let added = plumb_ingest::profiles::add_profiles_to_file(&path, &profiles)?;
+    let added = plumb_ingest::profiles::add_profiles_to_file(&path, &profiles, &websites)?;
     info!(
-        "{}: {} of {} articles have profiles, {} in all",
+        "{}: {} of {} articles have profiles, {} in all; {} link a website on their site",
         path.display(),
         added.with_profiles,
         added.articles,
-        added.profiles
+        added.profiles,
+        added.websites
     );
     Ok(())
 }
