@@ -83,19 +83,23 @@ pub(super) fn refresh(
 /// near them (see [`crate::places::WantedPlaces`]). Empty until there is a
 /// place index, or when no About page gives a town.
 pub(super) fn homes(inner: &Inner) -> Vec<(f64, f64)> {
+    known_homes(inner).unwrap_or_default()
+}
+
+/// [`homes`], but `None` while About pages give towns and there is no
+/// place index yet to find them in: until then, which places are near
+/// them is not known.
+pub(super) fn known_homes(inner: &Inner) -> Option<Vec<(f64, f64)>> {
     let towns = crate::about::all_towns(&inner.paths.data.join("history"));
     if towns.is_empty() {
-        return Vec::new();
+        return Some(Vec::new());
     }
-    let Some(searcher) = inner
+    let searcher = inner
         .places
         .read()
         .unwrap_or_else(PoisonError::into_inner)
         .as_ref()
-        .map(|(_, s)| s.clone())
-    else {
-        return Vec::new();
-    };
+        .map(|(_, s)| s.clone())?;
     let mut homes: Vec<(f64, f64)> = towns
         .iter()
         .filter_map(|town| searcher.locate(town, None).ok().flatten())
@@ -103,7 +107,7 @@ pub(super) fn homes(inner: &Inner) -> Vec<(f64, f64)> {
         .collect();
     homes.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
     homes.dedup();
-    homes
+    Some(homes)
 }
 
 /// The places `query` asks for, around `home` for "near me".

@@ -58,7 +58,7 @@ pub(super) fn run(inner: Arc<Inner>) {
         if inner.config.blackhole {
             settings.page_sets = settings.page_sets.all_unless_set();
         }
-        let near = super::places::homes(&inner);
+        let near = super::places::known_homes(&inner);
         let counts: Vec<(&SetInfo, u64)> =
             wanted_counts(&settings.page_sets, settings.storage_limit_mb)
                 .into_iter()
@@ -68,7 +68,7 @@ pub(super) fn run(inner: Arc<Inner>) {
                         crate::places::file_pages(
                             &settings.page_sets,
                             settings.storage_limit_mb,
-                            &near,
+                            near.as_deref().unwrap_or_default(),
                         ),
                     ),
                     _ => (set, pages),
@@ -77,6 +77,9 @@ pub(super) fn run(inner: Arc<Inner>) {
         // Only a node with a storage limit cuts its files: a server's are
         // handed on to other nodes whole.
         for &(set, pages) in counts.iter().filter(|_| settings.storage_limit_mb > 0) {
+            if !may_cut(set, pages, near.is_some()) {
+                continue;
+            }
             if let Err(err) = cut_if_longer(&inner, set, pages) {
                 warn!("page set {}: {err:#}", set.id);
             }
@@ -325,6 +328,15 @@ fn cut_if_longer(inner: &Inner, set: &SetInfo, pages: u64) -> Result<()> {
     Ok(())
 }
 
+/// Whether `set`'s file may be cut to `pages` now. The places file is
+/// not while the towns on the About pages are not yet found
+/// (`homes_known` false, until the place index has opened): cut to the
+/// places kept everywhere, it would lose the ones near them and be taken
+/// again whole once they are found, on every restart.
+fn may_cut(set: &SetInfo, pages: u64, homes_known: bool) -> bool {
+    homes_known || pages == 0 || set.id != plumb_index::places::PLACES_SET
+}
+
 fn write_notes(file: &std::path::Path, notes: &SetFileNotes) -> Result<()> {
     super::store::write_atomically(&notes_path(file), &serde_json::to_vec(notes)?)
 }
@@ -397,5 +409,24 @@ pub(super) fn add_pages(
             results.pages = place_pages(query, &results.hits, found);
         }
         Err(err) => warn!("searching pages: {err:#}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_places_file_is_not_cut_before_the_towns_are_found() {
+        let places = crate::places::set_info();
+        let wikipedia = SetInfo::find("wikipedia-en").unwrap();
+        // Before the place index opens, the places near the towns are not
+        // known: the file is kept whole.
+        assert!(!may_cut(places, crate::places::EVERYWHERE, false));
+        assert!(may_cut(places, crate::places::EVERYWHERE, true));
+        // Places turned off: cut whatever.
+        assert!(may_cut(places, 0, false));
+        // Other sets do not depend on the towns.
+        assert!(may_cut(wikipedia, 1_000, false));
     }
 }
