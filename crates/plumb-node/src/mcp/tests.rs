@@ -374,6 +374,22 @@ fn read_page_is_offered_only_with_a_reader() {
     let answer = &reply["result"]["structuredContent"];
     assert_eq!(answer["text"], "One two three.");
     assert_eq!(answer["start"], 6);
+
+    // Jumping to words, from the start of their line.
+    let reply = call(&with, "read_page", json!({ "url": url, "find": "THREE" }));
+    let answer = &reply["result"]["structuredContent"];
+    assert_eq!(answer["start"], 6);
+    assert_eq!(answer["found"], true);
+    let reply = call(&with, "read_page", json!({ "url": url, "find": "four" }));
+    assert_eq!(reply["result"]["structuredContent"]["found"], false);
+
+    // A bot check is not the page.
+    let check = serve_page(
+        &runtime,
+        "<title>Just a moment...</title><p>Checking your browser before accessing.</p>",
+    );
+    let reply = call(&with, "read_page", json!({ "url": check }));
+    assert_eq!(reply["result"]["isError"], true, "{reply}");
 }
 
 #[test]

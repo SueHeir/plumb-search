@@ -607,6 +607,9 @@ pub struct ReadArgs {
     start: usize,
     max_chars: usize,
     links: bool,
+    /// Words to jump to: the part returned starts at their first
+    /// appearance from `start`.
+    find: Option<String>,
 }
 
 impl ReadArgs {
@@ -618,6 +621,12 @@ impl ReadArgs {
                 .unwrap_or(DEFAULT_READ_CHARS)
                 .clamp(200, MAX_READ_CHARS),
             links: args.get("links").and_then(Value::as_bool).unwrap_or(false),
+            find: args
+                .get("find")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|find| !find.is_empty())
+                .map(|find| truncate_chars(find, MAX_QUERY_CHARS)),
         })
     }
 }
@@ -655,11 +664,48 @@ impl Reader {
             .runtime
             .block_on(self.pages.read(&args.url))
             .map_err(anyhow::Error::from)?;
-        let (start, max_chars, links) = (args.start, args.max_chars, args.links);
-        let total = page.text.chars().count();
-        let start = start.min(total);
+        let domain = registrable_domain(&page.url).or_else(|| {
+            url::Url::parse(&page.url)
+                .ok()?
+                .host_str()
+                .map(str::to_string)
+        });
+        if let Some(domain) = domain {
+            let opening: String = page.text.chars().take(2_000).collect();
+            if plumb_core::is_bot_check_page(
+                &domain,
+                page.title.as_deref(),
+                None,
+                &[],
+                Some(&opening),
+            ) {
+                bail!(
+                    "{domain} showed a bot check (a CAPTCHA or \"checking your browser\" page) \
+                     instead of the page; try another source"
+                );
+            }
+        }
+        let (max_chars, links) = (args.max_chars, args.links);
+        let chars: Vec<char> = page.text.chars().collect();
+        let total = chars.len();
+        let mut start = args.start.min(total);
+        let found = args
+            .find
+            .as_deref()
+            .map(|find| match find_from(&chars, find, start) {
+                Some(at) => {
+                    // From the start of its line, when that is near.
+                    let line = chars[..at]
+                        .iter()
+                        .rposition(|&c| c == '\n')
+                        .map_or(0, |n| n + 1);
+                    start = if at - line <= 300 { line } else { at };
+                    true
+                }
+                None => false,
+            });
         let mut end = (start + max_chars).min(total);
-        let mut text: String = page.text.chars().skip(start).take(end - start).collect();
+        let mut text: String = chars[start..end].iter().collect();
         if end < total {
             // End at a line break when one is in the second half.
             if let Some(cut) = text.rfind('\n').filter(|&cut| cut > text.len() / 2) {
@@ -681,6 +727,9 @@ impl Reader {
         if end < total {
             fields.insert("next_start".into(), json!(end));
         }
+        if let Some(found) = found {
+            fields.insert("found".into(), json!(found));
+        }
         if links {
             let links: Vec<Value> = page
                 .links
@@ -692,6 +741,21 @@ impl Reader {
         }
         Ok(answer)
     }
+}
+
+/// Where `find` first appears in `chars` at or after `from`, ignoring case.
+fn find_from(chars: &[char], find: &str, from: usize) -> Option<usize> {
+    let fold = |c: char| c.to_lowercase().next().unwrap_or(c);
+    let find: Vec<char> = find.trim().chars().map(fold).collect();
+    if find.is_empty() || find.len() > chars.len() {
+        return None;
+    }
+    (from..=chars.len() - find.len()).find(|&at| {
+        chars[at..at + find.len()]
+            .iter()
+            .zip(&find)
+            .all(|(&c, &f)| fold(c) == f)
+    })
 }
 
 fn error(id: Value, code: i64, message: &str) -> Value {
@@ -771,10 +835,12 @@ pub fn tools(read_pages: bool) -> Value {
         {
             "name": "search",
             "title": "Search",
-            "description": "Plumb Search results for a query: sites by name, best first, plus \
-                 pages such as Wikipedia articles placed among them. Plumb indexes homepages and \
-                 names, not the full text of the web, so search for names and topics, not \
-                 questions.",
+            "description": "Search the web (web_search) with Plumb Search: sites by name, best \
+                 first, plus Wikipedia articles, Stack Overflow questions, books and other pages \
+                 placed among them, a direct answer for sums, unit and currency conversions and \
+                 the time somewhere, facts about what the query names, and recent headlines. \
+                 Plumb indexes homepages and names, not the full text of the web, so search for \
+                 names and topics, then read a page with read_page.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -817,10 +883,11 @@ fn read_page_tool() -> Value {
     json!({
         "name": "read_page",
         "title": "Read a page",
-        "description": "Fetches a web page and returns its text (with headings and lists marked \
-             in Markdown), without menus, ads or scripts. Use it after search or official_site \
-             to read what a page says. Long pages come in parts: call again with start set to \
-             next_start. Also says whether the address is a look-alike of a better-known site.",
+        "description": "Fetch a web page (web_fetch) and return its text, with headings and \
+             lists marked in Markdown, without menus, ads or scripts. Use it after search or \
+             official_site to read what a page says. Long pages come in parts: call again with \
+             start set to next_start, or pass find to jump to the words you need. Also says \
+             whether the address is a look-alike of a better-known site.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -828,6 +895,7 @@ fn read_page_tool() -> Value {
                 "start": { "type": "integer", "minimum": 0, "description": "Character to start at, for the next part of a long page (default 0)." },
                 "max_chars": { "type": "integer", "minimum": 200, "maximum": MAX_READ_CHARS, "description": "Most characters to return (default 6000)." },
                 "links": { "type": "boolean", "description": "Also list the page's links (default false)." },
+                "find": { "type": "string", "description": "Jump to the first place these words appear (from start), like Ctrl-F; says found: false when they do not." },
             },
             "required": ["url"],
         },

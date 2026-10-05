@@ -548,6 +548,7 @@ fn app(state: AppState) -> Router {
         .route("/", get(home))
         .route("/search", get(search_page))
         .route("/api/search", get(api_search))
+        .route("/api/websearch", post(searxng::external))
         .route("/opensearch.xml", get(opensearch));
     router = mcp::routes(router);
     if state.node.is_some() {
@@ -674,6 +675,11 @@ struct SearchParams {
     pageno: Option<usize>,
     /// SearXNG's safe search: 0, 1 or 2.
     safesearch: Option<String>,
+    /// SearXNG's categories, comma separated: `news` alone asks for
+    /// recent headlines only.
+    categories: Option<String>,
+    /// SearXNG's time range (`day`, `week`, ...): recent headlines first.
+    time_range: Option<String>,
 }
 
 /// Whether a flag parameter is set: `1`, `on`, `true` or `yes`.
@@ -1152,6 +1158,8 @@ async fn go(
         format: None,
         pageno: None,
         safesearch: None,
+        categories: None,
+        time_range: None,
     };
     let query = search.query();
     let back = {
@@ -3091,6 +3099,41 @@ mod tests {
         let (_, _, body) = send(app.clone(), "/search?q=12*7&format=json").await;
         let body: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(body["answers"][0]["answer"], "12 × 7 = 84");
+        // And leads the first snippet, for apps that read only snippets.
+        assert!(body["results"][0]["content"]
+            .as_str()
+            .unwrap()
+            .starts_with("Answer: 12 × 7 = 84. Checking"));
+
+        // News only: this server keeps no headlines.
+        let (_, _, body) = send(app.clone(), "/search?q=us+bank&format=json&categories=news").await;
+        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(body["results"], serde_json::json!([]));
+
+        // Open WebUI's external search engine.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/api/websearch")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"query":"us bank","count":1}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!([{
+                "link": "https://www.usbank.com/",
+                "title": "U.S. Bank | Personal & Business Banking",
+                "snippet": "Checking, savings & loans.",
+            }])
+        );
 
         // A bang stays a search: an AI app wants results, not a redirect.
         let (status, _, _) = send(app, "/search?q=!g+rust&format=json").await;
