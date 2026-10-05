@@ -1,6 +1,6 @@
 # Page sets: articles, repositories, questions, books and papers in results
 
-Plumb lists single pages next to sites: English Wikipedia's articles, well-starred GitHub repositories, Stack Overflow's most viewed questions, Open Library's most read books and the most cited papers. Searching "marie curie" shows the article Marie Curie, and "python" shows python.org with the article on the Python language under it.
+Plumb lists single pages next to sites: English Wikipedia's articles, well-starred GitHub repositories, Stack Overflow's most viewed questions, Open Library's most read books, Podcast Index's most popular podcasts and the most cited papers. Searching "marie curie" shows the article Marie Curie, and "python" shows python.org with the article on the Python language under it.
 
 ## What is kept
 
@@ -84,6 +84,16 @@ plumb fetch-pages --set books --work /big/disk/dumps --data /path/to/node-data
 ```
 
 `--min-shelvings` and `--max-books` change what is kept.
+
+## Podcasts
+
+The `podcasts` set lists the podcasts Podcast Index rates most popular (300,000 by default, each scoring at least 4 of 9 and answering when last fetched): "hardcore history podcast" and "dan carlin podcast" find Dan Carlin's Hardcore History. Podcast Index keeps an open index of podcast feeds, "available for free, for any use", and publishes it whole as a SQLite database of about 1.8 GB (5 GB unpacked):
+
+```sh
+plumb fetch-pages --set podcasts --work /big/disk/dumps --data /path/to/node-data
+```
+
+Each podcast keeps its title, "Podcast by AUTHOR · CATEGORY" as its description, "AUTHOR podcast" as another title, its Podcast Index id (its page at podcastindex.org lists its episodes and the apps that play it), its Apple Podcasts id, and its website's domain when that is a site of its own, so it goes under that site's result. Many podcasts share Podcast Index's popularity score, so the number of episodes breaks ties. Like a book, a podcast is never listed before every site by its title alone, but its title or the end of it followed by "podcast", or by its author's name, asks for it. `--min-podcast-score`, `--max-podcasts` and `--podcast-db` (an unpacked database) change what is read and kept.
 
 ## Papers
 
