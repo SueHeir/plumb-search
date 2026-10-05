@@ -1025,6 +1025,7 @@ pub async fn start(
         batch_peers: HashSet::new(),
         relays: HashMap::new(),
         remote_addrs: HashMap::new(),
+        circuits: HashMap::new(),
         reserved: HashSet::new(),
         nearby: HashSet::new(),
         wanted: VecDeque::new(),
@@ -1534,6 +1535,8 @@ struct Task {
     relays: HashMap<PeerId, bool>,
     /// The address of each connected node, as we reached it or it reached us.
     remote_addrs: HashMap<PeerId, Multiaddr>,
+    /// Connected nodes reached through a relay, and that relay.
+    circuits: HashMap<PeerId, PeerId>,
     /// Nodes that hold a reservation with us (when we are a relay).
     reserved: HashSet<PeerId>,
     /// Nodes we reached over a home-network or loopback address (directly
@@ -2072,6 +2075,13 @@ impl Task {
                 if dialable && !addr.iter().any(|p| p == Protocol::P2pCircuit) {
                     self.remote_addrs.insert(peer_id, addr);
                 }
+                let through = match &endpoint {
+                    ConnectedPoint::Dialer { address, .. } => relay_of(address),
+                    ConnectedPoint::Listener { local_addr, .. } => relay_of(local_addr),
+                };
+                if let Some(relay) = through {
+                    self.circuits.insert(peer_id, relay);
+                }
             }
             SwarmEvent::ConnectionClosed {
                 peer_id,
@@ -2094,6 +2104,7 @@ impl Task {
                     // Asked again on coming back, for what it sent meanwhile.
                     self.listing.remove(&peer_id);
                     self.remote_addrs.remove(&peer_id);
+                    self.circuits.remove(&peer_id);
                     self.reserved.remove(&peer_id);
                     self.nearby.remove(&peer_id);
                     if self.relays.remove(&peer_id).is_some() {
@@ -3000,7 +3011,11 @@ impl Task {
             // A relay this node trusts may pass on as much as it likes,
             // within the day's limit.
             Asker::Relay(relay) if self.config.trusted_peers.contains(&relay) => None,
-            Asker::Relay(relay) => Some(Source::Peer(relay)),
+            // By its address: anyone can make keys and say they relay.
+            Asker::Relay(relay) => match self.source_of(&relay) {
+                Asker::From(Some(source)) => Some(source),
+                _ => Some(Source::Peer(relay)),
+            },
             Asker::From(source) => source,
         };
         if self.answering < self.config.max_answering
@@ -3017,8 +3032,8 @@ impl Task {
     }
 
     /// Where a request from `peer`, a throwaway identity most likely, comes
-    /// from: its IP address, unless it came through a relay circuit, whose
-    /// address would be the relay's.
+    /// from: its IP address (see [`Source::ip`]), or when it came through a
+    /// relay circuit, that relay.
     fn source_of(&self, peer: &PeerId) -> Asker {
         let ip = self.remote_addrs.get(peer).and_then(|addr| {
             addr.iter().find_map(|p| match p {
@@ -3027,7 +3042,8 @@ impl Task {
                 _ => None,
             })
         });
-        Asker::From(ip.map(Source::Ip))
+        let through = || self.circuits.get(peer).map(|relay| Source::Peer(*relay));
+        Asker::From(ip.map(Source::ip).or_else(through))
     }
 
     /// Asks the nodes this node searches for tokens, when it holds few of
