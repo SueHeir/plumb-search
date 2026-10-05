@@ -89,6 +89,7 @@ mod control;
 mod history;
 mod nodes;
 mod panel;
+mod places;
 
 use crate::{block_on, rank_config};
 pub use panel::ADD_TO_FIREFOX_PATH;
@@ -127,6 +128,25 @@ const OPENSEARCH_LINK: &str = "<link rel=\"search\" \
      type=\"application/opensearchdescription+xml\" title=\"Plumb Search\" \
      href=\"/opensearch.xml\">\n";
 
+/// The places `query` asks for, searched on a blocking thread.
+async fn run_places(
+    state: &AppState,
+    query: &str,
+    home: Option<&str>,
+    country: Option<&str>,
+) -> Option<plumb_index::places::PlaceResults> {
+    let backend = Arc::clone(&state.backend);
+    let (query, home, country) = (
+        query.to_string(),
+        home.map(str::to_string),
+        country.map(str::to_string),
+    );
+    tokio::task::spawn_blocking(move || backend.places(&query, home.as_deref(), country.as_deref()))
+        .await
+        .ok()
+        .flatten()
+}
+
 /// Answers queries for the web handlers. [`IndexBackend`] is the real one;
 /// tests can plug in their own.
 pub trait SearchBackend: Send + Sync {
@@ -150,6 +170,18 @@ pub trait SearchBackend: Send + Sync {
     }
     /// Number of sites that can be found.
     fn num_docs(&self) -> u64;
+    /// The places `query` asks for, when it asks for places somewhere
+    /// ("pizza in denver"), around `home`, the searcher's own town, for
+    /// "near me"; see [`plumb_index::places`]. By default there are none.
+    fn places(
+        &self,
+        query: &str,
+        home: Option<&str>,
+        country: Option<&str>,
+    ) -> Option<plumb_index::places::PlaceResults> {
+        let _ = (query, home, country);
+        None
+    }
 }
 
 /// A [`Searcher`] with fixed ranking settings.
@@ -157,6 +189,7 @@ pub struct IndexBackend {
     searcher: Searcher,
     rank: RankConfig,
     meaning: SharedMeaning,
+    places: Option<plumb_index::places::PlaceSearcher>,
 }
 
 impl IndexBackend {
@@ -165,7 +198,14 @@ impl IndexBackend {
             searcher,
             rank,
             meaning: SharedMeaning::default(),
+            places: None,
         }
+    }
+
+    /// Also lists the places of `places` for queries that ask for them.
+    pub fn with_places(mut self, places: plumb_index::places::PlaceSearcher) -> Self {
+        self.places = Some(places);
+        self
     }
 
     /// Also ranks by meaning, for queries that name no site, once
@@ -218,6 +258,21 @@ impl SearchBackend for IndexBackend {
 
     fn num_docs(&self) -> u64 {
         self.searcher.num_docs()
+    }
+
+    fn places(
+        &self,
+        query: &str,
+        home: Option<&str>,
+        country: Option<&str>,
+    ) -> Option<plumb_index::places::PlaceResults> {
+        let places = self.places.as_ref()?;
+        places
+            .search(query, home, country, 8)
+            .unwrap_or_else(|err| {
+                error!("searching places: {err:#}");
+                None
+            })
     }
 }
 
@@ -527,8 +582,12 @@ pub fn run(args: ServeArgs) -> Result<()> {
         .with_context(|| format!("opening the index in {}", args.index.display()))?;
     let docs = searcher.num_docs();
     let meaning = SharedMeaning::new(MeaningIndex::from_args(&args.meaning)?);
+    let mut backend = IndexBackend::new(searcher, rank_config(args.alpha)).with_meaning(meaning);
+    if let Some(places) = &args.places {
+        backend = backend.with_places(crate::places::open_file(places)?);
+    }
     let app = router_with(
-        Arc::new(IndexBackend::new(searcher, rank_config(args.alpha)).with_meaning(meaning)),
+        Arc::new(backend),
         WebSettings {
             home: args.country.clone(),
             web_search: args.web_search.0,
@@ -810,6 +869,15 @@ async fn search_page(
     } else {
         (local, NetOutcome::NotAsked)
     };
+    // As typed: spelling is corrected for site names, not towns. "Near me"
+    // goes by the town the searcher gave.
+    let found_places = run_places(
+        &state,
+        &query,
+        visitor.as_ref().and_then(|v| v.about.town()),
+        settings.options.country.as_deref(),
+    )
+    .await;
     let response = match local {
         Ok(mut results) => {
             if let Some(visitor) = &mut visitor {
@@ -832,23 +900,39 @@ async fn search_page(
             if let Some(profile) = &extras.profile {
                 domains.extend(plumb_core::registrable_domain(&profile.url));
             }
+            if let Some(found) = &found_places {
+                domains.extend(places::website_domains(found));
+            }
             let icons = state.icons(domains).await;
             let recent = state.recent(&query, &results);
-            html_response(
-                StatusCode::OK,
-                render_results_with(
-                    &query,
-                    &results,
-                    Some(&extras),
-                    &network,
-                    &settings,
-                    state.settings.web_search,
-                    limit,
-                    state.shares_popularity(),
+            let mut page = render_results_with(
+                &query,
+                &results,
+                Some(&extras),
+                &network,
+                &settings,
+                state.settings.web_search,
+                limit,
+                state.shares_popularity(),
+                &icons,
+                recent.as_ref(),
+            );
+            if let Some(found) = &found_places {
+                // Above the sites.
+                let html = places::render_places(
+                    found,
+                    visitor.is_some(),
+                    settings.options.country.as_deref(),
                     &icons,
-                    recent.as_ref(),
-                ),
-            )
+                );
+                if let Some(at) = page.find("<main>\n") {
+                    page.insert_str(
+                        at + "<main>\n".len(),
+                        &format!("<style>{}</style>\n{html}", places::STYLE),
+                    );
+                }
+            }
+            html_response(StatusCode::OK, page)
         }
         Err(_) => {
             error!("search page local lookup failed");
@@ -910,11 +994,13 @@ async fn api_search(
                     answers::info_box(&results.hits, &placed)
                 }
             };
+            let places = run_places(&state, &query, None, options.country.as_deref()).await;
             let body = FullResults {
                 results: &results,
                 answer: extras.answer,
                 profile: extras.profile,
                 info,
+                places,
             };
             (StatusCode::OK, security_headers(), Json(body)).into_response()
         }
@@ -969,6 +1055,8 @@ struct FullResults<'a> {
     profile: Option<answers::ProfileAnswer>,
     #[serde(skip_serializing_if = "Option::is_none")]
     info: Option<answers::InfoBox>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    places: Option<plumb_index::places::PlaceResults>,
 }
 
 /// The instant answer and the official profile asked for, for `query`
@@ -1620,7 +1708,7 @@ border-radius:1rem;color:var(--fg);text-decoration:none}\
 .hist ul{padding-left:1.1rem}.hist li{padding:.2rem 0;margin:0}.hist li a{color:var(--link)}\
 .hist form{margin-top:1.5rem}\
 .about label{display:block;margin-top:1.25rem}.about .m{margin:.2rem 0 .4rem}\
-.about textarea{width:100%;box-sizing:border-box;font:inherit;padding:.4rem;\
+.about textarea,.about #town{width:100%;box-sizing:border-box;font:inherit;padding:.4rem;\
 background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:6px}\
 .ia{margin:1rem 0 .5rem;padding:.85rem 1rem;border:1px solid var(--line);border-radius:.75rem}\
 .ia p{margin:0}.iaq{color:var(--muted);font-size:.9rem;overflow-wrap:anywhere}\

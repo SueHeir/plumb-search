@@ -115,6 +115,7 @@ pub mod journal;
 mod network;
 mod news;
 mod pages;
+mod places;
 pub mod schedule;
 pub(crate) mod store;
 mod worker;
@@ -1037,6 +1038,8 @@ struct Inner {
     /// The page index searched next to the sites, and its key; `None`
     /// while no page set is kept.
     pages: RwLock<Option<(String, Arc<plumb_index::pages::PageSearcher>)>>,
+    /// The place index and its key; `None` while no places are kept.
+    places: RwLock<Option<(String, Arc<plumb_index::places::PlaceSearcher>)>>,
     /// Recent headlines and the feeds watched for them.
     news: crate::news::NewsStore,
     /// The adult blocklist, once loaded.
@@ -1249,6 +1252,7 @@ impl Inner {
             journal,
             meaning_retry: AtomicBool::new(false),
             pages: RwLock::new(None),
+            places: RwLock::new(None),
             news,
             adult: RwLock::new(None),
         }
@@ -1763,6 +1767,15 @@ impl SearchBackend for Inner {
         results.hits.truncate(limit);
         pages::add_pages(self, query, options, &mut results);
         Ok(results)
+    }
+
+    fn places(
+        &self,
+        query: &str,
+        home: Option<&str>,
+        country: Option<&str>,
+    ) -> Option<plumb_index::places::PlaceResults> {
+        places::search(self, query, home, country)
     }
 
     fn num_docs(&self) -> u64 {

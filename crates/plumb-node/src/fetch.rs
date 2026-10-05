@@ -229,6 +229,40 @@ pub fn run_profiles(args: FetchProfilesArgs) -> Result<()> {
     Ok(())
 }
 
+/// Makes the places set file `dest` from an OpenStreetMap extract, by
+/// default the whole planet (about 90 GB), downloaded into --work.
+fn run_places(args: &FetchPagesArgs, dest: &std::path::Path) -> Result<()> {
+    use plumb_ingest::osm;
+    let pbf = match &args.osm {
+        Some(pbf) => pbf.clone(),
+        None => fetch_dump(args, osm::PLANET_URL, "OpenStreetMap's planet file")?,
+    };
+    let places = osm::read_places(&pbf)?;
+    if places.is_empty() {
+        bail!(
+            "no places were found in {}; nothing was written",
+            pbf.display()
+        );
+    }
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    osm::write_places_file(dest, &places)?;
+    let size = std::fs::metadata(dest).map_or(0, |m| m.len());
+    let towns = places.iter().filter(|p| p.is_town()).count();
+    let with_site = places.iter().filter(|p| p.website.is_some()).count();
+    let with_country = places.iter().filter(|p| p.country.is_some()).count();
+    info!(
+        "wrote {} places to {} ({:.1} MB): {towns} towns, {with_site} with a website, \
+         {with_country} with a country",
+        places.len(),
+        dest.display(),
+        size as f64 / 1e6,
+    );
+    Ok(())
+}
+
 /// `plumb fetch-pages`: makes a page set file.
 pub fn run_pages(args: FetchPagesArgs) -> Result<()> {
     let Some(set) = crate::pages::SetInfo::find(&args.set) else {
@@ -258,6 +292,9 @@ pub fn run_pages(args: FetchPagesArgs) -> Result<()> {
     }
     if set.id == plumb_index::pages::PAPERS_SET {
         return run_papers(&args, &dest);
+    }
+    if set.id == plumb_index::places::PLACES_SET {
+        return run_places(&args, &dest);
     }
     let Some(lang) = set.id.strip_prefix("wikipedia-") else {
         bail!("fetch-pages cannot make {} yet", set.id);

@@ -27,7 +27,7 @@ use serde::Deserialize;
 use tracing::warn;
 
 use super::{escape_html, html_response, page, search_link, time_ago, AppState};
-use crate::about::{About, AboutStore, Reason, MAX_INTERESTS, MAX_SITES};
+use crate::about::{About, AboutStore, Reason, MAX_INTERESTS, MAX_SITES, MAX_TOWN_CHARS};
 use crate::history::{new_profile, valid_profile, History, HistoryStore};
 
 /// The cookie holding a browser's profile id.
@@ -447,6 +447,8 @@ struct AboutForm {
     pinned: String,
     #[serde(default)]
     hidden: String,
+    #[serde(default)]
+    town: String,
     /// `1`: forget it all.
     clear: Option<String>,
 }
@@ -475,7 +477,7 @@ async fn save_about(
     let about = if super::flag(&form.clear) {
         About::default()
     } else {
-        About::from_form(&form.interests, &form.pinned, &form.hidden)
+        About::from_form(&form.interests, &form.pinned, &form.hidden).with_town(&form.town)
     };
     let saved = match (&visitor.profile, about.is_empty()) {
         // Nothing to save, and nothing saved before.
@@ -536,6 +538,10 @@ fn render_about(about: &About, note: Option<&str>) -> String {
          <p class=\"m\">One per line. They and their subdomains are left out of your \
          results. Up to {MAX_SITES}.</p>\n\
          <textarea id=\"hidden\" name=\"hidden\" rows=\"4\">{}</textarea>\n\
+         <label for=\"town\"><strong>Your town</strong></label>\n\
+         <p class=\"m\">Such as Denver, CO. Searches like \u{201c}coffee near me\u{201d} \
+         list places here. Plumb never works out where you are by itself.</p>\n\
+         <input id=\"town\" name=\"town\" maxlength=\"{MAX_TOWN_CHARS}\" value=\"{}\">\n\
          <p><button type=\"submit\">Save</button></p>\n</form>\n\
          <form method=\"post\" action=\"/about\"><input type=\"hidden\" name=\"clear\" \
          value=\"1\"><button type=\"submit\">Forget all of this</button></form>\n\
@@ -543,6 +549,7 @@ fn render_about(about: &About, note: Option<&str>) -> String {
         lines(&about.interests),
         lines(&about.pinned),
         lines(&about.hidden),
+        escape_html(&about.town),
     );
     page("About you - Plumb Search", &body)
 }

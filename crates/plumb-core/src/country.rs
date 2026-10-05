@@ -55,6 +55,80 @@ pub fn normalize_country(code: &str) -> Option<String> {
     COUNTRY_CODES.contains(&code.as_str()).then_some(code)
 }
 
+/// Countries offered on the search page, by English name. Any other code
+/// still works when given in the address.
+pub const COUNTRY_CHOICES: &[(&str, &str)] = &[
+    ("AR", "Argentina"),
+    ("AU", "Australia"),
+    ("AT", "Austria"),
+    ("BE", "Belgium"),
+    ("BR", "Brazil"),
+    ("CA", "Canada"),
+    ("CL", "Chile"),
+    ("CN", "China"),
+    ("CO", "Colombia"),
+    ("CZ", "Czechia"),
+    ("DK", "Denmark"),
+    ("EG", "Egypt"),
+    ("FI", "Finland"),
+    ("FR", "France"),
+    ("DE", "Germany"),
+    ("GR", "Greece"),
+    ("HK", "Hong Kong"),
+    ("HU", "Hungary"),
+    ("IN", "India"),
+    ("ID", "Indonesia"),
+    ("IE", "Ireland"),
+    ("IL", "Israel"),
+    ("IT", "Italy"),
+    ("JP", "Japan"),
+    ("KE", "Kenya"),
+    ("MY", "Malaysia"),
+    ("MX", "Mexico"),
+    ("NL", "Netherlands"),
+    ("NZ", "New Zealand"),
+    ("NG", "Nigeria"),
+    ("NO", "Norway"),
+    ("PK", "Pakistan"),
+    ("PE", "Peru"),
+    ("PH", "Philippines"),
+    ("PL", "Poland"),
+    ("PT", "Portugal"),
+    ("RO", "Romania"),
+    ("SA", "Saudi Arabia"),
+    ("SG", "Singapore"),
+    ("ZA", "South Africa"),
+    ("KR", "South Korea"),
+    ("ES", "Spain"),
+    ("SE", "Sweden"),
+    ("CH", "Switzerland"),
+    ("TW", "Taiwan"),
+    ("TH", "Thailand"),
+    ("TR", "Turkey"),
+    ("UA", "Ukraine"),
+    ("AE", "United Arab Emirates"),
+    ("GB", "United Kingdom"),
+    ("US", "United States"),
+    ("VN", "Vietnam"),
+];
+
+/// The code of the country named `name` in English ("germany" -> `DE`),
+/// of those in [`COUNTRY_CHOICES`] plus a few other names.
+pub fn country_of_name(name: &str) -> Option<&'static str> {
+    let name = crate::normalize_text(name);
+    let other = match name.as_str() {
+        "usa" | "us" | "america" | "united states of america" => Some("US"),
+        "uk" | "england" | "scotland" | "wales" | "great britain" | "britain" => Some("GB"),
+        _ => None,
+    };
+    other.or_else(|| {
+        COUNTRY_CHOICES
+            .iter()
+            .find(|(_, english)| crate::normalize_text(english) == name)
+            .map(|(code, _)| *code)
+    })
+}
+
 /// ISO 3166-1 alpha-2 codes.
 const COUNTRY_CODES: &[&str] = &[
     "AD", "AE", "AF", "AG", "AI", "AL", "AM", "AO", "AQ", "AR", "AS", "AT", "AU", "AW", "AX", "AZ",
