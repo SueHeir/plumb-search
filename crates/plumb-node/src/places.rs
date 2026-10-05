@@ -84,7 +84,7 @@ pub fn read_places(path: &Path, limit: u64) -> Result<impl Iterator<Item = Place
                 None
             }
         })
-        .filter(|(n, line)| !(*n == 0 && line.starts_with("rank\t")) && !line.is_empty())
+        .filter(|(n, line)| !(line.is_empty() || *n == 0 && line.starts_with("rank\t")))
         .filter_map(move |(n, line)| match parse_place(&line) {
             Ok(place) => Some(place),
             Err(err) => {

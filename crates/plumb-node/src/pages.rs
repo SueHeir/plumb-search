@@ -127,7 +127,7 @@ impl SetInfo {
     fn read(&self, path: &Path, limit: u64) -> Result<impl Iterator<Item = Page>> {
         // Every set's file is an articles file (see `Page::from_set`).
         let id = self.id;
-        if Page::from_set(id, Default::default()).is_none() {
+        if !Page::has_reader(id) {
             bail!("no reader for the page set {id}");
         }
         let reader = plumb_ingest::open_maybe_gz(path)?;
@@ -589,6 +589,16 @@ mod tests {
             .unwrap();
         }
         std::fs::write(file, text).unwrap();
+    }
+
+    #[test]
+    fn every_set_of_pages_has_a_reader() {
+        for set in SETS {
+            if set.id != plumb_index::places::PLACES_SET {
+                assert!(Page::has_reader(set.id), "{}", set.id);
+            }
+        }
+        assert!(!Page::has_reader("no-such-set"));
     }
 
     #[test]
