@@ -48,9 +48,17 @@ pub struct Repo {
 
 #[derive(Debug, Deserialize)]
 struct SearchPage {
+    /// GitHub gave up on the search before finding everything (it times
+    /// out on big star ranges), so a short page does not mean the end.
+    #[serde(default)]
+    incomplete_results: bool,
     #[serde(default)]
     items: Vec<Repo>,
 }
+
+/// Times a short, incomplete page is asked again before the band is ended
+/// where it got to.
+const INCOMPLETE_RETRIES: u32 = 5;
 
 impl Repo {
     /// The repository as an article line (see the module docs).
@@ -125,6 +133,13 @@ impl Bands {
         Some((q, self.page))
     }
 
+    /// Ends the current band at `last_stars` as if it were used up, when
+    /// GitHub keeps giving up on it.
+    pub fn end_band(&mut self, last_stars: Option<u64>) {
+        self.page = PAGES_PER_SEARCH;
+        self.record(PER_PAGE, last_stars);
+    }
+
     /// Takes in what the last search gave: `count` repositories, the last
     /// of them with `last_stars`.
     pub fn record(&mut self, count: usize, last_stars: Option<u64>) {
@@ -171,6 +186,7 @@ pub async fn fetch_repos(
     let mut seen: HashSet<String> = HashSet::new();
     let mut articles = Vec::new();
     let mut failures = 0u32;
+    let mut incomplete = 0u32;
     while let Some((q, page)) = bands.next() {
         if articles.len() >= limit {
             break;
@@ -235,12 +251,26 @@ pub async fn fetch_repos(
             .with_context(|| format!("reading GitHub's answer to {q} page {page}"))?;
         let count = body.items.len();
         let last_stars = body.items.last().map(|repo| repo.stargazers_count);
+        let cut_short = body.incomplete_results && count < PER_PAGE;
         for repo in body.items {
             if repo.fork || !seen.insert(repo.full_name.to_lowercase()) {
                 continue;
             }
             articles.push(repo.to_article());
         }
+        if cut_short {
+            incomplete += 1;
+            if incomplete <= INCOMPLETE_RETRIES {
+                warn!("GitHub gave up on {q} page {page} after {count}; asking again");
+                tokio::time::sleep(Duration::from_secs(10)).await;
+                continue;
+            }
+            warn!("GitHub keeps giving up on {q}; going on below {last_stars:?} stars");
+            incomplete = 0;
+            bands.end_band(last_stars);
+            continue;
+        }
+        incomplete = 0;
         bands.record(count, last_stars);
         if articles.len() % 10_000 < count {
             info!(
@@ -321,6 +351,9 @@ mod tests {
             bands.record(PER_PAGE, Some(30_000));
         }
         assert_eq!(bands.next(), Some(("stars:500..29999".to_string(), 1)));
+        // A band GitHub keeps giving up on ends where it got to.
+        bands.end_band(Some(20_000));
+        assert_eq!(bands.next(), Some(("stars:500..20000".to_string(), 1)));
         // A short page ends it all.
         bands.record(40, Some(510));
         assert_eq!(bands.next(), None);

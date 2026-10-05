@@ -26,7 +26,7 @@ use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 use plumb_core::article::{article_url, Article};
-use plumb_core::normalize_text;
+use plumb_core::{host_of, normalize_text, Operators};
 use serde::{Deserialize, Serialize};
 use tantivy::collector::TopDocs;
 use tantivy::query::{BooleanQuery, Occur, Query, TermQuery};
@@ -799,6 +799,48 @@ pub fn place_pages(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) -> Ve
     placed
 }
 
+/// Pages looked at for a query with search operators, before they narrow
+/// them.
+pub const OPERATOR_PAGES: usize = 100;
+/// Most pages listed for a `site:` query.
+pub const MAX_SITE_PAGES: usize = 10;
+
+/// Whether the search operators `ops` allow `page`: its address's host
+/// and its title, description and other names.
+pub fn operators_allow(ops: &Operators, page: &Page) -> bool {
+    let host = host_of(&page.url).unwrap_or_default();
+    let texts = [page.title.as_str()]
+        .into_iter()
+        .chain(page.description.as_deref())
+        .chain(page.aliases.iter().map(String::as_str));
+    ops.allows(&host, texts)
+}
+
+/// [`place_pages`] for a query with search operators `ops`, of the pages
+/// they allow. A `site:` query lists up to [`MAX_SITE_PAGES`] pages on
+/// that site after the sites, best first: "site:wikipedia.org einstein"
+/// lists the articles.
+pub fn place_operator_pages(
+    ops: &Operators,
+    sites: &[crate::Hit],
+    pages: Vec<PageHit>,
+) -> Vec<PlacedPage> {
+    let pages = pages
+        .into_iter()
+        .filter(|hit| operators_allow(ops, &hit.page));
+    if ops.sites.is_empty() {
+        return place_pages(&ops.words, sites, pages.collect());
+    }
+    pages
+        .take(MAX_SITE_PAGES)
+        .map(|hit| PlacedPage {
+            hit,
+            under: None,
+            at: sites.len(),
+        })
+        .collect()
+}
+
 /// Normalized form of `text` as page keys compare it, for tests and tools.
 pub fn page_key(text: &str) -> String {
     normalize_text(text).replace(' ', "")
@@ -859,6 +901,40 @@ mod tests {
         assert_eq!(titles(&hits)[0], "Marie Curie");
         assert!(hits[0].named);
         assert!(s.search("pythonidae", 1).unwrap()[0].named);
+    }
+
+    #[test]
+    fn operators_pick_and_list_pages() {
+        let mut repo = Page::from_repo(Article {
+            title: "python/cpython".into(),
+            views: 60_000,
+            ..Article::default()
+        });
+        repo.description = Some("The Python programming language".into());
+        let (_dir, s) = searcher(&[
+            page("Python (programming language)", 900_000, &[]),
+            page("Python (genus)", 20_000, &["Pythonidae"]),
+            page("Monty Python", 200_000, &[]),
+            repo,
+        ]);
+        let place = |query: &str| {
+            let ops = Operators::parse(query);
+            let found = s.search(&ops.words, OPERATOR_PAGES).unwrap();
+            let placed = place_operator_pages(&ops, &[site("python.org", false)], found);
+            placed
+                .into_iter()
+                .map(|p| (p.hit.page.title, p.at))
+                .collect::<Vec<_>>()
+        };
+        let on_github = place("python site:github.com");
+        assert_eq!(on_github, [("python/cpython".to_string(), 1)]);
+        let on_wikipedia = place("python site:en.wikipedia.org");
+        assert_eq!(on_wikipedia.len(), 3);
+        assert!(on_wikipedia.iter().all(|(_, at)| *at == 1));
+        let without = place("python -monty -site:github.com");
+        assert!(without
+            .iter()
+            .all(|(t, _)| t != "Monty Python" && t != "python/cpython"));
     }
 
     #[test]

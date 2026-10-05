@@ -132,7 +132,9 @@ async fn try_show() -> Result<(), JsValue> {
         return Err("This site's buckets are of another version.".into());
     }
     let secret = padding_secret(&window)?;
-    let (buckets, keys) = pick_buckets(&query, padding(&secret, &query));
+    // Search operators stay in the browser: only the words pick buckets.
+    let lookup = plumb_core::Operators::parse(&query).lookup_text();
+    let (buckets, keys) = pick_buckets(&lookup, padding(&secret, &lookup));
     // Through this site to other nodes when it can, so no one sees both who
     // asks and what for; otherwise from this site directly.
     let (answers, sealed) = match fetch_sealed(&window, &buckets).await {

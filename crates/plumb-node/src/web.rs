@@ -9,6 +9,8 @@
 //! and `only=1` (leave out other countries' sites). Without `country`, the
 //! server's [`HomeCountry`] setting decides, by default from the browser's
 //! `Accept-Language` and then this computer's region settings.
+//! - `POST /mcp` answers AI apps over the Model Context Protocol (see
+//!   [`crate::mcp`]),
 //! - `GET /opensearch.xml` describes the search engine to browsers
 //!   (OpenSearch 1.1), so that they can offer to add it; every page links to
 //!   it.
@@ -65,7 +67,7 @@ use base64::Engine as _;
 use plumb_core::{
     collapse_whitespace, display_url, now_unix, site_initial, truncate_chars, SiteRecord,
 };
-use plumb_index::pages::{place_pages, PageHit};
+use plumb_index::pages::{place_operator_pages, place_pages, PageHit};
 use plumb_index::{
     build_index, Hit, RankConfig, SearchOptions, SearchResults, Searcher, SiteSearch, Spelling,
 };
@@ -89,6 +91,7 @@ mod panel;
 use crate::{block_on, rank_config};
 pub use panel::ADD_TO_FIREFOX_PATH;
 
+mod mcp;
 pub(crate) mod private;
 mod relay;
 mod setup;
@@ -356,6 +359,8 @@ struct AppState {
     settings: WebSettings,
     /// Currency rates for instant answers.
     rates: Arc<answers::RatesCache>,
+    /// How many tool calls each client may still make to `/mcp`.
+    mcp_limiter: Arc<mcp::Limiter>,
 }
 
 impl AppState {
@@ -425,6 +430,7 @@ pub fn router_with(backend: Arc<dyn SearchBackend>, settings: impl Into<WebSetti
         node: None,
         settings: settings.into(),
         rates: Arc::default(),
+        mcp_limiter: Arc::default(),
     })
 }
 
@@ -446,6 +452,7 @@ pub fn node_router_with(
         node: Some(status),
         settings: settings.into(),
         rates: Arc::default(),
+        mcp_limiter: Arc::default(),
     })
 }
 
@@ -455,6 +462,7 @@ fn app(state: AppState) -> Router {
         .route("/search", get(search_page))
         .route("/api/search", get(api_search))
         .route("/opensearch.xml", get(opensearch));
+    router = mcp::routes(router);
     if state.node.is_some() {
         router = router
             .route("/api/status", get(api_status))
@@ -1087,7 +1095,9 @@ async fn network_search(
         .node
         .as_ref()
         .map_or_else(RankConfig::default, |node| node.rank());
-    let found = net.search(query, NETWORK_SEARCH_WAIT).await?;
+    // Search operators narrow the ranking below; only words pick buckets.
+    let lookup = plumb_core::Operators::parse(query).lookup_text();
+    let found = net.search(&lookup, NETWORK_SEARCH_WAIT).await?;
     let query = query.to_string();
     let options = options.clone();
     let node = state.node.clone();
@@ -2027,16 +2037,24 @@ fn render_results(
         .iter()
         .map(|item| item.hit.clone().into_owned())
         .collect();
-    let pages = place_pages(
-        picked_for,
-        &shown_hits,
-        results
-            .pages
-            .iter()
-            .map(|placed| placed.hit.clone())
-            .collect(),
-    );
-    let info = answers::info_box(&shown_hits, &pages);
+    let found_pages = results
+        .pages
+        .iter()
+        .map(|placed| placed.hit.clone())
+        .collect();
+    let ops = plumb_core::Operators::parse(query);
+    let pages = if ops.any() {
+        place_operator_pages(&ops, &shown_hits, found_pages)
+    } else {
+        place_pages(picked_for, &shown_hits, found_pages)
+    };
+    // An info box is about what the whole query names, which operators
+    // ("site:", "-word") change.
+    let info = if ops.any() {
+        None
+    } else {
+        answers::info_box(&shown_hits, &pages)
+    };
     let shown_count = shown.len();
     let pages = &pages;
     let listed_pages = move |at: usize| {
@@ -3739,6 +3757,50 @@ mod tests {
         );
         assert!(page.contains("&amp;exact=1"), "{page}");
         assert!(!page.contains("class=\"sp\""), "{page}");
+    }
+
+    #[test]
+    fn site_queries_list_every_page_on_the_site() {
+        let pages = ["Albert Einstein", "Einstein family", "Einstein (crater)"]
+            .into_iter()
+            .map(|title| plumb_index::pages::PlacedPage {
+                hit: PageHit {
+                    page: plumb_index::pages::Page::from_article(
+                        "en",
+                        plumb_core::Article {
+                            title: title.into(),
+                            ..Default::default()
+                        },
+                    ),
+                    score: 0.5,
+                    named: false,
+                    popularity: 0.1,
+                },
+                under: None,
+                at: 0,
+            })
+            .collect();
+        let results = SearchResults {
+            pages,
+            hits: Vec::new(),
+            site_search: None,
+            spelling: None,
+        };
+        let page = render_results(
+            "einstein site:wikipedia.org",
+            &results,
+            None,
+            &NetOutcome::NotAsked,
+            &no_settings(),
+            None,
+            10,
+            false,
+            &Icons::default(),
+        );
+        assert!(!page.contains("No sites match"));
+        for title in ["Albert Einstein", "Einstein family", "Einstein (crater)"] {
+            assert!(page.contains(title), "{title}");
+        }
     }
 
     #[test]
