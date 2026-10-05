@@ -253,7 +253,9 @@ pub struct RankConfig {
     /// and meaning together) a site needs for its popularity to count in
     /// full; below it, popularity counts in proportion. Keeps the most
     /// popular sites, which match "to do list" or "map of the world" not
-    /// at all, from outranking every site that does. `None` turns it off.
+    /// at all (under 0.01 on a million sites), from outranking every site
+    /// that does, while youtube.com ("video sharing site") and spotify.com
+    /// ("music streaming"), at about 0.04, keep theirs. `None` turns it off.
     pub described_relevance: Option<f32>,
 }
 
@@ -271,7 +273,7 @@ impl Default for RankConfig {
             meaning_weight: 0.7,
             described_alpha: Some(0.5),
             partial_label_bonus: None,
-            described_relevance: Some(0.25),
+            described_relevance: Some(0.04),
         }
     }
 }
@@ -3343,9 +3345,11 @@ mod tests {
             ),
         ];
         let (_dir, searcher) = build(&records);
-        // Popularity weighing heavily, as among a million sites.
+        // Popularity weighing heavily, as among a million sites, where
+        // youtube.com matches "to do list" far less than here.
         let on = RankConfig {
             described_alpha: Some(0.9),
+            described_relevance: Some(0.25),
             ..RankConfig::default()
         };
         let hits = searcher.search_with("to do list", 2, &on).unwrap();
