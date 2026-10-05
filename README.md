@@ -4,7 +4,7 @@ Plumb Search is a free, open-source search engine built to run on your own machi
 
 It indexes names, not pages. For each site it keeps the homepage title and description, the words other sites use when they link to it, and a few aliases. That is about 1 KB per site, so a million sites fit in roughly a gigabyte on a homelab server or a desktop.
 
-This repository holds the **Phase 1 prototype**: a single node that builds its own index from public seed data plus its own homepage crawls, searches it locally, and measures how often the official site comes first. Sharing the index between nodes, community crawling and private popularity counts come in later phases (see [Roadmap](#roadmap)).
+This repository holds the working **Phase 1 prototype** (a single node that builds its own index from public seed data plus its own homepage crawls, and measures how often the official site comes first) and the **first prototype of Phase 2**: opt-in networking with `--network` (daily crawl assignments, signed batches, relays and NAT traversal, network search; see [docs/network.md](docs/network.md)). Community crawling checks, private popularity counts and hardening come in later phases (see [Roadmap](#roadmap)).
 
 ## Quick start with the bundled test data
 
@@ -179,8 +179,8 @@ A node does this on its own with `plumb run --search-by-meaning`: it downloads t
 
 Each phase ends at a gate that proves it works before the next begins.
 
-1. **Prototype on one machine** (this repository). Gate: brand names on a test list return the official site first.
-2. **Shared index.** Signed records synced between full and light nodes by Merkle root and daily changes; storage settings; optional network search through an Oblivious HTTP relay. Gate: two nodes stay identical using daily changes alone.
+1. **Prototype on one machine** (done). Gate: brand names on a test list return the official site first.
+2. **Shared index** (first prototype in this repository, opt-in with `--network`). Signed records synced between full and light nodes by Merkle root and daily changes; storage settings; optional network search through an Oblivious HTTP relay. Gate: two nodes stay identical using daily changes alone.
 3. **Community crawling.** Random site assignments, receipts on homepage fetches, spot checks; growth from crawled links, Certificate Transparency logs and owner submissions. Gate: the list stays fresh with no new Common Crawl data.
 4. **Private popularity.** Blind tokens for verified crawls, capped reports through a relay, threshold counting of what people search for and pick. Gate: a simulated bot farm cannot move a ranking without matching crawl work.
 5. **Hardening.** Zero-knowledge membership if token issuers become a weak point, and a process for deciding protocol changes.
