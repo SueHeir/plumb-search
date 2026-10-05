@@ -333,7 +333,7 @@ impl NewsStore {
     }
 
     /// Headlines kept, all sites together.
-    pub fn len(&self) -> usize {
+    pub fn headline_count(&self) -> usize {
         self.read().headlines.values().map(Vec::len).sum()
     }
 
@@ -692,8 +692,8 @@ mod tests {
         store.save().unwrap();
         let again = NewsStore::open(dir.path());
         assert_eq!(again.watched(), (3, 1));
-        assert_eq!(again.len(), 1);
+        assert_eq!(again.headline_count(), 1);
         again.prune(NOW + 8 * 24 * HOUR);
-        assert_eq!(again.len(), 0);
+        assert_eq!(again.headline_count(), 0);
     }
 }

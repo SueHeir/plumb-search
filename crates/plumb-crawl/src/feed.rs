@@ -46,7 +46,7 @@ pub fn read_feed(domain: &str, feed_url: &Url, body: &str, now: u64) -> Option<V
             Headline::checked(domain, &title, link.as_str(), at, now)
         })
         .collect();
-    headlines.sort_by(|a, b| b.at.cmp(&a.at));
+    headlines.sort_by_key(|h| std::cmp::Reverse(h.at));
     headlines.dedup_by(|a, b| a.url == b.url);
     Some(headlines)
 }

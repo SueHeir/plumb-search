@@ -80,7 +80,7 @@ async fn check_due(inner: &Arc<Inner>, now: u64) {
         "checked {n} feeds: {} sites had new headlines; {feeds} of the {watched} sites watched \
          have a feed, {} headlines kept",
         fresh.len(),
-        inner.news.len()
+        inner.news.headline_count()
     );
     if fresh.is_empty() {
         return;
