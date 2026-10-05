@@ -13,9 +13,9 @@ use std::time::{Duration, Instant};
 use std::io::Write;
 
 use anyhow::{bail, Context, Result};
-use plumb_core::now_unix;
-use plumb_index::pages::place_pages;
-use plumb_index::SearchResults;
+use plumb_core::{now_unix, Operators};
+use plumb_index::pages::{options_allow, place_operator_pages, place_pages, OPERATOR_PAGES};
+use plumb_index::{SearchOptions, SearchResults};
 use plumb_net::pages::MAX_PAGES_CHUNK;
 use plumb_net::NetHandle;
 use tracing::{debug, info, warn};
@@ -270,7 +270,12 @@ impl Inner {
 
 /// Adds the pages found for `query` (as corrected, when the results are
 /// for a corrected spelling) to `results`.
-pub(super) fn add_pages(inner: &Inner, query: &str, results: &mut SearchResults) {
+pub(super) fn add_pages(
+    inner: &Inner,
+    query: &str,
+    options: &SearchOptions,
+    results: &mut SearchResults,
+) {
     let Some(searcher) = inner
         .pages
         .read()
@@ -280,12 +285,29 @@ pub(super) fn add_pages(inner: &Inner, query: &str, results: &mut SearchResults)
     else {
         return;
     };
+    let ops = Operators::parse(query);
+    if ops.any() {
+        if ops.words.is_empty() {
+            return;
+        }
+        match searcher.search(&ops.words, OPERATOR_PAGES) {
+            Ok(mut found) => {
+                found.retain(|hit| options_allow(options, &hit.page));
+                results.pages = place_operator_pages(&ops, &results.hits, found);
+            }
+            Err(err) => warn!("searching pages: {err:#}"),
+        }
+        return;
+    }
     let query = match &results.spelling {
         Some(spelling) if spelling.applied => spelling.query.as_str(),
         _ => query,
     };
     match searcher.search(query, PAGES_PER_SEARCH) {
-        Ok(found) => results.pages = place_pages(query, &results.hits, found),
+        Ok(mut found) => {
+            found.retain(|hit| options_allow(options, &hit.page));
+            results.pages = place_pages(query, &results.hits, found);
+        }
         Err(err) => warn!("searching pages: {err:#}"),
     }
 }

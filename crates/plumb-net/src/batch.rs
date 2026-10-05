@@ -559,12 +559,17 @@ fn accept_crawled(
     kept.url = url;
     kept.title = record.title;
     kept.description = record.description;
+    kept.language = record
+        .language
+        .as_deref()
+        .and_then(plumb_core::language_code);
     for alias in &record.aliases {
         kept.add_alias(alias);
     }
     if source == Source::Trusted {
         kept.headings = record.headings;
         kept.body_text = record.body_text;
+        kept.key_pages = plumb_core::key_pages::valid_key_pages(record.key_pages, &kept.domain);
     }
     kept.crawled_at = Some(crawled_at);
     Some(kept)
@@ -868,6 +873,16 @@ mod tests {
         for record in &mut records {
             record.headings = vec!["Widgets for everyone".into()];
             record.body_text = Some("We make widgets for homes and offices.".into());
+            record.key_pages = vec![
+                plumb_core::KeyPage {
+                    label: "Sign in".into(),
+                    url: format!("https://{}/login", record.domain),
+                },
+                plumb_core::KeyPage {
+                    label: "Log in".into(),
+                    url: "https://phish.example/login".into(),
+                },
+            ];
         }
         let batch = sign(&key, &records);
         let crawler = batch.check(NOW).unwrap();
@@ -878,6 +893,9 @@ mod tests {
         assert!(trusted
             .iter()
             .all(|r| r.body_text.is_some() && !r.headings.is_empty()));
+        assert!(trusted
+            .iter()
+            .all(|r| r.key_pages.len() == 1 && r.key_pages[0].label == "Sign in"));
         assert_eq!(trusted[0].signals, Default::default());
         assert_eq!(trusted[0].crawl_failures, 0);
 
@@ -888,6 +906,7 @@ mod tests {
             (other[0].body_text.as_deref(), other[0].headings.len()),
             (None, 0)
         );
+        assert!(other[0].key_pages.is_empty());
     }
 
     #[test]

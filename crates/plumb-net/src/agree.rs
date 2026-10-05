@@ -411,6 +411,7 @@ impl Agreement {
         let headings = std::mem::take(&mut record.headings);
         let body_text = record.body_text.take();
         let search_url = record.search_url.take();
+        let key_pages = std::mem::take(&mut record.key_pages);
         let icon = record.icon.take();
         let held = self.homepages.entry(domain.clone()).or_default();
         let mut observation = Observation {
@@ -449,6 +450,7 @@ impl Agreement {
             record.headings = headings;
             record.body_text = body_text;
             record.search_url = search_url;
+            record.key_pages = key_pages;
             record.icon = icon;
             return Some(record);
         }

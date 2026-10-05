@@ -104,6 +104,7 @@ async fn try_show() -> Result<(), JsValue> {
     input.set_value(&query);
     let list = element(&document, "pq-results")?;
     list.set_text_content(None);
+    show_answer(&document, &query)?;
     if query.is_empty() {
         document.set_title("Private search - Plumb Search");
         return set_status("");
@@ -123,6 +124,13 @@ async fn try_show() -> Result<(), JsValue> {
                     .and_then(|tag| language_country(&tag))
             }),
         only_country: false,
+        safe: page
+            .get_attribute("data-safe")
+            .and_then(|safe| plumb_core::SafeSearch::parse(&safe))
+            .unwrap_or_default(),
+        language: page
+            .get_attribute("data-language")
+            .and_then(|tag| plumb_core::language_code(&tag)),
     };
 
     let info: TableInfo = serde_json::from_str(&fetch_text(&window, "/api/buckets").await?)
@@ -131,7 +139,9 @@ async fn try_show() -> Result<(), JsValue> {
         return Err("This site's buckets are of another version.".into());
     }
     let secret = padding_secret(&window)?;
-    let (buckets, keys) = pick_buckets(&query, padding(&secret, &query));
+    // Search operators stay in the browser: only the words pick buckets.
+    let lookup = plumb_core::Operators::parse(&query).lookup_text();
+    let (buckets, keys) = pick_buckets(&lookup, padding(&secret, &lookup));
     // Through this site to other nodes when it can, so no one sees both who
     // asks and what for; otherwise from this site directly.
     let (answers, sealed) = match fetch_sealed(&window, &buckets).await {
@@ -361,6 +371,35 @@ fn result_item(document: &Document, hit: &Ranked) -> Result<Element, JsValue> {
         item.append_child(&text)?;
     }
     Ok(item)
+}
+
+/// The instant answer to `query`, worked out here like the rest, above the
+/// results; laid out like the server's. Currency conversions need rates
+/// this page does not fetch, so they get none.
+fn show_answer(document: &Document, query: &str) -> Result<(), JsValue> {
+    let place = element(document, "pq-answer")?;
+    place.set_text_content(None);
+    let now = (js_sys::Date::now() / 1000.0) as i64;
+    let Some(answer) = plumb_answer::answer(query, now, None) else {
+        return Ok(());
+    };
+    let section = document.create_element("section")?;
+    section.set_class_name("ia");
+    section.set_attribute("aria-label", "Answer")?;
+    for (class, text) in [
+        ("iaq", Some(answer.question.as_str())),
+        ("iaa", Some(answer.answer.as_str())),
+        ("m", answer.note.as_deref()),
+    ] {
+        if let Some(text) = text {
+            let line = document.create_element("p")?;
+            line.set_class_name(class);
+            line.set_text_content(Some(text));
+            section.append_child(&line)?;
+        }
+    }
+    place.append_child(&section)?;
+    Ok(())
 }
 
 /// A `<span>` of class `class`, holding `text` when there is some.

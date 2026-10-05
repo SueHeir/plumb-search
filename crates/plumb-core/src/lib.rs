@@ -13,17 +13,23 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 pub mod article;
 mod country;
+pub mod key_pages;
 pub mod keys;
 mod kinds;
 pub mod news;
 #[cfg(feature = "oblivious")]
 pub mod oblivious;
+mod operators;
+pub mod safe;
 mod site_search;
 
 pub use article::{article_url, Article};
 pub use country::{normalize_country, site_country, tld_country};
+pub use key_pages::{KeyPage, PageIntent, MAX_KEY_PAGES};
 pub use kinds::{is_generic_kind, kind_key, other_number, MAX_KINDS};
 pub use news::Headline;
+pub use operators::Operators;
+pub use safe::{adult_level, record_adult_level, AdultLevel, SafeSearch};
 pub use site_search::{search_link, search_template_for, SEARCH_TERMS};
 
 use anyhow::{Context, Result};
@@ -102,6 +108,15 @@ pub struct SiteRecord {
     /// go (see [`search_link`]), read from a search form on its homepage.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub search_url: Option<String>,
+    /// The language the homepage says it is in (`<html lang>`), as a
+    /// lowercase primary language code ([`language_code`]): `en`, `de`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    /// The site's key pages ("sitelinks": sign in, docs, pricing), from
+    /// the links its homepage makes to the site itself, at most
+    /// [`MAX_KEY_PAGES`]. See [`key_pages::pick_key_pages`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub key_pages: Vec<KeyPage>,
     /// Homepage fetch attempts in a row, up to the one at
     /// `crawl_attempted_at`, that could not reach the site at all (no
     /// connection or no answer); 0 once an attempt gets an answer. Crawlers
@@ -334,6 +349,10 @@ impl SiteRecord {
             .is_empty()
             .then(|| std::mem::take(&mut self.headings));
         let body_text = other.body_text.is_none().then(|| self.body_text.take());
+        let key_pages = other
+            .key_pages
+            .is_empty()
+            .then(|| std::mem::take(&mut self.key_pages));
         self.merge(other);
         if let Some(mine) = search_url {
             self.search_url = self.search_url.take().or(mine);
@@ -345,6 +364,11 @@ impl SiteRecord {
         }
         if let Some(mine) = body_text {
             self.body_text = self.body_text.take().or(mine);
+        }
+        if let Some(mine) = key_pages {
+            if self.key_pages.is_empty() {
+                self.key_pages = mine;
+            }
         }
     }
 
@@ -361,22 +385,30 @@ impl SiteRecord {
             if other.description.is_some() {
                 self.description = other.description;
             }
+            if other.language.is_some() {
+                self.language = other.language;
+            }
             // A fresh crawl that found no search form, or no headings,
             // means the site has none now.
             self.search_url = other.search_url;
             self.headings = other.headings;
             self.body_text = other.body_text;
+            self.key_pages = other.key_pages;
             self.crawled_at = other.crawled_at;
         } else {
             self.url = self.url.take().or(other.url);
             self.title = self.title.take().or(other.title);
             self.description = self.description.take().or(other.description);
+            self.language = self.language.take().or(other.language);
             if self.crawled_at.is_none() {
                 self.search_url = self.search_url.take().or(other.search_url);
                 if self.headings.is_empty() {
                     self.headings = other.headings;
                 }
                 self.body_text = self.body_text.take().or(other.body_text);
+                if self.key_pages.is_empty() {
+                    self.key_pages = other.key_pages;
+                }
             }
         }
         // The latest crawl decides: a redirect seen after the last
@@ -883,6 +915,16 @@ pub fn joined(text: &str) -> String {
     normalize_text(text).replace(' ', "")
 }
 
+/// The primary language of a language tag, lowercase: `en-US` -> `en`,
+/// `zh-Hant-TW` -> `zh`, `DE` -> `de`. `None` for tags that name no
+/// language (`x-default`, `und`, `zxx`, `mul`) or are not tags at all.
+pub fn language_code(tag: &str) -> Option<String> {
+    let primary = tag.trim().split(['-', '_']).next()?.to_ascii_lowercase();
+    let letters = primary.bytes().all(|b| b.is_ascii_lowercase());
+    let named = !matches!(primary.as_str(), "und" | "zxx" | "mul" | "mis");
+    (letters && (2..=3).contains(&primary.len()) && named).then_some(primary)
+}
+
 /// Collapses every whitespace run to one space and trims the ends.
 pub fn collapse_whitespace(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
@@ -988,6 +1030,27 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn language_codes_from_tags() {
+        assert_eq!(language_code("en-US").as_deref(), Some("en"));
+        assert_eq!(language_code("zh_Hant_TW").as_deref(), Some("zh"));
+        assert_eq!(language_code(" DE ").as_deref(), Some("de"));
+        for tag in ["", "x-default", "und", "zxx", "e", "english", "12"] {
+            assert_eq!(language_code(tag), None, "{tag}");
+        }
+        let mut mine = SiteRecord::new("a.com");
+        mine.language = Some("en".into());
+        mine.crawled_at = Some(1);
+        let mut newer = SiteRecord::new("a.com");
+        newer.crawled_at = Some(2);
+        mine.merge(newer.clone());
+        assert_eq!(mine.language.as_deref(), Some("en"));
+        newer.language = Some("de".into());
+        newer.crawled_at = Some(3);
+        mine.merge(newer);
+        assert_eq!(mine.language.as_deref(), Some("de"));
+    }
 
     #[test]
     fn addresses_are_shown_without_the_scheme() {
@@ -1187,6 +1250,10 @@ mod tests {
             search_url: Some("https://a.com/search?q={q}".into()),
             headings: vec!["Welcome".into()],
             body_text: Some("A shop for things".into()),
+            key_pages: vec![KeyPage {
+                label: "Sign in".into(),
+                url: "https://a.com/login".into(),
+            }],
             ..SiteRecord::default()
         };
         let shared = SiteRecord {
@@ -1198,6 +1265,7 @@ mod tests {
         let mut plain = mine.clone();
         plain.merge(shared.clone());
         assert!(plain.search_url.is_none() && plain.body_text.is_none());
+        assert!(plain.key_pages.is_empty());
 
         mine.merge_shared(shared);
         assert_eq!(mine.title.as_deref(), Some("New"));
@@ -1208,6 +1276,7 @@ mod tests {
         );
         assert_eq!(mine.headings, ["Welcome"]);
         assert_eq!(mine.body_text.as_deref(), Some("A shop for things"));
+        assert_eq!(mine.key_pages.len(), 1);
 
         // Text a trusted crawler shared does replace it.
         mine.merge_shared(SiteRecord {

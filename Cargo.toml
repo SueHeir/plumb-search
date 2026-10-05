@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/plumb-core",
+    "crates/plumb-answer",
     "crates/plumb-ingest",
     "crates/plumb-crawl",
     "crates/plumb-index",
@@ -16,6 +17,7 @@ members = [
 # GUI libraries (WebKitGTK on Linux); build it with `-p plumb-desktop`.
 default-members = [
     "crates/plumb-core",
+    "crates/plumb-answer",
     "crates/plumb-ingest",
     "crates/plumb-crawl",
     "crates/plumb-index",

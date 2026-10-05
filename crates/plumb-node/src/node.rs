@@ -92,6 +92,7 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use plumb_core::now_unix;
+use plumb_core::SafeSearch;
 use plumb_index::{Hit, RankConfig, SearchOptions, SearchResults, Searcher};
 use plumb_ingest::download;
 use serde::{Deserialize, Serialize};
@@ -104,6 +105,7 @@ use crate::meaning::SharedMeaning;
 use crate::web::{self, IndexBackend, SearchBackend, StatusSource};
 use crate::websearch::{Engine, WebSettings};
 
+mod adult;
 pub mod backup;
 pub mod control;
 mod embedding;
@@ -405,6 +407,9 @@ pub struct SeedSources {
     /// Where the embedding model's files are downloaded from, for search by
     /// meaning: each of [`plumb_embed::MODEL_FILES`] is appended.
     pub model_base_url: String,
+    /// The adult blocklist safe search leaves out (see `node::adult`);
+    /// `None` for none.
+    pub adult_list_url: Option<String>,
 }
 
 impl Default for SeedSources {
@@ -417,6 +422,7 @@ impl Default for SeedSources {
             wikidata_pacing: download::WikidataPacing::default(),
             cc_ranks_url: None,
             model_base_url: plumb_embed::MODEL_BASE_URL.to_string(),
+            adult_list_url: Some(plumb_core::safe::ADULT_LIST_URL.to_string()),
         }
     }
 }
@@ -654,6 +660,7 @@ pub struct NodeHandle {
     embedding: Option<JoinHandle<()>>,
     pages: JoinHandle<()>,
     news: JoinHandle<()>,
+    adult: JoinHandle<()>,
 }
 
 impl NodeHandle {
@@ -706,6 +713,7 @@ impl NodeHandle {
             embedding,
             pages,
             news,
+            adult,
             ..
         } = self;
         info!("stopping the node in {}", inner.paths.data.display());
@@ -735,6 +743,9 @@ impl NodeHandle {
         }
         if let Err(err) = news.await {
             warn!("checking feeds failed: {err}");
+        }
+        if let Err(err) = adult.await {
+            warn!("the adult blocklist failed: {err}");
         }
         network::stop(&inner).await;
         // Only now may another node take over the data directory.
@@ -871,6 +882,7 @@ pub async fn start(mut config: NodeConfig) -> Result<NodeHandle> {
         tokio::task::spawn_blocking(move || pages::run(inner))
     };
     let news = tokio::spawn(news::run(inner.clone()));
+    let adult = tokio::spawn(adult::run(inner.clone()));
     info!(
         "serving http://{addr}/ with data in {}",
         inner.paths.data.display()
@@ -884,6 +896,7 @@ pub async fn start(mut config: NodeConfig) -> Result<NodeHandle> {
         embedding,
         pages,
         news,
+        adult,
     })
 }
 
@@ -1021,6 +1034,8 @@ struct Inner {
     pages: RwLock<Option<(String, Arc<plumb_index::pages::PageSearcher>)>>,
     /// Recent headlines and the feeds watched for them.
     news: crate::news::NewsStore,
+    /// The adult blocklist, once loaded.
+    adult: RwLock<Option<Arc<adult::AdultList>>>,
 }
 
 /// Failed work the panel can have tried again now.
@@ -1230,6 +1245,7 @@ impl Inner {
             meaning_retry: AtomicBool::new(false),
             pages: RwLock::new(None),
             news,
+            adult: RwLock::new(None),
         }
     }
 
@@ -1711,12 +1727,21 @@ impl SearchBackend for Inner {
             bail!("the search index is not ready yet");
         };
         let meaning = self.meaning.get();
+        // Sites on the adult blocklist are left out after ranking, so a
+        // few more are ranked.
+        let adult = self
+            .adult_list()
+            .filter(|_| options.safe != SafeSearch::Off);
+        let wanted = match adult {
+            Some(_) => limit + adult::MARGIN,
+            None => limit,
+        };
         let mut results = match network::handle(self).map(|net| net.popularity()) {
             None => index
                 .backend()
-                .search_full_with(query, limit, options, meaning.as_deref())?,
+                .search_full_with(query, wanted, options, meaning.as_deref())?,
             Some(table) => {
-                let candidates = limit.max(network::POPULARITY_CANDIDATES);
+                let candidates = wanted.max(network::POPULARITY_CANDIDATES);
                 let mut results = index.backend().search_full_with(
                     query,
                     candidates,
@@ -1724,11 +1749,14 @@ impl SearchBackend for Inner {
                     meaning.as_deref(),
                 )?;
                 network::apply_popularity(&table, query, &mut results.hits);
-                results.hits.truncate(limit);
                 results
             }
         };
-        pages::add_pages(self, query, &mut results);
+        if let Some(adult) = &adult {
+            results.hits.retain(|hit| !adult.contains(&hit.domain));
+        }
+        results.hits.truncate(limit);
+        pages::add_pages(self, query, options, &mut results);
         Ok(results)
     }
 
@@ -1776,6 +1804,10 @@ impl StatusSource for Inner {
 
     fn record_pick(&self, query: &str, domain: &str) {
         network::record_pick(self, query, domain);
+    }
+
+    fn blocks_adult(&self, domain: &str) -> bool {
+        self.adult_list().is_some_and(|list| list.contains(domain))
     }
 
     fn keep_from_network(&self, records: Vec<plumb_core::SiteRecord>) {

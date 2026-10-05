@@ -75,6 +75,7 @@ fn test_config(dir: &Path) -> NodeConfig {
         wikidata_pacing: quick_wikidata(),
         cc_ranks_url: None,
         model_base_url: format!("{nowhere}/model/"),
+        adult_list_url: None,
     };
     config
 }
@@ -674,6 +675,7 @@ impl SeedHost {
             wikidata_pacing: quick_wikidata(),
             cc_ranks_url: None,
             model_base_url: self.url("/model/"),
+            adult_list_url: None,
         }
     }
 

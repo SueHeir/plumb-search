@@ -145,6 +145,10 @@ impl BucketSource for ServedIndex {
             }
         }
     }
+    fn icon(&self, domain: &str) -> Option<String> {
+        icons::to_shared(&IconStore::new(&self.0.paths.icons).get(domain)?)
+    }
+
     fn page_set_file(&self, set: &str) -> Option<PathBuf> {
         crate::pages::SetInfo::find(set)?.servable_file(&self.0.paths.data)
     }
@@ -461,6 +465,7 @@ fn crawl_facts(record: &SiteRecord) -> SiteRecord {
     facts.aliases = record.aliases.clone();
     facts.headings = record.headings.clone();
     facts.body_text = record.body_text.clone();
+    facts.key_pages = record.key_pages.clone();
     facts.crawled_at = record.crawled_at;
     facts
 }
@@ -651,6 +656,7 @@ mod tests {
             country: None,
             named: false,
             official: false,
+            key_pages: Vec::new(),
         }
     }
 

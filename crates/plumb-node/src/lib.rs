@@ -6,7 +6,8 @@
 //! 2. `ingest` folds them into a records file (one JSON line per site),
 //! 3. `crawl` refreshes the best-ranked homepages and discovers new sites,
 //! 4. `index` builds the local search index,
-//! 5. `search`, `serve` and `eval` query it.
+//! 5. `search`, `serve` and `eval` query it, and `mcp` lets AI apps ask
+//!    it for official sites ([`mcp`]).
 //!
 //! `run` does all of that as one long-running node: it sets up the index on
 //! first start, serves it, and keeps crawling and rebuilding ([`node`]).
@@ -30,6 +31,7 @@ pub mod cli;
 pub mod country;
 pub mod eval;
 pub mod history;
+pub mod mcp;
 pub mod meaning;
 pub mod node;
 pub mod pages;
@@ -93,6 +95,7 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::Embed(args) => meaning::run_embed(args),
         Command::RemoteControl(args) => run::remote_control(args),
         Command::Storage(args) => storage::run(args),
+        Command::Mcp(args) => mcp::run(args),
     }
 }
 
