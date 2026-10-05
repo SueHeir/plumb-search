@@ -2,11 +2,11 @@
 
 A model running on your own computer can search with Plumb and read the pages it finds, without anything going to Google. With the [desktop app](desktop.md) running, the searches don't leave your computer either: its node answers them from its own index.
 
-There are two ways in. Apps that speak MCP get Plumb's [tools](mcp.md): `search`, `official_site`, `check_lookalike`, `site_info` and `read_page`. Apps that take a SearXNG address for web search can use a node's `/search?format=json` instead.
+There are two ways in. Apps that speak MCP get Plumb's [tools](mcp.md): `search`, `official_site`, `check_lookalike`, `site_info`, `package`, `read_page` and `report_finding`. Apps that take a SearXNG address for web search can use a node's `/search?format=json` instead.
 
 Use a model that can call tools: Qwen3 (8B or bigger), gpt-oss, Llama 3.1 or 3.3, Mistral Small. Small models without tool training ignore the tools.
 
-The addresses below are the desktop app's. For a node in Docker on the same computer use `http://127.0.0.1:8080`; for any other node, its address, though `read_page` is then only offered with `--mcp-read-pages` (see [Reading pages](mcp.md#reading-pages)).
+The addresses below are the desktop app's. For a node in Docker on the same computer use `http://127.0.0.1:8080`, and for any other node its address. Those offer every tool but `read_page` and `report_finding`: Docker passes connections on from its own network, so the node cannot tell they come from this computer. To have those tools with a Docker node, start `docker exec -i plumb plumb mcp --node http://127.0.0.1:8080` as a command (see [below](#claude-desktop-ollama-front-ends-and-anything-that-starts-a-command)); `read_page` alone also comes with `--mcp-read-pages` (see [Reading pages](mcp.md#reading-pages)).
 
 ## LM Studio
 
@@ -66,4 +66,4 @@ It takes SearXNG's `pageno`, `safesearch` (0, 1 or 2), `categories` (`news` alon
 
 ## Claude Desktop, Ollama front ends and anything that starts a command
 
-`plumb mcp` speaks MCP over stdin and stdout. `plumb mcp --node http://127.0.0.1:7586` asks the desktop app's node; with no `--node` it asks plumbsearch.org. Either way it reads pages itself, on your computer. See [Set up](mcp.md#set-up).
+`plumb mcp` speaks MCP over stdin and stdout. `plumb mcp --node http://127.0.0.1:7586` asks the desktop app's node; with no `--node` it asks plumbsearch.org. Either way it reads pages itself, on your computer. For a node in Docker, run it inside the container: `docker exec -i plumb plumb mcp --node http://127.0.0.1:8080`. See [Set up](mcp.md#set-up).

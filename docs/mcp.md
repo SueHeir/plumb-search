@@ -81,7 +81,7 @@ curl -s https://plumbsearch.org/mcp -H 'content-type: application/json' -d '{
 
 `read_page` fetches the page from wherever it runs, keeps nothing, and adds nothing to the index: Plumb still crawls homepages only. Like the crawler it stays off private networks, so a page cannot send it to your router or a cloud metadata address, and it reads web pages and plain text only, not PDFs or images. A bot check (Cloudflare's "Just a moment..." and the like) is reported as an error rather than returned as the page.
 
-A node offers it only to AI apps on its own computer: a request from a loopback address (`127.0.0.1`, `::1`) that no proxy passed on. plumbsearch.org and other public nodes never offer it, since anyone could make them fetch pages. `plumb mcp` offers it whichever node it asks, because it fetches pages itself, on your computer. For a home server whose AI apps run on other computers, start the node with `--mcp-read-pages` to offer it to every client; never do that on a node the internet can reach.
+A node offers it only to AI apps on its own computer: a request from this computer, sent to a local name (`localhost`, `127.0.0.1` or `[::1]`), with no forwarding headers (`Forwarded`, `X-Forwarded-For` or `X-Real-IP`). The same goes for `report_finding` and findings. A reverse proxy in front of a node must add one of those headers, as Caddy does, or every request it passes on looks local. plumbsearch.org and other public nodes never offer it, since anyone could make them fetch pages. `plumb mcp` offers it whichever node it asks, because it fetches pages itself, on your computer. For a home server whose AI apps run on other computers, start the node with `--mcp-read-pages` to offer it to every client; never do that on a node the internet can reach.
 
 ## Findings
 
@@ -98,7 +98,7 @@ Searches say a lot about whoever makes them, so findings never leave the node. T
 - `POST /mcp` takes one JSON-RPC message and answers it with one JSON object; a notification gets `202 Accepted`. There is no event stream (`GET /mcp` answers 405) and no session.
 - No token: the tools read nothing that the search page doesn't show, and `read_page` is only offered as described above.
 - A request from a web page of another site (an `Origin` other than the node's own host) is refused.
-- Tool calls are limited to a burst of 30 per client, then 60 a minute, answered with `429` and `Retry-After` beyond that. Behind a reverse proxy on the same computer (plumbsearch.org's Caddy), the client is the proxy's `X-Forwarded-For`.
+- Tool calls are limited to a burst of 30 per client, then 60 a minute, answered with `429` and `Retry-After` beyond that. The client is the address the request comes from, or, when that is a proxy on the same computer or a private network (Caddy in front of a Docker container, as on plumbsearch.org), the last address in its `X-Forwarded-For`. An IPv6 client counts as its /64 network, which is what one home or server gets. The counts are kept in memory only.
 - Like the search page, the node logs no queries.
 
 ## Checking it

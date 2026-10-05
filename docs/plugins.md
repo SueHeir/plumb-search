@@ -31,13 +31,18 @@ the environment, or learn who searched. These limits hold for every search:
 
 | Limit | Value |
 | --- | --- |
-| Time for all plugins, from the start of the search | 4 seconds |
+| Time a search waits for plugins' results, from its start | 4 seconds |
 | Requests per plugin per search | 4 |
 | Response size | 2 MB |
 | Memory | 64 MB |
 | Work | about 2 billion WebAssembly instructions |
 | Results kept per plugin | 10 |
 | Searches one plugin runs at once | 4 (more searches go without it) |
+
+A plugin still running after 4 seconds is left out of that search, but it is
+not stopped at once: it can make no more requests (or finish one) after the 4
+seconds, yet it keeps computing in the background until it returns or uses up
+its work limit.
 
 Results are checked before they are shown: only `http` and `https` links with
 a title are kept, text is put on one line and shortened, everything is escaped
@@ -80,7 +85,9 @@ node:
   folders.
 
 Read `plugin.json` before installing: `hosts` lists everywhere the plugin can
-send your users' searches. On start the node lists each plugin it loaded and
+send your users' searches. A host is allowed on every port, so a plugin that
+lists `localhost`, `127.0.0.1` or a machine on your network can reach every
+service on it. On start the node lists each plugin it loaded and
 its hosts in its log and the panel's activity list. A plugin that cannot load
 is left out with a warning. To remove a plugin, delete its folder and restart.
 
