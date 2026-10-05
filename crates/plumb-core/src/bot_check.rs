@@ -66,9 +66,6 @@ const CHECK_TITLE_STARTS: &[&str] = &[
 const CHECK_PHRASES: &[&str] = &[
     "killbot",
     "killbot user verification",
-    // This crawler's own User-Agent, which only a page that echoes the
-    // request back (as KillBot's check does) shows.
-    "github com sueheir plumb search",
     "ddos guard",
     "link11 captcha",
     "checking your browser",
@@ -104,8 +101,9 @@ const CHECK_VENDORS: &[&str] = &[
 ];
 
 /// Whether a page with this title, description, headings and text is a
-/// bot check rather than the site at `domain`. A vendor's own site (a
-/// domain that names the vendor) is never one.
+/// bot check rather than the site at `domain`. A page that echoes the
+/// request back ([`echoes_the_request`]) always is; otherwise a vendor's
+/// own site (a domain that names the vendor) never is.
 pub fn is_bot_check_page(
     domain: &str,
     title: Option<&str>,
@@ -113,6 +111,16 @@ pub fn is_bot_check_page(
     headings: &[String],
     body_text: Option<&str>,
 ) -> bool {
+    let all = || {
+        title
+            .into_iter()
+            .chain(description)
+            .chain(headings.iter().map(String::as_str))
+            .chain(body_text)
+    };
+    if domain != crate::HOME_SITE && all().any(echoes_the_request) {
+        return true;
+    }
     if CHECK_VENDORS.iter().any(|vendor| domain.contains(vendor)) {
         return false;
     }
@@ -126,17 +134,27 @@ pub fn is_bot_check_page(
             return true;
         }
     }
-    let texts = title
-        .into_iter()
-        .chain(description)
-        .chain(headings.iter().map(String::as_str))
-        .chain(body_text);
-    texts.into_iter().any(|text| {
+    all().any(|text| {
         let text = format!(" {} ", normalize_text(text));
         CHECK_PHRASES
             .iter()
             .any(|phrase| text.contains(&format!(" {phrase} ")))
     })
+}
+
+/// Whether `text` shows what the crawler sent rather than what the site
+/// says: this crawler's User-Agent (`PlumbSearch/0.1.0 (+https://...)`) or
+/// an IPv4 address in brackets, the visitor's address as KillBot's check
+/// puts it ("KillBot user verification [203.0.113.7] [PlumbSearch/...]").
+/// Such text would also publish the crawler's address.
+pub fn echoes_the_request(text: &str) -> bool {
+    if text.to_ascii_lowercase().contains("plumbsearch/") {
+        return true;
+    }
+    text.split('[')
+        .skip(1)
+        .filter_map(|after| after.split_once(']'))
+        .any(|(inside, _)| inside.trim().parse::<std::net::Ipv4Addr>().is_ok())
 }
 
 impl SiteRecord {
@@ -209,6 +227,25 @@ mod tests {
     }
 
     #[test]
+    fn echoed_requests_are_checks_even_on_vendor_sites() {
+        for domain in ["killbot.ru", "kill-bot.net", "example.ru"] {
+            assert!(check(
+                domain,
+                "KillBot user verification [23.92.78.91] [PlumbSearch/0.1.0 (+https://github.com/SueHeir/plumb-search)]"
+            ));
+        }
+        assert!(is_bot_check_page(
+            "example.com",
+            Some("Welcome"),
+            Some("Your address is [198.51.100.4]"),
+            &[],
+            None,
+        ));
+        assert!(!echoes_the_request("Array [1.5] and [x]"));
+        assert!(!check(crate::HOME_SITE, "Plumb Search"));
+    }
+
+    #[test]
     fn page_text_catches_checks_with_plain_titles() {
         assert!(is_bot_check_page(
             "example.com",
@@ -244,7 +281,8 @@ mod tests {
             ("hcaptcha.com", "hCaptcha - captcha"),
             ("captcha.com", "Captcha - BotDetect CAPTCHA Generator"),
             ("ddos-guard.net", "DDoS-Guard: DDoS protection and CDN"),
-            ("killbot.ru", "KillBot user verification"),
+            ("killbot.ru", "KillBot - anti-bot protection"),
+            ("192-168-1-1-ip.co", "192.168.1.1 Admin Login"),
             ("github.com", "GitHub - SueHeir/plumb-search: Find websites"),
             ("accessdenied.org", "Access Denied Productions"),
             ("pleasewaitwhileweload.com", "Pleased to meet you"),

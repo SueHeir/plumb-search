@@ -2070,6 +2070,42 @@ mod tests {
     }
 
     #[test]
+    fn the_networks_own_site_comes_first_for_its_name() {
+        let records = vec![
+            plumb_core::home_site_record(),
+            site(
+                "plumbs.com",
+                Some("Plumbs"),
+                None,
+                &[],
+                &[],
+                popular(5_000, 2_000),
+            ),
+            site(
+                "plumbfounded.com",
+                Some("Plumbfounded Plumbing"),
+                None,
+                &[],
+                &[],
+                ranked(40_000, 200),
+            ),
+            site(
+                "search.com",
+                Some("Search"),
+                None,
+                &[],
+                &[],
+                popular(3_000, 5_000),
+            ),
+        ];
+        let (_dir, searcher) = build(&records);
+        for query in ["plumbsearch", "plumbsearch.org"] {
+            let hits = searcher.search(query, 10).unwrap();
+            assert_eq!(hits[0].domain, plumb_core::HOME_SITE, "{query}: {hits:?}");
+        }
+    }
+
+    #[test]
     fn wikidata_descriptions_are_searched_and_shown() {
         let mut navy = site("navyfederal.org", None, None, &[], &[], ranked(4_000, 500));
         navy.about = Some("American credit union".into());
