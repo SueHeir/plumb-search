@@ -957,12 +957,21 @@ pub(super) async fn retry_network(State(state): State<AppState>, request: Reques
 /// Why a change is refused: it does not come from this computer, or a page
 /// of another site sent it. `None` when it may go ahead.
 pub(super) fn refusal(request: &Request) -> Option<&'static str> {
-    let local = request
+    let peer = request
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
-        // A dual-stack `[::]` listener sees IPv4 peers as `::ffff:127.0.0.1`.
-        .is_some_and(|ConnectInfo(peer)| peer.ip().to_canonical().is_loopback());
-    let headers = request.headers();
+        .map(|ConnectInfo(peer)| *peer);
+    refusal_of(peer, request.headers(), request.uri())
+}
+
+/// [`refusal`] for a request from `peer` with `headers`, sent to `uri`.
+pub(super) fn refusal_of(
+    peer: Option<SocketAddr>,
+    headers: &HeaderMap,
+    uri: &Uri,
+) -> Option<&'static str> {
+    // A dual-stack `[::]` listener sees IPv4 peers as `::ffff:127.0.0.1`.
+    let local = peer.is_some_and(|peer| peer.ip().to_canonical().is_loopback());
     // A reverse proxy on this computer connects from loopback too, and may
     // name 127.0.0.1 as the host: what it passes on came from elsewhere.
     let proxied = super::control::FORWARDED_HEADERS
@@ -971,7 +980,7 @@ pub(super) fn refusal(request: &Request) -> Option<&'static str> {
     if !local || proxied {
         return Some("Settings can only be changed on the computer Plumb runs on.");
     }
-    let own = request_origin(headers, request.uri());
+    let own = request_origin(headers, uri);
     // A page whose DNS name was rebound to 127.0.0.1 is same-origin with
     // itself, so the Origin check alone would let it through: the page must
     // also have been opened by a local name.

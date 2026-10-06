@@ -188,12 +188,10 @@ async fn collect(
     options: &plumb_index::SearchOptions,
     wanted: Wanted,
 ) -> anyhow::Result<Collected> {
-    let (results, plugins) = tokio::join!(
-        run_search(state, query, limit, options),
-        state.plugin_results(query, options)
-    );
-    let results = results?;
+    let results = run_search(state, query, limit, options).await?;
     let extras = extras(state, query, &results, options).await;
+    let about = super::search_about(query, &results, &extras);
+    let plugins = state.plugin_results(query, options, about.as_ref()).await;
     let found_pages = results.pages.iter().map(|p| p.hit.clone()).collect();
     let operators = plumb_core::Operators::parse(query);
     let placed = if operators.any() {

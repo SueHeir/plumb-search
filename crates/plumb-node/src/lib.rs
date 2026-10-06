@@ -102,7 +102,9 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::RemoteControl(args) => run::remote_control(args),
         Command::Storage(args) => storage::run(args),
         Command::Mcp(args) => mcp::run(args),
-        Command::TryPlugin(args) => plugins::try_plugin(&args.plugin, &args.query.join(" ")),
+        Command::TryPlugin(args) => {
+            plugins::try_plugin(&args.plugin, &args.query.join(" "), args.act.as_deref())
+        }
         Command::Healthcheck(args) => healthcheck(&args),
     }
 }

@@ -94,6 +94,7 @@ mod link;
 mod nodes;
 mod panel;
 mod places;
+mod plugins;
 
 use crate::{block_on, rank_config};
 pub use panel::ADD_TO_FIREFOX_PATH;
@@ -510,11 +511,17 @@ impl AppState {
         self.node.as_ref()?.recent(query, top)
     }
 
-    /// What the node's plugins find for `query`.
-    async fn plugin_results(&self, query: &str, options: &SearchOptions) -> Vec<PluginResults> {
+    /// What the node's plugins find for `query`, which the node took to
+    /// be `about` one thing.
+    async fn plugin_results(
+        &self,
+        query: &str,
+        options: &SearchOptions,
+        about: Option<&plumb_plugin::About>,
+    ) -> Vec<PluginResults> {
         self.settings
             .plugins
-            .search(query, options.safe, options.language.as_deref())
+            .search(query, options.safe, options.language.as_deref(), about)
             .await
     }
 
@@ -607,6 +614,7 @@ fn app(state: AppState) -> Router {
         .route("/api/websearch", post(searxng::external))
         .route("/opensearch.xml", get(opensearch));
     router = mcp::routes(router);
+    router = plugins::routes(router);
     if state.node.is_some() {
         router = router
             .route("/api/status", get(api_status))
@@ -911,6 +919,7 @@ async fn search_page(
     State(state): State<AppState>,
     extensions: Extensions,
     headers: HeaderMap,
+    uri: Uri,
     Query(params): Query<SearchParams>,
 ) -> Response {
     let client = mcp::client_of(&extensions, &headers);
@@ -950,15 +959,21 @@ async fn search_page(
         history: None,
     };
     let limit = params.limit();
-    let (local, plugins) = tokio::join!(
-        run_search(&state, &query, limit, &settings.options),
-        state.plugin_results(&query, &settings.options)
-    );
+    let local = run_search(&state, &query, limit, &settings.options).await;
     let mut extras = match &local {
         Ok(results) => extras(&state, &query, results, &settings.options).await,
         Err(_) => answers::Extras::default(),
     };
-    extras.plugins = plugins;
+    // Plugins run once the node knows what the search is about, so that
+    // they can look it up by its identifiers.
+    let about = local
+        .as_ref()
+        .ok()
+        .and_then(|results| search_about(&query, results, &extras));
+    extras.plugins = state
+        .plugin_results(&query, &settings.options, about.as_ref())
+        .await;
+    extras.plugin_token = plugins::button_token(&state, &extensions, &headers, &uri);
     let (local, network) = if settings.network == NetSetting::On {
         let network = network_search(&state, client, &query, limit, &settings.options).await;
         let network = match network {
@@ -1207,19 +1222,12 @@ async fn api_search(
         };
     }
     let options = params.options(&state.settings.home, &headers);
-    let (found, plugins) = tokio::join!(
-        run_search(&state, &query, params.limit(), &options),
-        async {
-            if full {
-                state.plugin_results(&query, &options).await
-            } else {
-                Vec::new()
-            }
-        }
-    );
+    let found = run_search(&state, &query, params.limit(), &options).await;
     match found {
         Ok(results) if full => {
             let extras = extras(&state, &query, &results, &options).await;
+            let about = search_about(&query, &results, &extras);
+            let plugins = state.plugin_results(&query, &options, about.as_ref()).await;
             let info = match &extras.profile {
                 Some(profile) => answers::info_from_page(&profile.page, &results.hits),
                 None => {
@@ -1325,7 +1333,7 @@ async fn extras(
     answers::Extras {
         answer,
         profile,
-        plugins: Vec::new(),
+        ..answers::Extras::default()
     }
 }
 
@@ -1823,6 +1831,27 @@ async fn run_search(
     Ok(results)
 }
 
+/// What the node takes `query`, whose results are `results`, to be
+/// about, for its plugins: the article an info box would show.
+fn search_about(
+    query: &str,
+    results: &SearchResults,
+    extras: &answers::Extras,
+) -> Option<plumb_plugin::About> {
+    if let Some(profile) = &extras.profile {
+        return Some(crate::plugins::about_page(&profile.page));
+    }
+    if plumb_core::Operators::parse(query).any() {
+        return None;
+    }
+    let placed = place_pages(
+        query,
+        &results.hits,
+        results.pages.iter().map(|p| p.hit.clone()).collect(),
+    );
+    answers::page_about(&results.hits, &placed).map(crate::plugins::about_page)
+}
+
 fn security_headers() -> [(HeaderName, &'static str); 3] {
     [
         (header::CONTENT_SECURITY_POLICY, CONTENT_SECURITY_POLICY),
@@ -2017,6 +2046,15 @@ li.news{padding:.6rem .9rem;border:1px solid var(--line);border-radius:.6rem}\
 .news .m{margin:0}\
 .plugin .nh{margin:0 0 .2rem}\
 .plugin .d{margin:.1rem 0;font-size:.875rem}\
+.plugin li::after{content:'';display:block;clear:both}\
+.plugin .pim{float:left;width:3rem;max-height:4.5rem;object-fit:cover;margin:.15rem .6rem 0 0;\
+border-radius:.25rem}\
+.plugin .pb{font-size:.75rem;padding:0 .4rem;border:1px solid var(--line);border-radius:1rem;\
+color:var(--muted);white-space:nowrap}\
+.plugin .pa{display:flex;flex-wrap:wrap;gap:.4rem;margin:.3rem 0 .1rem}\
+.plugin .pa form{margin:0}\
+.plugin .pa button{font:inherit;font-size:.8rem;padding:.2rem .7rem;border-radius:.4rem;\
+border:1px solid var(--accent);background:none;color:var(--accent);cursor:pointer}\
 .web{margin:.25rem 0;font-size:.9rem}.web a{color:var(--muted)}\
 .setup{max-width:36rem}\
 .step{margin:2rem 0 .5rem;font-size:1.1rem}\
@@ -2797,7 +2835,12 @@ fn render_results_with(
         });
     let now = now_unix();
     let from_plugins: String = extras
-        .map(|e| e.plugins.iter().map(|p| render_plugin(p, now)).collect())
+        .map(|e| {
+            e.plugins
+                .iter()
+                .map(|p| render_plugin(p, now, query, e.plugin_token.as_deref()))
+                .collect()
+        })
         .unwrap_or_default();
     let news = match (news, from_plugins.is_empty()) {
         (news, true) => news,
@@ -3217,13 +3260,24 @@ fn render_recent(
 /// list after the first result, named for the plugin so that nobody
 /// takes it for Plumb's own. Plugin text is as untrusted as any record's,
 /// and is escaped the same way.
-fn render_plugin(found: &PluginResults, now: u64) -> String {
+/// A plugin's block of results. With `token` (the page is for the node's
+/// owner), its results' buttons are forms that press them.
+fn render_plugin(found: &PluginResults, now: u64, query: &str, token: Option<&str>) -> String {
     let mut items = String::new();
     for item in &found.results {
-        let Some(href) = http_url(&item.url) else {
+        let magnet = item.url.starts_with("magnet:?");
+        let Some(href) = (if magnet {
+            Some(item.url.clone())
+        } else {
+            http_url(&item.url)
+        }) else {
             continue;
         };
-        let mut meta = escape_html(&item.site);
+        let mut meta = if magnet {
+            "Magnet link".to_string()
+        } else {
+            escape_html(&item.site)
+        };
         if let Some(at) = item.published {
             let _ = write!(meta, " &middot; {}", time_ago(at, now));
         }
@@ -3232,9 +3286,44 @@ fn render_plugin(found: &PluginResults, now: u64) -> String {
             .as_deref()
             .map(|s| format!("<p class=\"d\">{}</p>", escape_html(s)))
             .unwrap_or_default();
+        // Only pictures the node fetched itself, carried in the page.
+        let image = item
+            .image
+            .as_deref()
+            .filter(|i| i.starts_with("data:image/"))
+            .map(|i| format!("<img class=\"pim\" src=\"{}\" alt=\"\">", escape_html(i)))
+            .unwrap_or_default();
+        let badge = item
+            .badge
+            .as_deref()
+            .map(|b| format!(" <span class=\"pb\">{}</span>", escape_html(b)))
+            .unwrap_or_default();
+        let mut buttons = String::new();
+        if let Some(token) = token {
+            for action in &item.actions {
+                let _ = write!(
+                    buttons,
+                    "<form method=\"post\" action=\"/plugins/act\">\
+                     <input type=\"hidden\" name=\"plugin\" value=\"{}\">\
+                     <input type=\"hidden\" name=\"data\" value=\"{}\">\
+                     <input type=\"hidden\" name=\"token\" value=\"{}\">\
+                     <input type=\"hidden\" name=\"q\" value=\"{}\">\
+                     <button type=\"submit\">{}</button></form>",
+                    escape_html(&found.plugin),
+                    escape_html(&action.data),
+                    escape_html(token),
+                    escape_html(query),
+                    escape_html(&action.label),
+                );
+            }
+        }
+        if !buttons.is_empty() {
+            buttons = format!("<div class=\"pa\">{buttons}</div>");
+        }
         let _ = write!(
             items,
-            "<li><a href=\"{}\" rel=\"noreferrer\">{}</a>{snippet}<div class=\"m\">{meta}</div></li>",
+            "<li>{image}<a href=\"{}\" rel=\"noreferrer\">{}</a>{badge}{snippet}\
+             <div class=\"m\">{meta}</div>{buttons}</li>",
             escape_html(&href),
             escape_html(&item.title),
         );
