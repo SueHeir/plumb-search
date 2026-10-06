@@ -63,7 +63,7 @@ pub struct Opened {
 }
 
 /// One profile's history, newest first.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct History {
     pub searches: Vec<PastSearch>,
