@@ -30,7 +30,7 @@ use tracing::warn;
 use super::{escape_html, html_response, page, search_link, time_ago, AppState};
 use crate::about::{About, AboutStore, Reason, MAX_INTERESTS, MAX_SITES, MAX_TOWN_CHARS};
 use crate::history::{new_profile, valid_profile, History, HistoryStore};
-use crate::learn::{describe_key, Block, Choice, Learned};
+use crate::learn::{describe_key, Block, Choice, Learned, Verdict};
 
 /// The cookie holding a browser's profile id.
 const PROFILE_COOKIE: &str = "plumb_profile";
@@ -46,6 +46,7 @@ pub(super) fn routes(router: Router<AppState>) -> Router<AppState> {
         .route("/history", get(history_page))
         .route("/history/clear", post(clear))
         .route("/history/forget-clicks", post(forget_clicks))
+        .route("/feedback", post(feedback))
         .route("/about", get(about_page).post(save_about))
 }
 
@@ -119,6 +120,9 @@ pub(super) struct Visitor {
     pub prefs: Prefs,
     pub history: History,
     pub about: About,
+    /// The results page is in edit mode: results hidden from the search
+    /// stay listed, last, so they can be brought back.
+    pub editing: bool,
     /// Cookies to send with the page.
     set_cookies: Vec<String>,
 }
@@ -155,6 +159,7 @@ impl Visitor {
             prefs,
             history,
             about,
+            editing: false,
             set_cookies,
         })
     }
@@ -210,7 +215,11 @@ impl Visitor {
     }
 
     /// What to do with `block` for `query`, shown in `context`.
+    /// What the searcher said wins; their clicks count only while learning.
     pub fn choice(&self, block: Block, query: &str, context: &str) -> Choice {
+        if let Some(fold) = self.history.learned.box_verdict(block, query, context) {
+            return if fold { Choice::Fold } else { Choice::Open };
+        }
         if !self.prefs.learn {
             return Choice::Usual;
         }
@@ -271,10 +280,44 @@ impl Visitor {
         self.profile.clone()
     }
 
-    /// Applies the browser's About profile to `hits`, then its history.
+    /// Applies the browser's About profile to `hits`, then its history,
+    /// then what it said about them for `query` in edit mode.
     pub fn rank(&self, query: &str, hits: &mut Vec<Hit>) {
         self.about.apply(hits);
         self.rank_opened(query, hits);
+        self.apply_verdicts(query, hits);
+    }
+
+    /// Whether the searcher hid `domain` from `query`.
+    pub fn hid(&self, query: &str, domain: &str) -> bool {
+        self.history.learned.verdict(query, domain) == Some(Verdict::Hide)
+    }
+
+    /// Moves results put higher or lower for `query`, and leaves out the
+    /// ones hidden from it (lists them last while editing).
+    fn apply_verdicts(&self, query: &str, hits: &mut Vec<Hit>) {
+        let verdicts = self.history.learned.verdicts_for(query);
+        if verdicts.is_empty() {
+            return;
+        }
+        let of = |domain: &str| {
+            verdicts
+                .iter()
+                .find(|(d, _)| d == domain)
+                .map(|(_, verdict)| *verdict)
+        };
+        for hit in hits.iter_mut() {
+            if let Some(verdict) = of(&hit.domain) {
+                hit.score += verdict.score();
+            }
+        }
+        hits.sort_by(|a, b| b.score.total_cmp(&a.score));
+        if self.editing {
+            // Stable: the hidden ones go last, in their order.
+            hits.sort_by_key(|hit| of(&hit.domain) == Some(Verdict::Hide));
+        } else {
+            hits.retain(|hit| of(&hit.domain) != Some(Verdict::Hide));
+        }
     }
 
     /// Moves the sites opened before up `hits`, when the browser asked for
@@ -331,6 +374,9 @@ impl Visitor {
             about: self.about.clone(),
             learns: self.prefs.learn,
             open_news: false,
+            news_verdict: None,
+            verdicts: HashMap::new(),
+            edit: None,
         }
     }
 
@@ -360,6 +406,85 @@ pub(super) struct HistoryView {
     /// Unfold the "Recent" headlines: they are often read for searches
     /// like this one.
     pub open_news: bool,
+    /// The searcher's own choice for the "Recent" box on this search:
+    /// folded, or open.
+    pub news_verdict: Option<bool>,
+    /// What the searcher said about this search's results, by domain.
+    pub verdicts: HashMap<String, Verdict>,
+    /// The page is in edit mode.
+    pub edit: Option<Editing>,
+}
+
+/// A results page in edit mode.
+#[derive(Debug, Clone, Default)]
+pub(super) struct Editing {
+    pub query: String,
+    /// The page's own address, to come back to after a button.
+    pub back: String,
+}
+
+/// Small buttons under a result in edit mode: higher, lower or hidden for
+/// this search; the one pressed takes it back.
+fn result_buttons(edit: &Editing, domain: &str, now: Option<Verdict>) -> String {
+    let mut out = format!(
+        "<form class=\"fb\" method=\"post\" action=\"/feedback\">\
+         <input type=\"hidden\" name=\"q\" value=\"{}\">\
+         <input type=\"hidden\" name=\"d\" value=\"{}\">\
+         <input type=\"hidden\" name=\"back\" value=\"{}\">",
+        escape_html(&edit.query),
+        escape_html(domain),
+        escape_html(&edit.back)
+    );
+    for (verdict, sign, title) in [
+        (Verdict::Up, "\u{25b2}", "Higher for this search"),
+        (Verdict::Down, "\u{25bc}", "Lower for this search"),
+        (Verdict::Hide, "\u{2715}", "Not for this search"),
+    ] {
+        let pressed = now == Some(verdict);
+        let _ = write!(
+            out,
+            "<button name=\"v\" value=\"{}\" title=\"{}\" aria-label=\"{}\" aria-pressed=\"{pressed}\">{sign}</button>",
+            if pressed { "none" } else { verdict.as_str() },
+            if pressed { "Undo" } else { title },
+            title,
+        );
+    }
+    out.push_str("</form>");
+    out
+}
+
+/// Buttons on a box in edit mode: fold it for this search or every
+/// search like it, keep it open for every one, or take that back.
+pub(super) fn box_buttons(
+    edit: &Editing,
+    block: Block,
+    context: &str,
+    now: Option<bool>,
+) -> String {
+    let mut out = format!(
+        "<form class=\"fb fbx\" method=\"post\" action=\"/feedback\">\
+         <input type=\"hidden\" name=\"q\" value=\"{}\">\
+         <input type=\"hidden\" name=\"b\" value=\"{}\">\
+         <input type=\"hidden\" name=\"c\" value=\"{}\">\
+         <input type=\"hidden\" name=\"back\" value=\"{}\">",
+        escape_html(&edit.query),
+        block.as_str(),
+        escape_html(context),
+        escape_html(&edit.back)
+    );
+    let buttons: &[(&str, &str)] = match now {
+        Some(_) => &[("none", "Undo my choice")],
+        None => &[
+            ("fold", "Fold for this search"),
+            ("fold-all", "Fold for searches like this"),
+            ("open-all", "Always open"),
+        ],
+    };
+    for (value, label) in buttons {
+        let _ = write!(out, "<button name=\"v\" value=\"{value}\">{label}</button>");
+    }
+    out.push_str("</form>");
+    out
 }
 
 impl HistoryView {
@@ -400,6 +525,20 @@ impl HistoryView {
                 escape_html(interest)
             )),
             None => {}
+        }
+        let verdict = self.verdicts.get(&hit.domain).copied();
+        match verdict {
+            Some(Verdict::Up) => notes.push("<span class=\"op\">You put this higher</span>".into()),
+            Some(Verdict::Down) => {
+                notes.push("<span class=\"op\">You put this lower</span>".into())
+            }
+            Some(Verdict::Hide) => {
+                notes.push("<span class=\"op\">Hidden from this search</span>".into());
+            }
+            None => {}
+        }
+        if let Some(edit) = &self.edit {
+            notes.push(result_buttons(edit, &hit.domain, verdict));
         }
         notes
     }
@@ -527,9 +666,9 @@ fn render_learned(body: &mut String, learned: &Learned) {
          and headlines you read come unfolded. Opening a folded box once brings it back.</p>\n",
     );
     let decided = learned.decided();
-    if decided.is_empty() {
+    if decided.is_empty() && learned.boxes.is_empty() {
         body.push_str("<p class=\"s\">Nothing folded or unfolded yet.</p>\n");
-    } else {
+    } else if !decided.is_empty() {
         body.push_str("<ul>\n");
         for (count, choice) in decided.iter().take(MAX_LEARNED_SHOWN) {
             let what = match choice {
@@ -544,6 +683,40 @@ fn render_learned(body: &mut String, learned: &Learned) {
                 escape_html(&truncate_chars(&describe_key(&count.key), 100)),
                 count.used.min(count.shown),
                 count.shown
+            );
+        }
+        body.push_str("</ul>\n");
+    }
+    let boxes: Vec<String> = learned
+        .boxes
+        .iter()
+        .take(MAX_LEARNED_SHOWN)
+        .map(|b| {
+            format!(
+                "<li><strong>{}</strong> {} for {} <span class=\"m\">your choice</span></li>",
+                b.block.label(),
+                if b.fold { "folded" } else { "open" },
+                escape_html(&truncate_chars(&describe_key(&b.key), 100))
+            )
+        })
+        .collect();
+    if !boxes.is_empty() {
+        let _ = writeln!(body, "<ul>\n{}\n</ul>", boxes.join("\n"));
+    }
+    if !learned.verdicts.is_empty() {
+        body.push_str("<p class=\"s\">Results you moved in edit mode:</p>\n<ul>\n");
+        let options = SearchOptions::default();
+        for verdict in learned.verdicts.iter().take(MAX_LEARNED_SHOWN) {
+            let _ = writeln!(
+                body,
+                "<li><strong>{}</strong> {} for <a href=\"{}\">{}</a></li>",
+                escape_html(&verdict.domain),
+                verdict.verdict.label(),
+                escape_html(&format!(
+                    "{}&edit=1",
+                    search_link("/search", &verdict.query, &options, false)
+                )),
+                escape_html(&truncate_chars(&verdict.query, 80))
             );
         }
         body.push_str("</ul>\n");
@@ -572,6 +745,92 @@ fn render_learned(body: &mut String, learned: &Learned) {
 
 /// Lines of each list on the history page's "Learned" part.
 const MAX_LEARNED_SHOWN: usize = 30;
+
+/// The edit mode's buttons.
+#[derive(Debug, Default, Deserialize)]
+struct FeedbackForm {
+    #[serde(default)]
+    q: String,
+    /// A result's domain, or else a box `b` shown in the way `c`.
+    d: Option<String>,
+    b: Option<String>,
+    c: Option<String>,
+    #[serde(default)]
+    v: String,
+    #[serde(default)]
+    back: String,
+}
+
+/// A change to a browser's history.
+type Change = Box<dyn FnOnce(&mut History)>;
+
+/// `POST /feedback`: says what the searcher thinks of a result or a box
+/// for a search, then goes back to the results.
+async fn feedback(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Form(form): Form<FeedbackForm>,
+) -> Response {
+    if cross_site(&headers) {
+        return refuse_cross_site();
+    }
+    let Some(mut visitor) = Visitor::of(&state, &headers, None) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    // Only back to a results page of this node.
+    let back = if form.back.starts_with("/search?") {
+        form.back.clone()
+    } else {
+        "/".to_owned()
+    };
+    let query = truncate_chars(&plumb_core::collapse_whitespace(&form.q), 200);
+    let now = now_unix();
+    let change: Option<Change> = match (&form.d, &form.b) {
+        (Some(domain), _) => {
+            let domain = domain.trim().to_ascii_lowercase();
+            let verdict = Verdict::parse(&form.v);
+            (verdict.is_some() || form.v == "none").then(|| {
+                Box::new(move |h: &mut History| {
+                    h.learned.set_verdict(&query, &domain, verdict, now);
+                }) as Change
+            })
+        }
+        (None, Some(block)) => {
+            let block = Block::parse(block);
+            let context = form
+                .c
+                .as_deref()
+                .filter(|c| matches!(*c, "said" | "guessed" | "site" | "words"))
+                .map(str::to_owned);
+            let what = match form.v.as_str() {
+                "fold" => Some((false, Some(true))),
+                "fold-all" => Some((true, Some(true))),
+                "open-all" => Some((true, Some(false))),
+                "none" => Some((true, None)),
+                _ => None,
+            };
+            match (block, context, what) {
+                (Some(block), Some(context), Some((every, fold))) => {
+                    Some(Box::new(move |h: &mut History| {
+                        h.learned.set_box(block, &query, &context, every, fold, now);
+                    }) as Change)
+                }
+                _ => None,
+            }
+        }
+        (None, None) => None,
+    };
+    let Some(change) = change else {
+        return super::redirect(&back);
+    };
+    let Some(profile) = visitor.profile_or_new() else {
+        return super::redirect(&back);
+    };
+    if let Err(err) = visitor.store.update(&profile, change) {
+        warn!("could not save a result's verdict: {err:#}");
+    }
+    visitor.send_cookies(super::redirect(&back))
+}
 
 /// `POST /history/forget-clicks`: forgets what was learned from clicks,
 /// keeping the rest of the history.

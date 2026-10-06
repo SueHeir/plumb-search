@@ -5,6 +5,7 @@
 ### Search
 
 - Learning from clicks, on the node for each browser with search history on: places and maps you seldom open for searches like one you make are folded to one line, "Recent" headlines you often read come unfolded, and sites you always pass over move down a little. `/history` shows what was learned and forgets it; the settings gear turns it off.
+- Edit mode ("Edit these results" on a results page): small buttons put a result higher or lower for that search or hide it from that search, and fold places or headlines for that search or every search like it. What you say wins over what your clicks say.
 - Sites opened before also come up for searches that share words with the one they were opened for ("us bank login" after "us bank").
 - "us bank" no longer lists banks in a town called Us: a town guessed from a query that names a site is left out. "Banks in denver" still lists them.
 
