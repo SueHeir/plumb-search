@@ -681,8 +681,13 @@ pub(super) fn cross_site(headers: &HeaderMap) -> bool {
     let site = headers
         .get("sec-fetch-site")
         .and_then(|site| site.to_str().ok());
-    if site.is_some_and(|site| !matches!(site, "same-origin" | "none")) {
-        return true;
+    match site {
+        // Set by the browser, which pages cannot change: it settles it.
+        // These pages' `no-referrer` policy makes browsers send
+        // `Origin: null` with their own forms, so the origin cannot.
+        Some("same-origin" | "none") => return false,
+        Some(_) => return true,
+        None => {}
     }
     let host = headers
         .get(header::HOST)
@@ -1177,6 +1182,15 @@ mod tests {
         assert!(cross_site(&headers(&[("sec-fetch-site", "cross-site")])));
         assert!(cross_site(&headers(&[("origin", "https://evil.example")])));
         assert!(cross_site(&headers(&[("origin", "null")])));
+        // A form of this node's own pages, under their no-referrer policy.
+        assert!(!cross_site(&headers(&[
+            ("origin", "null"),
+            ("sec-fetch-site", "same-origin"),
+        ])));
+        assert!(cross_site(&headers(&[
+            ("origin", "http://127.0.0.1:7586"),
+            ("sec-fetch-site", "same-site"),
+        ])));
     }
 
     #[test]

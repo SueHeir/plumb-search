@@ -5780,6 +5780,9 @@ mod tests {
                     .uri("/feedback")
                     .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
                     .header("cookie", profile.as_str())
+                    // What browsers send with a form of a no-referrer page.
+                    .header(header::ORIGIN, "null")
+                    .header("sec-fetch-site", "same-origin")
                     .body(Body::from(format!(
                         "q=us+bank&d=usbank.com&t=popular&v=up&back={back}"
                     )))
