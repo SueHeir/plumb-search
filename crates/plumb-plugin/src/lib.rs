@@ -42,7 +42,8 @@
 //! - `log(ptr, len)`: a line for the node's log, as UTF-8.
 //!
 //! A plugin with actions also exports `plumb_act`, which the node calls
-//! when the owner presses one of its buttons.
+//! when the owner presses one of its buttons, and a plugin that marks up
+//! the node's own results exports `plumb_annotate` (see [`annotate!`]).
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -215,11 +216,84 @@ impl Item {
     }
 }
 
+/// The node's own results on a page, as `plumb_annotate` gets them.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Shown {
+    /// The search, as typed.
+    pub query: String,
+    /// The results, in the order shown.
+    #[serde(default)]
+    pub results: Vec<ShownResult>,
+    /// The node owner's settings for this plugin, as in [`Query::config`].
+    #[serde(default)]
+    pub config: serde_json::Value,
+}
+
+/// One of the node's own results: a site, or an article about one thing.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ShownResult {
+    /// Which result it is, for [`Note::new`].
+    pub id: u32,
+    pub url: String,
+    pub title: String,
+    /// The site it is on: `wikipedia.org` for an article.
+    #[serde(default)]
+    pub site: String,
+    /// What it is about, when the node knows: a film's article, or the
+    /// article a site's result carries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub about: Option<About>,
+}
+
+/// What a plugin adds to one of the node's own results, or that it hides
+/// it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Note {
+    /// The [`ShownResult::id`] it is about.
+    pub id: u32,
+    /// A word or two shown with it: "Not in library", "Downloaded".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub badge: Option<String>,
+    /// Buttons for it, up to three, for the node's owner.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<Action>,
+    /// Leaves the result off the page.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hide: bool,
+}
+
+impl Note {
+    pub fn new(id: u32) -> Self {
+        Note {
+            id,
+            ..Note::default()
+        }
+    }
+
+    pub fn badge(mut self, badge: impl Into<String>) -> Self {
+        self.badge = Some(badge.into());
+        self
+    }
+
+    pub fn action(mut self, action: Action) -> Self {
+        self.actions.push(action);
+        self
+    }
+
+    pub fn hide(mut self) -> Self {
+        self.hide = true;
+        self
+    }
+}
+
 /// What a plugin hands back.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Output {
     #[serde(default)]
     pub results: Vec<Item>,
+    /// What `plumb_annotate` adds to the node's own results.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<Note>,
     /// What an action did, for the owner who pressed its button.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
@@ -470,6 +544,57 @@ pub fn run(search: fn(&Query) -> Result<Vec<Item>, Error>) {
     host::output(&json);
 }
 
+/// Makes `annotate` the plugin's way of marking up the node's own
+/// results: `annotate!(annotate)` once in the crate, where `annotate` is a
+/// `fn(&Shown) -> Result<Vec<Note>, Error>`. It can go with [`plugin!`] or
+/// alone, for a plugin that only marks up results.
+#[macro_export]
+macro_rules! annotate {
+    ($annotate:path) => {
+        #[no_mangle]
+        pub extern "C" fn plumb_annotate() {
+            $crate::run_annotate($annotate)
+        }
+    };
+}
+
+/// [`annotate!`] without [`plugin!`] still needs the interface version.
+#[macro_export]
+macro_rules! annotate_only {
+    ($annotate:path) => {
+        #[no_mangle]
+        pub extern "C" fn plumb_abi() -> i32 {
+            $crate::ABI
+        }
+
+        $crate::annotate!($annotate);
+    };
+}
+
+/// Runs `annotate` on the node's results and hands back its notes; what
+/// [`annotate!`] exports as `plumb_annotate`.
+#[doc(hidden)]
+pub fn run_annotate(annotate: fn(&Shown) -> Result<Vec<Note>, Error>) {
+    let output = match serde_json::from_slice::<Shown>(&host::input()) {
+        Ok(shown) => match annotate(&shown) {
+            Ok(notes) => Output {
+                notes,
+                ..Output::default()
+            },
+            Err(error) => Output {
+                error: Some(error.to_string()),
+                ..Output::default()
+            },
+        },
+        Err(error) => Output {
+            error: Some(format!("unreadable results: {error}")),
+            ..Output::default()
+        },
+    };
+    let json = serde_json::to_vec(&output).unwrap_or_else(|_| b"{}".to_vec());
+    host::output(&json);
+}
+
 /// Runs `act` on the button the owner pressed and hands back what it
 /// did; what [`plugin!`] exports as `plumb_act`.
 #[doc(hidden)]
@@ -630,6 +755,17 @@ mod tests {
         };
         assert_eq!(login.cookies(), "SID=abc; lang=en");
         assert_eq!(login.header("Content-Type"), Some("text/plain"));
+    }
+
+    #[test]
+    fn notes_leave_out_what_they_lack() {
+        let note = Note::new(3).badge("Not in library");
+        assert_eq!(
+            serde_json::to_string(&note).unwrap(),
+            r#"{"id":3,"badge":"Not in library"}"#
+        );
+        let hidden: Note = serde_json::from_str(r#"{"id":1,"hide":true}"#).unwrap();
+        assert_eq!(hidden, Note::new(1).hide());
     }
 
     #[test]

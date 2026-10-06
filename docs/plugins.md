@@ -81,6 +81,54 @@ item. Plugins start once the node's own search is done, so that this is known,
 and every plugin gets it, whatever ran it. (The MCP server's `search` tool
 runs plugins by their keywords alone.)
 
+## Marking up the node's own results
+
+A plugin can also look at the node's own results for a search and add to
+them: a badge on a result, shown with the plugin's name ("Shelf: Not saved"),
+buttons on it, or leaving it off the page. It exports `plumb_annotate`
+(`plumb_plugin::annotate!(annotate)`), which is shown the results (up to 30):
+each one's address, title, site, and, when the node knows, what it is about,
+with the same Wikidata item and identifiers as a search's `about`. A Wikipedia
+article about a film is about that film; a site's result is about what the
+article it carries is about. The plugin answers with a `Note` for the results
+it has something to say about.
+
+A plugin with `ids` is shown only results about something with one of those
+identifiers, and runs only when there is one; without `ids` it is shown every
+result of every search, so mind its source's limits. It runs beside the
+plugins' own searches, with the same time limit and cache. A plugin that only
+marks up results needs no keywords and no `plumb_search`
+(`plumb_plugin::annotate_only!(annotate)`).
+
+```rust
+use plumb_plugin::{Action, Error, Note, Shown};
+
+fn annotate(shown: &Shown) -> Result<Vec<Note>, Error> {
+    let saved = saved_ids(&shown.config)?; // one request for the whole list
+    Ok(shown
+        .results
+        .iter()
+        .filter_map(|result| {
+            let id = result.about.as_ref()?.wikidata.clone()?;
+            Some(if saved.contains(&id) {
+                Note::new(result.id).badge("Saved")
+            } else {
+                Note::new(result.id)
+                    .badge("Not saved")
+                    .action(Action::new("Save", serde_json::json!({ "id": id })))
+            })
+        })
+        .collect())
+}
+
+plumb_plugin::annotate!(annotate);
+```
+
+Badges show to anyone who can search the node; buttons, as everywhere, only
+to its owner. A result a plugin hides is left off this node's results page;
+`/api/search?full=1` lists the notes, hides included, as `plugin_notes` by the
+results' addresses. Results from other nodes are not marked up.
+
 ## Buttons
 
 A result can carry up to three buttons ("Add", "Download"). Pressing one runs
@@ -241,7 +289,8 @@ and copy `target/wasm32-unknown-unknown/release/my_plugin.wasm` to
 | `cache_seconds` | How long its results for a search are reused: 0 to 86400, 600 without it. |
 | `seconds` | How long a search waits for it: 1 to 10, 4 without it. The page waits for its slowest plugin. |
 
-It needs `keywords`, `ids`, `pages` or `always`.
+It needs `keywords`, `ids`, `pages` or `always`, unless it marks up the
+node's results.
 
 What `search` gets ([`Query`](../crates/plumb-plugin/src/lib.rs)):
 
@@ -302,8 +351,10 @@ answers, as the example does.
 
 The `plumb-plugin` crate covers this; it is here for reference. A plugin
 module exports its `memory`, `plumb_abi() -> i32` (returning `2`; a node also
-runs plugins built for interface `1`), `plumb_search()` and, for buttons,
-`plumb_act()`, and may import only these functions from the `plumb` module:
+runs plugins built for interface `1`), `plumb_search()`, for buttons
+`plumb_act()`, and to mark up results `plumb_annotate()` (whose input is
+`{"query", "results": [...], "config"}`), and may import only these functions
+from the `plumb` module:
 
 | Import | Does |
 | --- | --- |
@@ -311,7 +362,7 @@ runs plugins built for interface `1`), `plumb_search()` and, for buttons,
 | `fetch(ptr, len) -> i32` | Sends the request at `ptr` (JSON: `method`, `url`, `headers`, `body`); returns the body's length, or -1 host not allowed, -2 failed, -3 too many requests, -4 too large, -5 time up, -6 bad request. |
 | `fetch_status() -> i32`, `body_read(ptr)` | The last response's status and body. |
 | `headers_len() -> i32`, `headers_read(ptr)` | The last response's headers, as JSON: `[["name", "value"], ...]`. |
-| `output(ptr, len)` | The answer, as JSON: `{"results": [...]}`, for `plumb_act` `{"message": "..."}`, or `{"error": "..."}`. |
+| `output(ptr, len)` | The answer, as JSON: `{"results": [...]}`, for `plumb_act` `{"message": "..."}`, for `plumb_annotate` `{"notes": [...]}`, or `{"error": "..."}`. |
 | `log(ptr, len)` | A line for the node's log. |
 
 A node refuses a module that imports anything else.

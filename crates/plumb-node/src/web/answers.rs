@@ -165,6 +165,8 @@ pub(crate) struct Extras {
     pub profile: Option<ProfileAnswer>,
     /// What the node's plugins found.
     pub plugins: Vec<crate::plugins::PluginResults>,
+    /// What the node's plugins say about its own results, by address.
+    pub plugin_notes: crate::plugins::ResultNotes,
     /// The token for the forms of the plugins' buttons, when the page is
     /// for the node's owner and some plugin has buttons.
     pub plugin_token: Option<String>,

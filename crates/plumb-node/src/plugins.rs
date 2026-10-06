@@ -14,7 +14,9 @@
 //! this node's own pages and APIs, and are never shared with other
 //! nodes or kept in records.
 //!
-//! A plugin may also put buttons on its results. Pressing one runs the
+//! A plugin may also mark up the node's own results (a badge, buttons,
+//! or leaving one out) through its `plumb_annotate`, and put buttons on
+//! its results. Pressing one runs the
 //! plugin's `plumb_act` in the same sandbox; only the node's owner, on
 //! the computer the node runs on, can press them (see `web::plugins`).
 
@@ -28,7 +30,7 @@ use anyhow::{bail, Context, Result};
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
 use plumb_core::SafeSearch;
-use plumb_plugin::{About, ActInput, Item, Output, Query, Request};
+use plumb_plugin::{About, ActInput, Item, Note, Output, Query, Request, Shown, ShownResult};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
 use tracing::{debug, info, warn};
@@ -64,6 +66,8 @@ const MAX_ACTIONS: usize = 3;
 const MAX_ACTION_DATA: usize = 4096;
 /// The biggest picture the node fetches for a result.
 const MAX_IMAGE: usize = 256 * 1024;
+/// The node's results one plugin is shown, at most.
+const MAX_SHOWN: usize = 30;
 /// Searches one plugin runs at once; more are left without its results.
 const MAX_RUNNING: usize = 4;
 /// How long a plugin's results for a query are reused, unless its
@@ -193,7 +197,9 @@ impl HostSpec {
 }
 
 impl Manifest {
-    fn check(&self) -> Result<()> {
+    /// Whether it is a `plugin.json` the node can run, for a plugin that
+    /// `annotates` the node's results or not.
+    fn check(&self, annotates: bool) -> Result<()> {
         let name = self.name.trim();
         if name.is_empty() || name.chars().count() > 60 {
             bail!("its name must be 1 to 60 characters");
@@ -202,6 +208,7 @@ impl Manifest {
             && !self.always
             && self.ids.iter().all(|k| k.trim().is_empty())
             && self.pages.is_empty()
+            && !annotates
         {
             bail!("it needs keywords, ids, pages, or \"always\": true");
         }
@@ -272,12 +279,15 @@ impl Manifest {
                 return Some((Some(keyword.clone()), words[..words.len() - n].join(" ")));
             }
         }
-        let knows = about.is_some_and(|about| {
-            self.ids.iter().any(|key| {
-                about.ids.contains_key(key) || (key == "wikidata" && about.wikidata.is_some())
-            })
-        });
+        let knows = about.is_some_and(|about| self.knows(about));
         (self.always || knows).then(|| (None, words.join(" ")))
+    }
+
+    /// Whether `about` has an identifier its `ids` lists.
+    fn knows(&self, about: &About) -> bool {
+        self.ids.iter().any(|key| {
+            about.ids.contains_key(key) || (key == "wikidata" && about.wikidata.is_some())
+        })
     }
 
     fn time(&self) -> Duration {
@@ -303,6 +313,8 @@ pub struct Plugin {
     fuel: u64,
     /// Whether it exports `plumb_act`, so its buttons can be pressed.
     acts: bool,
+    /// Whether it exports `plumb_annotate`, to mark up the node's results.
+    annotates: bool,
 }
 
 impl std::fmt::Debug for Plugin {
@@ -341,9 +353,6 @@ impl Plugin {
                 .with_context(|| format!("reading {}", manifest_path.display()))?,
         )
         .with_context(|| format!("reading {}", manifest_path.display()))?;
-        manifest
-            .check()
-            .with_context(|| format!("checking {}", manifest_path.display()))?;
         let config_path = dir.join("config.json");
         let config = match std::fs::read(&config_path) {
             Ok(bytes) => serde_json::from_slice(&bytes)
@@ -355,6 +364,7 @@ impl Plugin {
         let wasm = std::fs::read(&wasm_path)
             .with_context(|| format!("reading {}", wasm_path.display()))?;
         Self::from_parts(id, manifest, config, &wasm)
+            .with_context(|| format!("checking {}", dir.display()))
     }
 
     /// A plugin from its manifest, settings and module (binary or text).
@@ -364,7 +374,6 @@ impl Plugin {
         config: serde_json::Value,
         wasm: &[u8],
     ) -> Result<Self> {
-        manifest.check()?;
         let mut engine_config = Config::default();
         engine_config.consume_fuel(true);
         let engine = Engine::new(&engine_config);
@@ -381,6 +390,10 @@ impl Plugin {
             }
         }
         let acts = module.exports().any(|export| export.name() == "plumb_act");
+        let annotates = module
+            .exports()
+            .any(|export| export.name() == "plumb_annotate");
+        manifest.check(annotates)?;
         let allowed = manifest.clone();
         let client = reqwest::Client::builder()
             .user_agent(format!(
@@ -409,12 +422,30 @@ impl Plugin {
             running: Arc::new(Semaphore::new(MAX_RUNNING)),
             fuel: FUEL,
             acts,
+            annotates,
         })
     }
 
     /// Whether its results' buttons can be pressed.
     pub fn acts(&self) -> bool {
         self.acts
+    }
+
+    /// The results of `shown` it is shown: those about something it knows
+    /// (`ids`), or all of them for a plugin without `ids`.
+    fn picks_shown(&self, shown: &[ShownResult]) -> Vec<ShownResult> {
+        shown
+            .iter()
+            .filter(|result| {
+                self.manifest.ids.is_empty()
+                    || result
+                        .about
+                        .as_ref()
+                        .is_some_and(|about| self.manifest.knows(about))
+            })
+            .take(MAX_SHOWN)
+            .cloned()
+            .collect()
     }
 
     /// Runs the plugin's search on `query`, blocking; its fetches run on
@@ -850,6 +881,72 @@ pub struct PluginAction {
     pub data: String,
 }
 
+/// What one plugin adds to one of the node's own results.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct ResultNote {
+    /// The plugin's folder name.
+    pub plugin: String,
+    /// Its name, from `plugin.json`.
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub badge: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<PluginAction>,
+    /// The plugin leaves the result off the page.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub hide: bool,
+}
+
+/// Plugins' notes on the node's results, by the results' addresses.
+pub type ResultNotes = HashMap<String, Vec<ResultNote>>;
+
+/// The buttons kept of `actions`: labelled, with little data, at most
+/// [`MAX_ACTIONS`]; none for a plugin that cannot `act`.
+fn clean_actions(actions: Vec<plumb_plugin::Action>, acts: bool) -> Vec<PluginAction> {
+    if !acts {
+        return Vec::new();
+    }
+    actions
+        .into_iter()
+        .filter_map(|action| {
+            let label = squash(&action.label, 30);
+            let data = serde_json::to_string(&action.data).ok()?;
+            (!label.is_empty() && data.len() <= MAX_ACTION_DATA)
+                .then_some(PluginAction { label, data })
+        })
+        .take(MAX_ACTIONS)
+        .collect()
+}
+
+/// Keeps the notes of `notes` about results of `shown`, checked, by the
+/// results' addresses; notes that say nothing are left out.
+fn clean_notes(
+    notes: Vec<Note>,
+    shown: &[ShownResult],
+    plugin: &Plugin,
+) -> Vec<(String, ResultNote)> {
+    let mut kept: Vec<(String, ResultNote)> = Vec::new();
+    for note in notes {
+        let Some(result) = shown.iter().find(|r| r.id == note.id) else {
+            continue;
+        };
+        if kept.iter().any(|(url, _)| *url == result.url) {
+            continue;
+        }
+        let kept_note = ResultNote {
+            plugin: plugin.id.clone(),
+            name: plugin.manifest.name.clone(),
+            badge: note.badge.map(|b| squash(&b, 24)).filter(|b| !b.is_empty()),
+            actions: clean_actions(note.actions, plugin.acts),
+            hide: note.hide,
+        };
+        if kept_note.badge.is_some() || !kept_note.actions.is_empty() || kept_note.hide {
+            kept.push((result.url.clone(), kept_note));
+        }
+    }
+    kept
+}
+
 /// Whether `url` is a magnet link the page can offer: `magnet:?` with an
 /// exact topic.
 fn is_magnet(url: &str) -> bool {
@@ -901,20 +998,7 @@ fn clean(items: Vec<Item>, safe: SafeSearch, acts: bool) -> Vec<PluginItem> {
         if safe.hides(level) {
             continue;
         }
-        let actions = if acts {
-            item.actions
-                .into_iter()
-                .filter_map(|action| {
-                    let label = squash(&action.label, 30);
-                    let data = serde_json::to_string(&action.data).ok()?;
-                    (!label.is_empty() && data.len() <= MAX_ACTION_DATA)
-                        .then_some(PluginAction { label, data })
-                })
-                .take(MAX_ACTIONS)
-                .collect()
-        } else {
-            Vec::new()
-        };
+        let actions = clean_actions(item.actions, acts);
         kept.push(PluginItem {
             title,
             url,
@@ -942,6 +1026,9 @@ fn squash(text: &str, max: usize) -> String {
 
 type CacheKey = (String, String);
 
+/// One plugin's notes on a page's results, with the results' addresses.
+type KeptNotes = Vec<(String, ResultNote)>;
+
 /// A node's plugins. Cheap to clone.
 #[derive(Clone, Default)]
 pub struct Plugins {
@@ -952,6 +1039,8 @@ pub struct Plugins {
 struct Inner {
     plugins: Vec<Arc<Plugin>>,
     cache: Mutex<HashMap<CacheKey, (Instant, Vec<PluginItem>)>>,
+    /// Plugins' notes on the node's results, by the same keys.
+    notes_cache: Mutex<HashMap<CacheKey, (Instant, KeptNotes)>>,
     /// Goes in the forms of the buttons on this node's results pages, so
     /// that a page of another site cannot press them.
     token: String,
@@ -989,6 +1078,7 @@ impl Plugins {
             inner: Arc::new(Inner {
                 plugins: plugins.into_iter().map(Arc::new).collect(),
                 cache: Mutex::default(),
+                notes_cache: Mutex::default(),
                 token,
             }),
         }
@@ -1188,6 +1278,100 @@ impl Plugins {
             .collect()
     }
 
+    /// What the plugins that mark up results say about `shown`, the
+    /// node's own results for `query`: badges, buttons and results to
+    /// leave out, by the results' addresses. Plugins run side by side,
+    /// each with its own time; one that fails or is late adds nothing.
+    pub async fn annotate(&self, query: &str, shown: &[ShownResult]) -> ResultNotes {
+        let runtime = tokio::runtime::Handle::current();
+        let mut running = tokio::task::JoinSet::new();
+        let mut found: Vec<(usize, Vec<(String, ResultNote)>)> = Vec::new();
+        let mut longest = Duration::ZERO;
+        for (at, plugin) in self.inner.plugins.iter().enumerate() {
+            if !plugin.annotates {
+                continue;
+            }
+            let picked = plugin.picks_shown(shown);
+            if picked.is_empty() {
+                continue;
+            }
+            let input = Shown {
+                query: query.to_string(),
+                results: picked,
+                config: plugin.config.clone(),
+            };
+            let Ok(json) = serde_json::to_vec(&input) else {
+                continue;
+            };
+            let key = (
+                plugin.id.clone(),
+                String::from_utf8_lossy(&json).into_owned(),
+            );
+            let ttl = plugin.manifest.cache_time();
+            let cached = self.inner.notes_cache.lock().ok().and_then(|cache| {
+                let (when, notes) = cache.get(&key)?;
+                (when.elapsed() < ttl).then(|| notes.clone())
+            });
+            if let Some(notes) = cached {
+                found.push((at, notes));
+                continue;
+            }
+            let Ok(permit) = Arc::clone(&plugin.running).try_acquire_owned() else {
+                debug!("plugin {} is busy; left out", plugin.id);
+                continue;
+            };
+            longest = longest.max(plugin.manifest.time());
+            let plugin = Arc::clone(plugin);
+            let runtime = runtime.clone();
+            running.spawn_blocking(move || {
+                let _permit = permit;
+                let deadline = Instant::now() + plugin.manifest.time();
+                let ran = plugin
+                    .call("plumb_annotate", json, deadline, &runtime)
+                    .map(|output| clean_notes(output.notes, &input.results, &plugin));
+                (at, plugin, key, ran)
+            });
+        }
+        let waited = tokio::time::timeout(longest + Duration::from_millis(500), async {
+            while let Some(done) = running.join_next().await {
+                let Ok((at, plugin, key, ran)) = done else {
+                    continue;
+                };
+                match ran {
+                    Ok(notes) => {
+                        let ttl = plugin.manifest.cache_time();
+                        if !ttl.is_zero() {
+                            if let Ok(mut cache) = self.inner.notes_cache.lock() {
+                                if cache.len() >= CACHE_ENTRIES {
+                                    cache.clear();
+                                }
+                                cache.insert(key, (Instant::now(), notes.clone()));
+                            }
+                        }
+                        found.push((at, notes));
+                    }
+                    Err(error) => warn!("plugin {} marked up nothing: {error:#}", plugin.id),
+                }
+            }
+        })
+        .await;
+        if waited.is_err() {
+            warn!("plugins took too long marking up results; left out");
+            running.detach_all();
+        }
+        found.sort_by_key(|(at, _)| *at);
+        let mut notes = ResultNotes::new();
+        for (url, note) in found.into_iter().flat_map(|(_, notes)| notes) {
+            notes.entry(url).or_default().push(note);
+        }
+        notes
+    }
+
+    /// Whether any plugin marks up the node's results.
+    pub fn any_annotate(&self) -> bool {
+        self.inner.plugins.iter().any(|p| p.annotates)
+    }
+
     /// Presses a button of plugin `id`: runs its `plumb_act` with `data`
     /// (JSON text) and returns the line it hands back for the owner. Its
     /// saved results are dropped, since what it shows may have changed.
@@ -1240,9 +1424,12 @@ impl Plugins {
         cache.insert(key, (Instant::now(), items));
     }
 
-    /// Drops the saved results of plugin `id`.
+    /// Drops the saved results and notes of plugin `id`.
     fn forget(&self, id: &str) {
         if let Ok(mut cache) = self.inner.cache.lock() {
+            cache.retain(|(plugin, _), _| plugin != id);
+        }
+        if let Ok(mut cache) = self.inner.notes_cache.lock() {
             cache.retain(|(plugin, _), _| plugin != id);
         }
     }
@@ -1348,6 +1535,41 @@ pub(crate) fn answering(output: &str) -> String {
             (func (export "plumb_act") (call $output (i32.const 0) (i32.const {len}))))"#,
         len = output.len()
     )
+}
+
+/// A plugin module that only marks up results, handing back `output`
+/// whatever it is shown.
+#[cfg(test)]
+pub(crate) fn annotating(output: &str) -> String {
+    let escaped: String = output.bytes().map(|b| format!("\\{b:02x}")).collect();
+    format!(
+        r#"(module
+            (import "plumb" "output" (func $output (param i32 i32)))
+            (memory (export "memory") 1)
+            (data (i32.const 0) "{escaped}")
+            (func (export "plumb_abi") (result i32) (i32.const 2))
+            (func (export "plumb_annotate") (call $output (i32.const 0) (i32.const {len}))))"#,
+        len = output.len()
+    )
+}
+
+/// Plugins of one plugin, named `name`, that marks up results with
+/// `output`.
+#[cfg(test)]
+pub(crate) fn annotating_plugins(name: &str, output: &str) -> Plugins {
+    let manifest = Manifest {
+        name: name.into(),
+        hosts: vec!["a.example".into()],
+        ..Manifest::default()
+    };
+    let plugin = Plugin::from_parts(
+        name.to_lowercase().replace(' ', "-"),
+        manifest,
+        serde_json::Value::Null,
+        annotating(output).as_bytes(),
+    )
+    .expect("a plugin");
+    Plugins::new(vec![plugin])
 }
 
 /// Plugins of one plugin, named `name`, that `keyword` runs and that
