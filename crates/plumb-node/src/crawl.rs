@@ -156,6 +156,11 @@ pub(crate) trait CrawlSet {
     fn apply(&mut self, change: Change);
     /// Sites held.
     fn len(&self) -> usize;
+    /// Whether a crawl may add `domain`, a site it found: any site, unless
+    /// the set holds back new sites, then only one it holds already.
+    fn takes(&self, _domain: &str) -> bool {
+        true
+    }
     /// Folds the journal of `store` into its records file. Returns how many
     /// records the file holds.
     fn compact(&self, store: &mut RecordStore) -> Result<usize>;
@@ -665,8 +670,14 @@ impl Fetcher for Rolling<'_> {
     }
 }
 
-/// Saves `changes`, then makes them to `set`.
-fn commit(set: &mut impl CrawlSet, store: &mut RecordStore, changes: Vec<Change>) -> Result<()> {
+/// Saves `changes`, then makes them to `set`, leaving out the sites the
+/// set does not take ([`CrawlSet::takes`]).
+fn commit(
+    set: &mut impl CrawlSet,
+    store: &mut RecordStore,
+    mut changes: Vec<Change>,
+) -> Result<()> {
+    changes.retain(|change| change.adds().is_none_or(|domain| set.takes(domain)));
     store.save(&changes)?;
     for change in changes {
         set.apply(change);

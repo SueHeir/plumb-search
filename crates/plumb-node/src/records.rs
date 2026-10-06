@@ -75,6 +75,16 @@ pub(crate) enum Change {
 }
 
 impl Change {
+    /// The domain of the record a change may add to a set: a merge's.
+    pub(crate) fn adds(&self) -> Option<&str> {
+        match self {
+            Change::Merge { record }
+            | Change::MergeShared { record }
+            | Change::SubdomainSite { record } => Some(&record.domain),
+            _ => None,
+        }
+    }
+
     /// Makes the change to `set`. A mark for a domain not in the set is
     /// ignored.
     pub(crate) fn apply(self, set: &mut RecordSet) {

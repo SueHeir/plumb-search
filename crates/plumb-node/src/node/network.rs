@@ -274,6 +274,12 @@ pub(super) async fn start(inner: &Arc<Inner>) -> Result<()> {
                     continue;
                 }
             }
+            if !receiver.config.take_new_sites {
+                held_only(&receiver, &mut batch);
+                if batch.is_empty() {
+                    continue;
+                }
+            }
             let inner = receiver.clone();
             let saved = tokio::task::spawn_blocking(move || {
                 let n = batch.len() as u64;
@@ -624,6 +630,16 @@ fn read_inbox(
         warn!("the network inbox had {damaged} damaged lines, skipped");
     }
     Ok(())
+}
+
+/// Leaves out of `batch`, crawls other nodes published, the sites the
+/// index being served does not hold, for a node holding back new sites
+/// ([`super::NodeConfig::take_new_sites`] off): they only refresh the sites
+/// it has. Filling free space still adds sites (see super::fill).
+fn held_only(inner: &Inner, batch: &mut Vec<SiteRecord>) {
+    let index = inner.current();
+    let backend = index.as_ref().and_then(|index| index.backend.as_ref());
+    batch.retain(|record| backend.is_some_and(|backend| backend.has_domain(&record.domain)));
 }
 
 /// Most sites [`Inner::kept_found`] remembers before it starts over.

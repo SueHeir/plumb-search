@@ -1195,6 +1195,8 @@ async fn a_node_in_the_network_takes_in_other_nodes_crawls_and_searches_them() {
     net.local_discovery = false;
     net.round_every = None;
     config.network = Some(net);
+    // Other nodes' crawls add sites only with new sites taken.
+    config.take_new_sites = true;
     let node = start(config).await.unwrap();
     let addr = node.addr();
     let status = wait_for(addr, "the first index", ready_and_idle).await;

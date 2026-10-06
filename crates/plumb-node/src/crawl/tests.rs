@@ -1077,3 +1077,65 @@ fn sites_can_be_made_due_early() {
     let early = select_targets_with(records.iter(), 10, now, WINDOW, |r| r.domain == "fresh.com");
     assert_eq!(domains(&early), ["fresh.com"]);
 }
+
+/// A record set that takes no site it does not hold, as a node's round
+/// does with [`crate::node::NodeConfig::take_new_sites`] off.
+struct Holding(RecordSet);
+
+impl CrawlSet for Holding {
+    fn marks(&self, domain: &str) -> (Option<u64>, u32) {
+        self.0.marks(domain)
+    }
+
+    fn apply(&mut self, change: Change) {
+        change.apply(&mut self.0);
+    }
+
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    fn takes(&self, domain: &str) -> bool {
+        self.0.get(domain).is_some()
+    }
+
+    fn compact(&self, store: &mut RecordStore) -> Result<usize> {
+        store.compact(&self.0)
+    }
+}
+
+#[test]
+fn a_set_holding_back_new_sites_only_refreshes_the_ones_it_holds() {
+    let dir = tempfile::tempdir().unwrap();
+    let (path, set, mut store) = records_file(
+        dir.path(),
+        &[
+            record("a.com", 10, None, None),
+            record("b.com", 20, None, None),
+        ],
+    );
+    let mut set = Holding(set);
+    let started = now_unix();
+    let targets: Vec<CrawlTarget> = ["a.com"].into_iter().map(CrawlTarget::new).collect();
+    let mut fetcher = Batches {
+        crawl: |_| Some(vec![fetched("a.com", started, &["new.com", "b.com"])]),
+        queued: Vec::new(),
+    };
+    let totals = crawl_rolling(
+        &mut set,
+        &targets,
+        10,
+        &mut store,
+        &[],
+        &mut fetcher,
+        |_| Ok(()),
+    )
+    .unwrap();
+    assert_eq!((totals.attempted, totals.discovered), (1, 0));
+    let saved = load_records(&path).unwrap();
+    assert_eq!(saved.len(), 2);
+    assert!(saved.get("new.com").is_none());
+    assert_eq!(saved.get("a.com").unwrap().crawled_at, Some(started));
+    // A site held still counts the links to it.
+    assert_eq!(saved.get("b.com").unwrap().signals.linking_domains, 1);
+}

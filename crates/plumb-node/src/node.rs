@@ -226,6 +226,13 @@ pub struct NodeConfig {
     /// Take sites that look dead ([`crate::dead`]) out of the index each
     /// crawl round. Off by default: the node only counts them in its log.
     pub drop_dead_sites: bool,
+    /// Add sites the records do not hold yet: the domains a crawl finds
+    /// linked or redirected to, and the new sites in other nodes' shared
+    /// crawls. Off by default (Liz, 2026-10-06: "hold off crawling new
+    /// sites, until we get search way better"): crawls refresh the sites
+    /// held, and filling free space from trusted nodes, the seed and
+    /// searches still add sites the network already knows.
+    pub take_new_sites: bool,
     /// The nodes that share the sites with this one under `crawl_any_site`;
     /// they should crawl with it on and name this node in turn.
     pub crawl_with: Vec<plumb_net::PeerId>,
@@ -306,6 +313,7 @@ impl NodeConfig {
             crawl_any_site: false,
             crawl_home_site: true,
             drop_dead_sites: false,
+            take_new_sites: false,
             crawl_with: Vec::new(),
             blackhole: false,
             publish_records: None,

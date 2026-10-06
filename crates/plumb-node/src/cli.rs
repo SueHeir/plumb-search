@@ -287,6 +287,12 @@ pub struct RunArgs {
     /// comes back when a crawl reaches it again.
     #[arg(long)]
     pub drop_dead_sites: bool,
+    /// Add sites the records do not hold yet: domains crawls find linked
+    /// from the sites held, and new sites in other nodes' shared crawls.
+    /// Off by default while the network holds its list of sites steady:
+    /// crawls only refresh the sites held.
+    #[arg(long)]
+    pub take_new_sites: bool,
     /// Homepages fetched at once while crawling [default: 16]. The panel's
     /// workload presets (light, balanced, full) set their own.
     #[arg(long, value_name = "N", value_parser = parse_positive)]
