@@ -53,7 +53,7 @@ const KNOWN_SEARCH_TEMPLATES: &[(&str, &str)] = &[
         "https://www.microsoft.com/en-us/search/explore?q={searchTerms}",
     ),
     (
-        "mozilla.org",
+        "developer.mozilla.org",
         "https://developer.mozilla.org/en-US/search?q={searchTerms}",
     ),
     (

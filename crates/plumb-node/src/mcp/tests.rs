@@ -207,7 +207,7 @@ fn search_and_site_info_return_plain_entries() {
     let answer = &call(
         &mcp,
         "site_info",
-        json!({ "domain": "https://docs.python.org/3/" }),
+        json!({ "domain": "https://wiki.python.org/moin/" }),
     )["result"]["structuredContent"];
     assert_eq!(answer["domain"], "python.org");
     assert_eq!(answer["found"], true);
