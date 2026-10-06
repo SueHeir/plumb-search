@@ -51,6 +51,7 @@ mod fetch;
 mod icons;
 mod ingest;
 mod limits;
+mod link_rank;
 pub mod news;
 mod outline;
 mod records;
@@ -104,6 +105,7 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::RemoteControl(args) => run::remote_control(args),
         Command::Storage(args) => storage::run(args),
         Command::DeadSites(args) => dead::run(&args),
+        Command::LinkRank(args) => link_rank::run(&args),
         Command::Mcp(args) => mcp::run(args),
         Command::TryPlugin(args) => plugins::try_plugin(
             &args.plugin,
