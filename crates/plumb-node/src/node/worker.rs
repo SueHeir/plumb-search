@@ -996,6 +996,7 @@ fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Option<ServingIndex
     inner.set_step(Step::Crawling, "Reading the site records");
     let topics = inner.focus_topics();
     let mut set = RoundSites::load(&inner.paths.records, topics.clone(), Keep::of(inner))?;
+    set.hold_new_sites(!inner.config.take_new_sites);
     let mut store = RecordStore::open(&inner.paths.records);
     inner.check_stop()?;
     let titled = set

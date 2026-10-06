@@ -186,6 +186,9 @@ pub(super) struct RoundSites {
     /// crawl adds.
     focus: Topics,
     keep: Keep,
+    /// Whether a crawl adds no site the records do not hold
+    /// ([`super::NodeConfig::take_new_sites`] off).
+    hold_new_sites: bool,
 }
 
 fn hash(domain: &str) -> u64 {
@@ -277,6 +280,11 @@ impl RoundSites {
         self.others.get(domain).map(|&i| i as usize)
     }
 
+    /// Keeps a crawl from adding sites the records do not hold, or not.
+    pub(super) fn hold_new_sites(&mut self, hold: bool) {
+        self.hold_new_sites = hold;
+    }
+
     pub(super) fn get(&self, domain: &str) -> Option<&RoundSite> {
         self.position(domain).map(|i| &self.sites[i])
     }
@@ -350,6 +358,11 @@ impl CrawlSet for RoundSites {
         self.sites.len()
     }
 
+    fn takes(&self, domain: &str) -> bool {
+        !self.hold_new_sites
+            || canonical_domain(domain).is_some_and(|domain| self.get(&domain).is_some())
+    }
+
     fn compact(&self, store: &mut RecordStore) -> Result<usize> {
         // The journal stays when only a whole set can fold it in; loading
         // the file replays it.
@@ -371,6 +384,18 @@ mod tests {
         let mut r = SiteRecord::new(domain);
         r.signals.tranco_rank = Some(tranco);
         r
+    }
+
+    #[test]
+    fn a_round_holding_back_new_sites_takes_only_the_ones_it_holds() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("records.jsonl");
+        write_jsonl(&path, &[record("held.com", 5)]).unwrap();
+        let mut sites = RoundSites::load(&path, Topics::default(), Keep::default()).unwrap();
+        assert!(sites.takes("new.com"), "takes any site by default");
+        sites.hold_new_sites(true);
+        assert!(sites.takes("Held.com"));
+        assert!(!sites.takes("new.com"));
     }
 
     #[test]

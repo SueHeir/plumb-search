@@ -31,6 +31,8 @@ Every day each node is assigned a random eighth of all sites, picked by a hash o
 
 ### Dead sites and reading sites anew
 
+New sites are held back by default: a crawl refreshes the sites the node holds and adds none of the domains it finds linked, and records other nodes share only refresh sites already held. `plumb run --take-new-sites` lets both add new sites again.
+
 Sites that stopped answering stay in a node's records until it is run with `--drop-dead-sites` (`crate::dead` in plumb-node). A site looks dead after 6 tries in a row that could not reach it at all (the retry waits double from a day, so that is a month or more) and no crawl, this node's or a trusted one's, reaching it for 60 days. The best 10,000 sites, official websites, sites about the node's topics and ones its searchers chose never look dead. A dead site is cut down to its ranks and crawl marks, left out of the index and the buckets other nodes take, tried again every 90 days, and back in full when a crawl reaches it. The judgment is the node's own: it is never taken from another node. `plumb dead-sites --data DIR` counts them without changing anything, and a node without the flag logs the count each round.
 
 Every crawl stamps its record with `plumb_crawl::CRAWL_VERSION`. When crawlers learn to read more or better from a homepage (such as a better list of its words), the version goes up, and every site last read by an older version counts as due again, best link score first, within the share of each round that goes to sites due again. A shared crawl without the page's text keeps the version of the text a node already has.

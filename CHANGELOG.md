@@ -12,6 +12,7 @@
 
 ### Crawling
 
+- New sites are held back: crawls refresh the sites a node holds and no longer add the domains they find linked, and records other nodes share only refresh sites already held, while the network makes the sites it has searchable first. Filling free space from trusted nodes, the seed and searches still add sites the network knows. `plumb run --take-new-sites` adds new sites as before.
 - Dead sites: `plumb run --drop-dead-sites` takes sites out of the index that no crawl has reached for 60 days after 6 tries in a row that got no answer. Never the best 10,000 sites, official websites or ones you chose. A dead site keeps a small record and comes back when it answers again. Off by default; without it the node only counts them in its log, and `plumb dead-sites --data DIR` counts them without changing anything.
 - Reading sites anew: when crawlers learn to read more from a homepage, the crawl version goes up and nodes crawl the sites read by an older crawler again, best-known first.
 
