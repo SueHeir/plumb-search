@@ -273,7 +273,7 @@ impl Visitor {
         }
     }
 
-    fn profile_or_new(&mut self) -> Option<String> {
+    pub fn profile_or_new(&mut self) -> Option<String> {
         if self.profile.is_none() {
             match new_profile() {
                 Ok(id) => {
@@ -409,6 +409,22 @@ impl Visitor {
             home: None,
             tune_bar: None,
         }
+    }
+
+    /// The browser's profile id, if it has one.
+    pub fn profile(&self) -> Option<&str> {
+        self.profile.as_deref()
+    }
+
+    /// The folder the profiles are kept in.
+    pub fn dir(&self) -> &std::path::Path {
+        self.store.dir()
+    }
+
+    /// Switches the browser to profile `id` (see [`crate::sync`]).
+    pub fn use_profile(&mut self, id: &str) {
+        self.set_cookies.push(cookie(PROFILE_COOKIE, id));
+        self.profile = Some(id.to_owned());
     }
 
     /// Adds the cookies this visit set to `response`.
@@ -1018,7 +1034,9 @@ fn render_history(history: &History, prefs: Prefs, now: u64) -> String {
     }
     body.push_str(
         "<form method=\"post\" action=\"/history/clear\"><button type=\"submit\">Clear my \
-         history</button></form>\n</main>\n</div>",
+         history</button></form>\n\
+         <p class=\"m\"><a href=\"/link\">Use your history on your other computers</a></p>\n\
+         </main>\n</div>",
     );
     page("History - Plumb Search", &body)
 }
@@ -1133,7 +1151,8 @@ fn render_about(about: &About, note: Option<&str>) -> String {
          <p><button type=\"submit\">Save</button></p>\n</form>\n\
          <form method=\"post\" action=\"/about\"><input type=\"hidden\" name=\"clear\" \
          value=\"1\"><button type=\"submit\">Forget all of this</button></form>\n\
-         <p class=\"m\"><a href=\"/history\">Your history</a></p>\n</main>\n</div>",
+         <p class=\"m\"><a href=\"/history\">Your history</a> \u{b7} <a href=\"/link\">Use \
+         this on your other computers</a></p>\n</main>\n</div>",
         lines(&about.interests),
         lines(&about.pinned),
         lines(&about.hidden),

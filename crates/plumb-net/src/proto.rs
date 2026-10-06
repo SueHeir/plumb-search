@@ -30,12 +30,17 @@
 //! * `/plumb/trust/1`: which nodes a node trusts, asked by the nodes that
 //!   trust it, so a search can ask friends of friends (see
 //!   [`crate::scope`]).
+//! * `/plumb/profile/1`: one searcher's profile (search history, About
+//!   you, what their clicks taught), shared between the nodes they linked
+//!   it on. Answered only for a profile linked with the asking node, so a
+//!   node never learns anything of a profile it was not given. The
+//!   connection is end to end encrypted, relayed or not.
 //! * `/plumb/kad/1.0.0`: Kademlia, to find more nodes.
 //!
 //! Requests and responses are CBOR.
 
 use serde::{Deserialize, Serialize};
-use serde_bytes::ByteBuf;
+pub use serde_bytes::ByteBuf;
 
 use crate::batch::{Batch, RecordProof, SignedHeader};
 use crate::credits::{Issued, Token};
@@ -47,6 +52,7 @@ pub const BATCH_PROTOCOL: &str = "/plumb/batch/1";
 pub const FILL_PROTOCOL: &str = "/plumb/fill/1";
 pub const PAGES_PROTOCOL: &str = "/plumb/pages/1";
 pub const TRUST_PROTOCOL: &str = "/plumb/trust/1";
+pub const PROFILE_PROTOCOL: &str = "/plumb/profile/1";
 pub const REPORT_PROTOCOL: &str = "/plumb/report/1";
 pub const CREDIT_PROTOCOL: &str = "/plumb/credits/1";
 pub const KAD_PROTOCOL: &str = "/plumb/kad/1.0.0";
@@ -175,6 +181,38 @@ pub struct TrustRequest {}
 pub struct TrustResponse {
     /// Node ids, at most [`crate::scope::MAX_SHARED_TRUST`].
     pub trusted: Vec<String>,
+}
+
+/// Most bytes of a profile request or response.
+pub const MAX_PROFILE_MESSAGE: u64 = 8 * 1024 * 1024;
+
+/// About one searcher's profile, between two nodes they use.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProfileRequest {
+    /// Links the asker to the profile a link code was made for; `token` is
+    /// the code's secret part, good once and only for a few minutes.
+    Join { token: String },
+    /// The asker's copy of `profile`, to merge with the answerer's. `round`
+    /// names the copy both nodes agreed on last time, if any.
+    Sync {
+        profile: String,
+        round: Option<u64>,
+        state: ByteBuf,
+    },
+    /// The asker no longer shares `profile` with the answerer.
+    Leave { profile: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProfileResponse {
+    /// The profile linked, and the answerer's copy of it.
+    Joined { profile: String, state: ByteBuf },
+    /// The merged copy, which both nodes now keep as round `round`.
+    Synced { round: u64, state: ByteBuf },
+    /// Done (for [`ProfileRequest::Leave`]).
+    Left,
+    /// Not answered, and why.
+    Refused(String),
 }
 
 /// Asks for `len` bytes from `offset` of the answering node's file of the

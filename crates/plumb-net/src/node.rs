@@ -95,6 +95,8 @@ use crate::store::{read_held, BatchStore, CrawlerView, RETAIN_EPOCHS};
 
 /// Relays a node behind NAT takes reservations on.
 pub const MAX_RELAYS: usize = 2;
+/// Profile requests answered at once.
+const MAX_PROFILE_SERVING: usize = 4;
 /// Epochs of batches a node asks for when it meets another.
 pub const CATCH_UP_EPOCHS: u64 = 3;
 /// Minutes between asking connected nodes again for the batches of this
@@ -407,6 +409,7 @@ type FillReply = oneshot::Sender<Result<Option<FillPage>>>;
 
 /// Where the answer to a page set request goes.
 type PagesReply = oneshot::Sender<Result<Option<PagesChunk>>>;
+type ProfileReply = oneshot::Sender<Result<ProfileResponse>>;
 
 enum Command {
     Publish {
@@ -437,6 +440,11 @@ enum Command {
     Pages {
         request: PagesRequest,
         reply: PagesReply,
+    },
+    Profile {
+        peer: PeerId,
+        request: ProfileRequest,
+        reply: ProfileReply,
     },
     Dial(Multiaddr),
     Reconnect,
@@ -782,6 +790,22 @@ impl NetHandle {
         answer.await.context("the network task stopped")?
     }
 
+    /// Asks `peer` about a searcher's profile (see [`ProfileRequest`]),
+    /// dialling it first when it is not connected.
+    pub async fn ask_profile(
+        &self,
+        peer: PeerId,
+        request: ProfileRequest,
+    ) -> Result<ProfileResponse> {
+        let (reply, answer) = oneshot::channel();
+        self.send(Command::Profile {
+            peer,
+            request,
+            reply,
+        })?;
+        answer.await.context("the network task stopped")?
+    }
+
     /// Tokens held that `issuer` signed.
     pub fn tokens_held(&self, issuer: &PeerId) -> usize {
         self.wallet
@@ -895,6 +919,7 @@ struct Behaviour {
     fill: request_response::cbor::Behaviour<FillRequest, FillResponse>,
     pages: request_response::cbor::Behaviour<PagesRequest, PagesResponse>,
     trust: request_response::cbor::Behaviour<TrustRequest, TrustResponse>,
+    profile: request_response::cbor::Behaviour<ProfileRequest, ProfileResponse>,
 }
 
 /// Starts the network side of a node. Returns its handle and the records
@@ -1056,6 +1081,8 @@ pub async fn start(
         lists_serving: 0,
         pages_asked: HashMap::new(),
         pages_asking: HashMap::new(),
+        profile_serving: 0,
+        profile_asking: HashMap::new(),
         gateway,
         oblivious_peers: HashSet::new(),
         relay_keys: HashMap::new(),
@@ -1442,6 +1469,13 @@ fn build_swarm(key: &Keypair, config: &NetConfig) -> Result<Swarm<Behaviour>> {
                         .set_request_size_maximum(64)
                         .set_response_size_maximum(64 * 1024),
                     [(StreamProtocol::new(TRUST_PROTOCOL), ProtocolSupport::Full)],
+                    request_config.clone(),
+                ),
+                profile: request_response::Behaviour::with_codec(
+                    request_response::cbor::codec::Codec::default()
+                        .set_request_size_maximum(MAX_PROFILE_MESSAGE)
+                        .set_response_size_maximum(MAX_PROFILE_MESSAGE),
+                    [(StreamProtocol::new(PROFILE_PROTOCOL), ProtocolSupport::Full)],
                     request_config,
                 ),
             })
@@ -1459,6 +1493,7 @@ enum Answer {
     Report(ResponseChannel<ReportResponse>, ReportResponse),
     Fill(ResponseChannel<FillResponse>, FillResponse),
     Pages(ResponseChannel<PagesResponse>, PagesResponse),
+    Profile(ResponseChannel<ProfileResponse>, ProfileResponse),
     /// Picks counted in a recount of the reports.
     Popularity(usize),
     Sealed(Reply, ObliviousResponse),
@@ -1591,6 +1626,10 @@ struct Task {
     pages_asked: HashMap<PeerId, (u64, u32)>,
     /// Our page set requests not yet answered.
     pages_asking: HashMap<OutboundRequestId, PagesReply>,
+    /// Profile requests being answered (see [`MAX_PROFILE_SERVING`]).
+    profile_serving: usize,
+    /// Our profile requests not yet answered.
+    profile_asking: HashMap<OutboundRequestId, ProfileReply>,
     /// This node's keys for sealed requests.
     gateway: Gateway,
     /// Connected nodes that relay and answer sealed requests.
@@ -1796,6 +1835,22 @@ impl Task {
                     .send_request(&peer, request);
                 self.pages_asking.insert(id, reply);
             }
+            Command::Profile {
+                peer,
+                request,
+                reply,
+            } => {
+                if !self.swarm.is_connected(&peer) {
+                    // Addresses the swarm lacks may be found by asking.
+                    self.swarm.behaviour_mut().kad.get_closest_peers(peer);
+                }
+                let id = self
+                    .swarm
+                    .behaviour_mut()
+                    .profile
+                    .send_request(&peer, request);
+                self.profile_asking.insert(id, reply);
+            }
             Command::Dial(addr) => self.dial(addr),
             Command::Reconnect => {
                 info!("trying the bootstrap nodes again");
@@ -1924,6 +1979,14 @@ impl Task {
                     .swarm
                     .behaviour_mut()
                     .pages
+                    .send_response(channel, response);
+            }
+            Answer::Profile(channel, response) => {
+                self.profile_serving = self.profile_serving.saturating_sub(1);
+                let _ = self
+                    .swarm
+                    .behaviour_mut()
+                    .profile
                     .send_response(channel, response);
             }
             Answer::Popularity(picks) => self.with_status(|s| s.popular_picks = picks),
@@ -2202,6 +2265,7 @@ impl Task {
             BehaviourEvent::Fill(event) => self.on_fill_event(event),
             BehaviourEvent::Pages(event) => self.on_pages_event(event),
             BehaviourEvent::Trust(event) => self.on_trust_event(event),
+            BehaviourEvent::Profile(event) => self.on_profile_event(event),
             BehaviourEvent::RelayClient(relay::client::Event::ReservationReqAccepted {
                 relay_peer_id,
                 renewal,
@@ -3381,6 +3445,63 @@ impl Task {
                 ..
             } => {
                 if let Some(reply) = self.pages_asking.remove(&request_id) {
+                    let _ = reply.send(Err(anyhow::anyhow!("{peer} did not answer: {error}")));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Profile requests are answered by the node's front end (see
+    /// [`BucketSource::profile`]), which answers only for profiles linked
+    /// with the asker; a few at a time.
+    fn on_profile_event(
+        &mut self,
+        event: request_response::Event<ProfileRequest, ProfileResponse>,
+    ) {
+        match event {
+            request_response::Event::Message {
+                peer,
+                message:
+                    request_response::Message::Request {
+                        request, channel, ..
+                    },
+                ..
+            } => {
+                if self.profile_serving >= MAX_PROFILE_SERVING {
+                    let _ = self.swarm.behaviour_mut().profile.send_response(
+                        channel,
+                        ProfileResponse::Refused("busy, ask again later".into()),
+                    );
+                    return;
+                }
+                self.profile_serving += 1;
+                let source = self.source.clone();
+                let tx = self.answers_tx.clone();
+                tokio::task::spawn_blocking(move || {
+                    let response = source.profile(peer, request);
+                    let _ = tx.send(Answer::Profile(channel, response));
+                });
+            }
+            request_response::Event::Message {
+                message:
+                    request_response::Message::Response {
+                        request_id,
+                        response,
+                    },
+                ..
+            } => {
+                if let Some(reply) = self.profile_asking.remove(&request_id) {
+                    let _ = reply.send(Ok(response));
+                }
+            }
+            request_response::Event::OutboundFailure {
+                peer,
+                request_id,
+                error,
+                ..
+            } => {
+                if let Some(reply) = self.profile_asking.remove(&request_id) {
                     let _ = reply.send(Err(anyhow::anyhow!("{peer} did not answer: {error}")));
                 }
             }

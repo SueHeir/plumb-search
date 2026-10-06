@@ -40,6 +40,7 @@ pub mod pages;
 pub mod places;
 pub mod plugins;
 pub mod storage;
+pub mod sync;
 pub mod tls;
 pub mod web;
 pub mod websearch;

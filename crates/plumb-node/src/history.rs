@@ -150,7 +150,7 @@ fn clean(query: &str) -> Option<String> {
 }
 
 /// What makes two searches the same: case and spacing do not count.
-fn key(query: &str) -> String {
+pub(crate) fn key(query: &str) -> String {
     collapse_whitespace(query).trim().to_lowercase()
 }
 

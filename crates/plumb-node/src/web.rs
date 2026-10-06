@@ -90,6 +90,7 @@ use crate::websearch::{bang_url, Engine, WebSettings};
 pub(crate) mod answers;
 mod control;
 mod history;
+mod link;
 mod nodes;
 mod panel;
 mod places;
@@ -633,6 +634,7 @@ fn app(state: AppState) -> Router {
         router = control::routes(router);
         router = nodes::routes(router);
         router = history::routes(router);
+        router = link::routes(router);
         router = tune::routes(router);
     }
     router.with_state(state)
