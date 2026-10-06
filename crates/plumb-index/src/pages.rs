@@ -1318,8 +1318,14 @@ pub fn place_pages(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) -> Ve
             let led = placed.iter().any(|p| p.hit.whole);
             usize::from(site_named || led)
         } else if !hit.named && hit.page.topic().is_some() {
-            // A question or paper with most of the query's words.
-            1
+            // A question or paper with most of the query's words: the best
+            // question leads when the query names no site, as a how-to
+            // search ("how to unclog a drain") wants the answer before a
+            // site that shares a word with it (cityofdrain.org).
+            let led = placed
+                .iter()
+                .any(|p| p.at == 0 && p.under.is_none() && p.hit.page.is_question());
+            usize::from(site_named || led || !hit.page.is_question())
         } else if !hit.named || namesake {
             PARTIAL_AFTER
         } else if hit.page.may_lead() && page_first(&hit) {
@@ -1612,11 +1618,19 @@ mod tests {
             place_pages("delete a git branch locally and remotely", &sites, hits)[0].at,
             0
         );
-        // Most of the query's words: after the best site.
+        // Most of the query's words, and no site named: the question still
+        // leads, ahead of a site that only shares a word with it.
         let hits = s.search("delete git branch remotely fast", 5).unwrap();
         assert!(!hits[0].whole);
         assert_eq!(
             place_pages("delete git branch remotely fast", &sites, hits)[0].at,
+            0
+        );
+        // A site the query names stays first.
+        let named = [known_site("git-scm.com", true, 0.9)];
+        let hits = s.search("delete git branch remotely fast", 5).unwrap();
+        assert_eq!(
+            place_pages("delete git branch remotely fast", &named, hits)[0].at,
             1
         );
     }
