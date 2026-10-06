@@ -721,6 +721,8 @@ struct SearchParams {
     hr: Option<String>,
     /// `1`: learn from clicks which boxes to fold (see [`crate::learn`]).
     hl: Option<String>,
+    /// `1`: edit mode, with buttons to move results and fold boxes.
+    edit: Option<String>,
     /// Safe search: `off`, `moderate` (the default) or `strict`.
     safe: Option<String>,
     /// Only sites in this language (a language code); empty for any.
@@ -921,6 +923,10 @@ async fn search_page(
         return home_or_setup(&state, &params, &headers);
     }
     let mut visitor = history::Visitor::of(&state, &headers, params.history_prefs());
+    let editing = visitor.is_some() && flag(&params.edit);
+    if let Some(visitor) = &mut visitor {
+        visitor.editing = editing;
+    }
     let mut settings = Settings {
         options: params.options(&state.settings.home, &headers),
         network: state.net_setting(&params),
@@ -952,9 +958,10 @@ async fn search_page(
         // came from.
         let network = match (network, &visitor) {
             (NetOutcome::Answered(mut found), Some(visitor)) => {
-                found
-                    .hits
-                    .retain(|result| !visitor.about.hides(&result.hit.domain));
+                found.hits.retain(|result| {
+                    !visitor.about.hides(&result.hit.domain)
+                        && (editing || !visitor.hid(&query, &result.hit.domain))
+                });
                 NetOutcome::Answered(found)
             }
             (network, _) => network,
@@ -977,7 +984,28 @@ async fn search_page(
             if let Some(visitor) = &mut visitor {
                 visitor.rank(&query, &mut results.hits);
                 visitor.note_search(&query);
-                settings.history = Some(visitor.view());
+                let mut view = visitor.view();
+                view.verdicts = visitor
+                    .history
+                    .learned
+                    .verdicts_for(&query)
+                    .into_iter()
+                    .collect();
+                if editing {
+                    view.edit = Some(history::Editing {
+                        query: query.clone(),
+                        back: format!(
+                            "{}&edit=1",
+                            search_link(
+                                "/search",
+                                &query,
+                                &settings.options,
+                                settings.network == NetSetting::On
+                            )
+                        ),
+                    });
+                }
+                settings.history = Some(view);
             }
             let mut domains: Vec<String> =
                 results.hits.iter().map(|hit| hit.domain.clone()).collect();
@@ -1019,6 +1047,11 @@ async fn search_page(
                 (&visitor, news_context, settings.history.as_mut())
             {
                 view.open_news = visitor.choice(Block::News, &query, context) == Choice::Open;
+                view.news_verdict =
+                    visitor
+                        .history
+                        .learned
+                        .box_verdict(Block::News, &query, context);
             }
             let mut page = render_results_with(
                 &query,
@@ -1049,8 +1082,29 @@ async fn search_page(
                     &icons,
                     &link,
                 );
+                if let (Some(edit), Some(context), Some(visitor)) = (
+                    settings.history.as_ref().and_then(|h| h.edit.as_ref()),
+                    places_context,
+                    &visitor,
+                ) {
+                    let now = visitor
+                        .history
+                        .learned
+                        .box_verdict(Block::Places, &query, context);
+                    let buttons = history::box_buttons(edit, Block::Places, context, now);
+                    match html.rfind("</section>") {
+                        Some(end) => html.insert_str(end, &buttons),
+                        None => html.push_str(&buttons),
+                    }
+                }
                 if fold_places {
-                    html = places::fold_places(found, &html);
+                    let chosen = places_context.zip(visitor.as_ref()).is_some_and(|(c, v)| {
+                        v.history
+                            .learned
+                            .box_verdict(Block::Places, &query, c)
+                            .is_some()
+                    });
+                    html = places::fold_places(found, &html, chosen);
                 }
                 if let Some(at) = page.find("<main>\n") {
                     page.insert_str(
@@ -1293,6 +1347,7 @@ async fn go(
         hs: None,
         hr: None,
         hl: None,
+        edit: None,
         safe: params.safe,
         lang: params.lang,
         news: params.news,
@@ -1940,6 +1995,12 @@ text-align:left}\
 .err strong{color:var(--err)}\
 .msg{white-space:pre-wrap;overflow-wrap:anywhere;font:.85rem/1.4 ui-monospace,monospace}\
 .op{color:var(--url);font-weight:600}\
+.fb{display:inline-flex;gap:.2rem;margin:0;vertical-align:middle}\
+.fb button{font:inherit;font-size:.75rem;line-height:1;padding:.15rem .35rem;border:1px solid var(--line);\
+border-radius:.35rem;background:none;color:var(--muted);cursor:pointer}\
+.fb button[aria-pressed=true]{background:var(--accent);color:var(--bg);border-color:var(--accent)}\
+.fbx{display:flex;flex-wrap:wrap;margin:.3rem 0 .6rem}\
+.ed{font-size:.85rem}\
 .panel a{color:var(--link)}\
 .recent{margin:1rem auto 0;max-width:36rem;display:flex;flex-wrap:wrap;gap:.4rem;\
 justify-content:center;align-items:center;font-size:.875rem}\
@@ -2580,6 +2641,28 @@ fn render_results_with(
         answers::render_answer(&mut body, answer);
     }
     render_source(&mut body, query, settings, network, from_network);
+    if let Some(history) = &settings.history {
+        // Edit mode: buttons to move results and fold boxes.
+        let here = search_link(
+            "/search",
+            query,
+            &settings.options,
+            settings.network == NetSetting::On,
+        );
+        let line = if history.edit.is_some() {
+            format!(
+                "Edit mode: \u{25b2} higher, \u{25bc} lower, \u{2715} not for this search. Kept on \
+                 this node for this browser. <a href=\"{}\">Done</a>",
+                escape_html(&here)
+            )
+        } else {
+            format!(
+                "<a href=\"{}\">Edit these results</a>",
+                escape_html(&format!("{here}&edit=1"))
+            )
+        };
+        let _ = writeln!(body, "<p class=\"s ed\">{line}</p>");
+    }
     if let Some(spelling) = &results.spelling {
         render_spelling(&mut body, spelling, &settings.options);
     }
@@ -2651,7 +2734,18 @@ fn render_results_with(
     };
     let news = recent
         .filter(|_| settings.options.recent != RecentNews::Off)
-        .map(|recent| render_recent(recent, news_view, now_unix(), &news_link));
+        .map(|recent| {
+            let mut html = render_recent(recent, news_view, now_unix(), &news_link);
+            if let Some(edit) = settings.history.as_ref().and_then(|h| h.edit.as_ref()) {
+                let context = learn::news_context(recent.site.is_some());
+                let now = settings.history.as_ref().and_then(|h| h.news_verdict);
+                let buttons = history::box_buttons(edit, Block::News, context, now);
+                if let Some(end) = html.rfind("</li>") {
+                    html.insert_str(end, &buttons);
+                }
+            }
+            html
+        });
     let now = now_unix();
     let from_plugins: String = extras
         .map(|e| e.plugins.iter().map(|p| render_plugin(p, now)).collect())
@@ -5484,6 +5578,125 @@ mod tests {
             assert!(!body.contains("class=\"plf\""), "{body}");
             assert!(!body.contains("b=places"), "{body}");
         }
+    }
+
+    #[tokio::test]
+    async fn edit_mode_moves_and_hides_results_and_folds_boxes() {
+        let dir = tempfile::tempdir().unwrap();
+        let node = Arc::new(HistoryNode(dir.path().join("history")));
+        let app = || node_router(Arc::new(BankPlaces), node.clone());
+        let post = |cookie: String, form: String, site: Option<&'static str>| {
+            let mut request = Request::builder()
+                .method("POST")
+                .uri("/feedback")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header("cookie", cookie);
+            if let Some(site) = site {
+                request = request.header("sec-fetch-site", site);
+            }
+            app().oneshot(request.body(Body::from(form)).unwrap())
+        };
+
+        let (_, headers, body) = send(app(), "/search?q=denver+bank&country=any").await;
+        let profile = set_cookie(&headers, "plumb_profile").unwrap();
+        let me = [("cookie", profile.as_str())];
+        assert!(
+            body.contains("&amp;edit=1\">Edit these results</a>"),
+            "{body}"
+        );
+        assert!(!body.contains("action=\"/feedback\""), "{body}");
+
+        let (_, _, body) =
+            send_with_headers(app(), "/search?q=denver+bank&country=any&edit=1", &me).await;
+        assert!(body.contains("Edit mode:"), "{body}");
+        assert!(
+            body.contains("name=\"d\" value=\"usbank-login-help.com\""),
+            "{body}"
+        );
+        assert!(body.contains("name=\"b\" value=\"places\""), "{body}");
+
+        // Not for this search: gone from it, listed last while editing.
+        let back = "%2Fsearch%3Fq%3Ddenver%2Bbank%26country%3Dany%26edit%3D1";
+        let response = post(
+            profile.clone(),
+            format!("q=denver+bank&d=usbank.com&v=hide&back={back}"),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            response.headers()[header::LOCATION],
+            "/search?q=denver+bank&country=any&edit=1"
+        );
+        let (_, _, body) = send_with_headers(app(), "/search?q=denver+bank&country=any", &me).await;
+        assert!(!body.contains("usbank.com</span>"), "{body}");
+        assert!(body.contains("usbank-login-help.com</span>"), "{body}");
+        let (_, _, other) = send_with_headers(app(), "/search?q=us+bank&country=any", &me).await;
+        assert!(other.contains("usbank.com</span>"), "{other}");
+        let (_, _, body) =
+            send_with_headers(app(), "/search?q=denver+bank&country=any&edit=1", &me).await;
+        assert!(
+            body.find("usbank-login-help.com</span>").unwrap()
+                < body.find("usbank.com</span>").unwrap(),
+            "{body}"
+        );
+        assert!(body.contains("Hidden from this search"), "{body}");
+        assert!(body.contains("value=\"none\" title=\"Undo\""), "{body}");
+
+        // Undo, then put the second one higher.
+        post(
+            profile.clone(),
+            "q=denver+bank&d=usbank.com&v=none&back=/search?q=x".into(),
+            None,
+        )
+        .await
+        .unwrap();
+        post(
+            profile.clone(),
+            "q=denver+bank&d=usbank-login-help.com&v=up&back=https://evil.example/".into(),
+            None,
+        )
+        .await
+        .unwrap();
+        let (_, _, body) = send_with_headers(app(), "/search?q=denver+bank&country=any", &me).await;
+        assert!(
+            body.find("usbank-login-help.com</span>").unwrap()
+                < body.find("usbank.com</span>").unwrap(),
+            "{body}"
+        );
+        assert!(body.contains("You put this higher"), "{body}");
+
+        // Fold the places for every search like this.
+        post(
+            profile.clone(),
+            "q=denver+bank&b=places&c=guessed&v=fold-all&back=/search?q=x".into(),
+            None,
+        )
+        .await
+        .unwrap();
+        let (_, _, body) =
+            send_with_headers(app(), "/search?q=boulder+bank&country=any", &me).await;
+        assert!(body.contains("folded, as you asked"), "{body}");
+        let (_, _, page) = send_with_headers(app(), "/history", &me).await;
+        assert!(
+            page.contains("<strong>Places and map</strong> folded for all searches"),
+            "{page}"
+        );
+        assert!(
+            page.contains("usbank-login-help.com</strong> higher"),
+            "{page}"
+        );
+
+        // Other sites' pages cannot press the buttons.
+        let response = post(
+            profile.clone(),
+            "q=denver+bank&d=usbank-login-help.com&v=hide".into(),
+            Some("cross-site"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]
