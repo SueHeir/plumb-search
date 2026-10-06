@@ -97,7 +97,7 @@ Each podcast keeps its title, "Podcast by AUTHOR · CATEGORY" as its description
 
 ## Papers
 
-The `papers` set lists the most cited scholarly works (2,000,000 by default, each cited at least 200 times), from OpenAlex's API (CC0): "attention is all you need" finds the paper. Each keeps only its title, "Paper by AUTHOR et al., YEAR, VENUE" as its description, its DOI (or OpenAlex id) and its citations. Like questions, papers are also found by most of their title's words.
+The `papers` set lists the most cited scholarly works (2,000,000 by default, each cited at least 200 times), from OpenAlex's API (CC0): "attention is all you need" finds the paper. Each keeps only its title, "Paper by AUTHOR et al., YEAR, VENUE" as its description, its DOI (or OpenAlex id) and its citations. Like questions, papers are also found by most of their title's words. A paper cited more than 40,000 times for each year since it came out is left out as a data error. A paper's whole title of four words or more ("basic local alignment search tool"), or its title followed by its first author's name, its year, its venue or "paper" ("random forests breiman", "deep learning lecun nature"), asks for the paper, which then comes first like an asked-for book.
 
 ```sh
 plumb fetch-pages --set papers --work /big/disk/dumps --data /path/to/node-data --min-citations 200
