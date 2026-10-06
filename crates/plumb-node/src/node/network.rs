@@ -63,7 +63,7 @@ use tracing::{debug, info, warn};
 
 use super::Inner;
 use crate::icons::{self, IconStore};
-use crate::records::{load_records, Change, RecordStore};
+use crate::records::{Change, RecordStore};
 
 /// Records from other nodes that make a node rebuild its index before the
 /// next refresh.
@@ -445,13 +445,18 @@ pub(super) async fn publish_new_records(inner: &Arc<Inner>, path: &Path) -> Resu
             } else {
                 0
             };
+            // Read a record at a time, the journal folded in first.
             let _records = inner.hold_records();
-            let set = load_records(&path)?;
-            let mut crawled: Vec<SiteRecord> = set
-                .iter()
-                .filter(|r| r.crawled_at.is_some_and(|at| at > after && at >= oldest))
-                .map(crawl_facts)
-                .collect();
+            crate::outline::fold_journal(&path)?;
+            let mut crawled: Vec<SiteRecord> = Vec::new();
+            crate::outline::for_each_record(&path, |record| {
+                if record
+                    .crawled_at
+                    .is_some_and(|at| at > after && at >= oldest)
+                {
+                    crawled.push(crawl_facts(&record));
+                }
+            })?;
             crawled.sort_by_key(|r| r.crawled_at);
             anyhow::Ok(crawled)
         })
@@ -580,9 +585,10 @@ pub(super) fn absorb_inbox(inner: &Inner) -> Result<u64> {
     n += changes.len() as u64;
     drop(changes);
     if store.wants_compaction() {
+        // Folded a record at a time; a file only a whole set can fold
+        // (a site on two lines) keeps its journal for the next build.
         let _records = inner.hold_records();
-        let set = load_records(&paths.records)?;
-        store.compact(&set)?;
+        store.fold()?;
     }
     fs::remove_file(&paths.absorbing)
         .with_context(|| format!("deleting {}", paths.absorbing.display()))?;

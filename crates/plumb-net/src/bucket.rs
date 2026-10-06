@@ -103,11 +103,6 @@ impl BucketTable {
     /// be the records themselves or references to them.
     pub fn build<R: Borrow<SiteRecord>>(dir: &Path, records: &[R]) -> Result<BucketTable> {
         let records: Vec<&SiteRecord> = records.iter().map(Borrow::borrow).collect();
-        ensure!(!dir.exists(), "{} already exists", dir.display());
-        let staging = dir.with_extension("staging");
-        let _ = fs::remove_dir_all(&staging);
-        fs::create_dir_all(&staging).with_context(|| format!("creating {}", staging.display()))?;
-
         let mut order: Vec<usize> = (0..records.len()).collect();
         order.sort_by(|&a, &b| {
             records[b]
@@ -115,58 +110,11 @@ impl BucketTable {
                 .total_cmp(&records[a].link_score())
                 .then_with(|| records[a].domain.cmp(&records[b].domain))
         });
-
-        let mut data = BufWriter::new(create(&staging.join("records.dat"))?);
-        let mut offsets = BufWriter::new(create(&staging.join("records.idx"))?);
-        let mut per_key: HashMap<u64, u8> = HashMap::new();
-        let mut buckets: Vec<Vec<u32>> = vec![Vec::new(); BUCKETS as usize];
-        let mut at: u64 = 0;
-        for (n, &i) in order.iter().enumerate() {
-            let record = &records[i];
-            let json = serde_json::to_vec(record).context("encoding a record")?;
-            offsets.write_all(&at.to_le_bytes())?;
-            data.write_all(&json)?;
-            at += json.len() as u64;
-            let mut seen_buckets = Vec::new();
-            for key in record_keys(record) {
-                let count = per_key
-                    .entry(Hash::of(&[key.as_bytes()]).prefix_u64())
-                    .or_insert(0);
-                if usize::from(*count) >= KEY_CAP {
-                    continue;
-                }
-                *count += 1;
-                let bucket = bucket_of(&key);
-                if !seen_buckets.contains(&bucket) {
-                    seen_buckets.push(bucket);
-                    buckets[bucket as usize].push(n as u32);
-                }
-            }
+        let mut writer = BucketWriter::new(dir)?;
+        for i in order {
+            writer.add(records[i])?;
         }
-        offsets.write_all(&at.to_le_bytes())?;
-        flush(data)?;
-        flush(offsets)?;
-        drop(per_key);
-
-        let mut index = BufWriter::new(create(&staging.join("buckets.idx"))?);
-        let mut entries = BufWriter::new(create(&staging.join("buckets.dat"))?);
-        let mut start: u64 = 0;
-        for bucket in &buckets {
-            index.write_all(&start.to_le_bytes())?;
-            for n in bucket {
-                entries.write_all(&n.to_le_bytes())?;
-            }
-            start += bucket.len() as u64;
-        }
-        index.write_all(&start.to_le_bytes())?;
-        flush(index)?;
-        flush(entries)?;
-        fs::rename(&staging, dir)
-            .with_context(|| format!("moving the buckets to {}", dir.display()))?;
-        Ok(BucketTable {
-            dir: dir.to_path_buf(),
-            records: records.len(),
-        })
+        writer.finish()
     }
 
     /// Opens a table [`BucketTable::build`] wrote.
@@ -289,6 +237,108 @@ fn read_u64s(file: &mut File, first: u64, n: usize) -> Result<Vec<u64>> {
         .iter()
         .map(|c| u64::from_le_bytes(*c))
         .collect())
+}
+
+/// A [`BucketTable`] written a record at a time, for a caller that cannot
+/// hold every record at once. The records must come best
+/// [`SiteRecord::link_score`] first (ties by domain), as
+/// [`BucketTable::build`] orders them: each key keeps the first
+/// [`KEY_CAP`] that have it.
+pub struct BucketWriter {
+    dir: PathBuf,
+    staging: PathBuf,
+    data: BufWriter<fs::File>,
+    offsets: BufWriter<fs::File>,
+    /// How many records each key has, by a hash of the key, up to KEY_CAP.
+    per_key: HashMap<u64, u8>,
+    buckets: Vec<Vec<u32>>,
+    /// Bytes of records written.
+    at: u64,
+    records: usize,
+}
+
+impl BucketWriter {
+    /// Starts a table in `dir`, which must not exist yet. It is written in
+    /// a staging directory next to it and moved there by
+    /// [`BucketWriter::finish`].
+    pub fn new(dir: &Path) -> Result<BucketWriter> {
+        ensure!(!dir.exists(), "{} already exists", dir.display());
+        let staging = dir.with_extension("staging");
+        let _ = fs::remove_dir_all(&staging);
+        fs::create_dir_all(&staging).with_context(|| format!("creating {}", staging.display()))?;
+        Ok(BucketWriter {
+            dir: dir.to_path_buf(),
+            data: BufWriter::new(create(&staging.join("records.dat"))?),
+            offsets: BufWriter::new(create(&staging.join("records.idx"))?),
+            staging,
+            per_key: HashMap::new(),
+            buckets: vec![Vec::new(); BUCKETS as usize],
+            at: 0,
+            records: 0,
+        })
+    }
+
+    /// Adds the next record.
+    pub fn add(&mut self, record: &SiteRecord) -> Result<()> {
+        let n = u32::try_from(self.records).context("too many records for a bucket table")?;
+        let json = serde_json::to_vec(record).context("encoding a record")?;
+        self.offsets.write_all(&self.at.to_le_bytes())?;
+        self.data.write_all(&json)?;
+        self.at += json.len() as u64;
+        self.records += 1;
+        let mut seen_buckets = Vec::new();
+        for key in record_keys(record) {
+            let count = self
+                .per_key
+                .entry(Hash::of(&[key.as_bytes()]).prefix_u64())
+                .or_insert(0);
+            if usize::from(*count) >= KEY_CAP {
+                continue;
+            }
+            *count += 1;
+            let bucket = bucket_of(&key);
+            if !seen_buckets.contains(&bucket) {
+                seen_buckets.push(bucket);
+                self.buckets[bucket as usize].push(n);
+            }
+        }
+        Ok(())
+    }
+
+    /// Writes the bucket lists and moves the table into place.
+    pub fn finish(self) -> Result<BucketTable> {
+        let BucketWriter {
+            dir,
+            staging,
+            data,
+            mut offsets,
+            per_key,
+            buckets,
+            at,
+            records,
+        } = self;
+        offsets.write_all(&at.to_le_bytes())?;
+        flush(data)?;
+        flush(offsets)?;
+        drop(per_key);
+
+        let mut index = BufWriter::new(create(&staging.join("buckets.idx"))?);
+        let mut entries = BufWriter::new(create(&staging.join("buckets.dat"))?);
+        let mut start: u64 = 0;
+        for bucket in &buckets {
+            index.write_all(&start.to_le_bytes())?;
+            for n in bucket {
+                entries.write_all(&n.to_le_bytes())?;
+            }
+            start += bucket.len() as u64;
+        }
+        index.write_all(&start.to_le_bytes())?;
+        flush(index)?;
+        flush(entries)?;
+        fs::rename(&staging, &dir)
+            .with_context(|| format!("moving the buckets to {}", dir.display()))?;
+        Ok(BucketTable { dir, records })
+    }
 }
 
 #[cfg(test)]

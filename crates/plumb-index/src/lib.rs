@@ -462,10 +462,114 @@ pub fn build_index<R: Borrow<SiteRecord>>(dir: &Path, records: &[R]) -> Result<I
     let (sites, redirect_names) = fold_redirects(sites);
     stats.redirected = stats.docs - sites.len() as u64;
     stats.docs = sites.len() as u64;
-    let staging = Staging::new(dir)?;
-    write_index(staging.path(), &sites, &redirect_names)?;
-    staging.install()?;
+    let mut build = IndexBuild::new(dir)?;
+    for (i, site) in sites.iter().enumerate() {
+        let names = redirect_names.get(&i).map_or(&[][..], Vec::as_slice);
+        build.add(site, names)?;
+    }
+    build.finish()?;
     Ok(stats)
+}
+
+/// An index built one site at a time, for a caller that cannot hold every
+/// record at once: a node reads its records file a record at a time
+/// instead. [`build_index`] does the rest for records in memory: merging
+/// records of one domain and folding redirects ([`redirect_targets`]), which
+/// a caller of this does itself.
+///
+/// The index is built in a hidden directory next to `dir`, and replaces
+/// what is there only on [`IndexBuild::finish`], as [`build_index`] says.
+pub struct IndexBuild {
+    staging: Staging,
+    index: Index,
+    writer: IndexWriter,
+    fields: Fields,
+}
+
+impl IndexBuild {
+    /// Starts a build that replaces the index in `dir` when finished.
+    pub fn new(dir: &Path) -> Result<IndexBuild> {
+        let staging = Staging::new(dir)?;
+        let schema = schema::schema();
+        let fields = Fields::new(&schema)?;
+        let index = Index::create_in_dir(staging.path(), schema)
+            .with_context(|| format!("creating index in {}", staging.path().display()))?;
+        analysis::register(index.tokenizers());
+        let writer: IndexWriter = index
+            .writer(WRITER_HEAP_BYTES)
+            .context("opening index writer")?;
+        // Merge once at the end instead of while indexing.
+        writer.set_merge_policy(Box::new(NoMergePolicy));
+        Ok(IndexBuild {
+            staging,
+            index,
+            writer,
+            fields,
+        })
+    }
+
+    /// Adds `site`, whose domain is canonical and not added before, with
+    /// the names other sites give it by redirecting to it
+    /// ([`redirect_name`]).
+    pub fn add(&mut self, site: &SiteRecord, redirect_names: &[String]) -> Result<()> {
+        self.writer
+            .add_document(schema::document(&self.fields, site, redirect_names))?;
+        Ok(())
+    }
+
+    /// Writes the index: one commit, then a merge into a single segment,
+    /// and puts it in place.
+    pub fn finish(mut self) -> Result<()> {
+        self.writer.commit().context("committing index")?;
+        fail_point("after_commit")?;
+        // The index is read-only from here on, and one segment searches fastest.
+        let segments = self.index.searchable_segment_ids()?;
+        if segments.len() > 1 {
+            self.writer
+                .merge(&segments)
+                .wait()
+                .context("merging index segments")?;
+        }
+        self.writer
+            .wait_merging_threads()
+            .context("finishing index merges")?;
+        self.staging.install()
+    }
+}
+
+/// The name a site whose homepage redirects to another site gives that
+/// site: its domain label, as "pnc bank" for `pncbank.com`.
+pub fn redirect_name(domain: &str) -> String {
+    schema::label_text(domain)
+}
+
+/// For each of `sites`, by position, the site it is folded into: the one
+/// its homepage redirects to, when that is another of `sites` and does not
+/// redirect itself (one step only). `domain` gives a site's canonical
+/// domain and `redirect_to` the canonical domain its homepage redirects to
+/// (an empty one when it redirects to no valid domain: no target, but it
+/// still redirects).
+/// A site folded into another is left out of the index, and its
+/// [`redirect_name`] names the other.
+pub fn redirect_targets<T>(
+    sites: &[T],
+    domain: impl Fn(&T) -> &str,
+    redirect_to: impl Fn(&T) -> Option<String>,
+) -> Vec<Option<usize>> {
+    let positions: HashMap<&str, usize> = sites
+        .iter()
+        .enumerate()
+        .map(|(i, site)| (domain(site), i))
+        .collect();
+    sites
+        .iter()
+        .map(|site| {
+            let to = redirect_to(site).filter(|to| !to.is_empty())?;
+            let &target = positions.get(to.as_str())?;
+            (redirect_to(&sites[target]).is_none() && domain(&sites[target]) != domain(site))
+                .then_some(target)
+        })
+        .collect()
 }
 
 /// A site to index: one of the records given, or a copy where records had
@@ -546,18 +650,14 @@ fn merge_by_domain<R: Borrow<SiteRecord>>(records: &[R]) -> (Vec<Site<'_>>, Inde
 /// name. Their domain labels become names of the site they redirect to,
 /// returned by its position in the sites kept, so "pnc bank" names pnc.com.
 fn fold_redirects(sites: Vec<Site<'_>>) -> (Vec<Site<'_>>, HashMap<usize, Vec<String>>) {
-    let positions: HashMap<&str, usize> = sites
-        .iter()
-        .enumerate()
-        .map(|(i, site)| (site.domain.as_str(), i))
-        .collect();
-    // Only one step: a site that itself redirects is not a target.
-    let target_of = |site: &SiteRecord| {
-        let to = canonical_domain(&site.redirect.as_ref()?.to)?;
-        let &target = positions.get(to.as_str())?;
-        (sites[target].redirect.is_none() && sites[target].domain != site.domain).then_some(target)
-    };
-    let targets: Vec<Option<usize>> = sites.iter().map(|site| target_of(site)).collect();
+    let targets = redirect_targets(
+        &sites,
+        |site| site.domain.as_str(),
+        |site| {
+            let to = &site.redirect.as_ref()?.to;
+            Some(canonical_domain(to).unwrap_or_default())
+        },
+    );
     let mut kept_at = vec![None; sites.len()];
     let mut kept = 0;
     for (i, target) in targets.iter().enumerate() {
@@ -572,10 +672,9 @@ fn fold_redirects(sites: Vec<Site<'_>>) -> (Vec<Site<'_>>, HashMap<usize, Vec<St
             names
                 .entry(target)
                 .or_default()
-                .push(schema::label_text(&sites[i].domain));
+                .push(redirect_name(&sites[i].domain));
         }
     }
-    drop(positions);
     let sites = sites
         .into_iter()
         .zip(&targets)
@@ -583,47 +682,6 @@ fn fold_redirects(sites: Vec<Site<'_>>) -> (Vec<Site<'_>>, HashMap<usize, Vec<St
         .map(|(site, _)| site)
         .collect();
     (sites, names)
-}
-
-/// Writes a complete index of `sites`, whose domains are canonical and
-/// unique, into the empty directory `dir`: one commit, then a merge into a
-/// single segment. `redirect_names` holds the names other sites give each
-/// site by redirecting to it, by position.
-fn write_index(
-    dir: &Path,
-    sites: &[Site],
-    redirect_names: &HashMap<usize, Vec<String>>,
-) -> Result<()> {
-    let schema = schema::schema();
-    let fields = Fields::new(&schema)?;
-    let index = Index::create_in_dir(dir, schema)
-        .with_context(|| format!("creating index in {}", dir.display()))?;
-    analysis::register(index.tokenizers());
-
-    let mut writer: IndexWriter = index
-        .writer(WRITER_HEAP_BYTES)
-        .context("opening index writer")?;
-    // Merge once at the end instead of while indexing.
-    writer.set_merge_policy(Box::new(NoMergePolicy));
-    for (i, site) in sites.iter().enumerate() {
-        let names = redirect_names.get(&i).map_or(&[][..], Vec::as_slice);
-        writer.add_document(schema::document(&fields, site, names))?;
-    }
-    writer.commit().context("committing index")?;
-    fail_point("after_commit")?;
-
-    // The index is read-only from here on, and one segment searches fastest.
-    let segments = index.searchable_segment_ids()?;
-    if segments.len() > 1 {
-        writer
-            .merge(&segments)
-            .wait()
-            .context("merging index segments")?;
-    }
-    writer
-        .wait_merging_threads()
-        .context("finishing index merges")?;
-    Ok(())
 }
 
 #[cfg(test)]

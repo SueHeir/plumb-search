@@ -12,9 +12,9 @@ use plumb_core::now_unix;
 
 use super::{Inner, LastError, MeaningWork};
 use crate::meaning::{
-    embed_sites, ensure_model, load_embedder, load_vectors_for, sites_to_embed, MeaningIndex,
+    embed_sites, ensure_model, load_embedder, load_vectors_for, sites_to_embed_from_file,
+    MeaningIndex,
 };
-use crate::records::load_records;
 
 /// Directory of the model's files in the data directory.
 pub(super) const MODEL_DIR: &str = "model";
@@ -26,6 +26,10 @@ const RETRY_WAIT: Duration = Duration::from_secs(30 * 60);
 const LOOK_EVERY: Duration = Duration::from_secs(5);
 /// How often a wait looks for shutdown.
 const TICK: Duration = Duration::from_secs(1);
+/// Sites embedded per turn, best first: each one's text is held until it
+/// is embedded, and a node with millions of sites to embed (a new model)
+/// would otherwise hold all their text at once.
+const EMBED_AT_ONCE: usize = 50_000;
 
 /// Loads (downloading when missing) the model and the saved vectors, then
 /// brings the vectors up to date with the records each time a new index is
@@ -105,17 +109,15 @@ fn work(inner: &Arc<Inner>) -> Result<()> {
             nap(inner, LOOK_EVERY);
             continue;
         }
-        let todo = {
-            // The whole records file is in memory only until the sites to
-            // embed are picked out, and never next to the copy a crawl or
-            // an index build holds.
+        let (todo, more) = {
+            // Read a record at a time, while no crawl or index build changes
+            // the file.
             let _records = inner.hold_records();
             if inner.stopping() {
                 break;
             }
-            let records = load_records(&inner.paths.records)
-                .with_context(|| format!("loading {}", inner.paths.records.display()))?;
-            sites_to_embed(meaning.vectors(), records)
+            sites_to_embed_from_file(meaning.vectors(), &inner.paths.records, EMBED_AT_ONCE)
+                .with_context(|| format!("reading {}", inner.paths.records.display()))?
         };
         let started = Instant::now();
         let embedded = embed_sites(
@@ -149,7 +151,10 @@ fn work(inner: &Arc<Inner>) -> Result<()> {
                 crate::web::group_thousands(embedded.done as u64)
             ));
         }
-        embedded_for = Some(index);
+        // With more sites waiting, the next turn picks the next best.
+        if !more || embedded.done == 0 {
+            embedded_for = Some(index);
+        }
     }
     Ok(())
 }

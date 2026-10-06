@@ -15,6 +15,11 @@
 - Dead sites: `plumb run --drop-dead-sites` takes sites out of the index that no crawl has reached for 60 days after 6 tries in a row that got no answer. Never the best 10,000 sites, official websites or ones you chose. A dead site keeps a small record and comes back when it answers again. Off by default; without it the node only counts them in its log, and `plumb dead-sites --data DIR` counts them without changing anything.
 - Reading sites anew: when crawlers learn to read more from a homepage, the crawl version goes up and nodes crawl the sites read by an older crawler again, best-known first.
 
+### Nodes
+
+- Much less memory: crawl rounds keep about 150 bytes of each site instead of its whole record, and index builds, search by meaning and the network's records read the records file a record at a time. With two million sites a crawl round holds about 300 MB of site data instead of 3 GB or more, and an index build about 0.6 GB instead of about 5 GB, so a 4 GB server runs a node. `plumb index` reads a record at a time too when the records file has no journal.
+- The records' journal is folded into the file at every index build, and once it reaches 128 MB, so it no longer grows for days on a big node.
+
 ## 0.1.0
 
 The first release. Downloads are on [GitHub Releases](https://github.com/SueHeir/plumb-search/releases/latest), and the Docker image is `ghcr.io/sueheir/plumb-search:0.1.0` (also `:0.1` and `:latest`).

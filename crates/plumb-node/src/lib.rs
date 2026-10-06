@@ -52,6 +52,7 @@ mod icons;
 mod ingest;
 mod limits;
 pub mod news;
+mod outline;
 mod records;
 mod run;
 mod search;
@@ -255,7 +256,7 @@ pub(crate) fn release_freed_memory() {
 }
 
 /// `dir/records.jsonl` -> `dir/.records.jsonl.<pid>.tmp`.
-fn temp_path_for(path: &Path) -> PathBuf {
+pub(crate) fn temp_path_for(path: &Path) -> PathBuf {
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
