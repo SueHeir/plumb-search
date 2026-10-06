@@ -49,6 +49,7 @@ impl Question {
             profiles: Vec::new(),
             website: None,
             package: None,
+            facts: Vec::new(),
         }
     }
 }

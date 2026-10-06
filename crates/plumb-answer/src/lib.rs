@@ -42,6 +42,10 @@ pub enum Kind {
     Time,
     /// Where to get help now ("depression help").
     Help,
+    /// A fact about something with a Wikipedia article, from Wikidata
+    /// ("capital of australia"); worked out by the node, which has the
+    /// facts, not here.
+    Fact,
 }
 
 /// An answer to the query, as shown: the question as understood, the
