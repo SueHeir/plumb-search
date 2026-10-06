@@ -6,6 +6,8 @@ The map is drawn by Plumb from the places' coordinates as numbered pins with a s
 
 Places are © [OpenStreetMap contributors](https://www.openstreetmap.org/copyright), under the Open Database License; every list of places says so.
 
+When a query only might say where ("denver brewery", with no "in" or "near") and is also the name of a site, such as "us bank", the site wins and no places are listed. On a node that keeps search history, places you seldom open for searches like the one you make are folded to one line; opening one brings them back (see the README's search history part).
+
 ## How a query is read
 
 - `WHAT in WHERE`, `WHAT near WHERE`, `WHAT around WHERE`, `WHAT close to WHERE`.

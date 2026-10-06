@@ -32,6 +32,7 @@ pub mod country;
 pub mod eval;
 pub mod findings;
 pub mod history;
+pub mod learn;
 pub mod mcp;
 pub mod meaning;
 pub mod node;

@@ -20,6 +20,8 @@ use anyhow::{Context, Result};
 use plumb_core::collapse_whitespace;
 use serde::{Deserialize, Serialize};
 
+use crate::learn::Learned;
+
 /// Most past searches kept per profile.
 pub const MAX_SEARCHES: usize = 200;
 /// Most opened sites kept per profile, one per search and site.
@@ -32,7 +34,10 @@ const PROFILE_ID_CHARS: usize = 32;
 /// Score added to a site opened before for the same search. Most of a
 /// result's score, so the site you went to last time comes back first.
 pub const OPENED_FOR_QUERY_BONUS: f32 = 0.3;
-/// Score added to a site opened before for another search.
+/// Score added to a site opened before for another search. A search that
+/// shares words with it gets up to [`OPENED_FOR_QUERY_BONUS`] times the
+/// share of words in common: "us bank login" lifts the site opened for
+/// "us bank" more than "pizza" does.
 pub const OPENED_BONUS: f32 = 0.05;
 
 /// One write at a time, for every profile: history files are small.
@@ -63,6 +68,8 @@ pub struct Opened {
 pub struct History {
     pub searches: Vec<PastSearch>,
     pub opened: Vec<Opened>,
+    /// What the browser's clicks taught the node.
+    pub learned: Learned,
 }
 
 impl History {
@@ -109,15 +116,25 @@ impl History {
     }
 
     /// The score a site gets for having been opened before: more for the
-    /// same search than for another one.
+    /// same search than for another one, and more for a search sharing
+    /// words with this one.
     pub fn bonus(&self, query: &str, domain: &str) -> f32 {
         let wanted = key(query);
+        let words = word_set(query);
         let mut bonus = 0.0f32;
         for opened in self.opened.iter().filter(|o| o.domain == domain) {
             let this = if key(&opened.query) == wanted {
                 OPENED_FOR_QUERY_BONUS
             } else {
-                OPENED_BONUS
+                let theirs = word_set(&opened.query);
+                let shared = words.intersection(&theirs).count();
+                let all = words.union(&theirs).count();
+                let alike = if all == 0 {
+                    0.0
+                } else {
+                    shared as f32 / all as f32
+                };
+                OPENED_BONUS.max(OPENED_FOR_QUERY_BONUS * alike)
             };
             bonus = bonus.max(this);
         }
@@ -135,6 +152,16 @@ fn clean(query: &str) -> Option<String> {
 /// What makes two searches the same: case and spacing do not count.
 fn key(query: &str) -> String {
     collapse_whitespace(query).trim().to_lowercase()
+}
+
+/// The distinct words of a query, as [`crate::learn::query_key`] spells
+/// them.
+fn word_set(query: &str) -> std::collections::HashSet<String> {
+    crate::learn::query_key(query)
+        .split(' ')
+        .filter(|w| !w.is_empty())
+        .map(str::to_owned)
+        .collect()
 }
 
 /// Whether `id` looks like a profile id this module made.
@@ -272,6 +299,13 @@ mod tests {
         assert_eq!(history.bonus("bank", "wellsfargo.com"), 0.0);
         assert!(history.was_opened("chase.com"));
         assert!(!history.was_opened("wellsfargo.com"));
+        // A search sharing words lifts it more than another search does.
+        history.add_opened("us bank", "usbank.com", 4);
+        let alike = history.bonus("us bank login", "usbank.com");
+        assert!(
+            alike > OPENED_BONUS && alike < OPENED_FOR_QUERY_BONUS,
+            "{alike}"
+        );
     }
 
     #[test]

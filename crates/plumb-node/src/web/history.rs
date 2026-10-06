@@ -30,6 +30,7 @@ use tracing::warn;
 use super::{escape_html, html_response, page, search_link, time_ago, AppState};
 use crate::about::{About, AboutStore, Reason, MAX_INTERESTS, MAX_SITES, MAX_TOWN_CHARS};
 use crate::history::{new_profile, valid_profile, History, HistoryStore};
+use crate::learn::{describe_key, Block, Choice, Learned};
 
 /// The cookie holding a browser's profile id.
 const PROFILE_COOKIE: &str = "plumb_profile";
@@ -44,6 +45,7 @@ pub(super) fn routes(router: Router<AppState>) -> Router<AppState> {
     router
         .route("/history", get(history_page))
         .route("/history/clear", post(clear))
+        .route("/history/forget-clicks", post(forget_clicks))
         .route("/about", get(about_page).post(save_about))
 }
 
@@ -54,6 +56,9 @@ pub(super) struct Prefs {
     pub show: bool,
     /// Rank sites opened before higher.
     pub rank: bool,
+    /// Learn from clicks which boxes (places and map, headlines) to fold
+    /// or unfold, and which sites are passed over (see [`crate::learn`]).
+    pub learn: bool,
 }
 
 impl Default for Prefs {
@@ -61,6 +66,7 @@ impl Default for Prefs {
         Prefs {
             show: true,
             rank: true,
+            learn: true,
         }
     }
 }
@@ -68,34 +74,38 @@ impl Default for Prefs {
 impl Prefs {
     /// Whether anything is noted at all.
     pub fn on(self) -> bool {
-        self.show || self.rank
+        self.show || self.rank || self.learn
     }
 
-    fn cookie_value(self) -> &'static str {
-        match (self.show, self.rank) {
-            (true, true) => "s1r1",
-            (true, false) => "s1r0",
-            (false, true) => "s0r1",
-            (false, false) => "s0r0",
-        }
+    /// `s1r1l1`; cookies set before learning was a choice have no `l`.
+    fn cookie_value(self) -> String {
+        format!(
+            "s{}r{}l{}",
+            u8::from(self.show),
+            u8::from(self.rank),
+            u8::from(self.learn)
+        )
     }
 
     fn from_cookie(value: &str) -> Prefs {
-        match value {
-            "s1r0" => Prefs {
-                show: true,
-                rank: false,
-            },
-            "s0r1" => Prefs {
-                show: false,
-                rank: true,
-            },
-            "s0r0" => Prefs {
-                show: false,
-                rank: false,
-            },
-            _ => Prefs::default(),
-        }
+        let bit = |c: u8| match c {
+            b'1' => Some(true),
+            b'0' => Some(false),
+            _ => None,
+        };
+        let parsed = match value.as_bytes() {
+            [b's', s, b'r', r] => bit(*s).zip(bit(*r)).map(|(show, rank)| Prefs {
+                show,
+                rank,
+                learn: true,
+            }),
+            [b's', s, b'r', r, b'l', l] => bit(*s)
+                .zip(bit(*r))
+                .zip(bit(*l))
+                .map(|((show, rank), learn)| Prefs { show, rank, learn }),
+            _ => None,
+        };
+        parsed.unwrap_or_default()
     }
 }
 
@@ -126,7 +136,7 @@ impl Visitor {
         let mut set_cookies = Vec::new();
         let prefs = match changed {
             Some(prefs) => {
-                set_cookies.push(cookie(PREFS_COOKIE, prefs.cookie_value()));
+                set_cookies.push(cookie(PREFS_COOKIE, &prefs.cookie_value()));
                 prefs
             }
             None => cookies
@@ -151,8 +161,8 @@ impl Visitor {
 
     /// Notes a search, giving the browser a profile if it has none yet.
     /// The search itself is kept only while past searches are shown; with
-    /// just ranking on, the browser still gets a profile for the sites it
-    /// opens.
+    /// just ranking or learning on, the browser still gets a profile for
+    /// the sites it opens.
     pub fn note_search(&mut self, query: &str) {
         if !self.prefs.on() {
             return;
@@ -170,9 +180,11 @@ impl Visitor {
         }
     }
 
-    /// Notes that `domain` was opened for `query`.
+    /// Notes that `domain` was opened for `query`, from this node's own
+    /// results.
     pub fn note_opened(&mut self, query: &str, domain: &str) {
-        if !self.prefs.on() {
+        let (keep, learn) = (self.prefs.show || self.prefs.rank, self.prefs.learn);
+        if !keep && !learn {
             return;
         }
         // A browser opens results only from a page that gave it a profile.
@@ -180,11 +192,69 @@ impl Visitor {
             return;
         };
         let now = now_unix();
+        if let Err(err) = self.store.update(&profile, |h| {
+            if keep {
+                h.add_opened(query, domain, now);
+            }
+            if learn {
+                h.learned.note_picked(query, domain, now);
+            }
+        }) {
+            warn!("could not note an opened site in the history: {err:#}");
+        }
+    }
+
+    /// Whether this browser's clicks are learned from.
+    pub fn learns(&self) -> bool {
+        self.prefs.learn
+    }
+
+    /// What to do with `block` for `query`, shown in `context`.
+    pub fn choice(&self, block: Block, query: &str, context: &str) -> Choice {
+        if !self.prefs.learn {
+            return Choice::Usual;
+        }
+        self.history.learned.choice(block, query, context)
+    }
+
+    /// Notes the boxes of a results page for `query` and this node's
+    /// results on it, best first, when learning. The browser has a profile
+    /// by then ([`Visitor::note_search`]).
+    pub fn note_page(
+        &mut self,
+        query: &str,
+        blocks: &[(Block, &str)],
+        folded: &[(Block, &str)],
+        sites: &[String],
+    ) {
+        if !self.prefs.learn {
+            return;
+        }
+        let Some(profile) = self.profile.clone() else {
+            return;
+        };
+        let now = now_unix();
+        if let Err(err) = self.store.update(&profile, |h| {
+            h.learned.note_shown(query, blocks, folded, sites, now);
+        }) {
+            warn!("could not note a results page in the history: {err:#}");
+        }
+    }
+
+    /// Notes that a link of `block` was opened for `query`.
+    pub fn note_used(&mut self, query: &str, block: Block) {
+        if !self.prefs.learn {
+            return;
+        }
+        let Some(profile) = self.profile.clone() else {
+            return;
+        };
+        let now = now_unix();
         if let Err(err) = self
             .store
-            .update(&profile, |h| h.add_opened(query, domain, now))
+            .update(&profile, |h| h.learned.note_used(query, block, now))
         {
-            warn!("could not note an opened site in the history: {err:#}");
+            warn!("could not note a box opened in the history: {err:#}");
         }
     }
 
@@ -208,16 +278,24 @@ impl Visitor {
     }
 
     /// Moves the sites opened before up `hits`, when the browser asked for
-    /// that.
+    /// that, and the sites it keeps passing over down, when it learns.
     fn rank_opened(&self, query: &str, hits: &mut [Hit]) {
-        if !self.prefs.rank || self.history.opened.is_empty() {
+        let opened = self.prefs.rank && !self.history.opened.is_empty();
+        let passed = self.prefs.learn && !self.history.learned.sites.is_empty();
+        if !opened && !passed {
             return;
         }
         let mut changed = false;
         for hit in hits.iter_mut() {
-            let bonus = self.history.bonus(query, &hit.domain);
-            if bonus > 0.0 {
-                hit.score += bonus;
+            let mut change = 0.0;
+            if opened {
+                change += self.history.bonus(query, &hit.domain);
+            }
+            if passed {
+                change += self.history.learned.passed_over(&hit.domain);
+            }
+            if change != 0.0 {
+                hit.score += change;
                 changed = true;
             }
         }
@@ -251,6 +329,8 @@ impl Visitor {
             opened,
             recent,
             about: self.about.clone(),
+            learns: self.prefs.learn,
+            open_news: false,
         }
     }
 
@@ -275,6 +355,11 @@ pub(super) struct HistoryView {
     pub recent: Vec<String>,
     /// What the browser told the node about its searcher.
     pub about: About,
+    /// Clicks are learned from: links of the boxes go through `/go`.
+    pub learns: bool,
+    /// Unfold the "Recent" headlines: they are often read for searches
+    /// like this one.
+    pub open_news: bool,
 }
 
 impl HistoryView {
@@ -287,11 +372,15 @@ impl HistoryView {
              searches</label>\
              <label><input type=\"checkbox\" name=\"hr\" value=\"1\"{}> Put sites I opened \
              before first</label>\
-             <p class=\"hint\">Kept on this node for this browser only. \
+             <label><input type=\"checkbox\" name=\"hl\" value=\"1\"{}> Learn from my clicks \
+             which boxes, like maps, I use</label>\
+             <p class=\"hint\">Kept on this node for this browser only, and never sent \
+             anywhere. \
              <a href=\"/history\">See or clear my history</a> \
              <a href=\"/about\">About you: interests and sites</a></p>",
             checked(self.prefs.show),
-            checked(self.prefs.rank)
+            checked(self.prefs.rank),
+            checked(self.prefs.learn)
         )
     }
 
@@ -335,15 +424,17 @@ impl HistoryView {
 }
 
 /// The gear's history choices in a search's parameters, if its form sent
-/// them: `hist=1`, then `hs` and `hr` for the boxes ticked.
+/// them: `hist=1`, then `hs`, `hr` and `hl` for the boxes ticked.
 pub(super) fn prefs_from_form(
     hist: &Option<String>,
     show: &Option<String>,
     rank: &Option<String>,
+    learn: &Option<String>,
 ) -> Option<Prefs> {
     super::flag(hist).then(|| Prefs {
         show: super::flag(show),
         rank: super::flag(rank),
+        learn: super::flag(learn),
     })
 }
 
@@ -425,6 +516,83 @@ async fn clear(State(state): State<AppState>, headers: HeaderMap) -> Response {
     super::redirect("/history")
 }
 
+/// What the browser's clicks taught the node, with a button to forget it.
+fn render_learned(body: &mut String, learned: &Learned) {
+    if learned.is_empty() {
+        return;
+    }
+    body.push_str(
+        "<h2 id=\"learned\">Learned from your clicks</h2>\n\
+         <p class=\"s\">Boxes you pass by for searches like these are folded to one line, \
+         and headlines you read come unfolded. Opening a folded box once brings it back.</p>\n",
+    );
+    let decided = learned.decided();
+    if decided.is_empty() {
+        body.push_str("<p class=\"s\">Nothing folded or unfolded yet.</p>\n");
+    } else {
+        body.push_str("<ul>\n");
+        for (count, choice) in decided.iter().take(MAX_LEARNED_SHOWN) {
+            let what = match choice {
+                Choice::Fold => "folded",
+                _ => "unfolded",
+            };
+            let _ = writeln!(
+                body,
+                "<li><strong>{}</strong> {what} for {} \
+                 <span class=\"m\">used {} of {} times</span></li>",
+                count.block.label(),
+                escape_html(&truncate_chars(&describe_key(&count.key), 100)),
+                count.used.min(count.shown),
+                count.shown
+            );
+        }
+        body.push_str("</ul>\n");
+    }
+    let down = learned.moved_down();
+    if !down.is_empty() {
+        body.push_str(
+            "<p class=\"s\">Moved down a little, because you passed them over for a result \
+             below them every time:</p>\n<ul>\n",
+        );
+        for site in down.iter().take(MAX_LEARNED_SHOWN) {
+            let _ = writeln!(
+                body,
+                "<li><strong>{}</strong> <span class=\"m\">passed over {} times</span></li>",
+                escape_html(&site.domain),
+                site.passed
+            );
+        }
+        body.push_str("</ul>\n");
+    }
+    body.push_str(
+        "<form method=\"post\" action=\"/history/forget-clicks\"><button type=\"submit\">\
+         Forget what was learned</button></form>\n",
+    );
+}
+
+/// Lines of each list on the history page's "Learned" part.
+const MAX_LEARNED_SHOWN: usize = 30;
+
+/// `POST /history/forget-clicks`: forgets what was learned from clicks,
+/// keeping the rest of the history.
+async fn forget_clicks(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if cross_site(&headers) {
+        return refuse_cross_site();
+    }
+    let Some(visitor) = Visitor::of(&state, &headers, None) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    if let Some(profile) = &visitor.profile {
+        if let Err(err) = visitor
+            .store
+            .update(profile, |h| h.learned = Learned::default())
+        {
+            warn!("could not forget what was learned from clicks: {err:#}");
+        }
+    }
+    super::redirect("/history")
+}
+
 fn render_history(history: &History, prefs: Prefs, now: u64) -> String {
     let options = SearchOptions::default();
     let mut body = String::from(
@@ -435,14 +603,15 @@ fn render_history(history: &History, prefs: Prefs, now: u64) -> String {
     );
     if !prefs.on() {
         body.push_str(
-            "<p class=\"s\">Nothing new is noted: both history choices are off in the search \
+            "<p class=\"s\">Nothing new is noted: all history choices are off in the search \
              page's settings.</p>\n",
         );
     }
-    if history.searches.is_empty() && history.opened.is_empty() {
+    if history.searches.is_empty() && history.opened.is_empty() && history.learned.is_empty() {
         body.push_str("<p class=\"none\">No searches yet.</p>\n</main>\n</div>");
         return page("History - Plumb Search", &body);
     }
+    render_learned(&mut body, &history.learned);
     if !history.opened.is_empty() {
         body.push_str("<h2>Sites you opened</h2>\n<ul>\n");
         for opened in &history.opened {
@@ -686,11 +855,24 @@ mod tests {
 
     #[test]
     fn prefs_round_trip_through_their_cookie() {
-        for (show, rank) in [(true, true), (true, false), (false, true), (false, false)] {
-            let prefs = Prefs { show, rank };
-            assert_eq!(Prefs::from_cookie(prefs.cookie_value()), prefs);
+        for show in [true, false] {
+            for rank in [true, false] {
+                for learn in [true, false] {
+                    let prefs = Prefs { show, rank, learn };
+                    assert_eq!(Prefs::from_cookie(&prefs.cookie_value()), prefs);
+                }
+            }
         }
         assert_eq!(Prefs::from_cookie("junk"), Prefs::default());
+        // Set before learning was a choice.
+        assert_eq!(
+            Prefs::from_cookie("s0r1"),
+            Prefs {
+                show: false,
+                rank: true,
+                learn: true
+            }
+        );
     }
 
     #[test]

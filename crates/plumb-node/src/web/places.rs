@@ -35,7 +35,9 @@ background:var(--accent);color:var(--bg);font-size:.8rem;font-weight:600}\
 .pl .pt a{color:var(--link)}.pl .pt>a{font-weight:600}\
 .pl .pa{font-size:.85rem;color:var(--muted)}\
 .pl .ic{display:inline-grid;width:1.1rem;height:1.1rem;vertical-align:-.2rem;margin-right:.25rem}\
-.pl .ic img{width:12px;height:12px}";
+.pl .ic img{width:12px;height:12px}\
+.plf{margin:1rem 0 .5rem}.plf>summary{cursor:pointer;color:var(--muted);font-size:.95rem}\
+.plf>summary .m{font-size:.85rem}.plf[open] .pl{margin-top:.5rem}";
 
 /// Whether distances are in miles for a searcher in `country`.
 fn in_miles(country: Option<&str>) -> bool {
@@ -80,12 +82,15 @@ fn capitalized(what: &str) -> String {
 
 /// The places part of a results page. `about` is whether this node has an
 /// About page where the searcher can give their town; `country` the
-/// searcher's country, for miles or km.
+/// searcher's country, for miles or km. `link` gives the address a place's
+/// link goes to, from the place's own (a `/go` link that notes the box was
+/// used, or the address itself).
 pub(super) fn render_places(
     found: &PlaceResults,
     about: bool,
     country: Option<&str>,
     icons: &Icons,
+    link: &dyn Fn(&str) -> String,
 ) -> String {
     let what = escape_html(&found.what);
     let Some(center) = &found.center else {
@@ -123,7 +128,7 @@ pub(super) fn render_places(
         out.push_str(&render_map(center, &found.hits, miles));
         out.push_str("<ol>\n");
         for (n, hit) in found.hits.iter().enumerate() {
-            render_place(&mut out, n + 1, hit, miles, icons);
+            render_place(&mut out, n + 1, hit, miles, icons, link);
         }
         out.push_str("</ol>\n");
     }
@@ -137,13 +142,49 @@ pub(super) fn render_places(
     out
 }
 
-/// One place of the list.
-fn render_place(out: &mut String, n: usize, hit: &PlaceHit, miles: bool, icons: &Icons) {
+/// The places part folded behind a one-line summary, for a searcher who
+/// seldom opens places for searches like this one (see [`crate::learn`]).
+pub(super) fn fold_places(found: &PlaceResults, html: &str) -> String {
+    let where_ = found
+        .center
+        .as_ref()
+        .map(|center| format!(" near {}", escape_html(&place_name(center))))
+        .unwrap_or_default();
+    format!(
+        "<details class=\"plf\"><summary>{}{where_} <span class=\"m\">folded: you seldom open \
+         places for searches like this</span></summary>\n{html}</details>\n",
+        escape_html(&capitalized(&found.what)),
+    )
+}
+
+/// The addresses a place's links go to: its website, if any, and its
+/// OpenStreetMap page.
+pub(super) fn place_links(hit: &PlaceHit) -> Vec<String> {
     let place = &hit.place;
-    let osm = escape_html(&place.osm_url());
+    let mut links = Vec::new();
+    if let Some(website) = place.website.as_deref().and_then(http_url) {
+        links.push(website);
+    }
+    links.push(place.osm_url());
+    links
+}
+
+/// One place of the list.
+fn render_place(
+    out: &mut String,
+    n: usize,
+    hit: &PlaceHit,
+    miles: bool,
+    icons: &Icons,
+    link: &dyn Fn(&str) -> String,
+) {
+    let place = &hit.place;
+    let osm_url = place.osm_url();
+    let osm = escape_html(&link(&osm_url));
     let website = place.website.as_deref().and_then(http_url);
     let name = escape_html(&place.name);
-    let link = website.as_deref().map_or(osm.clone(), escape_html);
+    let site_link = website.as_deref().map(|w| escape_html(&link(w)));
+    let link = site_link.clone().unwrap_or_else(|| osm.clone());
     let _ = write!(
         out,
         "<li><span class=\"no\" aria-hidden=\"true\">{n}</span><div class=\"pt\">\
@@ -172,7 +213,7 @@ fn render_place(out: &mut String, n: usize, hit: &PlaceHit, miles: bool, icons: 
                 .unwrap_or_default();
             parts.push(format!(
                 "{icon}<a href=\"{}\" rel=\"noreferrer\">{}</a>",
-                escape_html(website.as_deref().unwrap_or_default()),
+                site_link.as_deref().unwrap_or_default(),
                 escape_html(host)
             ));
         }
@@ -312,11 +353,42 @@ mod tests {
         }
     }
 
+    fn same(href: &str) -> String {
+        href.to_owned()
+    }
+
+    #[test]
+    fn place_links_can_go_through_go_and_fold() {
+        let found = found();
+        let html = render_places(&found, true, Some("US"), &Icons::default(), &|href| {
+            format!("/go?u={href}")
+        });
+        assert!(
+            html.contains("href=\"/go?u=https://www.bluepan.com/menu\""),
+            "{html}"
+        );
+        assert!(
+            html.contains("href=\"/go?u=https://www.openstreetmap.org/"),
+            "{html}"
+        );
+        assert_eq!(
+            place_links(&found.hits[0])[0],
+            "https://www.bluepan.com/menu"
+        );
+        let folded = fold_places(&found, &html);
+        assert!(
+            folded.starts_with("<details class=\"plf\"><summary>Pizza near Denver"),
+            "{folded}"
+        );
+        assert!(!folded.contains("<details class=\"plf\" open"));
+    }
+
     fn found() -> PlaceResults {
         PlaceResults {
             what: "pizza".into(),
             center: Some(place("Denver", "place=city", 39.7392, -104.9903)),
             near_me: false,
+            guessed: false,
             radius_km: 12.0,
             hits: vec![
                 PlaceHit {
@@ -338,7 +410,7 @@ mod tests {
 
     #[test]
     fn places_are_listed_with_a_map_and_credit() {
-        let html = render_places(&found(), true, Some("US"), &Icons::default());
+        let html = render_places(&found(), true, Some("US"), &Icons::default(), &same);
         assert!(html.contains("<h2>Pizza in Denver, CO</h2>"));
         assert!(html.contains("Blue &lt;Pan&gt;"));
         assert!(html.contains("1 Main &lt;St&gt;"));
@@ -353,7 +425,7 @@ mod tests {
         assert!(!map.contains("http"));
         assert_eq!(map.matches("class=\"pin\"").count(), 2);
         // Kilometres elsewhere.
-        let html = render_places(&found(), true, Some("DE"), &Icons::default());
+        let html = render_places(&found(), true, Some("DE"), &Icons::default(), &same);
         assert!(html.contains("1.4 km"));
     }
 
@@ -363,9 +435,9 @@ mod tests {
         found.center = None;
         found.near_me = true;
         found.hits.clear();
-        let html = render_places(&found, true, None, &Icons::default());
+        let html = render_places(&found, true, None, &Icons::default(), &same);
         assert!(html.contains("href=\"/about\""));
-        let html = render_places(&found, false, None, &Icons::default());
+        let html = render_places(&found, false, None, &Icons::default(), &same);
         assert!(html.contains("pizza in Denver"));
     }
 
@@ -429,7 +501,7 @@ mod tests {
     fn one_place_still_makes_a_map() {
         let mut found = found();
         found.hits.truncate(1);
-        let html = render_places(&found, false, None, &Icons::default());
+        let html = render_places(&found, false, None, &Icons::default(), &same);
         assert!(html.contains("class=\"pin\""));
         assert!(!html.contains("NaN") && !html.contains("inf"));
     }

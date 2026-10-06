@@ -80,6 +80,7 @@ use url::Url;
 
 use crate::cli::ServeArgs;
 use crate::country::{country_name, HomeCountry, COUNTRY_CHOICES};
+use crate::learn::{self, Block, Choice};
 use crate::meaning::{MeaningIndex, SharedMeaning};
 use crate::news::Recent;
 use crate::node::{NodeSettings, Phase, Status, Step};
@@ -152,6 +153,15 @@ async fn run_places(
         .await
         .ok()
         .flatten()
+}
+
+/// `found`, unless its town was guessed from a query that is the name of
+/// a site: "us bank" is the bank, not banks in Us, France.
+fn not_a_name(
+    found: Option<plumb_index::places::PlaceResults>,
+    hits: &[Hit],
+) -> Option<plumb_index::places::PlaceResults> {
+    found.filter(|found| !(found.guessed && hits.iter().any(|hit| hit.named)))
 }
 
 /// Answers queries for the web handlers. [`IndexBackend`] is the real one;
@@ -709,6 +719,8 @@ struct SearchParams {
     hs: Option<String>,
     /// `1`: rank sites opened before higher.
     hr: Option<String>,
+    /// `1`: learn from clicks which boxes to fold (see [`crate::learn`]).
+    hl: Option<String>,
     /// Safe search: `off`, `moderate` (the default) or `strict`.
     safe: Option<String>,
     /// Only sites in this language (a language code); empty for any.
@@ -752,7 +764,7 @@ impl SearchParams {
 
     /// The history choices the settings gear's form sent, if it sent them.
     fn history_prefs(&self) -> Option<history::Prefs> {
-        history::prefs_from_form(&self.hist, &self.hs, &self.hr)
+        history::prefs_from_form(&self.hist, &self.hs, &self.hr, &self.hl)
     }
 
     /// The searcher's choices: the `country` parameter when it is valid,
@@ -961,6 +973,7 @@ async fn search_page(
     .await;
     let response = match local {
         Ok(mut results) => {
+            let found_places = not_a_name(found_places, &results.hits);
             if let Some(visitor) = &mut visitor {
                 visitor.rank(&query, &mut results.hits);
                 visitor.note_search(&query);
@@ -985,6 +998,28 @@ async fn search_page(
             }
             let icons = state.icons(domains).await;
             let recent = state.recent(&query, &results);
+            // What the searcher's clicks taught this node: places they
+            // seldom open for searches like this are folded, headlines they
+            // read come unfolded.
+            let places_context = found_places
+                .as_ref()
+                .filter(|found| found.center.is_some() && !found.hits.is_empty())
+                .map(|found| learn::places_context(found.guessed));
+            let news_context = recent
+                .as_ref()
+                .filter(|_| settings.options.recent != RecentNews::Off)
+                .map(|recent| learn::news_context(recent.site.is_some()));
+            let fold_places = match (&visitor, places_context) {
+                (Some(visitor), Some(context)) => {
+                    visitor.choice(Block::Places, &query, context) == Choice::Fold
+                }
+                _ => false,
+            };
+            if let (Some(visitor), Some(context), Some(view)) =
+                (&visitor, news_context, settings.history.as_mut())
+            {
+                view.open_news = visitor.choice(Block::News, &query, context) == Choice::Open;
+            }
             let mut page = render_results_with(
                 &query,
                 &results,
@@ -999,18 +1034,46 @@ async fn search_page(
             );
             if let Some(found) = &found_places {
                 // Above the sites.
-                let html = places::render_places(
+                let learns = visitor.as_ref().is_some_and(history::Visitor::learns);
+                let link = |href: &str| {
+                    if learns {
+                        block_go_link(&query, &settings.options, Block::Places, href)
+                    } else {
+                        href.to_owned()
+                    }
+                };
+                let mut html = places::render_places(
                     found,
                     visitor.is_some(),
                     settings.options.country.as_deref(),
                     &icons,
+                    &link,
                 );
+                if fold_places {
+                    html = places::fold_places(found, &html);
+                }
                 if let Some(at) = page.find("<main>\n") {
                     page.insert_str(
                         at + "<main>\n".len(),
                         &format!("<style>{}</style>\n{html}", places::STYLE),
                     );
                 }
+            }
+            if let Some(visitor) = &mut visitor {
+                let mut shown = Vec::new();
+                let mut folded = Vec::new();
+                if let Some(context) = places_context {
+                    if fold_places {
+                        folded.push((Block::Places, context));
+                    } else {
+                        shown.push((Block::Places, context));
+                    }
+                }
+                if let Some(context) = news_context {
+                    shown.push((Block::News, context));
+                }
+                let sites: Vec<String> = results.hits.iter().map(|h| h.domain.clone()).collect();
+                visitor.note_page(&query, &shown, &folded, &sites);
             }
             html_response(StatusCode::OK, page)
         }
@@ -1084,7 +1147,10 @@ async fn api_search(
                     answers::info_box(&results.hits, &placed)
                 }
             };
-            let places = run_places(&state, &query, None, options.country.as_deref()).await;
+            let places = not_a_name(
+                run_places(&state, &query, None, options.country.as_deref()).await,
+                &results.hits,
+            );
             let body = FullResults {
                 results: &results,
                 answer: extras.answer,
@@ -1196,6 +1262,9 @@ struct GoParams {
     /// The domain picked.
     #[serde(default)]
     d: String,
+    /// A box of the page (`places`, `news`) whose link `u` was opened.
+    b: Option<String>,
+    u: Option<String>,
     country: Option<String>,
     only: Option<String>,
     exact: Option<String>,
@@ -1223,6 +1292,7 @@ async fn go(
         hist: None,
         hs: None,
         hr: None,
+        hl: None,
         safe: params.safe,
         lang: params.lang,
         news: params.news,
@@ -1237,6 +1307,10 @@ async fn go(
         let encoded: String = url::form_urlencoded::byte_serialize(query.as_bytes()).collect();
         format!("/search?q={encoded}")
     };
+    if let Some(block) = params.b.as_deref().and_then(Block::parse) {
+        let href = params.u.unwrap_or_default();
+        return go_block(&state, &headers, &search, &query, block, &href, &back).await;
+    }
     let found = if query.is_empty() || state.setting_up().is_some() {
         None
     } else {
@@ -1262,6 +1336,57 @@ async fn go(
         }
     }
     redirect(&href)
+}
+
+/// `/go?q=&b=&u=`: notes that a link of `block` was opened for the query,
+/// and goes on to `href` when the same search shows it in that box;
+/// anything else goes back to the results.
+async fn go_block(
+    state: &AppState,
+    headers: &HeaderMap,
+    search: &SearchParams,
+    query: &str,
+    block: Block,
+    href: &str,
+    back: &str,
+) -> Response {
+    if query.is_empty() || href.is_empty() || state.setting_up().is_some() {
+        return redirect(back);
+    }
+    let mut visitor = history::Visitor::of(state, headers, None);
+    let options = search.options(&state.settings.home, headers);
+    let links: Vec<String> = match block {
+        Block::Places => {
+            let town = visitor.as_ref().and_then(|v| v.about.town());
+            run_places(state, query, town, options.country.as_deref())
+                .await
+                .map(|found| found.hits.iter().flat_map(places::place_links).collect())
+                .unwrap_or_default()
+        }
+        Block::News => match run_search(state, query, MAX_LIMIT, &options).await {
+            Ok(results) => state
+                .recent(query, &results)
+                .map(|recent| {
+                    recent
+                        .headlines
+                        .iter()
+                        .filter_map(|h| http_url(&h.url))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            Err(_) => {
+                error!("box link redirect search failed");
+                Vec::new()
+            }
+        },
+    };
+    if !links.iter().any(|link| link == href) {
+        return redirect(back);
+    }
+    if let Some(visitor) = &mut visitor {
+        visitor.note_used(query, block);
+    }
+    redirect(href)
 }
 
 fn redirect(location: &str) -> Response {
@@ -2508,9 +2633,25 @@ fn render_results_with(
             p.under.is_none() && (p.at == at || (at == usize::MAX && p.at >= shown_count))
         })
     };
+    // What was learned from the searcher's clicks: headlines they read for
+    // searches like this come unfolded, and the box's links note a use.
+    let learns = settings.history.as_ref().is_some_and(|h| h.learns);
+    let news_view = match settings.options.recent {
+        RecentNews::Collapsed if settings.history.as_ref().is_some_and(|h| h.open_news) => {
+            RecentNews::Expanded
+        }
+        view => view,
+    };
+    let news_link = |href: &str| {
+        if learns {
+            block_go_link(query, &settings.options, Block::News, href)
+        } else {
+            href.to_owned()
+        }
+    };
     let news = recent
         .filter(|_| settings.options.recent != RecentNews::Off)
-        .map(|recent| render_recent(recent, settings.options.recent, now_unix()));
+        .map(|recent| render_recent(recent, news_view, now_unix(), &news_link));
     let now = now_unix();
     let from_plugins: String = extras
         .map(|e| e.plugins.iter().map(|p| render_plugin(p, now)).collect())
@@ -2738,9 +2879,21 @@ fn render_site_search(out: &mut String, site_search: &SiteSearch) {
 
 /// The `/go` link that notes a pick of `domain` for `query`.
 fn go_link(query: &str, options: &SearchOptions, domain: &str) -> String {
+    go_link_with(query, options, &[("d", domain)])
+}
+
+/// The `/go` link that notes a link of `block` was opened for `query`, and
+/// goes on to `href`, one of the box's own links.
+fn block_go_link(query: &str, options: &SearchOptions, block: Block, href: &str) -> String {
+    go_link_with(query, options, &[("b", block.as_str()), ("u", href)])
+}
+
+fn go_link_with(query: &str, options: &SearchOptions, what: &[(&str, &str)]) -> String {
     let mut link = url::form_urlencoded::Serializer::new(String::new());
     link.append_pair("q", query);
-    link.append_pair("d", domain);
+    for (key, value) in what {
+        link.append_pair(key, value);
+    }
     link.append_pair("country", options.country.as_deref().unwrap_or("any"));
     if options.only_country {
         link.append_pair("only", "1");
@@ -2873,7 +3026,12 @@ fn render_package(out: &mut String, package: &plumb_core::packages::PackageInfo)
 /// with its site and age, folded behind a one-line summary unless `view`
 /// says open (no script needed: `<details>`). Feed text is as untrusted
 /// as any record's, and is escaped the same way.
-fn render_recent(recent: &Recent, view: RecentNews, now: u64) -> String {
+fn render_recent(
+    recent: &Recent,
+    view: RecentNews,
+    now: u64,
+    link: &dyn Fn(&str) -> String,
+) -> String {
     let heading = match &recent.site {
         Some(site) => format!("Latest from {}", escape_html(site)),
         None => "Recent".to_string(),
@@ -2888,7 +3046,7 @@ fn render_recent(recent: &Recent, view: RecentNews, now: u64) -> String {
         let _ = write!(
             items,
             "<li><a href=\"{}\" rel=\"noreferrer\">{}</a><div class=\"m\">{} &middot; {}</div></li>",
-            escape_html(&href),
+            escape_html(&link(&href)),
             escape_html(&truncate_chars(&headline.title, 150)),
             escape_html(&headline.domain),
             time_ago(headline.at, now)
@@ -5180,7 +5338,7 @@ mod tests {
         let (_, headers, body) =
             send_with_headers(app(), "/search?q=us+bank&country=any&hist=1", &me).await;
         let prefs = set_cookie(&headers, "plumb_history").unwrap();
-        assert_eq!(prefs, "plumb_history=s0r0");
+        assert_eq!(prefs, "plumb_history=s0r0l0");
         assert!(first(&body), "{body}");
         assert!(!body.contains("You opened this before"), "{body}");
         let both = format!("{profile}; {prefs}");
@@ -5202,6 +5360,130 @@ mod tests {
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
         let (_, _, page) = send_with_headers(app(), "/history", &me).await;
         assert!(page.contains("No searches yet."), "{page}");
+    }
+
+    /// Bank sites, with banks around a town guessed from any query ending
+    /// in "bank"; usbank.com is named by "us bank".
+    struct BankPlaces;
+
+    impl SearchBackend for BankPlaces {
+        fn search(&self, query: &str, limit: usize) -> Result<Vec<Hit>> {
+            let mut hits = bank_hits();
+            hits[0].named = query == "us bank";
+            Ok(hits.into_iter().take(limit).collect())
+        }
+
+        fn num_docs(&self) -> u64 {
+            2
+        }
+
+        fn places(
+            &self,
+            query: &str,
+            _home: Option<&str>,
+            _country: Option<&str>,
+        ) -> Option<plumb_index::places::PlaceResults> {
+            use plumb_core::place::Place;
+            let (town, _) = query.split_once(' ')?;
+            let at = |name: &str, kind: &str, osm: &str| Place {
+                name: name.into(),
+                kind: kind.into(),
+                osm: osm.into(),
+                lat: 39.74,
+                lon: -104.99,
+                country: Some("US".into()),
+                ..Place::default()
+            };
+            Some(plumb_index::places::PlaceResults {
+                what: "bank".into(),
+                center: Some(at(town, "place=city", "n1")),
+                near_me: false,
+                guessed: true,
+                radius_km: 10.0,
+                hits: vec![plumb_index::places::PlaceHit {
+                    place: Place {
+                        website: Some("https://branch.example/denver".into()),
+                        ..at("First Branch", "amenity=bank", "n2")
+                    },
+                    km: 1.0,
+                }],
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_map_the_searcher_never_opens_is_folded_until_they_do() {
+        let dir = tempfile::tempdir().unwrap();
+        let node = Arc::new(HistoryNode(dir.path().join("history")));
+        let app = || node_router(Arc::new(BankPlaces), node.clone());
+
+        // "us bank" is the bank's name: no banks in a town called Us.
+        let (_, headers, body) = send(app(), "/search?q=us+bank&country=any").await;
+        assert!(!body.contains("class=\"pl\""), "{body}");
+        let profile = set_cookie(&headers, "plumb_profile").unwrap();
+        let me = [("cookie", profile.as_str())];
+
+        // Shown, and passed by, three times: folded the fourth.
+        for _ in 0..3 {
+            let (_, _, body) =
+                send_with_headers(app(), "/search?q=denver+bank&country=any", &me).await;
+            assert!(body.contains("<section class=\"pl\""), "{body}");
+            assert!(!body.contains("class=\"plf\""), "{body}");
+        }
+        let (_, _, body) = send_with_headers(app(), "/search?q=denver+bank&country=any", &me).await;
+        assert!(
+            body.contains("<details class=\"plf\"><summary>Bank near"),
+            "{body}"
+        );
+        let link = "/go?q=denver+bank&amp;b=places&amp;u=https%3A%2F%2Fbranch.example%2Fdenver\
+                    &amp;country=any";
+        assert!(body.contains(link), "{body}");
+        let (_, _, history) = send_with_headers(app(), "/history", &me).await;
+        assert!(history.contains("Learned from your clicks"), "{history}");
+        assert!(
+            history.contains("<strong>Places and map</strong> folded"),
+            "{history}"
+        );
+
+        // Only the box's own links are followed.
+        let (code, headers, _) = send_with_headers(
+            app(),
+            "/go?q=denver+bank&b=places&u=https%3A%2F%2Fevil.example%2F&country=any",
+            &me,
+        )
+        .await;
+        assert_eq!(code, StatusCode::SEE_OTHER);
+        assert_eq!(headers[header::LOCATION], "/search?q=denver+bank");
+        // Opening a place brings the box back.
+        let (code, headers, _) = send_with_headers(app(), &link.replace("&amp;", "&"), &me).await;
+        assert_eq!(code, StatusCode::SEE_OTHER);
+        assert_eq!(headers[header::LOCATION], "https://branch.example/denver");
+        let (_, _, body) = send_with_headers(app(), "/search?q=denver+bank&country=any", &me).await;
+        assert!(!body.contains("class=\"plf\""), "{body}");
+
+        // Forgetting, or turning learning off, keeps it unfolded.
+        let response = app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/history/forget-clicks")
+                    .header("cookie", profile.as_str())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let (_, _, history) = send_with_headers(app(), "/history", &me).await;
+        assert!(!history.contains("Learned from your clicks"), "{history}");
+        let off = format!("{profile}; plumb_history=s1r1l0");
+        let off = [("cookie", off.as_str())];
+        for _ in 0..4 {
+            let (_, _, body) =
+                send_with_headers(app(), "/search?q=denver+bank&country=any", &off).await;
+            assert!(!body.contains("class=\"plf\""), "{body}");
+            assert!(!body.contains("b=places"), "{body}");
+        }
     }
 
     #[tokio::test]

@@ -1,0 +1,615 @@
+//! Learning from clicks, for each browser that searches a node with its
+//! history on (see [`crate::history`]), kept in that browser's history
+//! file and nowhere else.
+//!
+//! Two things are learned:
+//!
+//! - Which boxes of the results page the searcher uses, and for which
+//!   searches: the places list and its map, and the "Recent" headlines.
+//!   Each time a box is shown the node notes it, and each time one of its
+//!   links is opened (through `/go`) it notes that too. A box the searcher
+//!   keeps passing by for searches like this one is folded to one line
+//!   (still there, opened with a click), and "Recent" headlines they keep
+//!   reading come unfolded.
+//! - Which results they pass over. A site listed above the one they pick,
+//!   search after search, and never picked itself, moves down a little.
+//!   Sites they pick move up through [`crate::history::History::bonus`].
+//!
+//! "Searches like this one" are, from most to least alike: the same
+//!   search, searches sharing its words, and every search the box was
+//!   shown for in the same way (for places: whether the query said where,
+//!   as in "pizza in denver", or the town was guessed, as in "us bank").
+//!   The most alike that has been seen [`MIN_SHOWN`] times decides.
+
+use plumb_core::normalize_text;
+use serde::{Deserialize, Serialize};
+
+/// Times a box must have been shown for searches alike before its use
+/// for them decides anything.
+pub const MIN_SHOWN: u32 = 3;
+/// A box opened less often than this, of the times shown, is folded.
+pub const FOLD_BELOW: f32 = 0.2;
+/// "Recent" headlines read at least this often are unfolded.
+pub const OPEN_FROM: f32 = 0.5;
+/// Most box counts kept; the ones seen longest ago go first.
+const MAX_BLOCK_COUNTS: usize = 400;
+/// Most site counts kept.
+const MAX_SITE_COUNTS: usize = 300;
+/// Results pages remembered, to tell which box or site was opened.
+const MAX_SHOWN: usize = 30;
+/// Results remembered per page, best first.
+const SITES_PER_PAGE: usize = 10;
+/// Times a site must be passed over, never picked, before it moves down.
+const PASSED_BEFORE_DOWN: u32 = 3;
+/// How far down a site passed over moves, per time past
+/// [`PASSED_BEFORE_DOWN`], and at most.
+const PASSED_STEP: f32 = 0.05;
+const PASSED_MOST: f32 = 0.1;
+/// Words of a query counted, at most.
+const MAX_WORDS: usize = 8;
+
+/// A box of the results page that is learned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Block {
+    /// Places and their map ("pizza in denver").
+    Places,
+    /// The "Recent" headlines.
+    News,
+}
+
+impl Block {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Block::Places => "places",
+            Block::News => "news",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<Block> {
+        match name {
+            "places" => Some(Block::Places),
+            "news" => Some(Block::News),
+            _ => None,
+        }
+    }
+
+    /// What the box is called on the history page.
+    pub fn label(self) -> &'static str {
+        match self {
+            Block::Places => "Places and map",
+            Block::News => "Recent headlines",
+        }
+    }
+}
+
+/// How a box was shown, which counts apart: places for a query that said
+/// where are not places for a guessed town.
+pub fn places_context(guessed: bool) -> &'static str {
+    if guessed {
+        "guessed"
+    } else {
+        "said"
+    }
+}
+
+/// How the "Recent" box was shown: a named site's latest posts, or
+/// headlines about the query's words.
+pub fn news_context(site: bool) -> &'static str {
+    if site {
+        "site"
+    } else {
+        "words"
+    }
+}
+
+/// Times a box was shown and used for searches alike.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockCount {
+    pub block: Block,
+    /// `q <query>`, `w <context> <word>` or `c <context>`.
+    pub key: String,
+    pub shown: u32,
+    pub used: u32,
+    /// Unix time it last changed.
+    pub at: u64,
+}
+
+/// Times a site was picked, and passed over for a site below it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SiteCount {
+    pub domain: String,
+    pub picked: u32,
+    pub passed: u32,
+    pub at: u64,
+}
+
+/// A results page shown, remembered until a few more are.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShownPage {
+    /// The query, as [`query_key`] makes it.
+    pub query: String,
+    /// The boxes shown, how, and whether they were counted as shown
+    /// (folded ones are not).
+    pub blocks: Vec<(Block, String, bool)>,
+    /// Boxes already counted as used on this page.
+    pub used: Vec<Block>,
+    /// This node's results, best first.
+    pub sites: Vec<String>,
+    /// Sites already counted as picked on this page.
+    pub picked: Vec<String>,
+    pub at: u64,
+}
+
+/// What a browser's clicks taught the node.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Learned {
+    pub blocks: Vec<BlockCount>,
+    pub sites: Vec<SiteCount>,
+    /// Newest first.
+    pub pages: Vec<ShownPage>,
+}
+
+/// What to do with a box.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Choice {
+    /// As always.
+    Usual,
+    /// Fold it to one line: it is seldom used for searches like this.
+    Fold,
+    /// Unfold it: it is often used for searches like this.
+    Open,
+}
+
+/// What makes two searches the same: case, accents and punctuation do not
+/// count.
+pub fn query_key(query: &str) -> String {
+    normalize_text(query)
+}
+
+fn words(query: &str) -> Vec<String> {
+    let mut words: Vec<String> = Vec::new();
+    for word in query_key(query).split(' ').filter(|w| !w.is_empty()) {
+        if !words.iter().any(|w| w == word) {
+            words.push(word.to_owned());
+        }
+        if words.len() == MAX_WORDS {
+            break;
+        }
+    }
+    words
+}
+
+/// The share of shows a box was used, leaning to a half while there is
+/// little to go on.
+fn rate(used: u32, shown: u32) -> f32 {
+    (used as f32 + 0.5) / (shown as f32 + 1.0)
+}
+
+impl Learned {
+    /// The keys a box shown for `query` in `context` counts under, most
+    /// alike first: the query, its words, the context.
+    fn keys(query: &str, context: &str) -> (String, Vec<String>, String) {
+        (
+            format!("q {}", query_key(query)),
+            words(query)
+                .into_iter()
+                .map(|word| format!("w {context} {word}"))
+                .collect(),
+            format!("c {context}"),
+        )
+    }
+
+    fn count(&self, block: Block, key: &str) -> Option<&BlockCount> {
+        self.blocks
+            .iter()
+            .find(|c| c.block == block && c.key == key)
+    }
+
+    fn bump(&mut self, block: Block, key: String, used: bool, at: u64) {
+        match self
+            .blocks
+            .iter_mut()
+            .find(|c| c.block == block && c.key == key)
+        {
+            Some(count) => {
+                if used {
+                    count.used = count.used.saturating_add(1);
+                } else {
+                    count.shown = count.shown.saturating_add(1);
+                }
+                count.at = at;
+            }
+            None => self.blocks.push(BlockCount {
+                block,
+                key,
+                shown: u32::from(!used),
+                used: u32::from(used),
+                at,
+            }),
+        }
+    }
+
+    /// How often `block` was used for searches like `query`, shown in
+    /// `context`: the share used, and of how many shows. `None` until
+    /// searches alike were seen [`MIN_SHOWN`] times.
+    pub fn estimate(&self, block: Block, query: &str, context: &str) -> Option<(f32, u32)> {
+        let (exact, words, all) = Self::keys(query, context);
+        if let Some(count) = self.count(block, &exact).filter(|c| c.shown >= MIN_SHOWN) {
+            return Some((rate(count.used, count.shown), count.shown));
+        }
+        let alike: Vec<&BlockCount> = words
+            .iter()
+            .filter_map(|key| self.count(block, key))
+            .filter(|c| c.shown >= MIN_SHOWN)
+            .collect();
+        if !alike.is_empty() {
+            let mean =
+                alike.iter().map(|c| rate(c.used, c.shown)).sum::<f32>() / alike.len() as f32;
+            let shown = alike.iter().map(|c| c.shown).max().unwrap_or_default();
+            return Some((mean, shown));
+        }
+        self.count(block, &all)
+            .filter(|c| c.shown >= MIN_SHOWN)
+            .map(|c| (rate(c.used, c.shown), c.shown))
+    }
+
+    /// What to do with `block` for `query`, shown in `context`.
+    pub fn choice(&self, block: Block, query: &str, context: &str) -> Choice {
+        match (block, self.estimate(block, query, context)) {
+            (Block::Places, Some((rate, _))) if rate < FOLD_BELOW => Choice::Fold,
+            (Block::News, Some((rate, _))) if rate >= OPEN_FROM => Choice::Open,
+            _ => Choice::Usual,
+        }
+    }
+
+    /// Notes a results page for `query`: the boxes shown open on it, those
+    /// shown folded (not counted as shown), and this node's results, best
+    /// first.
+    pub fn note_shown(
+        &mut self,
+        query: &str,
+        blocks: &[(Block, &str)],
+        folded: &[(Block, &str)],
+        sites: &[String],
+        at: u64,
+    ) {
+        let key = query_key(query);
+        if key.is_empty() {
+            return;
+        }
+        for &(block, context) in blocks {
+            let (exact, words, all) = Self::keys(query, context);
+            self.bump(block, exact, false, at);
+            for word in words {
+                self.bump(block, word, false, at);
+            }
+            self.bump(block, all, false, at);
+        }
+        self.pages.insert(
+            0,
+            ShownPage {
+                query: key,
+                blocks: blocks
+                    .iter()
+                    .map(|&(block, context)| (block, context.to_owned(), true))
+                    .chain(
+                        folded
+                            .iter()
+                            .map(|&(block, context)| (block, context.to_owned(), false)),
+                    )
+                    .collect(),
+                used: Vec::new(),
+                sites: sites.iter().take(SITES_PER_PAGE).cloned().collect(),
+                picked: Vec::new(),
+                at,
+            },
+        );
+        self.trim();
+    }
+
+    /// Notes that a link of `block` was opened from the latest page for
+    /// `query`; once per page.
+    pub fn note_used(&mut self, query: &str, block: Block, at: u64) {
+        let key = query_key(query);
+        let Some(page) = self.pages.iter_mut().find(|p| p.query == key) else {
+            return;
+        };
+        if page.used.contains(&block) {
+            return;
+        }
+        page.used.push(block);
+        let Some((_, context, counted)) = page.blocks.iter().find(|(b, _, _)| *b == block).cloned()
+        else {
+            return;
+        };
+        if !counted {
+            // A folded box was not counted as shown: count it now, so it is
+            // never used more often than shown.
+            let (exact, words, all) = Self::keys(query, &context);
+            self.bump(block, exact, false, at);
+            for word in words {
+                self.bump(block, word, false, at);
+            }
+            self.bump(block, all, false, at);
+        }
+        let (exact, words, all) = Self::keys(query, &context);
+        self.bump(block, exact, true, at);
+        for word in words {
+            self.bump(block, word, true, at);
+        }
+        self.bump(block, all, true, at);
+        self.trim();
+    }
+
+    /// Notes that `domain` was picked from the latest page for `query`:
+    /// the sites above it that are not picked from that page were passed
+    /// over, once per page.
+    pub fn note_picked(&mut self, query: &str, domain: &str, at: u64) {
+        let key = query_key(query);
+        let Some(page) = self.pages.iter_mut().find(|p| p.query == key) else {
+            return;
+        };
+        if page.picked.iter().any(|d| d == domain) {
+            return;
+        }
+        let first_pick = page.picked.is_empty();
+        page.picked.push(domain.to_owned());
+        let passed: Vec<String> = match page.sites.iter().position(|d| d == domain) {
+            Some(at) if first_pick => page.sites[..at].to_vec(),
+            _ => Vec::new(),
+        };
+        self.site(domain, at).picked += 1;
+        for domain in passed {
+            let count = self.site(&domain, at);
+            count.passed = count.passed.saturating_add(1);
+        }
+        self.trim();
+    }
+
+    fn site(&mut self, domain: &str, at: u64) -> &mut SiteCount {
+        let i = match self.sites.iter().position(|s| s.domain == domain) {
+            Some(i) => i,
+            None => {
+                self.sites.push(SiteCount {
+                    domain: domain.to_owned(),
+                    picked: 0,
+                    passed: 0,
+                    at,
+                });
+                self.sites.len() - 1
+            }
+        };
+        let count = &mut self.sites[i];
+        count.at = at;
+        count
+    }
+
+    /// The score `domain` loses for being passed over, never picked: 0 or
+    /// less.
+    pub fn passed_over(&self, domain: &str) -> f32 {
+        let Some(count) = self.sites.iter().find(|s| s.domain == domain) else {
+            return 0.0;
+        };
+        if count.picked > 0 || count.passed < PASSED_BEFORE_DOWN {
+            return 0.0;
+        }
+        let steps = (count.passed - PASSED_BEFORE_DOWN + 1) as f32;
+        -(steps * PASSED_STEP).min(PASSED_MOST)
+    }
+
+    /// Sites moved down for being passed over, most passed first.
+    pub fn moved_down(&self) -> Vec<&SiteCount> {
+        let mut sites: Vec<&SiteCount> = self
+            .sites
+            .iter()
+            .filter(|s| self.passed_over(&s.domain) < 0.0)
+            .collect();
+        sites.sort_by_key(|s| std::cmp::Reverse(s.passed));
+        sites
+    }
+
+    /// Searches (and words, and kinds of search) a box is folded or
+    /// unfolded for, most seen first.
+    pub fn decided(&self) -> Vec<(&BlockCount, Choice)> {
+        let mut decided: Vec<(&BlockCount, Choice)> = self
+            .blocks
+            .iter()
+            .filter(|c| c.shown >= MIN_SHOWN)
+            .filter_map(|c| {
+                let rate = rate(c.used, c.shown);
+                match c.block {
+                    Block::Places if rate < FOLD_BELOW => Some((c, Choice::Fold)),
+                    Block::News if rate >= OPEN_FROM => Some((c, Choice::Open)),
+                    _ => None,
+                }
+            })
+            .collect();
+        decided.sort_by_key(|d| std::cmp::Reverse(d.0.shown));
+        decided
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.blocks.is_empty() && self.sites.is_empty()
+    }
+
+    fn trim(&mut self) {
+        self.pages.truncate(MAX_SHOWN);
+        if self.blocks.len() > MAX_BLOCK_COUNTS {
+            self.blocks.sort_by_key(|c| std::cmp::Reverse(c.at));
+            self.blocks.truncate(MAX_BLOCK_COUNTS);
+        }
+        if self.sites.len() > MAX_SITE_COUNTS {
+            self.sites.sort_by_key(|c| std::cmp::Reverse(c.at));
+            self.sites.truncate(MAX_SITE_COUNTS);
+        }
+    }
+}
+
+/// A key of a [`BlockCount`] in words, for the history page.
+pub fn describe_key(key: &str) -> String {
+    let context = |c: &str| match c {
+        "guessed" => "searches without \"in\" or \"near\"",
+        "said" => "searches that say where",
+        "site" => "a site's latest posts",
+        "words" => "headlines about a search's words",
+        _ => "other searches",
+    };
+    if let Some(query) = key.strip_prefix("q ") {
+        return format!("\u{201c}{query}\u{201d}");
+    }
+    if let Some(rest) = key.strip_prefix("w ") {
+        if let Some((c, word)) = rest.split_once(' ') {
+            return format!("{} with \u{201c}{word}\u{201d}", context(c));
+        }
+    }
+    if let Some(c) = key.strip_prefix("c ") {
+        return format!("all {}", context(c));
+    }
+    key.to_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn show_places(learned: &mut Learned, query: &str, guessed: bool, at: u64) {
+        let sites = vec!["usbank.com".to_owned(), "bank.example".to_owned()];
+        let shown = [(Block::Places, places_context(guessed))];
+        match learned.choice(Block::Places, query, places_context(guessed)) {
+            Choice::Fold => learned.note_shown(query, &[], &shown, &sites, at),
+            _ => learned.note_shown(query, &shown, &[], &sites, at),
+        }
+    }
+
+    #[test]
+    fn a_box_never_used_is_folded_and_one_use_brings_it_back() {
+        let mut learned = Learned::default();
+        for at in 0..2 {
+            show_places(&mut learned, "us bank", true, at);
+        }
+        assert_eq!(
+            learned.choice(Block::Places, "us bank", "guessed"),
+            Choice::Usual
+        );
+        show_places(&mut learned, "US  Bank", true, 3);
+        assert_eq!(
+            learned.choice(Block::Places, "us bank", "guessed"),
+            Choice::Fold
+        );
+        // Shown folded: not counted, so still folded.
+        show_places(&mut learned, "us bank", true, 4);
+        assert_eq!(
+            learned.choice(Block::Places, "us bank", "guessed"),
+            Choice::Fold
+        );
+        // Opened from the folded box: shown, and used.
+        learned.note_used("us bank", Block::Places, 5);
+        assert_eq!(
+            learned.choice(Block::Places, "us bank", "guessed"),
+            Choice::Usual
+        );
+    }
+
+    #[test]
+    fn alike_searches_count_and_said_where_counts_apart() {
+        let mut learned = Learned::default();
+        for at in 0..3 {
+            show_places(&mut learned, "us bank", true, at);
+        }
+        // Shares "bank", shown the same way.
+        assert_eq!(
+            learned.choice(Block::Places, "denver bank", "guessed"),
+            Choice::Fold
+        );
+        // Said where: never seen.
+        assert_eq!(
+            learned.choice(Block::Places, "bank in denver", "said"),
+            Choice::Usual
+        );
+        // Used for pizza in denver every time.
+        for at in 0..3 {
+            show_places(&mut learned, "pizza in denver", false, at);
+            learned.note_used("pizza in denver", Block::Places, at);
+        }
+        assert_eq!(
+            learned.choice(Block::Places, "pizza in denver", "said"),
+            Choice::Usual
+        );
+        assert_eq!(
+            learned.choice(Block::Places, "tacos in boulder", "said"),
+            Choice::Usual
+        );
+    }
+
+    #[test]
+    fn a_box_counts_one_use_per_page() {
+        let mut learned = Learned::default();
+        for at in 0..3 {
+            learned.note_shown("rust", &[(Block::News, "words")], &[], &[], at);
+            learned.note_used("rust", Block::News, at);
+            learned.note_used("rust", Block::News, at);
+        }
+        let count = learned.count(Block::News, "q rust").unwrap();
+        assert_eq!((count.shown, count.used), (3, 3));
+        assert_eq!(learned.choice(Block::News, "rust", "words"), Choice::Open);
+        assert_eq!(learned.decided().len(), 3);
+    }
+
+    #[test]
+    fn sites_passed_over_move_down_until_picked() {
+        let mut learned = Learned::default();
+        let sites: Vec<String> = ["spam.example", "good.example", "other.example"]
+            .map(String::from)
+            .to_vec();
+        for at in 0..2 {
+            learned.note_shown("thing", &[], &[], &sites, at);
+            learned.note_picked("thing", "good.example", at);
+            // A second pick from the same page passes nothing more.
+            learned.note_picked("thing", "other.example", at);
+        }
+        assert_eq!(learned.passed_over("spam.example"), 0.0);
+        learned.note_shown("thing", &[], &[], &sites, 3);
+        learned.note_picked("thing", "good.example", 3);
+        assert!(learned.passed_over("spam.example") < 0.0);
+        assert_eq!(learned.passed_over("good.example"), 0.0);
+        assert_eq!(learned.passed_over("other.example"), 0.0);
+        assert_eq!(learned.moved_down().len(), 1);
+        for at in 4..20 {
+            learned.note_shown("thing", &[], &[], &sites, at);
+            learned.note_picked("thing", "good.example", at);
+        }
+        assert!(learned.passed_over("spam.example") >= -PASSED_MOST);
+        learned.note_shown("thing", &[], &[], &sites, 30);
+        learned.note_picked("thing", "spam.example", 30);
+        assert_eq!(learned.passed_over("spam.example"), 0.0);
+    }
+
+    #[test]
+    fn clicks_without_a_page_shown_are_ignored() {
+        let mut learned = Learned::default();
+        learned.note_used("us bank", Block::Places, 1);
+        learned.note_picked("us bank", "usbank.com", 1);
+        assert!(learned.is_empty());
+    }
+
+    #[test]
+    fn counts_are_capped() {
+        let mut learned = Learned::default();
+        for n in 0..300u64 {
+            let query = format!("query{n} word{n}");
+            learned.note_shown(
+                &query,
+                &[(Block::Places, "said")],
+                &[],
+                &[format!("s{n}.example")],
+                n,
+            );
+            learned.note_picked(&query, &format!("s{n}.example"), n);
+        }
+        assert!(learned.blocks.len() <= MAX_BLOCK_COUNTS);
+        assert!(learned.pages.len() <= MAX_SHOWN);
+        assert!(learned.sites.len() <= MAX_SITE_COUNTS);
+    }
+}
