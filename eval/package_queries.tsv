@@ -1,0 +1,113 @@
+# Searches for software packages, the way coding agents and people write
+# them ("serde crate", "requests python", "guzzle php"), with the package's
+# registry page expected first. The address is the registry's page for the
+# package (see plumb_core::packages), so each label follows from the
+# package's name. Run with --pages packages.tsv.gz made with fetch-pages.
+# npm
+react npm	https://www.npmjs.com/package/react
+lodash	https://www.npmjs.com/package/lodash
+express npm	https://www.npmjs.com/package/express
+axios	https://www.npmjs.com/package/axios
+typescript npm package	https://www.npmjs.com/package/typescript
+next npm	https://www.npmjs.com/package/next
+vue npm	https://www.npmjs.com/package/vue
+zod	https://www.npmjs.com/package/zod
+dayjs	https://www.npmjs.com/package/dayjs
+moment js npm	https://www.npmjs.com/package/moment
+chalk npm	https://www.npmjs.com/package/chalk
+commander npm	https://www.npmjs.com/package/commander
+dotenv npm	https://www.npmjs.com/package/dotenv
+uuid npm	https://www.npmjs.com/package/uuid
+eslint npm	https://www.npmjs.com/package/eslint
+prettier npm	https://www.npmjs.com/package/prettier
+jest npm	https://www.npmjs.com/package/jest
+vitest	https://www.npmjs.com/package/vitest
+@types/node	https://www.npmjs.com/package/@types/node
+types node npm	https://www.npmjs.com/package/@types/node
+socket.io npm	https://www.npmjs.com/package/socket.io
+mongoose	https://www.npmjs.com/package/mongoose
+nodemon	https://www.npmjs.com/package/nodemon
+tailwindcss npm	https://www.npmjs.com/package/tailwindcss
+webpack npm	https://www.npmjs.com/package/webpack
+
+# PyPI
+requests python	https://pypi.org/project/requests/
+numpy pypi	https://pypi.org/project/numpy/
+pandas pip	https://pypi.org/project/pandas/
+flask pypi	https://pypi.org/project/flask/
+django pypi	https://pypi.org/project/django/
+fastapi pip install	https://pypi.org/project/fastapi/
+pydantic	https://pypi.org/project/pydantic/
+pytest pypi	https://pypi.org/project/pytest/
+beautifulsoup4	https://pypi.org/project/beautifulsoup4/
+beautifulsoup python package	https://pypi.org/project/beautifulsoup4/
+scikit-learn pypi	https://pypi.org/project/scikit-learn/
+matplotlib pip	https://pypi.org/project/matplotlib/
+boto3	https://pypi.org/project/boto3/
+httpx python	https://pypi.org/project/httpx/
+transformers pypi	https://pypi.org/project/transformers/
+torch pypi	https://pypi.org/project/torch/
+sqlalchemy pypi	https://pypi.org/project/sqlalchemy/
+black python formatter pypi	https://pypi.org/project/black/
+click python	https://pypi.org/project/click/
+rich python	https://pypi.org/project/rich/
+pillow python	https://pypi.org/project/pillow/
+openai python package	https://pypi.org/project/openai/
+anthropic python sdk	https://pypi.org/project/anthropic/
+python-dotenv	https://pypi.org/project/python-dotenv/
+pyyaml	https://pypi.org/project/pyyaml/
+
+# crates.io
+serde crate	https://crates.io/crates/serde
+tokio crate	https://crates.io/crates/tokio
+reqwest crate	https://crates.io/crates/reqwest
+clap crate	https://crates.io/crates/clap
+anyhow crate	https://crates.io/crates/anyhow
+thiserror	https://crates.io/crates/thiserror
+rand crate	https://crates.io/crates/rand
+regex crate	https://crates.io/crates/regex
+axum crate	https://crates.io/crates/axum
+rayon crate	https://crates.io/crates/rayon
+tracing crate	https://crates.io/crates/tracing
+serde_json	https://crates.io/crates/serde_json
+hyper crate	https://crates.io/crates/hyper
+sqlx crate	https://crates.io/crates/sqlx
+chrono crate	https://crates.io/crates/chrono
+itertools crate	https://crates.io/crates/itertools
+tantivy crate	https://crates.io/crates/tantivy
+libp2p crate	https://crates.io/crates/libp2p
+
+# Go
+gin go	https://pkg.go.dev/github.com/gin-gonic/gin
+cobra go	https://pkg.go.dev/github.com/spf13/cobra
+testify go	https://pkg.go.dev/github.com/stretchr/testify
+gorilla mux	https://pkg.go.dev/github.com/gorilla/mux
+zap logger go	https://pkg.go.dev/go.uber.org/zap
+
+# RubyGems
+rails gem	https://rubygems.org/gems/rails
+devise gem	https://rubygems.org/gems/devise
+nokogiri gem	https://rubygems.org/gems/nokogiri
+rspec gem	https://rubygems.org/gems/rspec
+sidekiq gem	https://rubygems.org/gems/sidekiq
+
+# Packagist
+laravel framework composer	https://packagist.org/packages/laravel/framework
+guzzle php	https://packagist.org/packages/guzzlehttp/guzzle
+phpunit composer	https://packagist.org/packages/phpunit/phpunit
+monolog php	https://packagist.org/packages/monolog/monolog
+symfony console composer	https://packagist.org/packages/symfony/console
+
+# NuGet
+newtonsoft json nuget	https://www.nuget.org/packages/Newtonsoft.Json
+serilog nuget	https://www.nuget.org/packages/Serilog
+dapper nuget	https://www.nuget.org/packages/Dapper
+automapper nuget	https://www.nuget.org/packages/AutoMapper
+xunit nuget	https://www.nuget.org/packages/xunit
+
+# Maven Central
+guava maven	https://central.sonatype.com/artifact/com.google.guava/guava
+jackson databind maven	https://central.sonatype.com/artifact/com.fasterxml.jackson.core/jackson-databind
+junit jupiter maven	https://central.sonatype.com/artifact/org.junit.jupiter/junit-jupiter
+slf4j api maven	https://central.sonatype.com/artifact/org.slf4j/slf4j-api
+apache commons lang3	https://central.sonatype.com/artifact/org.apache.commons/commons-lang3

@@ -15,3 +15,198 @@ what does yield do in python	https://stackoverflow.com/questions/231767
 if __name__ == "__main__" python	https://stackoverflow.com/questions/419163
 check whether a file exists python without exceptions	https://stackoverflow.com/questions/82831
 regex match open tags except xhtml self-contained tags	https://stackoverflow.com/questions/1732348
+
+# Added 2026-10-06 to make the suite bigger.
+# Git
+change last commit message git	https://stackoverflow.com/questions/179123
+git revert to previous commit	https://stackoverflow.com/questions/4114095
+checkout remote branch git	https://stackoverflow.com/questions/1783405
+push new local branch to remote and track it	https://stackoverflow.com/questions/2765421
+discard unstaged changes git	https://stackoverflow.com/questions/52704
+remove untracked files git	https://stackoverflow.com/questions/61212
+git reset file to specific revision	https://stackoverflow.com/questions/215718
+move recent commits to a new branch	https://stackoverflow.com/questions/1628563
+clone a specific git branch	https://stackoverflow.com/questions/1911109
+git stop tracking file now in gitignore	https://stackoverflow.com/questions/1274057
+squash last n commits	https://stackoverflow.com/questions/5189560
+change git remote url	https://stackoverflow.com/questions/2432764
+resolve merge conflicts git	https://stackoverflow.com/questions/161813
+undo git reset	https://stackoverflow.com/questions/2510276
+delete remote tag git	https://stackoverflow.com/questions/5480258
+delete a commit from a branch	https://stackoverflow.com/questions/1338728
+list all remote branches git	https://stackoverflow.com/questions/3471827
+find the url a git repo was cloned from	https://stackoverflow.com/questions/4089430
+undo a git rebase	https://stackoverflow.com/questions/134882
+git stash pop vs apply	https://stackoverflow.com/questions/15286075
+src refspec master does not match any	https://stackoverflow.com/questions/4181861
+refusing to merge unrelated histories	https://stackoverflow.com/questions/37937984
+updates were rejected because the tip of your current branch is behind	https://stackoverflow.com/questions/39399804
+
+# Python
+call a system command from python	https://stackoverflow.com/questions/89228
+what are metaclasses in python	https://stackoverflow.com/questions/100003
+staticmethod vs classmethod	https://stackoverflow.com/questions/136097
+how does python slicing work	https://stackoverflow.com/questions/509211
+for loop index python	https://stackoverflow.com/questions/522563
+flatten a list of lists python	https://stackoverflow.com/questions/952914
+sort a dictionary by value python	https://stackoverflow.com/questions/613183
+concatenate two lists python	https://stackoverflow.com/questions/1720421
+create directory and missing parents python	https://stackoverflow.com/questions/273192
+current time in python	https://stackoverflow.com/questions/415511
+python string contains substring	https://stackoverflow.com/questions/3437059
+__str__ vs __repr__	https://stackoverflow.com/questions/1436703
+copy a list python without changing original	https://stackoverflow.com/questions/2612802
+iterate over rows in a pandas dataframe	https://stackoverflow.com/questions/16476924
+delete a column from a pandas dataframe	https://stackoverflow.com/questions/13411544
+rename columns pandas	https://stackoverflow.com/questions/11346283
+select rows from dataframe based on column values	https://stackoverflow.com/questions/17071871
+list all files in a directory python	https://stackoverflow.com/questions/3207219
+add new keys to a dictionary python	https://stackoverflow.com/questions/1024847
+merge two dictionaries python	https://stackoverflow.com/questions/38987
+catch multiple exceptions in one line python	https://stackoverflow.com/questions/6470428
+raise an exception in python	https://stackoverflow.com/questions/2052390
+print to stderr python	https://stackoverflow.com/questions/5574702
+iterate over dictionary python	https://stackoverflow.com/questions/3294889
+check if key exists in dictionary python	https://stackoverflow.com/questions/1602934
+access environment variables python	https://stackoverflow.com/questions/4906977
+convert bytes to string python 3	https://stackoverflow.com/questions/606191
+parse string to float or int python	https://stackoverflow.com/questions/379906
+remove a key from a dictionary python	https://stackoverflow.com/questions/11277432
+check if a list is empty python	https://stackoverflow.com/questions/53513
+find index of item in list python	https://stackoverflow.com/questions/176918
+convert string to datetime python	https://stackoverflow.com/questions/466345
+lowercase a string python	https://stackoverflow.com/questions/6797984
+static class variables python	https://stackoverflow.com/questions/68645
+python super init	https://stackoverflow.com/questions/576169
+what is __init__.py for	https://stackoverflow.com/questions/448271
+venv vs virtualenv vs pyenv	https://stackoverflow.com/questions/41573587
+why is 1000000000000000 in range fast in python 3	https://stackoverflow.com/questions/30081275
+mutable default argument python	https://stackoverflow.com/questions/1132941
+python version running my script	https://stackoverflow.com/questions/1093322
+pip is not recognized as an internal or external command	https://stackoverflow.com/questions/23708898
+module object is not callable	https://stackoverflow.com/questions/4534438
+missing parentheses in call to print	https://stackoverflow.com/questions/25445439
+site-packages directory location	https://stackoverflow.com/questions/122327
+why write usr bin env python on the first line	https://stackoverflow.com/questions/2429511
+
+# JavaScript and web
+redirect to another page javascript	https://stackoverflow.com/questions/503093
+how do javascript closures work	https://stackoverflow.com/questions/111102
+what does use strict do	https://stackoverflow.com/questions/1335851
+javascript variable scope	https://stackoverflow.com/questions/500431
+== vs === javascript	https://stackoverflow.com/questions/359494
+let vs var javascript	https://stackoverflow.com/questions/762011
+remove a property from a javascript object	https://stackoverflow.com/questions/208105
+sort array of objects by property javascript	https://stackoverflow.com/questions/1129216
+generate uuid javascript	https://stackoverflow.com/questions/105034
+capitalize first letter javascript	https://stackoverflow.com/questions/1026069
+replace all occurrences of a string javascript	https://stackoverflow.com/questions/1144783
+foreach over an array javascript	https://stackoverflow.com/questions/9329446
+return the response from an asynchronous call	https://stackoverflow.com/questions/14220321
+javascript closure inside loops	https://stackoverflow.com/questions/750486
+create array 1 to n javascript	https://stackoverflow.com/questions/3746725
+insert item into array at index javascript	https://stackoverflow.com/questions/586182
+random string javascript	https://stackoverflow.com/questions/1349404
+random integer in range javascript	https://stackoverflow.com/questions/1527803
+format number with commas javascript	https://stackoverflow.com/questions/2901102
+check if variable is an array javascript	https://stackoverflow.com/questions/767486
+array includes value javascript	https://stackoverflow.com/questions/237104
+copy to clipboard javascript	https://stackoverflow.com/questions/400212
+get current url javascript	https://stackoverflow.com/questions/1034621
+get query string values javascript	https://stackoverflow.com/questions/901115
+event binding on dynamically created elements	https://stackoverflow.com/questions/203198
+include a javascript file in another	https://stackoverflow.com/questions/950087
+call vs apply javascript	https://stackoverflow.com/questions/1986896
+function expression vs function declaration	https://stackoverflow.com/questions/336859
+check for empty undefined null string javascript	https://stackoverflow.com/questions/154059
+loop through object javascript	https://stackoverflow.com/questions/684672
+deep clone object javascript	https://stackoverflow.com/questions/122102
+detect undefined object property	https://stackoverflow.com/questions/27509
+why does google prepend while(1) to json	https://stackoverflow.com/questions/2669690
+can (a==1 && a==2 && a==3) be true	https://stackoverflow.com/questions/48270127
+no access-control-allow-origin header is present	https://stackoverflow.com/questions/43871637
+check if element is hidden jquery	https://stackoverflow.com/questions/178325
+center a div horizontally	https://stackoverflow.com/questions/618097
+vertically center text css	https://stackoverflow.com/questions/8865458
+div 100% height of browser window	https://stackoverflow.com/questions/1575141
+change input placeholder color css	https://stackoverflow.com/questions/2610497
+
+# Node and tools
+npm install vs npm ci	https://stackoverflow.com/questions/52499617
+dependencies vs devdependencies vs peerdependencies	https://stackoverflow.com/questions/18875674
+update all npm packages to latest version	https://stackoverflow.com/questions/16073603
+should package-lock.json be committed	https://stackoverflow.com/questions/44206782
+exit in node.js	https://stackoverflow.com/questions/5266152
+command line arguments node.js	https://stackoverflow.com/questions/4351521
+kill process on port 3000 mac	https://stackoverflow.com/questions/3855127
+copy files from host to docker container	https://stackoverflow.com/questions/22907231
+get a shell in a running docker container	https://stackoverflow.com/questions/30172605
+remove old docker containers	https://stackoverflow.com/questions/17236796
+cmd vs entrypoint dockerfile	https://stackoverflow.com/questions/21553353
+get docker container ip address	https://stackoverflow.com/questions/17157721
+
+# Shell
+get the directory of a bash script	https://stackoverflow.com/questions/59895
+check if a program exists bash	https://stackoverflow.com/questions/592620
+split string on delimiter bash	https://stackoverflow.com/questions/918886
+concatenate strings bash	https://stackoverflow.com/questions/4181703
+check if file does not exist bash	https://stackoverflow.com/questions/638975
+string contains substring bash	https://stackoverflow.com/questions/229551
+echo newline bash	https://stackoverflow.com/questions/8467424
+find files containing text linux	https://stackoverflow.com/questions/16956810
+
+# Java, C, C++, C#, Rust, Go
+is java pass by reference or pass by value	https://stackoverflow.com/questions/40480
+what is a nullpointerexception	https://stackoverflow.com/questions/218384
+convert string to int java	https://stackoverflow.com/questions/5585779
+iterate through a hashmap	https://stackoverflow.com/questions/1066589
+compare strings in java	https://stackoverflow.com/questions/513832
+java array contains value	https://stackoverflow.com/questions/1128723
+create arraylist from array	https://stackoverflow.com/questions/157944
+declare and initialize an array in java	https://stackoverflow.com/questions/1200621
+sort a map by values java	https://stackoverflow.com/questions/109383
+why is char[] preferred over string for passwords	https://stackoverflow.com/questions/8881291
+public protected private java	https://stackoverflow.com/questions/215497
+does finally always execute java	https://stackoverflow.com/questions/65035
+why is printing b slower than printing #	https://stackoverflow.com/questions/21947452
+what is the --> operator in c++	https://stackoverflow.com/questions/1642028
+why is using namespace std bad	https://stackoverflow.com/questions/1452721
+definitive c++ book list	https://stackoverflow.com/questions/388242
+copy and swap idiom	https://stackoverflow.com/questions/3279543
+pointer vs reference c++	https://stackoverflow.com/questions/57483
+what is a smart pointer	https://stackoverflow.com/questions/106508
+const int* vs int const*	https://stackoverflow.com/questions/1143262
+extern c in c++	https://stackoverflow.com/questions/1041866
+why do we need virtual functions	https://stackoverflow.com/questions/2391679
+static_cast vs dynamic_cast	https://stackoverflow.com/questions/28002
+why is reading lines from stdin slower in c++ than python	https://stackoverflow.com/questions/9371238
+is floating point math broken	https://stackoverflow.com/questions/588004
+enumerate an enum c#	https://stackoverflow.com/questions/105372
+difference between string and system.string c#	https://stackoverflow.com/questions/7074
+calculate age from birthday c#	https://stackoverflow.com/questions/9
+catch multiple exceptions at once c#	https://stackoverflow.com/questions/136035
+rust string vs str	https://stackoverflow.com/questions/24158114
+why are rust executables so big	https://stackoverflow.com/questions/29008127
+println in rust tests	https://stackoverflow.com/questions/25106554
+check if a map contains a key go	https://stackoverflow.com/questions/2050391
+
+# Concepts, SQL, PHP, mobile
+process vs thread	https://stackoverflow.com/questions/200469
+stack vs heap	https://stackoverflow.com/questions/79923
+post vs put http	https://stackoverflow.com/questions/630453
+big o notation plain english	https://stackoverflow.com/questions/487258
+what is tail recursion	https://stackoverflow.com/questions/33923
+what is dependency injection	https://stackoverflow.com/questions/130794
+interface vs abstract class	https://stackoverflow.com/questions/1913098
+what is restful programming	https://stackoverflow.com/questions/671118
+update from a select sql server	https://stackoverflow.com/questions/2334712
+inner join vs outer join	https://stackoverflow.com/questions/38549
+prevent sql injection php	https://stackoverflow.com/questions/60174
+what does this symbol mean in php	https://stackoverflow.com/questions/3737139
+why shouldn't i use mysql_* functions in php	https://stackoverflow.com/questions/12859942
+headers already sent php	https://stackoverflow.com/questions/8028957
+stop edittext from gaining focus android	https://stackoverflow.com/questions/1555109
+unique android device id	https://stackoverflow.com/questions/2785485
+hide android soft keyboard	https://stackoverflow.com/questions/1109022
+cant bind to ngmodel	https://stackoverflow.com/questions/38892771
+missing dependency warning useeffect	https://stackoverflow.com/questions/55840294

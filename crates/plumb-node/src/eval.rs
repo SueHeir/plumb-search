@@ -20,7 +20,7 @@ use plumb_index::pages::{lift_named_sites, place_pages, Page, PageSearcher, Plac
 use plumb_index::{Hit, Meaning, SearchOptions, Searcher};
 use tracing::info;
 
-use crate::cli::EvalArgs;
+use crate::cli::{EvalArgs, Half};
 use crate::meaning::MeaningIndex;
 
 /// One query of a queries file.
@@ -68,6 +68,32 @@ pub fn parse_queries(text: &str) -> Result<Vec<EvalQuery>> {
         });
     }
     Ok(queries)
+}
+
+/// The half of a queries file `query` is in. A query's half depends on its
+/// words alone (lowercased, spaces collapsed), not on its line or file, so
+/// adding queries never moves one from half to half, and a query asked in
+/// two files is in the same half of both.
+pub fn half_of(query: &str) -> Half {
+    // FNV-1a and a final mix (MurmurHash3's), which never change between
+    // Rust versions as std's hasher may.
+    let words = query.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut hash = words
+        .to_lowercase()
+        .bytes()
+        .fold(0xcbf2_9ce4_8422_2325u64, |h, b| {
+            (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3)
+        });
+    hash ^= hash >> 33;
+    hash = hash.wrapping_mul(0xff51_afd7_ed55_8ccd);
+    hash ^= hash >> 33;
+    hash = hash.wrapping_mul(0xc4ce_b9fe_1a85_ec53);
+    hash ^= hash >> 33;
+    if hash & 1 == 0 {
+        Half::Tune
+    } else {
+        Half::HeldOut
+    }
 }
 
 fn normalize_domain(domain: &str) -> String {
@@ -164,6 +190,10 @@ pub fn run(args: EvalArgs) -> Result<()> {
         .with_context(|| format!("reading {}", args.queries.display()))?;
     let queries =
         parse_queries(&text).with_context(|| format!("parsing {}", args.queries.display()))?;
+    let queries: Vec<EvalQuery> = queries
+        .into_iter()
+        .filter(|q| args.half.is_none_or(|half| half_of(&q.query) == half))
+        .collect();
     if queries.is_empty() {
         bail!("{} has no queries", args.queries.display());
     }
@@ -463,9 +493,10 @@ fn format_totals(m: &Metrics, limit: usize) -> String {
 /// github.tsv.gz and github-new.tsv.gz are repositories,
 /// wikipedia-en-old.tsv.gz English Wikipedia; any other is English
 /// Wikipedia.
-fn set_of_file(name: &str) -> String {
+pub(crate) fn set_of_file(name: &str) -> String {
     use plumb_index::pages::{
-        BOOKS_SET, GITHUB_SET, PAPERS_SET, STACKEXCHANGE_SET, STACKOVERFLOW_SET,
+        BOOKS_SET, GITHUB_SET, PACKAGES_SET, PAPERS_SET, PODCASTS_SET, STACKEXCHANGE_SET,
+        STACKOVERFLOW_SET, WIKIDATA_SET,
     };
     let stem = name.split('.').next().unwrap_or("");
     if let Some(set) = [
@@ -474,6 +505,9 @@ fn set_of_file(name: &str) -> String {
         STACKEXCHANGE_SET,
         BOOKS_SET,
         PAPERS_SET,
+        PACKAGES_SET,
+        PODCASTS_SET,
+        WIKIDATA_SET,
     ]
     .into_iter()
     .find(|set| stem.starts_with(set))
@@ -490,7 +524,8 @@ fn set_of_file(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_expected, parse_queries, rank_of, set_of_file};
+    use super::{half_of, is_expected, parse_queries, rank_of, set_of_file};
+    use crate::cli::Half;
 
     #[test]
     fn sets_come_from_file_names() {
@@ -499,6 +534,8 @@ mod tests {
         assert_eq!(set_of_file("stackoverflow.tsv.gz"), "stackoverflow");
         assert_eq!(set_of_file("stackexchange.tsv.gz"), "stackexchange");
         assert_eq!(set_of_file("books.tsv"), "books");
+        assert_eq!(set_of_file("packages.tsv.gz"), "packages");
+        assert_eq!(set_of_file("podcasts.tsv.gz"), "podcasts");
         assert_eq!(set_of_file("wikipedia-de.tsv.gz"), "wikipedia-de");
         assert_eq!(set_of_file("wikipedia-en-before157.tsv.gz"), "wikipedia-en");
         assert_eq!(set_of_file("articles.tsv.gz"), "wikipedia-en");
@@ -676,33 +713,83 @@ mod tests {
         assert!(close(all_missed.mrr, 0.0) && close(all_missed.top3_rate(), 0.0));
     }
 
-    /// The query lists in the repository parse, and every expected domain is
-    /// written as the registrable domain that hits are keyed by.
+    #[test]
+    fn halves_depend_on_the_words_alone() {
+        // Fixed for good: tuning runs on other machines rely on them.
+        assert_eq!(half_of("chase"), Half::Tune);
+        assert_eq!(half_of("paypal"), Half::HeldOut);
+        assert_eq!(half_of("marie curie"), Half::Tune);
+        assert_eq!(half_of("  Marie   CURIE "), half_of("marie curie"));
+        let halves: Vec<Half> = (0..1000).map(|i| half_of(&format!("query {i}"))).collect();
+        let tune = halves.iter().filter(|h| **h == Half::Tune).count();
+        assert!(
+            (400..=600).contains(&tune),
+            "{tune} of 1000 in the tune half"
+        );
+    }
+
+    /// Every queries file in eval/ parses, has no query twice, and writes
+    /// each expected answer as hits are keyed: a registrable domain, or a
+    /// page's https address. Both halves of each file have queries.
     #[test]
     fn repository_query_files_are_valid() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        for file in [
-            "fixtures/brand_queries.tsv",
-            "eval/brand_queries.tsv",
-            "eval/ai_queries.tsv",
-        ] {
-            let text = std::fs::read_to_string(root.join(file)).unwrap();
-            let queries = parse_queries(&text).unwrap();
+        let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(root.join("eval"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|e| e == "tsv"))
+            .collect();
+        files.sort();
+        assert!(files.len() >= 11, "{files:?}");
+        files.push(root.join("fixtures/brand_queries.tsv"));
+        for path in files {
+            let file = path.display();
+            let text = std::fs::read_to_string(&path).unwrap();
+            let queries = parse_queries(&text).unwrap_or_else(|err| panic!("{file}: {err:#}"));
             assert!(
-                queries.len() >= 40,
+                queries.len() >= 40 || path.ends_with("book_queries.tsv"),
                 "{file}: only {} queries",
                 queries.len()
             );
+            let mut seen = std::collections::HashSet::new();
+            for q in &queries {
+                let words = q.query.split_whitespace().collect::<Vec<_>>().join(" ");
+                assert!(
+                    seen.insert(words.to_lowercase()),
+                    "{file}: {:?} twice",
+                    q.query
+                );
+            }
+            let held_out = queries
+                .iter()
+                .filter(|q| half_of(&q.query) == Half::HeldOut)
+                .count();
+            assert!(
+                held_out * 4 >= queries.len() && held_out * 4 <= queries.len() * 3,
+                "{file}: {held_out} of {} held out",
+                queries.len()
+            );
+            let facts = path.ends_with("fact_queries.tsv");
             for line in text.lines().filter(|l| !l.trim_start().starts_with('#')) {
-                let Some((_, domains)) = line.split_once('\t') else {
+                let Some((_, answers)) = line.split_once('\t') else {
                     continue;
                 };
-                for domain in domains.split(',') {
-                    assert_eq!(
-                        registrable_domain(domain).as_deref(),
-                        Some(domain),
-                        "{file}: {line:?}"
-                    );
+                for answer in answers.split(',') {
+                    if facts {
+                        assert_eq!(answer, answer.trim().to_lowercase(), "{file}: {line:?}");
+                    } else if answer.contains('/') {
+                        let url = url::Url::parse(answer.trim_end_matches('*'));
+                        assert!(
+                            url.is_ok_and(|u| u.scheme() == "https" && u.path() != "/"),
+                            "{file}: {line:?}"
+                        );
+                    } else {
+                        assert_eq!(
+                            registrable_domain(answer).as_deref(),
+                            Some(answer),
+                            "{file}: {line:?}"
+                        );
+                    }
                 }
             }
         }
