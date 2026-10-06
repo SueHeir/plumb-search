@@ -220,3 +220,191 @@ naver	naver.com
 flipkart	flipkart.com
 mercado libre	mercadolibre.com,mercadolibre.com.mx,mercadolivre.com.br
 rakuten	rakuten.com,rakuten.co.jp
+
+# Added 2026-10-06 to make the suite bigger.
+# More language and tool docs
+rust std docs	rust-lang.org
+the rust book	rust-lang.org
+cargo book	rust-lang.org
+rust playground	rust-lang.org
+python asyncio docs	python.org
+pip documentation	pypa.io
+uv python package manager	astral.sh
+ruff linter	astral.sh
+poetry python	python-poetry.org
+conda	conda.io,anaconda.com
+jupyter	jupyter.org
+matplotlib docs	matplotlib.org
+scipy	scipy.org
+polars dataframe	pola.rs
+go playground	go.dev,golang.org
+zig language	ziglang.org
+elixir	elixir-lang.org
+haskell	haskell.org
+scala	scala-lang.org
+julia language	julialang.org
+r project	r-project.org
+lua	lua.org
+perl	perl.org
+dart	dart.dev
+flutter	flutter.dev
+react native	reactnative.dev
+cppreference	cppreference.com
+cmake	cmake.org
+gnu make manual	gnu.org
+bash reference manual	gnu.org
+vim	vim.org
+neovim	neovim.io
+zsh	zsh.org
+oh my zsh	ohmyz.sh
+
+# Web frameworks and tooling
+express.js	expressjs.com
+nestjs	nestjs.com
+vite	vite.dev,vitejs.dev
+eslint	eslint.org
+prettier	prettier.io
+jest	jestjs.io
+playwright	playwright.dev
+cypress	cypress.io
+selenium	selenium.dev
+astro	astro.build
+remix	remix.run
+nuxt	nuxt.com
+solidjs	solidjs.com
+htmx	htmx.org
+jquery	jquery.com
+bootstrap css	getbootstrap.com
+three.js	threejs.org
+d3.js	d3js.org
+electron	electronjs.org
+graphql	graphql.org
+grpc	grpc.io
+protocol buffers	protobuf.dev
+prisma orm	prisma.io
+sqlalchemy	sqlalchemy.org
+supabase	supabase.com
+
+# Servers, ops and homelab
+ansible	ansible.com
+helm	helm.sh
+prometheus	prometheus.io
+grafana	grafana.com
+elasticsearch	elastic.co
+apache kafka	apache.org
+rabbitmq	rabbitmq.com
+caddy server	caddyserver.com
+traefik	traefik.io
+podman	podman.io
+proxmox	proxmox.com
+truenas	truenas.com
+home assistant	home-assistant.io
+jellyfin	jellyfin.org
+nextcloud	nextcloud.com
+syncthing	syncthing.net
+tailscale	tailscale.com
+wireguard	wireguard.com
+pi-hole	pi-hole.net
+openssl	openssl.org
+fly.io	fly.io
+render hosting	render.com
+hetzner	hetzner.com
+linode	linode.com,akamai.com
+ovhcloud	ovhcloud.com
+backblaze b2	backblaze.com
+cloudflare workers docs	cloudflare.com
+aws s3 documentation	amazon.com
+aws lambda	amazon.com
+github actions docs	github.com
+gitlab ci docs	gitlab.com
+iana	iana.org
+icann	icann.org
+
+# AI and local models
+lm studio	lmstudio.ai
+open webui	openwebui.com
+searxng	searxng.org
+vllm	vllm.ai
+qdrant	qdrant.tech
+pinecone	pinecone.io
+weaviate	weaviate.io
+chroma vector database	trychroma.com
+openrouter	openrouter.ai
+groq	groq.com
+together ai	together.ai
+replicate	replicate.com
+anthropic api docs	anthropic.com,claude.com
+openai platform	openai.com
+google ai studio	google.com
+azure openai	microsoft.com,azure.com
+stability ai	stability.ai
+
+# APIs and services agents call
+plaid api	plaid.com
+sendgrid	sendgrid.com
+mailgun	mailgun.com
+auth0	auth0.com
+okta	okta.com
+mapbox	mapbox.com
+google maps api	google.com
+openweathermap api	openweathermap.org
+open-meteo	open-meteo.com
+wikipedia api	wikipedia.org,mediawiki.org
+wikidata query service	wikidata.org
+openalex	openalex.org
+google scholar	google.com
+jstor	jstor.org
+zotero	zotero.org
+overleaf	overleaf.com
+latex project	latex-project.org
+desmos	desmos.com
+matlab	mathworks.com
+w3schools	w3schools.com
+geeksforgeeks	geeksforgeeks.org
+leetcode	leetcode.com
+devdocs	devdocs.io
+codepen	codepen.io
+jsfiddle	jsfiddle.net
+replit	replit.com
+codesandbox	codesandbox.io
+compiler explorer	godbolt.org
+unsplash	unsplash.com
+pexels	pexels.com
+font awesome	fontawesome.com
+shields.io	shields.io
+
+# Sign-in, downloads and account pages
+wells fargo sign on	wellsfargo.com
+capital one login	capitalone.com
+amex login	americanexpress.com
+discover login	discover.com
+venmo login	venmo.com
+facebook login	facebook.com
+instagram login	instagram.com
+linkedin login	linkedin.com
+reddit login	reddit.com
+yahoo mail	yahoo.com
+aol mail	aol.com
+proton mail login	proton.me
+dropbox login	dropbox.com
+netflix login	netflix.com
+hulu login	hulu.com
+spotify web player	spotify.com
+canvas student login	instructure.com
+zoom download	zoom.us,zoom.com
+chrome download	google.com
+firefox download	mozilla.org,firefox.com
+python download	python.org
+node.js download	nodejs.org
+vs code download	visualstudio.com
+docker desktop download	docker.com
+steam download	steampowered.com
+amazon order tracking	amazon.com
+dhl tracking	dhl.com
+usps change of address	usps.com
+irs payment	irs.gov
+irs forms	irs.gov
+my social security login	ssa.gov
+medicare login	medicare.gov
+va benefits	va.gov
+passport renewal	state.gov

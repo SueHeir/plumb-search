@@ -30,6 +30,7 @@ pub mod about;
 pub mod cli;
 pub mod country;
 pub mod eval;
+pub mod eval_labels;
 pub mod findings;
 pub mod history;
 pub mod learn;
@@ -104,6 +105,7 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::Search(args) => search::run_search(args),
         Command::Serve(args) => web::run(args),
         Command::Eval(args) => eval::run(args),
+        Command::CheckLabels(args) => eval_labels::run(args),
         Command::Embed(args) => meaning::run_embed(args),
         Command::FetchText(args) => terms::run_fetch_text(args),
         Command::Terms(args) => terms::run_terms(args),

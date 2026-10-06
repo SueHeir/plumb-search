@@ -52,6 +52,8 @@ pub enum Command {
     Serve(ServeArgs),
     /// Check how often the official site ranks first for a list of queries.
     Eval(EvalArgs),
+    /// Check that the pages a queries file expects are in the page sets.
+    CheckLabels(crate::eval_labels::CheckLabelsArgs),
     /// Make a vector of each site's text with a small embedding model
     /// (downloaded on first use), so searches can find sites by meaning.
     Embed(EmbedArgs),
@@ -960,8 +962,22 @@ pub struct EvalArgs {
     /// How many of each page set's most read pages to keep.
     #[arg(long, value_name = "N", default_value_t = usize::MAX, hide_default_value = true)]
     pub pages_top: usize,
+    /// Measure only one half of the queries: `tune` to try ranking changes
+    /// on, `held-out` to check them on afterwards. Which half a query is in
+    /// depends on its words alone (see eval/README.md) [default: both].
+    #[arg(long, value_name = "HALF")]
+    pub half: Option<Half>,
     #[command(flatten)]
     pub meaning: MeaningArgs,
+}
+
+/// A half of a queries file, for `plumb eval --half`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum Half {
+    /// The queries ranking changes are tried and tuned on.
+    Tune,
+    /// The queries kept back to check a tuned ranking on.
+    HeldOut,
 }
 
 fn parse_rank_config(s: &str) -> Result<plumb_index::RankConfig, String> {

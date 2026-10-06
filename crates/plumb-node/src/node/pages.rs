@@ -57,6 +57,7 @@ pub(super) fn run(inner: Arc<Inner>) {
     let mut fetch_failed: HashMap<&'static str, Instant> = HashMap::new();
     let mut places_failed: Option<(String, Instant)> = None;
     let mut kept_whole = HashSet::new();
+    remove_stale_parts(&inner.paths.data);
     while !inner.stopping() {
         let mut settings = inner.settings();
         if inner.config.blackhole {
@@ -175,24 +176,32 @@ fn fetch_if_needed(
         Some(_) => return Ok(()),
     };
     let runtime = tokio::runtime::Handle::current();
-    // Is there a node to take it from, with a file worth taking?
+    // Is there a node to take it from, with a file worth taking? Nodes
+    // without one are passed over for the next trusted node.
+    let mut lacking = Vec::new();
     let first = loop {
-        match runtime.block_on(net.pages_chunk(set.id, 0, MAX_PAGES_CHUNK))? {
-            None => {
+        match runtime.block_on(net.pages_chunk(set.id, 0, MAX_PAGES_CHUNK, None, &lacking))? {
+            None if lacking.is_empty() => {
                 debug!("page set {}: no trusted node serves page sets", set.id);
                 return Ok(());
             }
+            None => bail!(
+                "no trusted node has a {} file ({} asked)",
+                set.id,
+                lacking.len()
+            ),
             Some(chunk) if chunk.busy => {
                 if !wait(inner, BUSY_WAIT) {
                     return Ok(());
                 }
             }
+            Some(chunk) if chunk.size == 0 => {
+                debug!("page set {}: {} has no file of it", set.id, chunk.peer);
+                lacking.push(chunk.peer);
+            }
             Some(chunk) => break chunk,
         }
     };
-    if first.size == 0 {
-        bail!("the trusted node {} has no {} file", first.peer, set.id);
-    }
     if let Some(n) = notes {
         if reason == "a month old" && first.modified <= n.source_modified {
             // Nothing newer; look again in a month.
@@ -227,8 +236,52 @@ fn fetch_if_needed(
     let mut part = file.as_os_str().to_owned();
     part.push(".part");
     let part = std::path::PathBuf::from(part);
-    let mut cutter = SetFileCutter::create(&part, pages)?;
-    if near_key != 0 {
+    let taken = take(inner, net, set, &part, first, pages, near);
+    if !matches!(taken, Ok(Some(_))) {
+        // Stopped, or failed: the part is of no use to a later try.
+        let _ = std::fs::remove_file(&part);
+    }
+    let Some((lines, complete, modified, offset)) = taken? else {
+        return Ok(());
+    };
+    std::fs::rename(&part, &file)
+        .with_context(|| format!("renaming {} to {}", part.display(), file.display()))?;
+    write_notes(
+        &file,
+        &SetFileNotes {
+            lines,
+            complete,
+            source_modified: modified,
+            fetched_at: now,
+            near: if complete { 0 } else { near_key },
+        },
+    )?;
+    inner.journal.info(format!(
+        "{}: {} pages taken ({} MB downloaded)",
+        set.name,
+        thousands(lines),
+        offset.div_ceil(1_000_000)
+    ));
+    Ok(())
+}
+
+/// Downloads the file of `set` into `part`, from the node that sent its
+/// `first` piece; every later piece is asked of that same node. Gives the
+/// pages written, whether the whole file was, the file's time at that node
+/// and the bytes downloaded; `None` when the node stopped meanwhile.
+fn take(
+    inner: &Inner,
+    net: &NetHandle,
+    set: &SetInfo,
+    part: &std::path::Path,
+    first: plumb_net::pages::PagesChunk,
+    pages: u64,
+    near: &[(f64, f64)],
+) -> Result<Option<(u64, bool, u64, u64)>> {
+    let runtime = tokio::runtime::Handle::current();
+    let from = first.peer;
+    let mut cutter = SetFileCutter::create(part, pages)?;
+    if !near.is_empty() {
         cutter = cutter.keep_past(crate::places::near_lines(near.to_vec()));
     }
     let mut decoder = flate2::write::MultiGzDecoder::new(cutter);
@@ -247,20 +300,26 @@ fn fetch_if_needed(
             break;
         }
         if inner.stopping() {
-            let _ = std::fs::remove_file(&part);
-            return Ok(());
+            return Ok(None);
         }
-        let size = chunk.size;
+        let (size, modified) = (chunk.size, chunk.modified);
         chunk = loop {
-            match runtime.block_on(net.pages_chunk(set.id, offset, MAX_PAGES_CHUNK))? {
-                None => bail!("the trusted node went away"),
+            match runtime.block_on(net.pages_chunk(
+                set.id,
+                offset,
+                MAX_PAGES_CHUNK,
+                Some(from),
+                &[],
+            ))? {
+                None => bail!("{from} went away while {} was taken", set.id),
                 Some(next) if next.busy => {
                     if !wait(inner, BUSY_WAIT) {
-                        let _ = std::fs::remove_file(&part);
-                        return Ok(());
+                        return Ok(None);
                     }
                 }
-                Some(next) if next.size != size => bail!("the file changed while it was taken"),
+                Some(next) if next.size != size || next.modified != modified => {
+                    bail!("{from} got a new {} file while it was taken", set.id)
+                }
                 Some(next) => break next,
             }
         };
@@ -270,25 +329,24 @@ fn fetch_if_needed(
     let lines = cutter.pages();
     cutter.finish()?;
     drop(decoder);
-    std::fs::rename(&part, &file)
-        .with_context(|| format!("renaming {} to {}", part.display(), file.display()))?;
-    write_notes(
-        &file,
-        &SetFileNotes {
-            lines,
-            complete,
-            source_modified: chunk.modified,
-            fetched_at: now,
-            near: if complete { 0 } else { near_key },
-        },
-    )?;
-    inner.journal.info(format!(
-        "{}: {} pages taken ({} MB downloaded)",
-        set.name,
-        thousands(lines),
-        offset.div_ceil(1_000_000)
-    ));
-    Ok(())
+    Ok(Some((lines, complete, chunk.modified, offset)))
+}
+
+/// Removes the `.part` files a download left when the node stopped hard
+/// (a crash, a kill): downloads run only in this job, so none is under
+/// way when it starts.
+fn remove_stale_parts(data: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(crate::pages::sets_dir(data)) else {
+        return;
+    };
+    for path in entries.flatten().map(|e| e.path()) {
+        if path.extension().is_some_and(|e| e == "part") {
+            match std::fs::remove_file(&path) {
+                Ok(()) => info!("removed {}, left by an unfinished download", path.display()),
+                Err(err) => warn!("could not remove {}: {err}", path.display()),
+            }
+        }
+    }
 }
 
 /// Cuts the file of `set` to its first `pages` pages when it holds more:
@@ -540,5 +598,21 @@ mod tests {
         )
         .unwrap();
         assert!(!is_own_file(&file), "taken from another node");
+    }
+
+    #[test]
+    fn stale_parts_are_removed_and_files_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let sets = crate::pages::sets_dir(dir.path());
+        std::fs::create_dir_all(&sets).unwrap();
+        let part = sets.join("stackexchange.tsv.gz.part");
+        let file = sets.join("stackexchange.tsv.gz");
+        std::fs::write(&part, b"half").unwrap();
+        std::fs::write(&file, b"whole").unwrap();
+        remove_stale_parts(dir.path());
+        assert!(!part.exists());
+        assert!(file.exists());
+        // No sets folder yet: nothing to do.
+        remove_stale_parts(&dir.path().join("none"));
     }
 }

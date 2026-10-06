@@ -439,6 +439,8 @@ enum Command {
     },
     Pages {
         request: PagesRequest,
+        peer: Option<PeerId>,
+        skip: Vec<PeerId>,
         reply: PagesReply,
     },
     Profile {
@@ -770,13 +772,18 @@ impl NetHandle {
     }
 
     /// Asks a connected node this node trusts for `len` bytes from
-    /// `offset` of its file of the page set `set` (see [`crate::pages`]).
-    /// `None` when no trusted node that serves page sets is connected.
+    /// `offset` of its file of the page set `set` (see [`crate::pages`]):
+    /// `peer` when given (the node a download started from, so its pieces
+    /// all come from one file), else any but those in `skip` (nodes that
+    /// said they have no file of it). `None` when no such trusted node that
+    /// serves page sets is connected.
     pub async fn pages_chunk(
         &self,
         set: &str,
         offset: u64,
         len: u32,
+        peer: Option<PeerId>,
+        skip: &[PeerId],
     ) -> Result<Option<PagesChunk>> {
         let (reply, answer) = oneshot::channel();
         self.send(Command::Pages {
@@ -785,6 +792,8 @@ impl NetHandle {
                 offset,
                 len,
             },
+            peer,
+            skip: skip.to_vec(),
             reply,
         })?;
         answer.await.context("the network task stopped")?
@@ -1824,8 +1833,17 @@ impl Task {
                     .send_request(&peer, FillRequest { from, count, all });
                 self.fill_asking.insert(id, (all, reply));
             }
-            Command::Pages { request, reply } => {
-                let Some(peer) = self.pages_peers.iter().next().copied() else {
+            Command::Pages {
+                request,
+                peer,
+                skip,
+                reply,
+            } => {
+                let peer = match peer {
+                    Some(peer) => Some(peer).filter(|p| self.pages_peers.contains(p)),
+                    None => self.pages_peers.iter().find(|p| !skip.contains(p)).copied(),
+                };
+                let Some(peer) = peer else {
                     let _ = reply.send(Ok(None));
                     return;
                 };
