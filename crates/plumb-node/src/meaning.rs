@@ -17,7 +17,7 @@ use plumb_index::Meaning;
 use tracing::{info, warn};
 
 use crate::block_on;
-use crate::cli::{EmbedArgs, MeaningArgs};
+use crate::cli::{EmbedArgs, MeaningArgs, QueryInstruction};
 use crate::records::load_records;
 
 /// Sites nearest a query in meaning: closeness is spread over them, and
@@ -34,7 +34,11 @@ const REPORT_EVERY: usize = 1_000;
 pub struct MeaningIndex {
     embedder: Embedder,
     vectors: RwLock<Vectors>,
+    instruction: QueryInstruction,
 }
+
+/// What the model was trained to read before a search query.
+const QUERY_INSTRUCTION: &str = "Represent this sentence for searching relevant passages: ";
 
 impl MeaningIndex {
     /// Loads the model in `model_dir` and the vectors in `vectors`, which
@@ -56,13 +60,17 @@ impl MeaningIndex {
         MeaningIndex {
             embedder,
             vectors: RwLock::new(vectors),
+            instruction: QueryInstruction::Off,
         }
     }
 
     /// Opens the model and vectors `args` name, if it names them.
     pub fn from_args(args: &MeaningArgs) -> Result<Option<Self>> {
         match (&args.model, &args.vectors) {
-            (Some(model), Some(vectors)) => Self::open(model, vectors).map(Some),
+            (Some(model), Some(vectors)) => Self::open(model, vectors).map(|mut meaning| {
+                meaning.instruction = args.query_instruction;
+                Some(meaning)
+            }),
             _ => Ok(None),
         }
     }
@@ -91,12 +99,22 @@ impl MeaningIndex {
     /// How close `query` is in meaning to each site; `None` when the query
     /// cannot be embedded.
     pub fn query(&self, query: &str) -> Option<QueryMeaning<'_>> {
-        match self.embedder.embed(query) {
-            Ok(vector) => Some(QueryMeaning::new(self.read(), vector)),
+        let embed = |text: &str| match self.embedder.embed(text) {
+            Ok(vector) => Some(vector),
             Err(_) => {
                 // Embedding errors may include input text too.
                 warn!("could not embed a search query; searching by words only");
                 None
+            }
+        };
+        let instructed = || embed(&format!("{QUERY_INSTRUCTION}{query}"));
+        let vectors = self.read();
+        match self.instruction {
+            QueryInstruction::Off => Some(QueryMeaning::new(vectors, embed(query)?, None)),
+            QueryInstruction::On => Some(QueryMeaning::new(vectors, instructed()?, None)),
+            QueryInstruction::Nearest => {
+                let near = instructed()?;
+                Some(QueryMeaning::new(vectors, embed(query)?, Some(near)))
             }
         }
     }
@@ -143,7 +161,9 @@ pub struct QueryMeaning<'a> {
 }
 
 impl<'a> QueryMeaning<'a> {
-    fn new(vectors: RwLockReadGuard<'a, Vectors>, vector: Vec<i8>) -> Self {
+    /// Closeness to `vector`; the nearest sites are those nearest `near`
+    /// when given, else `vector`.
+    fn new(vectors: RwLockReadGuard<'a, Vectors>, vector: Vec<i8>, near: Option<Vec<i8>>) -> Self {
         let found = vectors.nearest(&vector, NEAREST);
         let best = found.first().map_or(0.0, |&(_, cosine)| cosine);
         let floor = match found.last() {
@@ -151,10 +171,13 @@ impl<'a> QueryMeaning<'a> {
             Some(&(_, cosine)) if found.len() == NEAREST => cosine,
             _ => 0.0,
         };
-        let nearest = found
-            .into_iter()
-            .map(|(domain, _)| domain.to_string())
-            .collect();
+        let nearest = match near {
+            Some(near) => vectors.nearest(&near, NEAREST),
+            None => found,
+        }
+        .into_iter()
+        .map(|(domain, _)| domain.to_string())
+        .collect();
         QueryMeaning {
             vectors,
             vector,

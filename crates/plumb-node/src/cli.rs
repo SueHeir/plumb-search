@@ -266,6 +266,24 @@ pub struct MeaningArgs {
     /// Directory of the model that made the vectors.
     #[arg(long, value_name = "DIR", requires = "vectors")]
     pub model: Option<PathBuf>,
+    /// Whether searches are embedded after the model's instruction for
+    /// search queries ([`QueryInstruction`]); for trying it out.
+    #[arg(long, value_enum, default_value_t = QueryInstruction::Off, hide = true)]
+    pub query_instruction: QueryInstruction,
+}
+
+/// How a search is embedded: as it is, or after the instruction the model
+/// was trained to read before a search ("Represent this sentence for
+/// searching relevant passages: "), which sites' texts are not.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
+pub enum QueryInstruction {
+    /// As it is, for the nearest sites and their closeness.
+    #[default]
+    Off,
+    /// After the instruction, for both.
+    On,
+    /// After the instruction for the nearest sites; as it is for closeness.
+    Nearest,
 }
 
 #[derive(Debug, Args)]
