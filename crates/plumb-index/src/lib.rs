@@ -1229,6 +1229,39 @@ impl Searcher {
                 .then_with(|| a.tie_break.cmp(&b.tie_break))
         });
 
+        // Copies of the site the query names on other top-level domains
+        // (gmail.ru, gmail.hu for "gmail"; paypal.biz for "paypal"): never
+        // crawled, nothing says what they are, little linked. They go
+        // after every other site rather than crowding the first page.
+        // Country sites of the brand are kept where they rank: they are
+        // well known (amazon.de) or crawled (toyota.jp).
+        if let Some(top) = ranked
+            .first()
+            .filter(|top| top.named && top.link_score >= WELL_KNOWN_LINK_SCORE)
+        {
+            let top_label = columns[top.addr.segment_ord as usize]
+                .domain(top.addr.doc_id)
+                .and_then(|domain| domain.split('.').next().map(str::to_owned));
+            if let Some(top_label) = top_label {
+                let mut copies = HashSet::new();
+                for r in ranked.iter().skip(1) {
+                    if r.link_score >= WELL_KNOWN_LINK_SCORE {
+                        continue;
+                    }
+                    let same_label = columns[r.addr.segment_ord as usize]
+                        .domain(r.addr.doc_id)
+                        .is_some_and(|domain| domain.split('.').next() == Some(&top_label));
+                    if same_label && !self.says_what_it_is(&searcher, r.addr)? {
+                        copies.insert(r.addr);
+                    }
+                }
+                if !copies.is_empty() {
+                    // Stable: the copies keep their order among themselves.
+                    ranked.sort_by_key(|r| copies.contains(&r.addr));
+                }
+            }
+        }
+
         // The best-ranked site named by the query's first words, with words
         // left over to search it for.
         let named_site = ranked.iter().find_map(|r| {
@@ -1252,6 +1285,24 @@ impl Searcher {
             spelling: None,
         };
         Ok((results, named))
+    }
+
+    /// Whether anything of the site's own says what it is: a title, a
+    /// description or Wikidata's words.
+    fn says_what_it_is(&self, searcher: &tantivy::Searcher, addr: DocAddress) -> Result<bool> {
+        let segment = searcher.segment_reader(addr.segment_ord);
+        for field in [
+            self.fields.title,
+            self.fields.description,
+            self.fields.about,
+        ] {
+            if let Some(norms) = segment.fieldnorms_readers().get_field(field)? {
+                if norms.fieldnorm(addr.doc_id) > 0 {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
     }
 
     /// A link into the search of the site `domain` for `terms`, if the
@@ -2964,6 +3015,57 @@ mod tests {
         assert_eq!(hits[0].domain, "youtube.com", "{:?}", domains(&hits));
         // With no other site named, the bare name is the answer.
         assert_eq!(top(&searcher, "you tubemusic"), "you-tubemusic.com");
+    }
+
+    #[test]
+    fn copies_of_the_named_site_on_other_domains_come_after_the_rest() {
+        let records = [
+            site(
+                "gmail.com",
+                None,
+                None,
+                &["Gmail"],
+                &[("gmail", 900)],
+                popular(20, 5_000),
+            ),
+            site(
+                "gmail.ru",
+                None,
+                None,
+                &[],
+                &[("gmail", 3)],
+                obscure(9_000, 30),
+            ),
+            site("gmail.hu", None, None, &[], &[], obscure(12_000, 20)),
+            site(
+                "gmail.jp",
+                Some("Gmail Japan fans"),
+                Some("Tips for Gmail users in Japan."),
+                &[],
+                &[],
+                obscure(15_000, 10),
+            ),
+            site(
+                "gmailtips.net",
+                Some("Gmail tips and tricks"),
+                Some("How to use Gmail: filters, labels and shortcuts."),
+                &[],
+                &[("gmail tips", 2)],
+                obscure(200_000, 2),
+            ),
+        ];
+        let (_dir, searcher) = build(&records);
+        let hits = searcher.search("gmail", 10).unwrap();
+        let order = domains(&hits);
+        assert_eq!(order[0], "gmail.com", "{order:?}");
+        let at = |d: &str| order.iter().position(|o| *o == d).unwrap();
+        // Copies with nothing to say go last; a crawled one keeps its place.
+        assert!(at("gmail.ru") > at("gmailtips.net"), "{order:?}");
+        assert!(at("gmail.hu") > at("gmailtips.net"), "{order:?}");
+        assert!(at("gmail.jp") < at("gmail.ru"), "{order:?}");
+        // Typed, the copy is what was asked for.
+        let hits = searcher.search("gmail.ru", 10).unwrap();
+        assert_eq!(hits[0].domain, "gmail.ru", "{:?}", domains(&hits));
     }
 
     #[test]
