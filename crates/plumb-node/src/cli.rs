@@ -141,6 +141,12 @@ pub struct LinkRankArgs {
     /// lines.
     #[arg(long, value_name = "PATH")]
     pub out: Option<PathBuf>,
+    /// Also write a copy of the records here in which each site's
+    /// `pagerank_rank` is its place by links when that is better, to index
+    /// and evaluate a node that ranks by links. The records file is left
+    /// as it is.
+    #[arg(long, value_name = "PATH")]
+    pub apply: Option<PathBuf>,
     /// How many of the best sites to name.
     #[arg(long, value_name = "N", default_value_t = 30)]
     pub show: usize,
