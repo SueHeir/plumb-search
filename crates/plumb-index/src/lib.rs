@@ -1258,6 +1258,7 @@ impl Searcher {
                 link_score,
                 country,
                 named: name.typed || name.words() >= query.len,
+                label_names_query: query.len >= 2 && name.label >= query.len,
                 tie_break: (addr.segment_ord, domain_ord),
             });
         }
@@ -1386,7 +1387,9 @@ impl Searcher {
     /// [`UNTITLED_LOOKAHEAD`] past the first result: a bare `netflix.net`
     /// tells a person nothing they can judge it by, even when it has the
     /// query's name: netflix.net for "netflix". The first result keeps its
-    /// place, title or not.
+    /// place, title or not, and so does a site whose label is the whole
+    /// query of two or more words: awesome-python.com for "awesome python"
+    /// is what was asked for, titled or not.
     fn untitled_last(
         &self,
         searcher: &tantivy::Searcher,
@@ -1401,10 +1404,11 @@ impl Searcher {
         let mut titled = Vec::with_capacity(rest.len() + window);
         let mut bare = Vec::new();
         for (i, site) in ranked.into_iter().enumerate() {
-            let untitled = i > 0 && site.link_score < WELL_KNOWN_LINK_SCORE && {
-                let doc: TantivyDocument = searcher.doc(site.addr)?;
-                doc.get_first(self.fields.title).is_none()
-            };
+            let untitled =
+                i > 0 && !site.label_names_query && site.link_score < WELL_KNOWN_LINK_SCORE && {
+                    let doc: TantivyDocument = searcher.doc(site.addr)?;
+                    doc.get_first(self.fields.title).is_none()
+                };
             if untitled {
                 bare.push(site);
             } else {
@@ -1696,6 +1700,9 @@ struct Ranked {
     link_score: f32,
     country: Option<String>,
     named: bool,
+    /// The domain's label is the whole query of two or more words
+    /// (awesome-python.com for "awesome python").
+    label_names_query: bool,
     tie_break: (u32, u64),
 }
 
@@ -2409,6 +2416,46 @@ mod tests {
         // Bare domains still come back when nothing titled is left.
         let hits = searcher.search_with("netflix", 2, &keep_all()).unwrap();
         assert_eq!(domains(&hits), ["netflix.com", "netflixfans.org"]);
+    }
+
+    #[test]
+    fn a_site_named_by_the_whole_query_keeps_its_place_without_a_title() {
+        let mut records = vec![
+            site(
+                "awesome.com",
+                Some("Awesome"),
+                None,
+                &["Awesome"],
+                &[],
+                popular(500, 2_000),
+            ),
+            // Bare: never crawled, and less linked than awesome.com, which
+            // the query names by its first word.
+            site(
+                "awesome-python.com",
+                None,
+                None,
+                &[],
+                &[],
+                obscure(400_000, 3),
+            ),
+        ];
+        for i in 0..30 {
+            records.push(site(
+                &format!("pythontips{i}.org"),
+                Some(&format!("Awesome Python tips {i}")),
+                None,
+                &[],
+                &[],
+                ranked(5_000 + i, 60),
+            ));
+        }
+        let (_dir, searcher) = build(&records);
+        let hits = searcher.search("awesome python", 10).unwrap();
+        let at = domains(&hits)
+            .iter()
+            .position(|d| *d == "awesome-python.com");
+        assert!(at.is_some_and(|at| at < 3), "{:?}", domains(&hits));
     }
 
     fn ranked(tranco_rank: u32, linking_domains: u32) -> Signals {
