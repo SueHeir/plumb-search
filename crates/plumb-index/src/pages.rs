@@ -21,7 +21,7 @@
 //! How pages and sites are listed together is up to the caller; see
 //! [`PageHit::named`].
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
@@ -638,6 +638,32 @@ fn site_is_titled(domain: &str, title: &str) -> bool {
 pub struct PageIndexStats {
     pub pages: u64,
     pub most_views: u64,
+}
+
+/// How much people look up what each site is: the page views of the
+/// most read Wikipedia article whose official website it is
+/// ([`Page::site`]), as `ln(1 + views) / ln(1 + most views)` against the
+/// most read article of any set of Wikipedia. Sites no article is about
+/// are left out. For [`crate::Searcher::with_demand`].
+pub fn site_demand<'a>(pages: impl IntoIterator<Item = &'a Page>) -> HashMap<String, f32> {
+    let mut views: HashMap<String, u64> = HashMap::new();
+    let mut most = 0;
+    for page in pages {
+        if !page.set.starts_with("wikipedia-") {
+            continue;
+        }
+        most = most.max(page.views);
+        if let Some(site) = &page.site {
+            let seen = views.entry(site.clone()).or_default();
+            *seen = (*seen).max(page.views);
+        }
+    }
+    let scale = (1.0 + most as f64).ln();
+    views
+        .into_iter()
+        .filter(|&(_, views)| views > 0)
+        .map(|(site, views)| (site, ((1.0 + views as f64).ln() / scale) as f32))
+        .collect()
 }
 
 /// Builds the page index of `pages` in `dir`, replacing any there.
@@ -1477,6 +1503,29 @@ mod tests {
             ..Article::default()
         })
         .unwrap()
+    }
+
+    #[test]
+    fn demand_is_the_most_read_article_about_a_site() {
+        let about = |title: &str, views: u64, site: Option<&str>| {
+            let mut page = page(title, views, &[]);
+            page.site = site.map(str::to_string);
+            page
+        };
+        let mut repo = about("delta/delta", 1_000_000, Some("github.com"));
+        repo.set = GITHUB_SET.into();
+        let pages = [
+            about("Delta Air Lines", 99, Some("delta.com")),
+            about("Delta Faucet Company", 9, Some("deltafaucet.com")),
+            about("Delta (letter)", 9_999, None),
+            about("Delta Air Lines destinations", 30, Some("delta.com")),
+            about("Nothing read", 0, Some("unread.com")),
+            repo,
+        ];
+        let demand = site_demand(&pages);
+        assert_eq!(demand.len(), 2);
+        assert!((demand["delta.com"] - 0.5).abs() < 1e-6);
+        assert!((demand["deltafaucet.com"] - 0.25).abs() < 1e-6);
     }
 
     #[test]

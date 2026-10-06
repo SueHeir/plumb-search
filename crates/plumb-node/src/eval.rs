@@ -16,7 +16,11 @@ use std::fmt::Write as _;
 
 use anyhow::{bail, Context, Result};
 use plumb_core::registrable_domain;
-use plumb_index::pages::{lift_named_sites, place_pages, Page, PageSearcher, PlacedPage};
+use std::path::Path;
+
+use plumb_index::pages::{
+    lift_named_sites, place_pages, site_demand, Page, PageSearcher, PlacedPage,
+};
 use plumb_index::{Hit, Meaning, SearchOptions, Searcher};
 use tracing::info;
 
@@ -159,22 +163,94 @@ fn ratio(part: usize, whole: usize) -> f64 {
     }
 }
 
-pub fn run(args: EvalArgs) -> Result<()> {
-    let text = std::fs::read_to_string(&args.queries)
-        .with_context(|| format!("reading {}", args.queries.display()))?;
-    let queries =
-        parse_queries(&text).with_context(|| format!("parsing {}", args.queries.display()))?;
+/// One file of queries, read.
+struct Suite {
+    /// The file's name without its folder and extension (`brand_queries`).
+    name: String,
+    queries: Vec<EvalQuery>,
+}
+
+fn read_suite(path: &Path) -> Result<Suite> {
+    let text =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let queries = parse_queries(&text).with_context(|| format!("parsing {}", path.display()))?;
     if queries.is_empty() {
-        bail!("{} has no queries", args.queries.display());
+        bail!("{} has no queries", path.display());
     }
-    let searcher = Searcher::open(&args.index)
-        .with_context(|| format!("opening the index in {}", args.index.display()))?;
+    let name = path
+        .file_stem()
+        .and_then(|n| n.to_str())
+        .unwrap_or("queries")
+        .to_string();
+    Ok(Suite { name, queries })
+}
+
+/// What every query is searched with.
+struct Setup {
+    searcher: Searcher,
+    meaning: Option<MeaningIndex>,
+    pages: Option<PageSearcher>,
+    /// Holds the page index while it is searched.
+    _pages_dir: tempfile::TempDir,
+}
+
+pub fn run(args: EvalArgs) -> Result<()> {
+    let suites = args
+        .queries
+        .iter()
+        .map(|path| read_suite(path))
+        .collect::<Result<Vec<_>>>()?;
     let mut cfg = args.rank.unwrap_or_default();
     if let Some(alpha) = args.alpha {
         cfg.alpha = alpha;
     }
+    let variants = match &args.sweep {
+        Some(path) => {
+            let text = std::fs::read_to_string(path)
+                .with_context(|| format!("reading {}", path.display()))?;
+            parse_sweep(&text, &cfg).with_context(|| format!("parsing {}", path.display()))?
+        }
+        None => Vec::new(),
+    };
+    let setup = open_setup(&args)?;
+    if variants.is_empty() {
+        let mut low = None;
+        for suite in &suites {
+            if suites.len() > 1 {
+                println!("== {}", suite.name);
+            }
+            info!(
+                "evaluating {} queries against {} sites ({cfg:?})",
+                suite.queries.len(),
+                setup.searcher.num_docs(),
+            );
+            let ranks = evaluate(&args, &setup, &suite.queries, &cfg, true)?;
+            let metrics = Metrics::from_ranks(&ranks, args.limit);
+            print!("{}", format_totals(&metrics, args.limit));
+            if let Some(min) = args.min_top1 {
+                if metrics.top1_rate() < min {
+                    low = Some((suite.name.clone(), metrics.top1_rate()));
+                }
+            }
+        }
+        if let (Some((name, rate)), Some(min)) = (low, args.min_top1) {
+            bail!(
+                "{name}: top-1 is {:.1}%, below --min-top1 {:.1}%",
+                rate * 100.0,
+                min * 100.0
+            );
+        }
+        return Ok(());
+    }
+    sweep(&args, &setup, &suites, &variants)
+}
+
+fn open_setup(args: &EvalArgs) -> Result<Setup> {
+    let searcher = Searcher::open(&args.index)
+        .with_context(|| format!("opening the index in {}", args.index.display()))?;
     let meaning = MeaningIndex::from_args(&args.meaning)?;
     let pages_dir = tempfile::tempdir().context("making a folder for the page index")?;
+    let mut searcher = Some(searcher);
     let pages = if args.pages.is_empty() {
         None
     } else {
@@ -187,26 +263,48 @@ pub fn run(args: EvalArgs) -> Result<()> {
             let set = set_of_file(name);
             all.extend(articles.into_iter().filter_map(|a| Page::from_set(&set, a)));
         }
+        let demand = site_demand(&all);
+        info!("{} sites have a Wikipedia article's demand", demand.len());
+        searcher = searcher.map(|s| s.with_demand(demand));
         plumb_index::pages::build_page_index(pages_dir.path(), all)?;
         Some(PageSearcher::open(pages_dir.path())?)
     };
-    info!(
-        "evaluating {} queries against {} sites ({cfg:?})",
-        queries.len(),
-        searcher.num_docs(),
-    );
+    Ok(Setup {
+        searcher: searcher.expect("the searcher was opened"),
+        meaning,
+        pages,
+        _pages_dir: pages_dir,
+    })
+}
+
+/// The rank each query's expected answer was found at, within
+/// `args.limit`. With `verbose`, misses are printed (and `--show`,
+/// `--explain` say more).
+fn evaluate(
+    args: &EvalArgs,
+    setup: &Setup,
+    queries: &[EvalQuery],
+    cfg: &plumb_index::RankConfig,
+    verbose: bool,
+) -> Result<Vec<Option<usize>>> {
+    let Setup {
+        searcher,
+        meaning,
+        pages,
+        ..
+    } = setup;
     // With --explain, sites ranked below the limit are fetched too, to show
     // how far behind the expected one is.
-    let fetched = if args.explain {
+    let fetched = if args.explain && verbose {
         args.limit.max(EXPLAIN_DEPTH)
     } else {
         args.limit
     };
 
     let mut ranks = Vec::with_capacity(queries.len());
-    for q in &queries {
+    for q in queries {
         if args.facts {
-            ranks.push(fact_rank(&args, q, &searcher, &cfg, pages.as_ref())?);
+            ranks.push(fact_rank(args, q, searcher, cfg, pages.as_ref(), verbose)?);
             continue;
         }
         let options = SearchOptions {
@@ -221,7 +319,7 @@ pub fn run(args: EvalArgs) -> Result<()> {
                 .search_meaning(
                     query,
                     fetched,
-                    &cfg,
+                    cfg,
                     &options,
                     query_meaning
                         .as_ref()
@@ -267,7 +365,7 @@ pub fn run(args: EvalArgs) -> Result<()> {
             }
         };
         let rank = deep_rank.filter(|&rank| rank <= args.limit);
-        if args.show > 0 {
+        if verbose && args.show > 0 {
             println!("{:?}", q.query);
             let shown: Vec<String> = match &listed {
                 None => domains.iter().map(|d| d.to_string()).collect(),
@@ -277,7 +375,7 @@ pub fn run(args: EvalArgs) -> Result<()> {
                 println!("  {}. {row}", i + 1);
             }
         }
-        if rank != Some(1) {
+        if verbose && rank != Some(1) {
             println!("{}", format_miss(q, rank, first.as_deref(), args.limit));
             if args.explain {
                 let closeness = |domain: &str| {
@@ -308,19 +406,185 @@ pub fn run(args: EvalArgs) -> Result<()> {
         }
         ranks.push(rank);
     }
+    Ok(ranks)
+}
 
-    let metrics = Metrics::from_ranks(&ranks, args.limit);
-    print!("{}", format_totals(&metrics, args.limit));
-    if let Some(min) = args.min_top1 {
-        if metrics.top1_rate() < min {
-            bail!(
-                "top-1 is {:.1}%, below --min-top1 {:.1}%",
-                metrics.top1_rate() * 100.0,
-                min * 100.0
-            );
+/// One ranking to try in a sweep: a name and the knobs it changes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Variant {
+    pub name: String,
+    pub cfg: plumb_index::RankConfig,
+}
+
+/// Parses a sweep file: one `name<TAB>{"knob": value, ...}` per line, each
+/// knob changed from `base` (the ranking `--rank` and `--alpha` give);
+/// blank lines and lines starting with `#` are skipped. The first variant
+/// is always `base` itself, which the others are compared with.
+pub fn parse_sweep(text: &str, base: &plumb_index::RankConfig) -> Result<Vec<Variant>> {
+    let base_json = serde_json::to_value(base)?;
+    let mut variants = vec![Variant {
+        name: "base".to_string(),
+        cfg: *base,
+    }];
+    for (i, raw) in text.lines().enumerate() {
+        let line = i + 1;
+        let trimmed = raw.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
         }
+        let Some((name, knobs)) = trimmed.split_once('\t') else {
+            bail!("line {line}: expected `name<TAB>{{json}}`, found no tab");
+        };
+        let name = name.trim();
+        if variants.iter().any(|v| v.name == name) {
+            bail!("line {line}: a variant is already called {name:?}");
+        }
+        let knobs: serde_json::Value = serde_json::from_str(knobs.trim())
+            .with_context(|| format!("line {line}: reading the knobs of {name:?}"))?;
+        let serde_json::Value::Object(knobs) = knobs else {
+            bail!("line {line}: the knobs of {name:?} are not a JSON object");
+        };
+        let mut merged = base_json.clone();
+        for (knob, value) in knobs {
+            let serde_json::Value::Object(fields) = &mut merged else {
+                unreachable!("RankConfig serializes as an object");
+            };
+            if !fields.contains_key(&knob) {
+                bail!("line {line}: {name:?} changes {knob:?}, which is no ranking knob");
+            }
+            fields.insert(knob, value);
+        }
+        let cfg = serde_json::from_value(merged)
+            .with_context(|| format!("line {line}: reading the knobs of {name:?}"))?;
+        variants.push(Variant {
+            name: name.to_string(),
+            cfg,
+        });
+    }
+    Ok(variants)
+}
+
+/// `--sweep`: every suite under every variant, in one table, each
+/// compared query by query with `base`.
+fn sweep(args: &EvalArgs, setup: &Setup, suites: &[Suite], variants: &[Variant]) -> Result<()> {
+    // ranks[variant][suite][query]
+    let mut ranks: Vec<Vec<Vec<Option<usize>>>> = Vec::with_capacity(variants.len());
+    for variant in variants {
+        info!("sweep: {} ({:?})", variant.name, variant.cfg);
+        let mut of_suites = Vec::with_capacity(suites.len());
+        for suite in suites {
+            of_suites.push(evaluate(args, setup, &suite.queries, &variant.cfg, false)?);
+        }
+        ranks.push(of_suites);
+    }
+    print!("{}", format_sweep(args.limit, suites, variants, &ranks));
+    if let Some(path) = &args.ranks_out {
+        let mut out = String::from("variant\tsuite\tline\tquery\trank\n");
+        for (v, variant) in variants.iter().enumerate() {
+            for (s, suite) in suites.iter().enumerate() {
+                for (q, query) in suite.queries.iter().enumerate() {
+                    let rank = ranks[v][s][q].unwrap_or(0);
+                    let _ = writeln!(
+                        out,
+                        "{}\t{}\t{}\t{}\t{rank}",
+                        variant.name, suite.name, query.line, query.query
+                    );
+                }
+            }
+        }
+        std::fs::write(path, out).with_context(|| format!("writing {}", path.display()))?;
     }
     Ok(())
+}
+
+/// A rank as a number to compare: lower is better, not found is worst.
+fn place(rank: Option<usize>) -> usize {
+    rank.unwrap_or(usize::MAX)
+}
+
+fn format_sweep(
+    limit: usize,
+    suites: &[Suite],
+    variants: &[Variant],
+    ranks: &[Vec<Vec<Option<usize>>>],
+) -> String {
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "{:<24} {:<22} {:>7} {:>7} {:>7} {:>6} {:>6}",
+        "variant", "suite", "top-1", "top-3", "MRR", "better", "worse"
+    );
+    for (v, variant) in variants.iter().enumerate() {
+        let mut all = Vec::new();
+        let (mut better, mut worse) = (0, 0);
+        for (s, suite) in suites.iter().enumerate() {
+            let these = &ranks[v][s];
+            let base = &ranks[0][s];
+            let b = these
+                .iter()
+                .zip(base)
+                .filter(|(r, b)| place(**r) < place(**b))
+                .count();
+            let w = these
+                .iter()
+                .zip(base)
+                .filter(|(r, b)| place(**r) > place(**b))
+                .count();
+            better += b;
+            worse += w;
+            all.extend_from_slice(these);
+            let m = Metrics::from_ranks(these, limit);
+            let _ = writeln!(
+                out,
+                "{:<24} {:<22} {:>6.1}% {:>6.1}% {:>7.3} {:>6} {:>6}",
+                variant.name,
+                suite.name,
+                m.top1_rate() * 100.0,
+                m.top3_rate() * 100.0,
+                m.mrr,
+                b,
+                w
+            );
+        }
+        let m = Metrics::from_ranks(&all, limit);
+        let _ = writeln!(
+            out,
+            "{:<24} {:<22} {:>6.1}% {:>6.1}% {:>7.3} {:>6} {:>6}",
+            variant.name,
+            "ALL",
+            m.top1_rate() * 100.0,
+            m.top3_rate() * 100.0,
+            m.mrr,
+            better,
+            worse
+        );
+    }
+    // What each variant changed, query by query.
+    let shown = |rank: Option<usize>| rank.map_or_else(|| "-".to_string(), |r| r.to_string());
+    for (v, variant) in variants.iter().enumerate().skip(1) {
+        let mut changed = Vec::new();
+        for (s, suite) in suites.iter().enumerate() {
+            for (q, query) in suite.queries.iter().enumerate() {
+                let (was, now) = (ranks[0][s][q], ranks[v][s][q]);
+                if was != now {
+                    changed.push(format!(
+                        "  {} {:?}: {} -> {}",
+                        suite.name,
+                        query.query,
+                        shown(was),
+                        shown(now)
+                    ));
+                }
+            }
+        }
+        if !changed.is_empty() {
+            let _ = writeln!(out, "\n{} changed:", variant.name);
+            for line in changed {
+                let _ = writeln!(out, "{line}");
+            }
+        }
+    }
+    out
 }
 
 /// With `--facts`: `Some(1)` when the instant answer to `q` (worked out
@@ -333,6 +597,7 @@ fn fact_rank(
     searcher: &Searcher,
     cfg: &plumb_index::RankConfig,
     pages: Option<&PageSearcher>,
+    verbose: bool,
 ) -> Result<Option<usize>> {
     let asked = plumb_core::facts::fact_asked(&q.query);
     let answer = match (&asked, pages) {
@@ -361,7 +626,7 @@ fn fact_rank(
         let shown = a.answer.to_lowercase().replace(',', "");
         q.expected.iter().any(|e| shown.contains(e.as_str()))
     });
-    if args.show > 0 || !hit {
+    if verbose && (args.show > 0 || !hit) {
         let what = match (&asked, &text) {
             (None, _) => "not read as a fact question".to_string(),
             (Some(_), None) => "no answer".to_string(),
@@ -490,7 +755,26 @@ fn set_of_file(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_expected, parse_queries, rank_of, set_of_file};
+    use super::{is_expected, parse_queries, parse_sweep, rank_of, set_of_file};
+
+    #[test]
+    fn a_sweep_changes_knobs_of_the_base_ranking() {
+        let base = plumb_index::RankConfig {
+            alpha: 0.3,
+            ..Default::default()
+        };
+        let text = "# knobs\nlabel\t{\"exact_label_bonus\": 0.1}\nnone\t{\"named_share\": null}\n";
+        let variants = parse_sweep(text, &base).unwrap();
+        let names: Vec<&str> = variants.iter().map(|v| v.name.as_str()).collect();
+        assert_eq!(names, ["base", "label", "none"]);
+        assert_eq!(variants[0].cfg, base);
+        assert_eq!(variants[1].cfg.exact_label_bonus, 0.1);
+        assert_eq!(variants[1].cfg.alpha, 0.3);
+        assert_eq!(variants[2].cfg.named_share, None);
+        assert!(parse_sweep("x\t{\"no_such_knob\": 1}", &base).is_err());
+        assert!(parse_sweep("x {}", &base).is_err());
+        assert!(parse_sweep("x\t{}\nx\t{}", &base).is_err());
+    }
 
     #[test]
     fn sets_come_from_file_names() {
