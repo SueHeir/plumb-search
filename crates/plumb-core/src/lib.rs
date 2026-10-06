@@ -37,7 +37,7 @@ pub use news::{Headline, RecentNews};
 pub use operators::Operators;
 pub use safe::{adult_level, record_adult_level, AdultLevel, SafeSearch};
 pub use site_search::{search_link, search_template_for, SEARCH_TERMS};
-pub use subsites::subdomain_sites;
+pub use subsites::{parent_domain, subdomain_sites, SITES_VERSION};
 
 use anyhow::{Context, Result};
 use serde::de::DeserializeOwned;
@@ -618,6 +618,29 @@ impl RecordSet {
         self.map
             .entry(domain.to_string())
             .or_insert_with(|| Box::new(SiteRecord::new(domain)))
+    }
+
+    /// Takes off parent domains what they got from `seed` records of their
+    /// subdomain sites ([`parent_domain`]) when those were folded into them:
+    /// names, Wikidata's description and the Wikipedia intro. For seed data
+    /// read again after the subdomain lists grew ([`SITES_VERSION`]), before
+    /// it is upserted; the parent's own seed record adds its own back.
+    pub fn split_subdomain_sites(&mut self, seed: &[SiteRecord]) {
+        for site in seed {
+            let Some(parent) = parent_domain(&site.domain) else {
+                continue;
+            };
+            let Some(record) = self.map.get_mut(parent) else {
+                continue;
+            };
+            record.aliases.retain(|alias| !site.aliases.contains(alias));
+            if record.about.is_some() && record.about == site.about {
+                record.about = None;
+            }
+            if record.intro.is_some() && record.intro == site.intro {
+                record.intro = None;
+            }
+        }
     }
 
     /// Inserts a record, merging it into an existing one for the same domain.
@@ -1887,6 +1910,29 @@ mod tests {
         let domains: Vec<&str> = sorted.iter().map(|r| r.domain.as_str()).collect();
         assert_eq!(domains, ["b.com", "a.com", "c.com"]);
         assert_eq!(sorted[1].aliases, vec!["Alpha".to_string()]);
+    }
+
+    #[test]
+    fn subdomain_sites_take_their_names_off_their_parent() {
+        let mut set = RecordSet::new();
+        let mut old = SiteRecord::new("ycombinator.com");
+        old.aliases = vec!["Y Combinator".into(), "Hacker News".into()];
+        old.about = Some("social news website".into());
+        set.upsert(old);
+        let mut news = SiteRecord::new("news.ycombinator.com");
+        news.aliases = vec!["Hacker News".into()];
+        news.about = Some("social news website".into());
+        let mut yc = SiteRecord::new("ycombinator.com");
+        yc.aliases = vec!["Y Combinator".into()];
+        yc.about = Some("startup accelerator".into());
+        let seed = vec![news, yc];
+        set.split_subdomain_sites(&seed);
+        set.extend(seed);
+        let yc = set.get("ycombinator.com").unwrap();
+        assert_eq!(yc.aliases, ["Y Combinator"]);
+        assert_eq!(yc.about.as_deref(), Some("startup accelerator"));
+        let news = set.get("news.ycombinator.com").unwrap();
+        assert_eq!(news.aliases, ["Hacker News"]);
     }
 
     #[test]

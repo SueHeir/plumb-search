@@ -33,7 +33,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{bail, Context, Result};
-use plumb_core::{now_unix, RecordSet, SiteRecord};
+use plumb_core::{now_unix, RecordSet, SiteRecord, SITES_VERSION};
 use plumb_crawl::{CrawlConfig, CrawlOutcome, CrawlResult, CrawlTarget, HomepageCrawler};
 use plumb_index::build_index;
 use plumb_ingest::{
@@ -207,6 +207,10 @@ async fn step(inner: &Arc<Inner>) -> Result<Next> {
     let saved = inner.saved();
     if inner.current().is_none() || (saved.index_stale && saved.crawl_left == 0) {
         rebuild(inner, true).await?;
+        return Ok(Next::Continue);
+    }
+    if saved.sites_version < SITES_VERSION && !saved.quick_start {
+        refold_seed(inner).await?;
         return Ok(Next::Continue);
     }
     if missing_buckets(inner) {
@@ -391,6 +395,7 @@ async fn complete_seed(inner: &Arc<Inner>) -> Result<()> {
                 record.crawl_attempted_at.is_some() || !record.link_texts.is_empty()
             });
         }
+        set.split_subdomain_sites(&seed);
         set.extend(seed);
         if let Some(change) = home_site_change(inner, &set) {
             change.apply(&mut set);
@@ -409,6 +414,7 @@ async fn complete_seed(inner: &Arc<Inner>) -> Result<()> {
             saved.wikidata_missing = wikidata_missing;
             saved.quick_start = false;
             saved.index_stale = true;
+            saved.sites_version = SITES_VERSION;
         })?;
         info!(
             "folded the seed data into the records: {} sites (there were {before})",
@@ -427,6 +433,86 @@ async fn complete_seed(inner: &Arc<Inner>) -> Result<()> {
     }
     sweep(inner).await;
     Ok(())
+}
+
+/// Folds the seed files already on disk into the records again, without
+/// downloading anything, once the lists of sites on subdomains changed
+/// ([`SITES_VERSION`]): sites such as news.ycombinator.com, which were part
+/// of their parent domain, get records of their own, with their official
+/// names, and the index is rebuilt. A node with no seed files (one set up
+/// from the network) only notes the version: the network brings the sites.
+async fn refold_seed(inner: &Arc<Inner>) -> Result<()> {
+    let Some(files) = seed_files_on_disk(inner)? else {
+        inner.update_saved(|saved| saved.sites_version = SITES_VERSION)?;
+        return Ok(());
+    };
+    info!("the lists of sites on subdomains changed: folding the seed data in again");
+    let built = blocking(inner, move |inner| {
+        let _records = inner.hold_records();
+        let seed = seed_records(inner, &files)?;
+        inner.set_step(Step::Ingesting, "Reading the site records");
+        let mut set = load_records(&inner.paths.records)?;
+        let before = set.len();
+        set.split_subdomain_sites(&seed);
+        set.extend(seed);
+        inner.check_stop()?;
+        let records = sorted_by_link_score(&set);
+        inner.set_step(
+            Step::Ingesting,
+            format!(
+                "Saving {} site records",
+                group_thousands(records.len() as u64)
+            ),
+        );
+        replace_records(&inner.paths.records, records.iter().copied())?;
+        inner.update_saved(|saved| {
+            saved.sites_version = SITES_VERSION;
+            saved.index_stale = true;
+        })?;
+        info!(
+            "folded the seed data in again: {} sites (there were {before})",
+            records.len(),
+        );
+        inner.check_stop()?;
+        build(inner, &records)
+    })
+    .await?;
+    // Not put_in_service: this is no refresh, and a round under way goes on.
+    inner.install(built);
+    inner.update_saved(|saved| saved.index_stale = false)?;
+    Ok(())
+}
+
+/// The seed files an earlier setup left in `seed/`, however old; `None`
+/// without the Tranco list.
+fn seed_files_on_disk(inner: &Inner) -> Result<Option<SeedFiles>> {
+    let seed = &inner.paths.seed;
+    let tranco = seed.join(download::TRANCO_FILE_NAME);
+    if !tranco.is_file() {
+        return Ok(None);
+    }
+    let wikidata = seed.join(download::WIKIDATA_FILE_NAME);
+    let wikidata = if wikidata.is_file() {
+        Ok(wikidata)
+    } else {
+        Err(anyhow::anyhow!("not downloaded"))
+    };
+    let cc_ranks = match inner.config.cc_ranks_url() {
+        Some(url) => Some(seed.join(download::cc_domain_ranks_top_file_name(
+            &url,
+            inner.config.sites,
+        )?)),
+        None => None,
+    }
+    .filter(|path| path.is_file());
+    Ok(Some(SeedFiles {
+        tranco,
+        wikidata,
+        facts: seed.join(facts::FACTS_FILE_NAME),
+        kind_sites: seed.join(kind_sites::KIND_SITES_FILE_NAME),
+        intros: seed.join(intros::INTROS_FILE_NAME),
+        cc_ranks,
+    }))
 }
 
 /// The files a setup ingests.
