@@ -1093,6 +1093,57 @@ async fn sets_up_without_wikidata_and_adds_it_later() {
     assert!(usbank.signals.official_site);
     assert!(usbank.aliases.iter().any(|alias| alias == "U.S. Bancorp"));
 
+    // Records made before the lists of sites on subdomains are folded
+    // again too, from the seed files however old: Google Scholar, folded
+    // into google.com then, gets a record of its own.
+    let wikidata = dir.path().join("seed").join(download::WIKIDATA_FILE_NAME);
+    let mut tsv = std::fs::read_to_string(&wikidata).unwrap();
+    tsv.push_str(
+        "http://www.wikidata.org/entity/Q90000099\tGoogle Scholar\thttps://scholar.google.com/\n",
+    );
+    std::fs::write(&wikidata, tsv).unwrap();
+    let mut records: Vec<SiteRecord> = read_jsonl(&dir.path().join("records.jsonl")).unwrap();
+    let google = records
+        .iter_mut()
+        .find(|r| r.domain == "google.com")
+        .unwrap();
+    google.aliases.push("Google Scholar".into());
+    write_jsonl(&dir.path().join("records.jsonl"), &records).unwrap();
+    let mut saved = store::load_state(&paths).unwrap();
+    saved.sites_version = 0;
+    store::save_state(&paths, &saved).unwrap();
+    let index_before = names(&dir.path().join("indexes"));
+    let mut config = test_config(dir.path());
+    config.sources = offline.sources();
+    config.sites = 50;
+    let node = start(config).await.unwrap();
+    wait_for(
+        node.addr(),
+        "the seed folded for the subdomain sites",
+        |s| {
+            ready_and_idle(s)
+                && s.index
+                    .as_ref()
+                    .is_some_and(|index| !index_before.contains(index))
+        },
+    )
+    .await;
+    node.shutdown().await.unwrap();
+    assert_eq!(offline.requests.lock().unwrap().len(), 0);
+    assert_eq!(
+        store::load_state(&paths).unwrap().sites_version,
+        plumb_core::SITES_VERSION
+    );
+    let records: Vec<SiteRecord> = read_jsonl(&dir.path().join("records.jsonl")).unwrap();
+    let scholar = records
+        .iter()
+        .find(|r| r.domain == "scholar.google.com")
+        .unwrap();
+    assert_eq!(scholar.aliases, ["Google Scholar"]);
+    assert_eq!(scholar.signals.tranco_rank, Some(1));
+    let google = records.iter().find(|r| r.domain == "google.com").unwrap();
+    assert_eq!(google.aliases, ["Google"]);
+
     // Nothing to fold in a directory with no node yet.
     assert!(!request_reseed(tempfile::tempdir().unwrap().path()).unwrap());
 }
