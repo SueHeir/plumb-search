@@ -38,6 +38,10 @@ pub const LABELS_BATCH: usize = 400;
 /// [`LABELS_BATCH`]) for a kind whose pages Wikidata stopped answering.
 pub const FILL_IN_TOP: usize = 100_000;
 
+/// Most-read items asked about by name for every other kind: pages read
+/// by offset without an order can skip statements (France's area).
+pub const FILL_IN_ALWAYS: usize = 20_000;
+
 /// Facts by Wikidata item (`Q408`).
 pub type FactsByItem = HashMap<String, Vec<Fact>>;
 
@@ -54,6 +58,8 @@ struct Results {
 #[derive(Debug, Deserialize)]
 struct Term {
     value: String,
+    #[serde(rename = "xml:lang", default)]
+    lang: Option<String>,
 }
 
 fn bindings(json: &[u8]) -> Result<Vec<HashMap<String, Term>>> {
@@ -76,7 +82,14 @@ fn is_item_id(id: &str) -> bool {
 fn page_query(kind: FactKind, offset: usize) -> String {
     let p = kind.property();
     let value = match kind.value_type() {
-        ValueType::Item => format!("ps:{p} ?v ."),
+        // Founders stay founders; a capital, currency, CEO or headquarters
+        // that ended, or that is only some part's (the CFP franc of French
+        // Polynesia), is not the item's.
+        ValueType::Item if kind == FactKind::Founder => format!("ps:{p} ?v ."),
+        ValueType::Item => format!(
+            "ps:{p} ?v . FILTER NOT EXISTS {{ ?s pq:P582 [] }} \
+             FILTER NOT EXISTS {{ ?s pq:P518 [] }}"
+        ),
         // A count has no unit to normalize.
         ValueType::Quantity if kind == FactKind::Population => {
             format!("psv:{p}/wikibase:quantityAmount ?v . OPTIONAL {{ ?s pq:P585 ?t . }}")
@@ -114,6 +127,9 @@ pub struct RawFacts {
     facts: FactsByItem,
     /// A population's year, to keep the latest count when there are more.
     counted: HashMap<String, i32>,
+    /// Items whose best statements of a date kind disagree on the year
+    /// (France founded in 481 and in 843): no date is better than either.
+    disputed: HashSet<(String, FactKind)>,
 }
 
 impl RawFacts {
@@ -172,10 +188,32 @@ impl RawFacts {
                 }
                 ValueType::Time => {
                     let precision = row.get("p").and_then(|p| p.value.parse().ok()).unwrap_or(0);
-                    match Date::from_wikidata(&v.value, precision) {
-                        Some(date) => date.write(),
-                        None => continue,
+                    let Some(date) = Date::from_wikidata(&v.value, precision) else {
+                        continue;
+                    };
+                    if self.disputed.contains(&(item.to_string(), kind)) {
+                        continue;
                     }
+                    let kept = self.facts.get(item).and_then(|facts| {
+                        facts
+                            .iter()
+                            .find(|fact| fact.kind == kind)
+                            .and_then(|fact| Date::parse(&fact.value))
+                    });
+                    if let Some(kept) = kept {
+                        let facts = self.facts.get_mut(item).expect("kept a date");
+                        if kept.year != date.year {
+                            facts.retain(|fact| fact.kind != kind);
+                            self.disputed.insert((item.to_string(), kind));
+                            continue;
+                        }
+                        // The same year: the more precise date stays.
+                        if date.write().len() <= kept.write().len() {
+                            continue;
+                        }
+                        facts.retain(|fact| fact.kind != kind);
+                    }
+                    date.write()
                 }
             };
             let facts = self.facts.entry(item.to_string()).or_default();
@@ -242,7 +280,7 @@ fn labels_query(items: &[String]) -> String {
     let values: Vec<String> = items.iter().map(|item| format!("wd:{item}")).collect();
     format!(
         "SELECT ?item ?label WHERE {{ VALUES ?item {{ {} }} ?item rdfs:label ?label . \
-         FILTER(LANG(?label) = \"en\") }}",
+         FILTER(LANG(?label) = \"en\" || LANG(?label) = \"mul\") }}",
         values.join(" ")
     )
 }
@@ -250,9 +288,14 @@ fn labels_query(items: &[String]) -> String {
 fn add_labels(labels: &mut HashMap<String, String>, json: &[u8]) -> Result<()> {
     for row in bindings(json)? {
         if let (Some(item), Some(label)) = (row.get("item"), row.get("label")) {
-            let label = plumb_core::collapse_whitespace(&label.value);
-            if !label.is_empty() {
-                labels.insert(entity_id(&item.value).to_string(), label);
+            let text = plumb_core::collapse_whitespace(&label.value);
+            let id = entity_id(&item.value).to_string();
+            // An English label wins over the label for all languages
+            // ("mul"), which Wikidata gives names instead of an English one
+            // that would say the same (the euro, many people).
+            let english = label.lang.as_deref() != Some("mul");
+            if !text.is_empty() && (english || !labels.contains_key(&id)) {
+                labels.insert(id, text);
             }
         }
     }
@@ -304,9 +347,21 @@ pub async fn fetch_facts(
             }
             offset += FACTS_PAGE;
         }
-        if cut_short {
-            fill_in(client, endpoint, pacing, &mut raw, kind, items, wanted).await?;
-        }
+        let top = if cut_short {
+            FILL_IN_TOP
+        } else {
+            FILL_IN_ALWAYS
+        };
+        fill_in(
+            client,
+            endpoint,
+            pacing,
+            &mut raw,
+            kind,
+            &items[..top.min(items.len())],
+            wanted,
+        )
+        .await?;
     }
     let items = raw.named_items();
     info!("naming {} items the facts are about", items.len());
@@ -329,7 +384,7 @@ pub async fn fetch_facts(
     Ok(raw.named(&labels))
 }
 
-/// Asks for `kind` of the first [`FILL_IN_TOP`] of `items` that lack it.
+/// Asks for `kind` of those of `items` that lack it.
 async fn fill_in(
     client: &reqwest::Client,
     endpoint: &str,
@@ -341,7 +396,6 @@ async fn fill_in(
 ) -> Result<()> {
     let lacking: Vec<String> = items
         .iter()
-        .take(FILL_IN_TOP)
         .filter(|item| {
             !raw.facts
                 .get(*item)
@@ -350,10 +404,11 @@ async fn fill_in(
         .cloned()
         .collect();
     info!(
-        "{} ({}): asking about {} of the {FILL_IN_TOP} most read items that lack it",
+        "{} ({}): asking about {} of the {} most read items that lack it",
         kind.key(),
         kind.property(),
-        lacking.len()
+        lacking.len(),
+        items.len()
     );
     let mut found = 0;
     for (n, batch) in lacking.chunks(LABELS_BATCH).enumerate() {
@@ -452,6 +507,19 @@ mod tests {
 
     const E: &str = "http://www.wikidata.org/entity/";
 
+    fn lang_answer(item: &str, labels: &[(&str, &str)]) -> Vec<u8> {
+        let bindings: Vec<serde_json::Value> = labels
+            .iter()
+            .map(|(label, lang)| {
+                serde_json::json!({
+                    "item": { "value": item },
+                    "label": { "value": label, "xml:lang": lang },
+                })
+            })
+            .collect();
+        serde_json::to_vec(&serde_json::json!({ "results": { "bindings": bindings } })).unwrap()
+    }
+
     #[test]
     fn queries_ask_for_best_ranked_statements() {
         let q = page_query(FactKind::Elevation, 0);
@@ -464,6 +532,10 @@ mod tests {
         assert!(q.ends_with("LIMIT 50000 OFFSET 400000"), "{q}");
         let q = page_query(FactKind::Born, 0);
         assert!(q.contains("wikibase:timePrecision ?p"), "{q}");
+        let q = page_query(FactKind::Currency, 0);
+        assert!(q.contains("FILTER NOT EXISTS { ?s pq:P518 [] }"), "{q}");
+        assert!(q.contains("FILTER NOT EXISTS { ?s pq:P582 [] }"), "{q}");
+        assert!(!page_query(FactKind::Founder, 0).contains("FILTER"));
         let items = ["Q30".to_string(), "Q668".to_string()];
         let q = items_query(FactKind::Population, &items);
         assert!(
@@ -479,7 +551,7 @@ mod tests {
 
     #[test]
     fn facts_are_read_named_and_written() {
-        let wanted: HashSet<String> = ["Q408", "Q513", "Q937", "Q478214"]
+        let wanted: HashSet<String> = ["Q408", "Q513", "Q937", "Q478214", "Q142"]
             .into_iter()
             .map(String::from)
             .collect();
@@ -551,6 +623,18 @@ mod tests {
             &answer(&[&[("item", &tesla), ("v", &format!("{E}Q317521"))]]),
         )
         .unwrap();
+        // France: founded in 481 and in 843, so in neither.
+        let france = format!("{E}Q142");
+        for v in [
+            "0481-01-01T00:00:00Z",
+            "0843-08-01T00:00:00Z",
+            "0481-01-01T00:00:00Z",
+        ] {
+            let row = [("item", france.as_str()), ("v", v), ("p", "9")];
+            raw.add_page(FactKind::Founded, &wanted, &answer(&[&row]))
+                .unwrap();
+        }
+        assert!(raw.facts.get("Q142").is_none_or(Vec::is_empty));
         assert_eq!(raw.named_items(), ["Q3114", "Q317521"]);
         let mut labels = HashMap::new();
         add_labels(
@@ -558,6 +642,17 @@ mod tests {
             &answer(&[&[("item", &canberra), ("label", "Canberra")]]),
         )
         .unwrap();
+        // The label for all languages counts, after an English one.
+        let euro = format!("{E}Q4916");
+        let mut both = HashMap::new();
+        add_labels(
+            &mut both,
+            &lang_answer(&euro, &[("euro", "mul"), ("Euro", "en")]),
+        )
+        .unwrap();
+        add_labels(&mut both, &lang_answer(&canberra, &[("Canberra", "mul")])).unwrap();
+        assert_eq!(both["Q4916"], "Euro");
+        assert_eq!(both["Q3114"], "Canberra");
         let facts = raw.named(&labels);
         let fact = |kind, value: &str| Fact {
             kind,
