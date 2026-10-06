@@ -348,7 +348,7 @@ pub fn run_facts(args: FetchFactsArgs) -> Result<()> {
             path.display()
         );
     }
-    let wanted = plumb_ingest::profiles::items_in_file(&path)?;
+    let wanted = plumb_ingest::profiles::items_in_order(&path)?;
     info!("{} articles have a Wikidata item", wanted.len());
     let client = download::http_client()?;
     let facts = block_on(plumb_ingest::item_facts::fetch_facts(

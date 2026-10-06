@@ -404,6 +404,23 @@ pub fn items_in_file(path: &Path) -> Result<HashSet<String>> {
     Ok(items)
 }
 
+/// The Wikidata items of the articles in the file at `path`, in the
+/// file's order (most read first), each once.
+pub fn items_in_order(path: &Path) -> Result<Vec<String>> {
+    let reader = open_maybe_gz(path)?;
+    let mut seen = HashSet::new();
+    let mut items = Vec::new();
+    let lines = std::io::BufRead::lines(reader).map_while(Result::ok);
+    for (_, article) in articles_of(lines) {
+        if let Some(item) = article.ok().and_then(|article| article.item) {
+            if seen.insert(item.clone()) {
+                items.push(item);
+            }
+        }
+    }
+    Ok(items)
+}
+
 /// What [`add_profiles_to_file`] did.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct AddedProfiles {
