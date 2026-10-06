@@ -19,6 +19,11 @@
 //! seed records are built, as the rank lists only know registrable domains
 //! (see [`subdomain_sites`]).
 
+/// The version of [`SUBDOMAIN_SITES`] and [`UMBRELLA_DOMAINS`]: bump it
+/// when they change, so that nodes fold their seed data in again and make
+/// records for the new sites (version 0 is before there were any lists).
+pub const SITES_VERSION: u32 = 1;
+
 /// Hosts that are sites of their own although they are subdomains.
 pub const SUBDOMAIN_SITES: &[&str] = &[
     "news.ycombinator.com",
@@ -181,6 +186,12 @@ pub fn subdomain_sites() -> impl Iterator<Item = (&'static str, &'static str)> {
         .filter_map(|site| Some((*site, psl::domain_str(site)?)))
 }
 
+/// The registrable domain `site` is a subdomain of, when it is a site on
+/// a subdomain (see [`crate::registrable_domain`]).
+pub fn parent_domain(site: &str) -> Option<&str> {
+    psl::domain_str(site).filter(|domain| *domain != site)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -234,6 +245,9 @@ mod tests {
         assert_eq!(parents.len(), SUBDOMAIN_SITES.len());
         assert!(parents.contains(&("scholar.google.com", "google.com")));
         assert!(parents.contains(&("news.ycombinator.com", "ycombinator.com")));
+        assert_eq!(parent_domain("dmv.ca.gov"), Some("ca.gov"));
+        assert_eq!(parent_domain("ca.gov"), None);
+        assert_eq!(parent_domain("usbank.com"), None);
     }
 
     #[test]

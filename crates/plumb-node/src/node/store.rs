@@ -6,6 +6,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
+use plumb_core::SITES_VERSION;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
@@ -215,7 +216,7 @@ pub(super) fn remove_index(dir: &Path) -> io::Result<()> {
 
 /// Progress that survives restarts, kept in `DIR/state.json`. Missing fields
 /// read as their defaults, so older files keep working.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub(super) struct SavedState {
     /// Homepages still to crawl in the round under way: the initial crawl or
@@ -243,6 +244,30 @@ pub(super) struct SavedState {
     pub(super) downloaded_total: u64,
     /// Homepages visited since setup.
     pub(super) homepages_visited: u64,
+    /// The [`SITES_VERSION`] the records were made with. A node whose
+    /// records are older folds its seed data in again, to make records for
+    /// the sites on subdomains that were part of their parent domain. 0 in
+    /// files from before there was one.
+    #[serde(default)]
+    pub(super) sites_version: u32,
+}
+
+impl Default for SavedState {
+    fn default() -> Self {
+        SavedState {
+            crawl_left: 0,
+            index_stale: false,
+            last_refresh: None,
+            wikidata_missing: false,
+            network_pending: 0,
+            quick_start: false,
+            download_day: 0,
+            downloaded_on_day: 0,
+            downloaded_total: 0,
+            homepages_visited: 0,
+            sites_version: SITES_VERSION,
+        }
+    }
 }
 
 const SECONDS_PER_DAY: u64 = 24 * 60 * 60;
@@ -288,6 +313,7 @@ impl SavedState {
             downloaded_on_day: 0,
             downloaded_total: 0,
             homepages_visited: 0,
+            sites_version: SITES_VERSION,
         }
     }
 }
@@ -481,6 +507,7 @@ mod tests {
             downloaded_on_day: 1_234,
             downloaded_total: 5_678,
             homepages_visited: 90,
+            sites_version: SITES_VERSION,
         };
         save_state(&paths, &state).unwrap();
         assert_eq!(load_state(&paths), Some(state));
@@ -491,6 +518,8 @@ mod tests {
             load_state(&paths),
             Some(SavedState {
                 crawl_left: 3,
+                // Records from before the lists of sites on subdomains.
+                sites_version: 0,
                 ..SavedState::default()
             })
         );
