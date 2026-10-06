@@ -110,13 +110,13 @@ impl MeaningIndex {
         let instructed = || embed(&format!("{QUERY_INSTRUCTION}{query}"));
         let vectors = self.read();
         match self.instruction {
-            QueryInstruction::Off => Some(QueryMeaning::new(vectors, embed(query)?, None)),
-            QueryInstruction::On => Some(QueryMeaning::new(vectors, instructed()?, None)),
-            QueryInstruction::Nearest => {
-                let near = instructed()?;
-                Some(QueryMeaning::new(vectors, embed(query)?, Some(near)))
+            QueryInstruction::Off => Some(vec![embed(query)?]),
+            QueryInstruction::On => Some(vec![instructed()?]),
+            QueryInstruction::Mix | QueryInstruction::Min => {
+                Some(vec![embed(query)?, instructed()?])
             }
         }
+        .map(|query| QueryMeaning::new(vectors, query, self.instruction))
     }
 }
 
@@ -153,37 +153,65 @@ impl SharedMeaning {
 /// query's words, and must still count as close.
 pub struct QueryMeaning<'a> {
     vectors: RwLockReadGuard<'a, Vectors>,
-    vector: Vec<i8>,
     nearest: Vec<String>,
-    /// Cosines of the nearest and of the last of the nearest sites.
+    /// The query's vectors (one, or as it is and after the instruction)
+    /// with the cosines of the nearest and of the last of the nearest sites.
+    spreads: Vec<Spread>,
+    /// How the closeness of several vectors is combined.
+    combine: QueryInstruction,
+}
+
+struct Spread {
+    vector: Vec<i8>,
     best: f32,
     floor: f32,
 }
 
 impl<'a> QueryMeaning<'a> {
-    /// Closeness to `vector`; the nearest sites are those nearest `near`
-    /// when given, else `vector`.
-    fn new(vectors: RwLockReadGuard<'a, Vectors>, vector: Vec<i8>, near: Option<Vec<i8>>) -> Self {
-        let found = vectors.nearest(&vector, NEAREST);
-        let best = found.first().map_or(0.0, |&(_, cosine)| cosine);
-        let floor = match found.last() {
-            // Too few sites to spread: keep the cosines as they are.
-            Some(&(_, cosine)) if found.len() == NEAREST => cosine,
-            _ => 0.0,
-        };
-        let nearest = match near {
-            Some(near) => vectors.nearest(&near, NEAREST),
-            None => found,
-        }
-        .into_iter()
-        .map(|(domain, _)| domain.to_string())
-        .collect();
+    /// The nearest sites are those nearest the first of `vectors`.
+    fn new(
+        vectors: RwLockReadGuard<'a, Vectors>,
+        query: Vec<Vec<i8>>,
+        combine: QueryInstruction,
+    ) -> Self {
+        let mut nearest = None;
+        let spreads = query
+            .into_iter()
+            .map(|vector| {
+                let found = vectors.nearest(&vector, NEAREST);
+                let best = found.first().map_or(0.0, |&(_, cosine)| cosine);
+                let floor = match found.last() {
+                    // Too few sites to spread: keep the cosines as they are.
+                    Some(&(_, cosine)) if found.len() == NEAREST => cosine,
+                    _ => 0.0,
+                };
+                nearest.get_or_insert_with(|| {
+                    found
+                        .into_iter()
+                        .map(|(domain, _)| domain.to_string())
+                        .collect()
+                });
+                Spread {
+                    vector,
+                    best,
+                    floor,
+                }
+            })
+            .collect();
         QueryMeaning {
             vectors,
-            vector,
-            nearest,
-            best,
-            floor,
+            nearest: nearest.unwrap_or_default(),
+            spreads,
+            combine,
+        }
+    }
+
+    fn spread(&self, spread: &Spread, domain: &str) -> Option<f32> {
+        let cosine = self.vectors.closeness(&spread.vector, domain)?;
+        if spread.best > spread.floor {
+            Some(((cosine - spread.floor) / (spread.best - spread.floor)).clamp(0.0, 1.0))
+        } else {
+            Some(cosine.clamp(0.0, 1.0))
         }
     }
 }
@@ -194,11 +222,14 @@ impl Meaning for QueryMeaning<'_> {
     }
 
     fn closeness(&self, domain: &str) -> Option<f32> {
-        let cosine = self.vectors.closeness(&self.vector, domain)?;
-        if self.best > self.floor {
-            Some(((cosine - self.floor) / (self.best - self.floor)).clamp(0.0, 1.0))
-        } else {
-            Some(cosine.clamp(0.0, 1.0))
+        let all = self
+            .spreads
+            .iter()
+            .map(|spread| self.spread(spread, domain))
+            .collect::<Option<Vec<f32>>>()?;
+        match self.combine {
+            QueryInstruction::Min => all.into_iter().reduce(f32::min),
+            _ => Some(all.iter().sum::<f32>() / all.len().max(1) as f32),
         }
     }
 }

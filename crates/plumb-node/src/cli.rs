@@ -282,8 +282,10 @@ pub enum QueryInstruction {
     Off,
     /// After the instruction, for both.
     On,
-    /// After the instruction for the nearest sites; as it is for closeness.
-    Nearest,
+    /// Both ways, closeness being the mean of the two.
+    Mix,
+    /// Both ways, closeness being the lower of the two.
+    Min,
 }
 
 #[derive(Debug, Args)]
