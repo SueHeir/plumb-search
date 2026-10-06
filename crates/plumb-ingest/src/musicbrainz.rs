@@ -119,8 +119,8 @@ pub fn export_url(latest: &str) -> Result<String> {
 /// interrupted run carries on.
 pub fn extract_tables(archive: &Path, dir: &Path) -> Result<()> {
     // Which archive the tables there came from: its size and time.
-    let meta = std::fs::metadata(archive)
-        .with_context(|| format!("reading {}", archive.display()))?;
+    let meta =
+        std::fs::metadata(archive).with_context(|| format!("reading {}", archive.display()))?;
     let from = format!(
         "{} {}",
         meta.len(),
