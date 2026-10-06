@@ -190,6 +190,12 @@ fn is_about_one_thing(page: &Page) -> bool {
 
 /// The info box for results `sites` and `pages` (as placed among them),
 /// if one article is clearly what the query is about.
+///
+/// When the first result is a well-known or official site the query names
+/// in full, and no article named by the query is listed above it, the box is about that site's article or none: "zoom" is
+/// zoom.us, not the 2006 film called Zoom, and "tesla" is tesla.com, not
+/// the band. The article about the site is listed under it, named by the
+/// query or not ("Zoom Video Communications").
 pub(crate) fn info_box(sites: &[Hit], pages: &[PlacedPage]) -> Option<InfoBox> {
     info_from_page(page_about(sites, pages)?, sites)
 }
@@ -198,14 +204,26 @@ pub(crate) fn info_box(sites: &[Hit], pages: &[PlacedPage]) -> Option<InfoBox> {
 /// `pages` (as placed among them) are clearly about, as [`info_box`]
 /// picks it.
 pub(crate) fn page_about<'a>(sites: &[Hit], pages: &'a [PlacedPage]) -> Option<&'a Page> {
-    let top_site = sites.first().map(|hit| hit.domain.as_str());
+    let top = sites.first();
+    let top_site = top.map(|hit| hit.domain.as_str());
+    // Unless an article named by the query is listed first, above every
+    // site: then it is what the query is about ("marie curie").
+    let page_leads = pages
+        .iter()
+        .any(|placed| placed.hit.named && placed.under.is_none() && placed.at == 0);
+    let site_wins = !page_leads
+        && top.is_some_and(|hit| {
+            hit.named && (hit.official || hit.link_score >= plumb_index::WELL_KNOWN_LINK_SCORE)
+        });
     let placed = pages.iter().find(|placed| {
         let page = &placed.hit.page;
-        placed.hit.named
+        let under_top = placed.under.is_some() && placed.under.as_deref() == top_site;
+        (placed.hit.named || (site_wins && under_top))
             && is_about_one_thing(page)
             && !is_disambiguation(&page.title, page.description.as_deref())
             && match &placed.under {
-                Some(under) => Some(under.as_str()) == top_site,
+                _ if site_wins => under_top,
+                Some(_) => under_top,
                 None => placed.at <= 1,
             }
     })?;
@@ -478,6 +496,28 @@ mod tests {
         let mut html = String::new();
         render_info_box(&mut html, &info);
         assert!(html.contains("<dt>Official site</dt><dd><a href=\"https://github.com/\""));
+    }
+
+    #[test]
+    fn a_named_well_known_site_takes_the_box_from_its_namesakes() {
+        let mut zoom = site("zoom.us", Some("US"));
+        zoom.named = true;
+        zoom.official = true;
+        let film = placed(article("Zoom (2006 film)", "Film", None), None, 1);
+        let mut company = article(
+            "Zoom Video Communications",
+            "Video conferencing company",
+            Some("zoom.us"),
+        );
+        company.named = false;
+        let company = placed(company, Some("zoom.us"), 0);
+        let info = info_box(&[zoom.clone()], &[film.clone(), company]).unwrap();
+        assert_eq!(info.title, "Zoom Video Communications");
+        // Better no box than the film.
+        assert_eq!(info_box(&[zoom.clone()], &[film]), None);
+        // An article listed above every site is still what was searched.
+        let curie = placed(article("Zoom", "Physicist", None), None, 0);
+        assert_eq!(info_box(&[zoom], &[curie]).unwrap().title, "Zoom");
     }
 
     #[test]

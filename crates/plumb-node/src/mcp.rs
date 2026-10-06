@@ -645,10 +645,11 @@ impl Mcp {
         options: &SearchOptions,
     ) -> Result<Value> {
         let mut results = self.lookup(query, limit.unwrap_or(DEFAULT_SEARCH_LIMIT), options)?;
-        let guessed = if results.pages.iter().any(|p| p.hit.page.package.is_some()) {
-            None
-        } else {
-            self.guess_package(query, options)
+        let guessed = match plumb_core::packages::install_command(query) {
+            // "cargo add serde" asks for serde's card, whatever else is found.
+            Some((registry, name)) => self.installed_package(registry, &name, options),
+            None if results.pages.iter().any(|p| p.hit.page.package.is_some()) => None,
+            None => self.guess_package(query, options),
         };
         if guessed.is_some() {
             // "fastapi docs" is not "fastai docs".
@@ -833,6 +834,31 @@ impl Mcp {
             .map(|placed| placed.hit)
             .find(|hit| hit.page.package.is_some() && hit.popularity >= GUESSED_PACKAGE)
             .map(|hit| hit.page)
+    }
+
+    /// The package an install command names, from its registry.
+    fn installed_package(
+        &self,
+        registry: &plumb_core::packages::Registry,
+        name: &str,
+        options: &SearchOptions,
+    ) -> Option<plumb_index::pages::Page> {
+        let mut query = format!("{name} package");
+        if let Some(word) = registry.words.first().or(registry.languages.first()) {
+            query.push(' ');
+            query.push_str(word);
+        }
+        let found = self.lookup(&query, 1, options).ok()?;
+        found
+            .pages
+            .into_iter()
+            .map(|placed| placed.hit.page)
+            .find(|page| {
+                page.package.as_ref().is_some_and(|package| {
+                    package.registry().is_some_and(|r| r.key == registry.key)
+                        && package.name.eq_ignore_ascii_case(name)
+                })
+            })
     }
 
     /// `package`: the cards of the packages called `name`, of `registry`

@@ -115,7 +115,9 @@ fn ingest_index_search_and_eval_the_fixtures() {
     let hits: Vec<Hit> = serde_json::from_str(&json).expect("search --json output");
     assert_eq!(hits.first().map(|h| h.domain.as_str()), Some("usbank.com"));
     assert!(hits.len() <= 10);
-    assert!(hits.iter().any(|h| h.domain == "usbank-login-help.com"));
+    // The look-alike is indexed but far below the site named, so it is
+    // left off the page.
+    assert!(!hits.iter().any(|h| h.domain == "usbank-login-help.com"));
 
     let text = plumb_ok(&args(&[
         &"search", &"--index", &index, &"--limit", &"3", &"chase",

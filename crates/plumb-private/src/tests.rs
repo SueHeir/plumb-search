@@ -92,6 +92,11 @@ fn constants_match_the_index_defaults() {
     assert_eq!(rank::TRUSTED_LINK_SCORE, cfg.trusted_link_score);
     assert_eq!(rank::UNTRUSTED_SHARE, cfg.untrusted_share);
     assert_eq!(rank::KIND_BONUS, cfg.kind_bonus);
+    assert_eq!(Some(rank::NAMED_SHARE), cfg.named_share);
+    assert_eq!(
+        rank::WELL_KNOWN_LINK_SCORE,
+        plumb_index::WELL_KNOWN_LINK_SCORE
+    );
     assert_eq!(rank::COUNTRY_BOOST, cfg.country_boost);
 }
 

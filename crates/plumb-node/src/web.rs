@@ -1028,6 +1028,9 @@ async fn search_page(
                 } else {
                     visitor.ensure_profile();
                 }
+                if editing {
+                    visitor.note_judged(&query, &results.hits, settings.options.country.as_deref());
+                }
                 let mut view = visitor.view();
                 view.tune_bar = tuning.map(|t| t.bar(&settings.options));
                 view.home = settings.options.country.clone();
@@ -2095,7 +2098,7 @@ select{font:inherit;padding:.15rem .3rem;border:1px solid var(--line);border-rad
 background:var(--bg);color:var(--fg)}\
 .ss{margin:1rem 0 .25rem;padding:.6rem .8rem;border:1px solid var(--line);border-radius:.5rem}\
 .ss a{color:var(--link)}\
-.sp{margin:1rem 0 .25rem}.sp a{color:var(--link)}\
+.sp{margin:1rem 0 .25rem}.sp a{color:var(--link)}.sp .sps{margin-left:.5rem;font-size:.9em}\
 li.news{padding:.6rem .9rem;border:1px solid var(--line);border-radius:.6rem}\
 .news summary{cursor:pointer}\
 .news .nh{font-size:.875rem;font-weight:600}\
@@ -2577,7 +2580,20 @@ fn render_spelling(out: &mut String, spelling: &Spelling, options: &SearchOption
         )),
         escape_html(&truncate_chars(&spelling.query, 150))
     );
-    let _ = writeln!(out, "<p class=\"sp\">Did you mean {fixed}?</p>");
+    // A site the corrected name is, marked as the suggestion's.
+    let site = spelling
+        .site
+        .as_deref()
+        .and_then(|domain| Some((domain, homepage_url(domain)?)))
+        .map(|(domain, url)| {
+            format!(
+                " <a class=\"sps\" href=\"{}\" rel=\"noreferrer\">Go to {}</a>",
+                escape_html(&url),
+                escape_html(domain)
+            )
+        })
+        .unwrap_or_default();
+    let _ = writeln!(out, "<p class=\"sp\">Did you mean {fixed}?{site}</p>");
 }
 
 /// One result as shown: a hit, and what the network said about it when only
@@ -5394,6 +5410,39 @@ mod tests {
     }
 
     #[test]
+    fn a_misspelled_name_offers_its_site_with_the_suggestion() {
+        let results = SearchResults {
+            pages: Vec::new(),
+            hits: vec![scored("youtbue.com", 0.9)],
+            site_search: None,
+            spelling: Some(Spelling {
+                query: "youtube".into(),
+                site: Some("youtube.com".into()),
+            }),
+        };
+        let page = render_results(
+            "youtbue",
+            &results,
+            None,
+            &NetOutcome::NotAsked,
+            &no_settings(),
+            None,
+            10,
+            true,
+            &Icons::default(),
+        );
+        assert!(
+            page.contains(
+                "<strong>youtube</strong></a>? <a class=\"sps\" \
+                 href=\"https://youtube.com/\" rel=\"noreferrer\">Go to youtube.com</a></p>"
+            ),
+            "{page}"
+        );
+        // The results are still for what was typed.
+        assert!(page.contains("/go?q=youtbue&amp;d=youtbue.com"), "{page}");
+    }
+
+    #[test]
     fn typos_are_searched_as_typed_with_a_suggestion() {
         let mut results = SearchResults {
             pages: Vec::new(),
@@ -5401,6 +5450,7 @@ mod tests {
             site_search: None,
             spelling: Some(Spelling {
                 query: "amazon".into(),
+                site: None,
             }),
         };
         let mut settings = no_settings();
@@ -6121,7 +6171,8 @@ mod tests {
             "the buttons come back to the round: {body}"
         );
 
-        // Putting a well-known site up teaches that they are liked.
+        // Putting a well-known site up once teaches nothing about well-known
+        // sites yet.
         let back: String = url::form_urlencoded::byte_serialize(first.as_bytes()).collect();
         let response = app()
             .oneshot(
@@ -6142,10 +6193,15 @@ mod tests {
             .unwrap();
         assert_eq!(response.headers()[header::LOCATION], first.as_str());
         let (_, _, done) = send_with_headers(app(), "/tune?done=1", &me).await;
-        assert!(done.contains("You like <strong>well-known sites"), "{done}");
+        assert!(done.contains("Nothing learned yet"), "{done}");
         let (_, _, body) = send_with_headers(app(), "/search?q=denver+bank&country=any", &me).await;
-        assert!(body.contains("You like well-known sites"), "{body}");
+        assert!(!body.contains("You like well-known sites"), "{body}");
         assert!(body.contains("href=\"/tune\""), "{body}");
+        let id = profile.trim_start_matches("plumb_profile=");
+        let learned = crate::history::HistoryStore::new(&node.0).load(id).learned;
+        let judged = learned.judged.expect("results seen in edit mode");
+        assert_eq!(judged.liked, 1.0, "{judged:?}");
+        assert_eq!(judged.pages.len(), 1, "{judged:?}");
         // The round's searches are not kept as past searches.
         let (_, _, history) = send_with_headers(app(), "/history", &me).await;
         assert!(

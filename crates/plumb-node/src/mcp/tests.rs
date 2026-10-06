@@ -543,6 +543,14 @@ fn package_cards_say_version_install_and_docs() {
     let reply = call(&mcp, "search", json!({ "query": "serde crate" }));
     let text = reply["result"]["content"][0]["text"].as_str().unwrap();
     assert!(text.starts_with("1. [crates.io] serde 1.0.228"), "{text}");
+    // So does the command that installs it.
+    let reply = call(
+        &mcp,
+        "search",
+        json!({ "query": "cargo add serde --features derive" }),
+    );
+    let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.starts_with("1. [crates.io] serde 1.0.228"), "{text}");
     // Another registry's package of the name is not there.
     let reply = call(
         &mcp,

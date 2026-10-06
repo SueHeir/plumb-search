@@ -1493,13 +1493,15 @@ async fn a_node_sharing_popularity_reports_picks_and_ranks_with_the_networks() {
         .with_p2p(net_status.peer_id.parse().unwrap())
         .unwrap();
 
-    let before = search(addr, "us+bank").await;
+    // "bank" rather than "us bank": a search naming usbank.com leaves
+    // out the sites far below it, so it has no runner-up to pick.
+    let before = search(addr, "bank").await;
     assert!(before.len() >= 2, "{before:?}");
     let runner_up = before[1].clone();
 
     // A result opened from the page is noted.
-    let (_, _, body) = get(addr, "/search?q=us+bank").await;
-    let go = format!("/go?q=us+bank&amp;d={}", runner_up.domain);
+    let (_, _, body) = get(addr, "/search?q=bank").await;
+    let go = format!("/go?q=bank&amp;d={}", runner_up.domain);
     assert!(body.contains(&go), "{body}");
     let (code, head, _) = get(addr, &go.replace("&amp;", "&")).await;
     assert_eq!(code, 303);
@@ -1551,7 +1553,7 @@ async fn a_node_sharing_popularity_reports_picks_and_ranks_with_the_networks() {
     // Once enough others report the same pick, the node ranks with it.
     let epoch = report_epoch(now_unix());
     for _ in 1..REPORT_THRESHOLD {
-        let report = plumb_net::Report::new(epoch, "us bank", &runner_up.domain).unwrap();
+        let report = plumb_net::Report::new(epoch, "bank", &runner_up.domain).unwrap();
         peer.send_report(&report, Duration::from_secs(10))
             .await
             .unwrap();
@@ -1566,7 +1568,7 @@ async fn a_node_sharing_popularity_reports_picks_and_ranks_with_the_networks() {
         table = net.recount().await.unwrap();
     }
     assert_eq!(table.picks.len(), 1, "{table:?}");
-    let after = search(addr, "us+bank").await;
+    let after = search(addr, "bank").await;
     let boosted = after.iter().find(|h| h.domain == runner_up.domain).unwrap();
     assert!(
         (boosted.score - (runner_up.score + MAX_POPULARITY_BONUS)).abs() < 1e-4,

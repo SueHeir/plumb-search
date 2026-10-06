@@ -165,8 +165,26 @@ pub struct Learned {
     /// What the searcher said about boxes, in edit mode: newest first.
     pub boxes: Vec<BoxVerdict>,
     /// What they like and dislike in results in general, from the tuning
-    /// page and edit mode.
+    /// page and edit mode: one count for each trait.
     pub tastes: Vec<Taste>,
+    /// The same count over every result shown in edit mode, which each
+    /// trait is compared with. `None` in history files from before it was
+    /// kept, whose tastes counted only rated results and are dropped.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub judged: Option<Judged>,
+}
+
+/// Every result shown in edit mode and what was said of them; see
+/// [`Learned::tastes`].
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Judged {
+    pub liked: f32,
+    pub disliked: f32,
+    pub seen: f32,
+    /// The searches ([`query_key`]) whose results are counted as seen,
+    /// newest first, so a page reloaded after each button counts once.
+    pub pages: Vec<String>,
 }
 
 /// A kind of result people tend to like or not, whatever they search for.
@@ -376,6 +394,17 @@ const SMALL_BELOW: f32 = 0.35;
 /// Most a liked or disliked trait moves a result, and most all of them
 /// together do.
 pub const TASTE_MOST: f32 = 0.15;
+/// Results with a trait, and without it, seen in edit mode before what was
+/// said of them counts.
+const TASTE_MIN_SEEN: f32 = 6.0;
+/// Results with a trait moved up or down before it counts.
+const TASTE_MIN_RATED: f32 = 2.0;
+/// Standard errors the difference must clear before a trait counts.
+const TASTE_SURE: f32 = 2.0;
+/// Results of a page counted as seen in edit mode: those looked at.
+pub const JUDGED_PER_PAGE: usize = 10;
+/// Searches remembered in [`Judged::pages`].
+const MAX_JUDGED_PAGES: usize = 200;
 const TASTES_MOST: f32 = 0.2;
 /// A trait whose taste moves results at least this much is said to be
 /// liked (or disliked) on the pages.
@@ -418,23 +447,58 @@ pub fn traits(
     found
 }
 
-/// How a searcher feels about results with a trait, from what they rated.
+/// How a searcher feels about results with a trait, from what they did
+/// with them in edit mode.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Taste {
     #[serde(rename = "trait")]
     pub kind: Trait,
+    /// Moved up.
     pub liked: f32,
+    /// Moved down or hidden.
     pub disliked: f32,
-    /// Times rated, liked, disliked or neither.
+    /// Shown in edit mode, whatever was done with them.
     pub seen: f32,
 }
 
 impl Taste {
-    /// The score it adds to a result with the trait: up to
-    /// [`TASTE_MOST`] either way, more sure the more was rated.
-    pub fn score(&self) -> f32 {
-        let lean = (self.liked - self.disliked) / (self.seen + 2.0);
-        (lean * TASTE_MOST * 2.0).clamp(-TASTE_MOST, TASTE_MOST)
+    /// The score it adds to a result with the trait, up to [`TASTE_MOST`]
+    /// either way: how much more (or less) often results with it were moved
+    /// up rather than down than results without it, of those `all` seen.
+    ///
+    /// Most results moved down or hidden are simply not what was searched
+    /// for, and every result has some traits, so counting each rating
+    /// against the result's traits alone would make every common trait
+    /// look disliked. Only a difference from the other results says
+    /// anything, and only once it is larger than chance would make it:
+    /// [`TASTE_SURE`] standard errors, with enough results either way.
+    pub fn score(&self, all: &Judged) -> f32 {
+        let seen = self.seen;
+        let others = all.seen - seen;
+        if seen < TASTE_MIN_SEEN
+            || others < TASTE_MIN_SEEN
+            || self.liked + self.disliked < TASTE_MIN_RATED
+        {
+            return 0.0;
+        }
+        // Up counts 1, down -1, nothing 0: the mean and its variance.
+        let mean_and_variance = |liked: f32, disliked: f32, seen: f32| {
+            let (liked, disliked) = (liked.clamp(0.0, seen), disliked.clamp(0.0, seen));
+            let mean = (liked - disliked) / seen;
+            let variance = ((liked + disliked) / seen - mean * mean).max(0.0);
+            // Never quite sure from a handful of results.
+            (mean, variance.max(0.1) / seen)
+        };
+        let (with, with_var) = mean_and_variance(self.liked, self.disliked, seen);
+        let (without, without_var) =
+            mean_and_variance(all.liked - self.liked, all.disliked - self.disliked, others);
+        let difference = with - without;
+        let sure = TASTE_SURE * (with_var + without_var).sqrt();
+        if difference.abs() <= sure {
+            return 0.0;
+        }
+        let beyond = difference.abs() - sure;
+        (difference.signum() * beyond * TASTE_MOST * 2.0).clamp(-TASTE_MOST, TASTE_MOST)
     }
 }
 
@@ -809,29 +873,72 @@ impl Learned {
             && self.tastes.is_empty()
     }
 
-    /// Notes a rating of a result with `traits`, worth `weight` ratings.
-    pub fn rate(&mut self, traits: &[Trait], rating: Rating, weight: f32) {
-        for &kind in traits {
-            let i = match self.tastes.iter().position(|t| t.kind == kind) {
-                Some(i) => i,
-                None => {
-                    self.tastes.push(Taste {
-                        kind,
-                        liked: 0.0,
-                        disliked: 0.0,
-                        seen: 0.0,
-                    });
-                    self.tastes.len() - 1
-                }
-            };
-            let taste = &mut self.tastes[i];
-            taste.seen += weight;
-            match rating {
-                Rating::Like => taste.liked += weight,
-                Rating::Dislike => taste.disliked += weight,
-                Rating::Neither => {}
+    /// The count every trait is compared with, starting it (and dropping
+    /// tastes counted the old way) when there is none.
+    fn judged(&mut self) -> &mut Judged {
+        if self.judged.is_none() {
+            self.tastes.clear();
+        }
+        self.judged.get_or_insert_with(Judged::default)
+    }
+
+    fn taste(&mut self, kind: Trait) -> &mut Taste {
+        let i = match self.tastes.iter().position(|t| t.kind == kind) {
+            Some(i) => i,
+            None => {
+                self.tastes.push(Taste {
+                    kind,
+                    liked: 0.0,
+                    disliked: 0.0,
+                    seen: 0.0,
+                });
+                self.tastes.len() - 1
+            }
+        };
+        &mut self.tastes[i]
+    }
+
+    /// Notes the results of a page shown in edit mode for `query`, each by
+    /// its traits, once for each search.
+    pub fn note_judged(&mut self, query: &str, results: &[Vec<Trait>]) {
+        let key = query_key(query);
+        let judged = self.judged();
+        if judged.pages.contains(&key) {
+            return;
+        }
+        judged.pages.insert(0, key);
+        judged.pages.truncate(MAX_JUDGED_PAGES);
+        judged.seen += results.len() as f32;
+        for traits in results {
+            for &kind in traits {
+                self.taste(kind).seen += 1.0;
             }
         }
+    }
+
+    /// Notes a rating of a result with `traits`, worth `weight` ratings (a
+    /// negative weight takes one back).
+    pub fn rate(&mut self, traits: &[Trait], rating: Rating, weight: f32) {
+        let add = |liked: &mut f32, disliked: &mut f32| match rating {
+            Rating::Like => *liked = (*liked + weight).max(0.0),
+            Rating::Dislike => *disliked = (*disliked + weight).max(0.0),
+            Rating::Neither => {}
+        };
+        let judged = self.judged();
+        add(&mut judged.liked, &mut judged.disliked);
+        for &kind in traits {
+            let taste = self.taste(kind);
+            add(&mut taste.liked, &mut taste.disliked);
+        }
+    }
+
+    /// Each trait's score, see [`Taste::score`].
+    fn taste_scores(&self) -> impl Iterator<Item = (f32, Trait)> + '_ {
+        self.judged.iter().flat_map(move |all| {
+            self.tastes
+                .iter()
+                .map(move |taste| (taste.score(all), taste.kind))
+        })
     }
 
     /// The score a result with `traits` gets for the searcher's tastes,
@@ -839,11 +946,10 @@ impl Learned {
     pub fn taste_score(&self, traits: &[Trait]) -> (f32, Option<Trait>) {
         let mut total = 0.0f32;
         let mut best: Option<(f32, Trait)> = None;
-        for taste in self.tastes.iter().filter(|t| traits.contains(&t.kind)) {
-            let score = taste.score();
+        for (score, kind) in self.taste_scores().filter(|(_, k)| traits.contains(k)) {
             total += score;
             if score >= TASTE_SHOWN_FROM && best.is_none_or(|(b, _)| score > b) {
-                best = Some((score, taste.kind));
+                best = Some((score, kind));
             }
         }
         (
@@ -854,8 +960,7 @@ impl Learned {
 
     /// The traits liked and disliked enough to say so, strongest first.
     pub fn leanings(&self) -> (Vec<Trait>, Vec<Trait>) {
-        let mut tastes: Vec<(f32, Trait)> =
-            self.tastes.iter().map(|t| (t.score(), t.kind)).collect();
+        let mut tastes: Vec<(f32, Trait)> = self.taste_scores().collect();
         tastes.sort_by(|a, b| b.0.total_cmp(&a.0));
         let liked = tastes
             .iter()
@@ -1211,24 +1316,78 @@ mod tests {
     fn tastes_move_results_with_their_traits() {
         let mut learned = Learned::default();
         assert_eq!(learned.taste_score(&[Trait::Code]), (0.0, None));
-        for _ in 0..4 {
-            learned.rate(&[Trait::Code, Trait::Popular], Rating::Like, 1.0);
-            learned.rate(&[Trait::Social, Trait::Popular], Rating::Dislike, 1.0);
+        // Six searches of ten results: two code sites, one social site,
+        // seven others, popular and small alike.
+        let page = |n: usize| match n {
+            0 | 1 => vec![Trait::Code, Trait::Popular],
+            2 => vec![Trait::Social, Trait::Popular],
+            n if n % 2 == 0 => vec![Trait::Popular],
+            _ => vec![Trait::Small],
+        };
+        for search in 0..6 {
+            let results: Vec<Vec<Trait>> = (0..10).map(page).collect();
+            learned.note_judged(&format!("search {search}"), &results);
+            // Reloaded after each button: counted once.
+            learned.note_judged(&format!("search {search}"), &results);
+            learned.rate(&page(0), Rating::Like, 1.0);
+            learned.rate(&page(2), Rating::Dislike, 1.0);
+            // Something not searched for, of every kind.
+            learned.rate(&page(3 + search), Rating::Dislike, 1.0);
         }
-        learned.rate(&[Trait::Video], Rating::Neither, 1.0);
+        assert_eq!(learned.judged.as_ref().unwrap().seen, 60.0);
         let (code, why) = learned.taste_score(&[Trait::Code]);
         assert!(code > 0.0 && code <= TASTE_MOST, "{code}");
         assert_eq!(why, Some(Trait::Code));
         let (social, why) = learned.taste_score(&[Trait::Social]);
         assert!(social < 0.0, "{social}");
         assert_eq!(why, None);
-        // Liked as often as disliked.
+        // Moved down about as often as the rest: nothing to say.
         assert_eq!(learned.taste_score(&[Trait::Popular]).0, 0.0);
+        assert_eq!(learned.taste_score(&[Trait::Small]).0, 0.0);
         assert_eq!(learned.taste_score(&[Trait::Video]).0, 0.0);
         let (liked, disliked) = learned.leanings();
         assert_eq!(liked, [Trait::Code]);
         assert_eq!(disliked, [Trait::Social]);
         assert_eq!(Trait::parse("code"), Some(Trait::Code));
+    }
+
+    #[test]
+    fn a_few_results_moved_down_say_nothing_about_their_kind() {
+        // What Liz saw: small, well-known and official sites all
+        // "disliked" after hiding a few results that were not what she
+        // searched for.
+        let mut learned = Learned::default();
+        let results = [
+            vec![Trait::Official, Trait::Popular, Trait::Local],
+            vec![Trait::Reference, Trait::Popular],
+            vec![Trait::Small, Trait::Local],
+            vec![Trait::Small],
+            vec![Trait::Official, Trait::Small, Trait::Local],
+            vec![Trait::Popular, Trait::Local],
+        ];
+        for search in 0..4 {
+            learned.note_judged(&format!("search {search}"), &results);
+        }
+        learned.rate(&results[0], Rating::Dislike, 1.0);
+        learned.rate(&results[3], Rating::Dislike, 1.0);
+        learned.rate(&results[4], Rating::Dislike, 1.0);
+        learned.rate(&results[5], Rating::Like, 1.0);
+        assert_eq!(learned.leanings(), (vec![], vec![]));
+        // Taken back: counts as never said.
+        learned.rate(&results[5], Rating::Like, -1.0);
+        assert_eq!(learned.judged.as_ref().unwrap().liked, 0.0);
+    }
+
+    #[test]
+    fn tastes_counted_the_old_way_are_dropped() {
+        let mut learned: Learned = serde_json::from_str(
+            r#"{"tastes":[{"trait":"small","liked":0,"disliked":3,"seen":3}]}"#,
+        )
+        .unwrap();
+        assert_eq!(learned.taste_score(&[Trait::Small]).0, 0.0);
+        learned.note_judged("q", &[vec![Trait::Code]]);
+        assert_eq!(learned.tastes.len(), 1);
+        assert_eq!(learned.tastes[0].kind, Trait::Code);
     }
 
     #[test]
