@@ -8,8 +8,9 @@
 //!   seeds (official websites in Wikidata and Tranco's top
 //!   [`SEED_TRANCO`]), as in TrustRank, not to every site. A farm of
 //!   thousands of sites nobody else links to then passes on nothing.
-//! - Links between sites of one company's domain (`apple.com` and
-//!   `support.apple.com`) do not count.
+//! - Links between sites of one company (`apple.com` and
+//!   `support.apple.com`, `marriott.com` and `marriott.com.cn`) do not
+//!   count.
 //! - A homepage that links to fewer than [`MIN_SHARES`] other sites gives
 //!   each the share it would give one of [`MIN_SHARES`]; the rest goes
 //!   back to the seeds. One link from a big site is worth a lot, but not
@@ -250,20 +251,33 @@ impl Graph {
                 break;
             }
         }
+        // Links from sites with no rank: from sites no trusted site links
+        // to, directly or not, such as link farms.
+        let mut untrusted_in = vec![0u32; n];
+        self.for_each_source(|src, targets| {
+            if rank[src as usize] == 0.0 {
+                for &to in targets {
+                    untrusted_in[to as usize] += 1;
+                }
+            }
+        })?;
         Ok(Ranked {
             graph: self,
             rank,
             in_links,
+            untrusted_in,
             rounds: done,
             change,
         })
     }
 }
 
-/// The domain of the company behind a site: `apple.com` for
-/// `support.apple.com`, the site itself otherwise.
+/// The name of the company behind a site: its registrable domain without
+/// the public suffix, so `apple` for `apple.com` and `support.apple.com`,
+/// and `marriott` for `marriott.com` and `marriott.com.cn`.
 fn organization(site: &str) -> &str {
-    plumb_core::parent_domain(site).unwrap_or(site)
+    let domain = plumb_core::parent_domain(site).unwrap_or(site);
+    domain.split('.').next().unwrap_or(domain)
 }
 
 /// A ranked [`Graph`].
@@ -273,6 +287,8 @@ pub(crate) struct Ranked {
     rank: Vec<f64>,
     /// Distinct sites linking to each one, redirects followed.
     in_links: Vec<u32>,
+    /// Of those, the ones from sites with no rank.
+    untrusted_in: Vec<u32>,
     rounds: usize,
     change: f64,
 }
@@ -305,6 +321,48 @@ impl Ranked {
             }
         }
         positions
+    }
+
+    /// The sites most often linked from the same trusted sites (ones with
+    /// some rank) as `site`, best first, at most `limit`: co-citation, as
+    /// `(domain, shared linking sites, similarity)`. Similarity is the
+    /// shared count over the geometric mean of both sites' trusted links
+    /// in. Sites of the same company and ones shared by fewer than two
+    /// linking sites are left out.
+    pub(crate) fn similar(&self, site: &str, limit: usize) -> Result<Vec<(String, u32, f64)>> {
+        let g = &self.graph;
+        let Some(&id) = g.ids.get(site) else {
+            return Ok(Vec::new());
+        };
+        let id = g.resolve[id as usize];
+        let mut shared: HashMap<u32, u32> = HashMap::new();
+        g.for_each_source(|src, targets| {
+            if self.rank[src as usize] == 0.0 || !targets.contains(&id) {
+                return;
+            }
+            for &to in targets {
+                if to != id {
+                    *shared.entry(to).or_default() += 1;
+                }
+            }
+        })?;
+        let trusted = |id: u32| self.in_links[id as usize] - self.untrusted_in[id as usize];
+        let own = organization(&g.names[id as usize]);
+        let mut found: Vec<(String, u32, f64)> = shared
+            .into_iter()
+            .filter(|&(to, count)| count >= 2 && organization(&g.names[to as usize]) != own)
+            .map(|(to, count)| {
+                let mean = (f64::from(trusted(id)) * f64::from(trusted(to))).sqrt();
+                (
+                    g.names[to as usize].to_string(),
+                    count,
+                    f64::from(count) / mean.max(1.0),
+                )
+            })
+            .collect();
+        found.sort_by(|a, b| b.2.total_cmp(&a.2).then_with(|| a.0.cmp(&b.0)));
+        found.truncate(limit);
+        Ok(found)
     }
 
     /// A site's rank as a multiple of the average (1.0).
@@ -447,21 +505,42 @@ pub fn run(args: &LinkRankArgs) -> Result<()> {
         }
     }
 
+    for site in &args.similar {
+        let site = canonical_domain(site).unwrap_or_else(|| site.clone());
+        println!("\nsimilar to {site} (linked from the same trusted sites):");
+        let found = ranked.similar(&site, 15)?;
+        if found.is_empty() {
+            println!("  none: too few trusted sites link to it");
+        }
+        for (domain, shared, similarity) in found {
+            println!("  {similarity:>6.3}  {shared:>6}  {domain}");
+        }
+    }
+
     if let Some(apply) = &args.apply {
         let positions = ranked.positions(&order);
         let mut file = BufWriter::new(
             File::create(apply).with_context(|| format!("writing {}", apply.display()))?,
         );
         let mut changed = 0usize;
+        let mut demoted = 0usize;
         let mut failed = None;
         crate::outline::for_each_record(&read_from, |mut record| {
             if failed.is_some() {
                 return;
             }
-            let position = canonical_domain(&record.domain)
-                .and_then(|domain| ranked.graph.ids.get(domain.as_str()).copied())
-                .and_then(|id| positions[id as usize]);
-            if let Some(position) = position {
+            let id = canonical_domain(&record.domain)
+                .and_then(|domain| ranked.graph.ids.get(domain.as_str()).copied());
+            if let (true, Some(id)) = (args.demote, id) {
+                let untrusted = ranked.untrusted_in[id as usize];
+                let signals = &mut record.signals;
+                if untrusted > 0 && signals.linking_domains > 0 {
+                    signals.linking_domains = signals.linking_domains.saturating_sub(untrusted);
+                    demoted += 1;
+                }
+            }
+            let position = id.and_then(|id| positions[id as usize]);
+            if let Some(position) = position.filter(|&p| p <= args.apply_top) {
                 let ours = u64::from(position);
                 let signals = &mut record.signals;
                 if signals.pagerank_rank.is_none_or(|rank| ours < rank) {
@@ -481,9 +560,11 @@ pub fn run(args: &LinkRankArgs) -> Result<()> {
         }
         file.flush()?;
         println!(
-            "\nwrote the records to {} with {} sites ranked better by links than before",
+            "\nwrote the records to {} with {} sites ranked better by links than before \
+             and {} counted fewer linking sites (links from unranked sites taken off)",
             apply.display(),
-            group_thousands(changed as u64)
+            group_thousands(changed as u64),
+            group_thousands(demoted as u64)
         );
     }
 
@@ -532,8 +613,8 @@ mod tests {
     }
 
     fn ranked(records: &[SiteRecord]) -> Ranked {
-        let dir = tempfile::tempdir().unwrap();
-        let mut graph = Graph::new(dir.path()).unwrap();
+        // The links file removes itself when the graph goes.
+        let mut graph = Graph::new(&std::env::temp_dir()).unwrap();
         for record in records {
             graph.add(record).unwrap();
         }
@@ -628,9 +709,11 @@ mod tests {
     fn links_within_one_company_do_not_count() {
         let ranked = ranked(&[
             site("apple.com", &["support.apple.com", "other.com"]),
+            site("marriott.com", &["marriott.com.cn", "other.com"]),
             site("a.com", &["other.com"]),
         ]);
         assert!(!ranked.graph.ids.contains_key("support.apple.com"));
+        assert!(!ranked.graph.ids.contains_key("marriott.com.cn"));
         assert_eq!(names(&ranked)[0], "other.com");
     }
 
@@ -663,6 +746,31 @@ mod tests {
         // No record, and no rank (nobody trusted links to it).
         assert_eq!(place("nowhere.net"), None);
         assert_eq!(place("farm.biz"), None);
+    }
+
+    #[test]
+    fn sites_linked_from_the_same_trusted_sites_are_similar() {
+        let mut records = vec![
+            seed("a.com", &["slack.com", "discord.com", "news.org"]),
+            seed("b.com", &["slack.com", "discord.com"]),
+            seed("c.com", &["slack.com", "discord.com", "teams.net"]),
+            seed("d.com", &["slack.com", "teams.net", "news.org"]),
+            seed("e.com", &["news.org"]),
+        ];
+        // A farm linking slack.com with spam.biz counts for nothing.
+        for i in 0..20 {
+            records.push(site(&format!("farm{i}.net"), &["slack.com", "spam.biz"]));
+        }
+        let ranked = ranked(&records);
+        let similar = ranked.similar("slack.com", 10).unwrap();
+        let names: Vec<&str> = similar.iter().map(|(d, _, _)| d.as_str()).collect();
+        assert_eq!(names[0], "discord.com");
+        assert!(names.contains(&"teams.net"));
+        assert!(!names.contains(&"spam.biz"));
+        assert_eq!(similar[0].1, 3);
+        let slack = ranked.graph.ids["slack.com"] as usize;
+        assert_eq!(ranked.untrusted_in[slack], 20);
+        assert_eq!(ranked.in_links[slack], 24);
     }
 
     #[test]
