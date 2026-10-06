@@ -1273,11 +1273,26 @@ impl Searcher {
             None => None,
         };
 
-        ranked.truncate(limit);
-        let hits = ranked
-            .into_iter()
-            .map(|ranked| self.hit(&searcher, ranked))
-            .collect::<Result<_>>()?;
+        // Left out unless the query names them: sites on names reserved
+        // for tests (uniteddolls.test), and homepages that are only a
+        // company's sign-in page for someone else's product ("Outlook Web
+        // App" on bpl.net for "microsoft outlook").
+        let mut hits = Vec::with_capacity(limit.min(ranked.len()));
+        for ranked in ranked {
+            if hits.len() == limit {
+                break;
+            }
+            let named = ranked.named;
+            let hit = self.hit(&searcher, ranked)?;
+            let left_out = is_reserved_name(&hit.domain)
+                || hit
+                    .title
+                    .as_deref()
+                    .is_some_and(|title| plumb_core::is_sign_in_portal(&hit.domain, title));
+            if named || !left_out {
+                hits.push(hit);
+            }
+        }
         let results = SearchResults {
             hits,
             pages: Vec::new(),
@@ -1439,6 +1454,14 @@ impl Searcher {
                 .unwrap_or_default(),
         })
     }
+}
+
+/// Whether `domain` is under a top-level name reserved for tests (RFC
+/// 2606, RFC 6761), which no real site has. `.example` stays: Plumb's own
+/// tests and fixtures use it.
+fn is_reserved_name(domain: &str) -> bool {
+    let tld = domain.rsplit('.').next().unwrap_or("");
+    ["test", "invalid", "localhost"].contains(&tld)
 }
 
 /// How a query names sites, for typo correction.
@@ -3015,6 +3038,52 @@ mod tests {
         assert_eq!(hits[0].domain, "youtube.com", "{:?}", domains(&hits));
         // With no other site named, the bare name is the answer.
         assert_eq!(top(&searcher, "you tubemusic"), "you-tubemusic.com");
+    }
+
+    #[test]
+    fn other_companies_sign_in_pages_and_test_names_are_left_out() {
+        let records = [
+            site(
+                "outlook.com",
+                Some("Outlook"),
+                Some("Microsoft Outlook email and calendar."),
+                &["Microsoft Outlook"],
+                &[("outlook", 500)],
+                popular(40, 4_000),
+            ),
+            site(
+                "bpl.net",
+                Some("Outlook Web App"),
+                None,
+                &[],
+                &[],
+                obscure(50_000, 5),
+            ),
+            site(
+                "outlooktips.org",
+                Some("Microsoft Outlook tips"),
+                Some("Tips for Microsoft Outlook."),
+                &[],
+                &[],
+                obscure(90_000, 2),
+            ),
+            site(
+                "outlook.test",
+                Some("Microsoft Outlook"),
+                None,
+                &[],
+                &[],
+                obscure(9_000, 2),
+            ),
+        ];
+        let (_dir, searcher) = build(&records);
+        let hits = searcher.search("microsoft outlook", 10).unwrap();
+        let order = domains(&hits);
+        assert!(order.contains(&"outlooktips.org"), "{order:?}");
+        assert!(!order.contains(&"bpl.net"), "{order:?}");
+        assert!(!order.contains(&"outlook.test"), "{order:?}");
+        // Asked for by name, they are found.
+        assert_eq!(top(&searcher, "bpl.net"), "bpl.net");
     }
 
     #[test]

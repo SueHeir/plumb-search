@@ -148,6 +148,64 @@ pub fn is_bot_check_page(
     })
 }
 
+/// Whole titles, after [`normalize_text`], of sign-in pages that
+/// companies run for themselves with someone else's product: Outlook on
+/// the web, webmail, VPN and remote-desktop gateways. Such a homepage is
+/// the company's door, not a page about the product.
+const PORTAL_TITLES: &[&str] = &[
+    "outlook",
+    "outlook web app",
+    "outlook web access",
+    "outlook sign in",
+    "sign in to outlook",
+    "microsoft exchange",
+    "exchange admin center",
+    "owa",
+    "roundcube webmail",
+    "roundcube webmail login",
+    "squirrelmail",
+    "horde",
+    "horde login",
+    "zimbra web client sign in",
+    "zimbra",
+    "webmail",
+    "webmail login",
+    "citrix gateway",
+    "netscaler gateway",
+    "netscaler aaa",
+    "citrix storefront",
+    "pulse connect secure",
+    "ivanti connect secure",
+    "globalprotect portal",
+    "sslvpn portal",
+    "fortinet ssl vpn",
+    "remote desktop web access",
+    "rd web access",
+    "vmware horizon",
+    "cpanel login",
+    "whm login",
+    "plesk login",
+    "sign in",
+    "log in",
+    "login",
+    "user login",
+    "member login",
+];
+
+/// Whether a homepage titled `title` is a sign-in page for a product the
+/// site at `domain` only uses ([`PORTAL_TITLES`]): "Outlook Web App" on
+/// bpl.net. The product's own site (outlook.com, citrix.com) is not.
+pub fn is_sign_in_portal(domain: &str, title: &str) -> bool {
+    let title = normalize_text(title);
+    if !PORTAL_TITLES.contains(&title.as_str()) {
+        return false;
+    }
+    let label = domain.split('.').next().unwrap_or("");
+    let product = title.split(' ').next().unwrap_or("");
+    let generic = ["sign", "log", "login", "user", "member", "webmail"];
+    generic.contains(&product) || !label.contains(product)
+}
+
 /// Whether `text` shows what the crawler sent rather than what the site
 /// says: this crawler's User-Agent (`PlumbSearch/0.1.0 (+https://...)`) or
 /// an IPv4 address in brackets, the visitor's address as KillBot's check
@@ -345,5 +403,15 @@ mod tests {
         let mut kept = good.clone();
         assert!(!kept.drop_bot_check());
         assert_eq!(kept, good);
+    }
+
+    #[test]
+    fn sign_in_portals_of_other_products_are_told_apart() {
+        assert!(is_sign_in_portal("bpl.net", "Outlook Web App"));
+        assert!(is_sign_in_portal("se-coop.com", "Outlook"));
+        assert!(is_sign_in_portal("example.org", "Login"));
+        assert!(!is_sign_in_portal("outlook.com", "Outlook"));
+        assert!(!is_sign_in_portal("citrix.com", "Citrix Gateway"));
+        assert!(!is_sign_in_portal("bpl.net", "Brooklyn Public Library"));
     }
 }
