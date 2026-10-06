@@ -144,16 +144,21 @@ pub(super) fn render_places(
 
 /// The places part folded behind a one-line summary, for a searcher who
 /// seldom opens places for searches like this one (see [`crate::learn`]).
-pub(super) fn fold_places(found: &PlaceResults, html: &str) -> String {
+pub(super) fn fold_places(found: &PlaceResults, html: &str, chosen: bool) -> String {
     let where_ = found
         .center
         .as_ref()
         .map(|center| format!(" near {}", escape_html(&place_name(center))))
         .unwrap_or_default();
     format!(
-        "<details class=\"plf\"><summary>{}{where_} <span class=\"m\">folded: you seldom open \
-         places for searches like this</span></summary>\n{html}</details>\n",
+        "<details class=\"plf\"><summary>{}{where_} <span class=\"m\">{}</span></summary>\n\
+         {html}</details>\n",
         escape_html(&capitalized(&found.what)),
+        if chosen {
+            "folded, as you asked"
+        } else {
+            "folded: you seldom open places for searches like this"
+        },
     )
 }
 
@@ -375,7 +380,7 @@ mod tests {
             place_links(&found.hits[0])[0],
             "https://www.bluepan.com/menu"
         );
-        let folded = fold_places(&found, &html);
+        let folded = fold_places(&found, &html, false);
         assert!(
             folded.starts_with("<details class=\"plf\"><summary>Pizza near Denver"),
             "{folded}"

@@ -15,6 +15,12 @@
 //!   search after search, and never picked itself, moves down a little.
 //!   Sites they pick move up through [`crate::history::History::bonus`].
 //!
+//! In edit mode (`/search?edit=1`) the searcher can also say it outright:
+//! each result gets buttons to put it higher or lower for this search, or
+//! hide it from this search ([`Verdict`]), and each box buttons to fold it
+//! or keep it open, for this search or for every search ([`BoxVerdict`]).
+//! What they say wins over what their clicks say.
+//!
 //! "Searches like this one" are, from most to least alike: the same
 //!   search, searches sharing its words, and every search the box was
 //!   shown for in the same way (for places: whether the query said where,
@@ -47,6 +53,11 @@ const PASSED_STEP: f32 = 0.05;
 const PASSED_MOST: f32 = 0.1;
 /// Words of a query counted, at most.
 const MAX_WORDS: usize = 8;
+/// Score a result put higher for a search gets, and one put lower.
+pub const VERDICT_UP: f32 = 0.4;
+pub const VERDICT_DOWN: f32 = -0.3;
+/// Most verdicts kept, of each kind.
+const MAX_VERDICTS: usize = 500;
 
 /// A box of the results page that is learned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -149,6 +160,82 @@ pub struct Learned {
     pub sites: Vec<SiteCount>,
     /// Newest first.
     pub pages: Vec<ShownPage>,
+    /// What the searcher said about results, in edit mode: newest first.
+    pub verdicts: Vec<SiteVerdict>,
+    /// What the searcher said about boxes, in edit mode: newest first.
+    pub boxes: Vec<BoxVerdict>,
+}
+
+/// What the searcher said about a result for a search.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Verdict {
+    /// Higher for this search.
+    Up,
+    /// Lower for this search.
+    Down,
+    /// Not for this search: left out.
+    Hide,
+}
+
+impl Verdict {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Verdict::Up => "up",
+            Verdict::Down => "down",
+            Verdict::Hide => "hide",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<Verdict> {
+        match name {
+            "up" => Some(Verdict::Up),
+            "down" => Some(Verdict::Down),
+            "hide" => Some(Verdict::Hide),
+            _ => None,
+        }
+    }
+
+    /// The score it adds to the result, for a [`Verdict::Up`] or
+    /// [`Verdict::Down`]: enough to move it past most results that match
+    /// about as well.
+    pub fn score(self) -> f32 {
+        match self {
+            Verdict::Up => VERDICT_UP,
+            Verdict::Down => VERDICT_DOWN,
+            Verdict::Hide => 0.0,
+        }
+    }
+
+    /// What the history page calls it.
+    pub fn label(self) -> &'static str {
+        match self {
+            Verdict::Up => "higher",
+            Verdict::Down => "lower",
+            Verdict::Hide => "hidden",
+        }
+    }
+}
+
+/// A result's verdict for a search.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SiteVerdict {
+    /// The query, as [`query_key`] makes it.
+    pub query: String,
+    pub domain: String,
+    pub verdict: Verdict,
+    pub at: u64,
+}
+
+/// A box folded or shown by the searcher's own choice: for one search
+/// (`q <query>`) or every search showing it the same way (`c <context>`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoxVerdict {
+    pub block: Block,
+    pub key: String,
+    /// Folded, or else always shown open.
+    pub fold: bool,
+    pub at: u64,
 }
 
 /// What to do with a box.
@@ -255,8 +342,12 @@ impl Learned {
             .map(|c| (rate(c.used, c.shown), c.shown))
     }
 
-    /// What to do with `block` for `query`, shown in `context`.
+    /// What to do with `block` for `query`, shown in `context`: what the
+    /// searcher said, else what their clicks say.
     pub fn choice(&self, block: Block, query: &str, context: &str) -> Choice {
+        if let Some(fold) = self.box_verdict(block, query, context) {
+            return if fold { Choice::Fold } else { Choice::Open };
+        }
         match (block, self.estimate(block, query, context)) {
             (Block::Places, Some((rate, _))) if rate < FOLD_BELOW => Choice::Fold,
             (Block::News, Some((rate, _))) if rate >= OPEN_FROM => Choice::Open,
@@ -431,7 +522,103 @@ impl Learned {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.blocks.is_empty() && self.sites.is_empty()
+        self.blocks.is_empty()
+            && self.sites.is_empty()
+            && self.verdicts.is_empty()
+            && self.boxes.is_empty()
+    }
+
+    /// What the searcher said about `domain` for `query`.
+    pub fn verdict(&self, query: &str, domain: &str) -> Option<Verdict> {
+        let key = query_key(query);
+        self.verdicts
+            .iter()
+            .find(|v| v.domain == domain && v.query == key)
+            .map(|v| v.verdict)
+    }
+
+    /// Every verdict for `query`, by domain.
+    pub fn verdicts_for(&self, query: &str) -> Vec<(String, Verdict)> {
+        let key = query_key(query);
+        self.verdicts
+            .iter()
+            .filter(|v| v.query == key)
+            .map(|v| (v.domain.clone(), v.verdict))
+            .collect()
+    }
+
+    /// Says `verdict` about `domain` for `query`; `None` takes it back.
+    pub fn set_verdict(&mut self, query: &str, domain: &str, verdict: Option<Verdict>, at: u64) {
+        let key = query_key(query);
+        if key.is_empty() || domain.is_empty() {
+            return;
+        }
+        self.verdicts
+            .retain(|v| !(v.domain == domain && v.query == key));
+        if let Some(verdict) = verdict {
+            self.verdicts.insert(
+                0,
+                SiteVerdict {
+                    query: key,
+                    domain: domain.to_owned(),
+                    verdict,
+                    at,
+                },
+            );
+            self.verdicts.truncate(MAX_VERDICTS);
+        }
+    }
+
+    /// The searcher's own choice for `block` on `query`, shown in
+    /// `context`: folded (`true`) or open; for this search first.
+    pub fn box_verdict(&self, block: Block, query: &str, context: &str) -> Option<bool> {
+        let exact = format!("q {}", query_key(query));
+        let all = format!("c {context}");
+        [exact, all].iter().find_map(|key| {
+            self.boxes
+                .iter()
+                .find(|b| b.block == block && &b.key == key)
+                .map(|b| b.fold)
+        })
+    }
+
+    /// Folds `block` (or, with `fold` false, always shows it open) for
+    /// `query`, or with `every` for every search showing it in `context`;
+    /// `None` takes back what was said for this search, and for every
+    /// search too when `every`.
+    pub fn set_box(
+        &mut self,
+        block: Block,
+        query: &str,
+        context: &str,
+        every: bool,
+        fold: Option<bool>,
+        at: u64,
+    ) {
+        let key = if every {
+            format!("c {context}")
+        } else {
+            format!("q {}", query_key(query))
+        };
+        if key == "q " {
+            return;
+        }
+        let exact = format!("q {}", query_key(query));
+        self.boxes.retain(|b| {
+            !(b.block == block && (b.key == key || (fold.is_none() && b.key == exact)))
+        });
+        if let Some(fold) = fold {
+            self.boxes.insert(
+                0,
+                BoxVerdict {
+                    block,
+                    key,
+                    fold,
+                    at,
+                },
+            );
+            self.boxes.truncate(MAX_VERDICTS);
+        }
     }
 
     fn trim(&mut self) {
@@ -592,6 +779,67 @@ mod tests {
         learned.note_used("us bank", Block::Places, 1);
         learned.note_picked("us bank", "usbank.com", 1);
         assert!(learned.is_empty());
+    }
+
+    #[test]
+    fn verdicts_are_per_search_and_can_be_taken_back() {
+        let mut learned = Learned::default();
+        learned.set_verdict("US Bank", "spam.example", Some(Verdict::Hide), 1);
+        learned.set_verdict("us bank", "usbank.com", Some(Verdict::Up), 1);
+        assert_eq!(
+            learned.verdict("us  bank", "spam.example"),
+            Some(Verdict::Hide)
+        );
+        assert_eq!(learned.verdict("bank", "spam.example"), None);
+        assert_eq!(learned.verdicts_for("us bank").len(), 2);
+        learned.set_verdict("us bank", "spam.example", Some(Verdict::Down), 2);
+        assert_eq!(
+            learned.verdict("us bank", "spam.example"),
+            Some(Verdict::Down)
+        );
+        learned.set_verdict("us bank", "spam.example", None, 3);
+        assert_eq!(learned.verdict("us bank", "spam.example"), None);
+        assert_eq!(learned.verdicts.len(), 1);
+    }
+
+    #[test]
+    fn box_verdicts_win_over_clicks() {
+        let mut learned = Learned::default();
+        // Used every time, but the searcher says fold it here.
+        for at in 0..3 {
+            show_places(&mut learned, "pizza in denver", false, at);
+            learned.note_used("pizza in denver", Block::Places, at);
+        }
+        learned.set_box(
+            Block::Places,
+            "pizza in denver",
+            "said",
+            false,
+            Some(true),
+            4,
+        );
+        assert_eq!(
+            learned.choice(Block::Places, "pizza in denver", "said"),
+            Choice::Fold
+        );
+        assert_eq!(
+            learned.choice(Block::Places, "tacos in denver", "said"),
+            Choice::Usual
+        );
+        // Folded for every guessed town.
+        learned.set_box(Block::Places, "denver bank", "guessed", true, Some(true), 5);
+        assert_eq!(
+            learned.choice(Block::Places, "boulder bank", "guessed"),
+            Choice::Fold
+        );
+        // Taking back "every" also takes back this search's.
+        learned.set_box(Block::Places, "pizza in denver", "said", true, None, 6);
+        assert_eq!(
+            learned.choice(Block::Places, "pizza in denver", "said"),
+            Choice::Usual
+        );
+        learned.set_box(Block::News, "rust", "words", false, Some(false), 7);
+        assert_eq!(learned.choice(Block::News, "rust", "words"), Choice::Open);
     }
 
     #[test]
