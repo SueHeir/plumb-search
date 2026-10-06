@@ -906,6 +906,12 @@ pub struct EvalArgs {
     /// domain (with the pages shown under it) or page's address.
     #[arg(long, value_name = "N", default_value_t = 0)]
     pub show: usize,
+    /// Check the instant answers to fact searches instead of the ranks
+    /// (eval/fact_queries.tsv, with --pages and a Wikipedia set made with
+    /// fetch-facts): a query counts as found when its answer has one of
+    /// the expected texts.
+    #[arg(long)]
+    pub facts: bool,
     /// Page set files (wikipedia-en.tsv.gz, github.tsv.gz from fetch-pages)
     /// whose pages are listed among the sites, as a node lists them. Can be
     /// given more than once.

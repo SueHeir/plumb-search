@@ -1,0 +1,36 @@
+# Fact searches, each with text its instant answer should have (commas
+# left out of the answer, any of the texts given). Run with --facts and
+# --pages wikipedia-en.tsv.gz made with fetch-pages and fetch-facts. The
+# first ones are the fact searches of the 2026-10-06 sweep.
+capital of australia	canberra
+how tall is mount everest	8848
+what is the capital of japan	tokyo
+capital of canada	ottawa
+capital of brazil	brasília
+capital of california	sacramento
+capital of texas	austin
+how high is mont blanc	480
+how tall is k2	861
+height of burj khalifa	82
+how tall is the eiffel tower	330,324,300
+elevation of denver	160
+population of japan	12
+population of new york city	8
+when was albert einstein born	1879
+when was barack obama born	1961
+how old is taylor swift	36 years old
+when did freddie mercury die	1991
+when was ibm founded	1911
+when was google founded	1998
+when was the united nations founded	1945
+who founded microsoft	bill gates,paul allen
+who founded apple	steve jobs,steve wozniak
+who founded tesla	eberhard,tarpenning,musk
+ceo of nvidia	jensen huang
+ceo of microsoft	satya nadella
+who is the ceo of apple	tim cook
+where is nike headquartered	beaverton
+amazon headquarters	seattle
+currency of japan	yen
+what currency does switzerland use	franc
+area of france	km²

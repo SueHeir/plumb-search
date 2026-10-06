@@ -1318,8 +1318,17 @@ pub fn place_pages(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) -> Ve
             let led = placed.iter().any(|p| p.hit.whole);
             usize::from(site_named || led)
         } else if !hit.named && hit.page.topic().is_some() {
-            // A question or paper with most of the query's words.
-            1
+            // A question or paper with most of the query's words: the best
+            // question leads a search asked as a question that names no
+            // site, as "how to unclog a drain" wants the answer before a
+            // site that shares a word with it (cityofdrain.org). A search
+            // that only names something ("irs refund status") keeps its
+            // site first.
+            let led = placed
+                .iter()
+                .any(|p| p.at == 0 && p.under.is_none() && p.hit.page.is_question());
+            let leads = hit.page.is_question() && asked_as_question(query) && !site_named && !led;
+            usize::from(!leads)
         } else if !hit.named || namesake {
             PARTIAL_AFTER
         } else if hit.page.may_lead() && page_first(&hit) {
@@ -1335,6 +1344,21 @@ pub fn place_pages(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) -> Ve
         });
     }
     placed
+}
+
+/// Words a search asked as a question starts with.
+const QUESTION_WORDS: &[&str] = &[
+    "how", "why", "what", "whats", "what's", "when", "where", "which", "who", "can", "could",
+    "should", "do", "does", "did", "is", "are", "will", "would",
+];
+
+/// Whether `query` is asked as a question: "how to unclog a drain", "can
+/// you freeze cooked rice".
+fn asked_as_question(query: &str) -> bool {
+    query
+        .split_whitespace()
+        .next()
+        .is_some_and(|word| QUESTION_WORDS.contains(&word.to_lowercase().as_str()))
 }
 
 /// Pages looked at for a query with search operators, before they narrow
@@ -1612,13 +1636,23 @@ mod tests {
             place_pages("delete a git branch locally and remotely", &sites, hits)[0].at,
             0
         );
-        // Most of the query's words: after the best site.
-        let hits = s.search("delete git branch remotely fast", 5).unwrap();
+        // Most of the query's words, asked as a question naming no site:
+        // the question still leads, ahead of a site that only shares a
+        // word with it.
+        let asked = "how to delete git branch remotely fast";
+        let hits = s.search(asked, 5).unwrap();
         assert!(!hits[0].whole);
+        assert_eq!(place_pages(asked, &sites, hits)[0].at, 0);
+        // Not asked as a question: after the best site.
+        let hits = s.search("delete git branch remotely fast", 5).unwrap();
         assert_eq!(
             place_pages("delete git branch remotely fast", &sites, hits)[0].at,
             1
         );
+        // A site the question names stays first.
+        let named = [known_site("git-scm.com", true, 0.9)];
+        let hits = s.search(asked, 5).unwrap();
+        assert_eq!(place_pages(asked, &named, hits)[0].at, 1);
     }
 
     #[test]

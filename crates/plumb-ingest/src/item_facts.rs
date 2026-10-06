@@ -4,7 +4,10 @@
 //!
 //! Each kind's property is asked for whole, [`FACTS_PAGE`] statements at a
 //! time, as [`crate::profiles`] asks for profiles: a query for one
-//! property is a scan of one index. Only best-ranked statements count
+//! property is a scan of one index. Pages far into a big property
+//! (populations, birth dates) take the query service longer, so pages are
+//! smaller than profiles', and a kind the service keeps failing to answer
+//! is left with what it gave so far rather than losing every other kind. Only best-ranked statements count
 //! (the current CEO, not past ones), and only items with an article are
 //! kept. Values that are other items (Canberra, a founder) are then named
 //! by their English labels, [`LABELS_BATCH`] items at a time. The facts
@@ -19,14 +22,14 @@ use anyhow::{Context, Result};
 use plumb_core::article::{articles_of, write_article, ARTICLES_HEADER};
 use plumb_core::facts::{Date, Fact, FactKind, ValueType, KINDS};
 use serde::Deserialize;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::download::{part_path, WikidataPacing};
 use crate::facts::sparql_json;
 use crate::open_maybe_gz;
 
 /// Statements asked for in one query.
-pub const FACTS_PAGE: usize = 200_000;
+pub const FACTS_PAGE: usize = 50_000;
 
 /// Items asked about in one query for their labels.
 pub const LABELS_BATCH: usize = 400;
@@ -251,9 +254,18 @@ pub async fn fetch_facts(
         let mut offset = 0;
         loop {
             tokio::time::sleep(pacing.pause).await;
-            let json = sparql_json(client, endpoint, &page_query(kind, offset), pacing)
-                .await
-                .with_context(|| format!("asking Wikidata for {} facts", kind.key()))?;
+            let json = match sparql_json(client, endpoint, &page_query(kind, offset), pacing).await
+            {
+                Ok(json) => json,
+                Err(err) => {
+                    warn!(
+                        "{} ({}): kept the {offset} statements read before Wikidata failed: {err:#}",
+                        kind.key(),
+                        kind.property()
+                    );
+                    break;
+                }
+            };
             let rows = raw.add_page(kind, wanted, &json)?;
             info!(
                 "{} ({}): {rows} statements from {offset}",
@@ -271,10 +283,11 @@ pub async fn fetch_facts(
     let mut labels = HashMap::new();
     for (n, batch) in items.chunks(LABELS_BATCH).enumerate() {
         tokio::time::sleep(pacing.pause).await;
-        let json = sparql_json(client, endpoint, &labels_query(batch), pacing)
-            .await
-            .context("asking Wikidata for labels")?;
-        add_labels(&mut labels, &json)?;
+        match sparql_json(client, endpoint, &labels_query(batch), pacing).await {
+            Ok(json) => add_labels(&mut labels, &json)?,
+            // Facts naming these items are left out.
+            Err(err) => warn!("labels of {} items left out: {err:#}", batch.len()),
+        }
         if n % 50 == 0 {
             info!(
                 "labels: {} of {} items",
@@ -373,7 +386,7 @@ mod tests {
         let q = page_query(FactKind::Population, 400_000);
         assert!(q.contains("psv:P1082/wikibase:quantityAmount ?v"), "{q}");
         assert!(q.contains("pq:P585 ?t"), "{q}");
-        assert!(q.ends_with("LIMIT 200000 OFFSET 400000"), "{q}");
+        assert!(q.ends_with("LIMIT 50000 OFFSET 400000"), "{q}");
         let q = page_query(FactKind::Born, 0);
         assert!(q.contains("wikibase:timePrecision ?p"), "{q}");
     }
