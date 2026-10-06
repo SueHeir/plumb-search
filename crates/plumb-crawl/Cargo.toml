@@ -22,6 +22,7 @@ thiserror = "2.0.21"
 tokio = { version = "1.53.1", features = ["full"] }
 tracing = "0.1.44"
 url = "2.5.8"
+yake-rust = { version = "1.0.3", default-features = false, features = ["en"] }
 
 [dev-dependencies]
 axum = "0.8.9"

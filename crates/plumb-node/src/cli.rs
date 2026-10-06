@@ -55,6 +55,12 @@ pub enum Command {
     /// Make a vector of each site's text with a small embedding model
     /// (downloaded on first use), so searches can find sites by meaning.
     Embed(EmbedArgs),
+    /// Fetch homepages and keep their visible text, for `plumb terms`
+    /// (an experiment).
+    FetchText(crate::terms::FetchTextArgs),
+    /// Pick each site's search terms from its homepage text, made by
+    /// `plumb fetch-text`, into the records (an experiment).
+    Terms(crate::terms::TermsArgs),
     /// Let the Plumb Search app on another computer change this node's
     /// settings: `on` makes a new token (shown once), `off` stops it.
     RemoteControl(RemoteControlArgs),
@@ -151,6 +157,19 @@ pub struct LinkRankArgs {
     /// as it is.
     #[arg(long, value_name = "PATH")]
     pub apply: Option<PathBuf>,
+    /// With --apply, only the best this many sites by links get their
+    /// place; the rest keep their ranks as they were. 0 changes no rank.
+    #[arg(long, value_name = "N", default_value_t = 50_000, requires = "apply")]
+    pub apply_top: u32,
+    /// With --apply, also take the links a site got from unranked sites
+    /// (link farms: sites no trusted site links to) off its count of
+    /// linking sites.
+    #[arg(long, requires = "apply")]
+    pub demote: bool,
+    /// Name the sites most often linked from the same trusted sites as
+    /// this one (may be given more than once).
+    #[arg(long, value_name = "DOMAIN")]
+    pub similar: Vec<String>,
     /// How many of the best sites to name.
     #[arg(long, value_name = "N", default_value_t = 30)]
     pub show: usize,
@@ -909,7 +928,7 @@ fn parse_rank_config(s: &str) -> Result<plumb_index::RankConfig, String> {
     serde_json::from_str(s).map_err(|err| format!("expected ranking knobs as JSON: {err}"))
 }
 
-fn parse_positive(s: &str) -> Result<usize, String> {
+pub(crate) fn parse_positive(s: &str) -> Result<usize, String> {
     match s.trim().parse::<usize>() {
         Ok(n) if n > 0 => Ok(n),
         _ => Err(format!("expected a whole number above 0, got `{s}`")),

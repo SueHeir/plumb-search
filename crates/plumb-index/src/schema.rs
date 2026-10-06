@@ -8,6 +8,7 @@
 //! | `description` | meta description                                     | stored, BM25                |
 //! | `about`       | Wikidata's description of the organization           | stored, BM25                |
 //! | `headings`    | homepage `<h1>` and `<h2>` texts                     | BM25                        |
+//! | `terms`       | search terms picked from the homepage (experiment)   | BM25                        |
 //! | `label`       | domain label, its hyphen-split words and joined form | BM25                        |
 //! | `aliases`     | other names                                          | BM25                        |
 //! | `anchors`     | inbound link texts, frequent ones repeated           | BM25                        |
@@ -31,7 +32,7 @@ use plumb_core::key_pages::{key_pages_or_known, valid_key_pages};
 use plumb_core::{
     domain_label, joined, kind_key, language_code, normalize_text, record_adult_level,
     site_country, truncate_chars, AdultLevel, LinkText, SiteRecord, MAX_ALIASES, MAX_HEADINGS,
-    MAX_KINDS, MAX_LINK_TEXTS, MAX_TEXT_CHARS,
+    MAX_KINDS, MAX_LINK_TEXTS, MAX_TERMS, MAX_TEXT_CHARS,
 };
 use tantivy::schema::{
     Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, FAST, STORED, STRING,
@@ -45,6 +46,7 @@ pub(crate) const URL: &str = "url";
 pub(crate) const TITLE: &str = "title";
 pub(crate) const DESCRIPTION: &str = "description";
 pub(crate) const HEADINGS: &str = "headings";
+pub(crate) const TERMS: &str = "terms";
 pub(crate) const ABOUT: &str = "about";
 pub(crate) const LABEL: &str = "label";
 pub(crate) const ALIASES: &str = "aliases";
@@ -79,6 +81,7 @@ pub(crate) struct Fields {
     pub(crate) title: Field,
     pub(crate) description: Field,
     pub(crate) headings: Field,
+    pub(crate) terms: Field,
     pub(crate) about: Field,
     pub(crate) label: Field,
     pub(crate) aliases: Field,
@@ -109,6 +112,7 @@ impl Fields {
             title: field(TITLE)?,
             description: field(DESCRIPTION)?,
             headings: field(HEADINGS)?,
+            terms: field(TERMS)?,
             about: field(ABOUT)?,
             label: field(LABEL)?,
             aliases: field(ALIASES)?,
@@ -135,6 +139,7 @@ pub(crate) fn schema() -> Schema {
     builder.add_text_field(TITLE, words().set_stored());
     builder.add_text_field(DESCRIPTION, words().set_stored());
     builder.add_text_field(HEADINGS, words());
+    builder.add_text_field(TERMS, words());
     builder.add_text_field(ABOUT, words().set_stored());
     builder.add_text_field(LABEL, words());
     builder.add_text_field(ALIASES, words());
@@ -244,6 +249,15 @@ pub(crate) fn document(
     }
     for heading in record.headings.iter().take(MAX_HEADINGS) {
         doc.add_text(f.headings, truncate_chars(heading, MAX_TEXT_CHARS));
+    }
+    if !record.terms.is_empty() {
+        let terms: Vec<&str> = record
+            .terms
+            .iter()
+            .take(MAX_TERMS)
+            .map(String::as_str)
+            .collect();
+        doc.add_text(f.terms, terms.join(" "));
     }
     if let Some(about) = non_empty(&record.about) {
         doc.add_text(f.about, truncate_chars(about, MAX_TEXT_CHARS));

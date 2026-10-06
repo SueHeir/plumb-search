@@ -414,6 +414,7 @@ impl Agreement {
         // passed on with it, not held for two weeks.
         let headings = std::mem::take(&mut record.headings);
         let body_text = record.body_text.take();
+        let terms = std::mem::take(&mut record.terms);
         let search_url = record.search_url.take();
         let key_pages = std::mem::take(&mut record.key_pages);
         let links_to = std::mem::take(&mut record.links_to);
@@ -466,6 +467,7 @@ impl Agreement {
             self.confirmed.insert(domain, facts);
             record.headings = headings;
             record.body_text = body_text;
+            record.terms = terms;
             record.search_url = search_url;
             record.key_pages = key_pages;
             record.links_to = links_to;
