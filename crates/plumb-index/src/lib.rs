@@ -1274,7 +1274,8 @@ impl Searcher {
         };
 
         // Left out unless the query names them: sites on names reserved
-        // for tests (uniteddolls.test), and homepages that are only a
+        // for tests (uniteddolls.test), online pill shops named after a
+        // drug ("ibuprofen dosage" found celebrex365o24.com), and homepages that are only a
         // company's sign-in page for someone else's product ("Outlook Web
         // App" on bpl.net for "microsoft outlook").
         let mut hits = Vec::with_capacity(limit.min(ranked.len()));
@@ -1285,6 +1286,7 @@ impl Searcher {
             let named = ranked.named;
             let hit = self.hit(&searcher, ranked)?;
             let left_out = is_reserved_name(&hit.domain)
+                || is_pill_shop(&hit.domain, hit.link_score)
                 || hit
                     .title
                     .as_deref()
@@ -1454,6 +1456,67 @@ impl Searcher {
                 .unwrap_or_default(),
         })
     }
+}
+
+/// Drugs that spam pill shops put in their names.
+const PILL_SHOP_DRUGS: &[&str] = &[
+    "viagra",
+    "cialis",
+    "levitra",
+    "kamagra",
+    "sildenafil",
+    "tadalafil",
+    "vardenafil",
+    "vidalista",
+    "fildena",
+    "cenforce",
+    "celebrex",
+    "ciprofloxacin",
+    "flibanserin",
+    "tramadol",
+    "xanax",
+    "alprazolam",
+    "valium",
+    "diazepam",
+    "oxycodone",
+    "hydrocodone",
+    "modafinil",
+    "armodafinil",
+    "ivermectin",
+    "hydroxychloroquine",
+    "propecia",
+    "finasteride",
+    "clomid",
+    "accutane",
+    "isotretinoin",
+    "priligy",
+    "dapoxetine",
+    "zithromax",
+    "azithromycin",
+    "amoxicillin",
+    "doxycycline",
+    "lasix",
+    "furosemide",
+    "prednisone",
+    "neurontin",
+    "gabapentin",
+    "lyrica",
+    "pregabalin",
+    "synthroid",
+    "lexapro",
+    "zoloft",
+    "prozac",
+];
+
+/// Whether `domain` is a little-known site named after a drug that spam
+/// pill shops sell (celebrex365o24.com, vidalista.pics): such a name is
+/// nearly always a shop, not a place to learn about the drug.
+fn is_pill_shop(domain: &str, link_score: f32) -> bool {
+    if link_score >= WELL_KNOWN_LINK_SCORE {
+        return false;
+    }
+    let label = domain.split('.').next().unwrap_or("");
+    PILL_SHOP_DRUGS.iter().any(|drug| label.contains(drug))
 }
 
 /// Whether `domain` is under a top-level name reserved for tests (RFC
@@ -3041,7 +3104,7 @@ mod tests {
     }
 
     #[test]
-    fn other_companies_sign_in_pages_and_test_names_are_left_out() {
+    fn sign_in_pages_pill_shops_and_test_names_are_left_out() {
         let records = [
             site(
                 "outlook.com",
@@ -3068,6 +3131,14 @@ mod tests {
                 obscure(90_000, 2),
             ),
             site(
+                "celebrex365o24.com",
+                Some("Microsoft Outlook deals"),
+                None,
+                &[],
+                &[],
+                obscure(30_000, 2),
+            ),
+            site(
                 "outlook.test",
                 Some("Microsoft Outlook"),
                 None,
@@ -3082,6 +3153,7 @@ mod tests {
         assert!(order.contains(&"outlooktips.org"), "{order:?}");
         assert!(!order.contains(&"bpl.net"), "{order:?}");
         assert!(!order.contains(&"outlook.test"), "{order:?}");
+        assert!(!order.contains(&"celebrex365o24.com"), "{order:?}");
         // Asked for by name, they are found.
         assert_eq!(top(&searcher, "bpl.net"), "bpl.net");
     }

@@ -6,6 +6,8 @@
 //!   mile`;
 //! - currency conversions: `100 usd to eur`, from reference rates the
 //!   caller has ([`Rates`], the European Central Bank's daily rates);
+//! - where to get help now, for searches by someone who may be in crisis
+//!   ("depression help", "suicide hotline");
 //! - the time in a place: `time in tokyo`, `what time is it in paris`, and
 //!   a time from one place in another: `3pm est to pst` (with the `zones`
 //!   feature, on by default).
@@ -20,6 +22,7 @@ use serde::{Deserialize, Serialize};
 mod calc;
 mod currency;
 mod format;
+mod help;
 #[cfg(feature = "zones")]
 mod places;
 #[cfg(feature = "zones")]
@@ -37,6 +40,8 @@ pub enum Kind {
     Conversion,
     Currency,
     Time,
+    /// Where to get help now ("depression help").
+    Help,
 }
 
 /// An answer to the query, as shown: the question as understood, the
@@ -65,6 +70,9 @@ pub fn answer(query: &str, now: i64, rates: Option<&Rates>) -> Option<Answer> {
     let query = query.trim();
     if query.is_empty() || query.chars().count() > MAX_QUERY {
         return None;
+    }
+    if let Some(answer) = help::answer(query) {
+        return Some(answer);
     }
     #[cfg(feature = "zones")]
     if let Some(answer) = time::answer(query, now) {
