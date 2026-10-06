@@ -189,10 +189,12 @@ pub fn is_bot_check_page(
         }
     }
     let stand_in = |part: &str| STAND_IN_TITLE_PARTS.contains(&normalize_text(part).as_str());
-    if title.is_some_and(|title| title
+    if title.is_some_and(|title| {
+        title
             .split(TITLE_SEPARATORS)
             .flat_map(|part| part.split(" - "))
-            .any(stand_in)) {
+            .any(stand_in)
+    }) {
         return true;
     }
     all().any(|text| {

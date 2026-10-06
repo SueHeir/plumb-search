@@ -4,7 +4,7 @@ use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
 use plumb_core::{
-    canonical_domain, kind_key, linker_count, subdomain_sites_of, RecordSet, SiteRecord,
+    canonical_domain, kind_key, linker_count, subdomain_sites, RecordSet, SiteRecord,
     MAX_LINK_TEXTS,
 };
 use tracing::{info, warn};
@@ -44,9 +44,7 @@ impl Builder {
     /// A domain that already has a rank keeps the better (lower) one.
     /// Domains are made canonical first ([`plumb_core::canonical_domain`]),
     /// and entries whose domain is not a valid registrable domain, or whose
-    /// rank is 0, are ignored. The subdomains that are sites of their own
-    /// ([`subdomain_sites_of`]) get their domain's rank: Tranco only ranks
-    /// registrable domains.
+    /// rank is 0, are ignored.
     pub fn add_tranco(&mut self, entries: &[TrancoEntry]) {
         let mut invalid = 0u64;
         for entry in entries {
@@ -57,10 +55,8 @@ impl Builder {
                 invalid += 1;
                 continue;
             };
-            for site in std::iter::once(domain.as_str()).chain(subdomain_sites_of(&domain)) {
-                let signals = &mut self.records.entry(site).signals;
-                signals.tranco_rank = best_rank(signals.tranco_rank, Some(entry.rank));
-            }
+            let signals = &mut self.records.entry(&domain).signals;
+            signals.tranco_rank = best_rank(signals.tranco_rank, Some(entry.rank));
         }
         warn_invalid("Tranco entries", invalid);
     }
@@ -70,8 +66,6 @@ impl Builder {
     /// A domain that already has ranks keeps the better (lower) ones.
     /// Domains are made canonical first, and entries whose domain is not a
     /// valid registrable domain, or whose harmonic rank is 0, are ignored.
-    /// Subdomains that are sites of their own get their domain's ranks, as
-    /// in [`Builder::add_tranco`].
     pub fn add_cc_ranks(&mut self, ranks: &[CcRank]) {
         let mut invalid = 0u64;
         for rank in ranks {
@@ -82,13 +76,10 @@ impl Builder {
                 invalid += 1;
                 continue;
             };
-            for site in std::iter::once(domain.as_str()).chain(subdomain_sites_of(&domain)) {
-                let signals = &mut self.records.entry(site).signals;
-                signals.harmonic_rank =
-                    best_rank(signals.harmonic_rank, Some(rank.harmonic_rank));
-                signals.pagerank_rank =
-                    best_rank(signals.pagerank_rank, rank.pagerank_rank.filter(|&r| r > 0));
-            }
+            let signals = &mut self.records.entry(&domain).signals;
+            signals.harmonic_rank = best_rank(signals.harmonic_rank, Some(rank.harmonic_rank));
+            signals.pagerank_rank =
+                best_rank(signals.pagerank_rank, rank.pagerank_rank.filter(|&r| r > 0));
         }
         warn_invalid("Common Crawl ranks", invalid);
     }
@@ -269,6 +260,7 @@ impl Builder {
     /// With a cut, each record is scored once, only the kept ones are
     /// sorted, and they are moved out of the set rather than copied.
     pub fn finish(mut self, top_n: Option<usize>) -> Vec<SiteRecord> {
+        self.rank_subdomain_sites();
         let total = self.records.len();
         let n = match top_n {
             Some(n) if n < total => n,
@@ -294,6 +286,26 @@ impl Builder {
         kept.iter()
             .map(|domain| std::mem::take(self.records.entry(domain)))
             .collect()
+    }
+}
+
+impl Builder {
+    /// Gives each subdomain that is a site of its own
+    /// ([`plumb_core::subdomain_sites`]) and has a record, such as
+    /// news.ycombinator.com from Wikidata, the ranks of its domain that it
+    /// lacks: the rank lists only rank registrable domains. Subdomain sites
+    /// with no record are not made, so they take no room under a cap.
+    fn rank_subdomain_sites(&mut self) {
+        for (site, domain) in subdomain_sites() {
+            let (Some(_), Some(parent)) = (self.records.get(site), self.records.get(domain)) else {
+                continue;
+            };
+            let parent = parent.signals.clone();
+            let signals = &mut self.records.entry(site).signals;
+            signals.tranco_rank = signals.tranco_rank.or(parent.tranco_rank);
+            signals.harmonic_rank = signals.harmonic_rank.or(parent.harmonic_rank);
+            signals.pagerank_rank = signals.pagerank_rank.or(parent.pagerank_rank);
+        }
     }
 }
 
@@ -441,12 +453,8 @@ mod tests {
         builder.add_wat(&extract);
         builder.add_official_sites(&load_wikidata_official_sites(&wikidata).unwrap());
 
-        // google, facebook, usbank, plus a.com, c.net (homepages) and
-        // newsite.io (link target), and Google's products on subdomains,
-        // which take google.com's ranks.
-        let google_products = plumb_core::subdomain_sites_of("google.com").count();
-        assert!(google_products > 0);
-        assert_eq!(builder.len(), 6 + google_products);
+        // google, facebook, usbank, plus a.com, c.net (homepages) and newsite.io (link target).
+        assert_eq!(builder.len(), 6);
         let records = builder.finish(None);
         let usbank = records.iter().find(|r| r.domain == "usbank.com").unwrap();
         assert_eq!(usbank.url.as_deref(), Some("https://www.usbank.com/"));
@@ -550,10 +558,16 @@ mod tests {
     #[test]
     fn subdomain_sites_get_their_domains_ranks_and_their_own_names() {
         let mut builder = Builder::new();
-        builder.add_tranco(&[TrancoEntry {
-            rank: 900,
-            domain: "ycombinator.com".into(),
-        }]);
+        builder.add_tranco(&[
+            TrancoEntry {
+                rank: 900,
+                domain: "ycombinator.com".into(),
+            },
+            TrancoEntry {
+                rank: 1,
+                domain: "google.com".into(),
+            },
+        ]);
         builder.add_cc_ranks(&[CcRank {
             domain: "ycombinator.com".into(),
             harmonic_rank: 300,
@@ -572,7 +586,8 @@ mod tests {
         assert_eq!(news.signals.pagerank_rank, Some(200));
         assert_eq!(news.aliases, ["Hacker News"]);
         assert_eq!(yc.aliases, ["Y Combinator"]);
-        assert_eq!(records.len(), 2);
+        // Google's products with no record of their own are not made.
+        assert_eq!(records.len(), 3);
     }
 
     #[test]

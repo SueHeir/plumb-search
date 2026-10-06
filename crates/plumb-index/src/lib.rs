@@ -143,6 +143,9 @@ const NEAREST_RANKED: usize = 50;
 /// The most popular of the other sites [`Meaning::nearest`] gives that are
 /// ranked too.
 const NEAREST_POPULAR: usize = 50;
+/// How many results past the ones asked for may move up over a site with
+/// no title ([`Searcher::untitled_last`]).
+const UNTITLED_LOOKAHEAD: usize = 20;
 /// Most distinct query words used; the rest are ignored.
 const MAX_QUERY_WORDS: usize = 16;
 /// A query with operators ranks this many times its limit, and at least
@@ -1240,6 +1243,7 @@ impl Searcher {
             None => None,
         };
 
+        let mut ranked = self.untitled_last(&searcher, ranked, limit)?;
         ranked.truncate(limit);
         let hits = ranked
             .into_iter()
@@ -1263,6 +1267,41 @@ impl Searcher {
             return Ok(None);
         };
         self.site_search_link(&searcher, addr, terms.trim().to_string())
+    }
+
+    /// `ranked` with the sites that have no title and are not well known
+    /// moved after the titled ones, among the first `limit` plus
+    /// [`UNTITLED_LOOKAHEAD`] past the first result: a bare `netflix.net`
+    /// tells a person nothing they can judge it by, even when it has the
+    /// query's name: netflix.net for "netflix". The first result keeps its
+    /// place, title or not.
+    fn untitled_last(
+        &self,
+        searcher: &tantivy::Searcher,
+        mut ranked: Vec<Ranked>,
+        limit: usize,
+    ) -> Result<Vec<Ranked>> {
+        let window = limit.saturating_add(UNTITLED_LOOKAHEAD).min(ranked.len());
+        if window < 2 {
+            return Ok(ranked);
+        }
+        let rest = ranked.split_off(window);
+        let mut titled = Vec::with_capacity(rest.len() + window);
+        let mut bare = Vec::new();
+        for (i, site) in ranked.into_iter().enumerate() {
+            let untitled = i > 0 && site.link_score < WELL_KNOWN_LINK_SCORE && {
+                let doc: TantivyDocument = searcher.doc(site.addr)?;
+                doc.get_first(self.fields.title).is_none()
+            };
+            if untitled {
+                bare.push(site);
+            } else {
+                titled.push(site);
+            }
+        }
+        titled.extend(bare);
+        titled.extend(rest);
+        Ok(titled)
     }
 
     /// A link into the search of the site at `addr` for the words of `query`
@@ -2125,7 +2164,10 @@ mod tests {
         ];
         let (_dir, searcher) = build(&records);
         assert_eq!(top(&searcher, "hacker news"), "news.ycombinator.com");
-        assert_eq!(top(&searcher, "news.ycombinator.com"), "news.ycombinator.com");
+        assert_eq!(
+            top(&searcher, "news.ycombinator.com"),
+            "news.ycombinator.com"
+        );
         assert_eq!(top(&searcher, "y combinator"), "ycombinator.com");
     }
 
@@ -2140,6 +2182,44 @@ mod tests {
         assert_eq!(domains(&hits), ["gmail.com", "gmail.ru"]);
         assert_eq!(hits[0].title.as_deref(), Some("Gmail"));
         assert_eq!(hits[1].title, None);
+    }
+
+    #[test]
+    fn little_known_sites_without_a_title_come_after_titled_ones() {
+        let records = [
+            site(
+                "netflix.com",
+                Some("Netflix"),
+                None,
+                &["Netflix"],
+                &[],
+                popular(20, 500),
+            ),
+            site("netflix.net", None, None, &[], &[], obscure(200_000, 3)),
+            site("netflix.info", None, None, &[], &[], obscure(250_000, 2)),
+            site(
+                "netflixfans.org",
+                Some("Netflix fans: what to watch on Netflix"),
+                None,
+                &[],
+                &[],
+                obscure(900_000, 1),
+            ),
+        ];
+        let (_dir, searcher) = build(&records);
+        let hits = searcher.search("netflix", 10).unwrap();
+        assert_eq!(
+            domains(&hits),
+            [
+                "netflix.com",
+                "netflixfans.org",
+                "netflix.net",
+                "netflix.info"
+            ]
+        );
+        // Bare domains still come back when nothing titled is left.
+        let hits = searcher.search("netflix", 2).unwrap();
+        assert_eq!(domains(&hits), ["netflix.com", "netflixfans.org"]);
     }
 
     fn ranked(tranco_rank: u32, linking_domains: u32) -> Signals {
@@ -3070,9 +3150,12 @@ mod tests {
     #[test]
     fn aliases_beat_bare_redirect_domains() {
         let (_dir, searcher) = build(&corpus());
-        // allybank.com has the exact label, ally.com the alias, the page and the links.
+        // allybank.com has the exact label, ally.com the alias, the page and
+        // the links. With no title of its own, allybank.com then comes after
+        // the titled sites.
         let hits = searcher.search("ally bank", 10).unwrap();
-        assert_eq!(domains(&hits)[..2], ["ally.com", "allybank.com"]);
+        assert_eq!(hits[0].domain, "ally.com");
+        assert!(domains(&hits).contains(&"allybank.com"));
     }
 
     #[test]

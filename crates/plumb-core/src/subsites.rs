@@ -16,8 +16,8 @@
 //!   the DMV's site. `www.` stays the umbrella's own.
 //!
 //! A subdomain site inherits its parent domain's popularity ranks when the
-//! rank lists, which only know registrable domains, are read (see
-//! [`subdomain_sites_of`]).
+//! seed records are built, as the rank lists only know registrable domains
+//! (see [`subdomain_sites`]).
 
 /// Hosts that are sites of their own although they are subdomains.
 pub const SUBDOMAIN_SITES: &[&str] = &[
@@ -173,13 +173,12 @@ pub(crate) fn site_of(host: &str, domain: &str) -> String {
     domain.to_string()
 }
 
-/// The [`SUBDOMAIN_SITES`] whose registrable domain is `domain`, which get
-/// its popularity ranks: rank lists only name registrable domains.
-pub fn subdomain_sites_of<'a>(domain: &'a str) -> impl Iterator<Item = &'a str> + 'a {
+/// Each of the [`SUBDOMAIN_SITES`] with its registrable domain, whose
+/// popularity ranks it gets: rank lists only name registrable domains.
+pub fn subdomain_sites() -> impl Iterator<Item = (&'static str, &'static str)> {
     SUBDOMAIN_SITES
         .iter()
-        .map(|site| -> &'a str { site })
-        .filter(move |site| psl::domain_str(site) == Some(domain))
+        .filter_map(|site| Some((*site, psl::domain_str(site)?)))
 }
 
 #[cfg(test)]
@@ -190,7 +189,10 @@ mod tests {
     #[test]
     fn listed_subdomains_are_sites() {
         for (input, site) in [
-            ("https://news.ycombinator.com/item?id=1", "news.ycombinator.com"),
+            (
+                "https://news.ycombinator.com/item?id=1",
+                "news.ycombinator.com",
+            ),
             ("news.ycombinator.com", "news.ycombinator.com"),
             ("https://www.ycombinator.com/", "ycombinator.com"),
             ("https://scholar.google.com/", "scholar.google.com"),
@@ -198,7 +200,10 @@ mod tests {
             ("https://accounts.google.com/", "google.com"),
             ("https://docs.python.org/3/", "docs.python.org"),
             ("https://www.python.org/", "python.org"),
-            ("https://pubmed.ncbi.nlm.nih.gov/123/", "pubmed.ncbi.nlm.nih.gov"),
+            (
+                "https://pubmed.ncbi.nlm.nih.gov/123/",
+                "pubmed.ncbi.nlm.nih.gov",
+            ),
             ("https://www.ncbi.nlm.nih.gov/", "ncbi.nlm.nih.gov"),
             ("https://news.bbc.co.uk/", "bbc.co.uk"),
         ] {
@@ -224,15 +229,11 @@ mod tests {
     }
 
     #[test]
-    fn subdomain_sites_inherit_from_their_domain() {
-        let google: Vec<&str> = subdomain_sites_of("google.com").collect();
-        assert!(google.contains(&"scholar.google.com"));
-        assert!(!google.contains(&"news.ycombinator.com"));
-        assert_eq!(
-            subdomain_sites_of("ycombinator.com").collect::<Vec<_>>(),
-            ["news.ycombinator.com"]
-        );
-        assert_eq!(subdomain_sites_of("usbank.com").count(), 0);
+    fn subdomain_sites_know_their_domain() {
+        let parents: Vec<(&str, &str)> = subdomain_sites().collect();
+        assert_eq!(parents.len(), SUBDOMAIN_SITES.len());
+        assert!(parents.contains(&("scholar.google.com", "google.com")));
+        assert!(parents.contains(&("news.ycombinator.com", "ycombinator.com")));
     }
 
     #[test]

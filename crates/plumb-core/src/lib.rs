@@ -37,7 +37,7 @@ pub use news::{Headline, RecentNews};
 pub use operators::Operators;
 pub use safe::{adult_level, record_adult_level, AdultLevel, SafeSearch};
 pub use site_search::{search_link, search_template_for, SEARCH_TERMS};
-pub use subsites::subdomain_sites_of;
+pub use subsites::subdomain_sites;
 
 use anyhow::{Context, Result};
 use serde::de::DeserializeOwned;
