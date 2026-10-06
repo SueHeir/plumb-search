@@ -212,7 +212,18 @@ pub(crate) fn document(
         doc.add_text(f.aliases, name);
     }
 
-    if let Some(title) = non_empty(&record.title) {
+    // A site whose homepage gave no title (it blocks crawlers, redirects
+    // elsewhere or was not crawled yet) goes by its first name instead:
+    // Wikidata's for an official site ("Gmail"), else its own
+    // `og:site_name`. It is shown as the result's title, and matched as one.
+    let title = non_empty(&record.title).or_else(|| {
+        record
+            .aliases
+            .iter()
+            .map(String::as_str)
+            .find(|alias| !alias.trim().is_empty())
+    });
+    if let Some(title) = title {
         let title = truncate_chars(title, MAX_TEXT_CHARS);
         let parts = title_parts(&title);
         if parts.len() > 1 {

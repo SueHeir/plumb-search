@@ -113,9 +113,9 @@ impl Operators {
     }
 
     /// Whether a result on `host` (a site's domain, or the host of a
-    /// page's address) may be listed. A site's registrable domain counts
-    /// as on a `site:` host below it: `site:docs.python.org` keeps
-    /// python.org.
+    /// page's address) may be listed. A site counts as on a `site:` host
+    /// below it: `site:wiki.python.org` keeps python.org (but
+    /// `site:docs.python.org` only docs.python.org, a site of its own).
     pub fn allows_host(&self, host: &str) -> bool {
         let host = host.to_ascii_lowercase();
         let on = |site: &String| on_site(&host, site);
@@ -265,10 +265,15 @@ mod tests {
         assert!(!ops.allows_host("notwikipedia.org"));
         assert!(!ops.allows_host("einstein.org"));
 
-        let below = Operators::parse("site:docs.python.org");
+        let below = Operators::parse("site:wiki.python.org");
         assert!(below.allows_host("python.org"));
-        assert!(below.allows_host("docs.python.org"));
-        assert!(!below.allows_host("wiki.python.org"));
+        assert!(below.allows_host("wiki.python.org"));
+        assert!(!below.allows_host("docs.python.org"));
+
+        // A subdomain that is a site of its own is that site only.
+        let own = Operators::parse("site:docs.python.org");
+        assert!(own.allows_host("docs.python.org"));
+        assert!(!own.allows_host("python.org"));
 
         let tld = Operators::parse("site:gov tax");
         assert!(tld.allows_host("irs.gov"));

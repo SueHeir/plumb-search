@@ -26,6 +26,7 @@ pub mod place;
 pub mod profiles;
 pub mod safe;
 mod site_search;
+pub mod subsites;
 
 pub use article::{article_url, Article};
 pub use bot_check::{echoes_the_request, is_bot_check_page, is_sign_in_portal};
@@ -36,6 +37,7 @@ pub use news::{Headline, RecentNews};
 pub use operators::Operators;
 pub use safe::{adult_level, record_adult_level, AdultLevel, SafeSearch};
 pub use site_search::{search_link, search_template_for, SEARCH_TERMS};
+pub use subsites::subdomain_sites;
 
 use anyhow::{Context, Result};
 use serde::de::DeserializeOwned;
@@ -757,14 +759,17 @@ pub fn is_valid_host(host: &str) -> bool {
     labels >= 2 && !last.bytes().all(|b| b.is_ascii_digit())
 }
 
-/// The registrable domain ("eTLD+1") of a URL or hostname, using the Public
-/// Suffix List: `https://www.usbank.com/x` -> `usbank.com`,
-/// `news.bbc.co.uk` -> `bbc.co.uk`. Returns `None` for IP addresses, bare
-/// public suffixes like `co.uk`, single-label hosts like `localhost`, and
-/// everything [`host_of`] rejects.
+/// The site of a URL or hostname: its registrable domain ("eTLD+1"), using
+/// the Public Suffix List, `https://www.usbank.com/x` -> `usbank.com`,
+/// `news.bbc.co.uk` -> `bbc.co.uk`; or, for the few subdomains that are
+/// sites of their own ([`subsites`]), that subdomain:
+/// `https://news.ycombinator.com/item` -> `news.ycombinator.com`. Returns
+/// `None` for IP addresses, bare public suffixes like `co.uk`, single-label
+/// hosts like `localhost`, and everything [`host_of`] rejects.
 pub fn registrable_domain(input: &str) -> Option<String> {
     let host = host_of(input)?;
-    psl::domain_str(&host).map(str::to_string)
+    let domain = psl::domain_str(&host)?;
+    Some(subsites::site_of(&host, domain))
 }
 
 /// `links` made fit for [`SiteRecord::links_to`] of `domain`: each made a

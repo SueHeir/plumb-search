@@ -207,7 +207,7 @@ fn search_and_site_info_return_plain_entries() {
     let answer = &call(
         &mcp,
         "site_info",
-        json!({ "domain": "https://docs.python.org/3/" }),
+        json!({ "domain": "https://wiki.python.org/moin/" }),
     )["result"]["structuredContent"];
     assert_eq!(answer["domain"], "python.org");
     assert_eq!(answer["found"], true);
@@ -227,7 +227,7 @@ fn search_lists_what_plugins_found_apart_from_plumbs_results() {
             url: "https://blog.rust-lang.org/x".into(),
             site: "rust-lang.org".into(),
             snippet: Some("120 points".into()),
-            published: None,
+            ..Default::default()
         }],
     };
     let mcp = server(vec![hit("rust-lang.org", 2.0, 0.8, true)]).with_plugin_results(vec![found]);

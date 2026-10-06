@@ -165,6 +165,11 @@ pub(crate) struct Extras {
     pub profile: Option<ProfileAnswer>,
     /// What the node's plugins found.
     pub plugins: Vec<crate::plugins::PluginResults>,
+    /// What the node's plugins say about its own results, by address.
+    pub plugin_notes: crate::plugins::ResultNotes,
+    /// The token for the forms of the plugins' buttons, when the page is
+    /// for the node's owner and some plugin has buttons.
+    pub plugin_token: Option<String>,
 }
 
 /// Whether a Wikipedia article lists the pages a name could mean rather
@@ -192,6 +197,13 @@ fn is_about_one_thing(page: &Page) -> bool {
 /// the band. The article about the site is listed under it, named by the
 /// query or not ("Zoom Video Communications").
 pub(crate) fn info_box(sites: &[Hit], pages: &[PlacedPage]) -> Option<InfoBox> {
+    info_from_page(page_about(sites, pages)?, sites)
+}
+
+/// The Wikipedia article or Wikidata item that results `sites` and
+/// `pages` (as placed among them) are clearly about, as [`info_box`]
+/// picks it.
+pub(crate) fn page_about<'a>(sites: &[Hit], pages: &'a [PlacedPage]) -> Option<&'a Page> {
     let top = sites.first();
     let top_site = top.map(|hit| hit.domain.as_str());
     // Unless an article named by the query is listed first, above every
@@ -215,7 +227,7 @@ pub(crate) fn info_box(sites: &[Hit], pages: &[PlacedPage]) -> Option<InfoBox> {
                 None => placed.at <= 1,
             }
     })?;
-    info_from_page(&placed.hit.page, sites)
+    Some(&placed.hit.page)
 }
 
 /// The info box about the Wikipedia article or Wikidata item `page`.

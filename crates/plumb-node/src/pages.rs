@@ -180,6 +180,7 @@ impl SetInfo {
                     complete: true,
                     source_modified: 0,
                     fetched_at: 0,
+                    near: 0,
                 }),
         )
     }
@@ -205,6 +206,11 @@ pub struct SetFileNotes {
     pub source_modified: u64,
     /// When it was taken (Unix seconds).
     pub fetched_at: u64,
+    /// Past its first pages, the file holds only the places near the
+    /// towns with this key ([`crate::places::near_key`]); 0 when it holds
+    /// no more than its first pages.
+    #[serde(default)]
+    pub near: u64,
 }
 
 /// `<file>.json`, the notes of a set file.
@@ -236,7 +242,15 @@ pub struct SetFileCutter {
     /// Whether lines past the limit were dropped.
     cut: bool,
     out: Option<flate2::write::GzEncoder<std::io::BufWriter<std::fs::File>>>,
+    /// Past the limit, the lines to keep still ([`SetFileCutter::keep_past`]).
+    keep_past: Option<LineFilter>,
+    /// The line past the limit being read, whole lines being needed to
+    /// choose.
+    pending: Vec<u8>,
 }
+
+/// Whether to keep a line of a set file past its first pages.
+pub type LineFilter = Box<dyn Fn(&[u8]) -> bool + Send>;
 
 impl SetFileCutter {
     pub fn create(path: &Path, limit: u64) -> Result<Self> {
@@ -252,7 +266,30 @@ impl SetFileCutter {
                 std::io::BufWriter::new(file),
                 flate2::Compression::default(),
             )),
+            keep_past: None,
+            pending: Vec::new(),
         })
+    }
+
+    /// Past the limit, goes on through the whole file keeping the lines
+    /// `keep` says to (the places near the node's towns), rather than
+    /// stopping.
+    pub fn keep_past(mut self, keep: LineFilter) -> Self {
+        self.keep_past = Some(keep);
+        self
+    }
+
+    /// Writes `line`, read past the limit, if it is kept.
+    fn finish_line(&mut self, line: &[u8]) -> std::io::Result<()> {
+        let keep = self.keep_past.as_ref().is_some_and(|keep| keep(line));
+        match self.out.as_mut() {
+            Some(out) if keep && !is_profiles_line(line) => {
+                std::io::Write::write_all(out, line)?;
+                self.lines += 1;
+            }
+            _ => self.cut = true,
+        }
+        Ok(())
     }
 
     /// Pages written so far.
@@ -260,9 +297,10 @@ impl SetFileCutter {
         self.lines
     }
 
-    /// Whether it has all the pages it wants.
+    /// Whether it has all the pages it wants: never with
+    /// [`SetFileCutter::keep_past`], which reads to the end.
     pub fn full(&self) -> bool {
-        self.lines >= self.limit
+        self.keep_past.is_none() && self.lines >= self.limit
     }
 
     /// Whether pages past the limit were dropped, so the file is not
@@ -273,6 +311,10 @@ impl SetFileCutter {
 
     /// Finishes the gzip file.
     pub fn finish(&mut self) -> Result<()> {
+        if !self.pending.is_empty() {
+            let line = std::mem::take(&mut self.pending);
+            self.finish_line(&line)?;
+        }
         if let Some(out) = self.out.take() {
             out.finish()?
                 .into_inner()
@@ -287,9 +329,19 @@ impl std::io::Write for SetFileCutter {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         let mut rest = buf;
         while !rest.is_empty() && !self.full() {
-            let Some(out) = self.out.as_mut() else { break };
             let end = rest.iter().position(|&b| b == b'\n').map(|i| i + 1);
             let piece = &rest[..end.unwrap_or(rest.len())];
+            if self.header_done && self.lines >= self.limit {
+                // Past the limit with keep_past: whole lines, then choose.
+                self.pending.extend_from_slice(piece);
+                if end.is_some() {
+                    let line = std::mem::take(&mut self.pending);
+                    self.finish_line(&line)?;
+                }
+                rest = &rest[piece.len()..];
+                continue;
+            }
+            let Some(out) = self.out.as_mut() else { break };
             out.write_all(piece)?;
             // A line of profiles is not a page (see `plumb_core::article`).
             // Lines can come in pieces, so their starts are kept.
@@ -577,6 +629,27 @@ pub fn remove_other_indexes(data_dir: &Path, keep: Option<&str>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_cutter_can_keep_chosen_lines_past_its_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("cut.tsv.gz");
+        let mut cutter = SetFileCutter::create(&out, 2)
+            .unwrap()
+            .keep_past(Box::new(|line: &[u8]| line.starts_with(b"keep")));
+        // In pieces that split lines.
+        let text = b"header\na\nb\ndrop 1\nkeep 2\ndrop 3\nkeep 4";
+        for piece in text.chunks(3) {
+            std::io::Write::write_all(&mut cutter, piece).unwrap();
+        }
+        assert!(!cutter.full());
+        cutter.finish().unwrap();
+        assert_eq!((cutter.pages(), cutter.cut()), (4, true));
+        let mut kept = String::new();
+        std::io::Read::read_to_string(&mut plumb_ingest::open_maybe_gz(&out).unwrap(), &mut kept)
+            .unwrap();
+        assert_eq!(kept, "header\na\nb\nkeep 2\nkeep 4");
+    }
     use plumb_core::article::{write_article, Article, ARTICLES_HEADER};
 
     fn write_set(data_dir: &Path, titles: &[(&str, u64)]) {

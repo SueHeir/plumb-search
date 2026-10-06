@@ -61,28 +61,24 @@ pub(super) fn run(inner: Arc<Inner>) {
             settings.page_sets = settings.page_sets.all_unless_set();
         }
         let near = super::places::known_homes(&inner);
-        let counts: Vec<(&SetInfo, u64)> =
-            wanted_counts(&settings.page_sets, settings.storage_limit_mb)
-                .into_iter()
-                .map(|(set, pages)| match set.id {
-                    plumb_index::places::PLACES_SET => (
-                        set,
-                        crate::places::file_pages(
-                            &settings.page_sets,
-                            settings.storage_limit_mb,
-                            near.as_deref().unwrap_or_default(),
-                        ),
-                    ),
-                    _ => (set, pages),
-                })
-                .collect();
+        let counts = wanted_counts(&settings.page_sets, settings.storage_limit_mb);
+        // The towns whose places the file keeps past the first ones, for
+        // the places set (none for the others).
+        let near_of = |set: &SetInfo, pages: u64| -> Vec<(f64, f64)> {
+            if set.id == plumb_index::places::PLACES_SET && settings.storage_limit_mb > 0 {
+                crate::places::file_near(pages, near.as_deref().unwrap_or_default()).to_vec()
+            } else {
+                Vec::new()
+            }
+        };
         // Only a node with a storage limit cuts its files: a server's are
         // handed on to other nodes whole.
         for &(set, pages) in counts.iter().filter(|_| settings.storage_limit_mb > 0) {
             if !may_cut(set, pages, near.is_some()) {
                 continue;
             }
-            if let Err(err) = cut_if_longer(&inner, set, pages, &mut kept_whole) {
+            let near = near_of(set, pages);
+            if let Err(err) = cut_if_longer(&inner, set, pages, &near, &mut kept_whole) {
                 warn!("page set {}: {err:#}", set.id);
             }
         }
@@ -93,7 +89,8 @@ pub(super) fn run(inner: Arc<Inner>) {
                     if inner.stopping() {
                         break;
                     }
-                    if let Err(err) = fetch_if_needed(&inner, &net, set, pages) {
+                    let near = near_of(set, pages);
+                    if let Err(err) = fetch_if_needed(&inner, &net, set, pages, &near) {
                         warn!("page set {}: {err:#}", set.id);
                         fetch_failed = Some(Instant::now());
                     }
@@ -147,13 +144,25 @@ pub(super) fn run(inner: Arc<Inner>) {
 
 /// Takes the file of `set` from a trusted node when this node has none,
 /// fewer than `pages` of it, or an old one the other node has a newer
-/// version of.
-fn fetch_if_needed(inner: &Inner, net: &NetHandle, set: &SetInfo, pages: u64) -> Result<()> {
+/// version of. Past `pages`, only the places `near` the node's towns are
+/// kept (the places set on a node with a storage limit), not the whole
+/// file.
+fn fetch_if_needed(
+    inner: &Inner,
+    net: &NetHandle,
+    set: &SetInfo,
+    pages: u64,
+    near: &[(f64, f64)],
+) -> Result<()> {
     let data = &inner.paths.data;
     let notes = set.file_notes(data);
     let now = now_unix();
+    let near_key = crate::places::near_key(near);
     let reason = match notes {
         None => "none yet",
+        Some(n) if !n.complete && near_key != 0 && n.near != near_key => {
+            "places near other towns wanted"
+        }
         Some(n) if !n.complete && n.lines < pages => "more pages wanted",
         Some(n)
             if n.fetched_at > 0 && now.saturating_sub(n.fetched_at) > REFRESH_AFTER.as_secs() =>
@@ -215,7 +224,11 @@ fn fetch_if_needed(inner: &Inner, net: &NetHandle, set: &SetInfo, pages: u64) ->
     let mut part = file.as_os_str().to_owned();
     part.push(".part");
     let part = std::path::PathBuf::from(part);
-    let mut decoder = flate2::write::MultiGzDecoder::new(SetFileCutter::create(&part, pages)?);
+    let mut cutter = SetFileCutter::create(&part, pages)?;
+    if near_key != 0 {
+        cutter = cutter.keep_past(crate::places::near_lines(near.to_vec()));
+    }
+    let mut decoder = flate2::write::MultiGzDecoder::new(cutter);
     let mut offset = 0u64;
     let mut chunk = first;
     loop {
@@ -263,6 +276,7 @@ fn fetch_if_needed(inner: &Inner, net: &NetHandle, set: &SetInfo, pages: u64) ->
             complete,
             source_modified: chunk.modified,
             fetched_at: now,
+            near: if complete { 0 } else { near_key },
         },
     )?;
     inner.journal.info(format!(
@@ -282,17 +296,23 @@ fn fetch_if_needed(inner: &Inner, net: &NetHandle, set: &SetInfo, pages: u64) ->
 /// A file with no notes is the user's own (made by `plumb fetch-pages`),
 /// not one taken from another node, so it is never cut: it could not be
 /// taken back. `kept_whole` holds the sets already said so, to say it once.
+///
+/// With towns `near` (the places set), the places near them are kept past
+/// the first `pages`, from a whole file; one already cut around them is
+/// left as it is.
 fn cut_if_longer(
     inner: &Inner,
     set: &SetInfo,
     pages: u64,
+    near: &[(f64, f64)],
     kept_whole: &mut HashSet<&'static str>,
 ) -> Result<()> {
     let data = &inner.paths.data;
     let Some(notes) = set.file_notes(data) else {
         return Ok(());
     };
-    if pages == u64::MAX || notes.lines <= pages || inner.stopping() {
+    let near_key = crate::places::near_key(near);
+    if pages == u64::MAX || !needs_cut(&notes, pages, near_key) || inner.stopping() {
         return Ok(());
     }
     let file = set.file(data);
@@ -312,6 +332,9 @@ fn cut_if_longer(
     let before = std::fs::metadata(&file).map_or(0, |m| m.len());
     let mut reader = plumb_ingest::open_maybe_gz(&file)?;
     let mut cutter = SetFileCutter::create(&part, pages)?;
+    if near_key != 0 {
+        cutter = cutter.keep_past(crate::places::near_lines(near.to_vec()));
+    }
     let mut buf = vec![0u8; 1 << 16];
     while !cutter.full() {
         let n = std::io::Read::read(&mut reader, &mut buf)
@@ -331,22 +354,32 @@ fn cut_if_longer(
         &SetFileNotes {
             lines,
             complete: false,
+            near: near_key,
             ..notes
         },
     )?;
     let after = std::fs::metadata(&file).map_or(0, |m| m.len());
     inner.recount_disk();
-    info!(
-        "page set {}: kept the first {lines} pages of its file",
-        set.id
-    );
+    info!("page set {}: kept {lines} pages of its file", set.id);
     inner.journal.info(format!(
-        "{}: kept the first {} pages, freeing {} MB",
+        "{}: kept {} pages, freeing {} MB",
         set.name,
         thousands(lines),
         before.saturating_sub(after) / 1_000_000
     ));
     Ok(())
+}
+
+/// Whether a file with `notes` holds more than a node keeping its first
+/// `pages` and the places near the towns `near_key` names wants. A file
+/// cut around other towns lacks the places near these: it is taken again
+/// instead ([`fetch_if_needed`]).
+fn needs_cut(notes: &SetFileNotes, pages: u64, near_key: u64) -> bool {
+    if near_key == 0 {
+        notes.lines > pages
+    } else {
+        notes.complete && notes.near != near_key
+    }
 }
 
 /// Whether `set`'s file may be cut to `pages` now. The places file is
@@ -443,6 +476,30 @@ pub(super) fn add_pages(
 mod tests {
     use super::*;
 
+    fn notes(lines: u64, complete: bool, near: u64) -> SetFileNotes {
+        SetFileNotes {
+            lines,
+            complete,
+            source_modified: 0,
+            fetched_at: 0,
+            near,
+        }
+    }
+
+    #[test]
+    fn files_are_cut_once_around_the_towns() {
+        // No towns: cut to the first pages.
+        assert!(needs_cut(&notes(2_000, true, 0), 1_000, 0));
+        assert!(!needs_cut(&notes(1_000, false, 0), 1_000, 0));
+        // Towns: a whole file is cut around them, once.
+        assert!(needs_cut(&notes(2_000, true, 0), 1_000, 7));
+        assert!(!needs_cut(&notes(1_080, false, 7), 1_000, 7));
+        // Cut around other towns: taken again, not cut.
+        assert!(!needs_cut(&notes(1_080, false, 9), 1_000, 7));
+        // The towns gone: back to the first pages.
+        assert!(needs_cut(&notes(1_080, false, 7), 1_000, 0));
+    }
+
     #[test]
     fn the_places_file_is_not_cut_before_the_towns_are_found() {
         let places = crate::places::set_info();
@@ -472,6 +529,7 @@ mod tests {
                 complete: true,
                 source_modified: 0,
                 fetched_at: 0,
+                near: 0,
             },
         )
         .unwrap();
