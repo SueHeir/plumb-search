@@ -25,6 +25,7 @@ pub mod download;
 pub mod facts;
 pub mod github;
 pub mod intros;
+pub mod item_facts;
 pub mod kind_sites;
 pub mod openalex;
 pub mod openlibrary;

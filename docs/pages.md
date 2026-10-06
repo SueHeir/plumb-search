@@ -49,6 +49,16 @@ Some items with profiles have no English article: Linus Tech Tips the YouTube ch
 
 The results page lists an article's profiles in its info box, its own accounts apart from the places it is listed, and a query ending in a service's name ("mrbeast youtube", "valve steam", "spotify android app", "dune part two imdb", "bohemian rhapsody lyrics") shows that profile or listing first when the words before it name an article.
 
+### Facts
+
+To answer searches that ask a fact ("capital of australia", "how tall is mount everest", "when was albert einstein born", "how old is elon musk", "who is the ceo of nvidia", "who founded tesla", "japan population"), add a few facts about each article's item from Wikidata:
+
+```sh
+plumb fetch-facts --data /path/to/node-data
+```
+
+It asks for twelve properties, only their best-ranked statements, a page of 200,000 at a time: capital, population (the latest count), elevation, height, area, birth and death dates, founding date, founders, CEO, headquarters and currency. Quantities are kept in metres and square metres whatever unit Wikidata has them in, dates only as precise as Wikidata knows them, and items (Canberra, a founder) by their English labels. They ride on the article's `profiles` line as `f-capital=Canberra` entries, which readers made before facts leave out, so `fetch-profiles` and `fetch-facts` keep each other's entries and can run in either order. The answer is shown above the results, with "From Wikidata", only when the search's subject names an article that has the fact; the node never guesses one.
+
 ## Nodes in the network
 
 A node with no set file, or fewer pages than it is set to keep, takes the file from a node it trusts (plumbsearch.org by default) over `/plumb/pages/1`, 1 MiB at a time, and stops once it has the pages it keeps: a node keeping 100,000 articles downloads about 10 MB, not the whole file. It asks again for a newer file after 30 days. A node passes on only whole files, made with `fetch-pages` or taken whole, so a cut file never spreads. Nodes answer at most four such requests at once and 120 a minute from each node.

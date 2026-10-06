@@ -1350,6 +1350,15 @@ async fn extras(
             .and_then(|found| answers::profile_answer(query, &found.pages)),
         _ => None,
     };
+    // A fact the query asks about something ("capital of australia"),
+    // looked up by searching for that something.
+    let answer = match (answer, plumb_core::facts::fact_asked(query)) {
+        (None, Some(asked)) => run_search(state, &asked.subject, PROFILE_SEARCH_LIMIT, options)
+            .await
+            .ok()
+            .and_then(|found| answers::fact_answer(&asked, &found.pages, now_unix())),
+        (answer, _) => answer,
+    };
     answers::Extras {
         answer,
         profile,
@@ -4139,6 +4148,7 @@ mod tests {
                 profiles: Vec::new(),
                 website: None,
                 package: None,
+                facts: Vec::new(),
             },
             score: 1.0,
             named: true,
@@ -4226,6 +4236,7 @@ mod tests {
                 profiles: Vec::new(),
                 website: Some("https://music.youtube.com/".into()),
                 package: None,
+                facts: Vec::new(),
             },
             score: 1.0,
             named: true,
@@ -5306,6 +5317,7 @@ mod tests {
                             }],
                             website: None,
                             package: None,
+                            facts: Vec::new(),
                         },
                         score: 1.0,
                         named: query == "mrbeast",
@@ -5359,6 +5371,7 @@ mod tests {
                 profiles: Vec::new(),
                 website: None,
                 package: None,
+                facts: Vec::new(),
             },
             score: 1.0,
             named: true,

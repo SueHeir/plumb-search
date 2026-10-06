@@ -467,6 +467,7 @@ pub fn build_articles(lang: &str, dumps: &ArticleDumps) -> Result<Vec<Article>> 
                 profiles: Vec::new(),
                 website: site.and_then(ItemSite::website).map(str::to_string),
                 package: None,
+                facts: Vec::new(),
             }
         })
         .collect();

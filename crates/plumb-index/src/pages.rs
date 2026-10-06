@@ -88,6 +88,10 @@ pub struct Page {
     /// A software package's card: its version, install command, docs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub package: Option<PackageInfo>,
+    /// Facts about the item from Wikidata ([`plumb_core::facts`]): a
+    /// country's capital, a person's birth date.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub facts: Vec<plumb_core::facts::Fact>,
 }
 
 impl Page {
@@ -105,6 +109,7 @@ impl Page {
             profiles: article.profiles,
             website: article.website,
             package: None,
+            facts: article.facts,
         }
     }
 
@@ -123,6 +128,7 @@ impl Page {
             profiles: Vec::new(),
             website: None,
             package: None,
+            facts: Vec::new(),
         }
     }
 
@@ -144,6 +150,7 @@ impl Page {
             profiles: Vec::new(),
             website: None,
             package: None,
+            facts: Vec::new(),
         }
     }
 
@@ -166,6 +173,7 @@ impl Page {
             profiles: Vec::new(),
             website: None,
             package: None,
+            facts: Vec::new(),
         })
     }
 
@@ -202,6 +210,7 @@ impl Page {
             profiles: Vec::new(),
             website: None,
             package: None,
+            facts: Vec::new(),
         }
     }
 
@@ -224,6 +233,7 @@ impl Page {
             profiles: podcast.profiles,
             website: None,
             package: None,
+            facts: Vec::new(),
         }
     }
 
@@ -248,6 +258,7 @@ impl Page {
             profiles: Vec::new(),
             website: None,
             package: None,
+            facts: Vec::new(),
         }
     }
 
@@ -269,6 +280,7 @@ impl Page {
             profiles: item.profiles,
             website: None,
             package: None,
+            facts: item.facts,
         }
     }
 
@@ -292,6 +304,7 @@ impl Page {
             profiles: Vec::new(),
             website: None,
             package: Some(info),
+            facts: Vec::new(),
         })
     }
 

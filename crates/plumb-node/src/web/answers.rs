@@ -403,6 +403,175 @@ pub(crate) fn render_info_box(out: &mut String, info: &InfoBox) {
     out.push_str("</aside>\n");
 }
 
+/// The fact `asked` asks for, when the first page named by its subject
+/// (in `pages`, found for the subject's words) that has one of its kinds
+/// has it: "Canberra" for "capital of australia". `now` (Unix seconds)
+/// works out an age.
+pub(crate) fn fact_answer(
+    asked: &plumb_core::facts::FactQuestion,
+    pages: &[PlacedPage],
+    now: u64,
+) -> Option<plumb_answer::Answer> {
+    use plumb_core::facts::FactKind;
+    pages
+        .iter()
+        .filter(|placed| placed.hit.named && is_about_one_thing(&placed.hit.page))
+        .filter(|placed| {
+            !is_disambiguation(
+                &placed.hit.page.title,
+                placed.hit.page.description.as_deref(),
+            )
+        })
+        .find_map(|placed| {
+            let page = &placed.hit.page;
+            let kind = asked
+                .kinds
+                .iter()
+                .copied()
+                .find(|kind| page.facts.iter().any(|fact| fact.kind == *kind))?;
+            let values: Vec<&str> = page
+                .facts
+                .iter()
+                .filter(|fact| fact.kind == kind)
+                .map(|fact| fact.value.as_str())
+                .collect();
+            let date_of = |kind: FactKind| {
+                page.facts
+                    .iter()
+                    .find(|fact| fact.kind == kind)
+                    .and_then(|fact| plumb_core::facts::Date::parse(&fact.value))
+            };
+            let (question, answer, note) = if asked.age && kind == FactKind::Born {
+                let born = date_of(FactKind::Born)?;
+                match date_of(FactKind::Died) {
+                    Some(died) => (
+                        format!("Age of {}", page.title),
+                        format!("Died at {}", born.years_until(&died)?),
+                        Some(format!("{} to {}", born.display(), died.display())),
+                    ),
+                    None => (
+                        format!("Age of {}", page.title),
+                        format!("{} years old", born.years_until(&date_from_unix(now))?),
+                        Some(format!("Born {}", born.display())),
+                    ),
+                }
+            } else {
+                let (answer, note) = fact_text(kind, &values)?;
+                (kind.question(&page.title), answer, note)
+            };
+            let from = "from Wikidata";
+            Some(plumb_answer::Answer {
+                kind: plumb_answer::Kind::Fact,
+                question,
+                answer,
+                note: Some(match note {
+                    Some(note) => format!("{note}, {from}"),
+                    None => "From Wikidata".to_string(),
+                }),
+            })
+        })
+}
+
+/// A fact's values as shown, and a note: "27,204,809" and "counted in
+/// 2024".
+fn fact_text(
+    kind: plumb_core::facts::FactKind,
+    values: &[&str],
+) -> Option<(String, Option<String>)> {
+    use plumb_core::facts::{Date, ValueType};
+    let first = *values.first()?;
+    Some(match kind.value_type() {
+        ValueType::Item => (join_names(values), None),
+        ValueType::Time => (Date::parse(first)?.display(), None),
+        ValueType::Quantity => {
+            let (number, year) = first.split_once(';').unwrap_or((first, ""));
+            let amount: f64 = number.parse().ok()?;
+            match kind {
+                plumb_core::facts::FactKind::Population => (
+                    group_digits(amount.round(), 0),
+                    (!year.is_empty()).then(|| format!("Counted in {year}")),
+                ),
+                plumb_core::facts::FactKind::Area => {
+                    let km2 = amount / 1e6;
+                    let digits = if km2 >= 100.0 { 0 } else { 2 };
+                    (
+                        format!(
+                            "{} km² ({} sq mi)",
+                            group_digits(km2, digits),
+                            group_digits(km2 * 0.386_102, digits)
+                        ),
+                        None,
+                    )
+                }
+                _ => {
+                    let digits = if amount >= 100.0 {
+                        usize::from(amount.fract() != 0.0) * 2
+                    } else {
+                        2
+                    };
+                    (
+                        format!(
+                            "{} m ({} ft)",
+                            group_digits(amount, digits),
+                            group_digits(amount * 3.280_84, 0)
+                        ),
+                        None,
+                    )
+                }
+            }
+        }
+    })
+}
+
+/// "A", "A and B", "A, B and C".
+fn join_names(names: &[&str]) -> String {
+    match names {
+        [] => String::new(),
+        [one] => (*one).to_string(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
+/// `x` with `digits` decimals (trailing zeros dropped) and its whole part
+/// in groups of three: "8,848.86", "27,204,809".
+fn group_digits(x: f64, digits: usize) -> String {
+    let text = format!("{:.*}", digits, x.abs());
+    let (whole, fraction) = text.split_once('.').unwrap_or((&text, ""));
+    let mut grouped = String::new();
+    for (i, c) in whole.chars().enumerate() {
+        if i > 0 && (whole.len() - i) % 3 == 0 {
+            grouped.push(',');
+        }
+        grouped.push(c);
+    }
+    let fraction = fraction.trim_end_matches('0');
+    let sign = if x < 0.0 { "-" } else { "" };
+    if fraction.is_empty() {
+        format!("{sign}{grouped}")
+    } else {
+        format!("{sign}{grouped}.{fraction}")
+    }
+}
+
+/// The UTC date of Unix time `secs`.
+fn date_from_unix(secs: u64) -> plumb_core::facts::Date {
+    // Howard Hinnant's days-to-civil.
+    let z = i64::try_from(secs / 86_400).unwrap_or(0) + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    plumb_core::facts::Date {
+        year: i32::try_from(year).unwrap_or(i32::MAX),
+        month: u8::try_from(month).ok(),
+        day: u8::try_from(day).ok(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use plumb_index::pages::{Page, PageHit};
@@ -423,6 +592,7 @@ mod tests {
                 profiles: Vec::new(),
                 website: None,
                 package: None,
+                facts: Vec::new(),
             },
             score: 1.0,
             named: true,
@@ -453,6 +623,131 @@ mod tests {
             under: under.map(str::to_string),
             at,
         }
+    }
+
+    fn with_facts(mut hit: PageHit, facts: &[(plumb_core::facts::FactKind, &str)]) -> PageHit {
+        hit.page.facts = facts
+            .iter()
+            .map(|(kind, value)| plumb_core::facts::Fact {
+                kind: *kind,
+                value: value.to_string(),
+            })
+            .collect();
+        hit
+    }
+
+    #[test]
+    fn facts_answer_the_questions_that_ask_them() {
+        use plumb_core::facts::{fact_asked, FactKind::*};
+        let pages = [
+            placed(
+                article("Australia (disambiguation)", "may refer to", None),
+                None,
+                0,
+            ),
+            placed(
+                with_facts(
+                    article("Australia", "country in Oceania", None),
+                    &[
+                        (Capital, "Canberra"),
+                        (Population, "27204809;2024"),
+                        (Area, "7688287000000"),
+                    ],
+                ),
+                None,
+                1,
+            ),
+        ];
+        let ask = |q: &str, pages: &[PlacedPage]| {
+            fact_answer(&fact_asked(q).unwrap(), pages, 1_791_244_800)
+        };
+        let capital = ask("capital of australia", &pages).unwrap();
+        assert_eq!(capital.question, "Capital of Australia");
+        assert_eq!(capital.answer, "Canberra");
+        assert_eq!(capital.note.as_deref(), Some("From Wikidata"));
+        let people = ask("australia population", &pages).unwrap();
+        assert_eq!(people.answer, "27,204,809");
+        assert_eq!(
+            people.note.as_deref(),
+            Some("Counted in 2024, from Wikidata")
+        );
+        assert_eq!(
+            ask("how big is australia", &pages).unwrap().answer,
+            "7,688,287 km² (2,968,463 sq mi)"
+        );
+        // A kind it has no fact of: no answer.
+        assert_eq!(ask("australia currency", &pages), None);
+
+        let everest = [placed(
+            with_facts(
+                article("Mount Everest", "mountain", None),
+                &[(Elevation, "8848.86")],
+            ),
+            None,
+            0,
+        )];
+        assert_eq!(
+            ask("how tall is mount everest", &everest).unwrap().answer,
+            "8,848.86 m (29,032 ft)"
+        );
+
+        let einstein = [placed(
+            with_facts(
+                article("Albert Einstein", "physicist", None),
+                &[(Born, "1879-03-14"), (Died, "1955-04-18")],
+            ),
+            None,
+            0,
+        )];
+        assert_eq!(
+            ask("when was albert einstein born", &einstein)
+                .unwrap()
+                .answer,
+            "March 14, 1879"
+        );
+        let age = ask("how old is albert einstein", &einstein).unwrap();
+        assert_eq!(age.answer, "Died at 76");
+        // 2026-10-06 is when the test's "now" is.
+        let musk = [placed(
+            with_facts(
+                article("Elon Musk", "businessman", None),
+                &[(Born, "1971-06-28")],
+            ),
+            None,
+            0,
+        )];
+        assert_eq!(
+            ask("how old is elon musk", &musk).unwrap().answer,
+            "55 years old"
+        );
+
+        let tesla = [placed(
+            with_facts(
+                article("Tesla, Inc.", "carmaker", None),
+                &[
+                    (Founder, "Martin Eberhard"),
+                    (Founder, "Marc Tarpenning"),
+                    (Founder, "Elon Musk"),
+                ],
+            ),
+            None,
+            0,
+        )];
+        assert_eq!(
+            ask("who founded tesla", &tesla).unwrap().answer,
+            "Martin Eberhard, Marc Tarpenning and Elon Musk"
+        );
+        // A page not named by the subject is no answer.
+        let mut unnamed = tesla.clone();
+        unnamed[0].hit.named = false;
+        assert_eq!(ask("who founded tesla", &unnamed), None);
+    }
+
+    #[test]
+    fn dates_of_unix_times() {
+        assert_eq!(date_from_unix(0).write(), "1970-01-01");
+        assert_eq!(date_from_unix(1_791_244_800).write(), "2026-10-06");
+        assert_eq!(date_from_unix(951_782_400).write(), "2000-02-29");
     }
 
     #[test]
