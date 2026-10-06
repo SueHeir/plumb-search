@@ -1200,6 +1200,10 @@ pub struct PlacedPage {
 /// English Wikipedia.
 pub const DEMAND_MARGIN: f32 = 0.05;
 
+/// The text match ([`crate::Hit::text_score`]) below which a site the
+/// query does not name in full comes after an article the query names.
+pub const WEAK_SITE_MATCH: f32 = 0.5;
+
 /// How many of the first sites [`PageSearcher::note_demand`] notes.
 pub const DEMAND_NOTED: usize = 3;
 
@@ -1328,13 +1332,19 @@ pub fn place_pages(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) -> Ve
     // how big the site is: "mars" means the planet, read many times more
     // than Mars Inc. of mars.com; "napoleon" the emperor, not Napoleon,
     // North Dakota.
-    // A site that only shares some of the query's words is no namesake
-    // at all: the article "Nikola Tesla" before tesla.com, "Genghis Khan"
-    // before khanacademy.org.
+    // A site that matches the query only a little is no namesake at all:
+    // the article "Nikola Tesla" before tesla.com, "Genghis Khan" before
+    // khanacademy.org. One the query names by an official name or as a
+    // kind of thing ("veterans affairs", "search engine") matches it in
+    // full and is not passed over.
     let page_first = |page: &PageHit| match sites.first() {
         None => true,
         Some(_) if organizations_site => false,
-        Some(site) if !site.named && page.page.is_article() => true,
+        Some(site)
+            if !site.named && site.text_score < WEAK_SITE_MATCH && page.page.is_article() =>
+        {
+            true
+        }
         Some(site) => match site.demand {
             Some(demand) if page.page.is_article() => page.popularity > demand + DEMAND_MARGIN,
             _ => !site.official && page.popularity > site.link_score,
@@ -2170,12 +2180,22 @@ mod tests {
         // ...but not after one that only shares a word with the query.
         let mut tesla = known_site("tesla.com", false, 0.7);
         tesla.official = true;
+        tesla.text_score = 0.37;
         let placed = place_pages(
             "nikola tesla",
             &[tesla],
             vec![found("Nikola Tesla", None, true, 0.8)],
         );
         assert_eq!(placed[0].at, 0);
+        // A site of the kind searched for matches it in full and stays.
+        let mut nasa = known_site("nasa.gov", false, 0.8);
+        nasa.official = true;
+        let placed = place_pages(
+            "space agency",
+            &[nasa],
+            vec![found("Space agency", None, true, 0.6)],
+        );
+        assert_eq!(placed[0].at, 1);
     }
 
     #[test]
