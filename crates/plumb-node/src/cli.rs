@@ -60,6 +60,10 @@ pub enum Command {
     /// `plumb run --drop-dead-sites` takes out of its index, without
     /// changing anything. Reads the whole records file into memory.
     DeadSites(DeadSitesArgs),
+    /// Rank the sites in a records file by the links their homepages make
+    /// to each other (a PageRank of our own crawls), without changing
+    /// anything. A look at the link graph; nothing uses the ranks yet.
+    LinkRank(LinkRankArgs),
     /// Let AI apps on this computer (Claude Desktop, Claude Code, ...) ask
     /// Plumb for official sites and look-alikes: an MCP server over stdin
     /// and stdout.
@@ -125,6 +129,24 @@ pub struct StorageArgs {
     /// Print aggregate measurements as JSON.
     #[arg(long)]
     pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct LinkRankArgs {
+    /// Records file (JSON lines). A journal next to it is read too, from
+    /// a copy: the file is left as it is.
+    #[arg(long, value_name = "PATH")]
+    pub records: PathBuf,
+    /// Also write every site's rank here, best first, as tab-separated
+    /// lines.
+    #[arg(long, value_name = "PATH")]
+    pub out: Option<PathBuf>,
+    /// How many of the best sites to name.
+    #[arg(long, value_name = "N", default_value_t = 30)]
+    pub show: usize,
+    /// Most rounds to run before stopping.
+    #[arg(long, value_name = "N", default_value_t = 50, value_parser = parse_positive)]
+    pub rounds: usize,
 }
 
 #[derive(Debug, Args)]
