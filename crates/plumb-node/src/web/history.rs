@@ -209,6 +209,12 @@ impl Visitor {
         }
     }
 
+    /// Gives the browser a profile if it has none yet, for buttons that
+    /// change it.
+    pub fn ensure_profile(&mut self) {
+        let _ = self.profile_or_new();
+    }
+
     /// Whether this browser's clicks are learned from.
     pub fn learns(&self) -> bool {
         self.prefs.learn
@@ -310,24 +316,6 @@ impl Visitor {
         }
     }
 
-    /// Changes what was learned for this browser, giving it a profile if
-    /// it has none yet; `false` when it could not be saved.
-    pub fn change_learned(&mut self, change: impl FnOnce(&mut Learned)) -> bool {
-        let Some(profile) = self.profile_or_new() else {
-            return false;
-        };
-        match self.store.update(&profile, |h| change(&mut h.learned)) {
-            Ok(()) => {
-                self.history = self.store.load(&profile);
-                true
-            }
-            Err(err) => {
-                warn!("could not save what was learned: {err:#}");
-                false
-            }
-        }
-    }
-
     /// Whether the searcher hid `domain` from `query`.
     pub fn hid(&self, query: &str, domain: &str) -> bool {
         self.history.learned.verdict(query, domain) == Some(Verdict::Hide)
@@ -419,6 +407,7 @@ impl Visitor {
             edit: None,
             tastes: self.history.learned.tastes.clone(),
             home: None,
+            tune_bar: None,
         }
     }
 
@@ -459,6 +448,8 @@ pub(super) struct HistoryView {
     pub tastes: Vec<Taste>,
     /// The searcher's country.
     pub home: Option<String>,
+    /// While tuning: the bar on top of the page.
+    pub tune_bar: Option<String>,
 }
 
 /// The traits of a result, for a searcher from `home`.
@@ -515,9 +506,9 @@ fn result_buttons(edit: &Editing, domain: &str, traits: &[Trait], now: Option<Ve
         escape_html(&edit.back)
     );
     for (verdict, sign, title) in [
-        (Verdict::Up, "\u{25b2}", "Higher for this search"),
-        (Verdict::Down, "\u{25bc}", "Lower for this search"),
-        (Verdict::Hide, "\u{2715}", "Not for this search"),
+        (Verdict::Up, "\u{25b2} Up", "Higher for this search"),
+        (Verdict::Down, "\u{25bc} Down", "Lower for this search"),
+        (Verdict::Hide, "\u{2715} Hide", "Not for this search"),
     ] {
         let pressed = now == Some(verdict);
         let _ = write!(
