@@ -30,7 +30,7 @@ use tracing::warn;
 use super::{escape_html, html_response, page, search_link, time_ago, AppState};
 use crate::about::{About, AboutStore, Reason, MAX_INTERESTS, MAX_SITES, MAX_TOWN_CHARS};
 use crate::history::{new_profile, valid_profile, History, HistoryStore};
-use crate::learn::{describe_key, Block, Choice, Learned, Verdict};
+use crate::learn::{describe_key, traits, Block, Choice, Learned, Rating, Taste, Trait, Verdict};
 
 /// The cookie holding a browser's profile id.
 const PROFILE_COOKIE: &str = "plumb_profile";
@@ -282,10 +282,50 @@ impl Visitor {
 
     /// Applies the browser's About profile to `hits`, then its history,
     /// then what it said about them for `query` in edit mode.
-    pub fn rank(&self, query: &str, hits: &mut Vec<Hit>) {
+    /// `home` is the searcher's country, for the sites from it.
+    pub fn rank(&self, query: &str, hits: &mut Vec<Hit>, home: Option<&str>) {
         self.about.apply(hits);
         self.rank_opened(query, hits);
+        self.apply_tastes(hits, home);
         self.apply_verdicts(query, hits);
+    }
+
+    /// Moves results with traits the searcher likes up and ones they
+    /// dislike down (see [`crate::learn::Trait`]).
+    fn apply_tastes(&self, hits: &mut [Hit], home: Option<&str>) {
+        let learned = &self.history.learned;
+        if learned.tastes.is_empty() {
+            return;
+        }
+        let mut changed = false;
+        for hit in hits.iter_mut() {
+            let (score, _) = learned.taste_score(&hit_traits(hit, home));
+            if score != 0.0 {
+                hit.score += score;
+                changed = true;
+            }
+        }
+        if changed {
+            hits.sort_by(|a, b| b.score.total_cmp(&a.score));
+        }
+    }
+
+    /// Changes what was learned for this browser, giving it a profile if
+    /// it has none yet; `false` when it could not be saved.
+    pub fn change_learned(&mut self, change: impl FnOnce(&mut Learned)) -> bool {
+        let Some(profile) = self.profile_or_new() else {
+            return false;
+        };
+        match self.store.update(&profile, |h| change(&mut h.learned)) {
+            Ok(()) => {
+                self.history = self.store.load(&profile);
+                true
+            }
+            Err(err) => {
+                warn!("could not save what was learned: {err:#}");
+                false
+            }
+        }
     }
 
     /// Whether the searcher hid `domain` from `query`.
@@ -377,6 +417,8 @@ impl Visitor {
             news_verdict: None,
             verdicts: HashMap::new(),
             edit: None,
+            tastes: self.history.learned.tastes.clone(),
+            home: None,
         }
     }
 
@@ -413,6 +455,41 @@ pub(super) struct HistoryView {
     pub verdicts: HashMap<String, Verdict>,
     /// The page is in edit mode.
     pub edit: Option<Editing>,
+    /// What the searcher likes in results in general.
+    pub tastes: Vec<Taste>,
+    /// The searcher's country.
+    pub home: Option<String>,
+}
+
+/// The traits of a result, for a searcher from `home`.
+pub(super) fn hit_traits(hit: &Hit, home: Option<&str>) -> Vec<Trait> {
+    traits(
+        &hit.domain,
+        hit.official,
+        hit.link_score,
+        hit.country.as_deref(),
+        home,
+    )
+}
+
+/// Traits as a form field: `code,popular`.
+pub(super) fn traits_field(traits: &[Trait]) -> String {
+    traits
+        .iter()
+        .map(|t| t.as_str())
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// Traits from a form field; unknown ones are left out.
+pub(super) fn parse_traits(field: &str) -> Vec<Trait> {
+    let mut found = Vec::new();
+    for kind in field.split(',').filter_map(|t| Trait::parse(t.trim())) {
+        if !found.contains(&kind) {
+            found.push(kind);
+        }
+    }
+    found
 }
 
 /// A results page in edit mode.
@@ -425,14 +502,16 @@ pub(super) struct Editing {
 
 /// Small buttons under a result in edit mode: higher, lower or hidden for
 /// this search; the one pressed takes it back.
-fn result_buttons(edit: &Editing, domain: &str, now: Option<Verdict>) -> String {
+fn result_buttons(edit: &Editing, domain: &str, traits: &[Trait], now: Option<Verdict>) -> String {
     let mut out = format!(
         "<form class=\"fb\" method=\"post\" action=\"/feedback\">\
          <input type=\"hidden\" name=\"q\" value=\"{}\">\
          <input type=\"hidden\" name=\"d\" value=\"{}\">\
+         <input type=\"hidden\" name=\"t\" value=\"{}\">\
          <input type=\"hidden\" name=\"back\" value=\"{}\">",
         escape_html(&edit.query),
         escape_html(domain),
+        traits_field(traits),
         escape_html(&edit.back)
     );
     for (verdict, sign, title) in [
@@ -502,7 +581,8 @@ impl HistoryView {
              <p class=\"hint\">Kept on this node for this browser only, and never sent \
              anywhere. \
              <a href=\"/history\">See or clear my history</a> \
-             <a href=\"/about\">About you: interests and sites</a></p>",
+             <a href=\"/about\">About you: interests and sites</a> \
+             <a href=\"/tune\">Tune your search</a></p>",
             checked(self.prefs.show),
             checked(self.prefs.rank),
             checked(self.prefs.learn)
@@ -526,6 +606,19 @@ impl HistoryView {
             )),
             None => {}
         }
+        let traits = hit_traits(hit, self.home.as_deref());
+        if !self.tastes.is_empty() {
+            let learned = Learned {
+                tastes: self.tastes.clone(),
+                ..Learned::default()
+            };
+            if let (_, Some(kind)) = learned.taste_score(&traits) {
+                notes.push(format!(
+                    "<span class=\"op\">You like {}</span>",
+                    kind.label()
+                ));
+            }
+        }
         let verdict = self.verdicts.get(&hit.domain).copied();
         match verdict {
             Some(Verdict::Up) => notes.push("<span class=\"op\">You put this higher</span>".into()),
@@ -538,7 +631,7 @@ impl HistoryView {
             None => {}
         }
         if let Some(edit) = &self.edit {
-            notes.push(result_buttons(edit, &hit.domain, verdict));
+            notes.push(result_buttons(edit, &hit.domain, &traits, verdict));
         }
         notes
     }
@@ -593,7 +686,7 @@ async fn history_page(State(state): State<AppState>, headers: HeaderMap) -> Resp
 /// Whether a page of another site sent the form. Without the profile
 /// cookie (`SameSite=Lax` keeps it off such posts), saving would give the
 /// browser a new profile chosen by that page.
-fn cross_site(headers: &HeaderMap) -> bool {
+pub(super) fn cross_site(headers: &HeaderMap) -> bool {
     let site = headers
         .get("sec-fetch-site")
         .and_then(|site| site.to_str().ok());
@@ -620,7 +713,7 @@ fn cross_site(headers: &HeaderMap) -> bool {
     }
 }
 
-fn refuse_cross_site() -> Response {
+pub(super) fn refuse_cross_site() -> Response {
     html_response(
         StatusCode::FORBIDDEN,
         page(
@@ -661,10 +754,21 @@ fn render_learned(body: &mut String, learned: &Learned) {
         return;
     }
     body.push_str(
-        "<h2 id=\"learned\">Learned from your clicks</h2>\n\
+        "<h2 id=\"learned\">Learned from your clicks and ratings</h2>\n\
          <p class=\"s\">Boxes you pass by for searches like these are folded to one line, \
          and headlines you read come unfolded. Opening a folded box once brings it back.</p>\n",
     );
+    let (liked, disliked) = learned.leanings();
+    for (traits, how) in [(liked, "You like"), (disliked, "You'd rather not see")] {
+        if !traits.is_empty() {
+            let labels: Vec<&str> = traits.iter().map(|t| t.label()).collect();
+            let _ = writeln!(
+                body,
+                "<p class=\"s\">{how} <strong>{}</strong>. <a href=\"/tune\">Tune</a></p>",
+                labels.join(", ")
+            );
+        }
+    }
     let decided = learned.decided();
     if decided.is_empty() && learned.boxes.is_empty() {
         body.push_str("<p class=\"s\">Nothing folded or unfolded yet.</p>\n");
@@ -755,6 +859,10 @@ struct FeedbackForm {
     d: Option<String>,
     b: Option<String>,
     c: Option<String>,
+    /// The result's traits: a result put higher counts as liked, one put
+    /// lower or hidden as disliked.
+    #[serde(default)]
+    t: String,
     #[serde(default)]
     v: String,
     #[serde(default)]
@@ -789,9 +897,17 @@ async fn feedback(
         (Some(domain), _) => {
             let domain = domain.trim().to_ascii_lowercase();
             let verdict = Verdict::parse(&form.v);
+            let traits = parse_traits(&form.t);
             (verdict.is_some() || form.v == "none").then(|| {
                 Box::new(move |h: &mut History| {
                     h.learned.set_verdict(&query, &domain, verdict, now);
+                    match verdict {
+                        Some(Verdict::Up) => h.learned.rate(&traits, Rating::Like, 1.0),
+                        Some(Verdict::Down | Verdict::Hide) => {
+                            h.learned.rate(&traits, Rating::Dislike, 1.0);
+                        }
+                        None => {}
+                    }
                 }) as Change
             })
         }
@@ -977,7 +1093,7 @@ async fn save_about(
     visitor.send_cookies(response)
 }
 
-fn no_store(mut response: Response) -> Response {
+pub(super) fn no_store(mut response: Response) -> Response {
     response
         .headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));

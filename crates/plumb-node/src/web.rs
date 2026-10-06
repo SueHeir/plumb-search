@@ -102,6 +102,7 @@ pub(crate) mod private;
 mod relay;
 mod searxng;
 mod setup;
+mod tune;
 
 /// Results returned when a request does not say how many.
 pub const DEFAULT_LIMIT: usize = 10;
@@ -628,6 +629,7 @@ fn app(state: AppState) -> Router {
         router = control::routes(router);
         router = nodes::routes(router);
         router = history::routes(router);
+        router = tune::routes(router);
     }
     router.with_state(state)
 }
@@ -982,9 +984,14 @@ async fn search_page(
         Ok(mut results) => {
             let found_places = not_a_name(found_places, &results.hits);
             if let Some(visitor) = &mut visitor {
-                visitor.rank(&query, &mut results.hits);
+                visitor.rank(
+                    &query,
+                    &mut results.hits,
+                    settings.options.country.as_deref(),
+                );
                 visitor.note_search(&query);
                 let mut view = visitor.view();
+                view.home = settings.options.country.clone();
                 view.verdicts = visitor
                     .history
                     .learned
@@ -2001,6 +2008,11 @@ border-radius:.35rem;background:none;color:var(--muted);cursor:pointer}\
 .fb button[aria-pressed=true]{background:var(--accent);color:var(--bg);border-color:var(--accent)}\
 .fbx{display:flex;flex-wrap:wrap;margin:.3rem 0 .6rem}\
 .ed{font-size:.85rem}\
+.tr{border:1px solid var(--line);border-radius:.6rem;margin:0 0 1rem;padding:.6rem .9rem}\
+.tr legend{font-weight:600;padding:0 .3rem}\
+.tri{display:flex;flex-wrap:wrap;justify-content:space-between;gap:.4rem 1rem;padding:.45rem 0;\
+border-top:1px solid var(--line)}.tri:first-of-type{border-top:0}\
+.tro{display:flex;gap:.7rem;align-items:center;font-size:.9rem}\
 .panel a{color:var(--link)}\
 .recent{margin:1rem auto 0;max-width:36rem;display:flex;flex-wrap:wrap;gap:.4rem;\
 justify-content:center;align-items:center;font-size:.875rem}\
@@ -2657,7 +2669,8 @@ fn render_results_with(
             )
         } else {
             format!(
-                "<a href=\"{}\">Edit these results</a>",
+                "<a href=\"{}\">Edit these results</a> &middot; \
+                 <a href=\"/tune\">Tune your search</a>",
                 escape_html(&format!("{here}&edit=1"))
             )
         };
@@ -5697,6 +5710,52 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn the_tuning_page_learns_tastes_for_every_search() {
+        let dir = tempfile::tempdir().unwrap();
+        let node = Arc::new(HistoryNode(dir.path().join("history")));
+        let app = || node_router(Arc::new(BankPlaces), node.clone());
+
+        let (code, _, page) = send(app(), "/tune").await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(page.matches("<fieldset class=\"tr\">").count(), 5, "{page}");
+        assert!(page.contains("value=\"like|popular\""), "{page}");
+
+        let response = app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/tune")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(Body::from(
+                        "r0_0=like%7Cpopular&r0_1=like%7Cpopular&r1_0=dislike%7Cshopping\
+                         &b0_places=no%7Cguessed",
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let profile = set_cookie(response.headers(), "plumb_profile").expect("a profile");
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let page = String::from_utf8(body.to_vec()).unwrap();
+        assert!(page.contains("3 results rated"), "{page}");
+        assert!(page.contains("You like <strong>well-known sites"), "{page}");
+        assert!(page.contains("rather not see <strong>shops"), "{page}");
+
+        let me = [("cookie", profile.as_str())];
+        let (_, _, body) = send_with_headers(app(), "/search?q=denver+bank&country=any", &me).await;
+        assert!(body.contains("You like well-known sites"), "{body}");
+        assert!(body.contains("href=\"/tune\""), "{body}");
+        let (_, _, history) = send_with_headers(app(), "/history", &me).await;
+        assert!(
+            history.contains("You like <strong>well-known sites"),
+            "{history}"
+        );
     }
 
     #[tokio::test]

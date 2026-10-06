@@ -153,7 +153,7 @@ pub struct ShownPage {
 }
 
 /// What a browser's clicks taught the node.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Learned {
     pub blocks: Vec<BlockCount>,
@@ -164,6 +164,286 @@ pub struct Learned {
     pub verdicts: Vec<SiteVerdict>,
     /// What the searcher said about boxes, in edit mode: newest first.
     pub boxes: Vec<BoxVerdict>,
+    /// What they like and dislike in results in general, from the tuning
+    /// page and edit mode.
+    pub tastes: Vec<Taste>,
+}
+
+/// A kind of result people tend to like or not, whatever they search for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Trait {
+    /// The official site of what Wikidata describes.
+    Official,
+    /// Encyclopedias and dictionaries.
+    Reference,
+    /// Forums and question-and-answer sites.
+    Forums,
+    /// Code hosting, package registries and software docs.
+    Code,
+    Video,
+    Social,
+    Shopping,
+    News,
+    /// Government sites, universities and schools.
+    Public,
+    /// Among the best-known sites.
+    Popular,
+    /// Little-known sites.
+    Small,
+    /// Sites of the searcher's own country.
+    Local,
+}
+
+/// Every trait, in the order they are listed.
+pub const TRAITS: [Trait; 12] = [
+    Trait::Official,
+    Trait::Reference,
+    Trait::Forums,
+    Trait::Code,
+    Trait::Video,
+    Trait::Social,
+    Trait::Shopping,
+    Trait::News,
+    Trait::Public,
+    Trait::Popular,
+    Trait::Small,
+    Trait::Local,
+];
+
+impl Trait {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Trait::Official => "official",
+            Trait::Reference => "reference",
+            Trait::Forums => "forums",
+            Trait::Code => "code",
+            Trait::Video => "video",
+            Trait::Social => "social",
+            Trait::Shopping => "shopping",
+            Trait::News => "news",
+            Trait::Public => "public",
+            Trait::Popular => "popular",
+            Trait::Small => "small",
+            Trait::Local => "local",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<Trait> {
+        TRAITS.into_iter().find(|t| t.as_str() == name)
+    }
+
+    /// What the pages call it.
+    pub fn label(self) -> &'static str {
+        match self {
+            Trait::Official => "official sites",
+            Trait::Reference => "encyclopedias and dictionaries",
+            Trait::Forums => "forums and Q&A",
+            Trait::Code => "code and software docs",
+            Trait::Video => "video",
+            Trait::Social => "social media",
+            Trait::Shopping => "shops",
+            Trait::News => "news sites",
+            Trait::Public => "government and schools",
+            Trait::Popular => "well-known sites",
+            Trait::Small => "small, lesser-known sites",
+            Trait::Local => "sites from your country",
+        }
+    }
+}
+
+/// Sites of each kind that are known by name.
+const KNOWN: &[(Trait, &[&str])] = &[
+    (
+        Trait::Reference,
+        &[
+            "wikipedia.org",
+            "wikidata.org",
+            "wiktionary.org",
+            "wikimedia.org",
+            "britannica.com",
+            "merriam-webster.com",
+            "dictionary.com",
+            "cambridge.org",
+            "oxfordlearnersdictionaries.com",
+        ],
+    ),
+    (
+        Trait::Forums,
+        &[
+            "reddit.com",
+            "stackoverflow.com",
+            "stackexchange.com",
+            "superuser.com",
+            "serverfault.com",
+            "askubuntu.com",
+            "quora.com",
+            "news.ycombinator.com",
+            "ycombinator.com",
+            "lemmy.world",
+            "discourse.org",
+        ],
+    ),
+    (
+        Trait::Code,
+        &[
+            "github.com",
+            "gitlab.com",
+            "codeberg.org",
+            "sourceforge.net",
+            "crates.io",
+            "docs.rs",
+            "npmjs.com",
+            "pypi.org",
+            "readthedocs.io",
+            "rust-lang.org",
+            "python.org",
+            "mozilla.org",
+            "developer.mozilla.org",
+            "pkg.go.dev",
+        ],
+    ),
+    (
+        Trait::Video,
+        &[
+            "youtube.com",
+            "vimeo.com",
+            "twitch.tv",
+            "dailymotion.com",
+            "tiktok.com",
+            "netflix.com",
+        ],
+    ),
+    (
+        Trait::Social,
+        &[
+            "x.com",
+            "twitter.com",
+            "facebook.com",
+            "instagram.com",
+            "linkedin.com",
+            "pinterest.com",
+            "threads.net",
+            "bsky.app",
+            "tumblr.com",
+            "tiktok.com",
+            "mastodon.social",
+        ],
+    ),
+    (
+        Trait::Shopping,
+        &[
+            "amazon.com",
+            "amazon.co.uk",
+            "amazon.de",
+            "ebay.com",
+            "etsy.com",
+            "walmart.com",
+            "target.com",
+            "bestbuy.com",
+            "aliexpress.com",
+            "temu.com",
+            "shein.com",
+        ],
+    ),
+    (
+        Trait::News,
+        &[
+            "nytimes.com",
+            "bbc.com",
+            "bbc.co.uk",
+            "cnn.com",
+            "theguardian.com",
+            "reuters.com",
+            "apnews.com",
+            "washingtonpost.com",
+            "foxnews.com",
+            "npr.org",
+            "wsj.com",
+            "bloomberg.com",
+            "nbcnews.com",
+            "cbsnews.com",
+            "aljazeera.com",
+            "spiegel.de",
+            "lemonde.fr",
+        ],
+    ),
+];
+/// [`plumb_core::link_score`] from which a site counts as well known, and
+/// below which as little known.
+const POPULAR_FROM: f32 = 0.6;
+const SMALL_BELOW: f32 = 0.35;
+/// Most a liked or disliked trait moves a result, and most all of them
+/// together do.
+pub const TASTE_MOST: f32 = 0.15;
+const TASTES_MOST: f32 = 0.2;
+/// A trait whose taste moves results at least this much is said to be
+/// liked (or disliked) on the pages.
+pub const TASTE_SHOWN_FROM: f32 = 0.04;
+
+/// The traits of a site, for a searcher whose country is `home`.
+pub fn traits(
+    domain: &str,
+    official: bool,
+    link_score: f32,
+    country: Option<&str>,
+    home: Option<&str>,
+) -> Vec<Trait> {
+    let mut found = Vec::new();
+    if official {
+        found.push(Trait::Official);
+    }
+    let is = |known: &str| domain == known || domain.ends_with(&format!(".{known}"));
+    for (kind, domains) in KNOWN {
+        if domains.iter().any(|d| is(d)) && !found.contains(kind) {
+            found.push(*kind);
+        }
+    }
+    let public = [
+        ".gov", ".mil", ".edu", ".gov.uk", ".ac.uk", ".gc.ca", ".gov.au", ".edu.au",
+    ];
+    if public.iter().any(|end| domain.ends_with(end)) {
+        found.push(Trait::Public);
+    }
+    if link_score >= POPULAR_FROM {
+        found.push(Trait::Popular);
+    } else if link_score < SMALL_BELOW {
+        found.push(Trait::Small);
+    }
+    if let (Some(country), Some(home)) = (country, home) {
+        if country.eq_ignore_ascii_case(home) {
+            found.push(Trait::Local);
+        }
+    }
+    found
+}
+
+/// How a searcher feels about results with a trait, from what they rated.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Taste {
+    #[serde(rename = "trait")]
+    pub kind: Trait,
+    pub liked: f32,
+    pub disliked: f32,
+    /// Times rated, liked, disliked or neither.
+    pub seen: f32,
+}
+
+impl Taste {
+    /// The score it adds to a result with the trait: up to
+    /// [`TASTE_MOST`] either way, more sure the more was rated.
+    pub fn score(&self) -> f32 {
+        let lean = (self.liked - self.disliked) / (self.seen + 2.0);
+        (lean * TASTE_MOST * 2.0).clamp(-TASTE_MOST, TASTE_MOST)
+    }
+}
+
+/// How a result was rated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Rating {
+    Like,
+    Neither,
+    Dislike,
 }
 
 /// What the searcher said about a result for a search.
@@ -526,6 +806,80 @@ impl Learned {
             && self.sites.is_empty()
             && self.verdicts.is_empty()
             && self.boxes.is_empty()
+            && self.tastes.is_empty()
+    }
+
+    /// Notes a rating of a result with `traits`, worth `weight` ratings.
+    pub fn rate(&mut self, traits: &[Trait], rating: Rating, weight: f32) {
+        for &kind in traits {
+            let i = match self.tastes.iter().position(|t| t.kind == kind) {
+                Some(i) => i,
+                None => {
+                    self.tastes.push(Taste {
+                        kind,
+                        liked: 0.0,
+                        disliked: 0.0,
+                        seen: 0.0,
+                    });
+                    self.tastes.len() - 1
+                }
+            };
+            let taste = &mut self.tastes[i];
+            taste.seen += weight;
+            match rating {
+                Rating::Like => taste.liked += weight,
+                Rating::Dislike => taste.disliked += weight,
+                Rating::Neither => {}
+            }
+        }
+    }
+
+    /// The score a result with `traits` gets for the searcher's tastes,
+    /// and the liked trait that counts most, if one counts.
+    pub fn taste_score(&self, traits: &[Trait]) -> (f32, Option<Trait>) {
+        let mut total = 0.0f32;
+        let mut best: Option<(f32, Trait)> = None;
+        for taste in self.tastes.iter().filter(|t| traits.contains(&t.kind)) {
+            let score = taste.score();
+            total += score;
+            if score >= TASTE_SHOWN_FROM && best.is_none_or(|(b, _)| score > b) {
+                best = Some((score, taste.kind));
+            }
+        }
+        (
+            total.clamp(-TASTES_MOST, TASTES_MOST),
+            best.map(|(_, kind)| kind),
+        )
+    }
+
+    /// The traits liked and disliked enough to say so, strongest first.
+    pub fn leanings(&self) -> (Vec<Trait>, Vec<Trait>) {
+        let mut tastes: Vec<(f32, Trait)> =
+            self.tastes.iter().map(|t| (t.score(), t.kind)).collect();
+        tastes.sort_by(|a, b| b.0.total_cmp(&a.0));
+        let liked = tastes
+            .iter()
+            .filter(|(s, _)| *s >= TASTE_SHOWN_FROM)
+            .map(|(_, k)| *k)
+            .collect();
+        let disliked = tastes
+            .iter()
+            .rev()
+            .filter(|(s, _)| *s <= -TASTE_SHOWN_FROM)
+            .map(|(_, k)| *k)
+            .collect();
+        (liked, disliked)
+    }
+
+    /// Notes that `block`, shown in `context`, was useful or not on the
+    /// tuning page: counts as that many shows for every search showing it
+    /// that way.
+    pub fn rate_block(&mut self, block: Block, context: &str, useful: bool, at: u64) {
+        let key = format!("c {context}");
+        self.bump(block, key.clone(), false, at);
+        if useful {
+            self.bump(block, key, true, at);
+        }
     }
 
     /// What the searcher said about `domain` for `query`.
@@ -840,6 +1194,57 @@ mod tests {
         );
         learned.set_box(Block::News, "rust", "words", false, Some(false), 7);
         assert_eq!(learned.choice(Block::News, "rust", "words"), Choice::Open);
+    }
+
+    #[test]
+    fn traits_say_what_kind_of_site_it_is() {
+        let t = traits("en.wikipedia.org", false, 0.9, None, Some("US"));
+        assert_eq!(t, [Trait::Reference, Trait::Popular]);
+        let t = traits("irs.gov", true, 0.5, Some("US"), Some("US"));
+        assert_eq!(t, [Trait::Official, Trait::Public, Trait::Local]);
+        let t = traits("myblog.example", false, 0.1, Some("DE"), Some("US"));
+        assert_eq!(t, [Trait::Small]);
+        assert!(!traits("notgithub.com", false, 0.5, None, None).contains(&Trait::Code));
+    }
+
+    #[test]
+    fn tastes_move_results_with_their_traits() {
+        let mut learned = Learned::default();
+        assert_eq!(learned.taste_score(&[Trait::Code]), (0.0, None));
+        for _ in 0..4 {
+            learned.rate(&[Trait::Code, Trait::Popular], Rating::Like, 1.0);
+            learned.rate(&[Trait::Social, Trait::Popular], Rating::Dislike, 1.0);
+        }
+        learned.rate(&[Trait::Video], Rating::Neither, 1.0);
+        let (code, why) = learned.taste_score(&[Trait::Code]);
+        assert!(code > 0.0 && code <= TASTE_MOST, "{code}");
+        assert_eq!(why, Some(Trait::Code));
+        let (social, why) = learned.taste_score(&[Trait::Social]);
+        assert!(social < 0.0, "{social}");
+        assert_eq!(why, None);
+        // Liked as often as disliked.
+        assert_eq!(learned.taste_score(&[Trait::Popular]).0, 0.0);
+        assert_eq!(learned.taste_score(&[Trait::Video]).0, 0.0);
+        let (liked, disliked) = learned.leanings();
+        assert_eq!(liked, [Trait::Code]);
+        assert_eq!(disliked, [Trait::Social]);
+        assert_eq!(Trait::parse("code"), Some(Trait::Code));
+    }
+
+    #[test]
+    fn a_box_rated_useless_folds_everywhere_it_shows_that_way() {
+        let mut learned = Learned::default();
+        for at in 0..3 {
+            learned.rate_block(Block::Places, "guessed", false, at);
+        }
+        assert_eq!(
+            learned.choice(Block::Places, "denver bank", "guessed"),
+            Choice::Fold
+        );
+        assert_eq!(
+            learned.choice(Block::Places, "pizza in denver", "said"),
+            Choice::Usual
+        );
     }
 
     #[test]
