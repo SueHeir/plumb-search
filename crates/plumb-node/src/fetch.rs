@@ -7,7 +7,7 @@ use plumb_ingest::{articles, download, facts, intros, kind_sites};
 use tracing::{error, info, warn};
 
 use crate::block_on;
-use crate::cli::{FetchDataArgs, FetchPagesArgs, FetchProfilesArgs};
+use crate::cli::{FetchDataArgs, FetchFactsArgs, FetchPagesArgs, FetchProfilesArgs};
 
 /// Where release names for `--cc-release` are listed. We know of no
 /// machine-readable index of releases, so we point people here instead.
@@ -329,6 +329,41 @@ pub fn run_profiles(args: FetchProfilesArgs) -> Result<()> {
         added.articles,
         added.profiles,
         added.websites
+    );
+    Ok(())
+}
+
+/// `plumb fetch-facts`: adds facts from Wikidata to an articles file.
+pub fn run_facts(args: FetchFactsArgs) -> Result<()> {
+    let path = match (&args.articles, &args.data) {
+        (Some(path), _) => path.clone(),
+        (None, Some(data)) => crate::pages::SetInfo::find("wikipedia-en")
+            .context("no English Wikipedia set")?
+            .file(data),
+        (None, None) => bail!("pass --data DIR or --articles PATH"),
+    };
+    if !path.is_file() {
+        bail!(
+            "{} is not there; make it with plumb fetch-pages first",
+            path.display()
+        );
+    }
+    let wanted = plumb_ingest::profiles::items_in_file(&path)?;
+    info!("{} articles have a Wikidata item", wanted.len());
+    let client = download::http_client()?;
+    let facts = block_on(plumb_ingest::item_facts::fetch_facts(
+        &client,
+        download::WIKIDATA_SPARQL_URL,
+        download::WikidataPacing::default(),
+        &wanted,
+    ))??;
+    let added = plumb_ingest::item_facts::add_facts_to_file(&path, &facts)?;
+    info!(
+        "{}: {} of {} articles have facts, {} in all",
+        path.display(),
+        added.with_facts,
+        added.articles,
+        added.facts
     );
     Ok(())
 }

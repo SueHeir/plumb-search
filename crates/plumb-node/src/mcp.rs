@@ -671,6 +671,14 @@ impl Mcp {
             i64::try_from(now).unwrap_or(i64::MAX),
             self.rates.as_ref(),
         );
+        // A fact the query asks about something ("capital of australia").
+        let answer = match (answer, plumb_core::facts::fact_asked(query)) {
+            (None, Some(asked)) => self
+                .lookup(&asked.subject, PROFILE_SEARCH_LIMIT, options)
+                .ok()
+                .and_then(|found| answers::fact_answer(&asked, &found.pages, now)),
+            (answer, _) => answer,
+        };
         let names_a_page = placed.iter().any(|placed| placed.hit.named);
         let profile = match plumb_core::profiles::services_asked(query) {
             Some((_, name)) if !names_a_page => self

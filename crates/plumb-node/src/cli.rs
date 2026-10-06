@@ -36,6 +36,10 @@ pub enum Command {
     /// Wikidata to a Wikipedia articles file made by fetch-pages, and write
     /// the items with profiles but no article as the wikidata set beside it.
     FetchProfiles(FetchProfilesArgs),
+    /// Add facts from Wikidata (a country's capital, a person's birth date,
+    /// a company's CEO) to a Wikipedia articles file made by fetch-pages,
+    /// for searches that ask one ("capital of australia").
+    FetchFacts(FetchFactsArgs),
     /// Fold seed data and earlier records into one records file.
     Ingest(IngestArgs),
     /// Fetch the homepages of the best-scored records and merge what they say.
@@ -516,6 +520,17 @@ pub struct FetchDataArgs {
 pub struct FetchProfilesArgs {
     /// A node's data directory whose English Wikipedia set gets the
     /// profiles; the node picks the new file up within seconds.
+    #[arg(long, value_name = "DIR", required_unless_present = "articles")]
+    pub data: Option<PathBuf>,
+    /// The articles file to add them to instead.
+    #[arg(long, value_name = "PATH")]
+    pub articles: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub struct FetchFactsArgs {
+    /// A node's data directory whose English Wikipedia set gets the
+    /// facts; the node picks the new file up within seconds.
     #[arg(long, value_name = "DIR", required_unless_present = "articles")]
     pub data: Option<PathBuf>,
     /// The articles file to add them to instead.

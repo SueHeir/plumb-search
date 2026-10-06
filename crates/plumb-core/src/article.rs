@@ -38,6 +38,7 @@ use std::io::{BufRead, Write};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::facts::{parse_facts, write_facts, Fact};
 use crate::packages::{PackageInfo, PACKAGE_LINE};
 use crate::profiles::{parse_profiles, write_profiles, Profile};
 
@@ -90,6 +91,10 @@ pub struct Article {
     /// after it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub package: Option<PackageInfo>,
+    /// Facts about the item from Wikidata ([`crate::facts`]), on its line
+    /// of profiles.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub facts: Vec<Fact>,
 }
 
 /// The key of an official website on a line of profiles.
@@ -104,9 +109,18 @@ pub fn is_profiles_line(line: &[u8]) -> bool {
     line.starts_with(PROFILES_LINE.as_bytes())
 }
 
-/// The item, profiles and official website of a line of profiles, `None`
-/// for another line.
-pub fn parse_profiles_line(line: &str) -> Option<(&str, Vec<Profile>, Option<String>)> {
+/// What a line of profiles says about an article's item.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProfilesLine<'a> {
+    pub item: &'a str,
+    pub profiles: Vec<Profile>,
+    pub website: Option<String>,
+    pub facts: Vec<Fact>,
+}
+
+/// The item, profiles, official website and facts of a line of profiles,
+/// `None` for another line.
+pub fn parse_profiles_line(line: &str) -> Option<ProfilesLine<'_>> {
     let rest = line
         .trim_end_matches(['\n', '\r'])
         .strip_prefix(PROFILES_LINE)?;
@@ -116,7 +130,12 @@ pub fn parse_profiles_line(line: &str) -> Option<(&str, Vec<Profile>, Option<Str
         let url = url.trim();
         (key.trim() == WEBSITE_KEY && is_web_address(url)).then(|| url.to_string())
     });
-    Some((item.trim(), parse_profiles(profiles), website))
+    Some(ProfilesLine {
+        item: item.trim(),
+        profiles: parse_profiles(profiles),
+        website,
+        facts: parse_facts(profiles),
+    })
 }
 
 /// Whether `url` is an `http` or `https` address that fits a field.
@@ -186,6 +205,13 @@ pub fn write_article(out: &mut impl Write, article: &Article) -> std::io::Result
         profiles.push('=');
         profiles.push_str(website);
     }
+    let facts = write_facts(&article.facts);
+    if !facts.is_empty() {
+        if !profiles.is_empty() {
+            profiles.push('|');
+        }
+        profiles.push_str(&facts);
+    }
     if !profiles.is_empty() {
         write!(out, "{PROFILES_LINE}")?;
         writeln!(
@@ -241,11 +267,12 @@ impl<I: Iterator<Item = String>> Iterator for ArticleLines<I> {
             if (self.number == 1 && line.starts_with("views\t")) || line.trim().is_empty() {
                 continue;
             }
-            if let Some((item, profiles, website)) = parse_profiles_line(&line) {
+            if let Some(found) = parse_profiles_line(&line) {
                 if let Some((_, article)) = &mut self.pending {
-                    if article.item.as_deref() == Some(item) {
-                        article.profiles = profiles;
-                        article.website = website;
+                    if article.item.as_deref() == Some(found.item) {
+                        article.profiles = found.profiles;
+                        article.website = found.website;
+                        article.facts = found.facts;
                     }
                 }
                 continue;
@@ -313,6 +340,7 @@ pub fn parse_article(line: &str) -> Result<Article> {
         profiles: Vec::new(),
         website: None,
         package: None,
+        facts: Vec::new(),
     })
 }
 
@@ -372,6 +400,7 @@ mod tests {
             profiles: Vec::new(),
             website: None,
             package: None,
+            facts: Vec::new(),
         };
         let mut out = Vec::new();
         out.extend_from_slice(ARTICLES_HEADER.as_bytes());
@@ -442,6 +471,44 @@ mod tests {
         assert_eq!(read_articles(&out[..], 10).unwrap(), [music]);
         // Readers made before websites see no profile in it.
         assert!(parse_profiles("website=https://music.youtube.com/").is_empty());
+    }
+
+    #[test]
+    fn facts_ride_on_the_line_of_profiles() {
+        use crate::facts::FactKind;
+        let australia = Article {
+            title: "Australia".into(),
+            item: Some("Q408".into()),
+            views: 9_000,
+            profiles: vec![Profile {
+                service: "x".into(),
+                id: "Australia".into(),
+            }],
+            facts: vec![
+                Fact {
+                    kind: FactKind::Capital,
+                    value: "Canberra".into(),
+                },
+                Fact {
+                    kind: FactKind::Population,
+                    value: "27204809;2024".into(),
+                },
+            ],
+            ..Article::default()
+        };
+        let mut out = Vec::new();
+        out.extend_from_slice(ARTICLES_HEADER.as_bytes());
+        write_article(&mut out, &australia).unwrap();
+        let text = String::from_utf8(out.clone()).unwrap();
+        assert!(text.contains(
+            "\nprofiles\tQ408\tx=Australia|f-capital=Canberra|f-population=27204809;2024\n"
+        ));
+        assert_eq!(read_articles(&out[..], 10).unwrap(), [australia]);
+        // Readers made before facts see only the profile.
+        assert_eq!(
+            parse_profiles("x=Australia|f-capital=Canberra|f-population=27204809;2024").len(),
+            1
+        );
     }
 
     #[test]

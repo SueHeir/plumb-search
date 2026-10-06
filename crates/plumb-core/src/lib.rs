@@ -14,6 +14,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub mod article;
 mod bot_check;
 mod country;
+pub mod facts;
 pub mod key_pages;
 pub mod keys;
 mod kinds;

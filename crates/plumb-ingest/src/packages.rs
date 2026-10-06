@@ -159,6 +159,7 @@ impl Listed {
                 repo,
                 homepage,
             }),
+            facts: Vec::new(),
         })
     }
 }

@@ -383,6 +383,7 @@ fn profile_items(
                 item: Some(item),
                 website: None,
                 package: None,
+                facts: Vec::new(),
             })
         })
         .collect();
