@@ -7,8 +7,8 @@ The first release. Downloads are on [GitHub Releases](https://github.com/SueHeir
 ### Search
 
 - Homepage search: sites by name, homepage title and description, and the words other sites link to them with. Official sites come first, and look-alikes stuffed with a brand's keywords stay below the real one.
-- Page sets next to sites: English Wikipedia, Stack Overflow's most viewed questions, Open Library's most read books, the most cited papers, well-starred GitHub repositories and the most used packages of eight registries. Only titles, short descriptions and counts are kept.
-- Instant answers (sums, unit and currency conversions, the time in a place), info boxes with official sites and profiles, and sitelinks.
+- Page sets next to sites: English Wikipedia, Stack Overflow's most viewed questions, Open Library's most read books, the most cited papers, well-starred GitHub repositories, Podcast Index's most popular podcasts and the most used packages of eight registries. Only titles, short descriptions and counts are kept.
+- Instant answers (sums, unit and currency conversions, the time in a place), info boxes with official sites, profiles and where a film, show, game or album is listed, and sitelinks.
 - Places from OpenStreetMap, with a map drawn from coordinates.
 - Recent headlines from the RSS and Atom feeds of the best-ranked sites.
 - Search operators, safe search, language, spelling suggestions and optional search by meaning.
@@ -39,3 +39,13 @@ The first release. Downloads are on [GitHub Releases](https://github.com/SueHeir
 - Per-client limits for MCP and network search, counting clients behind a local proxy correctly.
 - Requests sent by other sites to the node's own forms are refused.
 - Tighter limits on a few inputs and on what plugins can write to the log.
+- A crawl found by a network search is kept only when its crawler is trusted or confirmed by others, so one new key cannot rewrite a site's title.
+- Network searches ask only nodes that take sealed requests when relays are available, and nodes limit connections and how much they serve at once.
+- Feeds are read without document type definitions, so a feed cannot expand into gigabytes.
+
+### Fixes from the pre-release audit
+
+- Searches with curly quotes, and a few calculator and time-zone inputs, no longer fail.
+- On nodes with a storage limit, the places file is no longer cut at every start, and trimming never drops more sites than it can free.
+- Unit symbols keep their case (`mW`, `Gb`), and `gr` is grain.
+- robots.txt redirects to another host are followed, and large downloads resume.
