@@ -10,6 +10,11 @@
 - Sites opened before also come up for searches that share words with the one they were opened for ("us bank login" after "us bank").
 - "us bank" no longer lists banks in a town called Us: a town guessed from a query that names a site is left out. "Banks in denver" still lists them.
 
+### Crawling
+
+- Dead sites: `plumb run --drop-dead-sites` takes sites out of the index that no crawl has reached for 60 days after 6 tries in a row that got no answer. Never the best 10,000 sites, official websites or ones you chose. A dead site keeps a small record and comes back when it answers again. Off by default; without it the node only counts them in its log, and `plumb dead-sites --data DIR` counts them without changing anything.
+- Reading sites anew: when crawlers learn to read more from a homepage, the crawl version goes up and nodes crawl the sites read by an older crawler again, best-known first.
+
 ## 0.1.0
 
 The first release. Downloads are on [GitHub Releases](https://github.com/SueHeir/plumb-search/releases/latest), and the Docker image is `ghcr.io/sueheir/plumb-search:0.1.0` (also `:0.1` and `:latest`).

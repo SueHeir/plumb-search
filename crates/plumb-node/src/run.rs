@@ -68,6 +68,7 @@ fn node_config(args: RunArgs) -> NodeConfig {
     if args.crawl_concurrency.is_some() {
         config.crawl_concurrency = args.crawl_concurrency;
     }
+    config.drop_dead_sites = args.drop_dead_sites;
     if let Some(feeds) = args.news_feeds {
         config.news_feeds = feeds;
     }

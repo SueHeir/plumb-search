@@ -46,6 +46,7 @@ pub mod web;
 pub mod websearch;
 
 mod crawl;
+mod dead;
 mod fetch;
 mod icons;
 mod ingest;
@@ -101,6 +102,7 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::Embed(args) => meaning::run_embed(args),
         Command::RemoteControl(args) => run::remote_control(args),
         Command::Storage(args) => storage::run(args),
+        Command::DeadSites(args) => dead::run(&args),
         Command::Mcp(args) => mcp::run(args),
         Command::TryPlugin(args) => plugins::try_plugin(
             &args.plugin,

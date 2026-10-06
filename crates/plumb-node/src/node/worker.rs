@@ -876,6 +876,7 @@ fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Option<ServingIndex
     let window = RECRAWL_AFTER_DAYS * SECONDS_PER_DAY;
     let net = network::handle(inner).cloned();
     let now = now_unix();
+    drop_dead_sites(inner, &mut set, &mut store, now)?;
     // In the network, only the sites assigned to this node today, or,
     // crawling any site, this node's slice among its trusted crawlers.
     let group = match &net {
@@ -954,7 +955,8 @@ fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Option<ServingIndex
     }
     let focused_domains: HashSet<&str> = focused.iter().map(|t| t.domain.as_str()).collect();
     // Sites crawled before nodes kept icons or key pages are due again for
-    // them.
+    // them, and so are sites read by an older crawler (see
+    // plumb_crawl::CRAWL_VERSION).
     let icons = IconStore::new(&inner.paths.icons);
     let noted = icons.noted();
     let rest = select_targets_with(
@@ -965,7 +967,9 @@ fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Option<ServingIndex
         budget - focused.len(),
         now,
         window,
-        |record| due_for_icon(record, &noted) || due_for_key_pages(record),
+        |record| {
+            due_for_icon(record, &noted) || due_for_key_pages(record) || due_for_rereading(record)
+        },
     );
     drop(noted);
     drop(focused_domains);
@@ -1130,6 +1134,66 @@ fn key_page_catch_up(set: &RecordSet) -> Vec<&SiteRecord> {
         .collect()
 }
 
+/// Whether a site was last read by an older crawler than this one
+/// ([`plumb_crawl::CRAWL_VERSION`]), so it is due again to be read anew.
+// Never, while the version is still the first one.
+#[allow(clippy::absurd_extreme_comparisons)]
+fn due_for_rereading(record: &SiteRecord) -> bool {
+    last_crawl_answered(record) && record.crawl_version < plumb_crawl::CRAWL_VERSION
+}
+
+/// Counts the sites that look dead ([`crate::dead`]) and, with
+/// [`NodeConfig::drop_dead_sites`], takes them out: each is cut down to its
+/// crawl marks and ranks, saved to the records' journal, and the index is
+/// built again without them.
+fn drop_dead_sites(
+    inner: &Inner,
+    set: &mut RecordSet,
+    store: &mut RecordStore,
+    now: u64,
+) -> Result<()> {
+    if !set
+        .iter()
+        .any(|record| crate::dead::looks_dead(record, now))
+    {
+        return Ok(());
+    }
+    let keep = super::trim::Keep::of(inner);
+    let dead: Vec<String> = crate::dead::find_dead(set, now, |record| keep.keeps(record))
+        .into_iter()
+        .map(|record| record.domain.clone())
+        .collect();
+    if dead.is_empty() {
+        return Ok(());
+    }
+    if !inner.config.drop_dead_sites {
+        info!(
+            "{} sites look dead (no answer for weeks; the best known: {}); kept, since \
+             --drop-dead-sites is off",
+            dead.len(),
+            dead.iter().take(5).cloned().collect::<Vec<_>>().join(", ")
+        );
+        return Ok(());
+    }
+    let changes: Vec<Change> = dead
+        .into_iter()
+        .map(|domain| Change::Gone { domain, at: now })
+        .collect();
+    store.save(&changes)?;
+    let count = changes.len();
+    for change in changes {
+        change.apply(set);
+    }
+    inner.update_saved(|saved| saved.index_stale = true)?;
+    info!("took {count} dead sites out of the index");
+    inner.journal.info(format!(
+        "Took {} sites out of the index that no crawl has reached for weeks; any that \
+         answer again come back",
+        group_thousands(count as u64)
+    ));
+    Ok(())
+}
+
 fn last_crawl_answered(record: &SiteRecord) -> bool {
     record
         .crawled_at
@@ -1218,6 +1282,14 @@ fn save_icons(icons: &IconStore, results: &[CrawlResult]) {
 
 /// Builds an index of `records` in a new numbered directory and opens it.
 pub(super) fn build<R: Borrow<SiteRecord>>(inner: &Inner, records: &[R]) -> Result<ServingIndex> {
+    // Sites judged dead stay in the records, out of the index and the
+    // buckets other nodes take.
+    let records: Vec<&SiteRecord> = records
+        .iter()
+        .map(Borrow::borrow)
+        .filter(|record| record.gone_at.is_none())
+        .collect();
+    let records = records.as_slice();
     let id = store::next_index_id(&inner.paths);
     let dir = inner.paths.index(id);
     inner.set_step(
@@ -1505,6 +1577,21 @@ mod tests {
             false
         )));
         assert!(!due_for_key_pages(&SiteRecord::new("never.com")));
+    }
+
+    #[test]
+    fn sites_are_read_anew_only_once_the_crawl_version_goes_up() {
+        let mut record = SiteRecord::new("a.com");
+        record.crawled_at = Some(10);
+        record.crawl_version = plumb_crawl::CRAWL_VERSION;
+        assert!(!due_for_rereading(&record));
+        if let Some(older) = plumb_crawl::CRAWL_VERSION.checked_sub(1) {
+            record.crawl_version = older;
+            assert!(due_for_rereading(&record));
+            record.crawl_attempted_at = Some(20);
+            record.crawl_failures = 1;
+            assert!(!due_for_rereading(&record), "not reached on its last try");
+        }
     }
 
     #[test]

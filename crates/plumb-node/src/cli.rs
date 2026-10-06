@@ -56,6 +56,10 @@ pub enum Command {
     RemoteControl(RemoteControlArgs),
     /// Measure node storage and private-search bucket sizes without changing data.
     Storage(StorageArgs),
+    /// Count the sites in a node's records that look dead, the ones
+    /// `plumb run --drop-dead-sites` takes out of its index, without
+    /// changing anything. Reads the whole records file into memory.
+    DeadSites(DeadSitesArgs),
     /// Let AI apps on this computer (Claude Desktop, Claude Code, ...) ask
     /// Plumb for official sites and look-alikes: an MCP server over stdin
     /// and stdout.
@@ -121,6 +125,16 @@ pub struct StorageArgs {
     /// Print aggregate measurements as JSON.
     #[arg(long)]
     pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct DeadSitesArgs {
+    /// The node's data directory, as given to `plumb run --data`.
+    #[arg(long, value_name = "DIR")]
+    pub data: PathBuf,
+    /// How many of the best-known dead sites to name.
+    #[arg(long, value_name = "N", default_value_t = 20)]
+    pub show: usize,
 }
 
 #[derive(Debug, Args)]
@@ -213,6 +227,15 @@ pub struct RunArgs {
     /// Homepages crawled per refresh [default: from --profile].
     #[arg(long, value_name = "N", value_parser = parse_positive)]
     pub crawl_per_refresh: Option<usize>,
+    /// Take sites that look dead out of the index: homepages no crawl has
+    /// reached for 60 days, after 6 tries in a row over a month or more
+    /// that got no answer at all (see `plumb dead-sites`, which counts them
+    /// without changing anything). Never the best 10,000 sites, official
+    /// websites, sites about this node's topics, or ones an About page puts
+    /// first or a searcher opened. A dead site keeps a small record and
+    /// comes back when a crawl reaches it again.
+    #[arg(long)]
+    pub drop_dead_sites: bool,
     /// Homepages fetched at once while crawling [default: 16]. The panel's
     /// workload presets (light, balanced, full) set their own.
     #[arg(long, value_name = "N", value_parser = parse_positive)]

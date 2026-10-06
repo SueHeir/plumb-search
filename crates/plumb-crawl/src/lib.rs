@@ -39,7 +39,7 @@ pub use extract::{extract_page_meta, MAX_BODY_WORDS, MAX_ICONS, MAX_OUT_LINKS};
 pub use feed::{parse_date, read_feed};
 pub use icon::{normalize_icon, ICON_SIZE};
 pub use read::{page_text, PageReader, ReadConfig, ReadError, ReadPage, MAX_READ_LINKS};
-pub use records::to_records;
+pub use records::{to_records, CRAWL_VERSION};
 
 /// Sent with every request so site owners can see who is crawling and why.
 pub const USER_AGENT: &str = concat!(
