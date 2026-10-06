@@ -50,7 +50,7 @@ There are no ads and no tracking. Plumb does not crawl the full text of the web:
 
 A node serves the same search page, keeps crawling homepages, and joins the Plumb network by default. A new node copies the best sites of a node it trusts (plumbsearch.org by default) and is searchable within a few minutes. No port forwarding is needed.
 
-**Server or homelab** ([docs/docker.md](docs/docker.md)): the image is published as `ghcr.io/sueheir/plumb-search`.
+**Server or homelab** ([docs/docker.md](docs/docker.md)): the image is published as `ghcr.io/sueheir/plumb-search`. Use `:0.1` to stay on this release line, or `:latest` to follow each new release.
 
 ```sh
 git clone https://github.com/SueHeir/plumb-search.git
@@ -58,7 +58,7 @@ cd plumb-search
 docker compose up -d        # then open http://<this machine>:8080
 ```
 
-**Desktop or laptop** ([docs/desktop.md](docs/desktop.md)): the desktop app for Windows, macOS and Linux runs the same node with a control panel, and search opens in your browser at http://127.0.0.1:7586. There is no published release yet; test builds of the installers come from the repository's **Desktop** workflow.
+**Desktop or laptop** ([docs/desktop.md](docs/desktop.md)): the desktop app for Windows, macOS and Linux runs the same node with a control panel, and search opens in your browser at http://127.0.0.1:7586. Download the installer from the [latest release](https://github.com/SueHeir/plumb-search/releases/latest).
 
 **From source** (Rust, stable toolchain):
 
@@ -105,7 +105,7 @@ It is good at what agents look up most: the official site ("chase login"), a pac
 
 ## Status
 
-Plumb is young and moving fast. plumbsearch.org runs on `main`, which also publishes the Docker image. There is no tagged release yet. The peer-to-peer network works but is young. Private information retrieval (PIR), which would let a node fetch results without learning which ones it asked for, is research in progress: the first pieces are in `crates/plumb-net/src/pir`, but no search uses them and there is no setting for it.
+Plumb is young and moving fast. The first release, [0.1.0](https://github.com/SueHeir/plumb-search/releases/latest), is out; [CHANGELOG.md](CHANGELOG.md) lists what it has. The peer-to-peer network works but is young. Private information retrieval (PIR), which would let a node fetch results without learning which ones it asked for, is research in progress: the first pieces are in `crates/plumb-net/src/pir`, but no search uses them and there is no setting for it.
 
 ## Contributing
 

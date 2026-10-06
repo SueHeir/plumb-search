@@ -41,8 +41,8 @@ searches work from the start. Starting
 the app again while it is running brings its window back too, and so does
 clicking its Dock icon on macOS.
 
-Test builds are not code-signed yet, so each system warns you before it opens
-them the first time. The [install](#install) steps say how to get past that.
+The installers are not code-signed yet, so each system warns you before it
+opens them the first time. The [install](#install) steps say how to get past that.
 
 ## Control your other nodes
 
@@ -76,6 +76,13 @@ allows more (see [Docker](docker.md#control-it-from-the-desktop-app)).
 
 The app's own node listens only on this computer, so other computers cannot
 control it.
+
+## Download a release
+
+The installers for every release are on the
+[Releases page](https://github.com/SueHeir/plumb-search/releases/latest):
+`.dmg` for macOS, `.exe` or `.msi` for Windows, and `.AppImage`, `.deb` or
+`.rpm` for Linux.
 
 ## Get a test build
 
