@@ -2159,7 +2159,8 @@ border-radius:1rem;color:var(--fg);text-decoration:none}\
 .hist ul{padding-left:1.1rem}.hist li{padding:.2rem 0;margin:0}.hist li a{color:var(--link)}\
 .hist form{margin-top:1.5rem}\
 .about label{display:block;margin-top:1.25rem}.about .m{margin:.2rem 0 .4rem}\
-.about textarea,.about #town{width:100%;box-sizing:border-box;font:inherit;padding:.4rem;\
+.about form.block{display:block}\
+.about textarea,.about #town,.about #paste,.about #code{width:100%;box-sizing:border-box;font:inherit;padding:.4rem;\
 background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:6px}\
 .ia{margin:1rem 0 .5rem;padding:.85rem 1rem;border:1px solid var(--line);border-radius:.75rem}\
 .ia p{margin:0}.iaq{color:var(--muted);font-size:.9rem;overflow-wrap:anywhere}\

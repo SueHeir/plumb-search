@@ -260,7 +260,7 @@ fn render(links: &Links, networked: bool, note: &Note, now: u64) -> String {
     }
     body.push_str(
         "<h2>Have a link code?</h2>\n\
-         <form method=\"post\" action=\"/link/join\">\n\
+         <form method=\"post\" action=\"/link/join\" class=\"block\">\n\
          <label for=\"paste\"><strong>Paste it here</strong></label>\n\
          <p class=\"m\">This browser then uses that profile. What it had here is merged \
          in, so nothing is lost.</p>\n\
