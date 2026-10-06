@@ -66,6 +66,10 @@ pub enum Command {
     /// `plumb run --drop-dead-sites` takes out of its index, without
     /// changing anything. Reads the whole records file into memory.
     DeadSites(DeadSitesArgs),
+    /// Rank the sites in a records file by the links their homepages make
+    /// to each other (a PageRank of our own crawls), without changing
+    /// anything. A look at the link graph; nothing uses the ranks yet.
+    LinkRank(LinkRankArgs),
     /// Let AI apps on this computer (Claude Desktop, Claude Code, ...) ask
     /// Plumb for official sites and look-alikes: an MCP server over stdin
     /// and stdout.
@@ -131,6 +135,30 @@ pub struct StorageArgs {
     /// Print aggregate measurements as JSON.
     #[arg(long)]
     pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct LinkRankArgs {
+    /// Records file (JSON lines). A journal next to it is read too, from
+    /// a copy: the file is left as it is.
+    #[arg(long, value_name = "PATH")]
+    pub records: PathBuf,
+    /// Also write every site's rank here, best first, as tab-separated
+    /// lines.
+    #[arg(long, value_name = "PATH")]
+    pub out: Option<PathBuf>,
+    /// Also write a copy of the records here in which each site's
+    /// `pagerank_rank` is its place by links when that is better, to index
+    /// and evaluate a node that ranks by links. The records file is left
+    /// as it is.
+    #[arg(long, value_name = "PATH")]
+    pub apply: Option<PathBuf>,
+    /// How many of the best sites to name.
+    #[arg(long, value_name = "N", default_value_t = 30)]
+    pub show: usize,
+    /// Most rounds to run before stopping.
+    #[arg(long, value_name = "N", default_value_t = 50, value_parser = parse_positive)]
+    pub rounds: usize,
 }
 
 #[derive(Debug, Args)]
@@ -501,6 +529,9 @@ pub struct FetchPagesArgs {
     /// github (GitHub repositories, from GitHub's search API; set
     /// GITHUB_TOKEN to search three times as fast), stackoverflow (Stack
     /// Overflow's most viewed questions, from Stack Exchange's data dump),
+    /// stackexchange (the most viewed questions of Super User, Ask Ubuntu,
+    /// Home Improvement and 30 more Stack Exchange sites, from the same
+    /// dump),
     /// books (Open Library's most shelved works, from its dumps), podcasts
     /// (Podcast Index's most popular podcasts, from its database), papers
     /// (the most cited works, from OpenAlex's API; set OPENALEX_API_KEY if
@@ -546,7 +577,8 @@ pub struct FetchPagesArgs {
     /// Stack Overflow: read this Posts .7z instead of downloading it.
     #[arg(long, value_name = "PATH")]
     pub posts: Option<PathBuf>,
-    /// Stack Overflow: lowest score of a question kept.
+    /// Stack Overflow and other Stack Exchange sites: lowest score of a
+    /// question kept.
     #[arg(
         long,
         value_name = "SCORE",
@@ -557,6 +589,14 @@ pub struct FetchPagesArgs {
     /// Stack Overflow: most questions kept, the most viewed.
     #[arg(long, value_name = "N", default_value_t = 2_000_000)]
     pub max_questions: usize,
+    /// Other Stack Exchange sites: most questions kept of each site, the
+    /// most viewed.
+    #[arg(long, value_name = "N", default_value_t = 100_000)]
+    pub max_per_site: usize,
+    /// Other Stack Exchange sites: delete each site's dump once it is read,
+    /// rather than keeping it for --keep-days.
+    #[arg(long)]
+    pub drop_dumps: bool,
     /// Books: fewest reading log entries and ratings of a book kept.
     #[arg(long, value_name = "N", default_value_t = 3)]
     pub min_shelvings: u32,
@@ -834,6 +874,10 @@ pub struct EvalArgs {
     /// scored: final score, text match, link score and closeness in meaning.
     #[arg(long)]
     pub explain: bool,
+    /// Print the first N results of every query, hit or miss: each site's
+    /// domain (with the pages shown under it) or page's address.
+    #[arg(long, value_name = "N", default_value_t = 0)]
+    pub show: usize,
     /// Page set files (wikipedia-en.tsv.gz, github.tsv.gz from fetch-pages)
     /// whose pages are listed among the sites, as a node lists them. Can be
     /// given more than once.

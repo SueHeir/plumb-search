@@ -64,6 +64,12 @@ pub const SETS: &[SetInfo] = &[
         bytes_per_page: 120,
     },
     SetInfo {
+        id: plumb_index::pages::STACKEXCHANGE_SET,
+        name: "Other Stack Exchange questions (Super User, Ask Ubuntu, Home Improvement and more)",
+        pages: 800_000,
+        bytes_per_page: 130,
+    },
+    SetInfo {
         id: plumb_index::pages::BOOKS_SET,
         name: "Books (Open Library)",
         pages: 1_000_000,
@@ -858,6 +864,52 @@ mod tests {
         );
         assert_eq!(question.page.set_name(), "Stack Overflow");
         assert_eq!(question.page.set_domain(), "stackoverflow.com");
+    }
+
+    #[test]
+    fn other_stack_exchange_questions_are_searched_by_their_words() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path();
+        write_set(data, &[("Drain", 5_000)]);
+        let file = SetInfo::find("stackexchange").unwrap().file(data);
+        let mut text = ARTICLES_HEADER.as_bytes().to_vec();
+        for (title, item) in [
+            (
+                "How can I unclog a bathroom sink drain?",
+                "diy.stackexchange.com/2142",
+            ),
+            // A site Plumb doesn't know is left out.
+            ("How can I unclog a drain fast?", "evil.example/1"),
+        ] {
+            write_article(
+                &mut text,
+                &Article {
+                    title: title.to_string(),
+                    description: Some("plumbing, drain, clog".to_string()),
+                    item: Some(item.to_string()),
+                    views: 400_000,
+                    ..Article::default()
+                },
+            )
+            .unwrap();
+        }
+        std::fs::write(&file, text).unwrap();
+        let wanted = Wanted::new(data, &PageSets::default(), 0);
+        let (_, searcher) = open_or_build(data, &wanted).unwrap().unwrap();
+        let hits = searcher.search("how to unclog a drain", 5).unwrap();
+        let questions: Vec<_> = hits
+            .iter()
+            .filter(|h| h.page.set == "stackexchange")
+            .collect();
+        assert_eq!(questions.len(), 1, "{hits:#?}");
+        let question = questions[0];
+        assert_eq!(
+            question.page.url,
+            "https://diy.stackexchange.com/questions/2142"
+        );
+        assert_eq!(question.page.set_name(), "Home Improvement");
+        assert_eq!(question.page.set_domain(), "diy.stackexchange.com");
+        assert_eq!(question.page.language(), Some("en"));
     }
 
     #[test]

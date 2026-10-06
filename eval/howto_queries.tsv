@@ -1,0 +1,45 @@
+# How-to searches that a question of another Stack Exchange site answers
+# (Home Improvement, Seasoned Advice, Super User and more), with any
+# question of the sites expected among the first results. Run with
+# --pages stackexchange.tsv.gz (and the other sets a node keeps). The
+# first ones are the how-to searches of the 2026-10-06 sweep.
+how to unclog a drain	https://diy.stackexchange.com/questions/*
+how to fix a leaky faucet	https://diy.stackexchange.com/questions/*
+how to fix a running toilet	https://diy.stackexchange.com/questions/*
+how to patch a hole in drywall	https://diy.stackexchange.com/questions/*
+how to replace a light switch	https://diy.stackexchange.com/questions/*
+how to remove a stripped screw	https://diy.stackexchange.com/questions/*,https://woodworking.stackexchange.com/questions/*
+how to get rid of mold in the shower	https://diy.stackexchange.com/questions/*
+why does my circuit breaker keep tripping	https://diy.stackexchange.com/questions/*,https://electronics.stackexchange.com/questions/*
+how long to boil an egg	https://cooking.stackexchange.com/questions/*
+how to sharpen a kitchen knife	https://cooking.stackexchange.com/questions/*
+can you freeze cooked rice	https://cooking.stackexchange.com/questions/*
+how to keep avocado from turning brown	https://cooking.stackexchange.com/questions/*
+substitute for buttermilk	https://cooking.stackexchange.com/questions/*
+how to make my laptop battery last longer	https://superuser.com/questions/*
+how to take a screenshot on windows	https://superuser.com/questions/*
+how to show hidden files on windows	https://superuser.com/questions/*
+how to copy files over ssh	https://superuser.com/questions/*,https://unix.stackexchange.com/questions/*,https://serverfault.com/questions/*
+how to check disk space in linux	https://unix.stackexchange.com/questions/*,https://superuser.com/questions/*,https://serverfault.com/questions/*
+how to reset an iphone to factory settings	https://apple.stackexchange.com/questions/*
+how to take a screenshot on a mac	https://apple.stackexchange.com/questions/*
+how to transfer contacts to a new android phone	https://android.stackexchange.com/questions/*
+how to fix a flat bike tire	https://bicycles.stackexchange.com/questions/*
+how to adjust bike brakes	https://bicycles.stackexchange.com/questions/*
+why is my check engine light on	https://mechanics.stackexchange.com/questions/*
+how often should i change my oil	https://mechanics.stackexchange.com/questions/*
+how to jump start a car	https://mechanics.stackexchange.com/questions/*
+how to keep squirrels out of the garden	https://gardening.stackexchange.com/questions/*
+why are my tomato leaves turning yellow	https://gardening.stackexchange.com/questions/*
+do i need a visa for a layover	https://travel.stackexchange.com/questions/*
+how much cash can i carry on a plane	https://travel.stackexchange.com/questions/*
+should i pay off my mortgage early	https://money.stackexchange.com/questions/*
+how does a roth ira work	https://money.stackexchange.com/questions/*
+how to ask for a raise	https://workplace.stackexchange.com/questions/*
+what does the word ubiquitous mean	https://english.stackexchange.com/questions/*,https://ell.stackexchange.com/questions/*
+which vs that	https://english.stackexchange.com/questions/*,https://ell.stackexchange.com/questions/*
+how to undo send in gmail	https://webapps.stackexchange.com/questions/*
+how to share a google calendar	https://webapps.stackexchange.com/questions/*
+how to fix blurry photos	https://photo.stackexchange.com/questions/*
+can my landlord enter without notice	https://law.stackexchange.com/questions/*
+how to get diamonds in minecraft	https://gaming.stackexchange.com/questions/*

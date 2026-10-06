@@ -1,6 +1,6 @@
 # Page sets: articles, repositories, questions, books and papers in results
 
-Plumb lists single pages next to sites: English Wikipedia's articles, well-starred GitHub repositories, Stack Overflow's most viewed questions, Open Library's most read books, Podcast Index's most popular podcasts and the most cited papers. Searching "marie curie" shows the article Marie Curie, and "python" shows python.org with the article on the Python language under it.
+Plumb lists single pages next to sites: English Wikipedia's articles, well-starred GitHub repositories, Stack Overflow's and other Stack Exchange sites' most viewed questions, Open Library's most read books, Podcast Index's most popular podcasts and the most cited papers. Searching "marie curie" shows the article Marie Curie, and "python" shows python.org with the article on the Python language under it.
 
 ## What is kept
 
@@ -74,6 +74,18 @@ plumb fetch-pages --set stackoverflow --work /big/disk/dumps --data /path/to/nod
 `--posts PATH` reads a downloaded posts 7z instead; `--min-score` and `--max-questions` change what is kept.
 
 Questions are also found by their words, since nobody types a question's title exactly: a query of three or more words (common words like "the" left out, "commits" counted as "commit") finds a question whose title and tags have at least three quarters of them. Such questions come after the best site. A question with every word of the query, which in turn has at least half of the question title's, is what was asked ("delete a git branch locally and remotely") and comes first, unless the first site is named by the whole query.
+
+## Other Stack Exchange questions
+
+The `stackexchange` set lists the most viewed questions of 33 other Stack Exchange sites where people ask practical things in plain words: Super User, Ask Ubuntu, Server Fault, Unix & Linux, Ask Different, Home Improvement, Seasoned Advice (cooking), Motor Vehicle Maintenance & Repair, Travel, Personal Finance & Money, The Workplace, English Language & Usage and more (`plumb_core::stack_exchange::SITES`). "how to unclog a drain" finds Home Improvement's question. Sites whose titles are mostly formulas, like Mathematics, are left out. Each question keeps what a Stack Overflow question does, plus its site, and is shown with its site's name. They are searched and placed the same way as Stack Overflow's.
+
+The set is made from each site's whole dump in the same Internet Archive collection, a few GB in all, downloaded one site at a time:
+
+```sh
+plumb fetch-pages --set stackexchange --work /big/disk/dumps --data /path/to/node-data
+```
+
+`--max-per-site` (100,000 by default) caps each site's questions, `--min-score` works as for Stack Overflow, and `--drop-dumps` deletes each dump once it is read. A site whose dump can't be downloaded is left out with a warning.
 
 ## Books
 

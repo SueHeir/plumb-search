@@ -90,6 +90,49 @@ fn run_stackoverflow(args: &FetchPagesArgs, dest: &std::path::Path) -> Result<()
     write_set(dest, &questions, "questions")
 }
 
+/// Makes the `stackexchange` set file `dest` from the dumps of the Stack
+/// Exchange sites in [`plumb_core::stack_exchange::SITES`] (a few GB in
+/// all), downloaded into --work one at a time: each site's
+/// --max-per-site most viewed questions, all of them together most viewed
+/// first. A site whose dump can't be had is left out, with a warning.
+fn run_stackexchange(args: &FetchPagesArgs, dest: &std::path::Path) -> Result<()> {
+    use plumb_core::stack_exchange::SITES;
+    use plumb_ingest::stackexchange;
+    let mut questions = Vec::new();
+    let mut missing = Vec::new();
+    for site in SITES {
+        let read = fetch_dump(args, &site.dump_url(), site.name).and_then(|dump| {
+            info!("reading {}'s questions from {}", site.name, dump.display());
+            let read = stackexchange::read_questions_7z(&dump, args.min_score, args.max_per_site);
+            if args.drop_dumps {
+                if let Err(err) = std::fs::remove_file(&dump) {
+                    warn!("removing {}: {err}", dump.display());
+                }
+            }
+            read
+        });
+        match read {
+            Ok(read) => questions.extend(
+                read.into_iter()
+                    .map(|question| (question.views, question.into_exchange_article(site))),
+            ),
+            Err(err) => {
+                warn!("leaving out {}: {err:#}", site.name);
+                missing.push(site.name);
+            }
+        }
+    }
+    if !missing.is_empty() {
+        warn!("{} sites left out: {}", missing.len(), missing.join(", "));
+    }
+    questions.sort_by_key(|(views, _)| std::cmp::Reverse(*views));
+    let questions: Vec<_> = questions.into_iter().map(|(_, article)| article).collect();
+    if questions.is_empty() {
+        bail!("no site's dump gave questions; nothing was written");
+    }
+    write_set(dest, &questions, "questions")
+}
+
 /// Downloads `url` into --work, unless a copy there is younger than
 /// --keep-days, and gives its path.
 fn fetch_dump(args: &FetchPagesArgs, url: &str, what: &str) -> Result<std::path::PathBuf> {
@@ -347,6 +390,9 @@ pub fn run_pages(args: FetchPagesArgs) -> Result<()> {
     }
     if set.id == plumb_index::pages::STACKOVERFLOW_SET {
         return run_stackoverflow(&args, &dest);
+    }
+    if set.id == plumb_index::pages::STACKEXCHANGE_SET {
+        return run_stackexchange(&args, &dest);
     }
     if set.id == plumb_index::pages::BOOKS_SET {
         return run_books(&args, &dest);
