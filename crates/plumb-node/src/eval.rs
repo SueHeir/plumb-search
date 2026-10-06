@@ -205,6 +205,10 @@ pub fn run(args: EvalArgs) -> Result<()> {
 
     let mut ranks = Vec::with_capacity(queries.len());
     for q in &queries {
+        if args.facts {
+            ranks.push(fact_rank(&args, q, &searcher, &cfg, pages.as_ref())?);
+            continue;
+        }
         let options = SearchOptions {
             country: args.country.clone(),
             only_country: false,
@@ -317,6 +321,60 @@ pub fn run(args: EvalArgs) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// With `--facts`: `Some(1)` when the instant answer to `q` (worked out
+/// as a node does, by searching for the fact's subject) has one of the
+/// expected texts, commas left out ("8848" in "8,848.86 m"); `None`
+/// otherwise.
+fn fact_rank(
+    args: &EvalArgs,
+    q: &EvalQuery,
+    searcher: &Searcher,
+    cfg: &plumb_index::RankConfig,
+    pages: Option<&PageSearcher>,
+) -> Result<Option<usize>> {
+    let asked = plumb_core::facts::fact_asked(&q.query);
+    let answer = match (&asked, pages) {
+        (Some(asked), Some(pages)) => {
+            let options = SearchOptions {
+                country: args.country.clone(),
+                exact: true,
+                ..SearchOptions::default()
+            };
+            let sites = searcher.search_meaning(&asked.subject, 5, cfg, &options, None)?;
+            let found = pages.search(&asked.subject, 10)?;
+            let placed = place_pages(&asked.subject, &sites.hits, found);
+            crate::web::answers::fact_answer(asked, &placed, plumb_core::now_unix())
+        }
+        _ => None,
+    };
+    let text = answer.as_ref().map(|a| {
+        format!(
+            "{}: {} ({})",
+            a.question,
+            a.answer,
+            a.note.as_deref().unwrap_or("")
+        )
+    });
+    let hit = answer.as_ref().is_some_and(|a| {
+        let shown = a.answer.to_lowercase().replace(',', "");
+        q.expected.iter().any(|e| shown.contains(e.as_str()))
+    });
+    if args.show > 0 || !hit {
+        let what = match (&asked, &text) {
+            (None, _) => "not read as a fact question".to_string(),
+            (Some(_), None) => "no answer".to_string(),
+            (Some(_), Some(text)) => text.clone(),
+        };
+        let mark = if hit { "ok" } else { "miss" };
+        println!(
+            "{mark}: {:?} expected {}; {what}",
+            q.query,
+            q.expected.join(" or ")
+        );
+    }
+    Ok(hit.then_some(1))
 }
 
 /// What each position of a results page holds, as a node lists sites and
