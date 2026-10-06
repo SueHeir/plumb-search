@@ -39,6 +39,8 @@ pub const KIND_BONUS: f32 = 0.25;
 /// Share of the top score a site needs to stay listed below a site the
 /// query names, as `plumb_index::RankConfig::default().named_share`.
 pub const NAMED_SHARE: f32 = 0.4;
+/// Link score of a well-known site, as `plumb_index::WELL_KNOWN_LINK_SCORE`.
+pub const WELL_KNOWN_LINK_SCORE: f32 = 0.5;
 /// Bonus of a site of the home country, and malus of another country's.
 pub const COUNTRY_BOOST: f32 = 0.06;
 
@@ -205,7 +207,10 @@ fn rank_words(query: &str, sites: &[SiteRecord], options: &Options, limit: usize
             .then_with(|| a.domain.cmp(&b.domain))
     });
     // Far below a site the query names: filler, as on a node.
-    if let Some(&(true, ref top)) = ranked.first() {
+    if let Some(&(true, ref top)) = ranked
+        .first()
+        .filter(|(_, top)| top.link_score >= WELL_KNOWN_LINK_SCORE)
+    {
         let least = top.score * NAMED_SHARE;
         ranked.retain(|(named, r)| *named || r.score >= least);
     }

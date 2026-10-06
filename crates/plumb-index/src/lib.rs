@@ -1288,7 +1288,10 @@ impl Searcher {
 
         // Far below a site the query names: filler.
         if let (Some(share), Some(top)) = (cfg.named_share, ranked.first()) {
-            if top.named && share > 0.0 {
+            // Only a site people know by that name: vacationrentals.com
+            // for "vacation rentals" is a namesake of the words, and
+            // airbnb.com is still what the query is after.
+            if top.named && top.link_score >= WELL_KNOWN_LINK_SCORE && share > 0.0 {
                 let least = top.score * share;
                 ranked.retain(|r| r.named || r.score >= least);
             }
@@ -2437,6 +2440,37 @@ mod tests {
         // Bare domains still come back when nothing titled is left.
         let hits = searcher.search_with("netflix", 2, &keep_all()).unwrap();
         assert_eq!(domains(&hits), ["netflix.com", "netflixfans.org"]);
+    }
+
+    #[test]
+    fn a_little_known_namesake_of_the_words_leaves_the_rest_listed() {
+        let records = [
+            site(
+                "vacationrentals.com",
+                Some("Vacation Rentals"),
+                None,
+                &[],
+                &[],
+                obscure(150_000, 20),
+            ),
+            site(
+                "airbnb.com",
+                Some("Airbnb: holiday rentals, cabins, beach houses"),
+                None,
+                &["Airbnb"],
+                &[],
+                popular(150, 5_000),
+            ),
+        ];
+        let (_dir, searcher) = build(&records);
+        let hits = searcher.search("vacation rentals", 10).unwrap();
+        assert_eq!(hits[0].domain, "vacationrentals.com");
+        assert!(hits[0].link_score < WELL_KNOWN_LINK_SCORE);
+        assert!(
+            domains(&hits).contains(&"airbnb.com"),
+            "{:?}",
+            domains(&hits)
+        );
     }
 
     #[test]
