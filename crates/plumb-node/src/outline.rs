@@ -404,44 +404,11 @@ fn scan(path: &Path) -> Result<Option<Vec<Outline>>> {
 fn fold(
     path: &Path,
     journal: &Path,
-    mut pending: Pending,
+    pending: Pending,
     outlines: bool,
 ) -> Result<Option<(usize, Vec<Outline>)>> {
-    let ranks = pending.parent_ranks(path)?;
     let tmp = temp_path_for(path);
-    let written = (|| -> Result<Option<(usize, Vec<Outline>)>> {
-        let mut out = Written::create(&tmp, outlines)?;
-        let mut lines = Lines::open(path)?;
-        let mut seen = HashSet::new();
-        let mut line_no = 0usize;
-        while let Some((_, line)) = lines.next()? {
-            line_no += 1;
-            let record: SiteRecord = serde_json::from_slice(line)
-                .with_context(|| format!("{}:{line_no}: invalid JSON line", path.display()))?;
-            let Some(domain) = canonical_domain(&record.domain) else {
-                continue;
-            };
-            if domain != record.domain || !seen.insert(domain.clone()) {
-                return Ok(None);
-            }
-            if let Some(record) = pending.apply(&domain, Some(record), &ranks) {
-                out.write(&record)?;
-            }
-        }
-        // Sites the file does not hold yet, in a fixed order.
-        let mut rest: Vec<String> = pending.ops.keys().cloned().collect();
-        rest.sort_unstable();
-        for site in rest {
-            if let Some(record) = pending.apply(&site, None, &ranks) {
-                // A change may name a site the file holds under its
-                // canonical domain only through another change.
-                if seen.insert(record.domain.clone()) {
-                    out.write(&record)?;
-                }
-            }
-        }
-        out.finish().map(Some)
-    })();
+    let written = write_folded(path, pending, &tmp, outlines);
     let (count, outlines) = match written {
         Ok(Some(written)) => written,
         Ok(None) => {
@@ -468,6 +435,67 @@ fn fold(
         path.display()
     );
     Ok(Some((count, outlines)))
+}
+
+/// Writes the records file at `path` with `pending` changes folded in to
+/// `out`, leaving `path` as it is. Returns how many records `out` holds and,
+/// when `outlines`, their outlines; `None` when only a whole set can fold
+/// the changes (see the module docs).
+fn write_folded(
+    path: &Path,
+    mut pending: Pending,
+    out: &Path,
+    outlines: bool,
+) -> Result<Option<(usize, Vec<Outline>)>> {
+    let ranks = pending.parent_ranks(path)?;
+    let mut written = Written::create(out, outlines)?;
+    let mut lines = Lines::open(path)?;
+    let mut seen = HashSet::new();
+    let mut line_no = 0usize;
+    while let Some((_, line)) = lines.next()? {
+        line_no += 1;
+        let record: SiteRecord = serde_json::from_slice(line)
+            .with_context(|| format!("{}:{line_no}: invalid JSON line", path.display()))?;
+        let Some(domain) = canonical_domain(&record.domain) else {
+            continue;
+        };
+        if domain != record.domain || !seen.insert(domain.clone()) {
+            return Ok(None);
+        }
+        if let Some(record) = pending.apply(&domain, Some(record), &ranks) {
+            written.write(&record)?;
+        }
+    }
+    // Sites the file does not hold yet, in a fixed order.
+    let mut rest: Vec<String> = pending.ops.keys().cloned().collect();
+    rest.sort_unstable();
+    for site in rest {
+        if let Some(record) = pending.apply(&site, None, &ranks) {
+            // A change may name a site the file holds under its canonical
+            // domain only through another change.
+            if seen.insert(record.domain.clone()) {
+                written.write(&record)?;
+            }
+        }
+    }
+    written.finish().map(Some)
+}
+
+/// [`outline`] for a reader that must not change the records file at
+/// `path`, such as `plumb index` next to a running node: the file with its
+/// journal folded in is written to `copy` (when there is a journal), and
+/// the outlines are of `copy` then. Returns the file to read the records
+/// from with them; `None` as [`outline`] does.
+pub(crate) fn outline_copy<'a>(
+    path: &'a Path,
+    copy: &'a Path,
+) -> Result<Option<(&'a Path, Vec<Outline>)>> {
+    match Pending::read(&journal_path(path))? {
+        None => Ok(scan(path)?.map(|outlines| (path, outlines))),
+        Some(pending) => Ok(write_folded(path, pending, copy, true)
+            .with_context(|| format!("writing {}", copy.display()))?
+            .map(|(_, outlines)| (copy, outlines))),
+    }
 }
 
 /// How far [`build_index`] got, for its caller to show (and to stop it,
@@ -823,6 +851,30 @@ mod tests {
         // Read again with no journal: the same outlines, from the file.
         assert_eq!(outline(&path).unwrap().unwrap(), outlines);
         assert_eq!(load_records(&path).unwrap().into_sorted_vec(), loaded);
+    }
+
+    #[test]
+    fn a_copy_folds_the_journal_and_leaves_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("records.jsonl");
+        let changes = file_and_journal(&path);
+        RecordStore::open(&path).save(&changes).unwrap();
+        let file = fs::read(&path).unwrap();
+        let journal = fs::read(journal_path(&path)).unwrap();
+        let loaded = load_records(&path).unwrap().into_sorted_vec();
+
+        let copy = dir.path().join("copy.jsonl");
+        let (read_from, outlines) = outline_copy(&path, &copy).unwrap().unwrap();
+        assert_eq!(read_from, copy);
+        assert_eq!(read_all(&copy, &outlines), loaded);
+        assert_eq!(fs::read(&path).unwrap(), file);
+        assert_eq!(fs::read(journal_path(&path)).unwrap(), journal);
+
+        // With no journal, the file itself is read.
+        let (read_from, outlines) = outline_copy(&copy, &path).unwrap().unwrap();
+        assert_eq!(read_from, copy);
+        assert_eq!(read_all(&copy, &outlines), loaded);
+        assert_eq!(fs::read(&path).unwrap(), file);
     }
 
     #[test]
