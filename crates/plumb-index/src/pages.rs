@@ -364,6 +364,9 @@ pub const GITHUB_SET: &str = "github";
 pub const STACKOVERFLOW_SET: &str = "stackoverflow";
 /// The set of books, from Open Library.
 pub const BOOKS_SET: &str = "books";
+/// Fewest words of a paper's title that ask for the paper with nothing
+/// else: "basic local alignment search tool".
+const PAPER_TITLE_WORDS: usize = 4;
 /// The set of podcasts, from Podcast Index.
 pub const PODCASTS_SET: &str = "podcasts";
 /// The set of software packages (npm, PyPI, crates.io and others).
@@ -764,6 +767,26 @@ impl PageSearcher {
                 addresses.push(address);
             }
         }
+        // Books and papers named by their title and then their author:
+        // "random forests breiman". Searched apart, the titles of two words
+        // or more that start the query; a page found only so is kept only
+        // when it is asked for so.
+        let mut by_title_first = HashSet::new();
+        for end in 2..words.len() {
+            let Some(key) = analysis::tokens(&self.joined, &words[..end].join(" ")).pop() else {
+                continue;
+            };
+            let named = TermQuery::new(
+                Term::from_field_text(self.fields.keys, &key),
+                IndexRecordOption::Basic,
+            );
+            for (_, address) in searcher.search(&named, &by_popularity())? {
+                if !addresses.contains(&address) {
+                    addresses.push(address);
+                    by_title_first.insert(address);
+                }
+            }
+        }
         // Packages, only ever found when the query asks for one: "serde
         // crate", "latest version of requests python".
         let package_query = plumb_core::packages::package_query(query);
@@ -839,9 +862,13 @@ impl PageSearcher {
                 }
                 continue;
             }
+            let asked_by_title = self.book_match(&page, &words);
+            if by_title_first.contains(&address) && !asked_by_title {
+                continue;
+            }
             let (mut name, mut named) = self.name_match(&page, query, &joined, &query_words);
             let mut whole = false;
-            if self.book_match(&page, &words) {
+            if asked_by_title {
                 (name, named, whole) = (name.max(ALIAS_MATCH), true, true);
             } else if !named {
                 let (question, asked) = self.question_match(&page, &stems);
@@ -929,37 +956,57 @@ impl PageSearcher {
         (PARTIAL_MATCH * share, asked)
     }
 
-    /// Whether the query `words` are a book's or podcast's title followed by
-    /// words of its author's name or by what it is ("book", "novel",
-    /// "podcast"): "dune frank herbert", "the great gatsby book",
-    /// "hardcore history podcast".
+    /// Whether the query `words` are a book's, podcast's or paper's title
+    /// followed by words of its author's name or by what it is ("book",
+    /// "novel", "podcast", "paper"): "dune frank herbert", "the great gatsby
+    /// book", "hardcore history podcast", "random forests breiman". A
+    /// paper's year and venue may follow too, and a paper's whole title of
+    /// [`PAPER_TITLE_WORDS`] words or more asks for it alone.
     fn book_match(&self, page: &Page, words: &[String]) -> bool {
         let (byline, kinds): (&str, &[&str]) = match page.set.as_str() {
             BOOKS_SET => ("Book by ", &["book", "novel"]),
             PODCASTS_SET => ("Podcast by ", &["podcast"]),
+            PAPERS_SET => ("Paper by ", &["paper"]),
             _ => return false,
         };
-        // "Book by AUTHOR, YEAR", "Podcast by AUTHOR · CATEGORY".
-        let author = page
+        let by = page
             .description
             .as_deref()
             .and_then(|d| d.strip_prefix(byline))
-            .map(|d| d.split(" · ").next().unwrap_or(d))
-            .map(|d| d.rsplit_once(", ").map_or(d, |(name, _)| name))
             .unwrap_or("");
-        let author: HashSet<String> = analysis::tokens(&self.words, author).into_iter().collect();
+        // "Book by AUTHOR, YEAR", "Podcast by AUTHOR · CATEGORY", "Paper by
+        // AUTHOR et al., YEAR, VENUE".
+        let author = if page.set == PAPERS_SET {
+            by.split(", ")
+                .collect::<Vec<_>>()
+                .join(" ")
+                .replace(" et al.", "")
+        } else {
+            let by = by.split(" · ").next().unwrap_or(by);
+            by.rsplit_once(", ")
+                .map_or(by, |(name, _)| name)
+                .to_string()
+        };
+        let author: HashSet<String> = analysis::tokens(&self.words, &author).into_iter().collect();
         // The title, or the title without its subtitle: "Frankenstein" for
         // "Frankenstein; or, The Modern Prometheus".
         let short = page.title.split([':', ';']).next().unwrap_or("");
-        [page.title.as_str(), short].into_iter().any(|title| {
-            let title = analysis::tokens(&self.words, title);
-            let rest = match words.strip_prefix(title.as_slice()) {
-                Some(rest) if !title.is_empty() && !rest.is_empty() => rest,
-                _ => return false,
-            };
-            rest.iter().all(|word| author.contains(word))
-                || matches!(rest, [word] if kinds.contains(&word.as_str()))
-        }) || (page.set == PODCASTS_SET && self.podcast_named(page, words))
+        [page.title.as_str(), short]
+            .into_iter()
+            .enumerate()
+            .any(|(i, title)| {
+                let title = analysis::tokens(&self.words, title);
+                let rest = match words.strip_prefix(title.as_slice()) {
+                    Some([]) => {
+                        return page.set == PAPERS_SET && i == 0 && title.len() >= PAPER_TITLE_WORDS
+                    }
+                    Some(rest) if !title.is_empty() => rest,
+                    _ => return false,
+                };
+                rest.iter().all(|word| author.contains(word))
+                    || matches!(rest, [word] if kinds.contains(&word.as_str()))
+            })
+            || (page.set == PODCASTS_SET && self.podcast_named(page, words))
     }
 
     /// Whether `words` are the end of a podcast's title, two words or more,
@@ -1906,6 +1953,59 @@ mod tests {
             .unwrap()
             .iter()
             .any(|hit| hit.whole));
+    }
+
+    #[test]
+    fn papers_are_asked_for_by_their_title_author_year_or_venue() {
+        let paper = |title: &str, description: &str, views: u64| {
+            Page::from_paper(Article {
+                title: title.into(),
+                description: Some(description.into()),
+                item: Some(format!("10.1/{views}")),
+                views,
+                ..Article::default()
+            })
+        };
+        let (_dir, s) = searcher(&[
+            paper(
+                "Random Forests",
+                "Paper by Leo Breiman, 2001, Machine Learning",
+                134_047,
+            ),
+            paper(
+                "Basic local alignment search tool",
+                "Paper by Stephen F. Altschul et al., 1990, Journal of Molecular Biology",
+                90_000,
+            ),
+            paper(
+                "Deep learning",
+                "Paper by Yann LeCun et al., 2015, Nature",
+                85_369,
+            ),
+            page("Random forest", 300_000, &[]),
+            page("Tool", 400_000, &[]),
+        ]);
+        for query in [
+            "random forests breiman",
+            "random forests leo breiman 2001",
+            "basic local alignment search tool",
+            "deep learning lecun nature",
+            "deep learning paper",
+        ] {
+            let hits = s.search(query, 5).unwrap();
+            assert!(
+                hits[0].whole && hits[0].page.set == PAPERS_SET,
+                "{query}: {hits:?}"
+            );
+        }
+        // A title of fewer words alone, or with words that are not its
+        // byline's, asks for no paper.
+        for query in ["deep learning", "random forests in python"] {
+            assert!(
+                !s.search(query, 5).unwrap().iter().any(|hit| hit.whole),
+                "{query}"
+            );
+        }
     }
 
     #[test]
