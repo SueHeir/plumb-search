@@ -747,7 +747,7 @@ mod tests {
             let text = std::fs::read_to_string(&path).unwrap();
             let queries = parse_queries(&text).unwrap_or_else(|err| panic!("{file}: {err:#}"));
             assert!(
-                queries.len() >= 40 || path.ends_with("book_queries.tsv"),
+                queries.len() >= 40,
                 "{file}: only {} queries",
                 queries.len()
             );

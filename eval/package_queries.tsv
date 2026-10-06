@@ -99,10 +99,10 @@ monolog php	https://packagist.org/packages/monolog/monolog
 symfony console composer	https://packagist.org/packages/symfony/console
 
 # NuGet
-newtonsoft json nuget	https://www.nuget.org/packages/Newtonsoft.Json
-serilog nuget	https://www.nuget.org/packages/Serilog
-dapper nuget	https://www.nuget.org/packages/Dapper
-automapper nuget	https://www.nuget.org/packages/AutoMapper
+newtonsoft json nuget	https://www.nuget.org/packages/newtonsoft.json
+serilog nuget	https://www.nuget.org/packages/serilog
+dapper nuget	https://www.nuget.org/packages/dapper
+automapper nuget	https://www.nuget.org/packages/automapper
 xunit nuget	https://www.nuget.org/packages/xunit
 
 # Maven Central
