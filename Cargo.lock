@@ -6121,6 +6121,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "plumb-plugin-youtube-music"
+version = "0.1.0"
+dependencies = [
+ "plumb-plugin",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "plumb-private"
 version = "0.1.0"
 dependencies = [
