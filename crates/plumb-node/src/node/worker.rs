@@ -33,7 +33,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{bail, Context, Result};
-use plumb_core::{now_unix, RecordSet, SiteRecord, SITES_VERSION};
+use plumb_core::{
+    now_unix, parent_domain, RecordSet, SiteRecord, SITES_VERSION, SUBDOMAIN_SITE_NAMES,
+};
 use plumb_crawl::{CrawlConfig, CrawlOutcome, CrawlResult, CrawlTarget, HomepageCrawler};
 use plumb_index::build_index;
 use plumb_ingest::{
@@ -437,121 +439,125 @@ async fn complete_seed(inner: &Arc<Inner>) -> Result<()> {
     Ok(())
 }
 
-/// Folds the seed files already on disk into the records again, without
-/// downloading anything, once the lists of sites on subdomains changed
-/// ([`SITES_VERSION`]): sites such as news.ycombinator.com, which were part
-/// of their parent domain, get records of their own, with their official
-/// names, and the index is rebuilt. A node with no seed files (one set up
-/// from the network) only notes the version: the network brings the sites.
+/// Brings records made before the lists of sites on subdomains, or before
+/// email addresses were refused as websites ([`SITES_VERSION`]), up to
+/// date from the seed files already on disk, without downloading anything:
+/// sites such as scholar.google.com, which were part of their parent
+/// domain, get records of their own with their official names, and claims
+/// misread from email addresses are taken back. Only the few records that
+/// change are read from the seed files; the changes go into the records'
+/// journal ([`subdomain_changes`]) and the index is rebuilt as after a
+/// crawl, so this needs no more memory than a rebuild. A node stopped part
+/// way does it again on its next start: the changes come out the same.
 async fn refold_seed(inner: &Arc<Inner>) -> Result<()> {
-    let Some(files) = seed_files_on_disk(inner)? else {
-        inner.update_saved(|saved| saved.sites_version = SITES_VERSION)?;
-        return Ok(());
-    };
-    info!("the lists of sites on subdomains changed: folding the seed data in again");
-    let built = blocking(inner, move |inner| {
-        let _records = inner.hold_records();
-        let seed = seed_records(inner, &files)?;
-        inner.set_step(Step::Ingesting, "Reading the site records");
-        let mut set = load_records(&inner.paths.records)?;
-        let before = set.len();
-        take_back_misread(&files, &mut set);
-        set.split_subdomain_sites(&seed);
-        set.extend(seed);
+    info!("the lists of sites on subdomains changed: updating the records from the seed data");
+    blocking(inner, |inner| {
+        let changes = subdomain_changes(&inner.paths.seed)?;
+        let n = changes.len();
         inner.check_stop()?;
-        let records = sorted_by_link_score(&set);
-        inner.set_step(
-            Step::Ingesting,
-            format!(
-                "Saving {} site records",
-                group_thousands(records.len() as u64)
-            ),
-        );
-        replace_records(&inner.paths.records, records.iter().copied())?;
+        {
+            let _records = inner.hold_records();
+            RecordStore::open(&inner.paths.records).save(&changes)?;
+        }
         inner.update_saved(|saved| {
             saved.sites_version = SITES_VERSION;
-            saved.index_stale = true;
+            saved.index_stale |= n > 0;
         })?;
-        info!(
-            "folded the seed data in again: {} sites (there were {before})",
-            records.len(),
-        );
-        inner.check_stop()?;
-        build(inner, &records)
+        info!("updated the records from the seed data: {n} changes");
+        Ok(())
     })
-    .await?;
-    // Not put_in_service: this is no refresh, and a round under way goes on.
-    inner.install(built);
-    inner.update_saved(|saved| saved.index_stale = false)?;
-    Ok(())
+    .await
+}
+
+/// The changes [`refold_seed`] makes, from the Wikidata files in `seed`:
+/// for each claim misread from an email address
+/// ([`plumb_ingest::OfficialSite::misread`]), taking it back and merging
+/// the domain's own claims again; for each subdomain site with a claim or
+/// a built-in name ([`SUBDOMAIN_SITE_NAMES`]), its record, made where its
+/// parent domain has one ([`Change::SubdomainSite`]).
+fn subdomain_changes(seed: &Path) -> Result<Vec<Change>> {
+    let files = [
+        seed.join(download::WIKIDATA_FILE_NAME),
+        seed.join(kind_sites::KIND_SITES_FILE_NAME),
+    ];
+    let files: Vec<&PathBuf> = files.iter().filter(|path| path.is_file()).collect();
+    let mut misread = Vec::new();
+    for path in &files {
+        misread.extend(
+            load_misread_official_sites(path)?
+                .into_iter()
+                .filter(|site| site.is_root_homepage()),
+        );
+    }
+    let misread_domains: HashSet<&str> = misread.iter().map(|site| site.domain.as_str()).collect();
+    let mut sites = Vec::new();
+    for path in &files {
+        sites.extend(
+            load_wikidata_official_sites(path)?
+                .into_iter()
+                .filter(|site| {
+                    parent_domain(&site.domain).is_some()
+                        || misread_domains.contains(site.domain.as_str())
+                }),
+        );
+    }
+    let facts = seed.join(facts::FACTS_FILE_NAME);
+    if facts.is_file() && !(sites.is_empty() && misread.is_empty()) {
+        let facts = load_site_facts(&facts)?;
+        attach_facts(&mut sites, &facts);
+        attach_facts(&mut misread, &facts);
+    }
+    let intros = seed.join(intros::INTROS_FILE_NAME);
+    if intros.is_file() && !sites.is_empty() {
+        attach_intros(&mut sites, &load_intros(&intros)?);
+    }
+    let mut changes: Vec<Change> = misread
+        .iter()
+        .map(|site| Change::TakeBack {
+            domain: site.domain.clone(),
+            names: std::iter::once(site.label.trim().to_string())
+                .chain(site.names.iter().cloned())
+                .collect(),
+        })
+        .collect();
+    let mut builder = Builder::new();
+    builder.add_official_sites(&sites);
+    for record in builder.finish(None) {
+        changes.push(if parent_domain(&record.domain).is_some() {
+            Change::SubdomainSite { record }
+        } else {
+            Change::Merge { record }
+        });
+    }
+    for (site, name) in SUBDOMAIN_SITE_NAMES {
+        let mut record = SiteRecord::new(*site);
+        record.signals.official_site = true;
+        record.add_alias(name);
+        changes.push(Change::SubdomainSite { record });
+    }
+    Ok(changes)
 }
 
 /// Takes back what Wikidata claims that earlier versions misread gave the
-/// records ([`plumb_ingest::OfficialSite::misread`]): an email address
-/// put where a website goes made gmail.com a college's official site.
+/// records ([`plumb_ingest::OfficialSite::misread`]), for a full fold of
+/// the seed: the domain's own seed record adds its facts back after.
 fn take_back_misread(files: &SeedFiles, set: &mut RecordSet) {
     let Ok(wikidata) = &files.wikidata else {
         return;
     };
-    let mut misread = Vec::new();
     for path in [wikidata, &files.kind_sites] {
-        if path.is_file() {
-            match load_misread_official_sites(path) {
-                Ok(sites) => misread.extend(sites),
-                Err(err) => warn!("could not read {} again: {err:#}", path.display()),
+        if !path.is_file() {
+            continue;
+        }
+        match load_misread_official_sites(path) {
+            Ok(sites) => {
+                for site in sites.iter().filter(|site| site.is_root_homepage()) {
+                    set.take_back_official_site(&site.domain, &[site.label.trim()]);
+                }
             }
+            Err(err) => warn!("could not read {} again: {err:#}", path.display()),
         }
     }
-    if misread.is_empty() {
-        return;
-    }
-    if files.facts.is_file() {
-        if let Ok(facts) = load_site_facts(&files.facts) {
-            attach_facts(&mut misread, &facts);
-        }
-    }
-    for site in misread.iter().filter(|site| site.is_root_homepage()) {
-        let names: Vec<&str> = std::iter::once(site.label.trim())
-            .chain(site.names.iter().map(String::as_str))
-            .collect();
-        set.take_back_official_site(&site.domain, &names);
-    }
-    info!(
-        "took back {} official websites misread from email addresses",
-        misread.len()
-    );
-}
-
-/// The seed files an earlier setup left in `seed/`, however old; `None`
-/// without the Tranco list.
-fn seed_files_on_disk(inner: &Inner) -> Result<Option<SeedFiles>> {
-    let seed = &inner.paths.seed;
-    let tranco = seed.join(download::TRANCO_FILE_NAME);
-    if !tranco.is_file() {
-        return Ok(None);
-    }
-    let wikidata = seed.join(download::WIKIDATA_FILE_NAME);
-    let wikidata = if wikidata.is_file() {
-        Ok(wikidata)
-    } else {
-        Err(anyhow::anyhow!("not downloaded"))
-    };
-    let cc_ranks = match inner.config.cc_ranks_url() {
-        Some(url) => Some(seed.join(download::cc_domain_ranks_top_file_name(
-            &url,
-            inner.config.sites,
-        )?)),
-        None => None,
-    }
-    .filter(|path| path.is_file());
-    Ok(Some(SeedFiles {
-        tranco,
-        wikidata,
-        facts: seed.join(facts::FACTS_FILE_NAME),
-        kind_sites: seed.join(kind_sites::KIND_SITES_FILE_NAME),
-        intros: seed.join(intros::INTROS_FILE_NAME),
-        cc_ranks,
-    }))
 }
 
 /// The files a setup ingests.

@@ -59,6 +59,14 @@ pub(crate) enum Change {
     /// Cuts a site judged dead down to its crawl marks and ranks
     /// ([`SiteRecord::make_gone`]), gone since `at`; see [`crate::dead`].
     Gone { domain: String, at: u64 },
+    /// Takes a misread official website claim back off `domain`'s record
+    /// ([`RecordSet::take_back_official_site`]).
+    TakeBack { domain: String, names: Vec<String> },
+    /// Adds a site on a subdomain ([`plumb_core::parent_domain`]) where its
+    /// parent domain has a record: it takes the parent's ranks it lacks,
+    /// and its names come off the parent
+    /// ([`RecordSet::split_subdomain_sites`]). Ignored without a parent.
+    SubdomainSite { record: SiteRecord },
 }
 
 impl Change {
@@ -94,6 +102,24 @@ impl Change {
                 if set.get(&domain).is_some() {
                     set.entry(&domain).make_gone(at);
                 }
+            }
+            Change::TakeBack { domain, names } => {
+                let names: Vec<&str> = names.iter().map(String::as_str).collect();
+                set.take_back_official_site(&domain, &names);
+            }
+            Change::SubdomainSite { mut record } => {
+                let Some(parent) = plumb_core::parent_domain(&record.domain)
+                    .and_then(|parent| set.get(parent))
+                    .map(|parent| parent.signals.clone())
+                else {
+                    return;
+                };
+                let signals = &mut record.signals;
+                signals.tranco_rank = signals.tranco_rank.or(parent.tranco_rank);
+                signals.harmonic_rank = signals.harmonic_rank.or(parent.harmonic_rank);
+                signals.pagerank_rank = signals.pagerank_rank.or(parent.pagerank_rank);
+                set.split_subdomain_sites(std::slice::from_ref(&record));
+                set.upsert(record);
             }
         }
     }
