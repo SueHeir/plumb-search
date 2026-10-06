@@ -56,6 +56,9 @@ pub(crate) enum Change {
         attempted_at: Option<u64>,
         failures: u32,
     },
+    /// Cuts a site judged dead down to its crawl marks and ranks
+    /// ([`SiteRecord::make_gone`]), gone since `at`; see [`crate::dead`].
+    Gone { domain: String, at: u64 },
 }
 
 impl Change {
@@ -85,6 +88,11 @@ impl Change {
                     let record = set.entry(&domain);
                     record.crawl_attempted_at = attempted_at;
                     record.crawl_failures = failures;
+                }
+            }
+            Change::Gone { domain, at } => {
+                if set.get(&domain).is_some() {
+                    set.entry(&domain).make_gone(at);
                 }
             }
         }
@@ -457,6 +465,20 @@ mod tests {
         titled("WWW.New.COM", "New").apply(&mut set);
         assert_eq!(set.get("new.com").unwrap().title.as_deref(), Some("New"));
         titled("not a domain", "x").apply(&mut set);
+        assert_eq!(set.len(), 2);
+        // Gone cuts a held site down, and creates none.
+        let gone = |domain: &str| Change::Gone {
+            domain: domain.into(),
+            at: 9,
+        };
+        let line = serde_json::to_string(&gone("new.com")).unwrap();
+        assert_eq!(line, r#"{"op":"gone","domain":"new.com","at":9}"#);
+        serde_json::from_str::<Change>(&line)
+            .unwrap()
+            .apply(&mut set);
+        gone("nowhere.com").apply(&mut set);
+        let new = set.get("new.com").unwrap();
+        assert_eq!((new.gone_at, new.title.as_deref()), (Some(9), None));
         assert_eq!(set.len(), 2);
     }
 

@@ -33,12 +33,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{bail, Context, Result};
-use plumb_core::{now_unix, RecordSet, SiteRecord};
+use plumb_core::{now_unix, RecordSet, SiteRecord, SITES_VERSION};
 use plumb_crawl::{CrawlConfig, CrawlOutcome, CrawlResult, CrawlTarget, HomepageCrawler};
 use plumb_index::build_index;
 use plumb_ingest::{
     attach_facts, attach_intros, download, facts, intros, kind_sites, load_cc_domain_ranks,
-    load_intros, load_site_facts, load_tranco, load_wikidata_official_sites, Builder,
+    load_intros, load_misread_official_sites, load_site_facts, load_tranco,
+    load_wikidata_official_sites, Builder,
 };
 use tokio::runtime::Handle;
 use tracing::{info, warn};
@@ -207,6 +208,10 @@ async fn step(inner: &Arc<Inner>) -> Result<Next> {
     let saved = inner.saved();
     if inner.current().is_none() || (saved.index_stale && saved.crawl_left == 0) {
         rebuild(inner, true).await?;
+        return Ok(Next::Continue);
+    }
+    if saved.sites_version < SITES_VERSION && !saved.quick_start {
+        refold_seed(inner).await?;
         return Ok(Next::Continue);
     }
     if missing_buckets(inner) {
@@ -391,6 +396,8 @@ async fn complete_seed(inner: &Arc<Inner>) -> Result<()> {
                 record.crawl_attempted_at.is_some() || !record.link_texts.is_empty()
             });
         }
+        take_back_misread(&files, &mut set);
+        set.split_subdomain_sites(&seed);
         set.extend(seed);
         if let Some(change) = home_site_change(inner, &set) {
             change.apply(&mut set);
@@ -409,6 +416,7 @@ async fn complete_seed(inner: &Arc<Inner>) -> Result<()> {
             saved.wikidata_missing = wikidata_missing;
             saved.quick_start = false;
             saved.index_stale = true;
+            saved.sites_version = SITES_VERSION;
         })?;
         info!(
             "folded the seed data into the records: {} sites (there were {before})",
@@ -427,6 +435,123 @@ async fn complete_seed(inner: &Arc<Inner>) -> Result<()> {
     }
     sweep(inner).await;
     Ok(())
+}
+
+/// Folds the seed files already on disk into the records again, without
+/// downloading anything, once the lists of sites on subdomains changed
+/// ([`SITES_VERSION`]): sites such as news.ycombinator.com, which were part
+/// of their parent domain, get records of their own, with their official
+/// names, and the index is rebuilt. A node with no seed files (one set up
+/// from the network) only notes the version: the network brings the sites.
+async fn refold_seed(inner: &Arc<Inner>) -> Result<()> {
+    let Some(files) = seed_files_on_disk(inner)? else {
+        inner.update_saved(|saved| saved.sites_version = SITES_VERSION)?;
+        return Ok(());
+    };
+    info!("the lists of sites on subdomains changed: folding the seed data in again");
+    let built = blocking(inner, move |inner| {
+        let _records = inner.hold_records();
+        let seed = seed_records(inner, &files)?;
+        inner.set_step(Step::Ingesting, "Reading the site records");
+        let mut set = load_records(&inner.paths.records)?;
+        let before = set.len();
+        take_back_misread(&files, &mut set);
+        set.split_subdomain_sites(&seed);
+        set.extend(seed);
+        inner.check_stop()?;
+        let records = sorted_by_link_score(&set);
+        inner.set_step(
+            Step::Ingesting,
+            format!(
+                "Saving {} site records",
+                group_thousands(records.len() as u64)
+            ),
+        );
+        replace_records(&inner.paths.records, records.iter().copied())?;
+        inner.update_saved(|saved| {
+            saved.sites_version = SITES_VERSION;
+            saved.index_stale = true;
+        })?;
+        info!(
+            "folded the seed data in again: {} sites (there were {before})",
+            records.len(),
+        );
+        inner.check_stop()?;
+        build(inner, &records)
+    })
+    .await?;
+    // Not put_in_service: this is no refresh, and a round under way goes on.
+    inner.install(built);
+    inner.update_saved(|saved| saved.index_stale = false)?;
+    Ok(())
+}
+
+/// Takes back what Wikidata claims that earlier versions misread gave the
+/// records ([`plumb_ingest::OfficialSite::misread`]): an email address
+/// put where a website goes made gmail.com a college's official site.
+fn take_back_misread(files: &SeedFiles, set: &mut RecordSet) {
+    let Ok(wikidata) = &files.wikidata else {
+        return;
+    };
+    let mut misread = Vec::new();
+    for path in [wikidata, &files.kind_sites] {
+        if path.is_file() {
+            match load_misread_official_sites(path) {
+                Ok(sites) => misread.extend(sites),
+                Err(err) => warn!("could not read {} again: {err:#}", path.display()),
+            }
+        }
+    }
+    if misread.is_empty() {
+        return;
+    }
+    if files.facts.is_file() {
+        if let Ok(facts) = load_site_facts(&files.facts) {
+            attach_facts(&mut misread, &facts);
+        }
+    }
+    for site in misread.iter().filter(|site| site.is_root_homepage()) {
+        let names: Vec<&str> = std::iter::once(site.label.trim())
+            .chain(site.names.iter().map(String::as_str))
+            .collect();
+        set.take_back_official_site(&site.domain, &names);
+    }
+    info!(
+        "took back {} official websites misread from email addresses",
+        misread.len()
+    );
+}
+
+/// The seed files an earlier setup left in `seed/`, however old; `None`
+/// without the Tranco list.
+fn seed_files_on_disk(inner: &Inner) -> Result<Option<SeedFiles>> {
+    let seed = &inner.paths.seed;
+    let tranco = seed.join(download::TRANCO_FILE_NAME);
+    if !tranco.is_file() {
+        return Ok(None);
+    }
+    let wikidata = seed.join(download::WIKIDATA_FILE_NAME);
+    let wikidata = if wikidata.is_file() {
+        Ok(wikidata)
+    } else {
+        Err(anyhow::anyhow!("not downloaded"))
+    };
+    let cc_ranks = match inner.config.cc_ranks_url() {
+        Some(url) => Some(seed.join(download::cc_domain_ranks_top_file_name(
+            &url,
+            inner.config.sites,
+        )?)),
+        None => None,
+    }
+    .filter(|path| path.is_file());
+    Ok(Some(SeedFiles {
+        tranco,
+        wikidata,
+        facts: seed.join(facts::FACTS_FILE_NAME),
+        kind_sites: seed.join(kind_sites::KIND_SITES_FILE_NAME),
+        intros: seed.join(intros::INTROS_FILE_NAME),
+        cc_ranks,
+    }))
 }
 
 /// The files a setup ingests.
@@ -876,6 +1001,7 @@ fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Option<ServingIndex
     let window = RECRAWL_AFTER_DAYS * SECONDS_PER_DAY;
     let net = network::handle(inner).cloned();
     let now = now_unix();
+    drop_dead_sites(inner, &mut set, &mut store, now)?;
     // In the network, only the sites assigned to this node today, or,
     // crawling any site, this node's slice among its trusted crawlers.
     let group = match &net {
@@ -954,7 +1080,8 @@ fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Option<ServingIndex
     }
     let focused_domains: HashSet<&str> = focused.iter().map(|t| t.domain.as_str()).collect();
     // Sites crawled before nodes kept icons or key pages are due again for
-    // them.
+    // them, and so are sites read by an older crawler (see
+    // plumb_crawl::CRAWL_VERSION).
     let icons = IconStore::new(&inner.paths.icons);
     let noted = icons.noted();
     let rest = select_targets_with(
@@ -965,7 +1092,9 @@ fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Option<ServingIndex
         budget - focused.len(),
         now,
         window,
-        |record| due_for_icon(record, &noted) || due_for_key_pages(record),
+        |record| {
+            due_for_icon(record, &noted) || due_for_key_pages(record) || due_for_rereading(record)
+        },
     );
     drop(noted);
     drop(focused_domains);
@@ -1130,6 +1259,66 @@ fn key_page_catch_up(set: &RecordSet) -> Vec<&SiteRecord> {
         .collect()
 }
 
+/// Whether a site was last read by an older crawler than this one
+/// ([`plumb_crawl::CRAWL_VERSION`]), so it is due again to be read anew.
+// Never, while the version is still the first one.
+#[allow(clippy::absurd_extreme_comparisons)]
+fn due_for_rereading(record: &SiteRecord) -> bool {
+    last_crawl_answered(record) && record.crawl_version < plumb_crawl::CRAWL_VERSION
+}
+
+/// Counts the sites that look dead ([`crate::dead`]) and, with
+/// [`NodeConfig::drop_dead_sites`], takes them out: each is cut down to its
+/// crawl marks and ranks, saved to the records' journal, and the index is
+/// built again without them.
+fn drop_dead_sites(
+    inner: &Inner,
+    set: &mut RecordSet,
+    store: &mut RecordStore,
+    now: u64,
+) -> Result<()> {
+    if !set
+        .iter()
+        .any(|record| crate::dead::looks_dead(record, now))
+    {
+        return Ok(());
+    }
+    let keep = super::trim::Keep::of(inner);
+    let dead: Vec<String> = crate::dead::find_dead(set, now, |record| keep.keeps(record))
+        .into_iter()
+        .map(|record| record.domain.clone())
+        .collect();
+    if dead.is_empty() {
+        return Ok(());
+    }
+    if !inner.config.drop_dead_sites {
+        info!(
+            "{} sites look dead (no answer for weeks; the best known: {}); kept, since \
+             --drop-dead-sites is off",
+            dead.len(),
+            dead.iter().take(5).cloned().collect::<Vec<_>>().join(", ")
+        );
+        return Ok(());
+    }
+    let changes: Vec<Change> = dead
+        .into_iter()
+        .map(|domain| Change::Gone { domain, at: now })
+        .collect();
+    store.save(&changes)?;
+    let count = changes.len();
+    for change in changes {
+        change.apply(set);
+    }
+    inner.update_saved(|saved| saved.index_stale = true)?;
+    info!("took {count} dead sites out of the index");
+    inner.journal.info(format!(
+        "Took {} sites out of the index that no crawl has reached for weeks; any that \
+         answer again come back",
+        group_thousands(count as u64)
+    ));
+    Ok(())
+}
+
 fn last_crawl_answered(record: &SiteRecord) -> bool {
     record
         .crawled_at
@@ -1218,6 +1407,14 @@ fn save_icons(icons: &IconStore, results: &[CrawlResult]) {
 
 /// Builds an index of `records` in a new numbered directory and opens it.
 pub(super) fn build<R: Borrow<SiteRecord>>(inner: &Inner, records: &[R]) -> Result<ServingIndex> {
+    // Sites judged dead stay in the records, out of the index and the
+    // buckets other nodes take.
+    let records: Vec<&SiteRecord> = records
+        .iter()
+        .map(Borrow::borrow)
+        .filter(|record| record.gone_at.is_none())
+        .collect();
+    let records = records.as_slice();
     let id = store::next_index_id(&inner.paths);
     let dir = inner.paths.index(id);
     inner.set_step(
@@ -1505,6 +1702,21 @@ mod tests {
             false
         )));
         assert!(!due_for_key_pages(&SiteRecord::new("never.com")));
+    }
+
+    #[test]
+    fn sites_are_read_anew_only_once_the_crawl_version_goes_up() {
+        let mut record = SiteRecord::new("a.com");
+        record.crawled_at = Some(10);
+        record.crawl_version = plumb_crawl::CRAWL_VERSION;
+        assert!(!due_for_rereading(&record));
+        if let Some(older) = plumb_crawl::CRAWL_VERSION.checked_sub(1) {
+            record.crawl_version = older;
+            assert!(due_for_rereading(&record));
+            record.crawl_attempted_at = Some(20);
+            record.crawl_failures = 1;
+            assert!(!due_for_rereading(&record), "not reached on its last try");
+        }
     }
 
     #[test]

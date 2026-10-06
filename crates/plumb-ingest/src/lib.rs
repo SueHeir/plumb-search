@@ -45,7 +45,7 @@ pub use tranco::{load_tranco, TrancoEntry};
 pub use wat::{
     parse_wat, HomepageMeta, WarcReader, WarcRecord, WatExtract, WatPage, WatStats, WatWriter,
 };
-pub use wikidata::{load_wikidata_official_sites, OfficialSite};
+pub use wikidata::{load_misread_official_sites, load_wikidata_official_sites, OfficialSite};
 
 /// Opens a file for buffered reading, gunzipping it when it starts with the
 /// gzip magic bytes. Multi-member gzip files (one member per record, as

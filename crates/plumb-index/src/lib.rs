@@ -326,7 +326,8 @@ pub struct IndexStats {
     pub merged: u64,
     /// Records skipped because their domain is not a valid registrable
     /// domain ([`plumb_core::canonical_domain`] rejects it), empty ones
-    /// included.
+    /// included, or because the site is gone
+    /// ([`plumb_core::SiteRecord::gone_at`]).
     #[serde(default)]
     pub skipped: u64,
     /// Records left out because their homepage redirects to another site in
@@ -509,7 +510,8 @@ fn merge_by_domain<R: Borrow<SiteRecord>>(records: &[R]) -> (Vec<Site<'_>>, Inde
     let mut stats = IndexStats::default();
     for record in records {
         let record: &SiteRecord = record.borrow();
-        let Some(domain) = canonical_domain(&record.domain) else {
+        let Some(domain) = canonical_domain(&record.domain).filter(|_| record.gone_at.is_none())
+        else {
             stats.skipped += 1;
             continue;
         };
@@ -4415,6 +4417,17 @@ mod tests {
         fs::create_dir(&empty).unwrap();
         assert_eq!(build_index(&empty, &corpus()[..2]).unwrap().docs, 2);
         assert_eq!(entries(root.path()), ["a", "data", "empty"]);
+    }
+
+    #[test]
+    fn gone_sites_are_left_out() {
+        let dir = TempDir::new().unwrap();
+        let mut records = corpus()[..2].to_vec();
+        let mut gone = example_site();
+        gone.make_gone(1);
+        records.push(gone);
+        let stats = build_index(dir.path(), &records).unwrap();
+        assert_eq!((stats.docs, stats.skipped), (2, 1));
     }
 
     /// The reported case: `plumb index --index myproject` deleted a project

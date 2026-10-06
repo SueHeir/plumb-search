@@ -19,6 +19,18 @@
 //! seed records are built, as the rank lists only know registrable domains
 //! (see [`subdomain_sites`]).
 
+/// The version of [`SUBDOMAIN_SITES`], [`SUBDOMAIN_SITE_NAMES`],
+/// [`UMBRELLA_DOMAINS`] and of how seed data is read: bump it when they
+/// change, so that nodes fold their seed data in again (version 0 is
+/// before there were any lists; 2 refuses websites with user info, such as
+/// `https://mailto:someone@gmail.com`, and adds the names).
+pub const SITES_VERSION: u32 = 2;
+
+/// Names of [`SUBDOMAIN_SITES`] that the seed data may not name: Wikidata
+/// gives Hacker News no official website the seed download keeps. A seed
+/// with a record for the parent domain gets a record of these too.
+pub const SUBDOMAIN_SITE_NAMES: &[(&str, &str)] = &[("news.ycombinator.com", "Hacker News")];
+
 /// Hosts that are sites of their own although they are subdomains.
 pub const SUBDOMAIN_SITES: &[&str] = &[
     "news.ycombinator.com",
@@ -181,6 +193,12 @@ pub fn subdomain_sites() -> impl Iterator<Item = (&'static str, &'static str)> {
         .filter_map(|site| Some((*site, psl::domain_str(site)?)))
 }
 
+/// The registrable domain `site` is a subdomain of, when it is a site on
+/// a subdomain (see [`crate::registrable_domain`]).
+pub fn parent_domain(site: &str) -> Option<&str> {
+    psl::domain_str(site).filter(|domain| *domain != site)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -234,6 +252,9 @@ mod tests {
         assert_eq!(parents.len(), SUBDOMAIN_SITES.len());
         assert!(parents.contains(&("scholar.google.com", "google.com")));
         assert!(parents.contains(&("news.ycombinator.com", "ycombinator.com")));
+        assert_eq!(parent_domain("dmv.ca.gov"), Some("ca.gov"));
+        assert_eq!(parent_domain("ca.gov"), None);
+        assert_eq!(parent_domain("usbank.com"), None);
     }
 
     #[test]
@@ -242,6 +263,9 @@ mod tests {
             let domain = psl::domain_str(site).unwrap();
             assert_ne!(*site, domain, "{site} is not a subdomain");
             assert_eq!(site_of(site, domain), *site);
+        }
+        for (site, _) in SUBDOMAIN_SITE_NAMES {
+            assert!(SUBDOMAIN_SITES.contains(site), "{site}");
         }
         for domain in UMBRELLA_DOMAINS {
             assert_eq!(psl::domain_str(domain), Some(*domain), "{domain}");
