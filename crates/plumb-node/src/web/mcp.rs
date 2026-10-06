@@ -273,7 +273,9 @@ async fn mcp(State(state): State<AppState>, request: Request) -> Response {
             let options = plumb_index::SearchOptions::default();
             tokio::join!(
                 state.rates.for_query(query),
-                state.plugin_results(query, &options)
+                // MCP's search runs later, in the server: plugins go by
+                // their keywords alone here.
+                state.plugin_results(query, &options, None)
             )
         }
         None => (None, Vec::new()),

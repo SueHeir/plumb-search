@@ -84,9 +84,19 @@ pub struct TryPluginArgs {
     /// config.json.
     #[arg(long, value_name = "DIR")]
     pub plugin: PathBuf,
-    /// What to search for, keyword included or not.
-    #[arg(required = true, num_args = 1..)]
+    /// What to search for, keyword included or not, or the address of a
+    /// page for a plugin with `pages`.
+    #[arg(required_unless_present_any = ["act", "annotate"], num_args = 1..)]
     pub query: Vec<String>,
+    /// Press one of its buttons instead: the button's data, as JSON (the
+    /// `data` of an action in its results), and print what it did.
+    #[arg(long, value_name = "JSON")]
+    pub act: Option<String>,
+    /// Have it mark up results instead: a JSON file of results as a
+    /// node shows them to plugins (a list of `{"id", "url", "title",
+    /// "site", "about"}`), and print its notes.
+    #[arg(long, value_name = "FILE", conflicts_with = "act")]
+    pub annotate: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
