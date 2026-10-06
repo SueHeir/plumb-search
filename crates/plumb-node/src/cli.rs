@@ -151,6 +151,19 @@ pub struct LinkRankArgs {
     /// as it is.
     #[arg(long, value_name = "PATH")]
     pub apply: Option<PathBuf>,
+    /// With --apply, only the best this many sites by links get their
+    /// place; the rest keep their ranks as they were. 0 changes no rank.
+    #[arg(long, value_name = "N", default_value_t = 50_000, requires = "apply")]
+    pub apply_top: u32,
+    /// With --apply, also take the links a site got from unranked sites
+    /// (link farms: sites no trusted site links to) off its count of
+    /// linking sites.
+    #[arg(long, requires = "apply")]
+    pub demote: bool,
+    /// Name the sites most often linked from the same trusted sites as
+    /// this one (may be given more than once).
+    #[arg(long, value_name = "DOMAIN")]
+    pub similar: Vec<String>,
     /// How many of the best sites to name.
     #[arg(long, value_name = "N", default_value_t = 30)]
     pub show: usize,
