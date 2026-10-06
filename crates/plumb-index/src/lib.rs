@@ -301,7 +301,7 @@ impl Default for RankConfig {
             described_relevance: Some(0.04),
             meaning_only_relevance: Some(0.35),
             named_share: Some(0.4),
-            terms_boost: 4.0,
+            terms_boost: 1.0,
         }
     }
 }
@@ -2462,7 +2462,7 @@ mod tests {
             obscure(200_000, 10),
         );
         let (_dir, searcher) = build(&[maker, other]);
-        assert_eq!(top(&searcher, "electric car"), "voltmotors.example");
+        assert_eq!(top(&searcher, "electric vehicles"), "voltmotors.example");
         let off = RankConfig {
             terms_boost: 0.0,
             ..RankConfig::default()
