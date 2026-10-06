@@ -2396,7 +2396,7 @@ mod tests {
             ),
         ];
         let (_dir, searcher) = build(&records);
-        let hits = searcher.search("netflix", 10).unwrap();
+        let hits = searcher.search_with("netflix", 10, &keep_all()).unwrap();
         assert_eq!(
             domains(&hits),
             [
@@ -2407,7 +2407,7 @@ mod tests {
             ]
         );
         // Bare domains still come back when nothing titled is left.
-        let hits = searcher.search("netflix", 2).unwrap();
+        let hits = searcher.search_with("netflix", 2, &keep_all()).unwrap();
         assert_eq!(domains(&hits), ["netflix.com", "netflixfans.org"]);
     }
 
