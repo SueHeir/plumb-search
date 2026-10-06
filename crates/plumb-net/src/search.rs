@@ -118,11 +118,16 @@ pub struct FoundSite {
     /// Signed crawls from at least [`QUORUM`] different crawlers agree.
     #[serde(default)]
     pub confirmed: bool,
+    /// The crawl in `shared` was signed by a node this node trusts (set by
+    /// [`crate::NetHandle::search`]).
+    #[serde(default)]
+    pub trusted: bool,
     /// What this node may keep of the site in its own records: the signed
     /// crawl as a batch from its crawler would be kept (homepage facts of
     /// an assigned site, plus headings and text when this node trusts the
     /// crawler, see [`crate::NetHandle::search`]). `None` when no signed
-    /// crawl counts here.
+    /// crawl counts here. One crawler alone can be anyone with a fresh key,
+    /// so a node keeps it only when [`FoundSite::keeps`] says so.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shared: Option<SiteRecord>,
     /// The first proof the answer held that checked out as signed, for
@@ -132,6 +137,17 @@ pub struct FoundSite {
 }
 
 impl FoundSite {
+    /// What of the site this node may keep in its own records: `shared`,
+    /// but only when its crawler is trusted here or crawlers this node
+    /// counts confirmed it, as a published batch's crawls are only folded
+    /// in once confirmed (see [`crate::agree`]). Otherwise one throwaway
+    /// key assigned the site could rewrite its title for good.
+    pub fn keeps(&self) -> Option<&SiteRecord> {
+        self.shared
+            .as_ref()
+            .filter(|_| self.trusted || self.confirmed)
+    }
+
     fn add_crawler(&mut self, crawler: String) {
         if !self.crawlers.contains(&crawler) {
             self.crawlers.push(crawler);
@@ -254,6 +270,11 @@ async fn round(
 ) -> NetSearch {
     out.buckets = buckets.len();
     let peers = if buckets.is_empty() { &[][..] } else { peers };
+    // Once requests can go through relays, only nodes that take them
+    // sealed are asked: asking one that does not would show it this
+    // node's IP address with the bucket.
+    let sealed = sealed_targets(peers);
+    let peers = sealed.as_deref().unwrap_or(peers);
     // Spread the buckets over the nodes so that no node gets two buckets
     // of one search while others get none.
     let mut order: Vec<usize> = (0..peers.len()).collect();
@@ -375,7 +396,9 @@ async fn round(
             out.rejected += 1;
             continue;
         };
-        out.answered_by.push(answerer);
+        if earns(&checked) {
+            out.answered_by.push(answerer);
+        }
         if let Some(records) = keep {
             fetched.entry(bucket).or_default().push(records);
         }
@@ -396,6 +419,13 @@ async fn round(
     found.sort_by(|a, b| a.record.domain.cmp(&b.record.domain));
     out.found = found;
     out
+}
+
+/// Whether an answer earns its node credits here (see
+/// [`crate::credits`]): only one holding a signed crawl that checked out,
+/// so a node cannot earn by answering every request with nothing.
+fn earns(checked: &[FoundSite]) -> bool {
+    checked.iter().any(|site| site.verified)
 }
 
 /// Search retained buckets locally, including stale and valid empty answers.
@@ -479,6 +509,14 @@ pub(crate) fn bucket_ready(cache: &BucketCache, bucket: u32, now: u64) -> bool {
     })
 }
 
+/// The nodes that take sealed requests, when at least two do, so each of
+/// them has another to relay to it; `None` when requests cannot all be
+/// relayed and any node may be asked.
+fn sealed_targets(peers: &[BucketPeer]) -> Option<Vec<BucketPeer>> {
+    let sealed: Vec<BucketPeer> = peers.iter().filter(|p| p.oblivious).cloned().collect();
+    (sealed.len() >= 2).then_some(sealed)
+}
+
 /// Asks `target` for a bucket: through one of `through` (relays, tried in
 /// turn) when there are any, else straight. Returns the answer and whether
 /// it came through a relay.
@@ -544,6 +582,7 @@ pub(crate) fn check_answer(
             answers: 1,
             crawlers: Vec::new(),
             confirmed: false,
+            trusted: false,
             shared: None,
             proof: None,
         };
@@ -909,6 +948,22 @@ mod tests {
     }
 
     #[test]
+    fn with_relays_only_nodes_taking_sealed_requests_are_asked() {
+        let peer = |oblivious| BucketPeer {
+            peer: PeerId::random(),
+            addrs: Vec::new(),
+            oblivious,
+        };
+        let (a, b, plain) = (peer(true), peer(true), peer(false));
+        // Two relays: the plain node would see the asker's address.
+        let all = [a.clone(), plain.clone(), b.clone()];
+        assert_eq!(sealed_targets(&all), Some(vec![a.clone(), b]));
+        // One relay cannot relay to itself: any node may be asked.
+        assert_eq!(sealed_targets(&[a, plain.clone()]), None);
+        assert_eq!(sealed_targets(&[plain]), None);
+    }
+
+    #[test]
     fn unproven_records_link_only_to_their_own_site_and_drop_bookkeeping() {
         let mut lying = SiteRecord::new("usbank.com");
         lying.url = Some("https://usbank-login.example/".into());
@@ -966,6 +1021,16 @@ mod tests {
     }
 
     #[test]
+    fn only_an_answer_with_a_signed_crawl_earns_credits() {
+        assert!(!earns(&check_answer(Vec::new(), 0).unwrap()));
+        let unsigned = check_answer(vec![item(&SiteRecord::new("a.com"))], 0).unwrap();
+        assert!(!earns(&unsigned));
+        let mut signed = unsigned;
+        signed[0].verified = true;
+        assert!(earns(&signed));
+    }
+
+    #[test]
     fn two_answers_keep_the_less_favorable_popularity() {
         let mut boosted = SiteRecord::new("phish.com");
         boosted.signals.tranco_rank = Some(1);
@@ -979,6 +1044,7 @@ mod tests {
             answers: 1,
             crawlers: Vec::new(),
             confirmed: false,
+            trusted: false,
             shared: None,
             proof: None,
         };
