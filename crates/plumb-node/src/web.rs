@@ -156,6 +156,10 @@ async fn run_places(
         .flatten()
 }
 
+/// Where the places go on a results page that does not start them at
+/// the top.
+const PLACES_MARK: &str = "<!--places-->\n";
+
 /// `found`, unless its town was guessed from a query that is the name of
 /// a site: "us bank" is the bank, not banks in Us, France.
 fn not_a_name(
@@ -725,6 +729,9 @@ struct SearchParams {
     hl: Option<String>,
     /// `1`: edit mode, with buttons to move results and fold boxes.
     edit: Option<String>,
+    /// `<seed>.<step>`: tuning, a round of random searches in edit mode
+    /// (see [`tune`]).
+    tune: Option<String>,
     /// Safe search: `off`, `moderate` (the default) or `strict`.
     safe: Option<String>,
     /// Only sites in this language (a language code); empty for any.
@@ -925,7 +932,11 @@ async fn search_page(
         return home_or_setup(&state, &params, &headers);
     }
     let mut visitor = history::Visitor::of(&state, &headers, params.history_prefs());
-    let editing = visitor.is_some() && flag(&params.edit);
+    let tuning = visitor
+        .as_ref()
+        .and(params.tune.as_deref())
+        .and_then(tune::Tuning::parse);
+    let editing = visitor.is_some() && (flag(&params.edit) || tuning.is_some());
     if let Some(visitor) = &mut visitor {
         visitor.editing = editing;
     }
@@ -989,8 +1000,14 @@ async fn search_page(
                     &mut results.hits,
                     settings.options.country.as_deref(),
                 );
-                visitor.note_search(&query);
+                // Tuning's searches are not the searcher's own.
+                if tuning.is_none() {
+                    visitor.note_search(&query);
+                } else {
+                    visitor.ensure_profile();
+                }
                 let mut view = visitor.view();
+                view.tune_bar = tuning.map(|t| t.bar(&settings.options));
                 view.home = settings.options.country.clone();
                 view.verdicts = visitor
                     .history
@@ -999,10 +1016,13 @@ async fn search_page(
                     .into_iter()
                     .collect();
                 if editing {
+                    let tune = tuning
+                        .map(|t| format!("&tune={}", t.value()))
+                        .unwrap_or_default();
                     view.edit = Some(history::Editing {
                         query: query.clone(),
                         back: format!(
-                            "{}&edit=1",
+                            "{}&edit=1{tune}",
                             search_link(
                                 "/search",
                                 &query,
@@ -1113,14 +1133,15 @@ async fn search_page(
                     });
                     html = places::fold_places(found, &html, chosen);
                 }
-                if let Some(at) = page.find("<main>\n") {
-                    page.insert_str(
-                        at + "<main>\n".len(),
-                        &format!("<style>{}</style>\n{html}", places::STYLE),
-                    );
+                let at = match page.find(PLACES_MARK) {
+                    Some(at) => Some(at + PLACES_MARK.len()),
+                    None => page.find("<main>\n").map(|at| at + "<main>\n".len()),
+                };
+                if let Some(at) = at {
+                    page.insert_str(at, &format!("<style>{}</style>\n{html}", places::STYLE));
                 }
             }
-            if let Some(visitor) = &mut visitor {
+            if let Some(visitor) = visitor.as_mut().filter(|_| tuning.is_none()) {
                 let mut shown = Vec::new();
                 let mut folded = Vec::new();
                 if let Some(context) = places_context {
@@ -1355,6 +1376,7 @@ async fn go(
         hr: None,
         hl: None,
         edit: None,
+        tune: None,
         safe: params.safe,
         lang: params.lang,
         news: params.news,
@@ -2003,16 +2025,21 @@ text-align:left}\
 .msg{white-space:pre-wrap;overflow-wrap:anywhere;font:.85rem/1.4 ui-monospace,monospace}\
 .op{color:var(--url);font-weight:600}\
 .fb{display:inline-flex;gap:.2rem;margin:0;vertical-align:middle}\
-.fb button{font:inherit;font-size:.75rem;line-height:1;padding:.15rem .35rem;border:1px solid var(--line);\
-border-radius:.35rem;background:none;color:var(--muted);cursor:pointer}\
+.fb button{font:inherit;font-size:.8rem;line-height:1.2;padding:.25rem .6rem;border:1px solid var(--line);\
+border-radius:999px;background:var(--bg);color:var(--fg);cursor:pointer}\
+.fb button:hover{background:var(--net)}\
+.tbar{margin:1rem 0 .5rem;padding:.85rem 1rem;border-radius:.75rem;background:var(--net);\
+border:1px solid var(--line)}\
+.tbar .th{display:flex;justify-content:space-between;gap:1rem;align-items:baseline}\
+.tbar .th span{color:var(--muted);font-size:.9rem}\
+.tbar p{margin:.35rem 0 .6rem;font-size:.95rem;line-height:1.5}\
+.tgo{display:flex;flex-wrap:wrap;gap:.6rem 1.25rem;align-items:center}\
+.tgo a{color:var(--link)}\
+.tgo .tnext{padding:.45rem 1rem;border-radius:.5rem;background:var(--accent);color:var(--bg);\
+text-decoration:none;font-weight:600}\
 .fb button[aria-pressed=true]{background:var(--accent);color:var(--bg);border-color:var(--accent)}\
 .fbx{display:flex;flex-wrap:wrap;margin:.3rem 0 .6rem}\
 .ed{font-size:.85rem}\
-.tr{border:1px solid var(--line);border-radius:.6rem;margin:0 0 1rem;padding:.6rem .9rem}\
-.tr legend{font-weight:600;padding:0 .3rem}\
-.tri{display:flex;flex-wrap:wrap;justify-content:space-between;gap:.4rem 1rem;padding:.45rem 0;\
-border-top:1px solid var(--line)}.tri:first-of-type{border-top:0}\
-.tro{display:flex;gap:.7rem;align-items:center;font-size:.9rem}\
 .panel a{color:var(--link)}\
 .recent{margin:1rem auto 0;max-width:36rem;display:flex;flex-wrap:wrap;gap:.4rem;\
 justify-content:center;align-items:center;font-size:.875rem}\
@@ -2645,6 +2672,11 @@ fn render_results_with(
     let shown = merge_results(&results.hits, network, limit);
     let from_network = shown.iter().filter(|s| s.network.is_some()).count();
     let mut body = String::from("<main>\n");
+    // Tuning: its bar comes first, above the places too.
+    if let Some(bar) = settings.history.as_ref().and_then(|h| h.tune_bar.as_ref()) {
+        body.push_str(bar);
+        body.push_str(PLACES_MARK);
+    }
     if let Some(profile) = extras.and_then(|e| e.profile.as_ref()) {
         let domain = plumb_core::registrable_domain(&profile.url).unwrap_or_default();
         answers::render_profile(&mut body, profile, icons.get(&domain));
@@ -2674,7 +2706,9 @@ fn render_results_with(
                 escape_html(&format!("{here}&edit=1"))
             )
         };
-        let _ = writeln!(body, "<p class=\"s ed\">{line}</p>");
+        if history.tune_bar.is_none() {
+            let _ = writeln!(body, "<p class=\"s ed\">{line}</p>");
+        }
     }
     if let Some(spelling) = &results.spelling {
         render_spelling(&mut body, spelling, &settings.options);
@@ -5713,47 +5747,56 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_tuning_page_learns_tastes_for_every_search() {
+    async fn tuning_goes_through_real_results_pages_in_edit_mode() {
         let dir = tempfile::tempdir().unwrap();
         let node = Arc::new(HistoryNode(dir.path().join("history")));
         let app = || node_router(Arc::new(BankPlaces), node.clone());
 
-        let (code, _, page) = send(app(), "/tune").await;
-        assert_eq!(code, StatusCode::OK);
-        assert_eq!(page.matches("<fieldset class=\"tr\">").count(), 5, "{page}");
-        assert!(page.contains("value=\"like|popular\""), "{page}");
+        let (code, headers, _) = send(app(), "/tune").await;
+        assert_eq!(code, StatusCode::SEE_OTHER);
+        let first = headers[header::LOCATION].to_str().unwrap().to_owned();
+        assert!(first.starts_with("/search?q="), "{first}");
+        assert!(first.contains("&edit=1&tune="), "{first}");
 
+        let (_, headers, body) = send(app(), &first).await;
+        let profile = set_cookie(&headers, "plumb_profile").expect("a profile");
+        let me = [("cookie", profile.as_str())];
+        assert!(body.contains("Tuning your search"), "{body}");
+        assert!(body.contains("1 of 5"), "{body}");
+        assert!(body.contains("Next search"), "{body}");
+        assert!(body.contains("name=\"t\" value=\"popular\""), "{body}");
+        let tune = first.split("tune=").nth(1).unwrap().to_owned();
+        assert!(
+            body.contains(&format!("&amp;edit=1&amp;tune={tune}\"")),
+            "the buttons come back to the round: {body}"
+        );
+
+        // Putting a well-known site up teaches that they are liked.
+        let back: String = url::form_urlencoded::byte_serialize(first.as_bytes()).collect();
         let response = app()
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/tune")
+                    .uri("/feedback")
                     .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-                    .body(Body::from(
-                        "r0_0=like%7Cpopular&r0_1=like%7Cpopular&r1_0=dislike%7Cshopping\
-                         &b0_places=no%7Cguessed",
-                    ))
+                    .header("cookie", profile.as_str())
+                    .body(Body::from(format!(
+                        "q=us+bank&d=usbank.com&t=popular&v=up&back={back}"
+                    )))
                     .unwrap(),
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let profile = set_cookie(response.headers(), "plumb_profile").expect("a profile");
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let page = String::from_utf8(body.to_vec()).unwrap();
-        assert!(page.contains("3 results rated"), "{page}");
-        assert!(page.contains("You like <strong>well-known sites"), "{page}");
-        assert!(page.contains("rather not see <strong>shops"), "{page}");
-
-        let me = [("cookie", profile.as_str())];
+        assert_eq!(response.headers()[header::LOCATION], first.as_str());
+        let (_, _, done) = send_with_headers(app(), "/tune?done=1", &me).await;
+        assert!(done.contains("You like <strong>well-known sites"), "{done}");
         let (_, _, body) = send_with_headers(app(), "/search?q=denver+bank&country=any", &me).await;
         assert!(body.contains("You like well-known sites"), "{body}");
         assert!(body.contains("href=\"/tune\""), "{body}");
+        // The round's searches are not kept as past searches.
         let (_, _, history) = send_with_headers(app(), "/history", &me).await;
         assert!(
-            history.contains("You like <strong>well-known sites"),
+            !history.contains("<h2>Searches</h2>\n<ul>\n<li><a href=\"/search?q=us"),
             "{history}"
         );
     }
