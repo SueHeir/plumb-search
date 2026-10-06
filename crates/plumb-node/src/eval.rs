@@ -6,7 +6,9 @@
 //! answer can also be a page's address (`https://en.wikipedia.org/wiki/
 //! Marie_Curie`): with `--pages`, pages are listed among the sites as a
 //! node lists them (see [`plumb_index::pages::place_pages`]), and a page
-//! shown under a site's result counts at that site's rank. The metrics
+//! shown under a site's result counts at that site's rank. An address
+//! ending in `*` takes any page whose address starts with the rest
+//! (`https://diy.stackexchange.com/questions/*`). The metrics
 //! are top-1 and top-3 rates and the mean reciprocal rank within the
 //! results fetched ([`Metrics::from_ranks`]).
 
@@ -78,11 +80,21 @@ fn normalize_domain(domain: &str) -> String {
     registrable_domain(domain).unwrap_or_else(|| domain.trim_end_matches('.').to_ascii_lowercase())
 }
 
+/// Whether a result keyed `key` (a domain or a page's address) is the
+/// expected answer `expected`, which takes any address it starts when it
+/// ends in `*`.
+pub fn is_expected(expected: &str, key: &str) -> bool {
+    match expected.strip_suffix('*') {
+        Some(start) => key.starts_with(start),
+        None => expected == key,
+    }
+}
+
 /// 1-based position of the first result whose domain is one of `expected`.
 pub fn rank_of<S: AsRef<str>>(results: &[S], expected: &[String]) -> Option<usize> {
     results
         .iter()
-        .position(|domain| expected.iter().any(|e| e == domain.as_ref()))
+        .position(|domain| expected.iter().any(|e| is_expected(e, domain.as_ref())))
         .map(|i| i + 1)
 }
 
@@ -241,13 +253,26 @@ pub fn run(args: EvalArgs) -> Result<()> {
                 first = rows.first().and_then(|keys| keys.first()).cloned();
                 let rank = rows
                     .iter()
-                    .position(|keys| keys.iter().any(|k| q.expected.contains(k)))
+                    .position(|keys| {
+                        keys.iter()
+                            .any(|k| q.expected.iter().any(|e| is_expected(e, k)))
+                    })
                     .map(|i| i + 1);
                 listed = Some(rows);
                 rank
             }
         };
         let rank = deep_rank.filter(|&rank| rank <= args.limit);
+        if args.show > 0 {
+            println!("{:?}", q.query);
+            let shown: Vec<String> = match &listed {
+                None => domains.iter().map(|d| d.to_string()).collect(),
+                Some(rows) => rows.iter().map(|keys| keys.join(" + ")).collect(),
+            };
+            for (i, row) in shown.iter().take(args.show).enumerate() {
+                println!("  {}. {row}", i + 1);
+            }
+        }
         if rank != Some(1) {
             println!("{}", format_miss(q, rank, first.as_deref(), args.limit));
             if args.explain {
@@ -407,7 +432,7 @@ fn set_of_file(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::set_of_file;
+    use super::{is_expected, parse_queries, rank_of, set_of_file};
 
     #[test]
     fn sets_come_from_file_names() {
@@ -419,6 +444,22 @@ mod tests {
         assert_eq!(set_of_file("wikipedia-de.tsv.gz"), "wikipedia-de");
         assert_eq!(set_of_file("wikipedia-en-before157.tsv.gz"), "wikipedia-en");
         assert_eq!(set_of_file("articles.tsv.gz"), "wikipedia-en");
+    }
+
+    #[test]
+    fn an_address_ending_in_a_star_takes_the_pages_it_starts() {
+        let queries =
+            parse_queries("unclog a drain\thttps://diy.stackexchange.com/questions/*\n").unwrap();
+        let expected = &queries[0].expected;
+        assert_eq!(expected, &["https://diy.stackexchange.com/questions/*"]);
+        let rows = [
+            "drain.com",
+            "https://superuser.com/questions/1",
+            "https://diy.stackexchange.com/questions/2142",
+        ];
+        assert_eq!(rank_of(&rows, expected), Some(3));
+        assert!(is_expected("usbank.com", "usbank.com"));
+        assert!(!is_expected("usbank.com", "usbank.com.evil"));
     }
 
     #[test]

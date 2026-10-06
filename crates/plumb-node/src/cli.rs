@@ -862,6 +862,10 @@ pub struct EvalArgs {
     /// scored: final score, text match, link score and closeness in meaning.
     #[arg(long)]
     pub explain: bool,
+    /// Print the first N results of every query, hit or miss: each site's
+    /// domain (with the pages shown under it) or page's address.
+    #[arg(long, value_name = "N", default_value_t = 0)]
+    pub show: usize,
     /// Page set files (wikipedia-en.tsv.gz, github.tsv.gz from fetch-pages)
     /// whose pages are listed among the sites, as a node lists them. Can be
     /// given more than once.
