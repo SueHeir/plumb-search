@@ -282,12 +282,6 @@ pub struct RankConfig {
     /// BM25 boost of a query word matching a site's search terms
     /// ([`plumb_core::SiteRecord::terms`]), picked from its whole homepage.
     pub terms_boost: f32,
-    /// How much of a site's demand ([`Searcher::with_demand`]: how much
-    /// people read the Wikipedia article about it) is added to its link
-    /// score where the ranking weighs popularity. Link scores say how big
-    /// a site is on the web; demand says how much people look up what it
-    /// is. 0 leaves it out.
-    pub demand_weight: f32,
 }
 
 impl Default for RankConfig {
@@ -308,7 +302,6 @@ impl Default for RankConfig {
             meaning_only_relevance: Some(0.35),
             named_share: Some(0.4),
             terms_boost: 1.0,
-            demand_weight: 0.0,
         }
     }
 }
@@ -377,6 +370,11 @@ pub struct Hit {
     /// listing under it when it is the site searched for.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub key_pages: Vec<KeyPage>,
+    /// How much the Wikipedia article about what the site is gets read, as
+    /// [`pages::PageHit::popularity`], when a page index says
+    /// ([`pages::PageSearcher::note_demand`]); see [`pages::place_pages`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub demand: Option<f32>,
 }
 
 /// Per-search choices of the person searching.
@@ -726,8 +724,6 @@ pub struct Searcher {
     fields: Fields,
     words: TextAnalyzer,
     joined: TextAnalyzer,
-    /// Each site's demand in `0..=1`, by domain; see [`Searcher::with_demand`].
-    demand: HashMap<String, f32>,
 }
 
 impl Searcher {
@@ -754,19 +750,7 @@ impl Searcher {
             fields,
             words: analysis::words_analyzer(),
             joined: analysis::joined_analyzer(),
-            demand: HashMap::new(),
         })
-    }
-
-    /// Ranks with each site's demand, by domain, in `0..=1`: how much
-    /// people read about what the site is, such as page views of the
-    /// Wikipedia article whose official website it is
-    /// ([`pages::site_demand`]). It counts as
-    /// [`RankConfig::demand_weight`] times itself, added to the site's
-    /// popularity.
-    pub fn with_demand(mut self, demand: HashMap<String, f32>) -> Self {
-        self.demand = demand;
-        self
     }
 
     /// Number of documents (sites) in the index.
@@ -1344,22 +1328,13 @@ impl Searcher {
                 .and_then(|domains| domains.term_ords(addr.doc_id).next())
                 .unwrap_or(u64::MAX);
             let unnamed = !is_kind && name.words() == 0;
-            let demand = if cfg.demand_weight > 0.0 && !self.demand.is_empty() {
-                column
-                    .domain(addr.doc_id)
-                    .and_then(|domain| self.demand.get(&domain).copied())
-                    .unwrap_or(0.0)
-            } else {
-                0.0
-            };
-            let popularity = link_score + cfg.demand_weight.max(0.0) * demand;
             let prior = match (relevance_floor, cfg.meaning_only_relevance) {
                 // No word of the query: only meaning speaks for it.
                 (_, Some(floor)) if unnamed && bm25 <= 0.0 && floor > 0.0 => {
-                    popularity * (text_score / floor).min(1.0)
+                    link_score * (text_score / floor).min(1.0)
                 }
-                (Some(floor), _) if unnamed => popularity * (text_score / floor).min(1.0),
-                _ => popularity,
+                (Some(floor), _) if unnamed => link_score * (text_score / floor).min(1.0),
+                _ => link_score,
             };
             ranked.push(Ranked {
                 addr,
@@ -1664,6 +1639,7 @@ impl Searcher {
         let url = text(self.fields.url).unwrap_or_else(|| format!("https://{domain}/"));
         let about = text(self.fields.about);
         Ok(Hit {
+            demand: None,
             url,
             title: text(self.fields.title),
             official: about.is_some(),
@@ -2468,41 +2444,6 @@ mod tests {
         let hits = searcher.search(query, 10).unwrap();
         assert!(!hits.is_empty(), "no hits for {query:?}");
         hits[0].domain.clone()
-    }
-
-    #[test]
-    fn demand_lifts_the_site_people_read_about() {
-        let records = [
-            site(
-                "linkedfaucets.example",
-                Some("Faucets"),
-                None,
-                &[],
-                &[],
-                obscure(1_000, 500),
-            ),
-            site(
-                "readfaucets.example",
-                Some("Faucets"),
-                None,
-                &[],
-                &[],
-                obscure(5_000, 100),
-            ),
-        ];
-        let (_dir, searcher) = build(&records);
-        let demand = HashMap::from([("readfaucets.example".to_string(), 0.9)]);
-        let searcher = searcher.with_demand(demand);
-        assert_eq!(top(&searcher, "faucets"), "linkedfaucets.example");
-        let with_demand = RankConfig {
-            demand_weight: 0.3,
-            ..RankConfig::default()
-        };
-        let hits = searcher.search_with("faucets", 10, &with_demand).unwrap();
-        assert_eq!(
-            domains(&hits),
-            ["readfaucets.example", "linkedfaucets.example"]
-        );
     }
 
     #[test]

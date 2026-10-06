@@ -468,6 +468,7 @@ mod tests {
 
     fn hit(domain: &str, title: &str, description: &str, score: f32) -> Hit {
         Hit {
+            demand: None,
             domain: domain.into(),
             url: format!("https://{domain}/"),
             title: Some(title.into()),

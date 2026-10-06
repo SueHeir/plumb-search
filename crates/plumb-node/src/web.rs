@@ -3744,6 +3744,7 @@ mod tests {
 
     fn hit(domain: &str, url: &str, title: Option<&str>, description: Option<&str>) -> Hit {
         Hit {
+            demand: None,
             domain: domain.to_string(),
             url: url.to_string(),
             title: title.map(str::to_string),

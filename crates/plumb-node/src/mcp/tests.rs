@@ -28,6 +28,7 @@ impl SearchBackend for Broken {
 
 fn hit(domain: &str, score: f32, link_score: f32, named: bool) -> Hit {
     Hit {
+        demand: None,
         domain: domain.to_string(),
         url: format!("https://www.{domain}/"),
         title: Some(domain.to_string()),

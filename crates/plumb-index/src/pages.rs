@@ -21,7 +21,7 @@
 //! How pages and sites are listed together is up to the caller; see
 //! [`PageHit::named`].
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
@@ -32,7 +32,7 @@ use serde::{Deserialize, Serialize};
 use tantivy::collector::TopDocs;
 use tantivy::query::{BooleanQuery, Occur, Query, TermQuery};
 use tantivy::schema::{
-    Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, Value, FAST, STORED,
+    Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, Value, FAST, STORED, STRING,
 };
 use tantivy::tokenizer::TextAnalyzer;
 use tantivy::{Index, IndexReader, ReloadPolicy, TantivyDocument, Term};
@@ -184,6 +184,11 @@ impl Page {
         }
         let host = self.url.strip_prefix("https://")?.split('/').next()?;
         plumb_core::stack_exchange::site_of(host)
+    }
+
+    /// Whether the page is a Wikipedia article.
+    pub fn is_article(&self) -> bool {
+        self.set.starts_with("wikipedia-")
     }
 
     /// Whether the page is a question, of Stack Overflow or another Stack
@@ -478,6 +483,9 @@ struct Fields {
     /// Stemmed words of a question's title and tags; empty for other pages.
     topic: Field,
     popularity: Field,
+    /// The registrable domain of the official website of what a Wikipedia
+    /// article is about ([`Page::site`]), for [`PageSearcher::site_popularity`].
+    site: Field,
     page: Field,
 }
 
@@ -508,6 +516,7 @@ fn schema() -> (Schema, Fields) {
         ),
     );
     let popularity = builder.add_u64_field("popularity", FAST | STORED);
+    let site = builder.add_text_field("site", STRING);
     let page = builder.add_text_field("page", STORED);
     (
         builder.build(),
@@ -516,6 +525,7 @@ fn schema() -> (Schema, Fields) {
             keys,
             topic,
             popularity,
+            site,
             page,
         },
     )
@@ -640,32 +650,6 @@ pub struct PageIndexStats {
     pub most_views: u64,
 }
 
-/// How much people look up what each site is: the page views of the
-/// most read Wikipedia article whose official website it is
-/// ([`Page::site`]), as `ln(1 + views) / ln(1 + most views)` against the
-/// most read article of any set of Wikipedia. Sites no article is about
-/// are left out. For [`crate::Searcher::with_demand`].
-pub fn site_demand<'a>(pages: impl IntoIterator<Item = &'a Page>) -> HashMap<String, f32> {
-    let mut views: HashMap<String, u64> = HashMap::new();
-    let mut most = 0;
-    for page in pages {
-        if !page.set.starts_with("wikipedia-") {
-            continue;
-        }
-        most = most.max(page.views);
-        if let Some(site) = &page.site {
-            let seen = views.entry(site.clone()).or_default();
-            *seen = (*seen).max(page.views);
-        }
-    }
-    let scale = (1.0 + most as f64).ln();
-    views
-        .into_iter()
-        .filter(|&(_, views)| views > 0)
-        .map(|(site, views)| (site, ((1.0 + views as f64).ln() / scale) as f32))
-        .collect()
-}
-
 /// Builds the page index of `pages` in `dir`, replacing any there.
 pub fn build_page_index(
     dir: &Path,
@@ -716,6 +700,9 @@ pub fn build_page_index(
             fields.popularity,
             (popularity * POPULARITY_SCALE).round() as u64,
         );
+        if let Some(site) = page.site.as_deref().filter(|_| page.is_article()) {
+            document.add_text(fields.site, site);
+        }
         document.add_text(fields.page, serde_json::to_string(&page)?);
         writer.add_document(document)?;
         stats.pages += 1;
@@ -773,6 +760,37 @@ impl PageSearcher {
 
     pub fn num_pages(&self) -> u64 {
         self.stats.pages
+    }
+
+    /// How much the most read Wikipedia article about what `domain` is the
+    /// official website of is read, as [`PageHit::popularity`]: how much
+    /// people look up what the site is. `None` when no article is about it.
+    pub fn site_popularity(&self, domain: &str) -> Result<Option<f32>> {
+        let searcher = self.reader.searcher();
+        let query = TermQuery::new(
+            Term::from_field_text(self.fields.site, domain),
+            IndexRecordOption::Basic,
+        );
+        let best = searcher.search(
+            &query,
+            &TopDocs::with_limit(1).order_by_fast_field::<u64>("popularity", tantivy::Order::Desc),
+        )?;
+        Ok(best
+            .first()
+            .and_then(|&(popularity, _)| popularity)
+            .map(|popularity| popularity as f32 / POPULARITY_SCALE))
+    }
+
+    /// Notes on the first [`DEMAND_NOTED`] of `sites` how much the article
+    /// about each is read ([`PageSearcher::site_popularity`],
+    /// [`crate::Hit::demand`]), for [`place_pages`] to weigh against the
+    /// pages a query names. A few, not one: a node may reorder the first
+    /// results for its searcher after.
+    pub fn note_demand(&self, sites: &mut [crate::Hit]) -> Result<()> {
+        for site in sites.iter_mut().take(DEMAND_NOTED) {
+            site.demand = self.site_popularity(&site.domain)?;
+        }
+        Ok(())
     }
 
     /// The best `limit` pages for `query`, best first.
@@ -1176,6 +1194,15 @@ pub struct PlacedPage {
     pub at: usize,
 }
 
+/// How much more read ([`PageHit::popularity`]) than the article about
+/// the best site's subject an article the query names must be to come
+/// before that site ([`crate::Hit::demand`]): about twice the views on
+/// English Wikipedia.
+pub const DEMAND_MARGIN: f32 = 0.05;
+
+/// How many of the first sites [`PageSearcher::note_demand`] notes.
+pub const DEMAND_NOTED: usize = 3;
+
 /// Most site results looked through by [`lift_named_sites`].
 const LIFTED_FROM: usize = 5;
 /// How much better known than a site the whole query names the page's
@@ -1294,10 +1321,20 @@ pub fn place_pages(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) -> Ve
                         && base_title(&page.page.title).contains(' ')))
             })
     });
-    // A named page goes first only when the best site may be a namesake.
+    // A named page goes first only when the best site may be a namesake:
+    // one less known than the page is read, or, when Wikipedia has an
+    // article about what the site is, one whose article is read far less
+    // than the page. What people look up decides between namesakes, not
+    // how big the site is: "mars" means the planet, read many times more
+    // than Mars Inc. of mars.com; "napoleon" the emperor, not Napoleon,
+    // North Dakota.
     let page_first = |page: &PageHit| match sites.first() {
         None => true,
-        Some(site) => !organizations_site && !site.official && page.popularity > site.link_score,
+        Some(_) if organizations_site => false,
+        Some(site) => match site.demand {
+            Some(demand) if page.page.is_article() => page.popularity > demand + DEMAND_MARGIN,
+            _ => !site.official && page.popularity > site.link_score,
+        },
     };
     let most = if site_named { 1 } else { MAX_PAGES_LISTED };
     let mut placed: Vec<PlacedPage> = Vec::new();
@@ -1503,29 +1540,6 @@ mod tests {
             ..Article::default()
         })
         .unwrap()
-    }
-
-    #[test]
-    fn demand_is_the_most_read_article_about_a_site() {
-        let about = |title: &str, views: u64, site: Option<&str>| {
-            let mut page = page(title, views, &[]);
-            page.site = site.map(str::to_string);
-            page
-        };
-        let mut repo = about("delta/delta", 1_000_000, Some("github.com"));
-        repo.set = GITHUB_SET.into();
-        let pages = [
-            about("Delta Air Lines", 99, Some("delta.com")),
-            about("Delta Faucet Company", 9, Some("deltafaucet.com")),
-            about("Delta (letter)", 9_999, None),
-            about("Delta Air Lines destinations", 30, Some("delta.com")),
-            about("Nothing read", 0, Some("unread.com")),
-            repo,
-        ];
-        let demand = site_demand(&pages);
-        assert_eq!(demand.len(), 2);
-        assert!((demand["delta.com"] - 0.5).abs() < 1e-6);
-        assert!((demand["deltafaucet.com"] - 0.25).abs() < 1e-6);
     }
 
     #[test]
@@ -1739,6 +1753,46 @@ mod tests {
     }
 
     #[test]
+    fn namesakes_are_weighed_by_how_much_their_articles_are_read() {
+        let mut planet = page("Mars", 2_000_000, &[]);
+        planet.description = Some("Fourth planet from the Sun".into());
+        let mut company = page("Mars Inc.", 20_000, &["Mars, Incorporated"]);
+        company.description = Some("American manufacturer of confectionery".into());
+        company.site = Some("mars.com".into());
+        let mut repo = Page::from_repo(Article {
+            title: "mars/mars".into(),
+            views: 9_000_000,
+            ..Article::default()
+        });
+        repo.site = Some("mars.com".into());
+        let (_dir, s) = searcher(&[planet, company, repo]);
+        // Only articles say what a site is read about.
+        assert!((s.site_popularity("mars.com").unwrap().unwrap() - 0.68).abs() < 0.01);
+        assert_eq!(s.site_popularity("planet.example").unwrap(), None);
+
+        let mut sites = [known_site("mars.com", true, 0.65)];
+        sites[0].official = true;
+        let place = |sites: &[crate::Hit]| {
+            let hits = s.search("mars", 5).unwrap();
+            assert_eq!(hits[0].page.title, "Mars");
+            place_pages("mars", sites, hits)
+                .into_iter()
+                .find(|p| p.hit.page.title == "Mars")
+                .unwrap()
+                .at
+        };
+        // An official site was never put after an article.
+        assert_eq!(place(&sites), 1);
+        // The planet is read a hundred times more than the company.
+        s.note_demand(&mut sites).unwrap();
+        assert!(sites[0].demand.is_some());
+        assert_eq!(place(&sites), 0);
+        // Not when the company is read about as much.
+        sites[0].demand = Some(0.99);
+        assert_eq!(place(&sites), 1);
+    }
+
+    #[test]
     fn articles_come_before_repositories_named_alike() {
         let repo = Page::from_repo(Article {
             title: "google-deepmind/sonnet".into(),
@@ -1778,6 +1832,7 @@ mod tests {
             named,
             official: false,
             key_pages: Vec::new(),
+            demand: None,
         }
     }
 

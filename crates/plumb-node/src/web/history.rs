@@ -1258,6 +1258,7 @@ mod tests {
             ..HistoryView::default()
         };
         let mut hit = Hit {
+            demand: None,
             domain: "rust-lang.org".into(),
             url: "https://rust-lang.org/".into(),
             title: Some("Rust Programming Language".into()),

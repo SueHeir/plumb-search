@@ -18,9 +18,7 @@ use anyhow::{bail, Context, Result};
 use plumb_core::registrable_domain;
 use std::path::Path;
 
-use plumb_index::pages::{
-    lift_named_sites, place_pages, site_demand, Page, PageSearcher, PlacedPage,
-};
+use plumb_index::pages::{lift_named_sites, place_pages, Page, PageSearcher, PlacedPage};
 use plumb_index::{Hit, Meaning, SearchOptions, Searcher};
 use tracing::info;
 
@@ -250,7 +248,6 @@ fn open_setup(args: &EvalArgs) -> Result<Setup> {
         .with_context(|| format!("opening the index in {}", args.index.display()))?;
     let meaning = MeaningIndex::from_args(&args.meaning)?;
     let pages_dir = tempfile::tempdir().context("making a folder for the page index")?;
-    let mut searcher = Some(searcher);
     let pages = if args.pages.is_empty() {
         None
     } else {
@@ -263,14 +260,11 @@ fn open_setup(args: &EvalArgs) -> Result<Setup> {
             let set = set_of_file(name);
             all.extend(articles.into_iter().filter_map(|a| Page::from_set(&set, a)));
         }
-        let demand = site_demand(&all);
-        info!("{} sites have a Wikipedia article's demand", demand.len());
-        searcher = searcher.map(|s| s.with_demand(demand));
         plumb_index::pages::build_page_index(pages_dir.path(), all)?;
         Some(PageSearcher::open(pages_dir.path())?)
     };
     Ok(Setup {
-        searcher: searcher.expect("the searcher was opened"),
+        searcher,
         meaning,
         pages,
         _pages_dir: pages_dir,
@@ -351,6 +345,7 @@ fn evaluate(
                     .with_context(|| format!("searching pages for {searched:?}"))?;
                 let mut lifted = hits.clone();
                 lift_named_sites(&mut lifted, &found);
+                pages.note_demand(&mut lifted)?;
                 let rows = listed_with_pages(&lifted, place_pages(&searched, &lifted, found));
                 first = rows.first().and_then(|keys| keys.first()).cloned();
                 let rank = rows
@@ -607,7 +602,8 @@ fn fact_rank(
                 exact: true,
                 ..SearchOptions::default()
             };
-            let sites = searcher.search_meaning(&asked.subject, 5, cfg, &options, None)?;
+            let mut sites = searcher.search_meaning(&asked.subject, 5, cfg, &options, None)?;
+            pages.note_demand(&mut sites.hits)?;
             let found = pages.search(&asked.subject, 10)?;
             let placed = place_pages(&asked.subject, &sites.hits, found);
             crate::web::answers::fact_answer(asked, &placed, plumb_core::now_unix())
@@ -807,6 +803,7 @@ mod tests {
     #[test]
     fn pages_are_listed_as_a_node_lists_them() {
         let site = |domain: &str, named: bool| Hit {
+            demand: None,
             domain: domain.into(),
             url: format!("https://{domain}/"),
             title: None,

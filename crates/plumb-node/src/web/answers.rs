@@ -603,6 +603,7 @@ mod tests {
 
     fn site(domain: &str, country: Option<&str>) -> Hit {
         Hit {
+            demand: None,
             domain: domain.to_string(),
             url: format!("https://{domain}/"),
             title: None,

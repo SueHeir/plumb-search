@@ -1,6 +1,4 @@
-# Ranking knobs one at a time, each a step either side of its default,
-# plus demand (page views of the Wikipedia article about a site), which
-# needs a Wikipedia set given with --pages.
+# Ranking knobs one at a time, each a step either side of its default.
 #   plumb eval --index DIR --pages wikipedia-en.tsv.gz \
 #     --queries eval/brand_queries.tsv --queries eval/ai_queries.tsv ... \
 #     --sweep eval/sweeps/rank_knobs.tsv --ranks-out ranks.tsv
@@ -27,7 +25,3 @@ named_share-0.5	{"named_share": 0.5}
 terms-0.5	{"terms_boost": 0.5}
 terms-2	{"terms_boost": 2.0}
 candidates-400	{"candidates": 400}
-demand-0.1	{"demand_weight": 0.1}
-demand-0.2	{"demand_weight": 0.2}
-demand-0.35	{"demand_weight": 0.35}
-demand-0.2-alpha-0.3	{"demand_weight": 0.2, "alpha": 0.3}
