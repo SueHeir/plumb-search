@@ -6,7 +6,9 @@
 //! the work's title, the description "Paper by AUTHOR et al., YEAR, VENUE",
 //! the item its DOI (`10.48550/arXiv.1706.03762`) or else its OpenAlex id
 //! (`W2741809807`), from which the address is made, and the views its
-//! citations. No abstract or text is kept.
+//! citations. No abstract or text is kept. A work cited more often a year
+//! than any real paper (OpenAlex credits a 2020 plasma camera paper with
+//! 800,000 citations) is left out as a data error.
 //!
 //! OpenAlex pages through results with a cursor, 200 works a request. Set
 //! `OPENALEX_API_KEY` if OpenAlex asks for a key.
@@ -25,6 +27,9 @@ const WORKS_URL: &str = "https://api.openalex.org/works";
 pub const PER_PAGE: usize = 200;
 /// Fewest citations of a paper kept, unless asked otherwise.
 pub const DEFAULT_MIN_CITATIONS: u64 = 200;
+/// Most citations a year a paper is believed to have: the most cited
+/// papers of recent years get about 25,000.
+const MAX_CITATIONS_A_YEAR: u64 = 40_000;
 /// Pause between requests, well under OpenAlex's ten a second.
 const PAUSE: Duration = Duration::from_millis(200);
 
@@ -152,6 +157,37 @@ impl Work {
             package: None,
         })
     }
+}
+
+/// The year of a paper written by [`Work::to_article`], from its
+/// description ("Paper by A et al., 2017, Venue").
+fn year_of(paper: &Article) -> Option<u64> {
+    paper
+        .description
+        .as_deref()?
+        .split(", ")
+        .skip(1)
+        .find(|part| part.len() == 4 && part.bytes().all(|b| b.is_ascii_digit()))?
+        .parse()
+        .ok()
+}
+
+/// Whether a paper's citations could be real in `this_year`: no more than
+/// [`MAX_CITATIONS_A_YEAR`] for each year since it came out.
+fn plausible(paper: &Article, this_year: u64) -> bool {
+    let Some(year) = year_of(paper) else {
+        return true;
+    };
+    let years = this_year.saturating_sub(year).max(1);
+    paper.views <= years.saturating_mul(MAX_CITATIONS_A_YEAR)
+}
+
+/// The year now.
+fn this_year() -> u64 {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    1970 + secs / 31_556_952
 }
 
 /// What [`fetch_papers`] got.
@@ -350,6 +386,15 @@ pub async fn fetch_papers(
         }
         tokio::time::sleep(PAUSE).await;
     }
+    let now = this_year();
+    let before = articles.len();
+    articles.retain(|paper| plausible(paper, now));
+    if articles.len() < before {
+        info!(
+            "left out {} papers cited implausibly often for their age",
+            before - articles.len()
+        );
+    }
     articles.truncate(limit);
     Ok(Fetched {
         papers: articles,
@@ -401,6 +446,32 @@ mod tests {
         assert_eq!(articles[1].title, "Growth of E. coli");
         assert_eq!(articles[1].item.as_deref(), Some("W1"));
         assert_eq!(articles[1].description.as_deref(), Some("Paper"));
+    }
+
+    #[test]
+    fn papers_cited_more_than_any_real_paper_are_left_out() {
+        let paper = |description: &str, views: u64| Article {
+            title: "A paper".to_string(),
+            description: Some(description.to_string()),
+            views,
+            ..Article::default()
+        };
+        let camera = paper(
+            "Paper by M. Shoji et al., 2020, Plasma and Fusion Research",
+            801_217,
+        );
+        assert_eq!(year_of(&camera), Some(2020));
+        assert!(!plausible(&camera, 2026));
+        let attention = paper("Paper by Ashish Vaswani et al., 2017, arXiv", 180_000);
+        assert!(plausible(&attention, 2026));
+        let lowry = paper(
+            "Paper by Oliver H. Lowry et al., 1951, J. Biol. Chem.",
+            318_762,
+        );
+        assert!(plausible(&lowry, 2026));
+        // Without a year nothing can be said.
+        assert!(plausible(&paper("Paper", 5_000_000), 2026));
+        assert!(this_year() >= 2026);
     }
 
     #[test]
