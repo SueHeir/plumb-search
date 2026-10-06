@@ -74,6 +74,10 @@ pub enum Command {
     /// to each other (a PageRank of our own crawls), without changing
     /// anything. A look at the link graph; nothing uses the ranks yet.
     LinkRank(LinkRankArgs),
+    /// How much of a records file the best sites take (by link score), by
+    /// kind and at 100k, 250k, 500k... sites, and optionally a copy cut
+    /// down to the best of them. The records file is left as it is.
+    TopSites(TopSitesArgs),
     /// Let AI apps on this computer (Claude Desktop, Claude Code, ...) ask
     /// Plumb for official sites and look-alikes: an MCP server over stdin
     /// and stdout.
@@ -139,6 +143,25 @@ pub struct StorageArgs {
     /// Print aggregate measurements as JSON.
     #[arg(long)]
     pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct TopSitesArgs {
+    /// Records file (JSON lines). A journal next to it is read too, from
+    /// a copy: the file is left as it is.
+    #[arg(long, value_name = "PATH")]
+    pub records: PathBuf,
+    /// Write the best sites here, as a records file to index and evaluate.
+    /// Sites a dead-site cut left only ranks are never written.
+    #[arg(long, value_name = "PATH")]
+    pub out: Option<PathBuf>,
+    /// With --out, how many sites to write [default: all].
+    #[arg(long, value_name = "N", requires = "out")]
+    pub top: Option<usize>,
+    /// With --out, write only sites with a name: a homepage title, or a
+    /// name from Wikidata or an About page.
+    #[arg(long, requires = "out")]
+    pub named_only: bool,
 }
 
 #[derive(Debug, Args)]
