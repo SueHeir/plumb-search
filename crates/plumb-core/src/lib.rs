@@ -26,6 +26,7 @@ pub mod place;
 pub mod profiles;
 pub mod safe;
 mod site_search;
+pub mod stack_exchange;
 pub mod subsites;
 
 pub use article::{article_url, Article};

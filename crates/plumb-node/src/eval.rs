@@ -381,11 +381,19 @@ fn format_totals(m: &Metrics, limit: usize) -> String {
 /// wikipedia-en-old.tsv.gz English Wikipedia; any other is English
 /// Wikipedia.
 fn set_of_file(name: &str) -> String {
-    use plumb_index::pages::{BOOKS_SET, GITHUB_SET, PAPERS_SET, STACKOVERFLOW_SET};
+    use plumb_index::pages::{
+        BOOKS_SET, GITHUB_SET, PAPERS_SET, STACKEXCHANGE_SET, STACKOVERFLOW_SET,
+    };
     let stem = name.split('.').next().unwrap_or("");
-    if let Some(set) = [GITHUB_SET, STACKOVERFLOW_SET, BOOKS_SET, PAPERS_SET]
-        .into_iter()
-        .find(|set| stem.starts_with(set))
+    if let Some(set) = [
+        GITHUB_SET,
+        STACKOVERFLOW_SET,
+        STACKEXCHANGE_SET,
+        BOOKS_SET,
+        PAPERS_SET,
+    ]
+    .into_iter()
+    .find(|set| stem.starts_with(set))
     {
         return set.to_string();
     }
@@ -406,6 +414,7 @@ mod tests {
         assert_eq!(set_of_file("github.tsv.gz"), "github");
         assert_eq!(set_of_file("github-new.tsv.gz"), "github");
         assert_eq!(set_of_file("stackoverflow.tsv.gz"), "stackoverflow");
+        assert_eq!(set_of_file("stackexchange.tsv.gz"), "stackexchange");
         assert_eq!(set_of_file("books.tsv"), "books");
         assert_eq!(set_of_file("wikipedia-de.tsv.gz"), "wikipedia-de");
         assert_eq!(set_of_file("wikipedia-en-before157.tsv.gz"), "wikipedia-en");

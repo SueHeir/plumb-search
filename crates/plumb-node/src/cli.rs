@@ -495,6 +495,9 @@ pub struct FetchPagesArgs {
     /// github (GitHub repositories, from GitHub's search API; set
     /// GITHUB_TOKEN to search three times as fast), stackoverflow (Stack
     /// Overflow's most viewed questions, from Stack Exchange's data dump),
+    /// stackexchange (the most viewed questions of Super User, Ask Ubuntu,
+    /// Home Improvement and 30 more Stack Exchange sites, from the same
+    /// dump),
     /// books (Open Library's most shelved works, from its dumps), podcasts
     /// (Podcast Index's most popular podcasts, from its database), papers
     /// (the most cited works, from OpenAlex's API; set OPENALEX_API_KEY if
@@ -540,7 +543,8 @@ pub struct FetchPagesArgs {
     /// Stack Overflow: read this Posts .7z instead of downloading it.
     #[arg(long, value_name = "PATH")]
     pub posts: Option<PathBuf>,
-    /// Stack Overflow: lowest score of a question kept.
+    /// Stack Overflow and other Stack Exchange sites: lowest score of a
+    /// question kept.
     #[arg(
         long,
         value_name = "SCORE",
@@ -551,6 +555,14 @@ pub struct FetchPagesArgs {
     /// Stack Overflow: most questions kept, the most viewed.
     #[arg(long, value_name = "N", default_value_t = 2_000_000)]
     pub max_questions: usize,
+    /// Other Stack Exchange sites: most questions kept of each site, the
+    /// most viewed.
+    #[arg(long, value_name = "N", default_value_t = 100_000)]
+    pub max_per_site: usize,
+    /// Other Stack Exchange sites: delete each site's dump once it is read,
+    /// rather than keeping it for --keep-days.
+    #[arg(long)]
+    pub drop_dumps: bool,
     /// Books: fewest reading log entries and ratings of a book kept.
     #[arg(long, value_name = "N", default_value_t = 3)]
     pub min_shelvings: u32,
