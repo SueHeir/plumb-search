@@ -1332,6 +1332,10 @@ pub fn place_pages(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) -> Ve
     // how big the site is: "mars" means the planet, read many times more
     // than Mars Inc. of mars.com; "napoleon" the emperor, not Napoleon,
     // North Dakota.
+    // An article titled just what was searched for is the one Wikipedia
+    // gives that name to, so being read more at all is enough: on
+    // plumbsearch.org the planet "Mars" was read 1.7 times as much as Mars
+    // Inc. that day.
     // A site that matches the query only a little is no namesake at all:
     // the article "Nikola Tesla" before tesla.com, "Genghis Khan" before
     // khanacademy.org. One the query names by an official name or as a
@@ -1346,7 +1350,14 @@ pub fn place_pages(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) -> Ve
             true
         }
         Some(site) => match site.demand {
-            Some(demand) if page.page.is_article() => page.popularity > demand + DEMAND_MARGIN,
+            Some(demand) if page.page.is_article() => {
+                let margin = if squash(&page.page.title) == query_word {
+                    0.0
+                } else {
+                    DEMAND_MARGIN
+                };
+                page.popularity > demand + margin
+            }
             _ => !site.official && page.popularity > site.link_score,
         },
     };
@@ -1802,8 +1813,12 @@ mod tests {
         assert!(sites[0].demand.is_some());
         assert_eq!(place(&sites), 0);
         // Not when the company is read about as much.
-        sites[0].demand = Some(0.99);
+        sites[0].demand = Some(1.0);
         assert_eq!(place(&sites), 1);
+        // The article Wikipedia calls "Mars" needs only to be read more.
+        let planet = s.search("mars", 5).unwrap()[0].popularity;
+        sites[0].demand = Some(planet - 0.02);
+        assert_eq!(place(&sites), 0);
     }
 
     #[test]
