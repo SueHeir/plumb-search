@@ -7,7 +7,7 @@
 //! again once it is [`REFRESH_AFTER`] old and the other node has a newer
 //! one.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -52,7 +52,9 @@ const FETCH_RETRY_WAIT: Duration = Duration::from_secs(15 * 60);
 /// Runs until the node stops, on a blocking thread.
 pub(super) fn run(inner: Arc<Inner>) {
     let mut failed: Option<(String, Instant)> = None;
-    let mut fetch_failed: Option<Instant> = None;
+    // By set: a set the trusted node lacks, or whose download failed, does
+    // not hold up the others.
+    let mut fetch_failed: HashMap<&'static str, Instant> = HashMap::new();
     let mut places_failed: Option<(String, Instant)> = None;
     let mut kept_whole = HashSet::new();
     while !inner.stopping() {
@@ -82,18 +84,19 @@ pub(super) fn run(inner: Arc<Inner>) {
                 warn!("page set {}: {err:#}", set.id);
             }
         }
-        if fetch_failed.is_none_or(|at| at.elapsed() >= FETCH_RETRY_WAIT) {
-            fetch_failed = None;
-            if let Some(net) = super::network::handle(&inner).cloned() {
-                for &(set, pages) in &counts {
-                    if inner.stopping() {
-                        break;
-                    }
-                    let near = near_of(set, pages);
-                    if let Err(err) = fetch_if_needed(&inner, &net, set, pages, &near) {
-                        warn!("page set {}: {err:#}", set.id);
-                        fetch_failed = Some(Instant::now());
-                    }
+        fetch_failed.retain(|_, at| at.elapsed() < FETCH_RETRY_WAIT);
+        if let Some(net) = super::network::handle(&inner).cloned() {
+            for &(set, pages) in &counts {
+                if inner.stopping() {
+                    break;
+                }
+                if fetch_failed.contains_key(set.id) {
+                    continue;
+                }
+                let near = near_of(set, pages);
+                if let Err(err) = fetch_if_needed(&inner, &net, set, pages, &near) {
+                    warn!("page set {}: {err:#}", set.id);
+                    fetch_failed.insert(set.id, Instant::now());
                 }
             }
         }
