@@ -156,11 +156,11 @@ pub fn save(data: &Path, label: Option<&str>) -> Result<BackupInfo> {
             let _ = std::fs::remove_file(dir.join(oldest.name));
         }
     }
-    Ok(BackupInfo {
-        name: file,
-        created_at: backup.created_at,
-        bytes: bytes.len() as u64,
-    })
+    // As list() describes it: the file's time can be a second past the
+    // backup's own.
+    let (_, info) =
+        info_of(&dir.join(&file), file).with_context(|| format!("reading {}", dir.display()))?;
+    Ok(info)
 }
 
 /// The backups in `DIR/backups/`, newest first.
@@ -168,29 +168,39 @@ pub fn list(data: &Path) -> Vec<BackupInfo> {
     let Ok(entries) = std::fs::read_dir(data.join(DIR_NAME)) else {
         return Vec::new();
     };
-    let mut backups: Vec<BackupInfo> = entries
+    let mut backups: Vec<(std::time::SystemTime, BackupInfo)> = entries
         .filter_map(|entry| entry.ok())
         .filter_map(|entry| {
             let name = entry.file_name().into_string().ok()?;
             if !is_backup_name(&name) {
                 return None;
             }
-            let meta = entry.metadata().ok()?;
-            let created_at = meta
-                .modified()
-                .ok()?
-                .duration_since(std::time::UNIX_EPOCH)
-                .ok()?
-                .as_secs();
-            Some(BackupInfo {
-                name,
-                created_at,
-                bytes: meta.len(),
-            })
+            info_of(&entry.path(), name)
         })
         .collect();
-    backups.sort_by(|a, b| (b.created_at, &b.name).cmp(&(a.created_at, &a.name)));
-    backups
+    // By the full modification time, as backups made in the same second
+    // have names that do not sort by age (`-10` before `-2`, `-2` before
+    // none).
+    backups.sort_by(|(a_time, a), (b_time, b)| (b_time, &b.name).cmp(&(a_time, &a.name)));
+    backups.into_iter().map(|(_, info)| info).collect()
+}
+
+/// When the backup file at `path` was written, and what the panel shows of it.
+fn info_of(path: &Path, name: String) -> Option<(std::time::SystemTime, BackupInfo)> {
+    let meta = std::fs::metadata(path).ok()?;
+    let modified = meta.modified().ok()?;
+    let created_at = modified
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    Some((
+        modified,
+        BackupInfo {
+            name,
+            created_at,
+            bytes: meta.len(),
+        },
+    ))
 }
 
 /// The path of the backup named `name`, when that is a backup's name: no
@@ -285,6 +295,16 @@ mod tests {
         assert!(path_of(Path::new("/d"), "../settings.json").is_none());
         assert!(path_of(Path::new("/d"), "plumb-backup-x/../../a.json").is_none());
         assert!(path_of(Path::new("/d"), "plumb-backup-2026-10-03-120000.json").is_some());
+    }
+
+    #[test]
+    fn the_newest_backup_lists_first_and_as_saved() {
+        let dir = tempfile::tempdir().unwrap();
+        // Within a second or two, so some share a time stamp in their names.
+        for _ in 0..12 {
+            let saved = save(dir.path(), None).unwrap();
+            assert_eq!(list(dir.path())[0], saved);
+        }
     }
 
     #[test]
