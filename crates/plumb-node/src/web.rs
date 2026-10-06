@@ -1008,6 +1008,9 @@ async fn search_page(
                 } else {
                     visitor.ensure_profile();
                 }
+                if editing {
+                    visitor.note_judged(&query, &results.hits, settings.options.country.as_deref());
+                }
                 let mut view = visitor.view();
                 view.tune_bar = tuning.map(|t| t.bar(&settings.options));
                 view.home = settings.options.country.clone();
@@ -5773,7 +5776,8 @@ mod tests {
             "the buttons come back to the round: {body}"
         );
 
-        // Putting a well-known site up teaches that they are liked.
+        // Putting a well-known site up once teaches nothing about well-known
+        // sites yet.
         let back: String = url::form_urlencoded::byte_serialize(first.as_bytes()).collect();
         let response = app()
             .oneshot(
@@ -5794,10 +5798,15 @@ mod tests {
             .unwrap();
         assert_eq!(response.headers()[header::LOCATION], first.as_str());
         let (_, _, done) = send_with_headers(app(), "/tune?done=1", &me).await;
-        assert!(done.contains("You like <strong>well-known sites"), "{done}");
+        assert!(done.contains("Nothing learned yet"), "{done}");
         let (_, _, body) = send_with_headers(app(), "/search?q=denver+bank&country=any", &me).await;
-        assert!(body.contains("You like well-known sites"), "{body}");
+        assert!(!body.contains("You like well-known sites"), "{body}");
         assert!(body.contains("href=\"/tune\""), "{body}");
+        let id = profile.trim_start_matches("plumb_profile=");
+        let learned = crate::history::HistoryStore::new(&node.0).load(id).learned;
+        let judged = learned.judged.expect("results seen in edit mode");
+        assert_eq!(judged.liked, 1.0, "{judged:?}");
+        assert_eq!(judged.pages.len(), 1, "{judged:?}");
         // The round's searches are not kept as past searches.
         let (_, _, history) = send_with_headers(app(), "/history", &me).await;
         assert!(
