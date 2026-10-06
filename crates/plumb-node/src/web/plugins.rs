@@ -87,8 +87,10 @@ async fn act_form(
             .finish()
     );
     let plugins = &state.settings.plugins;
-    let refused = refusal_of(peer(&extensions), &headers, &uri)
-        .or_else(|| (!plugins.accepts(&form.token)).then_some("This button is out of date."));
+    let refused = match refusal_of(peer(&extensions), &headers, &uri) {
+        Some(_) => Some("Buttons work only on the computer Plumb runs on, from its own pages."),
+        None => (!plugins.accepts(&form.token)).then_some("This button is out of date."),
+    };
     let (status, said) = match refused {
         Some(why) => (StatusCode::FORBIDDEN, why.to_string()),
         None => match plugins.act(&form.plugin, &form.data).await {
