@@ -2009,7 +2009,7 @@ select{font:inherit;padding:.15rem .3rem;border:1px solid var(--line);border-rad
 background:var(--bg);color:var(--fg)}\
 .ss{margin:1rem 0 .25rem;padding:.6rem .8rem;border:1px solid var(--line);border-radius:.5rem}\
 .ss a{color:var(--link)}\
-.sp{margin:1rem 0 .25rem}.sp a{color:var(--link)}\
+.sp{margin:1rem 0 .25rem}.sp a{color:var(--link)}.sp .sps{margin-left:.5rem;font-size:.9em}\
 li.news{padding:.6rem .9rem;border:1px solid var(--line);border-radius:.6rem}\
 .news summary{cursor:pointer}\
 .news .nh{font-size:.875rem;font-weight:600}\
@@ -2475,7 +2475,20 @@ fn render_spelling(out: &mut String, spelling: &Spelling, options: &SearchOption
         )),
         escape_html(&truncate_chars(&spelling.query, 150))
     );
-    let _ = writeln!(out, "<p class=\"sp\">Did you mean {fixed}?</p>");
+    // A site the corrected name is, marked as the suggestion's.
+    let site = spelling
+        .site
+        .as_deref()
+        .and_then(|domain| Some((domain, homepage_url(domain)?)))
+        .map(|(domain, url)| {
+            format!(
+                " <a class=\"sps\" href=\"{}\" rel=\"noreferrer\">Go to {}</a>",
+                escape_html(&url),
+                escape_html(domain)
+            )
+        })
+        .unwrap_or_default();
+    let _ = writeln!(out, "<p class=\"sp\">Did you mean {fixed}?{site}</p>");
 }
 
 /// One result as shown: a hit, and what the network said about it when only
@@ -5049,6 +5062,39 @@ mod tests {
     }
 
     #[test]
+    fn a_misspelled_name_offers_its_site_with_the_suggestion() {
+        let results = SearchResults {
+            pages: Vec::new(),
+            hits: vec![scored("youtbue.com", 0.9)],
+            site_search: None,
+            spelling: Some(Spelling {
+                query: "youtube".into(),
+                site: Some("youtube.com".into()),
+            }),
+        };
+        let page = render_results(
+            "youtbue",
+            &results,
+            None,
+            &NetOutcome::NotAsked,
+            &no_settings(),
+            None,
+            10,
+            true,
+            &Icons::default(),
+        );
+        assert!(
+            page.contains(
+                "<strong>youtube</strong></a>? <a class=\"sps\" \
+                 href=\"https://youtube.com/\" rel=\"noreferrer\">Go to youtube.com</a></p>"
+            ),
+            "{page}"
+        );
+        // The results are still for what was typed.
+        assert!(page.contains("/go?q=youtbue&amp;d=youtbue.com"), "{page}");
+    }
+
+    #[test]
     fn typos_are_searched_as_typed_with_a_suggestion() {
         let mut results = SearchResults {
             pages: Vec::new(),
@@ -5056,6 +5102,7 @@ mod tests {
             site_search: None,
             spelling: Some(Spelling {
                 query: "amazon".into(),
+                site: None,
             }),
         };
         let mut settings = no_settings();

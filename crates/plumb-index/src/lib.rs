@@ -258,6 +258,21 @@ pub struct RankConfig {
     /// that does, while youtube.com ("video sharing site") and spotify.com
     /// ("music streaming"), at about 0.04, keep theirs. `None` turns it off.
     pub described_relevance: Option<f32>,
+    /// For a site that has none of the query's words and is found only
+    /// for being near it in meaning, the text match (meaning alone) it
+    /// needs for its popularity to count in full; below it, popularity
+    /// counts in proportion. The nearest sites in meaning include big
+    /// ones the query has nothing to do with ("how to unclog a drain"
+    /// found stripe.com and snapchat.com, at a text match of 0.03 to
+    /// 0.06), which popularity alone would put on the first page. `None`
+    /// turns it off.
+    pub meaning_only_relevance: Option<f32>,
+    /// When the best site is one the query names, sites scoring less than
+    /// this share of its score are left out unless the query names them
+    /// too: what ranks that far below the site searched for is filler
+    /// ("bank of america login" listed apple.com, google.com and
+    /// cloudflare.com, matching none of it). `None` keeps them.
+    pub named_share: Option<f32>,
 }
 
 impl Default for RankConfig {
@@ -275,6 +290,8 @@ impl Default for RankConfig {
             described_alpha: Some(0.5),
             partial_label_bonus: None,
             described_relevance: Some(0.04),
+            meaning_only_relevance: Some(0.35),
+            named_share: Some(0.4),
         }
     }
 }
@@ -399,6 +416,10 @@ pub struct Spelling {
     /// hits are always for the query as typed; this is only a suggestion
     /// ("Did you mean ...?").
     pub query: String,
+    /// The well-known site the corrected spelling names, when the typo was
+    /// in a site's name ("youtbue": youtube.com), offered with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub site: Option<String>,
 }
 
 /// Builds a fresh index of `records` in `dir`, replacing any index already
@@ -897,8 +918,20 @@ impl Searcher {
         if fixed.hits.is_empty() {
             return Ok(results);
         }
+        let site = fixed
+            .hits
+            .first()
+            .filter(|hit| {
+                fix.name_link_score.is_some()
+                    && hit.named
+                    && hit.link_score >= spell::MIN_FIX_LINK_SCORE
+            })
+            .map(|hit| hit.domain.clone());
         Ok(SearchResults {
-            spelling: Some(Spelling { query: fix.query }),
+            spelling: Some(Spelling {
+                query: fix.query,
+                site,
+            }),
             ..results
         })
     }
@@ -1204,10 +1237,13 @@ impl Searcher {
                 .as_ref()
                 .and_then(|domains| domains.term_ords(addr.doc_id).next())
                 .unwrap_or(u64::MAX);
-            let prior = match relevance_floor {
-                Some(floor) if !is_kind && name.words() == 0 => {
+            let unnamed = !is_kind && name.words() == 0;
+            let prior = match (relevance_floor, cfg.meaning_only_relevance) {
+                // No word of the query: only meaning speaks for it.
+                (_, Some(floor)) if unnamed && bm25 <= 0.0 && floor > 0.0 => {
                     link_score * (text_score / floor).min(1.0)
                 }
+                (Some(floor), _) if unnamed => link_score * (text_score / floor).min(1.0),
                 _ => link_score,
             };
             ranked.push(Ranked {
@@ -1228,6 +1264,14 @@ impl Searcher {
                 .then_with(|| b.link_score.total_cmp(&a.link_score))
                 .then_with(|| a.tie_break.cmp(&b.tie_break))
         });
+
+        // Far below a site the query names: filler.
+        if let (Some(share), Some(top)) = (cfg.named_share, ranked.first()) {
+            if top.named && share > 0.0 {
+                let least = top.score * share;
+                ranked.retain(|r| r.named || r.score >= least);
+            }
+        }
 
         // Copies of the site the query names on other top-level domains
         // (gmail.ru, gmail.hu for "gmail"; paypal.biz for "paypal"): never
@@ -2058,6 +2102,14 @@ mod tests {
         record
     }
 
+    /// The default ranking, keeping sites far below a named one.
+    fn keep_all() -> RankConfig {
+        RankConfig {
+            named_share: None,
+            ..RankConfig::default()
+        }
+    }
+
     fn popular(tranco_rank: u32, linking_domains: u32) -> Signals {
         Signals {
             tranco_rank: Some(tranco_rank),
@@ -2356,6 +2408,63 @@ mod tests {
                 .find(|(d, _)| *d == domain)
                 .map(|&(_, closeness)| closeness)
         }
+    }
+
+    #[test]
+    fn big_sites_far_in_meaning_do_not_fill_a_weak_search() {
+        let records = vec![
+            site(
+                "stripe.com",
+                Some("Stripe | Financial Infrastructure"),
+                Some("Online payments for businesses."),
+                &["Stripe"],
+                &[],
+                popular(50, 20_000),
+            ),
+            site(
+                "drainhelp.net",
+                Some("Drain help"),
+                Some("How to unclog a drain with a plunger or a snake."),
+                &[],
+                &[],
+                ranked(400_000, 5),
+            ),
+            site(
+                "plumbers.org",
+                Some("Find a plumber"),
+                None,
+                &[],
+                &[],
+                ranked(200_000, 20),
+            ),
+        ];
+        let (_dir, searcher) = build(&records);
+        let options = SearchOptions::default();
+        // Among the thousand nearest, as every big site is for some query.
+        let meaning = FixedMeaning(vec![
+            ("drainhelp.net", 1.0),
+            ("plumbers.org", 0.3),
+            ("stripe.com", 0.08),
+        ]);
+        let score = |cfg: &RankConfig, domain: &str| {
+            searcher
+                .search_meaning("how to unclog a drain", 10, cfg, &options, Some(&meaning))
+                .unwrap()
+                .hits
+                .into_iter()
+                .find(|hit| hit.domain == domain)
+                .map_or(0.0, |hit| hit.score)
+        };
+        let before = RankConfig {
+            meaning_only_relevance: None,
+            ..RankConfig::default()
+        };
+        // On popularity alone it would have come before the plumbers...
+        assert!(score(&before, "stripe.com") > score(&before, "plumbers.org"));
+        // ...but nothing of the query's speaks for it.
+        let now = RankConfig::default();
+        assert!(score(&now, "stripe.com") < score(&now, "plumbers.org"));
+        assert!(score(&now, "stripe.com") < score(&now, "drainhelp.net"));
     }
 
     #[test]
@@ -3012,14 +3121,19 @@ mod tests {
     #[test]
     fn decoys_rank_below_the_brand() {
         let (_dir, searcher) = build(&corpus());
-        let hits = searcher.search("us bank", 10).unwrap();
+        let hits = searcher.search_with("us bank", 10, &keep_all()).unwrap();
         let found = domains(&hits);
         assert_eq!(found[0], "usbank.com");
-        // The decoys are still decent matches, just not first.
+        // The decoys are still decent matches, just not first...
         assert!(found.contains(&"usbank-login-help.com"), "{found:?}");
         assert!(found.contains(&"usbankreviews.net"), "{found:?}");
+        // ...though far enough below the bank to be left out by default.
+        let hits = searcher.search("us bank", 10).unwrap();
+        assert_eq!(domains(&hits), ["usbank.com"]);
 
-        let hits = searcher.search("bank of america", 10).unwrap();
+        let hits = searcher
+            .search_with("bank of america", 10, &keep_all())
+            .unwrap();
         let found = domains(&hits);
         assert_eq!(found[0], "bankofamerica.com");
         assert!(
@@ -3148,7 +3262,9 @@ mod tests {
             ),
         ];
         let (_dir, searcher) = build(&records);
-        let hits = searcher.search("microsoft outlook", 10).unwrap();
+        let hits = searcher
+            .search_with("microsoft outlook", 10, &keep_all())
+            .unwrap();
         let order = domains(&hits);
         assert!(order.contains(&"outlooktips.org"), "{order:?}");
         assert!(!order.contains(&"bpl.net"), "{order:?}");
@@ -3196,7 +3312,7 @@ mod tests {
             ),
         ];
         let (_dir, searcher) = build(&records);
-        let hits = searcher.search("gmail", 10).unwrap();
+        let hits = searcher.search_with("gmail", 10, &keep_all()).unwrap();
         let order = domains(&hits);
         assert_eq!(order[0], "gmail.com", "{order:?}");
         let at = |d: &str| order.iter().position(|o| *o == d).unwrap();
@@ -3528,7 +3644,9 @@ mod tests {
         assert_eq!(top(&searcher, "github login"), "github.com");
         // No site is named "maple" or "maple street", so the popular bakery
         // does not discount the unranked one.
-        let hits = searcher.search("maple street bakery", 10).unwrap();
+        let hits = searcher
+            .search_with("maple street bakery", 10, &keep_all())
+            .unwrap();
         assert_eq!(
             domains(&hits)[..2],
             ["maplestreetbakery.com", "panerabread.com"]
@@ -3795,7 +3913,7 @@ mod tests {
         assert!(all.len() <= searcher.num_docs() as usize);
         let few_candidates = RankConfig {
             candidates: 0,
-            ..RankConfig::default()
+            ..keep_all()
         };
         let hits = searcher.search_with("us bank", 3, &few_candidates).unwrap();
         assert_eq!(hits.len(), 3);
@@ -4544,10 +4662,13 @@ mod tests {
             .unwrap()
     }
 
-    fn suggested(query: &str) -> Option<Spelling> {
-        Some(Spelling {
-            query: query.to_string(),
-        })
+    /// The query suggested, whatever site comes with it.
+    fn suggested(query: &str) -> Option<String> {
+        Some(query.to_string())
+    }
+
+    fn suggestion(results: &SearchResults) -> Option<String> {
+        results.spelling.as_ref().map(|s| s.query.clone())
     }
 
     #[test]
@@ -4562,7 +4683,7 @@ mod tests {
             ("weather forcast", "weather forecast", "weather.com"),
         ] {
             let results = search_spelled(&searcher, typed);
-            assert_eq!(results.spelling, suggested(fixed), "{typed}");
+            assert_eq!(suggestion(&results), suggested(fixed), "{typed}");
             // The suggestion finds the site.
             let fixed_hits = search_spelled(&searcher, fixed).hits;
             assert_eq!(fixed_hits[0].domain, domain, "{typed}");
@@ -4575,7 +4696,7 @@ mod tests {
         // amazen.com is as near "amazn" as amazon.com, but has nothing to
         // show for itself.
         let results = search_spelled(&searcher, "amazn");
-        assert_eq!(results.spelling, suggested("amazon"));
+        assert_eq!(suggestion(&results), suggested("amazon"));
         let fixed_hits = search_spelled(&searcher, "amazon").hits;
         assert_eq!(domains(&fixed_hits)[0], "amazon.com");
     }
@@ -4596,7 +4717,7 @@ mod tests {
         // A little-known site named exactly is searched as typed, with
         // the far better-known site a letter away offered instead.
         let results = search_spelled(&searcher, "gogle");
-        assert_eq!(results.spelling, suggested("google"));
+        assert_eq!(suggestion(&results), suggested("google"));
         assert_eq!(results.hits[0].domain, "gogle.com");
         // Searching exactly finds it with no suggestion.
         let options = SearchOptions {
@@ -4667,7 +4788,7 @@ mod tests {
             ("fedx", "fedex", "fedex.com"),
         ] {
             let results = search_spelled(&searcher, typed);
-            assert_eq!(results.spelling, suggested(fixed), "{typed}");
+            assert_eq!(suggestion(&results), suggested(fixed), "{typed}");
             // The suggestion finds the site.
             let fixed_hits = search_spelled(&searcher, fixed).hits;
             assert_eq!(fixed_hits[0].domain, domain, "{typed}");

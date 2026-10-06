@@ -1091,6 +1091,11 @@ pub struct PlacedPage {
 
 /// Most site results looked through by [`lift_named_sites`].
 const LIFTED_FROM: usize = 5;
+/// How much better known than a site the whole query names the page's
+/// official site must be to be put above it: global.toyota (0.62) stays
+/// below toyota.com (0.47), aliexpress.com (0.75) goes above aliexpress.us
+/// (0.41).
+const LIFT_LINK_MARGIN: f32 = 0.2;
 
 /// Puts first the official site of the best page the query names, when
 /// it is among the first [`LIFTED_FROM`] sites: what Wikipedia and
@@ -1128,12 +1133,14 @@ pub fn lift_named_sites(sites: &mut [crate::Hit], pages: &[PageHit]) {
     // An official or well-known site named by all of the query stays
     // first: google.com for "google", not about.google, Google's own site
     // in Wikidata. So does any site named by all of it when the page's
-    // site is too: both are names of what was searched for, and the
-    // ranking already weighed them, so toyota.com stays above
-    // global.toyota for "toyota".
+    // site is too and is not far better known: both are names of what was
+    // searched for, and the ranking already weighed them, so toyota.com
+    // stays above global.toyota for "toyota". aliexpress.us, though, does
+    // not stay above aliexpress.com, which far more sites link to.
+    let about_as_known = sites[0].link_score + LIFT_LINK_MARGIN >= sites[at].link_score;
     if at > 0
         && sites[0].named
-        && (sites[at].named
+        && ((sites[at].named && about_as_known)
             || sites[0].official
             || sites[0].link_score >= crate::WELL_KNOWN_LINK_SCORE)
     {
@@ -1755,6 +1762,16 @@ mod tests {
         maker.page.item = Some("Q53268".into());
         lift_named_sites(&mut sites, &[maker]);
         assert_eq!(sites[0].domain, "toyota.com");
+        // Far less well known than the official site, which both are named
+        // by the query: the official site goes first.
+        let us = known_site("aliexpress.us", true, 0.41);
+        let mut com = known_site("aliexpress.com", true, 0.75);
+        com.official = true;
+        let mut sites = vec![us, com];
+        let mut shop = found("AliExpress", Some("aliexpress.com"), true, 0.9);
+        shop.page.item = Some("Q2647593".into());
+        lift_named_sites(&mut sites, &[shop]);
+        assert_eq!(sites[0].domain, "aliexpress.com");
         // Less well known than global.toyota, but scored higher, and both
         // are named by "toyota".
         let toyota = known_site("toyota.com", true, 0.47);
