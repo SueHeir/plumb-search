@@ -1343,9 +1343,10 @@ impl Searcher {
 
         // Left out unless the query names them: sites on names reserved
         // for tests (uniteddolls.test), online pill shops named after a
-        // drug ("ibuprofen dosage" found celebrex365o24.com), and homepages that are only a
-        // company's sign-in page for someone else's product ("Outlook Web
-        // App" on bpl.net for "microsoft outlook").
+        // drug ("ibuprofen dosage" found celebrex365o24.com), and little
+        // known homepages that are only a company's sign-in page for
+        // someone else's product ("Outlook Web App" on bpl.net for
+        // "microsoft outlook"). live.com, titled "Outlook", is Microsoft's.
         let ranked = self.untitled_last(&searcher, ranked, limit)?;
         let mut hits = Vec::with_capacity(limit.min(ranked.len()));
         for ranked in ranked {
@@ -1356,10 +1357,11 @@ impl Searcher {
             let hit = self.hit(&searcher, ranked)?;
             let left_out = is_reserved_name(&hit.domain)
                 || is_pill_shop(&hit.domain, hit.link_score)
-                || hit
-                    .title
-                    .as_deref()
-                    .is_some_and(|title| plumb_core::is_sign_in_portal(&hit.domain, title));
+                || (hit.link_score < WELL_KNOWN_LINK_SCORE
+                    && hit
+                        .title
+                        .as_deref()
+                        .is_some_and(|title| plumb_core::is_sign_in_portal(&hit.domain, title)));
             if named || !left_out {
                 hits.push(hit);
             }
@@ -1391,6 +1393,21 @@ impl Searcher {
         Ok(false)
     }
 
+    /// Whether the site has other names (from Wikidata or a redirect),
+    /// which stand in for a missing title.
+    fn has_aliases(&self, searcher: &tantivy::Searcher, addr: DocAddress) -> Result<bool> {
+        let segment = searcher.segment_reader(addr.segment_ord);
+        Ok(
+            match segment
+                .fieldnorms_readers()
+                .get_field(self.fields.aliases)?
+            {
+                Some(norms) => norms.fieldnorm(addr.doc_id) > 0,
+                None => false,
+            },
+        )
+    }
+
     /// A link into the search of the site `domain` for `terms`, if the
     /// index has the site and it has a search address.
     fn site_search_of(&self, domain: &str, terms: &str) -> Result<Option<SiteSearch>> {
@@ -1411,7 +1428,8 @@ impl Searcher {
     /// query of two or more words: awesome-python.com for "awesome python"
     /// is what was asked for, titled or not. A site that Wikidata or its
     /// description says what it is, never crawled or not, is not bare
-    /// either: vanguard.com for "vanguard". Nor is a site that scores
+    /// either, nor is one with another name to show for a title
+    /// (cars.com for "used cars"): vanguard.com for "vanguard". Nor is a site that scores
     /// within [`UNTITLED_CLOSE_SHARE`] of the first.
     fn untitled_last(
         &self,
@@ -1432,7 +1450,8 @@ impl Searcher {
                 && !site.label_names_query
                 && site.link_score < WELL_KNOWN_LINK_SCORE
                 && site.score < close
-                && !self.says_what_it_is(searcher, site.addr)?;
+                && !self.says_what_it_is(searcher, site.addr)?
+                && !self.has_aliases(searcher, site.addr)?;
             if untitled {
                 bare.push(site);
             } else {
@@ -3565,6 +3584,15 @@ mod tests {
                 &[],
                 obscure(30_000, 2),
             ),
+            // Microsoft's own, titled for its product.
+            site(
+                "live.com",
+                Some("Outlook"),
+                None,
+                &[],
+                &[],
+                popular(60, 3_000),
+            ),
             site(
                 "outlook.test",
                 Some("Microsoft Outlook"),
@@ -3580,6 +3608,7 @@ mod tests {
             .unwrap();
         let order = domains(&hits);
         assert!(order.contains(&"outlooktips.org"), "{order:?}");
+        assert!(order.contains(&"live.com"), "{order:?}");
         assert!(!order.contains(&"bpl.net"), "{order:?}");
         assert!(!order.contains(&"outlook.test"), "{order:?}");
         assert!(!order.contains(&"celebrex365o24.com"), "{order:?}");
