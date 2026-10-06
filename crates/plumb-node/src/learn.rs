@@ -38,9 +38,9 @@ pub const FOLD_BELOW: f32 = 0.2;
 /// "Recent" headlines read at least this often are unfolded.
 pub const OPEN_FROM: f32 = 0.5;
 /// Most box counts kept; the ones seen longest ago go first.
-const MAX_BLOCK_COUNTS: usize = 400;
+pub(crate) const MAX_BLOCK_COUNTS: usize = 400;
 /// Most site counts kept.
-const MAX_SITE_COUNTS: usize = 300;
+pub(crate) const MAX_SITE_COUNTS: usize = 300;
 /// Results pages remembered, to tell which box or site was opened.
 const MAX_SHOWN: usize = 30;
 /// Results remembered per page, best first.
@@ -57,7 +57,7 @@ const MAX_WORDS: usize = 8;
 pub const VERDICT_UP: f32 = 0.4;
 pub const VERDICT_DOWN: f32 = -0.3;
 /// Most verdicts kept, of each kind.
-const MAX_VERDICTS: usize = 500;
+pub(crate) const MAX_VERDICTS: usize = 500;
 
 /// A box of the results page that is learned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
