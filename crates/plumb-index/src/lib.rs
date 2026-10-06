@@ -146,6 +146,9 @@ const NEAREST_POPULAR: usize = 50;
 /// How many results past the ones asked for may move up over a site with
 /// no title ([`Searcher::untitled_last`]).
 const UNTITLED_LOOKAHEAD: usize = 20;
+/// Share of the first result's score a site with no title needs to keep
+/// its place anyway ([`Searcher::untitled_last`]).
+const UNTITLED_CLOSE_SHARE: f32 = 0.9;
 /// Most distinct query words used; the rest are ignored.
 const MAX_QUERY_WORDS: usize = 16;
 /// A query with operators ranks this many times its limit, and at least
@@ -1403,7 +1406,10 @@ impl Searcher {
     /// query's name: netflix.net for "netflix". The first result keeps its
     /// place, title or not, and so does a site whose label is the whole
     /// query of two or more words: awesome-python.com for "awesome python"
-    /// is what was asked for, titled or not.
+    /// is what was asked for, titled or not. A site that Wikidata or its
+    /// description says what it is, never crawled or not, is not bare
+    /// either: vanguard.com for "vanguard". Nor is a site that scores
+    /// within [`UNTITLED_CLOSE_SHARE`] of the first.
     fn untitled_last(
         &self,
         searcher: &tantivy::Searcher,
@@ -1415,14 +1421,15 @@ impl Searcher {
             return Ok(ranked);
         }
         let rest = ranked.split_off(window);
+        let close = ranked[0].score * UNTITLED_CLOSE_SHARE;
         let mut titled = Vec::with_capacity(rest.len() + window);
         let mut bare = Vec::new();
         for (i, site) in ranked.into_iter().enumerate() {
-            let untitled =
-                i > 0 && !site.label_names_query && site.link_score < WELL_KNOWN_LINK_SCORE && {
-                    let doc: TantivyDocument = searcher.doc(site.addr)?;
-                    doc.get_first(self.fields.title).is_none()
-                };
+            let untitled = i > 0
+                && !site.label_names_query
+                && site.link_score < WELL_KNOWN_LINK_SCORE
+                && site.score < close
+                && !self.says_what_it_is(searcher, site.addr)?;
             if untitled {
                 bare.push(site);
             } else {
@@ -2430,6 +2437,45 @@ mod tests {
         // Bare domains still come back when nothing titled is left.
         let hits = searcher.search_with("netflix", 2, &keep_all()).unwrap();
         assert_eq!(domains(&hits), ["netflix.com", "netflixfans.org"]);
+    }
+
+    #[test]
+    fn a_site_said_what_it_is_keeps_its_place_without_a_title() {
+        let records = [
+            site(
+                "vanguard.edu",
+                Some("Vanguard University"),
+                None,
+                &["Vanguard University"],
+                &[],
+                popular(40_000, 250),
+            ),
+            // Never crawled, but Wikidata says what it is.
+            site(
+                "vanguard.com",
+                None,
+                Some("American investment management company"),
+                &[],
+                &[],
+                ranked(30_000, 300),
+            ),
+            site(
+                "vanguardmil.com",
+                Some("Vanguard Industries military insignia"),
+                None,
+                &[],
+                &[],
+                obscure(200_000, 10),
+            ),
+        ];
+        let (_dir, searcher) = build(&records);
+        let hits = searcher.search_with("vanguard", 10, &keep_all()).unwrap();
+        let at = |domain: &str| domains(&hits).iter().position(|d| *d == domain);
+        assert!(
+            at("vanguard.com") < at("vanguardmil.com"),
+            "{:?}",
+            domains(&hits)
+        );
     }
 
     #[test]
