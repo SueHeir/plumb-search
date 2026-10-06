@@ -14,30 +14,33 @@ use crate::records::load_records;
 pub fn run_index(args: IndexArgs) -> Result<()> {
     // Read a record at a time when the file holds each site once, under
     // its canonical domain, as files written by plumb do: a whole set takes
-    // gigabytes. A journal next to it, of a crawl that was cut short, is
-    // left to loading to replay: this never changes the file.
-    if !crate::records::journal_path(&args.records).exists() {
-        let outlines = crate::outline::outline(&args.records)
-            .with_context(|| format!("reading records {}", args.records.display()))?;
-        if let Some(outlines) = outlines {
-            let built = crate::outline::build_index(
-                &args.records,
-                outlines,
-                &args.index,
-                None,
-                0,
-                &mut |_| Ok(()),
-            )
-            .with_context(|| format!("building the index in {}", args.index.display()))?;
-            println!(
-                "indexed {} sites from {} into {}",
-                built.docs,
-                args.records.display(),
-                args.index.display()
-            );
-            return Ok(());
-        }
+    // gigabytes. This never changes the file: a journal next to it, of a
+    // node's crawl, is folded into a copy that is removed when done.
+    let dir = match args.records.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => std::path::Path::new("."),
+    };
+    let copy = tempfile::Builder::new()
+        .prefix(".plumb-index-")
+        .suffix(".jsonl")
+        .tempfile_in(dir)
+        .with_context(|| format!("making a file in {}", dir.display()))?
+        .into_temp_path();
+    let outlines = crate::outline::outline_copy(&args.records, &copy)
+        .with_context(|| format!("reading records {}", args.records.display()))?;
+    if let Some((records, outlines)) = outlines {
+        let built =
+            crate::outline::build_index(records, outlines, &args.index, None, 0, &mut |_| Ok(()))
+                .with_context(|| format!("building the index in {}", args.index.display()))?;
+        println!(
+            "indexed {} sites from {} into {}",
+            built.docs,
+            args.records.display(),
+            args.index.display()
+        );
+        return Ok(());
     }
+    drop(copy);
     // Merging makes hand-made or concatenated files safe to index too.
     let records = load_records(&args.records)
         .with_context(|| format!("loading records {}", args.records.display()))?
