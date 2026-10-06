@@ -200,6 +200,8 @@ plumb try-plugin --plugin plugins/hacker-news hn rust async
 This runs it once in the same sandbox and prints what it found as JSON, or why
 it found nothing. Give it a page's address to try a page lookup, and
 `--act '<data>'` (an action's `data` from its results) to press a button.
+`--annotate results.json` has it mark up results instead: a JSON list of
+results as a node shows them (`{"id", "url", "title", "site", "about"}`).
 
 ## Write a plugin
 

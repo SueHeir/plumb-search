@@ -4106,6 +4106,94 @@ mod tests {
     }
 
     #[test]
+    fn plugins_are_shown_what_articles_are_about_and_mark_them_up() {
+        use plumb_index::pages::{Page, PlacedPage};
+        let url = "https://en.wikipedia.org/wiki/But_I%27m_a_Cheerleader";
+        let article = PageHit {
+            page: Page {
+                set: "wikipedia-en".into(),
+                url: url.into(),
+                title: "But I'm a Cheerleader".into(),
+                description: Some("1999 film by Jamie Babbit".into()),
+                site: None,
+                views: 1000,
+                aliases: Vec::new(),
+                item: Some("Q1257599".into()),
+                profiles: Vec::new(),
+                website: None,
+                package: None,
+            },
+            score: 1.0,
+            named: true,
+            popularity: 0.5,
+            whole: false,
+        };
+        let results = SearchResults {
+            pages: vec![PlacedPage {
+                hit: article,
+                under: None,
+                at: 0,
+            }],
+            hits: vec![scored("cheerz.com", 0.5)],
+            site_search: None,
+            spelling: None,
+        };
+        let shown = shown_results(&results, 10);
+        assert_eq!(shown.len(), 2);
+        assert_eq!(shown[0].site, "cheerz.com");
+        assert!(shown[0].about.is_none());
+        assert_eq!(shown[1].url, url);
+        let about = shown[1].about.as_ref().unwrap();
+        assert_eq!(about.wikidata.as_deref(), Some("Q1257599"));
+        assert_eq!(
+            about.description.as_deref(),
+            Some("1999 film by Jamie Babbit")
+        );
+
+        let mut extras = answers::Extras {
+            plugin_token: Some("t0k".into()),
+            ..answers::Extras::default()
+        };
+        extras.plugin_notes.insert(
+            url.into(),
+            vec![crate::plugins::ResultNote {
+                plugin: "shelf".into(),
+                name: "Shelf".into(),
+                badge: Some("Not in library".into()),
+                actions: vec![crate::plugins::PluginAction {
+                    label: "Add".into(),
+                    data: r#"{"id":1}"#.into(),
+                }],
+                hide: false,
+            }],
+        );
+        let render = |extras: &answers::Extras| {
+            render_results(
+                "but i'm a cheerleader",
+                &results,
+                Some(extras),
+                &NetOutcome::NotAsked,
+                &no_settings(),
+                None,
+                10,
+                false,
+                &Icons::default(),
+            )
+        };
+        let page = render(&extras);
+        let article = page.find("<li class=\"pg\">").expect("the article");
+        let marked = &page[article..];
+        assert!(marked.contains("Shelf: Not in library"), "{page}");
+        assert!(marked.contains("name=\"data\" value=\"{&quot;id&quot;:1}\""));
+        assert!(marked.contains("<button type=\"submit\">Add</button>"));
+        // Hidden, it is gone.
+        extras.plugin_notes.get_mut(url).unwrap()[0].hide = true;
+        let page = render(&extras);
+        assert!(!page.contains("<li class=\"pg\">"));
+        assert!(page.contains("cheerz.com"));
+    }
+
+    #[test]
     fn the_part_of_a_site_the_query_names_comes_first() {
         use plumb_index::pages::Page;
         let article = PageHit {

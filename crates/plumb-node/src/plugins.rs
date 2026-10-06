@@ -1483,8 +1483,14 @@ impl Plugin {
 
 /// `plumb try-plugin`: runs the plugin in folder `dir` on `query` and
 /// prints its results as JSON; with `act`, presses a button with that
-/// data instead and prints what the plugin said.
-pub fn try_plugin(dir: &Path, query: &str, act: Option<&str>) -> Result<()> {
+/// data instead and prints what the plugin said; with `annotate`, a file
+/// of results as a node shows them, prints its notes on them.
+pub fn try_plugin(
+    dir: &Path,
+    query: &str,
+    act: Option<&str>,
+    annotate: Option<&Path>,
+) -> Result<()> {
     let plugin = Plugin::load(dir)?;
     let runtime = tokio::runtime::Runtime::new().context("starting the runtime")?;
     if let Some(data) = act {
@@ -1496,6 +1502,19 @@ pub fn try_plugin(dir: &Path, query: &str, act: Option<&str>) -> Result<()> {
             .unwrap_or_default();
         let message = runtime.block_on(plugins.act(&id, data))?;
         println!("{message}");
+        return Ok(());
+    }
+    if let Some(path) = annotate {
+        if !plugin.annotates {
+            bail!("the plugin does not mark up results (it has no plumb_annotate)");
+        }
+        let shown: Vec<ShownResult> = serde_json::from_slice(
+            &std::fs::read(path).with_context(|| format!("reading {}", path.display()))?,
+        )
+        .with_context(|| format!("reading {}", path.display()))?;
+        let plugins = Plugins::new(vec![plugin]);
+        let notes = runtime.block_on(plugins.annotate(query, &shown));
+        println!("{}", serde_json::to_string_pretty(&notes)?);
         return Ok(());
     }
     let items = runtime.block_on(Arc::new(plugin).try_query(query))?;
