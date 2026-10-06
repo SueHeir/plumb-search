@@ -66,6 +66,18 @@ pub trait BucketSource: Send + Sync + 'static {
         let _ = set;
         None
     }
+
+    /// Answers `peer` about a searcher's profile it shares with this node
+    /// (see [`crate::proto::ProfileRequest`]). Refused unless the node keeps
+    /// profiles.
+    fn profile(
+        &self,
+        peer: libp2p::PeerId,
+        request: crate::proto::ProfileRequest,
+    ) -> crate::proto::ProfileResponse {
+        let _ = (peer, request);
+        crate::proto::ProfileResponse::Refused("this node keeps no profiles".into())
+    }
 }
 
 /// A node's buckets on disk, written next to an index and never changed.

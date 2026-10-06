@@ -2425,3 +2425,130 @@ async fn a_new_node_that_trusts_no_one_still_sets_up_from_the_seed_downloads() {
     assert!(error.contains("Tranco"), "{error}");
     node.shutdown().await.unwrap();
 }
+
+/// An HTTP/1.1 request with a cookie and, for a POST, a form: the status
+/// code, the head (lowercased) and the body.
+async fn send(
+    addr: SocketAddr,
+    method: &str,
+    path: &str,
+    cookie: &str,
+    form: &str,
+) -> (u16, String, String) {
+    let mut stream = TcpStream::connect(addr).await.unwrap();
+    let request = format!(
+        "{method} {path} HTTP/1.1\r\nHost: {addr}\r\nCookie: {cookie}\r\n\
+         Content-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\n\
+         Connection: close\r\n\r\n{form}",
+        form.len()
+    );
+    stream.write_all(request.as_bytes()).await.unwrap();
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).await.unwrap();
+    let response = String::from_utf8(response).unwrap();
+    let (head, body) = response.split_once("\r\n\r\n").unwrap();
+    let code = head.split(' ').nth(1).unwrap().parse().unwrap();
+    (code, head.to_ascii_lowercase(), body.to_string())
+}
+
+/// The profile cookie a response sets, if it sets one.
+fn profile_cookie(head: &str) -> Option<String> {
+    let start = head.find("plumb_profile=")? + "plumb_profile=".len();
+    Some(head[start..start + 32].to_string())
+}
+
+/// A searcher's other node, keeping its profiles in a folder.
+struct ProfileFolder(PathBuf);
+
+impl plumb_net::BucketSource for ProfileFolder {
+    fn bucket(&self, _bucket: u32) -> Option<Vec<String>> {
+        None
+    }
+
+    fn profile(
+        &self,
+        peer: plumb_net::PeerId,
+        request: plumb_net::proto::ProfileRequest,
+    ) -> plumb_net::proto::ProfileResponse {
+        crate::sync::answer(&self.0, peer, request)
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_browser_takes_a_profile_from_another_node_with_a_link_code() {
+    // The other node's browser searched github.
+    let peer_dir = tempfile::tempdir().unwrap();
+    let peer_id = plumb_net::load_or_create_key(&peer_dir.path().join("node.key"))
+        .unwrap()
+        .public()
+        .to_peer_id();
+    let profiles = peer_dir.path().join("history");
+    let theirs = crate::history::HistoryStore::new(&profiles);
+    let p = crate::history::new_profile().unwrap();
+    theirs.update(&p, |h| h.add_search("github", 1)).unwrap();
+    let mut peer_config = plumb_net::NetConfig::new(peer_dir.path().to_path_buf());
+    peer_config.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+    peer_config.upnp = false;
+    peer_config.local_discovery = false;
+    peer_config.round_every = None;
+    let (peer, _records) = plumb_net::start(peer_config, Arc::new(ProfileFolder(profiles)))
+        .await
+        .unwrap();
+    let peer_addr: plumb_net::Multiaddr = loop {
+        if let Some(addr) = peer.status().listening.first() {
+            break addr.parse().unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+
+    let dir = seeded_dir();
+    let mut config = test_config(dir.path());
+    config.search_history = true;
+    let mut net = plumb_net::NetConfig::new(PathBuf::new());
+    net.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+    net.upnp = false;
+    net.local_discovery = false;
+    net.round_every = None;
+    net.fill = false;
+    net.bootstrap = vec![peer_addr.with_p2p(peer_id).unwrap()];
+    config.network = Some(net);
+    let node = start(config).await.unwrap();
+    let addr = node.addr();
+    wait_for(addr, "the first index", ready_and_idle).await;
+
+    // This node's browser searched chase, then pastes the other's code.
+    let (_, head, _) = send(addr, "GET", "/search?q=chase", "", "").await;
+    let q = profile_cookie(&head).expect("a profile for the search");
+    let code = crate::sync::format_code(&crate::sync::make_code(&p).unwrap(), Some(&peer_id));
+    let form = format!("code={}", code.replace('@', "%40"));
+    let (status, head, body) = send(
+        addr,
+        "POST",
+        "/link/join",
+        &format!("plumb_profile={q}"),
+        &form,
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("Done."), "{body}");
+    assert_eq!(profile_cookie(&head).as_deref(), Some(p.as_str()));
+
+    // Both searches are on both nodes now.
+    let (_, _, history) = send(addr, "GET", "/history", &format!("plumb_profile={p}"), "").await;
+    assert!(
+        history.contains("github") && history.contains("chase"),
+        "{history}"
+    );
+    let searches: Vec<String> = theirs
+        .load(&p)
+        .searches
+        .into_iter()
+        .map(|s| s.query)
+        .collect();
+    assert_eq!(searches, ["chase", "github"]);
+    let (_, _, page) = send(addr, "GET", "/link", &format!("plumb_profile={p}"), "").await;
+    assert!(page.contains("synced"), "{page}");
+
+    peer.shutdown().await;
+    node.shutdown().await.unwrap();
+}

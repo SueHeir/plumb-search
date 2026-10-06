@@ -428,6 +428,23 @@ impl AboutStore {
             .with_context(|| format!("creating {}", self.dir.display()))?;
         crate::node::store::write_atomically(&path, &serde_json::to_vec(about)?)
     }
+
+    /// Changes the profile of `profile` with `change` and saves it, one
+    /// change at a time; an empty one is deleted.
+    pub fn update(&self, profile: &str, change: impl FnOnce(&mut About)) -> Result<()> {
+        let Some(path) = self.path(profile) else {
+            anyhow::bail!("not a profile id: {profile:?}");
+        };
+        let _writing = WRITING.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut about = read(&path).unwrap_or_default();
+        change(&mut about);
+        if about.is_empty() {
+            return remove(&path);
+        }
+        fs::create_dir_all(&self.dir)
+            .with_context(|| format!("creating {}", self.dir.display()))?;
+        crate::node::store::write_atomically(&path, &serde_json::to_vec(&about)?)
+    }
 }
 
 fn remove(path: &Path) -> Result<()> {

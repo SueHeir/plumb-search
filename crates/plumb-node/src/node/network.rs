@@ -152,6 +152,28 @@ impl BucketSource for ServedIndex {
     fn page_set_file(&self, set: &str) -> Option<PathBuf> {
         crate::pages::SetInfo::find(set)?.servable_file(&self.0.paths.data)
     }
+
+    fn profile(
+        &self,
+        peer: plumb_net::PeerId,
+        request: plumb_net::proto::ProfileRequest,
+    ) -> plumb_net::proto::ProfileResponse {
+        match profiles_dir(&self.0) {
+            Some(dir) => crate::sync::answer(&dir, peer, request),
+            None => plumb_net::proto::ProfileResponse::Refused(
+                "this node keeps no search profiles".into(),
+            ),
+        }
+    }
+}
+
+/// Where the node keeps its searchers' profiles, when it keeps them (see
+/// [`crate::history`]).
+fn profiles_dir(inner: &Inner) -> Option<PathBuf> {
+    inner
+        .config
+        .search_history
+        .then(|| inner.paths.data.join("history"))
 }
 
 /// Whether this node's indexes need buckets: it answers other nodes'
@@ -219,7 +241,11 @@ pub(super) async fn start(inner: &Arc<Inner>) -> Result<()> {
         "Joined the Plumb network as node {}",
         handle.peer_id()
     ));
-    let _ = inner.net.set(Arc::new(handle));
+    let handle = Arc::new(handle);
+    let _ = inner.net.set(handle.clone());
+    if let Some(dir) = profiles_dir(inner) {
+        tokio::spawn(crate::sync::run(dir, handle));
+    }
     if inner.config.share_popularity {
         let picks = PickLog::open(&inner.paths.net.join(PICKS_FILE));
         *inner
