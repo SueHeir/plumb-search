@@ -899,9 +899,20 @@ pub struct EvalArgs {
     #[arg(long, value_name = "DIR")]
     pub index: PathBuf,
     /// Queries file: `query<TAB>expected_domain[,another_ok_domain]` per line;
-    /// blank lines and lines starting with `#` are skipped.
+    /// blank lines and lines starting with `#` are skipped. Can be given
+    /// more than once; each file is measured on its own.
+    #[arg(long, value_name = "TSV", required = true)]
+    pub queries: Vec<PathBuf>,
+    /// Try several rankings in one run: a file of `name<TAB>{"knob": value}`
+    /// lines, each changing knobs of the ranking --rank gives. Prints one
+    /// table of every queries file under every ranking, and which queries
+    /// each one moved, against the ranking unchanged ("base").
     #[arg(long, value_name = "TSV")]
-    pub queries: PathBuf,
+    pub sweep: Option<PathBuf>,
+    /// With --sweep, also write every query's rank under every ranking to
+    /// this TSV file (`variant suite line query rank`, 0 when not found).
+    #[arg(long, value_name = "PATH", requires = "sweep")]
+    pub ranks_out: Option<PathBuf>,
     /// Results fetched per query; an expected site further down counts as not found.
     #[arg(long, value_name = "N", default_value_t = 10, value_parser = parse_positive)]
     pub limit: usize,

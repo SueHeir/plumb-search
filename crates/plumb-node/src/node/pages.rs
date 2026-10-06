@@ -518,6 +518,9 @@ pub(super) fn add_pages(
         Ok(mut found) => {
             found.retain(|hit| options_allow(options, &hit.page));
             lift_named_sites(&mut results.hits, &found);
+            if let Err(err) = searcher.note_demand(&mut results.hits) {
+                warn!("reading what sites' articles are read: {err:#}");
+            }
             // A query that names a package or a page, or asks a question
             // in full, is spelled right: "serde crate" is not "serde
             // create", and "git undo last commit" is not "git und".

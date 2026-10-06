@@ -370,6 +370,11 @@ pub struct Hit {
     /// listing under it when it is the site searched for.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub key_pages: Vec<KeyPage>,
+    /// How much the Wikipedia article about what the site is gets read, as
+    /// [`pages::PageHit::popularity`], when a page index says
+    /// ([`pages::PageSearcher::note_demand`]); see [`pages::place_pages`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub demand: Option<f32>,
 }
 
 /// Per-search choices of the person searching.
@@ -1634,6 +1639,7 @@ impl Searcher {
         let url = text(self.fields.url).unwrap_or_else(|| format!("https://{domain}/"));
         let about = text(self.fields.about);
         Ok(Hit {
+            demand: None,
             url,
             title: text(self.fields.title),
             official: about.is_some(),
