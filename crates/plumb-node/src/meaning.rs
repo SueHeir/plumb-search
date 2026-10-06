@@ -277,6 +277,73 @@ pub(crate) fn sites_to_embed(vectors: &RwLock<Vectors>, records: RecordSet) -> V
     todo
 }
 
+/// [`sites_to_embed`] for a node, reading the records file at `path` a
+/// record at a time (its journal folded in first, see [`crate::outline`])
+/// rather than holding every record: drops the vectors of sites not in the
+/// file and returns the best `max` sites to embed, best first, and whether
+/// more wait for a vector. The text of each site to embed is held until it
+/// is embedded, so a node takes them `max` at a time.
+pub(crate) fn sites_to_embed_from_file(
+    vectors: &RwLock<Vectors>,
+    path: &Path,
+    max: usize,
+) -> Result<(Vec<ToEmbed>, bool)> {
+    let max = max.max(1);
+    crate::outline::fold_journal(path)?;
+    let mut domains: HashSet<u64> = HashSet::new();
+    let mut todo: Vec<ToEmbed> = Vec::new();
+    let mut more = false;
+    let mut total = 0usize;
+    let best_first = |a: &ToEmbed, b: &ToEmbed| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(&b.1));
+    {
+        let held = vectors.read().unwrap_or_else(PoisonError::into_inner);
+        crate::outline::for_each_record(path, |record| {
+            total += 1;
+            domains.insert(domain_hash(&record.domain));
+            let text = site_text(&record);
+            if text.is_empty() {
+                return;
+            }
+            let hash = text_hash(&text);
+            if held.get(&record.domain).map(|(saved, _)| saved) != Some(&hash) {
+                todo.push((record.link_score(), record.domain, hash, text));
+                if todo.len() >= 2 * max {
+                    todo.select_nth_unstable_by(max, best_first);
+                    todo.truncate(max);
+                    more = true;
+                }
+            }
+        })?;
+    }
+    if todo.len() > max {
+        todo.select_nth_unstable_by(max, best_first);
+        todo.truncate(max);
+        more = true;
+    }
+    vectors
+        .write()
+        .unwrap_or_else(PoisonError::into_inner)
+        .retain(|domain| domains.contains(&domain_hash(domain)));
+    // The most popular sites first, as sites_to_embed orders them.
+    todo.sort_by(best_first);
+    todo.shrink_to_fit();
+    info!(
+        "{}{} of {total} sites need a vector ({} have one)",
+        if more { "the best " } else { "" },
+        todo.len(),
+        vectors.read().unwrap_or_else(PoisonError::into_inner).len()
+    );
+    Ok((todo, more))
+}
+
+/// A 64-bit hash of `domain`, the same in every run.
+fn domain_hash(domain: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::hash::DefaultHasher::new();
+    domain.hash(&mut hasher);
+    hasher.finish()
+}
+
 /// The second half of [`embed_records`]: embeds `todo`.
 pub(crate) fn embed_sites(
     embedder: &Embedder,

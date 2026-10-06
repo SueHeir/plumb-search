@@ -116,6 +116,7 @@ mod network;
 mod news;
 mod pages;
 mod places;
+mod round;
 pub mod schedule;
 pub(crate) mod store;
 mod trim;

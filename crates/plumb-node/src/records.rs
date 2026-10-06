@@ -7,8 +7,8 @@
 //! to the file (`records.jsonl` -> `records.jsonl.journal`), flushed to disk
 //! before the crawl goes on, and folds the journal into the file
 //! ([`RecordStore::compact`]) only once the journal has grown to a quarter of
-//! the file's size (and at least [`MIN_COMPACT_BYTES`]), and when `plumb
-//! crawl` ends. [`load_records`] replays a journal it finds, so whatever an
+//! the file's size (at least [`MIN_COMPACT_BYTES`], at most
+//! [`MAX_JOURNAL_BYTES`]), and when `plumb crawl` ends. [`load_records`] replays a journal it finds, so whatever an
 //! interrupted crawl saved is kept.
 //!
 //! The file is always replaced whole and atomically, by way of a temporary
@@ -32,6 +32,11 @@ use crate::{sync_parent_dir, write_records_atomically};
 /// A journal smaller than this is never folded into its file, however
 /// small the file.
 pub(crate) const MIN_COMPACT_BYTES: u64 = 64 << 20;
+
+/// A journal this big is folded into its file however big the file:
+/// folding it a record at a time ([`RecordStore::fold`]) holds the
+/// journal's changes in memory, about twice its size.
+pub(crate) const MAX_JOURNAL_BYTES: u64 = 128 << 20;
 
 /// One change a crawl makes to a set of records, as saved in a journal (one
 /// JSON object per line, tagged by `op`).
@@ -304,7 +309,10 @@ impl RecordStore {
     /// Whether the journal has grown enough to be folded into the file.
     pub(crate) fn wants_compaction(&self) -> bool {
         self.journal_bytes > 0
-            && self.journal_bytes >= self.min_compact_bytes.max(self.file_bytes / 4)
+            && self.journal_bytes
+                >= self
+                    .min_compact_bytes
+                    .max((self.file_bytes / 4).min(MAX_JOURNAL_BYTES))
     }
 
     /// Writes every record of `set` to the file, best link score first,
@@ -314,6 +322,17 @@ impl RecordStore {
         self.journal = None;
         let written = replace_records(&self.path, sorted_by_link_score(set))?;
         self.journal_bytes = 0;
+        self.file_bytes = file_len(&self.path);
+        Ok(written)
+    }
+
+    /// Folds the journal into the file a record at a time, without the set
+    /// ([`crate::outline::fold_journal`]).
+    pub(crate) fn fold(&mut self) -> Result<crate::outline::Folded> {
+        // Closed first: Windows cannot delete a file that is open.
+        self.journal = None;
+        let written = crate::outline::fold_journal(&self.path)?;
+        self.journal_bytes = file_len(&self.journal_path);
         self.file_bytes = file_len(&self.path);
         Ok(written)
     }
@@ -648,6 +667,13 @@ mod tests {
         // Also when that quarter is less than the minimum.
         store.set_min_compact_bytes(MIN_COMPACT_BYTES);
         assert!(!store.wants_compaction());
+        // A quarter of a big file is more than a journal may grow to.
+        store.file_bytes = 8 * MAX_JOURNAL_BYTES;
+        store.journal_bytes = MAX_JOURNAL_BYTES - 1;
+        assert!(!store.wants_compaction());
+        store.journal_bytes = MAX_JOURNAL_BYTES;
+        assert!(store.wants_compaction());
+        store.journal_bytes = saved;
 
         // A journal from before counts too.
         let store = RecordStore::open(&path);

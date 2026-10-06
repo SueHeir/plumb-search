@@ -124,6 +124,7 @@ fn share(limit: u64, percent: u64) -> u64 {
 }
 
 /// What the node keeps whatever the room.
+#[derive(Debug, Default)]
 pub(super) struct Keep {
     pub topics: Topics,
     /// Sites an About page always puts first, or a searcher opened.

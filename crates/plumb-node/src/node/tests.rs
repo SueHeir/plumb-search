@@ -400,8 +400,10 @@ async fn indexes_what_an_interrupted_crawl_saved() {
     let hits = search(node.addr(), "plumbline+example+widgets").await;
     assert_eq!(hits[0].domain, "plumbline-example.com");
     node.shutdown().await.unwrap();
-    // Every read replays it; the next crawl folds it in once it is big.
-    assert!(dir.path().join("records.jsonl.journal").exists());
+    // Building the index folded it into the records file.
+    assert!(!dir.path().join("records.jsonl.journal").exists());
+    let set = crate::records::load_records(&records).unwrap();
+    assert!(set.get("plumbline-example.com").is_some());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1140,8 +1142,9 @@ async fn sets_up_without_wikidata_and_adds_it_later() {
         store::load_state(&paths).unwrap().sites_version,
         plumb_core::SITES_VERSION
     );
-    // The changes went into the journal, not a rewrite of the records.
-    assert!(crate::records::journal_path(&dir.path().join("records.jsonl")).is_file());
+    // The changes went into the journal, which the index build folded into
+    // the records a record at a time.
+    assert!(!crate::records::journal_path(&dir.path().join("records.jsonl")).exists());
     let check = || {
         let set = crate::records::load_records(&dir.path().join("records.jsonl")).unwrap();
         let scholar = set.get("scholar.google.com").unwrap();

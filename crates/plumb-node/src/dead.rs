@@ -19,10 +19,10 @@
 //! recrawl windows, and a crawl that reaches it brings it back.
 
 use anyhow::Result;
-use plumb_core::{now_unix, RecordSet, SiteRecord};
+use plumb_core::{now_unix, SiteRecord};
 
 use crate::cli::DeadSitesArgs;
-use crate::crawl::SECONDS_PER_DAY;
+use crate::crawl::{CrawlSite, SECONDS_PER_DAY};
 use crate::records::load_records;
 use crate::web::group_thousands;
 
@@ -37,23 +37,23 @@ pub(crate) const DEAD_AFTER_DAYS: u64 = 60;
 pub(crate) const NEVER_DEAD_BEST: usize = 10_000;
 
 /// Whether `record`, by its own crawl marks alone, looks dead at `now`.
-pub(crate) fn looks_dead(record: &SiteRecord, now: u64) -> bool {
+pub(crate) fn looks_dead(record: &impl CrawlSite, now: u64) -> bool {
     let quiet_since = now.saturating_sub(DEAD_AFTER_DAYS * SECONDS_PER_DAY);
-    record.gone_at.is_none()
-        && record.crawl_failures >= DEAD_AFTER_FAILURES
-        && record.crawled_at.is_none_or(|at| at <= quiet_since)
+    record.gone_at().is_none()
+        && record.crawl_failures() >= DEAD_AFTER_FAILURES
+        && record.crawled_at().is_none_or(|at| at <= quiet_since)
 }
 
-/// The sites of `set` that look dead at `now`, best link score first: none
-/// of the best [`NEVER_DEAD_BEST`], and none that `keeps`.
-pub(crate) fn find_dead(
-    set: &RecordSet,
+/// The sites of `sites` that look dead at `now`, best link score first:
+/// none of the best [`NEVER_DEAD_BEST`], and none that `keeps`. `sites`
+/// gives every site, as many times as asked.
+pub(crate) fn find_dead<'a, S: CrawlSite + 'a, I: Iterator<Item = &'a S>>(
+    sites: impl Fn() -> I,
     now: u64,
-    keeps: impl Fn(&SiteRecord) -> bool,
-) -> Vec<&SiteRecord> {
-    let mut dead: Vec<(f32, &SiteRecord)> = set
-        .iter()
-        .filter(|record| looks_dead(record, now))
+    keeps: impl Fn(&S) -> bool,
+) -> Vec<&'a S> {
+    let mut dead: Vec<(f32, &S)> = sites()
+        .filter(|record| looks_dead(*record, now))
         .map(|record| (record.link_score(), record))
         .collect();
     if dead.is_empty() {
@@ -61,7 +61,7 @@ pub(crate) fn find_dead(
     }
     // The link score of the last of the best: a site scoring as well is
     // kept, ties included.
-    let mut scores: Vec<f32> = set.iter().map(SiteRecord::link_score).collect();
+    let mut scores: Vec<f32> = sites().map(|site| site.link_score()).collect();
     if scores.len() > NEVER_DEAD_BEST {
         let (_, nth, _) = scores.select_nth_unstable_by(NEVER_DEAD_BEST - 1, |a, b| b.total_cmp(a));
         let bar = *nth;
@@ -72,7 +72,7 @@ pub(crate) fn find_dead(
     dead.retain(|(_, record)| !keeps(record));
     dead.sort_by(|a, b| {
         b.0.total_cmp(&a.0)
-            .then_with(|| a.1.domain.cmp(&b.1.domain))
+            .then_with(|| a.1.domain().cmp(b.1.domain()))
     });
     dead.into_iter().map(|(_, record)| record).collect()
 }
@@ -92,9 +92,13 @@ pub fn run(args: &DeadSitesArgs) -> Result<()> {
     let interests = crate::about::all_interests(&history);
     let topics = crate::about::Topics::new(&interests);
     let now = now_unix();
-    let dead = find_dead(&set, now, |record| {
-        record.signals.official_site || kept.contains(&record.domain) || topics.matches(record)
-    });
+    let dead = find_dead(
+        || set.iter(),
+        now,
+        |record: &SiteRecord| {
+            record.signals.official_site || kept.contains(&record.domain) || topics.matches(record)
+        },
+    );
     let failing = set
         .iter()
         .filter(|record| record.gone_at.is_none() && record.crawl_failures > 0)
@@ -135,6 +139,8 @@ pub fn run(args: &DeadSitesArgs) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use plumb_core::RecordSet;
+
     use super::*;
 
     const NOW: u64 = 1_800_000_000;
@@ -176,13 +182,14 @@ mod tests {
         let mut official = site("official.com", 7, None);
         official.signals.official_site = true;
         set.extend([best, worst, official]);
-        let dead: Vec<&str> = find_dead(&set, NOW, |r| r.signals.official_site)
-            .iter()
-            .map(|r| r.domain.as_str())
-            .collect();
+        let dead: Vec<&str> =
+            find_dead(|| set.iter(), NOW, |r: &SiteRecord| r.signals.official_site)
+                .iter()
+                .map(|r| r.domain.as_str())
+                .collect();
         assert_eq!(dead, ["worst.com"]);
         // A small node keeps all of them.
         let small: RecordSet = [site("worst.com", 7, None)].into_iter().collect();
-        assert!(find_dead(&small, NOW, |_| false).is_empty());
+        assert!(find_dead(|| small.iter(), NOW, |_: &SiteRecord| false).is_empty());
     }
 }

@@ -12,9 +12,33 @@ use crate::rank_config;
 use crate::records::load_records;
 
 pub fn run_index(args: IndexArgs) -> Result<()> {
-    // Files written by plumb hold one record per domain already; merging
-    // makes hand-made or concatenated files safe to index too. The journal
-    // of a crawl that was cut short is replayed.
+    // Read a record at a time when the file holds each site once, under
+    // its canonical domain, as files written by plumb do: a whole set takes
+    // gigabytes. A journal next to it, of a crawl that was cut short, is
+    // left to loading to replay: this never changes the file.
+    if !crate::records::journal_path(&args.records).exists() {
+        let outlines = crate::outline::outline(&args.records)
+            .with_context(|| format!("reading records {}", args.records.display()))?;
+        if let Some(outlines) = outlines {
+            let built = crate::outline::build_index(
+                &args.records,
+                outlines,
+                &args.index,
+                None,
+                0,
+                &mut |_| Ok(()),
+            )
+            .with_context(|| format!("building the index in {}", args.index.display()))?;
+            println!(
+                "indexed {} sites from {} into {}",
+                built.docs,
+                args.records.display(),
+                args.index.display()
+            );
+            return Ok(());
+        }
+    }
+    // Merging makes hand-made or concatenated files safe to index too.
     let records = load_records(&args.records)
         .with_context(|| format!("loading records {}", args.records.display()))?
         .into_sorted_vec();
