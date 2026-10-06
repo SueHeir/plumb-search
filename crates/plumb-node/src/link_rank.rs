@@ -1,7 +1,21 @@
 //! `plumb link-rank`: a PageRank of the sites in a records file, from the
 //! links their homepages make to other sites ([`SiteRecord::links_to`]).
 //!
-//! A site ranks high when sites that rank high link to it. This is a first
+//! A site ranks high when sites that rank high link to it. Three changes
+//! from plain PageRank keep it from being gamed or skewed:
+//!
+//! - The part of rank that does not follow links goes only to trusted
+//!   seeds (official websites in Wikidata and Tranco's top
+//!   [`SEED_TRANCO`]), as in TrustRank, not to every site. A farm of
+//!   thousands of sites nobody else links to then passes on nothing.
+//! - Links between sites of one company's domain (`apple.com` and
+//!   `support.apple.com`) do not count.
+//! - A homepage that links to fewer than [`MIN_SHARES`] other sites gives
+//!   each the share it would give one of [`MIN_SHARES`]; the rest goes
+//!   back to the seeds. One link from a big site is worth a lot, but not
+//!   all of that site's rank.
+//!
+//! This is a first
 //! look at the graph our own crawls make, run offline on a copy of a node's
 //! records: it changes nothing and nothing reads what it writes yet.
 //!
@@ -26,6 +40,12 @@ use crate::web::group_thousands;
 /// every site evenly. Google's paper used 0.85.
 const DAMPING: f64 = 0.85;
 
+/// Sites in Tranco's top this many are seeds.
+const SEED_TRANCO: u32 = 100_000;
+
+/// A site's rank is split at least this many ways among its links.
+const MIN_SHARES: usize = 10;
+
 /// Rounds stop once ranks move less than this in all (sum of changes).
 const CONVERGED: f64 = 1e-7;
 
@@ -37,6 +57,9 @@ pub(crate) struct Graph {
     in_records: Vec<bool>,
     /// Each site's Tranco rank, 0 for none.
     tranco: Vec<u32>,
+    /// Whether each site is a seed: the part of rank that does not follow
+    /// links goes to these.
+    seed: Vec<bool>,
     /// The site each one stands for: itself, or the one its homepage
     /// redirects to.
     resolve: Vec<u32>,
@@ -60,6 +83,7 @@ impl Graph {
             ids: HashMap::new(),
             in_records: Vec::new(),
             tranco: Vec::new(),
+            seed: Vec::new(),
             resolve: Vec::new(),
             sources: 0,
             links: 0,
@@ -78,6 +102,7 @@ impl Graph {
         self.ids.insert(name, id);
         self.in_records.push(false);
         self.tranco.push(0);
+        self.seed.push(false);
         self.resolve.push(id);
         id
     }
@@ -90,6 +115,11 @@ impl Graph {
         let src = self.id(&domain);
         self.in_records[src as usize] = true;
         self.tranco[src as usize] = record.signals.tranco_rank.unwrap_or(0);
+        self.seed[src as usize] = record.signals.official_site
+            || record
+                .signals
+                .tranco_rank
+                .is_some_and(|rank| rank <= SEED_TRANCO);
         if let Some(to) = record
             .redirect
             .as_ref()
@@ -102,7 +132,7 @@ impl Graph {
         let targets: Vec<u32> = record
             .links_to
             .iter()
-            .filter(|to| **to != domain)
+            .filter(|to| organization(to) != organization(&domain))
             .map(|to| self.id(to))
             .collect();
         if targets.is_empty() {
@@ -166,8 +196,8 @@ impl Graph {
         }
     }
 
-    /// Ranks every site: PageRank with [`DAMPING`], the rank of sites
-    /// that link nowhere spread evenly, for at most `rounds` rounds.
+    /// Ranks every site: PageRank with [`DAMPING`], seeds and shares as
+    /// the module docs say, for at most `rounds` rounds.
     pub(crate) fn rank(mut self, rounds: usize) -> Result<Ranked> {
         if let Some(mut writer) = self.writer.take() {
             writer.flush()?;
@@ -180,7 +210,16 @@ impl Graph {
                 in_links[to as usize] += 1;
             }
         })?;
-        let mut rank = vec![if n == 0 { 0.0 } else { 1.0 / n as f64 }; n];
+        // Without any seed (a hand-made file), every site is one.
+        if !self.seed.contains(&true) {
+            self.seed.fill(true);
+        }
+        let seeds = self.seed.iter().filter(|&&seed| seed).count();
+        let mut rank: Vec<f64> = self
+            .seed
+            .iter()
+            .map(|&seed| if seed { 1.0 / seeds as f64 } else { 0.0 })
+            .collect();
         let mut next = vec![0.0f64; n];
         let mut done = 0;
         let mut change = 0.0;
@@ -191,18 +230,18 @@ impl Graph {
                 if targets.is_empty() {
                     return;
                 }
-                let share = rank[src as usize] / targets.len() as f64;
+                let share = rank[src as usize] / targets.len().max(MIN_SHARES) as f64;
                 for &to in targets {
                     next[to as usize] += share;
                 }
-                followed += rank[src as usize];
+                followed += share * targets.len() as f64;
             })?;
-            // What did not follow a link (sites linking nowhere, and the
-            // part every site gives up) is spread evenly.
-            let even = (1.0 - DAMPING * followed) / n as f64;
+            // What did not follow a link (sites linking nowhere or to few,
+            // and the part every site gives up) goes to the seeds.
+            let to_seeds = (1.0 - DAMPING * followed) / seeds as f64;
             change = 0.0;
-            for (old, new) in rank.iter_mut().zip(next.iter()) {
-                let value = DAMPING * new + even;
+            for ((old, new), &seed) in rank.iter_mut().zip(next.iter()).zip(&self.seed) {
+                let value = DAMPING * new + if seed { to_seeds } else { 0.0 };
                 change += (value - *old).abs();
                 *old = value;
             }
@@ -219,6 +258,12 @@ impl Graph {
             change,
         })
     }
+}
+
+/// The domain of the company behind a site: `apple.com` for
+/// `support.apple.com`, the site itself otherwise.
+fn organization(site: &str) -> &str {
+    plumb_core::parent_domain(site).unwrap_or(site)
 }
 
 /// A ranked [`Graph`].
@@ -316,6 +361,12 @@ pub fn run(args: &LinkRankArgs) -> Result<()> {
         "{} sites in the graph, {} of them only linked to (no record)",
         group_thousands(sites as u64),
         group_thousands(unknown as u64)
+    );
+    let seeds = ranked.graph.seed.iter().filter(|&&seed| seed).count();
+    println!(
+        "{} seeds (official websites and Tranco's top {})",
+        group_thousands(seeds as u64),
+        group_thousands(u64::from(SEED_TRANCO))
     );
     let linked = ranked.in_links.iter().filter(|&&n| n > 0).count();
     println!(
@@ -421,6 +472,12 @@ mod tests {
         record
     }
 
+    fn seed(domain: &str, links: &[&str]) -> SiteRecord {
+        let mut record = site(domain, links);
+        record.signals.official_site = true;
+        record
+    }
+
     fn ranked(records: &[SiteRecord]) -> Ranked {
         let dir = tempfile::tempdir().unwrap();
         let mut graph = Graph::new(dir.path()).unwrap();
@@ -495,6 +552,47 @@ mod tests {
         });
         let ranked = ranked(&[a, b, site("c.com", &["a.com"])]);
         assert_eq!(names(&ranked).len(), 3);
+    }
+
+    #[test]
+    fn a_farm_nobody_trusted_links_to_ranks_below_one_good_link() {
+        let mut records = vec![
+            seed("big.com", &["news.org", "a.com", "b.com"]),
+            seed("a.com", &[]),
+            seed("b.com", &[]),
+        ];
+        for i in 0..200 {
+            records.push(site(&format!("farm{i}.net"), &["spam.biz"]));
+        }
+        let ranked = ranked(&records);
+        let score = |domain: &str| ranked.score(ranked.graph.ids[domain]);
+        assert!(score("news.org") > 0.0);
+        assert_eq!(score("spam.biz"), 0.0);
+        assert_eq!(ranked.in_links[ranked.graph.ids["spam.biz"] as usize], 200);
+    }
+
+    #[test]
+    fn links_within_one_company_do_not_count() {
+        let ranked = ranked(&[
+            site("apple.com", &["support.apple.com", "other.com"]),
+            site("a.com", &["other.com"]),
+        ]);
+        assert!(!ranked.graph.ids.contains_key("support.apple.com"));
+        assert_eq!(names(&ranked)[0], "other.com");
+    }
+
+    #[test]
+    fn one_link_gets_a_tenth_of_a_site_not_all_of_it() {
+        let ranked = ranked(&[
+            seed("big.com", &["only.org"]),
+            seed("x.com", &[]),
+            seed("y.com", &[]),
+        ]);
+        let big = ranked.score(ranked.graph.ids["big.com"]);
+        let only = ranked.score(ranked.graph.ids["only.org"]);
+        assert!(only < big / 5.0, "{only} vs {big}");
+        let sum: f64 = ranked.rank.iter().sum();
+        assert!((sum - 1.0).abs() < 1e-9, "{sum}");
     }
 
     #[test]
