@@ -930,6 +930,20 @@ impl Searcher {
                     && hit.link_score >= spell::MIN_FIX_LINK_SCORE
             })
             .map(|hit| hit.domain.clone());
+        // A misspelled name matches no site's words, so only meaning finds
+        // the site it means ("adobee" is close to adobe.com): the results as
+        // typed keep what meaning alone finds rather than cutting it as
+        // filler.
+        let results = match cfg.meaning_only_relevance {
+            Some(_) if site.is_some() => {
+                let cfg = RankConfig {
+                    meaning_only_relevance: None,
+                    ..*cfg
+                };
+                self.rank(query_text, limit, &cfg, options, meaning)?.0
+            }
+            _ => results,
+        };
         Ok(SearchResults {
             spelling: Some(Spelling {
                 query: fix.query,
@@ -2641,6 +2655,49 @@ mod tests {
         let now = RankConfig::default();
         assert!(score(&now, "stripe.com") < score(&now, "plumbers.org"));
         assert!(score(&now, "stripe.com") < score(&now, "drainhelp.net"));
+    }
+
+    #[test]
+    fn a_misspelled_name_keeps_the_site_meaning_finds_for_it() {
+        let records = vec![
+            site(
+                "adobe.com",
+                Some("Adobe: Creative, marketing and document software"),
+                None,
+                &["Adobe"],
+                &[("adobe", 300)],
+                popular(60, 15_000),
+            ),
+            site(
+                "visualpde.com",
+                Some("VisualPDE"),
+                Some("Interactive equations in the browser."),
+                &[],
+                &[],
+                ranked(300_000, 5),
+            ),
+        ];
+        let (_dir, searcher) = build(&records);
+        let meaning = FixedMeaning(vec![("visualpde.com", 0.3), ("adobe.com", 0.06)]);
+        let found = searcher
+            .search_meaning(
+                "adobee",
+                10,
+                &RankConfig::default(),
+                &SearchOptions::default(),
+                Some(&meaning),
+            )
+            .unwrap();
+        let spelling = found.spelling.expect("a suggestion");
+        assert_eq!(spelling.site.as_deref(), Some("adobe.com"));
+        // The results are still those of "adobee", but what meaning finds
+        // for it is not cut as filler.
+        assert_eq!(
+            domains(&found.hits)[0],
+            "adobe.com",
+            "{:?}",
+            domains(&found.hits)
+        );
     }
 
     #[test]
