@@ -55,15 +55,40 @@ pub fn wanted(
     })
 }
 
-/// How many of the places file's places to keep, under `sets` and a
-/// storage limit of `storage_limit_mb`: with towns to keep places `near`,
-/// the whole file, so the places around them can be picked out of it.
-pub fn file_pages(sets: &PageSets, storage_limit_mb: u64, near: &[(f64, f64)]) -> u64 {
-    match set_info().kept(sets, storage_limit_mb) {
-        0 => 0,
-        _ if !near.is_empty() => u64::MAX,
-        count => count,
+/// The towns whose places a node with `count` places kept everywhere
+/// also keeps past them: none when it keeps them all.
+pub fn file_near(count: u64, near: &[(f64, f64)]) -> &[(f64, f64)] {
+    if count == 0 || count == u64::MAX {
+        &[]
+    } else {
+        near
     }
+}
+
+/// Names the towns `near` for a places file's notes
+/// ([`crate::pages::SetFileNotes::near`]): 0 for none.
+pub fn near_key(near: &[(f64, f64)]) -> u64 {
+    if near.is_empty() {
+        return 0;
+    }
+    let text: String = near
+        .iter()
+        .map(|(lat, lon)| format!("{lat:.2},{lon:.2}|"))
+        .collect();
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(text.as_bytes());
+    u64::from_le_bytes(digest[..8].try_into().expect("8 bytes")).max(1)
+}
+
+/// Keeps the lines of a places file that are places within [`NEAR_KM`]
+/// of a point of `near`, for a file cut past its first places.
+pub fn near_lines(near: Vec<(f64, f64)>) -> crate::pages::LineFilter {
+    Box::new(move |line: &[u8]| {
+        std::str::from_utf8(line)
+            .ok()
+            .and_then(|line| parse_place(line.trim_end_matches(['\n', '\r'])).ok())
+            .is_some_and(|place| is_near(&place, &near))
+    })
 }
 
 /// Places on Automatic are kept everywhere up to this many: every city
@@ -333,9 +358,20 @@ mod tests {
         );
         let sets = PageSets::parse("places=1").unwrap();
         let denver = [(39.74, -104.99)];
-        // With a town, the whole file is wanted, to pick places out of it.
-        assert_eq!(file_pages(&sets, 2_000, &denver), u64::MAX);
-        assert_eq!(file_pages(&sets, 2_000, &[]), 1);
+        // With a town, the file keeps the places near it past the first.
+        assert_eq!(file_near(1, &denver), &denver[..]);
+        assert!(file_near(u64::MAX, &denver).is_empty());
+        assert_ne!(near_key(&denver), 0);
+        assert_eq!(near_key(&[]), 0);
+        let keep = near_lines(denver.to_vec());
+        let file = set_info().file(data);
+        let lines: Vec<String> =
+            std::io::BufRead::lines(plumb_ingest::open_maybe_gz(&file).unwrap())
+                .map(Result::unwrap)
+                .skip(1)
+                .collect();
+        let kept: Vec<bool> = lines.iter().map(|l| keep(l.as_bytes())).collect();
+        assert_eq!(kept, [true, false, true]);
         let near = wanted(data, &sets, 2_000, &denver).unwrap();
         let names: Vec<String> = read_places_near(&near.file, near.count, near.near.clone())
             .unwrap()
