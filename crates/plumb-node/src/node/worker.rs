@@ -38,7 +38,8 @@ use plumb_crawl::{CrawlConfig, CrawlOutcome, CrawlResult, CrawlTarget, HomepageC
 use plumb_index::build_index;
 use plumb_ingest::{
     attach_facts, attach_intros, download, facts, intros, kind_sites, load_cc_domain_ranks,
-    load_intros, load_site_facts, load_tranco, load_wikidata_official_sites, Builder,
+    load_intros, load_misread_official_sites, load_site_facts, load_tranco,
+    load_wikidata_official_sites, Builder,
 };
 use tokio::runtime::Handle;
 use tracing::{info, warn};
@@ -395,6 +396,7 @@ async fn complete_seed(inner: &Arc<Inner>) -> Result<()> {
                 record.crawl_attempted_at.is_some() || !record.link_texts.is_empty()
             });
         }
+        take_back_misread(&files, &mut set);
         set.split_subdomain_sites(&seed);
         set.extend(seed);
         if let Some(change) = home_site_change(inner, &set) {
@@ -453,6 +455,7 @@ async fn refold_seed(inner: &Arc<Inner>) -> Result<()> {
         inner.set_step(Step::Ingesting, "Reading the site records");
         let mut set = load_records(&inner.paths.records)?;
         let before = set.len();
+        take_back_misread(&files, &mut set);
         set.split_subdomain_sites(&seed);
         set.extend(seed);
         inner.check_stop()?;
@@ -481,6 +484,42 @@ async fn refold_seed(inner: &Arc<Inner>) -> Result<()> {
     inner.install(built);
     inner.update_saved(|saved| saved.index_stale = false)?;
     Ok(())
+}
+
+/// Takes back what Wikidata claims that earlier versions misread gave the
+/// records ([`plumb_ingest::OfficialSite::misread`]): an email address
+/// put where a website goes made gmail.com a college's official site.
+fn take_back_misread(files: &SeedFiles, set: &mut RecordSet) {
+    let Ok(wikidata) = &files.wikidata else {
+        return;
+    };
+    let mut misread = Vec::new();
+    for path in [wikidata, &files.kind_sites] {
+        if path.is_file() {
+            match load_misread_official_sites(path) {
+                Ok(sites) => misread.extend(sites),
+                Err(err) => warn!("could not read {} again: {err:#}", path.display()),
+            }
+        }
+    }
+    if misread.is_empty() {
+        return;
+    }
+    if files.facts.is_file() {
+        if let Ok(facts) = load_site_facts(&files.facts) {
+            attach_facts(&mut misread, &facts);
+        }
+    }
+    for site in misread.iter().filter(|site| site.is_root_homepage()) {
+        let names: Vec<&str> = std::iter::once(site.label.trim())
+            .chain(site.names.iter().map(String::as_str))
+            .collect();
+        set.take_back_official_site(&site.domain, &names);
+    }
+    info!(
+        "took back {} official websites misread from email addresses",
+        misread.len()
+    );
 }
 
 /// The seed files an earlier setup left in `seed/`, however old; `None`

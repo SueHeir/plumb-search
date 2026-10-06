@@ -77,6 +77,36 @@ impl OfficialSite {
         })
     }
 
+    /// The claim as Plumb read it before website addresses with user info
+    /// were refused ([`host_of`]): `https://mailto:someone@gmail.com` as
+    /// gmail.com's. `None` for any other address. Used to take such
+    /// claims back off the records they reached.
+    pub fn misread(item: impl Into<String>, label: impl Into<String>, url: &str) -> Option<Self> {
+        let url = url.trim();
+        let mut parsed = Url::parse(url).ok()?;
+        if parsed.username().is_empty() && parsed.password().is_none() {
+            return None;
+        }
+        parsed.set_username("").ok()?;
+        parsed.set_password(None).ok()?;
+        let host = host_of(parsed.as_str())?;
+        let domain = registrable_domain(&host)?;
+        Some(OfficialSite {
+            item: item.into(),
+            label: label.into(),
+            url: url.to_string(),
+            path: parsed.path().to_string(),
+            host,
+            domain,
+            country: None,
+            kinds: Vec::new(),
+            names: Vec::new(),
+            about: None,
+            sitelinks: 0,
+            intro: None,
+        })
+    }
+
     /// True when the claim is for the front page of the registrable domain
     /// itself: the host is the domain or `www.` plus it, and the path is a
     /// front page ([`plumb_core::is_homepage_path`]; a query string is
@@ -154,6 +184,17 @@ fn url_path(url: &str) -> String {
 /// missing header is an error. Rows with too few fields or an empty item or
 /// website are skipped with a warning. The file may be gzipped.
 pub fn load_wikidata_official_sites(path: &Path) -> Result<Vec<OfficialSite>> {
+    load_sites(path, false)
+}
+
+/// The rows of a [`load_wikidata_official_sites`] file that it skips but
+/// earlier versions read wrongly ([`OfficialSite::misread`]), as they read
+/// them.
+pub fn load_misread_official_sites(path: &Path) -> Result<Vec<OfficialSite>> {
+    load_sites(path, true)
+}
+
+fn load_sites(path: &Path, misread: bool) -> Result<Vec<OfficialSite>> {
     let mut lines = LineReader::new(open_maybe_gz(path)?);
     let read_err = || format!("reading {}", path.display());
     let header = loop {
@@ -210,11 +251,19 @@ pub fn load_wikidata_official_sites(path: &Path) -> Result<Vec<OfficialSite>> {
             first_bad.get_or_insert_with(|| (line_no, snippet(&line)));
             continue;
         };
-        let Some(site) = OfficialSite::new(item, label, website) else {
+        let site = if misread {
+            OfficialSite::misread(item, label, website)
+        } else {
+            OfficialSite::new(item, label, website)
+        };
+        let Some(site) = site else {
             no_domain += 1;
             continue;
         };
         sites.push(site);
+    }
+    if misread {
+        return Ok(sites);
     }
 
     if let Some((line_no, line)) = first_bad {
@@ -243,6 +292,19 @@ mod tests {
 
     fn site(item: &str, label: &str, url: &str) -> OfficialSite {
         OfficialSite::new(item, label, url).unwrap()
+    }
+
+    #[test]
+    fn email_addresses_are_no_websites() {
+        let url = "https://mailto:collegeofeducationmoro@gmail.com";
+        assert_eq!(OfficialSite::new("Q1", "COE, Moro, Ife-North", url), None);
+        let misread = OfficialSite::misread("Q1", "COE, Moro, Ife-North", url).unwrap();
+        assert_eq!(misread.domain, "gmail.com");
+        assert!(misread.is_root_homepage());
+        assert_eq!(
+            OfficialSite::misread("Q2", "Gmail", "https://gmail.com/"),
+            None
+        );
     }
 
     fn domains(sites: &[OfficialSite]) -> Vec<&str> {

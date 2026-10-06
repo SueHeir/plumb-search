@@ -4,8 +4,8 @@ use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
 use plumb_core::{
-    canonical_domain, kind_key, linker_count, subdomain_sites, RecordSet, SiteRecord,
-    MAX_LINK_TEXTS,
+    canonical_domain, kind_key, linker_count, parent_domain, subdomain_sites, RecordSet,
+    SiteRecord, MAX_LINK_TEXTS, SUBDOMAIN_SITE_NAMES,
 };
 use tracing::{info, warn};
 
@@ -294,8 +294,17 @@ impl Builder {
     /// ([`plumb_core::subdomain_sites`]) and has a record, such as
     /// news.ycombinator.com from Wikidata, the ranks of its domain that it
     /// lacks: the rank lists only rank registrable domains. Subdomain sites
-    /// with no record are not made, so they take no room under a cap.
+    /// with no record are not made, so they take no room under a cap, but
+    /// for the few the seed data may not name ([`SUBDOMAIN_SITE_NAMES`]).
     fn rank_subdomain_sites(&mut self) {
+        for (site, name) in SUBDOMAIN_SITE_NAMES {
+            let parent = parent_domain(site).and_then(|domain| self.records.get(domain));
+            if parent.is_some() && self.records.get(site).is_none() {
+                let record = self.records.entry(site);
+                record.signals.official_site = true;
+                record.add_alias(name);
+            }
+        }
         for (site, domain) in subdomain_sites() {
             let (Some(_), Some(parent)) = (self.records.get(site), self.records.get(domain)) else {
                 continue;
@@ -588,6 +597,23 @@ mod tests {
         assert_eq!(yc.aliases, ["Y Combinator"]);
         // Google's products with no record of their own are not made.
         assert_eq!(records.len(), 3);
+    }
+
+    #[test]
+    fn hacker_news_gets_a_record_without_wikidata() {
+        let mut builder = Builder::new();
+        builder.add_tranco(&[TrancoEntry {
+            rank: 900,
+            domain: "ycombinator.com".into(),
+        }]);
+        let records = builder.finish(None);
+        let news = records
+            .iter()
+            .find(|r| r.domain == "news.ycombinator.com")
+            .unwrap();
+        assert_eq!(news.aliases, ["Hacker News"]);
+        assert_eq!(news.signals.tranco_rank, Some(900));
+        assert_eq!(records.len(), 2);
     }
 
     #[test]

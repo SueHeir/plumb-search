@@ -37,7 +37,7 @@ pub use news::{Headline, RecentNews};
 pub use operators::Operators;
 pub use safe::{adult_level, record_adult_level, AdultLevel, SafeSearch};
 pub use site_search::{search_link, search_template_for, SEARCH_TERMS};
-pub use subsites::{parent_domain, subdomain_sites, SITES_VERSION};
+pub use subsites::{parent_domain, subdomain_sites, SITES_VERSION, SUBDOMAIN_SITE_NAMES};
 
 use anyhow::{Context, Result};
 use serde::de::DeserializeOwned;
@@ -643,6 +643,26 @@ impl RecordSet {
         }
     }
 
+    /// Takes back what a misread Wikidata claim (an email address read as a
+    /// website) gave the record of `domain`: the item's `names`, and the
+    /// facts official websites bring (whether it is one, its sitelinks,
+    /// country, kinds, description and intro), which the domain's own seed
+    /// record adds back when it is upserted after.
+    pub fn take_back_official_site(&mut self, domain: &str, names: &[&str]) {
+        let Some(record) = self.map.get_mut(domain) else {
+            return;
+        };
+        record
+            .aliases
+            .retain(|alias| !names.contains(&alias.as_str()));
+        record.signals.official_site = false;
+        record.signals.sitelinks = 0;
+        record.country = None;
+        record.kinds.clear();
+        record.about = None;
+        record.intro = None;
+    }
+
     /// Inserts a record, merging it into an existing one for the same domain.
     /// The domain is made canonical first ([`canonical_domain`]), so
     /// `Example.COM` and `münchen.de` land on `example.com` and
@@ -792,6 +812,11 @@ pub fn host_of(input: &str) -> Option<String> {
     let parsed = if input.contains("://") {
         let parsed = url::Url::parse(input).ok()?;
         if !matches!(parsed.scheme(), "http" | "https") {
+            return None;
+        }
+        // User info names no site: `https://mailto:someone@gmail.com` is
+        // an email address put where a website goes, not gmail.com's.
+        if !parsed.username().is_empty() || parsed.password().is_some() {
             return None;
         }
         parsed
@@ -1757,6 +1782,8 @@ mod tests {
         for bad in [
             "mailto:a@b.com",
             "a@b.com",
+            "https://mailto:someone@gmail.com",
+            "https://user:pass@example.com/",
             "ftp://example.com/",
             "javascript:alert(1)",
             "a..b.com",

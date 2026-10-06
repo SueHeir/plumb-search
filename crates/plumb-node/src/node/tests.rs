@@ -1095,11 +1095,15 @@ async fn sets_up_without_wikidata_and_adds_it_later() {
 
     // Records made before the lists of sites on subdomains are folded
     // again too, from the seed files however old: Google Scholar, folded
-    // into google.com then, gets a record of its own.
+    // into google.com then, gets a record of its own, and a college whose
+    // website was misread from its email address is taken off google.com.
     let wikidata = dir.path().join("seed").join(download::WIKIDATA_FILE_NAME);
     let mut tsv = std::fs::read_to_string(&wikidata).unwrap();
     tsv.push_str(
         "http://www.wikidata.org/entity/Q90000099\tGoogle Scholar\thttps://scholar.google.com/\n",
+    );
+    tsv.push_str(
+        "http://www.wikidata.org/entity/Q90000098\tCOE, Moro\thttps://mailto:coe@google.com\n",
     );
     std::fs::write(&wikidata, tsv).unwrap();
     let mut records: Vec<SiteRecord> = read_jsonl(&dir.path().join("records.jsonl")).unwrap();
@@ -1108,6 +1112,8 @@ async fn sets_up_without_wikidata_and_adds_it_later() {
         .find(|r| r.domain == "google.com")
         .unwrap();
     google.aliases.push("Google Scholar".into());
+    google.aliases.insert(0, "COE, Moro".into());
+    google.kinds.push("college".into());
     write_jsonl(&dir.path().join("records.jsonl"), &records).unwrap();
     let mut saved = store::load_state(&paths).unwrap();
     saved.sites_version = 0;
@@ -1143,6 +1149,7 @@ async fn sets_up_without_wikidata_and_adds_it_later() {
     assert_eq!(scholar.signals.tranco_rank, Some(1));
     let google = records.iter().find(|r| r.domain == "google.com").unwrap();
     assert_eq!(google.aliases, ["Google"]);
+    assert!(!google.kinds.iter().any(|kind| kind == "college"));
 
     // Nothing to fold in a directory with no node yet.
     assert!(!request_reseed(tempfile::tempdir().unwrap().path()).unwrap());
