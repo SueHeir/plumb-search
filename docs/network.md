@@ -29,6 +29,12 @@ Every day each node is assigned a random eighth of all sites, picked by a hash o
 * A node in the network chooses its crawl targets as before (half never-crawled, half due again, best-ranked first), but only among the sites assigned to it today.
 * **Known weakness:** the epoch is public, so someone after one particular site can make keys until one is assigned to it (with a share of one eighth, any key gets a given site about every 8 days anyway). Assignment spreads the work and caps how much one key writes; it does not stop a targeted attack by itself. Agreement between crawlers (below) means one such key is not enough, and a fresh key does not count at all until its crawls have matched the checking node's own (see "One person, many keys"), so grinding keys gains little. The drand seed in "Next steps" would close the rest.
 
+### Dead sites and reading sites anew
+
+Sites that stopped answering stay in a node's records until it is run with `--drop-dead-sites` (`crate::dead` in plumb-node). A site looks dead after 6 tries in a row that could not reach it at all (the retry waits double from a day, so that is a month or more) and no crawl, this node's or a trusted one's, reaching it for 60 days. The best 10,000 sites, official websites, sites about the node's topics and ones its searchers chose never look dead. A dead site is cut down to its ranks and crawl marks, left out of the index and the buckets other nodes take, tried again every 90 days, and back in full when a crawl reaches it. The judgment is the node's own: it is never taken from another node. `plumb dead-sites --data DIR` counts them without changing anything, and a node without the flag logs the count each round.
+
+Every crawl stamps its record with `plumb_crawl::CRAWL_VERSION`. When crawlers learn to read more or better from a homepage (such as a better list of its words), the version goes up, and every site last read by an older version counts as due again, best link score first, within the share of each round that goes to sites due again. A shared crawl without the page's text keeps the version of the text a node already has.
+
 ## Crawl batches
 
 `plumb_net::batch`. After each batch of homepages (500 at a time), the node signs the records its crawl produced:

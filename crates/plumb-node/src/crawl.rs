@@ -18,7 +18,8 @@
 //! redirect loop. A site that could not be reached at all
 //! ([`is_connection_failure`]) is retried sooner: after 1 day, then 2, 4,
 //! 8... days for each further failure in a row, never longer than `window`.
-//! A dropped uplink costs the sites it hit a day, not a month.
+//! A dropped uplink costs the sites it hit a day, not a month. A site judged
+//! dead ([`crate::dead`]) is tried again only every three windows.
 //!
 //! Each homepage is fetched at `https://<domain>/` first. When that gets no
 //! answer, the crawler tries the URL the site was last reached at (the
@@ -78,6 +79,10 @@ pub(crate) const CRAWL_BATCH_SIZE: usize = 500;
 /// again; the wait doubles with each further failure in a row, up to the
 /// recrawl window.
 pub(crate) const FIRST_RETRY_AFTER: u64 = SECONDS_PER_DAY;
+
+/// A site judged dead ([`plumb_core::SiteRecord::gone_at`]) is tried again
+/// after this many recrawl windows, in case it came back.
+pub(crate) const GONE_RETRY_WINDOWS: u64 = 3;
 
 /// A batch needs at least this many homepages that should answer to be
 /// judged offline.
@@ -274,6 +279,7 @@ pub(crate) fn target_for(record: &SiteRecord) -> CrawlTarget {
 pub(crate) fn due_at(record: &SiteRecord, window: u64) -> Option<u64> {
     let last = record.crawled_at.max(record.crawl_attempted_at)?;
     let wait = match record.crawl_failures {
+        _ if record.gone_at.is_some() => window.saturating_mul(GONE_RETRY_WINDOWS),
         0 => window,
         failures => retry_after(failures, window),
     };

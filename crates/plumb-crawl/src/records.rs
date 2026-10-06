@@ -10,6 +10,20 @@ use url::Url;
 
 use crate::{CrawlOutcome, CrawlResult};
 
+/// What this crawler reads from a homepage, stamped on every record it
+/// crawls as [`SiteRecord::crawl_version`]. Raise it when a change to what
+/// crawls read makes the sites read before worth reading again: a better
+/// way to pick a homepage's words (the terms that go with its body text),
+/// say. Nodes then crawl the sites last read by an older version again,
+/// best link score first, in the share of each round that goes to sites due
+/// again (see `plumb_node::crawl`), so the whole web of a node is read anew
+/// most-known sites first, without waiting the month its sites are
+/// otherwise due after.
+///
+/// 0 is how crawlers read homepages up to 2026-10-06 (title, description,
+/// headings, the first 100 words of visible text, key pages, links).
+pub const CRAWL_VERSION: u32 = 0;
+
 /// Turns crawl results into records to merge into a
 /// [`plumb_core::RecordSet`]: one record per fetched homepage (url, title,
 /// description, `site_name` as an alias, `crawled_at`, the first
@@ -67,6 +81,7 @@ pub fn to_records(results: &[CrawlResult]) -> Vec<SiteRecord> {
                     &page.domain,
                 );
                 record.crawled_at = Some(page.fetched_at);
+                record.crawl_version = CRAWL_VERSION;
                 upsert(&mut records, record);
 
                 for link in &page.meta.links {

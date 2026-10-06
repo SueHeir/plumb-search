@@ -159,6 +159,21 @@ pub struct SiteRecord {
     /// each failure.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub crawl_failures: u32,
+    /// What the crawl at `crawled_at` read from the homepage, as the
+    /// crawler's `CRAWL_VERSION` then (`plumb_crawl::CRAWL_VERSION`). When
+    /// crawlers learn to read more, or better, from a homepage (a better
+    /// list of its words, say), the version goes up and nodes crawl the
+    /// sites read by an older one again, best-known first.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub crawl_version: u32,
+    /// Unix seconds when this node judged the site dead (its homepage could
+    /// not be reached for weeks; see `plumb run --drop-dead-sites`) and cut
+    /// its record down to the crawl marks and ranks: a gone site is left
+    /// out of the index, and a crawl that reaches it again brings it back.
+    /// A node's own judgment: [`SiteRecord::merge`] never takes it from
+    /// another record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gone_at: Option<u64>,
     /// Where the homepage sent the crawler instead, when it redirects to
     /// another site (`pncbank.com` -> `pnc.com`), as of the last crawl. Such
     /// a site is the other one under another name.
@@ -373,6 +388,8 @@ impl SiteRecord {
     /// `crawl_attempted_at` keeps the later time, with the `crawl_failures`
     /// counted at that attempt (the larger count when both tried at the same
     /// time). A redirect stays only when no successful crawl came after it.
+    /// A gone record ([`SiteRecord::gone_at`]) takes only ranks and crawl
+    /// marks, until a crawl made after it went reaches the site.
     /// [`SiteRecord::merge`] for a crawl another node shared. Shared crawls
     /// carry only some of what a crawl finds (no search box, and page text
     /// only from trusted crawlers), so a field the shared crawl leaves empty
@@ -384,6 +401,9 @@ impl SiteRecord {
             .is_empty()
             .then(|| std::mem::take(&mut self.headings));
         let body_text = other.body_text.is_none().then(|| self.body_text.take());
+        // Without the page's text, the shared crawl did not read what a
+        // newer crawler reads either.
+        let crawl_version = other.body_text.is_none().then_some(self.crawl_version);
         let key_pages = other
             .key_pages
             .is_empty()
@@ -404,6 +424,9 @@ impl SiteRecord {
         if let Some(mine) = body_text {
             self.body_text = self.body_text.take().or(mine);
         }
+        if let Some(mine) = crawl_version {
+            self.crawl_version = self.crawl_version.max(mine);
+        }
         if let Some(mine) = key_pages {
             if self.key_pages.is_empty() {
                 self.key_pages = mine;
@@ -418,6 +441,17 @@ impl SiteRecord {
 
     pub fn merge(&mut self, other: SiteRecord) {
         debug_assert_eq!(self.domain, other.domain);
+        if let Some(gone) = self.gone_at {
+            if !other.crawled_at.is_some_and(|at| at > gone) {
+                // Nothing reached it since it went: only its crawl marks
+                // and ranks change, so it stays small and stays out.
+                self.merge_signals(&other.signals);
+                self.merge_attempts(other.crawl_attempted_at, other.crawl_failures);
+                return;
+            }
+            // Reached again: it is back, and the fresh crawl fills it in.
+            self.gone_at = None;
+        }
         let other_is_fresher = other.crawled_at.is_some() && other.crawled_at >= self.crawled_at;
         if other_is_fresher {
             if other.url.is_some() {
@@ -439,6 +473,7 @@ impl SiteRecord {
             self.body_text = other.body_text;
             self.key_pages = other.key_pages;
             self.links_to = other.links_to;
+            self.crawl_version = other.crawl_version;
             self.crawled_at = other.crawled_at;
         } else {
             self.url = self.url.take().or(other.url);
@@ -457,6 +492,7 @@ impl SiteRecord {
                 if self.links_to.is_empty() {
                     self.links_to = other.links_to;
                 }
+                self.crawl_version = other.crawl_version;
             }
         }
         // The latest crawl decides: a redirect seen after the last
@@ -486,22 +522,48 @@ impl SiteRecord {
         for alias in &other.aliases {
             self.add_alias(alias);
         }
+        self.merge_signals(&other.signals);
+        self.merge_attempts(other.crawl_attempted_at, other.crawl_failures);
+    }
+
+    /// Ranks keep the best (lowest) value, counts the larger one, and
+    /// `official_site` is OR-ed.
+    fn merge_signals(&mut self, o: &Signals) {
         let s = &mut self.signals;
-        let o = other.signals;
         s.harmonic_rank = min_some(s.harmonic_rank, o.harmonic_rank);
         s.pagerank_rank = min_some(s.pagerank_rank, o.pagerank_rank);
         s.tranco_rank = min_some(s.tranco_rank, o.tranco_rank);
         s.linking_domains = s.linking_domains.max(o.linking_domains);
         s.official_site |= o.official_site;
         s.sitelinks = s.sitelinks.max(o.sitelinks);
-        match other.crawl_attempted_at.cmp(&self.crawl_attempted_at) {
-            std::cmp::Ordering::Greater => self.crawl_failures = other.crawl_failures,
+    }
+
+    /// `crawl_attempted_at` keeps the later time, with the `crawl_failures`
+    /// counted at that attempt (the larger count when both tried at the
+    /// same time).
+    fn merge_attempts(&mut self, attempted_at: Option<u64>, failures: u32) {
+        match attempted_at.cmp(&self.crawl_attempted_at) {
+            std::cmp::Ordering::Greater => self.crawl_failures = failures,
             std::cmp::Ordering::Equal => {
-                self.crawl_failures = self.crawl_failures.max(other.crawl_failures);
+                self.crawl_failures = self.crawl_failures.max(failures);
             }
             std::cmp::Ordering::Less => {}
         }
-        self.crawl_attempted_at = self.crawl_attempted_at.max(other.crawl_attempted_at);
+        self.crawl_attempted_at = self.crawl_attempted_at.max(attempted_at);
+    }
+
+    /// Cuts the record down to a gone site's (see [`SiteRecord::gone_at`]):
+    /// its domain, ranks and crawl marks, gone since `at`.
+    pub fn make_gone(&mut self, at: u64) {
+        *self = SiteRecord {
+            domain: std::mem::take(&mut self.domain),
+            signals: std::mem::take(&mut self.signals),
+            crawled_at: self.crawled_at,
+            crawl_attempted_at: self.crawl_attempted_at,
+            crawl_failures: self.crawl_failures,
+            gone_at: Some(at),
+            ..SiteRecord::default()
+        };
     }
 
     /// Popularity prior for this site, see [`link_score`].
@@ -1482,6 +1544,96 @@ mod tests {
             }]
         );
         assert_eq!(a.aliases, vec!["U.S. Bancorp".to_string()]);
+    }
+
+    #[test]
+    fn a_gone_site_stays_small_until_a_later_crawl_reaches_it() {
+        let mut gone = SiteRecord::new("dead.com");
+        gone.title = Some("Dead".into());
+        gone.body_text = Some("words".into());
+        gone.add_alias("Dead Inc");
+        gone.signals.tranco_rank = Some(50);
+        gone.crawled_at = Some(100);
+        gone.crawl_attempted_at = Some(900);
+        gone.crawl_failures = 6;
+        gone.make_gone(1_000);
+        assert_eq!(gone.title, None);
+        assert!(gone.aliases.is_empty() && gone.body_text.is_none());
+        assert_eq!(gone.signals.tranco_rank, Some(50));
+        assert_eq!(
+            (
+                gone.crawled_at,
+                gone.crawl_attempted_at,
+                gone.crawl_failures
+            ),
+            (Some(100), Some(900), 6)
+        );
+
+        // A seed or an older crawl only brings ranks and marks.
+        let mut old = SiteRecord::new("dead.com");
+        old.title = Some("Dead".into());
+        old.signals.tranco_rank = Some(40);
+        old.crawled_at = Some(500);
+        let mut tried = SiteRecord::new("dead.com");
+        tried.crawl_attempted_at = Some(1_100);
+        tried.crawl_failures = 7;
+        let mut merged = gone.clone();
+        merged.merge(old);
+        merged.merge_shared(tried);
+        assert_eq!(merged.gone_at, Some(1_000));
+        assert_eq!(merged.title, None);
+        assert_eq!(merged.signals.tranco_rank, Some(40));
+        assert_eq!(
+            (
+                merged.crawled_at,
+                merged.crawl_attempted_at,
+                merged.crawl_failures
+            ),
+            (Some(100), Some(1_100), 7)
+        );
+
+        // A crawl that reaches it after it went brings it back.
+        let mut back = SiteRecord::new("dead.com");
+        back.title = Some("Alive".into());
+        back.crawled_at = Some(1_200);
+        back.crawl_attempted_at = Some(1_200);
+        merged.merge(back);
+        assert_eq!(merged.gone_at, None);
+        assert_eq!(merged.title.as_deref(), Some("Alive"));
+        assert_eq!(merged.crawl_failures, 0);
+
+        // Gone is this node's own judgment: another record's never spreads.
+        let mut alive = SiteRecord::new("dead.com");
+        alive.title = Some("Here".into());
+        alive.merge(gone);
+        assert_eq!(alive.gone_at, None);
+        assert_eq!(alive.title.as_deref(), Some("Here"));
+    }
+
+    #[test]
+    fn the_crawl_version_follows_the_page_text() {
+        let crawl = |at: u64, version: u32, text: bool| {
+            let mut r = SiteRecord::new("a.com");
+            r.crawled_at = Some(at);
+            r.crawl_version = version;
+            r.body_text = text.then(|| "words".to_owned());
+            r
+        };
+        let mut a = crawl(10, 2, true);
+        a.merge(crawl(20, 1, true));
+        assert_eq!(a.crawl_version, 1, "a fresher crawl by an older crawler");
+        let mut a = crawl(10, 2, true);
+        a.merge(crawl(5, 1, true));
+        assert_eq!(a.crawl_version, 2, "an older crawl changes nothing");
+        // A shared crawl without the page's text read none of it.
+        let mut a = crawl(10, 2, true);
+        a.merge_shared(crawl(20, 0, false));
+        assert_eq!(a.crawl_version, 2);
+        let mut a = crawl(10, 1, true);
+        a.merge_shared(crawl(20, 2, true));
+        assert_eq!(a.crawl_version, 2);
+        let json = serde_json::to_string(&SiteRecord::new("a.com")).unwrap();
+        assert!(!json.contains("crawl_version") && !json.contains("gone_at"));
     }
 
     #[test]

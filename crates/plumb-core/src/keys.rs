@@ -180,6 +180,7 @@ pub fn slim_record(mut record: SiteRecord) -> SiteRecord {
     record.crawled_at = None;
     record.crawl_attempted_at = None;
     record.crawl_failures = 0;
+    record.gone_at = None;
     record.icon = None;
     record.news = Vec::new();
     record.key_pages.clear();
