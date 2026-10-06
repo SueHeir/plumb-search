@@ -293,6 +293,20 @@ impl Ranked {
         order
     }
 
+    /// Each site's place in `order` ([`Ranked::order`]), 1 for the best,
+    /// counting only sites with a record and some rank; `None` for others.
+    pub(crate) fn positions(&self, order: &[u32]) -> Vec<Option<u32>> {
+        let mut positions = vec![None; self.graph.names.len()];
+        let mut next = 1u32;
+        for &id in order {
+            if self.graph.in_records[id as usize] && self.rank[id as usize] > 0.0 {
+                positions[id as usize] = Some(next);
+                next += 1;
+            }
+        }
+        positions
+    }
+
     /// A site's rank as a multiple of the average (1.0).
     pub(crate) fn score(&self, id: u32) -> f64 {
         self.rank[id as usize] * self.graph.names.len() as f64
@@ -334,7 +348,6 @@ pub fn run(args: &LinkRankArgs) -> Result<()> {
             }
         }
     })?;
-    drop(copy);
     if let Some(err) = failed {
         return Err(err);
     }
@@ -432,6 +445,46 @@ pub fn run(args: &LinkRankArgs) -> Result<()> {
                 ranked.name(id)
             );
         }
+    }
+
+    if let Some(apply) = &args.apply {
+        let positions = ranked.positions(&order);
+        let mut file = BufWriter::new(
+            File::create(apply).with_context(|| format!("writing {}", apply.display()))?,
+        );
+        let mut changed = 0usize;
+        let mut failed = None;
+        crate::outline::for_each_record(&read_from, |mut record| {
+            if failed.is_some() {
+                return;
+            }
+            let position = canonical_domain(&record.domain)
+                .and_then(|domain| ranked.graph.ids.get(domain.as_str()).copied())
+                .and_then(|id| positions[id as usize]);
+            if let Some(position) = position {
+                let ours = u64::from(position);
+                let signals = &mut record.signals;
+                if signals.pagerank_rank.is_none_or(|rank| ours < rank) {
+                    signals.pagerank_rank = Some(ours);
+                    changed += 1;
+                }
+            }
+            let written = serde_json::to_writer(&mut file, &record)
+                .map_err(anyhow::Error::from)
+                .and_then(|()| file.write_all(b"\n").map_err(anyhow::Error::from));
+            if let Err(err) = written {
+                failed = Some(err);
+            }
+        })?;
+        if let Some(err) = failed {
+            return Err(err.context(format!("writing {}", apply.display())));
+        }
+        file.flush()?;
+        println!(
+            "\nwrote the records to {} with {} sites ranked better by links than before",
+            apply.display(),
+            group_thousands(changed as u64)
+        );
     }
 
     if let Some(out) = &args.out {
@@ -593,6 +646,23 @@ mod tests {
         assert!(only < big / 5.0, "{only} vs {big}");
         let sum: f64 = ranked.rank.iter().sum();
         assert!((sum - 1.0).abs() < 1e-9, "{sum}");
+    }
+
+    #[test]
+    fn places_count_only_sites_with_records_and_rank() {
+        let ranked = ranked(&[
+            seed("big.com", &["news.org", "nowhere.net"]),
+            seed("news.org", &[]),
+            site("farm.biz", &["news.org"]),
+        ]);
+        let order = ranked.order();
+        let positions = ranked.positions(&order);
+        let place = |domain: &str| positions[ranked.graph.ids[domain] as usize];
+        assert_eq!(place("news.org"), Some(1));
+        assert_eq!(place("big.com"), Some(2));
+        // No record, and no rank (nobody trusted links to it).
+        assert_eq!(place("nowhere.net"), None);
+        assert_eq!(place("farm.biz"), None);
     }
 
     #[test]
