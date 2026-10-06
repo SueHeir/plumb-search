@@ -124,6 +124,7 @@ fn share(limit: u64, percent: u64) -> u64 {
 }
 
 /// What the node keeps whatever the room.
+#[derive(Debug, Default)]
 pub(super) struct Keep {
     pub topics: Topics,
     /// Sites an About page always puts first, or a searcher opened.
@@ -131,7 +132,7 @@ pub(super) struct Keep {
 }
 
 impl Keep {
-    fn of(inner: &Inner) -> Keep {
+    pub(super) fn of(inner: &Inner) -> Keep {
         let history = inner.paths.data.join("history");
         let mut domains: HashSet<String> = crate::about::all_pinned(&history)
             .into_iter()
@@ -144,7 +145,7 @@ impl Keep {
         }
     }
 
-    fn keeps(&self, record: &SiteRecord) -> bool {
+    pub(super) fn keeps(&self, record: &SiteRecord) -> bool {
         record.signals.official_site
             || self.domains.contains(&record.domain)
             || self.topics.matches(record)

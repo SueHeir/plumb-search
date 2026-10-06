@@ -43,6 +43,9 @@ const NO_FEED_RECHECK_SECS: u64 = 7 * 24 * 60 * 60;
 const MAX_SHOWN: usize = 5;
 /// Headlines one site may have in a block about a topic.
 const MAX_SHOWN_PER_SITE: usize = 2;
+/// Headlines about a topic shown for a search that names a site and does
+/// not ask for news ("amazon"): the site is what was searched for.
+const MAX_SHOWN_BESIDE_NAME: usize = 2;
 /// A topic block needs this many sites with a matching headline, unless
 /// the query asks for news ("election news").
 const MIN_TOPIC_SITES: usize = 2;
@@ -381,9 +384,14 @@ impl NewsStore {
                 return Some(block);
             }
         }
-        let topical = (!topic.is_empty() && topic.len() <= MAX_TOPIC_WORDS)
+        let mut topical = (!topic.is_empty() && topic.len() <= MAX_TOPIC_WORDS)
             .then(|| self.topic_block(&topic, wants_news, now))
             .flatten();
+        if !wants_news && top.is_some_and(|(_, named)| named) {
+            if let Some(block) = &mut topical {
+                block.headlines.truncate(MAX_SHOWN_BESIDE_NAME);
+            }
+        }
         if topical.is_some() || !wants_news {
             return topical;
         }
@@ -409,6 +417,7 @@ impl NewsStore {
             return None;
         }
         found.sort_by(|a, b| b.at.cmp(&a.at).then_with(|| a.url.cmp(&b.url)));
+        drop_copies(&mut found);
         found.truncate(MAX_SHOWN);
         Some(Recent {
             site: None,
@@ -469,12 +478,20 @@ impl NewsStore {
             return None;
         }
         found.sort_by(|a, b| b.at.cmp(&a.at).then_with(|| a.url.cmp(&b.url)));
+        drop_copies(&mut found);
         found.truncate(MAX_SHOWN);
         Some(Recent {
             site: None,
             headlines: found,
         })
     }
+}
+
+/// Keeps the first of headlines with the same words: one story that
+/// papers of a group (smh.com.au, theage.com.au) all run.
+fn drop_copies(found: &mut Vec<RecentHeadline>) {
+    let mut seen = HashSet::new();
+    found.retain(|h| seen.insert(fold_words(&h.title)));
 }
 
 fn shown(domain: &str, h: &Headline) -> RecentHeadline {
@@ -647,6 +664,42 @@ mod tests {
             1
         );
         assert_eq!(store.recent("tips", None, NOW), None);
+    }
+
+    #[test]
+    fn a_named_site_keeps_topic_headlines_few_and_copies_go() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = NewsStore::open(dir.path().join("news"));
+        let story =
+            |site: &str, title: &str, ago: u64| shared(site, vec![headline(site, title, ago)]);
+        store.put_shared(
+            vec![
+                story("a.com", "Amazon Prime Day deals", HOUR),
+                story("b.com", "Best Amazon deals now", 2 * HOUR),
+                story("c.com", "Amazon earnings beat", 3 * HOUR),
+                story(
+                    "smh.com.au",
+                    "World Cup: Amazon streams the final",
+                    4 * HOUR,
+                ),
+                story(
+                    "theage.com.au",
+                    "World Cup: Amazon streams the final",
+                    4 * HOUR,
+                ),
+            ],
+            NOW,
+        );
+        let named = store
+            .recent("amazon", Some(("amazon.com", true)), NOW)
+            .unwrap();
+        assert_eq!(named.headlines.len(), 2, "{:?}", titles(&named));
+        let topic = store.recent("amazon", None, NOW).unwrap();
+        assert_eq!(topic.headlines.len(), 4, "{:?}", titles(&topic));
+        let asked = store
+            .recent("amazon news", Some(("amazon.com", true)), NOW)
+            .unwrap();
+        assert_eq!(asked.headlines.len(), 4, "{:?}", titles(&asked));
     }
 
     #[test]

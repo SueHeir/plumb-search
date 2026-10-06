@@ -1091,6 +1091,11 @@ pub struct PlacedPage {
 
 /// Most site results looked through by [`lift_named_sites`].
 const LIFTED_FROM: usize = 5;
+/// How much better known than a site the whole query names the page's
+/// official site must be to be put above it: global.toyota (0.62) stays
+/// below toyota.com (0.47), aliexpress.com (0.75) goes above aliexpress.us
+/// (0.41).
+const LIFT_LINK_MARGIN: f32 = 0.2;
 
 /// Puts first the official site of the best page the query names, when
 /// it is among the first [`LIFTED_FROM`] sites: what Wikipedia and
@@ -1099,31 +1104,49 @@ const LIFTED_FROM: usize = 5;
 /// youtube.com, so youtube.com goes above youtube.de; "google maps" puts
 /// google.com above googlemaps.com. An official site the whole query
 /// names keeps first place.
+///
+/// The homepage of a repository the query names goes first too when the
+/// query names that site as well: "awesome python" puts awesome-python.com,
+/// with vinta/awesome-python under it, above python.org. Never crawled, it
+/// would otherwise be taken for a mere spelling of the query.
 pub fn lift_named_sites(sites: &mut [crate::Hit], pages: &[PageHit]) {
-    let Some(site) = pages
+    let shown = sites.len().min(LIFTED_FROM);
+    let lifted = |hit: &PageHit| {
+        let site = hit.page.site.as_deref()?;
+        let at = sites[..shown].iter().position(|s| s.domain == site)?;
+        let ok = if hit.page.item.is_some() {
+            sites[at].official
+        } else {
+            hit.page.set == GITHUB_SET && sites[at].named
+        };
+        ok.then_some(at)
+    };
+    let article = pages
         .iter()
-        .find(|hit| hit.named && hit.page.item.is_some())
-        .and_then(|hit| hit.page.site.as_deref())
-    else {
+        .find(|hit| hit.named && hit.page.item.is_some());
+    let repo = pages
+        .iter()
+        .find(|hit| hit.named && hit.page.set == GITHUB_SET);
+    let Some(at) = article.and_then(lifted).or_else(|| repo.and_then(lifted)) else {
         return;
     };
     // An official or well-known site named by all of the query stays
     // first: google.com for "google", not about.google, Google's own site
-    // in Wikidata; toyota.com for "toyota", not global.toyota.
-    if sites.first().is_some_and(|top| {
-        top.named
-            && (top.official || top.link_score >= crate::WELL_KNOWN_LINK_SCORE)
-            && top.domain != site
-    }) {
+    // in Wikidata. So does any site named by all of it when the page's
+    // site is too and is not far better known: both are names of what was
+    // searched for, and the ranking already weighed them, so toyota.com
+    // stays above global.toyota for "toyota". aliexpress.us, though, does
+    // not stay above aliexpress.com, which far more sites link to.
+    let about_as_known = sites[0].link_score + LIFT_LINK_MARGIN >= sites[at].link_score;
+    if at > 0
+        && sites[0].named
+        && ((sites[at].named && about_as_known)
+            || sites[0].official
+            || sites[0].link_score >= crate::WELL_KNOWN_LINK_SCORE)
+    {
         return;
     }
-    let shown = sites.len().min(LIFTED_FROM);
-    if let Some(at) = sites[..shown]
-        .iter()
-        .position(|hit| hit.domain == site && hit.official)
-    {
-        sites[..=at].rotate_right(1);
-    }
+    sites[..=at].rotate_right(1);
 }
 
 /// Where `pages` (best first) go among the site results `sites`:
@@ -1159,8 +1182,10 @@ pub fn place_pages(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) -> Ve
     let query_word = squash(query);
     let organizations_site = sites.first().is_some_and(|site| {
         let label = squash(site.domain.split('.').next().unwrap_or(""));
-        // A site of government ("fafsa.gov") called after the page.
-        let government = is_government(&site.domain);
+        // A site of government called after the page and named by the
+        // query: fafsa.gov for "fafsa", not ada.gov (the Americans with
+        // Disabilities Act) for "ada lovelace".
+        let government = site.named && is_government(&site.domain);
         // The site is called what was searched for, and the best page
         // named so is an organization or a project: usbank.com for "us
         // bank" (the article "U.S. Bancorp"), regex101.com for the
@@ -1737,6 +1762,26 @@ mod tests {
         maker.page.item = Some("Q53268".into());
         lift_named_sites(&mut sites, &[maker]);
         assert_eq!(sites[0].domain, "toyota.com");
+        // Far less well known than the official site, which both are named
+        // by the query: the official site goes first.
+        let us = known_site("aliexpress.us", true, 0.41);
+        let mut com = known_site("aliexpress.com", true, 0.75);
+        com.official = true;
+        let mut sites = vec![us, com];
+        let mut shop = found("AliExpress", Some("aliexpress.com"), true, 0.9);
+        shop.page.item = Some("Q2647593".into());
+        lift_named_sites(&mut sites, &[shop]);
+        assert_eq!(sites[0].domain, "aliexpress.com");
+        // Less well known than global.toyota, but scored higher, and both
+        // are named by "toyota".
+        let toyota = known_site("toyota.com", true, 0.47);
+        let mut global = known_site("global.toyota", true, 0.62);
+        global.official = true;
+        let mut sites = vec![toyota, global];
+        let mut maker = found("Toyota", Some("global.toyota"), true, 0.9);
+        maker.page.item = Some("Q53268".into());
+        lift_named_sites(&mut sites, &[maker]);
+        assert_eq!(sites[0].domain, "toyota.com");
         music.named = false;
         let mut sites = vec![
             site("youtube.de", false),
@@ -1745,6 +1790,33 @@ mod tests {
         sites[1].official = true;
         lift_named_sites(&mut sites, &[music]);
         assert_eq!(sites[0].domain, "youtube.de");
+    }
+
+    #[test]
+    fn the_homepage_of_the_repository_the_query_names_goes_first() {
+        let mut python = known_site("python.org", false, 0.9);
+        python.official = true;
+        let mut sites = vec![
+            python.clone(),
+            site("realpython.com", false),
+            known_site("awesome-python.com", true, 0.2),
+        ];
+        let mut repo = found(
+            "vinta/awesome-python",
+            Some("awesome-python.com"),
+            true,
+            0.8,
+        );
+        repo.page.set = GITHUB_SET.into();
+        lift_named_sites(&mut sites, &[repo.clone()]);
+        assert_eq!(sites[0].domain, "awesome-python.com");
+        let placed = place_pages("awesome python", &sites, vec![repo.clone()]);
+        assert_eq!(placed[0].under.as_deref(), Some("awesome-python.com"));
+        // Not a homepage the query does not name.
+        let mut sites = vec![python, known_site("awesomelists.dev", false, 0.2)];
+        repo.page.site = Some("awesomelists.dev".into());
+        lift_named_sites(&mut sites, &[repo]);
+        assert_eq!(sites[0].domain, "python.org");
     }
 
     #[test]
@@ -1872,6 +1944,17 @@ mod tests {
             )],
         );
         assert_eq!(placed[0].at, 1);
+        // Not one only the page's first word spells.
+        let placed = place_pages(
+            "ada lovelace",
+            &[known_site("ada.gov", false, 0.48)],
+            vec![described(
+                "Ada Lovelace",
+                "English mathematician (1815-1852)",
+                0.9,
+            )],
+        );
+        assert_eq!(placed[0].at, 0);
         // ...and after an official website or a well known site.
         let mut official = known_site("example.org", false, 0.3);
         official.official = true;

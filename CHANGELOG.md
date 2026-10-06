@@ -6,9 +6,19 @@
 
 - Learning from clicks, on the node for each browser with search history on: places and maps you seldom open for searches like one you make are folded to one line, "Recent" headlines you often read come unfolded, and sites you always pass over move down a little. `/history` shows what was learned and forgets it; the settings gear turns it off.
 - Edit mode ("Edit these results" on a results page): small buttons put a result higher or lower for that search or hide it from that search, and fold places or headlines for that search or every search like it. What you say wins over what your clicks say.
-- Tune your search (`/tune`): go through five random searches on the real results page in edit mode, and Plumb learns from the results you move up or down and hide what kinds of result you like (official sites, encyclopedias, forums, code, video, shops, social media, news, government and schools, small or well-known sites, your country's) and whether maps and headlines help you, then leans every search that way. `/tune` and `/history` say what it learned.
+- Tune your search (`/tune`): go through five random searches on the real results page in edit mode, and Plumb learns from the results you move up or down and hide what kinds of result you like (official sites, encyclopedias, forums, code, video, shops, social media, news, government and schools, small or well-known sites, your country's) and whether maps and headlines help you, then leans every search that way. A kind counts only when results of that kind were moved up (or down) clearly more often than the other results on the same pages, so hiding a few off-topic results no longer reads as disliking every kind they belong to. `/tune` and `/history` say what it learned.
 - Sites opened before also come up for searches that share words with the one they were opened for ("us bank login" after "us bank").
 - "us bank" no longer lists banks in a town called Us: a town guessed from a query that names a site is left out. "Banks in denver" still lists them.
+
+### Crawling
+
+- Dead sites: `plumb run --drop-dead-sites` takes sites out of the index that no crawl has reached for 60 days after 6 tries in a row that got no answer. Never the best 10,000 sites, official websites or ones you chose. A dead site keeps a small record and comes back when it answers again. Off by default; without it the node only counts them in its log, and `plumb dead-sites --data DIR` counts them without changing anything.
+- Reading sites anew: when crawlers learn to read more from a homepage, the crawl version goes up and nodes crawl the sites read by an older crawler again, best-known first.
+
+### Nodes
+
+- Much less memory: crawl rounds keep about 150 bytes of each site instead of its whole record, and index builds, search by meaning and the network's records read the records file a record at a time. With two million sites a crawl round holds about 300 MB of site data instead of 3 GB or more, and an index build about 0.6 GB instead of about 5 GB, so a 4 GB server runs a node. `plumb index` reads a record at a time too when the records file has no journal.
+- The records' journal is folded into the file at every index build, and once it reaches 128 MB, so it no longer grows for days on a big node.
 
 ## 0.1.0
 

@@ -30,7 +30,9 @@ use tracing::warn;
 use super::{escape_html, html_response, page, search_link, time_ago, AppState};
 use crate::about::{About, AboutStore, Reason, MAX_INTERESTS, MAX_SITES, MAX_TOWN_CHARS};
 use crate::history::{new_profile, valid_profile, History, HistoryStore};
-use crate::learn::{describe_key, traits, Block, Choice, Learned, Rating, Taste, Trait, Verdict};
+use crate::learn::{
+    describe_key, traits, Block, Choice, Learned, Rating, Taste, Trait, Verdict, JUDGED_PER_PAGE,
+};
 
 /// The cookie holding a browser's profile id.
 const PROFILE_COOKIE: &str = "plumb_profile";
@@ -253,6 +255,24 @@ impl Visitor {
             h.learned.note_shown(query, blocks, folded, sites, now);
         }) {
             warn!("could not note a results page in the history: {err:#}");
+        }
+    }
+
+    /// Notes the first results of a page shown in edit mode, by their
+    /// traits, for telling what kinds of result the searcher likes.
+    pub fn note_judged(&mut self, query: &str, hits: &[Hit], home: Option<&str>) {
+        let Some(profile) = self.profile.clone() else {
+            return;
+        };
+        let results: Vec<Vec<Trait>> = hits
+            .iter()
+            .take(JUDGED_PER_PAGE)
+            .map(|hit| hit_traits(hit, home))
+            .collect();
+        if let Err(err) = self.store.update(&profile, |h| {
+            h.learned.note_judged(query, &results);
+        }) {
+            warn!("could not note a page in edit mode in the history: {err:#}");
         }
     }
 
@@ -912,14 +932,23 @@ async fn feedback(
             let traits = parse_traits(&form.t);
             (verdict.is_some() || form.v == "none").then(|| {
                 Box::new(move |h: &mut History| {
-                    h.learned.set_verdict(&query, &domain, verdict, now);
-                    match verdict {
-                        Some(Verdict::Up) => h.learned.rate(&traits, Rating::Like, 1.0),
-                        Some(Verdict::Down | Verdict::Hide) => {
-                            h.learned.rate(&traits, Rating::Dislike, 1.0);
+                    let rating = |verdict: Option<Verdict>| match verdict {
+                        Some(Verdict::Up) => Some(Rating::Like),
+                        Some(Verdict::Down | Verdict::Hide) => Some(Rating::Dislike),
+                        None => None,
+                    };
+                    // A changed mind takes back what was said before.
+                    let before = rating(h.learned.verdict(&query, &domain));
+                    let after = rating(verdict);
+                    if before != after {
+                        if let Some(before) = before {
+                            h.learned.rate(&traits, before, -1.0);
                         }
-                        None => {}
+                        if let Some(after) = after {
+                            h.learned.rate(&traits, after, 1.0);
+                        }
                     }
+                    h.learned.set_verdict(&query, &domain, verdict, now);
                 }) as Change
             })
         }

@@ -18,7 +18,8 @@
 //! redirect loop. A site that could not be reached at all
 //! ([`is_connection_failure`]) is retried sooner: after 1 day, then 2, 4,
 //! 8... days for each further failure in a row, never longer than `window`.
-//! A dropped uplink costs the sites it hit a day, not a month.
+//! A dropped uplink costs the sites it hit a day, not a month. A site judged
+//! dead ([`crate::dead`]) is tried again only every three windows.
 //!
 //! Each homepage is fetched at `https://<domain>/` first. When that gets no
 //! answer, the crawler tries the URL the site was last reached at (the
@@ -79,6 +80,10 @@ pub(crate) const CRAWL_BATCH_SIZE: usize = 500;
 /// recrawl window.
 pub(crate) const FIRST_RETRY_AFTER: u64 = SECONDS_PER_DAY;
 
+/// A site judged dead ([`plumb_core::SiteRecord::gone_at`]) is tried again
+/// after this many recrawl windows, in case it came back.
+pub(crate) const GONE_RETRY_WINDOWS: u64 = 3;
+
 /// A batch needs at least this many homepages that should answer to be
 /// judged offline.
 pub(crate) const OFFLINE_MIN_EXPECTED: usize = 20;
@@ -95,6 +100,88 @@ const OFFLINE_WAITS: [Duration; 4] = [
     Duration::from_secs(120),
     Duration::from_secs(240),
 ];
+
+/// What choosing homepages to crawl reads of a site: a whole
+/// [`SiteRecord`], or the little a node keeps of each site during a crawl
+/// round (see `crate::node`).
+pub(crate) trait CrawlSite {
+    /// The canonical domain.
+    fn domain(&self) -> &str;
+    /// Where the homepage was last reached ([`SiteRecord::url`]).
+    fn url(&self) -> Option<&str>;
+    fn link_score(&self) -> f32;
+    fn crawled_at(&self) -> Option<u64>;
+    fn crawl_attempted_at(&self) -> Option<u64>;
+    fn crawl_failures(&self) -> u32;
+    fn gone_at(&self) -> Option<u64>;
+}
+
+impl CrawlSite for SiteRecord {
+    fn domain(&self) -> &str {
+        &self.domain
+    }
+
+    fn url(&self) -> Option<&str> {
+        self.url.as_deref()
+    }
+
+    fn link_score(&self) -> f32 {
+        SiteRecord::link_score(self)
+    }
+
+    fn crawled_at(&self) -> Option<u64> {
+        self.crawled_at
+    }
+
+    fn crawl_attempted_at(&self) -> Option<u64> {
+        self.crawl_attempted_at
+    }
+
+    fn crawl_failures(&self) -> u32 {
+        self.crawl_failures
+    }
+
+    fn gone_at(&self) -> Option<u64> {
+        self.gone_at
+    }
+}
+
+/// The sites a crawl changes as it goes ([`crawl_rolling`]): a whole
+/// [`RecordSet`], or what a node keeps of each site during a round.
+pub(crate) trait CrawlSet {
+    /// When `domain`'s homepage was last tried, and how many tries in a row
+    /// failed to reach it; nothing for a site not held.
+    fn marks(&self, domain: &str) -> (Option<u64>, u32);
+    /// Makes a change saved to the journal.
+    fn apply(&mut self, change: Change);
+    /// Sites held.
+    fn len(&self) -> usize;
+    /// Folds the journal of `store` into its records file. Returns how many
+    /// records the file holds.
+    fn compact(&self, store: &mut RecordStore) -> Result<usize>;
+}
+
+impl CrawlSet for RecordSet {
+    fn marks(&self, domain: &str) -> (Option<u64>, u32) {
+        let record = self.get(domain);
+        (
+            record.and_then(|r| r.crawl_attempted_at),
+            record.map_or(0, |r| r.crawl_failures),
+        )
+    }
+
+    fn apply(&mut self, change: Change) {
+        change.apply(self);
+    }
+
+    fn len(&self) -> usize {
+        RecordSet::len(self)
+    }
+
+    fn compact(&self, store: &mut RecordStore) -> Result<usize> {
+        store.compact(self)
+    }
+}
 
 pub fn run(args: CrawlArgs) -> Result<()> {
     let runtime = runtime()?;
@@ -198,8 +285,8 @@ fn crawl_file_with(
 /// its share to the other, and an odd budget gives the extra one to sites
 /// never tried. The picks come best link score first, ties by domain, as
 /// targets made by [`target_for`].
-pub(crate) fn select_targets<'a>(
-    records: impl Iterator<Item = &'a SiteRecord>,
+pub(crate) fn select_targets<'a, S: CrawlSite + 'a>(
+    records: impl Iterator<Item = &'a S>,
     budget: usize,
     now: u64,
     window: u64,
@@ -209,15 +296,15 @@ pub(crate) fn select_targets<'a>(
 
 /// [`select_targets`], also counting the crawled sites for which `due_now`
 /// is true as due again, whenever they were last crawled.
-pub(crate) fn select_targets_with<'a>(
-    records: impl Iterator<Item = &'a SiteRecord>,
+pub(crate) fn select_targets_with<'a, S: CrawlSite + 'a>(
+    records: impl Iterator<Item = &'a S>,
     budget: usize,
     now: u64,
     window: u64,
-    due_now: impl Fn(&SiteRecord) -> bool,
+    due_now: impl Fn(&S) -> bool,
 ) -> Vec<CrawlTarget> {
-    let mut never: Vec<(f32, &SiteRecord)> = Vec::new();
-    let mut again: Vec<(f32, &SiteRecord)> = Vec::new();
+    let mut never: Vec<(f32, &S)> = Vec::new();
+    let mut again: Vec<(f32, &S)> = Vec::new();
     for record in records {
         let scored = (record.link_score(), record);
         match due_at(record, window) {
@@ -226,7 +313,7 @@ pub(crate) fn select_targets_with<'a>(
             Some(_) => {}
         }
     }
-    let best = |mut sites: Vec<(f32, &'a SiteRecord)>| {
+    let best = |mut sites: Vec<(f32, &'a S)>| {
         if sites.len() > budget {
             sites.select_nth_unstable_by(budget, by_score);
             sites.truncate(budget);
@@ -240,7 +327,7 @@ pub(crate) fn select_targets_with<'a>(
         .len()
         .min(never_share.max(budget.saturating_sub(again.len())));
     let take_again = again.len().min(budget - take_never);
-    let mut picked: Vec<(f32, &SiteRecord)> = never[..take_never]
+    let mut picked: Vec<(f32, &S)> = never[..take_never]
         .iter()
         .chain(&again[..take_again])
         .copied()
@@ -253,27 +340,28 @@ pub(crate) fn select_targets_with<'a>(
 }
 
 /// Best link score first, ties by domain.
-fn by_score(a: &(f32, &SiteRecord), b: &(f32, &SiteRecord)) -> std::cmp::Ordering {
+fn by_score<S: CrawlSite>(a: &(f32, &S), b: &(f32, &S)) -> std::cmp::Ordering {
     b.0.total_cmp(&a.0)
-        .then_with(|| a.1.domain.cmp(&b.1.domain))
+        .then_with(|| a.1.domain().cmp(b.1.domain()))
 }
 
 /// The homepage of `record` to fetch: `https://<domain>/`, falling back to
 /// the record's `url` (where the homepage was last reached, after
 /// redirects) when that gets no answer.
-pub(crate) fn target_for(record: &SiteRecord) -> CrawlTarget {
+pub(crate) fn target_for(record: &impl CrawlSite) -> CrawlTarget {
     CrawlTarget {
-        known_url: record.url.clone(),
-        ..CrawlTarget::new(&record.domain)
+        known_url: record.url().map(str::to_owned),
+        ..CrawlTarget::new(record.domain())
     }
 }
 
 /// When a site's homepage is due for another try, in Unix seconds: `window`
 /// after it was last fetched or answered, or [`retry_after`] its last try
 /// when that one could not reach it. `None` for a site never tried.
-pub(crate) fn due_at(record: &SiteRecord, window: u64) -> Option<u64> {
-    let last = record.crawled_at.max(record.crawl_attempted_at)?;
-    let wait = match record.crawl_failures {
+pub(crate) fn due_at(record: &impl CrawlSite, window: u64) -> Option<u64> {
+    let last = record.crawled_at().max(record.crawl_attempted_at())?;
+    let wait = match record.crawl_failures() {
+        _ if record.gone_at().is_some() => window.saturating_mul(GONE_RETRY_WINDOWS),
         0 => window,
         failures => retry_after(failures, window),
     };
@@ -411,7 +499,7 @@ pub(crate) fn crawl_in_batches(
 /// batch still offline after the last wait, every site started and not
 /// done gets its old marks back.
 pub(crate) fn crawl_rolling(
-    set: &mut RecordSet,
+    set: &mut impl CrawlSet,
     targets: &[CrawlTarget],
     batch_size: usize,
     store: &mut RecordStore,
@@ -519,7 +607,7 @@ pub(crate) fn crawl_rolling(
         totals.outcomes.add(&counted);
         totals.discovered += set.len().saturating_sub(known);
         if store.wants_compaction() {
-            let written = store.compact(set)?;
+            let written = set.compact(store)?;
             info!(
                 "folded the journal into {} ({written} records)",
                 store.path().display()
@@ -578,10 +666,10 @@ impl Fetcher for Rolling<'_> {
 }
 
 /// Saves `changes`, then makes them to `set`.
-fn commit(set: &mut RecordSet, store: &mut RecordStore, changes: Vec<Change>) -> Result<()> {
+fn commit(set: &mut impl CrawlSet, store: &mut RecordStore, changes: Vec<Change>) -> Result<()> {
     store.save(&changes)?;
     for change in changes {
-        change.apply(set);
+        set.apply(change);
     }
     Ok(())
 }
@@ -596,12 +684,12 @@ struct Mark {
 }
 
 impl Mark {
-    fn of(set: &RecordSet, domain: &str) -> Mark {
-        let record = set.get(domain);
+    fn of(set: &impl CrawlSet, domain: &str) -> Mark {
+        let (attempted_at, failures) = set.marks(domain);
         Mark {
             domain: domain.to_string(),
-            attempted_at: record.and_then(|r| r.crawl_attempted_at),
-            failures: record.map_or(0, |r| r.crawl_failures),
+            attempted_at,
+            failures,
         }
     }
 
@@ -668,7 +756,17 @@ struct BatchMerger {
     /// [`to_records`] counts the linking domains of one batch only, and
     /// merging keeps the larger of two counts, so without this a site linked
     /// from several batches would keep only the count of its best batch.
-    linkers: HashMap<String, HashSet<String>>,
+    /// Domains are kept as hashes ([`domain_hash`]): a round's links
+    /// number in the millions.
+    linkers: HashMap<u64, HashSet<u64>>,
+}
+
+/// A 64-bit hash of `domain`, the same in every run.
+fn domain_hash(domain: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::hash::DefaultHasher::new();
+    domain.hash(&mut hasher);
+    hasher.finish()
 }
 
 impl BatchMerger {
@@ -685,15 +783,15 @@ impl BatchMerger {
                     continue;
                 }
                 self.linkers
-                    .entry(link.target_domain.clone())
+                    .entry(domain_hash(&link.target_domain))
                     .or_default()
-                    .insert(page.domain.clone());
+                    .insert(domain_hash(&page.domain));
             }
         }
         to_records(results)
             .into_iter()
             .map(|mut record| {
-                if let Some(linkers) = self.linkers.get(&record.domain) {
+                if let Some(linkers) = self.linkers.get(&domain_hash(&record.domain)) {
                     let count = u32::try_from(linkers.len()).unwrap_or(u32::MAX);
                     let signals = &mut record.signals;
                     signals.linking_domains = signals.linking_domains.max(count);

@@ -40,6 +40,44 @@ const STOP_WORDS: &[&str] = &[
     "does", "i", "with", "from", "by", "at",
 ];
 
+/// Words that say what is wanted about a thing, not which thing: two
+/// searches match only when their other words are the same, so "latest
+/// version of python" does not match a finding for "requests latest
+/// version python".
+const ASKING_WORDS: &[&str] = &[
+    "latest",
+    "current",
+    "newest",
+    "new",
+    "stable",
+    "version",
+    "versions",
+    "release",
+    "releases",
+    "changelog",
+    "install",
+    "installing",
+    "setup",
+    "update",
+    "upgrade",
+    "upgrading",
+    "docs",
+    "documentation",
+    "example",
+    "examples",
+    "tutorial",
+    "guide",
+    "error",
+    "fix",
+    "use",
+    "using",
+    "why",
+    "when",
+    "where",
+    "which",
+    "best",
+];
+
 /// One finding.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Finding {
@@ -109,8 +147,19 @@ fn words(text: &str) -> HashSet<String> {
 
 /// How well a finding's search `found` matches the search `query`: the
 /// share of the larger one's words they have in common, 0 below
-/// [`MATCH_SHARE`].
+/// [`MATCH_SHARE`] or when they are about different things (their words
+/// besides [`ASKING_WORDS`] differ).
 fn closeness(found: &HashSet<String>, query: &HashSet<String>) -> f32 {
+    let things = |words: &HashSet<String>| -> HashSet<String> {
+        words
+            .iter()
+            .filter(|w| !ASKING_WORDS.contains(&w.as_str()))
+            .cloned()
+            .collect()
+    };
+    if things(found) != things(query) {
+        return 0.0;
+    }
     let shared = found.intersection(query).count();
     let share = shared as f32 / found.len().max(query.len()).max(1) as f32;
     if share >= MATCH_SHARE {
@@ -272,6 +321,20 @@ mod tests {
         assert_eq!(found[0].answer, "1.47.1, released 2025-07-23");
         assert!(findings.for_query("tokio", 5).is_empty());
         assert!(findings.for_query("tokio select macro", 5).is_empty());
+        findings
+            .add(finding(
+                "requests latest version python",
+                "https://pypi.org/project/requests/",
+                4,
+            ))
+            .unwrap();
+        assert!(findings
+            .for_query("what is the latest version of python", 5)
+            .is_empty());
+        assert_eq!(
+            findings.for_query("latest python requests version", 5)[0].at,
+            4
+        );
         // Kept on disk, and the same search and page replaces the old one.
         findings
             .add(finding(
@@ -281,7 +344,7 @@ mod tests {
             ))
             .unwrap();
         let again = Findings::in_dir(dir.path()).unwrap();
-        assert_eq!(again.len(), 2);
+        assert_eq!(again.len(), 3);
         assert_eq!(again.for_query("tokio latest version", 5)[0].at, 3);
     }
 

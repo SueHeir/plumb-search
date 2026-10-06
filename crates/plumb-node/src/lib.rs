@@ -46,11 +46,13 @@ pub mod web;
 pub mod websearch;
 
 mod crawl;
+mod dead;
 mod fetch;
 mod icons;
 mod ingest;
 mod limits;
 pub mod news;
+mod outline;
 mod records;
 mod run;
 mod search;
@@ -104,6 +106,7 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::Terms(args) => terms::run_terms(args),
         Command::RemoteControl(args) => run::remote_control(args),
         Command::Storage(args) => storage::run(args),
+        Command::DeadSites(args) => dead::run(&args),
         Command::Mcp(args) => mcp::run(args),
         Command::TryPlugin(args) => plugins::try_plugin(
             &args.plugin,
@@ -256,7 +259,7 @@ pub(crate) fn release_freed_memory() {
 }
 
 /// `dir/records.jsonl` -> `dir/.records.jsonl.<pid>.tmp`.
-fn temp_path_for(path: &Path) -> PathBuf {
+pub(crate) fn temp_path_for(path: &Path) -> PathBuf {
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())

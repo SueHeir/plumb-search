@@ -116,6 +116,7 @@ mod network;
 mod news;
 mod pages;
 mod places;
+mod round;
 pub mod schedule;
 pub(crate) mod store;
 mod trim;
@@ -222,6 +223,9 @@ pub struct NodeConfig {
     /// and crawl it every round it is due, assigned or not, so searching
     /// its name finds it. On by default.
     pub crawl_home_site: bool,
+    /// Take sites that look dead ([`crate::dead`]) out of the index each
+    /// crawl round. Off by default: the node only counts them in its log.
+    pub drop_dead_sites: bool,
     /// The nodes that share the sites with this one under `crawl_any_site`;
     /// they should crawl with it on and name this node in turn.
     pub crawl_with: Vec<plumb_net::PeerId>,
@@ -301,6 +305,7 @@ impl NodeConfig {
             share_popularity: false,
             crawl_any_site: false,
             crawl_home_site: true,
+            drop_dead_sites: false,
             crawl_with: Vec::new(),
             blackhole: false,
             publish_records: None,

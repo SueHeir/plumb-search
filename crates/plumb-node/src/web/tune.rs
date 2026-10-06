@@ -179,8 +179,9 @@ fn render_done(learned: &Learned) -> String {
     let (liked, disliked) = learned.leanings();
     if liked.is_empty() && disliked.is_empty() {
         body.push_str(
-            "<p>Nothing learned yet. Move a few results up or down, or hide them, and \
-             Plumb learns which kinds of result you like.</p>\n",
+            "<p>Nothing learned yet. Move results up or down, or hide them, over a few \
+             searches. Once one kind of result clearly fares better or worse with you \
+             than the rest do, Plumb says so here and leans that way.</p>\n",
         );
     } else {
         body.push_str("<h2>What your choices say</h2>\n<ul>\n");
@@ -252,8 +253,12 @@ mod tests {
     #[test]
     fn the_end_says_what_was_learned() {
         let mut learned = Learned::default();
-        learned.rate(&[Trait::Code], crate::learn::Rating::Like, 1.0);
-        learned.rate(&[Trait::Social], crate::learn::Rating::Dislike, 1.0);
+        let results = [vec![Trait::Code], vec![Trait::Social], vec![], vec![]];
+        for search in 0..8 {
+            learned.note_judged(&format!("search {search}"), &results);
+            learned.rate(&results[0], crate::learn::Rating::Like, 1.0);
+            learned.rate(&results[1], crate::learn::Rating::Dislike, 1.0);
+        }
         let page = render_done(&learned);
         assert!(
             page.contains("You like <strong>code and software docs"),

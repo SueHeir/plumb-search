@@ -28,6 +28,7 @@ mod feed;
 mod icon;
 mod read;
 mod records;
+mod terms;
 #[cfg(test)]
 mod test_alloc;
 
@@ -41,7 +42,8 @@ pub use extract::{
 pub use feed::{parse_date, read_feed};
 pub use icon::{normalize_icon, ICON_SIZE};
 pub use read::{page_text, PageReader, ReadConfig, ReadError, ReadPage, MAX_READ_LINKS};
-pub use records::to_records;
+pub use records::{to_records, CRAWL_VERSION};
+pub use terms::{pick_terms, words_of, TERM_WORDS};
 
 /// Sent with every request so site owners can see who is crawling and why.
 pub const USER_AGENT: &str = concat!(
@@ -215,6 +217,10 @@ pub struct PageMeta {
     /// form.
     #[serde(skip)]
     pub page_text: String,
+    /// Search terms [`pick_terms`] picked from the title, description,
+    /// headings and page text, for [`plumb_core::SiteRecord::terms`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub terms: Vec<String>,
     /// The site's feed: the first `<link rel="alternate">` to an RSS or
     /// Atom document, as an absolute http(s) URL. See [`check_feeds`].
     #[serde(default, skip_serializing_if = "Option::is_none")]

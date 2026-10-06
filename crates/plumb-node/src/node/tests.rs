@@ -400,8 +400,10 @@ async fn indexes_what_an_interrupted_crawl_saved() {
     let hits = search(node.addr(), "plumbline+example+widgets").await;
     assert_eq!(hits[0].domain, "plumbline-example.com");
     node.shutdown().await.unwrap();
-    // Every read replays it; the next crawl folds it in once it is big.
-    assert!(dir.path().join("records.jsonl.journal").exists());
+    // Building the index folded it into the records file.
+    assert!(!dir.path().join("records.jsonl.journal").exists());
+    let set = crate::records::load_records(&records).unwrap();
+    assert!(set.get("plumbline-example.com").is_some());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1093,6 +1095,91 @@ async fn sets_up_without_wikidata_and_adds_it_later() {
     assert!(usbank.signals.official_site);
     assert!(usbank.aliases.iter().any(|alias| alias == "U.S. Bancorp"));
 
+    // Records made before the lists of sites on subdomains are folded
+    // again too, from the seed files however old: Google Scholar, folded
+    // into google.com then, gets a record of its own, and a college whose
+    // website was misread from its email address is taken off google.com.
+    let wikidata = dir.path().join("seed").join(download::WIKIDATA_FILE_NAME);
+    let mut tsv = std::fs::read_to_string(&wikidata).unwrap();
+    tsv.push_str(
+        "http://www.wikidata.org/entity/Q90000099\tGoogle Scholar\thttps://scholar.google.com/\n",
+    );
+    tsv.push_str(
+        "http://www.wikidata.org/entity/Q90000098\tCOE, Moro\thttps://mailto:coe@google.com\n",
+    );
+    std::fs::write(&wikidata, tsv).unwrap();
+    let mut records: Vec<SiteRecord> = read_jsonl(&dir.path().join("records.jsonl")).unwrap();
+    let google = records
+        .iter_mut()
+        .find(|r| r.domain == "google.com")
+        .unwrap();
+    google.aliases.push("Google Scholar".into());
+    google.aliases.insert(0, "COE, Moro".into());
+    google.kinds.push("college".into());
+    write_jsonl(&dir.path().join("records.jsonl"), &records).unwrap();
+    let mut saved = store::load_state(&paths).unwrap();
+    saved.sites_version = 0;
+    store::save_state(&paths, &saved).unwrap();
+    let index_before = names(&dir.path().join("indexes"));
+    let mut config = test_config(dir.path());
+    config.sources = offline.sources();
+    config.sites = 50;
+    let node = start(config).await.unwrap();
+    wait_for(
+        node.addr(),
+        "the seed folded for the subdomain sites",
+        |s| {
+            ready_and_idle(s)
+                && s.index
+                    .as_ref()
+                    .is_some_and(|index| !index_before.contains(index))
+        },
+    )
+    .await;
+    node.shutdown().await.unwrap();
+    assert_eq!(offline.requests.lock().unwrap().len(), 0);
+    assert_eq!(
+        store::load_state(&paths).unwrap().sites_version,
+        plumb_core::SITES_VERSION
+    );
+    // The changes went into the journal, which the index build folded into
+    // the records a record at a time.
+    assert!(!crate::records::journal_path(&dir.path().join("records.jsonl")).exists());
+    let check = || {
+        let set = crate::records::load_records(&dir.path().join("records.jsonl")).unwrap();
+        let scholar = set.get("scholar.google.com").unwrap();
+        assert_eq!(scholar.aliases, ["Google Scholar"]);
+        assert_eq!(scholar.signals.tranco_rank, Some(1));
+        let google = set.get("google.com").unwrap();
+        assert_eq!(google.aliases, ["Google"]);
+        assert!(!google.kinds.iter().any(|kind| kind == "college"));
+        assert!(google.signals.official_site);
+        // Hacker News needs a record for ycombinator.com, which this has not.
+        assert!(set.get("news.ycombinator.com").is_none());
+        set.len()
+    };
+    let sites = check();
+
+    // A node stopped before it noted the version makes the same changes
+    // again on its next start, which leaves the records as they were.
+    let mut saved = store::load_state(&paths).unwrap();
+    saved.sites_version = 0;
+    store::save_state(&paths, &saved).unwrap();
+    let index_before = names(&dir.path().join("indexes"));
+    let mut config = test_config(dir.path());
+    config.sources = offline.sources();
+    config.sites = 50;
+    let node = start(config).await.unwrap();
+    wait_for(node.addr(), "the records updated again", |s| {
+        ready_and_idle(s)
+            && s.index
+                .as_ref()
+                .is_some_and(|index| !index_before.contains(index))
+    })
+    .await;
+    node.shutdown().await.unwrap();
+    assert_eq!(check(), sites);
+
     // Nothing to fold in a directory with no node yet.
     assert!(!request_reseed(tempfile::tempdir().unwrap().path()).unwrap());
 }
@@ -1435,13 +1522,15 @@ async fn a_node_sharing_popularity_reports_picks_and_ranks_with_the_networks() {
         .with_p2p(net_status.peer_id.parse().unwrap())
         .unwrap();
 
-    let before = search(addr, "us+bank").await;
+    // "bank" rather than "us bank": a search naming usbank.com leaves
+    // out the sites far below it, so it has no runner-up to pick.
+    let before = search(addr, "bank").await;
     assert!(before.len() >= 2, "{before:?}");
     let runner_up = before[1].clone();
 
     // A result opened from the page is noted.
-    let (_, _, body) = get(addr, "/search?q=us+bank").await;
-    let go = format!("/go?q=us+bank&amp;d={}", runner_up.domain);
+    let (_, _, body) = get(addr, "/search?q=bank").await;
+    let go = format!("/go?q=bank&amp;d={}", runner_up.domain);
     assert!(body.contains(&go), "{body}");
     let (code, head, _) = get(addr, &go.replace("&amp;", "&")).await;
     assert_eq!(code, 303);
@@ -1493,7 +1582,7 @@ async fn a_node_sharing_popularity_reports_picks_and_ranks_with_the_networks() {
     // Once enough others report the same pick, the node ranks with it.
     let epoch = report_epoch(now_unix());
     for _ in 1..REPORT_THRESHOLD {
-        let report = plumb_net::Report::new(epoch, "us bank", &runner_up.domain).unwrap();
+        let report = plumb_net::Report::new(epoch, "bank", &runner_up.domain).unwrap();
         peer.send_report(&report, Duration::from_secs(10))
             .await
             .unwrap();
@@ -1508,7 +1597,7 @@ async fn a_node_sharing_popularity_reports_picks_and_ranks_with_the_networks() {
         table = net.recount().await.unwrap();
     }
     assert_eq!(table.picks.len(), 1, "{table:?}");
-    let after = search(addr, "us+bank").await;
+    let after = search(addr, "bank").await;
     let boosted = after.iter().find(|h| h.domain == runner_up.domain).unwrap();
     assert!(
         (boosted.score - (runner_up.score + MAX_POPULARITY_BONUS)).abs() < 1e-4,

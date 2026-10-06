@@ -28,6 +28,7 @@ use plumb_core::{
 use tracing::debug;
 use url::Url;
 
+use crate::terms::{pick_terms, TERM_WORDS};
 use crate::{OutLink, PageMeta};
 
 /// Most icon links [`extract_page_meta`] keeps from one page.
@@ -143,8 +144,21 @@ const WORD_BREAK_ELEMENTS: &[&str] = &[
 ///   and is read the way it shows on screen: script and style contents are
 ///   skipped, and block elements separate words, so
 ///   `<div>Acme</div><div>Bank</div>` gives `acme bank`.
+/// - The search terms ([`PageMeta::terms`]) are picked from the title,
+///   description, headings and page text with [`pick_terms`].
 pub fn extract_page_meta(base_url: &Url, html: &str) -> PageMeta {
-    read_page(base_url, html, READ_TIME_LIMIT)
+    let mut meta = read_page(base_url, html, READ_TIME_LIMIT);
+    let text: Vec<&str> = meta
+        .title
+        .iter()
+        .chain(&meta.description)
+        .chain(&meta.headings)
+        .chain(std::iter::once(&meta.page_text))
+        .map(|part| part.trim())
+        .filter(|part| !part.is_empty())
+        .collect();
+    meta.terms = pick_terms(&text.join(". "), TERM_WORDS);
+    meta
 }
 
 /// [`extract_page_meta`], reading for at most `time_limit`.
@@ -741,6 +755,7 @@ impl<'a> Page<'a> {
         PageMeta {
             body_text: (!body.is_empty()).then(|| body.join(" ")),
             page_text: words.join(" "),
+            terms: Vec::new(),
             title: self.title,
             description: self.description.or(self.og_description),
             site_name: self.site_name,
@@ -1179,6 +1194,7 @@ mod tests {
             PageMeta {
                 body_text: Some("No head at all".into()),
                 page_text: "No head at all".into(),
+                terms: pick_terms("No head at all", TERM_WORDS),
                 ..PageMeta::default()
             }
         );
@@ -1595,7 +1611,7 @@ mod tests {
         let html =
             r#"<title>Caf&eacute; &amp; Co</title><a href="https://x.org/">X &copy; Org</a>"#;
         let base = Url::parse("https://example.com/").unwrap();
-        let whole = extract_page_meta(&base, html);
+        let whole = read_page(&base, html, READ_TIME_LIMIT);
         assert_eq!(whole.title.as_deref(), Some("Café & Co"));
         assert_eq!(whole.links[0].text, "x org");
         for size in 1..html.len() {

@@ -17,7 +17,6 @@
 //! vector does not depend on which other sites were embedded with it.
 
 mod model;
-mod sparse;
 mod text;
 mod vectors;
 
@@ -25,6 +24,5 @@ pub use model::{
     model_id, quantize, write_test_model, Embedder, ModelId, MAX_TOKENS, MODEL_BASE_URL,
     MODEL_FILES, MODEL_NAME,
 };
-pub use sparse::{write_test_sparse_model, SparseModel, WeightedWord, SPARSE_WEIGHT_FILES};
 pub use text::{site_text, text_hash, TextHash, MAX_LINK_TEXTS, MAX_TEXT_WORDS};
 pub use vectors::{cosine, Vectors, VECTORS_FILE_NAME};

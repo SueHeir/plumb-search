@@ -41,7 +41,6 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 url = "2.5.8"
 wasmi = "2.0.0"
-yake-rust = { version = "1.0.3", default-features = false, features = ["en"] }
 base64 = "0.22"
 
 [target.'cfg(unix)'.dependencies]

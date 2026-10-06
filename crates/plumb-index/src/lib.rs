@@ -143,6 +143,12 @@ const NEAREST_RANKED: usize = 50;
 /// The most popular of the other sites [`Meaning::nearest`] gives that are
 /// ranked too.
 const NEAREST_POPULAR: usize = 50;
+/// How many results past the ones asked for may move up over a site with
+/// no title ([`Searcher::untitled_last`]).
+const UNTITLED_LOOKAHEAD: usize = 20;
+/// Share of the first result's score a site with no title needs to keep
+/// its place anyway ([`Searcher::untitled_last`]).
+const UNTITLED_CLOSE_SHARE: f32 = 0.9;
 /// Most distinct query words used; the rest are ignored.
 const MAX_QUERY_WORDS: usize = 16;
 /// A query with operators ranks this many times its limit, and at least
@@ -258,6 +264,21 @@ pub struct RankConfig {
     /// that does, while youtube.com ("video sharing site") and spotify.com
     /// ("music streaming"), at about 0.04, keep theirs. `None` turns it off.
     pub described_relevance: Option<f32>,
+    /// For a site that has none of the query's words and is found only
+    /// for being near it in meaning, the text match (meaning alone) it
+    /// needs for its popularity to count in full; below it, popularity
+    /// counts in proportion. The nearest sites in meaning include big
+    /// ones the query has nothing to do with ("how to unclog a drain"
+    /// found stripe.com and snapchat.com, at a text match of 0.03 to
+    /// 0.06), which popularity alone would put on the first page. `None`
+    /// turns it off.
+    pub meaning_only_relevance: Option<f32>,
+    /// When the best site is one the query names, sites scoring less than
+    /// this share of its score are left out unless the query names them
+    /// too: what ranks that far below the site searched for is filler
+    /// ("bank of america login" listed apple.com, google.com and
+    /// cloudflare.com, matching none of it). `None` keeps them.
+    pub named_share: Option<f32>,
     /// BM25 boost of a query word matching a site's search terms
     /// ([`plumb_core::SiteRecord::terms`]), picked from its whole homepage.
     pub terms_boost: f32,
@@ -278,7 +299,9 @@ impl Default for RankConfig {
             described_alpha: Some(0.5),
             partial_label_bonus: None,
             described_relevance: Some(0.04),
-            terms_boost: 0.5,
+            meaning_only_relevance: Some(0.35),
+            named_share: Some(0.4),
+            terms_boost: 4.0,
         }
     }
 }
@@ -307,7 +330,8 @@ pub struct IndexStats {
     pub merged: u64,
     /// Records skipped because their domain is not a valid registrable
     /// domain ([`plumb_core::canonical_domain`] rejects it), empty ones
-    /// included.
+    /// included, or because the site is gone
+    /// ([`plumb_core::SiteRecord::gone_at`]).
     #[serde(default)]
     pub skipped: u64,
     /// Records left out because their homepage redirects to another site in
@@ -403,6 +427,10 @@ pub struct Spelling {
     /// hits are always for the query as typed; this is only a suggestion
     /// ("Did you mean ...?").
     pub query: String,
+    /// The well-known site the corrected spelling names, when the typo was
+    /// in a site's name ("youtbue": youtube.com), offered with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub site: Option<String>,
 }
 
 /// Builds a fresh index of `records` in `dir`, replacing any index already
@@ -438,10 +466,114 @@ pub fn build_index<R: Borrow<SiteRecord>>(dir: &Path, records: &[R]) -> Result<I
     let (sites, redirect_names) = fold_redirects(sites);
     stats.redirected = stats.docs - sites.len() as u64;
     stats.docs = sites.len() as u64;
-    let staging = Staging::new(dir)?;
-    write_index(staging.path(), &sites, &redirect_names)?;
-    staging.install()?;
+    let mut build = IndexBuild::new(dir)?;
+    for (i, site) in sites.iter().enumerate() {
+        let names = redirect_names.get(&i).map_or(&[][..], Vec::as_slice);
+        build.add(site, names)?;
+    }
+    build.finish()?;
     Ok(stats)
+}
+
+/// An index built one site at a time, for a caller that cannot hold every
+/// record at once: a node reads its records file a record at a time
+/// instead. [`build_index`] does the rest for records in memory: merging
+/// records of one domain and folding redirects ([`redirect_targets`]), which
+/// a caller of this does itself.
+///
+/// The index is built in a hidden directory next to `dir`, and replaces
+/// what is there only on [`IndexBuild::finish`], as [`build_index`] says.
+pub struct IndexBuild {
+    staging: Staging,
+    index: Index,
+    writer: IndexWriter,
+    fields: Fields,
+}
+
+impl IndexBuild {
+    /// Starts a build that replaces the index in `dir` when finished.
+    pub fn new(dir: &Path) -> Result<IndexBuild> {
+        let staging = Staging::new(dir)?;
+        let schema = schema::schema();
+        let fields = Fields::new(&schema)?;
+        let index = Index::create_in_dir(staging.path(), schema)
+            .with_context(|| format!("creating index in {}", staging.path().display()))?;
+        analysis::register(index.tokenizers());
+        let writer: IndexWriter = index
+            .writer(WRITER_HEAP_BYTES)
+            .context("opening index writer")?;
+        // Merge once at the end instead of while indexing.
+        writer.set_merge_policy(Box::new(NoMergePolicy));
+        Ok(IndexBuild {
+            staging,
+            index,
+            writer,
+            fields,
+        })
+    }
+
+    /// Adds `site`, whose domain is canonical and not added before, with
+    /// the names other sites give it by redirecting to it
+    /// ([`redirect_name`]).
+    pub fn add(&mut self, site: &SiteRecord, redirect_names: &[String]) -> Result<()> {
+        self.writer
+            .add_document(schema::document(&self.fields, site, redirect_names))?;
+        Ok(())
+    }
+
+    /// Writes the index: one commit, then a merge into a single segment,
+    /// and puts it in place.
+    pub fn finish(mut self) -> Result<()> {
+        self.writer.commit().context("committing index")?;
+        fail_point("after_commit")?;
+        // The index is read-only from here on, and one segment searches fastest.
+        let segments = self.index.searchable_segment_ids()?;
+        if segments.len() > 1 {
+            self.writer
+                .merge(&segments)
+                .wait()
+                .context("merging index segments")?;
+        }
+        self.writer
+            .wait_merging_threads()
+            .context("finishing index merges")?;
+        self.staging.install()
+    }
+}
+
+/// The name a site whose homepage redirects to another site gives that
+/// site: its domain label, as "pnc bank" for `pncbank.com`.
+pub fn redirect_name(domain: &str) -> String {
+    schema::label_text(domain)
+}
+
+/// For each of `sites`, by position, the site it is folded into: the one
+/// its homepage redirects to, when that is another of `sites` and does not
+/// redirect itself (one step only). `domain` gives a site's canonical
+/// domain and `redirect_to` the canonical domain its homepage redirects to
+/// (an empty one when it redirects to no valid domain: no target, but it
+/// still redirects).
+/// A site folded into another is left out of the index, and its
+/// [`redirect_name`] names the other.
+pub fn redirect_targets<T>(
+    sites: &[T],
+    domain: impl Fn(&T) -> &str,
+    redirect_to: impl Fn(&T) -> Option<String>,
+) -> Vec<Option<usize>> {
+    let positions: HashMap<&str, usize> = sites
+        .iter()
+        .enumerate()
+        .map(|(i, site)| (domain(site), i))
+        .collect();
+    sites
+        .iter()
+        .map(|site| {
+            let to = redirect_to(site).filter(|to| !to.is_empty())?;
+            let &target = positions.get(to.as_str())?;
+            (redirect_to(&sites[target]).is_none() && domain(&sites[target]) != domain(site))
+                .then_some(target)
+        })
+        .collect()
 }
 
 /// A site to index: one of the records given, or a copy where records had
@@ -486,7 +618,8 @@ fn merge_by_domain<R: Borrow<SiteRecord>>(records: &[R]) -> (Vec<Site<'_>>, Inde
     let mut stats = IndexStats::default();
     for record in records {
         let record: &SiteRecord = record.borrow();
-        let Some(domain) = canonical_domain(&record.domain) else {
+        let Some(domain) = canonical_domain(&record.domain).filter(|_| record.gone_at.is_none())
+        else {
             stats.skipped += 1;
             continue;
         };
@@ -521,18 +654,14 @@ fn merge_by_domain<R: Borrow<SiteRecord>>(records: &[R]) -> (Vec<Site<'_>>, Inde
 /// name. Their domain labels become names of the site they redirect to,
 /// returned by its position in the sites kept, so "pnc bank" names pnc.com.
 fn fold_redirects(sites: Vec<Site<'_>>) -> (Vec<Site<'_>>, HashMap<usize, Vec<String>>) {
-    let positions: HashMap<&str, usize> = sites
-        .iter()
-        .enumerate()
-        .map(|(i, site)| (site.domain.as_str(), i))
-        .collect();
-    // Only one step: a site that itself redirects is not a target.
-    let target_of = |site: &SiteRecord| {
-        let to = canonical_domain(&site.redirect.as_ref()?.to)?;
-        let &target = positions.get(to.as_str())?;
-        (sites[target].redirect.is_none() && sites[target].domain != site.domain).then_some(target)
-    };
-    let targets: Vec<Option<usize>> = sites.iter().map(|site| target_of(site)).collect();
+    let targets = redirect_targets(
+        &sites,
+        |site| site.domain.as_str(),
+        |site| {
+            let to = &site.redirect.as_ref()?.to;
+            Some(canonical_domain(to).unwrap_or_default())
+        },
+    );
     let mut kept_at = vec![None; sites.len()];
     let mut kept = 0;
     for (i, target) in targets.iter().enumerate() {
@@ -547,10 +676,9 @@ fn fold_redirects(sites: Vec<Site<'_>>) -> (Vec<Site<'_>>, HashMap<usize, Vec<St
             names
                 .entry(target)
                 .or_default()
-                .push(schema::label_text(&sites[i].domain));
+                .push(redirect_name(&sites[i].domain));
         }
     }
-    drop(positions);
     let sites = sites
         .into_iter()
         .zip(&targets)
@@ -558,47 +686,6 @@ fn fold_redirects(sites: Vec<Site<'_>>) -> (Vec<Site<'_>>, HashMap<usize, Vec<St
         .map(|(site, _)| site)
         .collect();
     (sites, names)
-}
-
-/// Writes a complete index of `sites`, whose domains are canonical and
-/// unique, into the empty directory `dir`: one commit, then a merge into a
-/// single segment. `redirect_names` holds the names other sites give each
-/// site by redirecting to it, by position.
-fn write_index(
-    dir: &Path,
-    sites: &[Site],
-    redirect_names: &HashMap<usize, Vec<String>>,
-) -> Result<()> {
-    let schema = schema::schema();
-    let fields = Fields::new(&schema)?;
-    let index = Index::create_in_dir(dir, schema)
-        .with_context(|| format!("creating index in {}", dir.display()))?;
-    analysis::register(index.tokenizers());
-
-    let mut writer: IndexWriter = index
-        .writer(WRITER_HEAP_BYTES)
-        .context("opening index writer")?;
-    // Merge once at the end instead of while indexing.
-    writer.set_merge_policy(Box::new(NoMergePolicy));
-    for (i, site) in sites.iter().enumerate() {
-        let names = redirect_names.get(&i).map_or(&[][..], Vec::as_slice);
-        writer.add_document(schema::document(&fields, site, names))?;
-    }
-    writer.commit().context("committing index")?;
-    fail_point("after_commit")?;
-
-    // The index is read-only from here on, and one segment searches fastest.
-    let segments = index.searchable_segment_ids()?;
-    if segments.len() > 1 {
-        writer
-            .merge(&segments)
-            .wait()
-            .context("merging index segments")?;
-    }
-    writer
-        .wait_merging_threads()
-        .context("finishing index merges")?;
-    Ok(())
 }
 
 #[cfg(test)]
@@ -901,8 +988,34 @@ impl Searcher {
         if fixed.hits.is_empty() {
             return Ok(results);
         }
+        let site = fixed
+            .hits
+            .first()
+            .filter(|hit| {
+                fix.name_link_score.is_some()
+                    && hit.named
+                    && hit.link_score >= spell::MIN_FIX_LINK_SCORE
+            })
+            .map(|hit| hit.domain.clone());
+        // A misspelled name matches no site's words, so only meaning finds
+        // the site it means ("adobee" is close to adobe.com): the results as
+        // typed keep what meaning alone finds rather than cutting it as
+        // filler.
+        let results = match cfg.meaning_only_relevance {
+            Some(_) if site.is_some() => {
+                let cfg = RankConfig {
+                    meaning_only_relevance: None,
+                    ..*cfg
+                };
+                self.rank(query_text, limit, &cfg, options, meaning)?.0
+            }
+            _ => results,
+        };
         Ok(SearchResults {
-            spelling: Some(Spelling { query: fix.query }),
+            spelling: Some(Spelling {
+                query: fix.query,
+                site,
+            }),
             ..results
         })
     }
@@ -1209,10 +1322,13 @@ impl Searcher {
                 .as_ref()
                 .and_then(|domains| domains.term_ords(addr.doc_id).next())
                 .unwrap_or(u64::MAX);
-            let prior = match relevance_floor {
-                Some(floor) if !is_kind && name.words() == 0 => {
+            let unnamed = !is_kind && name.words() == 0;
+            let prior = match (relevance_floor, cfg.meaning_only_relevance) {
+                // No word of the query: only meaning speaks for it.
+                (_, Some(floor)) if unnamed && bm25 <= 0.0 && floor > 0.0 => {
                     link_score * (text_score / floor).min(1.0)
                 }
+                (Some(floor), _) if unnamed => link_score * (text_score / floor).min(1.0),
                 _ => link_score,
             };
             ranked.push(Ranked {
@@ -1224,6 +1340,7 @@ impl Searcher {
                 link_score,
                 country,
                 named: name.typed || name.words() >= query.len,
+                label_names_query: query.len >= 2 && name.label >= query.len,
                 tie_break: (addr.segment_ord, domain_ord),
             });
         }
@@ -1233,6 +1350,50 @@ impl Searcher {
                 .then_with(|| b.link_score.total_cmp(&a.link_score))
                 .then_with(|| a.tie_break.cmp(&b.tie_break))
         });
+
+        // Far below a site the query names: filler.
+        if let (Some(share), Some(top)) = (cfg.named_share, ranked.first()) {
+            // Only a site people know by that name: vacationrentals.com
+            // for "vacation rentals" is a namesake of the words, and
+            // airbnb.com is still what the query is after.
+            if top.named && top.link_score >= WELL_KNOWN_LINK_SCORE && share > 0.0 {
+                let least = top.score * share;
+                ranked.retain(|r| r.named || r.score >= least);
+            }
+        }
+
+        // Copies of the site the query names on other top-level domains
+        // (gmail.ru, gmail.hu for "gmail"; paypal.biz for "paypal"): never
+        // crawled, nothing says what they are, little linked. They go
+        // after every other site rather than crowding the first page.
+        // Country sites of the brand are kept where they rank: they are
+        // well known (amazon.de) or crawled (toyota.jp).
+        if let Some(top) = ranked
+            .first()
+            .filter(|top| top.named && top.link_score >= WELL_KNOWN_LINK_SCORE)
+        {
+            let top_label = columns[top.addr.segment_ord as usize]
+                .domain(top.addr.doc_id)
+                .and_then(|domain| domain.split('.').next().map(str::to_owned));
+            if let Some(top_label) = top_label {
+                let mut copies = HashSet::new();
+                for r in ranked.iter().skip(1) {
+                    if r.link_score >= WELL_KNOWN_LINK_SCORE {
+                        continue;
+                    }
+                    let same_label = columns[r.addr.segment_ord as usize]
+                        .domain(r.addr.doc_id)
+                        .is_some_and(|domain| domain.split('.').next() == Some(&top_label));
+                    if same_label && !self.says_what_it_is(&searcher, r.addr)? {
+                        copies.insert(r.addr);
+                    }
+                }
+                if !copies.is_empty() {
+                    // Stable: the copies keep their order among themselves.
+                    ranked.sort_by_key(|r| copies.contains(&r.addr));
+                }
+            }
+        }
 
         // The best-ranked site named by the query's first words, with words
         // left over to search it for.
@@ -1245,11 +1406,31 @@ impl Searcher {
             None => None,
         };
 
-        ranked.truncate(limit);
-        let hits = ranked
-            .into_iter()
-            .map(|ranked| self.hit(&searcher, ranked))
-            .collect::<Result<_>>()?;
+        // Left out unless the query names them: sites on names reserved
+        // for tests (uniteddolls.test), online pill shops named after a
+        // drug ("ibuprofen dosage" found celebrex365o24.com), and little
+        // known homepages that are only a company's sign-in page for
+        // someone else's product ("Outlook Web App" on bpl.net for
+        // "microsoft outlook"). live.com, titled "Outlook", is Microsoft's.
+        let ranked = self.untitled_last(&searcher, ranked, limit)?;
+        let mut hits = Vec::with_capacity(limit.min(ranked.len()));
+        for ranked in ranked {
+            if hits.len() == limit {
+                break;
+            }
+            let named = ranked.named;
+            let hit = self.hit(&searcher, ranked)?;
+            let left_out = is_reserved_name(&hit.domain)
+                || is_pill_shop(&hit.domain, hit.link_score)
+                || (hit.link_score < WELL_KNOWN_LINK_SCORE
+                    && hit
+                        .title
+                        .as_deref()
+                        .is_some_and(|title| plumb_core::is_sign_in_portal(&hit.domain, title)));
+            if named || !left_out {
+                hits.push(hit);
+            }
+        }
         let results = SearchResults {
             hits,
             pages: Vec::new(),
@@ -1257,6 +1438,39 @@ impl Searcher {
             spelling: None,
         };
         Ok((results, named))
+    }
+
+    /// Whether anything of the site's own says what it is: a title, a
+    /// description or Wikidata's words.
+    fn says_what_it_is(&self, searcher: &tantivy::Searcher, addr: DocAddress) -> Result<bool> {
+        let segment = searcher.segment_reader(addr.segment_ord);
+        for field in [
+            self.fields.title,
+            self.fields.description,
+            self.fields.about,
+        ] {
+            if let Some(norms) = segment.fieldnorms_readers().get_field(field)? {
+                if norms.fieldnorm(addr.doc_id) > 0 {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    /// Whether the site has other names (from Wikidata or a redirect),
+    /// which stand in for a missing title.
+    fn has_aliases(&self, searcher: &tantivy::Searcher, addr: DocAddress) -> Result<bool> {
+        let segment = searcher.segment_reader(addr.segment_ord);
+        Ok(
+            match segment
+                .fieldnorms_readers()
+                .get_field(self.fields.aliases)?
+            {
+                Some(norms) => norms.fieldnorm(addr.doc_id) > 0,
+                None => false,
+            },
+        )
     }
 
     /// A link into the search of the site `domain` for `terms`, if the
@@ -1268,6 +1482,50 @@ impl Searcher {
             return Ok(None);
         };
         self.site_search_link(&searcher, addr, terms.trim().to_string())
+    }
+
+    /// `ranked` with the sites that have no title and are not well known
+    /// moved after the titled ones, among the first `limit` plus
+    /// [`UNTITLED_LOOKAHEAD`] past the first result: a bare `netflix.net`
+    /// tells a person nothing they can judge it by, even when it has the
+    /// query's name: netflix.net for "netflix". The first result keeps its
+    /// place, title or not, and so does a site whose label is the whole
+    /// query of two or more words: awesome-python.com for "awesome python"
+    /// is what was asked for, titled or not. A site that Wikidata or its
+    /// description says what it is, never crawled or not, is not bare
+    /// either, nor is one with another name to show for a title
+    /// (cars.com for "used cars"): vanguard.com for "vanguard". Nor is a site that scores
+    /// within [`UNTITLED_CLOSE_SHARE`] of the first.
+    fn untitled_last(
+        &self,
+        searcher: &tantivy::Searcher,
+        mut ranked: Vec<Ranked>,
+        limit: usize,
+    ) -> Result<Vec<Ranked>> {
+        let window = limit.saturating_add(UNTITLED_LOOKAHEAD).min(ranked.len());
+        if window < 2 {
+            return Ok(ranked);
+        }
+        let rest = ranked.split_off(window);
+        let close = ranked[0].score * UNTITLED_CLOSE_SHARE;
+        let mut titled = Vec::with_capacity(rest.len() + window);
+        let mut bare = Vec::new();
+        for (i, site) in ranked.into_iter().enumerate() {
+            let untitled = i > 0
+                && !site.label_names_query
+                && site.link_score < WELL_KNOWN_LINK_SCORE
+                && site.score < close
+                && !self.says_what_it_is(searcher, site.addr)?
+                && !self.has_aliases(searcher, site.addr)?;
+            if untitled {
+                bare.push(site);
+            } else {
+                titled.push(site);
+            }
+        }
+        titled.extend(bare);
+        titled.extend(rest);
+        Ok(titled)
     }
 
     /// A link into the search of the site at `addr` for the words of `query`
@@ -1395,6 +1653,75 @@ impl Searcher {
     }
 }
 
+/// Drugs that spam pill shops put in their names.
+const PILL_SHOP_DRUGS: &[&str] = &[
+    "viagra",
+    "cialis",
+    "levitra",
+    "kamagra",
+    "sildenafil",
+    "tadalafil",
+    "vardenafil",
+    "vidalista",
+    "fildena",
+    "cenforce",
+    "celebrex",
+    "ciprofloxacin",
+    "flibanserin",
+    "tramadol",
+    "xanax",
+    "alprazolam",
+    "valium",
+    "diazepam",
+    "oxycodone",
+    "hydrocodone",
+    "modafinil",
+    "armodafinil",
+    "ivermectin",
+    "hydroxychloroquine",
+    "propecia",
+    "finasteride",
+    "clomid",
+    "accutane",
+    "isotretinoin",
+    "priligy",
+    "dapoxetine",
+    "zithromax",
+    "azithromycin",
+    "amoxicillin",
+    "doxycycline",
+    "lasix",
+    "furosemide",
+    "prednisone",
+    "neurontin",
+    "gabapentin",
+    "lyrica",
+    "pregabalin",
+    "synthroid",
+    "lexapro",
+    "zoloft",
+    "prozac",
+];
+
+/// Whether `domain` is a little-known site named after a drug that spam
+/// pill shops sell (celebrex365o24.com, vidalista.pics): such a name is
+/// nearly always a shop, not a place to learn about the drug.
+fn is_pill_shop(domain: &str, link_score: f32) -> bool {
+    if link_score >= WELL_KNOWN_LINK_SCORE {
+        return false;
+    }
+    let label = domain.split('.').next().unwrap_or("");
+    PILL_SHOP_DRUGS.iter().any(|drug| label.contains(drug))
+}
+
+/// Whether `domain` is under a top-level name reserved for tests (RFC
+/// 2606, RFC 6761), which no real site has. `.example` stays: Plumb's own
+/// tests and fixtures use it.
+fn is_reserved_name(domain: &str) -> bool {
+    let tld = domain.rsplit('.').next().unwrap_or("");
+    ["test", "invalid", "localhost"].contains(&tld)
+}
+
 /// How a query names sites, for typo correction.
 #[derive(Debug, Clone, Copy, Default)]
 struct Named {
@@ -1481,6 +1808,9 @@ struct Ranked {
     link_score: f32,
     country: Option<String>,
     named: bool,
+    /// The domain's label is the whole query of two or more words
+    /// (awesome-python.com for "awesome python").
+    label_names_query: bool,
     tie_break: (u32, u64),
 }
 
@@ -1930,6 +2260,14 @@ mod tests {
         record
     }
 
+    /// The default ranking, keeping sites far below a named one.
+    fn keep_all() -> RankConfig {
+        RankConfig {
+            named_share: None,
+            ..RankConfig::default()
+        }
+    }
+
     fn popular(tranco_rank: u32, linking_domains: u32) -> Signals {
         Signals {
             tranco_rank: Some(tranco_rank),
@@ -2102,6 +2440,237 @@ mod tests {
         hits[0].domain.clone()
     }
 
+    #[test]
+    fn a_site_is_found_by_its_page_terms() {
+        let mut maker = site(
+            "voltmotors.example",
+            Some("Volt Motors"),
+            None,
+            &[],
+            &[],
+            obscure(200_000, 10),
+        );
+        maker.terms = ["electric", "electric", "car", "vehicles"]
+            .map(String::from)
+            .to_vec();
+        let other = site(
+            "carparts.example",
+            Some("Car parts"),
+            None,
+            &[],
+            &[],
+            obscure(200_000, 10),
+        );
+        let (_dir, searcher) = build(&[maker, other]);
+        assert_eq!(top(&searcher, "electric car"), "voltmotors.example");
+        let off = RankConfig {
+            terms_boost: 0.0,
+            ..RankConfig::default()
+        };
+        let hits = searcher.search_with("electric", 10, &off).unwrap();
+        assert!(hits.iter().all(|hit| hit.domain != "voltmotors.example"));
+    }
+
+    #[test]
+    fn sites_on_subdomains_are_found_by_name() {
+        // Hacker News takes Y Combinator's ranks (see plumb-ingest), so it
+        // beats a little-known site named after it.
+        let records = [
+            site(
+                "news.ycombinator.com",
+                Some("Hacker News"),
+                None,
+                &["Hacker News"],
+                &[],
+                popular(900, 50),
+            ),
+            site(
+                "hackernews.cc",
+                Some("HackerNews - threat intelligence"),
+                None,
+                &[],
+                &[],
+                obscure(400_000, 5),
+            ),
+            site(
+                "ycombinator.com",
+                Some("Y Combinator"),
+                None,
+                &["Y Combinator"],
+                &[],
+                popular(900, 50),
+            ),
+        ];
+        let (_dir, searcher) = build(&records);
+        assert_eq!(top(&searcher, "hacker news"), "news.ycombinator.com");
+        assert_eq!(
+            top(&searcher, "news.ycombinator.com"),
+            "news.ycombinator.com"
+        );
+        assert_eq!(top(&searcher, "y combinator"), "ycombinator.com");
+    }
+
+    #[test]
+    fn sites_without_a_title_go_by_their_name() {
+        let records = [
+            site("gmail.com", None, None, &["Gmail"], &[], popular(30, 100)),
+            site("gmail.ru", None, None, &[], &[], obscure(900_000, 1)),
+        ];
+        let (_dir, searcher) = build(&records);
+        let hits = searcher.search("gmail", 10).unwrap();
+        assert_eq!(domains(&hits), ["gmail.com", "gmail.ru"]);
+        assert_eq!(hits[0].title.as_deref(), Some("Gmail"));
+        assert_eq!(hits[1].title, None);
+    }
+
+    #[test]
+    fn little_known_sites_without_a_title_come_after_titled_ones() {
+        let records = [
+            site(
+                "netflix.com",
+                Some("Netflix"),
+                None,
+                &["Netflix"],
+                &[],
+                popular(20, 500),
+            ),
+            site("netflix.net", None, None, &[], &[], obscure(200_000, 3)),
+            site("netflix.info", None, None, &[], &[], obscure(250_000, 2)),
+            site(
+                "netflixfans.org",
+                Some("Netflix fans: what to watch on Netflix"),
+                None,
+                &[],
+                &[],
+                obscure(900_000, 1),
+            ),
+        ];
+        let (_dir, searcher) = build(&records);
+        let hits = searcher.search_with("netflix", 10, &keep_all()).unwrap();
+        assert_eq!(
+            domains(&hits),
+            [
+                "netflix.com",
+                "netflixfans.org",
+                "netflix.net",
+                "netflix.info"
+            ]
+        );
+        // Bare domains still come back when nothing titled is left.
+        let hits = searcher.search_with("netflix", 2, &keep_all()).unwrap();
+        assert_eq!(domains(&hits), ["netflix.com", "netflixfans.org"]);
+    }
+
+    #[test]
+    fn a_little_known_namesake_of_the_words_leaves_the_rest_listed() {
+        let records = [
+            site(
+                "vacationrentals.com",
+                Some("Vacation Rentals"),
+                None,
+                &[],
+                &[],
+                obscure(150_000, 20),
+            ),
+            site(
+                "airbnb.com",
+                Some("Airbnb: holiday rentals, cabins, beach houses"),
+                None,
+                &["Airbnb"],
+                &[],
+                popular(150, 5_000),
+            ),
+        ];
+        let (_dir, searcher) = build(&records);
+        let hits = searcher.search("vacation rentals", 10).unwrap();
+        assert_eq!(hits[0].domain, "vacationrentals.com");
+        assert!(hits[0].link_score < WELL_KNOWN_LINK_SCORE);
+        assert!(
+            domains(&hits).contains(&"airbnb.com"),
+            "{:?}",
+            domains(&hits)
+        );
+    }
+
+    #[test]
+    fn a_site_said_what_it_is_keeps_its_place_without_a_title() {
+        let records = [
+            site(
+                "vanguard.edu",
+                Some("Vanguard University"),
+                None,
+                &["Vanguard University"],
+                &[],
+                popular(40_000, 250),
+            ),
+            // Never crawled, but Wikidata says what it is.
+            site(
+                "vanguard.com",
+                None,
+                Some("American investment management company"),
+                &[],
+                &[],
+                ranked(30_000, 300),
+            ),
+            site(
+                "vanguardmil.com",
+                Some("Vanguard Industries military insignia"),
+                None,
+                &[],
+                &[],
+                obscure(200_000, 10),
+            ),
+        ];
+        let (_dir, searcher) = build(&records);
+        let hits = searcher.search_with("vanguard", 10, &keep_all()).unwrap();
+        let at = |domain: &str| domains(&hits).iter().position(|d| *d == domain);
+        assert!(
+            at("vanguard.com") < at("vanguardmil.com"),
+            "{:?}",
+            domains(&hits)
+        );
+    }
+
+    #[test]
+    fn a_site_named_by_the_whole_query_keeps_its_place_without_a_title() {
+        let mut records = vec![
+            site(
+                "awesome.com",
+                Some("Awesome"),
+                None,
+                &["Awesome"],
+                &[],
+                popular(500, 2_000),
+            ),
+            // Bare: never crawled, and less linked than awesome.com, which
+            // the query names by its first word.
+            site(
+                "awesome-python.com",
+                None,
+                None,
+                &[],
+                &[],
+                obscure(400_000, 3),
+            ),
+        ];
+        for i in 0..30 {
+            records.push(site(
+                &format!("pythontips{i}.org"),
+                Some(&format!("Awesome Python tips {i}")),
+                None,
+                &[],
+                &[],
+                ranked(5_000 + i, 60),
+            ));
+        }
+        let (_dir, searcher) = build(&records);
+        let hits = searcher.search("awesome python", 10).unwrap();
+        let at = domains(&hits)
+            .iter()
+            .position(|d| *d == "awesome-python.com");
+        assert!(at.is_some_and(|at| at < 3), "{:?}", domains(&hits));
+    }
+
     fn ranked(tranco_rank: u32, linking_domains: u32) -> Signals {
         Signals {
             official_site: false,
@@ -2228,6 +2797,106 @@ mod tests {
                 .find(|(d, _)| *d == domain)
                 .map(|&(_, closeness)| closeness)
         }
+    }
+
+    #[test]
+    fn big_sites_far_in_meaning_do_not_fill_a_weak_search() {
+        let records = vec![
+            site(
+                "stripe.com",
+                Some("Stripe | Financial Infrastructure"),
+                Some("Online payments for businesses."),
+                &["Stripe"],
+                &[],
+                popular(50, 20_000),
+            ),
+            site(
+                "drainhelp.net",
+                Some("Drain help"),
+                Some("How to unclog a drain with a plunger or a snake."),
+                &[],
+                &[],
+                ranked(400_000, 5),
+            ),
+            site(
+                "plumbers.org",
+                Some("Find a plumber"),
+                None,
+                &[],
+                &[],
+                ranked(200_000, 20),
+            ),
+        ];
+        let (_dir, searcher) = build(&records);
+        let options = SearchOptions::default();
+        // Among the thousand nearest, as every big site is for some query.
+        let meaning = FixedMeaning(vec![
+            ("drainhelp.net", 1.0),
+            ("plumbers.org", 0.3),
+            ("stripe.com", 0.08),
+        ]);
+        let score = |cfg: &RankConfig, domain: &str| {
+            searcher
+                .search_meaning("how to unclog a drain", 10, cfg, &options, Some(&meaning))
+                .unwrap()
+                .hits
+                .into_iter()
+                .find(|hit| hit.domain == domain)
+                .map_or(0.0, |hit| hit.score)
+        };
+        let before = RankConfig {
+            meaning_only_relevance: None,
+            ..RankConfig::default()
+        };
+        // On popularity alone it would have come before the plumbers...
+        assert!(score(&before, "stripe.com") > score(&before, "plumbers.org"));
+        // ...but nothing of the query's speaks for it.
+        let now = RankConfig::default();
+        assert!(score(&now, "stripe.com") < score(&now, "plumbers.org"));
+        assert!(score(&now, "stripe.com") < score(&now, "drainhelp.net"));
+    }
+
+    #[test]
+    fn a_misspelled_name_keeps_the_site_meaning_finds_for_it() {
+        let records = vec![
+            site(
+                "adobe.com",
+                Some("Adobe: Creative, marketing and document software"),
+                None,
+                &["Adobe"],
+                &[("adobe", 300)],
+                popular(60, 15_000),
+            ),
+            site(
+                "visualpde.com",
+                Some("VisualPDE"),
+                Some("Interactive equations in the browser."),
+                &[],
+                &[],
+                ranked(300_000, 5),
+            ),
+        ];
+        let (_dir, searcher) = build(&records);
+        let meaning = FixedMeaning(vec![("visualpde.com", 0.3), ("adobe.com", 0.06)]);
+        let found = searcher
+            .search_meaning(
+                "adobee",
+                10,
+                &RankConfig::default(),
+                &SearchOptions::default(),
+                Some(&meaning),
+            )
+            .unwrap();
+        let spelling = found.spelling.expect("a suggestion");
+        assert_eq!(spelling.site.as_deref(), Some("adobe.com"));
+        // The results are still those of "adobee", but what meaning finds
+        // for it is not cut as filler.
+        assert_eq!(
+            domains(&found.hits)[0],
+            "adobe.com",
+            "{:?}",
+            domains(&found.hits)
+        );
     }
 
     #[test]
@@ -2884,14 +3553,19 @@ mod tests {
     #[test]
     fn decoys_rank_below_the_brand() {
         let (_dir, searcher) = build(&corpus());
-        let hits = searcher.search("us bank", 10).unwrap();
+        let hits = searcher.search_with("us bank", 10, &keep_all()).unwrap();
         let found = domains(&hits);
         assert_eq!(found[0], "usbank.com");
-        // The decoys are still decent matches, just not first.
+        // The decoys are still decent matches, just not first...
         assert!(found.contains(&"usbank-login-help.com"), "{found:?}");
         assert!(found.contains(&"usbankreviews.net"), "{found:?}");
+        // ...though far enough below the bank to be left out by default.
+        let hits = searcher.search("us bank", 10).unwrap();
+        assert_eq!(domains(&hits), ["usbank.com"]);
 
-        let hits = searcher.search("bank of america", 10).unwrap();
+        let hits = searcher
+            .search_with("bank of america", 10, &keep_all())
+            .unwrap();
         let found = domains(&hits);
         assert_eq!(found[0], "bankofamerica.com");
         assert!(
@@ -2976,6 +3650,124 @@ mod tests {
     }
 
     #[test]
+    fn sign_in_pages_pill_shops_and_test_names_are_left_out() {
+        let records = [
+            site(
+                "outlook.com",
+                Some("Outlook"),
+                Some("Microsoft Outlook email and calendar."),
+                &["Microsoft Outlook"],
+                &[("outlook", 500)],
+                popular(40, 4_000),
+            ),
+            site(
+                "bpl.net",
+                Some("Outlook Web App"),
+                None,
+                &[],
+                &[],
+                obscure(50_000, 5),
+            ),
+            site(
+                "outlooktips.org",
+                Some("Microsoft Outlook tips"),
+                Some("Tips for Microsoft Outlook."),
+                &[],
+                &[],
+                obscure(90_000, 2),
+            ),
+            site(
+                "celebrex365o24.com",
+                Some("Microsoft Outlook deals"),
+                None,
+                &[],
+                &[],
+                obscure(30_000, 2),
+            ),
+            // Microsoft's own, titled for its product.
+            site(
+                "live.com",
+                Some("Outlook"),
+                None,
+                &[],
+                &[],
+                popular(60, 3_000),
+            ),
+            site(
+                "outlook.test",
+                Some("Microsoft Outlook"),
+                None,
+                &[],
+                &[],
+                obscure(9_000, 2),
+            ),
+        ];
+        let (_dir, searcher) = build(&records);
+        let hits = searcher
+            .search_with("microsoft outlook", 10, &keep_all())
+            .unwrap();
+        let order = domains(&hits);
+        assert!(order.contains(&"outlooktips.org"), "{order:?}");
+        assert!(order.contains(&"live.com"), "{order:?}");
+        assert!(!order.contains(&"bpl.net"), "{order:?}");
+        assert!(!order.contains(&"outlook.test"), "{order:?}");
+        assert!(!order.contains(&"celebrex365o24.com"), "{order:?}");
+        // Asked for by name, they are found.
+        assert_eq!(top(&searcher, "bpl.net"), "bpl.net");
+    }
+
+    #[test]
+    fn copies_of_the_named_site_on_other_domains_come_after_the_rest() {
+        let records = [
+            site(
+                "gmail.com",
+                None,
+                None,
+                &["Gmail"],
+                &[("gmail", 900)],
+                popular(20, 5_000),
+            ),
+            site(
+                "gmail.ru",
+                None,
+                None,
+                &[],
+                &[("gmail", 3)],
+                obscure(9_000, 30),
+            ),
+            site("gmail.hu", None, None, &[], &[], obscure(12_000, 20)),
+            site(
+                "gmail.jp",
+                Some("Gmail Japan fans"),
+                Some("Tips for Gmail users in Japan."),
+                &[],
+                &[],
+                obscure(15_000, 10),
+            ),
+            site(
+                "gmailtips.net",
+                Some("Gmail tips and tricks"),
+                Some("How to use Gmail: filters, labels and shortcuts."),
+                &[],
+                &[("gmail tips", 2)],
+                obscure(200_000, 2),
+            ),
+        ];
+        let (_dir, searcher) = build(&records);
+        let hits = searcher.search_with("gmail", 10, &keep_all()).unwrap();
+        let order = domains(&hits);
+        assert_eq!(order[0], "gmail.com", "{order:?}");
+        let at = |d: &str| order.iter().position(|o| *o == d).unwrap();
+        // Copies with nothing to say go last; a crawled one keeps its place.
+        assert!(at("gmail.ru") > at("gmailtips.net"), "{order:?}");
+        assert!(at("gmail.hu") > at("gmailtips.net"), "{order:?}");
+        assert!(at("gmail.jp") < at("gmail.ru"), "{order:?}");
+        // Typed, the copy is what was asked for.
+        let hits = searcher.search("gmail.ru", 10).unwrap();
+        assert_eq!(hits[0].domain, "gmail.ru", "{:?}", domains(&hits));
+    }
+
+    #[test]
     fn sites_people_link_to_by_name_are_not_bare() {
         let records = [
             site(
@@ -3030,9 +3822,12 @@ mod tests {
     #[test]
     fn aliases_beat_bare_redirect_domains() {
         let (_dir, searcher) = build(&corpus());
-        // allybank.com has the exact label, ally.com the alias, the page and the links.
+        // allybank.com has the exact label, ally.com the alias, the page and
+        // the links. With no title of its own, allybank.com then comes after
+        // the titled sites.
         let hits = searcher.search("ally bank", 10).unwrap();
-        assert_eq!(domains(&hits)[..2], ["ally.com", "allybank.com"]);
+        assert_eq!(hits[0].domain, "ally.com");
+        assert!(domains(&hits).contains(&"allybank.com"));
     }
 
     #[test]
@@ -3294,7 +4089,9 @@ mod tests {
         assert_eq!(top(&searcher, "github login"), "github.com");
         // No site is named "maple" or "maple street", so the popular bakery
         // does not discount the unranked one.
-        let hits = searcher.search("maple street bakery", 10).unwrap();
+        let hits = searcher
+            .search_with("maple street bakery", 10, &keep_all())
+            .unwrap();
         assert_eq!(
             domains(&hits)[..2],
             ["maplestreetbakery.com", "panerabread.com"]
@@ -3561,7 +4358,7 @@ mod tests {
         assert!(all.len() <= searcher.num_docs() as usize);
         let few_candidates = RankConfig {
             candidates: 0,
-            ..RankConfig::default()
+            ..keep_all()
         };
         let hits = searcher.search_with("us bank", 3, &few_candidates).unwrap();
         assert_eq!(hits.len(), 3);
@@ -3718,6 +4515,17 @@ mod tests {
         fs::create_dir(&empty).unwrap();
         assert_eq!(build_index(&empty, &corpus()[..2]).unwrap().docs, 2);
         assert_eq!(entries(root.path()), ["a", "data", "empty"]);
+    }
+
+    #[test]
+    fn gone_sites_are_left_out() {
+        let dir = TempDir::new().unwrap();
+        let mut records = corpus()[..2].to_vec();
+        let mut gone = example_site();
+        gone.make_gone(1);
+        records.push(gone);
+        let stats = build_index(dir.path(), &records).unwrap();
+        assert_eq!((stats.docs, stats.skipped), (2, 1));
     }
 
     /// The reported case: `plumb index --index myproject` deleted a project
@@ -4311,10 +5119,13 @@ mod tests {
             .unwrap()
     }
 
-    fn suggested(query: &str) -> Option<Spelling> {
-        Some(Spelling {
-            query: query.to_string(),
-        })
+    /// The query suggested, whatever site comes with it.
+    fn suggested(query: &str) -> Option<String> {
+        Some(query.to_string())
+    }
+
+    fn suggestion(results: &SearchResults) -> Option<String> {
+        results.spelling.as_ref().map(|s| s.query.clone())
     }
 
     #[test]
@@ -4329,7 +5140,7 @@ mod tests {
             ("weather forcast", "weather forecast", "weather.com"),
         ] {
             let results = search_spelled(&searcher, typed);
-            assert_eq!(results.spelling, suggested(fixed), "{typed}");
+            assert_eq!(suggestion(&results), suggested(fixed), "{typed}");
             // The suggestion finds the site.
             let fixed_hits = search_spelled(&searcher, fixed).hits;
             assert_eq!(fixed_hits[0].domain, domain, "{typed}");
@@ -4342,7 +5153,7 @@ mod tests {
         // amazen.com is as near "amazn" as amazon.com, but has nothing to
         // show for itself.
         let results = search_spelled(&searcher, "amazn");
-        assert_eq!(results.spelling, suggested("amazon"));
+        assert_eq!(suggestion(&results), suggested("amazon"));
         let fixed_hits = search_spelled(&searcher, "amazon").hits;
         assert_eq!(domains(&fixed_hits)[0], "amazon.com");
     }
@@ -4363,7 +5174,7 @@ mod tests {
         // A little-known site named exactly is searched as typed, with
         // the far better-known site a letter away offered instead.
         let results = search_spelled(&searcher, "gogle");
-        assert_eq!(results.spelling, suggested("google"));
+        assert_eq!(suggestion(&results), suggested("google"));
         assert_eq!(results.hits[0].domain, "gogle.com");
         // Searching exactly finds it with no suggestion.
         let options = SearchOptions {
@@ -4434,7 +5245,7 @@ mod tests {
             ("fedx", "fedex", "fedex.com"),
         ] {
             let results = search_spelled(&searcher, typed);
-            assert_eq!(results.spelling, suggested(fixed), "{typed}");
+            assert_eq!(suggestion(&results), suggested(fixed), "{typed}");
             // The suggestion finds the site.
             let fixed_hits = search_spelled(&searcher, fixed).hits;
             assert_eq!(fixed_hits[0].domain, domain, "{typed}");

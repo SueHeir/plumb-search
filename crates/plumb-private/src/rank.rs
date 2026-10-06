@@ -36,6 +36,11 @@ pub const TRUSTED_LINK_SCORE: f32 = 0.2;
 pub const UNTRUSTED_SHARE: f32 = 0.5;
 /// Bonus of a site of the kind the query names ("banks").
 pub const KIND_BONUS: f32 = 0.25;
+/// Share of the top score a site needs to stay listed below a site the
+/// query names, as `plumb_index::RankConfig::default().named_share`.
+pub const NAMED_SHARE: f32 = 0.4;
+/// Link score of a well-known site, as `plumb_index::WELL_KNOWN_LINK_SCORE`.
+pub const WELL_KNOWN_LINK_SCORE: f32 = 0.5;
 /// Bonus of a site of the home country, and malus of another country's.
 pub const COUNTRY_BOOST: f32 = 0.06;
 
@@ -174,31 +179,43 @@ fn rank_words(query: &str, sites: &[SiteRecord], options: &Options, limit: usize
             let evidence = (link_score / trusted).min(1.0);
             UNTRUSTED_SHARE + (1.0 - UNTRUSTED_SHARE) * evidence
         };
-        ranked.push(Ranked {
-            domain: site.domain.clone(),
-            url: site
-                .url
-                .as_deref()
-                .map(str::trim)
-                .filter(|url| !url.is_empty())
-                .map_or_else(|| format!("https://{}/", site.domain), str::to_string),
-            title: site.title.clone().filter(|t| !t.trim().is_empty()),
-            description: site.description.clone().filter(|d| !d.trim().is_empty()),
-            score: ALPHA * link_score
-                + trust * ((1.0 - ALPHA) * text_score + name_bonus)
-                + country_bonus,
-            text_score,
-            link_score,
-        });
+        let named = name.typed || name.words() >= query.len;
+        ranked.push((
+            named,
+            Ranked {
+                domain: site.domain.clone(),
+                url: site
+                    .url
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|url| !url.is_empty())
+                    .map_or_else(|| format!("https://{}/", site.domain), str::to_string),
+                title: site.title.clone().filter(|t| !t.trim().is_empty()),
+                description: site.description.clone().filter(|d| !d.trim().is_empty()),
+                score: ALPHA * link_score
+                    + trust * ((1.0 - ALPHA) * text_score + name_bonus)
+                    + country_bonus,
+                text_score,
+                link_score,
+            },
+        ));
     }
-    ranked.sort_by(|a, b| {
+    ranked.sort_by(|(_, a), (_, b)| {
         b.score
             .total_cmp(&a.score)
             .then_with(|| b.link_score.total_cmp(&a.link_score))
             .then_with(|| a.domain.cmp(&b.domain))
     });
+    // Far below a site the query names: filler, as on a node.
+    if let Some(&(true, ref top)) = ranked
+        .first()
+        .filter(|(_, top)| top.link_score >= WELL_KNOWN_LINK_SCORE)
+    {
+        let least = top.score * NAMED_SHARE;
+        ranked.retain(|(named, r)| *named || r.score >= least);
+    }
     ranked.truncate(limit);
-    ranked
+    ranked.into_iter().map(|(_, r)| r).collect()
 }
 
 /// A site's names, split the way the index splits them.

@@ -7,8 +7,8 @@
 //! to the file (`records.jsonl` -> `records.jsonl.journal`), flushed to disk
 //! before the crawl goes on, and folds the journal into the file
 //! ([`RecordStore::compact`]) only once the journal has grown to a quarter of
-//! the file's size (and at least [`MIN_COMPACT_BYTES`]), and when `plumb
-//! crawl` ends. [`load_records`] replays a journal it finds, so whatever an
+//! the file's size (at least [`MIN_COMPACT_BYTES`], at most
+//! [`MAX_JOURNAL_BYTES`]), and when `plumb crawl` ends. [`load_records`] replays a journal it finds, so whatever an
 //! interrupted crawl saved is kept.
 //!
 //! The file is always replaced whole and atomically, by way of a temporary
@@ -33,6 +33,11 @@ use crate::{sync_parent_dir, write_records_atomically};
 /// small the file.
 pub(crate) const MIN_COMPACT_BYTES: u64 = 64 << 20;
 
+/// A journal this big is folded into its file however big the file:
+/// folding it a record at a time ([`RecordStore::fold`]) holds the
+/// journal's changes in memory, about twice its size.
+pub(crate) const MAX_JOURNAL_BYTES: u64 = 128 << 20;
+
 /// One change a crawl makes to a set of records, as saved in a journal (one
 /// JSON object per line, tagged by `op`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -56,6 +61,17 @@ pub(crate) enum Change {
         attempted_at: Option<u64>,
         failures: u32,
     },
+    /// Cuts a site judged dead down to its crawl marks and ranks
+    /// ([`SiteRecord::make_gone`]), gone since `at`; see [`crate::dead`].
+    Gone { domain: String, at: u64 },
+    /// Takes a misread official website claim back off `domain`'s record
+    /// ([`RecordSet::take_back_official_site`]).
+    TakeBack { domain: String, names: Vec<String> },
+    /// Adds a site on a subdomain ([`plumb_core::parent_domain`]) where its
+    /// parent domain has a record: it takes the parent's ranks it lacks,
+    /// and its names come off the parent
+    /// ([`RecordSet::split_subdomain_sites`]). Ignored without a parent.
+    SubdomainSite { record: SiteRecord },
 }
 
 impl Change {
@@ -86,6 +102,29 @@ impl Change {
                     record.crawl_attempted_at = attempted_at;
                     record.crawl_failures = failures;
                 }
+            }
+            Change::Gone { domain, at } => {
+                if set.get(&domain).is_some() {
+                    set.entry(&domain).make_gone(at);
+                }
+            }
+            Change::TakeBack { domain, names } => {
+                let names: Vec<&str> = names.iter().map(String::as_str).collect();
+                set.take_back_official_site(&domain, &names);
+            }
+            Change::SubdomainSite { mut record } => {
+                let Some(parent) = plumb_core::parent_domain(&record.domain)
+                    .and_then(|parent| set.get(parent))
+                    .map(|parent| parent.signals.clone())
+                else {
+                    return;
+                };
+                let signals = &mut record.signals;
+                signals.tranco_rank = signals.tranco_rank.or(parent.tranco_rank);
+                signals.harmonic_rank = signals.harmonic_rank.or(parent.harmonic_rank);
+                signals.pagerank_rank = signals.pagerank_rank.or(parent.pagerank_rank);
+                set.split_subdomain_sites(std::slice::from_ref(&record));
+                set.upsert(record);
             }
         }
     }
@@ -270,7 +309,10 @@ impl RecordStore {
     /// Whether the journal has grown enough to be folded into the file.
     pub(crate) fn wants_compaction(&self) -> bool {
         self.journal_bytes > 0
-            && self.journal_bytes >= self.min_compact_bytes.max(self.file_bytes / 4)
+            && self.journal_bytes
+                >= self
+                    .min_compact_bytes
+                    .max((self.file_bytes / 4).min(MAX_JOURNAL_BYTES))
     }
 
     /// Writes every record of `set` to the file, best link score first,
@@ -280,6 +322,17 @@ impl RecordStore {
         self.journal = None;
         let written = replace_records(&self.path, sorted_by_link_score(set))?;
         self.journal_bytes = 0;
+        self.file_bytes = file_len(&self.path);
+        Ok(written)
+    }
+
+    /// Folds the journal into the file a record at a time, without the set
+    /// ([`crate::outline::fold_journal`]).
+    pub(crate) fn fold(&mut self) -> Result<crate::outline::Folded> {
+        // Closed first: Windows cannot delete a file that is open.
+        self.journal = None;
+        let written = crate::outline::fold_journal(&self.path)?;
+        self.journal_bytes = file_len(&self.journal_path);
         self.file_bytes = file_len(&self.path);
         Ok(written)
     }
@@ -458,6 +511,20 @@ mod tests {
         assert_eq!(set.get("new.com").unwrap().title.as_deref(), Some("New"));
         titled("not a domain", "x").apply(&mut set);
         assert_eq!(set.len(), 2);
+        // Gone cuts a held site down, and creates none.
+        let gone = |domain: &str| Change::Gone {
+            domain: domain.into(),
+            at: 9,
+        };
+        let line = serde_json::to_string(&gone("new.com")).unwrap();
+        assert_eq!(line, r#"{"op":"gone","domain":"new.com","at":9}"#);
+        serde_json::from_str::<Change>(&line)
+            .unwrap()
+            .apply(&mut set);
+        gone("nowhere.com").apply(&mut set);
+        let new = set.get("new.com").unwrap();
+        assert_eq!((new.gone_at, new.title.as_deref()), (Some(9), None));
+        assert_eq!(set.len(), 2);
     }
 
     #[test]
@@ -600,6 +667,13 @@ mod tests {
         // Also when that quarter is less than the minimum.
         store.set_min_compact_bytes(MIN_COMPACT_BYTES);
         assert!(!store.wants_compaction());
+        // A quarter of a big file is more than a journal may grow to.
+        store.file_bytes = 8 * MAX_JOURNAL_BYTES;
+        store.journal_bytes = MAX_JOURNAL_BYTES - 1;
+        assert!(!store.wants_compaction());
+        store.journal_bytes = MAX_JOURNAL_BYTES;
+        assert!(store.wants_compaction());
+        store.journal_bytes = saved;
 
         // A journal from before counts too.
         let store = RecordStore::open(&path);

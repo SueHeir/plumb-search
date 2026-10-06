@@ -48,7 +48,7 @@ pub mod search;
 pub mod store;
 pub mod throwaway;
 
-pub use bucket::{BucketSource, BucketTable, BUCKETS_PER_SEARCH};
+pub use bucket::{BucketSource, BucketTable, BucketWriter, BUCKETS_PER_SEARCH};
 pub use fill::FillPage;
 pub use joining::{default_bootstrap, JoinProblem, PeerView, Route, DEFAULT_BOOTSTRAP};
 pub use libp2p::multiaddr::Protocol;

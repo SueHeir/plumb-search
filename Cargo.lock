@@ -5953,6 +5953,7 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
+ "yake-rust",
 ]
 
 [[package]]
@@ -6100,7 +6101,6 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "wasmi",
- "yake-rust",
 ]
 
 [[package]]

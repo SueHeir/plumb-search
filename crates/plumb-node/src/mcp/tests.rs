@@ -207,7 +207,7 @@ fn search_and_site_info_return_plain_entries() {
     let answer = &call(
         &mcp,
         "site_info",
-        json!({ "domain": "https://docs.python.org/3/" }),
+        json!({ "domain": "https://wiki.python.org/moin/" }),
     )["result"]["structuredContent"];
     assert_eq!(answer["domain"], "python.org");
     assert_eq!(answer["found"], true);
@@ -541,6 +541,14 @@ fn package_cards_say_version_install_and_docs() {
     );
     // Search carries the same card.
     let reply = call(&mcp, "search", json!({ "query": "serde crate" }));
+    let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.starts_with("1. [crates.io] serde 1.0.228"), "{text}");
+    // So does the command that installs it.
+    let reply = call(
+        &mcp,
+        "search",
+        json!({ "query": "cargo add serde --features derive" }),
+    );
     let text = reply["result"]["content"][0]["text"].as_str().unwrap();
     assert!(text.starts_with("1. [crates.io] serde 1.0.228"), "{text}");
     // Another registry's package of the name is not there.

@@ -1,6 +1,6 @@
-//! `plumb fetch-text` and `plumb terms`: an experiment in picking a site's
-//! search terms from its whole homepage, rather than searching only its
-//! title, description, headings and link text.
+//! `plumb fetch-text` and `plumb terms`: for measuring how a site's search
+//! terms are picked from its whole homepage (crawls pick them with YAKE,
+//! [`plumb_crawl::pick_terms`]) without crawling again.
 //!
 //! `fetch-text` fetches homepages once and keeps their visible text (up to
 //! [`plumb_crawl::MAX_PAGE_TEXT_WORDS`] words) in a pages file. `terms` then picks each
@@ -15,11 +15,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Instant;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use clap::{Args, ValueEnum};
 use plumb_core::{SiteRecord, MAX_TERMS};
-use plumb_crawl::{CrawlConfig, CrawlOutcome, HomepageCrawler};
-use plumb_embed::SparseModel;
+use plumb_crawl::{pick_terms, words_of, CrawlConfig, CrawlOutcome, HomepageCrawler};
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
@@ -61,11 +60,8 @@ pub enum Method {
     /// The page's first distinct words, in order: what searching the
     /// page's own text would give.
     First,
-    /// YAKE, a statistical keyword extractor: no model.
+    /// YAKE, as crawls pick them ([`plumb_crawl::pick_terms`]).
     Yake,
-    /// A learned sparse model (--model), which can add words the page
-    /// does not use.
-    Sparse,
 }
 
 #[derive(Debug, Args)]
@@ -82,16 +78,9 @@ pub struct TermsArgs {
     pub out: PathBuf,
     #[arg(long, value_enum)]
     pub method: Method,
-    /// Directory of the sparse model: config.json, tokenizer.json and
-    /// model.safetensors (or pytorch_model.bin).
-    #[arg(long, value_name = "DIR", required_if_eq("method", "sparse"))]
-    pub model: Option<PathBuf>,
     /// Distinct words picked per page.
-    #[arg(long, value_name = "N", default_value_t = 100, value_parser = parse_positive)]
+    #[arg(long, value_name = "N", default_value_t = plumb_crawl::TERM_WORDS, value_parser = parse_positive)]
     pub count: usize,
-    /// Most tokens of a page the sparse model reads (at most 512).
-    #[arg(long, value_name = "N", default_value_t = 512, value_parser = parse_positive)]
-    pub max_tokens: usize,
     /// Pages worked on at once [default: one per CPU].
     #[arg(long, value_name = "N", value_parser = parse_positive)]
     pub threads: Option<usize>,
@@ -148,7 +137,7 @@ pub fn run_fetch_text(args: FetchTextArgs) -> Result<()> {
     if missing > 0 {
         info!("{missing} listed domains have no record and are skipped");
     }
-    let targets: Vec<_> = wanted.iter().map(|r| target_for(r)).collect();
+    let targets: Vec<_> = wanted.iter().map(|r| target_for(*r)).collect();
     let total = targets.len();
     println!("fetching {total} homepages, {} at a time", args.concurrency);
 
@@ -217,13 +206,13 @@ fn read_domains(path: &Path) -> Result<Vec<String>> {
 }
 
 /// A page's index in the pages file, its terms and the milliseconds they took.
-type Picked = (usize, Result<Vec<String>>, f64);
+type Picked = (usize, Vec<String>, f64);
 
 /// `plumb terms`.
 pub fn run_terms(args: TermsArgs) -> Result<()> {
     let pages: Vec<PageText> = plumb_core::read_jsonl(&args.pages)?;
     let mut records = load_records(&args.records)?;
-    let picker = Picker::new(&args)?;
+    let picker = Picker::new(&args);
     let threads = args
         .threads
         .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()))
@@ -255,17 +244,9 @@ pub fn run_terms(args: TermsArgs) -> Result<()> {
     let wall = started.elapsed().as_secs_f64();
 
     let mut times = Vec::new();
-    let (mut with_terms, mut failed, mut words, mut bytes) = (0usize, 0usize, 0usize, 0usize);
+    let (mut with_terms, mut words, mut bytes) = (0usize, 0usize, 0usize);
     for (i, terms, ms) in results.into_inner().unwrap() {
         times.push(ms);
-        let terms = match terms {
-            Ok(terms) => terms,
-            Err(err) => {
-                failed += 1;
-                info!("{}: {err:#}", pages[i].domain);
-                continue;
-            }
-        };
         if terms.is_empty() || records.get(&pages[i].domain).is_none() {
             continue;
         }
@@ -292,7 +273,7 @@ pub fn run_terms(args: TermsArgs) -> Result<()> {
     );
     if with_terms > 0 {
         println!(
-            "{with_terms} sites got terms ({failed} failed): {:.0} distinct words and {:.0} \
+            "{with_terms} sites got terms: {:.0} distinct words and {:.0} \
              bytes each on average",
             words as f64 / with_terms as f64,
             bytes as f64 / with_terms as f64
@@ -303,118 +284,37 @@ pub fn run_terms(args: TermsArgs) -> Result<()> {
 }
 
 /// Picks terms by one [`Method`].
-enum Picker {
-    First(usize),
-    Yake(usize, yake_rust::StopWords),
-    Sparse(usize, Box<SparseModel>),
+struct Picker {
+    method: Method,
+    count: usize,
 }
 
 impl Picker {
-    fn new(args: &TermsArgs) -> Result<Self> {
-        let count = args.count.min(MAX_TERMS);
-        Ok(match args.method {
-            Method::First => Picker::First(count),
-            Method::Yake => Picker::Yake(
-                count,
-                yake_rust::StopWords::predefined("en").context("YAKE's English stop words")?,
-            ),
-            Method::Sparse => {
-                let Some(dir) = &args.model else {
-                    bail!("--method sparse needs --model");
-                };
-                Picker::Sparse(
-                    count,
-                    Box::new(SparseModel::load(dir, args.max_tokens.min(512))?),
-                )
-            }
-        })
-    }
-
-    /// Up to `count` distinct words of `text`, best first, the best
-    /// repeated so they weigh more (see [`repeated`]); at most
-    /// [`MAX_TERMS`] entries in all.
-    fn terms(&self, text: &str) -> Result<Vec<String>> {
-        let words = match self {
-            Picker::First(count) => {
-                let mut seen = HashSet::new();
-                return Ok(words_of(text)
-                    .filter(|w| seen.insert(w.clone()))
-                    .take(*count)
-                    .collect());
-            }
-            Picker::Yake(count, stop_words) => {
-                let config = yake_rust::Config {
-                    ngrams: 2,
-                    ..yake_rust::Config::default()
-                };
-                let mut seen = HashSet::new();
-                let words: Vec<String> =
-                    yake_rust::get_n_best(*count * 2, text, stop_words, &config)
-                        .into_iter()
-                        .flat_map(|item| words_of(&item.keyword).collect::<Vec<_>>())
-                        .filter(|w| seen.insert(w.clone()))
-                        .take(*count)
-                        .collect();
-                // YAKE's scores do not compare between pages; its order does.
-                let n = words.len().max(1) as f32;
-                words
-                    .into_iter()
-                    .enumerate()
-                    .map(|(i, w)| (w, 1.0 - i as f32 / n))
-                    .collect::<Vec<_>>()
-            }
-            Picker::Sparse(count, model) => model
-                .words(text, *count)?
-                .into_iter()
-                .map(|w| (w.word, w.weight))
-                .collect(),
-        };
-        Ok(repeated(&words))
-    }
-}
-
-/// Lowercased words of letters and digits, two characters or more.
-fn words_of(text: &str) -> impl Iterator<Item = String> + '_ {
-    text.split(|c: char| !c.is_alphanumeric())
-        .filter(|w| w.chars().count() > 1)
-        .map(str::to_lowercase)
-}
-
-/// `words` (best first, with weights) as terms: a word weighing at least
-/// two thirds of the heaviest stands three times, at least a third twice,
-/// others once; at most [`MAX_TERMS`] entries.
-fn repeated(words: &[(String, f32)]) -> Vec<String> {
-    let top = words.iter().map(|(_, w)| *w).fold(0.0f32, f32::max);
-    let mut terms = Vec::new();
-    for (word, weight) in words {
-        let share = if top > 0.0 { weight / top } else { 0.0 };
-        let times = 1 + usize::from(share >= 1.0 / 3.0) + usize::from(share >= 2.0 / 3.0);
-        for _ in 0..times {
-            if terms.len() == MAX_TERMS {
-                return terms;
-            }
-            terms.push(word.clone());
+    fn new(args: &TermsArgs) -> Self {
+        Picker {
+            method: args.method,
+            count: args.count.min(MAX_TERMS),
         }
     }
-    terms
+
+    /// Up to `count` distinct words of `text`, best first.
+    fn terms(&self, text: &str) -> Vec<String> {
+        match self.method {
+            Method::First => {
+                let mut seen = HashSet::new();
+                words_of(text)
+                    .filter(|w| seen.insert(w.clone()))
+                    .take(self.count)
+                    .collect()
+            }
+            Method::Yake => pick_terms(text, self.count),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn heavier_words_stand_more_times() {
-        let words = [
-            ("tesla".to_string(), 3.0),
-            ("car".to_string(), 1.5),
-            ("the".to_string(), 0.3),
-        ];
-        assert_eq!(
-            repeated(&words),
-            ["tesla", "tesla", "tesla", "car", "car", "the"]
-        );
-    }
 
     #[test]
     fn first_and_yake_pick_distinct_words() {
@@ -423,22 +323,14 @@ mod tests {
             records: PathBuf::new(),
             out: PathBuf::new(),
             method,
-            model: None,
             count: 4,
-            max_tokens: 512,
             threads: None,
         };
         let text = "Electric cars. Tesla builds electric cars, solar roofs and batteries. \
                     Order a Tesla electric car online today.";
-        let first = Picker::new(&args(Method::First)).unwrap();
-        assert_eq!(
-            first.terms(text).unwrap(),
-            ["electric", "cars", "tesla", "builds"]
-        );
-        let yake = Picker::new(&args(Method::Yake))
-            .unwrap()
-            .terms(text)
-            .unwrap();
+        let first = Picker::new(&args(Method::First));
+        assert_eq!(first.terms(text), ["electric", "cars", "tesla", "builds"]);
+        let yake = Picker::new(&args(Method::Yake)).terms(text);
         let distinct: HashSet<_> = yake.iter().collect();
         assert!(!yake.is_empty() && distinct.len() <= 4);
         assert!(

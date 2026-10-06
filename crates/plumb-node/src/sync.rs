@@ -42,7 +42,7 @@ use tracing::{debug, info};
 
 use crate::about::{About, AboutStore, MAX_INTERESTS, MAX_SITES};
 use crate::history::{valid_profile, History, HistoryStore, MAX_OPENED, MAX_SEARCHES};
-use crate::learn::{Learned, MAX_BLOCK_COUNTS, MAX_SITE_COUNTS, MAX_VERDICTS};
+use crate::learn::{Judged, Learned, MAX_BLOCK_COUNTS, MAX_SITE_COUNTS, MAX_VERDICTS};
 
 /// How long a link code works.
 pub const CODE_MINUTES: u64 = 10;
@@ -220,6 +220,28 @@ fn merge_learned(base: Option<&Learned>, local: &Learned, remote: &Learned) -> L
             t
         },
     );
+    // Counted on both sides since the last agreed copy, as tastes are.
+    // Tastes counted the old way, without it, are dropped.
+    let judged = match (&local.judged, &remote.judged) {
+        (Some(l), Some(r)) => {
+            let b = base.and_then(|b| b.judged.as_ref());
+            let mut pages = l.pages.clone();
+            pages.extend(r.pages.iter().filter(|p| !l.pages.contains(p)).cloned());
+            pages.truncate(l.pages.len().max(r.pages.len()));
+            Some(Judged {
+                liked: add_f32(b.map(|b| b.liked), l.liked, r.liked),
+                disliked: add_f32(b.map(|b| b.disliked), l.disliked, r.disliked),
+                seen: add_f32(b.map(|b| b.seen), l.seen, r.seen),
+                pages,
+            })
+        }
+        (one, other) => one.clone().or_else(|| other.clone()),
+    };
+    let tastes = match (&local.judged, &remote.judged) {
+        (Some(_), None) => local.tastes.clone(),
+        (None, Some(_)) => remote.tastes.clone(),
+        _ => tastes,
+    };
     Learned {
         blocks,
         sites,
@@ -228,6 +250,7 @@ fn merge_learned(base: Option<&Learned>, local: &Learned, remote: &Learned) -> L
         verdicts,
         boxes,
         tastes,
+        judged,
     }
 }
 

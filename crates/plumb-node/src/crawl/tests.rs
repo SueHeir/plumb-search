@@ -136,6 +136,11 @@ fn when_sites_are_due_again() {
     assert_eq!(unreachable(u32::MAX), WINDOW);
     assert_eq!(retry_after(1, 6 * 3600), 6 * 3600, "never past the window");
     assert_eq!(retry_after(3, 0), 0);
+    // A site judged dead: three windows.
+    let mut gone = record("a.com", 1, Some(10), Some(1_000));
+    gone.crawl_failures = 6;
+    gone.make_gone(1_000);
+    assert_eq!(due_at(&gone, WINDOW), Some(1_000 + 3 * WINDOW));
 }
 
 #[test]

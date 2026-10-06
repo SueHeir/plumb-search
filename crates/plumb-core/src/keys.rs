@@ -180,6 +180,7 @@ pub fn slim_record(mut record: SiteRecord) -> SiteRecord {
     record.crawled_at = None;
     record.crawl_attempted_at = None;
     record.crawl_failures = 0;
+    record.gone_at = None;
     record.icon = None;
     record.news = Vec::new();
     record.key_pages.clear();
@@ -198,6 +199,7 @@ pub const LEAN_DESCRIPTION_CHARS: usize = 200;
 pub fn lean_record(record: SiteRecord) -> SiteRecord {
     let mut record = slim_record(record);
     record.body_text = None;
+    record.terms.clear();
     record.headings.clear();
     record.intro = None;
     record.key_pages.clear();
