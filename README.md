@@ -1,6 +1,6 @@
 # Plumb Search
 
-Plumb Search is a free, open-source search engine, and free web search for AI apps and local models. It needs no API key and has no quota. It doesn't scrape Google, Bing or anyone else: it answers from its own index, so there is no engine upstream to block or throttle it. It speaks SearXNG's JSON API and MCP, so it drops into the setup you already have:
+Plumb Search is a free, open-source, fully hackable search engine, and free web search for AI apps and local models. It needs no API key and has no quota. It doesn't scrape Google, Bing or anyone else: it answers from its own index, so there is no engine upstream to block or throttle it. It speaks SearXNG's JSON API and MCP, so it drops into the setup you already have:
 
 ```sh
 claude mcp add --transport http plumb https://plumbsearch.org/mcp
@@ -17,6 +17,7 @@ Type "us bank" and usbank.com comes first. Plumb indexes names, not pages: for e
 - [Try it](#try-it)
 - [What it does](#what-it-does)
 - [Run your own node](#run-your-own-node)
+- [Fully hackable](#fully-hackable)
 - [Use it from an AI](#use-it-from-an-ai)
 - [How it works](#how-it-works)
 - [Status](#status)
@@ -76,6 +77,10 @@ A new version keeps the data folder (the Docker volume, the desktop app's data f
 - **Docker**: `docker compose pull && docker compose up -d`, or with `docker run`, pull the image and start a new container with the same volume ([docs/docker.md](docs/docker.md#updating)).
 - **Desktop**: install the new version over the old one.
 - **From source**: pull, build again and restart `plumb run`.
+
+## Fully hackable
+
+All of Plumb is open source Rust, and every node is yours to change. Add results from any source with a plugin: a small Rust program compiled to WebAssembly that the node runs in a sandbox, where it can reach only the hosts its `plugin.json` lists ([docs/plugins.md](docs/plugins.md), with an example in `plugins/hacker-news`). Read results as JSON from `/api/search?q=<query>&full=1`, change how ranking works ([How ranking works](#how-ranking-works)), or fork the whole thing.
 
 ## Use it from an AI
 

@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Plumb Search</title>
-<meta name="description" content="Plumb Search is a free, open-source search engine, and free web search for AI apps and local models: no API key, no quota, and no other engine behind it.">
+<meta name="description" content="Plumb Search is a free, open-source, fully hackable search engine, and free web search for AI apps and local models: no API key, no quota, and no other engine behind it.">
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/style.css">
 <link rel="search" type="application/opensearchdescription+xml" title="Plumb Search" href="/opensearch.xml">
@@ -13,6 +13,7 @@
 <header class="top">
   <a class="brand" href="/"><img src="/favicon.svg" alt="" width="28" height="28">Plumb Search</a>
   <nav>
+    <a href="#hack">Hack it</a>
     <a href="#ai">AI apps</a>
     <a href="#get">Download</a>
     <a href="https://github.com/SueHeir/plumb-search">GitHub</a>
@@ -22,7 +23,7 @@
 <main>
   <section class="hero">
     <h1>Plumb Search</h1>
-    <p class="lede">Plumb is a free, open-source search engine for finding websites, and free web search for AI apps and local models. Use it here, or run it on your own computer so your searches stay with you.</p>
+    <p class="lede">Plumb is a free, open-source, fully hackable search engine for finding websites, and free web search for AI apps and local models. Use it here, or run it on your own computer so your searches stay with you.</p>
     <form class="try" action="/search" method="get" role="search">
       <label for="q" class="visually-hidden">Search for a website</label>
       <input id="q" name="q" type="search" placeholder="Try “irs” or “bank of america”" autocomplete="off" required>
@@ -33,6 +34,12 @@
       <a class="button primary" href="#get">Get Plumb</a>
       <a class="button" href="https://github.com/SueHeir/plumb-search">View the code</a>
     </div>
+  </section>
+
+  <section id="hack" class="ai hack">
+    <h2>Fully hackable</h2>
+    <p>All of Plumb is open source, written in Rust, under the MIT or Apache-2.0 license, and every copy you run is yours to change. Add results from any source with a plugin: a small Rust program the node runs in a sandbox, which can reach only the addresses it lists. Read results as JSON, change how it ranks, or fork the whole thing.</p>
+    <p class="small"><a href="https://github.com/SueHeir/plumb-search/blob/main/docs/plugins.md">Write a plugin</a> · <a href="https://github.com/SueHeir/plumb-search">Source code</a></p>
   </section>
 
   <section id="ai" class="ai">
