@@ -92,7 +92,9 @@ Buttons are for the node's owner. They show, and work, only on the computer
 the node runs on, the same rule as the panel's settings: not from another
 machine, not through a reverse proxy, and not from a page of another site
 (each results page's buttons carry a token that only the node knows). Anyone
-else who can search the node sees the results without buttons. Put the plugin
+else who can search the node sees the results without buttons. They still see everything else a plugin shows (titles, badges,
+pictures), so on a node other people can search, install only plugins whose
+results you are happy for them to see. Put the plugin
 on the node of the computer you browse on; its `hosts` can name other machines
 on your network.
 
