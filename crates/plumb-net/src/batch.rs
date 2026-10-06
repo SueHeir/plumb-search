@@ -606,6 +606,7 @@ fn accept_crawled(
     if source == Source::Trusted {
         kept.headings = record.headings;
         kept.body_text = record.body_text;
+        kept.terms = record.terms;
         kept.key_pages = plumb_core::key_pages::valid_key_pages(record.key_pages, &kept.domain);
         kept.links_to = plumb_core::valid_links_to(record.links_to, &kept.domain);
     }

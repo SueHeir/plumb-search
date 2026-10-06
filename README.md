@@ -249,6 +249,8 @@ score = α · link_score + trust · ((1 − α) · text_score + name_bonus)
 
 `α` defaults to 0.35 and can be changed with `--alpha`.
 
+Besides its names, title, description and headings, a site is also found by up to 30 search terms that each crawl picks from the whole homepage text with [YAKE](https://github.com/LIAAD/yake), a statistical keyword extractor (no model, a few milliseconds a page). They count for less than names. `plumb fetch-text` and `plumb terms` measure other choices on saved pages without crawling again.
+
 ### Search by meaning (optional)
 
 A query that names no site ("electric car maker") can also be matched by meaning. `plumb embed` turns each site's text (names, title, description, Wikidata's description, homepage headings and the start of the homepage text, at most 100 words) into 384 one-byte numbers with a small embedding model, [BAAI/bge-small-en-v1.5](https://huggingface.co/BAAI/bge-small-en-v1.5), run in Rust with [candle](https://github.com/huggingface/candle). The model (130 MB) is downloaded on first use. The same text gives the same vector on any machine, so nodes can check each other's.

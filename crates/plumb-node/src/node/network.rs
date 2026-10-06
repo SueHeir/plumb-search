@@ -505,6 +505,7 @@ fn crawl_facts(record: &SiteRecord) -> SiteRecord {
     facts.aliases = record.aliases.clone();
     facts.headings = record.headings.clone();
     facts.body_text = record.body_text.clone();
+    facts.terms = record.terms.clone();
     facts.key_pages = record.key_pages.clone();
     facts.crawled_at = record.crawled_at;
     facts

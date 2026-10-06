@@ -57,6 +57,7 @@ mod outline;
 mod records;
 mod run;
 mod search;
+mod terms;
 
 use cli::{Cli, Command};
 
@@ -103,6 +104,8 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::Serve(args) => web::run(args),
         Command::Eval(args) => eval::run(args),
         Command::Embed(args) => meaning::run_embed(args),
+        Command::FetchText(args) => terms::run_fetch_text(args),
+        Command::Terms(args) => terms::run_terms(args),
         Command::RemoteControl(args) => run::remote_control(args),
         Command::Storage(args) => storage::run(args),
         Command::DeadSites(args) => dead::run(&args),

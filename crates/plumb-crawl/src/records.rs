@@ -21,8 +21,10 @@ use crate::{CrawlOutcome, CrawlResult};
 /// otherwise due after.
 ///
 /// 0 is how crawlers read homepages up to 2026-10-06 (title, description,
-/// headings, the first 100 words of visible text, key pages, links).
-pub const CRAWL_VERSION: u32 = 0;
+/// headings, the first 100 words of visible text, key pages, links); 1
+/// adds the search terms picked from the whole page
+/// ([`crate::pick_terms`]).
+pub const CRAWL_VERSION: u32 = 1;
 
 /// Turns crawl results into records to merge into a
 /// [`plumb_core::RecordSet`]: one record per fetched homepage (url, title,
@@ -71,6 +73,7 @@ pub fn to_records(results: &[CrawlResult]) -> Vec<SiteRecord> {
                 record.language = page.meta.language.clone();
                 record.headings = page.meta.headings.clone();
                 record.body_text = page.meta.body_text.clone();
+                record.terms = page.meta.terms.clone();
                 record.key_pages = page.meta.key_pages.clone();
                 record.links_to = valid_links_to(
                     page.meta
@@ -181,6 +184,8 @@ mod tests {
                     key_pages: Vec::new(),
                     headings: Vec::new(),
                     body_text: None,
+                    page_text: String::new(),
+                    terms: Vec::new(),
                     feed: None,
                     links: links
                         .iter()

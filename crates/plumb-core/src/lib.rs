@@ -73,6 +73,8 @@ pub const MAX_LINKS_TO: usize = 50;
 pub const MAX_ALIASES: usize = 16;
 /// Most homepage headings kept per site.
 pub const MAX_HEADINGS: usize = 8;
+/// Most entries in [`SiteRecord::terms`].
+pub const MAX_TERMS: usize = 100;
 /// Most words kept from a homepage's headings, all together.
 pub const MAX_HEADING_WORDS: usize = 60;
 /// Longest title, description, alias or link text kept, in characters.
@@ -101,6 +103,12 @@ pub struct SiteRecord {
     /// its words; it goes into the site's embedding.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body_text: Option<String>,
+    /// Search terms picked from the whole homepage's text (YAKE), best
+    /// first, at most [`MAX_TERMS`]; a word stands more than once to weigh
+    /// more. Searched like headings: below names. Not searched by its
+    /// words; kept like `body_text`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub terms: Vec<String>,
     /// Normalized text of links from other sites, most frequent first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub link_texts: Vec<LinkText>,
@@ -403,6 +411,10 @@ impl SiteRecord {
             .is_empty()
             .then(|| std::mem::take(&mut self.headings));
         let body_text = other.body_text.is_none().then(|| self.body_text.take());
+        let terms = other
+            .terms
+            .is_empty()
+            .then(|| std::mem::take(&mut self.terms));
         // Without the page's text, the shared crawl did not read what a
         // newer crawler reads either.
         let crawl_version = other.body_text.is_none().then_some(self.crawl_version);
@@ -425,6 +437,11 @@ impl SiteRecord {
         }
         if let Some(mine) = body_text {
             self.body_text = self.body_text.take().or(mine);
+        }
+        if let Some(mine) = terms {
+            if self.terms.is_empty() {
+                self.terms = mine;
+            }
         }
         if let Some(mine) = crawl_version {
             self.crawl_version = self.crawl_version.max(mine);
@@ -473,6 +490,7 @@ impl SiteRecord {
             self.search_url = other.search_url;
             self.headings = other.headings;
             self.body_text = other.body_text;
+            self.terms = other.terms;
             self.key_pages = other.key_pages;
             self.links_to = other.links_to;
             self.crawl_version = other.crawl_version;
@@ -488,6 +506,9 @@ impl SiteRecord {
                     self.headings = other.headings;
                 }
                 self.body_text = self.body_text.take().or(other.body_text);
+                if self.terms.is_empty() {
+                    self.terms = other.terms;
+                }
                 if self.key_pages.is_empty() {
                     self.key_pages = other.key_pages;
                 }

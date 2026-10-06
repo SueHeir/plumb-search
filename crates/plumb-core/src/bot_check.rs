@@ -309,6 +309,7 @@ impl SiteRecord {
         self.description = None;
         self.headings.clear();
         self.body_text = None;
+        self.terms.clear();
         self.search_url = None;
         self.key_pages.clear();
         self.links_to.clear();
