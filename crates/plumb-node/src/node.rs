@@ -233,6 +233,16 @@ pub struct NodeConfig {
     /// held, and filling free space from trusted nodes, the seed and
     /// searches still add sites the network already knows.
     pub take_new_sites: bool,
+    /// Only crawl (Liz, 2026-10-06: "a memory safe setting for 'just
+    /// crawl'"), for a small server that supports the network and that
+    /// nobody searches: crawl rounds and the batches they publish go on,
+    /// while no search index is built or opened, no page sets, places,
+    /// feeds or adult blocklist are kept, search by meaning and private
+    /// search are off, and no other node's crawls are folded in. The
+    /// records are read for a round as [`round::RoundSites`], a few hundred
+    /// bytes a site, so millions of sites fit in a few hundred megabytes.
+    /// The index stays marked stale, so turning this off builds one.
+    pub crawl_only: bool,
     /// The nodes that share the sites with this one under `crawl_any_site`;
     /// they should crawl with it on and name this node in turn.
     pub crawl_with: Vec<plumb_net::PeerId>,
@@ -314,6 +324,7 @@ impl NodeConfig {
             crawl_home_site: true,
             drop_dead_sites: false,
             take_new_sites: false,
+            crawl_only: false,
             crawl_with: Vec::new(),
             blackhole: false,
             publish_records: None,
@@ -352,6 +363,17 @@ impl NodeConfig {
     }
 
     /// Catches settings that cannot work before anything is started.
+    /// Under [`NodeConfig::crawl_only`], turns off what only searching
+    /// needs, whatever the flags or the panel's features asked for.
+    fn limit_to_crawling(&mut self) {
+        if !self.crawl_only {
+            return;
+        }
+        self.search_by_meaning = false;
+        self.private_search = false;
+        self.news_feeds = 0;
+    }
+
     fn check(&self) -> Result<()> {
         if self.sites == 0 {
             bail!("sites must be at least 1");
@@ -819,6 +841,7 @@ pub async fn start(mut config: NodeConfig) -> Result<NodeHandle> {
     if let Some(features) = features::FeatureSettings::load(&config.data_dir)? {
         features.apply(&mut config)?;
     }
+    config.limit_to_crawling();
     config.check()?;
     let rank = crate::rank_config(config.alpha);
     let opened = {
@@ -903,15 +926,27 @@ pub async fn start(mut config: NodeConfig) -> Result<NodeHandle> {
             tokio::task::spawn_blocking(move || embedding::run(inner))
         })
     });
-    let pages = supervise(&inner, "page sets", |inner| {
-        tokio::task::spawn_blocking(move || pages::run(inner))
-    });
-    let news = supervise(&inner, "checking feeds", |inner| {
-        tokio::spawn(news::run(inner))
-    });
-    let adult = supervise(&inner, "the adult blocklist", |inner| {
-        tokio::spawn(adult::run(inner))
-    });
+    let (pages, news, adult) = if inner.config.crawl_only {
+        // Only searching needs these.
+        info!("crawling only: no search index, page sets, places, feeds or adult blocklist");
+        (
+            tokio::spawn(async {}),
+            tokio::spawn(async {}),
+            tokio::spawn(async {}),
+        )
+    } else {
+        (
+            supervise(&inner, "page sets", |inner| {
+                tokio::task::spawn_blocking(move || pages::run(inner))
+            }),
+            supervise(&inner, "checking feeds", |inner| {
+                tokio::spawn(news::run(inner))
+            }),
+            supervise(&inner, "the adult blocklist", |inner| {
+                tokio::spawn(adult::run(inner))
+            }),
+        )
+    };
     info!(
         "serving http://{addr}/ with data in {}",
         inner.paths.data.display()
@@ -976,6 +1011,9 @@ struct Opened {
     index: Option<ServingIndex>,
     /// Index directories that could not be deleted yet.
     leftover: Vec<Retired>,
+    /// Sites in the records file, counted only when crawling only
+    /// ([`Inner::round_sites`]).
+    sites: u64,
 }
 
 /// Creates and locks the data directory, clears leftovers, reads the saved
@@ -1008,7 +1046,14 @@ fn open_data_dir(config: &NodeConfig, rank: RankConfig) -> Result<Opened> {
     let mut index = None;
     let mut leftover = Vec::new();
     let mut broken = false;
-    for id in store::index_ids(&paths) {
+    // Crawling only, no index is opened, and those on disk stay for when
+    // the node searches again.
+    let ids = if config.crawl_only {
+        Vec::new()
+    } else {
+        store::index_ids(&paths)
+    };
+    for id in ids {
         let dir = paths.index(id);
         if index.is_none() {
             match ServingIndex::open(id, &dir, rank) {
@@ -1037,6 +1082,11 @@ fn open_data_dir(config: &NodeConfig, rank: RankConfig) -> Result<Opened> {
         }
     }
     let settings = store::load_settings(&paths).unwrap_or_else(|| config.settings.clone());
+    let sites = if config.crawl_only {
+        count_lines(&paths.records)
+    } else {
+        0
+    };
     Ok(Opened {
         paths,
         lock,
@@ -1044,7 +1094,30 @@ fn open_data_dir(config: &NodeConfig, rank: RankConfig) -> Result<Opened> {
         settings,
         index,
         leftover,
+        sites,
     })
+}
+
+/// Lines in the file at `path`, read a block at a time: about the sites in
+/// a records file. 0 when there is no file.
+fn count_lines(path: &Path) -> u64 {
+    use std::io::Read;
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return 0;
+    };
+    let mut block = vec![0u8; 1 << 20];
+    let mut lines = 0u64;
+    loop {
+        match file.read(&mut block) {
+            Ok(0) => return lines,
+            Ok(n) => lines += block[..n].iter().filter(|&&b| b == b'\n').count() as u64,
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(err) => {
+                warn!("cannot count the sites in {}: {err}", path.display());
+                return lines;
+            }
+        }
+    }
 }
 
 /// Raised inside the background work when the node is shutting down.
@@ -1093,6 +1166,9 @@ struct Inner {
     /// When this node last looked for sites to drop to get back under its
     /// storage limit (Unix time; 0 for not since it started).
     last_trim: std::sync::atomic::AtomicU64,
+    /// Crawling only, with no index to count them: the sites the records
+    /// held when last read, which filling counts as the index's.
+    round_sites: std::sync::atomic::AtomicU64,
     /// Since when the data folder has been over the storage limit (Unix
     /// time; 0 for not over).
     over_since: std::sync::atomic::AtomicU64,
@@ -1323,6 +1399,7 @@ impl Inner {
             fill: Mutex::new(fill_state),
             last_build: std::sync::atomic::AtomicU64::new(0),
             last_trim: std::sync::atomic::AtomicU64::new(0),
+            round_sites: std::sync::atomic::AtomicU64::new(opened.sites),
             over_since: std::sync::atomic::AtomicU64::new(0),
             inbox_lock: Mutex::new(()),
             records_held: Mutex::new(()),
@@ -1719,6 +1796,16 @@ impl Inner {
 
     /// The id and the size of the index searched now, read without holding
     /// the index open.
+    /// The sites this node holds, as filling counts them: those of the
+    /// index searched, or crawling only, those the records held when last
+    /// read ([`Inner::round_sites`]).
+    fn held_sites(&self) -> u64 {
+        if self.config.crawl_only {
+            return self.round_sites.load(Ordering::SeqCst);
+        }
+        self.current_summary().map_or(0, |(_, docs)| docs)
+    }
+
     fn current_summary(&self) -> Option<(u64, u64)> {
         self.index
             .read()

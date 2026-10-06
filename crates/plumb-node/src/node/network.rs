@@ -264,6 +264,11 @@ pub(super) async fn start(inner: &Arc<Inner>) -> Result<()> {
     let receiver = inner.clone();
     tokio::spawn(async move {
         while let Some(mut batch) = records.recv().await {
+            // Crawling only, other nodes' crawls are not kept: they would
+            // only grow the records this node crawls from.
+            if receiver.config.crawl_only {
+                continue;
+            }
             // Trusted nodes' feed checks go to the headline store, not the
             // records (see plumb_net::start).
             if batch.iter().any(|record| !record.news.is_empty()) {

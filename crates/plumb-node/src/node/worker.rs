@@ -169,6 +169,7 @@ async fn step(inner: &Arc<Inner>) -> Result<Next> {
     // built without them, before filling takes sites for the new ones.
     // Only under a storage limit: a node with none never loses sites.
     if inner.fill_state().prune
+        && !inner.config.crawl_only
         && inner.settings().storage_limit_mb > 0
         && inner.saved().crawl_left == 0
     {
@@ -183,21 +184,22 @@ async fn step(inner: &Arc<Inner>) -> Result<Next> {
             build(inner, &sorted_by_link_score(&set))
         })
         .await?;
-        put_in_service(inner, built, false).await?;
+        put_in_service(inner, Some(built), false).await?;
         return Ok(Next::Continue);
     }
     // Over the storage limit: the least useful sites go, before the limit
     // pauses crawling (see super::trim).
     if super::trim::due(inner) {
         if let Some(built) = blocking(inner, super::trim::trim).await? {
-            put_in_service(inner, built, false).await?;
+            put_in_service(inner, Some(built), false).await?;
         }
         return Ok(Next::Continue);
     }
     // Enough records from other nodes rebuild the index, but no sooner
     // than NETWORK_REBUILD_GAP after the last build.
-    let network_rebuild_at =
-        (inner.saved().network_pending >= REBUILD_AFTER_RECORDS).then(|| network_rebuild_at(inner));
+    let network_rebuild_at = (inner.saved().network_pending >= REBUILD_AFTER_RECORDS
+        && !inner.config.crawl_only)
+        .then(|| network_rebuild_at(inner));
     if network_rebuild_at.is_some_and(|at| at <= now_unix()) && !inner.saved().index_stale {
         if inner.saved().crawl_left > 0 {
             // The round under way builds them in when it ends.
@@ -210,7 +212,9 @@ async fn step(inner: &Arc<Inner>) -> Result<Next> {
         }
     }
     let saved = inner.saved();
-    if inner.current().is_none() || (saved.index_stale && saved.crawl_left == 0) {
+    if !inner.config.crawl_only
+        && (inner.current().is_none() || (saved.index_stale && saved.crawl_left == 0))
+    {
         rebuild(inner, true).await?;
         return Ok(Next::Continue);
     }
@@ -226,7 +230,11 @@ async fn step(inner: &Arc<Inner>) -> Result<Next> {
         rebuild(inner, false).await?;
         return Ok(Next::Continue);
     }
-    let wikidata_due = saved.wikidata_missing.then(|| inner.wikidata_retry_at());
+    // Crawling only, the sites set up with (from a trusted node, or the
+    // Tranco list) and those filling brings are crawled without the rest of
+    // the seed data, whose fold holds every record.
+    let wikidata_due =
+        (saved.wikidata_missing && !inner.config.crawl_only).then(|| inner.wikidata_retry_at());
     // Crawls and refreshes wait while background updates are off, paused
     // or outside the crawl hours, or a limit is reached; a day's download
     // limit ends with the day, a pause when it says.
@@ -281,7 +289,9 @@ fn network_rebuild_at(inner: &Inner) -> u64 {
 }
 
 fn idle_detail(config: &NodeConfig) -> &'static str {
-    if config.refresh_every.is_some() {
+    if config.crawl_only {
+        "Crawling only; up to date until the next crawl round"
+    } else if config.refresh_every.is_some() {
         "Up to date until the next refresh"
     } else {
         "Up to date; refreshing is off"
@@ -308,7 +318,7 @@ async fn set_up(inner: &Arc<Inner>) -> Result<()> {
             inner.update_saved(|saved| *saved = fresh)?;
             save_seed_records(inner, &records)?;
             inner.check_stop()?;
-            build(inner, &records)
+            build_unless_crawling_only(inner, &records)
         })
         .await?;
         return put_in_service(inner, built, true).await;
@@ -333,10 +343,35 @@ async fn set_up(inner: &Arc<Inner>) -> Result<()> {
         inner.update_saved(|saved| *saved = fresh)?;
         save_seed_records(inner, &records)?;
         inner.check_stop()?;
-        build(inner, &records)
+        build_unless_crawling_only(inner, &records)
     })
     .await?;
     put_in_service(inner, built, true).await
+}
+
+/// [`build`], or crawling only ([`NodeConfig::crawl_only`]), no index:
+/// `None`, noting how many sites the records hold.
+fn build_unless_crawling_only<R: Borrow<SiteRecord>>(
+    inner: &Inner,
+    records: &[R],
+) -> Result<Option<ServingIndex>> {
+    if inner.config.crawl_only {
+        inner
+            .round_sites
+            .store(records.len() as u64, Ordering::SeqCst);
+        return Ok(None);
+    }
+    build(inner, records).map(Some)
+}
+
+/// [`build_from_file`], or crawling only ([`NodeConfig::crawl_only`]),
+/// no index: `None`. The records are saved already, and the next round
+/// folds their journal in as it reads them.
+fn build_from_file_unless_crawling_only(inner: &Inner) -> Result<Option<ServingIndex>> {
+    if inner.config.crawl_only {
+        return Ok(None);
+    }
+    build_from_file(inner).map(Some)
 }
 
 /// Downloads the rest of the seed data, which setup went on without, and
@@ -864,7 +899,7 @@ async fn rebuild(inner: &Arc<Inner>, ends_round: bool) -> Result<()> {
         build_from_file(inner)
     })
     .await?;
-    put_in_service(inner, built, ends_round).await
+    put_in_service(inner, Some(built), ends_round).await
 }
 
 /// Starts a refresh: [`NodeConfig::crawl_per_refresh`] homepages to crawl.
@@ -933,7 +968,10 @@ impl Fetcher for NodeFetcher<'_> {
         }
         // Time to index what was crawled so far; the homepages in flight
         // are tried again when the crawl goes on.
-        if self.batches > 0 && self.started.elapsed() >= self.inner.config.index_during_crawl_every
+        // Crawling only, there is no index to put the crawl in.
+        if self.batches > 0
+            && !self.inner.config.crawl_only
+            && self.started.elapsed() >= self.inner.config.index_during_crawl_every
         {
             self.checkpoint = true;
             return None;
@@ -967,10 +1005,9 @@ impl Fetcher for NodeFetcher<'_> {
 /// in service.
 async fn crawl(inner: &Arc<Inner>) -> Result<()> {
     let handle = Handle::current();
-    let built = blocking(inner, move |inner| crawl_and_build(inner, &handle)).await?;
-    match built {
-        Some(built) => put_in_service(inner, built, true).await,
-        None => Ok(()),
+    match blocking(inner, move |inner| crawl_and_build(inner, &handle)).await? {
+        Done::Built(built) => put_in_service(inner, built, true).await,
+        Done::Nothing => Ok(()),
     }
 }
 
@@ -987,16 +1024,29 @@ fn home_site_change(inner: &Inner, titled: bool) -> Option<Change> {
     })
 }
 
+/// What [`crawl_and_build`] did. Made once a round, so its size does not
+/// matter.
+#[allow(clippy::large_enum_variant)]
+enum Done {
+    /// Crawled, and built an index of the records (none when crawling
+    /// only), for [`put_in_service`].
+    Built(Option<ServingIndex>),
+    /// Nothing to crawl and nothing new to index.
+    Nothing,
+}
+
 /// Crawls the homepages left in the round, saving each batch as it goes
-/// (see [`crate::crawl`]), then builds an index. `None` when there turned
-/// out to be nothing to crawl and nothing new to index.
-fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Option<ServingIndex>> {
+/// (see [`crate::crawl`]), then builds an index.
+fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Done> {
     let left = inner.saved().crawl_left;
     let _records = inner.hold_records();
     inner.set_step(Step::Crawling, "Reading the site records");
     let topics = inner.focus_topics();
     let mut set = RoundSites::load(&inner.paths.records, topics.clone(), Keep::of(inner))?;
     set.hold_new_sites(!inner.config.take_new_sites);
+    inner
+        .round_sites
+        .store(set.iter().len() as u64, Ordering::SeqCst);
     let mut store = RecordStore::open(&inner.paths.records);
     inner.check_stop()?;
     let titled = set
@@ -1181,7 +1231,7 @@ fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Option<ServingIndex
                     inner.saved().crawl_left
                 );
                 drop((set, store));
-                return build_from_file(inner).map(Some);
+                return build_from_file_unless_crawling_only(inner).map(Done::Built);
             }
             RunEnd::Stopped => {
                 // Paused by the settings or a limit: index what was crawled
@@ -1196,10 +1246,10 @@ fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Option<ServingIndex
                     group_thousands(totals.attempted as u64)
                 ));
                 if totals.attempted == 0 {
-                    return Ok(None);
+                    return Ok(Done::Nothing);
                 }
                 drop((set, store));
-                return build_from_file(inner).map(Some);
+                return build_from_file_unless_crawling_only(inner).map(Done::Built);
             }
             RunEnd::Offline(offline) => {
                 let proxy = if inner.config.use_system_proxy {
@@ -1239,13 +1289,13 @@ fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Option<ServingIndex
         let now = now_unix();
         inner.update_saved(|saved| saved.last_refresh = Some(now))?;
         inner.refresh_requested.store(false, Ordering::SeqCst);
-        return Ok(None);
+        return Ok(Done::Nothing);
     }
     inner.check_stop()?;
     // The records are read again a record at a time, rather than built
     // from the set held, so the build never holds every record.
     drop((set, store));
-    build_from_file(inner).map(Some)
+    build_from_file_unless_crawling_only(inner).map(Done::Built)
 }
 
 /// Whether the last try at `record`'s homepage fetched it.
@@ -1586,12 +1636,22 @@ fn watch_feeds<R: Borrow<SiteRecord>>(inner: &Inner, records: &[R]) {
 /// Swaps in a freshly built index and notes that the records file holds no
 /// changes it lacks. A build that `ends_round`, with no homepages left to
 /// crawl, ends the round: the next refresh is due a refresh interval later.
-async fn put_in_service(inner: &Arc<Inner>, built: ServingIndex, ends_round: bool) -> Result<()> {
-    inner.install(built);
+/// `None` when crawling only ([`NodeConfig::crawl_only`]): no index, and
+/// the records stay marked newer than the last one, for when the node
+/// searches again.
+async fn put_in_service(
+    inner: &Arc<Inner>,
+    built: Option<ServingIndex>,
+    ends_round: bool,
+) -> Result<()> {
+    let indexed = built.is_some();
+    if let Some(built) = built {
+        inner.install(built);
+    }
     let now = now_unix();
     inner.last_build.store(now, Ordering::SeqCst);
     inner.update_saved(|saved| {
-        saved.index_stale = false;
+        saved.index_stale = !indexed;
         saved.network_pending = 0;
         if ends_round && saved.crawl_left == 0 {
             saved.last_refresh = Some(now);

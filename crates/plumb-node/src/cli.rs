@@ -318,6 +318,14 @@ pub struct RunArgs {
     /// crawls only refresh the sites held.
     #[arg(long)]
     pub take_new_sites: bool,
+    /// Only crawl, for a small server that supports the network and that
+    /// nobody searches: crawl rounds go on and publish their batches, but
+    /// no search index is built, no page sets, places or feeds are kept,
+    /// and other nodes' crawls are not folded in, so millions of sites fit
+    /// in well under a gigabyte of memory. Search by meaning and private
+    /// search are off. Without it again, the node builds its index.
+    #[arg(long, conflicts_with_all = ["search_by_meaning", "private_search", "blackhole"])]
+    pub crawl_only: bool,
     /// Homepages fetched at once while crawling [default: 16]. The panel's
     /// workload presets (light, balanced, full) set their own.
     #[arg(long, value_name = "N", value_parser = parse_positive)]

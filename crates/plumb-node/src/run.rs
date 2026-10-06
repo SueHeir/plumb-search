@@ -70,6 +70,7 @@ fn node_config(args: RunArgs) -> NodeConfig {
     }
     config.drop_dead_sites = args.drop_dead_sites;
     config.take_new_sites = args.take_new_sites;
+    config.crawl_only = args.crawl_only;
     if let Some(feeds) = args.news_feeds {
         config.news_feeds = feeds;
     }
@@ -414,6 +415,14 @@ mod tests {
             "--blackhole needs --network"
         );
         assert!(parse(&["--data", "d", "--network", "--blackhole", "--no-fill"]).is_err());
+        assert!(!node.crawl_only);
+        assert!(config(&["--data", "d", "--network", "--crawl-only"]).crawl_only);
+        for other in ["--blackhole", "--search-by-meaning", "--private-search"] {
+            assert!(
+                parse(&["--data", "d", "--network", "--crawl-only", other]).is_err(),
+                "--crawl-only with {other}"
+            );
+        }
         assert_eq!(net.round_every, Some(plumb_net::rounds::ROUND_EVERY));
         let rounds = |minutes: &str| {
             config(&["--data", "d", "--network", "--round-minutes", minutes])
