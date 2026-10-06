@@ -133,7 +133,7 @@ fn render_private(available: bool, options: &SearchOptions) -> String {
          <a href=\"/\">Search normally</a> instead.</p>"
     };
     let body = format!(
-        "<main class=\"wrap\" id=\"pq\" data-country=\"{}\" data-safe=\"{}\" \
+        "<main class=\"wrap wide\" id=\"pq\" data-country=\"{}\" data-safe=\"{}\" \
          data-language=\"{}\">\n\
          <header><a class=\"logo\" href=\"/\">Plumb</a>\
          <form id=\"pq-form\" action=\"/private\" method=\"get\" role=\"search\">\
