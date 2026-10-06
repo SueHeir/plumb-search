@@ -2178,6 +2178,7 @@ background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:
 .ia p{margin:0}.iaq{color:var(--muted);font-size:.9rem;overflow-wrap:anywhere}\
 .iaa{font-size:1.75rem;line-height:1.3;overflow-wrap:anywhere}.ia .m{margin-top:.2rem}\
 .wide{max-width:74rem}.wide header form{max-width:42rem}\
+.wide>main,main.wide>:not(header){max-width:44rem}\
 .cols{display:flex;flex-direction:column}.cols>main{min-width:0}\
 .ib{order:-1;margin:1rem 0 .25rem;padding:1rem 1.1rem;border:1px solid var(--line);\
 border-radius:.75rem;overflow-wrap:anywhere}\
@@ -3041,8 +3042,9 @@ fn render_results_with(
         body,
         "<p class=\"s\">As JSON: {json}</p>\n{FOOTER}\n</main>\n"
     );
-    // With an info box the page is wider, with the box beside the results
-    // (above them on a narrow screen, unless a profile asked for leads).
+    // Results keep the same left edge whether or not an info box shows; the
+    // box sits beside them (above them on a narrow screen, unless a profile
+    // asked for leads).
     let form = results_form(query, settings);
     let body = match &info {
         Some(info) => {
@@ -3055,7 +3057,7 @@ fn render_results_with(
             };
             format!("<div class=\"wrap wide\">\n{form}\n<div class=\"{cols}\">\n{body}{aside}</div>\n</div>")
         }
-        None => format!("<div class=\"wrap\">\n{form}\n{body}</div>"),
+        None => format!("<div class=\"wrap wide\">\n{form}\n{body}</div>"),
     };
     page(&format!("{query} - Plumb Search"), &body)
 }
@@ -3063,7 +3065,10 @@ fn render_results_with(
 /// What other nodes answered, and nothing from this node. Their text is as
 /// untrusted as any record's, and is escaped the same way.
 fn render_network(query: &str, results: &NetworkResults, icons: &Icons) -> String {
-    let mut body = format!("<div class=\"wrap\">\n{}\n<main>\n", results_header(query));
+    let mut body = format!(
+        "<div class=\"wrap wide\">\n{}\n<main>\n",
+        results_header(query)
+    );
     if results.asked == 0 && (results.cached > 0 || results.pending > 0) {
         body.push_str(
             "<p class=\"s\">Plumb results are read from saved data and ranked on this node.</p>\n",
@@ -3152,7 +3157,7 @@ fn render_network(query: &str, results: &NetworkResults, icons: &Icons) -> Strin
 
 fn render_no_network() -> String {
     let body = format!(
-        "<div class=\"wrap\">\n{}\n<main>\n<p class=\"none\">This node has not joined the \
+        "<div class=\"wrap wide\">\n{}\n<main>\n<p class=\"none\">This node has not joined the \
          Plumb network. Start it with <code>plumb run --network</code> to search other \
          nodes.</p>\n</main>\n</div>",
         results_header("")
@@ -3698,7 +3703,7 @@ fn render_hit(
 
 fn render_error(query: &str) -> String {
     let body = format!(
-        "<div class=\"wrap\">\n{}\n<main>\n<p class=\"none\">Something went wrong while searching. \
+        "<div class=\"wrap wide\">\n{}\n<main>\n<p class=\"none\">Something went wrong while searching. \
          The server log has the details.</p>\n</main>\n</div>",
         results_header(query)
     );
@@ -5420,7 +5425,9 @@ mod tests {
             false,
             &Icons::default(),
         );
-        assert!(!page.contains("class=\"ib\"") && !page.contains("wrap wide"));
+        assert!(!page.contains("class=\"ib\""));
+        // Without the box the results keep the same left edge.
+        assert!(page.contains("<div class=\"wrap wide\">"), "{page}");
     }
 
     #[test]
