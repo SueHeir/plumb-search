@@ -227,7 +227,7 @@ fn search_lists_what_plugins_found_apart_from_plumbs_results() {
             url: "https://blog.rust-lang.org/x".into(),
             site: "rust-lang.org".into(),
             snippet: Some("120 points".into()),
-            published: None,
+            ..Default::default()
         }],
     };
     let mcp = server(vec![hit("rust-lang.org", 2.0, 0.8, true)]).with_plugin_results(vec![found]);
