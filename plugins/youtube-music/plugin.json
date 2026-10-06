@@ -1,0 +1,7 @@
+{
+  "name": "YouTube",
+  "about": "Songs and videos from YouTube and YouTube Music, through the YouTube Data API with your own key.",
+  "hosts": ["www.googleapis.com", "i.ytimg.com"],
+  "keywords": ["ytm", "youtube music", "yt", "youtube"],
+  "ids": ["youtube"]
+}
