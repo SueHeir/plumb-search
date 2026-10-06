@@ -405,17 +405,23 @@ pub(crate) fn render_info_box(out: &mut String, info: &InfoBox) {
 
 /// The fact `asked` asks for, when the first page named by its subject
 /// (in `pages`, found for the subject's words) that has one of its kinds
-/// has it: "Canberra" for "capital of australia". `now` (Unix seconds)
-/// works out an age.
+/// has it: "Canberra" for "capital of australia". Failing that, the
+/// article listed under the site the subject names: "Apple Inc." under
+/// apple.com for "ceo of apple", where the article named "Apple" is the
+/// fruit. `now` (Unix seconds) works out an age.
 pub(crate) fn fact_answer(
     asked: &plumb_core::facts::FactQuestion,
     pages: &[PlacedPage],
     now: u64,
 ) -> Option<plumb_answer::Answer> {
     use plumb_core::facts::FactKind;
-    pages
+    let named = pages.iter().filter(|placed| placed.hit.named);
+    let of_sites = pages
         .iter()
-        .filter(|placed| placed.hit.named && is_about_one_thing(&placed.hit.page))
+        .filter(|placed| !placed.hit.named && placed.under.is_some());
+    named
+        .chain(of_sites)
+        .filter(|placed| is_about_one_thing(&placed.hit.page))
         .filter(|placed| {
             !is_disambiguation(
                 &placed.hit.page.title,
@@ -677,6 +683,37 @@ mod tests {
         );
         // A kind it has no fact of: no answer.
         assert_eq!(ask("australia currency", &pages), None);
+
+        // The article named "Apple" is the fruit; Apple Inc. is listed
+        // under apple.com.
+        let unnamed = |mut hit: PageHit| {
+            hit.named = false;
+            hit
+        };
+        let apple = [
+            placed(article("Apple", "fruit", None), None, 1),
+            placed(
+                unnamed(with_facts(
+                    article("Apple Inc.", "American technology company", None),
+                    &[(Ceo, "Tim Cook")],
+                )),
+                Some("apple.com"),
+                0,
+            ),
+            placed(
+                unnamed(with_facts(
+                    article("Apple Records", "record label", None),
+                    &[(Ceo, "Someone")],
+                )),
+                None,
+                2,
+            ),
+        ];
+        let ceo = ask("who is the ceo of apple", &apple).unwrap();
+        assert_eq!(
+            (ceo.question.as_str(), ceo.answer.as_str()),
+            ("CEO of Apple Inc.", "Tim Cook")
+        );
 
         let everest = [placed(
             with_facts(

@@ -34,6 +34,10 @@ pub const FACTS_PAGE: usize = 50_000;
 /// Items asked about in one query for their labels.
 pub const LABELS_BATCH: usize = 400;
 
+/// Most-read items asked about one by one (in batches of
+/// [`LABELS_BATCH`]) for a kind whose pages Wikidata stopped answering.
+pub const FILL_IN_TOP: usize = 100_000;
+
 /// Facts by Wikidata item (`Q408`).
 pub type FactsByItem = HashMap<String, Vec<Fact>>;
 
@@ -86,6 +90,20 @@ fn page_query(kind: FactKind, offset: usize) -> String {
     format!(
         "SELECT ?item ?v ?p ?t WHERE {{ ?item p:{p} ?s . ?s a wikibase:BestRank ; {value} }} \
          LIMIT {FACTS_PAGE} OFFSET {offset}"
+    )
+}
+
+/// [`page_query`]'s statements for `items` only.
+fn items_query(kind: FactKind, items: &[String]) -> String {
+    let values: Vec<String> = items.iter().map(|item| format!("wd:{item}")).collect();
+    let page = page_query(kind, 0);
+    let (head, rest) = page
+        .split_once("WHERE { ")
+        .expect("a page query has a WHERE");
+    let body = rest.rsplit_once(" LIMIT").map_or(rest, |(body, _)| body);
+    format!(
+        "{head}WHERE {{ VALUES ?item {{ {} }} {body}",
+        values.join(" ")
     )
 }
 
@@ -242,16 +260,24 @@ fn add_labels(labels: &mut HashMap<String, String>, json: &[u8]) -> Result<()> {
 }
 
 /// Asks Wikidata's query service at `endpoint` for the facts of the items
-/// in `wanted` (those with an article).
+/// in `items` (those with an article, most read first).
+///
+/// Each kind is read in pages of all its statements. When Wikidata stops
+/// answering a kind's pages (deep pages time out), the first
+/// [`FILL_IN_TOP`] items that still lack it are asked about by name, so
+/// the most read keep their facts.
 pub async fn fetch_facts(
     client: &reqwest::Client,
     endpoint: &str,
     pacing: WikidataPacing,
-    wanted: &HashSet<String>,
+    items: &[String],
 ) -> Result<FactsByItem> {
+    let wanted: HashSet<String> = items.iter().cloned().collect();
+    let wanted = &wanted;
     let mut raw = RawFacts::default();
     for &kind in KINDS {
         let mut offset = 0;
+        let mut cut_short = false;
         loop {
             tokio::time::sleep(pacing.pause).await;
             let json = match sparql_json(client, endpoint, &page_query(kind, offset), pacing).await
@@ -263,6 +289,7 @@ pub async fn fetch_facts(
                         kind.key(),
                         kind.property()
                     );
+                    cut_short = true;
                     break;
                 }
             };
@@ -276,6 +303,9 @@ pub async fn fetch_facts(
                 break;
             }
             offset += FACTS_PAGE;
+        }
+        if cut_short {
+            fill_in(client, endpoint, pacing, &mut raw, kind, items, wanted).await?;
         }
     }
     let items = raw.named_items();
@@ -297,6 +327,51 @@ pub async fn fetch_facts(
         }
     }
     Ok(raw.named(&labels))
+}
+
+/// Asks for `kind` of the first [`FILL_IN_TOP`] of `items` that lack it.
+async fn fill_in(
+    client: &reqwest::Client,
+    endpoint: &str,
+    pacing: WikidataPacing,
+    raw: &mut RawFacts,
+    kind: FactKind,
+    items: &[String],
+    wanted: &HashSet<String>,
+) -> Result<()> {
+    let lacking: Vec<String> = items
+        .iter()
+        .take(FILL_IN_TOP)
+        .filter(|item| {
+            !raw.facts
+                .get(*item)
+                .is_some_and(|facts| facts.iter().any(|fact| fact.kind == kind))
+        })
+        .cloned()
+        .collect();
+    info!(
+        "{} ({}): asking about {} of the {FILL_IN_TOP} most read items that lack it",
+        kind.key(),
+        kind.property(),
+        lacking.len()
+    );
+    let mut found = 0;
+    for (n, batch) in lacking.chunks(LABELS_BATCH).enumerate() {
+        tokio::time::sleep(pacing.pause).await;
+        match sparql_json(client, endpoint, &items_query(kind, batch), pacing).await {
+            Ok(json) => found += raw.add_page(kind, wanted, &json)?,
+            Err(err) => warn!("{}: {} items left out: {err:#}", kind.key(), batch.len()),
+        }
+        if n % 50 == 0 {
+            info!(
+                "{}: {} of {} asked, {found} statements",
+                kind.key(),
+                ((n + 1) * LABELS_BATCH).min(lacking.len()),
+                lacking.len()
+            );
+        }
+    }
+    Ok(())
 }
 
 /// What [`add_facts_to_file`] did.
@@ -389,6 +464,17 @@ mod tests {
         assert!(q.ends_with("LIMIT 50000 OFFSET 400000"), "{q}");
         let q = page_query(FactKind::Born, 0);
         assert!(q.contains("wikibase:timePrecision ?p"), "{q}");
+        let items = ["Q30".to_string(), "Q668".to_string()];
+        let q = items_query(FactKind::Population, &items);
+        assert!(
+            q.starts_with(
+                "SELECT ?item ?v ?p ?t WHERE { VALUES ?item { wd:Q30 wd:Q668 } ?item p:P1082 ?s ."
+            ),
+            "{q}"
+        );
+        assert!(q.contains("pq:P585 ?t"), "{q}");
+        assert!(q.ends_with('}') && !q.contains("LIMIT"), "{q}");
+        assert_eq!(q.matches('{').count(), q.matches('}').count(), "{q}");
     }
 
     #[test]
