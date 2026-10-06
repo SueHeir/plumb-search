@@ -147,6 +147,43 @@ impl Page {
         }
     }
 
+    /// The question `question` of another Stack Exchange site, written as
+    /// an article whose item is the site and question number
+    /// (`diy.stackexchange.com/12345`) and whose description is its tags;
+    /// `None` for a site not in [`plumb_core::stack_exchange::SITES`].
+    pub fn from_exchange(question: Article) -> Option<Self> {
+        let (site, id) =
+            plumb_core::stack_exchange::parse_question_item(question.item.as_deref()?)?;
+        Some(Page {
+            set: STACKEXCHANGE_SET.to_string(),
+            url: site.question_url(id),
+            title: question.title,
+            description: question.description,
+            site: None,
+            views: question.views,
+            aliases: question.aliases,
+            item: None,
+            profiles: Vec::new(),
+            website: None,
+            package: None,
+        })
+    }
+
+    /// The Stack Exchange site of a page of the `stackexchange` set.
+    fn exchange_site(&self) -> Option<&'static plumb_core::stack_exchange::ExchangeSite> {
+        if self.set != STACKEXCHANGE_SET {
+            return None;
+        }
+        let host = self.url.strip_prefix("https://")?.split('/').next()?;
+        plumb_core::stack_exchange::site_of(host)
+    }
+
+    /// Whether the page is a question, of Stack Overflow or another Stack
+    /// Exchange site.
+    pub fn is_question(&self) -> bool {
+        self.set == STACKOVERFLOW_SET || self.set == STACKEXCHANGE_SET
+    }
+
     /// The Open Library work `book`, written as an article whose item is
     /// the work id (`OL45804W`).
     pub fn from_book(book: Article) -> Self {
@@ -261,11 +298,14 @@ impl Page {
     /// Whether [`Page::from_set`] can read pages of the set `set`. A
     /// package's line needs its card, so an empty article can't tell.
     pub fn has_reader(set: &str) -> bool {
-        set == PACKAGES_SET || Page::from_set(set, Article::default()).is_some()
+        set == PACKAGES_SET
+            || set == STACKEXCHANGE_SET
+            || Page::from_set(set, Article::default()).is_some()
     }
 
     /// The page of the set `set` written as `article` in its articles
-    /// file, `None` for a set without a reader (or a package without a card).
+    /// file, `None` for a set without a reader (or a package without a card,
+    /// or a question of a site not known).
     pub fn from_set(set: &str, article: Article) -> Option<Self> {
         Some(match set {
             GITHUB_SET => Page::from_repo(article),
@@ -275,6 +315,7 @@ impl Page {
             PAPERS_SET => Page::from_paper(article),
             WIKIDATA_SET => Page::from_item(article),
             PACKAGES_SET => Page::from_package(article)?,
+            STACKEXCHANGE_SET => Page::from_exchange(article)?,
             _ => Page::from_article(set.strip_prefix("wikipedia-")?, article),
         })
     }
@@ -286,7 +327,7 @@ impl Page {
         if self.set == PAPERS_SET {
             return Some(self.title.clone());
         }
-        (self.set == STACKOVERFLOW_SET).then(|| match &self.description {
+        self.is_question().then(|| match &self.description {
             Some(tags) => format!("{} {tags}", self.title),
             None => self.title.clone(),
         })
@@ -306,6 +347,8 @@ impl Page {
             "GitHub"
         } else if self.set == STACKOVERFLOW_SET {
             "Stack Overflow"
+        } else if let Some(site) = self.exchange_site() {
+            site.name
         } else if self.set == BOOKS_SET {
             "Open Library"
         } else if self.set == PODCASTS_SET {
@@ -327,11 +370,11 @@ impl Page {
     }
 
     /// The language the page is in, when its set says: `en` for
-    /// English Wikipedia, GitHub and Stack Overflow.
+    /// English Wikipedia, GitHub and Stack Exchange's questions.
     pub fn language(&self) -> Option<&str> {
         if let Some(lang) = self.set.strip_prefix("wikipedia-") {
             Some(lang)
-        } else if self.set == GITHUB_SET || self.set == STACKOVERFLOW_SET {
+        } else if self.set == GITHUB_SET || self.is_question() {
             Some("en")
         } else {
             None
@@ -344,6 +387,8 @@ impl Page {
             "github.com"
         } else if self.set == STACKOVERFLOW_SET {
             "stackoverflow.com"
+        } else if let Some(site) = self.exchange_site() {
+            site.domain
         } else if self.set == BOOKS_SET {
             "openlibrary.org"
         } else if self.set == PODCASTS_SET {
@@ -362,6 +407,9 @@ impl Page {
 pub const GITHUB_SET: &str = "github";
 /// The set of Stack Overflow questions.
 pub const STACKOVERFLOW_SET: &str = "stackoverflow";
+/// The set of questions of other Stack Exchange sites (Super User, Home
+/// Improvement and more; see [`plumb_core::stack_exchange`]).
+pub const STACKEXCHANGE_SET: &str = "stackexchange";
 /// The set of books, from Open Library.
 pub const BOOKS_SET: &str = "books";
 /// Fewest words of a paper's title that ask for the paper with nothing

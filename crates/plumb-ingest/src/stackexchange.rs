@@ -53,6 +53,19 @@ impl Question {
     }
 }
 
+impl Question {
+    /// The question of Stack Exchange site `site` as a line of the
+    /// `stackexchange` set's file: like [`Question::into_article`], with
+    /// the site in its item (`diy.stackexchange.com/12345`).
+    pub fn into_exchange_article(self, site: &plumb_core::stack_exchange::ExchangeSite) -> Article {
+        let item = plumb_core::stack_exchange::question_item(site, self.id);
+        Article {
+            item: Some(item),
+            ..self.into_article()
+        }
+    }
+}
+
 /// The value of attribute `name` in the XML element `row`, entities
 /// decoded.
 fn attribute(row: &str, name: &str) -> Option<String> {
@@ -253,6 +266,21 @@ mod tests {
         assert_eq!(
             article.description.as_deref(),
             Some("git, version-control, git-commit, undo")
+        );
+    }
+
+    #[test]
+    fn other_sites_questions_name_their_site() {
+        let questions = read_questions(POSTS.as_bytes(), 1, 10).unwrap();
+        let diy = plumb_core::stack_exchange::site_of("diy.stackexchange.com").unwrap();
+        let article = questions[0].clone().into_exchange_article(diy);
+        assert_eq!(
+            article.item.as_deref(),
+            Some("diy.stackexchange.com/927358")
+        );
+        assert_eq!(
+            article.title,
+            "How do I undo the most recent local commits in Git?"
         );
     }
 

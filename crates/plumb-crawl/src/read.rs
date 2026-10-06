@@ -205,16 +205,8 @@ pub fn stack_exchange_question(url: &Url) -> Option<(&'static str, u64)> {
     let host = url.host_str()?.trim_start_matches("www.");
     let site = match host {
         "stackoverflow.com" => "stackoverflow",
-        "superuser.com" => "superuser",
-        "serverfault.com" => "serverfault",
-        "askubuntu.com" => "askubuntu",
         "mathoverflow.net" => "mathoverflow.net",
-        "unix.stackexchange.com" => "unix",
-        "softwareengineering.stackexchange.com" => "softwareengineering",
-        "dba.stackexchange.com" => "dba",
-        "security.stackexchange.com" => "security",
-        "apple.stackexchange.com" => "apple",
-        _ => return None,
+        host => plumb_core::stack_exchange::site_of(host)?.api,
     };
     let mut segments = url.path_segments()?;
     if !matches!(segments.next(), Some("questions" | "q")) {

@@ -92,6 +92,7 @@ fn set_label(set: &str) -> &str {
         s if s.starts_with("wikipedia") => "Wikipedia",
         "wikidata" => "Wikidata",
         "stackoverflow" => "Stack Overflow",
+        "stackexchange" => "Stack Exchange",
         "github" => "GitHub",
         "books" => "Book",
         "papers" => "Paper",
