@@ -1140,16 +1140,42 @@ async fn sets_up_without_wikidata_and_adds_it_later() {
         store::load_state(&paths).unwrap().sites_version,
         plumb_core::SITES_VERSION
     );
-    let records: Vec<SiteRecord> = read_jsonl(&dir.path().join("records.jsonl")).unwrap();
-    let scholar = records
-        .iter()
-        .find(|r| r.domain == "scholar.google.com")
-        .unwrap();
-    assert_eq!(scholar.aliases, ["Google Scholar"]);
-    assert_eq!(scholar.signals.tranco_rank, Some(1));
-    let google = records.iter().find(|r| r.domain == "google.com").unwrap();
-    assert_eq!(google.aliases, ["Google"]);
-    assert!(!google.kinds.iter().any(|kind| kind == "college"));
+    // The changes went into the journal, not a rewrite of the records.
+    assert!(crate::records::journal_path(&dir.path().join("records.jsonl")).is_file());
+    let check = || {
+        let set = crate::records::load_records(&dir.path().join("records.jsonl")).unwrap();
+        let scholar = set.get("scholar.google.com").unwrap();
+        assert_eq!(scholar.aliases, ["Google Scholar"]);
+        assert_eq!(scholar.signals.tranco_rank, Some(1));
+        let google = set.get("google.com").unwrap();
+        assert_eq!(google.aliases, ["Google"]);
+        assert!(!google.kinds.iter().any(|kind| kind == "college"));
+        assert!(google.signals.official_site);
+        // Hacker News needs a record for ycombinator.com, which this has not.
+        assert!(set.get("news.ycombinator.com").is_none());
+        set.len()
+    };
+    let sites = check();
+
+    // A node stopped before it noted the version makes the same changes
+    // again on its next start, which leaves the records as they were.
+    let mut saved = store::load_state(&paths).unwrap();
+    saved.sites_version = 0;
+    store::save_state(&paths, &saved).unwrap();
+    let index_before = names(&dir.path().join("indexes"));
+    let mut config = test_config(dir.path());
+    config.sources = offline.sources();
+    config.sites = 50;
+    let node = start(config).await.unwrap();
+    wait_for(node.addr(), "the records updated again", |s| {
+        ready_and_idle(s)
+            && s.index
+                .as_ref()
+                .is_some_and(|index| !index_before.contains(index))
+    })
+    .await;
+    node.shutdown().await.unwrap();
+    assert_eq!(check(), sites);
 
     // Nothing to fold in a directory with no node yet.
     assert!(!request_reseed(tempfile::tempdir().unwrap().path()).unwrap());
