@@ -89,6 +89,9 @@ pub struct PlaceQuery {
     /// What is looked for, without filler words: "pizza".
     pub what: String,
     pub near: Near,
+    /// The query said where with "in", "near" or "near me"; `false` when
+    /// a town was guessed from its words ("denver pizza", "us bank").
+    pub said_where: bool,
 }
 
 /// Splits `query` into what is looked for and where, when it says where.
@@ -119,6 +122,7 @@ pub fn parse_place_query(query: &str) -> Option<PlaceQuery> {
             return Some(PlaceQuery {
                 what: what_of(&words[..words.len() - suffix.len()])?,
                 near: Near::Me,
+                said_where: true,
             });
         }
     }
@@ -126,6 +130,7 @@ pub fn parse_place_query(query: &str) -> Option<PlaceQuery> {
         return Some(PlaceQuery {
             what: what_of(&words[1..])?,
             near: Near::Me,
+            said_where: true,
         });
     }
     // The last "in" or "near" with words on both sides.
@@ -141,6 +146,7 @@ pub fn parse_place_query(query: &str) -> Option<PlaceQuery> {
                 return Some(PlaceQuery {
                     what,
                     near: Near::Named(place.join(" ")),
+                    said_where: true,
                 });
             }
         }
@@ -158,6 +164,7 @@ pub fn parse_place_query(query: &str) -> Option<PlaceQuery> {
                     return Some(PlaceQuery {
                         what,
                         near: Near::Named(town.join(" ")),
+                        said_where: false,
                     });
                 }
             }
@@ -166,6 +173,7 @@ pub fn parse_place_query(query: &str) -> Option<PlaceQuery> {
                 return Some(PlaceQuery {
                     what: what.join(" "),
                     near: Near::Named(town.join(" ")),
+                    said_where: false,
                 });
             }
         }
@@ -192,6 +200,10 @@ pub struct PlaceResults {
     /// The query said "near me".
     #[serde(default)]
     pub near_me: bool,
+    /// The query did not say where; the town was guessed from its words
+    /// ("denver pizza"), so it may be a name instead ("us bank").
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub guessed: bool,
     /// How far around the centre it looked, in km.
     pub radius_km: f64,
     pub hits: Vec<PlaceHit>,
@@ -393,11 +405,13 @@ impl PlaceSearcher {
             },
         };
         let near_me = asked.near == Near::Me;
+        let guessed = !asked.said_where;
         let Some(center) = center else {
             return Ok(Some(PlaceResults {
                 what: asked.what,
                 center: None,
                 near_me,
+                guessed,
                 radius_km: 0.0,
                 hits: Vec::new(),
             }));
@@ -417,6 +431,7 @@ impl PlaceSearcher {
             what: asked.what,
             center: Some(center),
             near_me,
+            guessed,
             radius_km,
             hits,
         }))
@@ -665,6 +680,11 @@ mod tests {
             query("sushi san francisco"),
             Some(("sushi".into(), Near::Named("san francisco".into())))
         );
+        // Only "in", "near" and "near me" say where for sure.
+        assert!(parse_place_query("pizza in denver").unwrap().said_where);
+        assert!(parse_place_query("coffee near me").unwrap().said_where);
+        assert!(!parse_place_query("denver pizza").unwrap().said_where);
+        assert!(!parse_place_query("us bank").unwrap().said_where);
         for plain in [
             "pizza",
             "apple music",
