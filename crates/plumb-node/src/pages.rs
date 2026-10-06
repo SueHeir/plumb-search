@@ -82,6 +82,12 @@ pub const SETS: &[SetInfo] = &[
         bytes_per_page: 140,
     },
     SetInfo {
+        id: plumb_index::pages::MUSIC_SET,
+        name: "Songs and albums (MusicBrainz)",
+        pages: 180_000,
+        bytes_per_page: 200,
+    },
+    SetInfo {
         id: plumb_index::pages::PAPERS_SET,
         name: "Papers (OpenAlex)",
         pages: 2_000_000,
