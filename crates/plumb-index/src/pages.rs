@@ -1328,9 +1328,13 @@ pub fn place_pages(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) -> Ve
     // how big the site is: "mars" means the planet, read many times more
     // than Mars Inc. of mars.com; "napoleon" the emperor, not Napoleon,
     // North Dakota.
+    // A site that only shares some of the query's words is no namesake
+    // at all: the article "Nikola Tesla" before tesla.com, "Genghis Khan"
+    // before khanacademy.org.
     let page_first = |page: &PageHit| match sites.first() {
         None => true,
         Some(_) if organizations_site => false,
+        Some(site) if !site.named && page.page.is_article() => true,
         Some(site) => match site.demand {
             Some(demand) if page.page.is_article() => page.popularity > demand + DEMAND_MARGIN,
             _ => !site.official && page.popularity > site.link_score,
@@ -2154,14 +2158,24 @@ mod tests {
             )],
         );
         assert_eq!(placed[0].at, 0);
-        // ...and after an official website or a well known site.
-        let mut official = known_site("example.org", false, 0.3);
+        // ...and after an official website or a well known site the query
+        // names too...
+        let mut official = known_site("example.org", true, 0.3);
         official.official = true;
-        let known = known_site("example.com", false, 0.9);
+        let known = known_site("example.com", true, 0.9);
         for site in [official, known] {
             let placed = place_pages("", &[site], vec![found("Example", None, true, 0.8)]);
             assert_eq!(placed[0].at, 1);
         }
+        // ...but not after one that only shares a word with the query.
+        let mut tesla = known_site("tesla.com", false, 0.7);
+        tesla.official = true;
+        let placed = place_pages(
+            "nikola tesla",
+            &[tesla],
+            vec![found("Nikola Tesla", None, true, 0.8)],
+        );
+        assert_eq!(placed[0].at, 0);
     }
 
     #[test]
