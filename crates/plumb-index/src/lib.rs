@@ -258,6 +258,9 @@ pub struct RankConfig {
     /// that does, while youtube.com ("video sharing site") and spotify.com
     /// ("music streaming"), at about 0.04, keep theirs. `None` turns it off.
     pub described_relevance: Option<f32>,
+    /// BM25 boost of a query word matching a site's search terms
+    /// ([`plumb_core::SiteRecord::terms`]), picked from its whole homepage.
+    pub terms_boost: f32,
 }
 
 impl Default for RankConfig {
@@ -275,6 +278,7 @@ impl Default for RankConfig {
             described_alpha: Some(0.5),
             partial_label_bonus: None,
             described_relevance: Some(0.04),
+            terms_boost: 0.5,
         }
     }
 }
@@ -916,9 +920,10 @@ impl Searcher {
         if limit == 0 {
             return Ok(Default::default());
         }
-        let Some(query) = ParsedQuery::new(query_text, &self.words, &self.joined) else {
+        let Some(mut query) = ParsedQuery::new(query_text, &self.words, &self.joined) else {
             return Ok(Default::default());
         };
+        query.terms_boost = cfg.terms_boost;
         let searcher = self.reader.searcher();
         let num_docs = usize::try_from(searcher.num_docs()).unwrap_or(usize::MAX);
         if num_docs == 0 {
@@ -1638,6 +1643,8 @@ struct ParsedQuery {
     len: usize,
     /// The registrable domain, when the query is a hostname or URL.
     domain: Option<String>,
+    /// [`RankConfig::terms_boost`].
+    terms_boost: f32,
 }
 
 impl ParsedQuery {
@@ -1685,6 +1692,7 @@ impl ParsedQuery {
             kind,
             len: tokens.len(),
             domain: typed_domain(&query),
+            terms_boost: 0.0,
         })
     }
 
@@ -1696,7 +1704,7 @@ impl ParsedQuery {
     /// for "us bank online banking", bank.com (whose whole name is one of
     /// the words) must not outweigh usbank.com matching every word elsewhere.
     /// The fields each query word is searched in, with their boosts.
-    fn per_word(&self, f: &Fields) -> [(Field, f32); 8] {
+    fn per_word(&self, f: &Fields) -> [(Field, f32); 9] {
         let name_share = 1.0 / self.words.len() as f32;
         [
             (f.label, LABEL_BOOST * name_share),
@@ -1707,6 +1715,7 @@ impl ParsedQuery {
             (f.description, DESCRIPTION_BOOST),
             (f.headings, HEADINGS_BOOST),
             (f.about, ABOUT_BOOST),
+            (f.terms, self.terms_boost),
         ]
     }
 
@@ -1731,7 +1740,7 @@ impl ParsedQuery {
         let joining = i > 0 && i + 1 < self.words.len() && is_function_word(word);
         let names = self.len == 1 || !joining;
         for (field, boost) in self.per_word(f) {
-            if !names && (field == f.label || field == f.joined) {
+            if boost <= 0.0 || (!names && (field == f.label || field == f.joined)) {
                 continue;
             }
             clauses.add(Term::from_field_text(field, word), boost);
@@ -1745,7 +1754,7 @@ impl ParsedQuery {
             Ok((1.0 + (docs - found + 0.5) / (found + 0.5)).ln())
         };
         for (field, boost) in self.per_word(f) {
-            if field == f.label || field == f.joined {
+            if boost <= 0.0 || field == f.label || field == f.joined {
                 continue;
             }
             let other = Term::from_field_text(field, other);
@@ -3960,6 +3969,7 @@ mod tests {
                 kind: Some("usbank".into()),
                 len: 2,
                 domain: None,
+                terms_boost: 0.0,
             }
         );
         let keys = |parsed: ParsedQuery| -> Vec<String> {

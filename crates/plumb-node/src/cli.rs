@@ -51,6 +51,12 @@ pub enum Command {
     /// Make a vector of each site's text with a small embedding model
     /// (downloaded on first use), so searches can find sites by meaning.
     Embed(EmbedArgs),
+    /// Fetch homepages and keep their visible text, for `plumb terms`
+    /// (an experiment).
+    FetchText(crate::terms::FetchTextArgs),
+    /// Pick each site's search terms from its homepage text, made by
+    /// `plumb fetch-text`, into the records (an experiment).
+    Terms(crate::terms::TermsArgs),
     /// Let the Plumb Search app on another computer change this node's
     /// settings: `on` makes a new token (shown once), `off` stops it.
     RemoteControl(RemoteControlArgs),
@@ -821,7 +827,7 @@ fn parse_rank_config(s: &str) -> Result<plumb_index::RankConfig, String> {
     serde_json::from_str(s).map_err(|err| format!("expected ranking knobs as JSON: {err}"))
 }
 
-fn parse_positive(s: &str) -> Result<usize, String> {
+pub(crate) fn parse_positive(s: &str) -> Result<usize, String> {
     match s.trim().parse::<usize>() {
         Ok(n) if n > 0 => Ok(n),
         _ => Err(format!("expected a whole number above 0, got `{s}`")),

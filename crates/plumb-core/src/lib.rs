@@ -69,6 +69,8 @@ pub const MAX_LINKS_TO: usize = 50;
 pub const MAX_ALIASES: usize = 16;
 /// Most homepage headings kept per site.
 pub const MAX_HEADINGS: usize = 8;
+/// Most entries in [`SiteRecord::terms`].
+pub const MAX_TERMS: usize = 200;
 /// Most words kept from a homepage's headings, all together.
 pub const MAX_HEADING_WORDS: usize = 60;
 /// Longest title, description, alias or link text kept, in characters.
@@ -97,6 +99,11 @@ pub struct SiteRecord {
     /// its words; it goes into the site's embedding.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body_text: Option<String>,
+    /// Search terms picked from the whole homepage by `plumb terms`, best
+    /// first, at most [`MAX_TERMS`]; a word stands more than once to weigh
+    /// more. An experiment: searched with a low weight when present.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub terms: Vec<String>,
     /// Normalized text of links from other sites, most frequent first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub link_texts: Vec<LinkText>,
@@ -456,6 +463,11 @@ impl SiteRecord {
                     self.links_to = other.links_to;
                 }
             }
+        }
+        // Terms are made apart from crawls: the other record's win when
+        // it has any.
+        if !other.terms.is_empty() {
+            self.terms = other.terms;
         }
         // The latest crawl decides: a redirect seen after the last
         // successful crawl stands, a successful crawl after it ends it.

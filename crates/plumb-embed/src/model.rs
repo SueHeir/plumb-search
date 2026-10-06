@@ -139,7 +139,7 @@ const TEST_WORDS: &[&str] = &[
 
 /// The `config.json` and `tokenizer.json` of a tiny BERT model with a
 /// word-level vocabulary of [`TEST_WORDS`].
-fn tiny_config_and_tokenizer() -> (String, String) {
+pub(crate) fn tiny_config_and_tokenizer() -> (String, String) {
     let config = serde_json::json!({
         "vocab_size": TEST_WORDS.len() + 5,
         "hidden_size": 32,

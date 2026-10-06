@@ -58,9 +58,14 @@ pub(crate) const READ_CHUNK_BYTES: usize = 4096;
 /// Most words of the page's visible text [`extract_page_meta`] keeps.
 pub const MAX_BODY_WORDS: usize = 100;
 
-/// Bytes of visible text read before [`MAX_BODY_WORDS`] are surely in hand
-/// (words average under ten bytes); the rest of the page's text is skipped.
-const BODY_TEXT_BYTES: usize = MAX_BODY_WORDS * 16;
+/// Most words of the page's visible text kept as [`PageMeta::page_text`],
+/// for picking search terms from the whole page.
+pub const MAX_PAGE_TEXT_WORDS: usize = 1000;
+
+/// Bytes of visible text read before [`MAX_PAGE_TEXT_WORDS`] are surely in
+/// hand (words average under ten bytes); the rest of the page's text is
+/// skipped.
+const BODY_TEXT_BYTES: usize = MAX_PAGE_TEXT_WORDS * 16;
 
 /// Elements that hold a site's furniture (menus, banners, footers, forms)
 /// rather than what the page is about; their text stays out of the body text.
@@ -727,9 +732,15 @@ impl<'a> Page<'a> {
         self.close_title();
         self.close_heading();
         self.close_form();
-        let body: Vec<&str> = self.body.split_whitespace().take(MAX_BODY_WORDS).collect();
+        let words: Vec<&str> = self
+            .body
+            .split_whitespace()
+            .take(MAX_PAGE_TEXT_WORDS)
+            .collect();
+        let body = &words[..words.len().min(MAX_BODY_WORDS)];
         PageMeta {
             body_text: (!body.is_empty()).then(|| body.join(" ")),
+            page_text: words.join(" "),
             title: self.title,
             description: self.description.or(self.og_description),
             site_name: self.site_name,
@@ -1167,6 +1178,7 @@ mod tests {
             nothing,
             PageMeta {
                 body_text: Some("No head at all".into()),
+                page_text: "No head at all".into(),
                 ..PageMeta::default()
             }
         );

@@ -35,7 +35,9 @@ pub use crawl::{
     check_feeds, crawl_homepages, fetch_site_icons, log_summary, FeedCheck, FeedOutcome,
     FeedTarget, HomepageCrawler,
 };
-pub use extract::{extract_page_meta, MAX_BODY_WORDS, MAX_ICONS, MAX_OUT_LINKS};
+pub use extract::{
+    extract_page_meta, MAX_BODY_WORDS, MAX_ICONS, MAX_OUT_LINKS, MAX_PAGE_TEXT_WORDS,
+};
 pub use feed::{parse_date, read_feed};
 pub use icon::{normalize_icon, ICON_SIZE};
 pub use read::{page_text, PageReader, ReadConfig, ReadError, ReadPage, MAX_READ_LINKS};
@@ -208,6 +210,11 @@ pub struct PageMeta {
     /// words.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body_text: Option<String>,
+    /// The same visible text cut to [`MAX_PAGE_TEXT_WORDS`] words instead,
+    /// for picking search terms from the whole page. Left out of the JSON
+    /// form.
+    #[serde(skip)]
+    pub page_text: String,
     /// The site's feed: the first `<link rel="alternate">` to an RSS or
     /// Atom document, as an absolute http(s) URL. See [`check_feeds`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
