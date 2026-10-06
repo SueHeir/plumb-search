@@ -125,7 +125,8 @@ plumb_plugin::annotate!(annotate);
 ```
 
 Badges show to anyone who can search the node; buttons, as everywhere, only
-to its owner. A result a plugin hides is left off this node's results page;
+to its owner. A result a plugin hides is left off this node's results page, for everyone
+who searches this node (notes are never sent to other nodes);
 `/api/search?full=1` lists the notes, hides included, as `plugin_notes` by the
 results' addresses. Results from other nodes are not marked up.
 
