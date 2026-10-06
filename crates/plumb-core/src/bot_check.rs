@@ -7,6 +7,11 @@
 //! (KillBot is also what phishing kits use to hide from scanners). Such a
 //! page says nothing about the site, so its title, description and links
 //! must not become the site's facts or travel to other nodes.
+//!
+//! The same goes for other pages that stand in for a homepage: an error or
+//! maintenance page ("FedEx | System Down"), an identity check ("Verifica
+//! tu identidad", "Client Challenge") or a parked domain's "this domain is
+//! for sale".
 
 use crate::{normalize_text, SiteRecord};
 
@@ -19,6 +24,8 @@ const CHECK_TITLES: &[&str] = &[
     "attention required",
     "bot check",
     "bot verification",
+    "client challenge",
+    "error",
     "browser check",
     "captcha",
     "captcha verification",
@@ -45,7 +52,37 @@ const CHECK_TITLES: &[&str] = &[
     "verifying",
     "verifying you are human",
     "you have been blocked",
+    "not found",
+    "page not found",
 ];
+
+/// Title parts, after [`normalize_text`], of a page standing in for the
+/// homepage, wherever they are in a title split at its separators: "FedEx |
+/// System Down", "Walmart: Verifica tu identidad".
+const STAND_IN_TITLE_PARTS: &[&str] = &[
+    "404 not found",
+    "500 internal server error",
+    "502 bad gateway",
+    "503 service unavailable",
+    "access denied",
+    "bad gateway",
+    "client challenge",
+    "down for maintenance",
+    "internal server error",
+    "page not found",
+    "service unavailable",
+    "site maintenance",
+    "site unavailable",
+    "system down",
+    "temporarily unavailable",
+    "under maintenance",
+    "verifica tu identidad",
+    "verify your identity",
+    "website unavailable",
+];
+
+/// What a page title is split at into parts for [`STAND_IN_TITLE_PARTS`].
+const TITLE_SEPARATORS: [char; 10] = ['|', '·', '•', ':', '–', '—', '»', '«', '/', '\\'];
 
 /// Title beginnings, after [`normalize_text`], that only a bot check has
 /// ("Just a moment...", "Checking your browser before accessing example.com",
@@ -85,6 +122,10 @@ const CHECK_PHRASES: &[&str] = &[
     "please complete the security check",
     "press hold to confirm you are a human",
     "this website is using a security service to protect itself",
+    // Parked domains.
+    "domain is for sale",
+    "this domain may be for sale",
+    "buy this domain",
 ];
 
 /// Vendors whose own homepages talk about their checks.
@@ -98,6 +139,13 @@ const CHECK_VENDORS: &[&str] = &[
     "plumbsearch",
     "sucuri",
     "vercel",
+    // Domain marketplaces, whose homepages sell domains.
+    "afternic",
+    "dan.com",
+    "godaddy",
+    "hugedomains",
+    "namecheap",
+    "sedo",
 ];
 
 /// Whether a page with this title, description, headings and text is a
@@ -139,6 +187,13 @@ pub fn is_bot_check_page(
         if CHECK_TITLES.contains(&title.as_str()) || CHECK_TITLE_STARTS.iter().any(starts) {
             return true;
         }
+    }
+    let stand_in = |part: &str| STAND_IN_TITLE_PARTS.contains(&normalize_text(part).as_str());
+    if title.is_some_and(|title| title
+            .split(TITLE_SEPARATORS)
+            .flat_map(|part| part.split(" - "))
+            .any(stand_in)) {
+        return true;
     }
     all().any(|text| {
         let text = format!(" {} ", normalize_text(text));
@@ -235,6 +290,43 @@ mod tests {
             "Verification",
         ] {
             assert!(check("example.com", title), "{title}");
+        }
+    }
+
+    #[test]
+    fn error_identity_and_parked_pages_are_not_homepages() {
+        for (domain, title) in [
+            ("fedex.com", "FedEx | System Down"),
+            ("walmart.com.mx", "Walmart - Verifica tu identidad"),
+            ("statesman.com", "Client Challenge"),
+            ("example.com", "Example: Under Maintenance"),
+            ("example.com", "503 Service Unavailable"),
+            ("example.com", "Error"),
+        ] {
+            assert!(check(domain, title), "{title}");
+        }
+        assert!(is_bot_check_page(
+            "icloud.sm",
+            Some("icloud.sm"),
+            Some("This domain is for sale!"),
+            &[],
+            None,
+        ));
+        // A marketplace's own homepage, and ordinary titles, are not.
+        assert!(!is_bot_check_page(
+            "sedo.com",
+            Some("Sedo: Buy and sell domains"),
+            Some("Buy this domain or sell yours"),
+            &[],
+            None,
+        ));
+        for title in [
+            "FedEx | Shipping, Tracking & Delivery",
+            "Downdetector",
+            "Errors in Medicine Journal",
+            "Not Found Records",
+        ] {
+            assert!(!check("example.com", title), "{title}");
         }
     }
 

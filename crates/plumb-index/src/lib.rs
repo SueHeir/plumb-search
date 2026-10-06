@@ -2093,6 +2093,55 @@ mod tests {
         hits[0].domain.clone()
     }
 
+    #[test]
+    fn sites_on_subdomains_are_found_by_name() {
+        // Hacker News takes Y Combinator's ranks (see plumb-ingest), so it
+        // beats a little-known site named after it.
+        let records = [
+            site(
+                "news.ycombinator.com",
+                Some("Hacker News"),
+                None,
+                &["Hacker News"],
+                &[],
+                popular(900, 50),
+            ),
+            site(
+                "hackernews.cc",
+                Some("HackerNews - threat intelligence"),
+                None,
+                &[],
+                &[],
+                obscure(400_000, 5),
+            ),
+            site(
+                "ycombinator.com",
+                Some("Y Combinator"),
+                None,
+                &["Y Combinator"],
+                &[],
+                popular(900, 50),
+            ),
+        ];
+        let (_dir, searcher) = build(&records);
+        assert_eq!(top(&searcher, "hacker news"), "news.ycombinator.com");
+        assert_eq!(top(&searcher, "news.ycombinator.com"), "news.ycombinator.com");
+        assert_eq!(top(&searcher, "y combinator"), "ycombinator.com");
+    }
+
+    #[test]
+    fn sites_without_a_title_go_by_their_name() {
+        let records = [
+            site("gmail.com", None, None, &["Gmail"], &[], popular(30, 100)),
+            site("gmail.ru", None, None, &[], &[], obscure(900_000, 1)),
+        ];
+        let (_dir, searcher) = build(&records);
+        let hits = searcher.search("gmail", 10).unwrap();
+        assert_eq!(domains(&hits), ["gmail.com", "gmail.ru"]);
+        assert_eq!(hits[0].title.as_deref(), Some("Gmail"));
+        assert_eq!(hits[1].title, None);
+    }
+
     fn ranked(tranco_rank: u32, linking_domains: u32) -> Signals {
         Signals {
             official_site: false,

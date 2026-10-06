@@ -3,7 +3,10 @@
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
-use plumb_core::{canonical_domain, kind_key, linker_count, RecordSet, SiteRecord, MAX_LINK_TEXTS};
+use plumb_core::{
+    canonical_domain, kind_key, linker_count, subdomain_sites_of, RecordSet, SiteRecord,
+    MAX_LINK_TEXTS,
+};
 use tracing::{info, warn};
 
 use crate::{CcRank, OfficialSite, TrancoEntry, WatExtract};
@@ -41,7 +44,9 @@ impl Builder {
     /// A domain that already has a rank keeps the better (lower) one.
     /// Domains are made canonical first ([`plumb_core::canonical_domain`]),
     /// and entries whose domain is not a valid registrable domain, or whose
-    /// rank is 0, are ignored.
+    /// rank is 0, are ignored. The subdomains that are sites of their own
+    /// ([`subdomain_sites_of`]) get their domain's rank: Tranco only ranks
+    /// registrable domains.
     pub fn add_tranco(&mut self, entries: &[TrancoEntry]) {
         let mut invalid = 0u64;
         for entry in entries {
@@ -52,8 +57,10 @@ impl Builder {
                 invalid += 1;
                 continue;
             };
-            let signals = &mut self.records.entry(&domain).signals;
-            signals.tranco_rank = best_rank(signals.tranco_rank, Some(entry.rank));
+            for site in std::iter::once(domain.as_str()).chain(subdomain_sites_of(&domain)) {
+                let signals = &mut self.records.entry(site).signals;
+                signals.tranco_rank = best_rank(signals.tranco_rank, Some(entry.rank));
+            }
         }
         warn_invalid("Tranco entries", invalid);
     }
@@ -63,6 +70,8 @@ impl Builder {
     /// A domain that already has ranks keeps the better (lower) ones.
     /// Domains are made canonical first, and entries whose domain is not a
     /// valid registrable domain, or whose harmonic rank is 0, are ignored.
+    /// Subdomains that are sites of their own get their domain's ranks, as
+    /// in [`Builder::add_tranco`].
     pub fn add_cc_ranks(&mut self, ranks: &[CcRank]) {
         let mut invalid = 0u64;
         for rank in ranks {
@@ -73,10 +82,13 @@ impl Builder {
                 invalid += 1;
                 continue;
             };
-            let signals = &mut self.records.entry(&domain).signals;
-            signals.harmonic_rank = best_rank(signals.harmonic_rank, Some(rank.harmonic_rank));
-            signals.pagerank_rank =
-                best_rank(signals.pagerank_rank, rank.pagerank_rank.filter(|&r| r > 0));
+            for site in std::iter::once(domain.as_str()).chain(subdomain_sites_of(&domain)) {
+                let signals = &mut self.records.entry(site).signals;
+                signals.harmonic_rank =
+                    best_rank(signals.harmonic_rank, Some(rank.harmonic_rank));
+                signals.pagerank_rank =
+                    best_rank(signals.pagerank_rank, rank.pagerank_rank.filter(|&r| r > 0));
+            }
         }
         warn_invalid("Common Crawl ranks", invalid);
     }
@@ -429,8 +441,12 @@ mod tests {
         builder.add_wat(&extract);
         builder.add_official_sites(&load_wikidata_official_sites(&wikidata).unwrap());
 
-        // google, facebook, usbank, plus a.com, c.net (homepages) and newsite.io (link target).
-        assert_eq!(builder.len(), 6);
+        // google, facebook, usbank, plus a.com, c.net (homepages) and
+        // newsite.io (link target), and Google's products on subdomains,
+        // which take google.com's ranks.
+        let google_products = plumb_core::subdomain_sites_of("google.com").count();
+        assert!(google_products > 0);
+        assert_eq!(builder.len(), 6 + google_products);
         let records = builder.finish(None);
         let usbank = records.iter().find(|r| r.domain == "usbank.com").unwrap();
         assert_eq!(usbank.url.as_deref(), Some("https://www.usbank.com/"));
@@ -529,6 +545,34 @@ mod tests {
                 ..Default::default()
             }
         );
+    }
+
+    #[test]
+    fn subdomain_sites_get_their_domains_ranks_and_their_own_names() {
+        let mut builder = Builder::new();
+        builder.add_tranco(&[TrancoEntry {
+            rank: 900,
+            domain: "ycombinator.com".into(),
+        }]);
+        builder.add_cc_ranks(&[CcRank {
+            domain: "ycombinator.com".into(),
+            harmonic_rank: 300,
+            pagerank_rank: Some(200),
+            n_hosts: None,
+        }]);
+        builder.add_official_sites(&[
+            site("Q1", "Y Combinator", "www.ycombinator.com"),
+            site("Q2", "Hacker News", "news.ycombinator.com"),
+        ]);
+        let records = builder.finish(None);
+        let get = |domain: &str| records.iter().find(|r| r.domain == domain).unwrap();
+        let (yc, news) = (get("ycombinator.com"), get("news.ycombinator.com"));
+        assert_eq!(news.signals.tranco_rank, Some(900));
+        assert_eq!(news.signals.harmonic_rank, Some(300));
+        assert_eq!(news.signals.pagerank_rank, Some(200));
+        assert_eq!(news.aliases, ["Hacker News"]);
+        assert_eq!(yc.aliases, ["Y Combinator"]);
+        assert_eq!(records.len(), 2);
     }
 
     #[test]
