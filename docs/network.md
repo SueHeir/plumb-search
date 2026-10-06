@@ -170,6 +170,20 @@ may take still hold, and it follows the node's trust rules: fill records and
 page set files only come from trusted nodes, and other crawls still need a
 second crawler to agree.
 
+**Crawl only.** `plumb run --network --crawl-only` is for a small server
+that supports the network and that nobody searches, such as a 4 GB VPS. Its
+crawl rounds go on as usual (its share of the sites, the same fields, each
+batch published with its receipt), but it builds and opens no search index
+and keeps no page sets, places, feeds or adult blocklist; search by meaning
+and private search are off. A round reads only an outline of each site
+(`node/round.rs`, about 150 bytes a site), so millions of sites fit in a few
+hundred megabytes. It does not fold in other nodes' crawls, and only
+filling (memory permitting, at about 500 bytes a site) and its own setup
+add sites; a node set up from the seed downloads skips the Wikidata fold,
+which holds every record. It answers no searches or fill requests from
+other nodes. The index on disk is left as it was and marked stale, so
+starting without the flag builds a fresh one.
+
 **Setting up from the network.** A new node in the network that
 trusts a node sets up from it instead of downloading the seed data: it asks
 with `all` set, and the trusted node sends every site of its list, crawled

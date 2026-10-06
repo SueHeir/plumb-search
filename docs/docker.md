@@ -185,6 +185,10 @@ node's crawled sites, every page set in full, all crawl batches), add
 `--blackhole` to its `command:` line; [network.md](network.md) says what it
 does.
 
+For a small server that only crawls for the network (nobody searches it),
+add `--crawl-only` instead: it builds no search index and keeps memory to a
+few hundred megabytes even with millions of sites.
+
 Feature choices in this file override startup feature flags and take effect
 on the next start (`docker compose restart`). Network transport, public
 addresses, relay, UPnP, and discovery flags are preserved. The two bootstrap
