@@ -476,3 +476,83 @@ fn about_carries_a_pages_identifiers() {
     assert_eq!(about.id("imdb"), Some("tt4468740"));
     assert_eq!(about.id("tmdb-movie"), Some("346648"));
 }
+
+fn shown(id: u32, url: &str, about: Option<About>) -> ShownResult {
+    ShownResult {
+        id,
+        url: url.into(),
+        title: url.into(),
+        site: "a.example".into(),
+        about,
+    }
+}
+
+#[test]
+fn plugins_with_ids_are_shown_only_results_about_what_they_know() {
+    let film = About {
+        title: "Paddington 2".into(),
+        wikidata: Some("Q25188".into()),
+        ..About::default()
+    };
+    let results = [
+        shown(0, "https://a.example/", None),
+        shown(1, "https://en.wikipedia.org/wiki/Paddington_2", Some(film)),
+    ];
+    let knows = plugin(
+        Manifest {
+            ids: vec!["wikidata".into()],
+            ..manifest(&[], &["a.example"])
+        },
+        &annotating("{}"),
+    );
+    let picked: Vec<u32> = knows.picks_shown(&results).iter().map(|r| r.id).collect();
+    assert_eq!(picked, [1]);
+    let all = plugin(manifest(&[], &["a.example"]), &annotating("{}"));
+    assert_eq!(all.picks_shown(&results).len(), 2);
+    // Without keywords, ids, pages or always, a plugin must mark up
+    // results to load.
+    assert!(Plugin::from_parts(
+        "x".into(),
+        manifest(&[], &["a.example"]),
+        serde_json::Value::Null,
+        answering("{}").as_bytes()
+    )
+    .is_err());
+}
+
+#[test]
+fn notes_are_kept_only_for_shown_results_and_say_something() {
+    let results = [
+        shown(0, "https://a.example/", None),
+        shown(1, "https://b.example/", None),
+    ];
+    let notes: Vec<Note> = serde_json::from_str(
+        r#"[{"id":0,"badge":"  Not in   library ","actions":[{"label":"Get","data":1}]},
+            {"id":1,"hide":true},
+            {"id":7,"badge":"Nowhere"},
+            {"id":0,"badge":"Twice"},
+            {"id":1}]"#,
+    )
+    .unwrap();
+    let marker = plugin(manifest(&[], &["a.example"]), &annotating("{}"));
+    let kept = clean_notes(notes, &results, &marker);
+    assert_eq!(kept.len(), 2);
+    assert_eq!(kept[0].0, "https://a.example/");
+    assert_eq!(kept[0].1.badge.as_deref(), Some("Not in library"));
+    // It has no plumb_act, so no buttons.
+    assert!(kept[0].1.actions.is_empty());
+    assert_eq!(kept[1].0, "https://b.example/");
+    assert!(kept[1].1.hide);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn annotations_come_back_by_address_and_are_cached() {
+    let plugins = annotating_plugins("Shelf", r#"{"notes":[{"id":0,"badge":"On your shelf"}]}"#);
+    let results = [shown(0, "https://a.example/", None)];
+    let notes = plugins.annotate("a", &results).await;
+    let on_a = &notes["https://a.example/"];
+    assert_eq!(on_a[0].name, "Shelf");
+    assert_eq!(on_a[0].badge.as_deref(), Some("On your shelf"));
+    assert_eq!(plugins.inner.notes_cache.lock().unwrap().len(), 1);
+    assert!(plugins.annotate("a", &[]).await.is_empty());
+}

@@ -970,9 +970,14 @@ async fn search_page(
         .as_ref()
         .ok()
         .and_then(|results| search_about(&query, results, &extras));
-    extras.plugins = state
-        .plugin_results(&query, &settings.options, about.as_ref())
-        .await;
+    let shown_to_plugins = match &local {
+        Ok(results) if state.settings.plugins.any_annotate() => shown_results(results, limit),
+        _ => Vec::new(),
+    };
+    (extras.plugins, extras.plugin_notes) = tokio::join!(
+        state.plugin_results(&query, &settings.options, about.as_ref()),
+        state.settings.plugins.annotate(&query, &shown_to_plugins)
+    );
     extras.plugin_token = plugins::button_token(&state, &extensions, &headers, &uri);
     let (local, network) = if settings.network == NetSetting::On {
         let network = network_search(&state, client, &query, limit, &settings.options).await;
@@ -1227,7 +1232,15 @@ async fn api_search(
         Ok(results) if full => {
             let extras = extras(&state, &query, &results, &options).await;
             let about = search_about(&query, &results, &extras);
-            let plugins = state.plugin_results(&query, &options, about.as_ref()).await;
+            let shown_to_plugins = if state.settings.plugins.any_annotate() {
+                shown_results(&results, params.limit())
+            } else {
+                Vec::new()
+            };
+            let (plugins, plugin_notes) = tokio::join!(
+                state.plugin_results(&query, &options, about.as_ref()),
+                state.settings.plugins.annotate(&query, &shown_to_plugins)
+            );
             let info = match &extras.profile {
                 Some(profile) => answers::info_from_page(&profile.page, &results.hits),
                 None => {
@@ -1250,6 +1263,7 @@ async fn api_search(
                 info,
                 places,
                 plugins,
+                plugin_notes,
             };
             (StatusCode::OK, security_headers(), Json(body)).into_response()
         }
@@ -1309,6 +1323,9 @@ struct FullResults<'a> {
     /// What the node's plugins found; never from other nodes.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     plugins: Vec<PluginResults>,
+    /// What the node's plugins say about its results, by their addresses.
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    plugin_notes: crate::plugins::ResultNotes,
 }
 
 /// The instant answer and the official profile asked for, for `query`
@@ -1831,6 +1848,49 @@ async fn run_search(
     Ok(results)
 }
 
+/// The node's own results for its plugins to mark up: its sites, then
+/// its articles, each with what it is about when the node knows.
+fn shown_results(results: &SearchResults, limit: usize) -> Vec<plumb_plugin::ShownResult> {
+    let about_of = |page: &plumb_index::pages::Page| {
+        (page.item.is_some() || page.set.starts_with("wikipedia-"))
+            .then(|| crate::plugins::about_page(page))
+    };
+    let mut shown = Vec::new();
+    for hit in results.hits.iter().take(limit) {
+        let Some(url) = safe_href(hit) else {
+            continue;
+        };
+        // The article a site's result carries is about what the site is.
+        let about = results
+            .pages
+            .iter()
+            .map(|placed| &placed.hit.page)
+            .find(|page| page.site.as_deref() == Some(hit.domain.as_str()))
+            .and_then(about_of);
+        shown.push(plumb_plugin::ShownResult {
+            id: shown.len() as u32,
+            url,
+            title: hit.title.clone().unwrap_or_else(|| hit.domain.clone()),
+            site: hit.domain.clone(),
+            about,
+        });
+    }
+    for placed in &results.pages {
+        let page = &placed.hit.page;
+        let Some(url) = http_url(&page.url) else {
+            continue;
+        };
+        shown.push(plumb_plugin::ShownResult {
+            id: shown.len() as u32,
+            url,
+            title: page.title.clone(),
+            site: page.set_domain().to_string(),
+            about: about_of(page),
+        });
+    }
+    shown
+}
+
 /// What the node takes `query`, whose results are `results`, to be
 /// about, for its plugins: the article an info box would show.
 fn search_about(
@@ -2053,6 +2113,12 @@ border-radius:.25rem}\
 color:var(--muted);white-space:nowrap}\
 .plugin .pa{display:flex;flex-wrap:wrap;gap:.4rem;margin:.3rem 0 .1rem}\
 .plugin .pa form{margin:0}\
+.pn{display:flex;flex-wrap:wrap;align-items:center;gap:.4rem;margin:.3rem 0 .1rem}\
+.pn form{margin:0}\
+.pn .pb{font-size:.75rem;padding:.05rem .5rem;border:1px solid var(--line);border-radius:1rem;\
+color:var(--muted)}\
+.pn button{font:inherit;font-size:.8rem;padding:.2rem .7rem;border-radius:.4rem;\
+border:1px solid var(--accent);background:none;color:var(--accent);cursor:pointer}\
 .plugin .pa button{font:inherit;font-size:.8rem;padding:.2rem .7rem;border-radius:.4rem;\
 border:1px solid var(--accent);background:none;color:var(--accent);cursor:pointer}\
 .web{margin:.25rem 0;font-size:.9rem}.web a{color:var(--muted)}\
@@ -2709,7 +2775,19 @@ fn render_results_with(
     icons: &Icons,
     recent: Option<&Recent>,
 ) -> String {
-    let shown = merge_results(&results.hits, network, limit);
+    let notes = extras.map(|e| &e.plugin_notes);
+    let notes_on = |url: Option<String>| -> &[crate::plugins::ResultNote] {
+        url.and_then(|url| notes?.get(&url))
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    };
+    let hidden = |url: Option<String>| notes_on(url).iter().any(|note| note.hide);
+    let mut shown = merge_results(&results.hits, network, limit);
+    // Results a plugin of this node leaves out; other nodes' results are
+    // not this node's to mark up.
+    shown.retain(|item| item.network.is_some() || !hidden(safe_href(&item.hit)));
+    let token = extras.and_then(|e| e.plugin_token.as_deref());
+    let marked = |url: Option<String>| render_notes(notes_on(url), query, token);
     let from_network = shown.iter().filter(|s| s.network.is_some()).count();
     let mut body = String::from("<main>\n");
     // Tuning: its bar comes first, above the places too.
@@ -2782,11 +2860,12 @@ fn render_results_with(
         .map(|placed| placed.hit.clone())
         .collect();
     let ops = plumb_core::Operators::parse(query);
-    let pages = if ops.any() {
+    let mut pages = if ops.any() {
         place_operator_pages(&ops, &shown_hits, found_pages)
     } else {
         place_pages(query, &shown_hits, found_pages)
     };
+    pages.retain(|placed| !hidden(http_url(&placed.hit.page.url)));
     // An info box is about what the whole query names, which operators
     // ("site:", "-word") change.
     let info = if let Some(profile) = extras.and_then(|e| e.profile.as_ref()) {
@@ -2859,7 +2938,7 @@ fn render_results_with(
         body.push_str("<ol>\n");
         for (position, item) in shown.iter().enumerate() {
             for page in listed_pages(position) {
-                render_page(&mut body, &page.hit, icons.get(page.hit.page.set_domain()));
+                render_marked_page(&mut body, &page.hit, icons, &marked);
             }
             // `/go` only follows this node's own results, so sites from other
             // nodes link straight to themselves.
@@ -2888,6 +2967,12 @@ fn render_results_with(
                     rendered.insert_str(end, &page_line(&page.hit));
                 }
             }
+            if item.network.is_none() {
+                let line = marked(safe_href(&item.hit));
+                if let Some(end) = rendered.rfind("</li>") {
+                    rendered.insert_str(end, &line);
+                }
+            }
             let product = carried.and_then(|page| product_of(&page.hit, &item.hit.domain, query));
             if position == 0 || product.is_some() {
                 if let Some(end) = rendered.rfind("<div class=\"m\">") {
@@ -2908,7 +2993,7 @@ fn render_results_with(
             }
         }
         for page in listed_pages(usize::MAX) {
-            render_page(&mut body, &page.hit, icons.get(page.hit.page.set_domain()));
+            render_marked_page(&mut body, &page.hit, icons, &marked);
         }
         body.push_str("</ol>\n");
     }
@@ -3298,25 +3383,9 @@ fn render_plugin(found: &PluginResults, now: u64, query: &str, token: Option<&st
             .as_deref()
             .map(|b| format!(" <span class=\"pb\">{}</span>", escape_html(b)))
             .unwrap_or_default();
-        let mut buttons = String::new();
-        if let Some(token) = token {
-            for action in &item.actions {
-                let _ = write!(
-                    buttons,
-                    "<form method=\"post\" action=\"/plugins/act\">\
-                     <input type=\"hidden\" name=\"plugin\" value=\"{}\">\
-                     <input type=\"hidden\" name=\"data\" value=\"{}\">\
-                     <input type=\"hidden\" name=\"token\" value=\"{}\">\
-                     <input type=\"hidden\" name=\"q\" value=\"{}\">\
-                     <button type=\"submit\">{}</button></form>",
-                    escape_html(&found.plugin),
-                    escape_html(&action.data),
-                    escape_html(token),
-                    escape_html(query),
-                    escape_html(&action.label),
-                );
-            }
-        }
+        let mut buttons = token
+            .map(|token| action_forms(&found.plugin, &item.actions, token, query))
+            .unwrap_or_default();
         if !buttons.is_empty() {
             buttons = format!("<div class=\"pa\">{buttons}</div>");
         }
@@ -3336,6 +3405,74 @@ fn render_plugin(found: &PluginResults, now: u64, query: &str, token: Option<&st
          <ol>{items}</ol></li>\n",
         escape_html(&found.name)
     )
+}
+
+/// The forms that press `actions` of plugin `plugin` on the results page
+/// for `query`.
+fn action_forms(
+    plugin: &str,
+    actions: &[crate::plugins::PluginAction],
+    token: &str,
+    query: &str,
+) -> String {
+    let mut forms = String::new();
+    for action in actions {
+        let _ = write!(
+            forms,
+            "<form method=\"post\" action=\"/plugins/act\">\
+             <input type=\"hidden\" name=\"plugin\" value=\"{}\">\
+             <input type=\"hidden\" name=\"data\" value=\"{}\">\
+             <input type=\"hidden\" name=\"token\" value=\"{}\">\
+             <input type=\"hidden\" name=\"q\" value=\"{}\">\
+             <button type=\"submit\">{}</button></form>",
+            escape_html(plugin),
+            escape_html(&action.data),
+            escape_html(token),
+            escape_html(query),
+            escape_html(&action.label),
+        );
+    }
+    forms
+}
+
+/// What plugins say about one of the node's results: each one's badge,
+/// named for the plugin, and, with `token` (the page is for the node's
+/// owner), its buttons. Empty when they say nothing.
+fn render_notes(notes: &[crate::plugins::ResultNote], query: &str, token: Option<&str>) -> String {
+    let mut line = String::new();
+    for note in notes {
+        if let Some(badge) = &note.badge {
+            let _ = write!(
+                line,
+                "<span class=\"pb\" title=\"From the {name} plugin on this node\">{name}: {}</span>",
+                escape_html(badge),
+                name = escape_html(&note.name),
+            );
+        }
+        if let Some(token) = token {
+            line.push_str(&action_forms(&note.plugin, &note.actions, token, query));
+        }
+    }
+    if line.is_empty() {
+        return line;
+    }
+    format!("<div class=\"pn\">{line}</div>")
+}
+
+/// [`render_page`], with what plugins say about it from `marked`.
+fn render_marked_page(
+    out: &mut String,
+    hit: &PageHit,
+    icons: &Icons,
+    marked: &dyn Fn(Option<String>) -> String,
+) {
+    let mut rendered = String::new();
+    render_page(&mut rendered, hit, icons.get(hit.page.set_domain()));
+    let line = marked(http_url(&hit.page.url));
+    if let Some(end) = rendered.rfind("</li>") {
+        rendered.insert_str(end, &line);
+    }
+    out.push_str(&rendered);
 }
 
 /// Most key pages listed under a result.
@@ -3649,6 +3786,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn plugins_mark_up_and_leave_out_the_nodes_own_results() {
+        // Results are shown to plugins sites first: usbank.com is 0, the
+        // look-alike 1.
+        let plugins = crate::plugins::annotating_plugins(
+            "Shelf",
+            r#"{"notes":[{"id":0,"badge":"On <your> shelf"},{"id":1,"hide":true}]}"#,
+        );
+        let app = router_with(
+            backend(bank_hits()),
+            WebSettings {
+                home: HomeCountry::Off,
+                plugins,
+                ..WebSettings::default()
+            },
+        );
+        let (_, _, page) = send(app.clone(), "/search?q=us+bank").await;
+        assert!(page.contains("Shelf: On &lt;your&gt; shelf"), "{page}");
+        assert!(!page.contains("usbank-login-help.com"));
+        // Not on this computer, so no buttons.
+        assert!(!page.contains("/plugins/act"));
+        let (_, _, body) = send(app, "/api/search?q=us+bank&full=1").await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(
+            json["plugin_notes"]["https://www.usbank.com/"][0]["badge"],
+            "On <your> shelf"
+        );
+        assert_eq!(
+            json["plugin_notes"]["https://usbank-login-help.com/"][0]["hide"],
+            true
+        );
+    }
+
+    #[tokio::test]
     async fn plugin_results_show_on_the_page_and_in_json_but_only_when_asked() {
         let plugins = crate::plugins::answering_plugins(
             "Test News",
@@ -3933,6 +4103,94 @@ mod tests {
         .await
         .2;
         assert!(!body.contains("class=\"kp\""));
+    }
+
+    #[test]
+    fn plugins_are_shown_what_articles_are_about_and_mark_them_up() {
+        use plumb_index::pages::{Page, PlacedPage};
+        let url = "https://en.wikipedia.org/wiki/But_I%27m_a_Cheerleader";
+        let article = PageHit {
+            page: Page {
+                set: "wikipedia-en".into(),
+                url: url.into(),
+                title: "But I'm a Cheerleader".into(),
+                description: Some("1999 film by Jamie Babbit".into()),
+                site: None,
+                views: 1000,
+                aliases: Vec::new(),
+                item: Some("Q1257599".into()),
+                profiles: Vec::new(),
+                website: None,
+                package: None,
+            },
+            score: 1.0,
+            named: true,
+            popularity: 0.5,
+            whole: false,
+        };
+        let results = SearchResults {
+            pages: vec![PlacedPage {
+                hit: article,
+                under: None,
+                at: 0,
+            }],
+            hits: vec![scored("cheerz.com", 0.5)],
+            site_search: None,
+            spelling: None,
+        };
+        let shown = shown_results(&results, 10);
+        assert_eq!(shown.len(), 2);
+        assert_eq!(shown[0].site, "cheerz.com");
+        assert!(shown[0].about.is_none());
+        assert_eq!(shown[1].url, url);
+        let about = shown[1].about.as_ref().unwrap();
+        assert_eq!(about.wikidata.as_deref(), Some("Q1257599"));
+        assert_eq!(
+            about.description.as_deref(),
+            Some("1999 film by Jamie Babbit")
+        );
+
+        let mut extras = answers::Extras {
+            plugin_token: Some("t0k".into()),
+            ..answers::Extras::default()
+        };
+        extras.plugin_notes.insert(
+            url.into(),
+            vec![crate::plugins::ResultNote {
+                plugin: "shelf".into(),
+                name: "Shelf".into(),
+                badge: Some("Not in library".into()),
+                actions: vec![crate::plugins::PluginAction {
+                    label: "Add".into(),
+                    data: r#"{"id":1}"#.into(),
+                }],
+                hide: false,
+            }],
+        );
+        let render = |extras: &answers::Extras| {
+            render_results(
+                "but i'm a cheerleader",
+                &results,
+                Some(extras),
+                &NetOutcome::NotAsked,
+                &no_settings(),
+                None,
+                10,
+                false,
+                &Icons::default(),
+            )
+        };
+        let page = render(&extras);
+        let article = page.find("<li class=\"pg\">").expect("the article");
+        let marked = &page[article..];
+        assert!(marked.contains("Shelf: Not in library"), "{page}");
+        assert!(marked.contains("name=\"data\" value=\"{&quot;id&quot;:1}\""));
+        assert!(marked.contains("<button type=\"submit\">Add</button>"));
+        // Hidden, it is gone.
+        extras.plugin_notes.get_mut(url).unwrap()[0].hide = true;
+        let page = render(&extras);
+        assert!(!page.contains("<li class=\"pg\">"));
+        assert!(page.contains("cheerz.com"));
     }
 
     #[test]
