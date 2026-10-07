@@ -1,0 +1,92 @@
+# Searches for well-known songs and albums, with the song's or album's
+# MusicBrainz page expected among the first results: "TITLE ARTIST",
+# "TITLE by ARTIST", "TITLE song", "TITLE album". Run with --pages
+# music.tsv.gz (and wikipedia-en.tsv.gz to see them next to the articles).
+# Ids are the recordings the music set lists, checked against its file;
+# a song ListenBrainz barely counts (Lose Yourself, the Beatles'
+# Yesterday) is not in the set and so not here.
+bohemian rhapsody queen	https://musicbrainz.org/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69
+hey jude by the beatles	https://musicbrainz.org/recording/2bc34fa0-e20f-4a1a-8a00-c7c672c40a6e
+smells like teen spirit song	https://musicbrainz.org/recording/5fb524f1-8cc8-4c04-a921-e34c0a911ea7
+creep radiohead	https://musicbrainz.org/recording/70595637-9310-45f2-a266-58f8de4874a7
+karma police by radiohead	https://musicbrainz.org/recording/9e2ad5bc-c6f9-40d2-a36f-3122ee2072a3
+blinding lights song	https://musicbrainz.org/recording/1a67e215-a19e-40c9-9b12-732de134bf5f
+shape of you ed sheeran	https://musicbrainz.org/recording/d7500dd6-b815-4299-88c6-3fbda358f1fc
+take on me by a-ha	https://musicbrainz.org/recording/12f65dca-de8f-43fe-a65d-f12a02aaadf3
+sweet child o' mine song	https://musicbrainz.org/recording/1a8b5f7c-58ed-4757-a8d3-47bf7f77a32f
+hotel california eagles	https://musicbrainz.org/recording/40bd0203-bc3f-4b15-9ab3-ceeb2ef35d7a
+stairway to heaven by led zeppelin	https://musicbrainz.org/recording/ccfdd180-22e1-49b9-bd81-b5fcf2c6474e
+billie jean song	https://musicbrainz.org/recording/f980fc14-e29b-481d-ad3a-5ed9b4ab6340
+like a rolling stone bob dylan	https://musicbrainz.org/recording/26244520-0e1d-4d42-b101-ce6b83299d33
+imagine by john lennon	https://musicbrainz.org/recording/ec04e3c5-0548-4e73-bfc3-19a26108f302
+wonderwall song	https://musicbrainz.org/recording/580f4553-e29a-4d19-989c-1b097b76de48
+mr. brightside the killers	https://musicbrainz.org/recording/560062d0-e122-46be-9d89-0f3b44077fdf
+seven nation army by the white stripes	https://musicbrainz.org/recording/24cc8311-98fd-423a-bed1-97728f5eabc5
+rolling in the deep song	https://musicbrainz.org/recording/1a13c710-4b7e-4701-8968-cd61f2e58110
+hurt johnny cash	https://musicbrainz.org/recording/25d8de5e-3662-4ffd-8dea-511a696ac3e7
+jolene by dolly parton	https://musicbrainz.org/recording/c546d32b-03d9-4cc9-b7a0-bd039404d669
+respect song	https://musicbrainz.org/recording/4855f9bc-1189-4915-aeba-1871cf6016c9
+dancing queen abba	https://musicbrainz.org/recording/a502f559-f70c-4e0d-a5e5-e0cc319d0bd7
+africa by toto	https://musicbrainz.org/recording/55dc4892-b5ae-4bd7-9e98-2a0d4dd53cbc
+don't stop believin' song	https://musicbrainz.org/recording/93036a0a-0513-4d27-b384-4a5d9b674a37
+back in black ac/dc	https://musicbrainz.org/recording/ef71afb6-5e51-41df-999b-9e7c7306063a
+purple rain by prince	https://musicbrainz.org/recording/85a752f8-cbad-42e6-8828-bd81318e3c7d
+thriller song	https://musicbrainz.org/recording/8403caf8-3714-46da-934c-1fe91a049540
+wish you were here pink floyd	https://musicbrainz.org/recording/feecff58-8ee2-4a7f-ac23-dc8ce7925286
+comfortably numb by pink floyd	https://musicbrainz.org/recording/d3528f95-1a3f-45d2-a569-826740c0adee
+under pressure song	https://musicbrainz.org/recording/b107f66c-42d2-4d2e-8354-5ed0eef7858a
+losing my religion r.e.m.	https://musicbrainz.org/recording/d4e0a590-e461-499a-8f62-b595b6c65ada
+viva la vida by coldplay	https://musicbrainz.org/recording/307ce9da-5690-4e21-ab71-9d12ea106e52
+yellow song	https://musicbrainz.org/recording/729cf505-94eb-4fbe-bc76-cbae44cff091
+bad guy billie eilish	https://musicbrainz.org/recording/694da04d-1ffc-435c-8b4b-59cc23ac8003
+get lucky by daft punk	https://musicbrainz.org/recording/833f00e1-781f-4edd-90e4-e52712618862
+toxic song	https://musicbrainz.org/recording/ffb6e773-2d24-420c-90ce-36b6025f31e2
+crazy in love beyoncé	https://musicbrainz.org/recording/1cd11dd1-484e-498d-b864-9d6c6fcf3862
+hallelujah by jeff buckley	https://musicbrainz.org/recording/da1308d1-6037-4ba1-b6fc-a643a4201140
+paint it black song	https://musicbrainz.org/recording/c6ddba3b-a1a4-40a5-b686-b040ba536f24
+gimme shelter the rolling stones	https://musicbrainz.org/recording/6e1930ed-5be2-499e-9a6f-9202202f18a3
+superstition by stevie wonder	https://musicbrainz.org/recording/1d9a8f3b-e7b7-44b0-a004-04bc62f9755b
+september song	https://musicbrainz.org/recording/661d35c3-6ade-4367-af96-6c2898149906
+gangnam style psy	https://musicbrainz.org/recording/2fad79c1-7d1f-40ea-9fa5-4b9124ea93f5
+anti-hero by taylor swift	https://musicbrainz.org/recording/6bb9e766-97a5-440f-9173-99515493d2d4
+cruel summer song	https://musicbrainz.org/recording/f7f6fb88-e5b8-49aa-ad11-75f5416bad56
+as it was harry styles	https://musicbrainz.org/recording/53969964-673a-4407-9396-3087be9245f6
+levitating by dua lipa	https://musicbrainz.org/recording/957df7c5-9c3a-4dbc-b139-f339f2378986
+do i wanna know? song	https://musicbrainz.org/recording/f1e57531-e0df-4b3e-938f-1ae30c5b1a11
+heroes david bowie	https://musicbrainz.org/recording/722190f8-f718-482f-a8bc-a8d479426a30
+space oddity by david bowie	https://musicbrainz.org/recording/84649f3b-6da6-4da6-8e33-a7a990b69516
+clocks song	https://musicbrainz.org/recording/3e963c34-06d2-4a32-93d8-bd03e98d5e81
+zombie the cranberries	https://musicbrainz.org/recording/5f843af3-5d20-433c-9cf7-4413c92073bc
+everlong by foo fighters	https://musicbrainz.org/recording/9160e42b-8fae-402d-9cee-d6826c5cce33
+enter sandman song	https://musicbrainz.org/recording/fe4a0608-cf7f-444a-a932-a1b77c766673
+in the end linkin park	https://musicbrainz.org/recording/9d70086c-5d7a-4e7f-b1ed-c53c4b11310f
+bitter sweet symphony by the verve	https://musicbrainz.org/recording/8b6d9029-1990-4660-bd57-24b5bc0fb626
+abbey road the beatles album	https://musicbrainz.org/release-group/9162580e-5df4-32de-80cc-f45a8d8a9b1d
+rumours album	https://musicbrainz.org/release-group/416bb5e5-c7d1-3977-8fd7-7c9daf6c2be6
+nevermind nirvana album	https://musicbrainz.org/release-group/1b022e01-4da6-387b-8658-8678046e4cef
+ok computer album	https://musicbrainz.org/release-group/b1392450-e666-3926-a536-22c65f834433
+the dark side of the moon pink floyd album	https://musicbrainz.org/release-group/f5093c06-23e3-404f-aeaa-40f72885ee3a
+21 album	https://musicbrainz.org/release-group/e4174758-d333-4a8e-a31f-dd0edd51518e
+random access memories daft punk album	https://musicbrainz.org/release-group/aa997ea0-2936-40bd-884d-3af8a0e064dc
+thriller album	https://musicbrainz.org/release-group/f32fab67-77dd-3937-addc-9062e28e4c37
+back to black amy winehouse album	https://musicbrainz.org/release-group/6eac2e57-ee50-36f8-b0c4-c4c847a2c098
+kind of blue album	https://musicbrainz.org/release-group/8e8a594f-2175-38c7-a871-abb68ec363e7
+pet sounds the beach boys album	https://musicbrainz.org/release-group/fdd96703-7b21-365e-bdea-38029fbeb84e
+purple rain album	https://musicbrainz.org/release-group/b93a7c47-a6d4-33f2-9034-53fdd991f4ba
+1989 taylor swift album	https://musicbrainz.org/release-group/4d9ec1c2-58ec-48a4-aa0a-916718adead0
+to pimp a butterfly album	https://musicbrainz.org/release-group/d9103c72-3807-4378-9ce7-b6f3e8fdd547
+am arctic monkeys album	https://musicbrainz.org/release-group/a348ba2f-f8b3-4686-b928-e63d8d94d543
+the wall album	https://musicbrainz.org/release-group/f2026101-945b-3d05-9ef4-aa718fc3feef
+revolver the beatles album	https://musicbrainz.org/release-group/72d15666-99a7-321e-b1f3-a3f8c09dff9f
+hotel california album	https://musicbrainz.org/release-group/836f349a-0434-3e8b-a0bc-261f77a9f99c
+back in black ac/dc album	https://musicbrainz.org/release-group/d3bc1a64-7561-3787-b680-0003aa50f8f1
+harder, better, faster, stronger daft punk	https://musicbrainz.org/recording/f1a6a40f-78f5-4918-968d-f64363bae94c
+kids by mgmt	https://musicbrainz.org/recording/c741a7ef-dd33-4c79-a4d4-8745d9675620
+come together song	https://musicbrainz.org/recording/485bbe7f-d0f7-4ffe-8adb-0f1093dd2dbf
+let it be the beatles	https://musicbrainz.org/recording/0cdc9b5b-b16b-4ff1-9f16-5b4ba76f1c17
+the real slim shady by eminem	https://musicbrainz.org/recording/684ca01c-9775-42fe-9cdb-28fa37c27851
+little red corvette song	https://musicbrainz.org/recording/18fe52d0-d030-4430-8b63-81b682baa5cc
+led zeppelin ii album	https://musicbrainz.org/release-group/33b4653d-006e-3cc1-8afb-386b15a6cd6e
+let it be the beatles album	https://musicbrainz.org/release-group/bff544a7-56e0-3ed6-9e0f-3b676cca9111
+californication song	https://musicbrainz.org/recording/084a24a9-b289-4584-9fb5-1ca0f7500eb3
+supermassive black hole muse	https://musicbrainz.org/recording/ff1e3e1a-f6e8-4692-b426-355880383bb6

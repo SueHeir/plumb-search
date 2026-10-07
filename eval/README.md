@@ -20,6 +20,8 @@ shows up.
 | `paper_queries.tsv` | a well-known paper | its DOI | `--pages papers.tsv.gz` |
 | `book_queries.tsv` | a well-known book | its Open Library work | `--pages books.tsv.gz` |
 | `film_queries.tsv` | a film or show with its year, director or cast ("dune 2021") | its Wikipedia article | `--pages wikipedia-en.tsv.gz --pages films.tsv.gz` |
+| `music_queries.tsv` | a song or album with its artist ("hey jude beatles", "abbey road album") | its MusicBrainz page | `--pages music.tsv.gz` |
+| `lyrics_queries.tsv` | a song's lyrics ("jolene lyrics") | its lyrics page on Genius, shown above the results | `--pages music.tsv.gz --profiles` |
 
 ## Format
 
