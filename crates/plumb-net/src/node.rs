@@ -247,6 +247,9 @@ pub struct NetConfig {
     /// Days of batches kept, [`RETAIN_EPOCHS`] unless changed; fewer for a
     /// node that crawls a lot on a small disk.
     pub keep_batches_days: u64,
+    /// Most bytes of other crawlers' batches kept, the oldest deleted
+    /// first; `None` for no limit but [`NetConfig::keep_batches_days`].
+    pub keep_batches_bytes: Option<u64>,
     /// Fixed interval between independently scheduled bucket rounds (see
     /// [`crate::rounds`]). Enabled searches read retained local data. `None`
     /// preserves legacy immediate-fetch behavior; default is [`ROUND_EVERY`].
@@ -289,6 +292,7 @@ impl NetConfig {
             collect_tokens: true,
             answer_per_day: None,
             keep_batches_days: RETAIN_EPOCHS,
+            keep_batches_bytes: None,
             round_every: Some(ROUND_EVERY),
             fill: true,
             catch_up_epochs: CATCH_UP_EPOCHS,
@@ -2107,8 +2111,12 @@ impl Task {
         }
         if ticks.is_multiple_of(60) {
             let now = now_unix();
-            self.lock_store()
-                .prune_keeping(now, self.config.keep_batches_days);
+            let mut store = self.lock_store();
+            store.prune_keeping(now, self.config.keep_batches_days);
+            if let Some(bytes) = self.config.keep_batches_bytes {
+                store.prune_to_bytes(bytes, &self.key.public().encode_protobuf());
+            }
+            drop(store);
             self.agreement.prune(now);
             let agreement = self.agreement.status();
             self.with_status(|s| s.agreement = agreement);

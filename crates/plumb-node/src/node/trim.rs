@@ -21,7 +21,9 @@
 //!
 //! Dropping a site only takes it out of this node's index. The batches this
 //! node signed and published stay in `net/batches/` for as long as they
-//! always did, so the network loses none of its crawls.
+//! always did, so the network loses none of its crawls. Other crawlers'
+//! batches there are held to a share of the limit by themselves, oldest out
+//! first (see super::network::start).
 
 use std::collections::HashSet;
 use std::sync::atomic::Ordering;
