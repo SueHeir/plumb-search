@@ -105,6 +105,9 @@ impl Place {
             if let Some(cuisine) = tag.strip_prefix("cuisine=") {
                 words.push(cuisine.replace('_', " "));
             }
+            if let Some(sport) = tag.strip_prefix("sport=") {
+                words.push(sport.replace('_', " "));
+            }
         }
         words.join(" ")
     }
