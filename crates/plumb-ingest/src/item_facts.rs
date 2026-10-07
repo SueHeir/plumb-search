@@ -82,15 +82,19 @@ fn is_item_id(id: &str) -> bool {
 fn page_query(kind: FactKind, offset: usize) -> String {
     let p = kind.property();
     let value = match kind.value_type() {
-        // Founders stay founders; a capital, currency, CEO or headquarters
-        // that ended is not the item's. One only some part's (the CFP franc
-        // of French Polynesia, South Africa's three capitals) counts only
-        // when there is no other. A CEO's start `?t` keeps the latest.
-        ValueType::Item if kind == FactKind::Founder => format!("ps:{p} ?v ."),
+        // Founders and authors stay theirs; a capital, currency, CEO or
+        // spouse that ended is not the item's ([`FactKind::current`]). One
+        // only some part's (the CFP franc of French Polynesia, South
+        // Africa's three capitals) counts only when there is no other. A
+        // CEO's start `?t` keeps the latest.
         ValueType::Item => format!(
-            "ps:{p} ?v . FILTER NOT EXISTS {{ ?s pq:P582 [] }} \
-             OPTIONAL {{ ?s pq:P518 ?part . }}{}",
-            if kind == FactKind::Ceo {
+            "ps:{p} ?v . {}OPTIONAL {{ ?s pq:P518 ?part . }}{}",
+            if kind.current() {
+                "FILTER NOT EXISTS { ?s pq:P582 [] } "
+            } else {
+                ""
+            },
+            if kind.latest_only() {
                 " OPTIONAL { ?s pq:P580 ?t . }"
             } else {
                 ""
@@ -140,7 +144,7 @@ pub struct RawFacts {
     /// other of their kind.
     partial: HashMap<(String, FactKind), Vec<String>>,
     /// The start (`2025-03-18T…`) of the CEOs kept, to keep the latest.
-    started: HashMap<String, String>,
+    started: HashMap<(String, FactKind), String>,
 }
 
 impl RawFacts {
@@ -169,10 +173,11 @@ impl RawFacts {
                         }
                         continue;
                     }
-                    if kind == FactKind::Ceo {
+                    if kind.latest_only() {
                         // No start counts as the earliest.
                         let start = row.get("t").map_or("", |t| t.value.as_str());
-                        let kept = self.started.get(item).map_or("", String::as_str);
+                        let key = (item.to_string(), kind);
+                        let kept = self.started.get(&key).map_or("", String::as_str);
                         let has = self
                             .facts
                             .get(item)
@@ -185,7 +190,7 @@ impl RawFacts {
                                 facts.retain(|fact| fact.kind != kind);
                             }
                         }
-                        self.started.insert(item.to_string(), start.to_string());
+                        self.started.insert(key, start.to_string());
                     }
                     id.to_string()
                 }
@@ -367,8 +372,9 @@ pub async fn fetch_facts(
     let mut raw = RawFacts::default();
     for &kind in KINDS {
         let mut offset = 0;
-        let mut cut_short = false;
-        loop {
+        // Too big to read whole: the most read items only, by name.
+        let mut cut_short = kind.by_name_only();
+        while !kind.by_name_only() {
             tokio::time::sleep(pacing.pause).await;
             let json = match sparql_json(client, endpoint, &page_query(kind, offset), pacing).await
             {

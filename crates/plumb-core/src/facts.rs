@@ -46,6 +46,15 @@ pub enum FactKind {
     Ceo,
     Headquarters,
     Currency,
+    Author,
+    Director,
+    Composer,
+    Creator,
+    Owner,
+    Birthplace,
+    Spouse,
+    HeadOfState,
+    HeadOfGovernment,
 }
 
 /// Every kind, in the order an article's facts are written.
@@ -62,6 +71,15 @@ pub const KINDS: &[FactKind] = &[
     FactKind::Ceo,
     FactKind::Headquarters,
     FactKind::Currency,
+    FactKind::Author,
+    FactKind::Director,
+    FactKind::Composer,
+    FactKind::Creator,
+    FactKind::Owner,
+    FactKind::Birthplace,
+    FactKind::Spouse,
+    FactKind::HeadOfState,
+    FactKind::HeadOfGovernment,
 ];
 
 /// Most values kept of one kind (a company's founders).
@@ -86,6 +104,15 @@ impl FactKind {
             FactKind::Ceo => "ceo",
             FactKind::Headquarters => "headquarters",
             FactKind::Currency => "currency",
+            FactKind::Author => "author",
+            FactKind::Director => "director",
+            FactKind::Composer => "composer",
+            FactKind::Creator => "creator",
+            FactKind::Owner => "owner",
+            FactKind::Birthplace => "birthplace",
+            FactKind::Spouse => "spouse",
+            FactKind::HeadOfState => "head-of-state",
+            FactKind::HeadOfGovernment => "head-of-government",
         }
     }
 
@@ -108,6 +135,15 @@ impl FactKind {
             FactKind::Ceo => "P169",
             FactKind::Headquarters => "P159",
             FactKind::Currency => "P38",
+            FactKind::Author => "P50",
+            FactKind::Director => "P57",
+            FactKind::Composer => "P86",
+            FactKind::Creator => "P170",
+            FactKind::Owner => "P127",
+            FactKind::Birthplace => "P19",
+            FactKind::Spouse => "P26",
+            FactKind::HeadOfState => "P35",
+            FactKind::HeadOfGovernment => "P6",
         }
     }
 
@@ -117,12 +153,54 @@ impl FactKind {
             | FactKind::Founder
             | FactKind::Ceo
             | FactKind::Headquarters
-            | FactKind::Currency => ValueType::Item,
+            | FactKind::Currency
+            | FactKind::Author
+            | FactKind::Director
+            | FactKind::Composer
+            | FactKind::Creator
+            | FactKind::Owner
+            | FactKind::Birthplace
+            | FactKind::Spouse
+            | FactKind::HeadOfState
+            | FactKind::HeadOfGovernment => ValueType::Item,
             FactKind::Population | FactKind::Elevation | FactKind::Height | FactKind::Area => {
                 ValueType::Quantity
             }
             FactKind::Born | FactKind::Died | FactKind::Founded => ValueType::Time,
         }
+    }
+
+    /// Whether only what holds now counts: a capital, CEO or spouse that
+    /// ended is not the item's, while founders and authors stay theirs.
+    pub fn current(self) -> bool {
+        use FactKind::*;
+        matches!(
+            self,
+            Capital
+                | Ceo
+                | Headquarters
+                | Currency
+                | Owner
+                | Spouse
+                | HeadOfState
+                | HeadOfGovernment
+        )
+    }
+
+    /// Whether of several current values those that started last are kept
+    /// (a new CEO next to an interim one whose end was not recorded).
+    pub fn latest_only(self) -> bool {
+        matches!(
+            self,
+            FactKind::Ceo | FactKind::HeadOfState | FactKind::HeadOfGovernment
+        )
+    }
+
+    /// Whether the property is too big to read whole (authors of millions
+    /// of papers, creators of paintings), so only the most read items are
+    /// asked about, by name.
+    pub fn by_name_only(self) -> bool {
+        matches!(self, FactKind::Author | FactKind::Creator)
     }
 
     /// How many values of the kind an item keeps.
@@ -148,6 +226,15 @@ impl FactKind {
             FactKind::Ceo => format!("CEO of {subject}"),
             FactKind::Headquarters => format!("Headquarters of {subject}"),
             FactKind::Currency => format!("Currency of {subject}"),
+            FactKind::Author => format!("Author of {subject}"),
+            FactKind::Director => format!("Director of {subject}"),
+            FactKind::Composer => format!("Composer of {subject}"),
+            FactKind::Creator => format!("Creator of {subject}"),
+            FactKind::Owner => format!("Owner of {subject}"),
+            FactKind::Birthplace => format!("Birthplace of {subject}"),
+            FactKind::Spouse => format!("Spouse of {subject}"),
+            FactKind::HeadOfState => format!("Head of state of {subject}"),
+            FactKind::HeadOfGovernment => format!("Head of government of {subject}"),
         }
     }
 }
@@ -384,6 +471,9 @@ pub fn fact_asked(query: &str) -> Option<FactQuestion> {
         .find_map(|lead| q.strip_prefix(lead))
         .unwrap_or(&q)
         .to_string();
+    // "the capital of x"; the subject that ends the query keeps its own
+    // "the" ("the art of war author"), dropped below unless a work's.
+    let whole = q.as_str();
     let q = q.strip_prefix("the ").unwrap_or(&q);
     use FactKind::*;
     // Words before the subject.
@@ -415,6 +505,37 @@ pub fn fact_asked(query: &str) -> Option<FactQuestion> {
         ("where is the headquarters of ", &[Headquarters], false),
         ("currency of ", &[Currency], false),
         ("currency in ", &[Currency], false),
+        ("what currency is used in ", &[Currency], false),
+        ("who wrote ", &[Author], false),
+        ("who is the author of ", &[Author], false),
+        ("author of ", &[Author], false),
+        ("writer of ", &[Author], false),
+        ("who directed ", &[Director], false),
+        ("director of ", &[Director, Creator], false),
+        ("who composed ", &[Composer], false),
+        ("composer of ", &[Composer], false),
+        ("who painted ", &[Creator], false),
+        ("who sculpted ", &[Creator], false),
+        ("who designed ", &[Creator], false),
+        ("who owns ", &[Owner], false),
+        ("who is the owner of ", &[Owner], false),
+        ("owner of ", &[Owner], false),
+        ("birthplace of ", &[Birthplace], false),
+        ("who is the wife of ", &[Spouse], false),
+        ("who is the husband of ", &[Spouse], false),
+        ("wife of ", &[Spouse], false),
+        ("husband of ", &[Spouse], false),
+        ("spouse of ", &[Spouse], false),
+        ("who is the president of ", &[HeadOfState], false),
+        ("president of ", &[HeadOfState], false),
+        ("who is the prime minister of ", &[HeadOfGovernment], false),
+        ("prime minister of ", &[HeadOfGovernment], false),
+        (
+            "who is the leader of ",
+            &[HeadOfGovernment, HeadOfState],
+            false,
+        ),
+        ("leader of ", &[HeadOfGovernment, HeadOfState], false),
     ];
     // Words after it.
     let after: &[(&str, &[FactKind], bool)] = &[
@@ -433,12 +554,26 @@ pub fn fact_asked(query: &str) -> Option<FactQuestion> {
         (" headquarters", &[Headquarters], false),
         (" hq", &[Headquarters], false),
         (" currency", &[Currency], false),
+        (" author", &[Author], false),
+        (" director", &[Director], false),
+        (" composer", &[Composer], false),
+        (" painter", &[Creator], false),
+        (" owner", &[Owner], false),
+        (" birthplace", &[Birthplace], false),
+        (" wife", &[Spouse], false),
+        (" husband", &[Spouse], false),
+        (" spouse", &[Spouse], false),
+        (" president", &[HeadOfState], false),
+        (" prime minister", &[HeadOfGovernment], false),
+        (" leader", &[HeadOfGovernment, HeadOfState], false),
     ];
     // Words around it.
     let around: &[(&str, &str, &[FactKind])] = &[
         ("when was ", " born", &[Born]),
         ("when is ", " birthday", &[Born]),
-        ("where was ", " born", &[]),
+        ("where was ", " born", &[Birthplace]),
+        ("who is ", " married to", &[Spouse]),
+        ("who was ", " married to", &[Spouse]),
         ("when did ", " die", &[Died]),
         ("when was ", " founded", &[Founded]),
         ("when was ", " established", &[Founded]),
@@ -460,12 +595,25 @@ pub fn fact_asked(query: &str) -> Option<FactQuestion> {
                 .find_map(|(lead, kinds, age)| Some((q.strip_prefix(lead)?, kinds.to_vec(), *age)))
         })
         .or_else(|| {
-            after
-                .iter()
-                .find_map(|(tail, kinds, age)| Some((q.strip_suffix(tail)?, kinds.to_vec(), *age)))
+            after.iter().find_map(|(tail, kinds, age)| {
+                Some((whole.strip_suffix(tail)?, kinds.to_vec(), *age))
+            })
         })?;
     let (subject, kinds, age) = found;
-    let subject = subject.strip_prefix("the ").unwrap_or(subject).trim();
+    // "the eiffel tower" is "Eiffel Tower", but "The Hobbit" keeps it.
+    let work = kinds.iter().any(|kind| {
+        matches!(
+            kind,
+            FactKind::Author | FactKind::Director | FactKind::Composer | FactKind::Creator
+        )
+    });
+    let subject = match subject.strip_prefix("the ") {
+        Some(rest) if !work => rest,
+        _ => subject,
+    }
+    .trim();
+    // "nepal's capital", "what is australia's capital".
+    let subject = subject.strip_suffix("'s").unwrap_or(subject).trim();
     if kinds.is_empty() || subject.is_empty() || subject.split(' ').count() > 6 {
         return None;
     }
@@ -561,6 +709,36 @@ mod tests {
     fn questions_people_type_are_read() {
         let asked = |q: &str| fact_asked(q).map(|f| (f.kinds[0], f.subject, f.age));
         use FactKind::*;
+        for (q, kind, subject) in [
+            ("what is the capital of nepal", Capital, "nepal"),
+            ("brazil capital", Capital, "brazil"),
+            ("nepal's capital", Capital, "nepal"),
+            ("what is australia's capital", Capital, "australia"),
+            ("what currency is used in japan", Currency, "japan"),
+            (
+                "who wrote pride and prejudice",
+                Author,
+                "pride and prejudice",
+            ),
+            ("who wrote the hobbit", Author, "the hobbit"),
+            ("the art of war author", Author, "the art of war"),
+            ("who directed jaws", Director, "jaws"),
+            (
+                "who composed the four seasons",
+                Composer,
+                "the four seasons",
+            ),
+            ("who painted the mona lisa", Creator, "the mona lisa"),
+            ("who owns instagram", Owner, "instagram"),
+            ("where was einstein born", Birthplace, "einstein"),
+            ("paul mccartney wife", Spouse, "paul mccartney"),
+            ("who is barack obama married to", Spouse, "barack obama"),
+            ("germany president", HeadOfState, "germany"),
+            ("who is the president of france", HeadOfState, "france"),
+            ("prime minister of canada", HeadOfGovernment, "canada"),
+        ] {
+            assert_eq!(asked(q), Some((kind, subject.into(), false)), "{q}");
+        }
         assert_eq!(
             asked("capital of australia"),
             Some((Capital, "australia".into(), false))
@@ -611,7 +789,6 @@ mod tests {
         );
         // Not questions of a fact.
         assert_eq!(asked("capital one"), None);
-        assert_eq!(asked("where was einstein born"), None);
         assert_eq!(asked("python"), None);
         assert_eq!(asked("capital"), None);
     }
