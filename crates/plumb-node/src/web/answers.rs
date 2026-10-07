@@ -289,6 +289,21 @@ pub(crate) fn info_from_page(page: &Page, sites: &[Hit]) -> Option<InfoBox> {
     })
 }
 
+/// What to search for to find whose profile `query` asks for: the words
+/// before the service ("mrbeast" of "mrbeast youtube"), and for lyrics
+/// those words as a song too, since a song is only found when asked for
+/// as one ("bohemian rhapsody song" for "bohemian rhapsody lyrics").
+pub(crate) fn profile_lookups(query: &str) -> Vec<String> {
+    let Some((services, name)) = services_asked(query) else {
+        return Vec::new();
+    };
+    let mut lookups = vec![name.clone()];
+    if services.iter().any(|s| s.key == "genius-song") {
+        lookups.push(format!("{name} song"));
+    }
+    lookups
+}
+
 /// The official profile `query` asks for ("mrbeast youtube", "valve
 /// steam", "bohemian rhapsody lyrics"), when the words before the service
 /// name a Wikipedia article or a song or album in `pages` (found for those
@@ -1110,6 +1125,12 @@ mod tests {
         assert!(html.contains("Searched for on Genius"), "{html}");
         // Never another service.
         assert_eq!(profile_answer("hey jude spotify", &pages), None);
+        assert_eq!(
+            profile_lookups("hey jude lyrics"),
+            ["hey jude", "hey jude song"]
+        );
+        assert_eq!(profile_lookups("mrbeast youtube"), ["mrbeast"]);
+        assert!(profile_lookups("hey jude").is_empty());
     }
 
     #[test]

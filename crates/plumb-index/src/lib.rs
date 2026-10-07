@@ -1519,7 +1519,8 @@ impl Searcher {
             // under google.com for "search engines" are the same site
             // again, titled the same or not at all. The best ranked of
             // them stays; a country site with a title of its own
-            // (amazon.co.jp's) does too.
+            // (amazon.co.jp's) does too, and so does one that is the
+            // official site of something (cbc.ca, under cbc.com).
             let same_title = |kept: &Hit| {
                 hit.title.as_deref().is_none_or(|title| {
                     kept.title
@@ -1527,9 +1528,10 @@ impl Searcher {
                         .is_some_and(|kept| normalize_text(kept) == normalize_text(title))
                 })
             };
-            if hits
-                .iter()
-                .any(|kept| country_copy(&kept.domain, &hit.domain) && same_title(kept))
+            if !hit.official
+                && hits
+                    .iter()
+                    .any(|kept| country_copy(&kept.domain, &hit.domain) && same_title(kept))
             {
                 continue;
             }
@@ -4050,6 +4052,16 @@ mod tests {
         );
         // Typed, a copy is what was asked for.
         assert_eq!(top(&searcher, "google.de"), "google.de");
+        // A country site that is the official site of something stays.
+        let mut cbc_ca = site("cbc.ca", Some("CBC"), None, &[], &[], popular(300, 500));
+        cbc_ca.about = Some("Canadian public broadcaster".into());
+        let records = [
+            site("cbc.com", Some("CBC"), None, &[], &[], popular(200, 600)),
+            cbc_ca,
+        ];
+        let (_dir, searcher) = build(&records);
+        let hits = searcher.search("cbc", 10).unwrap();
+        assert!(domains(&hits).contains(&"cbc.ca"), "{:?}", domains(&hits));
         assert!(country_copy("google.com", "google.co.uk"));
         assert!(country_copy("facebook.com", "facebook.co"));
         assert!(!country_copy("news.ycombinator.com", "news.bbc.co.uk"));

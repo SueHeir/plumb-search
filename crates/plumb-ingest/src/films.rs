@@ -377,8 +377,13 @@ fn add_details(details: &mut HashMap<String, Details>, json: &[u8]) -> Result<()
             "alias" if !kept.aliases.contains(&text) => kept.aliases.push(text),
             "title" if !kept.titles.contains(&text) => kept.titles.push(text),
             "article" => {
+                // Written as Plumb writes articles' addresses, which
+                // Wikidata's differ from ("%27" for "'").
                 if let Some(path) = value.value.strip_prefix(ENGLISH_WIKIPEDIA) {
-                    kept.article = Some(path.to_string());
+                    let url = plumb_core::article::article_url("en", &article_title(path));
+                    if let Some(path) = url.strip_prefix(ENGLISH_WIKIPEDIA) {
+                        kept.article = Some(path.to_string());
+                    }
                 }
             }
             "date" => earliest(&mut kept.released, year(&text)),
@@ -699,7 +704,8 @@ mod tests {
             {"item": {"value": "http://www.wikidata.org/entity/Q10"}, "k": {"value": "date"}, "v": {"value": "2008-01-01T00:00:00Z"}},
             {"item": {"value": "http://www.wikidata.org/entity/Q11"}, "k": {"value": "label"}, "v": {"value": "Dune"}},
             {"item": {"value": "http://www.wikidata.org/entity/Q11"}, "k": {"value": "alias"}, "v": {"value": "Dune: Part One"}},
-            {"item": {"value": "http://www.wikidata.org/entity/Q11"}, "k": {"value": "article"}, "v": {"value": "https://en.wikipedia.org/wiki/Dune_(2021_film)"}}
+            {"item": {"value": "http://www.wikidata.org/entity/Q11"}, "k": {"value": "article"}, "v": {"value": "https://en.wikipedia.org/wiki/Dune_(2021_film)"}},
+            {"item": {"value": "http://www.wikidata.org/entity/Q12"}, "k": {"value": "article"}, "v": {"value": "https://en.wikipedia.org/wiki/Schindler%27s_List"}}
         ]}}"#
     }
 
@@ -747,6 +753,9 @@ mod tests {
             .collect();
         assert_eq!(profiles, ["netflix", "imdb"]);
         assert_eq!(films[2].aliases, ["Dune: Part One"]);
+        let mut details = HashMap::new();
+        add_details(&mut details, details_json().as_bytes()).unwrap();
+        assert_eq!(details["Q12"].article.as_deref(), Some("Schindler's_List"));
         assert!(plumb_core::films::describes_a_show(
             films[0].description.as_deref().unwrap()
         ));

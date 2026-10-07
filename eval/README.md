@@ -19,6 +19,7 @@ shows up.
 | `package_queries.tsv` | a software package ("serde crate") | its registry page | `--pages packages.tsv.gz` |
 | `paper_queries.tsv` | a well-known paper | its DOI | `--pages papers.tsv.gz` |
 | `book_queries.tsv` | a well-known book | its Open Library work | `--pages books.tsv.gz` |
+| `film_queries.tsv` | a film or show with its year, director or cast ("dune 2021") | its Wikipedia article | `--pages wikipedia-en.tsv.gz --pages films.tsv.gz` |
 
 ## Format
 

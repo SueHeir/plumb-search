@@ -691,18 +691,20 @@ fn profile_shown(
     cfg: &plumb_index::RankConfig,
     pages: &PageSearcher,
 ) -> Result<Option<String>> {
-    let Some((_, name)) = plumb_core::profiles::services_asked(query) else {
-        return Ok(None);
-    };
     let options = SearchOptions {
         country: args.country.clone(),
         ..SearchOptions::default()
     };
-    let mut sites = searcher.search_meaning(&name, 5, cfg, &options, None)?;
-    pages.note_demand(&mut sites.hits)?;
-    let found = pages.search(&name, 10)?;
-    let placed = place_pages(&name, &sites.hits, found);
-    Ok(crate::web::answers::profile_answer(query, &placed).map(|p| p.url))
+    for name in crate::web::answers::profile_lookups(query) {
+        let mut sites = searcher.search_meaning(&name, 5, cfg, &options, None)?;
+        pages.note_demand(&mut sites.hits)?;
+        let found = pages.search(&name, 10)?;
+        let placed = place_pages(&name, &sites.hits, found);
+        if let Some(profile) = crate::web::answers::profile_answer(query, &placed) {
+            return Ok(Some(profile.url));
+        }
+    }
+    Ok(None)
 }
 
 /// With `--facts`: `Some(1)` when the instant answer to `q` (worked out

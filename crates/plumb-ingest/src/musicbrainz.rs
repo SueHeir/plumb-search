@@ -751,8 +751,6 @@ impl MusicDump {
             "keeping {songs_kept} songs and {} albums",
             kept.len() - songs_kept
         );
-        add_links(&self.dir, &mut kept, &self.release_group)?;
-
         let credits: HashSet<u32> = kept.iter().map(|k| k.credit).collect();
         let mut names: HashMap<u32, String> = HashMap::new();
         for_each_row(&self.dir, "artist_credit", |row| {
@@ -765,6 +763,7 @@ impl MusicDump {
                 }
             }
         })?;
+        add_links(&self.dir, &mut kept, &self.release_group, &names)?;
         kept.sort_by(|a, b| {
             b.listeners
                 .cmp(&a.listeners)
@@ -841,7 +840,12 @@ pub fn profile_of(kind: &str, address: &str) -> Option<Profile> {
 /// Adds to the songs and albums `kept` the links MusicBrainz has for
 /// them: a song's recording's own and its work's (lyrics), an album's
 /// releases'. `release_group` gives each official release's group.
-fn add_links(dir: &Path, kept: &mut [Kept], release_group: &[u32]) -> Result<()> {
+fn add_links(
+    dir: &Path,
+    kept: &mut [Kept],
+    release_group: &[u32],
+    names: &HashMap<u32, String>,
+) -> Result<()> {
     let index = |kind: &str| -> HashMap<u32, usize> {
         kept.iter()
             .enumerate()
@@ -902,13 +906,24 @@ fn add_links(dir: &Path, kept: &mut [Kept], release_group: &[u32]) -> Result<()>
             let Some(profile) = profile_of(kept[i].kind, address) else {
                 continue;
             };
-            // One of each service, the first linked.
-            if !kept[i]
+            // One of each service, the first linked; but of a song's
+            // lyrics, the page of its own artist's version when there is
+            // one, rather than another artist's whose song it covers.
+            let artist = names.get(&kept[i].credit).map(String::as_str);
+            match kept[i]
                 .profiles
-                .iter()
-                .any(|p| p.service == profile.service)
+                .iter_mut()
+                .find(|p| p.service == profile.service)
             {
-                kept[i].profiles.push(profile);
+                None => kept[i].profiles.push(profile),
+                Some(had)
+                    if profile.service == "genius-song"
+                        && artist.is_some_and(|a| is_genius_page_of(&profile.id, a))
+                        && !artist.is_some_and(|a| is_genius_page_of(&had.id, a)) =>
+                {
+                    *had = profile;
+                }
+                Some(_) => {}
             }
         }
     })?;
@@ -920,6 +935,18 @@ fn add_links(dir: &Path, kept: &mut [Kept], release_group: &[u32]) -> Result<()>
         });
     }
     Ok(())
+}
+
+/// Whether the Genius page `page` (`Nine-inch-nails-hurt-lyrics`) is of a
+/// song by `artist` ("Nine Inch Nails"): Genius names a song's page after
+/// its artist.
+fn is_genius_page_of(page: &str, artist: &str) -> bool {
+    let artist = plumb_core::normalize_text(&artist.replace('&', " and "));
+    let artist: Vec<&str> = artist.split_whitespace().collect();
+    !artist.is_empty()
+        && page
+            .to_lowercase()
+            .starts_with(&format!("{}-", artist.join("-")))
 }
 
 /// The song or album `kept` by `artist` as an articles file line (see the
@@ -1157,12 +1184,15 @@ mod tests {
                 "1\tx\t500\t1000\t1\t1\tBohemian Rhapsody\t1\t1\t0\tx\tf\n2\tx\t500\t1001\t1\t1\tBohemian Rhapsody\t1\t1\t0\tx\tf\n3\tx\t500\t1002\t1\t1\tBohemian Rhapsody\t1\t1\t0\tx\tf\n4\tx\t501\t1003\t1\t1\tBohemian Rhapsody\t1\t1\t0\tx\tf\n5\tx\t501\t1004\t1\t1\tBohemian Rhapsody\t1\t1\t0\tx\tf\n6\tx\t502\t1005\t1\t1\tSomething\t2\t1\t0\tx\tf\n7\tx\t503\t1000\t2\t2\tVideo\t1\t1\t0\tx\tf\n8\tx\t504\t1000\t3\t3\tx\t1\t1\t0\tx\tf\n",
             ),
             ("l_recording_work", "1\t1\t500\t9000\t0\tx\t0\t\t\n"),
-            ("l_url_work", "1\t2\t7000\t9000\t0\tx\t0\t\t\n"),
+            (
+                "l_url_work",
+                "1\t2\t7000\t9000\t0\tx\t0\t\t\n2\t2\t6999\t9000\t0\tx\t0\t\t\n",
+            ),
             ("l_recording_url", "1\t3\t500\t7001\t0\tx\t0\t\t\n2\t3\t500\t7002\t0\tx\t0\t\t\n"),
             ("l_release_url", "1\t4\t101\t7003\t0\tx\t0\t\t\n"),
             (
                 "url",
-                "7000\tx\thttps://genius.com/Queen-bohemian-rhapsody-lyrics\t0\tx\n7001\tx\thttps://open.spotify.com/track/7tFiyTwD0nx5a1eklYtX2J\t0\tx\n7002\tx\thttps://example.com/evil\t0\tx\n7003\tx\thttps://music.apple.com/gb/album/1440650428\t0\tx\n7004\tx\thttps://genius.com/unrelated-lyrics\t0\tx\n",
+                "6999\tx\thttps://genius.com/Panic-at-the-disco-bohemian-rhapsody-lyrics\t0\tx\n7000\tx\thttps://genius.com/Queen-bohemian-rhapsody-lyrics\t0\tx\n7001\tx\thttps://open.spotify.com/track/7tFiyTwD0nx5a1eklYtX2J\t0\tx\n7002\tx\thttps://example.com/evil\t0\tx\n7003\tx\thttps://music.apple.com/gb/album/1440650428\t0\tx\n7004\tx\thttps://genius.com/unrelated-lyrics\t0\tx\n",
             ),
         ];
         for (table, rows) in tables {
@@ -1276,6 +1306,24 @@ mod tests {
         assert_eq!(parse_popularity(json).unwrap(), [(mbid(NIGHT), 19_247)]);
         assert_eq!(mbid_text(mbid(BOHEMIAN)), BOHEMIAN);
         assert_eq!(parse_mbid("b1a9c0e9d9874042ae9178d6a3267d69"), None);
+    }
+
+    #[test]
+    fn genius_pages_are_told_by_their_artist() {
+        assert!(is_genius_page_of("Queen-bohemian-rhapsody-lyrics", "Queen"));
+        assert!(is_genius_page_of(
+            "Nine-inch-nails-hurt-lyrics",
+            "Nine Inch Nails"
+        ));
+        assert!(is_genius_page_of(
+            "Simon-and-garfunkel-the-boxer-lyrics",
+            "Simon & Garfunkel"
+        ));
+        assert!(!is_genius_page_of(
+            "Nine-inch-nails-hurt-lyrics",
+            "Johnny Cash"
+        ));
+        assert!(!is_genius_page_of("Queenie-x-lyrics", "Queen"));
     }
 
     #[test]
