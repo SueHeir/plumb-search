@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 use super::NodeSettings;
+use crate::meaning::MeaningModel;
 
 /// Held locked while a node runs.
 const LOCK_FILE: &str = "node.lock";
@@ -134,14 +135,16 @@ pub(super) fn remove_leftovers(paths: &Paths) {
         format!(".{SETTINGS_FILE}."),
     ];
     for name in file_names(&paths.data) {
-        let partial_vectors = name == format!("{}.part", plumb_embed::VECTORS_FILE_NAME);
+        let partial_vectors = name == format!("{}.part", plumb_embed::VECTORS_FILE_NAME)
+            || name == super::shared_vectors::PART_FILE;
         if partial_vectors
             || name.ends_with(".tmp") && temp_prefixes.iter().any(|p| name.starts_with(p))
         {
             remove_leftover(&paths.data.join(name));
         }
     }
-    for dir in [&paths.seed, &paths.data.join(super::embedding::MODEL_DIR)] {
+    let models = [MeaningModel::Small, MeaningModel::Gemma].map(|m| paths.data.join(m.dir_name()));
+    for dir in std::iter::once(&paths.seed).chain(&models) {
         for name in file_names(dir) {
             if name.ends_with(".part") {
                 remove_leftover(&dir.join(name));

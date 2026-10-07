@@ -14,9 +14,15 @@
 //!
 //! `dim` keeps the first values of each vector (for models trained to allow
 //! it, such as Matryoshka ones), `query_prefix` goes before searches and
-//! `text_prefix` before sites' texts; all three are optional. Only plain
+//! `text_prefix` before sites' texts; all three are optional, as is
+//! `text_words`, the most words of a site's text given to the model
+//! (otherwise [`crate::MAX_TEXT_WORDS`]). Only plain
 //! `http://` addresses work. Vectors from a server are not pinned the way
-//! [`crate::Embedder`]'s own are, so they are for evals, not for sharing.
+//! [`crate::Embedder`]'s own are, so they are for evals, not for sharing,
+//! unless `"same_as"` names a directory of the EmbeddingGemma files Plumb
+//! runs itself ([`crate::GEMMA_FILE`]) that the server runs too: the
+//! vectors then carry that model's id, so a node running it in Plumb uses
+//! and shares them. It needs Plumb's own `dim` and prefixes.
 
 use std::path::Path;
 use std::time::Duration;
@@ -24,6 +30,7 @@ use std::time::Duration;
 use anyhow::{anyhow, bail, Context, Result};
 use sha2::{Digest, Sha256};
 
+use crate::gemma::{gemma_id, GEMMA_DIM, GEMMA_QUERY_PREFIX, GEMMA_TEXT_PREFIX};
 use crate::{quantize, ModelId};
 
 /// The file in a model directory that names an embedding server.
@@ -38,6 +45,8 @@ pub(crate) struct Server {
     dim: Option<usize>,
     query_prefix: String,
     text_prefix: String,
+    /// Most words of a site's text it is given.
+    text_words: Option<usize>,
 }
 
 impl Server {
@@ -67,6 +76,12 @@ impl Server {
                     as usize,
             ),
         };
+        let text_words = match config.get("text_words") {
+            None => None,
+            Some(words) => Some(words.as_u64().filter(|&words| words > 0).ok_or_else(|| {
+                anyhow!("text_words in {} is not a positive number", path.display())
+            })? as usize),
+        };
         let agent = ureq::Agent::config_builder()
             .timeout_global(Some(Duration::from_secs(120)))
             .build()
@@ -78,7 +93,32 @@ impl Server {
             dim,
             query_prefix: text("query_prefix").to_string(),
             text_prefix: text("text_prefix").to_string(),
+            text_words,
         };
+        if let Some(same_as) = config.get("same_as") {
+            let same_as = Path::new(
+                same_as
+                    .as_str()
+                    .ok_or_else(|| anyhow!("same_as in {} is not a path", path.display()))?,
+            );
+            if dim != Some(GEMMA_DIM)
+                || server.query_prefix != GEMMA_QUERY_PREFIX
+                || server.text_prefix != GEMMA_TEXT_PREFIX
+                || text_words.is_some()
+            {
+                bail!(
+                    "{} names same_as, so it needs dim {GEMMA_DIM} and Plumb's EmbeddingGemma prefixes and no text_words",
+                    path.display()
+                );
+            }
+            let id = gemma_id(same_as)
+                .with_context(|| format!("reading the model in {}", same_as.display()))?;
+            let len = server
+                .embed("dimension check")
+                .with_context(|| format!("asking the embedding server at {url}"))?
+                .len();
+            return Ok(Some((server, id, len)));
+        }
         // The id leaves out the address, so moving the server keeps vectors.
         let mut id = Sha256::new();
         for part in [
@@ -90,11 +130,21 @@ impl Server {
         ] {
             id.update(Sha256::digest(part.as_bytes()));
         }
+        // Left out when not given, so the ids of servers named before it
+        // existed stay the same.
+        if let Some(words) = text_words {
+            id.update(Sha256::digest(format!("text words {words}").as_bytes()));
+        }
         let len = server
             .embed("dimension check")
             .with_context(|| format!("asking the embedding server at {url}"))?
             .len();
         Ok(Some((server, id.finalize().into(), len)))
+    }
+
+    /// Most words of a site's text it is given.
+    pub(crate) fn text_words(&self) -> usize {
+        self.text_words.unwrap_or(crate::MAX_TEXT_WORDS)
     }
 
     /// The vector of a site's `text`.
@@ -233,6 +283,49 @@ mod tests {
         assert_eq!(ids[0], ids[1]);
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join(SERVER_FILE), r#"{"model": "m"}"#).unwrap();
+        assert!(Embedder::load(dir.path()).is_err());
+    }
+
+    #[test]
+    fn a_server_can_read_more_words_of_a_site() {
+        let load = |config: serde_json::Value| {
+            let (url, served) = fake_server(1);
+            let dir = tempfile::tempdir().unwrap();
+            let mut config = config;
+            config["url"] = url.into();
+            std::fs::write(dir.path().join(SERVER_FILE), config.to_string()).unwrap();
+            let embedder = Embedder::load(dir.path()).unwrap();
+            served.join().unwrap();
+            embedder
+        };
+        let plain = load(serde_json::json!({"model": "m"}));
+        let longer = load(serde_json::json!({"model": "m", "text_words": 3}));
+        assert_eq!(plain.text_words(), crate::MAX_TEXT_WORDS);
+        assert_eq!(longer.text_words(), 3);
+        assert_ne!(plain.id(), longer.id());
+        let mut record = plumb_core::SiteRecord::new("tesla.com");
+        record.title = Some("Tesla electric cars and solar".into());
+        assert_eq!(longer.site_text(&record), "Tesla electric cars");
+        assert_eq!(plain.site_text(&record), crate::site_text(&record));
+    }
+
+    #[test]
+    fn a_server_running_plumbs_gemma_gives_its_id() {
+        let gemma = tempfile::tempdir().unwrap();
+        crate::write_test_gemma(gemma.path()).unwrap();
+        let (url, served) = fake_server(1);
+        let dir = tempfile::tempdir().unwrap();
+        let config = serde_json::json!({"url": url, "model": "m", "dim": GEMMA_DIM,
+            "query_prefix": GEMMA_QUERY_PREFIX, "text_prefix": GEMMA_TEXT_PREFIX,
+            "same_as": gemma.path()});
+        std::fs::write(dir.path().join(SERVER_FILE), config.to_string()).unwrap();
+        let id = Embedder::load(dir.path()).unwrap().id();
+        served.join().unwrap();
+        assert_eq!(id, gemma_id(gemma.path()).unwrap());
+        // Only with Plumb's own prefixes.
+        let config = serde_json::json!({"url": url, "model": "m", "dim": GEMMA_DIM,
+            "same_as": gemma.path()});
+        std::fs::write(dir.path().join(SERVER_FILE), config.to_string()).unwrap();
         assert!(Embedder::load(dir.path()).is_err());
     }
 }
