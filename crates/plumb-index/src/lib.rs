@@ -1060,16 +1060,14 @@ impl Searcher {
         // match as typed: "saples" still lists what has those letters
         // first, and staples.com right under it rather than nowhere.
         let mut results = results;
-        if site.is_some() {
-            if let Some(fixed_site) = fixed
-                .hits
-                .into_iter()
-                .next()
-                .filter(|site| !results.hits.iter().any(|hit| hit.domain == site.domain))
-            {
-                let at = results.hits.len().min(1);
-                results.hits.insert(at, fixed_site);
-                results.hits.truncate(limit);
+        if let Some(site) = &site {
+            match fixed.hits.into_iter().next() {
+                Some(fixed_site) if !results.hits.iter().any(|hit| hit.domain == *site) => {
+                    let at = results.hits.len().min(1);
+                    results.hits.insert(at, fixed_site);
+                    results.hits.truncate(limit);
+                }
+                _ => suggested_site_second(&mut results.hits, site),
             }
         }
         Ok(SearchResults {
@@ -2066,6 +2064,23 @@ fn brand_label(domain: &str) -> Option<(&str, &str)> {
     registrable_domain(suffix)
         .is_none()
         .then_some((label, suffix))
+}
+
+/// Moves `site`, the site a spelling suggestion names, up to second when
+/// it is listed lower: "tco bell" lists tacobell.com right under bell.ca,
+/// not fourth. Its score is put between its new neighbours', so scores
+/// still go down the list. Not first: the results stay those of the query
+/// as typed.
+pub fn suggested_site_second(hits: &mut Vec<Hit>, site: &str) {
+    let Some(at) = hits.iter().position(|hit| hit.domain == site) else {
+        return;
+    };
+    if at <= 1 {
+        return;
+    }
+    let mut hit = hits.remove(at);
+    hit.score = (hits[0].score + hits[1].score) / 2.0;
+    hits.insert(1, hit);
 }
 
 /// `hits` without the copies of a site listed with them:
@@ -4153,6 +4168,42 @@ mod tests {
         // Typed, the copy is what was asked for.
         let hits = searcher.search("gmail.ru", 10).unwrap();
         assert_eq!(hits[0].domain, "gmail.ru", "{:?}", domains(&hits));
+    }
+
+    #[test]
+    fn the_site_a_suggestion_names_is_listed_second() {
+        let hit = |domain: &str, score: f32| Hit {
+            domain: domain.into(),
+            url: format!("https://{domain}/"),
+            title: None,
+            description: None,
+            score,
+            text_score: 1.0,
+            link_score: 0.5,
+            placing_text_score: None,
+            country: None,
+            named: false,
+            official: false,
+            key_pages: Vec::new(),
+            demand: None,
+        };
+        // "tco bell": bell.ca as typed, tacobell.com right under it.
+        let mut hits = vec![
+            hit("bell.ca", 0.7),
+            hit("cityofbell.org", 0.6),
+            hit("t.co", 0.5),
+            hit("tacobell.com", 0.4),
+        ];
+        suggested_site_second(&mut hits, "tacobell.com");
+        assert_eq!(
+            domains(&hits),
+            ["bell.ca", "tacobell.com", "cityofbell.org", "t.co"]
+        );
+        assert!(hits.windows(2).all(|w| w[0].score >= w[1].score));
+        // First or second already: left where it is.
+        suggested_site_second(&mut hits, "bell.ca");
+        suggested_site_second(&mut hits, "tacobell.com");
+        assert_eq!(domains(&hits)[..2], ["bell.ca", "tacobell.com"]);
     }
 
     #[test]
