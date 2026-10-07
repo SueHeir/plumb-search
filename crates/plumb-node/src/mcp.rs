@@ -681,12 +681,14 @@ impl Mcp {
             (answer, _) => answer,
         };
         let names_a_page = placed.iter().any(|placed| placed.hit.named);
-        let profile = match plumb_core::profiles::services_asked(query) {
-            Some((_, name)) if !names_a_page => self
-                .lookup(&name, PROFILE_SEARCH_LIMIT, options)
-                .ok()
-                .and_then(|found| answers::profile_answer(query, &found.pages)),
-            _ => None,
+        let profile = if names_a_page {
+            None
+        } else {
+            answers::profile_lookups(query).iter().find_map(|name| {
+                self.lookup(name, PROFILE_SEARCH_LIMIT, options)
+                    .ok()
+                    .and_then(|found| answers::profile_answer(query, &found.pages))
+            })
         };
         let info = match &profile {
             Some(profile) => answers::info_from_page(&profile.page, &results.hits),

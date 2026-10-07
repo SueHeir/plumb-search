@@ -1440,13 +1440,18 @@ async fn extras(
 ) -> answers::Extras {
     let answer = instant_answer(state, query).await;
     let names_a_page = results.pages.iter().any(|placed| placed.hit.named);
-    let profile = match plumb_core::profiles::services_asked(query) {
-        Some((_, name)) if !names_a_page => run_search(state, &name, PROFILE_SEARCH_LIMIT, options)
-            .await
-            .ok()
-            .and_then(|found| answers::profile_answer(query, &found.pages)),
-        _ => None,
-    };
+    let mut profile = None;
+    if !names_a_page {
+        for name in answers::profile_lookups(query) {
+            profile = run_search(state, &name, PROFILE_SEARCH_LIMIT, options)
+                .await
+                .ok()
+                .and_then(|found| answers::profile_answer(query, &found.pages));
+            if profile.is_some() {
+                break;
+            }
+        }
+    }
     // A fact the query asks about something ("capital of australia"),
     // looked up by searching for that something.
     let answer = match (answer, plumb_core::facts::fact_asked(query)) {

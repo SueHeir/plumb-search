@@ -129,7 +129,7 @@ A song is all the recordings of one title by one artist credit, remasters and li
 
 No lyrics are kept: they are copyrighted. "bohemian rhapsody lyrics" links the song's page on Genius, which MusicBrainz links the song's work to, shown first like a profile ("Listing, from MusicBrainz"); a song MusicBrainz knows no such page for gets a link to Genius's search for its title and artist instead. Nothing is fetched from Genius.
 
-Like a book, a song or album is never listed before every site by its title alone ("hello" is not Adele's song), and an article of the same name comes before it.
+Song and album titles are too often the names of other things ("Dead Sea", "Notion", "Lord of the Flies"), so a song or album is only listed when asked for: by its title and its artist, or its title and "song" or "album". Its title alone lists the article of that name, never the song. For "TITLE lyrics", the song is looked up as "TITLE song" when no article of that name has a Genius page.
 
 The answers ListenBrainz gives are kept in `--work` (`listenbrainz-albums.tsv`, `listenbrainz-recordings.tsv`) as they come, so a run that stops carries on where it left off. It keeps to the rate ListenBrainz sets. `--max-songs`, `--max-albums`, `--min-song-releases`, `--min-listeners` (20 by default) and `--musicbrainz-dump` (a downloaded `mbdump.tar.bz2`, or a directory of its tables) change what is read and kept. Reading the dump takes a few GB of memory.
 

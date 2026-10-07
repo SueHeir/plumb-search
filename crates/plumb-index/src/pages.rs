@@ -1112,6 +1112,12 @@ impl PageSearcher {
             }
             let asked_as_film = self.film_match(&page, &words);
             let asked_by_title = asked_as_film || self.book_match(&page, &words);
+            // Songs and albums share their titles with too much ("Dead
+            // Sea", "Notion", "Lord of the Flies"): one is only listed
+            // when asked for by its artist or as a song or album.
+            if page.set == MUSIC_SET && !asked_by_title {
+                continue;
+            }
             if by_title_first.contains(&address) && !asked_by_title
                 || film_title_first.contains(&address) && !asked_as_film
             {
@@ -2533,10 +2539,16 @@ mod tests {
                 "{query}: {hits:?}"
             );
         }
-        // Alone, the title asks for the article first.
+        // Alone, the title asks for the article only, and part of it for
+        // no song.
         let hits = s.search("hey jude", 5).unwrap();
-        assert_eq!(titles(&hits), ["Hey Jude", "Hey Jude"]);
-        assert!(hits[0].page.is_article() && !hits[1].whole);
+        assert_eq!(titles(&hits), ["Hey Jude"]);
+        assert!(hits[0].page.is_article());
+        assert!(s
+            .search("jude", 5)
+            .unwrap()
+            .iter()
+            .all(|hit| hit.page.set != MUSIC_SET));
         let hits = s.search("the beatles album", 5).unwrap();
         assert!(hits[0].whole && hits[0].page.set == MUSIC_SET && !hits[0].page.is_song());
         // An item of neither kind is no page.
