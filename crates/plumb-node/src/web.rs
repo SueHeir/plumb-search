@@ -980,6 +980,16 @@ struct Settings {
     welcome: bool,
 }
 
+impl Settings {
+    /// The searcher's About profile, wherever it is kept.
+    fn about(&self) -> Option<&About> {
+        match &self.history {
+            Some(history) => Some(&history.about),
+            None => self.browser_about.as_ref(),
+        }
+    }
+}
+
 impl AppState {
     /// Which nodes this node's network searches ask, set by its owner.
     fn search_scope(&self) -> plumb_net::SearchScope {
@@ -2328,6 +2338,10 @@ border-radius:1rem;color:var(--fg);text-decoration:none}\
 .hist form{margin-top:1.5rem}\
 .about label{display:block;margin-top:1.25rem}.about .m{margin:.2rem 0 .4rem}\
 .about form.block{display:block}\
+.about .kinds{border:0;padding:0;margin:1.25rem 0 0}.about .kinds legend{padding:0}\
+.about .kind{display:flex;flex-wrap:wrap;align-items:center;gap:.2rem .9rem;padding:.35rem 0;\
+border-bottom:1px solid var(--line)}.about .kind>span{flex:1 1 12rem}\
+.about .kind label{display:inline-flex;align-items:center;gap:.25rem;margin:0}\
 .welcome fieldset{border:0;padding:0;margin:1.25rem 0 0}.welcome legend{padding:0}\
 .welcome .topics label{display:inline-block;margin:.15rem 1rem .15rem 0}\
 .invite{margin:.75rem 0}.invite form{display:inline;margin:0}\
@@ -2532,6 +2546,12 @@ fn settings_form(query: &str, autofocus: bool, settings: &Settings) -> String {
         (None, Some(_)) => history::browser_settings_html().to_owned(),
         (None, None) => String::new(),
     };
+    let kinds = if settings.about().is_some() {
+        "<p class=\"hint\"><a href=\"/about#kinds\">More or less of each kind of result: \
+         podcasts, songs, papers and more</a></p>"
+    } else {
+        ""
+    };
     let private = if settings.private {
         private_toggle(false)
     } else {
@@ -2548,7 +2568,7 @@ fn settings_form(query: &str, autofocus: bool, settings: &Settings) -> String {
          <label>Language <select name=\"lang\">{language_choices}</select></label>\
          <label>Safe search <select name=\"safe\">{safe_choices}</select></label>\
          <label>Recent news <select name=\"news\">{news_choices}</select></label>\
-         {network}{network_hint}{history}{private}<button type=\"submit\">Apply</button></div></details>\
+         {network}{network_hint}{history}{kinds}{private}<button type=\"submit\">Apply</button></div></details>\
          <button type=\"submit\">Search</button></form>",
         escape_html(query),
         if autofocus { " autofocus" } else { "" },
@@ -3059,6 +3079,10 @@ fn render_results_with(
         place_pages(query, &shown_hits, found_pages)
     };
     pages.retain(|placed| !hidden(http_url(&placed.hit.page.url)));
+    // How much of each kind of page the searcher wants.
+    if let Some(about) = settings.about() {
+        about.apply_pages(&mut pages, shown_hits.len());
+    }
     // An info box is about what the whole query names, which operators
     // ("site:", "-word") change.
     let info = if let Some(profile) = extras.and_then(|e| e.profile.as_ref()) {
@@ -6798,6 +6822,39 @@ mod tests {
         let (code, _, _) =
             send_with_headers(app(), "/search?q=us+bank", &[("cookie", "plumb_about=!!")]).await;
         assert_eq!(code, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn kinds_of_results_are_kept_in_the_browser_and_shown_on_the_about_page() {
+        let app = || {
+            node_router(
+                backend(bank_hits()),
+                node(node_status(Phase::Ready, Step::Idle)),
+            )
+        };
+        let request = Request::builder()
+            .method("POST")
+            .uri("/about")
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(Body::from(
+                "interests=&kind-podcasts=off&kind-music=more&kind-papers=normal&kind-junk=off",
+            ))
+            .unwrap();
+        let response = app().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let about = set_cookie(response.headers(), "plumb_about").expect("kept in the browser");
+        let me = [("cookie", about.as_str())];
+        let (_, _, page) = send_with_headers(app(), "/about", &me).await;
+        assert!(
+            page.contains("name=\"kind-podcasts\" value=\"off\" checked"),
+            "{page}"
+        );
+        assert!(page.contains("name=\"kind-music\" value=\"more\" checked"));
+        assert!(page.contains("name=\"kind-papers\" value=\"normal\" checked"));
+        assert!(!page.contains("kind-junk"));
+        // The gear links to them.
+        let (_, _, body) = send_with_headers(app(), "/search?q=us+bank", &me).await;
+        assert!(body.contains("href=\"/about#kinds\""), "{body}");
     }
 
     #[tokio::test]

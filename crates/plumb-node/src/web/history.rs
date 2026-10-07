@@ -34,7 +34,9 @@ use serde::Deserialize;
 use tracing::warn;
 
 use super::{escape_html, html_response, page, search_link, time_ago, AppState};
-use crate::about::{About, AboutStore, Reason, MAX_INTERESTS, MAX_SITES, MAX_TOWN_CHARS};
+use crate::about::{
+    About, AboutStore, Amount, Reason, KINDS, MAX_INTERESTS, MAX_SITES, MAX_TOWN_CHARS,
+};
 use crate::history::{new_profile, valid_profile, History, HistoryStore};
 use crate::learn::{
     describe_key, traits, Block, Choice, Learned, Rating, Taste, Trait, Verdict, JUDGED_PER_PAGE,
@@ -1107,6 +1109,19 @@ struct AboutForm {
     town: String,
     /// `1`: forget it all.
     clear: Option<String>,
+    /// How much of each kind of result: `kind-<kind>` = `off`, `less`,
+    /// `normal` or `more`.
+    #[serde(flatten)]
+    kinds: HashMap<String, String>,
+}
+
+impl AboutForm {
+    /// The amounts of each kind of result the form sent.
+    fn kinds(&self) -> impl Iterator<Item = (&str, Amount)> {
+        self.kinds
+            .iter()
+            .filter_map(|(key, value)| Some((key.strip_prefix("kind-")?, Amount::parse(value)?)))
+    }
 }
 
 /// `GET /about`.
@@ -1132,7 +1147,9 @@ async fn save_about(
     let about = if super::flag(&form.clear) {
         About::default()
     } else {
-        About::from_form(&form.interests, &form.pinned, &form.hidden).with_town(&form.town)
+        About::from_form(&form.interests, &form.pinned, &form.hidden)
+            .with_town(&form.town)
+            .with_kinds(form.kinds())
     };
     let (status, note) = match kept.save(about) {
         Ok(fit) => {
@@ -1259,7 +1276,13 @@ fn decode_about(value: &str) -> Option<About> {
             &about.pinned.join("\n"),
             &about.hidden.join("\n"),
         )
-        .with_town(&about.town),
+        .with_town(&about.town)
+        .with_kinds(
+            about
+                .kinds
+                .iter()
+                .map(|(kind, amount)| (kind.as_str(), *amount)),
+        ),
     )
 }
 
@@ -1344,6 +1367,7 @@ fn render_about(about: &About, in_browser: bool, note: Option<&str>) -> String {
          <p class=\"m\">Such as Denver, CO. Searches like \u{201c}coffee near me\u{201d} \
          list places here. Plumb never works out where you are by itself.</p>\n\
          <input id=\"town\" name=\"town\" maxlength=\"{MAX_TOWN_CHARS}\" value=\"{}\">\n\
+         {}\
          <p><button type=\"submit\">Save</button></p>\n</form>\n\
          <form method=\"post\" action=\"/about\"><input type=\"hidden\" name=\"clear\" \
          value=\"1\"><button type=\"submit\">Forget all of this</button></form>\n\
@@ -1352,8 +1376,35 @@ fn render_about(about: &About, in_browser: bool, note: Option<&str>) -> String {
         lines(&about.pinned),
         lines(&about.hidden),
         escape_html(&about.town),
+        kinds_html(about),
     );
     page("About you - Plumb Search", &body)
+}
+
+/// The About page's choices of how much of each kind of result to show:
+/// a row of off, less, normal and more for each.
+fn kinds_html(about: &About) -> String {
+    let mut html = String::from(
+        "<fieldset id=\"kinds\" class=\"kinds\"><legend><strong>Kinds of results</strong></legend>\n\
+         <p class=\"m\">How much of each kind of page to list with the sites. Less moves it \
+         a few places down, more a few places up, and off leaves it out.</p>\n",
+    );
+    for (kind, name) in KINDS {
+        let current = about.kinds.get(*kind).copied().unwrap_or_default();
+        let _ = write!(html, "<div class=\"kind\"><span>{name}</span>");
+        for amount in Amount::ALL {
+            let checked = if amount == current { " checked" } else { "" };
+            let _ = write!(
+                html,
+                "<label><input type=\"radio\" name=\"kind-{kind}\" value=\"{}\"{checked}> {}</label>",
+                amount.as_str(),
+                amount.name()
+            );
+        }
+        html.push_str("</div>\n");
+    }
+    html.push_str("</fieldset>\n");
+    html
 }
 
 /// Where the About page says the profile is kept, and the links under it.

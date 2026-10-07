@@ -11,12 +11,15 @@
 //! - Your town: where "coffee near me" looks for places (see
 //!   [`crate::places`]). Plumb never works it out from the searcher's
 //!   address.
+//! - Kinds of results: how much of each kind of page (podcasts, songs,
+//!   papers) the searcher wants, from off through less and normal to more
+//!   (see [`Amount`]).
 //!
 //! The profile is used only after results are found, on the node itself.
 //! It is never part of a search sent to other nodes, so nothing of it
 //! leaves the node.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
@@ -24,6 +27,7 @@ use std::sync::{Mutex, PoisonError};
 use anyhow::{Context, Result};
 use plumb_core::collapse_whitespace;
 use plumb_core::SiteRecord;
+use plumb_index::pages::PlacedPage;
 use plumb_index::Hit;
 use serde::{Deserialize, Serialize};
 
@@ -47,6 +51,85 @@ pub const PINNED_BONUS: f32 = 0.5;
 /// enough to settle a close call between two meanings of a name, not
 /// enough to beat a much better match.
 pub const INTEREST_BONUS: f32 = 0.1;
+/// How many places a page of a kind the searcher wants less (or more) of
+/// moves down (or up) the list.
+pub const AMOUNT_SHIFT: usize = 3;
+
+/// The kinds of results a searcher can ask for more or less of: a page
+/// set's id (every Wikipedia's is `wikipedia`), and what it is called.
+pub const KINDS: &[(&str, &str)] = &[
+    ("wikipedia", "Wikipedia articles"),
+    (plumb_index::pages::FILMS_SET, "Films and TV shows"),
+    (plumb_index::pages::MUSIC_SET, "Songs and albums"),
+    (plumb_index::pages::PODCASTS_SET, "Podcasts"),
+    (plumb_index::pages::BOOKS_SET, "Books"),
+    (plumb_index::pages::PAPERS_SET, "Papers"),
+    (
+        plumb_index::pages::STACKOVERFLOW_SET,
+        "Stack Overflow questions",
+    ),
+    (
+        plumb_index::pages::STACKEXCHANGE_SET,
+        "Other Stack Exchange questions",
+    ),
+    (plumb_index::pages::GITHUB_SET, "GitHub repositories"),
+    (plumb_index::pages::PACKAGES_SET, "Software packages"),
+    (plumb_index::pages::DOCS_SET, "Software docs"),
+    (plumb_index::pages::WIKIDATA_SET, "Official profiles"),
+];
+
+/// The kind of result a page is, as [`KINDS`] names it.
+pub fn kind_of(set: &str) -> &str {
+    if set.starts_with("wikipedia-") {
+        "wikipedia"
+    } else {
+        set
+    }
+}
+
+/// How much of one kind of result a searcher wants.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Amount {
+    /// Never shown.
+    Off,
+    /// Moved [`AMOUNT_SHIFT`] places down.
+    Less,
+    /// Where the ranking puts it.
+    #[default]
+    Normal,
+    /// Moved [`AMOUNT_SHIFT`] places up.
+    More,
+}
+
+impl Amount {
+    pub const ALL: [Amount; 4] = [Amount::Off, Amount::Less, Amount::Normal, Amount::More];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Amount::Off => "off",
+            Amount::Less => "less",
+            Amount::Normal => "normal",
+            Amount::More => "more",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Amount> {
+        Amount::ALL
+            .into_iter()
+            .find(|amount| amount.as_str() == text.trim())
+    }
+
+    /// What the About page calls it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Amount::Off => "Off",
+            Amount::Less => "Less",
+            Amount::Normal => "Normal",
+            Amount::More => "More",
+        }
+    }
+}
 
 /// One write at a time: profiles are small.
 static WRITING: Mutex<()> = Mutex::new(());
@@ -65,6 +148,10 @@ pub struct About {
     /// "near me"; empty when not given.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub town: String,
+    /// How much of each kind of result ([`KINDS`]) the searcher wants,
+    /// by kind; kinds left out are [`Amount::Normal`].
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub kinds: BTreeMap<String, Amount>,
 }
 
 /// Why a result was moved, for its label.
@@ -90,6 +177,7 @@ impl About {
                 .filter_map(|item| clean_domain(&item))
                 .collect(),
             town: String::new(),
+            kinds: BTreeMap::new(),
         };
         dedup_by_key(&mut about.interests, |i| i.to_lowercase());
         dedup_by_key(&mut about.pinned, Clone::clone);
@@ -113,6 +201,24 @@ impl About {
         self
     }
 
+    /// This profile with `kinds`, as a form or cookie gave them: kinds
+    /// [`KINDS`] does not name, and normal amounts, are left out.
+    pub fn with_kinds<'a>(mut self, kinds: impl IntoIterator<Item = (&'a str, Amount)>) -> About {
+        self.kinds = kinds
+            .into_iter()
+            .filter(|(kind, amount)| {
+                *amount != Amount::Normal && KINDS.iter().any(|(id, _)| id == kind)
+            })
+            .map(|(kind, amount)| (kind.to_owned(), amount))
+            .collect();
+        self
+    }
+
+    /// How much of the kind of page of `set` the searcher wants.
+    pub fn amount(&self, set: &str) -> Amount {
+        self.kinds.get(kind_of(set)).copied().unwrap_or_default()
+    }
+
     /// The searcher's town, when they gave one.
     pub fn town(&self) -> Option<&str> {
         (!self.town.is_empty()).then_some(self.town.as_str())
@@ -130,6 +236,7 @@ impl About {
             && self.pinned.is_empty()
             && self.hidden.is_empty()
             && self.town.is_empty()
+            && self.kinds.is_empty()
     }
 
     /// Whether `domain`, or a site it belongs to, is never shown.
@@ -173,6 +280,25 @@ impl About {
         if changed {
             // Stable, so equal scores keep their order.
             hits.sort_by(|a, b| b.score.total_cmp(&a.score));
+        }
+    }
+}
+
+impl About {
+    /// Leaves out the `pages` of kinds the searcher turned off and moves
+    /// those they want less or more of down or up the list of `sites`
+    /// sites. A page shown under a site's result stays there.
+    pub fn apply_pages(&self, pages: &mut Vec<PlacedPage>, sites: usize) {
+        if self.kinds.is_empty() {
+            return;
+        }
+        pages.retain(|page| self.amount(&page.hit.page.set) != Amount::Off);
+        for page in pages.iter_mut().filter(|page| page.under.is_none()) {
+            match self.amount(&page.hit.page.set) {
+                Amount::Less => page.at = (page.at + AMOUNT_SHIFT).min(sites),
+                Amount::More => page.at = page.at.saturating_sub(AMOUNT_SHIFT),
+                Amount::Off | Amount::Normal => {}
+            }
         }
     }
 }
@@ -482,6 +608,57 @@ mod tests {
             official: false,
             key_pages: Vec::new(),
         }
+    }
+
+    fn placed(set: &str, title: &str, at: usize, under: Option<&str>) -> PlacedPage {
+        serde_json::from_value(serde_json::json!({
+            "page": {"set": set, "url": format!("https://example.org/{title}"), "title": title, "views": 1},
+            "score": 1.0,
+            "named": false,
+            "under": under,
+            "at": at,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn kinds_of_results_move_their_pages_or_leave_them_out() {
+        let about = About::default().with_kinds([
+            ("podcasts", Amount::Off),
+            ("music", Amount::Less),
+            ("papers", Amount::More),
+            ("wikipedia", Amount::Normal),
+            ("not-a-kind", Amount::Off),
+        ]);
+        assert_eq!(about.kinds.len(), 3, "{:?}", about.kinds);
+        assert!(!about.is_empty());
+        let mut pages = vec![
+            placed("podcasts", "Better Call Saul Insider", 0, None),
+            placed("wikipedia-en", "Better Call Saul", 0, None),
+            placed("music", "Theme", 1, None),
+            placed("music", "Album", 0, Some("amc.com")),
+            placed("papers", "A study", 5, None),
+            placed("music", "Last", 4, None),
+        ];
+        about.apply_pages(&mut pages, 5);
+        let got: Vec<(&str, usize)> = pages
+            .iter()
+            .map(|p| (p.hit.page.title.as_str(), p.at))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("Better Call Saul", 0),
+                ("Theme", 4),
+                ("Album", 0),
+                ("A study", 2),
+                ("Last", 5)
+            ]
+        );
+        // Nothing set changes nothing.
+        let mut same = vec![placed("podcasts", "P", 0, None)];
+        About::default().apply_pages(&mut same, 3);
+        assert_eq!(same[0].at, 0);
     }
 
     #[test]
