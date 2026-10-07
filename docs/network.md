@@ -194,12 +194,30 @@ Tranco, Common Crawl, Wikidata or Wikipedia. The best 50,000 make the first
 index; filling then takes the rest, a round a minute, until the node holds
 `--sites` of them (or as many as its storage and memory allow), and goes on
 filling as usual from there. When no trusted node answers within two
-minutes, or it sends fewer than 1,000 sites, the node downloads the seed
-data as before; so does `--seed-from-outside`, `--no-fill`, or a node that
-trusts no one. Nodes from before this ignore `all` and send crawled sites
+minutes, or it sends fewer than 1,000 sites, the node downloads only the
+Tranco list to start searching, and asks the trusted nodes again before it
+goes on to Wikidata and Wikipedia: if one answers then, its best 50,000
+sites are folded in instead and nothing is asked of Wikidata. Only when no
+trusted node answers again does the node download the rest of the seed
+data; so does `--seed-from-outside`, `--no-fill`, or a node that trusts no
+one. Nodes from before this ignore `all` and send crawled sites
 only, which still sets a node up, without the uncrawled ones. The ranks and
 facts are as fresh as the trusted node's seed: refreshing them means
 reseeding that node.
+
+**Outside data comes from the network first.** Nodes do not each ask
+Wikipedia, Wikidata or other sources for data the network already holds:
+setup takes the sites above from a trusted node, page set files come from
+trusted nodes ([pages.md](pages.md#nodes-in-the-network)), and so does the
+weekly adult blocklist safe search uses: a node whose copy is a week old
+asks its trusted nodes for theirs over `/plumb/pages/1` (as
+`adult-domains`) and takes one younger than a week, keeping that copy's
+date so it ages as the original does. It waits up to ten minutes after
+starting for a trusted node to connect, and downloads the list from its
+source only when none has a fresh copy, so in practice only the nodes that
+build from source (plumbsearch.org) fetch it, once a week. Answers that
+need live data (currency rates, cached six hours) and a page an AI asks
+to read are still fetched by the node that needs them.
 
 ## Network search
 

@@ -394,6 +394,13 @@ fn build_from_file_unless_crawling_only(inner: &Inner) -> Result<Option<ServingI
 /// A failure of Wikidata only sets the time of the next try: it is shown in
 /// the status, but does not hold up other work.
 async fn complete_seed(inner: &Arc<Inner>) -> Result<()> {
+    let from_network = tokio::select! {
+        done = complete_seed_from_network(inner) => done?,
+        () = inner.stopped() => return Err(Stopped.into()),
+    };
+    if from_network {
+        return Ok(());
+    }
     let quick = inner.saved().quick_start;
     if quick {
         info!("downloading the rest of the seed data: Wikidata's official websites and more");
@@ -488,6 +495,36 @@ async fn complete_seed(inner: &Arc<Inner>) -> Result<()> {
     }
     sweep(inner).await;
     Ok(())
+}
+
+/// The rest of the seed data from the network rather than Wikidata: a
+/// node that set up from the Tranco list because no trusted node answered
+/// in time asks again before it goes to Wikidata and Wikipedia, and takes
+/// the best sites of a trusted node's list, which carry the official
+/// sites, facts and intros, as filling does. `false` when no trusted node
+/// answers now either.
+async fn complete_seed_from_network(inner: &Arc<Inner>) -> Result<bool> {
+    let Some((records, downloaded)) = super::fill::seed_from_network(inner).await? else {
+        return Ok(false);
+    };
+    let n = records.len() as u64;
+    blocking(inner, move |inner| {
+        super::network::append_inbox(inner, &records)?;
+        inner.update_saved(|saved| {
+            saved.wikidata_missing = false;
+            saved.quick_start = false;
+            saved.sites_version = SITES_VERSION;
+        })
+    })
+    .await?;
+    inner.add_downloaded(downloaded)?;
+    inner.inbox_records.fetch_add(n, Ordering::SeqCst);
+    inner.wake.notify_one();
+    info!("took {n} sites from a trusted node instead of asking Wikidata");
+    inner.journal.info(format!(
+        "Took the rest of the seed data from a trusted node in the network ({n} sites) instead of Wikidata"
+    ));
+    Ok(true)
 }
 
 /// Brings records made before the lists of sites on subdomains, or before

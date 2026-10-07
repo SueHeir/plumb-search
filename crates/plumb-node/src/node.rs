@@ -629,6 +629,10 @@ pub struct Status {
     pub paused_until: Option<u64>,
     /// Bytes the data folder takes, counted at most a minute ago.
     pub disk_used: u64,
+    /// The storage limit in bytes ([`NodeSettings::storage_limit_mb`]); 0
+    /// when there is none.
+    #[serde(default)]
+    pub storage_limit: u64,
     /// Bytes downloaded today (UTC): crawls and seed data.
     pub downloaded_today: u64,
     /// Bytes downloaded since the node was set up.
@@ -1483,6 +1487,7 @@ impl Inner {
             paused: pause.as_ref().map(|p| p.reason.clone()),
             paused_until: pause.and_then(|p| p.until),
             disk_used: self.disk_used(),
+            storage_limit: self.settings().storage_limit_mb.saturating_mul(MB),
             downloaded_today: saved.downloaded_today(now_unix()),
             downloaded_total: saved.downloaded_total,
             homepages_visited: saved.homepages_visited,

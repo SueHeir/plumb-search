@@ -378,6 +378,16 @@ pub fn reorder(model: &Model, query: &str, hits: &mut Vec<Hit>, placed: &mut Vec
             }
         }
     }
+    // A docs page found by its words never comes before the best site,
+    // whatever the model says: "python package index" wants pypi.org first.
+    if !new_hits.is_empty() {
+        for page in alone
+            .iter_mut()
+            .filter(|p| p.at == 0 && crate::pages::docs_found_by_words(&p.hit))
+        {
+            page.at = 1;
+        }
+    }
     // The moved sites' scores, highest first, in their new order.
     let moved = new_hits
         .iter()
@@ -398,6 +408,7 @@ pub fn reorder(model: &Model, query: &str, hits: &mut Vec<Hit>, placed: &mut Vec
     let under = placed.iter().filter(|p| p.under.is_some()).cloned();
     *placed = alone.into_iter().chain(under).collect();
     *hits = new_hits;
+    crate::pages::keep_page_rules(query, hits, placed);
 }
 
 /// One test search for [`train`]: its query and listed rows, labelled.
@@ -692,7 +703,7 @@ fn build(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pages::{place_pages, Page};
+    use crate::pages::{place_pages, Page, PlacedPage};
     use plumb_core::article::Article;
 
     fn site(domain: &str, score: f32, named: bool) -> Hit {
@@ -709,6 +720,7 @@ mod tests {
             official: false,
             key_pages: Vec::new(),
             demand: None,
+            missing_words: false,
             placing_text_score: None,
         }
     }
@@ -814,6 +826,38 @@ mod tests {
         // Placing the pages again (as the results page does) keeps it first.
         let again = place_pages(query, &hits, placed.iter().map(|p| p.hit.clone()).collect());
         assert_eq!(again[0].at, 0);
+    }
+
+    #[test]
+    fn a_docs_page_found_by_its_words_never_leads() {
+        let model = train(&training(), TrainOptions::default());
+        let mut hits = vec![site("pypi.org", 1.0, false), site("python.org", 0.9, false)];
+        let docs = PageHit {
+            page: Page::from_docs(Article {
+                title: "Software Packaging and Distribution".into(),
+                item: Some("https://docs.python.org/3/library/distribution.html".into()),
+                views: 1_000,
+                ..Article::default()
+            })
+            .unwrap(),
+            score: 0.9,
+            named: false,
+            popularity: 1.0,
+            whole: true,
+            learned: None,
+        };
+        let mut placed = vec![PlacedPage {
+            at: 0,
+            under: None,
+            hit: docs,
+        }];
+        reorder(&model, "python package index", &mut hits, &mut placed);
+        assert!(placed[0].at >= 1, "{:?}", placed[0].at);
+        let expected = match hits.get(placed[0].at) {
+            Some(site) => LearnedPlace::Before(site.domain.clone()),
+            None => LearnedPlace::Last,
+        };
+        assert_eq!(placed[0].hit.learned, Some(expected));
     }
 
     #[test]

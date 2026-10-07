@@ -16,8 +16,8 @@ use std::io::Write;
 use anyhow::{bail, Context, Result};
 use plumb_core::{now_unix, Operators};
 use plumb_index::pages::{
-    add_named_site, lift_named_sites, options_allow, place_operator_pages, place_pages,
-    OPERATOR_PAGES,
+    add_named_site, drop_namesakes_of_words, lift_named_sites, options_allow, place_operator_pages,
+    place_pages, OPERATOR_PAGES,
 };
 use plumb_index::{SearchOptions, SearchResults};
 use plumb_net::pages::MAX_PAGES_CHUNK;
@@ -570,6 +570,9 @@ pub(super) fn add_pages(
                 add_named_site(&mut results.hits, &found, |domain| {
                     index.backend().site(domain)
                 });
+            }
+            if inner.rank.drop_namesakes {
+                drop_namesakes_of_words(&mut results.hits, &found);
             }
             lift_named_sites(&mut results.hits, &found);
             if let Err(err) = searcher.note_demand(&mut results.hits) {
