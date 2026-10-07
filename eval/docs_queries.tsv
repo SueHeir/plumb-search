@@ -1,0 +1,47 @@
+# Searches a software docs page answers, the way coding agents and people
+# write them, with any page of the right docs site expected among the first
+# results (a docs page of the product, or the docs site itself). Run with
+# --pages docs.tsv.gz made with `fetch-pages --set docs` (and the other sets
+# a node keeps).
+python sorting techniques	https://docs.python.org/3/*
+sort a list in python	https://docs.python.org/3/*
+python list comprehension	https://docs.python.org/3/*
+python f-string format	https://docs.python.org/3/*
+python datetime strftime	https://docs.python.org/3/*
+python os.path	https://docs.python.org/3/*
+python asyncio tutorial	https://docs.python.org/3/*
+python virtual environment venv	https://docs.python.org/3/*
+javascript array sort	https://developer.mozilla.org/en-US/docs/*
+javascript array.prototype.map()	https://developer.mozilla.org/en-US/docs/*
+javascript promise all	https://developer.mozilla.org/en-US/docs/*
+fetch api javascript	https://developer.mozilla.org/en-US/docs/*
+css grid layout	https://developer.mozilla.org/en-US/docs/*
+css flexbox justify-content	https://developer.mozilla.org/en-US/docs/*
+html input element	https://developer.mozilla.org/en-US/docs/*
+http status code 418	https://developer.mozilla.org/en-US/docs/*
+rust vec	https://doc.rust-lang.org/std/*
+rust hashmap entry	https://doc.rust-lang.org/std/*
+rust ownership and borrowing	https://doc.rust-lang.org/book/*
+rust traits book	https://doc.rust-lang.org/book/*
+cargo workspaces	https://doc.rust-lang.org/cargo/*,https://doc.rust-lang.org/book/*
+go goroutines	https://go.dev/doc/*,https://go.dev/ref/*
+node.js fs readfile	https://nodejs.org/api/*
+typescript generics	https://www.typescriptlang.org/docs/*
+react useeffect	https://react.dev/reference/*,https://react.dev/learn*
+react usestate hook	https://react.dev/reference/*,https://react.dev/learn*
+django models fields	https://docs.djangoproject.com/en/*
+numpy reshape	https://numpy.org/doc/*
+pandas merge dataframes	https://pandas.pydata.org/docs/*
+postgresql create index	https://www.postgresql.org/docs/*
+postgresql json functions	https://www.postgresql.org/docs/*
+sqlite date and time functions	https://www.sqlite.org/lang*
+docker compose file reference	https://docs.docker.com/reference/*,https://docs.docker.com/compose/*
+kubernetes deployment	https://kubernetes.io/docs/*
+git rebase	https://git-scm.com/docs/*,https://git-scm.com/book/*
+git cherry-pick	https://git-scm.com/docs/*
+github actions workflow syntax	https://docs.github.com/en/*
+php array_map	https://www.php.net/manual/*
+linux chmod command	https://man7.org/linux/man-pages/*
+bash parameter expansion	https://www.gnu.org/software/bash/*
+nginx reverse proxy	https://nginx.org/en/docs/*
+cpp std::vector	https://en.cppreference.com/w/*

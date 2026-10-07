@@ -448,7 +448,7 @@ async fn check_feed(client: &Client, cfg: &CrawlConfig, target: &FeedTarget) -> 
 }
 
 /// One client for the whole batch, so connections are reused.
-fn build_client(cfg: &CrawlConfig) -> reqwest::Result<Client> {
+pub(crate) fn build_client(cfg: &CrawlConfig) -> reqwest::Result<Client> {
     client_builder(cfg).build()
 }
 
@@ -543,7 +543,7 @@ fn start_url(target: &CrawlTarget) -> Result<Url, String> {
 }
 
 /// `raw` as an absolute http(s) URL with a host.
-fn http_url(raw: &str) -> Result<Url, String> {
+pub(crate) fn http_url(raw: &str) -> Result<Url, String> {
     let url = Url::parse(raw.trim()).map_err(|err| format!("invalid URL {raw:?}: {err}"))?;
     if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
         return Err(format!("not an http(s) URL: {raw:?}"));
@@ -604,7 +604,7 @@ fn push_new(urls: &mut Vec<Url>, url: Url) {
 
 /// A failure, to report as [`CrawlOutcome::Failed`].
 #[derive(Debug, Clone)]
-struct Failure {
+pub(crate) struct Failure {
     error: String,
     network: bool,
 }
@@ -649,7 +649,7 @@ fn is_network_error(err: &reqwest::Error) -> bool {
 
 /// What robots.txt says about crawling an origin.
 #[derive(Clone)]
-enum Robots {
+pub(crate) enum Robots {
     /// A robots.txt was fetched and parsed; obey it.
     Rules(Arc<Robot>),
     /// There is no usable robots.txt (4xx, or a redirect chain that does
@@ -662,7 +662,7 @@ enum Robots {
 
 /// One target's crawl: the robots.txt of each origin it visits, and when
 /// each host it asked last answered.
-struct Visit<'a> {
+pub(crate) struct Visit<'a> {
     client: &'a Client,
     cfg: &'a CrawlConfig,
     robots: HashMap<Origin, Robots>,
@@ -670,7 +670,12 @@ struct Visit<'a> {
 }
 
 impl<'a> Visit<'a> {
-    fn new(client: &'a Client, cfg: &'a CrawlConfig) -> Self {
+    /// The client requests are sent with.
+    pub(crate) fn client(&self) -> &'a Client {
+        self.client
+    }
+
+    pub(crate) fn new(client: &'a Client, cfg: &'a CrawlConfig) -> Self {
         Visit {
             client,
             cfg,
@@ -682,7 +687,7 @@ impl<'a> Visit<'a> {
     /// Fetches the page at `start`, following redirects that stay on its
     /// site and checking every URL against the robots.txt of its origin
     /// before requesting it.
-    async fn fetch_homepage(&mut self, domain: &str, start: &Url) -> CrawlOutcome {
+    pub(crate) async fn fetch_homepage(&mut self, domain: &str, start: &Url) -> CrawlOutcome {
         let mut url = start.clone();
         let mut redirects = 0;
         loop {
@@ -812,7 +817,7 @@ impl<'a> Visit<'a> {
     /// also where hosts written as private IP addresses are refused: the
     /// resolver only checks names, and icons, feeds and redirects can
     /// point anywhere.
-    async fn robots(&mut self, url: &Url) -> Robots {
+    pub(crate) async fn robots(&mut self, url: &Url) -> Robots {
         if !self.cfg.allow_private_addresses && crate::read::names_private_ip(url) {
             return Robots::DoNotCrawl(Failure::other(format!("{url}: a private address")));
         }
@@ -878,7 +883,7 @@ impl<'a> Visit<'a> {
     /// last answered (or failed to), and notes when this request is done.
     /// Counting from the answer rather than the request keeps slow hosts
     /// from being asked again right away.
-    async fn send(
+    pub(crate) async fn send(
         &mut self,
         url: &Url,
         delay: Duration,
@@ -1060,7 +1065,7 @@ fn regex_cost(body: &[u8]) -> usize {
 /// Whether `robot` allows `url`. A big robots.txt has many rules to try, so
 /// the matching runs away from the threads driving the fetches; if it
 /// fails, the URL counts as disallowed.
-async fn allowed(robot: &Arc<Robot>, url: &Url) -> bool {
+pub(crate) async fn allowed(robot: &Arc<Robot>, url: &Url) -> bool {
     let (robot, url) = (Arc::clone(robot), url.to_string());
     tokio::task::spawn_blocking(move || robot.allowed(&url))
         .await
@@ -1082,7 +1087,7 @@ fn robots_url(url: &Url) -> Url {
 /// How long to wait before a page request after the last request to the
 /// same host: `per_host_delay`, or the robots.txt `Crawl-delay` (seconds,
 /// capped at [`MAX_CRAWL_DELAY`]) when that is longer.
-fn page_delay(per_host_delay: Duration, crawl_delay: Option<f32>) -> Duration {
+pub(crate) fn page_delay(per_host_delay: Duration, crawl_delay: Option<f32>) -> Duration {
     let robots_delay = match crawl_delay {
         Some(secs) if secs > 0.0 => {
             Duration::from_secs_f32(secs.min(MAX_CRAWL_DELAY.as_secs_f32()))
@@ -1096,7 +1101,7 @@ fn page_delay(per_host_delay: Duration, crawl_delay: Option<f32>) -> Duration {
 /// Where a redirect points: its `Location`, resolved against the response's
 /// URL, without credentials or fragment. `None` unless the status is 301,
 /// 302, 303, 307 or 308 and the `Location` makes an http(s) URL.
-fn redirect_target(response: &Response) -> Option<Url> {
+pub(crate) fn redirect_target(response: &Response) -> Option<Url> {
     if !matches!(response.status().as_u16(), 301 | 302 | 303 | 307 | 308) {
         return None;
     }
@@ -1115,7 +1120,7 @@ fn redirect_target(response: &Response) -> Option<Url> {
 
 /// Same host, or two hosts with the same registrable domain
 /// (`usbank.com` and `www.usbank.com`). Ports and schemes do not matter.
-fn same_site(a: &Url, b: &Url) -> bool {
+pub(crate) fn same_site(a: &Url, b: &Url) -> bool {
     if a.host_str().is_some() && a.host_str() == b.host_str() {
         return true;
     }
@@ -1144,7 +1149,7 @@ fn is_html(content_type: &str) -> bool {
 /// reading once the limit is reached and drops the rest. With gzip the
 /// limit applies to the decompressed bytes. Every byte read is added to
 /// `downloaded`.
-async fn read_body(
+pub(crate) async fn read_body(
     mut response: Response,
     max_bytes: usize,
     downloaded: &AtomicU64,
@@ -1173,7 +1178,7 @@ fn decode_html(body: &[u8]) -> Cow<'_, str> {
 }
 
 /// An error and its causes on one line, like `a: b: c`.
-fn error_text(err: reqwest::Error) -> String {
+pub(crate) fn error_text(err: reqwest::Error) -> String {
     format!("{:#}", anyhow::Error::new(err))
 }
 

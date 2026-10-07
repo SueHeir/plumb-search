@@ -28,6 +28,7 @@ mod feed;
 mod icon;
 mod read;
 mod records;
+mod site_pages;
 mod terms;
 #[cfg(test)]
 mod test_alloc;
@@ -43,6 +44,7 @@ pub use feed::{parse_date, read_feed};
 pub use icon::{normalize_icon, ICON_SIZE};
 pub use read::{page_text, PageReader, ReadConfig, ReadError, ReadPage, MAX_READ_LINKS};
 pub use records::{to_records, CRAWL_VERSION};
+pub use site_pages::{fetch_site_pages, SitePage, SitePagesResult, SitePagesTarget, MAX_SITEMAPS};
 pub use terms::{pick_terms, words_of, TERM_WORDS};
 
 /// Sent with every request so site owners can see who is crawling and why.

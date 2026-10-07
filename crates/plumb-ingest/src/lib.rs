@@ -21,6 +21,7 @@ use flate2::read::MultiGzDecoder;
 pub mod articles;
 pub mod builder;
 pub mod ccranks;
+pub mod docs;
 pub mod download;
 pub mod facts;
 pub mod films;
