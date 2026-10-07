@@ -128,6 +128,23 @@ const FUNCTION_WORDS: &[&str] = &[
 fn is_function_word(word: &str) -> bool {
     FUNCTION_WORDS.contains(&word)
 }
+
+/// Words that ask or say what is wanted rather than name anything: in a
+/// query of two words or more, one of them never matches a domain label,
+/// joined name or other name on its own, nor counts as a leading name, so
+/// who.int is not found for "who wrote hamlet", in.gov for "ups sign in",
+/// website.ws for "amtrak website" or bestbuy.com for "best mattress". The
+/// whole query joined still names a site ("best buy", "my chart").
+const FILLER_WORDS: &[&str] = &[
+    // Asking.
+    "how", "why", "what", "whats", "when", "where", "which", "who", "whom", "whose", "can", "could",
+    "should", "do", "does", "did", "is", "are", "was", "were", "will", "would",
+    // Wanting.
+    "my", "me", "your", "best", "top", "open", "now", "today", "hours", "near", "nearby", "website",
+    "site", "homepage", "app", "login", "signin", "sign", "log", "account", "contact", "support",
+    "help", "official",
+];
+
 /// BM25 boost of a query that is the hostname or URL of an indexed domain.
 const DOMAIN_BOOST: f32 = 10.0;
 /// The share of a word's boost its other number gets ("video" for
@@ -277,6 +294,13 @@ pub struct RankConfig {
     /// wix.com or youtube.com, matching nothing of it, are not listed for
     /// being big. `None` turns it off.
     pub navigational_relevance: Option<f32>,
+    /// The same floor for queries asked as a question ("what is the
+    /// smallest country", "how to boil an egg"): the answer is a page, and
+    /// a site matching next to none of the words is not one, however
+    /// popular (cloudflare.com and stripe.com led such searches at a text
+    /// match of 0.03). The higher of this and the other floor applies.
+    /// `None` turns it off.
+    pub question_relevance: Option<f32>,
     /// For a site that has none of the query's words and is found only
     /// for being near it in meaning, the text match (meaning alone) it
     /// needs for its popularity to count in full; below it, popularity
@@ -304,6 +328,18 @@ pub struct RankConfig {
     /// BM25 boost of a query word matching a site's search terms
     /// ([`plumb_core::SiteRecord::terms`]), picked from its whole homepage.
     pub terms_boost: f32,
+    /// Words that ask or say what is wanted ([`FILLER_WORDS`]) name no site
+    /// in a query of two words or more.
+    pub filler_words: bool,
+    /// A query of three words or more asked as a question ("how to get
+    /// rid of aphids") names no site by its words: none of them matches a
+    /// domain label or joined name on its own, and its first words are no
+    /// leading name. Questions describe what they want; rid.it and get.gov
+    /// are not it.
+    pub questions_name_nothing: bool,
+    /// Add the official site of the article the query names when no site
+    /// found is it ([`pages::add_named_site`]).
+    pub add_named_site: bool,
     /// Put the first results in the order the learned ranking gives
     /// ([`learned::reorder`]), once pages are placed among the sites.
     pub learned: bool,
@@ -325,10 +361,14 @@ impl Default for RankConfig {
             partial_label_bonus: None,
             described_relevance: Some(0.04),
             navigational_relevance: Some(0.05),
+            question_relevance: Some(0.3),
             meaning_only_relevance: Some(0.35),
             named_share: Some(0.4),
             named_needs_all_words: true,
             terms_boost: 1.0,
+            filler_words: true,
+            questions_name_nothing: true,
+            add_named_site: true,
             learned: true,
         }
     }
@@ -804,6 +844,30 @@ impl Searcher {
         self.reader.searcher().doc_freq(&term).is_ok_and(|n| n > 0)
     }
 
+    /// The site `domain`, a canonical domain, as a result no query found:
+    /// no score, no text match, not named.
+    pub fn site(&self, domain: &str) -> Result<Option<Hit>> {
+        if !self.has_domain(domain) {
+            return Ok(None);
+        }
+        let options = SearchOptions {
+            exact: true,
+            ..SearchOptions::default()
+        };
+        let found = self.search_full(domain, 1, &RankConfig::default(), &options)?;
+        Ok(found
+            .hits
+            .into_iter()
+            .find(|hit| hit.domain == domain)
+            .map(|hit| Hit {
+                score: 0.0,
+                text_score: 0.0,
+                placing_text_score: None,
+                named: false,
+                ..hit
+            }))
+    }
+
     /// [`Searcher::search_with`] using [`RankConfig::default`].
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<Hit>> {
         self.search_with(query, limit, &RankConfig::default())
@@ -1096,6 +1160,9 @@ impl Searcher {
             return Ok(Default::default());
         };
         query.terms_boost = cfg.terms_boost;
+        query.filler_words = cfg.filler_words;
+        query.asked =
+            cfg.questions_name_nothing && query.len >= 3 && pages::asked_as_question(query_text);
         let searcher = self.reader.searcher();
         let num_docs = usize::try_from(searcher.num_docs()).unwrap_or(usize::MAX);
         if num_docs == 0 {
@@ -1232,10 +1299,19 @@ impl Searcher {
             Some(described) if !navigational => unit_or(described, default.alpha),
             _ => unit_or(cfg.alpha, default.alpha),
         };
-        let relevance_floor = if navigational {
-            cfg.navigational_relevance
-        } else {
-            cfg.described_relevance
+        let question_floor = cfg
+            .question_relevance
+            .filter(|_| query.len >= 2 && !named_in_full && pages::asked_as_question(query_text));
+        let relevance_floor = match (
+            if navigational {
+                cfg.navigational_relevance
+            } else {
+                cfg.described_relevance
+            },
+            question_floor,
+        ) {
+            (Some(floor), Some(question)) => Some(floor.max(question)),
+            (floor, question) => floor.or(question),
         }
         .filter(|floor| *floor > 0.0);
         let partial_label_bonus = cfg.partial_label_bonus.unwrap_or(cfg.exact_label_bonus);
@@ -1755,6 +1831,9 @@ impl Searcher {
         let mut names: HashMap<DocAddress, NameMatch> = HashMap::new();
         for (key, words) in &query.leading {
             let words = *words;
+            if query.asked || words == 1 && query.len > 1 && query.is_filler(key) {
+                continue;
+            }
             let label = Term::from_field_text(self.fields.label_key, key);
             for addr in matching_docs(searcher, vec![label])? {
                 let name = names.entry(addr).or_default();
@@ -2292,6 +2371,11 @@ struct ParsedQuery {
     domain: Option<String>,
     /// [`RankConfig::terms_boost`].
     terms_boost: f32,
+    /// [`RankConfig::filler_words`].
+    filler_words: bool,
+    /// Asked as a question that names nothing
+    /// ([`RankConfig::questions_name_nothing`]).
+    asked: bool,
 }
 
 impl ParsedQuery {
@@ -2340,7 +2424,15 @@ impl ParsedQuery {
             len: tokens.len(),
             domain: typed_domain(&query),
             terms_boost: 0.0,
+            filler_words: false,
+            asked: false,
         })
+    }
+
+    /// Whether `word` is a [`FILLER_WORDS`] entry and they are taken as
+    /// such.
+    fn is_filler(&self, word: &str) -> bool {
+        self.filler_words && FILLER_WORDS.contains(&word)
     }
 
     /// One boosted BM25 clause per word and field, plus the joined query on
@@ -2382,12 +2474,19 @@ impl ParsedQuery {
         clauses: &mut Clauses,
     ) -> Result<()> {
         let word = &self.words[i];
-        // Only a word joining two others: "to" in "to do list" is a word
-        // of the thing looked for.
-        let joining = i > 0 && i + 1 < self.words.len() && is_function_word(word);
-        let names = self.len == 1 || !joining;
+        // Only a word after others: "to" in "to do list" is a word of the
+        // thing looked for, "in" in "ups sign in" is not.
+        let joining = i > 0 && is_function_word(word);
+        let names = (self.len == 1 || !joining) && !self.asked;
+        // A filler word is no name, nor what a site calls itself or is
+        // called by others: who.int's title and link text say "WHO".
+        let filler = self.len > 1 && self.is_filler(word);
         for (field, boost) in self.per_word(f) {
-            if boost <= 0.0 || (!names && (field == f.label || field == f.joined)) {
+            let name_field = field == f.label || field == f.joined || field == f.aliases;
+            if boost <= 0.0
+                || (!names && name_field)
+                || (filler && (name_field || field == f.title || field == f.anchors))
+            {
                 continue;
             }
             clauses.add(Term::from_field_text(field, word), boost);
@@ -2401,7 +2500,11 @@ impl ParsedQuery {
             Ok((1.0 + (docs - found + 0.5) / (found + 0.5)).ln())
         };
         for (field, boost) in self.per_word(f) {
-            if boost <= 0.0 || field == f.label || field == f.joined {
+            if boost <= 0.0
+                || field == f.label
+                || field == f.joined
+                || (filler && (field == f.aliases || field == f.title || field == f.anchors))
+            {
                 continue;
             }
             let other = Term::from_field_text(field, other);
@@ -2908,6 +3011,125 @@ mod tests {
     }
 
     #[test]
+    fn asking_and_wanting_words_name_no_site() {
+        let records = [
+            site(
+                "who.int",
+                Some("World Health Organization (WHO)"),
+                None,
+                &["WHO"],
+                &[("who", 300)],
+                popular(200, 5_000),
+            ),
+            site(
+                "in.gov",
+                Some("Austin Indiana"),
+                None,
+                &[],
+                &[],
+                popular(900, 2_000),
+            ),
+            site(
+                "website.ws",
+                Some("WebSite.ws"),
+                None,
+                &[],
+                &[],
+                obscure(20_000, 300),
+            ),
+            site(
+                "ups.com",
+                Some("UPS"),
+                Some("Shipping and tracking."),
+                &["UPS"],
+                &[("ups", 300)],
+                popular(300, 3_000),
+            ),
+            site(
+                "hamletguide.org",
+                Some("Hamlet study guide"),
+                Some("Who wrote Hamlet, and when."),
+                &[],
+                &[],
+                obscure(300_000, 3),
+            ),
+            site(
+                "amtrak.com",
+                Some("Amtrak"),
+                None,
+                &["Amtrak"],
+                &[("amtrak", 200)],
+                popular(800, 2_000),
+            ),
+        ];
+        let mut records = records.to_vec();
+        records.push(site(
+            "rid.it",
+            Some("RID"),
+            None,
+            &[],
+            &[],
+            popular(5_000, 900),
+        ));
+        records.push(site(
+            "aphidfacts.org",
+            Some("Aphids"),
+            Some("How to get rid of aphids in the garden."),
+            &[],
+            &[],
+            obscure(300_000, 3),
+        ));
+        records.push(site(
+            "earthhour.org",
+            Some("Earth Hour"),
+            None,
+            &["Earth Hour"],
+            &[("earth hour", 50)],
+            popular(3_000, 900),
+        ));
+        records.push(site(
+            "rei.com",
+            Some("REI Co-op"),
+            None,
+            &["REI"],
+            &[("rei", 100)],
+            popular(900, 1_000),
+        ));
+        let (_dir, searcher) = build(&records);
+        for (query, wrong) in [
+            ("rei hours", "earthhour.org"),
+            ("who wrote hamlet", "who.int"),
+            ("ups sign in", "in.gov"),
+            ("amtrak website", "website.ws"),
+        ] {
+            let hits = searcher.search(query, 10).unwrap();
+            assert!(
+                !domains(&hits).contains(&wrong),
+                "{query:?}: {:?}",
+                domains(&hits)
+            );
+        }
+        assert_eq!(top(&searcher, "who wrote hamlet"), "hamletguide.org");
+        // A question names nothing: rid.it, popular and with "RID" in its
+        // title, has one word of it, but not as its name.
+        let rid = |cfg: &RankConfig| {
+            searcher
+                .search_with("how to get rid of aphids", 10, cfg)
+                .unwrap()
+                .into_iter()
+                .find(|hit| hit.domain == "rid.it")
+                .map_or(0.0, |hit| hit.score)
+        };
+        let naming = RankConfig {
+            questions_name_nothing: false,
+            ..RankConfig::default()
+        };
+        assert!(rid(&RankConfig::default()) < rid(&naming));
+        // Alone, they are names.
+        assert_eq!(top(&searcher, "who"), "who.int");
+    }
+
+    #[test]
     fn sites_with_one_word_of_a_known_name_are_left_out() {
         let records = [
             site(
@@ -3243,6 +3465,7 @@ mod tests {
         };
         let before = RankConfig {
             meaning_only_relevance: None,
+            question_relevance: None,
             ..RankConfig::default()
         };
         // On popularity alone it would have come before the plumbers...
@@ -3832,7 +4055,7 @@ mod tests {
     #[test]
     fn site_search_needs_the_site_first_and_more_than_a_common_word() {
         let mut records = corpus();
-        let mut get = site("get.gov", Some("Get"), None, &[], &[], ranked(5_000, 100));
+        let mut get = site("get.gov", Some("Get"), None, &[], &[], ranked(50_000, 10));
         get.search_url = Some("https://get.gov/search?q={searchTerms}".into());
         records.push(get);
         for i in 0..25 {
@@ -4762,8 +4985,6 @@ mod tests {
             "amazon-prime-refund.com"
         );
 
-        // Without the trust rule the stuffed titles win, which is what it is
-        // for ("login" kept, as in an exact search).
         let untrusting = RankConfig {
             trusted_link_score: 0.0,
             ..RankConfig::default()
@@ -4772,11 +4993,13 @@ mod tests {
             exact: true,
             ..SearchOptions::default()
         };
+        // "login" names no site, so the look-alike's domain does not win
+        // "us bank login" even without the trust rule, in an exact search.
         let hits = searcher
             .search_full("us bank login", 1, &untrusting, &exact)
             .unwrap()
             .hits;
-        assert_eq!(hits[0].domain, "usbank-login-help.com");
+        assert_eq!(hits[0].domain, "usbank.com");
     }
 
     #[test]
@@ -5476,6 +5699,8 @@ mod tests {
                 len: 2,
                 domain: None,
                 terms_boost: 0.0,
+                filler_words: false,
+                asked: false,
             }
         );
         let keys = |parsed: ParsedQuery| -> Vec<String> {

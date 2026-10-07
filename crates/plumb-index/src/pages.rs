@@ -1604,6 +1604,42 @@ const LIFTED_FROM: usize = 5;
 /// (0.41).
 const LIFT_LINK_MARGIN: f32 = 0.2;
 
+/// Adds the official site of the best article the query names when the
+/// sites found leave it out, as the [`LIFTED_FROM`]th site or last, so
+/// that [`lift_named_sites`] can weigh it: "better call saul" names the
+/// article whose site is amc.com, which no word of the query matches.
+/// `site` gives the site of a domain; one with no Wikidata item
+/// ([`crate::Hit::official`]) is not added. Returns whether it added one.
+pub fn add_named_site(
+    sites: &mut Vec<crate::Hit>,
+    pages: &[PageHit],
+    site: impl Fn(&str) -> Option<crate::Hit>,
+) -> bool {
+    let Some(domain) = pages
+        .iter()
+        .find(|hit| hit.named && hit.page.item.is_some())
+        .and_then(|hit| hit.page.site.as_deref())
+    else {
+        return false;
+    };
+    if sites.is_empty() || sites.iter().any(|hit| hit.domain == domain) {
+        return false;
+    }
+    let Some(mut added) = site(domain).filter(|hit| hit.official) else {
+        return false;
+    };
+    let at = sites.len().min(LIFTED_FROM - 1);
+    // Scored between its neighbours, so a later sort by score keeps it
+    // there.
+    let above = sites[at - 1].score;
+    added.score = match sites.get(at) {
+        Some(below) => (above + below.score) / 2.0,
+        None => above - above.abs().max(1.0) * 1e-3,
+    };
+    sites.insert(at, added);
+    true
+}
+
 /// Puts first the official site of the best page the query names, when
 /// it is among the first [`LIFTED_FROM`] sites: what Wikipedia and
 /// Wikidata call exactly what was searched for says which site it is.
@@ -2576,6 +2612,41 @@ mod tests {
         sites[1].official = true;
         lift_named_sites(&mut sites, &[music]);
         assert_eq!(sites[0].domain, "youtube.de");
+    }
+
+    #[test]
+    fn the_site_of_the_article_named_is_added_when_missing() {
+        let mut sites = vec![
+            site("comedycentral.com", false),
+            site("callofduty.com", false),
+            site("walmart.com", false),
+        ];
+        for (i, s) in sites.iter_mut().enumerate() {
+            s.score = 1.0 - i as f32 * 0.1;
+        }
+        let mut show = found("Better Call Saul", Some("amc.com"), true, 0.9);
+        show.page.item = Some("Q3010697".into());
+        let amc = |domain: &str| {
+            let mut hit = known_site(domain, false, 0.7);
+            hit.official = domain == "amc.com";
+            Some(hit)
+        };
+        assert!(add_named_site(&mut sites, &[show.clone()], amc));
+        let order: Vec<&str> = sites.iter().map(|s| s.domain.as_str()).collect();
+        assert_eq!(
+            order,
+            [
+                "comedycentral.com",
+                "callofduty.com",
+                "walmart.com",
+                "amc.com"
+            ]
+        );
+        assert!(sites[3].score < sites[2].score);
+        // Once is enough, and a site Wikidata does not know is not added.
+        assert!(!add_named_site(&mut sites, &[show.clone()], amc));
+        show.page.site = Some("fans.example".into());
+        assert!(!add_named_site(&mut sites, &[show], amc));
     }
 
     #[test]
