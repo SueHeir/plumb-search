@@ -4,7 +4,6 @@
   "hosts": ["www.googleapis.com", "i.ytimg.com"],
   "keywords": ["ytm", "youtube music", "yt", "youtube"],
   "ids": [
-    "youtube",
     "youtube-video",
     "musicbrainz-artist",
     "musicbrainz-album",

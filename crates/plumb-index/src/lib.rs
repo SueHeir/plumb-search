@@ -1406,10 +1406,11 @@ impl Searcher {
 
         // Copies of the site the query names on other top-level domains
         // (gmail.ru, gmail.hu for "gmail"; paypal.biz for "paypal"): never
-        // crawled, nothing says what they are, little linked. They go
-        // after every other site rather than crowding the first page.
-        // Country sites of the brand are kept where they rank: they are
-        // well known (amazon.de) or crawled (toyota.jp).
+        // crawled, nothing says what they are, little linked. They are
+        // left out: a bare facebook.co under facebook.com only looks like
+        // a trap. Typed, they are still found. Country sites of the brand
+        // are kept where they rank: they are well known (amazon.de) or
+        // crawled (toyota.jp).
         if let Some(top) = ranked
             .first()
             .filter(|top| top.named && top.link_score >= WELL_KNOWN_LINK_SCORE)
@@ -1430,10 +1431,7 @@ impl Searcher {
                         copies.insert(r.addr);
                     }
                 }
-                if !copies.is_empty() {
-                    // Stable: the copies keep their order among themselves.
-                    ranked.sort_by_key(|r| copies.contains(&r.addr));
-                }
+                ranked.retain(|r| !copies.contains(&r.addr));
             }
         }
 
@@ -1455,13 +1453,31 @@ impl Searcher {
         // someone else's product ("Outlook Web App" on bpl.net for
         // "microsoft outlook"). live.com, titled "Outlook", is Microsoft's.
         let ranked = self.untitled_last(&searcher, ranked, limit)?;
-        let mut hits = Vec::with_capacity(limit.min(ranked.len()));
+        let mut hits: Vec<Hit> = Vec::with_capacity(limit.min(ranked.len()));
         for ranked in ranked {
             if hits.len() == limit {
                 break;
             }
             let named = ranked.named;
             let hit = self.hit(&searcher, ranked)?;
+            // One site per brand: google.co.uk, google.de and google.fr
+            // under google.com for "search engines" are the same site
+            // again, titled the same or not at all. The best ranked of
+            // them stays; a country site with a title of its own
+            // (amazon.co.jp's) does too.
+            let same_title = |kept: &Hit| {
+                hit.title.as_deref().is_none_or(|title| {
+                    kept.title
+                        .as_deref()
+                        .is_some_and(|kept| normalize_text(kept) == normalize_text(title))
+                })
+            };
+            if hits
+                .iter()
+                .any(|kept| country_copy(&kept.domain, &hit.domain) && same_title(kept))
+            {
+                continue;
+            }
             let left_out = is_reserved_name(&hit.domain)
                 || is_pill_shop(&hit.domain, hit.link_score)
                 || (hit.link_score < WELL_KNOWN_LINK_SCORE
@@ -1916,6 +1932,22 @@ fn words_after(analyzer: &TextAnalyzer, query: &str, words: usize) -> Option<Str
         }
     }
     None
+}
+
+/// Whether `b` is `a` on another top-level domain where one of them is a
+/// country's: google.de for google.com, facebook.co for facebook.com.
+/// Sites with the same label on two generic domains (swift.com,
+/// swift.org) are often not one site, so they are not copies.
+fn country_copy(a: &str, b: &str) -> bool {
+    let (Some((label_a, tld_a)), Some((label_b, tld_b))) = (a.split_once('.'), b.split_once('.'))
+    else {
+        return false;
+    };
+    if registrable_domain(a).as_deref() != Some(a) || registrable_domain(b).as_deref() != Some(b) {
+        return false;
+    }
+    let country = |tld: &str| tld.rsplit('.').next().is_some_and(|last| last.len() == 2);
+    label_a == label_b && tld_a != tld_b && (country(tld_a) || country(tld_b))
 }
 
 /// How many of the query's words, from the first on, a site's names cover.
@@ -2563,9 +2595,11 @@ mod tests {
         ];
         let (_dir, searcher) = build(&records);
         let hits = searcher.search("gmail", 10).unwrap();
-        assert_eq!(domains(&hits), ["gmail.com", "gmail.ru"]);
+        assert_eq!(domains(&hits), ["gmail.com"]);
         assert_eq!(hits[0].title.as_deref(), Some("Gmail"));
-        assert_eq!(hits[1].title, None);
+        let hits = searcher.search("gmail.ru", 10).unwrap();
+        assert_eq!(hits[0].domain, "gmail.ru");
+        assert_eq!(hits[0].title, None);
     }
 
     #[test]
@@ -2591,19 +2625,14 @@ mod tests {
             ),
         ];
         let (_dir, searcher) = build(&records);
+        // The bare copies of netflix.com are left out altogether.
         let hits = searcher.search_with("netflix", 10, &keep_all()).unwrap();
-        assert_eq!(
-            domains(&hits),
-            [
-                "netflix.com",
-                "netflixfans.org",
-                "netflix.net",
-                "netflix.info"
-            ]
-        );
-        // Bare domains still come back when nothing titled is left.
-        let hits = searcher.search_with("netflix", 2, &keep_all()).unwrap();
         assert_eq!(domains(&hits), ["netflix.com", "netflixfans.org"]);
+        // Typed, a bare one is found.
+        let hits = searcher
+            .search_with("netflix.net", 10, &keep_all())
+            .unwrap();
+        assert_eq!(hits[0].domain, "netflix.net");
     }
 
     #[test]
@@ -3762,7 +3791,7 @@ mod tests {
     }
 
     #[test]
-    fn copies_of_the_named_site_on_other_domains_come_after_the_rest() {
+    fn copies_of_the_named_site_on_other_domains_are_left_out() {
         let records = [
             site(
                 "gmail.com",
@@ -3803,13 +3832,79 @@ mod tests {
         let order = domains(&hits);
         assert_eq!(order[0], "gmail.com", "{order:?}");
         let at = |d: &str| order.iter().position(|o| *o == d).unwrap();
-        // Copies with nothing to say go last; a crawled one keeps its place.
-        assert!(at("gmail.ru") > at("gmailtips.net"), "{order:?}");
-        assert!(at("gmail.hu") > at("gmailtips.net"), "{order:?}");
-        assert!(at("gmail.jp") < at("gmail.ru"), "{order:?}");
+        // Copies with nothing to say are left out; a crawled one keeps its
+        // place.
+        assert!(!order.contains(&"gmail.ru"), "{order:?}");
+        assert!(!order.contains(&"gmail.hu"), "{order:?}");
+        assert!(at("gmail.jp") > 0, "{order:?}");
+        assert!(order.contains(&"gmailtips.net"), "{order:?}");
         // Typed, the copy is what was asked for.
         let hits = searcher.search("gmail.ru", 10).unwrap();
         assert_eq!(hits[0].domain, "gmail.ru", "{:?}", domains(&hits));
+    }
+
+    #[test]
+    fn country_copies_of_a_site_are_listed_once() {
+        let engine = |domain: &str, rank: u32| {
+            site(
+                domain,
+                Some("Google"),
+                Some("Search the world's information. Google search engine."),
+                &[],
+                &[("search engine", 50)],
+                popular(rank, 1_000),
+            )
+        };
+        let records = [
+            engine("google.com", 1),
+            engine("google.co.uk", 20),
+            engine("google.de", 25),
+            engine("google.fr", 30),
+            site(
+                "bing.com",
+                Some("Bing"),
+                Some("Microsoft's search engine."),
+                &[],
+                &[("search engine", 20)],
+                popular(40, 500),
+            ),
+            site(
+                "swift.org",
+                Some("Swift search engines"),
+                Some("Swift search engines."),
+                &[],
+                &[],
+                popular(500, 50),
+            ),
+            site(
+                "swift.com",
+                Some("Swift search engines"),
+                Some("Swift search engines."),
+                &[],
+                &[],
+                popular(600, 50),
+            ),
+        ];
+        let (_dir, searcher) = build(&records);
+        let hits = searcher.search("search engines", 10).unwrap();
+        let order = domains(&hits);
+        assert_eq!(
+            order.iter().filter(|d| d.starts_with("google.")).count(),
+            1,
+            "{order:?}"
+        );
+        assert!(order.contains(&"bing.com"), "{order:?}");
+        // The same label on two generic domains is not one site.
+        assert!(
+            order.contains(&"swift.org") && order.contains(&"swift.com"),
+            "{order:?}"
+        );
+        // Typed, a copy is what was asked for.
+        assert_eq!(top(&searcher, "google.de"), "google.de");
+        assert!(country_copy("google.com", "google.co.uk"));
+        assert!(country_copy("facebook.com", "facebook.co"));
+        assert!(!country_copy("news.ycombinator.com", "news.bbc.co.uk"));
+        assert!(!country_copy("swift.com", "swift.org"));
     }
 
     #[test]

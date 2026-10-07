@@ -5,8 +5,10 @@
 
 use std::fmt::Write as _;
 
+use plumb_core::normalize_text;
 use plumb_core::place::{Place, OSM_COPYRIGHT_URL};
 use plumb_index::places::{PlaceHit, PlaceResults};
+use plumb_index::Hit;
 
 use super::{escape_html, http_url, Icons};
 
@@ -242,6 +244,82 @@ pub(super) fn website_domains(found: &PlaceResults) -> Vec<String> {
         .collect()
 }
 
+/// The domains of the places' own websites, each once, in the order the
+/// places are listed.
+pub(super) fn local_domains(found: &PlaceResults) -> Vec<String> {
+    let mut domains: Vec<String> = Vec::new();
+    for domain in website_domains(found) {
+        if !domains.contains(&domain) {
+            domains.push(domain);
+        }
+    }
+    domains
+}
+
+/// The sites for a query that lists places around a town ("brewery in
+/// denver"): the places' own sites (`local`, from [`local_domains`])
+/// first, then the sites that say what was looked for, then the rest,
+/// which match the town's name only (the city's own site, its football
+/// team). At most `limit`, or as many as there were.
+pub(super) fn local_first(
+    found: &PlaceResults,
+    hits: &mut Vec<Hit>,
+    local: Vec<Hit>,
+    limit: usize,
+) {
+    if found.center.is_none() || found.hits.is_empty() || found.near_me {
+        return;
+    }
+    let roots: Vec<String> = normalize_text(&found.what)
+        .split(' ')
+        .filter_map(word_root)
+        .collect();
+    if roots.is_empty() {
+        return;
+    }
+    let says_what = |hit: &Hit| {
+        let text = normalize_text(&format!(
+            "{} {}",
+            hit.title.as_deref().unwrap_or(""),
+            hit.description.as_deref().unwrap_or("")
+        ));
+        let words: Vec<&str> = text.split(' ').collect();
+        roots
+            .iter()
+            .all(|root| words.iter().any(|w| w.starts_with(root.as_str())))
+    };
+    let keep = hits.len().max(limit.min(hits.len() + local.len()));
+    let rest = std::mem::take(hits);
+    let mut sorted: Vec<Hit> = local;
+    let (what, town): (Vec<Hit>, Vec<Hit>) = rest
+        .into_iter()
+        .filter(|hit| !sorted.iter().any(|s| s.domain == hit.domain))
+        .partition(says_what);
+    sorted.extend(what);
+    sorted.extend(town);
+    sorted.truncate(keep);
+    *hits = sorted;
+}
+
+/// What a word of a query starts with in its other forms: "brewer" for
+/// "brewery" and "breweries", "hotel" for "hotels". `None` for words too
+/// short to tell by.
+fn word_root(word: &str) -> Option<String> {
+    let root = if let Some(stem) = word.strip_suffix("ies") {
+        stem
+    } else if let Some(stem) = word.strip_suffix('y') {
+        stem
+    } else if let Some(stem) = word
+        .strip_suffix("es")
+        .filter(|w| w.ends_with(['s', 'x', 'h']))
+    {
+        stem
+    } else {
+        word.strip_suffix('s').unwrap_or(word)
+    };
+    (root.chars().count() >= 3).then(|| root.to_string())
+}
+
 /// openstreetmap.org around `center`, zoomed to show `km` around it.
 fn area_url(center: &Place, km: f64) -> String {
     let zoom = match km {
@@ -343,6 +421,16 @@ fn render_map(center: &Place, hits: &[PlaceHit], miles: bool) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn words_match_their_other_forms() {
+        assert_eq!(word_root("brewery").as_deref(), Some("brewer"));
+        assert_eq!(word_root("breweries").as_deref(), Some("brewer"));
+        assert_eq!(word_root("hotels").as_deref(), Some("hotel"));
+        assert_eq!(word_root("pizza").as_deref(), Some("pizza"));
+        assert_eq!(word_root("bars").as_deref(), Some("bar"));
+        assert_eq!(word_root("ny"), None);
+    }
+
     use super::*;
 
     fn place(name: &str, kind: &str, lat: f64, lon: f64) -> Place {
