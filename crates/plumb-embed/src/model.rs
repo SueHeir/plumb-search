@@ -9,6 +9,8 @@ use candle_transformers::models::bert::{BertModel, Config};
 use sha2::{Digest, Sha256};
 use tokenizers::{Tokenizer, TruncationParams};
 
+use crate::server::Server;
+
 /// The model: BAAI's small English embedding model, 384 values per text.
 pub const MODEL_NAME: &str = "BAAI/bge-small-en-v1.5";
 /// Where the model's files are downloaded from: each of [`MODEL_FILES`]
@@ -44,15 +46,34 @@ pub fn quantize(values: &[f32]) -> Vec<i8> {
 
 /// Turns texts into vectors with the model.
 pub struct Embedder {
-    model: BertModel,
-    tokenizer: Tokenizer,
+    runner: Runner,
     id: ModelId,
     dim: usize,
 }
 
+/// What runs the model. One per process, so its size does not matter.
+#[allow(clippy::large_enum_variant)]
+enum Runner {
+    /// Plumb itself: the pinned model.
+    Bert {
+        model: BertModel,
+        tokenizer: Tokenizer,
+    },
+    /// An embedding server ([`crate::SERVER_FILE`]), for trying other models.
+    Server(Server),
+}
+
 impl Embedder {
-    /// Loads the model whose [`MODEL_FILES`] are in `dir`.
+    /// Loads the model whose [`MODEL_FILES`] are in `dir`, or the
+    /// embedding server `dir`'s [`crate::SERVER_FILE`] names.
     pub fn load(dir: &Path) -> Result<Self> {
+        if let Some((server, id, dim)) = Server::load(dir)? {
+            return Ok(Embedder {
+                runner: Runner::Server(server),
+                id,
+                dim,
+            });
+        }
         let id = model_id(dir)?;
         let read = |name: &str| {
             let path = dir.join(name);
@@ -86,8 +107,7 @@ impl Embedder {
         let dim = config.hidden_size;
         let model = BertModel::load(vb, &config).context("loading the model")?;
         Ok(Embedder {
-            model,
-            tokenizer,
+            runner: Runner::Bert { model, tokenizer },
             id,
             dim,
         })
@@ -103,23 +123,26 @@ impl Embedder {
         self.dim
     }
 
-    /// The vector of `text`: the model's output for its first token (how
-    /// BAAI's models are meant to be used), scaled to length 1 and
-    /// [`quantize`]d. An empty text gives the vector of no words.
+    /// The vector of a site's `text`: the model's output for its first
+    /// token (how BAAI's models are meant to be used), scaled to length 1
+    /// and [`quantize`]d. An empty text gives the vector of no words.
     pub fn embed(&self, text: &str) -> Result<Vec<i8>> {
-        let encoding = self
-            .tokenizer
+        let (model, tokenizer) = match &self.runner {
+            Runner::Bert { model, tokenizer } => (model, tokenizer),
+            Runner::Server(server) => return server.embed_text(text),
+        };
+        let encoding = tokenizer
             .encode(text, true)
             .map_err(|err| anyhow!("splitting text into tokens: {err}"))?;
         let ids = encoding.get_ids();
         if ids.is_empty() {
             bail!("the tokenizer gave no tokens");
         }
-        let device = &self.model.device;
+        let device = &model.device;
         let input = Tensor::new(ids, device)?.unsqueeze(0)?;
         let types = input.zeros_like()?;
         let mask = input.ones_like()?;
-        let output = self.model.forward(&input, &types, Some(&mask))?;
+        let output = model.forward(&input, &types, Some(&mask))?;
         let first: Vec<f32> = output.get(0)?.get(0)?.to_vec1()?;
         // Summed in order on one thread, so the length is the same anywhere.
         let length = first.iter().map(|x| x * x).sum::<f32>().sqrt();
@@ -128,6 +151,15 @@ impl Embedder {
         }
         let unit: Vec<f32> = first.iter().map(|x| x / length).collect();
         Ok(quantize(&unit))
+    }
+
+    /// The vector of a search `query`: as [`Embedder::embed`] for the
+    /// pinned model; after the server's query prefix for a server.
+    pub fn embed_query(&self, query: &str) -> Result<Vec<i8>> {
+        match &self.runner {
+            Runner::Bert { .. } => self.embed(query),
+            Runner::Server(server) => server.embed_query(query),
+        }
     }
 }
 
