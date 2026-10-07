@@ -328,7 +328,11 @@ pub fn build_place_index(
         }
     }
     writer.commit().context("writing the place index")?;
-    drop(writer);
+    // A merge the commit started must end before the index is put in
+    // place: one cut short leaves its segment files behind for good.
+    writer
+        .wait_merging_threads()
+        .context("finishing the place index merges")?;
     std::fs::write(
         staging.path().join("places.json"),
         serde_json::to_vec(&stats)?,

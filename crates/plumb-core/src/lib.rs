@@ -461,7 +461,7 @@ impl SiteRecord {
     pub fn merge(&mut self, other: SiteRecord) {
         debug_assert_eq!(self.domain, other.domain);
         if let Some(gone) = self.gone_at {
-            if !other.crawled_at.is_some_and(|at| at > gone) {
+            if other.crawled_at.is_none_or(|at| at <= gone) {
                 // Nothing reached it since it went: only its crawl marks
                 // and ranks change, so it stays small and stays out.
                 self.merge_signals(&other.signals);
