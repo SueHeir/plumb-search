@@ -346,6 +346,8 @@ pub struct RankConfig {
     pub add_named_site: bool,
     /// Leave out sites lacking some of the query's main words when the
     /// whole query names an article ([`pages::drop_namesakes_of_words`]).
+    /// Off: the test searches came out better without it (17 better, 14
+    /// worse), the described ones most of all.
     pub drop_namesakes: bool,
     /// Put the first results in the order the learned ranking gives
     /// ([`learned::reorder`]), once pages are placed among the sites.
@@ -376,7 +378,7 @@ impl Default for RankConfig {
             filler_words: true,
             questions_name_nothing: true,
             add_named_site: true,
-            drop_namesakes: true,
+            drop_namesakes: false,
             learned: true,
         }
     }
