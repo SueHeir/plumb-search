@@ -325,6 +325,9 @@ pub struct RankConfig {
     /// Words that ask or say what is wanted ([`FILLER_WORDS`]) name no site
     /// in a query of two words or more.
     pub filler_words: bool,
+    /// Add the official site of the article the query names when no site
+    /// found is it ([`pages::add_named_site`]).
+    pub add_named_site: bool,
     /// Put the first results in the order the learned ranking gives
     /// ([`learned::reorder`]), once pages are placed among the sites.
     pub learned: bool,
@@ -352,6 +355,7 @@ impl Default for RankConfig {
             named_needs_all_words: true,
             terms_boost: 1.0,
             filler_words: true,
+            add_named_site: true,
             learned: true,
         }
     }
@@ -825,6 +829,30 @@ impl Searcher {
     pub fn has_domain(&self, domain: &str) -> bool {
         let term = Term::from_field_text(self.fields.domain, domain);
         self.reader.searcher().doc_freq(&term).is_ok_and(|n| n > 0)
+    }
+
+    /// The site `domain`, a canonical domain, as a result no query found:
+    /// no score, no text match, not named.
+    pub fn site(&self, domain: &str) -> Result<Option<Hit>> {
+        if !self.has_domain(domain) {
+            return Ok(None);
+        }
+        let options = SearchOptions {
+            exact: true,
+            ..SearchOptions::default()
+        };
+        let found = self.search_full(domain, 1, &RankConfig::default(), &options)?;
+        Ok(found
+            .hits
+            .into_iter()
+            .find(|hit| hit.domain == domain)
+            .map(|hit| Hit {
+                score: 0.0,
+                text_score: 0.0,
+                placing_text_score: None,
+                named: false,
+                ..hit
+            }))
     }
 
     /// [`Searcher::search_with`] using [`RankConfig::default`].

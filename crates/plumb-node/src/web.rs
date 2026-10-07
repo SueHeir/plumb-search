@@ -279,6 +279,12 @@ impl IndexBackend {
     }
 
     /// Whether the index holds `domain`.
+    /// The site `domain` as a result no query found
+    /// ([`Searcher::site`]).
+    pub fn site(&self, domain: &str) -> Option<Hit> {
+        self.searcher.site(domain).ok().flatten()
+    }
+
     pub fn has_domain(&self, domain: &str) -> bool {
         self.searcher.has_domain(domain)
     }

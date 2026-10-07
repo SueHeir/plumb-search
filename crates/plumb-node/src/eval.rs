@@ -18,7 +18,9 @@ use anyhow::{bail, Context, Result};
 use plumb_core::registrable_domain;
 use std::path::Path;
 
-use plumb_index::pages::{lift_named_sites, place_pages, Page, PageSearcher, PlacedPage};
+use plumb_index::pages::{
+    add_named_site, lift_named_sites, place_pages, Page, PageSearcher, PlacedPage,
+};
 use plumb_index::{Hit, Meaning, SearchOptions, Searcher};
 use tracing::info;
 
@@ -407,6 +409,11 @@ fn evaluate(
                     .search(&searched, 10)
                     .with_context(|| format!("searching pages for {searched:?}"))?;
                 let mut lifted = hits.clone();
+                if cfg.add_named_site {
+                    add_named_site(&mut lifted, &found, |domain| {
+                        searcher.site(domain).ok().flatten()
+                    });
+                }
                 lift_named_sites(&mut lifted, &found);
                 pages.note_demand(&mut lifted)?;
                 let mut placed = place_pages(&searched, &lifted, found);
