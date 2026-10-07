@@ -1355,6 +1355,19 @@ impl PageSearcher {
                 }
             }
         }
+        // The query's rarest word that some question has: what it is
+        // about. A question without it has only the asking words ("how to
+        // get rid of aphids" found "How do I get rid of my bounty?").
+        let mut topic_word: Option<(u64, &String)> = None;
+        if stems.len() >= QUESTION_QUERY_WORDS {
+            for stem in &stems {
+                let found = searcher.doc_freq(&Term::from_field_text(self.fields.topic, stem))?;
+                if found > 0 && topic_word.is_none_or(|(least, _)| found < least) {
+                    topic_word = Some((found, stem));
+                }
+            }
+        }
+        let topic_word = topic_word.map(|(_, stem)| stem.as_str());
         let mut hits = Vec::new();
         for address in addresses {
             let document: TantivyDocument = searcher.doc(address)?;
@@ -1406,7 +1419,7 @@ impl PageSearcher {
             if asked_by_title {
                 (name, named, whole) = (name.max(ALIAS_MATCH), true, true);
             } else if !named && (page.set != DOCS_SET || docs_asked(&page, query)) {
-                let (question, asked) = self.question_match(&page, &stems);
+                let (question, asked) = self.question_match(&page, &stems, topic_word);
                 name = name.max(question);
                 whole = asked;
             }
@@ -1493,8 +1506,14 @@ impl PageSearcher {
     /// at least [`QUESTION_SHARE`] of at least [`QUESTION_QUERY_WORDS`].
     /// And whether the query asks the question as a whole: it has all of
     /// the query's words, and the query at least [`QUESTION_TITLE_SHARE`]
-    /// of its title's.
-    fn question_match(&self, page: &Page, stems: &[String]) -> (f32, bool) {
+    /// of its title's. A question without `topic_word`, the query's rarest
+    /// word, matches not at all.
+    fn question_match(
+        &self,
+        page: &Page,
+        stems: &[String],
+        topic_word: Option<&str>,
+    ) -> (f32, bool) {
         if stems.len() < QUESTION_QUERY_WORDS {
             return (0.0, false);
         }
@@ -1504,6 +1523,9 @@ impl PageSearcher {
         let words: HashSet<String> = analysis::tokens(&self.stemmed, &topic)
             .into_iter()
             .collect();
+        if topic_word.is_some_and(|word| !words.contains(word)) {
+            return (0.0, false);
+        }
         let share =
             stems.iter().filter(|stem| words.contains(*stem)).count() as f32 / stems.len() as f32;
         if share < QUESTION_SHARE {
@@ -1855,7 +1877,12 @@ pub fn lift_named_sites(sites: &mut [crate::Hit], pages: &[PageHit]) {
 /// A page the learned ranking listed on its own ([`PageHit::learned`])
 /// stays where it put it: before the same site, or last, except that a
 /// docs page found by its words never comes before the best site.
-pub fn place_pages(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) -> Vec<PlacedPage> {
+pub fn place_pages(query: &str, sites: &[crate::Hit], mut pages: Vec<PageHit>) -> Vec<PlacedPage> {
+    if !asks_for_podcasts(query) {
+        // Podcasts it does not ask for take no other page's place
+        // ([`keep_page_rules`]).
+        pages.sort_by_key(|hit| hit.page.set == PODCASTS_SET);
+    }
     let mut placed = place_pages_by_rules(query, sites, pages);
     for page in placed.iter_mut().filter(|p| p.under.is_none()) {
         match &page.hit.learned {
@@ -1867,13 +1894,49 @@ pub fn place_pages(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) -> Ve
             Some(LearnedPlace::Last) => page.at = sites.len(),
             None => {}
         }
-        // Not even the learned ranking puts a docs page found by its words
-        // before the best site.
+    }
+    keep_page_rules(query, sites, &mut placed);
+    placed
+}
+
+/// The places no ranking overrides, applied after [`place_pages`] and
+/// after [`crate::learned::reorder`]: a docs page found by its words never
+/// comes before the best site, and, unless the query asks for them,
+/// podcasts come after the best site and the other pages listed on their
+/// own ("better call saul" wants amc.com and the article first).
+pub fn keep_page_rules(query: &str, sites: &[crate::Hit], placed: &mut Vec<PlacedPage>) {
+    for page in placed.iter_mut().filter(|p| p.under.is_none()) {
         if docs_found_by_words(&page.hit) {
             page.at = page.at.max(1).min(sites.len());
         }
     }
-    placed
+    if asks_for_podcasts(query) {
+        return;
+    }
+    let others = placed
+        .iter()
+        .filter(|p| p.under.is_none() && p.hit.page.set != PODCASTS_SET)
+        .map(|p| p.at)
+        .max()
+        .unwrap_or(0);
+    let (podcasts, mut rest): (Vec<PlacedPage>, Vec<PlacedPage>) = std::mem::take(placed)
+        .into_iter()
+        .partition(|p| p.under.is_none() && p.hit.page.set == PODCASTS_SET);
+    for mut page in podcasts {
+        page.at = page.at.max(others).max(1).min(sites.len());
+        rest.push(page);
+    }
+    *placed = rest;
+}
+
+/// Whether `query` asks for podcasts or episodes.
+fn asks_for_podcasts(query: &str) -> bool {
+    query.split_whitespace().any(|word| {
+        matches!(
+            word.to_lowercase().as_str(),
+            "podcast" | "podcasts" | "episode" | "episodes"
+        )
+    })
 }
 
 fn place_pages_by_rules(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) -> Vec<PlacedPage> {
@@ -2390,6 +2453,31 @@ mod tests {
     }
 
     #[test]
+    fn questions_without_the_word_asked_about_are_not_found() {
+        let question = |title: &str, tags: &str, item: &str| {
+            Page::from_question(Article {
+                title: title.into(),
+                description: Some(tags.into()),
+                item: Some(item.into()),
+                views: 100_000,
+                ..Article::default()
+            })
+        };
+        let pages = [
+            question("How do I get rid of my bounty?", "bounty, meta", "1"),
+            question(
+                "How to get rid of large gaps in text",
+                "ms-word, layout",
+                "2",
+            ),
+            question("How do I get rid of aphids on roses?", "pests, roses", "3"),
+        ];
+        let (_dir, s) = searcher(&pages);
+        let hits = s.search("how to get rid of aphids", 5).unwrap();
+        assert_eq!(titles(&hits), ["How do I get rid of aphids on roses?"]);
+    }
+
+    #[test]
     fn whole_questions_lead() {
         let question = Page::from_question(Article {
             title: "How do I delete a Git branch locally and remotely?".into(),
@@ -2632,6 +2720,37 @@ mod tests {
             whole: false,
             learned: None,
         }
+    }
+
+    #[test]
+    fn podcasts_come_after_the_site_and_the_article_unless_asked_for() {
+        let sites = [site("comedycentral.com", false), site("amc.com", false)];
+        let podcast = |title: &str| {
+            let mut hit = found(title, None, true, 0.95);
+            hit.page.set = PODCASTS_SET.into();
+            hit.learned = Some(LearnedPlace::Before("comedycentral.com".into()));
+            hit
+        };
+        let article = found("Better Call Saul", None, true, 0.9);
+        let pages = vec![
+            podcast("Better Call Saul Insider"),
+            podcast("Better Call Saul Podcast"),
+            article,
+        ];
+        let placed = place_pages("better call saul", &sites, pages.clone());
+        let alone: Vec<(&str, usize)> = placed
+            .iter()
+            .filter(|p| p.under.is_none())
+            .map(|p| (p.hit.page.title.as_str(), p.at))
+            .collect();
+        let article_at = alone[0].1;
+        assert_eq!(alone[0].0, "Better Call Saul");
+        assert!(alone[1..].iter().all(|&(_, at)| at >= article_at.max(1)));
+        // Asked for, they stay where they were put.
+        let placed = place_pages("better call saul podcast", &sites, pages);
+        assert!(placed
+            .iter()
+            .any(|p| p.hit.page.set == PODCASTS_SET && p.at == 0));
     }
 
     #[test]
