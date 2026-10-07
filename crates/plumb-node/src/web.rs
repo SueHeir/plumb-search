@@ -206,6 +206,11 @@ pub trait SearchBackend: Send + Sync {
         let _ = (query, home, country);
         None
     }
+
+    /// The map the places' map is drawn on, if the node keeps one.
+    fn base_map(&self) -> Option<Arc<crate::map::BaseMap>> {
+        None
+    }
 }
 
 /// A [`Searcher`] with fixed ranking settings.
@@ -214,6 +219,7 @@ pub struct IndexBackend {
     rank: RankConfig,
     meaning: SharedMeaning,
     places: Option<plumb_index::places::PlaceSearcher>,
+    map: Option<crate::map::MapFile>,
 }
 
 impl IndexBackend {
@@ -223,7 +229,14 @@ impl IndexBackend {
             rank,
             meaning: SharedMeaning::default(),
             places: None,
+            map: None,
         }
+    }
+
+    /// Draws the places' map on the map in `file` (see [`crate::map`]).
+    pub fn with_map(mut self, file: std::path::PathBuf) -> Self {
+        self.map = Some(crate::map::MapFile::new(file));
+        self
     }
 
     /// Also lists the places of `places` for queries that ask for them.
@@ -297,6 +310,10 @@ impl SearchBackend for IndexBackend {
                 error!("searching places: {err:#}");
                 None
             })
+    }
+
+    fn base_map(&self) -> Option<Arc<crate::map::BaseMap>> {
+        self.map.as_ref()?.get()
     }
 }
 
@@ -659,6 +676,9 @@ pub fn run(args: ServeArgs) -> Result<()> {
     let mut backend = IndexBackend::new(searcher, rank_config(args.alpha)).with_meaning(meaning);
     if let Some(places) = &args.places {
         backend = backend.with_places(crate::places::open_file(places)?);
+    }
+    if let Some(map) = &args.map {
+        backend = backend.with_map(map.clone());
     }
     let app = router_with(
         Arc::new(backend),
@@ -1142,8 +1162,10 @@ async fn search_page(
                         href.to_owned()
                     }
                 };
+                let base_map = state.backend.base_map();
                 let mut html = places::render_places(
                     found,
+                    base_map.as_deref(),
                     visitor.is_some(),
                     settings.options.country.as_deref(),
                     &icons,

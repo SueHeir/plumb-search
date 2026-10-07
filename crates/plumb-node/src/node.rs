@@ -1204,6 +1204,8 @@ struct Inner {
     pages: RwLock<Option<(String, Arc<plumb_index::pages::PageSearcher>)>>,
     /// The place index and its key; `None` while no places are kept.
     places: RwLock<Option<(String, Arc<plumb_index::places::PlaceSearcher>)>>,
+    /// The map the places' map is drawn on (`DIR/pages/sets/map.pmtiles`).
+    map: crate::map::MapFile,
     /// Recent headlines and the feeds watched for them.
     news: crate::news::NewsStore,
     /// The adult blocklist, once loaded.
@@ -1376,6 +1378,7 @@ impl Inner {
     ) -> Self {
         let backoff = worker::Backoff::new(config.retry_wait, config.max_retry_wait);
         let journal = journal::Journal::open(&opened.paths.data);
+        let map_data = opened.paths.data.clone();
         let fill_state = fill::FillState::load(&opened.paths.net);
         let news = crate::news::NewsStore::open(&opened.paths.news);
         Inner {
@@ -1420,6 +1423,7 @@ impl Inner {
             meaning_retry: AtomicBool::new(false),
             pages: RwLock::new(None),
             places: RwLock::new(None),
+            map: crate::map::MapFile::new(crate::map::file(&map_data)),
             news,
             adult: RwLock::new(None),
         }
@@ -1953,6 +1957,10 @@ impl SearchBackend for Inner {
         country: Option<&str>,
     ) -> Option<plumb_index::places::PlaceResults> {
         places::search(self, query, home, country)
+    }
+
+    fn base_map(&self) -> Option<Arc<crate::map::BaseMap>> {
+        self.map.get()
     }
 
     fn num_docs(&self) -> u64 {
