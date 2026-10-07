@@ -1032,6 +1032,7 @@ mod end_to_end {
                 background_updates: true,
                 paused: None,
                 disk_used: 0,
+                storage_limit: 0,
                 downloaded_today: 0,
                 downloaded_total: 0,
                 homepages_visited: 0,
