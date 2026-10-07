@@ -628,7 +628,8 @@ pub struct FetchPagesArgs {
     /// books (Open Library's most shelved works, from its dumps), podcasts
     /// (Podcast Index's most popular podcasts, from its database), music
     /// (the songs and albums most listened to, from MusicBrainz's dump and
-    /// ListenBrainz's listener counts), papers
+    /// ListenBrainz's listener counts), films (films and TV shows, with
+    /// their year, director, cast and listings, from Wikidata), papers
     /// (the most cited works, from OpenAlex's API; set OPENALEX_API_KEY if
     /// it asks for one), packages (the most used packages of eight
     /// registries, from ecosyste.ms) or places (named shops, restaurants,
@@ -733,6 +734,14 @@ pub struct FetchPagesArgs {
     /// Music: fewest ListenBrainz listeners of a song or album kept.
     #[arg(long, value_name = "N", default_value_t = plumb_ingest::musicbrainz::DEFAULT_MIN_LISTENERS)]
     pub min_listeners: u64,
+    /// Films: most films and shows kept, the most linked from Wikipedias
+    /// and other wikis.
+    #[arg(long, value_name = "N", default_value_t = plumb_ingest::films::DEFAULT_MAX_FILMS)]
+    pub max_films: usize,
+    /// Films: fewest sitelinks (Wikipedias and other wikis with a page on
+    /// it) of a film or show kept.
+    #[arg(long, value_name = "N", default_value_t = plumb_ingest::films::DEFAULT_MIN_SITELINKS)]
+    pub min_film_sitelinks: u64,
     /// Packages: the registries to list (npm, pypi, crates, go, gem,
     /// composer, nuget, maven), comma-separated; all when left out.
     #[arg(long, value_name = "KEYS", value_delimiter = ',')]

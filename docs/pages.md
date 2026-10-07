@@ -133,6 +133,20 @@ Like a book, a song or album is never listed before every site by its title alon
 
 The answers ListenBrainz gives are kept in `--work` (`listenbrainz-albums.tsv`, `listenbrainz-recordings.tsv`) as they come, so a run that stops carries on where it left off. It keeps to the rate ListenBrainz sets. `--max-songs`, `--max-albums`, `--min-song-releases`, `--min-listeners` (20 by default) and `--musicbrainz-dump` (a downloaded `mbdump.tar.bz2`, or a directory of its tables) change what is read and kept. Reading the dump takes a few GB of memory.
 
+## Films and TV shows
+
+The `films` set lists the films and TV shows Wikidata knows best (150,000 by default, each with a page on at least 3 Wikipedias or other wikis, the most such pages first), from Wikidata's query service (CC0):
+
+```sh
+plumb fetch-pages --set films --data /path/to/node-data
+```
+
+Each keeps its English name (or else its English article's title, or its title in its own language), its other English names and original titles, "Film by DIRECTOR, YEAR · with CAST" or "TV series by CREATOR, 2008–2013 · with CAST" as its description (the three best-known cast members that fit), its Wikidata item, its English Wikipedia article when it has one, how many wikis have a page on it, and its listings: IMDb, Rotten Tomatoes, Metacritic, Letterboxd, TMDB, MyAnimeList and Netflix. Only Wikidata's identifiers for those are kept, which make links; nothing is copied from IMDb or TMDB. Films are items of film, animated film, documentary film or TV film; shows of TV series, miniseries, animated series, anime series or web series. Each class's label is checked before it is asked for.
+
+Most films and shows with an English article are already listed by their titles as that article, so the set adds what tells them apart: their title followed by their year, a director's, creator's or cast member's name, or "movie" ("film") or "tv show" ("series", "tv") asks for one ("dune 2021", "dune david lynch", "breaking bad tv show"), which is then listed first as its article. One with no English article is listed by its title like a book, never before every site, and links its Wikidata item. "les dents de la nuit imdb" links its IMDb page like a profile.
+
+`--max-films` and `--min-film-sitelinks` change what is kept. The fetch asks Wikidata a few hundred questions, waiting between them, and leaves out a batch Wikidata keeps failing to answer.
+
 ## Papers
 
 The `papers` set lists the most cited scholarly works (2,000,000 by default, each cited at least 200 times), from OpenAlex's API (CC0): "attention is all you need" finds the paper. Each keeps only its title, "Paper by AUTHOR et al., YEAR, VENUE" as its description, its DOI (or OpenAlex id) and its citations. Like questions, papers are also found by most of their title's words. A paper cited more than 40,000 times for each year since it came out is left out as a data error. A paper's whole title of four words or more ("basic local alignment search tool"), or its title followed by its first author's name, its year, its venue or "paper" ("random forests breiman", "deep learning lecun nature"), asks for the paper, which then comes first like an asked-for book.

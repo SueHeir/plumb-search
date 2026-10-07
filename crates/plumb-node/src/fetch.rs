@@ -299,6 +299,22 @@ fn run_music(args: &FetchPagesArgs, dest: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
+/// Makes the films set file `dest` from Wikidata's query service.
+fn run_films(args: &FetchPagesArgs, dest: &std::path::Path) -> Result<()> {
+    let client = download::http_client()?;
+    let options = plumb_ingest::films::FilmOptions {
+        max_films: args.max_films,
+        min_sitelinks: args.min_film_sitelinks,
+    };
+    let films = block_on(plumb_ingest::films::fetch_films(
+        &client,
+        download::WIKIDATA_SPARQL_URL,
+        download::WikidataPacing::default(),
+        &options,
+    ))??;
+    write_set(dest, &films, "films and shows")
+}
+
 /// Makes the papers set file `dest` from OpenAlex's API.
 fn run_papers(args: &FetchPagesArgs, dest: &std::path::Path) -> Result<()> {
     let key = std::env::var("OPENALEX_API_KEY")
@@ -514,6 +530,9 @@ pub fn run_pages(args: FetchPagesArgs) -> Result<()> {
     }
     if set.id == plumb_index::pages::MUSIC_SET {
         return run_music(&args, &dest);
+    }
+    if set.id == plumb_index::pages::FILMS_SET {
+        return run_films(&args, &dest);
     }
     if set.id == plumb_index::pages::PACKAGES_SET {
         return run_packages(&args, &dest);

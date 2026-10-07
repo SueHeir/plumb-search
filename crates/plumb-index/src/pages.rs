@@ -268,6 +268,63 @@ impl Page {
         })
     }
 
+    /// The film or TV show `film`, written as an article whose item is its
+    /// Wikidata item (`Q25188`), followed by `/` and its English Wikipedia
+    /// article's address path when it has one (`Q25188/Inception`), and
+    /// whose views are its sitelinks. Its address is that article, or else
+    /// the item on Wikidata. `None` for an item that does not read.
+    pub fn from_film(film: Article) -> Option<Self> {
+        let item = film.item.as_deref()?;
+        let (id, article) = match item.split_once('/') {
+            Some((id, path)) => (id, Some(path)),
+            None => (item, None),
+        };
+        if !is_item_id(id) {
+            return None;
+        }
+        let url = match article {
+            None => format!("https://www.wikidata.org/wiki/{id}"),
+            Some(path)
+                if !path.is_empty()
+                    && path.chars().all(|c| {
+                        c.is_ascii_graphic() && !matches!(c, '"' | '<' | '>' | '\\' | '|')
+                    }) =>
+            {
+                format!("{ENGLISH_WIKIPEDIA}{path}")
+            }
+            Some(_) => return None,
+        };
+        Some(Page {
+            set: FILMS_SET.to_string(),
+            url,
+            title: film.title,
+            description: film.description,
+            site: None,
+            views: film.views,
+            aliases: film.aliases,
+            item: Some(id.to_string()),
+            profiles: film.profiles,
+            website: None,
+            package: None,
+            facts: Vec::new(),
+        })
+    }
+
+    /// Whether the page is a TV show of the films set, rather than a film.
+    pub fn is_show(&self) -> bool {
+        self.set == FILMS_SET
+            && self
+                .description
+                .as_deref()
+                .is_some_and(plumb_core::films::describes_a_show)
+    }
+
+    /// Whether the page is a film or show of the films set that English
+    /// Wikipedia has an article on, which is its address.
+    pub fn is_film_with_article(&self) -> bool {
+        self.set == FILMS_SET && self.url.starts_with(ENGLISH_WIKIPEDIA)
+    }
+
     /// Whether the page is a song of the music set, rather than an album.
     pub fn is_song(&self) -> bool {
         self.set == MUSIC_SET && self.url.starts_with("https://musicbrainz.org/recording/")
@@ -350,6 +407,7 @@ impl Page {
         set == PACKAGES_SET
             || set == STACKEXCHANGE_SET
             || set == MUSIC_SET
+            || set == FILMS_SET
             || Page::from_set(set, Article::default()).is_some()
     }
 
@@ -367,6 +425,7 @@ impl Page {
             PACKAGES_SET => Page::from_package(article)?,
             STACKEXCHANGE_SET => Page::from_exchange(article)?,
             MUSIC_SET => Page::from_music(article)?,
+            FILMS_SET => Page::from_film(article)?,
             _ => Page::from_article(set.strip_prefix("wikipedia-")?, article),
         })
     }
@@ -385,18 +444,19 @@ impl Page {
     }
 
     /// Whether the page may be listed before every site. Books, podcasts,
-    /// papers, songs and albums share their titles with too much
-    /// ("Python", "Apple", "Hello") to.
+    /// papers, songs, albums, films and shows share their titles with too
+    /// much ("Python", "Apple", "Hello", "Up") to.
     pub fn may_lead(&self) -> bool {
         self.set != BOOKS_SET
             && self.set != PAPERS_SET
             && self.set != PODCASTS_SET
             && self.set != MUSIC_SET
+            && self.set != FILMS_SET
     }
 
     /// The name of the set people see: "Wikipedia".
     pub fn set_name(&self) -> &str {
-        if self.set.starts_with("wikipedia-") {
+        if self.set.starts_with("wikipedia-") || self.is_film_with_article() {
             "Wikipedia"
         } else if self.set == GITHUB_SET {
             "GitHub"
@@ -412,7 +472,7 @@ impl Page {
             "MusicBrainz"
         } else if self.set == PAPERS_SET {
             "OpenAlex"
-        } else if self.set == WIKIDATA_SET {
+        } else if self.set == WIKIDATA_SET || self.set == FILMS_SET {
             "Wikidata"
         } else if let Some(registry) = self.registry() {
             registry.name
@@ -431,7 +491,7 @@ impl Page {
     pub fn language(&self) -> Option<&str> {
         if let Some(lang) = self.set.strip_prefix("wikipedia-") {
             Some(lang)
-        } else if self.set == GITHUB_SET || self.is_question() {
+        } else if self.set == GITHUB_SET || self.is_question() || self.is_film_with_article() {
             Some("en")
         } else {
             None
@@ -454,6 +514,8 @@ impl Page {
             "musicbrainz.org"
         } else if self.set == PAPERS_SET {
             "openalex.org"
+        } else if self.set == FILMS_SET && !self.is_film_with_article() {
+            "wikidata.org"
         } else if let Some(registry) = self.registry() {
             registry.domain
         } else {
@@ -479,6 +541,10 @@ pub const PODCASTS_SET: &str = "podcasts";
 /// The set of songs and albums, from MusicBrainz, ranked by
 /// ListenBrainz's listeners.
 pub const MUSIC_SET: &str = "music";
+/// The set of films and TV shows, from Wikidata, ranked by sitelinks.
+pub const FILMS_SET: &str = "films";
+/// Where English Wikipedia's articles are.
+const ENGLISH_WIKIPEDIA: &str = "https://en.wikipedia.org/wiki/";
 /// The set of software packages (npm, PyPI, crates.io and others).
 pub const PACKAGES_SET: &str = "packages";
 /// Least popularity of a package found by a query that names only its
@@ -587,6 +653,11 @@ fn schema() -> (Schema, Fields) {
             page,
         },
     )
+}
+
+/// Whether `id` is a Wikidata item's: `Q25188`.
+fn is_item_id(id: &str) -> bool {
+    id.len() > 1 && id.starts_with('Q') && id[1..].bytes().all(|b| b.is_ascii_digit())
 }
 
 /// `title` without a trailing qualifier in brackets: `Python (programming
@@ -942,7 +1013,10 @@ impl PageSearcher {
         // or more that start the query; a page found only so is kept only
         // when it is asked for so.
         let mut by_title_first = HashSet::new();
-        for end in 2..words.len() {
+        // Films and shows by a title of one word too: "inception 2010".
+        // Other pages found so must be films asked for so.
+        let mut film_title_first = HashSet::new();
+        for end in 1..words.len() {
             let Some(key) = analysis::tokens(&self.joined, &words[..end].join(" ")).pop() else {
                 continue;
             };
@@ -954,6 +1028,9 @@ impl PageSearcher {
                 if !addresses.contains(&address) {
                     addresses.push(address);
                     by_title_first.insert(address);
+                    if end == 1 {
+                        film_title_first.insert(address);
+                    }
                 }
             }
         }
@@ -1033,8 +1110,11 @@ impl PageSearcher {
                 }
                 continue;
             }
-            let asked_by_title = self.book_match(&page, &words);
-            if by_title_first.contains(&address) && !asked_by_title {
+            let asked_as_film = self.film_match(&page, &words);
+            let asked_by_title = asked_as_film || self.book_match(&page, &words);
+            if by_title_first.contains(&address) && !asked_by_title
+                || film_title_first.contains(&address) && !asked_as_film
+            {
                 continue;
             }
             let (mut name, mut named) = self.name_match(&page, query, &joined, &query_words);
@@ -1064,9 +1144,36 @@ impl PageSearcher {
                 learned: None,
             });
         }
+        let mut hits = fold_films(hits);
         hits.sort_by(|a, b| b.score.total_cmp(&a.score));
         hits.truncate(limit);
         Ok(hits)
+    }
+
+    /// Whether the query `words` are a film's or show's title followed by
+    /// words of its description (its year, director or cast) or by what it
+    /// is: "inception 2010", "inception christopher nolan", "dune movie",
+    /// "breaking bad tv show".
+    fn film_match(&self, page: &Page, words: &[String]) -> bool {
+        if page.set != FILMS_SET {
+            return false;
+        }
+        let kinds = if page.is_show() {
+            plumb_core::films::SHOW_WORDS
+        } else {
+            plumb_core::films::FILM_WORDS
+        };
+        let title = analysis::tokens(&self.words, &page.title);
+        let rest = match words.strip_prefix(title.as_slice()) {
+            Some(rest) if !title.is_empty() && !rest.is_empty() => rest,
+            _ => return false,
+        };
+        let told: HashSet<String> =
+            analysis::tokens(&self.words, page.description.as_deref().unwrap_or(""))
+                .into_iter()
+                .collect();
+        rest.iter()
+            .all(|word| told.contains(word) || kinds.contains(&word.as_str()))
     }
 
     /// Whether the package `page` is the one `asked` for, whose name's key
@@ -1247,6 +1354,31 @@ impl PageSearcher {
     }
 }
 
+/// Folds the films and shows in `hits` that English Wikipedia has an
+/// article on into that article: such a film is listed only when the query
+/// asks for it ([`PageHit::whole`]: "inception 2010"), and then as its
+/// article when that was found too, which the query then asks for. The
+/// article alone covers its title.
+fn fold_films(hits: Vec<PageHit>) -> Vec<PageHit> {
+    let (films, mut kept): (Vec<PageHit>, Vec<PageHit>) = hits
+        .into_iter()
+        .partition(|hit| hit.page.is_film_with_article());
+    for film in films.into_iter().filter(|film| film.whole) {
+        match kept
+            .iter_mut()
+            .find(|hit| hit.page.is_article() && hit.page.item == film.page.item)
+        {
+            Some(article) => {
+                article.named = true;
+                article.whole = true;
+                article.score = article.score.max(film.score);
+            }
+            None => kept.push(film),
+        }
+    }
+    kept
+}
+
 /// Most pages listed on their own among the sites.
 pub const MAX_PAGES_LISTED: usize = 2;
 /// Least score of a page the query does not name in full that is listed.
@@ -1315,7 +1447,7 @@ pub fn lift_named_sites(sites: &mut [crate::Hit], pages: &[PageHit]) {
     };
     let article = pages
         .iter()
-        .find(|hit| hit.named && hit.page.item.is_some());
+        .find(|hit| hit.named && hit.page.item.is_some() && hit.page.set != FILMS_SET);
     let repo = pages
         .iter()
         .find(|hit| hit.named && hit.page.set == GITHUB_SET);
@@ -2416,6 +2548,146 @@ mod tests {
             }),
             None
         );
+    }
+
+    fn film(title: &str, description: &str, item: &str, sitelinks: u64) -> Page {
+        Page::from_film(Article {
+            title: title.into(),
+            description: Some(description.into()),
+            item: Some(item.into()),
+            views: sitelinks,
+            ..Article::default()
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn films_and_shows_are_found_by_their_title_and_year_or_maker() {
+        let dune = film(
+            "Dune",
+            "Film by Denis Villeneuve, 2021 · with Timothée Chalamet, Zendaya",
+            "Q63985561/Dune_(2021_film)",
+            80,
+        );
+        assert_eq!(dune.url, "https://en.wikipedia.org/wiki/Dune_(2021_film)");
+        assert_eq!(dune.item.as_deref(), Some("Q63985561"));
+        assert!(dune.is_film_with_article() && !dune.is_show() && !dune.may_lead());
+        assert_eq!(dune.set_name(), "Wikipedia");
+        let lynch = film(
+            "Dune",
+            "Film by David Lynch, 1984 · with Kyle MacLachlan",
+            "Q114819/Dune_(1984_film)",
+            60,
+        );
+        // No English article: listed as itself, on Wikidata.
+        let foreign = film(
+            "Les Dents de la nuit",
+            "Film by Stephen Cafiero, 2008",
+            "Q3230000",
+            4,
+        );
+        assert_eq!(foreign.url, "https://www.wikidata.org/wiki/Q3230000");
+        assert_eq!(foreign.set_name(), "Wikidata");
+        assert_eq!(foreign.set_domain(), "wikidata.org");
+        let bad = film(
+            "Breaking Bad",
+            "TV series by Vince Gilligan, 2008–2013 · with Bryan Cranston",
+            "Q1079/Breaking_Bad",
+            90,
+        );
+        assert!(bad.is_show());
+        let mut article_2021 = page("Dune (2021 film)", 400_000, &[]);
+        article_2021.item = Some("Q63985561".into());
+        let mut novel = page("Dune (novel)", 900_000, &["Dune"]);
+        novel.item = Some("Q190192".into());
+        let mut show_article = page("Breaking Bad", 800_000, &[]);
+        show_article.item = Some("Q1079".into());
+        let (_dir, s) = searcher(&[
+            dune.clone(),
+            lynch.clone(),
+            foreign.clone(),
+            bad,
+            article_2021,
+            novel,
+            show_article,
+        ]);
+        // The year, the director or "movie" asks for the film, found as its
+        // article.
+        for (query, url) in [
+            (
+                "dune 2021",
+                "https://en.wikipedia.org/wiki/Dune_(2021_film)",
+            ),
+            (
+                "dune villeneuve",
+                "https://en.wikipedia.org/wiki/Dune_(2021_film)",
+            ),
+            (
+                "dune 1984",
+                "https://en.wikipedia.org/wiki/Dune_(1984_film)",
+            ),
+            (
+                "dune david lynch",
+                "https://en.wikipedia.org/wiki/Dune_(1984_film)",
+            ),
+            (
+                "dune 2021 movie",
+                "https://en.wikipedia.org/wiki/Dune_(2021_film)",
+            ),
+            (
+                "dune zendaya",
+                "https://en.wikipedia.org/wiki/Dune_(2021_film)",
+            ),
+            (
+                "breaking bad tv show",
+                "https://en.wikipedia.org/wiki/Breaking_Bad",
+            ),
+            (
+                "les dents de la nuit 2008",
+                "https://www.wikidata.org/wiki/Q3230000",
+            ),
+        ] {
+            let hits = s.search(query, 5).unwrap();
+            assert!(
+                hits[0].whole && hits[0].named && hits[0].page.url == url,
+                "{query}: {hits:?}"
+            );
+        }
+        // Found with it, the article is what is listed, once.
+        let hits = s.search("dune 2021", 5).unwrap();
+        assert!(hits[0].page.is_article(), "{hits:?}");
+        assert_eq!(
+            hits.iter()
+                .filter(|h| h.page.item.as_deref() == Some("Q63985561"))
+                .count(),
+            1
+        );
+        // Not found with it, the film is listed with its article's address.
+        let hits = s.search("dune 1984", 5).unwrap();
+        assert_eq!(hits[0].page.set, FILMS_SET);
+        // Its title alone asks for the articles, not the films.
+        let hits = s.search("dune", 5).unwrap();
+        assert!(hits.iter().all(|h| h.page.set != FILMS_SET), "{hits:?}");
+        // A show is not asked for as a movie, nor a film as a show.
+        let hits = s.search("breaking bad movie", 5).unwrap();
+        assert!(hits.iter().all(|h| !h.whole), "{hits:?}");
+        let hits = s.search("dune tv series", 5).unwrap();
+        assert!(hits.iter().all(|h| !h.whole), "{hits:?}");
+        // A film with no article is listed by its title, below the sites.
+        let hits = s.search("les dents de la nuit", 5).unwrap();
+        assert!(hits[0].named && !hits[0].whole && hits[0].page.url == foreign.url);
+        // An item that does not read is no page.
+        for item in ["X1", "Q12/bad path", ""] {
+            assert_eq!(
+                Page::from_film(Article {
+                    title: "x".into(),
+                    item: Some(item.into()),
+                    ..Article::default()
+                }),
+                None,
+                "{item}"
+            );
+        }
     }
 
     #[test]

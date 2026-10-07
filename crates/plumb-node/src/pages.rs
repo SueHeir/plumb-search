@@ -88,6 +88,12 @@ pub const SETS: &[SetInfo] = &[
         bytes_per_page: 200,
     },
     SetInfo {
+        id: plumb_index::pages::FILMS_SET,
+        name: "Films and TV shows (Wikidata)",
+        pages: 150_000,
+        bytes_per_page: 220,
+    },
+    SetInfo {
         id: plumb_index::pages::PAPERS_SET,
         name: "Papers (OpenAlex)",
         pages: 2_000_000,

@@ -74,7 +74,7 @@ fn entity_id(uri: &str) -> &str {
 }
 
 /// The query for the formatter URLs of every service's property.
-fn formatters_query() -> String {
+pub(crate) fn formatters_query() -> String {
     let values: Vec<String> = SERVICES
         .iter()
         .map(|s| format!("wd:{}", s.property))
@@ -96,7 +96,7 @@ fn other_hosts(service: &Service) -> &'static [&'static str] {
 /// The services whose property's formatter URL, in the answer to
 /// [`formatters_query`], points at the service's site. Mastodon's
 /// addresses name the user's own server, so its property is taken as it is.
-fn checked_services(json: &[u8]) -> Result<Vec<&'static Service>> {
+pub(crate) fn checked_services(json: &[u8]) -> Result<Vec<&'static Service>> {
     let mut formatters: HashMap<String, Vec<String>> = HashMap::new();
     for row in bindings(json)? {
         if let (Some(p), Some(f)) = (row.get("p"), row.get("f")) {

@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 use plumb_answer::{Answer, Rates, ECB_RATES_URL};
 use plumb_core::profiles::{services_asked, shown_profiles};
 use plumb_core::truncate_chars;
-use plumb_index::pages::{Page, PlacedPage, MUSIC_SET, WIKIDATA_SET};
+use plumb_index::pages::{Page, PlacedPage, FILMS_SET, MUSIC_SET, WIKIDATA_SET};
 use plumb_index::Hit;
 use serde::Serialize;
 use tokio::sync::Mutex;
@@ -190,10 +190,10 @@ fn is_disambiguation(title: &str, description: Option<&str>) -> bool {
         })
 }
 
-/// Whether an info box can be about `page`: a Wikipedia article, or a
-/// Wikidata item with profiles and no article.
+/// Whether an info box can be about `page`: a Wikipedia article, a
+/// Wikidata item with profiles and no article, or a film or show.
 fn is_about_one_thing(page: &Page) -> bool {
-    page.set.starts_with("wikipedia-") || page.set == WIKIDATA_SET
+    page.set.starts_with("wikipedia-") || page.set == WIKIDATA_SET || page.set == FILMS_SET
 }
 
 /// The info box for results `sites` and `pages` (as placed among them),
@@ -228,6 +228,8 @@ pub(crate) fn page_about<'a>(sites: &[Hit], pages: &'a [PlacedPage]) -> Option<&
         let under_top = placed.under.is_some() && placed.under.as_deref() == top_site;
         (placed.hit.named || (site_wins && under_top))
             && is_about_one_thing(page)
+            // A film or show only when asked for as one: "dune 2021".
+            && (page.set != FILMS_SET || placed.hit.whole)
             && !is_disambiguation(&page.title, page.description.as_deref())
             && match &placed.under {
                 _ if site_wins => under_top,
@@ -243,11 +245,12 @@ pub(crate) fn info_from_page(page: &Page, sites: &[Hit]) -> Option<InfoBox> {
     if !is_about_one_thing(page) {
         return None;
     }
-    let article = if page.set == WIKIDATA_SET {
-        None
-    } else {
-        Some(http_url(&page.url)?)
-    };
+    let article =
+        if page.set == WIKIDATA_SET || (page.set == FILMS_SET && !page.is_film_with_article()) {
+            None
+        } else {
+            Some(http_url(&page.url)?)
+        };
     let site = page
         .site
         .clone()
@@ -1010,6 +1013,47 @@ mod tests {
         let mut html = String::new();
         render_profile(&mut html, &found, None);
         assert!(html.contains("Listing, from Wikidata"), "{html}");
+    }
+
+    #[test]
+    fn boxes_and_links_a_film_asked_for() {
+        let film = |item: &str, whole: bool| PageHit {
+            page: Page::from_film(plumb_core::article::Article {
+                title: "Les Dents de la nuit".into(),
+                description: Some("Film by Stephen Cafiero, 2008".into()),
+                item: Some(item.into()),
+                views: 4,
+                profiles: vec![profile("imdb", "tt1103275")],
+                ..Default::default()
+            })
+            .unwrap(),
+            named: true,
+            whole,
+            ..article("x", "x", None)
+        };
+        // With no English article, it links its IMDb page from Wikidata.
+        let pages = [placed(film("Q3230000", false), None, 1)];
+        let found = profile_answer("les dents de la nuit imdb", &pages).unwrap();
+        assert_eq!(found.url, "https://www.imdb.com/title/tt1103275/");
+        assert_eq!(found.source, "Wikidata");
+        // Named by its title alone, it gets no info box; asked for, it does,
+        // with no article.
+        assert!(info_box(&[], &pages).is_none());
+        let pages = [placed(film("Q3230000", true), None, 0)];
+        let info = info_box(&[], &pages).unwrap();
+        assert_eq!(info.article, None);
+        assert_eq!(
+            info.wikidata.as_deref(),
+            Some("https://www.wikidata.org/wiki/Q3230000")
+        );
+        assert_eq!(info.profiles.len(), 1);
+        // With one, the box links the article.
+        let pages = [placed(film("Q3230000/Les_Dents_de_la_nuit", true), None, 0)];
+        let info = info_box(&[], &pages).unwrap();
+        assert_eq!(
+            info.article.as_deref(),
+            Some("https://en.wikipedia.org/wiki/Les_Dents_de_la_nuit")
+        );
     }
 
     #[test]
