@@ -1119,6 +1119,8 @@ async fn search_page(
                 let local = place_sites(&state, found).await;
                 places::local_first(found, &mut results.hits, local, limit);
             }
+            // Places shown: none found around a town is no list.
+            let found_places = found_places.filter(|found| found.near_me || !found.hits.is_empty());
             if let Some(visitor) = &mut visitor {
                 visitor.rank(
                     &query,
@@ -1351,6 +1353,7 @@ async fn api_search(
                 let local = place_sites(&state, found).await;
                 places::local_first(found, &mut results.hits, local, params.limit());
             }
+            let places = places.filter(|found| !found.hits.is_empty());
             let extras = extras(&state, &query, &results, &options).await;
             let about = search_about(&query, &results, &extras);
             let shown_to_plugins = if state.settings.plugins.any_annotate() {
@@ -1985,14 +1988,24 @@ async fn run_search(
     let backend = Arc::clone(&state.backend);
     // "safeway near me": the places list is for "near me"; the sites are
     // for the rest ("me" names no site).
-    let owned_query =
-        plumb_index::places::without_near_me(query).unwrap_or_else(|| query.to_string());
+    let near_me = plumb_index::places::without_near_me(query);
+    let local = near_me.is_some();
+    let owned_query = near_me.unwrap_or_else(|| query.to_string());
     let owned_options = options.clone();
-    let results = tokio::task::spawn_blocking(move || {
+    let mut results = tokio::task::spawn_blocking(move || {
         backend.search_full(&owned_query, limit, &owned_options)
     })
     .await
     .context("the search task failed")??;
+    // "handyman near me" asks for someone to call: a bare handyman.nl,
+    // named by the word but saying nothing, goes after sites that say
+    // what they are.
+    if local {
+        let (said, bare): (Vec<Hit>, Vec<Hit>) = std::mem::take(&mut results.hits)
+            .into_iter()
+            .partition(|hit| hit.title.is_some() || hit.official);
+        results.hits = said.into_iter().chain(bare).collect();
+    }
     debug!("local search completed: {} hits", results.hits.len());
     Ok(results)
 }
@@ -4230,6 +4243,16 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bare_sites_go_last_for_near_me() {
+        let mut hits = bank_hits();
+        hits.reverse();
+        let (_, _, body) = get(backend(hits), "/api/search?q=us+bank+near+me").await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json[0]["domain"], "usbank.com", "{body}");
+        assert_eq!(json[1]["domain"], "usbank-login-help.com", "{body}");
+    }
+
+    #[tokio::test]
     async fn sites_are_searched_without_near_me() {
         let fake = backend(bank_hits());
         let _ = get(fake.clone(), "/search?q=us+bank+near+me").await;
@@ -6262,6 +6285,17 @@ mod tests {
                     hits: Vec::new(),
                 });
             }
+            // A town without any mapped.
+            if query.contains("aurora") {
+                return Some(plumb_index::places::PlaceResults {
+                    what: "brewery".into(),
+                    center: Some(at("Aurora", "place=city", "n5", None)),
+                    near_me: false,
+                    guessed: false,
+                    radius_km: 12.0,
+                    hits: Vec::new(),
+                });
+            }
             let brewery =
                 |name: &str, osm: &str, website: Option<&str>| plumb_index::places::PlaceHit {
                     place: at(name, "craft=brewery", osm, website),
@@ -6291,6 +6325,33 @@ mod tests {
                 )
             })
         }
+    }
+
+    #[tokio::test]
+    async fn sites_saying_what_come_first_around_a_town_with_no_places() {
+        let (_, _, body) = send(
+            router(Arc::new(BreweryPlaces)),
+            "/api/search?q=brewery+in+aurora&full=1",
+        )
+        .await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let domains: Vec<&str> = json["hits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|h| h["domain"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            domains,
+            ["westword.com", "denvergov.org", "denverbroncos.com"]
+        );
+        assert!(json.get("places").is_none(), "{body}");
+        let (_, _, page) = send(
+            router(Arc::new(BreweryPlaces)),
+            "/search?q=brewery+in+aurora",
+        )
+        .await;
+        assert!(!page.contains("aria-label=\"Places\""), "{page}");
     }
 
     #[tokio::test]

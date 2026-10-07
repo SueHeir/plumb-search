@@ -315,7 +315,7 @@ pub(super) fn local_first(
     local: Vec<Hit>,
     limit: usize,
 ) {
-    if found.center.is_none() || found.hits.is_empty() || found.near_me {
+    if found.center.is_none() || found.near_me {
         return;
     }
     let roots: Vec<String> = normalize_text(&found.what)
