@@ -53,6 +53,13 @@ const CANDIDATES: usize = 200;
 pub const QUESTION_QUERY_WORDS: usize = 3;
 /// Least share of those words a question's title and tags must have.
 pub const QUESTION_SHARE: f32 = 0.75;
+/// Least number of pages whose names have a word for the word to be
+/// spelled right: "pkce", "nalgebra", "stain" and "biles" are, however few
+/// sites say them.
+pub const KNOWN_WORD_PAGES: u64 = 3;
+/// Most read articles about a site looked at for one about the site itself
+/// ([`PageSearcher::title_untitled`]).
+const TITLE_CANDIDATES: usize = 20;
 /// Least share of a question title's stemmed words a query that has all of
 /// the question's own must have to ask the question as a whole.
 pub const QUESTION_TITLE_SHARE: f32 = 0.5;
@@ -310,6 +317,43 @@ impl Page {
         })
     }
 
+    /// The software docs page `doc`, written as an article whose item is
+    /// the page's address (see `plumb_ingest::docs`). `None` for an item
+    /// that is not an https:// address.
+    pub fn from_docs(doc: Article) -> Option<Self> {
+        let url = doc.item.filter(|item| {
+            item.starts_with("https://")
+                && item.len() > "https://".len()
+                && !item.contains(char::is_whitespace)
+        })?;
+        Some(Page {
+            set: DOCS_SET.to_string(),
+            url,
+            title: doc.title,
+            description: doc.description,
+            site: None,
+            views: doc.views,
+            aliases: doc.aliases,
+            item: None,
+            profiles: Vec::new(),
+            website: None,
+            package: None,
+            facts: Vec::new(),
+        })
+    }
+
+    /// The host of a docs page's address: `docs.python.org`.
+    fn docs_host(&self) -> Option<&str> {
+        if self.set != DOCS_SET {
+            return None;
+        }
+        self.url
+            .strip_prefix("https://")?
+            .split(['/', '?', '#'])
+            .next()
+            .filter(|host| !host.is_empty())
+    }
+
     /// Whether the page is a TV show of the films set, rather than a film.
     pub fn is_show(&self) -> bool {
         self.set == FILMS_SET
@@ -408,6 +452,7 @@ impl Page {
             || set == STACKEXCHANGE_SET
             || set == MUSIC_SET
             || set == FILMS_SET
+            || set == DOCS_SET
             || Page::from_set(set, Article::default()).is_some()
     }
 
@@ -426,16 +471,26 @@ impl Page {
             STACKEXCHANGE_SET => Page::from_exchange(article)?,
             MUSIC_SET => Page::from_music(article)?,
             FILMS_SET => Page::from_film(article)?,
+            DOCS_SET => Page::from_docs(article)?,
             _ => Page::from_article(set.strip_prefix("wikipedia-")?, article),
         })
     }
 
-    /// The words a question or paper is found by besides its title: its
-    /// title, and a question's tags. `None` for pages of other sets, found
-    /// by their names only.
+    /// The words a question, paper or docs page is found by besides its
+    /// title: its title, a question's tags, and a docs page's other names
+    /// and description. `None` for pages of other sets, found by their
+    /// names only.
     pub fn topic(&self) -> Option<String> {
         if self.set == PAPERS_SET {
             return Some(self.title.clone());
+        }
+        if self.set == DOCS_SET {
+            let mut topic = self.title.clone();
+            for text in self.aliases.iter().chain(&self.description) {
+                topic.push(' ');
+                topic.push_str(text);
+            }
+            return Some(topic);
         }
         self.is_question().then(|| match &self.description {
             Some(tags) => format!("{} {tags}", self.title),
@@ -476,6 +531,8 @@ impl Page {
             "Wikidata"
         } else if let Some(registry) = self.registry() {
             registry.name
+        } else if let Some(host) = self.docs_host() {
+            host
         } else {
             &self.set
         }
@@ -518,6 +575,8 @@ impl Page {
             "wikidata.org"
         } else if let Some(registry) = self.registry() {
             registry.domain
+        } else if let Some(host) = self.docs_host() {
+            host
         } else {
             "wikipedia.org"
         }
@@ -543,6 +602,9 @@ pub const PODCASTS_SET: &str = "podcasts";
 pub const MUSIC_SET: &str = "music";
 /// The set of films and TV shows, from Wikidata, ranked by sitelinks.
 pub const FILMS_SET: &str = "films";
+/// The set of software docs pages (MDN, Python's docs and others), fetched
+/// from the docs sites' sitemaps.
+pub const DOCS_SET: &str = "docs";
 /// Where English Wikipedia's articles are.
 const ENGLISH_WIKIPEDIA: &str = "https://en.wikipedia.org/wiki/";
 /// The set of software packages (npm, PyPI, crates.io and others).
@@ -814,13 +876,18 @@ pub fn build_page_index(
         if let Some(topic) = page.topic() {
             document.add_text(fields.topic, topic);
         }
-        document.add_text(fields.keys, &page.title);
-        let base = base_title(&page.title);
-        if base != page.title {
-            document.add_text(fields.keys, base);
+        // A docs page's title alone ("Introduction") names nothing: it is
+        // named by its product's name and title ("python sorting
+        // techniques").
+        if page.set != DOCS_SET {
+            document.add_text(fields.keys, &page.title);
+            let base = base_title(&page.title);
+            if base != page.title {
+                document.add_text(fields.keys, base);
+            }
         }
         // A package is asked for by its short name too: "gin golang".
-        if page.package.is_some() {
+        if page.package.is_some() || page.set == DOCS_SET {
             for alias in &page.aliases {
                 document.add_text(fields.keys, alias);
             }
@@ -924,6 +991,106 @@ impl PageSearcher {
             site.demand = self.site_popularity(&site.domain)?;
         }
         Ok(())
+    }
+
+    /// Gives the sites among `sites` that have no title the title of the
+    /// most read Wikipedia article about what each is the official website
+    /// of, without its qualifier: "Notion" for notion.so, "Yelp" for
+    /// yelp.com, whose homepages turn crawlers away. Only an article whose
+    /// official website is the site's homepage ([`Page::website`]) and
+    /// whose title the domain spells ([`site_is_titled`]) counts:
+    /// "Schitt's Creek", whose website is a page on cbc.ca, is not what
+    /// cbc.ca is.
+    pub fn title_untitled(&self, sites: &mut [crate::Hit]) -> Result<()> {
+        let searcher = self.reader.searcher();
+        for site in sites.iter_mut().filter(|site| {
+            site.title
+                .as_deref()
+                .is_none_or(|title| title.trim().is_empty())
+        }) {
+            let query = TermQuery::new(
+                Term::from_field_text(self.fields.site, &site.domain),
+                IndexRecordOption::Basic,
+            );
+            let best = searcher.search(
+                &query,
+                &TopDocs::with_limit(TITLE_CANDIDATES)
+                    .order_by_fast_field::<u64>("popularity", tantivy::Order::Desc),
+            )?;
+            for (_, address) in best {
+                let document: TantivyDocument = searcher.doc(address)?;
+                let Some(stored) = document
+                    .get_first(self.fields.page)
+                    .and_then(|v| v.as_str())
+                else {
+                    continue;
+                };
+                let page: Page = serde_json::from_str(stored)?;
+                if !page.is_article()
+                    || page.website.is_some()
+                    || !site_is_titled(&site.domain, &page.title)
+                {
+                    continue;
+                }
+                let title = base_title(&page.title).trim();
+                if !title.is_empty() {
+                    site.title = Some(title.to_string());
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether `word` (one word of [`analysis::words_analyzer`]) is in the
+    /// names of at least [`KNOWN_WORD_PAGES`] pages.
+    pub fn knows_word(&self, word: &str) -> Result<bool> {
+        let searcher = self.reader.searcher();
+        Ok(searcher.doc_freq(&Term::from_field_text(self.fields.words, word))? >= KNOWN_WORD_PAGES)
+    }
+
+    /// `spelling`, suggested for `query`, with the words the pages know
+    /// ([`PageSearcher::knows_word`]) put back as typed; `None` when no
+    /// change is left. The sites index hardly knows "pkce", "dplyr" or
+    /// "stain", so it suggests "pace", "plyr" and "spain"; pages name them.
+    /// A correction to a site's name ([`crate::Spelling::site`]) is kept:
+    /// "wels fargo" is a typo even though Wels is a town.
+    pub fn check_spelling(
+        &self,
+        query: &str,
+        spelling: crate::Spelling,
+    ) -> Result<Option<crate::Spelling>> {
+        if spelling.site.is_some() {
+            return Ok(Some(spelling));
+        }
+        let typed = analysis::tokens(&self.words, query);
+        let mut fixed: Vec<String> = spelling
+            .query
+            .split_whitespace()
+            .map(String::from)
+            .collect();
+        if typed.len() == fixed.len() {
+            for (word, fix) in typed.iter().zip(fixed.iter_mut()) {
+                if word != fix && self.knows_word(word)? {
+                    fix.clone_from(word);
+                }
+            }
+        } else {
+            // Words were split or joined, so they can't be put back one by
+            // one: a known word among those changed drops the suggestion.
+            for word in &typed {
+                if !fixed.contains(word) && self.knows_word(word)? {
+                    return Ok(None);
+                }
+            }
+        }
+        if fixed == typed {
+            return Ok(None);
+        }
+        Ok(Some(crate::Spelling {
+            query: fixed.join(" "),
+            ..spelling
+        }))
     }
 
     /// The best `limit` pages for `query`, best first.
@@ -1325,6 +1492,16 @@ impl PageSearcher {
                 .unwrap_or_default()
         };
         let spelled = |text: &str| plumb_core::collapse_whitespace(text).to_lowercase();
+        // A docs page is named only by one of its names in full: its title
+        // alone ("Glossary") or part of it says too little.
+        if page.set == DOCS_SET {
+            let named = page.aliases.iter().any(|alias| key(alias) == joined);
+            return if named {
+                (ALIAS_MATCH, true)
+            } else {
+                (0.0, false)
+            };
+        }
         if spelled(&page.title) == spelled(raw_query) {
             return (1.0, true);
         }
@@ -1837,6 +2014,81 @@ mod tests {
         .unwrap()
     }
 
+    fn docs_page(url: &str, title: &str, aliases: &[&str], description: &str) -> Page {
+        Page::from_docs(Article {
+            title: title.into(),
+            description: Some(description.into()),
+            item: Some(url.into()),
+            views: 5_000,
+            aliases: aliases.iter().map(|a| a.to_string()).collect(),
+            ..Article::default()
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn docs_pages_are_found_by_product_and_title_or_most_words() {
+        let sorting = docs_page(
+            "https://docs.python.org/3/howto/sorting.html",
+            "Sorting Techniques",
+            &["Python Sorting Techniques", "Sorting Techniques Python"],
+            "Python lists have a built-in list.sort() method that modifies the list in-place.",
+        );
+        assert_eq!(sorting.set_name(), "docs.python.org");
+        assert_eq!(sorting.set_domain(), "docs.python.org");
+        let glossary = docs_page(
+            "https://docs.python.org/3/glossary.html",
+            "Glossary",
+            &["Python Glossary", "Glossary Python"],
+            "The default Python prompt of the interactive shell.",
+        );
+        let (_dir, searcher) = searcher(&[
+            page("Glossary", 2_000, &[]),
+            sorting.clone(),
+            glossary.clone(),
+        ]);
+        let found = |query: &str| -> Vec<(String, bool)> {
+            searcher
+                .search(query, 10)
+                .unwrap()
+                .into_iter()
+                .filter(|hit| hit.page.set == DOCS_SET)
+                .map(|hit| (hit.page.title, hit.named))
+                .collect()
+        };
+        assert_eq!(
+            found("python sorting techniques"),
+            [("Sorting Techniques".to_string(), true)]
+        );
+        assert_eq!(found("python glossary"), [("Glossary".to_string(), true)]);
+        // Its title alone names nothing.
+        assert!(found("glossary").is_empty());
+        assert!(found("sorting techniques").is_empty());
+        // Most of the query's words.
+        assert_eq!(
+            found("sort a list in python"),
+            [("Sorting Techniques".to_string(), false)]
+        );
+        assert!(Page::from_docs(Article {
+            item: Some("http://docs.python.org/3/".into()),
+            ..Article::default()
+        })
+        .is_none());
+        let read = Page::from_set(
+            DOCS_SET,
+            Article {
+                title: sorting.title.clone(),
+                description: sorting.description.clone(),
+                item: Some(sorting.url.clone()),
+                views: sorting.views,
+                aliases: sorting.aliases.clone(),
+                ..Article::default()
+            },
+        );
+        assert_eq!(read, Some(sorting));
+        assert!(Page::has_reader(DOCS_SET));
+    }
+
     #[test]
     fn packages_are_found_only_when_asked_for() {
         let (_dir, searcher) = searcher(&[
@@ -2113,6 +2365,75 @@ mod tests {
         assert!(hit.score < 0.5, "{}", hit.score);
         assert!(s.search("marie antoinette", 1).unwrap().is_empty());
         assert!(s.search("", 1).unwrap().is_empty());
+    }
+
+    #[test]
+    fn spellings_keep_the_words_pages_know() {
+        let mut pages = Vec::new();
+        for i in 0..3 {
+            pages.push(page(&format!("PKCE flow {i}"), 10, &[]));
+            pages.push(page(&format!("Stain removal {i}"), 10, &[]));
+        }
+        let (_dir, searcher) = searcher(&pages);
+        let spelling = |query: &str, site: Option<&str>| crate::Spelling {
+            query: query.into(),
+            site: site.map(str::to_string),
+        };
+        // Every changed word is known: no suggestion.
+        assert_eq!(
+            searcher
+                .check_spelling("oauth2 pkce flow", spelling("oauth2 pace flow", None))
+                .unwrap(),
+            None
+        );
+        // Only the real typo is still fixed.
+        assert_eq!(
+            searcher
+                .check_spelling(
+                    "remove red wnie stain",
+                    spelling("remove red wine spain", None)
+                )
+                .unwrap(),
+            Some(spelling("remove red wine stain", None))
+        );
+        // Split or joined words with a known one changed: dropped.
+        assert_eq!(
+            searcher
+                .check_spelling("stain wood", spelling("stainwood", None))
+                .unwrap(),
+            None
+        );
+        // A site's name is corrected whatever pages say.
+        assert_eq!(
+            searcher
+                .check_spelling("stain", spelling("spain", Some("spain.info")))
+                .unwrap(),
+            Some(spelling("spain", Some("spain.info")))
+        );
+    }
+
+    #[test]
+    fn untitled_sites_take_their_article_s_title() {
+        let mut notion = page("Notion (productivity software)", 500, &[]);
+        notion.site = Some("notion.so".into());
+        // A show whose website is a page of cbc.ca is read more than CBC's
+        // own article, but it is not what cbc.ca is.
+        let mut show = page("Schitt's Creek", 9_000, &[]);
+        show.site = Some("cbc.ca".into());
+        show.website = Some("https://www.cbc.ca/schittscreek".into());
+        let mut cbc = page("CBC Television", 3_000, &[]);
+        cbc.site = Some("cbc.ca".into());
+        let (_dir, searcher) = searcher(&[notion, show, cbc]);
+        let mut sites = vec![
+            site("notion.so", true),
+            site("other.com", false),
+            site("cbc.ca", true),
+        ];
+        sites[1].title = Some("Other".into());
+        searcher.title_untitled(&mut sites).unwrap();
+        assert_eq!(sites[0].title.as_deref(), Some("Notion"));
+        assert_eq!(sites[1].title.as_deref(), Some("Other"));
+        assert_eq!(sites[2].title.as_deref(), Some("CBC Television"));
     }
 
     fn site(domain: &str, named: bool) -> crate::Hit {

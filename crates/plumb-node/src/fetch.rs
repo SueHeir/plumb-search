@@ -273,7 +273,24 @@ fn run_music(args: &FetchPagesArgs, dest: &std::path::Path) -> Result<()> {
         &music.album_mbids(),
         &work.join("listenbrainz-albums.tsv"),
     ))??;
-    let recordings = music.songs_to_ask(&albums)?;
+    let canonical = match &args.listenbrainz_canonical {
+        Some(path) => path.clone(),
+        None => {
+            let listing = block_on(async {
+                client
+                    .get(musicbrainz::CANONICAL_URL)
+                    .send()
+                    .await?
+                    .error_for_status()?
+                    .text()
+                    .await
+            })?
+            .with_context(|| format!("reading {}", musicbrainz::CANONICAL_URL))?;
+            let url = musicbrainz::canonical_dump_url(&listing)?;
+            fetch_dump(args, &url, "ListenBrainz's canonical data dump")?
+        }
+    };
+    let recordings = music.songs_to_ask(&albums, Some(&canonical))?;
     let recordings = block_on(musicbrainz::fetch_listeners(
         &client,
         Listened::Recordings,
@@ -313,6 +330,121 @@ fn run_films(args: &FetchPagesArgs, dest: &std::path::Path) -> Result<()> {
         &options,
     ))??;
     write_set(dest, &films, "films and shows")
+}
+
+/// Docs sites fetched at once; each site's pages are fetched one at a time.
+const DOCS_SITES_AT_ONCE: usize = 16;
+
+/// Makes the docs set file `dest` from the docs sites' pages (see
+/// [`plumb_core::docs`]). With --work, each site's pages are kept there as
+/// `docs-KEY.json` when fetched, and a site already kept is not fetched
+/// again.
+fn run_docs(args: &FetchPagesArgs, dest: &std::path::Path) -> Result<()> {
+    use plumb_core::docs::{DocsSite, DOCS_SITES};
+    use plumb_ingest::docs::{docs_articles, sort_docs, FetchedDoc};
+
+    let sites: Vec<&'static DocsSite> = if args.docs_sites.is_empty() {
+        DOCS_SITES.iter().collect()
+    } else {
+        args.docs_sites
+            .iter()
+            .map(|key| {
+                plumb_core::docs::site(key).with_context(|| {
+                    let keys: Vec<&str> = DOCS_SITES.iter().map(|site| site.key).collect();
+                    format!("unknown docs site {key:?}; there are: {}", keys.join(", "))
+                })
+            })
+            .collect::<Result<_>>()?
+    };
+    if let Some(work) = &args.work {
+        std::fs::create_dir_all(work).with_context(|| format!("creating {}", work.display()))?;
+    }
+    let max_pages = args.max_docs_per_site;
+    let work = args.work.clone();
+    let fetched = block_on(async move {
+        let cfg = plumb_crawl::CrawlConfig::default();
+        let mut running = tokio::task::JoinSet::new();
+        let mut done = Vec::new();
+        let mut queue = sites.into_iter();
+        loop {
+            while running.len() < DOCS_SITES_AT_ONCE {
+                let Some(site) = queue.next() else { break };
+                let cfg = cfg.clone();
+                let kept = work
+                    .as_ref()
+                    .map(|work| work.join(format!("docs-{}.json", site.key)));
+                running.spawn(async move {
+                    if let Some(docs) = kept.as_deref().and_then(read_kept_docs) {
+                        info!(
+                            "{}: {} pages kept from an earlier run",
+                            site.key,
+                            docs.len()
+                        );
+                        return (site, docs);
+                    }
+                    let target = plumb_crawl::SitePagesTarget {
+                        domain: site.domain.to_string(),
+                        roots: site.roots.iter().map(|r| r.to_string()).collect(),
+                        sitemaps: site.sitemaps.iter().map(|r| r.to_string()).collect(),
+                        index_pages: site.index_pages.iter().map(|r| r.to_string()).collect(),
+                        max_pages,
+                    };
+                    let result = plumb_crawl::fetch_site_pages(&target, &cfg).await;
+                    let docs: Vec<FetchedDoc> = result
+                        .pages
+                        .into_iter()
+                        .map(|page| FetchedDoc {
+                            url: page.url,
+                            title: page.meta.title,
+                            description: page.meta.description,
+                            text: page.meta.body_text,
+                        })
+                        .collect();
+                    if let Some(kept) = &kept {
+                        if !docs.is_empty() {
+                            if let Err(err) = write_kept_docs(kept, &docs) {
+                                warn!("{}: keeping its pages: {err:#}", site.key);
+                            }
+                        }
+                    }
+                    (site, docs)
+                });
+            }
+            match running.join_next().await {
+                Some(Ok(site_docs)) => done.push(site_docs),
+                Some(Err(err)) => warn!("a docs site's fetch failed: {err}"),
+                None => break,
+            }
+        }
+        done
+    })?;
+    let mut pages = Vec::new();
+    for (site, docs) in &fetched {
+        let articles = docs_articles(site, docs);
+        info!(
+            "{}: {} pages of {} fetched",
+            site.key,
+            articles.len(),
+            docs.len()
+        );
+        pages.extend(articles);
+    }
+    sort_docs(&mut pages);
+    write_set(dest, &pages, "docs pages")
+}
+
+/// The pages of a docs site kept at `path` by an earlier run.
+fn read_kept_docs(path: &std::path::Path) -> Option<Vec<plumb_ingest::docs::FetchedDoc>> {
+    let bytes = std::fs::read(path).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+/// Keeps the pages `docs` of a docs site at `path`.
+fn write_kept_docs(path: &std::path::Path, docs: &[plumb_ingest::docs::FetchedDoc]) -> Result<()> {
+    let part = path.with_extension("json.part");
+    std::fs::write(&part, serde_json::to_vec(docs)?)?;
+    std::fs::rename(&part, path)?;
+    Ok(())
 }
 
 /// Makes the papers set file `dest` from OpenAlex's API.
@@ -533,6 +665,9 @@ pub fn run_pages(args: FetchPagesArgs) -> Result<()> {
     }
     if set.id == plumb_index::pages::FILMS_SET {
         return run_films(&args, &dest);
+    }
+    if set.id == plumb_index::pages::DOCS_SET {
+        return run_docs(&args, &dest);
     }
     if set.id == plumb_index::pages::PACKAGES_SET {
         return run_packages(&args, &dest);

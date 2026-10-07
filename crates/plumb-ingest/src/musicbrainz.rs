@@ -18,6 +18,11 @@
 //! album's best-known songs are asked about even when no single or
 //! compilation put them out.
 //!
+//! ListenBrainz counts a song's listens on one canonical recording of it,
+//! often a single's or a compilation's that no album kept here has; its
+//! canonical data dump (CC0 too) says which, so the canonical recording of
+//! each recording asked about is asked about as well.
+//!
 //! They are written as an articles file ([`plumb_core::article`]): the
 //! title is the song's or album's title, the description "Song by ARTIST,
 //! YEAR" or "Album by ARTIST, YEAR", the item `recording/MBID` or
@@ -43,6 +48,11 @@ use tracing::{info, warn};
 pub const FULLEXPORT_URL: &str = "https://data.metabrainz.org/pub/musicbrainz/data/fullexport/";
 /// The core tables' archive in an export, about 6 GB.
 pub const CORE_DUMP: &str = "mbdump.tar.bz2";
+
+/// Where ListenBrainz's canonical data dumps are listed, one directory each.
+pub const CANONICAL_URL: &str = "https://data.metabrainz.org/pub/musicbrainz/canonical_data/";
+/// The file in a canonical data dump saying each recording's canonical one.
+const CANONICAL_REDIRECTS: &str = "canonical_recording_redirect.csv";
 
 /// The tables read, each a file `mbdump/TABLE` in the archive.
 pub const TABLES: &[&str] = &[
@@ -112,6 +122,73 @@ pub fn export_url(latest: &str) -> Result<String> {
         bail!("MusicBrainz's LATEST does not name an export: {latest:?}");
     }
     Ok(format!("{FULLEXPORT_URL}{latest}/"))
+}
+
+/// The archive of the newest canonical data dump, from the listing of
+/// [`CANONICAL_URL`].
+pub fn canonical_dump_url(listing: &str) -> Result<String> {
+    let newest = listing
+        .split("href=\"")
+        .skip(1)
+        .filter_map(|rest| rest.split('"').next())
+        .filter_map(|href| href.strip_suffix('/'))
+        .filter(|name| {
+            name.starts_with("musicbrainz-canonical-dump-")
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        })
+        .max()
+        .context("ListenBrainz's canonical data listing names no dump")?;
+    Ok(format!("{CANONICAL_URL}{newest}/{newest}.tar.zst"))
+}
+
+/// The canonical recording of each of `asked` that has another one, from
+/// `path`: a canonical data dump (`.tar.zst`) or its
+/// `canonical_recording_redirect.csv`.
+pub fn read_redirects(path: &Path, asked: &HashSet<Mbid>) -> Result<HashMap<Mbid, Mbid>> {
+    let file = std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
+    let file = BufReader::with_capacity(1 << 20, file);
+    if path.extension().is_some_and(|e| e == "csv") {
+        return redirects_of(file, asked);
+    }
+    let decoder = zstd::stream::read::Decoder::new(file)
+        .with_context(|| format!("reading {}", path.display()))?;
+    let mut tar = tar::Archive::new(decoder);
+    for entry in tar.entries().context("reading the canonical data dump")? {
+        let entry = entry.context("reading the canonical data dump")?;
+        if entry
+            .path()?
+            .file_name()
+            .is_some_and(|name| name == CANONICAL_REDIRECTS)
+        {
+            return redirects_of(BufReader::new(entry), asked);
+        }
+    }
+    bail!("{} has no {CANONICAL_REDIRECTS}", path.display())
+}
+
+/// Reads `recording_mbid,canonical_recording_mbid,...` lines.
+fn redirects_of(lines: impl BufRead, asked: &HashSet<Mbid>) -> Result<HashMap<Mbid, Mbid>> {
+    let mut redirects = HashMap::new();
+    for line in lines.lines() {
+        let line = line.context("reading the canonical recordings")?;
+        let mut fields = line.split(',');
+        if let (Some(from), Some(to)) = (
+            fields.next().and_then(parse_mbid),
+            fields.next().and_then(parse_mbid),
+        ) {
+            if from != to && asked.contains(&from) {
+                redirects.insert(from, to);
+            }
+        }
+    }
+    info!(
+        "{} of {} recordings have another canonical one",
+        redirects.len(),
+        asked.len()
+    );
+    Ok(redirects)
 }
 
 /// Writes the [`TABLES`] of the core dump `archive` (`mbdump.tar.bz2`) to
@@ -614,8 +691,14 @@ impl MusicDump {
 
     /// The recordings to ask ListenBrainz about: every recording of each
     /// song on at least [`MusicOptions::min_song_releases`] release groups
-    /// or on an album kept, given each album's `listeners`.
-    pub fn songs_to_ask(&mut self, album_listeners: &HashMap<Mbid, u64>) -> Result<Vec<Mbid>> {
+    /// or on an album kept, given each album's `listeners`, and the
+    /// canonical recordings of those (see [`read_redirects`]) in
+    /// `canonical`, a canonical data dump.
+    pub fn songs_to_ask(
+        &mut self,
+        album_listeners: &HashMap<Mbid, u64>,
+        canonical: Option<&Path>,
+    ) -> Result<Vec<Mbid>> {
         let kept_albums: HashSet<u32> = self
             .kept_albums(album_listeners)
             .into_iter()
@@ -658,6 +741,39 @@ impl MusicDump {
                 }
             }
         })?;
+        if let Some(canonical) = canonical {
+            let asked: HashSet<Mbid> = mbids.values().copied().collect();
+            let redirects = read_redirects(canonical, &asked)?;
+            let new: HashSet<Mbid> = redirects
+                .values()
+                .filter(|gid| !asked.contains(gid))
+                .copied()
+                .collect();
+            for_each_row(&self.dir, "recording", |row| {
+                if let (Some(id), Some(gid)) = (
+                    row.first().and_then(|f| num(f)),
+                    row.get(1).and_then(|f| parse_mbid(f)),
+                ) {
+                    if new.contains(&gid) {
+                        mbids.insert(id, gid);
+                    }
+                }
+            })?;
+            let ids: HashMap<Mbid, u32> = mbids.iter().map(|(&id, &gid)| (gid, id)).collect();
+            for song in &mut songs {
+                for i in 0..song.recordings.len() {
+                    let to = mbids
+                        .get(&song.recordings[i])
+                        .and_then(|gid| redirects.get(gid))
+                        .and_then(|gid| ids.get(gid));
+                    if let Some(&to) = to {
+                        if !song.recordings.contains(&to) {
+                            song.recordings.push(to);
+                        }
+                    }
+                }
+            }
+        }
         info!(
             "{} songs with {} recordings to ask about",
             songs.len(),
@@ -702,6 +818,10 @@ impl MusicDump {
             })
             .collect();
         songs.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        // Songs told apart by their titles ("Hey Jude", "Hey Jude
+        // (remastered)") can share a canonical recording; it is kept once.
+        let mut listed = HashSet::new();
+        songs.retain(|&(best, _, _)| listed.insert(best));
         songs.truncate(self.options.max_songs);
         let wanted: HashMap<u32, (u64, u16)> = songs
             .iter()
@@ -928,6 +1048,14 @@ fn add_links(
         }
     })?;
     for k in kept.iter_mut() {
+        // A song's only lyrics page may be a cover's; then none is kept,
+        // and the song's lyrics are searched for on Genius instead.
+        if k.kind == RECORDING {
+            if let Some(artist) = names.get(&k.credit) {
+                k.profiles
+                    .retain(|p| p.service != "genius-song" || is_genius_page_of(&p.id, artist));
+            }
+        }
         k.profiles.sort_by_key(|p| {
             plumb_core::profiles::SERVICES
                 .iter()
@@ -939,14 +1067,24 @@ fn add_links(
 
 /// Whether the Genius page `page` (`Nine-inch-nails-hurt-lyrics`) is of a
 /// song by `artist` ("Nine Inch Nails"): Genius names a song's page after
-/// its artist.
+/// its artist, or after the first of several ("Prince and The
+/// Revolution", "Daft Punk feat. Pharrell Williams").
 fn is_genius_page_of(page: &str, artist: &str) -> bool {
-    let artist = plumb_core::normalize_text(&artist.replace('&', " and "));
-    let artist: Vec<&str> = artist.split_whitespace().collect();
-    !artist.is_empty()
-        && page
-            .to_lowercase()
-            .starts_with(&format!("{}-", artist.join("-")))
+    let page = page.to_lowercase();
+    let named = |artist: &str| {
+        let artist = plumb_core::normalize_text(&artist.replace('&', " and "));
+        let artist: Vec<&str> = artist.split_whitespace().collect();
+        !artist.is_empty() && page.starts_with(&format!("{}-", artist.join("-")))
+    };
+    let lower = artist.to_lowercase();
+    let first = [
+        " feat", " ft.", " & ", " and ", ", ", " x ", " with ", " vs",
+    ]
+    .iter()
+    .filter_map(|joint| lower.find(joint))
+    .min()
+    .map_or(artist, |end| &artist[..end]);
+    named(artist) || named(first)
 }
 
 /// The song or album `kept` by `artist` as an articles file line (see the
@@ -1152,6 +1290,8 @@ mod tests {
     const VIDEO: &str = "cccccccc-d987-4042-ae91-78d6a3267d69";
     const NIGHT: &str = "1dc4c347-a1db-32aa-b14f-bc9cc507b843";
     const HITS: &str = "dddddddd-a1db-32aa-b14f-bc9cc507b843";
+    /// A recording on no release here, where ListenBrainz counts the song.
+    const CANONICAL: &str = "eeeeeeee-d987-4042-ae91-78d6a3267d69";
 
     /// Writes the tables of a small dump: Queen's "Bohemian Rhapsody" on
     /// A Night at the Opera (two official editions) and on Greatest Hits
@@ -1177,7 +1317,7 @@ mod tests {
             ("medium", "1000\t100\t1\t1\t\t0\tx\t12\n1001\t101\t1\t1\t\t0\tx\t12\n1002\t102\t1\t1\t\t0\tx\t17\n1003\t103\t1\t1\t\t0\tx\t2\n1004\t104\t1\t1\t\t0\tx\t2\n1005\t105\t1\t1\t\t0\tx\t2\n"),
             (
                 "recording",
-                &format!("500\t{BOHEMIAN}\tBohemian Rhapsody\t1\t354000\t\t0\tx\tf\n501\t{BOHEMIAN_LIVE}\tBohemian  Rhapsody\t1\t360000\tlive\t0\tx\tf\n502\t{NOBODY}\tSomething\t2\t1\t\t0\tx\tf\n503\t{VIDEO}\tBohemian Rhapsody (video)\t1\t1\t\t0\tx\tt\n504\t{NOBODY}\t[untitled]\t1\t1\t\t0\tx\tf\n"),
+                &format!("500\t{BOHEMIAN}\tBohemian Rhapsody\t1\t354000\t\t0\tx\tf\n501\t{BOHEMIAN_LIVE}\tBohemian  Rhapsody\t1\t360000\tlive\t0\tx\tf\n502\t{NOBODY}\tSomething\t2\t1\t\t0\tx\tf\n503\t{VIDEO}\tBohemian Rhapsody (video)\t1\t1\t\t0\tx\tt\n504\t{NOBODY}\t[untitled]\t1\t1\t\t0\tx\tf\n505\t{CANONICAL}\tBohemian Rhapsody\t1\t354000\t\t0\tx\tf\n"),
             ),
             (
                 "track",
@@ -1221,7 +1361,7 @@ mod tests {
         // Bohemian Rhapsody is on three release groups (the bootleg is not
         // counted); the song by no artist, the video and the placeholder
         // are left out.
-        let mut asked = dump.songs_to_ask(&albums).unwrap();
+        let mut asked = dump.songs_to_ask(&albums, None).unwrap();
         asked.sort();
         let mut both = vec![mbid(BOHEMIAN), mbid(BOHEMIAN_LIVE)];
         both.sort();
@@ -1271,12 +1411,12 @@ mod tests {
         // On too few release groups, and its album too little listened to.
         let mut dump = MusicDump::read(dir.path(), &options).unwrap();
         let quiet = HashMap::from([(mbid(NIGHT), 99)]);
-        assert!(dump.songs_to_ask(&quiet).unwrap().is_empty());
+        assert!(dump.songs_to_ask(&quiet, None).unwrap().is_empty());
         // Its album is kept, so the song is asked about; but it is too
         // little listened to itself.
         let mut dump = MusicDump::read(dir.path(), &options).unwrap();
         let albums = HashMap::from([(mbid(NIGHT), 100)]);
-        assert_eq!(dump.songs_to_ask(&albums).unwrap().len(), 2);
+        assert_eq!(dump.songs_to_ask(&albums, None).unwrap().len(), 2);
         let recordings = HashMap::from([(mbid(BOHEMIAN), 60), (mbid(BOHEMIAN_LIVE), 39)]);
         let music = dump.into_articles(&albums, &recordings).unwrap();
         let titles: Vec<&str> = music.iter().map(|a| a.title.as_str()).collect();
@@ -1288,8 +1428,65 @@ mod tests {
             ..options
         };
         let mut dump = MusicDump::read(dir.path(), &few).unwrap();
-        dump.songs_to_ask(&albums).unwrap();
+        dump.songs_to_ask(&albums, None).unwrap();
         assert!(dump.into_articles(&albums, &recordings).unwrap().is_empty());
+    }
+
+    #[test]
+    fn canonical_recordings_are_asked_about() {
+        let dir = tempfile::tempdir().unwrap();
+        write_dump(dir.path());
+        let redirects = dir.path().join("canonical_recording_redirect.csv");
+        std::fs::write(
+            &redirects,
+            format!("recording_mbid,canonical_recording_mbid,canonical_release_mbid\n{BOHEMIAN_LIVE},{CANONICAL},{NIGHT}\n{BOHEMIAN},{BOHEMIAN},{NIGHT}\n{NOBODY},{VIDEO},{NIGHT}\n"),
+        )
+        .unwrap();
+        let options = MusicOptions {
+            min_song_releases: 3,
+            min_listeners: 1,
+            ..MusicOptions::default()
+        };
+        let mut dump = MusicDump::read(dir.path(), &options).unwrap();
+        let albums = HashMap::from([(mbid(NIGHT), 19_247)]);
+        let mut asked = dump.songs_to_ask(&albums, Some(&redirects)).unwrap();
+        asked.sort();
+        let mut all = vec![mbid(BOHEMIAN), mbid(BOHEMIAN_LIVE), mbid(CANONICAL)];
+        all.sort();
+        assert_eq!(asked, all);
+        let recordings = HashMap::from([(mbid(BOHEMIAN), 7), (mbid(CANONICAL), 211_087)]);
+        let music = dump.into_articles(&albums, &recordings).unwrap();
+        assert_eq!(music[0].views, 211_094);
+        assert_eq!(
+            music[0].item.as_deref(),
+            Some(&*format!("recording/{CANONICAL}"))
+        );
+        // The dump itself is read too.
+        let archive = dir.path().join("canonical.tar.zst");
+        let mut tar = tar::Builder::new(
+            zstd::stream::write::Encoder::new(std::fs::File::create(&archive).unwrap(), 3).unwrap(),
+        );
+        tar.append_path_with_name(
+            &redirects,
+            "musicbrainz-canonical-dump-1/canonical/canonical_recording_redirect.csv",
+        )
+        .unwrap();
+        tar.into_inner().unwrap().finish().unwrap();
+        let asked = HashSet::from([mbid(BOHEMIAN_LIVE), mbid(BOHEMIAN)]);
+        assert_eq!(
+            read_redirects(&archive, &asked).unwrap(),
+            HashMap::from([(mbid(BOHEMIAN_LIVE), mbid(CANONICAL))])
+        );
+    }
+
+    #[test]
+    fn the_newest_canonical_dump_is_fetched() {
+        let listing = r#"<a href="../">../</a><a href="musicbrainz-canonical-dump-20261003-080002/">x</a><a href="musicbrainz-canonical-dump-20261003-080003/">x</a><a href="evil/">x</a>"#;
+        assert_eq!(
+            canonical_dump_url(listing).unwrap(),
+            "https://data.metabrainz.org/pub/musicbrainz/canonical_data/musicbrainz-canonical-dump-20261003-080003/musicbrainz-canonical-dump-20261003-080003.tar.zst"
+        );
+        assert!(canonical_dump_url("<a href=\"../\">").is_err());
     }
 
     #[test]
@@ -1309,6 +1506,29 @@ mod tests {
     }
 
     #[test]
+    fn a_covers_lyrics_are_not_linked() {
+        let dir = tempfile::tempdir().unwrap();
+        write_dump(dir.path());
+        // The work's only Genius page is Panic! at the Disco's.
+        std::fs::write(
+            dir.path().join("l_url_work"),
+            "2\t2\t6999\t9000\t0\tx\t0\t\t\n",
+        )
+        .unwrap();
+        let options = MusicOptions {
+            min_song_releases: 3,
+            min_listeners: 1,
+            ..MusicOptions::default()
+        };
+        let mut dump = MusicDump::read(dir.path(), &options).unwrap();
+        let albums = HashMap::from([(mbid(NIGHT), 19_247)]);
+        dump.songs_to_ask(&albums, None).unwrap();
+        let recordings = HashMap::from([(mbid(BOHEMIAN), 211_087)]);
+        let music = dump.into_articles(&albums, &recordings).unwrap();
+        assert!(music[0].profiles.iter().all(|p| p.service != "genius-song"));
+    }
+
+    #[test]
     fn genius_pages_are_told_by_their_artist() {
         assert!(is_genius_page_of("Queen-bohemian-rhapsody-lyrics", "Queen"));
         assert!(is_genius_page_of(
@@ -1324,6 +1544,22 @@ mod tests {
             "Johnny Cash"
         ));
         assert!(!is_genius_page_of("Queenie-x-lyrics", "Queen"));
+        assert!(is_genius_page_of(
+            "Prince-purple-rain-lyrics",
+            "Prince and The Revolution"
+        ));
+        assert!(is_genius_page_of(
+            "Daft-punk-get-lucky-lyrics",
+            "Daft Punk feat. Pharrell Williams & Nile Rodgers"
+        ));
+        assert!(is_genius_page_of(
+            "Earth-wind-and-fire-september-lyrics",
+            "Earth, Wind & Fire"
+        ));
+        assert!(!is_genius_page_of(
+            "Budjerah-sweet-disposition-lyrics",
+            "The Temper Trap"
+        ));
     }
 
     #[test]

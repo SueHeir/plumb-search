@@ -57,7 +57,7 @@ To answer searches that ask a fact ("capital of australia", "how tall is mount e
 plumb fetch-facts --data /path/to/node-data
 ```
 
-It asks for twelve properties, only their best-ranked statements, a page of 200,000 at a time: capital, population (the latest count), elevation, height, area, birth and death dates, founding date, founders, CEO, headquarters and currency. Quantities are kept in metres and square metres whatever unit Wikidata has them in, dates only as precise as Wikidata knows them, and items (Canberra, a founder) by their English labels. They ride on the article's `profiles` line as `f-capital=Canberra` entries, which readers made before facts leave out, so `fetch-profiles` and `fetch-facts` keep each other's entries and can run in either order. The answer is shown above the results, with "From Wikidata", only when the search's subject names an article that has the fact; the node never guesses one.
+It asks for twenty-one properties, only their best-ranked statements, a page of 50,000 at a time: capital, population (the latest count), elevation, height, area, birth and death dates, founding date, founders, CEO, headquarters, currency, author, director, composer, creator, owner, birthplace, spouse, head of state and head of government. Authors and creators (millions of papers and paintings) are asked for only for the most read articles, by name, as is any property whose pages Wikidata stops answering. A capital, CEO, spouse or leader that ended is left out, and one that applies only to a part (South Africa's three capitals) counts only when there is no other. Quantities are kept in metres and square metres whatever unit Wikidata has them in, dates only as precise as Wikidata knows them, and items (Canberra, a founder) by their English labels. They ride on the article's `profiles` line as `f-capital=Canberra` entries, which readers made before facts leave out, so `fetch-profiles` and `fetch-facts` keep each other's entries and can run in either order. The answer is shown above the results, with "From Wikidata", only when the search's subject names an article that has the fact; the node never guesses one.
 
 ## Nodes in the network
 
@@ -125,13 +125,13 @@ The `music` set lists the songs and albums people listen to most (150,000 songs 
 plumb fetch-pages --set music --work /big/disk/dumps --data /path/to/node-data
 ```
 
-A song is all the recordings of one title by one artist credit, remasters and live versions too, and its listeners are its recordings' together. ListenBrainz is asked about every song on at least two release groups (an album, a single, a compilation) and every song of the 30,000 albums most listened to, so an album's best-known songs are found even when no single put them out. Each song keeps its title, "Song by ARTIST, YEAR" as its description, "TITLE ARTIST" as another title, its most listened to recording's MusicBrainz id (its address on musicbrainz.org), its listeners, and the links MusicBrainz has for it: its lyrics on Genius, its Spotify track and its music video. Each album keeps the same, with "Album by ARTIST, YEAR", and its Spotify and Apple Music albums. A compilation, live album or DJ mix is no album here; a soundtrack is.
+A song is all the recordings of one title by one artist credit, remasters and live versions too, and its listeners are its recordings' together. ListenBrainz is asked about every song on at least two release groups (an album, a single, a compilation) and every song of the 30,000 albums most listened to, so an album's best-known songs are found even when no single put them out. ListenBrainz counts a song's listens on one canonical recording of it, often a single's or a compilation's, so the canonical recording of each one asked about is asked about too, from ListenBrainz's canonical data dump (CC0, `canonical_recording_redirect.csv`). Each song keeps its title, "Song by ARTIST, YEAR" as its description, "TITLE ARTIST" as another title, its most listened to recording's MusicBrainz id (its address on musicbrainz.org), its listeners, and the links MusicBrainz has for it: its lyrics on Genius, its Spotify track and its music video. Each album keeps the same, with "Album by ARTIST, YEAR", and its Spotify and Apple Music albums. A compilation, live album or DJ mix is no album here; a soundtrack is.
 
 No lyrics are kept: they are copyrighted. "bohemian rhapsody lyrics" links the song's page on Genius, which MusicBrainz links the song's work to, shown first like a profile ("Listing, from MusicBrainz"); a song MusicBrainz knows no such page for gets a link to Genius's search for its title and artist instead. Nothing is fetched from Genius.
 
 Song and album titles are too often the names of other things ("Dead Sea", "Notion", "Lord of the Flies"), so a song or album is only listed when asked for: by its title and its artist, or its title and "song" or "album". Its title alone lists the article of that name, never the song. For "TITLE lyrics", the song is looked up as "TITLE song" when no article of that name has a Genius page.
 
-The answers ListenBrainz gives are kept in `--work` (`listenbrainz-albums.tsv`, `listenbrainz-recordings.tsv`) as they come, so a run that stops carries on where it left off. It keeps to the rate ListenBrainz sets. `--max-songs`, `--max-albums`, `--min-song-releases`, `--min-listeners` (20 by default) and `--musicbrainz-dump` (a downloaded `mbdump.tar.bz2`, or a directory of its tables) change what is read and kept. Reading the dump takes a few GB of memory.
+The answers ListenBrainz gives are kept in `--work` (`listenbrainz-albums.tsv`, `listenbrainz-recordings.tsv`) as they come, so a run that stops carries on where it left off. It keeps to the rate ListenBrainz sets. `--max-songs`, `--max-albums`, `--min-song-releases`, `--min-listeners` (20 by default) and `--musicbrainz-dump` (a downloaded `mbdump.tar.bz2`, or a directory of its tables), `--listenbrainz-canonical` (a downloaded canonical data dump) change what is read and kept. Reading the dump takes a few GB of memory.
 
 ## Films and TV shows
 
@@ -175,6 +175,20 @@ A package is listed only when the query asks for one, so "react" is still the si
 > Latest 1.0.228 (2025-09-27) · MIT OR Apache-2.0 · `cargo add serde` · Docs · Code · Home
 
 The MCP server's `package` tool returns the same card by name ([mcp.md](mcp.md)). In the SearXNG-style JSON it follows the description in `content`.
+
+## Software docs
+
+The `docs` set lists the pages of software docs sites: MDN, Python's docs, Rust's standard library and books, Go, Node.js, TypeScript, React, Vue, Next.js, Tailwind CSS, Django, Flask, NumPy, pandas, PyTorch, PostgreSQL, MySQL, SQLite, Docker, Kubernetes, Git, GitHub Docs, Java, C++ (cppreference), .NET, Kotlin, PHP, Ruby, Rails, Linux man pages, Bash, the Arch Wiki, nginx, Redis, MongoDB, Terraform, Godot and Bootstrap (`plumb_core::docs::DOCS_SITES`):
+
+```sh
+plumb fetch-pages --set docs --work /path/to/work --data /path/to/node-data
+```
+
+Each site's pages are those its sitemaps (named in its robots.txt, or `/sitemap.xml`) and its table of contents link to under its docs addresses (`https://docs.python.org/3/`), the shallowest first, at most 20,000 a site (`--max-docs-per-site`). Each page is fetched like a homepage in a crawl: robots.txt is obeyed for every address, a site is asked one page at a time with a second (or its `Crawl-delay`) between answers, and only redirects on the same site are followed. Sixteen sites are fetched at once. Each page keeps its title without the site's name ("Sorting Techniques — Python 3.14 documentation" is "Sorting Techniques"), its description (or else the start of its text), and its address. Its views are the site's weight (1 to 10) over how deep the page is under the site's docs, so a site's main pages come first. With `--work`, each site's pages are kept there (`docs-python.json`) as it finishes, and a run that stops carries on with the sites not yet done. `--docs-sites python,mdn` fetches only some.
+
+A docs page's title alone ("Glossary") names nothing. It is named by its product's name and title ("python glossary", "glossary python") or, for pages whose title names a section ("Array.prototype.sort() — JavaScript"), by the section and title ("javascript array.prototype.sort()"), and then may come first. Like a question, it is also found by most of the words of its title, names and description ("sort a list in python") and listed after the best site, or first when the query asks for the whole page.
+
+This is the first set of inner pages of good sites; universities, professors, companies and other kinds follow the same way (`plumb_crawl::fetch_site_pages`), each as a set of its own that a node turns on or off under Page sets.
 
 ## How pages and sites are listed together
 

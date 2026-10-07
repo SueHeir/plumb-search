@@ -108,9 +108,16 @@ impl MeaningIndex {
             }
         };
         let instructed = || embed(&format!("{QUERY_INSTRUCTION}{query}"));
+        let plain = || match self.embedder.embed_query(query) {
+            Ok(vector) => Some(vector),
+            Err(_) => {
+                warn!("could not embed a search query; searching by words only");
+                None
+            }
+        };
         let vectors = self.read();
         match self.instruction {
-            QueryInstruction::Off => Some(vec![embed(query)?]),
+            QueryInstruction::Off => Some(vec![plain()?]),
             QueryInstruction::On => Some(vec![instructed()?]),
             QueryInstruction::Mix | QueryInstruction::Min => {
                 Some(vec![embed(query)?, instructed()?])
@@ -506,9 +513,12 @@ pub fn run_embed(args: EmbedArgs) -> Result<()> {
 }
 
 /// Downloads the model's files into `dir` from `base_url` (each of
-/// [`MODEL_FILES`] appended), those not there yet.
+/// [`MODEL_FILES`] appended), those not there yet; nothing when `dir`
+/// names an embedding server ([`plumb_embed::SERVER_FILE`]).
 pub(crate) async fn ensure_model(dir: &Path, base_url: &str) -> Result<()> {
-    if MODEL_FILES.iter().all(|name| dir.join(name).is_file()) {
+    if MODEL_FILES.iter().all(|name| dir.join(name).is_file())
+        || dir.join(plumb_embed::SERVER_FILE).is_file()
+    {
         return Ok(());
     }
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;

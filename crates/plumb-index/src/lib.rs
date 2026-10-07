@@ -167,6 +167,12 @@ const UNTITLED_LOOKAHEAD: usize = 20;
 /// Share of the first result's score a site with no title needs to keep
 /// its place anyway ([`Searcher::untitled_last`]).
 const UNTITLED_CLOSE_SHARE: f32 = 0.9;
+/// Results looked at past the ones asked for, to fill the places of the
+/// copies [`without_copies`] leaves out.
+const COPY_LOOKAHEAD: usize = 10;
+/// Link score under which a site that copies a listed site's title is a
+/// look-alike ([`without_copies`]).
+const COPYCAT_LINK_SCORE: f32 = 0.05;
 /// Most distinct query words used; the rest are ignored.
 const MAX_QUERY_WORDS: usize = 16;
 /// A query with operators ranks this many times its limit, and at least
@@ -1114,6 +1120,20 @@ impl Searcher {
             }
             _ => results,
         };
+        // The site the correction names is listed second, under the best
+        // match as typed: "saples" still lists what has those letters
+        // first, and staples.com right under it rather than nowhere.
+        let mut results = results;
+        if let Some(site) = &site {
+            match fixed.hits.into_iter().next() {
+                Some(fixed_site) if !results.hits.iter().any(|hit| hit.domain == *site) => {
+                    let at = results.hits.len().min(1);
+                    results.hits.insert(at, fixed_site);
+                    results.hits.truncate(limit);
+                }
+                _ => suggested_site_second(&mut results.hits, site),
+            }
+        }
         Ok(SearchResults {
             spelling: Some(Spelling {
                 query: fix.query,
@@ -1566,15 +1586,24 @@ impl Searcher {
             }
         }
 
-        // The best-ranked site named by the query's first words, with words
-        // left over to search it for.
-        let named_site = ranked.iter().find_map(|r| {
+        // The first result, when the query's first words name it, with
+        // words left over to search it for. A site named lower down is not
+        // what the query is about: capital.edu for "capital one my
+        // account". Nor is a little-known site named by a common word
+        // (get.gov for "get rid of fruit flies", yoga.com for "yoga studio
+        // near seattle").
+        let named_site = ranked.first().and_then(|r| {
             let words = names.get(&r.addr)?.words();
-            (words > 0 && words < query.len).then_some((r.addr, words))
+            (words > 0 && words < query.len).then_some((r, words))
         });
         let site_search = match named_site {
-            Some((addr, words)) => self.site_search(&searcher, addr, query_text, words)?,
-            None => None,
+            Some((r, words))
+                if r.link_score >= WELL_KNOWN_LINK_SCORE
+                    || !self.names_by_common_word(&searcher, query_text, words)? =>
+            {
+                self.site_search(&searcher, r.addr, query_text, words)?
+            }
+            _ => None,
         };
 
         // Left out unless the query names them: sites on names reserved
@@ -1584,33 +1613,16 @@ impl Searcher {
         // someone else's product ("Outlook Web App" on bpl.net for
         // "microsoft outlook"). live.com, titled "Outlook", is Microsoft's.
         let ranked = self.untitled_last(&searcher, ranked, limit)?;
-        let mut hits: Vec<Hit> = Vec::with_capacity(limit.min(ranked.len()));
+        // A few more than asked for, so that copies left out below leave
+        // the page full.
+        let wanted = limit.saturating_add(COPY_LOOKAHEAD);
+        let mut hits: Vec<Hit> = Vec::with_capacity(wanted.min(ranked.len()));
         for ranked in ranked {
-            if hits.len() == limit {
+            if hits.len() == wanted {
                 break;
             }
             let named = ranked.named;
             let hit = self.hit(&searcher, ranked)?;
-            // One site per brand: google.co.uk, google.de and google.fr
-            // under google.com for "search engines" are the same site
-            // again, titled the same or not at all. The best ranked of
-            // them stays; a country site with a title of its own
-            // (amazon.co.jp's) does too, and so does one that is the
-            // official site of something (cbc.ca, under cbc.com).
-            let same_title = |kept: &Hit| {
-                hit.title.as_deref().is_none_or(|title| {
-                    kept.title
-                        .as_deref()
-                        .is_some_and(|kept| normalize_text(kept) == normalize_text(title))
-                })
-            };
-            if !hit.official
-                && hits
-                    .iter()
-                    .any(|kept| country_copy(&kept.domain, &hit.domain) && same_title(kept))
-            {
-                continue;
-            }
             let left_out = is_reserved_name(&hit.domain)
                 || is_pill_shop(&hit.domain, hit.link_score)
                 || (hit.link_score < WELL_KNOWN_LINK_SCORE
@@ -1622,6 +1634,9 @@ impl Searcher {
                 hits.push(hit);
             }
         }
+        let typed = registrable_domain(query_text.trim());
+        let mut hits = without_copies(hits, typed.as_deref(), home.as_deref());
+        hits.truncate(limit);
         let results = SearchResults {
             hits,
             pages: Vec::new(),
@@ -1733,6 +1748,10 @@ impl Searcher {
     /// A link into the search of the site at `addr` for the words of `query`
     /// after its first `words`, if the site has a search address (its own,
     /// or one Plumb knows for big sites).
+    ///
+    /// A question has no site to search ("can cats eat chocolate"), and
+    /// neither do words that go on from the name as one phrase: "capital
+    /// of ohio", "house of the dragon", "airbnb vs vrbo".
     fn site_search(
         &self,
         searcher: &tantivy::Searcher,
@@ -1740,10 +1759,42 @@ impl Searcher {
         query: &str,
         words: usize,
     ) -> Result<Option<SiteSearch>> {
+        if pages::asked_as_question(query) {
+            return Ok(None);
+        }
         let Some(terms) = words_after(&self.words, query, words) else {
             return Ok(None);
         };
+        let goes_on = terms
+            .split_whitespace()
+            .next()
+            .map(normalize_text)
+            .is_some_and(|word| {
+                is_function_word(&word) || matches!(word.as_str(), "vs" | "versus" | "v")
+            });
+        if goes_on {
+            return Ok(None);
+        }
         self.site_search_link(searcher, addr, terms)
+    }
+
+    /// Whether the first `words` words of `query` are one word that many
+    /// sites' titles have ([`spell::KNOWN_WORD_DOCS`] or more): "get",
+    /// "yoga", "capital".
+    fn names_by_common_word(
+        &self,
+        searcher: &tantivy::Searcher,
+        query: &str,
+        words: usize,
+    ) -> Result<bool> {
+        if words != 1 {
+            return Ok(false);
+        }
+        let Some(word) = analysis::tokens(&self.words, query).into_iter().next() else {
+            return Ok(false);
+        };
+        let term = Term::from_field_text(self.fields.title, &word);
+        Ok(searcher.doc_freq(&term)? >= spell::KNOWN_WORD_DOCS)
     }
 
     /// A link into the search of the site at `addr` for `terms`.
@@ -1836,16 +1887,28 @@ impl Searcher {
                 .map(str::to_string)
         };
         let domain = text(self.fields.domain).unwrap_or_default();
-        let url = text(self.fields.url).unwrap_or_else(|| format!("https://{domain}/"));
+        // A homepage read on another site's host, indexed before crawls
+        // stopped there (prevention.nih.gov for nih.gov), says what that
+        // site is: its address, title and description are left out until
+        // the index is rebuilt without them ([`schema::document`]).
+        let stored_url = text(self.fields.url);
+        let borrowed = stored_url
+            .as_deref()
+            .is_some_and(|url| reads_another_site(url, &domain));
+        let url = stored_url
+            .filter(|_| !borrowed)
+            .unwrap_or_else(|| format!("https://{domain}/"));
+        let own = |field| text(field).filter(|_| !borrowed);
         let about = text(self.fields.about);
         Ok(Hit {
             demand: None,
             url,
-            title: text(self.fields.title),
+            // A title in the wrong encoding ("����") says nothing.
+            title: own(self.fields.title).filter(|title| !title.contains('\u{FFFD}')),
             official: about.is_some(),
             // The site's own description, else Wikipedia's, else what
             // Wikidata says it is.
-            description: text(self.fields.description).or(about),
+            description: own(self.fields.description).or(about),
             domain,
             score: ranked.score,
             text_score: ranked.text_score,
@@ -1858,6 +1921,13 @@ impl Searcher {
                 .unwrap_or_default(),
         })
     }
+}
+
+/// Whether `url`, a site's homepage address, is on another site than
+/// `domain`: prevention.nih.gov for nih.gov, play.google.com for
+/// google.com ([`plumb_core::subsites`]).
+pub(crate) fn reads_another_site(url: &str, domain: &str) -> bool {
+    registrable_domain(url).is_some_and(|site| site != domain)
 }
 
 /// Drugs that spam pill shops put in their names.
@@ -2081,20 +2151,122 @@ fn words_after(analyzer: &TextAnalyzer, query: &str, words: usize) -> Option<Str
     None
 }
 
-/// Whether `b` is `a` on another top-level domain where one of them is a
-/// country's: google.de for google.com, facebook.co for facebook.com.
-/// Sites with the same label on two generic domains (swift.com,
-/// swift.org) are often not one site, so they are not copies.
-fn country_copy(a: &str, b: &str) -> bool {
-    let (Some((label_a, tld_a)), Some((label_b, tld_b))) = (a.split_once('.'), b.split_once('.'))
-    else {
-        return false;
-    };
-    if registrable_domain(a).as_deref() != Some(a) || registrable_domain(b).as_deref() != Some(b) {
-        return false;
+/// The label and suffix of a registrable domain: ("google", "co.uk")
+/// for google.co.uk. `None` for a host below one (news.ycombinator.com).
+fn brand_label(domain: &str) -> Option<(&str, &str)> {
+    if registrable_domain(domain).as_deref() != Some(domain) {
+        return None;
     }
-    let country = |tld: &str| tld.rsplit('.').next().is_some_and(|last| last.len() == 2);
-    label_a == label_b && tld_a != tld_b && (country(tld_a) || country(tld_b))
+    let (label, suffix) = domain.split_once('.')?;
+    // news.ycombinator.com is a site of its own, but not a brand's domain.
+    registrable_domain(suffix)
+        .is_none()
+        .then_some((label, suffix))
+}
+
+/// Moves `site`, the site a spelling suggestion names, up to second when
+/// it is listed lower: "tco bell" lists tacobell.com right under bell.ca,
+/// not fourth. Its score is put between its new neighbours', so scores
+/// still go down the list. Not first: the results stay those of the query
+/// as typed.
+pub fn suggested_site_second(hits: &mut Vec<Hit>, site: &str) {
+    let Some(at) = hits.iter().position(|hit| hit.domain == site) else {
+        return;
+    };
+    if at <= 1 {
+        return;
+    }
+    let mut hit = hits.remove(at);
+    hit.score = (hits[0].score + hits[1].score) / 2.0;
+    hits.insert(1, hit);
+}
+
+/// `hits` without the copies of a site listed with them:
+///
+/// - One site per brand: airbnb.fr, airbnb.co.uk and airbnb.tech next to
+///   airbnb.com, or google.de next to google.com, are the same site again
+///   when they say nothing of their own (no title, or a title that names
+///   the brand). Where one of them is the official site of
+///   something Wikidata describes, it stays and the others go, even when
+///   they rank above it (23andme.org's copy of 23andMe's title above
+///   23andme.com); otherwise the best known (most linked) stays. Every official site
+///   stays (cbc.ca next to cbc.com), and so does a country site with a
+///   title of its own (amazon.co.jp's).
+/// - A site nobody links to whose title is that of a site listed above it
+///   (a copy of Coinbase's title on elephant-blue.org).
+///
+/// `typed` is the domain the query is, which always stays, and so do the
+/// sites of `home`, the searcher's country (bbc.co.uk in Britain).
+fn without_copies(hits: Vec<Hit>, typed: Option<&str>, home: Option<&str>) -> Vec<Hit> {
+    // The title names the brand anywhere in it: "StubHub UK", "Buy and
+    // sell tickets | StubHub".
+    let names_brand = |hit: &Hit, label: &str| {
+        hit.title
+            .as_deref()
+            .is_none_or(|title| normalize_text(title).replace(' ', "").contains(label))
+    };
+    let mut copies = vec![false; hits.len()];
+    for (i, hit) in hits.iter().enumerate() {
+        if hit.official
+            || typed == Some(hit.domain.as_str())
+            || (home.is_some() && hit.country.as_deref() == home)
+        {
+            continue;
+        }
+        let title = hit.title.as_deref().map(normalize_text);
+        let same_title =
+            |other: &Hit| title.is_some() && other.title.as_deref().map(normalize_text) == title;
+        // Another site's title word for word, naming that site and not
+        // this one: elephant-blue.org titled "Coinbase - Buy and Sell
+        // Bitcoin…", however linked, short of a well-known site (live.com
+        // titled "Outlook" is Microsoft's own).
+        let names_other = |other: &Hit| {
+            brand_label(&other.domain).is_some_and(|(label, _)| {
+                label.len() >= 4 && names_brand(other, label) && !hit.domain.contains(label)
+            })
+        };
+        if hits.iter().any(|other| {
+            other.link_score > hit.link_score
+                && same_title(other)
+                && (hit.link_score < COPYCAT_LINK_SCORE
+                    || (hit.link_score < WELL_KNOWN_LINK_SCORE && names_other(other)))
+        }) {
+            copies[i] = true;
+            continue;
+        }
+        let Some((label, suffix)) = brand_label(&hit.domain) else {
+            continue;
+        };
+        // On a country's ending, a title naming the brand is
+        // the brand's, and so is one on a site nobody links to
+        // (quizlet.fun); on two generic endings (acme.com, acme.net)
+        // otherwise only a missing title says nothing of its own.
+        let country = |suffix: &str| suffix.rsplit('.').next().is_some_and(|tld| tld.len() == 2);
+        let same_brand = |other: &Hit| {
+            brand_label(&other.domain).is_some_and(|(l, s)| {
+                l == label
+                    && s != suffix
+                    && (hit.title.is_none()
+                        || ((country(s) || country(suffix) || hit.link_score < COPYCAT_LINK_SCORE)
+                            && (names_brand(hit, label) || same_title(other))))
+            })
+        };
+        let official = hits.iter().any(|other| other.official && same_brand(other));
+        // The best known of them, not the best ranked: ranking comes
+        // again after this (the learned order), and cbc.bb ranked above
+        // cbc.ca is no reason to leave out cbc.ca.
+        let better = hits.iter().enumerate().any(|(j, other)| {
+            j != i
+                && same_brand(other)
+                && (other.link_score > hit.link_score
+                    || (other.link_score == hit.link_score && j < i))
+        });
+        copies[i] = official || better;
+    }
+    hits.into_iter()
+        .zip(copies)
+        .filter_map(|(hit, copy)| (!copy).then_some(hit))
+        .collect()
 }
 
 /// How many of the query's words, from the first on, a site's names cover.
@@ -2650,7 +2822,7 @@ mod tests {
                 None,
                 &[],
                 &[],
-                Signals::default(),
+                obscure(900_000, 20),
             ),
             site(
                 "wikipedia.org",
@@ -3832,6 +4004,80 @@ mod tests {
         assert_eq!(full("github").site_search, None);
         assert_eq!(full("us bank login").site_search, None);
         assert_eq!(full("liar stuff").site_search, None);
+        // Words that go on from the name as a phrase, and questions, have
+        // no site to search.
+        assert_eq!(full("github of the world").site_search, None);
+        assert_eq!(full("github vs gitlab").site_search, None);
+        assert_eq!(full("can github host pages").site_search, None);
+    }
+
+    #[test]
+    fn borrowed_and_garbled_titles_are_not_shown() {
+        let mut records = corpus();
+        let mut nih = site(
+            "nih.gov",
+            Some("Home | NIH Office of Disease Prevention Website"),
+            Some("Prevention research"),
+            &["National Institutes of Health"],
+            &[],
+            popular(400, 20_000),
+        );
+        nih.url = Some("https://prevention.nih.gov/".into());
+        records.push(nih);
+        records.push(site(
+            "netease.com",
+            Some("\u{FFFD}\u{FFFD}\u{FFFD}\u{FFFD}"),
+            None,
+            &[],
+            &[],
+            popular(900, 10_000),
+        ));
+        let (_dir, searcher) = build(&records);
+        let first = |q: &str| {
+            searcher
+                .search_full(q, 10, &RankConfig::default(), &SearchOptions::default())
+                .unwrap()
+                .hits
+                .into_iter()
+                .next()
+                .unwrap()
+        };
+        let nih = first("nih");
+        assert_eq!(nih.domain, "nih.gov");
+        assert_eq!(nih.url, "https://nih.gov/");
+        assert_eq!(nih.title.as_deref(), Some("National Institutes of Health"));
+        assert_ne!(nih.description.as_deref(), Some("Prevention research"));
+        let netease = first("netease");
+        assert_eq!(netease.domain, "netease.com");
+        assert_eq!(netease.title, None);
+    }
+
+    #[test]
+    fn site_search_needs_the_site_first_and_more_than_a_common_word() {
+        let mut records = corpus();
+        let mut get = site("get.gov", Some("Get"), None, &[], &[], ranked(5_000, 100));
+        get.search_url = Some("https://get.gov/search?q={searchTerms}".into());
+        records.push(get);
+        for i in 0..25 {
+            records.push(site(
+                &format!("getaway{i}.com"),
+                Some(&format!("Get away {i}")),
+                None,
+                &[],
+                &[],
+                ranked(100_000 + i, 10),
+            ));
+        }
+        let (_dir, searcher) = build(&records);
+        let found = searcher
+            .search_full(
+                "get rid of flies",
+                10,
+                &RankConfig::default(),
+                &SearchOptions::default(),
+            )
+            .unwrap();
+        assert_eq!(found.site_search, None);
     }
 
     #[test]
@@ -4186,7 +4432,7 @@ mod tests {
             site("gmail.hu", None, None, &[], &[], obscure(12_000, 20)),
             site(
                 "gmail.jp",
-                Some("Gmail Japan fans"),
+                Some("Fans in Japan"),
                 Some("Tips for Gmail users in Japan."),
                 &[],
                 &[],
@@ -4218,6 +4464,155 @@ mod tests {
     }
 
     #[test]
+    fn the_site_a_suggestion_names_is_listed_second() {
+        let hit = |domain: &str, score: f32| Hit {
+            domain: domain.into(),
+            url: format!("https://{domain}/"),
+            title: None,
+            description: None,
+            score,
+            text_score: 1.0,
+            link_score: 0.5,
+            placing_text_score: None,
+            country: None,
+            named: false,
+            official: false,
+            key_pages: Vec::new(),
+            demand: None,
+        };
+        // "tco bell": bell.ca as typed, tacobell.com right under it.
+        let mut hits = vec![
+            hit("bell.ca", 0.7),
+            hit("cityofbell.org", 0.6),
+            hit("t.co", 0.5),
+            hit("tacobell.com", 0.4),
+        ];
+        suggested_site_second(&mut hits, "tacobell.com");
+        assert_eq!(
+            domains(&hits),
+            ["bell.ca", "tacobell.com", "cityofbell.org", "t.co"]
+        );
+        assert!(hits.windows(2).all(|w| w[0].score >= w[1].score));
+        // First or second already: left where it is.
+        suggested_site_second(&mut hits, "bell.ca");
+        suggested_site_second(&mut hits, "tacobell.com");
+        assert_eq!(domains(&hits)[..2], ["bell.ca", "tacobell.com"]);
+    }
+
+    #[test]
+    fn copies_and_copycats_are_left_out() {
+        let hit = |domain: &str, title: Option<&str>, link_score: f32, official: bool| Hit {
+            domain: domain.into(),
+            url: format!("https://{domain}/"),
+            title: title.map(str::to_string),
+            description: None,
+            score: 1.0,
+            text_score: 1.0,
+            link_score,
+            placing_text_score: None,
+            country: None,
+            named: true,
+            official,
+            key_pages: Vec::new(),
+            demand: None,
+        };
+        let kept = |hits: Vec<Hit>, typed: Option<&str>| -> Vec<String> {
+            without_copies(hits, typed, None)
+                .into_iter()
+                .map(|h| h.domain)
+                .collect()
+        };
+        // Airbnb in other countries and on other endings, titled with the
+        // brand or not at all; its charity has a title of its own.
+        let airbnb = vec![
+            hit("airbnb.com", Some("Airbnb | Vacation rentals"), 0.9, true),
+            hit(
+                "airbnb.fr",
+                Some("Airbnb : locations de vacances"),
+                0.6,
+                false,
+            ),
+            hit("airbnb.tech", None, 0.3, false),
+            hit("airbnb.org", Some("Emergency housing by hosts"), 0.5, false),
+            hit("vrbo.com", Some("Vrbo"), 0.8, true),
+        ];
+        assert_eq!(
+            kept(airbnb.clone(), None),
+            ["airbnb.com", "airbnb.org", "vrbo.com"]
+        );
+        // Typed, the copy stays.
+        assert!(kept(airbnb, Some("airbnb.fr")).contains(&"airbnb.fr".to_string()));
+        // An official site beats the copy ranked above it.
+        let gene = vec![
+            hit(
+                "23andme.org",
+                Some("DNA Genetic Testing - 23andMe"),
+                0.0,
+                false,
+            ),
+            hit(
+                "23andme.com",
+                Some("DNA Genetic Testing - 23andMe"),
+                0.7,
+                true,
+            ),
+        ];
+        assert_eq!(kept(gene, None), ["23andme.com"]);
+        // A site nobody links to with a listed site's title.
+        let coin = vec![
+            hit(
+                "coinbase.com",
+                Some("Coinbase - Buy and Sell Crypto"),
+                0.9,
+                true,
+            ),
+            hit(
+                "elephant-blue.org",
+                Some("Coinbase - Buy and Sell Crypto"),
+                0.0,
+                false,
+            ),
+            hit("kraken.com", Some("Kraken"), 0.8, true),
+        ];
+        assert_eq!(kept(coin, None), ["coinbase.com", "kraken.com"]);
+        // Linked or not, and the real one with no Wikidata: the title
+        // names Coinbase, and elephant-blue.org is not Coinbase.
+        let coin = vec![
+            hit(
+                "coinbase.com",
+                Some("Coinbase - Buy and Sell Crypto"),
+                0.65,
+                false,
+            ),
+            hit(
+                "elephant-blue.org",
+                Some("Coinbase - Buy and Sell Crypto"),
+                0.23,
+                false,
+            ),
+        ];
+        assert_eq!(kept(coin, None), ["coinbase.com"]);
+        // Sites sharing a title that names neither stay.
+        let homes = vec![
+            hit("acme.com", Some("Home"), 0.6, false),
+            hit("widgets.com", Some("Home"), 0.3, false),
+        ];
+        assert_eq!(kept(homes, None), ["acme.com", "widgets.com"]);
+        // The best known of unofficial namesakes stays, wherever it ranks.
+        let cbc = vec![
+            hit("cbc.bb", Some("CBC Barbados"), 0.3, false),
+            hit("cbc.ca", Some("CBC"), 0.8, false),
+        ];
+        assert_eq!(kept(cbc, None), ["cbc.ca"]);
+        // The first of unofficial namesakes stays.
+        let quiz = vec![
+            hit("quizlet.com", None, 0.8, false),
+            hit("quizlet.fun", Some("quizlet.fun - Coming Soon"), 0.0, false),
+        ];
+        assert_eq!(kept(quiz, None), ["quizlet.com"]);
+    }
+
+    #[test]
     fn country_copies_of_a_site_are_listed_once() {
         let engine = |domain: &str, rank: u32| {
             site(
@@ -4228,6 +4623,10 @@ mod tests {
                 &[("search engine", 50)],
                 popular(rank, 1_000),
             )
+        };
+        let official = |mut record: SiteRecord| {
+            record.about = Some("Something Wikidata describes".into());
+            record
         };
         let records = [
             engine("google.com", 1),
@@ -4242,22 +4641,22 @@ mod tests {
                 &[("search engine", 20)],
                 popular(40, 500),
             ),
-            site(
+            official(site(
                 "swift.org",
                 Some("Swift search engines"),
                 Some("Swift search engines."),
                 &[],
                 &[],
                 popular(500, 50),
-            ),
-            site(
+            )),
+            official(site(
                 "swift.com",
                 Some("Swift search engines"),
                 Some("Swift search engines."),
                 &[],
                 &[],
                 popular(600, 50),
-            ),
+            )),
         ];
         let (_dir, searcher) = build(&records);
         let hits = searcher.search("search engines", 10).unwrap();
@@ -4268,7 +4667,7 @@ mod tests {
             "{order:?}"
         );
         assert!(order.contains(&"bing.com"), "{order:?}");
-        // The same label on two generic domains is not one site.
+        // Two official sites of one label are two sites.
         assert!(
             order.contains(&"swift.org") && order.contains(&"swift.com"),
             "{order:?}"
@@ -4285,10 +4684,8 @@ mod tests {
         let (_dir, searcher) = build(&records);
         let hits = searcher.search("cbc", 10).unwrap();
         assert!(domains(&hits).contains(&"cbc.ca"), "{:?}", domains(&hits));
-        assert!(country_copy("google.com", "google.co.uk"));
-        assert!(country_copy("facebook.com", "facebook.co"));
-        assert!(!country_copy("news.ycombinator.com", "news.bbc.co.uk"));
-        assert!(!country_copy("swift.com", "swift.org"));
+        assert_eq!(brand_label("google.co.uk"), Some(("google", "co.uk")));
+        assert_eq!(brand_label("news.ycombinator.com"), None);
     }
 
     #[test]
@@ -5608,6 +6005,14 @@ mod tests {
                 obscure(3_000_000 + i, 10),
             ));
             records.push(site(
+                &format!("capitalnews{i}.com"),
+                Some(&format!("Capital city news {i}")),
+                None,
+                &[],
+                &[],
+                obscure(6_000_000 + i, 10),
+            ));
+            records.push(site(
                 &format!("taco{i}.com"),
                 Some(&format!("Taco stand {i}")),
                 None,
@@ -5680,6 +6085,12 @@ mod tests {
         // show for itself.
         let results = search_spelled(&searcher, "amazn");
         assert_eq!(suggestion(&results), suggested("amazon"));
+        // The site the suggestion names is listed, second at most, without
+        // correcting the search.
+        if let Some(site) = results.spelling.as_ref().and_then(|s| s.site.clone()) {
+            let at = domains(&results.hits).iter().position(|d| *d == site);
+            assert!(at.is_some_and(|at| at <= 1), "{:?}", domains(&results.hits));
+        }
         let fixed_hits = search_spelled(&searcher, "amazon").hits;
         assert_eq!(domains(&fixed_hits)[0], "amazon.com");
     }
@@ -5776,6 +6187,98 @@ mod tests {
             let fixed_hits = search_spelled(&searcher, fixed).hits;
             assert_eq!(fixed_hits[0].domain, domain, "{typed}");
         }
+    }
+
+    #[test]
+    fn spelled_right_words_get_no_suggestion() {
+        let mut records = typo_corpus();
+        records.extend([
+            site(
+                "ulta.com",
+                Some("Ulta Beauty"),
+                None,
+                &[],
+                &[],
+                popular(800, 15_000),
+            ),
+            site(
+                "lyft.com",
+                Some("Lyft"),
+                None,
+                &[],
+                &[],
+                popular(700, 15_000),
+            ),
+            site(
+                "syft.com",
+                Some("Syft"),
+                None,
+                &[],
+                &[],
+                ranked(30_000, 2_000),
+            ),
+            site(
+                "numbeo.com",
+                Some("Numbeo"),
+                None,
+                &[],
+                &[],
+                popular(2_000, 9_000),
+            ),
+            site(
+                "whattf.com",
+                Some("What TF"),
+                None,
+                &[],
+                &[],
+                popular(2_500, 9_000),
+            ),
+        ]);
+        for i in 0..25 {
+            records.push(site(
+                &format!("alta{i}.com"),
+                Some(&format!("Alta ski lodge {i}")),
+                None,
+                &[],
+                &[],
+                obscure(7_000_000 + i, 10),
+            ));
+            records.push(site(
+                &format!("words{i}.com"),
+                Some(&format!("The number of things to do {i}")),
+                None,
+                &[],
+                &[],
+                obscure(8_000_000 + i, 10),
+            ));
+            records.push(site(
+                &format!("outlets{i}.com"),
+                Some(&format!("Outlet store {i}")),
+                None,
+                &[],
+                &[],
+                obscure(9_000_000 + i, 10),
+            ));
+        }
+        let (_dir, searcher) = build(&records);
+        for query in [
+            // A popular site's name is what was meant, wherever it is.
+            "where to buy ulta",
+            "lyft app",
+            // Known short words don't bend into a name: not "numbe o
+            // senators", not "what tf bring".
+            "number of senators",
+            "what to bring",
+            // Numbers and versions aren't typos.
+            "240v outlet",
+        ] {
+            assert_eq!(search_spelled(&searcher, query).spelling, None, "{query}");
+        }
+        // A real typo still gets one.
+        assert_eq!(
+            suggestion(&search_spelled(&searcher, "amazom")),
+            suggested("amazon")
+        );
     }
 
     #[test]

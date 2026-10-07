@@ -305,16 +305,17 @@ pub(super) fn local_sites(found: &PlaceResults) -> Vec<Hit> {
 
 /// The sites for a query that lists places around a town ("brewery in
 /// denver"): the places' own sites (`local`, from [`local_sites`])
-/// first, then the sites that say what was looked for, then the rest,
-/// which match the town's name only (the city's own site, its football
-/// team). At most `limit`, or as many as there were.
+/// first, then the sites that say what was looked for, then the rest;
+/// sites named after the town (the city's own site, its football team)
+/// are left out when places have sites to show. At most `limit`, or as
+/// many as there were.
 pub(super) fn local_first(
     found: &PlaceResults,
     hits: &mut Vec<Hit>,
     local: Vec<Hit>,
     limit: usize,
 ) {
-    if found.center.is_none() || found.hits.is_empty() || found.near_me {
+    if found.center.is_none() || found.near_me {
         return;
     }
     let roots: Vec<String> = normalize_text(&found.what)
@@ -342,8 +343,31 @@ pub(super) fn local_first(
         .into_iter()
         .filter(|hit| !sorted.iter().any(|s| s.domain == hit.domain))
         .partition(says_what);
+    let local = sorted.len();
     sorted.extend(what);
-    sorted.extend(town);
+    // Sites named after the town (its government, university, football
+    // team) are not what was asked for; with the places' own sites to
+    // show, they are left out.
+    let town_name = found
+        .center
+        .as_ref()
+        .map(|center| normalize_text(&center.name).replace(' ', ""))
+        .unwrap_or_default();
+    let named_after_town = |hit: &Hit| {
+        town_name.len() >= 3
+            && (hit.domain.replace(['.', '-'], "").contains(&town_name)
+                || hit
+                    .title
+                    .as_deref()
+                    .is_some_and(|t| normalize_text(t).replace(' ', "").contains(&town_name)))
+    };
+    // Without any, they go last: Seattle's climbing gyms have no sites of
+    // their own, and seattle.gov is still not one.
+    let (named, other): (Vec<Hit>, Vec<Hit>) = town.into_iter().partition(named_after_town);
+    sorted.extend(other);
+    if local == 0 {
+        sorted.extend(named);
+    }
     sorted.truncate(keep);
     *hits = sorted;
 }
@@ -530,6 +554,32 @@ mod tests {
 
     fn same(href: &str) -> String {
         href.to_owned()
+    }
+
+    #[test]
+    fn town_sites_go_last_when_the_places_have_no_sites() {
+        let site = |domain: &str, title: &str| Hit {
+            domain: domain.into(),
+            url: format!("https://{domain}/"),
+            title: Some(title.into()),
+            description: None,
+            score: 1.0,
+            text_score: 1.0,
+            link_score: 0.5,
+            placing_text_score: None,
+            country: None,
+            named: false,
+            official: false,
+            key_pages: Vec::new(),
+            demand: None,
+        };
+        let mut hits = vec![
+            site("denvergov.org", "City and County of Denver"),
+            site("slicelife.com", "Order food online"),
+        ];
+        local_first(&found(), &mut hits, Vec::new(), 10);
+        let domains: Vec<&str> = hits.iter().map(|h| h.domain.as_str()).collect();
+        assert_eq!(domains, ["slicelife.com", "denvergov.org"]);
     }
 
     #[test]

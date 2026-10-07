@@ -584,6 +584,27 @@ pub(super) fn add_pages(
             {
                 results.spelling = None;
             }
+            // A query that is a page's whole name is about what the page
+            // is, not a search inside a site its first word names:
+            // "virginia woolf" is not virginia.gov's search for "woolf",
+            // nor "the last of us" last.fm's.
+            if let Some(link) = &results.site_search {
+                if found
+                    .iter()
+                    .any(|hit| hit.named && hit.page.site.as_deref() != Some(link.domain.as_str()))
+                {
+                    results.site_search = None;
+                }
+            }
+            if let Some(spelling) = results.spelling.take() {
+                results.spelling = match searcher.check_spelling(query, spelling.clone()) {
+                    Ok(checked) => checked,
+                    Err(err) => {
+                        warn!("checking a spelling against pages: {err:#}");
+                        Some(spelling)
+                    }
+                };
+            }
             results.pages = place_pages(query, &results.hits, found);
             if inner.rank.learned {
                 plumb_index::learned::reorder(
@@ -592,6 +613,16 @@ pub(super) fn add_pages(
                     &mut results.hits,
                     &mut results.pages,
                 );
+            }
+            // The learned order knows nothing of spelling: the site a
+            // suggestion names stays second.
+            if let Some(site) = results.spelling.as_ref().and_then(|s| s.site.clone()) {
+                plumb_index::suggested_site_second(&mut results.hits, &site);
+            }
+            // Only shown, after the ranking, which weighs a site's own
+            // title.
+            if let Err(err) = searcher.title_untitled(&mut results.hits) {
+                warn!("titling sites from their articles: {err:#}");
             }
         }
         Err(err) => warn!("searching pages: {err:#}"),

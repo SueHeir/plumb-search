@@ -67,6 +67,43 @@ const NEAR_ME: &[&[&str]] = &[
 ];
 /// Words that say where, in "pizza in denver".
 const WHERE_WORDS: &[&[&str]] = &[&["in"], &["near"], &["around"], &["close", "to"], &["at"]];
+/// Kinds of town a query may name without "in" or "near": "denver
+/// pizza", "barber brooklyn".
+const GUESSED_TOWNS: &[&str] = &["place=city", "place=borough"];
+/// Words ending a query that say when, not where: "open now".
+const WHEN: &[&[&str]] = &[
+    &["open", "now"],
+    &["open", "late"],
+    &["open", "today"],
+    &["open", "24", "hours"],
+    &["24", "hours"],
+    &["24", "7"],
+    &["now"],
+    &["today"],
+    &["tonight"],
+];
+/// First words of a query about a town itself, not places in it: "time in
+/// tokyo", "weather in denver", "capital of washington".
+const ABOUT_TOWN: &[&str] = &[
+    "time",
+    "timezone",
+    "weather",
+    "temperature",
+    "forecast",
+    "climate",
+    "population",
+    "capital",
+    "history",
+    "news",
+    "mayor",
+    "elevation",
+    "sunrise",
+    "sunset",
+    "currency",
+    "cost",
+    "crime",
+    "jobs",
+];
 /// Words left out of what is looked for: "best pizza", "places to eat".
 const FILLER: &[&str] = &[
     "best", "good", "great", "cheap", "top", "nice", "nearest", "closest", "open", "the", "a",
@@ -99,11 +136,26 @@ pub struct PlaceQuery {
 /// kind of place and a town: "denver pizza" ([`PlaceSearcher::search`]
 /// checks the town).
 pub fn parse_place_query(query: &str) -> Option<PlaceQuery> {
-    let words: Vec<String> = normalize_text(query)
+    let mut words: Vec<String> = normalize_text(query)
         .split(' ')
         .filter(|w| !w.is_empty())
         .map(str::to_string)
         .collect();
+    // "plumber boston open now": when is not where.
+    while let Some(when) = WHEN
+        .iter()
+        .find(|when| words.len() > when.len() && words[words.len() - when.len()..] == ***when)
+    {
+        words.truncate(words.len() - when.len());
+    }
+    if words
+        .iter()
+        .map(String::as_str)
+        .find(|w| !FILLER.contains(w))
+        .is_some_and(|w| ABOUT_TOWN.contains(&w))
+    {
+        return None;
+    }
     let what_of = |words: &[String]| -> Option<String> {
         let what: Vec<&str> = words
             .iter()
@@ -156,10 +208,9 @@ pub fn parse_place_query(query: &str) -> Option<PlaceQuery> {
     if words.len() >= 2 {
         for town_words in (1..=3.min(words.len() - 1)).rev() {
             let (what, town) = words.split_at(words.len() - town_words);
-            if what
-                .iter()
-                .all(|w| is_kind_word(w) || FILLER.contains(&w.as_str()))
-            {
+            // What is looked for ends in a kind of place: "pizza", "best
+            // climbing gym", "cheap bookstore".
+            if what.last().is_some_and(|w| is_kind_word(w)) {
                 if let Some(what) = what_of(what) {
                     return Some(PlaceQuery {
                         what,
@@ -179,6 +230,21 @@ pub fn parse_place_query(query: &str) -> Option<PlaceQuery> {
         }
     }
     None
+}
+
+/// `query` without the "near me" that ends it ("safeway near me" ->
+/// "safeway"), for searching sites: "me" names no site (domain.me,
+/// maine.gov). `None` when it has none.
+pub fn without_near_me(query: &str) -> Option<String> {
+    let words: Vec<String> = normalize_text(query)
+        .split(' ')
+        .filter(|w| !w.is_empty())
+        .map(str::to_string)
+        .collect();
+    NEAR_ME.iter().find_map(|suffix| {
+        (words.len() > suffix.len() && words[words.len() - suffix.len()..] == **suffix)
+            .then(|| words[..words.len() - suffix.len()].join(" "))
+    })
 }
 
 /// A place found, and how far it is from where the search looked.
@@ -404,6 +470,15 @@ impl PlaceSearcher {
                 None => None,
             },
             Near::Named(name) => match self.locate(name, country)? {
+                // A town guessed from words ("toy story", "hotel
+                // california", "crypto exchange") is only taken for a big
+                // one: Story in France and Crypto in Poland are villages
+                // whose names are words.
+                Some(place)
+                    if !asked.said_where && !GUESSED_TOWNS.contains(&place.kind.as_str()) =>
+                {
+                    return Ok(None)
+                }
                 Some(place) => Some(place),
                 None => return Ok(None),
             },
@@ -428,7 +503,10 @@ impl PlaceSearcher {
             radius_km = radius * 3.0;
             hits = self.around(&asked.what, &center, radius_km, limit)?;
         }
-        if hits.is_empty() && !near_me {
+        // None around a town is still a search for places there: the
+        // node lists sites saying what was asked for ahead of the town's
+        // own, without a list of places.
+        if hits.is_empty() && !near_me && !center.is_town() {
             return Ok(None);
         }
         Ok(Some(PlaceResults {
@@ -684,6 +762,22 @@ mod tests {
             query("sushi san francisco"),
             Some(("sushi".into(), Near::Named("san francisco".into())))
         );
+        assert_eq!(
+            query("best climbing gym seattle"),
+            Some(("climbing gym".into(), Near::Named("seattle".into())))
+        );
+        assert_eq!(
+            query("plumber in boston open now"),
+            Some(("plumber".into(), Near::Named("boston".into())))
+        );
+        assert_eq!(
+            query("pizza denver open now"),
+            Some(("pizza".into(), Near::Named("denver".into())))
+        );
+        assert_eq!(
+            query("plumber boston open now"),
+            Some(("plumber".into(), Near::Named("boston".into())))
+        );
         // Only "in", "near" and "near me" say where for sure.
         assert!(parse_place_query("pizza in denver").unwrap().said_where);
         assert!(parse_place_query("coffee near me").unwrap().said_where);
@@ -696,6 +790,15 @@ mod tests {
             "in",
             "near me",
             "log in",
+            "open now",
+            "leonardo dicaprio",
+            "tim cook",
+            // About the town, not places in it.
+            "time in tokyo",
+            "weather in denver",
+            "best time to visit seattle",
+            "capital of washington",
+            "capital of singapore",
         ] {
             assert_eq!(query(plain), None, "{plain}");
         }
@@ -737,6 +840,12 @@ mod tests {
             city("Portland", 68_000, "ME", "US", 43.6591, -70.2568),
             city("Paris", 2_100_000, "Île-de-France", "FR", 48.8566, 2.3522),
             city("Paris", 25_000, "TX", "US", 33.6609, -95.5555),
+            Place {
+                rank: place_rank("place=village", 300, false, false, 3),
+                country: Some("FR".into()),
+                ..at("Story", "place=village", 46.0, 3.0)
+            },
+            at("King Jouet", "shop=toys", 46.001, 3.001),
             Place {
                 tags: vec!["cuisine=pizza".into()],
                 address: Some("1 Main St".into()),
@@ -807,6 +916,14 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(parking.hits[0].place.name, "Union Station Park-n-Ride");
+        // Nothing of the kind around a town: still a search there, with no
+        // places to list.
+        let gyms = searcher
+            .search("climbing gym in denver", None, None, 5)
+            .unwrap()
+            .unwrap();
+        assert!(gyms.hits.is_empty());
+        assert_eq!(gyms.center.unwrap().name, "Denver");
         // The searcher's own town, for "near me".
         let near = searcher
             .search("coffee near me", Some("Denver, CO"), None, 5)
@@ -819,6 +936,26 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(nowhere.center.is_none() && nowhere.hits.is_empty());
+        // A guessed town must be a city: "pizza paris" is Paris, France,
+        // but a village called Story is not "toy story".
+        assert!(searcher
+            .search("denver pizza", None, None, 5)
+            .unwrap()
+            .is_some());
+        assert!(searcher
+            .search("toy story", None, None, 5)
+            .unwrap()
+            .is_none());
+        let toys = searcher
+            .search("toys in story", None, None, 5)
+            .unwrap()
+            .unwrap();
+        assert_eq!(toys.hits[0].place.name, "King Jouet");
+        assert_eq!(
+            without_near_me("Safeway near me").as_deref(),
+            Some("safeway")
+        );
+        assert_eq!(without_near_me("safeway"), None);
         // No town of that name, or nothing of that kind there.
         assert!(searcher
             .search("pizza in gotham", None, None, 5)

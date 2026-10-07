@@ -78,6 +78,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, error, info};
 use url::Url;
 
+use crate::about::About;
 use crate::cli::ServeArgs;
 use crate::country::{country_name, HomeCountry, COUNTRY_CHOICES};
 use crate::learn::{self, Block, Choice};
@@ -105,6 +106,7 @@ mod relay;
 mod searxng;
 mod setup;
 mod tune;
+mod welcome;
 
 /// Results returned when a request does not say how many.
 pub const DEFAULT_LIMIT: usize = 10;
@@ -711,6 +713,7 @@ fn app(state: AppState) -> Router {
         router = history::routes(router);
         router = link::routes(router);
         router = tune::routes(router);
+        router = welcome::routes(router);
     }
     router.with_state(state)
 }
@@ -912,12 +915,22 @@ fn home_or_setup(state: &AppState, params: &SearchParams, headers: &HeaderMap) -
         Some(status) if status.phase != Phase::Ready => setup_response(status, now),
         _ => {
             let visitor = history::Visitor::of(state, headers, params.history_prefs());
+            let browser_about = visitor.is_none().then(|| history::browser_about(headers));
+            // A new searcher is asked about themselves, until they answer
+            // or say no thanks.
+            let told = match (&visitor, &browser_about) {
+                (Some(visitor), _) => !visitor.about.is_empty(),
+                (None, Some(about)) => !about.is_empty(),
+                (None, None) => false,
+            };
             let settings = Settings {
                 options: params.options(&state.settings.home, headers),
                 network: state.net_setting(params),
                 scope: state.search_scope(),
                 private: state.private_search(),
                 history: visitor.as_ref().map(history::Visitor::view),
+                browser_about,
+                welcome: state.node.is_some() && !told && !history::welcomed(headers),
             };
             let response = html_response(
                 StatusCode::OK,
@@ -960,6 +973,11 @@ struct Settings {
     private: bool,
     /// The searcher's history, on a node that keeps one.
     history: Option<history::HistoryView>,
+    /// On a node that keeps no profiles, the About profile the browser
+    /// keeps itself (see [`history::KeptAbout`]).
+    browser_about: Option<About>,
+    /// The home page invites the searcher to the welcome page.
+    welcome: bool,
 }
 
 impl AppState {
@@ -1030,6 +1048,8 @@ async fn search_page(
         scope: state.search_scope(),
         private: state.private_search(),
         history: None,
+        browser_about: visitor.is_none().then(|| history::browser_about(&headers)),
+        welcome: false,
     };
     let limit = params.limit();
     let local = run_search(&state, &query, limit, &settings.options).await;
@@ -1074,28 +1094,30 @@ async fn search_page(
         };
         // Sites the searcher never wants to see stay out, wherever they
         // came from.
-        let network = match (network, &visitor) {
-            (NetOutcome::Answered(mut found), Some(visitor)) => {
+        let network = match (network, &visitor, &settings.browser_about) {
+            (NetOutcome::Answered(mut found), Some(visitor), _) => {
                 found.hits.retain(|result| {
                     !visitor.about.hides(&result.hit.domain)
                         && (editing || !visitor.hid(&query, &result.hit.domain))
                 });
                 NetOutcome::Answered(found)
             }
-            (network, _) => network,
+            (NetOutcome::Answered(mut found), None, Some(about)) => {
+                found.hits.retain(|result| !about.hides(&result.hit.domain));
+                NetOutcome::Answered(found)
+            }
+            (network, _, _) => network,
         };
         (local, network)
     } else {
         (local, NetOutcome::NotAsked)
     };
     // "Near me" goes by the town the searcher gave.
-    let found_places = run_places(
-        &state,
-        &query,
-        visitor.as_ref().and_then(|v| v.about.town()),
-        settings.options.country.as_deref(),
-    )
-    .await;
+    let town = match &visitor {
+        Some(visitor) => visitor.about.town(),
+        None => settings.browser_about.as_ref().and_then(About::town),
+    };
+    let found_places = run_places(&state, &query, town, settings.options.country.as_deref()).await;
     let response = match local {
         Ok(mut results) => {
             let found_places = not_a_name(found_places, &results.hits);
@@ -1103,6 +1125,8 @@ async fn search_page(
                 let local = place_sites(&state, found).await;
                 places::local_first(found, &mut results.hits, local, limit);
             }
+            // Places shown: none found around a town is no list.
+            let found_places = found_places.filter(|found| found.near_me || !found.hits.is_empty());
             if let Some(visitor) = &mut visitor {
                 visitor.rank(
                     &query,
@@ -1145,6 +1169,8 @@ async fn search_page(
                     });
                 }
                 settings.history = Some(view);
+            } else if let Some(about) = &settings.browser_about {
+                about.apply(&mut results.hits);
             }
             let mut domains: Vec<String> =
                 results.hits.iter().map(|hit| hit.domain.clone()).collect();
@@ -1322,14 +1348,18 @@ async fn api_search(
     let found = run_search(&state, &query, params.limit(), &options).await;
     match found {
         Ok(mut results) if full => {
+            // No town is given here, so "near me" finds no places: an
+            // empty list around nowhere says nothing.
             let places = not_a_name(
                 run_places(&state, &query, None, options.country.as_deref()).await,
                 &results.hits,
-            );
+            )
+            .filter(|found| found.center.is_some());
             if let Some(found) = &places {
                 let local = place_sites(&state, found).await;
                 places::local_first(found, &mut results.hits, local, params.limit());
             }
+            let places = places.filter(|found| !found.hits.is_empty());
             let extras = extras(&state, &query, &results, &options).await;
             let about = search_about(&query, &results, &extras);
             let shown_to_plugins = if state.settings.plugins.any_annotate() {
@@ -1589,7 +1619,11 @@ async fn go_block(
     let options = search.options(&state.settings.home, headers);
     let links: Vec<String> = match block {
         Block::Places => {
-            let town = visitor.as_ref().and_then(|v| v.about.town());
+            let browser_about = visitor.is_none().then(|| history::browser_about(headers));
+            let town = match &visitor {
+                Some(visitor) => visitor.about.town(),
+                None => browser_about.as_ref().and_then(About::town),
+            };
             run_places(state, query, town, options.country.as_deref())
                 .await
                 .map(|found| found.hits.iter().flat_map(places::place_links).collect())
@@ -1958,13 +1992,26 @@ async fn run_search(
         return Ok(SearchResults::default());
     }
     let backend = Arc::clone(&state.backend);
-    let owned_query = query.to_string();
+    // "safeway near me": the places list is for "near me"; the sites are
+    // for the rest ("me" names no site).
+    let near_me = plumb_index::places::without_near_me(query);
+    let local = near_me.is_some();
+    let owned_query = near_me.unwrap_or_else(|| query.to_string());
     let owned_options = options.clone();
-    let results = tokio::task::spawn_blocking(move || {
+    let mut results = tokio::task::spawn_blocking(move || {
         backend.search_full(&owned_query, limit, &owned_options)
     })
     .await
     .context("the search task failed")??;
+    // "handyman near me" asks for someone to call: a bare handyman.nl,
+    // named by the word but saying nothing, goes after sites that say
+    // what they are.
+    if local {
+        let (said, bare): (Vec<Hit>, Vec<Hit>) = std::mem::take(&mut results.hits)
+            .into_iter()
+            .partition(|hit| hit.title.is_some() || hit.official);
+        results.hits = said.into_iter().chain(bare).collect();
+    }
     debug!("local search completed: {} hits", results.hits.len());
     Ok(results)
 }
@@ -2281,6 +2328,11 @@ border-radius:1rem;color:var(--fg);text-decoration:none}\
 .hist form{margin-top:1.5rem}\
 .about label{display:block;margin-top:1.25rem}.about .m{margin:.2rem 0 .4rem}\
 .about form.block{display:block}\
+.welcome fieldset{border:0;padding:0;margin:1.25rem 0 0}.welcome legend{padding:0}\
+.welcome .topics label{display:inline-block;margin:.15rem 1rem .15rem 0}\
+.invite{margin:.75rem 0}.invite form{display:inline;margin:0}\
+.invite button{background:none;border:0;padding:0;color:var(--muted);font:inherit;\
+text-decoration:underline;cursor:pointer}\
 .about textarea,.about #town,.about #paste,.about #code{width:100%;box-sizing:border-box;font:inherit;padding:.4rem;\
 background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:6px}\
 .ia{margin:1rem 0 .5rem;padding:.85rem 1rem;border:1px solid var(--line);border-radius:.75rem}\
@@ -2475,11 +2527,11 @@ fn settings_form(query: &str, autofocus: bool, settings: &Settings) -> String {
             settings.scope.explain()
         ),
     };
-    let history = settings
-        .history
-        .as_ref()
-        .map(history::HistoryView::settings_html)
-        .unwrap_or_default();
+    let history = match (&settings.history, &settings.browser_about) {
+        (Some(history), _) => history.settings_html(),
+        (None, Some(_)) => history::browser_settings_html().to_owned(),
+        (None, None) => String::new(),
+    };
     let private = if settings.private {
         private_toggle(false)
     } else {
@@ -2537,9 +2589,14 @@ fn render_home(docs: u64, status: Option<&Status>, now: u64, settings: &Settings
         .as_ref()
         .map(|history| history.recent_html(&settings.options))
         .unwrap_or_default();
+    let welcome = if settings.welcome {
+        welcome::invite_html()
+    } else {
+        ""
+    };
     let body = format!(
         "<main class=\"wrap home\">\n<h1>Plumb Search</h1>\n\
-         {}{recent}\n<p class=\"s\">{} sites indexed{note}</p>{wikidata}\n\
+         {}{welcome}{recent}\n<p class=\"s\">{} sites indexed{note}</p>{wikidata}\n\
          <p class=\"s\">Not looking for a site? Add !g, !ddg or !b to search Google, \
          DuckDuckGo or Bing.</p>\n{FOOTER}\n</main>",
         settings_form("", true, settings),
@@ -3083,11 +3140,11 @@ fn render_results_with(
             let go = (notes_picks && item.network.is_none())
                 .then(|| go_link(query, &settings.options, &item.hit.domain));
             let icon = icons.get(&item.hit.domain);
-            let notes = settings
-                .history
-                .as_ref()
-                .map(|history| history.notes(&item.hit))
-                .unwrap_or_default();
+            let notes = match (&settings.history, &settings.browser_about) {
+                (Some(history), _) => history.notes(&item.hit),
+                (None, Some(about)) => history::about_note(about, &item.hit).into_iter().collect(),
+                (None, None) => Vec::new(),
+            };
             let mut rendered = String::new();
             render_hit(
                 &mut rendered,
@@ -3394,6 +3451,7 @@ fn render_page(out: &mut String, hit: &PageHit, icon: Option<&str>) {
                 "popularity (score, then listing, years and episodes)",
             plumb_index::pages::MUSIC_SET => "listeners on ListenBrainz",
             plumb_index::pages::FILMS_SET => "sitelinks on Wikidata",
+            plumb_index::pages::DOCS_SET => "the docs site's weight over the page's depth",
             plumb_index::pages::PAPERS_SET => "citations",
             plumb_index::pages::PACKAGES_SET => "use (share of the registry's most, in billionths)",
             _ => "views",
@@ -4188,6 +4246,25 @@ mod tests {
         assert_eq!(group_thousands(999), "999");
         assert_eq!(group_thousands(1_000), "1,000");
         assert_eq!(group_thousands(12_345_678), "12,345,678");
+    }
+
+    #[tokio::test]
+    async fn bare_sites_go_last_for_near_me() {
+        let mut hits = bank_hits();
+        hits.reverse();
+        let (_, _, body) = get(backend(hits), "/api/search?q=us+bank+near+me").await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json[0]["domain"], "usbank.com", "{body}");
+        assert_eq!(json[1]["domain"], "usbank-login-help.com", "{body}");
+    }
+
+    #[tokio::test]
+    async fn sites_are_searched_without_near_me() {
+        let fake = backend(bank_hits());
+        let _ = get(fake.clone(), "/search?q=us+bank+near+me").await;
+        let _ = get(fake.clone(), "/api/search?q=us+bank+near+me&full=1").await;
+        let calls = fake.calls.lock().unwrap();
+        assert!(calls.iter().all(|(q, _)| q == "us bank"), "{calls:?}");
     }
 
     #[tokio::test]
@@ -5245,6 +5322,8 @@ mod tests {
     fn no_settings() -> Settings {
         Settings {
             history: None,
+            browser_about: None,
+            welcome: false,
             options: SearchOptions::default(),
             network: NetSetting::Unavailable,
             scope: plumb_net::SearchScope::default(),
@@ -6202,6 +6281,27 @@ mod tests {
                 website: website.map(str::to_string),
                 ..Place::default()
             };
+            if query.ends_with("near me") {
+                return Some(plumb_index::places::PlaceResults {
+                    what: "brewery".into(),
+                    center: None,
+                    near_me: true,
+                    guessed: false,
+                    radius_km: 0.0,
+                    hits: Vec::new(),
+                });
+            }
+            // A town without any mapped.
+            if query.contains("aurora") {
+                return Some(plumb_index::places::PlaceResults {
+                    what: "brewery".into(),
+                    center: Some(at("Aurora", "place=city", "n5", None)),
+                    near_me: false,
+                    guessed: false,
+                    radius_km: 12.0,
+                    hits: Vec::new(),
+                });
+            }
             let brewery =
                 |name: &str, osm: &str, website: Option<&str>| plumb_index::places::PlaceHit {
                     place: at(name, "craft=brewery", osm, website),
@@ -6234,6 +6334,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sites_saying_what_come_first_around_a_town_with_no_places() {
+        let (_, _, body) = send(
+            router(Arc::new(BreweryPlaces)),
+            "/api/search?q=brewery+in+aurora&full=1",
+        )
+        .await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let domains: Vec<&str> = json["hits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|h| h["domain"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            domains,
+            ["westword.com", "denvergov.org", "denverbroncos.com"]
+        );
+        assert!(json.get("places").is_none(), "{body}");
+        let (_, _, page) = send(
+            router(Arc::new(BreweryPlaces)),
+            "/search?q=brewery+in+aurora",
+        )
+        .await;
+        assert!(!page.contains("aria-label=\"Places\""), "{page}");
+    }
+
+    #[tokio::test]
+    async fn the_api_lists_no_places_around_nowhere() {
+        let (_, _, body) = send(
+            router(Arc::new(BreweryPlaces)),
+            "/api/search?q=brewery+near+me&full=1",
+        )
+        .await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert!(json.get("places").is_none(), "{body}");
+    }
+
+    #[tokio::test]
     async fn places_around_a_town_put_local_sites_before_the_town_s_own() {
         for query in ["brewery+in+denver", "denver+brewery"] {
             let (_, _, body) = send(
@@ -6249,17 +6387,11 @@ mod tests {
                 .map(|h| h["domain"].as_str().unwrap())
                 .collect();
             // The breweries' own sites (one the index does not have, as the
-            // place says), then the guide that says breweries, then the
-            // sites only named after Denver.
+            // place says), then the guide that says breweries; the sites
+            // only named after Denver are left out.
             assert_eq!(
                 domains,
-                [
-                    "greatdivide.com",
-                    "unknown-ales.example",
-                    "westword.com",
-                    "denvergov.org",
-                    "denverbroncos.com"
-                ],
+                ["greatdivide.com", "unknown-ales.example", "westword.com"],
                 "{query}"
             );
             assert_eq!(json["hits"][0]["title"], "Great Divide Brewing Co.");
@@ -6274,7 +6406,8 @@ mod tests {
             .await;
             let at = |d: &str| page.find(&format!("https://{d}")).unwrap();
             assert!(page.contains("<section class=\"pl\""), "{page}");
-            assert!(at("www.westword.com") < at("denvergov.org"), "{page}");
+            assert!(at("www.westword.com") > 0, "{page}");
+            assert!(!page.contains("denverbroncos.com"), "{page}");
         }
     }
 
@@ -6600,8 +6733,124 @@ mod tests {
         assert!(!body.contains("name=\"hist\""), "{body}");
         let (code, _, _) = send(app.clone(), "/history").await;
         assert_eq!(code, StatusCode::NOT_FOUND);
-        let (code, _, _) = send(app, "/about").await;
-        assert_eq!(code, StatusCode::NOT_FOUND);
+        // The About page is still there: the browser keeps it.
+        let (code, headers, page) = send(app, "/about").await;
+        assert_eq!(code, StatusCode::OK);
+        assert!(headers.get(header::SET_COOKIE).is_none());
+        assert!(page.contains("keeps no copy"), "{page}");
+    }
+
+    #[tokio::test]
+    async fn a_node_without_history_uses_the_about_profile_the_browser_keeps() {
+        let app = || {
+            node_router(
+                backend(bank_hits()),
+                node(node_status(Phase::Ready, Step::Idle)),
+            )
+        };
+        let post = |cookie: Option<&str>, form: &'static str| {
+            let mut request = Request::builder()
+                .method("POST")
+                .uri("/about")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded");
+            if let Some(cookie) = cookie {
+                request = request.header("cookie", cookie);
+            }
+            app().oneshot(request.body(Body::from(form)).unwrap())
+        };
+        let response = post(None, "pinned=usbank-login-help.com&town=Denver")
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(set_cookie(response.headers(), "plumb_profile").is_none());
+        let about = set_cookie(response.headers(), "plumb_about").expect("kept in the browser");
+        let me = [("cookie", about.as_str())];
+        let (_, _, body) = send_with_headers(app(), "/search?q=us+bank&country=any", &me).await;
+        assert!(
+            body.find("usbank-login-help.com</span>").unwrap()
+                < body.find("usbank.com</span>").unwrap(),
+            "{body}"
+        );
+        assert!(body.contains("One of your sites"), "{body}");
+        let (_, _, page) = send_with_headers(app(), "/about", &me).await;
+        assert!(page.contains("value=\"Denver\""), "{page}");
+
+        // Hiding, and forgetting, change only the cookie.
+        let response = post(Some(&about), "hidden=usbank-login-help.com")
+            .await
+            .unwrap();
+        let about = set_cookie(response.headers(), "plumb_about").unwrap();
+        let me = [("cookie", about.as_str())];
+        let (_, _, body) = send_with_headers(app(), "/search?q=us+bank&country=any", &me).await;
+        assert!(!body.contains("usbank-login-help.com</span>"), "{body}");
+        let response = post(Some(&about), "clear=1").await.unwrap();
+        let cleared = response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .find(|v| v.starts_with("plumb_about="))
+            .unwrap()
+            .to_owned();
+        assert!(cleared.contains("Max-Age=0"), "{cleared}");
+
+        // A cookie the browser changed is cleaned, and junk is no profile.
+        let (code, _, _) =
+            send_with_headers(app(), "/search?q=us+bank", &[("cookie", "plumb_about=!!")]).await;
+        assert_eq!(code, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn new_searchers_are_invited_to_the_welcome_page_until_they_answer() {
+        let dir = tempfile::tempdir().unwrap();
+        let node = Arc::new(HistoryNode(dir.path().join("history")));
+        let fake = backend(bank_hits());
+        let app = || node_router(fake.clone(), node.clone());
+        let post = |uri: &'static str, cookie: Option<&str>, form: &'static str| {
+            let mut request = Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded");
+            if let Some(cookie) = cookie {
+                request = request.header("cookie", cookie);
+            }
+            app().oneshot(request.body(Body::from(form)).unwrap())
+        };
+        let (_, _, home) = send(app(), "/").await;
+        assert!(home.contains("href=\"/welcome\""), "{home}");
+        let (code, _, page) = send(app(), "/welcome").await;
+        assert_eq!(code, StatusCode::OK);
+        assert!(page.contains("name=\"town\""), "{page}");
+        assert!(page.contains("value=\"cooking\""), "{page}");
+
+        // No thanks: the invitation goes.
+        let response = post("/welcome/skip", None, "").await.unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let welcomed = set_cookie(response.headers(), "plumb_welcome").unwrap();
+        let (_, _, home) = send_with_headers(app(), "/", &[("cookie", welcomed.as_str())]).await;
+        assert!(!home.contains("href=\"/welcome\""), "{home}");
+
+        // Answering saves the About profile, ticked topics and all, and
+        // goes on to search; topics not offered are not taken from `t`.
+        let response = post(
+            "/welcome",
+            None,
+            "town=Denver%2C+CO&t=cooking&t=music&t=evil&more=my+team&pinned=usbank-login-help.com",
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let profile = set_cookie(response.headers(), "plumb_profile").unwrap();
+        assert!(set_cookie(response.headers(), "plumb_welcome").is_some());
+        let (_, _, page) =
+            send_with_headers(app(), "/about", &[("cookie", profile.as_str())]).await;
+        assert!(
+            page.contains(">cooking\nmusic\nmy team</textarea>"),
+            "{page}"
+        );
+        assert!(page.contains("value=\"Denver, CO\""), "{page}");
+        let (_, _, home) = send_with_headers(app(), "/", &[("cookie", profile.as_str())]).await;
+        assert!(!home.contains("href=\"/welcome\""), "{home}");
     }
 
     struct IconNode;

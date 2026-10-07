@@ -636,8 +636,10 @@ pub struct FetchPagesArgs {
     /// their year, director, cast and listings, from Wikidata), papers
     /// (the most cited works, from OpenAlex's API; set OPENALEX_API_KEY if
     /// it asks for one), packages (the most used packages of eight
-    /// registries, from ecosyste.ms) or places (named shops, restaurants,
-    /// parks and towns from OpenStreetMap).
+    /// registries, from ecosyste.ms), docs (pages of MDN, Python's docs and
+    /// 36 more software docs sites, from their sitemaps; --work keeps each
+    /// site's pages so a stopped run carries on) or places (named shops,
+    /// restaurants, parks and towns from OpenStreetMap).
     #[arg(long, value_name = "SET", default_value = "wikipedia-en")]
     pub set: String,
     /// Directory to download Wikipedia's dumps into (created if missing).
@@ -724,6 +726,11 @@ pub struct FetchPagesArgs {
     /// directory of its tables) instead of downloading it into --work.
     #[arg(long, value_name = "PATH")]
     pub musicbrainz_dump: Option<PathBuf>,
+    /// Music: ListenBrainz's canonical data dump (`.tar.zst`, or its
+    /// canonical_recording_redirect.csv) instead of downloading it into
+    /// --work.
+    #[arg(long, value_name = "PATH")]
+    pub listenbrainz_canonical: Option<PathBuf>,
     /// Music: most songs kept, the most listened to.
     #[arg(long, value_name = "N", default_value_t = plumb_ingest::musicbrainz::DEFAULT_MAX_SONGS)]
     pub max_songs: usize,
@@ -757,6 +764,13 @@ pub struct FetchPagesArgs {
     /// downloading the whole planet (about 90 GB) into --work.
     #[arg(long, value_name = "PATH")]
     pub osm: Option<PathBuf>,
+    /// Docs: the docs sites to fetch (mdn, python, rust and others; see
+    /// plumb_core::docs), comma-separated; all when left out.
+    #[arg(long, value_name = "KEYS", value_delimiter = ',')]
+    pub docs_sites: Vec<String>,
+    /// Docs: most pages fetched of each site, the shallowest first.
+    #[arg(long, value_name = "N", default_value_t = plumb_ingest::docs::DEFAULT_MAX_PER_SITE)]
+    pub max_docs_per_site: usize,
 }
 
 #[derive(Debug, Args)]

@@ -105,6 +105,9 @@ impl Place {
             if let Some(cuisine) = tag.strip_prefix("cuisine=") {
                 words.push(cuisine.replace('_', " "));
             }
+            if let Some(sport) = tag.strip_prefix("sport=") {
+                words.push(sport.replace('_', " "));
+            }
         }
         words.join(" ")
     }
@@ -474,6 +477,18 @@ const KINDS: &[KindInfo] = &[
     ("craft=brewery", "Brewery", "beer"),
     ("craft=winery", "Winery", "wine"),
     ("craft=distillery", "Distillery", "spirits"),
+    ("craft=plumber", "Plumber", "plumbing"),
+    ("craft=electrician", "Electrician", "electrical"),
+    ("craft=carpenter", "Carpenter", "handyman woodworking"),
+    ("craft=handyman", "Handyman", ""),
+    ("craft=roofer", "Roofer", "roofing"),
+    ("craft=painter", "Painter", "painting"),
+    ("craft=hvac", "HVAC", "heating furnace"),
+    ("craft=locksmith", "Locksmith", ""),
+    ("shop=locksmith", "Locksmith", ""),
+    ("craft=gardener", "Landscaper", "landscaping gardener lawn"),
+    ("craft=tailor", "Tailor", "alterations"),
+    ("craft=shoemaker", "Shoe repair", "cobbler"),
     ("office=government", "Government office", ""),
     ("office=company", "Company office", ""),
     ("healthcare=hospital", "Hospital", ""),
@@ -545,6 +560,14 @@ pub fn kind_label(kind: &str) -> String {
 /// Whether `word` (normalized, lowercase) names a kind of place or is one
 /// of the words people search kinds by: "pizza", "coffee", "hotels".
 pub fn is_kind_word(word: &str) -> bool {
+    // Little words of labels ("Place of worship"): "capital of washington"
+    // asks for no place.
+    if matches!(
+        word,
+        "of" | "to" | "and" | "the" | "for" | "a" | "an" | "in" | "on" | "at"
+    ) {
+        return false;
+    }
     let one = word
         .strip_suffix("es")
         .filter(|w| w.ends_with(['s', 'x', 'h']))
