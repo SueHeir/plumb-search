@@ -2251,7 +2251,12 @@ fn without_copies(hits: Vec<Hit>, typed: Option<&str>, home: Option<&str>) -> Ve
                             && (names_brand(hit, label) || same_title(other))))
             })
         };
-        let official = hits.iter().any(|other| other.official && same_brand(other));
+        // An official namesake known no better: vanguard.edu (official)
+        // is no reason to leave out vanguard.com, better linked, when the
+        // crawl has no title for it to tell them apart by.
+        let official = hits
+            .iter()
+            .any(|other| other.official && other.link_score >= hit.link_score && same_brand(other));
         // The best known of them, not the best ranked: ranking comes
         // again after this (the learned order), and cbc.bb ranked above
         // cbc.ca is no reason to leave out cbc.ca.
@@ -4558,6 +4563,13 @@ mod tests {
             ),
         ];
         assert_eq!(kept(gene, None), ["23andme.com"]);
+        // A better-linked site with no title stays next to an official
+        // namesake: hm.com and hm.edu (a university) for "h&m".
+        let hm = vec![
+            hit("hm.edu", Some("Hochschule München"), 0.4, true),
+            hit("hm.com", None, 0.7, false),
+        ];
+        assert_eq!(kept(hm, None), ["hm.edu", "hm.com"]);
         // A site nobody links to with a listed site's title.
         let coin = vec![
             hit(
