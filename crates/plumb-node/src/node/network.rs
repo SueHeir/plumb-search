@@ -791,6 +791,7 @@ mod tests {
     fn hit(domain: &str, score: f32) -> Hit {
         Hit {
             demand: None,
+            missing_words: false,
             placing_text_score: None,
             domain: domain.to_string(),
             url: format!("https://{domain}/"),

@@ -180,6 +180,7 @@ mod tests {
     fn hit(domain: &str, title: Option<&str>) -> Hit {
         Hit {
             demand: None,
+            missing_words: false,
             placing_text_score: None,
             domain: domain.to_string(),
             url: format!("https://www.{domain}/"),

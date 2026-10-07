@@ -408,6 +408,7 @@ pub fn reorder(model: &Model, query: &str, hits: &mut Vec<Hit>, placed: &mut Vec
     let under = placed.iter().filter(|p| p.under.is_some()).cloned();
     *placed = alone.into_iter().chain(under).collect();
     *hits = new_hits;
+    crate::pages::keep_page_rules(query, hits, placed);
 }
 
 /// One test search for [`train`]: its query and listed rows, labelled.
@@ -719,6 +720,7 @@ mod tests {
             official: false,
             key_pages: Vec::new(),
             demand: None,
+            missing_words: false,
             placing_text_score: None,
         }
     }
