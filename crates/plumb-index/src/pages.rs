@@ -1626,8 +1626,10 @@ pub fn drop_namesakes_of_words(sites: &mut Vec<crate::Hit>, pages: &[PageHit]) -
 /// sites found leave it out, as the [`LIFTED_FROM`]th site or last, so
 /// that [`lift_named_sites`] can weigh it: "better call saul" names the
 /// article whose site is amc.com, which no word of the query matches.
-/// `site` gives the site of a domain; one with no Wikidata item
-/// ([`crate::Hit::official`]) is not added. Returns whether it added one.
+/// `site` gives the site of a domain, crawled or not: the page's site is
+/// the item's official website in Wikidata, which is enough to list it
+/// (adultswim.com for "rick and morty", never fetched on some nodes).
+/// Returns whether it added one.
 pub fn add_named_site(
     sites: &mut Vec<crate::Hit>,
     pages: &[PageHit],
@@ -1643,7 +1645,7 @@ pub fn add_named_site(
     if sites.is_empty() || sites.iter().any(|hit| hit.domain == domain) {
         return false;
     }
-    let Some(mut added) = site(domain).filter(|hit| hit.official) else {
+    let Some(mut added) = site(domain) else {
         return false;
     };
     let at = sites.len().min(LIFTED_FROM - 1);
@@ -2683,10 +2685,10 @@ mod tests {
             ]
         );
         assert!(sites[3].score < sites[2].score);
-        // Once is enough, and a site Wikidata does not know is not added.
+        // Once is enough, and a site the index does not hold is not added.
         assert!(!add_named_site(&mut sites, &[show.clone()], amc));
         show.page.site = Some("fans.example".into());
-        assert!(!add_named_site(&mut sites, &[show], amc));
+        assert!(!add_named_site(&mut sites, &[show], |_| None));
     }
 
     #[test]
