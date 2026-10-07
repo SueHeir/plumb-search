@@ -15,6 +15,10 @@ pub struct DocsSite {
     pub key: &'static str,
     /// What the docs are of, as people name it in a search: "Python".
     pub product: &'static str,
+    /// Words that, in a search, ask about what the docs are of (lowercase):
+    /// a docs page is only found by most of a search's words when one of
+    /// these is among them ("python", "golang").
+    pub asked_by: &'static [&'static str],
     /// Registrable domain of the site, as Plumb counts them (docs.python.org
     /// is a site of its own).
     pub domain: &'static str,
@@ -37,6 +41,7 @@ pub const DOCS_SITES: &[DocsSite] = &[
     DocsSite {
         key: "mdn",
         product: "MDN",
+        asked_by: &["mdn", "javascript", "js", "css", "html", "dom", "http"],
         domain: "developer.mozilla.org",
         roots: &["https://developer.mozilla.org/en-US/docs/"],
         sitemaps: &["https://developer.mozilla.org/sitemaps/en-us/sitemap.xml.gz"],
@@ -47,6 +52,7 @@ pub const DOCS_SITES: &[DocsSite] = &[
     DocsSite {
         key: "python",
         product: "Python",
+        asked_by: &["python", "python3", "py"],
         domain: "docs.python.org",
         roots: &["https://docs.python.org/3/"],
         sitemaps: &[],
@@ -60,6 +66,7 @@ pub const DOCS_SITES: &[DocsSite] = &[
     DocsSite {
         key: "rust",
         product: "Rust",
+        asked_by: &["rust", "rustlang", "cargo"],
         domain: "doc.rust-lang.org",
         roots: &[
             "https://doc.rust-lang.org/std/",
@@ -85,6 +92,7 @@ pub const DOCS_SITES: &[DocsSite] = &[
     DocsSite {
         key: "go",
         product: "Go",
+        asked_by: &["go", "golang"],
         domain: "go.dev",
         roots: &["https://go.dev/doc/", "https://go.dev/ref/"],
         sitemaps: &[],
@@ -95,6 +103,7 @@ pub const DOCS_SITES: &[DocsSite] = &[
     DocsSite {
         key: "node",
         product: "Node.js",
+        asked_by: &["node", "node.js", "nodejs"],
         domain: "nodejs.org",
         roots: &["https://nodejs.org/api/", "https://nodejs.org/en/learn/"],
         sitemaps: &[],
@@ -105,6 +114,7 @@ pub const DOCS_SITES: &[DocsSite] = &[
     DocsSite {
         key: "typescript",
         product: "TypeScript",
+        asked_by: &["typescript", "ts"],
         domain: "typescriptlang.org",
         roots: &["https://www.typescriptlang.org/docs/"],
         sitemaps: &[],
@@ -115,6 +125,7 @@ pub const DOCS_SITES: &[DocsSite] = &[
     DocsSite {
         key: "react",
         product: "React",
+        asked_by: &["react", "reactjs", "react.js"],
         domain: "react.dev",
         roots: &["https://react.dev/reference/", "https://react.dev/learn"],
         sitemaps: &[],
@@ -125,6 +136,7 @@ pub const DOCS_SITES: &[DocsSite] = &[
     DocsSite {
         key: "vue",
         product: "Vue",
+        asked_by: &["vue", "vuejs", "vue.js"],
         domain: "vuejs.org",
         roots: &["https://vuejs.org/guide/", "https://vuejs.org/api/"],
         sitemaps: &[],
@@ -135,6 +147,7 @@ pub const DOCS_SITES: &[DocsSite] = &[
     DocsSite {
         key: "nextjs",
         product: "Next.js",
+        asked_by: &["next.js", "nextjs"],
         domain: "nextjs.org",
         roots: &["https://nextjs.org/docs/"],
         sitemaps: &[],
@@ -145,6 +158,7 @@ pub const DOCS_SITES: &[DocsSite] = &[
     DocsSite {
         key: "tailwind",
         product: "Tailwind CSS",
+        asked_by: &["tailwind", "tailwindcss"],
         domain: "tailwindcss.com",
         roots: &["https://tailwindcss.com/docs/"],
         sitemaps: &[],
@@ -155,6 +169,7 @@ pub const DOCS_SITES: &[DocsSite] = &[
     DocsSite {
         key: "django",
         product: "Django",
+        asked_by: &["django"],
         domain: "djangoproject.com",
         roots: &["https://docs.djangoproject.com/en/stable/"],
         sitemaps: &[],
@@ -165,6 +180,7 @@ pub const DOCS_SITES: &[DocsSite] = &[
     DocsSite {
         key: "flask",
         product: "Flask",
+        asked_by: &["flask"],
         domain: "palletsprojects.com",
         roots: &["https://flask.palletsprojects.com/en/stable/"],
         sitemaps: &[],
@@ -175,6 +191,7 @@ pub const DOCS_SITES: &[DocsSite] = &[
     DocsSite {
         key: "numpy",
         product: "NumPy",
+        asked_by: &["numpy", "np"],
         domain: "numpy.org",
         roots: &["https://numpy.org/doc/stable/"],
         sitemaps: &[],
@@ -188,6 +205,7 @@ pub const DOCS_SITES: &[DocsSite] = &[
     DocsSite {
         key: "pandas",
         product: "pandas",
+        asked_by: &["pandas", "dataframe", "pd"],
         domain: "pydata.org",
         roots: &["https://pandas.pydata.org/docs/"],
         sitemaps: &[],
@@ -201,6 +219,7 @@ pub const DOCS_SITES: &[DocsSite] = &[
     DocsSite {
         key: "pytorch",
         product: "PyTorch",
+        asked_by: &["pytorch", "torch"],
         domain: "pytorch.org",
         roots: &["https://docs.pytorch.org/docs/stable/"],
         sitemaps: &[],
@@ -211,6 +230,7 @@ pub const DOCS_SITES: &[DocsSite] = &[
     DocsSite {
         key: "postgres",
         product: "PostgreSQL",
+        asked_by: &["postgres", "postgresql", "psql"],
         domain: "postgresql.org",
         roots: &["https://www.postgresql.org/docs/current/"],
         sitemaps: &[],
@@ -221,6 +241,7 @@ pub const DOCS_SITES: &[DocsSite] = &[
     DocsSite {
         key: "mysql",
         product: "MySQL",
+        asked_by: &["mysql"],
         domain: "mysql.com",
         roots: &["https://dev.mysql.com/doc/refman/8.4/en/"],
         sitemaps: &[],
@@ -231,6 +252,7 @@ pub const DOCS_SITES: &[DocsSite] = &[
     DocsSite {
         key: "sqlite",
         product: "SQLite",
+        asked_by: &["sqlite", "sqlite3"],
         domain: "sqlite.org",
         roots: &["https://www.sqlite.org/"],
         sitemaps: &[],
@@ -244,6 +266,7 @@ pub const DOCS_SITES: &[DocsSite] = &[
     DocsSite {
         key: "docker",
         product: "Docker",
+        asked_by: &["docker", "dockerfile"],
         domain: "docker.com",
         roots: &["https://docs.docker.com/"],
         sitemaps: &[],
@@ -254,6 +277,7 @@ pub const DOCS_SITES: &[DocsSite] = &[
     DocsSite {
         key: "kubernetes",
         product: "Kubernetes",
+        asked_by: &["kubernetes", "k8s", "kubectl"],
         domain: "kubernetes.io",
         roots: &["https://kubernetes.io/docs/"],
         sitemaps: &[],
@@ -264,6 +288,7 @@ pub const DOCS_SITES: &[DocsSite] = &[
     DocsSite {
         key: "git",
         product: "Git",
+        asked_by: &["git"],
         domain: "git-scm.com",
         roots: &[
             "https://git-scm.com/docs/",
@@ -277,6 +302,7 @@ pub const DOCS_SITES: &[DocsSite] = &[
     DocsSite {
         key: "github",
         product: "GitHub",
+        asked_by: &["github"],
         domain: "docs.github.com",
         roots: &["https://docs.github.com/en/"],
         sitemaps: &[],
@@ -287,6 +313,7 @@ pub const DOCS_SITES: &[DocsSite] = &[
     DocsSite {
         key: "java",
         product: "Java",
+        asked_by: &["java"],
         domain: "oracle.com",
         roots: &["https://docs.oracle.com/en/java/javase/21/docs/api/"],
         sitemaps: &[],
@@ -297,6 +324,7 @@ pub const DOCS_SITES: &[DocsSite] = &[
     DocsSite {
         key: "cpp",
         product: "C++",
+        asked_by: &["c++", "cpp", "std::"],
         domain: "cppreference.com",
         roots: &["https://en.cppreference.com/w/"],
         sitemaps: &[],
@@ -310,6 +338,7 @@ pub const DOCS_SITES: &[DocsSite] = &[
     DocsSite {
         key: "dotnet",
         product: ".NET",
+        asked_by: &[".net", "dotnet", "c#", "csharp", "powershell"],
         domain: "learn.microsoft.com",
         roots: &[
             "https://learn.microsoft.com/en-us/dotnet/",
@@ -323,6 +352,7 @@ pub const DOCS_SITES: &[DocsSite] = &[
     DocsSite {
         key: "kotlin",
         product: "Kotlin",
+        asked_by: &["kotlin"],
         domain: "kotlinlang.org",
         roots: &[
             "https://kotlinlang.org/docs/",
@@ -336,6 +366,7 @@ pub const DOCS_SITES: &[DocsSite] = &[
     DocsSite {
         key: "php",
         product: "PHP",
+        asked_by: &["php"],
         domain: "php.net",
         roots: &["https://www.php.net/manual/en/"],
         sitemaps: &[],
@@ -346,6 +377,7 @@ pub const DOCS_SITES: &[DocsSite] = &[
     DocsSite {
         key: "ruby",
         product: "Ruby",
+        asked_by: &["ruby"],
         domain: "ruby-lang.org",
         roots: &["https://docs.ruby-lang.org/en/master/"],
         sitemaps: &[],
@@ -356,6 +388,7 @@ pub const DOCS_SITES: &[DocsSite] = &[
     DocsSite {
         key: "rails",
         product: "Rails",
+        asked_by: &["rails", "ror"],
         domain: "rubyonrails.org",
         roots: &["https://guides.rubyonrails.org/"],
         sitemaps: &[],
@@ -366,6 +399,7 @@ pub const DOCS_SITES: &[DocsSite] = &[
     DocsSite {
         key: "man",
         product: "Linux",
+        asked_by: &["linux", "man", "unix"],
         domain: "man7.org",
         roots: &["https://man7.org/linux/man-pages/"],
         sitemaps: &[],
@@ -376,6 +410,7 @@ pub const DOCS_SITES: &[DocsSite] = &[
     DocsSite {
         key: "bash",
         product: "Bash",
+        asked_by: &["bash", "shell"],
         domain: "gnu.org",
         roots: &["https://www.gnu.org/software/bash/manual/html_node/"],
         sitemaps: &[],
@@ -386,6 +421,7 @@ pub const DOCS_SITES: &[DocsSite] = &[
     DocsSite {
         key: "archwiki",
         product: "Arch Linux",
+        asked_by: &["arch", "archlinux", "linux"],
         domain: "archlinux.org",
         roots: &["https://wiki.archlinux.org/title/"],
         sitemaps: &[],
@@ -396,6 +432,7 @@ pub const DOCS_SITES: &[DocsSite] = &[
     DocsSite {
         key: "nginx",
         product: "nginx",
+        asked_by: &["nginx"],
         domain: "nginx.org",
         roots: &["https://nginx.org/en/docs/"],
         sitemaps: &[],
@@ -409,6 +446,7 @@ pub const DOCS_SITES: &[DocsSite] = &[
     DocsSite {
         key: "redis",
         product: "Redis",
+        asked_by: &["redis"],
         domain: "redis.io",
         roots: &["https://redis.io/docs/"],
         sitemaps: &[],
@@ -419,6 +457,7 @@ pub const DOCS_SITES: &[DocsSite] = &[
     DocsSite {
         key: "mongodb",
         product: "MongoDB",
+        asked_by: &["mongodb", "mongo"],
         domain: "mongodb.com",
         roots: &["https://www.mongodb.com/docs/manual/"],
         sitemaps: &[],
@@ -429,6 +468,7 @@ pub const DOCS_SITES: &[DocsSite] = &[
     DocsSite {
         key: "terraform",
         product: "Terraform",
+        asked_by: &["terraform", "hcl"],
         domain: "hashicorp.com",
         roots: &["https://developer.hashicorp.com/terraform/"],
         sitemaps: &[],
@@ -439,6 +479,7 @@ pub const DOCS_SITES: &[DocsSite] = &[
     DocsSite {
         key: "godot",
         product: "Godot",
+        asked_by: &["godot", "gdscript"],
         domain: "godotengine.org",
         roots: &["https://docs.godotengine.org/en/stable/"],
         sitemaps: &[],
@@ -449,6 +490,7 @@ pub const DOCS_SITES: &[DocsSite] = &[
     DocsSite {
         key: "bootstrap",
         product: "Bootstrap",
+        asked_by: &["bootstrap"],
         domain: "getbootstrap.com",
         roots: &["https://getbootstrap.com/docs/5.3/"],
         sitemaps: &[],
@@ -503,6 +545,70 @@ pub fn page_title(site: &DocsSite, title: &str) -> Option<String> {
     Some(parts.join(" — "))
 }
 
+/// Words that ask for docs in general, not for something in them: "python
+/// docs" asks for the docs site, not one of its pages.
+const DOCS_WORDS: &[&str] = &[
+    "doc",
+    "docs",
+    "documentation",
+    "manual",
+    "reference",
+    "official",
+    "web",
+    "site",
+    "website",
+    "a",
+    "an",
+    "the",
+    "in",
+    "of",
+    "on",
+    "to",
+    "for",
+    "and",
+    "how",
+    "what",
+    "is",
+];
+
+/// The docs site a page at `url` is on: the one with a root it is under.
+pub fn site_of_url(url: &str) -> Option<&'static DocsSite> {
+    DOCS_SITES.iter().find(|site| {
+        site.roots
+            .iter()
+            .any(|root| url.starts_with(root.trim_end_matches('/')))
+    })
+}
+
+/// Whether `query` asks about something in `site`'s docs: it names what
+/// the docs are of ([`DocsSite::asked_by`]) and something more than docs
+/// in general. "python sort list" does; "python docs", "mdn web docs" and
+/// "note taking app" do not.
+pub fn asks_about(site: &DocsSite, query: &str) -> bool {
+    let words: Vec<String> = query
+        .split_whitespace()
+        .map(|word| {
+            let word = word.to_lowercase();
+            let word = word
+                .strip_suffix("'s")
+                .or_else(|| word.strip_suffix("’s"))
+                .unwrap_or(&word);
+            word.trim_matches(|c: char| !c.is_alphanumeric() && !"+#".contains(c))
+                .to_string()
+        })
+        .filter(|word| !word.is_empty())
+        .collect();
+    let names = |word: &str| {
+        site.asked_by
+            .iter()
+            .any(|asked| word == *asked || (asked.ends_with("::") && word.starts_with(asked)))
+    };
+    words.iter().any(|word| names(word))
+        && words
+            .iter()
+            .any(|word| !names(word) && !DOCS_WORDS.contains(&word.as_str()))
+}
+
 /// The site of `key`.
 pub fn site(key: &str) -> Option<&'static DocsSite> {
     DOCS_SITES.iter().find(|site| site.key == key)
@@ -521,6 +627,10 @@ mod tests {
                 site.key
             );
             assert!((1..=10).contains(&site.weight), "{}", site.key);
+            assert!(!site.asked_by.is_empty(), "{}", site.key);
+            for word in site.asked_by {
+                assert_eq!(*word, word.to_lowercase(), "{}", site.key);
+            }
             for root in site
                 .roots
                 .iter()
@@ -537,6 +647,32 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn searches_ask_about_docs_when_they_name_the_product() {
+        let python = site("python").unwrap();
+        assert!(asks_about(python, "sort a list in python"));
+        assert!(asks_about(python, "Python's f-string format"));
+        assert!(!asks_about(python, "python docs"));
+        assert!(!asks_about(python, "python"));
+        assert!(!asks_about(python, "module object is not callable"));
+        let mdn = site("mdn").unwrap();
+        assert!(!asks_about(mdn, "mdn web docs"));
+        assert!(!asks_about(mdn, "note taking app"));
+        assert!(asks_about(mdn, "css grid layout"));
+        let cpp = site("cpp").unwrap();
+        assert!(asks_about(cpp, "std::vector push_back"));
+        assert!(asks_about(cpp, "c++ vector"));
+        assert_eq!(
+            site_of_url("https://docs.python.org/3/howto/sorting.html").map(|s| s.key),
+            Some("python")
+        );
+        assert_eq!(
+            site_of_url("https://react.dev/learn/thinking-in-react").map(|s| s.key),
+            Some("react")
+        );
+        assert!(site_of_url("https://example.com/").is_none());
     }
 
     #[test]
