@@ -2433,6 +2433,73 @@ async fn a_node_takes_wikipedia_articles_from_a_trusted_node() {
     node.shutdown().await.unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_set_file_over_the_storage_limit_is_cut_before_it_is_indexed() {
+    // A file taken from a trusted node, with more pages than the node now
+    // keeps.
+    let dir = seeded_dir();
+    let set = crate::pages::SetInfo::find("wikipedia-en").unwrap();
+    let file = set.file(dir.path());
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    let articles: Vec<plumb_core::Article> = [
+        ("Marie Curie", 900u64),
+        ("Pierre Curie", 500),
+        ("Curie (unit)", 10),
+    ]
+    .iter()
+    .map(|(title, views)| plumb_core::Article {
+        title: title.to_string(),
+        views: *views,
+        ..Default::default()
+    })
+    .collect();
+    plumb_ingest::articles::write_articles_file(&file, &articles).unwrap();
+    let notes = crate::pages::SetFileNotes {
+        lines: 3,
+        complete: true,
+        source_modified: 1,
+        fetched_at: now_unix(),
+        near: 0,
+    };
+    std::fs::write(
+        crate::pages::notes_path(&file),
+        serde_json::to_vec(&notes).unwrap(),
+    )
+    .unwrap();
+    let mut config = test_config(dir.path());
+    config.settings.page_sets = crate::pages::PageSets::parse("wikipedia-en=2").unwrap();
+    config.settings.storage_limit_mb = 500;
+    let node = start(config).await.unwrap();
+    let addr = node.addr();
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let (_, _, body) = get(addr, "/search?q=pierre+curie").await;
+        if body.contains("Pierre_Curie") {
+            break;
+        }
+        assert!(Instant::now() < deadline, "no pages: {body}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(set.file_notes(dir.path()).unwrap().lines, 2);
+    // One index, of the pages kept: none of the whole file first.
+    let built: Vec<String> = node
+        .inner
+        .journal
+        .entries()
+        .into_iter()
+        .map(|entry| entry.message)
+        .filter(|message| message.starts_with("Page sets ready"))
+        .collect();
+    assert_eq!(
+        built,
+        ["Page sets ready: 2 pages searched next to the sites"],
+        "{built:?}"
+    );
+
+    node.shutdown().await.unwrap();
+}
+
 /// A trusted node that says when it is asked for a page set file, then
 /// answers only once let go (or the asker gives up).
 struct SlowPages {
