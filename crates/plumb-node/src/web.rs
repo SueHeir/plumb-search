@@ -1119,6 +1119,8 @@ async fn search_page(
                 let local = place_sites(&state, found).await;
                 places::local_first(found, &mut results.hits, local, limit);
             }
+            // Places shown: none found around a town is no list.
+            let found_places = found_places.filter(|found| found.near_me || !found.hits.is_empty());
             if let Some(visitor) = &mut visitor {
                 visitor.rank(
                     &query,
@@ -1351,6 +1353,7 @@ async fn api_search(
                 let local = place_sites(&state, found).await;
                 places::local_first(found, &mut results.hits, local, params.limit());
             }
+            let places = places.filter(|found| !found.hits.is_empty());
             let extras = extras(&state, &query, &results, &options).await;
             let about = search_about(&query, &results, &extras);
             let shown_to_plugins = if state.settings.plugins.any_annotate() {
@@ -6262,6 +6265,17 @@ mod tests {
                     hits: Vec::new(),
                 });
             }
+            // A town without any mapped.
+            if query.contains("aurora") {
+                return Some(plumb_index::places::PlaceResults {
+                    what: "brewery".into(),
+                    center: Some(at("Aurora", "place=city", "n5", None)),
+                    near_me: false,
+                    guessed: false,
+                    radius_km: 12.0,
+                    hits: Vec::new(),
+                });
+            }
             let brewery =
                 |name: &str, osm: &str, website: Option<&str>| plumb_index::places::PlaceHit {
                     place: at(name, "craft=brewery", osm, website),
@@ -6291,6 +6305,33 @@ mod tests {
                 )
             })
         }
+    }
+
+    #[tokio::test]
+    async fn sites_saying_what_come_first_around_a_town_with_no_places() {
+        let (_, _, body) = send(
+            router(Arc::new(BreweryPlaces)),
+            "/api/search?q=brewery+in+aurora&full=1",
+        )
+        .await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let domains: Vec<&str> = json["hits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|h| h["domain"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            domains,
+            ["westword.com", "denvergov.org", "denverbroncos.com"]
+        );
+        assert!(json.get("places").is_none(), "{body}");
+        let (_, _, page) = send(
+            router(Arc::new(BreweryPlaces)),
+            "/search?q=brewery+in+aurora",
+        )
+        .await;
+        assert!(!page.contains("aria-label=\"Places\""), "{page}");
     }
 
     #[tokio::test]
