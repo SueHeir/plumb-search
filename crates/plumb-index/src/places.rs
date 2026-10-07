@@ -67,6 +67,18 @@ const NEAR_ME: &[&[&str]] = &[
 ];
 /// Words that say where, in "pizza in denver".
 const WHERE_WORDS: &[&[&str]] = &[&["in"], &["near"], &["around"], &["close", "to"], &["at"]];
+/// Words ending a query that say when, not where: "open now".
+const WHEN: &[&[&str]] = &[
+    &["open", "now"],
+    &["open", "late"],
+    &["open", "today"],
+    &["open", "24", "hours"],
+    &["24", "hours"],
+    &["24", "7"],
+    &["now"],
+    &["today"],
+    &["tonight"],
+];
 /// Words left out of what is looked for: "best pizza", "places to eat".
 const FILLER: &[&str] = &[
     "best", "good", "great", "cheap", "top", "nice", "nearest", "closest", "open", "the", "a",
@@ -99,11 +111,18 @@ pub struct PlaceQuery {
 /// kind of place and a town: "denver pizza" ([`PlaceSearcher::search`]
 /// checks the town).
 pub fn parse_place_query(query: &str) -> Option<PlaceQuery> {
-    let words: Vec<String> = normalize_text(query)
+    let mut words: Vec<String> = normalize_text(query)
         .split(' ')
         .filter(|w| !w.is_empty())
         .map(str::to_string)
         .collect();
+    // "plumber boston open now": when is not where.
+    while let Some(when) = WHEN
+        .iter()
+        .find(|when| words.len() > when.len() && words[words.len() - when.len()..] == ***when)
+    {
+        words.truncate(words.len() - when.len());
+    }
     let what_of = |words: &[String]| -> Option<String> {
         let what: Vec<&str> = words
             .iter()
@@ -156,10 +175,9 @@ pub fn parse_place_query(query: &str) -> Option<PlaceQuery> {
     if words.len() >= 2 {
         for town_words in (1..=3.min(words.len() - 1)).rev() {
             let (what, town) = words.split_at(words.len() - town_words);
-            if what
-                .iter()
-                .all(|w| is_kind_word(w) || FILLER.contains(&w.as_str()))
-            {
+            // What is looked for ends in a kind of place: "pizza", "best
+            // climbing gym", "cheap bookstore".
+            if what.last().is_some_and(|w| is_kind_word(w)) {
                 if let Some(what) = what_of(what) {
                     return Some(PlaceQuery {
                         what,
@@ -684,6 +702,18 @@ mod tests {
             query("sushi san francisco"),
             Some(("sushi".into(), Near::Named("san francisco".into())))
         );
+        assert_eq!(
+            query("best climbing gym seattle"),
+            Some(("climbing gym".into(), Near::Named("seattle".into())))
+        );
+        assert_eq!(
+            query("plumber in boston open now"),
+            Some(("plumber".into(), Near::Named("boston".into())))
+        );
+        assert_eq!(
+            query("pizza denver open now"),
+            Some(("pizza".into(), Near::Named("denver".into())))
+        );
         // Only "in", "near" and "near me" say where for sure.
         assert!(parse_place_query("pizza in denver").unwrap().said_where);
         assert!(parse_place_query("coffee near me").unwrap().said_where);
@@ -696,6 +726,9 @@ mod tests {
             "in",
             "near me",
             "log in",
+            "open now",
+            "leonardo dicaprio",
+            "tim cook",
         ] {
             assert_eq!(query(plain), None, "{plain}");
         }
