@@ -4055,7 +4055,7 @@ mod tests {
     #[test]
     fn site_search_needs_the_site_first_and_more_than_a_common_word() {
         let mut records = corpus();
-        let mut get = site("get.gov", Some("Get"), None, &[], &[], ranked(5_000, 100));
+        let mut get = site("get.gov", Some("Get"), None, &[], &[], ranked(50_000, 10));
         get.search_url = Some("https://get.gov/search?q={searchTerms}".into());
         records.push(get);
         for i in 0..25 {
