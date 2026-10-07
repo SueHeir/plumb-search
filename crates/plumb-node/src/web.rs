@@ -2338,12 +2338,20 @@ border-radius:1rem;color:var(--fg);text-decoration:none}\
 .hist form{margin-top:1.5rem}\
 .about label{display:block;margin-top:1.25rem}.about .m{margin:.2rem 0 .4rem}\
 .about form.block{display:block}\
+.about form{display:block}\
+.welcome fieldset{border:0;padding:0;margin:1.25rem 0 0;min-width:0}.welcome legend{padding:0}\
+.welcome .topics{display:grid;grid-template-columns:repeat(auto-fill,minmax(9rem,1fr));gap:.4rem}\
+.welcome .topics label{display:flex;align-items:center;gap:.45rem;margin:0;padding:.4rem .6rem;\
+border:1px solid var(--line);border-radius:.5rem;cursor:pointer;overflow-wrap:anywhere}\
+.welcome .topics label:has(input:checked){border-color:var(--accent)}\
+.welcome .topics input{flex:none;width:auto;margin:0;padding:0;accent-color:var(--accent)}\
+.welcome .acts{display:flex;flex-wrap:wrap;align-items:center;gap:1rem;margin-top:1.5rem}\
+.welcome .quiet{background:none;color:var(--muted);padding:.55rem 0;text-decoration:underline}\
 .about .kinds{border:0;padding:0;margin:1.25rem 0 0}.about .kinds legend{padding:0}\
 .about .kind{display:flex;flex-wrap:wrap;align-items:center;gap:.2rem .9rem;padding:.35rem 0;\
 border-bottom:1px solid var(--line)}.about .kind>span{flex:1 1 12rem}\
 .about .kind label{display:inline-flex;align-items:center;gap:.25rem;margin:0}\
-.welcome fieldset{border:0;padding:0;margin:1.25rem 0 0}.welcome legend{padding:0}\
-.welcome .topics label{display:inline-block;margin:.15rem 1rem .15rem 0}\
+.about .kind input{flex:none;width:auto;margin:0;padding:0;accent-color:var(--accent)}\
 .invite{margin:.75rem 0}.invite form{display:inline;margin:0}\
 .invite button{background:none;border:0;padding:0;color:var(--muted);font:inherit;\
 text-decoration:underline;cursor:pointer}\

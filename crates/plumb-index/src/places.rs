@@ -142,11 +142,13 @@ pub fn parse_place_query(query: &str) -> Option<PlaceQuery> {
         .map(str::to_string)
         .collect();
     // "plumber boston open now": when is not where.
+    let mut said_when = false;
     while let Some(when) = WHEN
         .iter()
         .find(|when| words.len() > when.len() && words[words.len() - when.len()..] == ***when)
     {
         words.truncate(words.len() - when.len());
+        said_when = true;
     }
     if words
         .iter()
@@ -228,6 +230,15 @@ pub fn parse_place_query(query: &str) -> Option<PlaceQuery> {
                 });
             }
         }
+    }
+    // "coffee open now", "pharmacy open late": a kind of place asked for
+    // at a time, with no town, is near the searcher.
+    if said_when && words.last().is_some_and(|w| is_kind_word(w)) {
+        return Some(PlaceQuery {
+            what: what_of(&words)?,
+            near: Near::Me,
+            said_where: true,
+        });
     }
     None
 }
@@ -778,6 +789,16 @@ mod tests {
             query("plumber boston open now"),
             Some(("plumber".into(), Near::Named("boston".into())))
         );
+        // A kind of place at a time, with no town, is near the searcher.
+        assert_eq!(query("coffee open now"), Some(("coffee".into(), Near::Me)));
+        assert_eq!(
+            query("pharmacy open late"),
+            Some(("pharmacy".into(), Near::Me))
+        );
+        assert_eq!(query("pizza tonight"), Some(("pizza".into(), Near::Me)));
+        // Not for words that are no kind of place.
+        assert_eq!(query("chrome open now"), None);
+        assert_eq!(query("news today"), None);
         // Only "in", "near" and "near me" say where for sure.
         assert!(parse_place_query("pizza in denver").unwrap().said_where);
         assert!(parse_place_query("coffee near me").unwrap().said_where);

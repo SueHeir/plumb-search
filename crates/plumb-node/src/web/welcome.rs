@@ -261,9 +261,10 @@ fn render_welcome(about: &About, in_browser: bool, note: Option<&str>) -> String
          places there. Plumb never works out where you are by itself.</p>\n\
          <input id=\"town\" name=\"town\" maxlength=\"{MAX_TOWN_CHARS}\" value=\"{}\" \
          autocomplete=\"address-level2\">\n\
-         <fieldset class=\"topics\"><legend><strong>What are you into?</strong></legend>\n\
+         <fieldset><legend><strong>What are you into?</strong></legend>\n\
          <p class=\"m\">Results that match one move up a little and say so, so a name like \
-         \u{201c}jaguar\u{201d} or \u{201c}rust\u{201d} leans your way.</p>\n{topics}</fieldset>\n\
+         \u{201c}jaguar\u{201d} or \u{201c}rust\u{201d} leans your way.</p>\n\
+         <div class=\"topics\">{topics}</div></fieldset>\n\
          <label for=\"more\"><strong>Anything else you care about</strong></label>\n\
          <p class=\"m\">Your team, your school, a hobby: one per line.</p>\n\
          <textarea id=\"more\" name=\"more\" rows=\"3\">{}</textarea>\n\
@@ -271,9 +272,9 @@ fn render_welcome(about: &About, in_browser: bool, note: Option<&str>) -> String
          <p class=\"m\">One per line, such as seriouseats.com. They come first whenever a \
          search finds them.</p>\n\
          <textarea id=\"pinned\" name=\"pinned\" rows=\"3\">{}</textarea>\n\
-         <p><button type=\"submit\">Save and start searching</button></p>\n</form>\n\
-         <form method=\"post\" action=\"/welcome/skip\"><button type=\"submit\">Skip for \
-         now</button></form>\n</main>\n</div>",
+         <div class=\"acts\"><button type=\"submit\">Save and start searching</button>\
+         <button type=\"submit\" class=\"quiet\" formaction=\"/welcome/skip\">Skip for \
+         now</button></div>\n</form>\n</main>\n</div>",
         escape_html(&about.town),
         escape_html(&more.join("\n")),
         escape_html(&about.pinned.join("\n")),
