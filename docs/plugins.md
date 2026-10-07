@@ -225,6 +225,22 @@ it found nothing. Give it a page's address to try a page lookup, and
 `--annotate results.json` has it mark up results instead: a JSON list of
 results as a node shows them (`{"id", "url", "title", "site", "about"}`).
 
+## Plugins in this repository
+
+Each folder in `plugins/` has a `plugin.json` and, where it needs one, a
+`config.example.json` to copy to `config.json`. Build one with
+`cargo build --release -p plumb-plugin-<folder> --target wasm32-unknown-unknown`
+and copy `target/wasm32-unknown-unknown/release/plumb_plugin_<folder>.wasm`
+into its folder as `plugin.wasm`.
+
+| Plugin | What it adds | Needs |
+| --- | --- | --- |
+| `hacker-news` | `hn rust async`: Hacker News stories. | Nothing. |
+| `youtube-music` | `ytm` or `yt` searches: songs and videos from YouTube and YouTube Music, and a channel's uploads for searches about someone with one. | A YouTube Data API key (see its README). |
+| `reddit` | `reddit` searches: Reddit threads. | Your own Reddit app keys (see its README). |
+| `github` | `gh http client`: repositories with stars, language and last push. With a token: "Starred" badges, star counts on GitHub results among the node's own, and Star and Unstar buttons. | Nothing to search (GitHub allows 10 searches a minute without a token); a [fine-grained token](https://github.com/settings/personal-access-tokens) with read and write access to Starring for the rest. |
+| `steam` | `steam portal` or `my games portal`: games in your library with hours played. Results about a game get "Owned, 25 h" or "On your wishlist". | A [Steam Web API key](https://steamcommunity.com/dev/apikey) and your SteamID64. If your library comes back empty, set your Steam profile's game details to public. |
+
 ## Write a plugin
 
 Start a library crate:
