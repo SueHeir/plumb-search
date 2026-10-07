@@ -1,2 +1,3 @@
 # The learned ranking (crates/plumb-index/src/learned.rs) against the hand-made order.
 hand	{"learned": false}
+partial	{"named_needs_all_words": false}
