@@ -272,6 +272,20 @@ pub fn merge_about(base: Option<&About>, local: &About, remote: &About) -> About
         None if local.town.is_empty() => remote.town.clone(),
         _ => local.town.clone(),
     };
+    // Each kind of result as the town: a side that changed it wins.
+    let mut kinds = local.kinds.clone();
+    for kind in local.kinds.keys().chain(remote.kinds.keys()) {
+        let unchanged = match base {
+            Some(base) => local.kinds.get(kind) == base.kinds.get(kind),
+            None => !local.kinds.contains_key(kind),
+        };
+        if unchanged {
+            match remote.kinds.get(kind) {
+                Some(amount) => kinds.insert(kind.clone(), *amount),
+                None => kinds.remove(kind),
+            };
+        }
+    }
     About {
         interests: words(
             base.map(|b| &b.interests),
@@ -292,6 +306,7 @@ pub fn merge_about(base: Option<&About>, local: &About, remote: &About) -> About
             MAX_SITES,
         ),
         town,
+        kinds,
     }
 }
 
