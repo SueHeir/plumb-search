@@ -108,7 +108,7 @@ pub(crate) fn correct(
         }
     };
     for word in &tokens[rest..] {
-        match speller.fix_word(word)? {
+        match speller.fix_word(word, link_score)? {
             Some(better) => {
                 fixed.push(better);
                 changed = true;
@@ -154,6 +154,25 @@ impl Speller<'_> {
                 .doc_freq(&Term::from_field_text(field, word))?;
         }
         Ok(docs)
+    }
+
+    /// Whether `word` is, as typed, the whole name of a site with a link
+    /// score of at least `least`: "lyft" is not a typo of "syft", nor
+    /// "ulta" of "alta".
+    fn names_a_site(
+        &self,
+        word: &str,
+        least: f32,
+        link_score: &dyn Fn(&HashSet<DocAddress>) -> f32,
+    ) -> Result<bool> {
+        let docs: HashSet<DocAddress> = [self.fields.label_key, self.fields.alias_key]
+            .into_iter()
+            .map(|field| matching_docs(self.searcher, vec![Term::from_field_text(field, word)]))
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .flatten()
+            .collect();
+        Ok(!docs.is_empty() && link_score(&docs) >= least)
     }
 
     /// The best correction of the query's first words (at least
@@ -214,14 +233,27 @@ impl Speller<'_> {
                 // not "piazza". In a name of several words that a
                 // well-known site has, it may be: "capitol one", "wels
                 // fargo".
+                // Even then only a word of four letters or more, changed
+                // into another known word: "why is" is not "who is",
+                // "number of" is not "numbe o", "what to" is not "what tf".
                 let known_words_ok = covers > 1 && score >= WELL_KNOWN_LINK_SCORE;
                 let mut plausible = true;
                 for (word, fixed) in words.iter().zip(&fixed) {
                     if word == fixed {
                         continue;
                     }
+                    // A word that is the name of a site as popular as the
+                    // correction's stays: "lyft app" is not "syft app".
                     if !within_edits(word, fixed)
-                        || (!known_words_ok && self.docs_with(word)? >= KNOWN_WORD_DOCS)
+                        || self.names_a_site(word, score.max(MIN_FIX_LINK_SCORE), link_score)?
+                    {
+                        plausible = false;
+                        break;
+                    }
+                    if self.docs_with(word)? >= KNOWN_WORD_DOCS
+                        && (!known_words_ok
+                            || word.chars().count() < 4
+                            || self.docs_with(fixed)? < KNOWN_WORD_DOCS)
                     {
                         plausible = false;
                         break;
@@ -241,13 +273,20 @@ impl Speller<'_> {
 
     /// The word `word` was probably meant to be, when the index hardly
     /// knows it and knows a near word far better.
-    fn fix_word(&self, word: &str) -> Result<Option<String>> {
+    /// A word with a digit in it is a number, a model or a version
+    /// ("401k", "240v", "oauth2"), not a typo; a popular site's name is
+    /// what was meant ("ulta" is not "alta").
+    fn fix_word(
+        &self,
+        word: &str,
+        link_score: &dyn Fn(&HashSet<DocAddress>) -> f32,
+    ) -> Result<Option<String>> {
         let edits = max_edits(word.chars().count());
-        if edits == 0 || word.chars().all(|c| c.is_ascii_digit()) {
+        if edits == 0 || word.chars().any(|c| c.is_ascii_digit()) {
             return Ok(None);
         }
         let docs = self.docs_with(word)?;
-        if docs >= KNOWN_WORD_DOCS {
+        if docs >= KNOWN_WORD_DOCS || self.names_a_site(word, MIN_FIX_LINK_SCORE, link_score)? {
             return Ok(None);
         }
         let mut near: BTreeMap<String, u8> = BTreeMap::new();

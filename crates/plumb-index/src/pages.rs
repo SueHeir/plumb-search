@@ -53,6 +53,10 @@ const CANDIDATES: usize = 200;
 pub const QUESTION_QUERY_WORDS: usize = 3;
 /// Least share of those words a question's title and tags must have.
 pub const QUESTION_SHARE: f32 = 0.75;
+/// Least number of pages whose names have a word for the word to be
+/// spelled right: "pkce", "nalgebra", "stain" and "biles" are, however few
+/// sites say them.
+pub const KNOWN_WORD_PAGES: u64 = 3;
 /// Least share of a question title's stemmed words a query that has all of
 /// the question's own must have to ask the question as a whole.
 pub const QUESTION_TITLE_SHARE: f32 = 0.5;
@@ -924,6 +928,98 @@ impl PageSearcher {
             site.demand = self.site_popularity(&site.domain)?;
         }
         Ok(())
+    }
+
+    /// Gives the sites among `sites` that have no title the title of the
+    /// most read Wikipedia article about what each is the official website
+    /// of, without its qualifier: "Notion" for notion.so, "Yelp" for
+    /// yelp.com, whose homepages turn crawlers away.
+    pub fn title_untitled(&self, sites: &mut [crate::Hit]) -> Result<()> {
+        let searcher = self.reader.searcher();
+        for site in sites.iter_mut().filter(|site| {
+            site.title
+                .as_deref()
+                .is_none_or(|title| title.trim().is_empty())
+        }) {
+            let query = TermQuery::new(
+                Term::from_field_text(self.fields.site, &site.domain),
+                IndexRecordOption::Basic,
+            );
+            let best = searcher.search(
+                &query,
+                &TopDocs::with_limit(1)
+                    .order_by_fast_field::<u64>("popularity", tantivy::Order::Desc),
+            )?;
+            let Some(&(_, address)) = best.first() else {
+                continue;
+            };
+            let document: TantivyDocument = searcher.doc(address)?;
+            let Some(stored) = document
+                .get_first(self.fields.page)
+                .and_then(|v| v.as_str())
+            else {
+                continue;
+            };
+            let page: Page = serde_json::from_str(stored)?;
+            if page.is_article() {
+                let title = base_title(&page.title).trim();
+                if !title.is_empty() {
+                    site.title = Some(title.to_string());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether `word` (one word of [`analysis::words_analyzer`]) is in the
+    /// names of at least [`KNOWN_WORD_PAGES`] pages.
+    pub fn knows_word(&self, word: &str) -> Result<bool> {
+        let searcher = self.reader.searcher();
+        Ok(searcher.doc_freq(&Term::from_field_text(self.fields.words, word))? >= KNOWN_WORD_PAGES)
+    }
+
+    /// `spelling`, suggested for `query`, with the words the pages know
+    /// ([`PageSearcher::knows_word`]) put back as typed; `None` when no
+    /// change is left. The sites index hardly knows "pkce", "dplyr" or
+    /// "stain", so it suggests "pace", "plyr" and "spain"; pages name them.
+    /// A correction to a site's name ([`crate::Spelling::site`]) is kept:
+    /// "wels fargo" is a typo even though Wels is a town.
+    pub fn check_spelling(
+        &self,
+        query: &str,
+        spelling: crate::Spelling,
+    ) -> Result<Option<crate::Spelling>> {
+        if spelling.site.is_some() {
+            return Ok(Some(spelling));
+        }
+        let typed = analysis::tokens(&self.words, query);
+        let mut fixed: Vec<String> = spelling
+            .query
+            .split_whitespace()
+            .map(String::from)
+            .collect();
+        if typed.len() == fixed.len() {
+            for (word, fix) in typed.iter().zip(fixed.iter_mut()) {
+                if word != fix && self.knows_word(word)? {
+                    fix.clone_from(word);
+                }
+            }
+        } else {
+            // Words were split or joined, so they can't be put back one by
+            // one: a known word among those changed drops the suggestion.
+            for word in &typed {
+                if !fixed.contains(word) && self.knows_word(word)? {
+                    return Ok(None);
+                }
+            }
+        }
+        if fixed == typed {
+            return Ok(None);
+        }
+        Ok(Some(crate::Spelling {
+            query: fixed.join(" "),
+            ..spelling
+        }))
     }
 
     /// The best `limit` pages for `query`, best first.
@@ -2077,6 +2173,63 @@ mod tests {
         assert!(hit.score < 0.5, "{}", hit.score);
         assert!(s.search("marie antoinette", 1).unwrap().is_empty());
         assert!(s.search("", 1).unwrap().is_empty());
+    }
+
+    #[test]
+    fn spellings_keep_the_words_pages_know() {
+        let mut pages = Vec::new();
+        for i in 0..3 {
+            pages.push(page(&format!("PKCE flow {i}"), 10, &[]));
+            pages.push(page(&format!("Stain removal {i}"), 10, &[]));
+        }
+        let (_dir, searcher) = searcher(&pages);
+        let spelling = |query: &str, site: Option<&str>| crate::Spelling {
+            query: query.into(),
+            site: site.map(str::to_string),
+        };
+        // Every changed word is known: no suggestion.
+        assert_eq!(
+            searcher
+                .check_spelling("oauth2 pkce flow", spelling("oauth2 pace flow", None))
+                .unwrap(),
+            None
+        );
+        // Only the real typo is still fixed.
+        assert_eq!(
+            searcher
+                .check_spelling(
+                    "remove red wnie stain",
+                    spelling("remove red wine spain", None)
+                )
+                .unwrap(),
+            Some(spelling("remove red wine stain", None))
+        );
+        // Split or joined words with a known one changed: dropped.
+        assert_eq!(
+            searcher
+                .check_spelling("stain wood", spelling("stainwood", None))
+                .unwrap(),
+            None
+        );
+        // A site's name is corrected whatever pages say.
+        assert_eq!(
+            searcher
+                .check_spelling("stain", spelling("spain", Some("spain.info")))
+                .unwrap(),
+            Some(spelling("spain", Some("spain.info")))
+        );
+    }
+
+    #[test]
+    fn untitled_sites_take_their_article_s_title() {
+        let mut notion = page("Notion (productivity software)", 500, &[]);
+        notion.site = Some("notion.so".into());
+        let (_dir, searcher) = searcher(&[notion]);
+        let mut sites = vec![site("notion.so", true), site("other.com", false)];
+        sites[1].title = Some("Other".into());
+        searcher.title_untitled(&mut sites).unwrap();
+        assert_eq!(sites[0].title.as_deref(), Some("Notion"));
+        assert_eq!(sites[1].title.as_deref(), Some("Other"));
     }
 
     fn site(domain: &str, named: bool) -> crate::Hit {

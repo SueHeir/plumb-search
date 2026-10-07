@@ -73,6 +73,39 @@ const MAX_TITLE_PARTS: usize = 4;
 /// between spaces) separates too; a bare hyphen does not (`Coca-Cola`).
 const TITLE_SEPARATORS: [char; 10] = ['|', '·', '•', ':', '–', '—', '»', '«', '/', '\\'];
 
+/// Whole homepage titles, after [`normalize_text`], that say nothing about
+/// the site: "Home", "Index", a site builder's default. Such a site goes by
+/// its other names, as if it had no title, and is not found by "home".
+const BLANK_TITLES: &[&str] = &[
+    "home",
+    "homepage",
+    "home page",
+    "index",
+    "welcome",
+    "untitled",
+    "untitled document",
+    "document",
+    "main page",
+    "default",
+    "new tab",
+    "react app",
+    "vite react",
+    "vite react ts",
+    "my blog",
+    "my wordpress blog",
+    "my wordpress site",
+];
+
+/// Whether `title` says nothing about the site ([`BLANK_TITLES`]), or is an
+/// unfilled template ("%siteName", "<!-- figma:title -->", "{{ title }}").
+fn is_blank_title(title: &str) -> bool {
+    let raw = title.trim();
+    raw.starts_with("<!--")
+        || raw.contains("{{")
+        || raw.starts_with('%')
+        || BLANK_TITLES.contains(&normalize_text(raw).as_str())
+}
+
 /// Handles on the schema's fields.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Fields {
@@ -218,16 +251,19 @@ pub(crate) fn document(
     }
 
     // A site whose homepage gave no title (it blocks crawlers, redirects
-    // elsewhere or was not crawled yet) goes by its first name instead:
+    // elsewhere or was not crawled yet), or one that says nothing ("Home"),
+    // goes by its first name instead:
     // Wikidata's for an official site ("Gmail"), else its own
     // `og:site_name`. It is shown as the result's title, and matched as one.
-    let title = non_empty(&record.title).or_else(|| {
-        record
-            .aliases
-            .iter()
-            .map(String::as_str)
-            .find(|alias| !alias.trim().is_empty())
-    });
+    let title = non_empty(&record.title)
+        .filter(|title| !is_blank_title(title))
+        .or_else(|| {
+            record
+                .aliases
+                .iter()
+                .map(String::as_str)
+                .find(|alias| !alias.trim().is_empty())
+        });
     if let Some(title) = title {
         let title = truncate_chars(title, MAX_TEXT_CHARS);
         let parts = title_parts(&title);
@@ -390,6 +426,23 @@ mod tests {
         assert_eq!(label_text("us-bank-login.com"), "us-bank-login");
         assert_eq!(label_text("bbc.co.uk"), "bbc");
         assert_eq!(label_text("xn--bcher-kva.de"), "bücher");
+    }
+
+    #[test]
+    fn blank_titles_say_nothing() {
+        for title in [
+            "Home",
+            "index",
+            "Welcome!",
+            "%siteName",
+            "<!-- figma:title -->",
+            "React App",
+        ] {
+            assert!(is_blank_title(title), "{title}");
+        }
+        for title in ["Home Depot", "Welcome to Chase", "Notion", "100% Pure"] {
+            assert!(!is_blank_title(title), "{title}");
+        }
     }
 
     #[test]

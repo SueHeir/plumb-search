@@ -1490,15 +1490,24 @@ impl Searcher {
             }
         }
 
-        // The best-ranked site named by the query's first words, with words
-        // left over to search it for.
-        let named_site = ranked.iter().find_map(|r| {
+        // The first result, when the query's first words name it, with
+        // words left over to search it for. A site named lower down is not
+        // what the query is about: capital.edu for "capital one my
+        // account". Nor is a little-known site named by a common word
+        // (get.gov for "get rid of fruit flies", yoga.com for "yoga studio
+        // near seattle").
+        let named_site = ranked.first().and_then(|r| {
             let words = names.get(&r.addr)?.words();
-            (words > 0 && words < query.len).then_some((r.addr, words))
+            (words > 0 && words < query.len).then_some((r, words))
         });
         let site_search = match named_site {
-            Some((addr, words)) => self.site_search(&searcher, addr, query_text, words)?,
-            None => None,
+            Some((r, words))
+                if r.link_score >= WELL_KNOWN_LINK_SCORE
+                    || !self.names_by_common_word(&searcher, query_text, words)? =>
+            {
+                self.site_search(&searcher, r.addr, query_text, words)?
+            }
+            _ => None,
         };
 
         // Left out unless the query names them: sites on names reserved
@@ -1657,6 +1666,10 @@ impl Searcher {
     /// A link into the search of the site at `addr` for the words of `query`
     /// after its first `words`, if the site has a search address (its own,
     /// or one Plumb knows for big sites).
+    ///
+    /// A question has no site to search ("can cats eat chocolate"), and
+    /// neither do words that go on from the name as one phrase: "capital
+    /// of ohio", "house of the dragon", "airbnb vs vrbo".
     fn site_search(
         &self,
         searcher: &tantivy::Searcher,
@@ -1664,10 +1677,42 @@ impl Searcher {
         query: &str,
         words: usize,
     ) -> Result<Option<SiteSearch>> {
+        if pages::asked_as_question(query) {
+            return Ok(None);
+        }
         let Some(terms) = words_after(&self.words, query, words) else {
             return Ok(None);
         };
+        let goes_on = terms
+            .split_whitespace()
+            .next()
+            .map(|word| normalize_text(word))
+            .is_some_and(|word| {
+                is_function_word(&word) || matches!(word.as_str(), "vs" | "versus" | "v")
+            });
+        if goes_on {
+            return Ok(None);
+        }
         self.site_search_link(searcher, addr, terms)
+    }
+
+    /// Whether the first `words` words of `query` are one word that many
+    /// sites' titles have ([`spell::KNOWN_WORD_DOCS`] or more): "get",
+    /// "yoga", "capital".
+    fn names_by_common_word(
+        &self,
+        searcher: &tantivy::Searcher,
+        query: &str,
+        words: usize,
+    ) -> Result<bool> {
+        if words != 1 {
+            return Ok(false);
+        }
+        let Some(word) = analysis::tokens(&self.words, query).into_iter().next() else {
+            return Ok(false);
+        };
+        let term = Term::from_field_text(self.fields.title, &word);
+        Ok(searcher.doc_freq(&term)? >= spell::KNOWN_WORD_DOCS)
     }
 
     /// A link into the search of the site at `addr` for `terms`.
@@ -3609,6 +3654,39 @@ mod tests {
         assert_eq!(full("github").site_search, None);
         assert_eq!(full("us bank login").site_search, None);
         assert_eq!(full("liar stuff").site_search, None);
+        // Words that go on from the name as a phrase, and questions, have
+        // no site to search.
+        assert_eq!(full("github of the world").site_search, None);
+        assert_eq!(full("github vs gitlab").site_search, None);
+        assert_eq!(full("can github host pages").site_search, None);
+    }
+
+    #[test]
+    fn site_search_needs_the_site_first_and_more_than_a_common_word() {
+        let mut records = corpus();
+        let mut get = site("get.gov", Some("Get"), None, &[], &[], ranked(5_000, 100));
+        get.search_url = Some("https://get.gov/search?q={searchTerms}".into());
+        records.push(get);
+        for i in 0..25 {
+            records.push(site(
+                &format!("getaway{i}.com"),
+                Some(&format!("Get away {i}")),
+                None,
+                &[],
+                &[],
+                ranked(100_000 + i, 10),
+            ));
+        }
+        let (_dir, searcher) = build(&records);
+        let found = searcher
+            .search_full(
+                "get rid of flies",
+                10,
+                &RankConfig::default(),
+                &SearchOptions::default(),
+            )
+            .unwrap();
+        assert_eq!(found.site_search, None);
     }
 
     #[test]
@@ -5383,6 +5461,14 @@ mod tests {
                 obscure(3_000_000 + i, 10),
             ));
             records.push(site(
+                &format!("capitalnews{i}.com"),
+                Some(&format!("Capital city news {i}")),
+                None,
+                &[],
+                &[],
+                obscure(6_000_000 + i, 10),
+            ));
+            records.push(site(
                 &format!("taco{i}.com"),
                 Some(&format!("Taco stand {i}")),
                 None,
@@ -5551,6 +5637,98 @@ mod tests {
             let fixed_hits = search_spelled(&searcher, fixed).hits;
             assert_eq!(fixed_hits[0].domain, domain, "{typed}");
         }
+    }
+
+    #[test]
+    fn spelled_right_words_get_no_suggestion() {
+        let mut records = typo_corpus();
+        records.extend([
+            site(
+                "ulta.com",
+                Some("Ulta Beauty"),
+                None,
+                &[],
+                &[],
+                popular(800, 15_000),
+            ),
+            site(
+                "lyft.com",
+                Some("Lyft"),
+                None,
+                &[],
+                &[],
+                popular(700, 15_000),
+            ),
+            site(
+                "syft.com",
+                Some("Syft"),
+                None,
+                &[],
+                &[],
+                ranked(30_000, 2_000),
+            ),
+            site(
+                "numbeo.com",
+                Some("Numbeo"),
+                None,
+                &[],
+                &[],
+                popular(2_000, 9_000),
+            ),
+            site(
+                "whattf.com",
+                Some("What TF"),
+                None,
+                &[],
+                &[],
+                popular(2_500, 9_000),
+            ),
+        ]);
+        for i in 0..25 {
+            records.push(site(
+                &format!("alta{i}.com"),
+                Some(&format!("Alta ski lodge {i}")),
+                None,
+                &[],
+                &[],
+                obscure(7_000_000 + i, 10),
+            ));
+            records.push(site(
+                &format!("words{i}.com"),
+                Some(&format!("The number of things to do {i}")),
+                None,
+                &[],
+                &[],
+                obscure(8_000_000 + i, 10),
+            ));
+            records.push(site(
+                &format!("outlets{i}.com"),
+                Some(&format!("Outlet store {i}")),
+                None,
+                &[],
+                &[],
+                obscure(9_000_000 + i, 10),
+            ));
+        }
+        let (_dir, searcher) = build(&records);
+        for query in [
+            // A popular site's name is what was meant, wherever it is.
+            "where to buy ulta",
+            "lyft app",
+            // Known short words don't bend into a name: not "numbe o
+            // senators", not "what tf bring".
+            "number of senators",
+            "what to bring",
+            // Numbers and versions aren't typos.
+            "240v outlet",
+        ] {
+            assert_eq!(search_spelled(&searcher, query).spelling, None, "{query}");
+        }
+        // A real typo still gets one.
+        assert_eq!(
+            suggestion(&search_spelled(&searcher, "amazom")),
+            suggested("amazon")
+        );
     }
 
     #[test]
