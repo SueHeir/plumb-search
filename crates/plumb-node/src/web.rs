@@ -4677,6 +4677,7 @@ mod tests {
             background_updates: true,
             paused: None,
             disk_used: 0,
+            storage_limit: 0,
             downloaded_today: 0,
             downloaded_total: 0,
             homepages_visited: 0,
@@ -4724,6 +4725,9 @@ mod tests {
             assert!(json[null].is_null(), "{null}");
         }
         assert_eq!(json["sites"], 0);
+        // plumbsearch.org's homepage shows these two.
+        assert_eq!(json["disk_used"], 0);
+        assert_eq!(json["storage_limit"], 0);
 
         // `plumb serve` has no status to report.
         let (code, _, _) = get(backend(Vec::new()), "/api/status").await;

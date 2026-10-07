@@ -2010,7 +2010,7 @@ fn place_pages_by_rules(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) 
 
 /// Whether `hit` is a docs page the search found by most of its words
 /// rather than named.
-fn docs_found_by_words(hit: &PageHit) -> bool {
+pub(crate) fn docs_found_by_words(hit: &PageHit) -> bool {
     hit.page.set == DOCS_SET && !hit.named
 }
 
