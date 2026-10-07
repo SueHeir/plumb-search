@@ -6037,6 +6037,7 @@ dependencies = [
  "tracing",
  "url",
  "zip",
+ "zstd",
 ]
 
 [[package]]

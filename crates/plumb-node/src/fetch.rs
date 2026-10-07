@@ -273,7 +273,24 @@ fn run_music(args: &FetchPagesArgs, dest: &std::path::Path) -> Result<()> {
         &music.album_mbids(),
         &work.join("listenbrainz-albums.tsv"),
     ))??;
-    let recordings = music.songs_to_ask(&albums)?;
+    let canonical = match &args.listenbrainz_canonical {
+        Some(path) => path.clone(),
+        None => {
+            let listing = block_on(async {
+                client
+                    .get(musicbrainz::CANONICAL_URL)
+                    .send()
+                    .await?
+                    .error_for_status()?
+                    .text()
+                    .await
+            })?
+            .with_context(|| format!("reading {}", musicbrainz::CANONICAL_URL))?;
+            let url = musicbrainz::canonical_dump_url(&listing)?;
+            fetch_dump(args, &url, "ListenBrainz's canonical data dump")?
+        }
+    };
+    let recordings = music.songs_to_ask(&albums, Some(&canonical))?;
     let recordings = block_on(musicbrainz::fetch_listeners(
         &client,
         Listened::Recordings,
