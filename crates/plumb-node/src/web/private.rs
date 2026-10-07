@@ -137,7 +137,7 @@ fn render_private(available: bool, options: &SearchOptions) -> String {
          data-language=\"{}\">\n\
          <header><a class=\"logo\" href=\"/\">Plumb</a>\
          <form id=\"pq-form\" action=\"/private\" method=\"get\" role=\"search\">\
-         <input type=\"search\" id=\"pq-q\" placeholder=\"A site's name, e.g. us bank\" \
+         <input type=\"search\" id=\"pq-q\" placeholder=\"Search sites, e.g. us bank\" \
          aria-label=\"Search privately\" autocomplete=\"off\" autofocus>\
          {gear}<button type=\"submit\" id=\"pq-go\" disabled>Search</button></form></header>\n\
          <p class=\"src\"><strong>Private search.</strong> Your browser looks up the results \

@@ -158,18 +158,20 @@ async fn run_places(
         .flatten()
 }
 
-/// The sites of the places in `found` that the index has, in the order
-/// the places are listed, looked up on a blocking thread.
+/// The sites of the places in `found`, in the order the places are
+/// listed: as the index has them, or else as the place says (its name and
+/// kind), since small local sites are often not in the index. Looked up on
+/// a blocking thread.
 async fn place_sites(state: &AppState, found: &plumb_index::places::PlaceResults) -> Vec<Hit> {
-    let domains = places::local_domains(found);
-    if domains.is_empty() {
+    let sites = places::local_sites(found);
+    if sites.is_empty() {
         return Vec::new();
     }
     let backend = Arc::clone(&state.backend);
     tokio::task::spawn_blocking(move || {
-        domains
-            .iter()
-            .filter_map(|domain| backend.site(domain))
+        sites
+            .into_iter()
+            .map(|site| backend.site(&site.domain).unwrap_or(site))
             .collect()
     })
     .await
@@ -2319,7 +2321,7 @@ fn page_with_head(title: &str, head: &str, body: &str) -> String {
 fn search_form(query: &str, autofocus: bool) -> String {
     format!(
         "<form action=\"/search\" method=\"get\" role=\"search\">\
-         <input type=\"search\" name=\"q\" value=\"{}\" placeholder=\"A site's name, e.g. us bank\" \
+         <input type=\"search\" name=\"q\" value=\"{}\" placeholder=\"Search sites, articles, questions and more\" \
          aria-label=\"Search\" autocomplete=\"off\"{}>\
          <button type=\"submit\">Search</button></form>",
         escape_html(query),
@@ -2474,7 +2476,7 @@ fn settings_form(query: &str, autofocus: bool, settings: &Settings) -> String {
     };
     format!(
         "<form action=\"/search\" method=\"get\" role=\"search\">\
-         <input type=\"search\" name=\"q\" value=\"{}\" placeholder=\"A site's name, e.g. us bank\" \
+         <input type=\"search\" name=\"q\" value=\"{}\" placeholder=\"Search sites, articles, questions and more\" \
          aria-label=\"Search\" autocomplete=\"off\"{}>\
          <details class=\"gear\"><summary title=\"Settings\" aria-label=\"Settings\">\
          &#9881;&#xFE0E;</summary><div class=\"panel\">\
@@ -6234,18 +6236,23 @@ mod tests {
                 .iter()
                 .map(|h| h["domain"].as_str().unwrap())
                 .collect();
-            // The brewery's own site, then the guide that says breweries,
-            // then the sites only named after Denver.
+            // The breweries' own sites (one the index does not have, as the
+            // place says), then the guide that says breweries, then the
+            // sites only named after Denver.
             assert_eq!(
                 domains,
                 [
                     "greatdivide.com",
+                    "unknown-ales.example",
                     "westword.com",
                     "denvergov.org",
                     "denverbroncos.com"
                 ],
                 "{query}"
             );
+            assert_eq!(json["hits"][0]["title"], "Great Divide Brewing Co.");
+            assert_eq!(json["hits"][1]["title"], "Unknown Ales");
+            assert_eq!(json["hits"][1]["description"], "Brewery");
             assert_eq!(json["places"]["hits"].as_array().unwrap().len(), 3);
 
             let (_, _, page) = send(
