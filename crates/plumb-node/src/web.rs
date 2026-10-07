@@ -6721,7 +6721,7 @@ mod tests {
 
         let (code, _, page) = send(app(), "/about").await;
         assert_eq!(code, StatusCode::OK);
-        assert!(page.contains("name=\"interests\""), "{page}");
+        assert!(page.contains("name=\"more\""), "{page}");
 
         // Saving gives the browser a profile.
         let response = post(None, "pinned=usbank-login-help.com&interests=")
@@ -6901,7 +6901,7 @@ mod tests {
         let response = post(
             "/welcome",
             None,
-            "town=Denver%2C+CO&t=cooking&t=music&t=evil&more=my+team&pinned=usbank-login-help.com",
+            "welcome=1&town=Denver%2C+CO&t=cooking&t=music&t=evil&more=my+team&pinned=usbank-login-help.com",
         )
         .await
         .unwrap();
@@ -6910,10 +6910,9 @@ mod tests {
         assert!(set_cookie(response.headers(), "plumb_welcome").is_some());
         let (_, _, page) =
             send_with_headers(app(), "/about", &[("cookie", profile.as_str())]).await;
-        assert!(
-            page.contains(">cooking\nmusic\nmy team</textarea>"),
-            "{page}"
-        );
+        assert!(page.contains("value=\"cooking\" checked"), "{page}");
+        assert!(page.contains("value=\"music\" checked"), "{page}");
+        assert!(page.contains(">my team</textarea>"), "{page}");
         assert!(page.contains("value=\"Denver, CO\""), "{page}");
         let (_, _, home) = send_with_headers(app(), "/", &[("cookie", profile.as_str())]).await;
         assert!(!home.contains("href=\"/welcome\""), "{home}");
