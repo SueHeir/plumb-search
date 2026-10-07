@@ -361,10 +361,13 @@ pub(super) fn local_first(
                     .as_deref()
                     .is_some_and(|t| normalize_text(t).replace(' ', "").contains(&town_name)))
     };
-    sorted.extend(
-        town.into_iter()
-            .filter(|hit| local == 0 || !named_after_town(hit)),
-    );
+    // Without any, they go last: Seattle's climbing gyms have no sites of
+    // their own, and seattle.gov is still not one.
+    let (named, other): (Vec<Hit>, Vec<Hit>) = town.into_iter().partition(named_after_town);
+    sorted.extend(other);
+    if local == 0 {
+        sorted.extend(named);
+    }
     sorted.truncate(keep);
     *hits = sorted;
 }
@@ -551,6 +554,32 @@ mod tests {
 
     fn same(href: &str) -> String {
         href.to_owned()
+    }
+
+    #[test]
+    fn town_sites_go_last_when_the_places_have_no_sites() {
+        let site = |domain: &str, title: &str| Hit {
+            domain: domain.into(),
+            url: format!("https://{domain}/"),
+            title: Some(title.into()),
+            description: None,
+            score: 1.0,
+            text_score: 1.0,
+            link_score: 0.5,
+            placing_text_score: None,
+            country: None,
+            named: false,
+            official: false,
+            key_pages: Vec::new(),
+            demand: None,
+        };
+        let mut hits = vec![
+            site("denvergov.org", "City and County of Denver"),
+            site("slicelife.com", "Order food online"),
+        ];
+        local_first(&found(), &mut hits, Vec::new(), 10);
+        let domains: Vec<&str> = hits.iter().map(|h| h.domain.as_str()).collect();
+        assert_eq!(domains, ["slicelife.com", "denvergov.org"]);
     }
 
     #[test]
