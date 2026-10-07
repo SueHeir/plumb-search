@@ -7,9 +7,12 @@
 //!   (YouTube's Music category), linked to music.youtube.com.
 //! - `yt <search>` or `<search> youtube`: videos, channels and playlists,
 //!   linked to youtube.com.
-//! - A search the node knows is about someone with a YouTube channel
-//!   (Wikidata's P2397), such as an artist: that channel's latest uploads,
-//!   unless `config.json` sets `"channel_uploads": false`.
+//! - A search that fits it without a keyword (see `plugin.json`'s `ids`
+//!   and `hints`), which by default the results page offers as a link: for
+//!   someone with a YouTube channel (Wikidata's P2397), such as an artist,
+//!   that channel's latest uploads, unless `config.json` sets
+//!   `"channel_uploads": false`; otherwise songs when it is about music,
+//!   or videos.
 //!
 //! The free key allows 10,000 quota units a day. A keyword search costs
 //! 101 (a search is 100, the lengths and views 1), so about 100 a day; a
@@ -32,6 +35,28 @@ const RESULTS: usize = 8;
 
 /// Keywords that ask for music rather than any video.
 const MUSIC_KEYWORDS: &[&str] = &["ytm", "youtube music"];
+
+/// Identifiers that make a search, without a keyword, about music: the
+/// node knows it is about an artist, an album or a song.
+const MUSIC_IDS: &[&str] = &[
+    "musicbrainz-artist",
+    "musicbrainz-album",
+    "spotify",
+    "spotify-album",
+    "spotify-track",
+    "apple-music",
+    "apple-music-album",
+    "soundcloud",
+    "discogs",
+    "genius-song",
+    "genius-artist",
+];
+
+/// Words that make a search, without a keyword, about music. The same as
+/// `hints` in `plugin.json`, less the ones for any video.
+const MUSIC_WORDS: &[&str] = &[
+    "song", "songs", "lyrics", "album", "remix", "acoustic", "playlist", "cover",
+];
 
 #[derive(Debug, Deserialize)]
 struct SearchList {
@@ -158,12 +183,27 @@ struct Details {
 
 fn search(query: &Query) -> Result<Vec<Item>, Error> {
     let terms = query.terms.trim();
-    let music = query
-        .keyword
-        .as_deref()
-        .is_some_and(|k| MUSIC_KEYWORDS.contains(&k.to_lowercase().as_str()));
-    let found = match (&query.keyword, query.about.as_ref()) {
-        (Some(_), _) if !terms.is_empty() => {
+    let music = match &query.keyword {
+        Some(keyword) => MUSIC_KEYWORDS.contains(&keyword.to_lowercase().as_str()),
+        None => about_music(query),
+    };
+    let uploads = query
+        .about
+        .as_ref()
+        .filter(|_| query.keyword.is_none() && query.config["channel_uploads"] != false)
+        .and_then(|about| about.id("youtube"))
+        .and_then(uploads_playlist);
+    let found = match uploads {
+        Some(uploads) => {
+            let key = api_key(query)?;
+            let url = format!(
+                "{API}/playlistItems?part=snippet&maxResults={RESULTS}&playlistId={}&key={}",
+                encode(&uploads),
+                encode(key)
+            );
+            playlist_results(call(&url)?)
+        }
+        None if !terms.is_empty() => {
             let key = api_key(query)?;
             let mut url = format!(
                 "{API}/search?part=snippet&maxResults={RESULTS}&q={}&safeSearch={}&key={}",
@@ -179,19 +219,7 @@ fn search(query: &Query) -> Result<Vec<Item>, Error> {
             }
             search_results(call(&url)?)
         }
-        (None, Some(about)) if query.config["channel_uploads"] != false => {
-            let Some(uploads) = about.id("youtube").and_then(uploads_playlist) else {
-                return Ok(Vec::new());
-            };
-            let key = api_key(query)?;
-            let url = format!(
-                "{API}/playlistItems?part=snippet&maxResults={RESULTS}&playlistId={}&key={}",
-                encode(&uploads),
-                encode(key)
-            );
-            playlist_results(call(&url)?)
-        }
-        _ => return Ok(Vec::new()),
+        None => return Ok(Vec::new()),
     };
     let details = details(query, &found).unwrap_or_else(|error| {
         // Lengths and views are extras: show the results without them.
@@ -199,6 +227,20 @@ fn search(query: &Query) -> Result<Vec<Item>, Error> {
         HashMap::new()
     });
     Ok(items(found, &details, music))
+}
+
+/// Whether a search without a keyword is about music: about an artist,
+/// album or song, or with a music word in it.
+fn about_music(query: &Query) -> bool {
+    let known = query
+        .about
+        .as_ref()
+        .is_some_and(|about| MUSIC_IDS.iter().any(|id| about.id(id).is_some()));
+    known
+        || query
+            .terms
+            .split_whitespace()
+            .any(|word| MUSIC_WORDS.contains(&word.to_lowercase().as_str()))
 }
 
 fn api_key(query: &Query) -> Result<&str, Error> {
@@ -546,6 +588,24 @@ mod tests {
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].id, "TTAU7lLDZYU");
         assert_eq!(found[0].channel.as_deref(), Some("Radiohead Official"));
+    }
+
+    #[test]
+    fn searches_without_a_keyword_are_music_when_about_music() {
+        let mut query = Query {
+            terms: "creep lyrics".into(),
+            ..Query::default()
+        };
+        assert!(about_music(&query));
+        query.terms = "dune trailer".into();
+        assert!(!about_music(&query));
+        query.terms = "radiohead".into();
+        let mut about = plumb_plugin::About::default();
+        about
+            .ids
+            .insert("musicbrainz-artist".into(), "a74b1b7f".into());
+        query.about = Some(about);
+        assert!(about_music(&query));
     }
 
     #[test]

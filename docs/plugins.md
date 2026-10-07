@@ -81,6 +81,25 @@ item. Plugins start once the node's own search is done, so that this is known,
 and every plugin gets it, whatever ran it. (The MCP server's `search` tool
 runs plugins by their keywords alone.)
 
+### Run it, or offer it
+
+A search that fits a plugin without one of its keywords, by its `ids` or its
+`hints` (words such as `lyrics` or `music video` anywhere in the search), can
+do one of three things:
+
+- **Run it** (`"suggest": "automatic"`, the default): its results show with the
+  node's, as above.
+- **Offer it** (`"suggest": "button"`): the results page shows a "Show results
+  from YouTube" link where its results would be, and runs it only when that is
+  followed. This suits a source with a small daily quota.
+- **Leave it** (`"suggest": "keywords"`): only its keywords run it.
+
+`plugin.json`'s `suggest` is the plugin's own choice. The node's owner can
+change it under **Search → Plugins** in the panel, and the change applies from
+the next search; the panel keeps it in `plugins/suggest.json`. An offer's link
+is the same search with `run=<folder name>`, which runs that plugin on the whole
+search; `/api/search?full=1` lists the offers as `plugin_offers`.
+
 ## Marking up the node's own results
 
 A plugin can also look at the node's own results for a search and add to
@@ -311,11 +330,13 @@ and copy `target/wasm32-unknown-unknown/release/my_plugin.wasm` to
 | `keywords` | Words or phrases that run it at the start or end of a search. |
 | `always` | `true` to run it for every search. |
 | `ids` | Run it, without a keyword, for searches about something with an identifier on one of these services (see [When a plugin runs](#when-a-plugin-runs)). |
+| `hints` | Words or phrases that, anywhere in a search, make it fit the plugin, as `ids` do. |
+| `suggest` | What a search that fits it does without a keyword: `automatic` (run it, the default), `button` (offer a link that runs it) or `keywords` (nothing). The node's owner can change it ([Run it, or offer it](#run-it-or-offer-it)). |
 | `pages` | Sites whose pages it can say something about, for [page lookups](#pages-and-browser-extensions). |
 | `cache_seconds` | How long its results for a search are reused: 0 to 86400, 600 without it. |
 | `seconds` | How long a search waits for it: 1 to 10, 4 without it. The page waits for its slowest plugin. |
 
-It needs `keywords`, `ids`, `pages` or `always`, unless it marks up the
+It needs `keywords`, `ids`, `hints`, `pages` or `always`, unless it marks up the
 node's results.
 
 What `search` gets ([`Query`](../crates/plumb-plugin/src/lib.rs)):

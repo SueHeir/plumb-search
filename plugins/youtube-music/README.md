@@ -8,9 +8,16 @@ with your own free API key. Nothing is scraped.
 | --- | --- |
 | `ytm creep`, `creep youtube music` | Songs and music videos (YouTube's Music category), opening in YouTube Music |
 | `yt rust async`, `rust async youtube` | Videos, channels and playlists, opening on YouTube |
-| `radiohead` (anything the node knows has a YouTube channel) | That channel's latest uploads |
+| `radiohead`, `creep lyrics`, `dune trailer` (a search that fits it) | A "Show results from YouTube" link; following it shows that channel's latest uploads, or songs or videos for the search |
 
 Each video shows its length, channel and views, with its thumbnail.
+
+A search fits it when the node knows it is about an artist, album or song (it
+has a MusicBrainz, Spotify, Apple Music, Discogs or Genius identifier), or about
+someone with a YouTube channel, or when it has a word such as `lyrics`, `song`,
+`album`, `music video` or `trailer`. To save your quota such a search shows a
+link rather than asking YouTube; in the panel, **Search → Plugins** can make it
+run on its own instead, or only for its keywords.
 
 ## What it can and cannot do
 
@@ -22,7 +29,8 @@ subscription adds nothing to the API, but the links open in your browser, where
 you are signed in, so they play without ads.
 
 The free key allows 10,000 quota units a day. A keyword search costs 101 units
-(about 100 searches a day); a channel's uploads cost 2. Your node reuses a
+(about 100 searches a day); a channel's uploads cost 2. A link the results
+page shows costs nothing until it is followed. Your node reuses a
 search's results for 10 minutes. When the quota is used up the node's log says
 so, and it comes back at midnight Pacific time. It never costs money: the key
 needs no billing account.
@@ -57,8 +65,8 @@ Make a `youtube-music` folder in your node's `plugins/` folder (see
 }
 ```
 
-Add `"channel_uploads": false` to leave out channels' uploads on searches
-without a keyword. Restart the node, then try `ytm creep`.
+Add `"channel_uploads": false` to search for the words, rather than show a
+channel's uploads, on a search about someone with a YouTube channel. Restart the node, then try `ytm creep`.
 
 To try it first:
 
