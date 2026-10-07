@@ -13,7 +13,7 @@
 //! tu identidad", "Client Challenge") or a parked domain's "this domain is
 //! for sale".
 
-use crate::{normalize_text, SiteRecord};
+use crate::{canonical_domain, normalize_text, registrable_domain, SiteRecord};
 
 /// Whole titles, after [`normalize_text`], that only a bot check has.
 const CHECK_TITLES: &[&str] = &[
@@ -79,6 +79,31 @@ const STAND_IN_TITLE_PARTS: &[&str] = &[
     "verifica tu identidad",
     "verify your identity",
     "website unavailable",
+];
+
+/// Whole titles, after [`normalize_text`], of a placeholder where a
+/// homepage should be: a web server's default page, a site not built yet,
+/// a suspended hosting account.
+const PLACEHOLDER_TITLES: &[&str] = &[
+    "welcome to nginx",
+    "welcome to nginx on debian",
+    "welcome to centos",
+    "apache2 ubuntu default page it works",
+    "apache2 debian default page it works",
+    "test page for the apache http server",
+    "iis windows server",
+    "it works",
+    "coming soon",
+    "website coming soon",
+    "site coming soon",
+    "under construction",
+    "website under construction",
+    "site under construction",
+    "account suspended",
+    "this account has been suspended",
+    "suspended domain",
+    "default web site page",
+    "web server s default page",
 ];
 
 /// What a page title is split at into parts for [`STAND_IN_TITLE_PARTS`].
@@ -178,13 +203,20 @@ pub fn is_bot_check_page(
     if CHECK_VENDORS.iter().any(|vendor| domain.contains(vendor)) {
         return false;
     }
+    // A server's directory listing: "Index of /".
+    if title.is_some_and(|title| title.trim_start().to_lowercase().starts_with("index of /")) {
+        return true;
+    }
     if let Some(title) = title.map(normalize_text) {
         let starts = |start: &&str| {
             title
                 .strip_prefix(start)
                 .is_some_and(|rest| rest.is_empty() || rest.starts_with(' '))
         };
-        if CHECK_TITLES.contains(&title.as_str()) || CHECK_TITLE_STARTS.iter().any(starts) {
+        if CHECK_TITLES.contains(&title.as_str())
+            || PLACEHOLDER_TITLES.contains(&title.as_str())
+            || CHECK_TITLE_STARTS.iter().any(starts)
+        {
             return true;
         }
     }
@@ -286,7 +318,26 @@ fn shows_the_user_agent(text: &str) -> bool {
 impl SiteRecord {
     /// Whether the record's page fields came from a bot check
     /// ([`is_bot_check_page`]) rather than the site's homepage.
+    ///
+    /// So is a homepage read on another site's host: prevention.nih.gov's
+    /// "NIH Office of Disease Prevention" kept for nih.gov, or
+    /// play.google.com's page for google.com, from crawls before those
+    /// subdomains were sites of their own ([`crate::subsites`]); crawlers
+    /// now stop at such a redirect. And so is a hosting company's page for
+    /// a suspended account (cPanel's `/cgi-sys/suspendedpage.cgi`, titled
+    /// "Contact Support").
     pub fn is_bot_check(&self) -> bool {
+        if let Some(url) = self.url.as_deref() {
+            let read_elsewhere = registrable_domain(url).is_some_and(|site| {
+                canonical_domain(&self.domain).is_some_and(|domain| site != domain)
+            });
+            let suspended = url
+                .to_ascii_lowercase()
+                .contains("/cgi-sys/suspendedpage.cgi");
+            if read_elsewhere || suspended {
+                return true;
+            }
+        }
         is_bot_check_page(
             &self.domain,
             self.title.as_deref(),
@@ -498,6 +549,55 @@ mod tests {
         let mut kept = good.clone();
         assert!(!kept.drop_bot_check());
         assert_eq!(kept, good);
+    }
+
+    #[test]
+    fn placeholders_are_not_homepages() {
+        for title in [
+            "Welcome to nginx!",
+            "Coming Soon",
+            "Under Construction",
+            "Account Suspended",
+            "Index of /",
+            "Apache2 Ubuntu Default Page: It works",
+        ] {
+            assert!(check("example.com", title), "{title}");
+        }
+        for title in [
+            "Gladiator II | Coming Soon to Theaters",
+            "Nginx: Advanced Load Balancer",
+            "Index Ventures",
+        ] {
+            assert!(!check("example.com", title), "{title}");
+        }
+    }
+
+    #[test]
+    fn pages_of_another_site_or_a_suspended_account_are_dropped() {
+        let record = |domain: &str, url: &str| {
+            let mut record = SiteRecord::new(domain);
+            record.url = Some(url.into());
+            record.title = Some("Some Title".into());
+            record.crawled_at = Some(100);
+            record
+        };
+        let mut nih = record("nih.gov", "https://prevention.nih.gov/");
+        assert!(nih.drop_bot_check());
+        assert_eq!(nih.title, None);
+        assert!(record("google.com", "https://play.google.com/store/games").is_bot_check());
+        assert!(record(
+            "example.com",
+            "https://example.com/cgi-sys/suspendedpage.cgi"
+        )
+        .is_bot_check());
+        for (domain, url) in [
+            ("nih.gov", "https://www.nih.gov/"),
+            ("usbank.com", "https://www.usbank.com/index.html"),
+            ("prevention.nih.gov", "https://prevention.nih.gov/"),
+            ("squareup.com", "https://squareup.com/us/en"),
+        ] {
+            assert!(!record(domain, url).is_bot_check(), "{url}");
+        }
     }
 
     #[test]
