@@ -325,6 +325,12 @@ pub struct RankConfig {
     /// Words that ask or say what is wanted ([`FILLER_WORDS`]) name no site
     /// in a query of two words or more.
     pub filler_words: bool,
+    /// A query of three words or more asked as a question ("how to get
+    /// rid of aphids") names no site by its words: none of them matches a
+    /// domain label or joined name on its own, and its first words are no
+    /// leading name. Questions describe what they want; rid.it and get.gov
+    /// are not it.
+    pub questions_name_nothing: bool,
     /// Add the official site of the article the query names when no site
     /// found is it ([`pages::add_named_site`]).
     pub add_named_site: bool,
@@ -355,6 +361,7 @@ impl Default for RankConfig {
             named_needs_all_words: true,
             terms_boost: 1.0,
             filler_words: true,
+            questions_name_nothing: true,
             add_named_site: true,
             learned: true,
         }
@@ -1134,6 +1141,8 @@ impl Searcher {
         };
         query.terms_boost = cfg.terms_boost;
         query.filler_words = cfg.filler_words;
+        query.asked =
+            cfg.questions_name_nothing && query.len >= 3 && pages::asked_as_question(query_text);
         let searcher = self.reader.searcher();
         let num_docs = usize::try_from(searcher.num_docs()).unwrap_or(usize::MAX);
         if num_docs == 0 {
@@ -1771,7 +1780,7 @@ impl Searcher {
         let mut names: HashMap<DocAddress, NameMatch> = HashMap::new();
         for (key, words) in &query.leading {
             let words = *words;
-            if words == 1 && query.len > 1 && query.is_filler(key) {
+            if query.asked || words == 1 && query.len > 1 && query.is_filler(key) {
                 continue;
             }
             let label = Term::from_field_text(self.fields.label_key, key);
@@ -2192,6 +2201,9 @@ struct ParsedQuery {
     terms_boost: f32,
     /// [`RankConfig::filler_words`].
     filler_words: bool,
+    /// Asked as a question that names nothing
+    /// ([`RankConfig::questions_name_nothing`]).
+    asked: bool,
 }
 
 impl ParsedQuery {
@@ -2241,6 +2253,7 @@ impl ParsedQuery {
             domain: typed_domain(&query),
             terms_boost: 0.0,
             filler_words: false,
+            asked: false,
         })
     }
 
@@ -2292,7 +2305,7 @@ impl ParsedQuery {
         // Only a word after others: "to" in "to do list" is a word of the
         // thing looked for, "in" in "ups sign in" is not.
         let joining = i > 0 && is_function_word(word);
-        let names = self.len == 1 || !joining;
+        let names = (self.len == 1 || !joining) && !self.asked;
         // A filler word is no name, nor what a site calls itself or is
         // called by others: who.int's title and link text say "WHO".
         let filler = self.len > 1 && self.is_filler(word);
@@ -2315,7 +2328,11 @@ impl ParsedQuery {
             Ok((1.0 + (docs - found + 0.5) / (found + 0.5)).ln())
         };
         for (field, boost) in self.per_word(f) {
-            if boost <= 0.0 || field == f.label || field == f.joined {
+            if boost <= 0.0
+                || field == f.label
+                || field == f.joined
+                || (filler && (field == f.aliases || field == f.title || field == f.anchors))
+            {
                 continue;
             }
             let other = Term::from_field_text(field, other);
@@ -2873,8 +2890,42 @@ mod tests {
                 popular(800, 2_000),
             ),
         ];
+        let mut records = records.to_vec();
+        records.push(site(
+            "rid.it",
+            Some("RID"),
+            None,
+            &[],
+            &[],
+            popular(5_000, 900),
+        ));
+        records.push(site(
+            "aphidfacts.org",
+            Some("Aphids"),
+            Some("How to get rid of aphids in the garden."),
+            &[],
+            &[],
+            obscure(300_000, 3),
+        ));
+        records.push(site(
+            "earthhour.org",
+            Some("Earth Hour"),
+            None,
+            &["Earth Hour"],
+            &[("earth hour", 50)],
+            popular(3_000, 900),
+        ));
+        records.push(site(
+            "rei.com",
+            Some("REI Co-op"),
+            None,
+            &["REI"],
+            &[("rei", 100)],
+            popular(900, 1_000),
+        ));
         let (_dir, searcher) = build(&records);
         for (query, wrong) in [
+            ("rei hours", "earthhour.org"),
             ("who wrote hamlet", "who.int"),
             ("ups sign in", "in.gov"),
             ("amtrak website", "website.ws"),
@@ -2887,6 +2938,21 @@ mod tests {
             );
         }
         assert_eq!(top(&searcher, "who wrote hamlet"), "hamletguide.org");
+        // A question names nothing: rid.it, popular and with "RID" in its
+        // title, has one word of it, but not as its name.
+        let rid = |cfg: &RankConfig| {
+            searcher
+                .search_with("how to get rid of aphids", 10, cfg)
+                .unwrap()
+                .into_iter()
+                .find(|hit| hit.domain == "rid.it")
+                .map_or(0.0, |hit| hit.score)
+        };
+        let naming = RankConfig {
+            questions_name_nothing: false,
+            ..RankConfig::default()
+        };
+        assert!(rid(&RankConfig::default()) < rid(&naming));
         // Alone, they are names.
         assert_eq!(top(&searcher, "who"), "who.int");
     }
@@ -5237,6 +5303,7 @@ mod tests {
                 domain: None,
                 terms_boost: 0.0,
                 filler_words: false,
+                asked: false,
             }
         );
         let keys = |parsed: ParsedQuery| -> Vec<String> {
