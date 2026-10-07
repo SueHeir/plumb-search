@@ -18,6 +18,7 @@
 
 mod model;
 mod rerank;
+mod server;
 mod text;
 mod vectors;
 
@@ -26,5 +27,6 @@ pub use model::{
     MODEL_FILES, MODEL_NAME,
 };
 pub use rerank::{Reranker, RERANK_MAX_TOKENS};
+pub use server::SERVER_FILE;
 pub use text::{site_text, text_hash, TextHash, MAX_LINK_TEXTS, MAX_TEXT_WORDS};
 pub use vectors::{cosine, Vectors, VECTORS_FILE_NAME};

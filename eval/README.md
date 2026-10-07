@@ -92,3 +92,15 @@ model nodes use. To compare with the hand-made order in a full eval, use a
 sweep line `hand	{"learned": false}`. `--rerank-model DIR` (with
 `--features-out`) also scores the first 20 results with a cross-encoder
 model, for trying a second pass.
+
+## Trying another embedding model
+
+`--model DIR` can name an embedding server instead of the pinned model:
+put an `embedding-server.json` in DIR (see `plumb_embed::SERVER_FILE`)
+with the server's `/v1/embeddings` address, the model's name, and
+optionally `dim` (values kept, for Matryoshka models) and the model's
+`query_prefix` and `text_prefix`. `plumb embed --model DIR` then makes the
+sites' vectors with it and `plumb eval --model DIR --vectors FILE` embeds
+the searches with it, so a model Plumb cannot run yet (llama.cpp's
+`llama-server --embedding`) can be measured before anyone ports it. Server
+vectors are for evals only; nodes keep the pinned model.
