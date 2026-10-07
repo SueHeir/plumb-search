@@ -10,7 +10,7 @@ or give any app that takes a SearXNG address `https://plumbsearch.org` (`/search
 
 Search at **[plumbsearch.org](https://plumbsearch.org)**, or run your own node on a homelab server or a desktop so your searches stay with you. Nodes share their crawling with each other over a peer-to-peer network, so nobody has to crawl the whole web alone.
 
-Type "us bank" and usbank.com comes first. Plumb indexes names, not pages: for each site it keeps the homepage title and description, the words other sites use when they link to it, and a few aliases, about 1 KB per site, so a million sites fit in roughly a gigabyte. Next to sites it lists single pages from open page sets (Wikipedia, GitHub, Stack Overflow, software packages, books and papers) and places from OpenStreetMap.
+Type "us bank" and usbank.com comes first. Plumb indexes sites, not every page: for each site it keeps its names, homepage title, description and key terms, the words other sites use when they link to it, and its Wikidata description, kind and country, about 1 KB per site, so a million sites fit in roughly a gigabyte. Next to sites it lists single pages from open page sets (Wikipedia, GitHub, Stack Overflow, software packages, books and papers) and places from OpenStreetMap. Results are matched by words and by meaning, then put in order by a small ranking model trained on test searches.
 
 ![Plumb Search results for "package registry"](docs/images/results.png)
 

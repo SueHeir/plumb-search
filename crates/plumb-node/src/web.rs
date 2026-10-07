@@ -2297,7 +2297,7 @@ fn page_with_head(title: &str, head: &str, body: &str) -> String {
 fn search_form(query: &str, autofocus: bool) -> String {
     format!(
         "<form action=\"/search\" method=\"get\" role=\"search\">\
-         <input type=\"search\" name=\"q\" value=\"{}\" placeholder=\"A site's name, e.g. us bank\" \
+         <input type=\"search\" name=\"q\" value=\"{}\" placeholder=\"Search sites, articles, questions and more\" \
          aria-label=\"Search\" autocomplete=\"off\"{}>\
          <button type=\"submit\">Search</button></form>",
         escape_html(query),
@@ -2452,7 +2452,7 @@ fn settings_form(query: &str, autofocus: bool, settings: &Settings) -> String {
     };
     format!(
         "<form action=\"/search\" method=\"get\" role=\"search\">\
-         <input type=\"search\" name=\"q\" value=\"{}\" placeholder=\"A site's name, e.g. us bank\" \
+         <input type=\"search\" name=\"q\" value=\"{}\" placeholder=\"Search sites, articles, questions and more\" \
          aria-label=\"Search\" autocomplete=\"off\"{}>\
          <details class=\"gear\"><summary title=\"Settings\" aria-label=\"Settings\">\
          &#9881;&#xFE0E;</summary><div class=\"panel\">\
