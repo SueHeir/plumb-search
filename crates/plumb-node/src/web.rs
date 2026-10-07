@@ -1952,7 +1952,10 @@ async fn run_search(
         return Ok(SearchResults::default());
     }
     let backend = Arc::clone(&state.backend);
-    let owned_query = query.to_string();
+    // "safeway near me": the places list is for "near me"; the sites are
+    // for the rest ("me" names no site).
+    let owned_query =
+        plumb_index::places::without_near_me(query).unwrap_or_else(|| query.to_string());
     let owned_options = options.clone();
     let results = tokio::task::spawn_blocking(move || {
         backend.search_full(&owned_query, limit, &owned_options)
@@ -4182,6 +4185,15 @@ mod tests {
         assert_eq!(group_thousands(999), "999");
         assert_eq!(group_thousands(1_000), "1,000");
         assert_eq!(group_thousands(12_345_678), "12,345,678");
+    }
+
+    #[tokio::test]
+    async fn sites_are_searched_without_near_me() {
+        let fake = backend(bank_hits());
+        let _ = get(fake.clone(), "/search?q=us+bank+near+me").await;
+        let _ = get(fake.clone(), "/api/search?q=us+bank+near+me&full=1").await;
+        let calls = fake.calls.lock().unwrap();
+        assert!(calls.iter().all(|(q, _)| q == "us bank"), "{calls:?}");
     }
 
     #[tokio::test]
