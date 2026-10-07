@@ -84,6 +84,17 @@ const KEY_PAGES_KEPT_SINCE: u64 = 1_791_190_000;
 /// otherwise keep no sitelinks here until another node's regular recrawl.
 const KEY_PAGES_CATCH_UP_PER_ROUND: usize = 200;
 
+/// Well-known sites no crawl has fetched yet (this node's or a trusted
+/// crawler's) that a round crawls whether or not they are this node's to
+/// crawl today, at most this many, best-known first. A popular site outside
+/// the node's daily share can otherwise wait weeks for a first read, and
+/// until then search knows nothing of what it is.
+const FIRST_FETCH_CATCH_UP_PER_ROUND: usize = 50;
+
+/// Link score a site needs for [`first_fetch_catch_up`]: about the top
+/// 60,000 of the Tranco list, or any official site.
+const FIRST_FETCH_MIN_SCORE: f32 = 0.3;
+
 /// Sites without an icon here that a crawl round fetches just the icon of,
 /// most linked first: crawls that came from the network before nodes shared
 /// icons, or through filling, carry none, and those sites would otherwise
@@ -1109,7 +1120,10 @@ fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Done> {
             rechecks.push(target_for(home));
         }
     }
-    for record in key_page_catch_up(&set) {
+    for record in key_page_catch_up(&set)
+        .into_iter()
+        .chain(first_fetch_catch_up(&set, now, window))
+    {
         if !rechecks
             .iter()
             .any(|target| target.domain == record.domain())
@@ -1327,6 +1341,29 @@ fn key_page_catch_up(set: &RoundSites) -> Vec<&RoundSite> {
         .filter(|record| due_for_key_pages(record))
         .take(KEY_PAGES_CATCH_UP_PER_ROUND)
         .collect()
+}
+
+/// The best-known sites, up to [`FIRST_FETCH_CATCH_UP_PER_ROUND`], that no
+/// crawl has fetched yet and are due a try ([`due_at`]: never tried, or
+/// waited out the pause after their last failed try), assigned to this node
+/// or not.
+fn first_fetch_catch_up(set: &RoundSites, now: u64, window: u64) -> Vec<&RoundSite> {
+    let mut due: Vec<&RoundSite> = set
+        .iter()
+        .filter(|record| {
+            record.crawled_at().is_none()
+                && record.gone_at().is_none()
+                && record.link_score() >= FIRST_FETCH_MIN_SCORE
+                && due_at(*record, window).is_none_or(|due| due <= now)
+        })
+        .collect();
+    due.sort_by(|a, b| {
+        b.link_score()
+            .total_cmp(&a.link_score())
+            .then_with(|| a.domain().cmp(b.domain()))
+    });
+    due.truncate(FIRST_FETCH_CATCH_UP_PER_ROUND);
+    due
 }
 
 /// Whether a site was last read by an older crawler than this one
@@ -1905,6 +1942,53 @@ mod tests {
         ]);
         let domains: Vec<&str> = key_page_catch_up(&set).iter().map(|r| r.domain()).collect();
         assert_eq!(domains, ["facebook.com", "paypal.com"]);
+    }
+
+    #[test]
+    fn well_known_sites_never_fetched_are_caught_up_once_due() {
+        const NOW: u64 = 100 * SECONDS_PER_DAY;
+        const WINDOW: u64 = 30 * SECONDS_PER_DAY;
+        let site = |domain: &str, rank: u32| {
+            let mut record = SiteRecord::new(domain);
+            record.signals.tranco_rank = Some(rank);
+            record
+        };
+        let mut crawled = site("crawled.com", 1);
+        crawled.crawled_at = Some(NOW - SECONDS_PER_DAY);
+        let mut failed_lately = site("failed-lately.com", 2);
+        failed_lately.crawl_attempted_at = Some(NOW - 60);
+        failed_lately.crawl_failures = 1;
+        let mut failed_long_ago = site("failed-long-ago.com", 3);
+        failed_long_ago.crawl_attempted_at = Some(NOW - WINDOW);
+        failed_long_ago.crawl_failures = 1;
+        let mut gone = site("gone.com", 4);
+        gone.gone_at = Some(NOW - SECONDS_PER_DAY);
+        let mut official = SiteRecord::new("official.com");
+        official.signals.official_site = true;
+        official.signals.tranco_rank = Some(500_000);
+        let set = RoundSites::of([
+            site("obscure.com", 5_000_000),
+            site("instacart.com", 2_339),
+            crawled,
+            failed_lately,
+            failed_long_ago,
+            gone,
+            official,
+            site("google.com", 1),
+        ]);
+        let domains: Vec<&str> = first_fetch_catch_up(&set, NOW, WINDOW)
+            .iter()
+            .map(|r| r.domain())
+            .collect();
+        assert_eq!(
+            domains,
+            [
+                "google.com",
+                "failed-long-ago.com",
+                "instacart.com",
+                "official.com"
+            ]
+        );
     }
 
     #[test]
