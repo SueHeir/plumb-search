@@ -1048,6 +1048,14 @@ fn add_links(
         }
     })?;
     for k in kept.iter_mut() {
+        // A song's only lyrics page may be a cover's; then none is kept,
+        // and the song's lyrics are searched for on Genius instead.
+        if k.kind == RECORDING {
+            if let Some(artist) = names.get(&k.credit) {
+                k.profiles
+                    .retain(|p| p.service != "genius-song" || is_genius_page_of(&p.id, artist));
+            }
+        }
         k.profiles.sort_by_key(|p| {
             plumb_core::profiles::SERVICES
                 .iter()
@@ -1059,14 +1067,24 @@ fn add_links(
 
 /// Whether the Genius page `page` (`Nine-inch-nails-hurt-lyrics`) is of a
 /// song by `artist` ("Nine Inch Nails"): Genius names a song's page after
-/// its artist.
+/// its artist, or after the first of several ("Prince and The
+/// Revolution", "Daft Punk feat. Pharrell Williams").
 fn is_genius_page_of(page: &str, artist: &str) -> bool {
-    let artist = plumb_core::normalize_text(&artist.replace('&', " and "));
-    let artist: Vec<&str> = artist.split_whitespace().collect();
-    !artist.is_empty()
-        && page
-            .to_lowercase()
-            .starts_with(&format!("{}-", artist.join("-")))
+    let page = page.to_lowercase();
+    let named = |artist: &str| {
+        let artist = plumb_core::normalize_text(&artist.replace('&', " and "));
+        let artist: Vec<&str> = artist.split_whitespace().collect();
+        !artist.is_empty() && page.starts_with(&format!("{}-", artist.join("-")))
+    };
+    let lower = artist.to_lowercase();
+    let first = [
+        " feat", " ft.", " & ", " and ", ", ", " x ", " with ", " vs",
+    ]
+    .iter()
+    .filter_map(|joint| lower.find(joint))
+    .min()
+    .map_or(artist, |end| &artist[..end]);
+    named(artist) || named(first)
 }
 
 /// The song or album `kept` by `artist` as an articles file line (see the
@@ -1488,6 +1506,29 @@ mod tests {
     }
 
     #[test]
+    fn a_covers_lyrics_are_not_linked() {
+        let dir = tempfile::tempdir().unwrap();
+        write_dump(dir.path());
+        // The work's only Genius page is Panic! at the Disco's.
+        std::fs::write(
+            dir.path().join("l_url_work"),
+            "2\t2\t6999\t9000\t0\tx\t0\t\t\n",
+        )
+        .unwrap();
+        let options = MusicOptions {
+            min_song_releases: 3,
+            min_listeners: 1,
+            ..MusicOptions::default()
+        };
+        let mut dump = MusicDump::read(dir.path(), &options).unwrap();
+        let albums = HashMap::from([(mbid(NIGHT), 19_247)]);
+        dump.songs_to_ask(&albums, None).unwrap();
+        let recordings = HashMap::from([(mbid(BOHEMIAN), 211_087)]);
+        let music = dump.into_articles(&albums, &recordings).unwrap();
+        assert!(music[0].profiles.iter().all(|p| p.service != "genius-song"));
+    }
+
+    #[test]
     fn genius_pages_are_told_by_their_artist() {
         assert!(is_genius_page_of("Queen-bohemian-rhapsody-lyrics", "Queen"));
         assert!(is_genius_page_of(
@@ -1503,6 +1544,22 @@ mod tests {
             "Johnny Cash"
         ));
         assert!(!is_genius_page_of("Queenie-x-lyrics", "Queen"));
+        assert!(is_genius_page_of(
+            "Prince-purple-rain-lyrics",
+            "Prince and The Revolution"
+        ));
+        assert!(is_genius_page_of(
+            "Daft-punk-get-lucky-lyrics",
+            "Daft Punk feat. Pharrell Williams & Nile Rodgers"
+        ));
+        assert!(is_genius_page_of(
+            "Earth-wind-and-fire-september-lyrics",
+            "Earth, Wind & Fire"
+        ));
+        assert!(!is_genius_page_of(
+            "Budjerah-sweet-disposition-lyrics",
+            "The Temper Trap"
+        ));
     }
 
     #[test]
