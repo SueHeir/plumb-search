@@ -1332,8 +1332,9 @@ pub fn place_pages(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) -> Ve
     // how big the site is: "mars" means the planet, read many times more
     // than Mars Inc. of mars.com; "napoleon" the emperor, not Napoleon,
     // North Dakota.
-    // An article titled just what was searched for is the one Wikipedia
-    // gives that name to, so being read more at all is enough: on
+    // When the site and an article are both called just what was searched
+    // for, the article is the one Wikipedia gives that name to, so being
+    // read more at all is enough ("password manager" still means a site): on
     // plumbsearch.org the planet "Mars" was read 1.7 times as much as Mars
     // Inc. that day.
     // A site that matches the query only a little is no namesake at all:
@@ -1353,7 +1354,7 @@ pub fn place_pages(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) -> Ve
         }
         Some(site) => match site.demand {
             Some(demand) if page.page.is_article() => {
-                let margin = if squash(&page.page.title) == query_word {
+                let margin = if site.named && squash(&page.page.title) == query_word {
                     0.0
                 } else {
                     DEMAND_MARGIN
