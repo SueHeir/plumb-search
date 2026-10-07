@@ -2433,6 +2433,91 @@ async fn a_node_takes_wikipedia_articles_from_a_trusted_node() {
     node.shutdown().await.unwrap();
 }
 
+/// A trusted node's buckets plus its adult blocklist.
+struct WithAdultList(plumb_net::BucketTable, PathBuf);
+
+impl plumb_net::BucketSource for WithAdultList {
+    fn bucket(&self, bucket: u32) -> Option<Vec<String>> {
+        self.0.bucket(bucket)
+    }
+
+    fn page_set_file(&self, set: &str) -> Option<PathBuf> {
+        (set == super::adult::SHARED_NAME).then(|| self.1.clone())
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_node_takes_the_adult_blocklist_from_a_trusted_node_before_its_source() {
+    let peer_dir = tempfile::tempdir().unwrap();
+    let peer_id = plumb_net::load_or_create_key(&peer_dir.path().join("node.key"))
+        .unwrap()
+        .public()
+        .to_peer_id();
+    let list_file = peer_dir.path().join("adult-domains.txt");
+    std::fs::write(&list_file, "adult.example\nother.example\n").unwrap();
+    let table = plumb_net::BucketTable::build(
+        &peer_dir.path().join("buckets"),
+        &[SiteRecord::new("lighthouses.org")],
+    )
+    .unwrap();
+    let mut peer_config = plumb_net::NetConfig::new(peer_dir.path().to_path_buf());
+    peer_config.search_scope = plumb_net::SearchScope::Anyone;
+    peer_config.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+    peer_config.upnp = false;
+    peer_config.local_discovery = false;
+    peer_config.round_every = None;
+    let (peer, _records) = plumb_net::start(
+        peer_config,
+        Arc::new(WithAdultList(table, list_file.clone())),
+    )
+    .await
+    .unwrap();
+    let peer_addr: plumb_net::Multiaddr = loop {
+        if let Some(addr) = peer.status().listening.first() {
+            break addr.parse().unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+
+    let dir = seeded_dir();
+    let mut config = test_config(dir.path());
+    // The source cannot be reached: the list can only come from the peer.
+    config.sources.adult_list_url = Some("http://127.0.0.1:9/porn-nl.txt".into());
+    let mut net = plumb_net::NetConfig::new(PathBuf::new());
+    net.search_scope = plumb_net::SearchScope::Anyone;
+    net.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+    net.upnp = false;
+    net.local_discovery = false;
+    net.round_every = None;
+    net.fill = false;
+    net.trusted_peers = vec![peer_id];
+    net.bootstrap = vec![peer_addr.with_p2p(peer_id).unwrap()];
+    config.network = Some(net);
+    let node = start(config).await.unwrap();
+
+    let kept = dir.path().join("safe").join("adult-domains.txt");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !kept.is_file() {
+        assert!(Instant::now() < deadline, "no list came");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(
+        std::fs::read_to_string(&kept).unwrap(),
+        "adult.example\nother.example\n"
+    );
+    // It keeps the time of the peer's copy, so it ages as that one does.
+    let modified = |path: &Path| std::fs::metadata(path).unwrap().modified().unwrap();
+    let (theirs, ours) = (modified(&list_file), modified(&kept));
+    let apart = theirs
+        .duration_since(ours)
+        .or_else(|_| ours.duration_since(theirs))
+        .unwrap();
+    assert!(apart < Duration::from_secs(2), "{apart:?}");
+
+    peer.shutdown().await;
+    node.shutdown().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_set_file_over_the_storage_limit_is_cut_before_it_is_indexed() {
     // A file taken from a trusted node, with more pages than the node now
