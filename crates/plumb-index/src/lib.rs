@@ -1694,7 +1694,7 @@ impl Searcher {
         let goes_on = terms
             .split_whitespace()
             .next()
-            .map(|word| normalize_text(word))
+            .map(normalize_text)
             .is_some_and(|word| {
                 is_function_word(&word) || matches!(word.as_str(), "vs" | "versus" | "v")
             });
