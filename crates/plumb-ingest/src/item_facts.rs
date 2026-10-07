@@ -83,12 +83,18 @@ fn page_query(kind: FactKind, offset: usize) -> String {
     let p = kind.property();
     let value = match kind.value_type() {
         // Founders stay founders; a capital, currency, CEO or headquarters
-        // that ended, or that is only some part's (the CFP franc of French
-        // Polynesia), is not the item's.
+        // that ended is not the item's. One only some part's (the CFP franc
+        // of French Polynesia, South Africa's three capitals) counts only
+        // when there is no other. A CEO's start `?t` keeps the latest.
         ValueType::Item if kind == FactKind::Founder => format!("ps:{p} ?v ."),
         ValueType::Item => format!(
             "ps:{p} ?v . FILTER NOT EXISTS {{ ?s pq:P582 [] }} \
-             FILTER NOT EXISTS {{ ?s pq:P518 [] }}"
+             OPTIONAL {{ ?s pq:P518 ?part . }}{}",
+            if kind == FactKind::Ceo {
+                " OPTIONAL { ?s pq:P580 ?t . }"
+            } else {
+                ""
+            }
         ),
         // A count has no unit to normalize.
         ValueType::Quantity if kind == FactKind::Population => {
@@ -101,7 +107,7 @@ fn page_query(kind: FactKind, offset: usize) -> String {
         }
     };
     format!(
-        "SELECT ?item ?v ?p ?t WHERE {{ ?item p:{p} ?s . ?s a wikibase:BestRank ; {value} }} \
+        "SELECT ?item ?v ?p ?t ?part WHERE {{ ?item p:{p} ?s . ?s a wikibase:BestRank ; {value} }} \
          LIMIT {FACTS_PAGE} OFFSET {offset}"
     )
 }
@@ -130,6 +136,11 @@ pub struct RawFacts {
     /// Items whose best statements of a date kind disagree on the year
     /// (France founded in 481 and in 843): no date is better than either.
     disputed: HashSet<(String, FactKind)>,
+    /// Values only for some part of an item (P518), used when it has no
+    /// other of their kind.
+    partial: HashMap<(String, FactKind), Vec<String>>,
+    /// The start (`2025-03-18T…`) of the CEOs kept, to keep the latest.
+    started: HashMap<String, String>,
 }
 
 impl RawFacts {
@@ -150,6 +161,31 @@ impl RawFacts {
                     let id = entity_id(&v.value);
                     if !is_item_id(id) {
                         continue;
+                    }
+                    if row.contains_key("part") {
+                        let values = self.partial.entry((item.to_string(), kind)).or_default();
+                        if values.len() < kind.most_values() && !values.iter().any(|v| v == id) {
+                            values.push(id.to_string());
+                        }
+                        continue;
+                    }
+                    if kind == FactKind::Ceo {
+                        // No start counts as the earliest.
+                        let start = row.get("t").map_or("", |t| t.value.as_str());
+                        let kept = self.started.get(item).map_or("", String::as_str);
+                        let has = self
+                            .facts
+                            .get(item)
+                            .is_some_and(|facts| facts.iter().any(|fact| fact.kind == kind));
+                        if has && start < kept {
+                            continue;
+                        }
+                        if has && start > kept {
+                            if let Some(facts) = self.facts.get_mut(item) {
+                                facts.retain(|fact| fact.kind != kind);
+                            }
+                        }
+                        self.started.insert(item.to_string(), start.to_string());
                     }
                     id.to_string()
                 }
@@ -226,6 +262,17 @@ impl RawFacts {
             }
         }
         Ok(rows.len())
+    }
+
+    /// Adds the values only for some part of an item to the items that
+    /// have no other of their kind.
+    fn add_partial(&mut self) {
+        for ((item, kind), values) in std::mem::take(&mut self.partial) {
+            let facts = self.facts.entry(item).or_default();
+            if !facts.iter().any(|fact| fact.kind == kind) {
+                facts.extend(values.into_iter().map(|value| Fact { kind, value }));
+            }
+        }
     }
 
     /// The items the facts name, to look up their labels.
@@ -363,6 +410,7 @@ pub async fn fetch_facts(
         )
         .await?;
     }
+    raw.add_partial();
     let items = raw.named_items();
     info!("naming {} items the facts are about", items.len());
     let mut labels = HashMap::new();
@@ -533,14 +581,16 @@ mod tests {
         let q = page_query(FactKind::Born, 0);
         assert!(q.contains("wikibase:timePrecision ?p"), "{q}");
         let q = page_query(FactKind::Currency, 0);
-        assert!(q.contains("FILTER NOT EXISTS { ?s pq:P518 [] }"), "{q}");
+        assert!(q.contains("OPTIONAL { ?s pq:P518 ?part . }"), "{q}");
+        assert!(!q.contains("P580"), "{q}");
+        assert!(page_query(FactKind::Ceo, 0).contains("OPTIONAL { ?s pq:P580 ?t . }"));
         assert!(q.contains("FILTER NOT EXISTS { ?s pq:P582 [] }"), "{q}");
         assert!(!page_query(FactKind::Founder, 0).contains("FILTER"));
         let items = ["Q30".to_string(), "Q668".to_string()];
         let q = items_query(FactKind::Population, &items);
         assert!(
             q.starts_with(
-                "SELECT ?item ?v ?p ?t WHERE { VALUES ?item { wd:Q30 wd:Q668 } ?item p:P1082 ?s ."
+                "SELECT ?item ?v ?p ?t ?part WHERE { VALUES ?item { wd:Q30 wd:Q668 } ?item p:P1082 ?s ."
             ),
             "{q}"
         );
@@ -635,6 +685,79 @@ mod tests {
                 .unwrap();
         }
         assert!(raw.facts.get("Q142").is_none_or(Vec::is_empty));
+
+        // South Africa's capitals are each for a branch of government:
+        // kept, as it has no other. France's euro outranks the CFP franc.
+        let za = format!("{E}Q258");
+        let fr = format!("{E}Q142");
+        let pretoria = format!("{E}Q3926");
+        let cfp = format!("{E}Q214393");
+        let euro = format!("{E}Q4916");
+        let branch = format!("{E}Q35798");
+        let mut parts = RawFacts::default();
+        let wanted_parts: HashSet<String> = ["Q258", "Q142"].map(String::from).into();
+        parts
+            .add_page(
+                FactKind::Capital,
+                &wanted_parts,
+                &answer(&[&[("item", &za), ("v", &pretoria), ("part", &branch)]]),
+            )
+            .unwrap();
+        parts
+            .add_page(
+                FactKind::Currency,
+                &wanted_parts,
+                &answer(&[
+                    &[("item", &fr), ("v", &cfp), ("part", &branch)],
+                    &[("item", &fr), ("v", &euro)],
+                ]),
+            )
+            .unwrap();
+        parts.add_partial();
+        assert_eq!(
+            parts.facts["Q258"],
+            [Fact {
+                kind: FactKind::Capital,
+                value: "Q3926".into()
+            }]
+        );
+        assert_eq!(
+            parts.facts["Q142"],
+            [Fact {
+                kind: FactKind::Currency,
+                value: "Q4916".into()
+            }]
+        );
+
+        // Intel: the CEO who started last.
+        let intel = format!("{E}Q248");
+        let mut ceos = RawFacts::default();
+        let wanted_intel: HashSet<String> = ["Q248"].map(String::from).into();
+        ceos.add_page(
+            FactKind::Ceo,
+            &wanted_intel,
+            &answer(&[
+                &[
+                    ("item", &intel),
+                    ("v", &format!("{E}Q1")),
+                    ("t", "2024-12-02T00:00:00Z"),
+                ],
+                &[
+                    ("item", &intel),
+                    ("v", &format!("{E}Q2")),
+                    ("t", "2025-03-18T00:00:00Z"),
+                ],
+                &[("item", &intel), ("v", &format!("{E}Q3"))],
+            ]),
+        )
+        .unwrap();
+        assert_eq!(
+            ceos.facts["Q248"],
+            [Fact {
+                kind: FactKind::Ceo,
+                value: "Q2".into()
+            }]
+        );
         assert_eq!(raw.named_items(), ["Q3114", "Q317521"]);
         let mut labels = HashMap::new();
         add_labels(
