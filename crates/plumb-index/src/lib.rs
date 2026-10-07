@@ -265,6 +265,12 @@ pub struct RankConfig {
     /// that does, while youtube.com ("video sharing site") and spotify.com
     /// ("music streaming"), at about 0.04, keep theirs. `None` turns it off.
     pub described_relevance: Option<f32>,
+    /// The same floor for queries that name what they look for ("twin
+    /// peaks", "us bank"): a site the query does not name gets its
+    /// popularity in full only once its text matches this well, so
+    /// wix.com or youtube.com, matching nothing of it, are not listed for
+    /// being big. `None` turns it off.
+    pub navigational_relevance: Option<f32>,
     /// For a site that has none of the query's words and is found only
     /// for being near it in meaning, the text match (meaning alone) it
     /// needs for its popularity to count in full; below it, popularity
@@ -303,6 +309,7 @@ impl Default for RankConfig {
             described_alpha: Some(0.5),
             partial_label_bonus: None,
             described_relevance: Some(0.04),
+            navigational_relevance: Some(0.05),
             meaning_only_relevance: Some(0.35),
             named_share: Some(0.4),
             terms_boost: 1.0,
@@ -1195,9 +1202,12 @@ impl Searcher {
             Some(described) if !navigational => unit_or(described, default.alpha),
             _ => unit_or(cfg.alpha, default.alpha),
         };
-        let relevance_floor = cfg
-            .described_relevance
-            .filter(|floor| !navigational && *floor > 0.0);
+        let relevance_floor = if navigational {
+            cfg.navigational_relevance
+        } else {
+            cfg.described_relevance
+        }
+        .filter(|floor| *floor > 0.0);
         let partial_label_bonus = cfg.partial_label_bonus.unwrap_or(cfg.exact_label_bonus);
         let untrusted_share = unit_or(cfg.untrusted_share, default.untrusted_share);
         let country_boost = unit_or(cfg.country_boost, default.country_boost);
