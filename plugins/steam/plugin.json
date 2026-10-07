@@ -1,0 +1,12 @@
+{
+  "name": "Steam",
+  "about": "Your Steam library and wishlist, through the Steam Web API with your own key.",
+  "hosts": [
+    "api.steampowered.com",
+    "cdn.cloudflare.steamstatic.com",
+    "shared.cloudflare.steamstatic.com"
+  ],
+  "keywords": ["steam", "my games"],
+  "ids": ["steam"],
+  "cache_seconds": 3600
+}

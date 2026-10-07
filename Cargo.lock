@@ -6112,7 +6112,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "plumb-plugin-github"
+version = "0.1.0"
+dependencies = [
+ "plumb-plugin",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "plumb-plugin-hacker-news"
+version = "0.1.0"
+dependencies = [
+ "plumb-plugin",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "plumb-plugin-steam"
 version = "0.1.0"
 dependencies = [
  "plumb-plugin",

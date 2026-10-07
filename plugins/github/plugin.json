@@ -1,0 +1,7 @@
+{
+  "name": "GitHub",
+  "about": "Repositories from GitHub's API, with star counts and your stars when you give it a token.",
+  "hosts": ["api.github.com", "avatars.githubusercontent.com"],
+  "keywords": ["gh", "github"],
+  "pages": ["github.com"]
+}
