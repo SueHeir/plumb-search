@@ -392,8 +392,8 @@ pub fn fact_asked(query: &str) -> Option<FactQuestion> {
         ("capital of ", &[Capital], false),
         ("population of ", &[Population], false),
         ("how many people live in ", &[Population], false),
-        ("how tall is ", &[Elevation, Height], false),
-        ("how high is ", &[Elevation, Height], false),
+        ("how tall is ", &[Height, Elevation], false),
+        ("how high is ", &[Height, Elevation], false),
         ("height of ", &[Height, Elevation], false),
         ("elevation of ", &[Elevation], false),
         ("area of ", &[Area], false),
@@ -571,7 +571,7 @@ mod tests {
         );
         assert_eq!(
             asked("how tall is mount everest"),
-            Some((Elevation, "mount everest".into(), false))
+            Some((Height, "mount everest".into(), false))
         );
         assert_eq!(
             asked("when was albert einstein born"),
