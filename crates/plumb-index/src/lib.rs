@@ -1552,7 +1552,7 @@ impl Searcher {
             }
         }
         let typed = registrable_domain(query_text.trim());
-        let mut hits = without_copies(hits, typed.as_deref());
+        let mut hits = without_copies(hits, typed.as_deref(), home.as_deref());
         hits.truncate(limit);
         let results = SearchResults {
             hits,
@@ -2040,14 +2040,15 @@ fn first_word(title: &str) -> Option<String> {
 ///   with the brand's name). Where one of them is the official site of
 ///   something Wikidata describes, it stays and the others go, even when
 ///   they rank above it (23andme.org's copy of 23andMe's title above
-///   23andme.com); otherwise the best ranked stays. Every official site
+///   23andme.com); otherwise the best known (most linked) stays. Every official site
 ///   stays (cbc.ca next to cbc.com), and so does a country site with a
 ///   title of its own (amazon.co.jp's).
 /// - A site nobody links to whose title is that of a site listed above it
 ///   (a copy of Coinbase's title on elephant-blue.org).
 ///
-/// `typed` is the domain the query is, which always stays.
-fn without_copies(hits: Vec<Hit>, typed: Option<&str>) -> Vec<Hit> {
+/// `typed` is the domain the query is, which always stays, and so do the
+/// sites of `home`, the searcher's country (bbc.co.uk in Britain).
+fn without_copies(hits: Vec<Hit>, typed: Option<&str>, home: Option<&str>) -> Vec<Hit> {
     let names_brand = |hit: &Hit, label: &str| {
         hit.title
             .as_deref()
@@ -2056,7 +2057,10 @@ fn without_copies(hits: Vec<Hit>, typed: Option<&str>) -> Vec<Hit> {
     };
     let mut copies = vec![false; hits.len()];
     for (i, hit) in hits.iter().enumerate() {
-        if hit.official || typed == Some(hit.domain.as_str()) {
+        if hit.official
+            || typed == Some(hit.domain.as_str())
+            || (home.is_some() && hit.country.as_deref() == home)
+        {
             continue;
         }
         let title = hit.title.as_deref().map(normalize_text);
@@ -2088,11 +2092,16 @@ fn without_copies(hits: Vec<Hit>, typed: Option<&str>) -> Vec<Hit> {
             })
         };
         let official = hits.iter().any(|other| other.official && same_brand(other));
-        let above = hits[..i]
-            .iter()
-            .zip(&copies)
-            .any(|(other, copy)| !copy && same_brand(other));
-        copies[i] = official || above;
+        // The best known of them, not the best ranked: ranking comes
+        // again after this (the learned order), and cbc.bb ranked above
+        // cbc.ca is no reason to leave out cbc.ca.
+        let better = hits.iter().enumerate().any(|(j, other)| {
+            j != i
+                && same_brand(other)
+                && (other.link_score > hit.link_score
+                    || (other.link_score == hit.link_score && j < i))
+        });
+        copies[i] = official || better;
     }
     hits.into_iter()
         .zip(copies)
@@ -4094,7 +4103,7 @@ mod tests {
             demand: None,
         };
         let kept = |hits: Vec<Hit>, typed: Option<&str>| -> Vec<String> {
-            without_copies(hits, typed)
+            without_copies(hits, typed, None)
                 .into_iter()
                 .map(|h| h.domain)
                 .collect()
@@ -4152,6 +4161,12 @@ mod tests {
             hit("kraken.com", Some("Kraken"), 0.8, true),
         ];
         assert_eq!(kept(coin, None), ["coinbase.com", "kraken.com"]);
+        // The best known of unofficial namesakes stays, wherever it ranks.
+        let cbc = vec![
+            hit("cbc.bb", Some("CBC Barbados"), 0.3, false),
+            hit("cbc.ca", Some("CBC"), 0.8, false),
+        ];
+        assert_eq!(kept(cbc, None), ["cbc.ca"]);
         // The first of unofficial namesakes stays.
         let quiz = vec![
             hit("quizlet.com", None, 0.8, false),

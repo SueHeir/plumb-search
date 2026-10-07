@@ -67,6 +67,9 @@ const NEAR_ME: &[&[&str]] = &[
 ];
 /// Words that say where, in "pizza in denver".
 const WHERE_WORDS: &[&[&str]] = &[&["in"], &["near"], &["around"], &["close", "to"], &["at"]];
+/// Kinds of town a query may name without "in" or "near": "denver
+/// pizza", "barber brooklyn".
+const GUESSED_TOWNS: &[&str] = &["place=city", "place=borough"];
 /// Words ending a query that say when, not where: "open now".
 const WHEN: &[&[&str]] = &[
     &["open", "now"],
@@ -197,6 +200,21 @@ pub fn parse_place_query(query: &str) -> Option<PlaceQuery> {
         }
     }
     None
+}
+
+/// `query` without the "near me" that ends it ("safeway near me" ->
+/// "safeway"), for searching sites: "me" names no site (domain.me,
+/// maine.gov). `None` when it has none.
+pub fn without_near_me(query: &str) -> Option<String> {
+    let words: Vec<String> = normalize_text(query)
+        .split(' ')
+        .filter(|w| !w.is_empty())
+        .map(str::to_string)
+        .collect();
+    NEAR_ME.iter().find_map(|suffix| {
+        (words.len() > suffix.len() && words[words.len() - suffix.len()..] == **suffix)
+            .then(|| words[..words.len() - suffix.len()].join(" "))
+    })
 }
 
 /// A place found, and how far it is from where the search looked.
@@ -422,6 +440,15 @@ impl PlaceSearcher {
                 None => None,
             },
             Near::Named(name) => match self.locate(name, country)? {
+                // A town guessed from words ("toy story", "hotel
+                // california", "crypto exchange") is only taken for a big
+                // one: Story in France and Crypto in Poland are villages
+                // whose names are words.
+                Some(place)
+                    if !asked.said_where && !GUESSED_TOWNS.contains(&place.kind.as_str()) =>
+                {
+                    return Ok(None)
+                }
                 Some(place) => Some(place),
                 None => return Ok(None),
             },
@@ -771,6 +798,12 @@ mod tests {
             city("Paris", 2_100_000, "Île-de-France", "FR", 48.8566, 2.3522),
             city("Paris", 25_000, "TX", "US", 33.6609, -95.5555),
             Place {
+                rank: place_rank("place=village", 300, false, false, 3),
+                country: Some("FR".into()),
+                ..at("Story", "place=village", 46.0, 3.0)
+            },
+            at("King Jouet", "shop=toys", 46.001, 3.001),
+            Place {
                 tags: vec!["cuisine=pizza".into()],
                 address: Some("1 Main St".into()),
                 ..at("Blue Pan", "amenity=restaurant", 39.75, -104.98)
@@ -852,6 +885,26 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(nowhere.center.is_none() && nowhere.hits.is_empty());
+        // A guessed town must be a city: "pizza paris" is Paris, France,
+        // but a village called Story is not "toy story".
+        assert!(searcher
+            .search("denver pizza", None, None, 5)
+            .unwrap()
+            .is_some());
+        assert!(searcher
+            .search("toy story", None, None, 5)
+            .unwrap()
+            .is_none());
+        let toys = searcher
+            .search("toys in story", None, None, 5)
+            .unwrap()
+            .unwrap();
+        assert_eq!(toys.hits[0].place.name, "King Jouet");
+        assert_eq!(
+            without_near_me("Safeway near me").as_deref(),
+            Some("safeway")
+        );
+        assert_eq!(without_near_me("safeway"), None);
         // No town of that name, or nothing of that kind there.
         assert!(searcher
             .search("pizza in gotham", None, None, 5)
