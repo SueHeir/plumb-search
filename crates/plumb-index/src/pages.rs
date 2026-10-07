@@ -57,6 +57,9 @@ pub const QUESTION_SHARE: f32 = 0.75;
 /// spelled right: "pkce", "nalgebra", "stain" and "biles" are, however few
 /// sites say them.
 pub const KNOWN_WORD_PAGES: u64 = 3;
+/// Most read articles about a site looked at for one about the site itself
+/// ([`PageSearcher::title_untitled`]).
+const TITLE_CANDIDATES: usize = 20;
 /// Least share of a question title's stemmed words a query that has all of
 /// the question's own must have to ask the question as a whole.
 pub const QUESTION_TITLE_SHARE: f32 = 0.5;
@@ -933,7 +936,11 @@ impl PageSearcher {
     /// Gives the sites among `sites` that have no title the title of the
     /// most read Wikipedia article about what each is the official website
     /// of, without its qualifier: "Notion" for notion.so, "Yelp" for
-    /// yelp.com, whose homepages turn crawlers away.
+    /// yelp.com, whose homepages turn crawlers away. Only an article whose
+    /// official website is the site's homepage ([`Page::website`]) and
+    /// whose title the domain spells ([`site_is_titled`]) counts:
+    /// "Schitt's Creek", whose website is a page on cbc.ca, is not what
+    /// cbc.ca is.
     pub fn title_untitled(&self, sites: &mut [crate::Hit]) -> Result<()> {
         let searcher = self.reader.searcher();
         for site in sites.iter_mut().filter(|site| {
@@ -947,24 +954,28 @@ impl PageSearcher {
             );
             let best = searcher.search(
                 &query,
-                &TopDocs::with_limit(1)
+                &TopDocs::with_limit(TITLE_CANDIDATES)
                     .order_by_fast_field::<u64>("popularity", tantivy::Order::Desc),
             )?;
-            let Some(&(_, address)) = best.first() else {
-                continue;
-            };
-            let document: TantivyDocument = searcher.doc(address)?;
-            let Some(stored) = document
-                .get_first(self.fields.page)
-                .and_then(|v| v.as_str())
-            else {
-                continue;
-            };
-            let page: Page = serde_json::from_str(stored)?;
-            if page.is_article() {
+            for (_, address) in best {
+                let document: TantivyDocument = searcher.doc(address)?;
+                let Some(stored) = document
+                    .get_first(self.fields.page)
+                    .and_then(|v| v.as_str())
+                else {
+                    continue;
+                };
+                let page: Page = serde_json::from_str(stored)?;
+                if !page.is_article()
+                    || page.website.is_some()
+                    || !site_is_titled(&site.domain, &page.title)
+                {
+                    continue;
+                }
                 let title = base_title(&page.title).trim();
                 if !title.is_empty() {
                     site.title = Some(title.to_string());
+                    break;
                 }
             }
         }
@@ -2224,12 +2235,24 @@ mod tests {
     fn untitled_sites_take_their_article_s_title() {
         let mut notion = page("Notion (productivity software)", 500, &[]);
         notion.site = Some("notion.so".into());
-        let (_dir, searcher) = searcher(&[notion]);
-        let mut sites = vec![site("notion.so", true), site("other.com", false)];
+        // A show whose website is a page of cbc.ca is read more than CBC's
+        // own article, but it is not what cbc.ca is.
+        let mut show = page("Schitt's Creek", 9_000, &[]);
+        show.site = Some("cbc.ca".into());
+        show.website = Some("https://www.cbc.ca/schittscreek".into());
+        let mut cbc = page("CBC Television", 3_000, &[]);
+        cbc.site = Some("cbc.ca".into());
+        let (_dir, searcher) = searcher(&[notion, show, cbc]);
+        let mut sites = vec![
+            site("notion.so", true),
+            site("other.com", false),
+            site("cbc.ca", true),
+        ];
         sites[1].title = Some("Other".into());
         searcher.title_untitled(&mut sites).unwrap();
         assert_eq!(sites[0].title.as_deref(), Some("Notion"));
         assert_eq!(sites[1].title.as_deref(), Some("Other"));
+        assert_eq!(sites[2].title.as_deref(), Some("CBC Television"));
     }
 
     fn site(domain: &str, named: bool) -> crate::Hit {
