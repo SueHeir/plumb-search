@@ -244,20 +244,50 @@ pub(super) fn website_domains(found: &PlaceResults) -> Vec<String> {
         .collect()
 }
 
-/// The domains of the places' own websites, each once, in the order the
-/// places are listed.
-pub(super) fn local_domains(found: &PlaceResults) -> Vec<String> {
-    let mut domains: Vec<String> = Vec::new();
-    for domain in website_domains(found) {
-        if !domains.contains(&domain) {
-            domains.push(domain);
+/// The places' own websites as results, each site once, in the order the
+/// places are listed: titled with the place's name, described by its kind
+/// and address.
+pub(super) fn local_sites(found: &PlaceResults) -> Vec<Hit> {
+    let mut sites: Vec<Hit> = Vec::new();
+    for hit in &found.hits {
+        let Some(url) = hit.place.website.as_deref().and_then(http_url) else {
+            continue;
+        };
+        let Some(domain) = url::Url::parse(&url).ok().and_then(|u| {
+            let host = u.host_str()?.to_string();
+            plumb_core::registrable_domain(&host).or(Some(host))
+        }) else {
+            continue;
+        };
+        if sites.iter().any(|s| s.domain == domain) {
+            continue;
         }
+        let mut about = hit.place.label();
+        if let Some(address) = &hit.place.address {
+            about.push_str(" \u{b7} ");
+            about.push_str(address);
+        }
+        sites.push(Hit {
+            domain,
+            url,
+            title: Some(hit.place.name.clone()),
+            description: Some(about),
+            score: 0.0,
+            text_score: 0.0,
+            link_score: 0.0,
+            placing_text_score: None,
+            country: None,
+            named: false,
+            official: false,
+            key_pages: Vec::new(),
+            demand: None,
+        });
     }
-    domains
+    sites
 }
 
 /// The sites for a query that lists places around a town ("brewery in
-/// denver"): the places' own sites (`local`, from [`local_domains`])
+/// denver"): the places' own sites (`local`, from [`local_sites`])
 /// first, then the sites that say what was looked for, then the rest,
 /// which match the town's name only (the city's own site, its football
 /// team). At most `limit`, or as many as there were.
@@ -576,7 +606,9 @@ mod tests {
         let places = body
             .find("<section class=\"pl\"")
             .expect("places are listed");
-        assert!(places < body.find("No sites match").unwrap());
+        // The place's own site is listed among the sites, below.
+        assert!(!body.contains("No sites match"), "{body}");
+        assert!(places < body.rfind("https://www.bluepan.com/menu").unwrap());
         assert!(body.contains("<h2>Pizza in Denver, CO</h2>"));
         let request = axum::http::Request::builder()
             .uri("/api/search?q=pizza+in+denver&full=1")
@@ -588,6 +620,8 @@ mod tests {
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["places"]["hits"][0]["place"]["name"], "Blue <Pan>");
+        assert_eq!(json["hits"][0]["domain"], "bluepan.com");
+        assert_eq!(json["hits"][0]["title"], "Blue <Pan>");
     }
 
     #[test]
