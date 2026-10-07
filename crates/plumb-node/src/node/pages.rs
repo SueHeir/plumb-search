@@ -23,7 +23,7 @@ use plumb_net::pages::MAX_PAGES_CHUNK;
 use plumb_net::NetHandle;
 use tracing::{debug, info, warn};
 
-use super::Inner;
+use super::{Inner, NodeSettings};
 use crate::pages::{
     notes_path, open_or_build, remove_other_indexes, thousands, wanted_counts, SetFileCutter,
     SetFileNotes, SetInfo, Wanted,
@@ -74,10 +74,26 @@ pub(super) fn run(inner: Arc<Inner>) {
     };
     let mut failed: Option<(String, Instant)> = None;
     let mut places_failed: Option<(String, Instant)> = None;
+    let mut kept_whole = HashSet::new();
     while !inner.stopping() {
         let mut settings = inner.settings();
         if inner.config.blackhole {
             settings.page_sets = settings.page_sets.all_unless_set();
+        }
+        // Files are cut before they are indexed, not after: an index of
+        // the whole file would be built again at once.
+        let near = super::places::known_homes(&inner);
+        let counts = wanted_counts(&settings.page_sets, settings.storage_limit_mb);
+        // Only a node with a storage limit cuts its files: a server's are
+        // handed on to other nodes whole.
+        for &(set, pages) in counts.iter().filter(|_| settings.storage_limit_mb > 0) {
+            if !may_cut(set, pages, near.is_some()) {
+                continue;
+            }
+            let near = near_of(&settings, near.as_deref(), set, pages);
+            if let Err(err) = cut_if_longer(&inner, set, pages, &near, &mut kept_whole) {
+                warn!("page set {}: {err:#}", set.id);
+            }
         }
         let wanted = Wanted::new(
             &inner.paths.data,
@@ -127,13 +143,12 @@ pub(super) fn run(inner: Arc<Inner>) {
     }
 }
 
-/// Cuts the set files to the pages kept and takes the ones missing from a
-/// trusted node, until the node stops.
+/// Takes the set files missing, or short of pages, from a trusted node,
+/// until the node stops.
 fn keep_files(inner: &Inner) {
     // By set: a set the trusted node lacks, or whose download failed, does
     // not hold up the others.
     let mut fetch_failed: HashMap<&'static str, Instant> = HashMap::new();
-    let mut kept_whole = HashSet::new();
     while !inner.stopping() {
         let mut settings = inner.settings();
         if inner.config.blackhole {
@@ -141,26 +156,6 @@ fn keep_files(inner: &Inner) {
         }
         let near = super::places::known_homes(inner);
         let counts = wanted_counts(&settings.page_sets, settings.storage_limit_mb);
-        // The towns whose places the file keeps past the first ones, for
-        // the places set (none for the others).
-        let near_of = |set: &SetInfo, pages: u64| -> Vec<(f64, f64)> {
-            if set.id == plumb_index::places::PLACES_SET && settings.storage_limit_mb > 0 {
-                crate::places::file_near(pages, near.as_deref().unwrap_or_default()).to_vec()
-            } else {
-                Vec::new()
-            }
-        };
-        // Only a node with a storage limit cuts its files: a server's are
-        // handed on to other nodes whole.
-        for &(set, pages) in counts.iter().filter(|_| settings.storage_limit_mb > 0) {
-            if !may_cut(set, pages, near.is_some()) {
-                continue;
-            }
-            let near = near_of(set, pages);
-            if let Err(err) = cut_if_longer(inner, set, pages, &near, &mut kept_whole) {
-                warn!("page set {}: {err:#}", set.id);
-            }
-        }
         fetch_failed.retain(|_, at| at.elapsed() < FETCH_RETRY_WAIT);
         if let Some(net) = super::network::handle(inner).cloned() {
             for &(set, pages) in &counts {
@@ -170,7 +165,7 @@ fn keep_files(inner: &Inner) {
                 if fetch_failed.contains_key(set.id) {
                     continue;
                 }
-                let near = near_of(set, pages);
+                let near = near_of(&settings, near.as_deref(), set, pages);
                 if let Err(err) = fetch_if_needed(inner, &net, set, pages, &near) {
                     warn!("page set {}: {err:#}", set.id);
                     fetch_failed.insert(set.id, Instant::now());
@@ -181,6 +176,21 @@ fn keep_files(inner: &Inner) {
         while !inner.stopping() && Instant::now() < until {
             std::thread::sleep(TICK);
         }
+    }
+}
+
+/// The towns whose places the file of `set` keeps past its first `pages`,
+/// for the places set on a node with a storage limit (none otherwise).
+fn near_of(
+    settings: &NodeSettings,
+    homes: Option<&[(f64, f64)]>,
+    set: &SetInfo,
+    pages: u64,
+) -> Vec<(f64, f64)> {
+    if set.id == plumb_index::places::PLACES_SET && settings.storage_limit_mb > 0 {
+        crate::places::file_near(pages, homes.unwrap_or_default()).to_vec()
+    } else {
+        Vec::new()
     }
 }
 
