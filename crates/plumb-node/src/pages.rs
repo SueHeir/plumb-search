@@ -94,6 +94,12 @@ pub const SETS: &[SetInfo] = &[
         bytes_per_page: 220,
     },
     SetInfo {
+        id: plumb_index::pages::DOCS_SET,
+        name: "Software docs (MDN, Python, Rust and more)",
+        pages: 400_000,
+        bytes_per_page: 250,
+    },
+    SetInfo {
         id: plumb_index::pages::PAPERS_SET,
         name: "Papers (OpenAlex)",
         pages: 2_000_000,

@@ -22,7 +22,7 @@ Places are listed within a town's size of its centre (12 km for a city, 6 for a 
 
 ## Near me
 
-"Near me" is the town you give on the **About you** page, kept on the node for your browser only. Plumb never works out where you are from your address or anything else. Without a town, a "near me" search says how to give one.
+"Near me" is the town you give on the **About you** page or the welcome page, kept on the node for your browser only (on a public server, in your browser). Plumb never works out where you are from your address or anything else. Without a town, a "near me" search says how to give one.
 
 ## What is kept
 

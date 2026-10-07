@@ -176,6 +176,20 @@ A package is listed only when the query asks for one, so "react" is still the si
 
 The MCP server's `package` tool returns the same card by name ([mcp.md](mcp.md)). In the SearXNG-style JSON it follows the description in `content`.
 
+## Software docs
+
+The `docs` set lists the pages of software docs sites: MDN, Python's docs, Rust's standard library and books, Go, Node.js, TypeScript, React, Vue, Next.js, Tailwind CSS, Django, Flask, NumPy, pandas, PyTorch, PostgreSQL, MySQL, SQLite, Docker, Kubernetes, Git, GitHub Docs, Java, C++ (cppreference), .NET, Kotlin, PHP, Ruby, Rails, Linux man pages, Bash, the Arch Wiki, nginx, Redis, MongoDB, Terraform, Godot and Bootstrap (`plumb_core::docs::DOCS_SITES`):
+
+```sh
+plumb fetch-pages --set docs --work /path/to/work --data /path/to/node-data
+```
+
+Each site's pages are those its sitemaps (named in its robots.txt, or `/sitemap.xml`) and its table of contents link to under its docs addresses (`https://docs.python.org/3/`), the shallowest first, at most 20,000 a site (`--max-docs-per-site`). Each page is fetched like a homepage in a crawl: robots.txt is obeyed for every address, a site is asked one page at a time with a second (or its `Crawl-delay`) between answers, and only redirects on the same site are followed. Sixteen sites are fetched at once. Each page keeps its title without the site's name ("Sorting Techniques — Python 3.14 documentation" is "Sorting Techniques"), its description (or else the start of its text), and its address. Its views are the site's weight (1 to 10) over how deep the page is under the site's docs, so a site's main pages come first. With `--work`, each site's pages are kept there (`docs-python.json`) as it finishes, and a run that stops carries on with the sites not yet done. `--docs-sites python,mdn` fetches only some.
+
+A docs page's title alone ("Glossary") names nothing. It is named by its product's name and title ("python glossary", "glossary python") or, for pages whose title names a section ("Array.prototype.sort() — JavaScript"), by the section and title ("javascript array.prototype.sort()"), and then may come first. Like a question, it is also found by most of the words of its title, names and description ("sort a list in python") and listed after the best site, or first when the query asks for the whole page.
+
+This is the first set of inner pages of good sites; universities, professors, companies and other kinds follow the same way (`plumb_crawl::fetch_site_pages`), each as a set of its own that a node turns on or off under Page sets.
+
 ## How pages and sites are listed together
 
 - An article about a listed site (its Wikidata item's official website) goes under that site's result instead of in a place of its own.
