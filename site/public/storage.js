@@ -8,9 +8,10 @@
   var limit = document.getElementById("storage-limit");
   if (!box || !used || !limit || !window.fetch) return;
 
-  // Decimal gigabytes, as the node's storage limit counts them.
+  // Gigabytes of 1,024 of the node's megabytes (10^6 bytes each), so a
+  // storage limit set as 65,536 MB reads as the 64 GB it was chosen as.
   function gb(bytes) {
-    var n = bytes / 1e9;
+    var n = bytes / 1.024e9;
     return (n >= 100 ? Math.round(n) : n.toFixed(1)) + " GB";
   }
 
