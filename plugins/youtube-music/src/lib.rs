@@ -9,7 +9,7 @@
 //!   linked to youtube.com.
 //! - A search that fits it without a keyword (see `plugin.json`'s `ids`
 //!   and `hints`), which by default the results page offers as a link: for
-//!   someone with a YouTube channel (Wikidata's P2397), such as an artist,
+//!   an artist with a YouTube channel (Wikidata's P2397), say,
 //!   that channel's latest uploads, unless `config.json` sets
 //!   `"channel_uploads": false`; otherwise songs when it is about music,
 //!   or videos.
