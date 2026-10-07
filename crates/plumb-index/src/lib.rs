@@ -9,7 +9,9 @@
 //! `score = alpha * link_score + trust * ((1 - alpha) * text_score + name_bonus) + country`
 //!
 //! - `alpha` is [`RankConfig::described_alpha`] instead, when set, for a
-//!   query no site is named by in full and that names no kind of thing.
+//!   query no site is named by in full and that names no kind of thing,
+//!   or [`RankConfig::titled_alpha`] when some site's title part spells
+//!   that query out whole.
 //! - `text_score` is the BM25 score normalized to `0..=1` within the
 //!   candidates of each query.
 //! - `name_bonus` rewards a site whose name the query starts with. A domain
@@ -231,6 +233,9 @@ const INTENT_WORDS: &[&str] = &[
 /// Memory budget of the index writer, shared by its threads. Enough for a
 /// million records without flushing tiny segments.
 const WRITER_HEAP_BYTES: usize = 200_000_000;
+/// How many sites a query's joined form matches are checked for a title
+/// part that is the whole query ([`RankConfig::titled_alpha`]).
+const TITLED_CHECKED: usize = 50;
 
 /// Ranking knobs. Missing fields deserialize to their [`Default`] values.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -280,6 +285,12 @@ pub struct RankConfig {
     /// ("code hosting"). Small sites that repeat such a query's words match
     /// it better than the big site it describes. `None` keeps `alpha`.
     pub described_alpha: Option<f32>,
+    /// [`RankConfig::described_alpha`] for such a query that some site's
+    /// title part, link text or label spells out whole ("pizza in denver"
+    /// for "Denver Pizza Company | Pizza in Denver", "charles schwab"):
+    /// it half names that site, so popularity counts less. `None` keeps
+    /// `described_alpha`.
+    pub titled_alpha: Option<f32>,
     /// [`RankConfig::exact_label_bonus`] for a domain label equal to only
     /// the first `k` of the query's `n` words, which then gets `k / n` of
     /// it (code.gov in "code hosting"). `None` keeps the full-name bonus.
@@ -366,7 +377,8 @@ impl Default for RankConfig {
             kind_bonus: 0.25,
             country_boost: 0.06,
             meaning_weight: 0.7,
-            described_alpha: Some(0.5),
+            described_alpha: Some(0.6),
+            titled_alpha: Some(0.5),
             partial_label_bonus: None,
             described_relevance: Some(0.04),
             navigational_relevance: Some(0.05),
@@ -1312,8 +1324,43 @@ impl Searcher {
             || names.iter().any(|(&addr, name)| {
                 name.typed || (name.words() > 0 && link_score_of(addr) >= WELL_KNOWN_LINK_SCORE)
             });
-        let alpha = match cfg.described_alpha {
-            Some(described) if !navigational => unit_or(described, default.alpha),
+        // Whether some site's title part is the whole query: a site
+        // matching it in the joined field, which also holds link texts,
+        // and whose stored title has that part.
+        let titled = || -> Result<bool> {
+            let (Some(joined), Some(_)) = (&query.joined, cfg.titled_alpha) else {
+                return Ok(false);
+            };
+            if query.len < 2 {
+                return Ok(false);
+            }
+            let found = searcher.search(
+                &TermQuery::new(
+                    Term::from_field_text(self.fields.joined, joined),
+                    IndexRecordOption::Basic,
+                ),
+                &TopDocs::with_limit(TITLED_CHECKED).order_by_score(),
+            )?;
+            for (_, addr) in found {
+                let document: TantivyDocument = searcher.doc(addr)?;
+                let title = document
+                    .get_first(self.fields.title)
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default();
+                if schema::title_parts(title)
+                    .into_iter()
+                    .any(|part| analysis::tokens(&self.joined, part).first() == Some(joined))
+                {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        };
+        let alpha = match (cfg.described_alpha, cfg.titled_alpha) {
+            (Some(_), Some(titled_alpha)) if !navigational && titled()? => {
+                unit_or(titled_alpha, default.alpha)
+            }
+            (Some(described), _) if !navigational => unit_or(described, default.alpha),
             _ => unit_or(cfg.alpha, default.alpha),
         };
         let question_floor = cfg

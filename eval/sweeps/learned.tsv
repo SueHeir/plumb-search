@@ -10,3 +10,5 @@ nav-15	{"navigational_relevance": 0.15}
 no-added-site	{"add_named_site": false}
 questions-name	{"questions_name_nothing": false}
 drop-namesakes	{"drop_namesakes": true}
+no-titled	{"titled_alpha": null}
+described-0.5	{"described_alpha": 0.5, "titled_alpha": null}
