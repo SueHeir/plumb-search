@@ -1345,7 +1345,9 @@ pub fn place_pages(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) -> Ve
         None => true,
         Some(_) if organizations_site => false,
         Some(site)
-            if !site.named && site.text_score < WEAK_SITE_MATCH && page.page.is_article() =>
+            if !site.named
+                && site.placing_text_score.unwrap_or(site.text_score) < WEAK_SITE_MATCH
+                && page.page.is_article() =>
         {
             true
         }
@@ -1862,6 +1864,7 @@ mod tests {
             official: false,
             key_pages: Vec::new(),
             demand: None,
+            placing_text_score: None,
         }
     }
 

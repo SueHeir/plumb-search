@@ -115,6 +115,8 @@ impl MeaningIndex {
             QueryInstruction::Mix | QueryInstruction::Min => {
                 Some(vec![embed(query)?, instructed()?])
             }
+            // Ranked by the instructed vector; placed by the plain one.
+            QueryInstruction::Split => Some(vec![instructed()?, embed(query)?]),
         }
         .map(|query| QueryMeaning::new(vectors, query, self.instruction))
     }
@@ -221,7 +223,17 @@ impl Meaning for QueryMeaning<'_> {
         self.nearest.clone()
     }
 
+    fn plain_closeness(&self, domain: &str) -> Option<Option<f32>> {
+        match self.combine {
+            QueryInstruction::Split => Some(self.spread(self.spreads.get(1)?, domain)),
+            _ => None,
+        }
+    }
+
     fn closeness(&self, domain: &str) -> Option<f32> {
+        if self.combine == QueryInstruction::Split {
+            return self.spread(self.spreads.first()?, domain);
+        }
         let all = self
             .spreads
             .iter()

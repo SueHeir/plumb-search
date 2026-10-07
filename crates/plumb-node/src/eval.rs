@@ -842,6 +842,7 @@ mod tests {
     fn pages_are_listed_as_a_node_lists_them() {
         let site = |domain: &str, named: bool| Hit {
             demand: None,
+            placing_text_score: None,
             domain: domain.into(),
             url: format!("https://{domain}/"),
             title: None,

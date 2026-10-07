@@ -286,6 +286,9 @@ pub enum QueryInstruction {
     Mix,
     /// Both ways, closeness being the lower of the two.
     Min,
+    /// After the instruction for ranking sites; as it is for deciding
+    /// whether a page goes before them.
+    Split,
 }
 
 #[derive(Debug, Args)]
