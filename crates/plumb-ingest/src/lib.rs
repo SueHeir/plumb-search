@@ -23,6 +23,7 @@ pub mod builder;
 pub mod ccranks;
 pub mod download;
 pub mod facts;
+pub mod films;
 pub mod github;
 pub mod intros;
 pub mod item_facts;

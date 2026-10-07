@@ -15,6 +15,7 @@ pub mod article;
 mod bot_check;
 mod country;
 pub mod facts;
+pub mod films;
 pub mod key_pages;
 pub mod keys;
 mod kinds;
