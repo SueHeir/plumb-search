@@ -3806,6 +3806,7 @@ mod tests {
     fn hit(domain: &str, url: &str, title: Option<&str>, description: Option<&str>) -> Hit {
         Hit {
             demand: None,
+            placing_text_score: None,
             domain: domain.to_string(),
             url: url.to_string(),
             title: title.map(str::to_string),
