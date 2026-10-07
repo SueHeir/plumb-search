@@ -8,7 +8,10 @@
 //! Both searches take `country=XX` (a two-letter code, or `any` for none)
 //! and `only=1` (leave out other countries' sites). Without `country`, the
 //! server's [`HomeCountry`] setting decides, by default from the browser's
-//! `Accept-Language` and then this computer's region settings.
+//! `Accept-Language`, then this computer's region settings, then the
+//! United States. They also take `lang=XX` (only sites in that language, or
+//! `any`); without it, the browser's first language when the settings gear
+//! offers it, else English.
 //! - `POST /mcp` answers AI apps over the Model Context Protocol (see
 //!   [`crate::mcp`]),
 //! - `GET /opensearch.xml` describes the search engine to browsers
@@ -820,7 +823,9 @@ struct SearchParams {
     tune: Option<String>,
     /// Safe search: `off`, `moderate` (the default) or `strict`.
     safe: Option<String>,
-    /// Only sites in this language (a language code); empty for any.
+    /// Only sites in this language (a language code), `any` (or empty)
+    /// for any; without it, the browser's first language when the gear
+    /// offers it, else [`DEFAULT_LANGUAGE`].
     lang: Option<String>,
     /// The "Recent" headlines: `collapsed` (the default), `expanded` or
     /// `off`.
@@ -837,6 +842,21 @@ struct SearchParams {
     categories: Option<String>,
     /// SearXNG's time range (`day`, `week`, ...): recent headlines first.
     time_range: Option<String>,
+}
+
+/// The language filter of a search that names none, when the browser's
+/// first language is not one the settings gear offers.
+const DEFAULT_LANGUAGE: &str = "en";
+
+/// The language filter of a search that names none: the first language of
+/// the browser's `Accept-Language` when the settings gear offers it
+/// (`de-DE,de;q=0.9` -> `de`), else [`DEFAULT_LANGUAGE`].
+fn default_language(accept_language: Option<&str>) -> String {
+    accept_language
+        .and_then(|header| header.split(',').next())
+        .and_then(|first| language_code(first.split(';').next().unwrap_or_default()))
+        .filter(|code| LANGUAGE_CHOICES.iter().any(|(offered, _)| offered == code))
+        .unwrap_or_else(|| DEFAULT_LANGUAGE.to_string())
 }
 
 /// Whether a flag parameter is set: `1`, `on`, `true` or `yes`.
@@ -888,7 +908,11 @@ impl SearchParams {
                 .as_deref()
                 .and_then(SafeSearch::parse)
                 .unwrap_or_default(),
-            language: self.lang.as_deref().and_then(language_code),
+            language: match self.lang.as_deref().map(str::trim) {
+                None => Some(default_language(accept_language)),
+                Some(lang) if lang.is_empty() || lang.eq_ignore_ascii_case("any") => None,
+                Some(lang) => language_code(lang),
+            },
             recent: self
                 .news
                 .as_deref()
@@ -2481,7 +2505,7 @@ fn settings_form(query: &str, autofocus: bool, settings: &Settings) -> String {
     .collect();
     let language = options.language.as_deref();
     let mut language_choices = format!(
-        "<option value=\"\"{}>Any language</option>",
+        "<option value=\"any\"{}>Any language</option>",
         if language.is_none() { " selected" } else { "" }
     );
     if let Some(code) = language.filter(|c| !LANGUAGE_CHOICES.iter().any(|(l, _)| l == c)) {
@@ -2723,9 +2747,7 @@ fn results_form(query: &str, settings: &Settings) -> String {
 fn search_link(path: &str, query: &str, options: &SearchOptions, net: bool) -> String {
     let mut params = url::form_urlencoded::Serializer::new(String::new());
     params.append_pair("q", query);
-    if let Some(country) = &options.country {
-        params.append_pair("country", country);
-    }
+    params.append_pair("country", options.country.as_deref().unwrap_or("any"));
     if options.only_country {
         params.append_pair("only", "1");
     }
@@ -3375,15 +3397,13 @@ fn go_link_with(query: &str, options: &SearchOptions, what: &[(&str, &str)]) -> 
     format!("/go?{}", link.finish())
 }
 
-/// Adds safe search, when not the default, and the language filter to a
-/// link's parameters.
+/// Adds safe search, when not the default, and the language filter (`any`
+/// for none) to a link's parameters.
 fn append_filters(params: &mut url::form_urlencoded::Serializer<String>, options: &SearchOptions) {
     if options.safe != SafeSearch::default() {
         params.append_pair("safe", options.safe.as_str());
     }
-    if let Some(language) = &options.language {
-        params.append_pair("lang", language);
-    }
+    params.append_pair("lang", options.language.as_deref().unwrap_or("any"));
     if options.recent != RecentNews::default() {
         params.append_pair("news", options.recent.as_str());
     }
@@ -4110,7 +4130,7 @@ mod tests {
         let (_, _, page) = send(app.clone(), "/search?q=us+bank").await;
         assert!(!page.contains("From Test News"), "not run");
         assert!(page.contains(
-            "<a href=\"/search?q=us+bank&amp;run=test-news\">Show results from Test News</a>"
+            "<a href=\"/search?q=us+bank&amp;country=any&amp;lang=en&amp;run=test-news\">Show results from Test News</a>"
         ));
         let (_, _, page) = send(app.clone(), "/search?q=us+bank&run=test-news").await;
         assert!(page.contains("From Test News"));
@@ -4310,7 +4330,7 @@ mod tests {
         // Without an icon, a site gets its first letter.
         assert!(body.contains("aria-hidden=\"true\">U</span>"));
         assert!(body.contains("value=\"us bank\""));
-        assert!(body.contains("href=\"/api/search?q=us+bank\""));
+        assert!(body.contains("href=\"/api/search?q=us+bank&amp;country=any&amp;lang=en\""));
         assert_eq!(
             *fake.calls.lock().unwrap(),
             vec![("us bank".to_string(), DEFAULT_LIMIT)]
@@ -4837,7 +4857,7 @@ mod tests {
         let (code, _, body) = send(app(), "/search?q=us+bank&country=any").await;
         assert_eq!(code, StatusCode::OK);
         assert!(
-            body.contains("href=\"/go?q=us+bank&amp;d=usbank.com&amp;country=any\""),
+            body.contains("href=\"/go?q=us+bank&amp;d=usbank.com&amp;country=any&amp;lang=en\""),
             "{body}"
         );
         // The address shown is still the site's own.
@@ -5389,6 +5409,32 @@ mod tests {
         assert!(!body.contains("class=\"net\""));
     }
 
+    #[test]
+    fn english_is_the_language_unless_chosen() {
+        let language = |lang: Option<&str>, accept: Option<&str>| {
+            let params = SearchParams {
+                lang: lang.map(str::to_string),
+                ..SearchParams::default()
+            };
+            let mut headers = HeaderMap::new();
+            if let Some(accept) = accept {
+                headers.insert(header::ACCEPT_LANGUAGE, accept.parse().unwrap());
+            }
+            params.options(&HomeCountry::Off, &headers).language
+        };
+        assert_eq!(language(None, None).as_deref(), Some("en"));
+        assert_eq!(language(None, Some("*")).as_deref(), Some("en"));
+        assert_eq!(
+            language(None, Some("de-DE,de;q=0.9")).as_deref(),
+            Some("de")
+        );
+        // A language the gear does not offer falls back to English.
+        assert_eq!(language(None, Some("eu-ES")).as_deref(), Some("en"));
+        assert_eq!(language(Some("any"), Some("de-DE")), None);
+        assert_eq!(language(Some(""), None), None);
+        assert_eq!(language(Some("fr"), None).as_deref(), Some("fr"));
+    }
+
     #[tokio::test]
     async fn safe_search_and_language_stay_with_the_search() {
         let (_, _, body) = get(
@@ -5405,13 +5451,14 @@ mod tests {
         };
         assert_eq!(
             search_link("/search", "x", &options, false),
-            "/search?q=x&safe=off&lang=de"
+            "/search?q=x&country=any&safe=off&lang=de"
         );
         assert!(go_link("x", &options, "a.com").ends_with("&safe=off&lang=de"));
-        // The default needs no parameter.
+        // No country and no language filter say so, as the defaults
+        // are the United States and English.
         assert_eq!(
             search_link("/search", "x", &SearchOptions::default(), false),
-            "/search?q=x"
+            "/search?q=x&country=any&lang=any"
         );
     }
 
@@ -5742,7 +5789,7 @@ mod tests {
         );
         assert!(
             page.contains(
-                "<p class=\"sp\">Did you mean <a href=\"/search?q=amazon&amp;country=DE\">\
+                "<p class=\"sp\">Did you mean <a href=\"/search?q=amazon&amp;country=DE&amp;lang=any\">\
              <strong>amazon</strong></a>?</p>"
             ),
             "{page}"
@@ -5839,7 +5886,7 @@ mod tests {
             &Icons::default(),
         );
         assert!(page.contains(
-            "From this site's own index. <a href=\"/search?q=q&amp;country=DE&amp;net=1\">"
+            "From this site's own index. <a href=\"/search?q=q&amp;country=DE&amp;net=1&amp;lang=any\">"
         ));
 
         settings.network = NetSetting::On;
@@ -6112,7 +6159,9 @@ mod tests {
         assert_eq!(code, StatusCode::OK);
         let profile = set_cookie(&headers, "plumb_profile").expect("a profile cookie");
         assert!(
-            body.contains("href=\"/go?q=us+bank&amp;d=usbank-login-help.com&amp;country=any\""),
+            body.contains(
+                "href=\"/go?q=us+bank&amp;d=usbank-login-help.com&amp;country=any&amp;lang=en\""
+            ),
             "{body}"
         );
         assert!(!body.contains("You opened this before"), "{body}");

@@ -360,6 +360,7 @@ fn evaluate(
             country: args.country.clone(),
             only_country: false,
             exact: args.exact,
+            language: args.lang.clone(),
             ..SearchOptions::default()
         };
         let search = |query: &str| {
@@ -700,6 +701,7 @@ fn profile_shown(
 ) -> Result<Option<String>> {
     let options = SearchOptions {
         country: args.country.clone(),
+        language: args.lang.clone(),
         ..SearchOptions::default()
     };
     for name in crate::web::answers::profile_lookups(query) {
@@ -732,6 +734,7 @@ fn fact_rank(
             let options = SearchOptions {
                 country: args.country.clone(),
                 exact: true,
+                language: args.lang.clone(),
                 ..SearchOptions::default()
             };
             let mut sites = searcher.search_meaning(&asked.subject, 5, cfg, &options, None)?;

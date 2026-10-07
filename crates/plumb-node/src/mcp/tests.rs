@@ -745,3 +745,15 @@ fn official_site_prefers_a_packages_home_page_to_a_guess() {
     assert_eq!(answer["confidence"], "medium");
     assert_eq!(answer["alternatives"][0]["domain"], "xapo.com");
 }
+
+#[test]
+fn search_is_in_english_unless_asked() {
+    let language = |args: Value| search_language(args.as_object().unwrap());
+    assert_eq!(language(json!({})), Ok(Some("en".into())));
+    assert_eq!(language(json!({ "language": "any" })), Ok(None));
+    assert_eq!(
+        language(json!({ "language": "de-DE" })),
+        Ok(Some("de".into()))
+    );
+    assert!(language(json!({ "language": "german!" })).is_err());
+}

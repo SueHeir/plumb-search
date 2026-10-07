@@ -476,7 +476,8 @@ pub struct SearchOptions {
     /// What safe search leaves out; see [`plumb_core::safe`].
     pub safe: SafeSearch,
     /// Leave out sites whose homepage is in another language than this
-    /// one (a language code, `en`). Sites that do not say stay.
+    /// one (a language code, `en`). Sites that do not say stay, and so do
+    /// sites the whole query names.
     pub language: Option<String>,
     /// How the results page shows recent headlines; the index ignores it.
     pub recent: plumb_core::RecentNews,
@@ -1409,12 +1410,6 @@ impl Searcher {
             if options.safe.hides(column.adult(addr.doc_id)) {
                 continue;
             }
-            let site_language = column.language(addr.doc_id);
-            if let (Some(wanted), Some(site)) = (&language, &site_language) {
-                if wanted != site {
-                    continue;
-                }
-            }
             let country = column.country(addr.doc_id);
             let country_bonus = match (&home, &country) {
                 (Some(home), Some(country)) if home == country => country_boost,
@@ -1425,6 +1420,13 @@ impl Searcher {
             let link_score = link_score_of(addr);
             let is_kind = kinds.contains(&addr);
             let name = names.get(&addr).copied().unwrap_or_default();
+            // A site whose domain the whole query names stays whatever its
+            // language: "spiegel" finds spiegel.de with English chosen.
+            if let (Some(wanted), Some(site)) = (&language, column.language(addr.doc_id)) {
+                if *wanted != site && !name.typed && name.label < query.len {
+                    continue;
+                }
+            }
             let mut placing_text_score = None;
             let text_score = if is_kind || name.label >= query.len {
                 // Being what the query names, or being named by all of it,
@@ -4186,6 +4188,16 @@ mod tests {
             ..SearchOptions::default()
         });
         assert!(has(&german, "bankde.example"));
+        // ...unless the query names the site.
+        let english = SearchOptions {
+            language: Some("en".into()),
+            ..SearchOptions::default()
+        };
+        let named = searcher
+            .search_full("bankde", 50, &RankConfig::default(), &english)
+            .unwrap()
+            .hits;
+        assert!(domains(&named).contains(&"bankde.example"));
     }
 
     #[test]
