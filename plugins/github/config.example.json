@@ -1,0 +1,3 @@
+{
+  "token": "optional: a fine-grained GitHub token with read and write access to Starring, from https://github.com/settings/personal-access-tokens"
+}

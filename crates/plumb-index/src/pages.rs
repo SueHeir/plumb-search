@@ -242,6 +242,37 @@ impl Page {
         }
     }
 
+    /// The song or album `music`, written as an article whose item is
+    /// `recording/MBID` or `release-group/MBID` and whose views are its
+    /// listeners; `None` for an item that is neither.
+    pub fn from_music(music: Article) -> Option<Self> {
+        let item = music.item.as_deref()?;
+        let (kind, mbid) = item.split_once('/')?;
+        let mbid_ok = mbid.len() == 36 && mbid.chars().all(|c| c.is_ascii_hexdigit() || c == '-');
+        if !matches!(kind, "recording" | "release-group") || !mbid_ok {
+            return None;
+        }
+        Some(Page {
+            set: MUSIC_SET.to_string(),
+            url: format!("https://musicbrainz.org/{item}"),
+            title: music.title,
+            description: music.description,
+            site: None,
+            views: music.views,
+            aliases: music.aliases,
+            item: None,
+            profiles: music.profiles,
+            website: None,
+            package: None,
+            facts: Vec::new(),
+        })
+    }
+
+    /// Whether the page is a song of the music set, rather than an album.
+    pub fn is_song(&self) -> bool {
+        self.set == MUSIC_SET && self.url.starts_with("https://musicbrainz.org/recording/")
+    }
+
     /// The paper `paper`, written as an article whose item is its DOI or
     /// else its OpenAlex id, and whose views are its citations.
     pub fn from_paper(paper: Article) -> Self {
@@ -318,6 +349,7 @@ impl Page {
     pub fn has_reader(set: &str) -> bool {
         set == PACKAGES_SET
             || set == STACKEXCHANGE_SET
+            || set == MUSIC_SET
             || Page::from_set(set, Article::default()).is_some()
     }
 
@@ -334,6 +366,7 @@ impl Page {
             WIKIDATA_SET => Page::from_item(article),
             PACKAGES_SET => Page::from_package(article)?,
             STACKEXCHANGE_SET => Page::from_exchange(article)?,
+            MUSIC_SET => Page::from_music(article)?,
             _ => Page::from_article(set.strip_prefix("wikipedia-")?, article),
         })
     }
@@ -351,10 +384,14 @@ impl Page {
         })
     }
 
-    /// Whether the page may be listed before every site. Books, podcasts
-    /// and papers share their titles with too much ("Python", "Apple") to.
+    /// Whether the page may be listed before every site. Books, podcasts,
+    /// papers, songs and albums share their titles with too much
+    /// ("Python", "Apple", "Hello") to.
     pub fn may_lead(&self) -> bool {
-        self.set != BOOKS_SET && self.set != PAPERS_SET && self.set != PODCASTS_SET
+        self.set != BOOKS_SET
+            && self.set != PAPERS_SET
+            && self.set != PODCASTS_SET
+            && self.set != MUSIC_SET
     }
 
     /// The name of the set people see: "Wikipedia".
@@ -371,6 +408,8 @@ impl Page {
             "Open Library"
         } else if self.set == PODCASTS_SET {
             "Podcast Index"
+        } else if self.set == MUSIC_SET {
+            "MusicBrainz"
         } else if self.set == PAPERS_SET {
             "OpenAlex"
         } else if self.set == WIKIDATA_SET {
@@ -411,6 +450,8 @@ impl Page {
             "openlibrary.org"
         } else if self.set == PODCASTS_SET {
             "podcastindex.org"
+        } else if self.set == MUSIC_SET {
+            "musicbrainz.org"
         } else if self.set == PAPERS_SET {
             "openalex.org"
         } else if let Some(registry) = self.registry() {
@@ -435,6 +476,9 @@ pub const BOOKS_SET: &str = "books";
 const PAPER_TITLE_WORDS: usize = 4;
 /// The set of podcasts, from Podcast Index.
 pub const PODCASTS_SET: &str = "podcasts";
+/// The set of songs and albums, from MusicBrainz, ranked by
+/// ListenBrainz's listeners.
+pub const MUSIC_SET: &str = "music";
 /// The set of software packages (npm, PyPI, crates.io and others).
 pub const PACKAGES_SET: &str = "packages";
 /// Least popularity of a package found by a query that names only its
@@ -826,10 +870,13 @@ impl PageSearcher {
             })
             .collect();
         clauses.push((Occur::Should, Box::new(BooleanQuery::new(every_word))));
-        // Books and podcasts named by their title and what they are: "dune
-        // book", "hardcore history podcast".
+        // Books, podcasts, songs and albums named by their title and what
+        // they are: "dune book", "hardcore history podcast", "hey jude song".
         if let Some((title, last)) = query.trim().rsplit_once(char::is_whitespace) {
-            if matches!(last.to_lowercase().as_str(), "book" | "novel" | "podcast") {
+            if matches!(
+                last.to_lowercase().as_str(),
+                "book" | "novel" | "podcast" | "song" | "album"
+            ) {
                 let title_words: Vec<(Occur, Box<dyn Query>)> =
                     analysis::tokens(&self.words, title)
                         .iter()
@@ -1072,6 +1119,8 @@ impl PageSearcher {
             BOOKS_SET => ("Book by ", &["book", "novel"]),
             PODCASTS_SET => ("Podcast by ", &["podcast"]),
             PAPERS_SET => ("Paper by ", &["paper"]),
+            MUSIC_SET if page.is_song() => ("Song by ", &["song"]),
+            MUSIC_SET => ("Album by ", &["album"]),
             _ => return false,
         };
         let by = page
@@ -1107,6 +1156,11 @@ impl PageSearcher {
                     }
                     Some(rest) if !title.is_empty() => rest,
                     _ => return false,
+                };
+                // "hey jude by the beatles".
+                let rest = match rest {
+                    [by, rest @ ..] if by == "by" && !rest.is_empty() => rest,
+                    rest => rest,
                 };
                 rest.iter().all(|word| author.contains(word))
                     || matches!(rest, [word] if kinds.contains(&word.as_str()))
@@ -2253,6 +2307,74 @@ mod tests {
             "Navy Federal Credit Union"
         ));
         assert!(!site_is_titled("navyfed.org", "Navy Federal Credit Union"));
+    }
+
+    fn song(title: &str, by: &str, item: &str, listeners: u64) -> Page {
+        Page::from_music(Article {
+            title: title.into(),
+            description: Some(format!("{by}, 1968")),
+            item: Some(item.into()),
+            views: listeners,
+            aliases: vec![format!("{title} {}", by.split_once(" by ").unwrap().1)],
+            ..Article::default()
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn songs_and_albums_are_found_by_their_name_and_artist() {
+        let jude = song(
+            "Hey Jude",
+            "Song by The Beatles",
+            "recording/a1b2c3d4-d987-4042-ae91-78d6a3267d69",
+            120_000,
+        );
+        assert_eq!(
+            jude.url,
+            "https://musicbrainz.org/recording/a1b2c3d4-d987-4042-ae91-78d6a3267d69"
+        );
+        assert!(jude.is_song() && !jude.may_lead());
+        assert_eq!(jude.set_name(), "MusicBrainz");
+        let white = song(
+            "The Beatles",
+            "Album by The Beatles",
+            "release-group/a1b2c3d4-a1db-32aa-b14f-bc9cc507b843",
+            40_000,
+        );
+        assert!(!white.is_song());
+        let (_dir, s) = searcher(&[
+            jude.clone(),
+            white,
+            page("Hey Jude", 300_000, &[]),
+            page("The Beatles", 900_000, &[]),
+        ]);
+        for query in [
+            "hey jude the beatles",
+            "hey jude beatles",
+            "hey jude by the beatles",
+            "hey jude song",
+        ] {
+            let hits = s.search(query, 5).unwrap();
+            assert!(
+                hits[0].whole && hits[0].named && hits[0].page.url == jude.url,
+                "{query}: {hits:?}"
+            );
+        }
+        // Alone, the title asks for the article first.
+        let hits = s.search("hey jude", 5).unwrap();
+        assert_eq!(titles(&hits), ["Hey Jude", "Hey Jude"]);
+        assert!(hits[0].page.is_article() && !hits[1].whole);
+        let hits = s.search("the beatles album", 5).unwrap();
+        assert!(hits[0].whole && hits[0].page.set == MUSIC_SET && !hits[0].page.is_song());
+        // An item of neither kind is no page.
+        assert_eq!(
+            Page::from_music(Article {
+                title: "x".into(),
+                item: Some("artist/a1b2c3d4-d987-4042-ae91-78d6a3267d69".into()),
+                ..Article::default()
+            }),
+            None
+        );
     }
 
     #[test]

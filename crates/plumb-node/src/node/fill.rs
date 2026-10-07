@@ -159,6 +159,11 @@ pub(super) const BLACKHOLE_AGAIN_AFTER: Duration = Duration::from_secs(24 * 3600
 /// sites peaks at about 2.2 GB, rounded up.
 pub(super) const BUILD_BYTES_PER_SITE: u64 = 2_500;
 
+/// Peak memory a crawl round takes per site when crawling only
+/// ([`super::NodeConfig::crawl_only`]), which builds no index: the round's
+/// outline of each site ([`super::round::RoundSites`]), rounded up well.
+pub(super) const ROUND_BYTES_PER_SITE: u64 = 500;
+
 /// Share of the machine's memory (or its container's limit) an index
 /// build may take; filling stops before the index outgrows it, so a 4 GB
 /// server stops at about 800,000 sites.
@@ -362,18 +367,19 @@ fn room_up_to(
     Ok(Some((cap - used) / DISK_PER_RECORD_BYTE))
 }
 
-/// How many more sites the index may grow by before a build of it takes
-/// more than [`BUILD_MEMORY_PERCENT`] of `memory` bytes, when known, and
-/// why none when none.
+/// How many more sites the index may grow by before a build of it, at
+/// `per_site` bytes a site, takes more than [`BUILD_MEMORY_PERCENT`] of
+/// `memory` bytes, when known, and why none when none.
 pub(super) fn site_room(
     memory: Option<u64>,
+    per_site: u64,
     sites: u64,
     pending_sites: u64,
 ) -> std::result::Result<Option<u64>, &'static str> {
     let Some(memory) = memory else {
         return Ok(None);
     };
-    let cap = memory / 100 * BUILD_MEMORY_PERCENT / BUILD_BYTES_PER_SITE;
+    let cap = memory / 100 * BUILD_MEMORY_PERCENT / per_site;
     let have = sites.saturating_add(pending_sites);
     if have >= cap {
         return Err("Full: a bigger index would not fit in this machine's memory");
@@ -556,7 +562,7 @@ async fn fill_round(inner: &Arc<Inner>) -> Result<()> {
     let Some(net) = network::handle(inner).cloned() else {
         return Ok(());
     };
-    if inner.current().is_none() {
+    if inner.current().is_none() && !inner.config.crawl_only {
         inner.update_fill(|s| s.detail = "Waiting for the first index".into());
         return Ok(());
     }
@@ -661,7 +667,7 @@ async fn fill_round(inner: &Arc<Inner>) -> Result<()> {
                 Ok(room) => {
                     if state.focus_from.is_none() {
                         state.focus_from = Some(state.next);
-                        let sites = inner.current_summary().map_or(0, |(_, docs)| docs);
+                        let sites = inner.held_sites();
                         state.focus_base = Some(sites + state.pending_sites);
                     }
                     (room, true)
@@ -677,12 +683,17 @@ async fn fill_round(inner: &Arc<Inner>) -> Result<()> {
             return Ok(());
         }
     };
-    let sites = inner.current_summary().map_or(0, |(_, docs)| docs);
+    let sites = inner.held_sites();
     // While setting up, every site counts, up to the sites a node keeps.
     let mut seed_room = seed.then(|| {
         (inner.config.sites as u64).saturating_sub(sites.saturating_add(state.pending_sites))
     });
-    let mut site_room = match site_room(memory_limit(), sites, state.pending_sites) {
+    let per_site = if inner.config.crawl_only {
+        ROUND_BYTES_PER_SITE
+    } else {
+        BUILD_BYTES_PER_SITE
+    };
+    let mut site_room = match site_room(memory_limit(), per_site, sites, state.pending_sites) {
         Ok(room) => room,
         Err(why) => {
             inner.update_fill(|s| s.detail = why.into());
@@ -1018,14 +1029,31 @@ mod tests {
     #[test]
     fn stops_before_an_index_build_outgrows_the_memory() {
         const GB: u64 = 1_000_000_000;
-        assert_eq!(site_room(None, 5_000_000, 0), Ok(None));
+        assert_eq!(
+            site_room(None, BUILD_BYTES_PER_SITE, 5_000_000, 0),
+            Ok(None)
+        );
         // A 4 GB server: about 800,000 sites.
-        assert_eq!(site_room(Some(4 * GB), 600_000, 0), Ok(Some(200_000)));
-        assert_eq!(site_room(Some(4 * GB), 600_000, 150_000), Ok(Some(50_000)));
-        assert!(site_room(Some(4 * GB), 800_000, 0).is_err());
-        assert!(site_room(Some(4 * GB), 1_190_000, 0).is_err());
+        assert_eq!(
+            site_room(Some(4 * GB), BUILD_BYTES_PER_SITE, 600_000, 0),
+            Ok(Some(200_000))
+        );
+        assert_eq!(
+            site_room(Some(4 * GB), BUILD_BYTES_PER_SITE, 600_000, 150_000),
+            Ok(Some(50_000))
+        );
+        assert!(site_room(Some(4 * GB), BUILD_BYTES_PER_SITE, 800_000, 0).is_err());
+        assert!(site_room(Some(4 * GB), BUILD_BYTES_PER_SITE, 1_190_000, 0).is_err());
         // A 16 GB desktop: 3.2 million.
-        assert_eq!(site_room(Some(16 * GB), 250_000, 0), Ok(Some(2_950_000)));
+        assert_eq!(
+            site_room(Some(16 * GB), BUILD_BYTES_PER_SITE, 250_000, 0),
+            Ok(Some(2_950_000))
+        );
+        // Crawling only, a 4 GB server holds 4 million sites.
+        assert_eq!(
+            site_room(Some(4 * GB), ROUND_BYTES_PER_SITE, 2_450_000, 0),
+            Ok(Some(1_550_000))
+        );
         assert!(memory_limit().is_none_or(|m| m > 0));
     }
 

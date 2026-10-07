@@ -1,6 +1,6 @@
 # Page sets: articles, repositories, questions, books and papers in results
 
-Plumb lists single pages next to sites: English Wikipedia's articles, well-starred GitHub repositories, Stack Overflow's and other Stack Exchange sites' most viewed questions, Open Library's most read books, Podcast Index's most popular podcasts and the most cited papers. Searching "marie curie" shows the article Marie Curie, and "python" shows python.org with the article on the Python language under it.
+Plumb lists single pages next to sites: English Wikipedia's articles, well-starred GitHub repositories, Stack Overflow's and other Stack Exchange sites' most viewed questions, Open Library's most read books, Podcast Index's most popular podcasts, the songs and albums most listened to and the most cited papers. Searching "marie curie" shows the article Marie Curie, and "python" shows python.org with the article on the Python language under it.
 
 ## What is kept
 
@@ -116,6 +116,22 @@ plumb fetch-pages --set podcasts --work /big/disk/dumps --data /path/to/node-dat
 ```
 
 Each podcast keeps its title, "Podcast by AUTHOR · CATEGORY" as its description, "AUTHOR podcast" as another title, its Podcast Index id (its page at podcastindex.org lists its episodes and the apps that play it), its Apple Podcasts id, and its website's domain when that is a site of its own, so it goes under that site's result. Many podcasts share Podcast Index's popularity score, so an Apple Podcasts listing, then the years a show has run, then its episodes (counted up to 999) break ties, and a show listed twice under one title and site (or author) is kept once. Like a book, a podcast is never listed before every site by its title alone, but its title or the end of it followed by "podcast", or by its author's name, asks for it. `--min-podcast-score`, `--max-podcasts` and `--podcast-db` (an unpacked database) change what is read and kept.
+
+## Songs and albums
+
+The `music` set lists the songs and albums people listen to most (150,000 songs and 30,000 albums by default): "hey jude beatles", "hey jude by the beatles" and "hey jude song" find the song, "abbey road album" the album. It is made from MusicBrainz's core data dump (CC0, `mbdump.tar.bz2`, about 7 GB; nothing of the derived dumps is read) and how many people listened to each song and album, which ListenBrainz's popularity API (CC0) gives for 1,000 at a time:
+
+```sh
+plumb fetch-pages --set music --work /big/disk/dumps --data /path/to/node-data
+```
+
+A song is all the recordings of one title by one artist credit, remasters and live versions too, and its listeners are its recordings' together. ListenBrainz is asked about every song on at least two release groups (an album, a single, a compilation) and every song of the 30,000 albums most listened to, so an album's best-known songs are found even when no single put them out. Each song keeps its title, "Song by ARTIST, YEAR" as its description, "TITLE ARTIST" as another title, its most listened to recording's MusicBrainz id (its address on musicbrainz.org), its listeners, and the links MusicBrainz has for it: its lyrics on Genius, its Spotify track and its music video. Each album keeps the same, with "Album by ARTIST, YEAR", and its Spotify and Apple Music albums. A compilation, live album or DJ mix is no album here; a soundtrack is.
+
+No lyrics are kept: they are copyrighted. "bohemian rhapsody lyrics" links the song's page on Genius, which MusicBrainz links the song's work to, shown first like a profile ("Listing, from MusicBrainz"); a song MusicBrainz knows no such page for gets a link to Genius's search for its title and artist instead. Nothing is fetched from Genius.
+
+Like a book, a song or album is never listed before every site by its title alone ("hello" is not Adele's song), and an article of the same name comes before it.
+
+The answers ListenBrainz gives are kept in `--work` (`listenbrainz-albums.tsv`, `listenbrainz-recordings.tsv`) as they come, so a run that stops carries on where it left off. It keeps to the rate ListenBrainz sets. `--max-songs`, `--max-albums`, `--min-song-releases`, `--min-listeners` (20 by default) and `--musicbrainz-dump` (a downloaded `mbdump.tar.bz2`, or a directory of its tables) change what is read and kept. Reading the dump takes a few GB of memory.
 
 ## Papers
 

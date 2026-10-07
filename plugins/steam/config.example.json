@@ -1,0 +1,4 @@
+{
+  "key": "your Steam Web API key, from https://steamcommunity.com/dev/apikey",
+  "steamid": "your 17-digit SteamID64, such as 76561197960287930"
+}

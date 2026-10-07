@@ -1,0 +1,23 @@
+{
+  "name": "YouTube",
+  "about": "Songs and videos from YouTube and YouTube Music, through the YouTube Data API with your own key.",
+  "hosts": ["www.googleapis.com", "i.ytimg.com"],
+  "keywords": ["ytm", "youtube music", "yt", "youtube"],
+  "ids": [
+    "youtube",
+    "youtube-video",
+    "musicbrainz-artist",
+    "musicbrainz-album",
+    "spotify",
+    "spotify-album",
+    "spotify-track",
+    "apple-music",
+    "apple-music-album",
+    "soundcloud",
+    "discogs",
+    "genius-song",
+    "genius-artist"
+  ],
+  "hints": ["song", "songs", "lyrics", "album", "remix", "acoustic", "playlist", "cover", "music video", "official video", "trailer"],
+  "suggest": "button"
+}

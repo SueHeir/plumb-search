@@ -599,6 +599,66 @@ async fn picks_up_a_round_left_unfinished() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_node_that_only_crawls_builds_no_index_until_it_searches_again() {
+    let dir = recently_crawled_dir();
+    let paths = store::Paths::new(dir.path());
+    store::save_state(
+        &paths,
+        // Records newer than any index, as after a crawl.
+        &SavedState {
+            crawl_left: 700,
+            index_stale: true,
+            ..SavedState::default()
+        },
+    )
+    .unwrap();
+    let mut config = test_config(dir.path());
+    config.crawl_only = true;
+    config.search_by_meaning = true;
+    config.refresh_every = Some(Duration::from_secs(3600));
+    let node = start(config).await.unwrap();
+    assert!(!node.inner.config.search_by_meaning, "turned off");
+    let status = wait_for(node.addr(), "the end of the round", |s| {
+        s.step == Step::Idle && s.last_refresh.is_some()
+    })
+    .await;
+    assert_eq!(status.phase, Phase::SettingUp, "nothing to search");
+    assert_eq!(status.index, None);
+    assert_eq!(status.last_error, None);
+    assert_eq!(
+        node.inner.held_sites(),
+        fixture_records().len() as u64,
+        "counted for filling"
+    );
+    node.shutdown().await.unwrap();
+    assert!(names(&paths.indexes).is_empty(), "no index built");
+    let saved = store::load_state(&paths).unwrap();
+    assert_eq!(saved.crawl_left, 0);
+    assert!(saved.index_stale, "still newer than any index");
+
+    // Without the flag again, the node builds its index.
+    let node = start(test_config(dir.path())).await.unwrap();
+    let status = wait_for(node.addr(), "the index", ready_and_idle).await;
+    assert_eq!(status.sites, fixture_records().len() as u64);
+    assert_eq!(search(node.addr(), "chase").await[0].domain, "chase.com");
+    node.shutdown().await.unwrap();
+}
+
+#[test]
+fn crawling_only_turns_off_what_only_searching_needs() {
+    let mut config = NodeConfig::server(PathBuf::from("d"));
+    config.crawl_only = true;
+    config.search_by_meaning = true;
+    config.private_search = true;
+    config.network = Some(plumb_net::NetConfig::new(PathBuf::from("d/net")));
+    config.limit_to_crawling();
+    assert!(!config.search_by_meaning && !config.private_search);
+    assert_eq!(config.news_feeds, 0);
+    let net = config.network.unwrap();
+    assert!(!net.answer_searches && !net.follow_crawls);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn refreshes_when_due() {
     let dir = recently_crawled_dir();
     let paths = store::Paths::new(dir.path());

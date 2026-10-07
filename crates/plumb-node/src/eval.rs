@@ -377,7 +377,18 @@ fn evaluate(
                 let mut lifted = hits.clone();
                 lift_named_sites(&mut lifted, &found);
                 pages.note_demand(&mut lifted)?;
-                let rows = listed_with_pages(&lifted, place_pages(&searched, &lifted, found));
+                let placed = place_pages(&searched, &lifted, found);
+                let profile = if !args.profiles || placed.iter().any(|p| p.hit.named) {
+                    None
+                } else {
+                    profile_shown(args, &searched, searcher, cfg, pages)?
+                };
+                let mut rows = listed_with_pages(&lifted, placed);
+                // The profile asked for ("bohemian rhapsody lyrics") is
+                // shown above the results.
+                if let Some(url) = profile {
+                    rows.insert(0, vec![url]);
+                }
                 first = rows.first().and_then(|keys| keys.first()).cloned();
                 let rank = rows
                     .iter()
@@ -613,6 +624,30 @@ fn format_sweep(
     out
 }
 
+/// The address of the profile a node shows above the results for `query`
+/// ("bohemian rhapsody lyrics", "mrbeast youtube"), found as a node finds
+/// it, by searching for the words before the service.
+fn profile_shown(
+    args: &EvalArgs,
+    query: &str,
+    searcher: &Searcher,
+    cfg: &plumb_index::RankConfig,
+    pages: &PageSearcher,
+) -> Result<Option<String>> {
+    let Some((_, name)) = plumb_core::profiles::services_asked(query) else {
+        return Ok(None);
+    };
+    let options = SearchOptions {
+        country: args.country.clone(),
+        ..SearchOptions::default()
+    };
+    let mut sites = searcher.search_meaning(&name, 5, cfg, &options, None)?;
+    pages.note_demand(&mut sites.hits)?;
+    let found = pages.search(&name, 10)?;
+    let placed = place_pages(&name, &sites.hits, found);
+    Ok(crate::web::answers::profile_answer(query, &placed).map(|p| p.url))
+}
+
 /// With `--facts`: `Some(1)` when the instant answer to `q` (worked out
 /// as a node does, by searching for the fact's subject) has one of the
 /// expected texts, commas left out ("8848" in "8,848.86 m"); `None`
@@ -757,8 +792,8 @@ fn format_totals(m: &Metrics, limit: usize) -> String {
 /// Wikipedia.
 pub(crate) fn set_of_file(name: &str) -> String {
     use plumb_index::pages::{
-        BOOKS_SET, GITHUB_SET, PACKAGES_SET, PAPERS_SET, PODCASTS_SET, STACKEXCHANGE_SET,
-        STACKOVERFLOW_SET, WIKIDATA_SET,
+        BOOKS_SET, GITHUB_SET, MUSIC_SET, PACKAGES_SET, PAPERS_SET, PODCASTS_SET,
+        STACKEXCHANGE_SET, STACKOVERFLOW_SET, WIKIDATA_SET,
     };
     let stem = name.split('.').next().unwrap_or("");
     if let Some(set) = [
@@ -769,6 +804,7 @@ pub(crate) fn set_of_file(name: &str) -> String {
         PAPERS_SET,
         PACKAGES_SET,
         PODCASTS_SET,
+        MUSIC_SET,
         WIKIDATA_SET,
     ]
     .into_iter()

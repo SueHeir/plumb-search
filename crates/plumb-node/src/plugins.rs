@@ -38,6 +38,9 @@ use wasmi::{Caller, Config, Engine, Extern, Linker, Memory, Module, Store, Store
 
 /// The folder in a node's data folder that holds its plugins.
 pub const PLUGINS_DIR: &str = "plugins";
+/// The file in [`PLUGINS_DIR`] that keeps the owner's choices of what a
+/// search that fits a plugin does ([`Suggest`]), by its folder name.
+pub const SUGGEST_FILE: &str = "suggest.json";
 
 /// How long a search waits for a plugin, unless its `plugin.json` says.
 const SEARCH_TIME: Duration = Duration::from_secs(4);
@@ -103,6 +106,14 @@ pub struct Manifest {
     /// with a Wikidata item.
     #[serde(default)]
     pub ids: Vec<String>,
+    /// Words or phrases that, anywhere in a search, say it fits the
+    /// plugin ("lyrics", "music video"), as its `ids` do.
+    #[serde(default)]
+    pub hints: Vec<String>,
+    /// What a search that fits it does without a keyword, unless the
+    /// node's owner chose otherwise: run it, or offer its results.
+    #[serde(default)]
+    pub suggest: Suggest,
     /// Sites whose pages it can say something about (`*.example.org`),
     /// for `/api/plugins/page`, which a browser extension asks about the
     /// page open in a tab.
@@ -116,6 +127,55 @@ pub struct Manifest {
     /// The results page waits for its slowest plugin.
     #[serde(default)]
     pub seconds: Option<u64>,
+}
+
+/// What a search that fits a plugin (by its `ids` or `hints`) does when
+/// none of its keywords ran it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Suggest {
+    /// Runs it: its results show with the node's.
+    #[default]
+    Automatic,
+    /// Shows a link that runs it: for a source with a small daily quota.
+    Button,
+    /// Nothing: only its keywords run it.
+    Keywords,
+}
+
+impl Suggest {
+    pub const ALL: [Suggest; 3] = [Suggest::Automatic, Suggest::Button, Suggest::Keywords];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Suggest::Automatic => "automatic",
+            Suggest::Button => "button",
+            Suggest::Keywords => "keywords",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Suggest> {
+        Suggest::ALL.into_iter().find(|s| s.as_str() == text)
+    }
+}
+
+/// What a search does with one plugin.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Pick {
+    /// Runs it, with the keyword that did, if one did, and the terms.
+    Run(Option<String>, String),
+    /// Offers its results behind a link.
+    Offer,
+}
+
+/// A link on a results page that runs a plugin for a search that fits
+/// it: the same search with `run` set to the plugin's folder name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Offer {
+    /// The plugin's folder name.
+    pub plugin: String,
+    /// Its name, from `plugin.json`.
+    pub name: String,
 }
 
 /// One entry of `hosts` or `pages`: a host name or address, or `*.` and
@@ -207,10 +267,11 @@ impl Manifest {
         if self.keywords.iter().all(|k| k.trim().is_empty())
             && !self.always
             && self.ids.iter().all(|k| k.trim().is_empty())
+            && self.hints.iter().all(|k| k.trim().is_empty())
             && self.pages.is_empty()
             && !annotates
         {
-            bail!("it needs keywords, ids, pages, or \"always\": true");
+            bail!("it needs keywords, ids, hints, pages, or \"always\": true");
         }
         for host in &self.hosts {
             if HostSpec::parse(host).is_none() {
@@ -260,10 +321,11 @@ impl Manifest {
             .any(|spec| spec.allows(host, None))
     }
 
-    /// The keyword `query` starts or ends with, and the rest of it; for
-    /// a plugin that runs on every search, or for things it knows about,
-    /// the whole query.
-    fn picks(&self, query: &str, about: Option<&About>) -> Option<(Option<String>, String)> {
+    /// What `query` does with it, under the owner's `suggest`: runs it
+    /// with the keyword it starts or ends with and the rest of it; for a
+    /// plugin that runs on every search, or a search that fits it, runs
+    /// it on the whole query or offers it.
+    fn picks(&self, query: &str, about: Option<&About>, suggest: Suggest) -> Option<Pick> {
         let words: Vec<&str> = query.split_whitespace().collect();
         let lower: Vec<String> = words.iter().map(|w| w.to_lowercase()).collect();
         for keyword in &self.keywords {
@@ -273,14 +335,40 @@ impl Manifest {
                 continue;
             }
             if lower[..n] == wanted[..] {
-                return Some((Some(keyword.clone()), words[n..].join(" ")));
+                return Some(Pick::Run(Some(keyword.clone()), words[n..].join(" ")));
             }
             if lower[words.len() - n..] == wanted[..] {
-                return Some((Some(keyword.clone()), words[..words.len() - n].join(" ")));
+                return Some(Pick::Run(
+                    Some(keyword.clone()),
+                    words[..words.len() - n].join(" "),
+                ));
             }
         }
-        let knows = about.is_some_and(|about| self.knows(about));
-        (self.always || knows).then(|| (None, words.join(" ")))
+        if self.always {
+            return Some(Pick::Run(None, words.join(" ")));
+        }
+        let fits = about.is_some_and(|about| self.knows(about)) || self.hinted(&lower);
+        match suggest {
+            _ if !fits => None,
+            Suggest::Automatic => Some(Pick::Run(None, words.join(" "))),
+            Suggest::Button => Some(Pick::Offer),
+            Suggest::Keywords => None,
+        }
+    }
+
+    /// Whether the search of `words` (lowercase) has one of its `hints`.
+    fn hinted(&self, words: &[String]) -> bool {
+        self.hints.iter().any(|hint| {
+            let wanted: Vec<String> = hint.split_whitespace().map(str::to_lowercase).collect();
+            !wanted.is_empty() && words.windows(wanted.len()).any(|w| w == &wanted[..])
+        })
+    }
+
+    /// Whether a search can fit it without a keyword.
+    pub fn can_fit(&self) -> bool {
+        !self.always
+            && (self.ids.iter().any(|k| !k.trim().is_empty())
+                || self.hints.iter().any(|h| !h.trim().is_empty()))
     }
 
     /// Whether `about` has an identifier its `ids` lists.
@@ -1044,6 +1132,10 @@ struct Inner {
     /// Goes in the forms of the buttons on this node's results pages, so
     /// that a page of another site cannot press them.
     token: String,
+    /// The owner's choices of what a search that fits a plugin does, by
+    /// folder name, and the file they are kept in.
+    suggest: Mutex<BTreeMap<String, Suggest>>,
+    suggest_file: Option<PathBuf>,
 }
 
 impl std::fmt::Debug for Plugins {
@@ -1080,8 +1172,82 @@ impl Plugins {
                 cache: Mutex::default(),
                 notes_cache: Mutex::default(),
                 token,
+                suggest: Mutex::default(),
+                suggest_file: None,
             }),
         }
+    }
+
+    /// These plugins, with the owner's choices kept in `file`
+    /// ([`SUGGEST_FILE`] in the plugins' folder).
+    fn with_suggest_file(self, file: PathBuf) -> Self {
+        let chosen: BTreeMap<String, Suggest> = match std::fs::read(&file) {
+            Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|error| {
+                warn!("{} left out: {error}", file.display());
+                BTreeMap::new()
+            }),
+            Err(_) => BTreeMap::new(),
+        };
+        let inner = Arc::into_inner(self.inner).expect("not shared yet");
+        Plugins {
+            inner: Arc::new(Inner {
+                suggest: Mutex::new(chosen),
+                suggest_file: Some(file),
+                ..inner
+            }),
+        }
+    }
+
+    /// What a search that fits `plugin` does: the owner's choice, or its
+    /// `plugin.json`'s.
+    pub fn suggest(&self, plugin: &Plugin) -> Suggest {
+        let chosen = self.inner.suggest.lock().expect("suggest lock");
+        chosen
+            .get(&plugin.id)
+            .copied()
+            .unwrap_or(plugin.manifest.suggest)
+    }
+
+    /// Keeps the owner's choice of what a search that fits the plugin in
+    /// folder `id` does; from the next search on.
+    pub fn set_suggest(&self, id: &str, suggest: Suggest) -> Result<()> {
+        let Some(plugin) = self.inner.plugins.iter().find(|p| p.id == id) else {
+            bail!("no plugin {id:?} on this node");
+        };
+        let mut chosen = self.inner.suggest.lock().expect("suggest lock");
+        if suggest == plugin.manifest.suggest {
+            chosen.remove(id);
+        } else {
+            chosen.insert(id.to_string(), suggest);
+        }
+        if let Some(file) = &self.inner.suggest_file {
+            let json = serde_json::to_vec_pretty(&*chosen)?;
+            let part = file.with_extension("json.part");
+            std::fs::write(&part, json).with_context(|| format!("writing {}", part.display()))?;
+            std::fs::rename(&part, file).with_context(|| format!("writing {}", file.display()))?;
+        }
+        Ok(())
+    }
+
+    /// Links to the plugins a search for `query`, taken to be `about`
+    /// one thing, fits but does not run, by the owner's choice; never to
+    /// the plugin the search was asked to `run`.
+    pub fn offers(&self, query: &str, about: Option<&About>, run: Option<&str>) -> Vec<Offer> {
+        if query.trim().is_empty() {
+            return Vec::new();
+        }
+        self.inner
+            .plugins
+            .iter()
+            .filter(|plugin| run != Some(plugin.id.as_str()))
+            .filter(|plugin| {
+                plugin.manifest.picks(query, about, self.suggest(plugin)) == Some(Pick::Offer)
+            })
+            .map(|plugin| Offer {
+                plugin: plugin.id.clone(),
+                name: plugin.manifest.name.clone(),
+            })
+            .collect()
     }
 
     /// The plugins in the folders of `dir`; none when it does not exist.
@@ -1111,7 +1277,7 @@ impl Plugins {
                 Err(error) => warn!("plugin in {} left out: {error:#}", folder.display()),
             }
         }
-        Plugins::new(plugins)
+        Plugins::new(plugins).with_suggest_file(dir.join(SUGGEST_FILE))
     }
 
     pub fn is_empty(&self) -> bool {
@@ -1150,6 +1316,20 @@ impl Plugins {
         language: Option<&str>,
         about: Option<&About>,
     ) -> Vec<PluginResults> {
+        self.search_running(query, safe, language, about, None)
+            .await
+    }
+
+    /// [`Plugins::search`], also running the plugin in folder `run`
+    /// on the whole query when its keywords do not: an offer's link.
+    pub async fn search_running(
+        &self,
+        query: &str,
+        safe: SafeSearch,
+        language: Option<&str>,
+        about: Option<&About>,
+        run: Option<&str>,
+    ) -> Vec<PluginResults> {
         if self.is_empty() || query.trim().is_empty() {
             return Vec::new();
         }
@@ -1159,7 +1339,17 @@ impl Plugins {
             .iter()
             .enumerate()
             .filter_map(|(at, plugin)| {
-                let (keyword, terms) = plugin.manifest.picks(query, about)?;
+                let asked = run == Some(plugin.id.as_str());
+                let suggest = if asked {
+                    Suggest::Automatic
+                } else {
+                    self.suggest(plugin)
+                };
+                let (keyword, terms) = match plugin.manifest.picks(query, about, suggest) {
+                    Some(Pick::Run(keyword, terms)) => (keyword, terms),
+                    _ if asked => (None, query.split_whitespace().collect::<Vec<_>>().join(" ")),
+                    _ => return None,
+                };
                 let input = Query {
                     text: query.to_string(),
                     terms,
@@ -1448,10 +1638,10 @@ impl Plugin {
     /// pick it: for `plumb try-plugin`. Its results, checked as a search
     /// would check them, or why it found nothing.
     pub async fn try_query(self: Arc<Self>, query: &str) -> Result<Vec<PluginItem>> {
-        let (keyword, terms) = self
-            .manifest
-            .picks(query, None)
-            .unwrap_or_else(|| (None, query.to_string()));
+        let (keyword, terms) = match self.manifest.picks(query, None, Suggest::Automatic) {
+            Some(Pick::Run(keyword, terms)) => (keyword, terms),
+            _ => (None, query.to_string()),
+        };
         let page = url::Url::parse(query)
             .ok()
             .filter(|url| self.manifest.covers_page(url))
@@ -1599,6 +1789,28 @@ pub(crate) fn answering_plugins(name: &str, keyword: &str, output: &str) -> Plug
         name: name.into(),
         hosts: vec!["a.example".into()],
         keywords: vec![keyword.into()],
+        ..Manifest::default()
+    };
+    let plugin = Plugin::from_parts(
+        name.to_lowercase().replace(' ', "-"),
+        manifest,
+        serde_json::Value::Null,
+        answering(output).as_bytes(),
+    )
+    .expect("a plugin");
+    Plugins::new(vec![plugin])
+}
+
+/// [`answering_plugins`], for a plugin that searches with `hint` fit,
+/// with a link to its results rather than running it.
+#[cfg(test)]
+pub(crate) fn offering_plugins(name: &str, hint: &str, output: &str) -> Plugins {
+    let manifest = Manifest {
+        name: name.into(),
+        hosts: vec!["a.example".into()],
+        keywords: vec!["x".into()],
+        hints: vec![hint.into()],
+        suggest: Suggest::Button,
         ..Manifest::default()
     };
     let plugin = Plugin::from_parts(

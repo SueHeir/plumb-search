@@ -518,10 +518,11 @@ impl AppState {
         query: &str,
         options: &SearchOptions,
         about: Option<&plumb_plugin::About>,
+        run: Option<&str>,
     ) -> Vec<PluginResults> {
         self.settings
             .plugins
-            .search(query, options.safe, options.language.as_deref(), about)
+            .search_running(query, options.safe, options.language.as_deref(), about, run)
             .await
     }
 
@@ -626,6 +627,7 @@ fn app(state: AppState) -> Router {
             .route("/app/settings", post(panel::save_settings))
             .route("/app/setup", post(setup::save_setup))
             .route("/app/features", post(panel::save_features))
+            .route("/app/plugins", post(panel::save_plugins))
             .route("/app/refresh", post(panel::refresh))
             .route("/app/network/retry", post(panel::retry_network))
             .route("/app/pause", post(panel::pause))
@@ -717,6 +719,9 @@ pub(crate) async fn shutdown_signal() {
 struct SearchParams {
     #[serde(default)]
     q: String,
+    /// A plugin's folder name: run it for this search, as a link it
+    /// offers asks (see [`crate::plugins::Offer`]).
+    run: Option<String>,
     limit: Option<usize>,
     /// A two-letter code, `any` for no home country, or empty for the default.
     country: Option<String>,
@@ -975,10 +980,20 @@ async fn search_page(
         _ => Vec::new(),
     };
     (extras.plugins, extras.plugin_notes) = tokio::join!(
-        state.plugin_results(&query, &settings.options, about.as_ref()),
+        state.plugin_results(
+            &query,
+            &settings.options,
+            about.as_ref(),
+            params.run.as_deref()
+        ),
         state.settings.plugins.annotate(&query, &shown_to_plugins)
     );
     extras.plugin_token = plugins::button_token(&state, &extensions, &headers, &uri);
+    extras.plugin_offers =
+        state
+            .settings
+            .plugins
+            .offers(&query, about.as_ref(), params.run.as_deref());
     let (local, network) = if settings.network == NetSetting::On {
         let network = network_search(&state, client, &query, limit, &settings.options).await;
         let network = match network {
@@ -1241,9 +1256,14 @@ async fn api_search(
                 Vec::new()
             };
             let (plugins, plugin_notes) = tokio::join!(
-                state.plugin_results(&query, &options, about.as_ref()),
+                state.plugin_results(&query, &options, about.as_ref(), params.run.as_deref()),
                 state.settings.plugins.annotate(&query, &shown_to_plugins)
             );
+            let plugin_offers =
+                state
+                    .settings
+                    .plugins
+                    .offers(&query, about.as_ref(), params.run.as_deref());
             let info = match &extras.profile {
                 Some(profile) => answers::info_from_page(&profile.page, &results.hits),
                 None => {
@@ -1267,6 +1287,7 @@ async fn api_search(
                 places,
                 plugins,
                 plugin_notes,
+                plugin_offers,
             };
             (StatusCode::OK, security_headers(), Json(body)).into_response()
         }
@@ -1329,6 +1350,10 @@ struct FullResults<'a> {
     /// What the node's plugins say about its results, by their addresses.
     #[serde(skip_serializing_if = "HashMap::is_empty")]
     plugin_notes: crate::plugins::ResultNotes,
+    /// Plugins this search fits but did not run, with the search that
+    /// runs each.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    plugin_offers: Vec<crate::plugins::Offer>,
 }
 
 /// The instant answer and the official profile asked for, for `query`
@@ -1404,6 +1429,7 @@ async fn go(
 ) -> Response {
     let search = SearchParams {
         q: params.q,
+        run: None,
         limit: Some(MAX_LIMIT),
         country: params.country,
         only: params.only,
@@ -2178,6 +2204,7 @@ background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:
 .ia p{margin:0}.iaq{color:var(--muted);font-size:.9rem;overflow-wrap:anywhere}\
 .iaa{font-size:1.75rem;line-height:1.3;overflow-wrap:anywhere}.ia .m{margin-top:.2rem}\
 .wide{max-width:74rem}.wide header form{max-width:42rem}\
+.wide>main,main.wide>:not(header){max-width:44rem}\
 .cols{display:flex;flex-direction:column}.cols>main{min-width:0}\
 .ib{order:-1;margin:1rem 0 .25rem;padding:1rem 1.1rem;border:1px solid var(--line);\
 border-radius:.75rem;overflow-wrap:anywhere}\
@@ -2941,10 +2968,12 @@ fn render_results_with(
     let now = now_unix();
     let from_plugins: String = extras
         .map(|e| {
-            e.plugins
+            let found: String = e
+                .plugins
                 .iter()
                 .map(|p| render_plugin(p, now, query, e.plugin_token.as_deref()))
-                .collect()
+                .collect();
+            found + &render_offers(&e.plugin_offers, query, &settings.options)
         })
         .unwrap_or_default();
     let news = match (news, from_plugins.is_empty()) {
@@ -3041,8 +3070,9 @@ fn render_results_with(
         body,
         "<p class=\"s\">As JSON: {json}</p>\n{FOOTER}\n</main>\n"
     );
-    // With an info box the page is wider, with the box beside the results
-    // (above them on a narrow screen, unless a profile asked for leads).
+    // Results keep the same left edge whether or not an info box shows; the
+    // box sits beside them (above them on a narrow screen, unless a profile
+    // asked for leads).
     let form = results_form(query, settings);
     let body = match &info {
         Some(info) => {
@@ -3055,7 +3085,7 @@ fn render_results_with(
             };
             format!("<div class=\"wrap wide\">\n{form}\n<div class=\"{cols}\">\n{body}{aside}</div>\n</div>")
         }
-        None => format!("<div class=\"wrap\">\n{form}\n{body}</div>"),
+        None => format!("<div class=\"wrap wide\">\n{form}\n{body}</div>"),
     };
     page(&format!("{query} - Plumb Search"), &body)
 }
@@ -3063,7 +3093,10 @@ fn render_results_with(
 /// What other nodes answered, and nothing from this node. Their text is as
 /// untrusted as any record's, and is escaped the same way.
 fn render_network(query: &str, results: &NetworkResults, icons: &Icons) -> String {
-    let mut body = format!("<div class=\"wrap\">\n{}\n<main>\n", results_header(query));
+    let mut body = format!(
+        "<div class=\"wrap wide\">\n{}\n<main>\n",
+        results_header(query)
+    );
     if results.asked == 0 && (results.cached > 0 || results.pending > 0) {
         body.push_str(
             "<p class=\"s\">Plumb results are read from saved data and ranked on this node.</p>\n",
@@ -3152,7 +3185,7 @@ fn render_network(query: &str, results: &NetworkResults, icons: &Icons) -> Strin
 
 fn render_no_network() -> String {
     let body = format!(
-        "<div class=\"wrap\">\n{}\n<main>\n<p class=\"none\">This node has not joined the \
+        "<div class=\"wrap wide\">\n{}\n<main>\n<p class=\"none\">This node has not joined the \
          Plumb network. Start it with <code>plumb run --network</code> to search other \
          nodes.</p>\n</main>\n</div>",
         results_header("")
@@ -3276,6 +3309,7 @@ fn render_page(out: &mut String, hit: &PageHit, icon: Option<&str>) {
             plumb_index::pages::BOOKS_SET => "readers",
             plumb_index::pages::PODCASTS_SET =>
                 "popularity (score, then listing, years and episodes)",
+            plumb_index::pages::MUSIC_SET => "listeners on ListenBrainz",
             plumb_index::pages::PAPERS_SET => "citations",
             plumb_index::pages::PACKAGES_SET => "use (share of the registry's most, in billionths)",
             _ => "views",
@@ -3430,6 +3464,33 @@ fn render_plugin(found: &PluginResults, now: u64, query: &str, token: Option<&st
         "<li class=\"news plugin\"><p class=\"nh\">From {} <span class=\"m\">plugin on this node</span></p>\
          <ol>{items}</ol></li>\n",
         escape_html(&found.name)
+    )
+}
+
+/// Links that run the plugins a search fits but did not run, each with
+/// its keyword: "Show results from YouTube".
+fn render_offers(offers: &[crate::plugins::Offer], query: &str, options: &SearchOptions) -> String {
+    if offers.is_empty() {
+        return String::new();
+    }
+    let links: Vec<String> = offers
+        .iter()
+        .map(|offer| {
+            format!(
+                "<a href=\"{}\">Show results from {}</a>",
+                escape_html(&format!(
+                    "{}&run={}",
+                    search_link("/search", query, options, false),
+                    url::form_urlencoded::byte_serialize(offer.plugin.as_bytes())
+                        .collect::<String>()
+                )),
+                escape_html(&offer.name)
+            )
+        })
+        .collect();
+    format!(
+        "<li class=\"news plugin offer\"><p class=\"nh\">{} <span class=\"m\">plugin on this node</span></p></li>\n",
+        links.join(" · ")
     )
 }
 
@@ -3698,7 +3759,7 @@ fn render_hit(
 
 fn render_error(query: &str) -> String {
     let body = format!(
-        "<div class=\"wrap\">\n{}\n<main>\n<p class=\"none\">Something went wrong while searching. \
+        "<div class=\"wrap wide\">\n{}\n<main>\n<p class=\"none\">Something went wrong while searching. \
          The server log has the details.</p>\n</main>\n</div>",
         results_header(query)
     );
@@ -3887,6 +3948,35 @@ mod tests {
         assert_eq!(results[1]["url"], "https://news.example.com/1");
         assert_eq!(results[1]["engine"], "test-news");
         assert_eq!(results[0]["engine"], "plumb");
+    }
+
+    #[tokio::test]
+    async fn a_plugin_a_search_fits_can_be_offered_behind_a_link() {
+        let plugins = crate::plugins::offering_plugins(
+            "Test News",
+            "bank",
+            r#"{"results":[{"title":"Story","url":"https://news.example.com/1"}]}"#,
+        );
+        let app = router_with(
+            backend(bank_hits()),
+            WebSettings {
+                home: HomeCountry::Off,
+                plugins,
+                ..WebSettings::default()
+            },
+        );
+        let (_, _, page) = send(app.clone(), "/search?q=us+bank").await;
+        assert!(!page.contains("From Test News"), "not run");
+        assert!(page.contains(
+            "<a href=\"/search?q=us+bank&amp;run=test-news\">Show results from Test News</a>"
+        ));
+        let (_, _, page) = send(app.clone(), "/search?q=us+bank&run=test-news").await;
+        assert!(page.contains("From Test News"));
+        assert!(!page.contains("Show results from"));
+        let (_, _, body) = send(app, "/api/search?q=us+bank&full=1").await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["plugin_offers"][0]["plugin"], "test-news");
+        assert!(json.get("plugins").is_none());
     }
 
     #[tokio::test]
@@ -5421,7 +5511,9 @@ mod tests {
             false,
             &Icons::default(),
         );
-        assert!(!page.contains("class=\"ib\"") && !page.contains("wrap wide"));
+        assert!(!page.contains("class=\"ib\""));
+        // Without the box the results keep the same left edge.
+        assert!(page.contains("<div class=\"wrap wide\">"), "{page}");
     }
 
     #[test]

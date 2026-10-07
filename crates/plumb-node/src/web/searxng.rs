@@ -191,7 +191,9 @@ async fn collect(
     let results = run_search(state, query, limit, options).await?;
     let extras = extras(state, query, &results, options).await;
     let about = super::search_about(query, &results, &extras);
-    let plugins = state.plugin_results(query, options, about.as_ref()).await;
+    let plugins = state
+        .plugin_results(query, options, about.as_ref(), None)
+        .await;
     let found_pages = results.pages.iter().map(|p| p.hit.clone()).collect();
     let operators = plumb_core::Operators::parse(query);
     let placed = if operators.any() {
