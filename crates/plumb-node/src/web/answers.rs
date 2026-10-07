@@ -657,6 +657,7 @@ mod tests {
             named: true,
             popularity: 0.9,
             whole: false,
+            learned: None,
         }
     }
 

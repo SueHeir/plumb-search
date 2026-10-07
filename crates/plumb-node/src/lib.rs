@@ -43,6 +43,7 @@ pub mod plugins;
 pub mod storage;
 pub mod sync;
 pub mod tls;
+pub mod train_rank;
 pub mod web;
 pub mod websearch;
 
@@ -106,6 +107,7 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::Serve(args) => web::run(args),
         Command::Eval(args) => eval::run(args),
         Command::CheckLabels(args) => eval_labels::run(args),
+        Command::TrainRank(args) => train_rank::run(args),
         Command::Embed(args) => meaning::run_embed(args),
         Command::FetchText(args) => terms::run_fetch_text(args),
         Command::Terms(args) => terms::run_terms(args),

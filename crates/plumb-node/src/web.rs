@@ -4246,6 +4246,7 @@ mod tests {
             named: true,
             popularity: 0.5,
             whole: false,
+            learned: None,
         };
         let results = SearchResults {
             pages: vec![PlacedPage {
@@ -4334,6 +4335,7 @@ mod tests {
             named: true,
             popularity: 0.5,
             whole: false,
+            learned: None,
         };
         let youtube = hit(
             "youtube.com",
@@ -5415,6 +5417,7 @@ mod tests {
                         named: query == "mrbeast",
                         popularity: 0.9,
                         whole: false,
+                        learned: None,
                     },
                     under: None,
                     at: 0,
@@ -5469,6 +5472,7 @@ mod tests {
             named: true,
             popularity: 0.9,
             whole: false,
+            learned: None,
         };
         let results = SearchResults {
             pages: vec![PlacedPage {
@@ -5620,6 +5624,7 @@ mod tests {
                     named: false,
                     popularity: 0.1,
                     whole: false,
+                    learned: None,
                 },
                 under: None,
                 at: 0,

@@ -531,6 +531,14 @@ pub(super) fn add_pages(
                 results.spelling = None;
             }
             results.pages = place_pages(query, &results.hits, found);
+            if inner.rank.learned {
+                plumb_index::learned::reorder(
+                    plumb_index::learned::Model::builtin(),
+                    query,
+                    &mut results.hits,
+                    &mut results.pages,
+                );
+            }
         }
         Err(err) => warn!("searching pages: {err:#}"),
     }

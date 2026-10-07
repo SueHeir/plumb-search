@@ -54,6 +54,9 @@ pub enum Command {
     Eval(EvalArgs),
     /// Check that the pages a queries file expects are in the page sets.
     CheckLabels(crate::eval_labels::CheckLabelsArgs),
+    /// Train the learned ranking on the test searches `eval
+    /// --features-out` wrote, and measure it on the half it did not see.
+    TrainRank(crate::train_rank::TrainRankArgs),
     /// Make a vector of each site's text with a small embedding model
     /// (downloaded on first use), so searches can find sites by meaning.
     Embed(EmbedArgs),
@@ -964,6 +967,17 @@ pub struct EvalArgs {
     /// this TSV file (`variant suite line query rank`, 0 when not found).
     #[arg(long, value_name = "PATH", requires = "sweep")]
     pub ranks_out: Option<PathBuf>,
+    /// Write each query's listed results, with the scores and signals that
+    /// ranked them and which one was expected, to this JSON-lines file:
+    /// what a learned ranking is trained on. Not with --sweep or --facts.
+    #[arg(long, value_name = "PATH", conflicts_with_all = ["sweep", "facts"])]
+    pub features_out: Option<PathBuf>,
+    /// With --features-out, also score the first 20 results of each query
+    /// with this cross-encoder model (a folder with its config.json,
+    /// tokenizer.json and model.safetensors), and time it. Can be given
+    /// more than once.
+    #[arg(long, value_name = "DIR", requires = "features_out")]
+    pub rerank_model: Vec<PathBuf>,
     /// Results fetched per query; an expected site further down counts as not found.
     #[arg(long, value_name = "N", default_value_t = 10, value_parser = parse_positive)]
     pub limit: usize,

@@ -244,7 +244,17 @@ pub fn run(args: EvalArgs) -> Result<()> {
     let setup = open_setup(&args)?;
     if variants.is_empty() {
         let mut low = None;
+        let mut features_out = String::new();
+        let rerankers = args
+            .rerank_model
+            .iter()
+            .map(|dir| {
+                plumb_embed::Reranker::load(dir)
+                    .with_context(|| format!("loading the reranker in {}", dir.display()))
+            })
+            .collect::<Result<Vec<_>>>()?;
         for suite in &suites {
+            let mut features = args.features_out.as_ref().map(|_| Vec::new());
             if suites.len() > 1 {
                 println!("== {}", suite.name);
             }
@@ -253,7 +263,14 @@ pub fn run(args: EvalArgs) -> Result<()> {
                 suite.queries.len(),
                 setup.searcher.num_docs(),
             );
-            let ranks = evaluate(&args, &setup, &suite.queries, &cfg, true)?;
+            let ranks = evaluate(&args, &setup, &suite.queries, &cfg, true, features.as_mut())?;
+            for mut query in features.into_iter().flatten() {
+                if let serde_json::Value::Object(fields) = &mut query {
+                    fields.insert("suite".into(), suite.name.clone().into());
+                }
+                rerank_rows(&rerankers, &mut query)?;
+                let _ = writeln!(features_out, "{query}");
+            }
             let metrics = Metrics::from_ranks(&ranks, args.limit);
             print!("{}", format_totals(&metrics, args.limit));
             if let Some(min) = args.min_top1 {
@@ -261,6 +278,10 @@ pub fn run(args: EvalArgs) -> Result<()> {
                     low = Some((suite.name.clone(), metrics.top1_rate()));
                 }
             }
+        }
+        if let Some(path) = &args.features_out {
+            std::fs::write(path, features_out)
+                .with_context(|| format!("writing {}", path.display()))?;
         }
         if let (Some((name, rate)), Some(min)) = (low, args.min_top1) {
             bail!(
@@ -311,6 +332,7 @@ fn evaluate(
     queries: &[EvalQuery],
     cfg: &plumb_index::RankConfig,
     verbose: bool,
+    mut features: Option<&mut Vec<serde_json::Value>>,
 ) -> Result<Vec<Option<usize>>> {
     let Setup {
         searcher,
@@ -369,7 +391,17 @@ fn evaluate(
         // With pages, what each listed position holds (pages count as rows).
         let mut listed = None;
         let deep_rank = match &pages {
-            None => rank_of(&domains, &q.expected),
+            None => {
+                if let Some(features) = features.as_deref_mut() {
+                    let closeness = |domain: &str| {
+                        query_meaning
+                            .as_ref()
+                            .and_then(|meaning| meaning.closeness(domain))
+                    };
+                    features.push(feature_rows(q, &searched, &hits, &[], &closeness));
+                }
+                rank_of(&domains, &q.expected)
+            }
             Some(pages) => {
                 let found = pages
                     .search(&searched, 10)
@@ -377,7 +409,25 @@ fn evaluate(
                 let mut lifted = hits.clone();
                 lift_named_sites(&mut lifted, &found);
                 pages.note_demand(&mut lifted)?;
-                let placed = place_pages(&searched, &lifted, found);
+                let mut placed = place_pages(&searched, &lifted, found);
+                // --features-out writes the hand-made order the learned
+                // ranking is trained to improve.
+                if cfg.learned && features.is_none() {
+                    plumb_index::learned::reorder(
+                        plumb_index::learned::Model::builtin(),
+                        &searched,
+                        &mut lifted,
+                        &mut placed,
+                    );
+                }
+                if let Some(features) = features.as_deref_mut() {
+                    let closeness = |domain: &str| {
+                        query_meaning
+                            .as_ref()
+                            .and_then(|meaning| meaning.closeness(domain))
+                    };
+                    features.push(feature_rows(q, &searched, &lifted, &placed, &closeness));
+                }
                 let profile = if !args.profiles || placed.iter().any(|p| p.hit.named) {
                     None
                 } else {
@@ -510,7 +560,14 @@ fn sweep(args: &EvalArgs, setup: &Setup, suites: &[Suite], variants: &[Variant])
         info!("sweep: {} ({:?})", variant.name, variant.cfg);
         let mut of_suites = Vec::with_capacity(suites.len());
         for suite in suites {
-            of_suites.push(evaluate(args, setup, &suite.queries, &variant.cfg, false)?);
+            of_suites.push(evaluate(
+                args,
+                setup,
+                &suite.queries,
+                &variant.cfg,
+                false,
+                None,
+            )?);
         }
         ranks.push(of_suites);
     }
@@ -735,6 +792,149 @@ fn listed_with_pages(hits: &[Hit], pages: Vec<PlacedPage>) -> Vec<Vec<String>> {
     listed
 }
 
+/// Most listed rows of a query `--features-out` writes.
+const FEATURE_ROWS: usize = 30;
+
+/// One query's listed rows with everything that ranked them, for
+/// `--features-out`: what a learned ranking is trained and judged on.
+/// Rows are listed as [`listed_with_pages`] lists them; `label` is 1 for
+/// a row holding an expected answer.
+fn feature_rows(
+    q: &EvalQuery,
+    searched: &str,
+    hits: &[Hit],
+    placed: &[PlacedPage],
+    closeness: &dyn Fn(&str) -> Option<f32>,
+) -> serde_json::Value {
+    use serde_json::json;
+    let expected = |key: &str| q.expected.iter().any(|e| is_expected(e, key));
+    let page = |p: &PlacedPage| {
+        json!({
+            "key": p.hit.page.url,
+            "set": p.hit.page.set,
+            "title": p.hit.page.title,
+            "description": p.hit.page.description,
+            "score": p.hit.score,
+            "named": p.hit.named,
+            "popularity": p.hit.popularity,
+            "whole": p.hit.whole,
+            "label": u8::from(expected(&p.hit.page.url)),
+        })
+    };
+    let alone = |at: usize| {
+        placed
+            .iter()
+            .filter(move |p| p.under.is_none() && p.at == at)
+            .map(|p| {
+                let mut row = page(p);
+                row["kind"] = "page".into();
+                row
+            })
+    };
+    let mut rows = Vec::new();
+    for (i, hit) in hits.iter().enumerate() {
+        rows.extend(alone(i));
+        let under: Vec<serde_json::Value> = placed
+            .iter()
+            .filter(|p| p.under.as_deref() == Some(hit.domain.as_str()))
+            .map(page)
+            .collect();
+        let label = expected(&hit.domain) || under.iter().any(|p| p["label"] == 1);
+        rows.push(json!({
+            "kind": "site",
+            "key": hit.domain,
+            "site_rank": i + 1,
+            "title": hit.title,
+            "description": hit.description,
+            "score": hit.score,
+            "text_score": hit.text_score,
+            "placing_text_score": hit.placing_text_score,
+            "link_score": hit.link_score,
+            "closeness": closeness(&hit.domain),
+            "country": hit.country,
+            "named": hit.named,
+            "official": hit.official,
+            "demand": hit.demand,
+            "under": under,
+            "label": u8::from(label),
+        }));
+    }
+    rows.extend(
+        placed
+            .iter()
+            .filter(|p| p.under.is_none() && p.at >= hits.len())
+            .map(|p| {
+                let mut row = page(p);
+                row["kind"] = "page".into();
+                row
+            }),
+    );
+    rows.truncate(FEATURE_ROWS);
+    json!({
+        "line": q.line,
+        "query": q.query,
+        "searched": searched,
+        "half": match half_of(&q.query) {
+            Half::Tune => "tune",
+            Half::HeldOut => "held-out",
+        },
+        "expected": q.expected,
+        "rows": rows,
+    })
+}
+
+/// Most rows of a query each `--rerank-model` scores.
+const RERANKED_ROWS: usize = 20;
+
+/// What a reranker reads of a listed row: a site's name, title and
+/// description, or a page's title and description.
+fn row_text(row: &serde_json::Value) -> String {
+    let field = |name: &str| row[name].as_str().unwrap_or("").trim().to_string();
+    let mut text = field("title");
+    if row["kind"] == "site" {
+        let key = field("key");
+        text = if text.is_empty() {
+            key
+        } else {
+            format!("{text} ({key})")
+        };
+    }
+    let description = field("description");
+    if !description.is_empty() {
+        text = format!("{text}. {description}");
+    }
+    text
+}
+
+/// Scores the first [`RERANKED_ROWS`] rows of a query written by
+/// [`feature_rows`] with each reranker: `ce` holds one score per model,
+/// and the query's `ce_ms` how long each model took over all its rows.
+fn rerank_rows(rerankers: &[plumb_embed::Reranker], query: &mut serde_json::Value) -> Result<()> {
+    if rerankers.is_empty() {
+        return Ok(());
+    }
+    let searched = query["searched"].as_str().unwrap_or("").to_string();
+    let mut millis = Vec::with_capacity(rerankers.len());
+    let Some(rows) = query["rows"].as_array_mut() else {
+        return Ok(());
+    };
+    for row in rows.iter_mut() {
+        row["ce"] = serde_json::json!([]);
+    }
+    for reranker in rerankers {
+        let start = std::time::Instant::now();
+        for row in rows.iter_mut().take(RERANKED_ROWS) {
+            let score = reranker.score(&searched, &row_text(row))?;
+            if let Some(scores) = row["ce"].as_array_mut() {
+                scores.push(score.into());
+            }
+        }
+        millis.push(start.elapsed().as_secs_f64() * 1000.0);
+    }
+    query["ce_ms"] = millis.into();
+    Ok(())
+}
+
 /// How deep `--explain` looks for the expected site.
 const EXPLAIN_DEPTH: usize = 1_000;
 
@@ -906,6 +1106,7 @@ mod tests {
             named: true,
             popularity: 0.9,
             whole: false,
+            learned: None,
         };
         let hits = [site("curie.org", false), site("python.org", false)];
         let placed = place_pages(

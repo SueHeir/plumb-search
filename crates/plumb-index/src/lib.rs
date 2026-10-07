@@ -62,6 +62,7 @@
 //! `us bank` and `US BANK` are the same query and `nestle` finds `Nestlé`.
 
 mod analysis;
+pub mod learned;
 pub mod pages;
 pub mod places;
 mod replace;
@@ -282,6 +283,9 @@ pub struct RankConfig {
     /// BM25 boost of a query word matching a site's search terms
     /// ([`plumb_core::SiteRecord::terms`]), picked from its whole homepage.
     pub terms_boost: f32,
+    /// Put the first results in the order the learned ranking gives
+    /// ([`learned::reorder`]), once pages are placed among the sites.
+    pub learned: bool,
 }
 
 impl Default for RankConfig {
@@ -302,6 +306,7 @@ impl Default for RankConfig {
             meaning_only_relevance: Some(0.35),
             named_share: Some(0.4),
             terms_boost: 1.0,
+            learned: true,
         }
     }
 }

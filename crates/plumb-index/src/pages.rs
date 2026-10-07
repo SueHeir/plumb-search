@@ -519,6 +519,20 @@ pub struct PageHit {
     /// page may come before the sites.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub whole: bool,
+    /// Where the learned ranking listed the page on its own
+    /// ([`crate::learned::reorder`]), which [`place_pages`] keeps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub learned: Option<LearnedPlace>,
+}
+
+/// Where the learned ranking listed a page on its own.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LearnedPlace {
+    /// Just before this site's result.
+    Before(String),
+    /// After all the sites.
+    Last,
 }
 
 struct Fields {
@@ -1010,6 +1024,7 @@ impl PageSearcher {
                         named: true,
                         popularity,
                         whole: false,
+                        learned: None,
                     });
                 }
                 continue;
@@ -1042,6 +1057,7 @@ impl PageSearcher {
                 named,
                 popularity,
                 whole,
+                learned: None,
             });
         }
         hits.sort_by(|a, b| b.score.total_cmp(&a.score));
@@ -1349,7 +1365,26 @@ pub fn lift_named_sites(sites: &mut [crate::Hit], pages: &[PageHit]) {
 /// - A site called exactly what was searched for stays first when the
 ///   best page named so is an organization or a repository: "us bank"
 ///   lists usbank.com before the article "U.S. Bancorp".
+///
+/// A page the learned ranking listed on its own ([`PageHit::learned`])
+/// stays where it put it: before the same site, or last.
 pub fn place_pages(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) -> Vec<PlacedPage> {
+    let mut placed = place_pages_by_rules(query, sites, pages);
+    for page in placed.iter_mut().filter(|p| p.under.is_none()) {
+        match &page.hit.learned {
+            Some(LearnedPlace::Before(domain)) => {
+                if let Some(at) = sites.iter().position(|s| &s.domain == domain) {
+                    page.at = at;
+                }
+            }
+            Some(LearnedPlace::Last) => page.at = sites.len(),
+            None => {}
+        }
+    }
+    placed
+}
+
+fn place_pages_by_rules(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) -> Vec<PlacedPage> {
     let site_named = sites.first().is_some_and(|hit| hit.named);
     let query_word = squash(query);
     let organizations_site = sites.first().is_some_and(|site| {
@@ -1499,7 +1534,7 @@ const QUESTION_WORDS: &[&str] = &[
 
 /// Whether `query` is asked as a question: "how to unclog a drain", "can
 /// you freeze cooked rice".
-fn asked_as_question(query: &str) -> bool {
+pub(crate) fn asked_as_question(query: &str) -> bool {
     query
         .split_whitespace()
         .next()
@@ -1829,6 +1864,7 @@ mod tests {
                 named: true,
                 popularity: 0.9,
                 whole: false,
+                learned: None,
             }],
         );
         assert_eq!(placed[0].at, 0);
@@ -1932,6 +1968,7 @@ mod tests {
             named,
             popularity: score,
             whole: false,
+            learned: None,
         }
     }
 

@@ -62,3 +62,30 @@ change that only fits these exact searches shows up:
     plumb eval --index DIR --queries eval/brand_queries.tsv --half held-out
 
 Without `--half`, both halves are measured.
+
+## Learned ranking
+
+The first ten results of every search are put in order by a small model
+trained on these searches (`crates/plumb-index/src/learned.rs`, the model
+in `learned_model.json` next to it). It reads the signals the hand-made
+ranking already has for each result: its place, score, text match, link
+score, whether the query names it, the pages under a site, a page's set
+and how read it is. It is trained on the **tune half only**, so the
+held-out half still says how well it does on searches it never saw.
+
+To train it again after the searches or the ranking change:
+
+    plumb eval --index DIR --queries eval/ai_queries.tsv ... \
+      --pages ... --limit 20 --features-out features.jsonl
+    plumb eval --index DIR --queries eval/typo_queries.tsv \
+      --follow-suggestions --limit 20 --features-out features-typo.jsonl
+    plumb train-rank --features features.jsonl --features features-typo.jsonl \
+      --out crates/plumb-index/src/learned_model.json
+
+`--features-out` writes the hand-made order (the model is never trained
+on its own output), and `train-rank` prints top-1, top-3 and MRR of both
+halves before and after. `plumb train-rank --judge builtin` measures the
+model nodes use. To compare with the hand-made order in a full eval, use a
+sweep line `hand	{"learned": false}`. `--rerank-model DIR` (with
+`--features-out`) also scores the first 20 results with a cross-encoder
+model, for trying a second pass.
