@@ -1391,7 +1391,10 @@ fn kinds_html(about: &About) -> String {
     );
     for (kind, name) in KINDS {
         let current = about.kinds.get(*kind).copied().unwrap_or_default();
-        let _ = write!(html, "<div class=\"kind\"><span>{name}</span>");
+        let _ = write!(
+            html,
+            "<div class=\"kind\"><span>{name}</span><span class=\"amt\">"
+        );
         for amount in Amount::ALL {
             let checked = if amount == current { " checked" } else { "" };
             let _ = write!(
@@ -1401,7 +1404,7 @@ fn kinds_html(about: &About) -> String {
                 amount.name()
             );
         }
-        html.push_str("</div>\n");
+        html.push_str("</span></div>\n");
     }
     html.push_str("</fieldset>\n");
     html

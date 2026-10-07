@@ -2349,7 +2349,8 @@ border:1px solid var(--line);border-radius:.5rem;cursor:pointer;overflow-wrap:an
 .welcome .quiet{background:none;color:var(--muted);padding:.55rem 0;text-decoration:underline}\
 .about .kinds{border:0;padding:0;margin:1.25rem 0 0}.about .kinds legend{padding:0}\
 .about .kind{display:flex;flex-wrap:wrap;align-items:center;gap:.2rem .9rem;padding:.35rem 0;\
-border-bottom:1px solid var(--line)}.about .kind>span{flex:1 1 12rem}\
+border-bottom:1px solid var(--line)}.about .kind>span:first-child{flex:1 1 12rem}\
+.about .kind .amt{display:flex;flex-wrap:wrap;gap:.2rem .9rem}\
 .about .kind label{display:inline-flex;align-items:center;gap:.25rem;margin:0}\
 .about .kind input{flex:none;width:auto;margin:0;padding:0;accent-color:var(--accent)}\
 .invite{margin:.75rem 0}.invite form{display:inline;margin:0}\
