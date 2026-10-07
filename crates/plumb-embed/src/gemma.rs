@@ -339,8 +339,10 @@ impl Gemma {
             let bytes = &data[id * row_bytes..(id + 1) * row_bytes];
             let row = if dtype == GgmlDType::F32 {
                 let values: Vec<f32> = bytes
-                    .chunks_exact(4)
-                    .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|b| f32::from_le_bytes(*b))
                     .collect();
                 Tensor::from_vec(values, width, &Device::Cpu)?
             } else {
