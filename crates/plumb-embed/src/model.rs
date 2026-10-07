@@ -9,6 +9,9 @@ use candle_transformers::models::bert::{BertModel, Config};
 use sha2::{Digest, Sha256};
 use tokenizers::{Tokenizer, TruncationParams};
 
+use crate::gemma::{
+    gemma_id, is_gemma_dir, Gemma, GEMMA_DIM, GEMMA_QUERY_PREFIX, GEMMA_TEXT_PREFIX,
+};
 use crate::server::Server;
 
 /// The model: BAAI's small English embedding model, 384 values per text.
@@ -61,12 +64,24 @@ enum Runner {
     },
     /// An embedding server ([`crate::SERVER_FILE`]), for trying other models.
     Server(Server),
+    /// EmbeddingGemma 2, from its GGUF file ([`crate::GEMMA_FILE`]).
+    Gemma(Gemma),
 }
 
 impl Embedder {
     /// Loads the model whose [`MODEL_FILES`] are in `dir`, or the
     /// embedding server `dir`'s [`crate::SERVER_FILE`] names.
     pub fn load(dir: &Path) -> Result<Self> {
+        if is_gemma_dir(dir) {
+            let id = gemma_id(dir)?;
+            let gemma = Gemma::load(dir)?;
+            let dim = GEMMA_DIM.min(gemma.dim());
+            return Ok(Embedder {
+                runner: Runner::Gemma(gemma),
+                id,
+                dim,
+            });
+        }
         if let Some((server, id, dim)) = Server::load(dir)? {
             return Ok(Embedder {
                 runner: Runner::Server(server),
@@ -130,6 +145,7 @@ impl Embedder {
         let (model, tokenizer) = match &self.runner {
             Runner::Bert { model, tokenizer } => (model, tokenizer),
             Runner::Server(server) => return server.embed_text(text),
+            Runner::Gemma(gemma) => return gemma.embed(GEMMA_TEXT_PREFIX, text),
         };
         let encoding = tokenizer
             .encode(text, true)
@@ -159,6 +175,7 @@ impl Embedder {
         match &self.runner {
             Runner::Bert { .. } => self.embed(query),
             Runner::Server(server) => server.embed_query(query),
+            Runner::Gemma(gemma) => gemma.embed(GEMMA_QUERY_PREFIX, query),
         }
     }
 }
