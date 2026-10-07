@@ -1,0 +1,54 @@
+# Searches for a film or show told apart from its namesakes by its year,
+# director, cast or what it is, with its English Wikipedia article
+# expected first. Run with --pages wikipedia-en.tsv.gz and --pages
+# films.tsv.gz (from fetch-pages --set films), and without the films set
+# to see what it adds. Picked by hand, from remakes and namesakes.
+dune 2021	https://en.wikipedia.org/wiki/Dune_(2021_film)
+dune 1984	https://en.wikipedia.org/wiki/Dune_(1984_film)
+dune david lynch	https://en.wikipedia.org/wiki/Dune_(1984_film)
+dune villeneuve	https://en.wikipedia.org/wiki/Dune_(2021_film)
+the batman 2022	https://en.wikipedia.org/wiki/The_Batman_(film)
+batman 1989	https://en.wikipedia.org/wiki/Batman_(1989_film)
+king kong 1933	https://en.wikipedia.org/wiki/King_Kong_(1933_film)
+king kong 2005	https://en.wikipedia.org/wiki/King_Kong_(2005_film)
+king kong peter jackson	https://en.wikipedia.org/wiki/King_Kong_(2005_film)
+titanic 1997	https://en.wikipedia.org/wiki/Titanic_(1997_film)
+titanic james cameron	https://en.wikipedia.org/wiki/Titanic_(1997_film)
+little women 2019	https://en.wikipedia.org/wiki/Little_Women_(2019_film)
+little women 1994	https://en.wikipedia.org/wiki/Little_Women_(1994_film)
+a star is born 2018	https://en.wikipedia.org/wiki/A_Star_Is_Born_(2018_film)
+a star is born 1954	https://en.wikipedia.org/wiki/A_Star_Is_Born_(1954_film)
+west side story spielberg	https://en.wikipedia.org/wiki/West_Side_Story_(2021_film)
+west side story 1961	https://en.wikipedia.org/wiki/West_Side_Story_(1961_film)
+the lion king 2019	https://en.wikipedia.org/wiki/The_Lion_King_(2019_film)
+scarface 1983	https://en.wikipedia.org/wiki/Scarface_(1983_film)
+scarface al pacino	https://en.wikipedia.org/wiki/Scarface_(1983_film)
+the thing john carpenter	https://en.wikipedia.org/wiki/The_Thing_(1982_film)
+halloween 1978	https://en.wikipedia.org/wiki/Halloween_(1978_film)
+alien ridley scott	https://en.wikipedia.org/wiki/Alien_(film)
+fargo coen	https://en.wikipedia.org/wiki/Fargo_(1996_film)
+fargo tv series	https://en.wikipedia.org/wiki/Fargo_(TV_series)
+the crown tv series	https://en.wikipedia.org/wiki/The_Crown_(TV_series)
+succession tv series	https://en.wikipedia.org/wiki/Succession_(TV_series)
+chernobyl miniseries	https://en.wikipedia.org/wiki/Chernobyl_(miniseries)
+breaking bad tv show	https://en.wikipedia.org/wiki/Breaking_Bad
+inception dicaprio	https://en.wikipedia.org/wiki/Inception
+the departed scorsese	https://en.wikipedia.org/wiki/The_Departed
+the godfather movie	https://en.wikipedia.org/wiki/The_Godfather
+the matrix movie	https://en.wikipedia.org/wiki/The_Matrix
+psycho 1960	https://en.wikipedia.org/wiki/Psycho_(1960_film)
+psycho hitchcock	https://en.wikipedia.org/wiki/Psycho_(1960_film)
+the fly 1986	https://en.wikipedia.org/wiki/The_Fly_(1986_film)
+the fly cronenberg	https://en.wikipedia.org/wiki/The_Fly_(1986_film)
+total recall 1990	https://en.wikipedia.org/wiki/Total_Recall_(1990_film)
+robocop 1987	https://en.wikipedia.org/wiki/RoboCop_(1987_film)
+blade runner 2049 movie	https://en.wikipedia.org/wiki/Blade_Runner_2049
+ocean's eleven 2001	https://en.wikipedia.org/wiki/Ocean's_Eleven
+true grit 2010	https://en.wikipedia.org/wiki/True_Grit_(2010_film)
+true grit john wayne	https://en.wikipedia.org/wiki/True_Grit_(1969_film)
+mulan 1998	https://en.wikipedia.org/wiki/Mulan_(1998_film)
+mulan 2020	https://en.wikipedia.org/wiki/Mulan_(2020_film)
+aladdin 1992	https://en.wikipedia.org/wiki/Aladdin_(1992_Disney_film)
+the jungle book 2016	https://en.wikipedia.org/wiki/The_Jungle_Book_(2016_film)
+the office tv series	https://en.wikipedia.org/wiki/The_Office_(American_TV_series),https://en.wikipedia.org/wiki/The_Office_(British_TV_series)
+shameless tv series	https://en.wikipedia.org/wiki/Shameless_(American_TV_series),https://en.wikipedia.org/wiki/Shameless_(British_TV_series)
