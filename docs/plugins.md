@@ -263,7 +263,9 @@ plumb_plugin::plugin!(search);
 ```
 
 `plugins/hacker-news` in this repository is a complete example: it asks
-Hacker News's public search API for stories. Build a plugin with
+Hacker News's public search API for stories. `plugins/reddit` signs in to
+Reddit's official API with the owner's own app keys from `config.json`
+(see its README). Build a plugin with
 
 ```sh
 rustup target add wasm32-unknown-unknown
