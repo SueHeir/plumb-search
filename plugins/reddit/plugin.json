@@ -1,0 +1,8 @@
+{
+  "name": "Reddit",
+  "about": "Reddit threads, through Reddit's official Data API with your own API keys.",
+  "hosts": ["www.reddit.com", "oauth.reddit.com"],
+  "keywords": ["reddit"],
+  "cache_seconds": 3600,
+  "seconds": 6
+}

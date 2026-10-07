@@ -266,7 +266,9 @@ plumb_plugin::plugin!(search);
 Hacker News's public search API for stories. `plugins/youtube-music` is a bigger
 one: YouTube and YouTube Music through the YouTube Data API with the owner's
 own key, two requests per search, and a channel's uploads for searches about
-someone with a YouTube channel. Build a plugin with
+someone with a YouTube channel. `plugins/reddit` signs in to Reddit's
+official API with the owner's own app keys from `config.json` (see its
+README). Build a plugin with
 
 ```sh
 rustup target add wasm32-unknown-unknown
