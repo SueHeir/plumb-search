@@ -501,6 +501,7 @@ impl SearchBackend for Packages {
                     named: true,
                     popularity: 1.0,
                     whole: false,
+                    learned: None,
                 },
                 under: None,
                 at: 0,

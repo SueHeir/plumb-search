@@ -409,7 +409,17 @@ fn evaluate(
                 let mut lifted = hits.clone();
                 lift_named_sites(&mut lifted, &found);
                 pages.note_demand(&mut lifted)?;
-                let placed = place_pages(&searched, &lifted, found);
+                let mut placed = place_pages(&searched, &lifted, found);
+                // --features-out writes the hand-made order the learned
+                // ranking is trained to improve.
+                if cfg.learned && features.is_none() {
+                    plumb_index::learned::reorder(
+                        plumb_index::learned::Model::builtin(),
+                        &searched,
+                        &mut lifted,
+                        &mut placed,
+                    );
+                }
                 if let Some(features) = features.as_deref_mut() {
                     let closeness = |domain: &str| {
                         query_meaning
@@ -1059,6 +1069,7 @@ mod tests {
             named: true,
             popularity: 0.9,
             whole: false,
+            learned: None,
         };
         let hits = [site("curie.org", false), site("python.org", false)];
         let placed = place_pages(

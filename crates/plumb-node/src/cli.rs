@@ -54,6 +54,9 @@ pub enum Command {
     Eval(EvalArgs),
     /// Check that the pages a queries file expects are in the page sets.
     CheckLabels(crate::eval_labels::CheckLabelsArgs),
+    /// Train the learned ranking on the test searches `eval
+    /// --features-out` wrote, and measure it on the half it did not see.
+    TrainRank(crate::train_rank::TrainRankArgs),
     /// Make a vector of each site's text with a small embedding model
     /// (downloaded on first use), so searches can find sites by meaning.
     Embed(EmbedArgs),
