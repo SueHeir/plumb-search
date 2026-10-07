@@ -2448,7 +2448,11 @@ impl plumb_net::BucketSource for SlowPages {
 
     fn page_set_file(&self, _set: &str) -> Option<PathBuf> {
         let _ = self.asked.lock().unwrap().send(());
-        let _ = self.gate.lock().unwrap().recv_timeout(Duration::from_secs(60));
+        let _ = self
+            .gate
+            .lock()
+            .unwrap()
+            .recv_timeout(Duration::from_secs(60));
         None
     }
 }

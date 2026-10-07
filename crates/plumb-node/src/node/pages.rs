@@ -51,55 +51,33 @@ const FETCH_RETRY_WAIT: Duration = Duration::from_secs(15 * 60);
 
 /// Runs until the node stops, on a blocking thread.
 pub(super) fn run(inner: Arc<Inner>) {
-    let mut failed: Option<(String, Instant)> = None;
-    // By set: a set the trusted node lacks, or whose download failed, does
-    // not hold up the others.
-    let mut fetch_failed: HashMap<&'static str, Instant> = HashMap::new();
-    let mut places_failed: Option<(String, Instant)> = None;
-    let mut kept_whole = HashSet::new();
     remove_stale_parts(&inner.paths.data);
+    // Downloads run beside the index: one can take hours (a big file, a
+    // busy or slow trusted node), and the pages already here are searched
+    // meanwhile. A file taken is indexed at the next look.
+    let runtime = tokio::runtime::Handle::current();
+    let files = {
+        let inner = inner.clone();
+        std::thread::Builder::new()
+            .name("page set files".into())
+            .spawn(move || {
+                let _entered = runtime.enter();
+                keep_files(&inner);
+            })
+    };
+    let files = match files {
+        Ok(files) => Some(files),
+        Err(err) => {
+            warn!("page sets: no thread for downloads: {err}");
+            None
+        }
+    };
+    let mut failed: Option<(String, Instant)> = None;
+    let mut places_failed: Option<(String, Instant)> = None;
     while !inner.stopping() {
         let mut settings = inner.settings();
         if inner.config.blackhole {
             settings.page_sets = settings.page_sets.all_unless_set();
-        }
-        let near = super::places::known_homes(&inner);
-        let counts = wanted_counts(&settings.page_sets, settings.storage_limit_mb);
-        // The towns whose places the file keeps past the first ones, for
-        // the places set (none for the others).
-        let near_of = |set: &SetInfo, pages: u64| -> Vec<(f64, f64)> {
-            if set.id == plumb_index::places::PLACES_SET && settings.storage_limit_mb > 0 {
-                crate::places::file_near(pages, near.as_deref().unwrap_or_default()).to_vec()
-            } else {
-                Vec::new()
-            }
-        };
-        // Only a node with a storage limit cuts its files: a server's are
-        // handed on to other nodes whole.
-        for &(set, pages) in counts.iter().filter(|_| settings.storage_limit_mb > 0) {
-            if !may_cut(set, pages, near.is_some()) {
-                continue;
-            }
-            let near = near_of(set, pages);
-            if let Err(err) = cut_if_longer(&inner, set, pages, &near, &mut kept_whole) {
-                warn!("page set {}: {err:#}", set.id);
-            }
-        }
-        fetch_failed.retain(|_, at| at.elapsed() < FETCH_RETRY_WAIT);
-        if let Some(net) = super::network::handle(&inner).cloned() {
-            for &(set, pages) in &counts {
-                if inner.stopping() {
-                    break;
-                }
-                if fetch_failed.contains_key(set.id) {
-                    continue;
-                }
-                let near = near_of(set, pages);
-                if let Err(err) = fetch_if_needed(&inner, &net, set, pages, &near) {
-                    warn!("page set {}: {err:#}", set.id);
-                    fetch_failed.insert(set.id, Instant::now());
-                }
-            }
         }
         let wanted = Wanted::new(
             &inner.paths.data,
@@ -139,6 +117,66 @@ pub(super) fn run(inner: Arc<Inner>) {
             }
         }
         super::places::refresh(&inner, &settings, &mut places_failed);
+        let until = Instant::now() + LOOK_EVERY;
+        while !inner.stopping() && Instant::now() < until {
+            std::thread::sleep(TICK);
+        }
+    }
+    if let Some(files) = files {
+        let _ = files.join();
+    }
+}
+
+/// Cuts the set files to the pages kept and takes the ones missing from a
+/// trusted node, until the node stops.
+fn keep_files(inner: &Inner) {
+    // By set: a set the trusted node lacks, or whose download failed, does
+    // not hold up the others.
+    let mut fetch_failed: HashMap<&'static str, Instant> = HashMap::new();
+    let mut kept_whole = HashSet::new();
+    while !inner.stopping() {
+        let mut settings = inner.settings();
+        if inner.config.blackhole {
+            settings.page_sets = settings.page_sets.all_unless_set();
+        }
+        let near = super::places::known_homes(inner);
+        let counts = wanted_counts(&settings.page_sets, settings.storage_limit_mb);
+        // The towns whose places the file keeps past the first ones, for
+        // the places set (none for the others).
+        let near_of = |set: &SetInfo, pages: u64| -> Vec<(f64, f64)> {
+            if set.id == plumb_index::places::PLACES_SET && settings.storage_limit_mb > 0 {
+                crate::places::file_near(pages, near.as_deref().unwrap_or_default()).to_vec()
+            } else {
+                Vec::new()
+            }
+        };
+        // Only a node with a storage limit cuts its files: a server's are
+        // handed on to other nodes whole.
+        for &(set, pages) in counts.iter().filter(|_| settings.storage_limit_mb > 0) {
+            if !may_cut(set, pages, near.is_some()) {
+                continue;
+            }
+            let near = near_of(set, pages);
+            if let Err(err) = cut_if_longer(inner, set, pages, &near, &mut kept_whole) {
+                warn!("page set {}: {err:#}", set.id);
+            }
+        }
+        fetch_failed.retain(|_, at| at.elapsed() < FETCH_RETRY_WAIT);
+        if let Some(net) = super::network::handle(inner).cloned() {
+            for &(set, pages) in &counts {
+                if inner.stopping() {
+                    break;
+                }
+                if fetch_failed.contains_key(set.id) {
+                    continue;
+                }
+                let near = near_of(set, pages);
+                if let Err(err) = fetch_if_needed(inner, &net, set, pages, &near) {
+                    warn!("page set {}: {err:#}", set.id);
+                    fetch_failed.insert(set.id, Instant::now());
+                }
+            }
+        }
         let until = Instant::now() + LOOK_EVERY;
         while !inner.stopping() && Instant::now() < until {
             std::thread::sleep(TICK);
