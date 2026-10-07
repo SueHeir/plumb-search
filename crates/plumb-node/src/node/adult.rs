@@ -1,9 +1,15 @@
 //! The adult blocklist safe search leaves out (see [`plumb_core::safe`]).
 //!
-//! The node downloads the list from [`SeedSources::adult_list_url`] when
-//! it has none or its copy is [`REFRESH_AFTER`] old, keeps only whole
-//! sites in `DATA/safe/adult-domains.txt`, and holds them in memory as
-//! sorted hashes: under 6 MB for the list's few hundred thousand sites.
+//! The node keeps only whole sites in `DATA/safe/adult-domains.txt` and
+//! holds them in memory as sorted hashes: under 6 MB for the list's few
+//! hundred thousand sites. When it has none or its copy is
+//! [`REFRESH_AFTER`] old, it takes a trusted node's copy over the page set
+//! protocol (`/plumb/pages/1`, as [`SHARED_NAME`]) when one has a fresher
+//! one, so the network does not ask the list's host once per node. Only
+//! when no trusted node has a fresh copy does it download the list from
+//! [`SeedSources::adult_list_url`]. A copy taken keeps the time of the
+//! copy it came from, so it ages as that one does and the nodes that
+//! build from the source still download it once a week.
 //!
 //! [`SeedSources::adult_list_url`]: super::SeedSources::adult_list_url
 
@@ -13,13 +19,19 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, PoisonError};
 use std::time::{Duration, SystemTime};
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use plumb_core::registrable_domain;
 use plumb_core::safe::parse_adult_list;
 use plumb_ingest::download;
+use plumb_net::pages::MAX_PAGES_CHUNK;
+use plumb_net::PeerId;
 use tracing::{info, warn};
 
-use super::Inner;
+use super::{network, Inner};
+
+/// The name nodes ask each other for the list by, over the page set
+/// protocol.
+pub(super) const SHARED_NAME: &str = "adult-domains";
 
 /// The list's folder in the data directory.
 const DIR: &str = "safe";
@@ -33,6 +45,24 @@ const RETRY_WAIT: Duration = Duration::from_secs(3600);
 pub(super) const MARGIN: usize = 10;
 /// How often the job looks at the list's age.
 const LOOK_EVERY: Duration = Duration::from_secs(3600);
+/// How long a node in the network waits for a trusted node to connect
+/// before it downloads the list from its source instead.
+#[cfg(not(test))]
+const PEER_WAIT: Duration = Duration::from_secs(10 * 60);
+#[cfg(test)]
+const PEER_WAIT: Duration = Duration::from_secs(2);
+/// Time between two looks for a trusted node while waiting for one.
+#[cfg(not(test))]
+const PEER_POLL: Duration = Duration::from_secs(60);
+#[cfg(test)]
+const PEER_POLL: Duration = Duration::from_millis(200);
+/// Wait when a trusted node is busy before asking it again.
+#[cfg(not(test))]
+const BUSY_WAIT: Duration = Duration::from_secs(5);
+#[cfg(test)]
+const BUSY_WAIT: Duration = Duration::from_millis(100);
+/// Largest list taken from another node; the real one is a few MB.
+const MAX_SHARED_BYTES: u64 = 64 << 20;
 
 /// Adult sites, as sorted hashes of their registrable domains.
 #[derive(Debug, Default)]
@@ -82,21 +112,32 @@ pub(super) async fn run(inner: Arc<Inner>) {
         info!("safe search leaves out {} adult sites", list.len());
         inner.set_adult(list);
     }
-    let Some(url) = inner.config.sources.adult_list_url.clone() else {
-        return;
-    };
+    let url = inner.config.sources.adult_list_url.clone();
+    let started = std::time::Instant::now();
     let mut stopped = inner.stopped.clone();
     loop {
         let wait = if is_fresh(&data) {
             LOOK_EVERY
         } else {
-            match refresh(&url, &data).await {
-                Ok(list) => {
+            let taken = match from_network(&inner, &data).await {
+                Ok(Taken::List(list)) => Some(Ok(list)),
+                // No trusted node has connected yet: give them time, so a
+                // node just started takes the network's copy.
+                Ok(Taken::NoPeer) if trusts_nodes(&inner) && started.elapsed() < PEER_WAIT => None,
+                Ok(_) => source(url.as_deref(), &data).await,
+                Err(err) => {
+                    warn!("adult blocklist from a trusted node: {err:#}");
+                    source(url.as_deref(), &data).await
+                }
+            };
+            match taken {
+                None => PEER_POLL,
+                Some(Ok(list)) => {
                     info!("safe search leaves out {} adult sites", list.len());
                     inner.set_adult(list);
                     LOOK_EVERY
                 }
-                Err(err) => {
+                Some(Err(err)) => {
                     warn!("adult blocklist: {err:#}");
                     RETRY_WAIT
                 }
@@ -110,6 +151,133 @@ pub(super) async fn run(inner: Arc<Inner>) {
             return;
         }
     }
+}
+
+/// The list from its source, when the node has one to download it from.
+async fn source(url: Option<&str>, data: &Path) -> Option<Result<AdultList>> {
+    Some(refresh(url?, data).await)
+}
+
+/// Whether the node is in the network and trusts nodes to send it the list.
+fn trusts_nodes(inner: &Inner) -> bool {
+    network::handle(inner).is_some()
+        && inner
+            .config
+            .network
+            .as_ref()
+            .is_some_and(|net| !net.trusted_peers.is_empty())
+}
+
+/// What asking the trusted nodes gave.
+enum Taken {
+    /// A fresh list from one of them.
+    List(AdultList),
+    /// No trusted node that shares files is connected.
+    NoPeer,
+    /// None of those connected has a fresh copy.
+    NoneFresh,
+}
+
+/// Takes the list from a connected trusted node whose copy is fresh
+/// (younger than [`REFRESH_AFTER`]) and saves it with that copy's time.
+async fn from_network(inner: &Inner, data: &Path) -> Result<Taken> {
+    let Some(net) = network::handle(inner).cloned() else {
+        return Ok(Taken::NoPeer);
+    };
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let mut skip: Vec<PeerId> = Vec::new();
+    let mut busy = 0;
+    let first = loop {
+        let Some(chunk) = net
+            .pages_chunk(SHARED_NAME, 0, MAX_PAGES_CHUNK, None, &skip)
+            .await?
+        else {
+            return Ok(if skip.is_empty() {
+                Taken::NoPeer
+            } else {
+                Taken::NoneFresh
+            });
+        };
+        if chunk.busy {
+            busy += 1;
+            if busy >= 3 {
+                skip.push(chunk.peer);
+            } else {
+                tokio::time::sleep(BUSY_WAIT).await;
+            }
+            continue;
+        }
+        let fresh = now.saturating_sub(chunk.modified) < REFRESH_AFTER.as_secs();
+        if chunk.size == 0 || !fresh || chunk.size > MAX_SHARED_BYTES {
+            skip.push(chunk.peer);
+            continue;
+        }
+        break chunk;
+    };
+    let (from, size, modified) = (first.peer, first.size, first.modified);
+    let mut bytes = first.bytes;
+    while (bytes.len() as u64) < size {
+        if inner.stopping() {
+            bail!("the node is stopping");
+        }
+        let Some(next) = net
+            .pages_chunk(
+                SHARED_NAME,
+                bytes.len() as u64,
+                MAX_PAGES_CHUNK,
+                Some(from),
+                &[],
+            )
+            .await?
+        else {
+            bail!("{from} went away while the list was taken");
+        };
+        if next.busy {
+            tokio::time::sleep(BUSY_WAIT).await;
+            continue;
+        }
+        if next.size != size || next.modified != modified {
+            bail!("{from} got a new list while it was taken");
+        }
+        if next.bytes.is_empty() {
+            bail!("{from} sent less of the list than it said it holds");
+        }
+        bytes.extend_from_slice(&next.bytes);
+    }
+    let file = list_path(data);
+    let list = tokio::task::spawn_blocking(move || save_shared(&file, &bytes, modified))
+        .await
+        .context("the list task failed")??;
+    info!("took the adult blocklist from trusted node {from}");
+    Ok(Taken::List(list))
+}
+
+/// Saves a list another node sent, dated `modified` (Unix seconds) as its
+/// copy was. Only lines that are sites are kept.
+fn save_shared(file: &Path, bytes: &[u8], modified: u64) -> Result<AdultList> {
+    let text = std::str::from_utf8(bytes).context("the list is not text")?;
+    let domains = parse_adult_list(text);
+    anyhow::ensure!(!domains.is_empty(), "the list names no sites");
+    let dir = file.parent().context("the list has no folder")?;
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    let partial = file.with_extension("txt.tmp");
+    let written = std::fs::File::create(&partial).and_then(|mut out| {
+        use std::io::Write;
+        out.write_all((domains.join("\n") + "\n").as_bytes())?;
+        out.set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(modified))?;
+        out.sync_all()
+    });
+    written.with_context(|| format!("writing {}", partial.display()))?;
+    std::fs::rename(&partial, file).with_context(|| format!("writing {}", file.display()))?;
+    Ok(AdultList::new(&domains))
+}
+
+/// The list's file, for sending to other nodes; `None` when the node has
+/// none.
+pub(super) fn shared_file(data: &Path) -> Option<PathBuf> {
+    Some(list_path(data)).filter(|path| path.is_file())
 }
 
 fn is_fresh(data: &Path) -> bool {
@@ -180,5 +348,35 @@ mod tests {
         std::fs::write(list_path(dir.path()), "adult.example\n").unwrap();
         assert!(load(dir.path()).unwrap().contains("adult.example"));
         assert!(is_fresh(dir.path()));
+    }
+
+    #[test]
+    fn a_list_from_another_node_keeps_its_time() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(shared_file(dir.path()).is_none());
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let file = list_path(dir.path());
+        let list = save_shared(
+            &file,
+            b"adult.example\nnot a site\nother.example\n",
+            now - 3600,
+        )
+        .unwrap();
+        assert_eq!(list.len(), 2);
+        assert!(is_fresh(dir.path()));
+        assert_eq!(shared_file(dir.path()), Some(file.clone()));
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "adult.example\nother.example\n"
+        );
+        // A copy that was already old at the node it came from stays old,
+        // so the node goes back for a fresh one.
+        let old = now - REFRESH_AFTER.as_secs() - 60;
+        save_shared(&file, b"adult.example\n", old).unwrap();
+        assert!(!is_fresh(dir.path()));
+        assert!(save_shared(&file, b"nothing here\n", now).is_err());
     }
 }

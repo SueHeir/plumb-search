@@ -153,6 +153,9 @@ impl BucketSource for ServedIndex {
     }
 
     fn page_set_file(&self, set: &str) -> Option<PathBuf> {
+        if set == super::adult::SHARED_NAME {
+            return super::adult::shared_file(&self.0.paths.data);
+        }
         crate::pages::SetInfo::find(set)?.servable_file(&self.0.paths.data)
     }
 
