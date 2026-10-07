@@ -474,6 +474,9 @@ impl<S: Source> Reader<S> {
     }
 }
 
+/// Tiles up to this many bytes are stored once however often they repeat.
+const DEDUPED_TILE: usize = 4096;
+
 /// Writes a PMTiles file: tiles are added in tile id order, the same bytes
 /// stored once, then [`Writer::finish`] writes the directories in front.
 pub struct Writer {
@@ -481,8 +484,12 @@ pub struct Writer {
     data_path: std::path::PathBuf,
     data_len: u64,
     entries: Vec<Entry>,
-    /// Where each tile's bytes went, by their hash.
+    /// Where each small tile's bytes went, by their hash: small tiles
+    /// (open sea, empty land) repeat, big ones seldom do, and remembering
+    /// every tile of the world would take gigabytes.
     stored: HashMap<[u8; 32], (u64, u32)>,
+    /// Tile contents written.
+    contents: u64,
     addressed: u64,
     /// The header and root directory fit in this many bytes.
     root_span: usize,
@@ -499,6 +506,7 @@ impl Writer {
             data_len: 0,
             entries: Vec::new(),
             stored: HashMap::new(),
+            contents: 0,
             addressed: 0,
             root_span: ROOT_SPAN,
         })
@@ -514,14 +522,18 @@ impl Writer {
                 "tiles out of order"
             );
         }
-        let hash: [u8; 32] = sha2::Sha256::digest(bytes).into();
-        let (offset, length) = match self.stored.get(&hash) {
+        let hash: Option<[u8; 32]> =
+            (bytes.len() <= DEDUPED_TILE).then(|| sha2::Sha256::digest(bytes).into());
+        let (offset, length) = match hash.and_then(|h| self.stored.get(&h)) {
             Some(at) => *at,
             None => {
                 self.data.write_all(bytes)?;
                 let at = (self.data_len, bytes.len() as u32);
                 self.data_len += bytes.len() as u64;
-                self.stored.insert(hash, at);
+                self.contents += 1;
+                if let Some(hash) = hash {
+                    self.stored.insert(hash, at);
+                }
                 at
             }
         };
@@ -573,7 +585,7 @@ impl Writer {
         header.data_length = self.data_len;
         header.addressed_tiles = self.addressed;
         header.tile_entries = self.entries.len() as u64;
-        header.tile_contents = self.stored.len() as u64;
+        header.tile_contents = self.contents;
         let mut out = std::io::BufWriter::new(
             std::fs::File::create(path).with_context(|| format!("creating {}", path.display()))?,
         );
