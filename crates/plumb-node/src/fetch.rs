@@ -225,6 +225,80 @@ fn run_podcasts(args: &FetchPagesArgs, dest: &std::path::Path) -> Result<()> {
     write_set(dest, &pages, "podcasts")
 }
 
+/// Makes the music set file `dest` from MusicBrainz's core dump (about
+/// 7 GB, downloaded into --work unless --musicbrainz-dump names it) and
+/// ListenBrainz's listener counts, which are kept in --work as they come.
+fn run_music(args: &FetchPagesArgs, dest: &std::path::Path) -> Result<()> {
+    use plumb_ingest::musicbrainz::{self, Listened, MusicDump, MusicOptions};
+    let work = args
+        .work
+        .as_deref()
+        .context("pass --work DIR for MusicBrainz's dump and ListenBrainz's answers")?;
+    std::fs::create_dir_all(work).with_context(|| format!("creating {}", work.display()))?;
+    let client = download::http_client()?;
+    let dump = match &args.musicbrainz_dump {
+        Some(dump) => dump.clone(),
+        None => {
+            let latest_url = format!("{}LATEST", musicbrainz::FULLEXPORT_URL);
+            let latest = block_on(async {
+                client
+                    .get(&latest_url)
+                    .send()
+                    .await?
+                    .error_for_status()?
+                    .text()
+                    .await
+            })?
+            .with_context(|| format!("reading {latest_url}"))?;
+            let url = format!(
+                "{}{}",
+                musicbrainz::export_url(&latest)?,
+                musicbrainz::CORE_DUMP
+            );
+            fetch_dump(args, &url, "MusicBrainz's core dump")?
+        }
+    };
+    let tables = musicbrainz::tables_dir(&dump)?;
+    let options = MusicOptions {
+        max_songs: args.max_songs,
+        min_song_releases: args.min_song_releases,
+        max_albums: args.max_albums,
+        min_listeners: args.min_listeners,
+        ..MusicOptions::default()
+    };
+    let mut music = MusicDump::read(&tables, &options)?;
+    let albums = block_on(musicbrainz::fetch_listeners(
+        &client,
+        Listened::Albums,
+        &music.album_mbids(),
+        &work.join("listenbrainz-albums.tsv"),
+    ))??;
+    let recordings = music.songs_to_ask(&albums)?;
+    let recordings = block_on(musicbrainz::fetch_listeners(
+        &client,
+        Listened::Recordings,
+        &recordings,
+        &work.join("listenbrainz-recordings.tsv"),
+    ))??;
+    let pages = music.into_articles(&albums, &recordings)?;
+    write_set(dest, &pages, "songs and albums")?;
+    info!(
+        "{} songs, {} with lyrics on Genius",
+        pages
+            .iter()
+            .filter(|p| p
+                .description
+                .as_deref()
+                .is_some_and(|d| d.starts_with("Song")))
+            .count(),
+        pages
+            .iter()
+            .filter(|p| p.profiles.iter().any(|p| p.service == "genius-song"))
+            .count(),
+    );
+    Ok(())
+}
+
 /// Makes the papers set file `dest` from OpenAlex's API.
 fn run_papers(args: &FetchPagesArgs, dest: &std::path::Path) -> Result<()> {
     let key = std::env::var("OPENALEX_API_KEY")
@@ -437,6 +511,9 @@ pub fn run_pages(args: FetchPagesArgs) -> Result<()> {
     }
     if set.id == plumb_index::pages::PODCASTS_SET {
         return run_podcasts(&args, &dest);
+    }
+    if set.id == plumb_index::pages::MUSIC_SET {
+        return run_music(&args, &dest);
     }
     if set.id == plumb_index::pages::PACKAGES_SET {
         return run_packages(&args, &dest);

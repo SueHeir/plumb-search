@@ -52,14 +52,18 @@ pub struct CrawlerView {
     pub last_batch_at: u64,
 }
 
-/// Where one crawler's newest record of a homepage is.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Where one crawler's newest record of a homepage is. A store holds one
+/// for each homepage each crawler sent in the batches held, millions on a
+/// node keeping a month of the network's crawls, so it is kept small: 44
+/// bytes, with the crawler's key held once in [`BatchStore::crawler_keys`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Holding {
     batch: Hash,
-    index: usize,
-    created_at: u64,
-    /// The crawler's public key, as in the batch header.
-    crawler: Vec<u8>,
+    index: u32,
+    /// Unix seconds, as in the batch header.
+    created_at: u32,
+    /// Where the crawler's key is in [`BatchStore::crawler_keys`].
+    crawler: u32,
 }
 
 /// Reads batches of a [`BatchStore`] to prove records, keeping the last
@@ -136,19 +140,36 @@ pub struct BatchStore {
     ids: HashSet<Hash>,
     headers: HashMap<Hash, SignedHeader>,
     /// Per crawled homepage, the newest record from each crawler.
-    crawls: HashMap<String, Vec<Holding>>,
+    crawls: HashMap<Box<str>, Box<[Holding]>>,
+    /// The public keys of the crawlers in [`BatchStore::crawls`], as in
+    /// the batch headers, each once.
+    crawler_keys: Vec<Vec<u8>>,
+    /// Where each key is in `crawler_keys`.
+    crawler_ids: HashMap<Vec<u8>, u32>,
+    /// Whether `crawls` is kept ([`crate::NetConfig::follow_crawls`]).
+    following: bool,
 }
 
 impl BatchStore {
     /// Opens the store in `dir`, creating it, and indexes the batches there.
     /// Unreadable files are deleted.
     pub fn open(dir: &Path) -> Result<BatchStore> {
+        BatchStore::open_following(dir, true)
+    }
+
+    /// [`BatchStore::open`], noting where each crawl is for proofs only
+    /// when `following` ([`crate::NetConfig::follow_crawls`]): a store that
+    /// does not has none to give.
+    pub fn open_following(dir: &Path, following: bool) -> Result<BatchStore> {
         fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
         let mut store = BatchStore {
             dir: dir.to_path_buf(),
             ids: HashSet::new(),
             headers: HashMap::new(),
             crawls: HashMap::new(),
+            crawler_keys: Vec::new(),
+            crawler_ids: HashMap::new(),
+            following,
         };
         for entry in fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
             let path = entry?.path();
@@ -246,7 +267,9 @@ impl BatchStore {
             })
             .collect();
         held.sort_by_key(|h| std::cmp::Reverse(h.created_at));
-        held.into_iter().map(|h| (h.batch, h.index)).collect()
+        held.into_iter()
+            .map(|h| (h.batch, h.index as usize))
+            .collect()
     }
 
     /// Reads held batches from disk for proofs.
@@ -352,9 +375,26 @@ impl BatchStore {
             self.headers.remove(id);
         }
         self.crawls.retain(|_, held| {
-            held.retain(|holding| !old.contains(&holding.batch));
+            if held.iter().any(|holding| old.contains(&holding.batch)) {
+                *held = held
+                    .iter()
+                    .filter(|holding| !old.contains(&holding.batch))
+                    .copied()
+                    .collect();
+            }
             !held.is_empty()
         });
+    }
+
+    /// Where `key` is in [`BatchStore::crawler_keys`], added if new.
+    fn crawler_id(&mut self, key: &[u8]) -> u32 {
+        if let Some(&id) = self.crawler_ids.get(key) {
+            return id;
+        }
+        let id = u32::try_from(self.crawler_keys.len()).unwrap_or(u32::MAX);
+        self.crawler_keys.push(key.to_vec());
+        self.crawler_ids.insert(key.to_vec(), id);
+        id
     }
 
     fn path(&self, id: &Hash) -> PathBuf {
@@ -363,11 +403,18 @@ impl BatchStore {
 
     fn note(&mut self, batch: &Batch) {
         let id = batch.id();
+        self.ids.insert(id);
+        self.headers.insert(id, batch.header.clone());
+        if !self.following {
+            return;
+        }
         let h = &batch.header.header;
         let created_at = h.created_at;
         let crawler = libp2p::identity::PublicKey::try_decode_protobuf(&h.crawler)
             .map(|key| key.to_peer_id())
             .ok();
+        let key = self.crawler_id(&h.crawler);
+        let created = u32::try_from(created_at).unwrap_or(u32::MAX);
         for (index, line) in batch.records.iter().enumerate() {
             let Ok(record) = serde_json::from_str::<SiteRecord>(line) else {
                 continue;
@@ -385,21 +432,31 @@ impl BatchStore {
             if !in_window || !assigned {
                 continue;
             }
+            let Ok(index) = u32::try_from(index) else {
+                break;
+            };
             let holding = Holding {
                 batch: id,
                 index,
-                created_at,
-                crawler: batch.header.header.crawler.clone(),
+                created_at: created,
+                crawler: key,
             };
-            let held = self.crawls.entry(record.domain).or_default();
-            match held.iter_mut().find(|h| h.crawler == holding.crawler) {
-                Some(old) if old.created_at > created_at => {}
-                Some(old) => *old = holding,
-                None => held.push(holding),
+            match self.crawls.get_mut(record.domain.as_str()) {
+                Some(held) => match held.iter_mut().find(|h| h.crawler == key) {
+                    Some(old) if old.created_at > created => {}
+                    Some(old) => *old = holding,
+                    None => {
+                        let mut more = held.to_vec();
+                        more.push(holding);
+                        *held = more.into_boxed_slice();
+                    }
+                },
+                None => {
+                    self.crawls
+                        .insert(record.domain.into_boxed_str(), Box::new([holding]));
+                }
             }
         }
-        self.ids.insert(id);
-        self.headers.insert(id, batch.header.clone());
     }
 }
 
@@ -463,6 +520,33 @@ mod tests {
         assert!(store.is_empty());
         assert!(store.proof(&domain, now).unwrap().is_none());
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn a_store_not_following_crawls_holds_batches_without_proofs() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = 1_790_000_000;
+        let key = Keypair::generate_ed25519();
+        let crawler = key.public().to_peer_id();
+        let domain = (0..)
+            .map(|i| format!("site{i}.example"))
+            .find(|d| is_assigned(epoch_of(now), &crawler, d, MAX_SHARE_PPM))
+            .unwrap();
+        let mut record = SiteRecord::new(domain.as_str());
+        record.crawled_at = Some(now - 5);
+        let batch = Batch::sign(&key, &[record], epoch_of(now), MAX_SHARE_PPM, now)
+            .unwrap()
+            .unwrap();
+        let mut store = BatchStore::open_following(dir.path(), false).unwrap();
+        store.insert(&batch).unwrap();
+        assert!(store.contains(&batch.id()));
+        assert!(store.get(&batch.id()).unwrap().is_some(), "still served");
+        assert!(store.proof(&domain, now).unwrap().is_none());
+        assert_eq!(store.crawlers(now).len(), 1);
+        drop(store);
+        // Following again, the crawls held are noted.
+        let store = BatchStore::open(dir.path()).unwrap();
+        assert!(store.proof(&domain, now).unwrap().is_some());
     }
 
     #[test]

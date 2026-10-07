@@ -217,6 +217,8 @@ into its folder as `plugin.wasm`.
 | Plugin | What it adds | Needs |
 | --- | --- | --- |
 | `hacker-news` | `hn rust async`: Hacker News stories. | Nothing. |
+| `youtube-music` | `ytm` or `yt` searches: songs and videos from YouTube and YouTube Music, and a channel's uploads for searches about someone with one. | A YouTube Data API key (see its README). |
+| `reddit` | `reddit` searches: Reddit threads. | Your own Reddit app keys (see its README). |
 | `github` | `gh http client`: repositories with stars, language and last push. With a token: "Starred" badges, star counts on GitHub results among the node's own, and Star and Unstar buttons. | Nothing to search (GitHub allows 10 searches a minute without a token); a [fine-grained token](https://github.com/settings/personal-access-tokens) with read and write access to Starring for the rest. |
 | `steam` | `steam portal` or `my games portal`: games in your library with hours played. Results about a game get "Owned, 25 h" or "On your wishlist". | A [Steam Web API key](https://steamcommunity.com/dev/apikey) and your SteamID64. If your library comes back empty, set your Steam profile's game details to public. |
 
@@ -277,7 +279,12 @@ plumb_plugin::plugin!(search);
 ```
 
 `plugins/hacker-news` in this repository is a complete example: it asks
-Hacker News's public search API for stories. Build a plugin with
+Hacker News's public search API for stories. `plugins/youtube-music` is a bigger
+one: YouTube and YouTube Music through the YouTube Data API with the owner's
+own key, two requests per search, and a channel's uploads for searches about
+someone with a YouTube channel. `plugins/reddit` signs in to Reddit's
+official API with the owner's own app keys from `config.json` (see its
+README). Build a plugin with
 
 ```sh
 rustup target add wasm32-unknown-unknown

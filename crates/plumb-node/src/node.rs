@@ -372,6 +372,12 @@ impl NodeConfig {
         self.search_by_meaning = false;
         self.private_search = false;
         self.news_feeds = 0;
+        if let Some(net) = &mut self.network {
+            // Nothing is searched here, and other nodes' crawls are not
+            // taken in, so neither is followed in memory.
+            net.answer_searches = false;
+            net.follow_crawls = false;
+        }
     }
 
     fn check(&self) -> Result<()> {

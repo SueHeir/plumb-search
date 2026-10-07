@@ -80,7 +80,7 @@ A new version keeps the data folder (the Docker volume, the desktop app's data f
 
 ## Fully hackable
 
-All of Plumb is open source Rust, and every node is yours to change. Add results from any source with a plugin: a small Rust program compiled to WebAssembly that the node runs in a sandbox, where it can reach only the hosts its `plugin.json` lists ([docs/plugins.md](docs/plugins.md), with examples in `plugins/`: Hacker News, GitHub and your Steam library). Read results as JSON from `/api/search?q=<query>&full=1`, change how ranking works ([How ranking works](#how-ranking-works)), or fork the whole thing.
+All of Plumb is open source Rust, and every node is yours to change. Add results from any source with a plugin: a small Rust program compiled to WebAssembly that the node runs in a sandbox, where it can reach only the hosts its `plugin.json` lists ([docs/plugins.md](docs/plugins.md), with examples in `plugins/`: Hacker News, YouTube Music, Reddit, GitHub and your Steam library). Read results as JSON from `/api/search?q=<query>&full=1`, change how ranking works ([How ranking works](#how-ranking-works)), or fork the whole thing.
 
 ## Use it from an AI
 
@@ -275,7 +275,7 @@ A node does this on its own with `plumb run --search-by-meaning`: it downloads t
 | `crates/plumb-answer` | Instant answers worked out from the query alone: sums, unit and currency conversions, the time in a place |
 | `crates/plumb-node` | The `plumb` command line tool, the long-running node behind `plumb run`, and the web page |
 | `crates/plumb-private` | Private search in the browser: fetches buckets and ranks them, compiled to WebAssembly; see [docs/private-search.md](docs/private-search.md) |
-| `crates/plumb-plugin` | The kit for writing plugins in Rust; `plugins/` has Hacker News, GitHub and Steam plugins. See [docs/plugins.md](docs/plugins.md) |
+| `crates/plumb-plugin` | The kit for writing plugins in Rust; `plugins/` has Hacker News, YouTube Music, Reddit, GitHub and Steam plugins. See [docs/plugins.md](docs/plugins.md) |
 | `crates/plumb-desktop` | The desktop app: a [Tauri](https://v2.tauri.app) window around a node running inside it. A plain `cargo build` leaves it out; see [docs/desktop.md](docs/desktop.md) |
 | `crates/plumb-e2e` | End-to-end tests that run the Docker image, kill containers mid-work and restart them |
 
