@@ -767,7 +767,11 @@ pub fn build_page_index(
         stats.most_views = stats.most_views.max(page.views);
     }
     writer.commit().context("writing the page index")?;
-    drop(writer);
+    // A merge the commit started must end before the index is put in
+    // place: one cut short leaves its segment files behind for good.
+    writer
+        .wait_merging_threads()
+        .context("finishing the page index merges")?;
     std::fs::write(
         staging.path().join("pages.json"),
         serde_json::to_vec(&stats)?,
