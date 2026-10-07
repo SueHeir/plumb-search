@@ -1,3 +1,9 @@
 # The learned ranking (crates/plumb-index/src/learned.rs) against the hand-made order.
 hand	{"learned": false}
 partial	{"named_needs_all_words": false}
+no-filler	{"filler_words": false}
+no-question	{"question_relevance": null}
+question-15	{"question_relevance": 0.15}
+question-50	{"question_relevance": 0.5}
+nav-10	{"navigational_relevance": 0.1}
+nav-15	{"navigational_relevance": 0.15}
