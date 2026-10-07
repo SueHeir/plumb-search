@@ -1604,6 +1604,24 @@ const LIFTED_FROM: usize = 5;
 /// (0.41).
 const LIFT_LINK_MARGIN: f32 = 0.2;
 
+/// Leaves out the sites that lack some of the query's main words
+/// ([`crate::Hit::missing_words`]) when the whole query is the name of an
+/// article or Wikidata item: "toy story" names the film, so rawstory.com
+/// and codastory.com, having one word of it, are no answer. The page's
+/// own site stays. Returns how many were left out.
+pub fn drop_namesakes_of_words(sites: &mut Vec<crate::Hit>, pages: &[PageHit]) -> usize {
+    let Some(named) = pages
+        .iter()
+        .find(|hit| hit.named && hit.page.item.is_some())
+    else {
+        return 0;
+    };
+    let own = named.page.site.as_deref();
+    let before = sites.len();
+    sites.retain(|hit| !hit.missing_words || Some(hit.domain.as_str()) == own);
+    before - sites.len()
+}
+
 /// Adds the official site of the best article the query names when the
 /// sites found leave it out, as the [`LIFTED_FROM`]th site or last, so
 /// that [`lift_named_sites`] can weigh it: "better call saul" names the
@@ -2454,6 +2472,7 @@ mod tests {
             official: false,
             key_pages: Vec::new(),
             demand: None,
+            missing_words: false,
             placing_text_score: None,
         }
     }
@@ -2612,6 +2631,27 @@ mod tests {
         sites[1].official = true;
         lift_named_sites(&mut sites, &[music]);
         assert_eq!(sites[0].domain, "youtube.de");
+    }
+
+    #[test]
+    fn sites_with_some_words_of_a_named_article_are_left_out() {
+        let mut sites = vec![
+            site("toystory.disney.com", false),
+            site("rawstory.com", false),
+            site("toys.com", false),
+        ];
+        sites[1].missing_words = true;
+        sites[2].missing_words = true;
+        let mut film = found("Toy Story", Some("toys.com"), true, 0.9);
+        film.page.item = Some("Q171048".into());
+        // Not named in full: all stay.
+        film.named = false;
+        assert_eq!(drop_namesakes_of_words(&mut sites, &[film.clone()]), 0);
+        film.named = true;
+        assert_eq!(drop_namesakes_of_words(&mut sites, &[film]), 1);
+        let order: Vec<&str> = sites.iter().map(|s| s.domain.as_str()).collect();
+        // The article's own site stays.
+        assert_eq!(order, ["toystory.disney.com", "toys.com"]);
     }
 
     #[test]
