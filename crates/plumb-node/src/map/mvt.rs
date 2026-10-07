@@ -172,7 +172,7 @@ pub struct Layer<'a> {
 impl Layer<'_> {
     /// Feature `f`'s value for `key`.
     pub fn prop(&self, f: &Feature, key: &str) -> Option<&Value<'_>> {
-        f.tags.chunks_exact(2).find_map(|kv| {
+        f.tags.as_chunks::<2>().0.iter().find_map(|kv| {
             (self.keys.get(kv[0] as usize) == Some(&key))
                 .then(|| self.values.get(kv[1] as usize))
                 .flatten()
