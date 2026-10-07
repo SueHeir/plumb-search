@@ -658,6 +658,7 @@ async fn show(
                 remote_control: None,
                 activity: &view.activity,
                 backups: None,
+                plugins: None,
             }))
             .into_response()
         }

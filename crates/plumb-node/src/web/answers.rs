@@ -176,6 +176,8 @@ pub(crate) struct Extras {
     /// The token for the forms of the plugins' buttons, when the page is
     /// for the node's owner and some plugin has buttons.
     pub plugin_token: Option<String>,
+    /// Links to the plugins this search fits but did not run.
+    pub plugin_offers: Vec<crate::plugins::Offer>,
 }
 
 /// Whether a Wikipedia article lists the pages a name could mean rather

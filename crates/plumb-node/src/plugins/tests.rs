@@ -23,25 +23,25 @@ fn plugin(manifest: Manifest, wat: &str) -> Plugin {
 fn keywords_at_either_end_pick_a_plugin() {
     let m = manifest(&["hn", "hacker news"], &["hn.algolia.com"]);
     assert_eq!(
-        m.picks("hn rust async", None),
-        Some((Some("hn".into()), "rust async".into()))
+        m.picks("hn rust async", None, Suggest::Automatic),
+        Some(Pick::Run(Some("hn".into()), "rust async".into()))
     );
     assert_eq!(
-        m.picks("Rust Async Hacker  News", None),
-        Some((Some("hacker news".into()), "Rust Async".into()))
+        m.picks("Rust Async Hacker  News", None, Suggest::Automatic),
+        Some(Pick::Run(Some("hacker news".into()), "Rust Async".into()))
     );
     // Not in the middle, and not alone: "hn" alone is a search for the
     // site.
-    assert_eq!(m.picks("rust hn async", None), None);
-    assert_eq!(m.picks("hn", None), None);
-    assert_eq!(m.picks("hacker news", None), None);
+    assert_eq!(m.picks("rust hn async", None, Suggest::Automatic), None);
+    assert_eq!(m.picks("hn", None, Suggest::Automatic), None);
+    assert_eq!(m.picks("hacker news", None, Suggest::Automatic), None);
     let always = Manifest {
         always: true,
         ..manifest(&[], &["a.example"])
     };
     assert_eq!(
-        always.picks("rust  async", None),
-        Some((None, "rust async".into()))
+        always.picks("rust  async", None, Suggest::Automatic),
+        Some(Pick::Run(None, "rust async".into()))
     );
 }
 
@@ -91,23 +91,106 @@ fn identifiers_pick_a_plugin_without_a_keyword() {
         title: "Paddington 2".into(),
         ..About::default()
     };
-    assert_eq!(m.picks("paddington 2", Some(&about)), None);
+    assert_eq!(
+        m.picks("paddington 2", Some(&about), Suggest::Automatic),
+        None
+    );
     about.ids.insert("tmdb-movie".into(), "346648".into());
     assert_eq!(
-        m.picks("paddington 2", Some(&about)),
-        Some((None, "paddington 2".into()))
+        m.picks("paddington 2", Some(&about), Suggest::Automatic),
+        Some(Pick::Run(None, "paddington 2".into()))
     );
     // A keyword still wins, and is taken off.
     assert_eq!(
-        m.picks("films paddington 2", Some(&about)),
-        Some((Some("films".into()), "paddington 2".into()))
+        m.picks("films paddington 2", Some(&about), Suggest::Automatic),
+        Some(Pick::Run(Some("films".into()), "paddington 2".into()))
     );
     let any_item = Manifest {
         ids: vec!["wikidata".into()],
         ..manifest(&[], &["a.example"])
     };
     about.wikidata = Some("Q25188".into());
-    assert!(any_item.picks("paddington 2", Some(&about)).is_some());
+    assert!(any_item
+        .picks("paddington 2", Some(&about), Suggest::Automatic)
+        .is_some());
+}
+
+#[test]
+fn a_search_that_fits_runs_offers_or_skips_a_plugin_as_the_owner_chose() {
+    let m = Manifest {
+        ids: vec!["musicbrainz-artist".into()],
+        hints: vec!["lyrics".into(), "music video".into()],
+        ..manifest(&["ytm", "yt"], &["a.example"])
+    };
+    let about = About {
+        title: "Radiohead".into(),
+        ids: [("musicbrainz-artist".to_string(), "a74b1b7f".to_string())].into(),
+        ..About::default()
+    };
+    let run = Some(Pick::Run(None, "radiohead".into()));
+    assert_eq!(m.picks("radiohead", Some(&about), Suggest::Automatic), run);
+    assert_eq!(
+        m.picks("radiohead", Some(&about), Suggest::Button),
+        Some(Pick::Offer)
+    );
+    assert_eq!(m.picks("radiohead", Some(&about), Suggest::Keywords), None);
+    // Hints anywhere in the search, as whole words.
+    assert_eq!(
+        m.picks("creep music video radiohead", None, Suggest::Button),
+        Some(Pick::Offer)
+    );
+    assert_eq!(m.picks("lyricsfinder", None, Suggest::Button), None);
+    assert_eq!(m.picks("weather", None, Suggest::Automatic), None);
+    // A keyword runs it, whatever was chosen.
+    assert_eq!(
+        m.picks("ytm creep", None, Suggest::Keywords),
+        Some(Pick::Run(Some("ytm".into()), "creep".into()))
+    );
+}
+
+#[tokio::test]
+async fn offers_run_when_asked_and_the_owner_choice_is_kept() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join(SUGGEST_FILE);
+    let manifest = Manifest {
+        hints: vec!["lyrics".into()],
+        suggest: Suggest::Button,
+        ..manifest(&["ytm", "yt"], &["a.example"])
+    };
+    let plugins = Plugins::new(vec![plugin(
+        manifest,
+        &answering(r#"{"results":[{"title":"Creep","url":"https://example.org/creep"}]}"#),
+    )])
+    .with_suggest_file(file.clone());
+    assert_eq!(
+        plugins.offers("creep  lyrics", None, None),
+        vec![Offer {
+            plugin: "test".into(),
+            name: "Test".into(),
+        }]
+    );
+    assert!(plugins.offers("creep", None, None).is_empty());
+    // An offer is not run, until its link asks for it.
+    assert!(plugins
+        .search("creep lyrics", SafeSearch::Off, None, None)
+        .await
+        .is_empty());
+    let found = plugins
+        .search_running("creep lyrics", SafeSearch::Off, None, None, Some("test"))
+        .await;
+    assert_eq!(found[0].results[0].title, "Creep");
+    assert!(plugins
+        .offers("creep lyrics", None, Some("test"))
+        .is_empty());
+    plugins.set_suggest("test", Suggest::Keywords).unwrap();
+    assert!(plugins.offers("creep lyrics", None, None).is_empty());
+    assert!(plugins.set_suggest("nope", Suggest::Keywords).is_err());
+    let kept: BTreeMap<String, Suggest> =
+        serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    assert_eq!(kept.get("test"), Some(&Suggest::Keywords));
+    // Choosing the plugin's own default again forgets the choice.
+    plugins.set_suggest("test", Suggest::Button).unwrap();
+    assert_eq!(std::fs::read_to_string(&file).unwrap().trim(), "{}");
 }
 
 #[test]
