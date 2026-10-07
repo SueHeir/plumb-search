@@ -2139,7 +2139,8 @@ fn without_copies(hits: Vec<Hit>, typed: Option<&str>, home: Option<&str>) -> Ve
             |other: &Hit| title.is_some() && other.title.as_deref().map(normalize_text) == title;
         // Another site's title word for word, naming that site and not
         // this one: elephant-blue.org titled "Coinbase - Buy and Sell
-        // Bitcoin…", however linked.
+        // Bitcoin…", however linked, short of a well-known site (live.com
+        // titled "Outlook" is Microsoft's own).
         let names_other = |other: &Hit| {
             brand_label(&other.domain).is_some_and(|(label, _)| {
                 label.len() >= 4 && names_brand(other, label) && !hit.domain.contains(label)
@@ -2148,7 +2149,8 @@ fn without_copies(hits: Vec<Hit>, typed: Option<&str>, home: Option<&str>) -> Ve
         if hits.iter().any(|other| {
             other.link_score > hit.link_score
                 && same_title(other)
-                && (hit.link_score < COPYCAT_LINK_SCORE || names_other(other))
+                && (hit.link_score < COPYCAT_LINK_SCORE
+                    || (hit.link_score < WELL_KNOWN_LINK_SCORE && names_other(other)))
         }) {
             copies[i] = true;
             continue;
