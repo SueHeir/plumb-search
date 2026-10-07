@@ -503,7 +503,10 @@ impl PlaceSearcher {
             radius_km = radius * 3.0;
             hits = self.around(&asked.what, &center, radius_km, limit)?;
         }
-        if hits.is_empty() && !near_me {
+        // None around a town is still a search for places there: the
+        // node lists sites saying what was asked for ahead of the town's
+        // own, without a list of places.
+        if hits.is_empty() && !near_me && !center.is_town() {
             return Ok(None);
         }
         Ok(Some(PlaceResults {
@@ -913,6 +916,14 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(parking.hits[0].place.name, "Union Station Park-n-Ride");
+        // Nothing of the kind around a town: still a search there, with no
+        // places to list.
+        let gyms = searcher
+            .search("climbing gym in denver", None, None, 5)
+            .unwrap()
+            .unwrap();
+        assert!(gyms.hits.is_empty());
+        assert_eq!(gyms.center.unwrap().name, "Denver");
         // The searcher's own town, for "near me".
         let near = searcher
             .search("coffee near me", Some("Denver, CO"), None, 5)
