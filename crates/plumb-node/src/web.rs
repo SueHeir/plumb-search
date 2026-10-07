@@ -1340,10 +1340,13 @@ async fn api_search(
     let found = run_search(&state, &query, params.limit(), &options).await;
     match found {
         Ok(mut results) if full => {
+            // No town is given here, so "near me" finds no places: an
+            // empty list around nowhere says nothing.
             let places = not_a_name(
                 run_places(&state, &query, None, options.country.as_deref()).await,
                 &results.hits,
-            );
+            )
+            .filter(|found| found.center.is_some());
             if let Some(found) = &places {
                 let local = place_sites(&state, found).await;
                 places::local_first(found, &mut results.hits, local, params.limit());
@@ -6249,6 +6252,16 @@ mod tests {
                 website: website.map(str::to_string),
                 ..Place::default()
             };
+            if query.ends_with("near me") {
+                return Some(plumb_index::places::PlaceResults {
+                    what: "brewery".into(),
+                    center: None,
+                    near_me: true,
+                    guessed: false,
+                    radius_km: 0.0,
+                    hits: Vec::new(),
+                });
+            }
             let brewery =
                 |name: &str, osm: &str, website: Option<&str>| plumb_index::places::PlaceHit {
                     place: at(name, "craft=brewery", osm, website),
@@ -6278,6 +6291,17 @@ mod tests {
                 )
             })
         }
+    }
+
+    #[tokio::test]
+    async fn the_api_lists_no_places_around_nowhere() {
+        let (_, _, body) = send(
+            router(Arc::new(BreweryPlaces)),
+            "/api/search?q=brewery+near+me&full=1",
+        )
+        .await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert!(json.get("places").is_none(), "{body}");
     }
 
     #[tokio::test]

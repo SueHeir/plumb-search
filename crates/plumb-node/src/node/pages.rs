@@ -608,6 +608,11 @@ pub(super) fn add_pages(
                     &mut results.pages,
                 );
             }
+            // The learned order knows nothing of spelling: the site a
+            // suggestion names stays second.
+            if let Some(site) = results.spelling.as_ref().and_then(|s| s.site.clone()) {
+                plumb_index::suggested_site_second(&mut results.hits, &site);
+            }
             // Only shown, after the ranking, which weighs a site's own
             // title.
             if let Err(err) = searcher.title_untitled(&mut results.hits) {

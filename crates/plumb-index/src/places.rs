@@ -82,6 +82,28 @@ const WHEN: &[&[&str]] = &[
     &["today"],
     &["tonight"],
 ];
+/// First words of a query about a town itself, not places in it: "time in
+/// tokyo", "weather in denver", "capital of washington".
+const ABOUT_TOWN: &[&str] = &[
+    "time",
+    "timezone",
+    "weather",
+    "temperature",
+    "forecast",
+    "climate",
+    "population",
+    "capital",
+    "history",
+    "news",
+    "mayor",
+    "elevation",
+    "sunrise",
+    "sunset",
+    "currency",
+    "cost",
+    "crime",
+    "jobs",
+];
 /// Words left out of what is looked for: "best pizza", "places to eat".
 const FILLER: &[&str] = &[
     "best", "good", "great", "cheap", "top", "nice", "nearest", "closest", "open", "the", "a",
@@ -125,6 +147,14 @@ pub fn parse_place_query(query: &str) -> Option<PlaceQuery> {
         .find(|when| words.len() > when.len() && words[words.len() - when.len()..] == ***when)
     {
         words.truncate(words.len() - when.len());
+    }
+    if words
+        .iter()
+        .map(String::as_str)
+        .find(|w| !FILLER.contains(w))
+        .is_some_and(|w| ABOUT_TOWN.contains(&w))
+    {
+        return None;
     }
     let what_of = |words: &[String]| -> Option<String> {
         let what: Vec<&str> = words
@@ -741,6 +771,10 @@ mod tests {
             query("pizza denver open now"),
             Some(("pizza".into(), Near::Named("denver".into())))
         );
+        assert_eq!(
+            query("plumber boston open now"),
+            Some(("plumber".into(), Near::Named("boston".into())))
+        );
         // Only "in", "near" and "near me" say where for sure.
         assert!(parse_place_query("pizza in denver").unwrap().said_where);
         assert!(parse_place_query("coffee near me").unwrap().said_where);
@@ -756,6 +790,12 @@ mod tests {
             "open now",
             "leonardo dicaprio",
             "tim cook",
+            // About the town, not places in it.
+            "time in tokyo",
+            "weather in denver",
+            "best time to visit seattle",
+            "capital of washington",
+            "capital of singapore",
         ] {
             assert_eq!(query(plain), None, "{plain}");
         }
