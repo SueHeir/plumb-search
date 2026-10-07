@@ -158,6 +158,24 @@ async fn run_places(
         .flatten()
 }
 
+/// The sites of the places in `found` that the index has, in the order
+/// the places are listed, looked up on a blocking thread.
+async fn place_sites(state: &AppState, found: &plumb_index::places::PlaceResults) -> Vec<Hit> {
+    let domains = places::local_domains(found);
+    if domains.is_empty() {
+        return Vec::new();
+    }
+    let backend = Arc::clone(&state.backend);
+    tokio::task::spawn_blocking(move || {
+        domains
+            .iter()
+            .filter_map(|domain| backend.site(domain))
+            .collect()
+    })
+    .await
+    .unwrap_or_default()
+}
+
 /// Where the places go on a results page that does not start them at
 /// the top.
 const PLACES_MARK: &str = "<!--places-->\n";
@@ -204,6 +222,12 @@ pub trait SearchBackend: Send + Sync {
         country: Option<&str>,
     ) -> Option<plumb_index::places::PlaceResults> {
         let _ = (query, home, country);
+        None
+    }
+    /// The site `domain` (a canonical domain) as a hit, when the index
+    /// has it. By default there are none.
+    fn site(&self, domain: &str) -> Option<Hit> {
+        let _ = domain;
         None
     }
 
@@ -314,6 +338,22 @@ impl SearchBackend for IndexBackend {
 
     fn base_map(&self) -> Option<Arc<crate::map::BaseMap>> {
         self.map.as_ref()?.get()
+    }
+
+    fn site(&self, domain: &str) -> Option<Hit> {
+        if !self.searcher.has_domain(domain) {
+            return None;
+        }
+        let options = SearchOptions {
+            exact: true,
+            ..SearchOptions::default()
+        };
+        self.searcher
+            .search_full(domain, 1, &self.rank, &options)
+            .ok()?
+            .hits
+            .into_iter()
+            .find(|hit| hit.domain == domain)
     }
 }
 
@@ -1051,6 +1091,10 @@ async fn search_page(
     let response = match local {
         Ok(mut results) => {
             let found_places = not_a_name(found_places, &results.hits);
+            if let Some(found) = &found_places {
+                let local = place_sites(&state, found).await;
+                places::local_first(found, &mut results.hits, local, limit);
+            }
             if let Some(visitor) = &mut visitor {
                 visitor.rank(
                     &query,
@@ -1269,7 +1313,15 @@ async fn api_search(
     let options = params.options(&state.settings.home, &headers);
     let found = run_search(&state, &query, params.limit(), &options).await;
     match found {
-        Ok(results) if full => {
+        Ok(mut results) if full => {
+            let places = not_a_name(
+                run_places(&state, &query, None, options.country.as_deref()).await,
+                &results.hits,
+            );
+            if let Some(found) = &places {
+                let local = place_sites(&state, found).await;
+                places::local_first(found, &mut results.hits, local, params.limit());
+            }
             let extras = extras(&state, &query, &results, &options).await;
             let about = search_about(&query, &results, &extras);
             let shown_to_plugins = if state.settings.plugins.any_annotate() {
@@ -1297,10 +1349,6 @@ async fn api_search(
                     answers::info_box(&results.hits, &placed)
                 }
             };
-            let places = not_a_name(
-                run_places(&state, &query, None, options.country.as_deref()).await,
-                &results.hits,
-            );
             let body = FullResults {
                 results: &results,
                 answer: extras.answer,
@@ -6083,6 +6131,131 @@ mod tests {
                     km: 1.0,
                 }],
             })
+        }
+    }
+
+    /// Denver sites that only have the town's name, a guide that says
+    /// "breweries", and breweries around Denver, one of them with a site
+    /// the index has.
+    struct BreweryPlaces;
+
+    impl SearchBackend for BreweryPlaces {
+        fn search(&self, _query: &str, limit: usize) -> Result<Vec<Hit>> {
+            let hits = vec![
+                hit(
+                    "denvergov.org",
+                    "https://denvergov.org/",
+                    Some("City and County of Denver"),
+                    None,
+                ),
+                hit(
+                    "denverbroncos.com",
+                    "https://www.denverbroncos.com/",
+                    Some("Denver Broncos"),
+                    None,
+                ),
+                hit(
+                    "westword.com",
+                    "https://www.westword.com/",
+                    Some("Westword"),
+                    Some("Denver news, the best breweries and bars."),
+                ),
+            ];
+            Ok(hits.into_iter().take(limit).collect())
+        }
+
+        fn num_docs(&self) -> u64 {
+            4
+        }
+
+        fn places(
+            &self,
+            query: &str,
+            _home: Option<&str>,
+            _country: Option<&str>,
+        ) -> Option<plumb_index::places::PlaceResults> {
+            use plumb_core::place::Place;
+            if !query.contains("brewery") {
+                return None;
+            }
+            let at = |name: &str, kind: &str, osm: &str, website: Option<&str>| Place {
+                name: name.into(),
+                kind: kind.into(),
+                osm: osm.into(),
+                lat: 39.74,
+                lon: -104.99,
+                country: Some("US".into()),
+                website: website.map(str::to_string),
+                ..Place::default()
+            };
+            let brewery =
+                |name: &str, osm: &str, website: Option<&str>| plumb_index::places::PlaceHit {
+                    place: at(name, "craft=brewery", osm, website),
+                    km: 1.0,
+                };
+            Some(plumb_index::places::PlaceResults {
+                what: "brewery".into(),
+                center: Some(at("Denver", "place=city", "n1", None)),
+                near_me: false,
+                guessed: !query.contains(" in "),
+                radius_km: 12.0,
+                hits: vec![
+                    brewery("Great Divide", "n2", Some("https://greatdivide.com/")),
+                    brewery("Unknown Ales", "n3", Some("https://unknown-ales.example/")),
+                    brewery("No Site Brewing", "n4", None),
+                ],
+            })
+        }
+
+        fn site(&self, domain: &str) -> Option<Hit> {
+            (domain == "greatdivide.com").then(|| {
+                hit(
+                    "greatdivide.com",
+                    "https://greatdivide.com/",
+                    Some("Great Divide Brewing Co."),
+                    None,
+                )
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn places_around_a_town_put_local_sites_before_the_town_s_own() {
+        for query in ["brewery+in+denver", "denver+brewery"] {
+            let (_, _, body) = send(
+                router(Arc::new(BreweryPlaces)),
+                &format!("/api/search?q={query}&full=1"),
+            )
+            .await;
+            let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+            let domains: Vec<&str> = json["hits"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|h| h["domain"].as_str().unwrap())
+                .collect();
+            // The brewery's own site, then the guide that says breweries,
+            // then the sites only named after Denver.
+            assert_eq!(
+                domains,
+                [
+                    "greatdivide.com",
+                    "westword.com",
+                    "denvergov.org",
+                    "denverbroncos.com"
+                ],
+                "{query}"
+            );
+            assert_eq!(json["places"]["hits"].as_array().unwrap().len(), 3);
+
+            let (_, _, page) = send(
+                router(Arc::new(BreweryPlaces)),
+                &format!("/search?q={query}"),
+            )
+            .await;
+            let at = |d: &str| page.find(&format!("https://{d}")).unwrap();
+            assert!(page.contains("<section class=\"pl\""), "{page}");
+            assert!(at("www.westword.com") < at("denvergov.org"), "{page}");
         }
     }
 
