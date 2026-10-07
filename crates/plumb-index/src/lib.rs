@@ -2137,13 +2137,18 @@ fn without_copies(hits: Vec<Hit>, typed: Option<&str>, home: Option<&str>) -> Ve
         let title = hit.title.as_deref().map(normalize_text);
         let same_title =
             |other: &Hit| title.is_some() && other.title.as_deref().map(normalize_text) == title;
-        // Another site's title word for word, naming that site and not
-        // this one: elephant-blue.org titled "Coinbase - Buy and Sell
-        // Bitcoin…", however linked.
+        // Another site's long title word for word, naming that site and
+        // not this one: elephant-blue.org titled "Coinbase - Buy and Sell
+        // Bitcoin…", however linked. A short one is a product's name, and
+        // its maker's other sites carry it too: live.com titled "Outlook".
+        let long_title = title
+            .as_deref()
+            .is_some_and(|title| title.split(' ').filter(|w| !w.is_empty()).count() >= 4);
         let names_other = |other: &Hit| {
-            brand_label(&other.domain).is_some_and(|(label, _)| {
-                label.len() >= 4 && names_brand(other, label) && !hit.domain.contains(label)
-            })
+            long_title
+                && brand_label(&other.domain).is_some_and(|(label, _)| {
+                    label.len() >= 4 && names_brand(other, label) && !hit.domain.contains(label)
+                })
         };
         if hits.iter().any(|other| {
             other.link_score > hit.link_score
