@@ -231,7 +231,9 @@ pub(crate) fn document(
     let domain = record.domain.as_str();
     let mut doc = TantivyDocument::default();
     doc.add_text(f.domain, domain);
-    if let Some(url) = non_empty(&record.url) {
+    // A homepage read on another site's host says what that site is.
+    let borrowed = non_empty(&record.url).is_some_and(|url| crate::reads_another_site(url, domain));
+    if let Some(url) = non_empty(&record.url).filter(|_| !borrowed) {
         doc.add_text(f.url, url.trim());
     }
 
@@ -256,7 +258,7 @@ pub(crate) fn document(
     // Wikidata's for an official site ("Gmail"), else its own
     // `og:site_name`. It is shown as the result's title, and matched as one.
     let title = non_empty(&record.title)
-        .filter(|title| !is_blank_title(title))
+        .filter(|title| !borrowed && !is_blank_title(title) && !title.contains('\u{FFFD}'))
         .or_else(|| {
             record
                 .aliases
@@ -275,7 +277,7 @@ pub(crate) fn document(
         }
         doc.add_text(f.title, &title);
     }
-    if let Some(description) = non_empty(&record.description) {
+    if let Some(description) = non_empty(&record.description).filter(|_| !borrowed) {
         doc.add_text(f.description, truncate_chars(description, MAX_TEXT_CHARS));
     }
     // Wikipedia's words for the site count like its own description, and

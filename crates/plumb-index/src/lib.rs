@@ -1808,16 +1808,28 @@ impl Searcher {
                 .map(str::to_string)
         };
         let domain = text(self.fields.domain).unwrap_or_default();
-        let url = text(self.fields.url).unwrap_or_else(|| format!("https://{domain}/"));
+        // A homepage read on another site's host, indexed before crawls
+        // stopped there (prevention.nih.gov for nih.gov), says what that
+        // site is: its address, title and description are left out until
+        // the index is rebuilt without them ([`schema::document`]).
+        let stored_url = text(self.fields.url);
+        let borrowed = stored_url
+            .as_deref()
+            .is_some_and(|url| reads_another_site(url, &domain));
+        let url = stored_url
+            .filter(|_| !borrowed)
+            .unwrap_or_else(|| format!("https://{domain}/"));
+        let own = |field| text(field).filter(|_| !borrowed);
         let about = text(self.fields.about);
         Ok(Hit {
             demand: None,
             url,
-            title: text(self.fields.title),
+            // A title in the wrong encoding ("����") says nothing.
+            title: own(self.fields.title).filter(|title| !title.contains('\u{FFFD}')),
             official: about.is_some(),
             // The site's own description, else Wikipedia's, else what
             // Wikidata says it is.
-            description: text(self.fields.description).or(about),
+            description: own(self.fields.description).or(about),
             domain,
             score: ranked.score,
             text_score: ranked.text_score,
@@ -1830,6 +1842,13 @@ impl Searcher {
                 .unwrap_or_default(),
         })
     }
+}
+
+/// Whether `url`, a site's homepage address, is on another site than
+/// `domain`: prevention.nih.gov for nih.gov, play.google.com for
+/// google.com ([`plumb_core::subsites`]).
+pub(crate) fn reads_another_site(url: &str, domain: &str) -> bool {
+    registrable_domain(url).is_some_and(|site| site != domain)
 }
 
 /// Drugs that spam pill shops put in their names.
@@ -3757,6 +3776,47 @@ mod tests {
         assert_eq!(full("github of the world").site_search, None);
         assert_eq!(full("github vs gitlab").site_search, None);
         assert_eq!(full("can github host pages").site_search, None);
+    }
+
+    #[test]
+    fn borrowed_and_garbled_titles_are_not_shown() {
+        let mut records = corpus();
+        let mut nih = site(
+            "nih.gov",
+            Some("Home | NIH Office of Disease Prevention Website"),
+            Some("Prevention research"),
+            &["National Institutes of Health"],
+            &[],
+            popular(400, 20_000),
+        );
+        nih.url = Some("https://prevention.nih.gov/".into());
+        records.push(nih);
+        records.push(site(
+            "netease.com",
+            Some("\u{FFFD}\u{FFFD}\u{FFFD}\u{FFFD}"),
+            None,
+            &[],
+            &[],
+            popular(900, 10_000),
+        ));
+        let (_dir, searcher) = build(&records);
+        let first = |q: &str| {
+            searcher
+                .search_full(q, 10, &RankConfig::default(), &SearchOptions::default())
+                .unwrap()
+                .hits
+                .into_iter()
+                .next()
+                .unwrap()
+        };
+        let nih = first("nih");
+        assert_eq!(nih.domain, "nih.gov");
+        assert_eq!(nih.url, "https://nih.gov/");
+        assert_eq!(nih.title.as_deref(), Some("National Institutes of Health"));
+        assert_ne!(nih.description.as_deref(), Some("Prevention research"));
+        let netease = first("netease");
+        assert_eq!(netease.domain, "netease.com");
+        assert_eq!(netease.title, None);
     }
 
     #[test]
