@@ -26,6 +26,18 @@ pub const DEFAULT_MAX_PER_SITE: usize = 20_000;
 /// in "Array.prototype.sort() — JavaScript").
 const SECTION_WORDS: usize = 3;
 
+/// What a wiki's pages that list or are about pages start with.
+const WIKI_LISTS: &[&str] = &[
+    "Category:",
+    "Special:",
+    "Talk:",
+    "File:",
+    "Template:",
+    "User:",
+    "Help:",
+    "ArchWiki:",
+];
+
 /// A docs page as fetched.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FetchedDoc {
@@ -52,6 +64,11 @@ pub fn docs_articles(site: &DocsSite, docs: &[FetchedDoc]) -> Vec<Article> {
 pub fn doc_article(site: &DocsSite, doc: &FetchedDoc) -> Option<Article> {
     let depth = depth_under(site, &doc.url)?;
     let title = page_title(site, doc.title.as_deref()?)?;
+    // A wiki's lists of pages, not pages: "Category:Electronic Frontier
+    // Foundation".
+    if WIKI_LISTS.iter().any(|list| title.starts_with(list)) {
+        return None;
+    }
     let description = doc
         .description
         .as_deref()
@@ -190,6 +207,16 @@ mod tests {
         )
         .is_none());
         assert!(doc_article(python, &doc("https://python.org/x", "X", None)).is_none());
+        let arch = site("archwiki").unwrap();
+        assert!(doc_article(
+            arch,
+            &doc(
+                "https://wiki.archlinux.org/title/Category:Electronic_Frontier_Foundation",
+                "Category:Electronic Frontier Foundation - ArchWiki",
+                None
+            )
+        )
+        .is_none());
     }
 
     #[test]

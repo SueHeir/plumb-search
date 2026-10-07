@@ -116,7 +116,7 @@ pub async fn fetch_site_pages(target: &SitePagesTarget, cfg: &CrawlConfig) -> Si
                     found.add(link);
                 }
             }
-            Err(error) => debug!("{}: index page {url}: {error}", target.domain),
+            Err(error) => info!("{}: index page {url}: {error}", target.domain),
         }
     }
     let sitemaps = sitemaps_of(&mut visit, target, &roots).await;
@@ -131,34 +131,65 @@ pub async fn fetch_site_pages(target: &SitePagesTarget, cfg: &CrawlConfig) -> Si
         urls.len()
     );
     let mut seen = HashSet::new();
+    let mut why = std::collections::BTreeMap::<String, usize>::new();
     for url in urls {
-        match visit.fetch_homepage(&target.domain, &url).await {
+        let skipped = match visit.fetch_homepage(&target.domain, &url).await {
             CrawlOutcome::Fetched(page) => {
                 let at = Url::parse(&page.final_url).ok().map(|mut at| {
                     at.set_fragment(None);
                     at
                 });
                 match at {
-                    Some(at) if under_roots(&at, &roots) && seen.insert(at.to_string()) => {
+                    // A page under the roots, or one it redirects to on the
+                    // same host ("stable/" to "2.9/").
+                    Some(at)
+                        if (under_roots(&at, &roots) || at.host_str() == url.host_str())
+                            && !seen.contains(at.as_str()) =>
+                    {
+                        seen.insert(at.to_string());
                         result.pages.push(SitePage {
                             url: at.into(),
                             meta: page.meta,
                         });
+                        None
                     }
-                    _ => result.skipped += 1,
+                    Some(at) if seen.contains(at.as_str()) => Some("a page fetched before".into()),
+                    _ => Some("a redirect off the site's host".into()),
                 }
             }
-            outcome => {
-                debug!("{url}: {outcome:?}");
-                result.skipped += 1;
+            CrawlOutcome::RobotsDisallowed => Some("disallowed by robots.txt".into()),
+            CrawlOutcome::OffsiteRedirect { .. } => Some("a redirect to another site".into()),
+            CrawlOutcome::HttpStatus { status } => Some(format!("HTTP {status}")),
+            CrawlOutcome::NotHtml { .. } => Some("not a web page".into()),
+            CrawlOutcome::BotCheck { .. } => Some("a bot check".into()),
+            CrawlOutcome::Failed { error, .. } => {
+                debug!("{url}: {error}");
+                Some(if error.starts_with("robots.txt") {
+                    "robots.txt could not be read".into()
+                } else {
+                    "failed".into()
+                })
             }
+        };
+        if let Some(reason) = skipped {
+            result.skipped += 1;
+            *why.entry(reason).or_default() += 1;
         }
     }
+    let why: Vec<String> = why
+        .into_iter()
+        .map(|(reason, count)| format!("{count} {reason}"))
+        .collect();
     info!(
-        "{}: fetched {} pages, skipped {}",
+        "{}: fetched {} pages, skipped {}{}",
         target.domain,
         result.pages.len(),
-        result.skipped
+        result.skipped,
+        if why.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", why.join(", "))
+        }
     );
     result
 }
@@ -218,12 +249,12 @@ async fn read_sitemaps(
         let body = match fetch_list(visit, cfg, sitemap.clone()).await {
             Ok((_, body)) => body,
             Err(error) => {
-                debug!("{domain}: sitemap {sitemap}: {error}");
+                info!("{domain}: sitemap {sitemap}: {error}");
                 continue;
             }
         };
         let Some(listed) = parse_sitemap(&body) else {
-            debug!("{domain}: sitemap {sitemap} does not read");
+            info!("{domain}: sitemap {sitemap} does not read");
             continue;
         };
         for nested in listed.sitemaps {
@@ -241,7 +272,11 @@ async fn read_sitemaps(
             }
         }
     }
-    debug!("{domain}: read {} sitemaps", read.len());
+    info!(
+        "{domain}: read {} sitemaps, found {} pages",
+        read.len(),
+        found.count
+    );
 }
 
 /// Fetches a sitemap or index page at `url`, following redirects on the
@@ -353,13 +388,25 @@ pub(crate) fn page_links(base: &Url, html: &str) -> Vec<Url> {
     let mut rest = html;
     while let Some(at) = find_href(rest) {
         rest = &rest[at..];
-        let Some(quote) = rest.chars().next().filter(|c| *c == '"' || *c == '\'') else {
-            continue;
+        let href = match rest.chars().next() {
+            Some(quote @ ('"' | '\'')) => {
+                rest = &rest[1..];
+                let Some(end) = rest.find(quote) else { break };
+                let href = html_unescape(&rest[..end]);
+                rest = &rest[end + 1..];
+                href
+            }
+            // Minified pages leave values unquoted: `<a href=fs.html>`.
+            Some(c) if !c.is_whitespace() && c != '>' => {
+                let end = rest
+                    .find(|c: char| c.is_whitespace() || c == '>')
+                    .unwrap_or(rest.len());
+                let href = html_unescape(&rest[..end]);
+                rest = &rest[end..];
+                href
+            }
+            _ => continue,
         };
-        rest = &rest[1..];
-        let Some(end) = rest.find(quote) else { break };
-        let href = html_unescape(&rest[..end]);
-        rest = &rest[end + 1..];
         if let Ok(mut url) = base.join(href.trim()) {
             if matches!(url.scheme(), "http" | "https") {
                 url.set_fragment(None);
@@ -630,7 +677,8 @@ mod tests {
         let html = r#"<a class="x" href="library/index.html">L</a>
             <A HREF='howto/sorting.html#sortinghowto'>S</A>
             <a href="https://other.org/">O</a> <a data-href="nope.html">N</a>
-            <a href="mailto:x@a.org">M</a> <a href="q.html?a=1&amp;b=2">Q</a>"#;
+            <a href="mailto:x@a.org">M</a> <a href="q.html?a=1&amp;b=2">Q</a>
+            <a href=fs.html>F</a><a class=x href=path.html#p>P</a>"#;
         let links: Vec<String> = page_links(&base, html)
             .into_iter()
             .map(String::from)
@@ -642,6 +690,8 @@ mod tests {
                 "https://docs.a.org/3/howto/sorting.html",
                 "https://other.org/",
                 "https://docs.a.org/3/q.html?a=1&b=2",
+                "https://docs.a.org/3/fs.html",
+                "https://docs.a.org/3/path.html",
             ]
         );
     }

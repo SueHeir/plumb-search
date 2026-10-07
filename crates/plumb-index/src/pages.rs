@@ -1405,7 +1405,7 @@ impl PageSearcher {
             let mut whole = false;
             if asked_by_title {
                 (name, named, whole) = (name.max(ALIAS_MATCH), true, true);
-            } else if !named {
+            } else if !named && (page.set != DOCS_SET || docs_asked(&page, query)) {
                 let (question, asked) = self.question_match(&page, &stems);
                 name = name.max(question);
                 whole = asked;
@@ -1833,7 +1833,8 @@ pub fn lift_named_sites(sites: &mut [crate::Hit], pages: &[PageHit]) {
 ///   lists usbank.com before the article "U.S. Bancorp".
 ///
 /// A page the learned ranking listed on its own ([`PageHit::learned`])
-/// stays where it put it: before the same site, or last.
+/// stays where it put it: before the same site, or last, except that a
+/// docs page found by its words never comes before the best site.
 pub fn place_pages(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) -> Vec<PlacedPage> {
     let mut placed = place_pages_by_rules(query, sites, pages);
     for page in placed.iter_mut().filter(|p| p.under.is_none()) {
@@ -1845,6 +1846,11 @@ pub fn place_pages(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) -> Ve
             }
             Some(LearnedPlace::Last) => page.at = sites.len(),
             None => {}
+        }
+        // Not even the learned ranking puts a docs page found by its words
+        // before the best site.
+        if docs_found_by_words(&page.hit) {
+            page.at = page.at.max(1).min(sites.len());
         }
     }
     placed
@@ -1958,7 +1964,17 @@ fn place_pages_by_rules(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) 
         if listed == most || !(hit.named || hit.score >= MIN_PARTIAL_SCORE) {
             continue;
         }
-        let at = if hit.whole {
+        // One docs page found by its words is enough: more crowd out the
+        // questions that answer the same search.
+        let docs_found = |p: &PlacedPage| p.hit.page.set == DOCS_SET && !p.hit.named;
+        if docs_found_by_words(&hit) && placed.iter().any(docs_found) {
+            continue;
+        }
+        let at = if docs_found_by_words(&hit) {
+            // A docs page found by its words comes after the best site:
+            // "docker desktop download" wants docker.com first.
+            1
+        } else if hit.whole {
             // Only the best of them leads: another edition of the book
             // comes after the best site.
             let led = placed.iter().any(|p| p.hit.whole);
@@ -1990,6 +2006,20 @@ fn place_pages_by_rules(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) 
         });
     }
     placed
+}
+
+/// Whether `hit` is a docs page the search found by most of its words
+/// rather than named.
+fn docs_found_by_words(hit: &PageHit) -> bool {
+    hit.page.set == DOCS_SET && !hit.named
+}
+
+/// Whether `query` asks about something in the docs of the docs page
+/// `page`'s site (see [`plumb_core::docs::asks_about`]): "python sort
+/// list" does for a page of Python's docs; "note taking app" for none.
+fn docs_asked(page: &Page, query: &str) -> bool {
+    plumb_core::docs::site_of_url(&page.url)
+        .is_some_and(|site| plumb_core::docs::asks_about(site, query))
 }
 
 /// Words a search asked as a question starts with.
@@ -2175,11 +2205,12 @@ mod tests {
         // Its title alone names nothing.
         assert!(found("glossary").is_empty());
         assert!(found("sorting techniques").is_empty());
-        // Most of the query's words.
+        // Most of the query's words, with the product named.
         assert_eq!(
             found("sort a list in python"),
             [("Sorting Techniques".to_string(), false)]
         );
+        assert!(found("sort a list in place").is_empty());
         assert!(Page::from_docs(Article {
             item: Some("http://docs.python.org/3/".into()),
             ..Article::default()
