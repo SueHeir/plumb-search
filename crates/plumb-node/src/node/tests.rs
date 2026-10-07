@@ -2433,6 +2433,115 @@ async fn a_node_takes_wikipedia_articles_from_a_trusted_node() {
     node.shutdown().await.unwrap();
 }
 
+/// A trusted node that says when it is asked for a page set file, then
+/// answers only once let go (or the asker gives up).
+struct SlowPages {
+    table: plumb_net::BucketTable,
+    asked: Mutex<std::sync::mpsc::Sender<()>>,
+    gate: Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+impl plumb_net::BucketSource for SlowPages {
+    fn bucket(&self, bucket: u32) -> Option<Vec<String>> {
+        self.table.bucket(bucket)
+    }
+
+    fn page_set_file(&self, _set: &str) -> Option<PathBuf> {
+        let _ = self.asked.lock().unwrap().send(());
+        let _ = self
+            .gate
+            .lock()
+            .unwrap()
+            .recv_timeout(Duration::from_secs(60));
+        None
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_node_searches_the_pages_it_has_while_a_download_waits() {
+    let peer_dir = tempfile::tempdir().unwrap();
+    let peer_id = plumb_net::load_or_create_key(&peer_dir.path().join("node.key"))
+        .unwrap()
+        .public()
+        .to_peer_id();
+    let table = plumb_net::BucketTable::build(
+        &peer_dir.path().join("buckets"),
+        &[SiteRecord::new("lighthouses.org")],
+    )
+    .unwrap();
+    let (asked_tx, asked) = std::sync::mpsc::channel();
+    let (let_go, gate) = std::sync::mpsc::channel();
+    let mut peer_config = plumb_net::NetConfig::new(peer_dir.path().to_path_buf());
+    peer_config.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+    peer_config.upnp = false;
+    peer_config.local_discovery = false;
+    peer_config.round_every = None;
+    let source = SlowPages {
+        table,
+        asked: Mutex::new(asked_tx),
+        gate: Mutex::new(gate),
+    };
+    let (peer, _records) = plumb_net::start(peer_config, Arc::new(source))
+        .await
+        .unwrap();
+    let peer_addr: plumb_net::Multiaddr = loop {
+        if let Some(addr) = peer.status().listening.first() {
+            break addr.parse().unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+
+    // The node keeps a set it has no file of, so it asks the trusted node,
+    // which takes its time.
+    let dir = seeded_dir();
+    let mut config = test_config(dir.path());
+    config.settings.page_sets = crate::pages::PageSets::parse("wikipedia-en=2").unwrap();
+    let mut net = plumb_net::NetConfig::new(PathBuf::new());
+    net.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+    net.upnp = false;
+    net.local_discovery = false;
+    net.round_every = None;
+    net.fill = false;
+    net.trusted_peers = vec![peer_id];
+    net.bootstrap = vec![peer_addr.with_p2p(peer_id).unwrap()];
+    config.network = Some(net);
+    let node = start(config).await.unwrap();
+    let addr = node.addr();
+    wait_for(addr, "the first index", ready_and_idle).await;
+    tokio::task::spawn_blocking(move || asked.recv_timeout(Duration::from_secs(30)))
+        .await
+        .unwrap()
+        .expect("the node asks the trusted node for the set");
+
+    // Meanwhile a file of the set turns up here (from fetch-pages, say):
+    // it is searched without waiting on the download.
+    let set = crate::pages::SetInfo::find("wikipedia-en").unwrap();
+    let file = set.file(dir.path());
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    let articles = [plumb_core::Article {
+        title: "Pierre Curie".into(),
+        views: 500,
+        ..Default::default()
+    }];
+    plumb_ingest::articles::write_articles_file(&file, &articles).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let (_, _, body) = get(addr, "/search?q=pierre+curie").await;
+        if body.contains("Pierre_Curie") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the pages wait on the download: {body}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    let _ = let_go.send(());
+    peer.shutdown().await;
+    node.shutdown().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_new_node_sets_up_from_a_trusted_node_without_the_seed_downloads() {
     // A trusted node holds five sites, two never crawled, with what the
