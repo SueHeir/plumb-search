@@ -109,8 +109,11 @@ async fn save_welcome(
     let mut kept = KeptAbout::of(&state, &headers);
     // Sites never shown are not asked for here, so they stay as they were.
     let hidden = kept.about.hidden.join("\n");
+    // Nor are kinds of results.
+    let kinds = kept.about.kinds.clone();
     let about = About::from_form(&interests.join("\n"), &pinned.join("\n"), &hidden)
-        .with_town(field("town").next().unwrap_or_default());
+        .with_town(field("town").next().unwrap_or_default())
+        .with_kinds(kinds.iter().map(|(kind, amount)| (kind.as_str(), *amount)));
     let fit = match kept.save(about) {
         Ok(fit) => fit,
         Err(err) => {
