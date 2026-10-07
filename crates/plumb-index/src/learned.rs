@@ -378,15 +378,14 @@ pub fn reorder(model: &Model, query: &str, hits: &mut Vec<Hit>, placed: &mut Vec
             }
         }
     }
-    // A docs page found by its words never comes before the best site,
-    // whatever the model says: "python package index" wants pypi.org first.
-    if !new_hits.is_empty() {
-        for page in alone
-            .iter_mut()
-            .filter(|p| p.at == 0 && crate::pages::docs_found_by_words(&p.hit))
-        {
-            page.at = 1;
-        }
+    // A docs page found by its words never comes before the best site but
+    // its own, whatever the model says: "python package index" wants
+    // pypi.org first.
+    for page in alone
+        .iter_mut()
+        .filter(|p| p.at == 0 && crate::pages::docs_kept_below(&p.hit, &new_hits))
+    {
+        page.at = 1;
     }
     // The moved sites' scores, highest first, in their new order.
     let moved = new_hits

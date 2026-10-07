@@ -1901,12 +1901,13 @@ pub fn place_pages(query: &str, sites: &[crate::Hit], mut pages: Vec<PageHit>) -
 
 /// The places no ranking overrides, applied after [`place_pages`] and
 /// after [`crate::learned::reorder`]: a docs page found by its words never
-/// comes before the best site, and, unless the query asks for them,
+/// comes before the best site unless that site is the docs' own (see
+/// [`docs_kept_below`]), and, unless the query asks for them,
 /// podcasts come after the best site and the other pages listed on their
 /// own ("better call saul" wants amc.com and the article first).
 pub fn keep_page_rules(query: &str, sites: &[crate::Hit], placed: &mut Vec<PlacedPage>) {
     for page in placed.iter_mut().filter(|p| p.under.is_none()) {
-        if docs_found_by_words(&page.hit) {
+        if docs_kept_below(&page.hit, sites) {
             page.at = page.at.max(1).min(sites.len());
         }
     }
@@ -2095,6 +2096,28 @@ fn place_pages_by_rules(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) 
 /// rather than named.
 pub(crate) fn docs_found_by_words(hit: &PageHit) -> bool {
     hit.page.set == DOCS_SET && !hit.named
+}
+
+/// Whether `hit` is a docs page found by its words that must come after
+/// the best of `sites`: "python package index" wants pypi.org first, and
+/// "bash parameter expansion" anything but expansion.com. Only the docs'
+/// own site may come after it, as python.org for docs.python.org's
+/// "python sorting techniques".
+pub(crate) fn docs_kept_below(hit: &PageHit, sites: &[crate::Hit]) -> bool {
+    docs_found_by_words(hit)
+        && sites
+            .first()
+            .is_some_and(|best| !docs_of(&hit.page, &best.domain))
+}
+
+/// Whether the docs page `page` is on `domain` or one of its subdomains.
+fn docs_of(page: &Page, domain: &str) -> bool {
+    plumb_core::host_of(&page.url).is_some_and(|host| {
+        host == domain
+            || host
+                .strip_suffix(domain)
+                .is_some_and(|sub| sub.ends_with('.'))
+    })
 }
 
 /// Whether `query` asks about something in the docs of the docs page
@@ -2310,8 +2333,32 @@ mod tests {
                 ..Article::default()
             },
         );
-        assert_eq!(read, Some(sorting));
+        assert_eq!(read, Some(sorting.clone()));
         assert!(Page::has_reader(DOCS_SET));
+
+        // Found by its words, it comes after the best site unless that is
+        // the docs' own.
+        let placed_at = |best: &str| {
+            let sites = [site(best, false), site("other.com", false)];
+            let mut placed = vec![PlacedPage {
+                at: 0,
+                under: None,
+                hit: PageHit {
+                    page: sorting.clone(),
+                    score: 0.9,
+                    named: false,
+                    popularity: 1.0,
+                    whole: true,
+                    learned: None,
+                },
+            }];
+            keep_page_rules("sort a list in python", &sites, &mut placed);
+            placed[0].at
+        };
+        assert_eq!(placed_at("pypi.org"), 1);
+        assert_eq!(placed_at("python.org"), 0);
+        assert_eq!(placed_at("docs.python.org"), 0);
+        assert_eq!(placed_at("cpython.org"), 1);
     }
 
     #[test]
