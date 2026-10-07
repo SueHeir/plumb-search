@@ -6243,17 +6243,11 @@ mod tests {
                 .map(|h| h["domain"].as_str().unwrap())
                 .collect();
             // The breweries' own sites (one the index does not have, as the
-            // place says), then the guide that says breweries, then the
-            // sites only named after Denver.
+            // place says), then the guide that says breweries; the sites
+            // only named after Denver are left out.
             assert_eq!(
                 domains,
-                [
-                    "greatdivide.com",
-                    "unknown-ales.example",
-                    "westword.com",
-                    "denvergov.org",
-                    "denverbroncos.com"
-                ],
+                ["greatdivide.com", "unknown-ales.example", "westword.com"],
                 "{query}"
             );
             assert_eq!(json["hits"][0]["title"], "Great Divide Brewing Co.");
@@ -6268,7 +6262,8 @@ mod tests {
             .await;
             let at = |d: &str| page.find(&format!("https://{d}")).unwrap();
             assert!(page.contains("<section class=\"pl\""), "{page}");
-            assert!(at("www.westword.com") < at("denvergov.org"), "{page}");
+            assert!(at("www.westword.com") > 0, "{page}");
+            assert!(!page.contains("denverbroncos.com"), "{page}");
         }
     }
 
