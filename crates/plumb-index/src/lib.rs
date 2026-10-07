@@ -2137,11 +2137,19 @@ fn without_copies(hits: Vec<Hit>, typed: Option<&str>, home: Option<&str>) -> Ve
         let title = hit.title.as_deref().map(normalize_text);
         let same_title =
             |other: &Hit| title.is_some() && other.title.as_deref().map(normalize_text) == title;
-        if hit.link_score < COPYCAT_LINK_SCORE
-            && hits
-                .iter()
-                .any(|other| other.link_score > hit.link_score && same_title(other))
-        {
+        // Another site's title word for word, naming that site and not
+        // this one: elephant-blue.org titled "Coinbase - Buy and Sell
+        // Bitcoin…", however linked.
+        let names_other = |other: &Hit| {
+            brand_label(&other.domain).is_some_and(|(label, _)| {
+                label.len() >= 4 && names_brand(other, label) && !hit.domain.contains(label)
+            })
+        };
+        if hits.iter().any(|other| {
+            other.link_score > hit.link_score
+                && same_title(other)
+                && (hit.link_score < COPYCAT_LINK_SCORE || names_other(other))
+        }) {
             copies[i] = true;
             continue;
         }
@@ -4342,6 +4350,29 @@ mod tests {
             hit("kraken.com", Some("Kraken"), 0.8, true),
         ];
         assert_eq!(kept(coin, None), ["coinbase.com", "kraken.com"]);
+        // Linked or not, and the real one with no Wikidata: the title
+        // names Coinbase, and elephant-blue.org is not Coinbase.
+        let coin = vec![
+            hit(
+                "coinbase.com",
+                Some("Coinbase - Buy and Sell Crypto"),
+                0.65,
+                false,
+            ),
+            hit(
+                "elephant-blue.org",
+                Some("Coinbase - Buy and Sell Crypto"),
+                0.23,
+                false,
+            ),
+        ];
+        assert_eq!(kept(coin, None), ["coinbase.com"]);
+        // Sites sharing a title that names neither stay.
+        let homes = vec![
+            hit("acme.com", Some("Home"), 0.6, false),
+            hit("widgets.com", Some("Home"), 0.3, false),
+        ];
+        assert_eq!(kept(homes, None), ["acme.com", "widgets.com"]);
         // The best known of unofficial namesakes stays, wherever it ranks.
         let cbc = vec![
             hit("cbc.bb", Some("CBC Barbados"), 0.3, false),

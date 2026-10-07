@@ -1988,14 +1988,24 @@ async fn run_search(
     let backend = Arc::clone(&state.backend);
     // "safeway near me": the places list is for "near me"; the sites are
     // for the rest ("me" names no site).
-    let owned_query =
-        plumb_index::places::without_near_me(query).unwrap_or_else(|| query.to_string());
+    let near_me = plumb_index::places::without_near_me(query);
+    let local = near_me.is_some();
+    let owned_query = near_me.unwrap_or_else(|| query.to_string());
     let owned_options = options.clone();
-    let results = tokio::task::spawn_blocking(move || {
+    let mut results = tokio::task::spawn_blocking(move || {
         backend.search_full(&owned_query, limit, &owned_options)
     })
     .await
     .context("the search task failed")??;
+    // "handyman near me" asks for someone to call: a bare handyman.nl,
+    // named by the word but saying nothing, goes after sites that say
+    // what they are.
+    if local {
+        let (said, bare): (Vec<Hit>, Vec<Hit>) = std::mem::take(&mut results.hits)
+            .into_iter()
+            .partition(|hit| hit.title.is_some() || hit.official);
+        results.hits = said.into_iter().chain(bare).collect();
+    }
     debug!("local search completed: {} hits", results.hits.len());
     Ok(results)
 }
@@ -4230,6 +4240,16 @@ mod tests {
         assert_eq!(group_thousands(999), "999");
         assert_eq!(group_thousands(1_000), "1,000");
         assert_eq!(group_thousands(12_345_678), "12,345,678");
+    }
+
+    #[tokio::test]
+    async fn bare_sites_go_last_for_near_me() {
+        let mut hits = bank_hits();
+        hits.reverse();
+        let (_, _, body) = get(backend(hits), "/api/search?q=us+bank+near+me").await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json[0]["domain"], "usbank.com", "{body}");
+        assert_eq!(json[1]["domain"], "usbank-login-help.com", "{body}");
     }
 
     #[tokio::test]
