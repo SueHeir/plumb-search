@@ -2068,21 +2068,12 @@ fn brand_label(domain: &str) -> Option<(&str, &str)> {
         .then_some((label, suffix))
 }
 
-/// The first word of a title, lowercase: "airbnb" for "Airbnb : locations
-/// de vacances".
-fn first_word(title: &str) -> Option<String> {
-    normalize_text(title)
-        .split(' ')
-        .find(|w| !w.is_empty())
-        .map(str::to_string)
-}
-
 /// `hits` without the copies of a site listed with them:
 ///
 /// - One site per brand: airbnb.fr, airbnb.co.uk and airbnb.tech next to
 ///   airbnb.com, or google.de next to google.com, are the same site again
-///   when they say nothing of their own (no title, or a title that starts
-///   with the brand's name). Where one of them is the official site of
+///   when they say nothing of their own (no title, or a title that names
+///   the brand). Where one of them is the official site of
 ///   something Wikidata describes, it stays and the others go, even when
 ///   they rank above it (23andme.org's copy of 23andMe's title above
 ///   23andme.com); otherwise the best known (most linked) stays. Every official site
@@ -2094,11 +2085,12 @@ fn first_word(title: &str) -> Option<String> {
 /// `typed` is the domain the query is, which always stays, and so do the
 /// sites of `home`, the searcher's country (bbc.co.uk in Britain).
 fn without_copies(hits: Vec<Hit>, typed: Option<&str>, home: Option<&str>) -> Vec<Hit> {
+    // The title names the brand anywhere in it: "StubHub UK", "Buy and
+    // sell tickets | StubHub".
     let names_brand = |hit: &Hit, label: &str| {
         hit.title
             .as_deref()
-            .and_then(first_word)
-            .is_none_or(|word| word == label)
+            .is_none_or(|title| normalize_text(title).replace(' ', "").contains(label))
     };
     let mut copies = vec![false; hits.len()];
     for (i, hit) in hits.iter().enumerate() {
@@ -2122,7 +2114,7 @@ fn without_copies(hits: Vec<Hit>, typed: Option<&str>, home: Option<&str>) -> Ve
         let Some((label, suffix)) = brand_label(&hit.domain) else {
             continue;
         };
-        // On a country's ending, a title starting with the brand's name is
+        // On a country's ending, a title naming the brand is
         // the brand's, and so is one on a site nobody links to
         // (quizlet.fun); on two generic endings (acme.com, acme.net)
         // otherwise only a missing title says nothing of its own.
