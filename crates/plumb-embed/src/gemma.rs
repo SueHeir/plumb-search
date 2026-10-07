@@ -628,4 +628,53 @@ mod tests {
         std::fs::write(dir.path().join(GEMMA_TOKENIZER_FILE), "{}").unwrap();
         assert_ne!(gemma_id(dir.path()).unwrap(), id);
     }
+
+    /// Checks the port against llama.cpp: `PLUMB_EG2_DIR` holds the real
+    /// model's [`GEMMA_FILE`] and [`GEMMA_TOKENIZER_FILE`] and a
+    /// `reference.jsonl` of llama-server's tokens and vectors (`input`,
+    /// `tokens`, `embedding`). Run with `cargo test --release -p
+    /// plumb-embed llama_cpp -- --ignored`.
+    #[test]
+    #[ignore]
+    fn the_real_gemma_matches_llama_cpp() {
+        let dir = std::path::PathBuf::from(std::env::var("PLUMB_EG2_DIR").unwrap());
+        let gemma = Gemma::load(&dir).unwrap();
+        let reference = std::fs::read_to_string(dir.join("reference.jsonl")).unwrap();
+        for line in reference.lines() {
+            let line: serde_json::Value = serde_json::from_str(line).unwrap();
+            let input = line["input"].as_str().unwrap();
+            let tokens: Vec<u32> = line["tokens"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t.as_u64().unwrap() as u32)
+                .collect();
+            if tokens.len() <= GEMMA_MAX_TOKENS {
+                assert_eq!(
+                    gemma.tokenize(input).unwrap(),
+                    tokens,
+                    "tokens of {input:?}"
+                );
+            }
+            let wanted: Vec<f32> = line["embedding"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_f64().unwrap() as f32)
+                .collect();
+            let got = gemma.forward(&tokens).unwrap();
+            assert_eq!(got.len(), wanted.len());
+            let dot = |a: &[f32], b: &[f32]| a.iter().zip(b).map(|(x, y)| x * y).sum::<f32>();
+            let similar = |n: usize| {
+                let (a, b) = (&got[..n], &wanted[..n]);
+                dot(a, b) / (dot(a, a) * dot(b, b)).sqrt()
+            };
+            let (full, cut) = (similar(got.len()), similar(GEMMA_DIM));
+            println!(
+                "{} tokens: cosine {full:.5}, first {GEMMA_DIM}: {cut:.5}",
+                tokens.len()
+            );
+            assert!(full > 0.999 && cut > 0.999, "{input:?}: {full} {cut}");
+        }
+    }
 }
