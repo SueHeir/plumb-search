@@ -682,6 +682,7 @@ mod tests {
     fn site(domain: &str, country: Option<&str>) -> Hit {
         Hit {
             demand: None,
+            missing_words: false,
             placing_text_score: None,
             domain: domain.to_string(),
             url: format!("https://{domain}/"),

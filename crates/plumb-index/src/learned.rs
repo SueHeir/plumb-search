@@ -709,6 +709,7 @@ mod tests {
             official: false,
             key_pages: Vec::new(),
             demand: None,
+            missing_words: false,
             placing_text_score: None,
         }
     }

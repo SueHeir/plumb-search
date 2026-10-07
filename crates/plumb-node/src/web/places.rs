@@ -298,6 +298,7 @@ pub(super) fn local_sites(found: &PlaceResults) -> Vec<Hit> {
             official: false,
             key_pages: Vec::new(),
             demand: None,
+            missing_words: false,
         });
     }
     sites
@@ -572,6 +573,7 @@ mod tests {
             official: false,
             key_pages: Vec::new(),
             demand: None,
+            missing_words: false,
         };
         let mut hits = vec![
             site("denvergov.org", "City and County of Denver"),

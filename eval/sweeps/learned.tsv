@@ -9,3 +9,4 @@ nav-10	{"navigational_relevance": 0.1}
 nav-15	{"navigational_relevance": 0.15}
 no-added-site	{"add_named_site": false}
 questions-name	{"questions_name_nothing": false}
+keep-namesakes	{"drop_namesakes": false}

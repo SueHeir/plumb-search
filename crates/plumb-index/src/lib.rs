@@ -344,6 +344,9 @@ pub struct RankConfig {
     /// Add the official site of the article the query names when no site
     /// found is it ([`pages::add_named_site`]).
     pub add_named_site: bool,
+    /// Leave out sites lacking some of the query's main words when the
+    /// whole query names an article ([`pages::drop_namesakes_of_words`]).
+    pub drop_namesakes: bool,
     /// Put the first results in the order the learned ranking gives
     /// ([`learned::reorder`]), once pages are placed among the sites.
     pub learned: bool,
@@ -373,6 +376,7 @@ impl Default for RankConfig {
             filler_words: true,
             questions_name_nothing: true,
             add_named_site: true,
+            drop_namesakes: true,
             learned: true,
         }
     }
@@ -459,6 +463,13 @@ pub struct Hit {
     /// ([`pages::PageSearcher::note_demand`]); see [`pages::place_pages`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub demand: Option<f32>,
+    /// The query, of two words or more, does not name the site and the
+    /// site lacks some of its main words (all but [`FILLER_WORDS`] and
+    /// [`FUNCTION_WORDS`]): better.com for "better call saul". Such a site
+    /// is filler once a page is named by the whole query
+    /// ([`pages::drop_namesakes_of_words`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub missing_words: bool,
 }
 
 /// Per-search choices of the person searching.
@@ -1620,13 +1631,22 @@ impl Searcher {
         // A few more than asked for, so that copies left out below leave
         // the page full.
         let wanted = limit.saturating_add(COPY_LOOKAHEAD);
+        let unnamed: Vec<DocAddress> = ranked
+            .iter()
+            .take(wanted.saturating_mul(2))
+            .filter(|r| !r.named)
+            .map(|r| r.addr)
+            .collect();
+        let missing = query.missing_main_words(&searcher, &self.fields, &unnamed)?;
         let mut hits: Vec<Hit> = Vec::with_capacity(wanted.min(ranked.len()));
         for ranked in ranked {
             if hits.len() == wanted {
                 break;
             }
             let named = ranked.named;
-            let hit = self.hit(&searcher, ranked)?;
+            let missing_words = missing.contains(&ranked.addr);
+            let mut hit = self.hit(&searcher, ranked)?;
+            hit.missing_words = missing_words;
             let left_out = is_reserved_name(&hit.domain)
                 || is_pill_shop(&hit.domain, hit.link_score)
                 || (hit.link_score < WELL_KNOWN_LINK_SCORE
@@ -1906,6 +1926,7 @@ impl Searcher {
         let about = text(self.fields.about);
         Ok(Hit {
             demand: None,
+            missing_words: false,
             url,
             // A title in the wrong encoding ("����") says nothing.
             title: own(self.fields.title).filter(|title| !title.contains('\u{FFFD}')),
@@ -2580,6 +2601,47 @@ impl ParsedQuery {
         Ok(covered)
     }
 
+    /// Which of `docs` lack one of the query's main words: those other
+    /// than [`FILLER_WORDS`] and [`FUNCTION_WORDS`]. None for a query of
+    /// one main word or fewer.
+    fn missing_main_words(
+        &self,
+        searcher: &tantivy::Searcher,
+        f: &Fields,
+        docs: &[DocAddress],
+    ) -> Result<HashSet<DocAddress>> {
+        let main: Vec<usize> = (0..self.words.len())
+            .filter(|&i| {
+                let word = self.words[i].as_str();
+                !is_function_word(word) && !FILLER_WORDS.contains(&word)
+            })
+            .collect();
+        let mut missing = HashSet::new();
+        if main.len() < 2 || docs.is_empty() {
+            return Ok(missing);
+        }
+        for i in main {
+            let mut clauses = Clauses::default();
+            self.word_clauses(i, searcher, f, &mut clauses)?;
+            for (bm25, addr) in bm25_of(searcher, &clauses.into_query(), docs.to_vec())? {
+                if bm25 <= 0.0 {
+                    missing.insert(addr);
+                }
+            }
+        }
+        if let Some(joined) = &self.joined {
+            let mut clauses = Clauses::default();
+            clauses.add(Term::from_field_text(f.joined, joined), 1.0);
+            clauses.add(Term::from_field_text(f.label, joined), 1.0);
+            for (bm25, addr) in bm25_of(searcher, &clauses.into_query(), docs.to_vec())? {
+                if bm25 > 0.0 {
+                    missing.remove(&addr);
+                }
+            }
+        }
+        Ok(missing)
+    }
+
     fn text_query(&self, searcher: &tantivy::Searcher, f: &Fields) -> Result<BooleanQuery> {
         let mut clauses = Clauses::default();
         for i in 0..self.words.len() {
@@ -3151,6 +3213,47 @@ mod tests {
         assert!(rid(&RankConfig::default()) < rid(&naming));
         // Alone, they are names.
         assert_eq!(top(&searcher, "who"), "who.int");
+    }
+
+    #[test]
+    fn sites_missing_a_main_word_are_marked() {
+        let records = [
+            site(
+                "rawstory.com",
+                Some("Raw Story"),
+                Some("News and story."),
+                &[],
+                &[],
+                popular(3_000, 900),
+            ),
+            site(
+                "toystoryfans.net",
+                Some("Toy Story fans"),
+                None,
+                &[],
+                &[],
+                obscure(90_000, 3),
+            ),
+        ];
+        let (_dir, searcher) = build(&records);
+        let hits = searcher.search("toy story", 10).unwrap();
+        let missing = |domain: &str| {
+            hits.iter()
+                .find(|h| h.domain == domain)
+                .unwrap()
+                .missing_words
+        };
+        assert!(missing("rawstory.com"));
+        assert!(!missing("toystoryfans.net"));
+        // Filler words do not count: "my" is not a main word.
+        let hits = searcher.search("my toy story", 10).unwrap();
+        assert!(
+            !hits
+                .iter()
+                .find(|h| h.domain == "toystoryfans.net")
+                .unwrap()
+                .missing_words
+        );
     }
 
     #[test]
@@ -4503,6 +4606,7 @@ mod tests {
             official: false,
             key_pages: Vec::new(),
             demand: None,
+            missing_words: false,
         };
         // "tco bell": bell.ca as typed, tacobell.com right under it.
         let mut hits = vec![
@@ -4539,6 +4643,7 @@ mod tests {
             official,
             key_pages: Vec::new(),
             demand: None,
+            missing_words: false,
         };
         let kept = |hits: Vec<Hit>, typed: Option<&str>| -> Vec<String> {
             without_copies(hits, typed, None)
