@@ -72,9 +72,9 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo install wasm-bindgen-cli --version 0.2.108 --locked
       - run: cargo clippy -p plumb-private --target wasm32-unknown-unknown -- -D warnings
-      # The example plugin, as a node runs it.
-      - run: cargo clippy -p plumb-plugin -p plumb-plugin-hacker-news -p plumb-plugin-reddit --target wasm32-unknown-unknown -- -D warnings
-      - run: cargo build --locked --release -p plumb-plugin-hacker-news -p plumb-plugin-reddit --target wasm32-unknown-unknown
+      # The example plugins, as a node runs them.
+      - run: cargo clippy -p plumb-plugin -p plumb-plugin-hacker-news -p plumb-plugin-youtube-music -p plumb-plugin-reddit --target wasm32-unknown-unknown -- -D warnings
+      - run: cargo build --locked --release -p plumb-plugin-hacker-news -p plumb-plugin-youtube-music -p plumb-plugin-reddit --target wasm32-unknown-unknown
       - run: cargo build --locked -p plumb-private --target wasm32-unknown-unknown --profile wasm
       - run: >-
           wasm-bindgen --target web --no-typescript --out-dir target/private
