@@ -170,6 +170,10 @@ const UNTITLED_CLOSE_SHARE: f32 = 0.9;
 /// Results looked at past the ones asked for, to fill the places of the
 /// copies [`without_copies`] leaves out.
 const COPY_LOOKAHEAD: usize = 10;
+/// Country endings mostly used as generic ones: proton.me, grpc.io.
+const GENERIC_COUNTRY_ENDINGS: [&str; 14] = [
+    "io", "co", "ai", "me", "tv", "ly", "gg", "fm", "so", "sh", "to", "cc", "ws", "la",
+];
 /// Link score under which a site that copies a listed site's title is a
 /// look-alike ([`without_copies`]).
 const COPYCAT_LINK_SCORE: f32 = 0.05;
@@ -2237,18 +2241,33 @@ fn without_copies(hits: Vec<Hit>, typed: Option<&str>, home: Option<&str>) -> Ve
         let Some((label, suffix)) = brand_label(&hit.domain) else {
             continue;
         };
-        // On a country's ending, a title naming the brand is
-        // the brand's, and so is one on a site nobody links to
-        // (quizlet.fun); on two generic endings (acme.com, acme.net)
-        // otherwise only a missing title says nothing of its own.
-        let country = |suffix: &str| suffix.rsplit('.').next().is_some_and(|tld| tld.len() == 2);
+        // A copy is the brand again somewhere it says nothing of its own:
+        // on a country's ending with a title naming the brand (airbnb.fr
+        // next to airbnb.com), on a site nobody links to (quizlet.fun),
+        // or with no title next to the brand's own titled site
+        // (airbnb.tech). A site on a generic ending is never a copy of a
+        // country's (honda.com of honda.com.vn, astro.build of
+        // astro.com.my), and a site with no title is not a copy of a
+        // namesake whose title does not name the brand (hm.com of hm.edu).
+        // Endings used as generic ones (.io, .me, .co) are not countries'.
+        let country = |suffix: &str| {
+            suffix
+                .rsplit('.')
+                .next()
+                .is_some_and(|tld| tld.len() == 2 && !GENERIC_COUNTRY_ENDINGS.contains(&tld))
+        };
         let same_brand = |other: &Hit| {
             brand_label(&other.domain).is_some_and(|(l, s)| {
                 l == label
                     && s != suffix
-                    && (hit.title.is_none()
-                        || ((country(s) || country(suffix) || hit.link_score < COPYCAT_LINK_SCORE)
-                            && (names_brand(hit, label) || same_title(other))))
+                    && (country(suffix) || !country(s))
+                    && match &hit.title {
+                        None => other.title.is_some() && names_brand(other, label),
+                        Some(_) => {
+                            (country(suffix) || hit.link_score < COPYCAT_LINK_SCORE)
+                                && (names_brand(hit, label) || same_title(other))
+                        }
+                    }
             })
         };
         // An official namesake known no better: vanguard.edu (official)
@@ -4570,6 +4589,63 @@ mod tests {
             hit("hm.com", None, 0.7, false),
         ];
         assert_eq!(kept(hm, None), ["hm.edu", "hm.com"]);
+        // Not copies (the brand suite's misses after #270): a generic
+        // ending next to a country's, a site with no title next to a
+        // namesake not titled with the brand, and .me as a generic ending.
+        let cases = [
+            (
+                "honda.com.vn",
+                Some("Honda"),
+                0.49,
+                true,
+                "honda.com",
+                None,
+                0.4,
+            ),
+            (
+                "astro.com.my",
+                Some("Astro TV | Astro"),
+                0.52,
+                false,
+                "astro.build",
+                Some("Astro"),
+                0.4,
+            ),
+            (
+                "hm.edu",
+                Some("Hochschule München"),
+                0.54,
+                true,
+                "hm.com",
+                None,
+                0.4,
+            ),
+            (
+                "proton.com",
+                Some("PROTON - INSPIRING CONNECTIONS"),
+                0.5,
+                true,
+                "proton.me",
+                Some("Proton"),
+                0.4,
+            ),
+            (
+                "mercadolibre.com.ar",
+                Some("Mercado Libre Argentina"),
+                0.5,
+                false,
+                "mercadolibre.com",
+                Some("Mercado Libre"),
+                0.4,
+            ),
+        ];
+        for (a, a_title, a_link, a_official, b, b_title, b_link) in cases {
+            let both = vec![
+                hit(a, a_title, a_link, a_official),
+                hit(b, b_title, b_link, false),
+            ];
+            assert_eq!(kept(both, None), [a, b]);
+        }
         // A site nobody links to with a listed site's title.
         let coin = vec![
             hit(
