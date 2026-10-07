@@ -180,7 +180,11 @@ fn keep(
     }
     let wanted = {
         let _records = inner.hold_records();
-        wanted_texts(meaning.vectors(), &inner.paths.records)?
+        wanted_texts(
+            meaning.vectors(),
+            &inner.paths.records,
+            meaning.embedder().text_words(),
+        )?
     };
     let mut kept = 0usize;
     {

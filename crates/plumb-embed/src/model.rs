@@ -138,6 +138,19 @@ impl Embedder {
         self.dim
     }
 
+    /// Most words of a site's text the model is given.
+    pub fn text_words(&self) -> usize {
+        match &self.runner {
+            Runner::Server(server) => server.text_words(),
+            _ => crate::MAX_TEXT_WORDS,
+        }
+    }
+
+    /// The text of `record` this model embeds ([`crate::site_text_words`]).
+    pub fn site_text(&self, record: &plumb_core::SiteRecord) -> String {
+        crate::site_text_words(record, self.text_words())
+    }
+
     /// The vector of a site's `text`: the model's output for its first
     /// token (how BAAI's models are meant to be used), scaled to length 1
     /// and [`quantize`]d. An empty text gives the vector of no words.

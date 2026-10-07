@@ -11,7 +11,7 @@ use std::time::Instant;
 use anyhow::{bail, Context, Result};
 use plumb_core::RecordSet;
 use plumb_embed::{
-    site_text, text_hash, Embedder, Vectors, MODEL_BASE_URL, MODEL_FILES, MODEL_NAME,
+    site_text_words, text_hash, Embedder, Vectors, MODEL_BASE_URL, MODEL_FILES, MODEL_NAME,
 };
 use plumb_index::Meaning;
 use tracing::{info, warn};
@@ -304,7 +304,7 @@ pub(crate) fn embed_records(
     save: &mut dyn FnMut(&Vectors) -> Result<()>,
     progress: &mut dyn FnMut(usize, usize),
 ) -> Result<Embedded> {
-    let todo = sites_to_embed(vectors, records);
+    let todo = sites_to_embed(vectors, records, embedder.text_words());
     embed_sites(embedder, vectors, todo, threads, stop, save, progress)
 }
 
@@ -315,7 +315,11 @@ pub(crate) type ToEmbed = (f32, String, plumb_embed::TextHash, String);
 /// The first half of [`embed_records`]: drops the vectors of sites not in
 /// `records` and returns the sites to embed, best first. The records are
 /// freed by the time it returns.
-pub(crate) fn sites_to_embed(vectors: &RwLock<Vectors>, records: RecordSet) -> Vec<ToEmbed> {
+pub(crate) fn sites_to_embed(
+    vectors: &RwLock<Vectors>,
+    records: RecordSet,
+    words: usize,
+) -> Vec<ToEmbed> {
     let write = || vectors.write().unwrap_or_else(PoisonError::into_inner);
     {
         let domains: HashSet<&str> = records.iter().map(|r| r.domain.as_str()).collect();
@@ -327,7 +331,7 @@ pub(crate) fn sites_to_embed(vectors: &RwLock<Vectors>, records: RecordSet) -> V
     {
         let vectors = vectors.read().unwrap_or_else(PoisonError::into_inner);
         for record in records {
-            let text = site_text(&record);
+            let text = site_text_words(&record, words);
             if text.is_empty() {
                 continue;
             }
@@ -360,6 +364,7 @@ pub(crate) fn sites_to_embed_from_file(
     vectors: &RwLock<Vectors>,
     path: &Path,
     max: usize,
+    words: usize,
 ) -> Result<(Vec<ToEmbed>, bool)> {
     let max = max.max(1);
     crate::outline::fold_journal(path)?;
@@ -373,7 +378,7 @@ pub(crate) fn sites_to_embed_from_file(
         crate::outline::for_each_record(path, |record| {
             total += 1;
             domains.insert(domain_hash(&record.domain));
-            let text = site_text(&record);
+            let text = site_text_words(&record, words);
             if text.is_empty() {
                 return;
             }
@@ -415,12 +420,13 @@ pub(crate) fn sites_to_embed_from_file(
 pub(crate) fn wanted_texts(
     vectors: &RwLock<Vectors>,
     path: &Path,
+    words: usize,
 ) -> Result<std::collections::HashMap<String, plumb_embed::TextHash>> {
     crate::outline::fold_journal(path)?;
     let mut wanted = std::collections::HashMap::new();
     let held = vectors.read().unwrap_or_else(PoisonError::into_inner);
     crate::outline::for_each_record(path, |record| {
-        let text = site_text(&record);
+        let text = site_text_words(&record, words);
         if text.is_empty() {
             return;
         }
@@ -696,7 +702,7 @@ mod tests {
         let embedder = Embedder::load(&model).unwrap();
         assert_eq!(
             embedder
-                .embed(&site_text(&record(
+                .embed(&plumb_embed::site_text(&record(
                     "tesla.com",
                     "Tesla electric cars and solar energy"
                 )))

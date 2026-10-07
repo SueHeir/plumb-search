@@ -33,5 +33,5 @@ pub use model::{
 };
 pub use rerank::{Reranker, RERANK_MAX_TOKENS};
 pub use server::SERVER_FILE;
-pub use text::{site_text, text_hash, TextHash, MAX_LINK_TEXTS, MAX_TEXT_WORDS};
+pub use text::{site_text, site_text_words, text_hash, TextHash, MAX_LINK_TEXTS, MAX_TEXT_WORDS};
 pub use vectors::{cosine, Vectors, VECTORS_FILE_NAME};

@@ -135,8 +135,13 @@ fn work(inner: &Arc<Inner>) -> Result<()> {
             if inner.stopping() {
                 break;
             }
-            sites_to_embed_from_file(meaning.vectors(), &inner.paths.records, EMBED_AT_ONCE)
-                .with_context(|| format!("reading {}", inner.paths.records.display()))?
+            sites_to_embed_from_file(
+                meaning.vectors(),
+                &inner.paths.records,
+                EMBED_AT_ONCE,
+                meaning.embedder().text_words(),
+            )
+            .with_context(|| format!("reading {}", inner.paths.records.display()))?
         };
         // Many sites to embed (search by meaning just turned on, or a new
         // model): a trusted node may have made their vectors already.
