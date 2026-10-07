@@ -231,7 +231,7 @@ fn category(path: &Path) -> &'static str {
     match first {
         "records.jsonl" | "records.jsonl.journal" => "records_journals",
         "indexes" | "index" => "indexes",
-        "model" | "models" | "vectors.bin" => "models_vectors",
+        "model" | "model-gemma" | "models" | "vectors.bin" => "models_vectors",
         "icons" => "icons",
         "net" | "network" | "cache" => "network_cache",
         "history" => "history",

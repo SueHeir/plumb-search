@@ -24,6 +24,12 @@ pub type TextHash = [u8; 32];
 /// record always gives the same text; a record with none of these gives an
 /// empty one.
 pub fn site_text(record: &SiteRecord) -> String {
+    site_text_words(record, MAX_TEXT_WORDS)
+}
+
+/// [`site_text`] cut at `words` words instead of [`MAX_TEXT_WORDS`], for
+/// models that read longer texts.
+pub fn site_text_words(record: &SiteRecord, words: usize) -> String {
     let link_texts = record
         .link_texts
         .iter()
@@ -48,8 +54,8 @@ pub fn site_text(record: &SiteRecord) -> String {
         }
     }
     let text = kept.join(". ");
-    let words: Vec<&str> = text.split_whitespace().take(MAX_TEXT_WORDS).collect();
-    words.join(" ")
+    let kept: Vec<&str> = text.split_whitespace().take(words).collect();
+    kept.join(" ")
 }
 
 /// SHA-256 of `text`, so nodes can tell whether they embedded the same text.
