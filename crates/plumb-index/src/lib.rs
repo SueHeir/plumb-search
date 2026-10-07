@@ -286,6 +286,15 @@ pub struct RankConfig {
     /// ("bank of america login" listed apple.com, google.com and
     /// cloudflare.com, matching none of it). `None` keeps them.
     pub named_share: Option<f32>,
+    /// When the query of two words or more is the whole name of a site
+    /// with a Wikidata item, other names or many links, other sites are
+    /// left out unless they have every word of it, or the query names them
+    /// too, or they are of the kind it names: having one word is not having
+    /// the name ("twin peaks" listed twinfallscounty.org and peakdesign.com,
+    /// "us bank" worldbank.org and us.es). A namesake of plain words
+    /// (vacationrentals.com) leaves the rest listed: airbnb.com is still
+    /// what "vacation rentals" is after.
+    pub named_needs_all_words: bool,
     /// BM25 boost of a query word matching a site's search terms
     /// ([`plumb_core::SiteRecord::terms`]), picked from its whole homepage.
     pub terms_boost: f32,
@@ -312,6 +321,7 @@ impl Default for RankConfig {
             navigational_relevance: Some(0.05),
             meaning_only_relevance: Some(0.35),
             named_share: Some(0.4),
+            named_needs_all_words: true,
             terms_boost: 1.0,
             learned: true,
         }
@@ -1414,6 +1424,41 @@ impl Searcher {
             }
         }
 
+        // Named in full by a site known by that name: what has only some
+        // of its words is filler, unless the query names it by its first
+        // words and it is known by that name too (youtube.com for "youtube
+        // music").
+        if cfg.named_needs_all_words && query.words.len() >= 2 {
+            let mut known_name = false;
+            for &addr in &full_names {
+                if link_score_of(addr) >= WELL_KNOWN_LINK_SCORE
+                    || self.is_official(&searcher, addr)?
+                    || self.has_aliases(&searcher, addr)?
+                {
+                    known_name = true;
+                    break;
+                }
+            }
+            if known_name {
+                let mut partial = Vec::new();
+                for r in &ranked {
+                    if r.named || kinds.contains(&r.addr) {
+                        continue;
+                    }
+                    let first_words = names.get(&r.addr).is_some_and(|name| name.words() > 0);
+                    if first_words
+                        && (r.link_score >= WELL_KNOWN_LINK_SCORE
+                            || self.is_official(&searcher, r.addr)?)
+                    {
+                        continue;
+                    }
+                    partial.push(r.addr);
+                }
+                let coverage = query.coverage(&searcher, &self.fields, &partial)?;
+                ranked.retain(|r| coverage.get(&r.addr).is_none_or(|&share| share > 0.999));
+            }
+        }
+
         // Copies of the site the query names on other top-level domains
         // (gmail.ru, gmail.hu for "gmail"; paypal.biz for "paypal"): never
         // crawled, nothing says what they are, little linked. They are
@@ -1526,6 +1571,17 @@ impl Searcher {
             }
         }
         Ok(false)
+    }
+
+    /// Whether the site is the official site of a Wikidata item.
+    fn is_official(&self, searcher: &tantivy::Searcher, addr: DocAddress) -> Result<bool> {
+        let segment = searcher.segment_reader(addr.segment_ord);
+        Ok(
+            match segment.fieldnorms_readers().get_field(self.fields.about)? {
+                Some(norms) => norms.fieldnorm(addr.doc_id) > 0,
+                None => false,
+            },
+        )
     }
 
     /// Whether the site has other names (from Wikidata or a redirect),
@@ -2353,6 +2409,7 @@ mod tests {
     fn keep_all() -> RankConfig {
         RankConfig {
             named_share: None,
+            named_needs_all_words: false,
             ..RankConfig::default()
         }
     }
@@ -2673,6 +2730,88 @@ mod tests {
         assert!(hits[0].link_score < WELL_KNOWN_LINK_SCORE);
         assert!(
             domains(&hits).contains(&"airbnb.com"),
+            "{:?}",
+            domains(&hits)
+        );
+    }
+
+    #[test]
+    fn sites_with_one_word_of_a_known_name_are_left_out() {
+        let records = [
+            site(
+                "usbank.com",
+                None,
+                None,
+                &["U.S. Bank"],
+                &[("us bank", 40)],
+                obscure(20_000, 300),
+            ),
+            site(
+                "worldbank.org",
+                Some("World Bank Group"),
+                Some("The World Bank works to end poverty."),
+                &["World Bank"],
+                &[("world bank", 300)],
+                popular(300, 4_000),
+            ),
+            site(
+                "vogue.com",
+                Some("Vogue US"),
+                Some("Fashion news from us."),
+                &["Vogue"],
+                &[("vogue", 300)],
+                popular(400, 4_000),
+            ),
+            site(
+                "us.es",
+                Some("Universidad de Sevilla"),
+                None,
+                &[],
+                &[],
+                obscure(9_000, 200),
+            ),
+            site(
+                "usbankreviews.net",
+                Some("US Bank reviews"),
+                Some("Reviews of US Bank branches."),
+                &[],
+                &[],
+                obscure(400_000, 2),
+            ),
+            site(
+                "youtube.com",
+                Some("YouTube"),
+                Some("Enjoy the videos you love."),
+                &["YouTube"],
+                &[("youtube", 300)],
+                popular(9, 6_000),
+            ),
+            site(
+                "youtubemusic.net",
+                Some("YouTube Music"),
+                None,
+                &["YouTube Music"],
+                &[("youtube music", 30)],
+                obscure(50_000, 100),
+            ),
+        ];
+        let (_dir, searcher) = build(&records);
+        let hits = searcher.search("us bank", 10).unwrap();
+        assert_eq!(domains(&hits), ["usbank.com", "usbankreviews.net"]);
+        let keep = RankConfig {
+            named_needs_all_words: false,
+            ..RankConfig::default()
+        };
+        let hits = searcher.search_with("us bank", 10, &keep).unwrap();
+        assert!(
+            domains(&hits).contains(&"worldbank.org"),
+            "{:?}",
+            domains(&hits)
+        );
+        // A site known by the query's first words stays.
+        let hits = searcher.search("youtube music", 10).unwrap();
+        assert!(
+            domains(&hits).contains(&"youtube.com"),
             "{:?}",
             domains(&hits)
         );
