@@ -70,6 +70,9 @@ pub struct RowSignals {
     pub score: f32,
     /// A site's text match.
     pub text_score: f32,
+    /// A site's text match without the search instruction, when the
+    /// meaning of the query was found with one ([`Hit::placing_text_score`]).
+    pub placing_text_score: Option<f32>,
     pub link_score: f32,
     pub named: bool,
     pub official: bool,
@@ -94,6 +97,7 @@ impl RowSignals {
             kind: "site".into(),
             score: hit.score,
             text_score: hit.text_score,
+            placing_text_score: hit.placing_text_score,
             link_score: hit.link_score,
             named: hit.named,
             official: hit.official,
@@ -124,7 +128,7 @@ impl RowSignals {
 }
 
 /// The names of the values [`features`] gives each row, in order.
-pub const FEATURES: [&str; 30] = [
+pub const FEATURES: [&str; 31] = [
     "pos_inv",
     "pos",
     "nwords",
@@ -155,6 +159,7 @@ pub const FEATURES: [&str; 30] = [
     "s_under_named",
     "s_under_pop",
     "s_has_title",
+    "s_text_plain",
 ];
 
 /// What the model reads of each of `rows`, listed in this order for
@@ -206,6 +211,7 @@ pub fn features(query: &str, rows: &[RowSignals]) -> Vec<[f64; FEATURES.len()]> 
                     .fold(-1.0, f64::max);
                 let titled = row.title.as_deref().is_some_and(|t| !t.trim().is_empty());
                 f[29] = flag(titled);
+                f[30] = f64::from(row.placing_text_score.unwrap_or(row.text_score));
             }
             f
         })
@@ -703,6 +709,7 @@ mod tests {
             official: false,
             key_pages: Vec::new(),
             demand: None,
+            placing_text_score: None,
         }
     }
 

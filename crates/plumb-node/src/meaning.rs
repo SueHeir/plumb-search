@@ -17,7 +17,7 @@ use plumb_index::Meaning;
 use tracing::{info, warn};
 
 use crate::block_on;
-use crate::cli::{EmbedArgs, MeaningArgs};
+use crate::cli::{EmbedArgs, MeaningArgs, QueryInstruction};
 use crate::records::load_records;
 
 /// Sites nearest a query in meaning: closeness is spread over them, and
@@ -34,7 +34,11 @@ const REPORT_EVERY: usize = 1_000;
 pub struct MeaningIndex {
     embedder: Embedder,
     vectors: RwLock<Vectors>,
+    instruction: QueryInstruction,
 }
+
+/// What the model was trained to read before a search query.
+const QUERY_INSTRUCTION: &str = "Represent this sentence for searching relevant passages: ";
 
 impl MeaningIndex {
     /// Loads the model in `model_dir` and the vectors in `vectors`, which
@@ -56,13 +60,17 @@ impl MeaningIndex {
         MeaningIndex {
             embedder,
             vectors: RwLock::new(vectors),
+            instruction: QueryInstruction::Off,
         }
     }
 
     /// Opens the model and vectors `args` name, if it names them.
     pub fn from_args(args: &MeaningArgs) -> Result<Option<Self>> {
         match (&args.model, &args.vectors) {
-            (Some(model), Some(vectors)) => Self::open(model, vectors).map(Some),
+            (Some(model), Some(vectors)) => Self::open(model, vectors).map(|mut meaning| {
+                meaning.instruction = args.query_instruction;
+                Some(meaning)
+            }),
             _ => Ok(None),
         }
     }
@@ -91,14 +99,26 @@ impl MeaningIndex {
     /// How close `query` is in meaning to each site; `None` when the query
     /// cannot be embedded.
     pub fn query(&self, query: &str) -> Option<QueryMeaning<'_>> {
-        match self.embedder.embed(query) {
-            Ok(vector) => Some(QueryMeaning::new(self.read(), vector)),
+        let embed = |text: &str| match self.embedder.embed(text) {
+            Ok(vector) => Some(vector),
             Err(_) => {
                 // Embedding errors may include input text too.
                 warn!("could not embed a search query; searching by words only");
                 None
             }
+        };
+        let instructed = || embed(&format!("{QUERY_INSTRUCTION}{query}"));
+        let vectors = self.read();
+        match self.instruction {
+            QueryInstruction::Off => Some(vec![embed(query)?]),
+            QueryInstruction::On => Some(vec![instructed()?]),
+            QueryInstruction::Mix | QueryInstruction::Min => {
+                Some(vec![embed(query)?, instructed()?])
+            }
+            // Ranked by the instructed vector; placed by the plain one.
+            QueryInstruction::Split => Some(vec![instructed()?, embed(query)?]),
         }
+        .map(|query| QueryMeaning::new(vectors, query, self.instruction))
     }
 }
 
@@ -135,32 +155,65 @@ impl SharedMeaning {
 /// query's words, and must still count as close.
 pub struct QueryMeaning<'a> {
     vectors: RwLockReadGuard<'a, Vectors>,
-    vector: Vec<i8>,
     nearest: Vec<String>,
-    /// Cosines of the nearest and of the last of the nearest sites.
+    /// The query's vectors (one, or as it is and after the instruction)
+    /// with the cosines of the nearest and of the last of the nearest sites.
+    spreads: Vec<Spread>,
+    /// How the closeness of several vectors is combined.
+    combine: QueryInstruction,
+}
+
+struct Spread {
+    vector: Vec<i8>,
     best: f32,
     floor: f32,
 }
 
 impl<'a> QueryMeaning<'a> {
-    fn new(vectors: RwLockReadGuard<'a, Vectors>, vector: Vec<i8>) -> Self {
-        let found = vectors.nearest(&vector, NEAREST);
-        let best = found.first().map_or(0.0, |&(_, cosine)| cosine);
-        let floor = match found.last() {
-            // Too few sites to spread: keep the cosines as they are.
-            Some(&(_, cosine)) if found.len() == NEAREST => cosine,
-            _ => 0.0,
-        };
-        let nearest = found
+    /// The nearest sites are those nearest the first of `vectors`.
+    fn new(
+        vectors: RwLockReadGuard<'a, Vectors>,
+        query: Vec<Vec<i8>>,
+        combine: QueryInstruction,
+    ) -> Self {
+        let mut nearest = None;
+        let spreads = query
             .into_iter()
-            .map(|(domain, _)| domain.to_string())
+            .map(|vector| {
+                let found = vectors.nearest(&vector, NEAREST);
+                let best = found.first().map_or(0.0, |&(_, cosine)| cosine);
+                let floor = match found.last() {
+                    // Too few sites to spread: keep the cosines as they are.
+                    Some(&(_, cosine)) if found.len() == NEAREST => cosine,
+                    _ => 0.0,
+                };
+                nearest.get_or_insert_with(|| {
+                    found
+                        .into_iter()
+                        .map(|(domain, _)| domain.to_string())
+                        .collect()
+                });
+                Spread {
+                    vector,
+                    best,
+                    floor,
+                }
+            })
             .collect();
         QueryMeaning {
             vectors,
-            vector,
-            nearest,
-            best,
-            floor,
+            nearest: nearest.unwrap_or_default(),
+            spreads,
+            combine,
+        }
+    }
+
+    fn spread(&self, spread: &Spread, domain: &str) -> Option<f32> {
+        let cosine = self.vectors.closeness(&spread.vector, domain)?;
+        if spread.best > spread.floor {
+            Some(((cosine - spread.floor) / (spread.best - spread.floor)).clamp(0.0, 1.0))
+        } else {
+            Some(cosine.clamp(0.0, 1.0))
         }
     }
 }
@@ -170,12 +223,25 @@ impl Meaning for QueryMeaning<'_> {
         self.nearest.clone()
     }
 
+    fn plain_closeness(&self, domain: &str) -> Option<Option<f32>> {
+        match self.combine {
+            QueryInstruction::Split => Some(self.spread(self.spreads.get(1)?, domain)),
+            _ => None,
+        }
+    }
+
     fn closeness(&self, domain: &str) -> Option<f32> {
-        let cosine = self.vectors.closeness(&self.vector, domain)?;
-        if self.best > self.floor {
-            Some(((cosine - self.floor) / (self.best - self.floor)).clamp(0.0, 1.0))
-        } else {
-            Some(cosine.clamp(0.0, 1.0))
+        if self.combine == QueryInstruction::Split {
+            return self.spread(self.spreads.first()?, domain);
+        }
+        let all = self
+            .spreads
+            .iter()
+            .map(|spread| self.spread(spread, domain))
+            .collect::<Option<Vec<f32>>>()?;
+        match self.combine {
+            QueryInstruction::Min => all.into_iter().reduce(f32::min),
+            _ => Some(all.iter().sum::<f32>() / all.len().max(1) as f32),
         }
     }
 }

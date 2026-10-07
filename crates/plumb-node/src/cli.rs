@@ -269,6 +269,29 @@ pub struct MeaningArgs {
     /// Directory of the model that made the vectors.
     #[arg(long, value_name = "DIR", requires = "vectors")]
     pub model: Option<PathBuf>,
+    /// Whether searches are embedded after the model's instruction for
+    /// search queries ([`QueryInstruction`]); for trying it out.
+    #[arg(long, value_enum, default_value_t = QueryInstruction::Off, hide = true)]
+    pub query_instruction: QueryInstruction,
+}
+
+/// How a search is embedded: as it is, or after the instruction the model
+/// was trained to read before a search ("Represent this sentence for
+/// searching relevant passages: "), which sites' texts are not.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
+pub enum QueryInstruction {
+    /// As it is, for the nearest sites and their closeness.
+    #[default]
+    Off,
+    /// After the instruction, for both.
+    On,
+    /// Both ways, closeness being the mean of the two.
+    Mix,
+    /// Both ways, closeness being the lower of the two.
+    Min,
+    /// After the instruction for ranking sites; as it is for deciding
+    /// whether a page goes before them.
+    Split,
 }
 
 #[derive(Debug, Args)]
@@ -321,6 +344,14 @@ pub struct RunArgs {
     /// crawls only refresh the sites held.
     #[arg(long)]
     pub take_new_sites: bool,
+    /// Only crawl, for a small server that supports the network and that
+    /// nobody searches: crawl rounds go on and publish their batches, but
+    /// no search index is built, no page sets, places or feeds are kept,
+    /// and other nodes' crawls are not folded in, so millions of sites fit
+    /// in well under a gigabyte of memory. Search by meaning and private
+    /// search are off. Without it again, the node builds its index.
+    #[arg(long, conflicts_with_all = ["search_by_meaning", "private_search", "blackhole"])]
+    pub crawl_only: bool,
     /// Homepages fetched at once while crawling [default: 16]. The panel's
     /// workload presets (light, balanced, full) set their own.
     #[arg(long, value_name = "N", value_parser = parse_positive)]
@@ -595,7 +626,9 @@ pub struct FetchPagesArgs {
     /// Home Improvement and 30 more Stack Exchange sites, from the same
     /// dump),
     /// books (Open Library's most shelved works, from its dumps), podcasts
-    /// (Podcast Index's most popular podcasts, from its database), papers
+    /// (Podcast Index's most popular podcasts, from its database), music
+    /// (the songs and albums most listened to, from MusicBrainz's dump and
+    /// ListenBrainz's listener counts), papers
     /// (the most cited works, from OpenAlex's API; set OPENALEX_API_KEY if
     /// it asks for one), packages (the most used packages of eight
     /// registries, from ecosyste.ms) or places (named shops, restaurants,
@@ -682,6 +715,24 @@ pub struct FetchPagesArgs {
     /// instead of downloading it into --work.
     #[arg(long, value_name = "PATH")]
     pub podcast_db: Option<PathBuf>,
+    /// Music: read this MusicBrainz core dump (mbdump.tar.bz2, or a
+    /// directory of its tables) instead of downloading it into --work.
+    #[arg(long, value_name = "PATH")]
+    pub musicbrainz_dump: Option<PathBuf>,
+    /// Music: most songs kept, the most listened to.
+    #[arg(long, value_name = "N", default_value_t = plumb_ingest::musicbrainz::DEFAULT_MAX_SONGS)]
+    pub max_songs: usize,
+    /// Music: most albums kept, the most listened to.
+    #[arg(long, value_name = "N", default_value_t = plumb_ingest::musicbrainz::DEFAULT_MAX_ALBUMS)]
+    pub max_albums: usize,
+    /// Music: fewest release groups (albums, singles, compilations) a song
+    /// is on for ListenBrainz to be asked about it, unless it is on an
+    /// album kept.
+    #[arg(long, value_name = "N", default_value_t = plumb_ingest::musicbrainz::DEFAULT_MIN_SONG_RELEASES)]
+    pub min_song_releases: u32,
+    /// Music: fewest ListenBrainz listeners of a song or album kept.
+    #[arg(long, value_name = "N", default_value_t = plumb_ingest::musicbrainz::DEFAULT_MIN_LISTENERS)]
+    pub min_listeners: u64,
     /// Packages: the registries to list (npm, pypi, crates, go, gem,
     /// composer, nuget, maven), comma-separated; all when left out.
     #[arg(long, value_name = "KEYS", value_delimiter = ',')]
@@ -968,6 +1019,12 @@ pub struct EvalArgs {
     /// the expected texts.
     #[arg(long)]
     pub facts: bool,
+    /// Count the profile or listing a node shows above the results for a
+    /// query ending in a service ("bohemian rhapsody lyrics", "mrbeast
+    /// youtube") as the first result (eval/lyrics_queries.tsv, with
+    /// --pages).
+    #[arg(long)]
+    pub profiles: bool,
     /// Page set files (wikipedia-en.tsv.gz, github.tsv.gz from fetch-pages)
     /// whose pages are listed among the sites, as a node lists them. Can be
     /// given more than once.

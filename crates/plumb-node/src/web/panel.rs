@@ -266,6 +266,7 @@ pub(super) async fn panel(State(state): State<AppState>, request: Request) -> Re
         backups: (writable && data_dir.is_some())
             .then(|| backup::list(data_dir.as_deref().expect("checked")))
             .as_deref(),
+        plugins: Some(&state.settings.plugins),
     });
     panel_page(page)
 }
@@ -1089,6 +1090,9 @@ pub(super) struct PanelView<'a> {
     /// This node's saved backups, for its "Backup" section; `None` on the
     /// panel of another node.
     pub(super) backups: Option<&'a [BackupInfo]>,
+    /// This node's plugins, for the choice of when they run; `None` for
+    /// another node's panel.
+    pub(super) plugins: Option<&'a crate::plugins::Plugins>,
 }
 
 /// What the "Remote control" section shows.
@@ -1117,6 +1121,7 @@ pub(super) fn render_panel(view: &PanelView<'_>) -> String {
         remote_control,
         activity,
         backups,
+        plugins,
     } = *view;
     let mut sections = vec![
         ("overview", "Overview"),
@@ -1176,6 +1181,8 @@ pub(super) fn render_panel(view: &PanelView<'_>) -> String {
         });
     } else if query.saved == "retry" {
         body.push_str("<p class=\"notice\" role=\"status\">Trying the bootstrap nodes again. Refresh the status in a few seconds.</p>");
+    } else if query.saved == "plugins" {
+        body.push_str("<p class=\"notice\" role=\"status\">Plugin choices saved. They apply from the next search.</p>");
     } else if query.saved == "features" {
         body.push_str("<p class=\"notice\" role=\"status\">Feature settings saved. No restart is needed because they match the running node.</p>");
     }
@@ -1269,6 +1276,9 @@ pub(super) fn render_panel(view: &PanelView<'_>) -> String {
                 body.push_str("<fieldset disabled>");
             }
             render_features(&mut body, active, saved, "search", base);
+            if let Some(plugins) = plugins {
+                render_plugin_choices(&mut body, plugins, base);
+            }
             if !writable {
                 body.push_str("</fieldset>");
             }
@@ -2329,6 +2339,92 @@ fn render_page_sets(settings: &NodeSettings) -> String {
     }
     out.push_str("</fieldset>\n");
     out
+}
+
+/// For each plugin a search can fit without a keyword (by its `ids` or
+/// `hints`), the choice of what such a search does with it.
+fn render_plugin_choices(body: &mut String, plugins: &crate::plugins::Plugins, base: &str) {
+    use crate::plugins::Suggest;
+    let fitting: Vec<_> = plugins.list().filter(|p| p.manifest.can_fit()).collect();
+    if fitting.is_empty() {
+        return;
+    }
+    body.push_str(&format!(
+        "<h2>Plugins</h2><p class=\"hint\">When a search fits a plugin, such as a search \
+         about a band for a music plugin, it can run on its own, or show a link that runs it, \
+         which saves a source’s daily quota. Its keywords always run it.</p>\
+         <form method=\"post\" action=\"{base}/plugins\">"
+    ));
+    for plugin in fitting {
+        let chosen = plugins.suggest(plugin);
+        let keywords = plugin
+            .manifest
+            .keywords
+            .iter()
+            .map(|k| k.trim())
+            .filter(|k| !k.is_empty())
+            .collect::<Vec<_>>();
+        let mut options = String::new();
+        for suggest in Suggest::ALL {
+            let label = match suggest {
+                Suggest::Automatic => "Run it when a search fits",
+                Suggest::Button => "Show a link to its results when a search fits",
+                Suggest::Keywords => "Only when a search has one of its keywords",
+            };
+            options.push_str(&format!(
+                "<option value=\"{}\"{}>{label}</option>",
+                suggest.as_str(),
+                if suggest == chosen { " selected" } else { "" }
+            ));
+        }
+        let id = format!("plugin-{}", plugin.id);
+        let keywords = if keywords.is_empty() {
+            String::new()
+        } else {
+            format!("Keywords: {}. ", keywords.join(", "))
+        };
+        body.push_str(&format!(
+            "<div class=\"feature\"><label for=\"{id}\">{}</label> \
+             <select id=\"{id}\" name=\"{}\">{options}</select>\
+             <p class=\"hint\">{}{}</p></div>",
+            escape_html(&plugin.manifest.name),
+            escape_html(&plugin.id),
+            escape_html(&keywords),
+            escape_html(&plugin.manifest.about),
+        ));
+    }
+    body.push_str("<p><button type=\"submit\">Save plugin choices</button></p></form>");
+}
+
+/// Keeps the owner's choices of when the node's plugins run, from the
+/// form of [`render_plugin_choices`]: each plugin's folder name and its
+/// choice.
+pub(super) async fn save_plugins(State(state): State<AppState>, request: Request) -> Response {
+    if state.node.is_none() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    if let Some(why) = refusal(&request) {
+        return forbidden(why);
+    }
+    let Ok(Form(choices)) = Form::<Vec<(String, String)>>::from_request(request, &state).await
+    else {
+        return panel_error(
+            StatusCode::BAD_REQUEST,
+            "The plugin choices could not be read.",
+        );
+    };
+    for (plugin, choice) in choices {
+        let Some(suggest) = crate::plugins::Suggest::parse(&choice) else {
+            return panel_error(StatusCode::BAD_REQUEST, "That is not a plugin choice.");
+        };
+        if let Err(err) = state.settings.plugins.set_suggest(&plugin, suggest) {
+            return panel_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("Could not save plugin choices: {err:#}"),
+            );
+        }
+    }
+    Redirect::to("/app?section=search&saved=plugins").into_response()
 }
 
 fn render_browser(body: &mut String, origin: &str) {

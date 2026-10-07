@@ -81,6 +81,25 @@ item. Plugins start once the node's own search is done, so that this is known,
 and every plugin gets it, whatever ran it. (The MCP server's `search` tool
 runs plugins by their keywords alone.)
 
+### Run it, or offer it
+
+A search that fits a plugin without one of its keywords, by its `ids` or its
+`hints` (words such as `lyrics` or `music video` anywhere in the search), can
+do one of three things:
+
+- **Run it** (`"suggest": "automatic"`, the default): its results show with the
+  node's, as above.
+- **Offer it** (`"suggest": "button"`): the results page shows a "Show results
+  from YouTube" link where its results would be, and runs it only when that is
+  followed. This suits a source with a small daily quota.
+- **Leave it** (`"suggest": "keywords"`): only its keywords run it.
+
+`plugin.json`'s `suggest` is the plugin's own choice. The node's owner can
+change it under **Search → Plugins** in the panel, and the change applies from
+the next search; the panel keeps it in `plugins/suggest.json`. An offer's link
+is the same search with `run=<folder name>`, which runs that plugin on the whole
+search; `/api/search?full=1` lists the offers as `plugin_offers`.
+
 ## Marking up the node's own results
 
 A plugin can also look at the node's own results for a search and add to
@@ -206,6 +225,22 @@ it found nothing. Give it a page's address to try a page lookup, and
 `--annotate results.json` has it mark up results instead: a JSON list of
 results as a node shows them (`{"id", "url", "title", "site", "about"}`).
 
+## Plugins in this repository
+
+Each folder in `plugins/` has a `plugin.json` and, where it needs one, a
+`config.example.json` to copy to `config.json`. Build one with
+`cargo build --release -p plumb-plugin-<folder> --target wasm32-unknown-unknown`
+and copy `target/wasm32-unknown-unknown/release/plumb_plugin_<folder>.wasm`
+into its folder as `plugin.wasm`.
+
+| Plugin | What it adds | Needs |
+| --- | --- | --- |
+| `hacker-news` | `hn rust async`: Hacker News stories. | Nothing. |
+| `youtube-music` | `ytm` or `yt` searches: songs and videos from YouTube and YouTube Music, and a channel's uploads for searches about someone with one. | A YouTube Data API key (see its README). |
+| `reddit` | `reddit` searches: Reddit threads. | Your own Reddit app keys (see its README). |
+| `github` | `gh http client`: repositories with stars, language and last push. With a token: "Starred" badges, star counts on GitHub results among the node's own, and Star and Unstar buttons. | Nothing to search (GitHub allows 10 searches a minute without a token); a [fine-grained token](https://github.com/settings/personal-access-tokens) with read and write access to Starring for the rest. |
+| `steam` | `steam portal` or `my games portal`: games in your library with hours played. Results about a game get "Owned, 25 h" or "On your wishlist". | A [Steam Web API key](https://steamcommunity.com/dev/apikey) and your SteamID64. If your library comes back empty, set your Steam profile's game details to public. |
+
 ## Write a plugin
 
 Start a library crate:
@@ -263,7 +298,12 @@ plumb_plugin::plugin!(search);
 ```
 
 `plugins/hacker-news` in this repository is a complete example: it asks
-Hacker News's public search API for stories. Build a plugin with
+Hacker News's public search API for stories. `plugins/youtube-music` is a bigger
+one: YouTube and YouTube Music through the YouTube Data API with the owner's
+own key, two requests per search, and a channel's uploads for searches about
+someone with a YouTube channel. `plugins/reddit` signs in to Reddit's
+official API with the owner's own app keys from `config.json` (see its
+README). Build a plugin with
 
 ```sh
 rustup target add wasm32-unknown-unknown
@@ -290,11 +330,13 @@ and copy `target/wasm32-unknown-unknown/release/my_plugin.wasm` to
 | `keywords` | Words or phrases that run it at the start or end of a search. |
 | `always` | `true` to run it for every search. |
 | `ids` | Run it, without a keyword, for searches about something with an identifier on one of these services (see [When a plugin runs](#when-a-plugin-runs)). |
+| `hints` | Words or phrases that, anywhere in a search, make it fit the plugin, as `ids` do. |
+| `suggest` | What a search that fits it does without a keyword: `automatic` (run it, the default), `button` (offer a link that runs it) or `keywords` (nothing). The node's owner can change it ([Run it, or offer it](#run-it-or-offer-it)). |
 | `pages` | Sites whose pages it can say something about, for [page lookups](#pages-and-browser-extensions). |
 | `cache_seconds` | How long its results for a search are reused: 0 to 86400, 600 without it. |
 | `seconds` | How long a search waits for it: 1 to 10, 4 without it. The page waits for its slowest plugin. |
 
-It needs `keywords`, `ids`, `pages` or `always`, unless it marks up the
+It needs `keywords`, `ids`, `hints`, `pages` or `always`, unless it marks up the
 node's results.
 
 What `search` gets ([`Query`](../crates/plumb-plugin/src/lib.rs)):

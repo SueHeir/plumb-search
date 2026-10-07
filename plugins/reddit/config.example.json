@@ -1,0 +1,5 @@
+{
+  "client_id": "the id under your app's name at reddit.com/prefs/apps",
+  "client_secret": "the app's secret",
+  "username": "your Reddit username, without u/"
+}

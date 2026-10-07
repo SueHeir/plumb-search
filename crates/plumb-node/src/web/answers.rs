@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 use plumb_answer::{Answer, Rates, ECB_RATES_URL};
 use plumb_core::profiles::{services_asked, shown_profiles};
 use plumb_core::truncate_chars;
-use plumb_index::pages::{Page, PlacedPage, WIKIDATA_SET};
+use plumb_index::pages::{Page, PlacedPage, MUSIC_SET, WIKIDATA_SET};
 use plumb_index::Hit;
 use serde::Serialize;
 use tokio::sync::Mutex;
@@ -153,6 +153,12 @@ pub(crate) struct ProfileAnswer {
     pub url: String,
     /// Its own account, rather than a listing (a film on IMDb).
     pub official: bool,
+    /// Where the link comes from: "Wikidata", "MusicBrainz".
+    pub source: &'static str,
+    /// A search of the service for it, as no page of it is known: a
+    /// song's lyrics searched on Genius.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub search: bool,
     /// The article, for the info box beside it.
     #[serde(skip)]
     pub page: Page,
@@ -170,6 +176,8 @@ pub(crate) struct Extras {
     /// The token for the forms of the plugins' buttons, when the page is
     /// for the node's owner and some plugin has buttons.
     pub plugin_token: Option<String>,
+    /// Links to the plugins this search fits but did not run.
+    pub plugin_offers: Vec<crate::plugins::Offer>,
 }
 
 /// Whether a Wikipedia article lists the pages a name could mean rather
@@ -279,27 +287,57 @@ pub(crate) fn info_from_page(page: &Page, sites: &[Hit]) -> Option<InfoBox> {
 }
 
 /// The official profile `query` asks for ("mrbeast youtube", "valve
-/// steam"), when the words before the service name a Wikipedia article in
-/// `pages` (found for those words) whose item has a profile there.
+/// steam", "bohemian rhapsody lyrics"), when the words before the service
+/// name a Wikipedia article or a song or album in `pages` (found for those
+/// words) that has a profile there. A song with no page on Genius has its
+/// lyrics searched for there, by its title and artist.
 pub(crate) fn profile_answer(query: &str, pages: &[PlacedPage]) -> Option<ProfileAnswer> {
     let (services, _) = services_asked(query)?;
     pages
         .iter()
-        .filter(|placed| placed.hit.named && is_about_one_thing(&placed.hit.page))
+        .filter(|placed| {
+            placed.hit.named
+                && (is_about_one_thing(&placed.hit.page) || placed.hit.page.set == MUSIC_SET)
+        })
         .find_map(|placed| {
             let page = &placed.hit.page;
+            let source = if page.set == MUSIC_SET {
+                "MusicBrainz"
+            } else {
+                "Wikidata"
+            };
             // A handle before a channel id: services come in that order.
-            let (service, url) = services.iter().find_map(|service| {
+            let found = services.iter().find_map(|service| {
                 page.profiles
                     .iter()
                     .filter(|p| p.service == service.key)
                     .find_map(|p| Some((*service, service.url(&p.id)?)))
-            })?;
+            });
+            if let Some((service, url)) = found {
+                return Some(ProfileAnswer {
+                    of: page.title.clone(),
+                    service: service.name,
+                    url,
+                    official: service.official,
+                    source,
+                    search: false,
+                    page: page.clone(),
+                });
+            }
+            let genius = services.iter().find(|s| s.key == "genius-song")?;
+            if !page.is_song() {
+                return None;
+            }
+            // "Hey Jude The Beatles", the song's title and artist.
+            let words = page.aliases.first().unwrap_or(&page.title);
+            let words: String = url::form_urlencoded::byte_serialize(words.as_bytes()).collect();
             Some(ProfileAnswer {
                 of: page.title.clone(),
-                service: service.name,
-                url,
-                official: service.official,
+                service: genius.name,
+                url: format!("https://genius.com/search?q={words}"),
+                official: false,
+                source,
+                search: true,
                 page: page.clone(),
             })
         })
@@ -314,17 +352,32 @@ pub(crate) fn render_profile(out: &mut String, profile: &ProfileAnswer, icon: Op
         "<section class=\"pf\" aria-label=\"{kind}\"><a class=\"r\" href=\"{}\" \
          rel=\"noreferrer\"><span class=\"site\">{}<span class=\"sn\"><span class=\"dn\">{}</span>\
          <span class=\"u\">{}</span></span></span><span class=\"t\">{} on {}</span></a>\
-         <p class=\"m\">{kind}, from Wikidata</p></section>",
+         <p class=\"m\">{note}</p></section>",
         escape_html(&profile.url),
         super::site_badge(&domain, icon),
         escape_html(profile.service),
         escape_html(&shown),
         escape_html(&truncate_chars(&profile.of, 120)),
         escape_html(profile.service),
-        kind = if profile.official {
+        kind = if profile.search {
+            "Search"
+        } else if profile.official {
             "Official profile"
         } else {
             "Listing"
+        },
+        note = if profile.search {
+            format!("Searched for on {}", escape_html(profile.service))
+        } else {
+            format!(
+                "{}, from {}",
+                if profile.official {
+                    "Official profile"
+                } else {
+                    "Listing"
+                },
+                profile.source
+            )
         },
     );
 }
@@ -611,6 +664,7 @@ mod tests {
     fn site(domain: &str, country: Option<&str>) -> Hit {
         Hit {
             demand: None,
+            placing_text_score: None,
             domain: domain.to_string(),
             url: format!("https://{domain}/"),
             title: None,
@@ -956,6 +1010,62 @@ mod tests {
         let mut html = String::new();
         render_profile(&mut html, &found, None);
         assert!(html.contains("Listing, from Wikidata"), "{html}");
+    }
+
+    #[test]
+    fn links_a_songs_lyrics() {
+        let song = |title: &str, by: &str, profiles: Vec<plumb_core::profiles::Profile>| PageHit {
+            page: Page::from_music(plumb_core::article::Article {
+                title: title.into(),
+                description: Some(format!("Song by {by}, 1975")),
+                item: Some("recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69".into()),
+                views: 211_087,
+                aliases: vec![format!("{title} {by}")],
+                profiles,
+                ..Default::default()
+            })
+            .unwrap(),
+            named: true,
+            ..article("x", "x", None)
+        };
+        // The article on the song has no Genius page; the song has.
+        let mut rhapsody = article("Bohemian Rhapsody", "1975 single by Queen", None);
+        rhapsody.named = true;
+        let pages = [
+            placed(rhapsody, None, 0),
+            placed(
+                song(
+                    "Bohemian Rhapsody",
+                    "Queen",
+                    vec![profile("genius-song", "Queen-bohemian-rhapsody-lyrics")],
+                ),
+                None,
+                1,
+            ),
+        ];
+        let found = profile_answer("bohemian rhapsody lyrics", &pages).unwrap();
+        assert_eq!(
+            found.url,
+            "https://genius.com/Queen-bohemian-rhapsody-lyrics"
+        );
+        assert!(!found.search);
+        let mut html = String::new();
+        render_profile(&mut html, &found, None);
+        assert!(html.contains("Listing, from MusicBrainz"), "{html}");
+
+        // A song with no Genius page has its lyrics searched for there.
+        let pages = [placed(song("Hey Jude", "The Beatles", Vec::new()), None, 0)];
+        let found = profile_answer("hey jude lyrics", &pages).unwrap();
+        assert_eq!(
+            found.url,
+            "https://genius.com/search?q=Hey+Jude+The+Beatles"
+        );
+        assert!(found.search);
+        let mut html = String::new();
+        render_profile(&mut html, &found, None);
+        assert!(html.contains("Searched for on Genius"), "{html}");
+        // Never another service.
+        assert_eq!(profile_answer("hey jude spotify", &pages), None);
     }
 
     #[test]

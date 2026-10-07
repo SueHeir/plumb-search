@@ -321,6 +321,13 @@ pub trait Meaning {
     /// How close the site of `domain` is to the query, in `0..=1`; `None`
     /// for a site with no embedding.
     fn closeness(&self, domain: &str) -> Option<f32>;
+    /// [`Meaning::closeness`] as the query alone gives it, when that
+    /// differs (a query embedded after an instruction to the model); it
+    /// decides only whether a page goes before the sites
+    /// ([`Hit::placing_text_score`]).
+    fn plain_closeness(&self, _domain: &str) -> Option<Option<f32>> {
+        None
+    }
 }
 
 /// What [`build_index`] built. Every record is a document, merged into
@@ -359,6 +366,11 @@ pub struct Hit {
     pub text_score: f32,
     /// [`plumb_core::link_score`] of the site.
     pub link_score: f32,
+    /// [`Hit::text_score`] by the query's plain meaning, when the ranking
+    /// used another ([`Meaning::plain_closeness`]), for
+    /// [`pages::place_pages`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placing_text_score: Option<f32>,
     /// The country the site belongs to ([`plumb_core::site_country`]),
     /// `None` for global sites.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1252,6 +1264,13 @@ impl Searcher {
                     .and_then(|domain| meaning.closeness(&domain))
             })
         };
+        let plain_closeness_of = |addr: DocAddress| {
+            meaning.and_then(|meaning| {
+                columns[addr.segment_ord as usize]
+                    .domain(addr.doc_id)
+                    .map(|domain| meaning.plain_closeness(&domain))
+            })
+        };
         let no_vector: Vec<DocAddress> = match meaning {
             Some(_) => candidates
                 .iter()
@@ -1286,6 +1305,7 @@ impl Searcher {
             let link_score = link_score_of(addr);
             let is_kind = kinds.contains(&addr);
             let name = names.get(&addr).copied().unwrap_or_default();
+            let mut placing_text_score = None;
             let text_score = if is_kind || name.label >= query.len {
                 // Being what the query names, or being named by all of it,
                 // is a full match, however little of the site's own text
@@ -1301,6 +1321,17 @@ impl Searcher {
                 };
                 let closeness =
                     closeness_of(addr).or_else(|| coverage.get(&addr).map(|&share| share * words));
+                if let Some(Some(plain)) = plain_closeness_of(addr) {
+                    placing_text_score = Some(
+                        match plain.or_else(|| coverage.get(&addr).map(|&share| share * words)) {
+                            Some(plain) => {
+                                (1.0 - meaning_weight) * words
+                                    + meaning_weight * plain.clamp(0.0, 1.0)
+                            }
+                            None => words,
+                        },
+                    );
+                }
                 match closeness {
                     Some(closeness) => {
                         (1.0 - meaning_weight) * words + meaning_weight * closeness.clamp(0.0, 1.0)
@@ -1347,6 +1378,7 @@ impl Searcher {
                     + trust * ((1.0 - alpha) * text_score + name_bonus)
                     + country_bonus,
                 text_score,
+                placing_text_score,
                 link_score,
                 country,
                 named: name.typed || name.words() >= query.len,
@@ -1654,6 +1686,7 @@ impl Searcher {
             domain,
             score: ranked.score,
             text_score: ranked.text_score,
+            placing_text_score: ranked.placing_text_score,
             link_score: ranked.link_score,
             country: ranked.country,
             named: ranked.named,
@@ -1816,6 +1849,7 @@ struct Ranked {
     addr: DocAddress,
     score: f32,
     text_score: f32,
+    placing_text_score: Option<f32>,
     link_score: f32,
     country: Option<String>,
     named: bool,
