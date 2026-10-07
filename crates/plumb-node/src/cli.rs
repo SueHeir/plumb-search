@@ -7,6 +7,7 @@ use std::time::Duration;
 use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 
 use crate::country::HomeCountry;
+pub use crate::meaning::MeaningModel;
 use crate::websearch::{parse_web_search, WebSearch};
 
 /// Plumb Search: a self-hostable search engine.
@@ -408,6 +409,12 @@ pub struct RunArgs {
     /// index build, best-ranked sites first, into DIR/vectors.bin.
     #[arg(long)]
     pub search_by_meaning: bool,
+    /// The model search by meaning runs: `small` (bge-small-en-v1.5, about
+    /// 130 MB, English) or `gemma` (EmbeddingGemma 2, about 310 MB, many
+    /// languages) into DIR/model-gemma. Switching makes the vectors again,
+    /// or takes them from trusted nodes running the same model.
+    #[arg(long, value_name = "MODEL", value_enum, default_value_t = MeaningModel::Small, requires = "search_by_meaning")]
+    pub meaning_model: MeaningModel,
     /// Threads that embed sites for search by meaning [default: half the
     /// CPUs this node may use]. A server with CPUs to spare catches up
     /// faster with more.

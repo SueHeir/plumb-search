@@ -24,8 +24,8 @@ mod text;
 mod vectors;
 
 pub use gemma::{
-    gemma_id, is_gemma_dir, write_test_gemma, GEMMA_DIM, GEMMA_FILE, GEMMA_MAX_TOKENS,
-    GEMMA_QUERY_PREFIX, GEMMA_TEXT_PREFIX, GEMMA_TOKENIZER_FILE,
+    gemma_id, is_gemma_dir, write_test_gemma, GEMMA_DIM, GEMMA_DOWNLOADS, GEMMA_FILE,
+    GEMMA_MAX_TOKENS, GEMMA_QUERY_PREFIX, GEMMA_TEXT_PREFIX, GEMMA_TOKENIZER_FILE,
 };
 pub use model::{
     model_id, quantize, write_test_model, Embedder, ModelId, MAX_TOKENS, MODEL_BASE_URL,

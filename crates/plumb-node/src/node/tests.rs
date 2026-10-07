@@ -20,6 +20,7 @@ use tokio::net::{TcpListener, TcpStream};
 
 use super::store::{self, SavedState};
 use super::*;
+use crate::meaning::MeaningModel;
 
 fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -76,6 +77,7 @@ fn test_config(dir: &Path) -> NodeConfig {
         wikidata_pacing: quick_wikidata(),
         cc_ranks_url: None,
         model_base_url: format!("{nowhere}/model/"),
+        gemma_downloads: Vec::new(),
         adult_list_url: None,
     };
     config
@@ -738,6 +740,7 @@ impl SeedHost {
             wikidata_pacing: quick_wikidata(),
             cc_ranks_url: None,
             model_base_url: self.url("/model/"),
+            gemma_downloads: Vec::new(),
             adult_list_url: None,
         }
     }
@@ -1948,7 +1951,7 @@ fn downloads_are_counted_per_day() {
 async fn search_by_meaning_embeds_sites_in_the_background() {
     let dir = seeded_dir();
     // The model is in place, so nothing is downloaded.
-    plumb_embed::write_test_model(&dir.path().join(embedding::MODEL_DIR)).unwrap();
+    plumb_embed::write_test_model(&dir.path().join(MeaningModel::Small.dir_name())).unwrap();
     let mut config = test_config(dir.path());
     config.search_by_meaning = true;
     let node = start(config).await.unwrap();
@@ -1974,6 +1977,44 @@ async fn search_by_meaning_embeds_sites_in_the_background() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     node.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn search_by_meaning_downloads_and_runs_embedding_gemma_when_chosen() {
+    let made = tempfile::tempdir().unwrap();
+    plumb_embed::write_test_gemma(made.path()).unwrap();
+    let model = std::fs::read(made.path().join(plumb_embed::GEMMA_FILE)).unwrap();
+    let tokenizer = std::fs::read(made.path().join(plumb_embed::GEMMA_TOKENIZER_FILE)).unwrap();
+    let host = SeedHost::start(move |request, _| match request {
+        "GET /gemma/model.gguf" => http("200 OK", &model),
+        "GET /gemma/tokenizer.json" => http("200 OK", &tokenizer),
+        _ => http("404 Not Found", b"no such file"),
+    })
+    .await;
+    let dir = seeded_dir();
+    let mut config = test_config(dir.path());
+    config.search_by_meaning = true;
+    config.meaning_model = MeaningModel::Gemma;
+    config.sources.gemma_downloads = [plumb_embed::GEMMA_FILE, plumb_embed::GEMMA_TOKENIZER_FILE]
+        .map(|name| (name.to_string(), host.url(&format!("/gemma/{name}"))))
+        .to_vec();
+    let node = start(config).await.unwrap();
+    wait_for(node.addr(), "the first index", ready_and_idle).await;
+
+    let vectors_path = dir.path().join(plumb_embed::VECTORS_FILE_NAME);
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    while plumb_embed::Vectors::load(&vectors_path).map_or(0, |v| v.len()) == 0 {
+        assert!(std::time::Instant::now() < deadline, "no vectors saved");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    node.shutdown().await.unwrap();
+    let gemma_dir = dir.path().join(MeaningModel::Gemma.dir_name());
+    let (model, dim, _) = plumb_embed::Vectors::read_header(&vectors_path).unwrap();
+    assert_eq!(model, plumb_embed::gemma_id(&gemma_dir).unwrap());
+    assert_eq!(model, plumb_embed::gemma_id(made.path()).unwrap());
+    assert_eq!(dim, 96);
+    // The small model was never downloaded.
+    assert!(!dir.path().join(MeaningModel::Small.dir_name()).exists());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2897,7 +2938,7 @@ impl plumb_net::BucketSource for WithVectors {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_node_takes_site_vectors_made_from_its_own_text_from_a_trusted_node() {
     let dir = seeded_dir();
-    let model_dir = dir.path().join(embedding::MODEL_DIR);
+    let model_dir = dir.path().join(MeaningModel::Small.dir_name());
     plumb_embed::write_test_model(&model_dir).unwrap();
     let model = plumb_embed::model_id(&model_dir).unwrap();
 

@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 use super::NodeSettings;
+use crate::meaning::MeaningModel;
 
 /// Held locked while a node runs.
 const LOCK_FILE: &str = "node.lock";
@@ -142,7 +143,8 @@ pub(super) fn remove_leftovers(paths: &Paths) {
             remove_leftover(&paths.data.join(name));
         }
     }
-    for dir in [&paths.seed, &paths.data.join(super::embedding::MODEL_DIR)] {
+    let models = [MeaningModel::Small, MeaningModel::Gemma].map(|m| paths.data.join(m.dir_name()));
+    for dir in std::iter::once(&paths.seed).chain(&models) {
         for name in file_names(dir) {
             if name.ends_with(".part") {
                 remove_leftover(&dir.join(name));

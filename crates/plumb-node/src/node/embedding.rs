@@ -13,14 +13,10 @@ use plumb_core::now_unix;
 use super::shared_vectors::Taken;
 use super::{Inner, LastError, MeaningWork};
 use crate::meaning::{
-    embed_sites, ensure_model, load_embedder, load_vectors_for, sites_to_embed_from_file,
-    MeaningIndex,
+    embed_sites, ensure_gemma, ensure_model, load_embedder, load_vectors_for,
+    sites_to_embed_from_file, MeaningIndex, MeaningModel,
 };
 
-/// Directory of the model's files in the data directory.
-pub(super) const MODEL_DIR: &str = "model";
-/// About how big the model's files are, for the panel's progress.
-pub(super) const MODEL_MB: u64 = 130;
 /// Wait after a failure (no network for the model download, a bad file).
 const RETRY_WAIT: Duration = Duration::from_secs(30 * 60);
 /// How often the job looks for a new index.
@@ -81,7 +77,8 @@ pub(super) fn run(inner: Arc<Inner>) {
 }
 
 fn work(inner: &Arc<Inner>) -> Result<()> {
-    let model_dir = inner.paths.data.join(MODEL_DIR);
+    let model = inner.config.meaning_model;
+    let model_dir = inner.paths.data.join(model.dir_name());
     let vectors_path = inner.paths.data.join(plumb_embed::VECTORS_FILE_NAME);
     let meaning = match inner.meaning.get() {
         Some(meaning) => meaning,
@@ -90,7 +87,13 @@ fn work(inner: &Arc<Inner>) -> Result<()> {
             // A stop does not wait for the download, which can take minutes.
             let downloaded = tokio::runtime::Handle::current().block_on(async {
                 tokio::select! {
-                    downloaded = ensure_model(&model_dir, &inner.config.sources.model_base_url) => Some(downloaded),
+                    downloaded = async {
+                        let sources = &inner.config.sources;
+                        match model {
+                            MeaningModel::Small => ensure_model(&model_dir, &sources.model_base_url).await,
+                            MeaningModel::Gemma => ensure_gemma(&model_dir, &sources.gemma_downloads).await,
+                        }
+                    } => Some(downloaded),
                     () = inner.stopped() => None,
                 }
             });

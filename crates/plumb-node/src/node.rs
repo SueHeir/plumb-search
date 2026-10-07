@@ -189,6 +189,9 @@ pub struct NodeConfig {
     /// and keeps a vector of each site's text in `DIR/vectors.bin`, made in
     /// the background after each index build, best-ranked sites first.
     pub search_by_meaning: bool,
+    /// The model search by meaning runs; its files go in their own
+    /// directory, and switching makes the vectors again.
+    pub meaning_model: crate::meaning::MeaningModel,
     /// Threads that embed sites for search by meaning; `None` for half the
     /// CPUs this node may use.
     pub embed_threads: Option<usize>,
@@ -313,6 +316,7 @@ impl NodeConfig {
             web_search: None,
             mcp_read_pages: false,
             search_by_meaning: false,
+            meaning_model: crate::meaning::MeaningModel::default(),
             embed_threads: None,
             seed_from_network: true,
             sources: SeedSources::default(),
@@ -459,6 +463,10 @@ pub struct SeedSources {
     /// Where the embedding model's files are downloaded from, for search by
     /// meaning: each of [`plumb_embed::MODEL_FILES`] is appended.
     pub model_base_url: String,
+    /// Where EmbeddingGemma's files are downloaded from, for
+    /// [`crate::meaning::MeaningModel::Gemma`]: each file name with its
+    /// address.
+    pub gemma_downloads: Vec<(String, String)>,
     /// The adult blocklist safe search leaves out (see `node::adult`);
     /// `None` for none.
     pub adult_list_url: Option<String>,
@@ -474,6 +482,10 @@ impl Default for SeedSources {
             wikidata_pacing: download::WikidataPacing::default(),
             cc_ranks_url: None,
             model_base_url: plumb_embed::MODEL_BASE_URL.to_string(),
+            gemma_downloads: plumb_embed::GEMMA_DOWNLOADS
+                .iter()
+                .map(|(name, url)| (name.to_string(), url.to_string()))
+                .collect(),
             adult_list_url: Some(plumb_core::safe::ADULT_LIST_URL.to_string()),
         }
     }
@@ -1526,12 +1538,13 @@ impl Inner {
         Some(match work {
             MeaningWork::Downloading => {
                 // The model's files, the one being written included.
-                let done = store::dir_size(&self.paths.data.join(embedding::MODEL_DIR)) / MB;
+                let model = self.config.meaning_model;
+                let done = store::dir_size(&self.paths.data.join(model.dir_name())) / MB;
                 BackgroundWork {
                     detail: "Downloading the search-by-meaning model".into(),
                     progress: Some(Progress {
-                        done: done.min(embedding::MODEL_MB),
-                        total: embedding::MODEL_MB,
+                        done: done.min(model.size_mb()),
+                        total: model.size_mb(),
                         unit: "MB".into(),
                     }),
                     error: None,

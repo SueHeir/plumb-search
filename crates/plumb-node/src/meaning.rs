@@ -504,6 +504,55 @@ pub(crate) fn embed_sites(
     })
 }
 
+/// The model search by meaning runs on a node.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum MeaningModel {
+    /// bge-small-en-v1.5 (about 130 MB, English).
+    #[default]
+    Small,
+    /// EmbeddingGemma 2 at 256 values (about 310 MB, many languages).
+    Gemma,
+}
+
+impl MeaningModel {
+    /// The directory of its files in a node's data directory.
+    pub fn dir_name(self) -> &'static str {
+        match self {
+            MeaningModel::Small => "model",
+            MeaningModel::Gemma => "model-gemma",
+        }
+    }
+
+    /// About how big its files are, in MB.
+    pub fn size_mb(self) -> u64 {
+        match self {
+            MeaningModel::Small => 130,
+            MeaningModel::Gemma => 320,
+        }
+    }
+}
+
+/// Downloads EmbeddingGemma's files into `dir` from `downloads` (each file
+/// name with its address), those not there yet.
+pub(crate) async fn ensure_gemma(dir: &Path, downloads: &[(String, String)]) -> Result<()> {
+    if downloads.iter().all(|(name, _)| dir.join(name).is_file()) {
+        return Ok(());
+    }
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    let client = plumb_ingest::download::http_client()?;
+    info!("downloading the embedding model EmbeddingGemma 2");
+    for (name, url) in downloads {
+        let dest = dir.join(name);
+        if dest.is_file() {
+            continue;
+        }
+        plumb_ingest::download::download_to_file(&client, url, &dest)
+            .await
+            .with_context(|| format!("downloading {url}"))?;
+    }
+    Ok(())
+}
+
 /// `plumb embed`: downloads the model when missing, then makes a vector
 /// for every site in the records file whose text changed since the last
 /// run, and drops the vectors of sites no longer there.

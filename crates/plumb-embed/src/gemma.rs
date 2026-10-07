@@ -34,6 +34,20 @@ pub const GEMMA_QUERY_PREFIX: &str = "task: search result | query: ";
 /// What it reads before a site's text.
 pub const GEMMA_TEXT_PREFIX: &str = "title: none | text: ";
 
+/// Where a node downloads EmbeddingGemma 2 from: the file each address
+/// becomes and the address (Q8_0 GGUF from ggml-org, the tokenizer from
+/// Google's own repository).
+pub const GEMMA_DOWNLOADS: [(&str, &str); 2] = [
+    (
+        GEMMA_FILE,
+        "https://huggingface.co/ggml-org/embeddinggemma-2-GGUF/resolve/main/embeddinggemma-2-Q8_0.gguf",
+    ),
+    (
+        GEMMA_TOKENIZER_FILE,
+        "https://huggingface.co/google/embeddinggemma-2/resolve/914f7f89142e33e77833254d9c9b90c3cef7303b/tokenizer.json",
+    ),
+];
+
 /// The [`ModelId`] of the EmbeddingGemma 2 files in `dir`: SHA-256 of the
 /// SHA-256s of [`GEMMA_FILE`] and [`GEMMA_TOKENIZER_FILE`], then of
 /// [`GEMMA_DIM`] and the two prefixes, which change the vectors too.
