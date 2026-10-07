@@ -1,7 +1,8 @@
 //! The places part of a results page: "pizza in denver" lists pizza places
-//! in Denver above the sites, with a small map drawn here as SVG (no map
-//! tiles: the page loads nothing from anywhere else), and links to
-//! OpenStreetMap, whose data it is.
+//! in Denver above the sites, with a small map drawn here as SVG, on the
+//! streets of the node's own map file when it has one (see [`crate::map`]:
+//! the page loads nothing from anywhere else), and links to OpenStreetMap,
+//! whose data it is.
 
 use std::fmt::Write as _;
 
@@ -25,10 +26,24 @@ pub(super) const STYLE: &str = "\
 .pl{margin:1rem 0 .5rem;padding:.9rem 1rem;border:1px solid var(--line);border-radius:.75rem}\
 .pl h2{margin:0 0 .6rem;font-size:1.05rem}\
 .pl .map{display:block;width:100%;height:auto;margin:0 0 .4rem;border-radius:.5rem}\
+.pl .map{overflow:hidden;--m-land:#f4f2ee;--m-sea:#b3d4e6;--m-green:#d3e8c4;--m-minor:#dcd8cf;\
+--m-major:#c9c3b8;--m-hw:#e7b766;--m-rail:#aaa49a;--m-name:#5f6368}\
+@media (prefers-color-scheme:dark){.pl .map{--m-land:#2b2c2f;--m-sea:#1d3442;--m-green:#25362b;\
+--m-minor:#3e4045;--m-major:#55575d;--m-hw:#8a6a33;--m-rail:#5a5d63;--m-name:#a8adb3}}\
 .map .bg{fill:var(--net)}.map .grid{stroke:var(--line);stroke-width:1}\
-.map .pin{fill:var(--accent)}.map .pn{fill:var(--bg);font:600 12px system-ui,sans-serif}\
+.map .sea,.map .water{fill:var(--m-sea)}.map .land,.map .earth{fill:var(--m-land)}\
+.map .green{fill:var(--m-green)}.map path.river{fill:none;stroke:var(--m-sea);stroke-width:3}\
+.map path.rail{fill:none;stroke:var(--m-rail);stroke-width:2;stroke-dasharray:6 4}\
+.map path.minor,.map path.major,.map path.highway{fill:none;stroke-linecap:round;stroke-linejoin:round}\
+.map .minor{stroke:var(--m-minor);stroke-width:2}.map .major{stroke:var(--m-major);stroke-width:4}\
+.map .highway{stroke:var(--m-hw);stroke-width:5}\
+.map .nm{fill:var(--m-name);font:11px system-ui,sans-serif;paint-order:stroke;stroke:var(--m-land);\
+stroke-width:3px;stroke-linejoin:round}.map .nm.tn{font-weight:600}\
+.map .pin{fill:var(--accent);stroke:var(--bg);stroke-width:1.5}\
+.map .pn{fill:var(--bg);font:600 12px system-ui,sans-serif}\
 .map .ctr{fill:none;stroke:var(--fg);stroke-width:2}\
-.map .lbl{fill:var(--fg);font:12px system-ui,sans-serif}\
+.map .lbl{fill:var(--fg);font:12px system-ui,sans-serif;paint-order:stroke;stroke:var(--bg);\
+stroke-width:3px;stroke-linejoin:round}\
 .map .bar{stroke:var(--fg);stroke-width:2}\
 .pl ol{margin:0}.pl li{display:flex;gap:.6rem;padding:.45rem 0;margin:0}\
 .pl .no{flex:none;display:grid;place-items:center;width:1.5rem;height:1.5rem;border-radius:50%;\
@@ -82,13 +97,15 @@ fn capitalized(what: &str) -> String {
     }
 }
 
-/// The places part of a results page. `about` is whether this node has an
+/// The places part of a results page, its map drawn on `base_map` when
+/// there is one. `about` is whether this node has an
 /// About page where the searcher can give their town; `country` the
 /// searcher's country, for miles or km. `link` gives the address a place's
 /// link goes to, from the place's own (a `/go` link that notes the box was
 /// used, or the address itself).
 pub(super) fn render_places(
     found: &PlaceResults,
+    base_map: Option<&crate::map::BaseMap>,
     about: bool,
     country: Option<&str>,
     icons: &Icons,
@@ -127,7 +144,7 @@ pub(super) fn render_places(
             distance_words(found.radius_km, miles)
         );
     } else {
-        out.push_str(&render_map(center, &found.hits, miles));
+        out.push_str(&render_map(center, &found.hits, miles, base_map));
         out.push_str("<ol>\n");
         for (n, hit) in found.hits.iter().enumerate() {
             render_place(&mut out, n + 1, hit, miles, icons, link);
@@ -366,8 +383,13 @@ fn area_url(center: &Place, km: f64) -> String {
 }
 
 /// A map of the places as numbered pins around the centre, with a scale
-/// bar. Drawn from coordinates alone: no streets.
-fn render_map(center: &Place, hits: &[PlaceHit], miles: bool) -> String {
+/// bar, on the streets of `base_map` when it has them there.
+fn render_map(
+    center: &Place,
+    hits: &[PlaceHit],
+    miles: bool,
+    base_map: Option<&crate::map::BaseMap>,
+) -> String {
     // Kilometres east and north of the centre.
     let km_per_lon = 111.32 * center.lat.to_radians().cos().max(0.01);
     let at = |lat: f64, lon: f64| {
@@ -401,9 +423,40 @@ fn render_map(center: &Place, hits: &[PlaceHit], miles: bool) -> String {
     };
     let mut svg = format!(
         "<svg class=\"map\" viewBox=\"0 0 {MAP_WIDTH} {MAP_HEIGHT}\" role=\"img\" \
-         aria-label=\"Map of the places listed, numbered as in the list\">\
-         <rect class=\"bg\" width=\"{MAP_WIDTH}\" height=\"{MAP_HEIGHT}\" rx=\"8\"/>"
+         aria-label=\"Map of the places listed, numbered as in the list\">"
     );
+    let pins: Vec<(f64, f64)> = points.iter().map(|p| to_svg(*p)).collect();
+    let streets = base_map.and_then(|map| {
+        // The map's corners, back from SVG units to degrees.
+        let lat_at = |sy: f64| center.lat + (mid_y - (sy - MAP_HEIGHT / 2.0) / scale) / 110.57;
+        let lon_at = |sx: f64| center.lon + (mid_x + (sx - MAP_WIDTH / 2.0) / scale) / km_per_lon;
+        let place_to_svg = |lat: f64, lon: f64| to_svg(at(lat, lon));
+        let mut keep_clear = pins.clone();
+        keep_clear.push(to_svg((0.0, 0.0)));
+        map.draw(&crate::map::draw::Frame {
+            bounds: (
+                lat_at(MAP_HEIGHT),
+                lon_at(0.0),
+                lat_at(0.0),
+                lon_at(MAP_WIDTH),
+            ),
+            width: MAP_WIDTH,
+            height: MAP_HEIGHT,
+            metres_per_unit: 1000.0 / scale,
+            to_svg: &place_to_svg,
+            keep_clear: &keep_clear,
+            skip: &center.name,
+        })
+    });
+    match streets {
+        Some(streets) => svg.push_str(&streets),
+        None => {
+            let _ = write!(
+                svg,
+                "<rect class=\"bg\" width=\"{MAP_WIDTH}\" height=\"{MAP_HEIGHT}\" rx=\"8\"/>"
+            );
+        }
+    }
     // A scale bar of a round distance, about a fifth of the map across.
     let unit_km = if miles { 1.609_344 } else { 1.0 };
     let want = MAP_WIDTH / 5.0 / scale / unit_km;
@@ -435,8 +488,7 @@ fn render_map(center: &Place, hits: &[PlaceHit], miles: bool) -> String {
         );
     }
     // The farthest first, so the nearest are drawn on top.
-    for (n, point) in points.iter().enumerate().rev() {
-        let (x, y) = to_svg(*point);
+    for (n, &(x, y)) in pins.iter().enumerate().rev() {
         let _ = write!(
             svg,
             "<circle class=\"pin\" cx=\"{x:.1}\" cy=\"{y:.1}\" r=\"11\"/>\
@@ -483,7 +535,7 @@ mod tests {
     #[test]
     fn place_links_can_go_through_go_and_fold() {
         let found = found();
-        let html = render_places(&found, true, Some("US"), &Icons::default(), &|href| {
+        let html = render_places(&found, None, true, Some("US"), &Icons::default(), &|href| {
             format!("/go?u={href}")
         });
         assert!(
@@ -532,8 +584,27 @@ mod tests {
     }
 
     #[test]
+    fn the_map_is_drawn_on_streets_when_the_node_has_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let map = crate::map::BaseMap::open(&crate::map::tests::sample_map(dir.path())).unwrap();
+        let html = render_places(
+            &found(),
+            Some(&map),
+            true,
+            Some("US"),
+            &Icons::default(),
+            &same,
+        );
+        let svg = &html[html.find("<svg").unwrap()..html.find("</svg>").unwrap()];
+        assert!(svg.contains("<rect class=\"sea\""), "{svg}");
+        assert!(!svg.contains("class=\"bg\""), "{svg}");
+        // The pins are still on top.
+        assert!(svg.rfind("class=\"pin\"").unwrap() > svg.find("<path").unwrap());
+    }
+
+    #[test]
     fn places_are_listed_with_a_map_and_credit() {
-        let html = render_places(&found(), true, Some("US"), &Icons::default(), &same);
+        let html = render_places(&found(), None, true, Some("US"), &Icons::default(), &same);
         assert!(html.contains("<h2>Pizza in Denver, CO</h2>"));
         assert!(html.contains("Blue &lt;Pan&gt;"));
         assert!(html.contains("1 Main &lt;St&gt;"));
@@ -548,7 +619,7 @@ mod tests {
         assert!(!map.contains("http"));
         assert_eq!(map.matches("class=\"pin\"").count(), 2);
         // Kilometres elsewhere.
-        let html = render_places(&found(), true, Some("DE"), &Icons::default(), &same);
+        let html = render_places(&found(), None, true, Some("DE"), &Icons::default(), &same);
         assert!(html.contains("1.4 km"));
     }
 
@@ -558,9 +629,9 @@ mod tests {
         found.center = None;
         found.near_me = true;
         found.hits.clear();
-        let html = render_places(&found, true, None, &Icons::default(), &same);
+        let html = render_places(&found, None, true, None, &Icons::default(), &same);
         assert!(html.contains("href=\"/about\""));
-        let html = render_places(&found, false, None, &Icons::default(), &same);
+        let html = render_places(&found, None, false, None, &Icons::default(), &same);
         assert!(html.contains("pizza in Denver"));
     }
 
@@ -628,7 +699,7 @@ mod tests {
     fn one_place_still_makes_a_map() {
         let mut found = found();
         found.hits.truncate(1);
-        let html = render_places(&found, false, None, &Icons::default(), &same);
+        let html = render_places(&found, None, false, None, &Icons::default(), &same);
         assert!(html.contains("class=\"pin\""));
         assert!(!html.contains("NaN") && !html.contains("inf"));
     }
