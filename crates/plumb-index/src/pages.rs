@@ -317,6 +317,43 @@ impl Page {
         })
     }
 
+    /// The software docs page `doc`, written as an article whose item is
+    /// the page's address (see `plumb_ingest::docs`). `None` for an item
+    /// that is not an https:// address.
+    pub fn from_docs(doc: Article) -> Option<Self> {
+        let url = doc.item.filter(|item| {
+            item.starts_with("https://")
+                && item.len() > "https://".len()
+                && !item.contains(char::is_whitespace)
+        })?;
+        Some(Page {
+            set: DOCS_SET.to_string(),
+            url,
+            title: doc.title,
+            description: doc.description,
+            site: None,
+            views: doc.views,
+            aliases: doc.aliases,
+            item: None,
+            profiles: Vec::new(),
+            website: None,
+            package: None,
+            facts: Vec::new(),
+        })
+    }
+
+    /// The host of a docs page's address: `docs.python.org`.
+    fn docs_host(&self) -> Option<&str> {
+        if self.set != DOCS_SET {
+            return None;
+        }
+        self.url
+            .strip_prefix("https://")?
+            .split(['/', '?', '#'])
+            .next()
+            .filter(|host| !host.is_empty())
+    }
+
     /// Whether the page is a TV show of the films set, rather than a film.
     pub fn is_show(&self) -> bool {
         self.set == FILMS_SET
@@ -415,6 +452,7 @@ impl Page {
             || set == STACKEXCHANGE_SET
             || set == MUSIC_SET
             || set == FILMS_SET
+            || set == DOCS_SET
             || Page::from_set(set, Article::default()).is_some()
     }
 
@@ -433,16 +471,26 @@ impl Page {
             STACKEXCHANGE_SET => Page::from_exchange(article)?,
             MUSIC_SET => Page::from_music(article)?,
             FILMS_SET => Page::from_film(article)?,
+            DOCS_SET => Page::from_docs(article)?,
             _ => Page::from_article(set.strip_prefix("wikipedia-")?, article),
         })
     }
 
-    /// The words a question or paper is found by besides its title: its
-    /// title, and a question's tags. `None` for pages of other sets, found
-    /// by their names only.
+    /// The words a question, paper or docs page is found by besides its
+    /// title: its title, a question's tags, and a docs page's other names
+    /// and description. `None` for pages of other sets, found by their
+    /// names only.
     pub fn topic(&self) -> Option<String> {
         if self.set == PAPERS_SET {
             return Some(self.title.clone());
+        }
+        if self.set == DOCS_SET {
+            let mut topic = self.title.clone();
+            for text in self.aliases.iter().chain(&self.description) {
+                topic.push(' ');
+                topic.push_str(text);
+            }
+            return Some(topic);
         }
         self.is_question().then(|| match &self.description {
             Some(tags) => format!("{} {tags}", self.title),
@@ -483,6 +531,8 @@ impl Page {
             "Wikidata"
         } else if let Some(registry) = self.registry() {
             registry.name
+        } else if let Some(host) = self.docs_host() {
+            host
         } else {
             &self.set
         }
@@ -525,6 +575,8 @@ impl Page {
             "wikidata.org"
         } else if let Some(registry) = self.registry() {
             registry.domain
+        } else if let Some(host) = self.docs_host() {
+            host
         } else {
             "wikipedia.org"
         }
@@ -550,6 +602,9 @@ pub const PODCASTS_SET: &str = "podcasts";
 pub const MUSIC_SET: &str = "music";
 /// The set of films and TV shows, from Wikidata, ranked by sitelinks.
 pub const FILMS_SET: &str = "films";
+/// The set of software docs pages (MDN, Python's docs and others), fetched
+/// from the docs sites' sitemaps.
+pub const DOCS_SET: &str = "docs";
 /// Where English Wikipedia's articles are.
 const ENGLISH_WIKIPEDIA: &str = "https://en.wikipedia.org/wiki/";
 /// The set of software packages (npm, PyPI, crates.io and others).
@@ -821,13 +876,18 @@ pub fn build_page_index(
         if let Some(topic) = page.topic() {
             document.add_text(fields.topic, topic);
         }
-        document.add_text(fields.keys, &page.title);
-        let base = base_title(&page.title);
-        if base != page.title {
-            document.add_text(fields.keys, base);
+        // A docs page's title alone ("Introduction") names nothing: it is
+        // named by its product's name and title ("python sorting
+        // techniques").
+        if page.set != DOCS_SET {
+            document.add_text(fields.keys, &page.title);
+            let base = base_title(&page.title);
+            if base != page.title {
+                document.add_text(fields.keys, base);
+            }
         }
         // A package is asked for by its short name too: "gin golang".
-        if page.package.is_some() {
+        if page.package.is_some() || page.set == DOCS_SET {
             for alias in &page.aliases {
                 document.add_text(fields.keys, alias);
             }
@@ -1432,6 +1492,16 @@ impl PageSearcher {
                 .unwrap_or_default()
         };
         let spelled = |text: &str| plumb_core::collapse_whitespace(text).to_lowercase();
+        // A docs page is named only by one of its names in full: its title
+        // alone ("Glossary") or part of it says too little.
+        if page.set == DOCS_SET {
+            let named = page.aliases.iter().any(|alias| key(alias) == joined);
+            return if named {
+                (ALIAS_MATCH, true)
+            } else {
+                (0.0, false)
+            };
+        }
         if spelled(&page.title) == spelled(raw_query) {
             return (1.0, true);
         }
@@ -1906,6 +1976,81 @@ mod tests {
             ..Article::default()
         })
         .unwrap()
+    }
+
+    fn docs_page(url: &str, title: &str, aliases: &[&str], description: &str) -> Page {
+        Page::from_docs(Article {
+            title: title.into(),
+            description: Some(description.into()),
+            item: Some(url.into()),
+            views: 5_000,
+            aliases: aliases.iter().map(|a| a.to_string()).collect(),
+            ..Article::default()
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn docs_pages_are_found_by_product_and_title_or_most_words() {
+        let sorting = docs_page(
+            "https://docs.python.org/3/howto/sorting.html",
+            "Sorting Techniques",
+            &["Python Sorting Techniques", "Sorting Techniques Python"],
+            "Python lists have a built-in list.sort() method that modifies the list in-place.",
+        );
+        assert_eq!(sorting.set_name(), "docs.python.org");
+        assert_eq!(sorting.set_domain(), "docs.python.org");
+        let glossary = docs_page(
+            "https://docs.python.org/3/glossary.html",
+            "Glossary",
+            &["Python Glossary", "Glossary Python"],
+            "The default Python prompt of the interactive shell.",
+        );
+        let (_dir, searcher) = searcher(&[
+            page("Glossary", 2_000, &[]),
+            sorting.clone(),
+            glossary.clone(),
+        ]);
+        let found = |query: &str| -> Vec<(String, bool)> {
+            searcher
+                .search(query, 10)
+                .unwrap()
+                .into_iter()
+                .filter(|hit| hit.page.set == DOCS_SET)
+                .map(|hit| (hit.page.title, hit.named))
+                .collect()
+        };
+        assert_eq!(
+            found("python sorting techniques"),
+            [("Sorting Techniques".to_string(), true)]
+        );
+        assert_eq!(found("python glossary"), [("Glossary".to_string(), true)]);
+        // Its title alone names nothing.
+        assert!(found("glossary").is_empty());
+        assert!(found("sorting techniques").is_empty());
+        // Most of the query's words.
+        assert_eq!(
+            found("sort a list in python"),
+            [("Sorting Techniques".to_string(), false)]
+        );
+        assert!(Page::from_docs(Article {
+            item: Some("http://docs.python.org/3/".into()),
+            ..Article::default()
+        })
+        .is_none());
+        let read = Page::from_set(
+            DOCS_SET,
+            Article {
+                title: sorting.title.clone(),
+                description: sorting.description.clone(),
+                item: Some(sorting.url.clone()),
+                views: sorting.views,
+                aliases: sorting.aliases.clone(),
+                ..Article::default()
+            },
+        );
+        assert_eq!(read, Some(sorting));
+        assert!(Page::has_reader(DOCS_SET));
     }
 
     #[test]
