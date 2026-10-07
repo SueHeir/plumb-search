@@ -61,7 +61,7 @@ use plumb_net::popularity::report_epoch;
 use plumb_net::{BucketSource, BucketTable, NetHandle, PickLog, PopularityTable, Report};
 use tracing::{debug, info, warn};
 
-use super::Inner;
+use super::{Inner, MB};
 use crate::icons::{self, IconStore};
 use crate::records::{Change, RecordStore};
 
@@ -76,6 +76,9 @@ pub(crate) const NETWORK_REBUILD_GAP: std::time::Duration = std::time::Duration:
 
 /// Records from the inbox saved to the records journal at a time.
 const ABSORB_CHUNK: usize = 1_000;
+/// The share of a storage limit, in percent, other crawlers' batches may
+/// take. About two days of the network's crawls on an 8 GB limit.
+const BATCHES_PERCENT: u64 = 20;
 
 /// Where an index keeps its buckets, inside its directory.
 pub(super) const BUCKETS_DIR: &str = "buckets";
@@ -227,11 +230,16 @@ pub(super) async fn start(inner: &Arc<Inner>) -> Result<()> {
     // A node with a storage limit keeps the batches it holds for as long as
     // crawls are checked against each other, not the default five weeks:
     // other nodes take none older than a week, and the rest takes room
-    // (see super::trim).
-    if inner.settings().storage_limit_mb > 0
-        && config.keep_batches_days == plumb_net::store::RETAIN_EPOCHS
-    {
-        config.keep_batches_days = plumb_net::agree::WINDOW_EPOCHS;
+    // (see super::trim). Other crawlers' batches come at a gigabyte a day
+    // or more, so they also get a share of the limit, oldest out first.
+    let limit = inner.settings().storage_limit_mb.saturating_mul(MB);
+    if limit > 0 {
+        if config.keep_batches_days == plumb_net::store::RETAIN_EPOCHS {
+            config.keep_batches_days = plumb_net::agree::WINDOW_EPOCHS;
+        }
+        if config.keep_batches_bytes.is_none() {
+            config.keep_batches_bytes = Some(limit / 100 * BATCHES_PERCENT);
+        }
     }
     let (handle, mut records) = plumb_net::start(config, Arc::new(ServedIndex(inner.clone())))
         .await

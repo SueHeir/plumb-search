@@ -8,7 +8,9 @@
 //! For every crawled homepage the store remembers the newest batch holding
 //! it from each crawler, so a search answer can carry a [`RecordProof`] for
 //! each hit, and a second one from another crawler that agrees (see
-//! [`crate::agree`]). Batches older than [`RETAIN_EPOCHS`] are deleted.
+//! [`crate::agree`]). Batches older than [`RETAIN_EPOCHS`] are deleted, and
+//! a node with little room deletes other crawlers' oldest batches sooner
+//! ([`BatchStore::prune_to_bytes`]).
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -359,6 +361,35 @@ impl BatchStore {
             .filter(|(_, header)| header.header.epoch < oldest)
             .map(|(id, _)| *id)
             .collect();
+        self.remove(old);
+    }
+
+    /// Deletes the oldest batches other crawlers made until the batches held
+    /// take no more than `bytes` on disk. The batches crawled with `own`, this
+    /// node's key, stay: no other node may hold them yet.
+    pub fn prune_to_bytes(&mut self, bytes: u64, own: &[u8]) {
+        let mut others = Vec::new();
+        let mut held = 0;
+        for id in self.ids_oldest_first() {
+            let size = fs::metadata(self.path(&id)).map_or(0, |m| m.len());
+            held += size;
+            if self.headers[&id].header.crawler != own {
+                others.push((id, size));
+            }
+        }
+        let mut old = HashSet::new();
+        for (id, size) in others {
+            if held <= bytes {
+                break;
+            }
+            held -= size;
+            old.insert(id);
+        }
+        self.remove(old);
+    }
+
+    /// Deletes the batches `old` and forgets the crawls in them.
+    fn remove(&mut self, old: HashSet<Hash>) {
         if old.is_empty() {
             return;
         }
@@ -520,6 +551,43 @@ mod tests {
         assert!(store.is_empty());
         assert!(store.proof(&domain, now).unwrap().is_none());
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn a_full_store_deletes_other_crawlers_oldest_batches_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = 1_790_000_000;
+        let me = Keypair::generate_ed25519();
+        let other = Keypair::generate_ed25519();
+        let sign = |key: &Keypair, i: u64| {
+            let mut record = SiteRecord::new(format!("s{i}.com"));
+            record.crawled_at = Some(now - 5);
+            Batch::sign(key, &[record], epoch_of(now), MAX_SHARE_PPM, now + i)
+                .unwrap()
+                .unwrap()
+        };
+        let mine = sign(&me, 0);
+        let older = sign(&other, 1);
+        let newer = sign(&other, 2);
+        let mut store = BatchStore::open(dir.path()).unwrap();
+        for batch in [&mine, &older, &newer] {
+            store.insert(batch).unwrap();
+        }
+        let size = |batch: &Batch| fs::metadata(store.path(&batch.id())).unwrap().len();
+        let all = size(&mine) + size(&older) + size(&newer);
+        let own = me.public().encode_protobuf();
+
+        store.prune_to_bytes(all, &own);
+        assert_eq!(store.len(), 3);
+        // One byte too many: the oldest of the other crawler's goes.
+        store.prune_to_bytes(all - 1, &own);
+        assert!(!store.contains(&older.id()));
+        assert!(store.contains(&newer.id()) && store.contains(&mine.id()));
+        // However little room is left, this node's own batch stays.
+        store.prune_to_bytes(0, &own);
+        assert!(!store.contains(&newer.id()));
+        assert!(store.contains(&mine.id()));
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
     #[test]
