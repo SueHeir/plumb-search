@@ -153,6 +153,9 @@ impl BucketSource for ServedIndex {
     }
 
     fn page_set_file(&self, set: &str) -> Option<PathBuf> {
+        if let Some(file) = super::shared_vectors::servable(&self.0.paths.data, set) {
+            return Some(file);
+        }
         crate::pages::SetInfo::find(set)?.servable_file(&self.0.paths.data)
     }
 

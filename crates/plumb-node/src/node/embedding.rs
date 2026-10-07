@@ -10,6 +10,7 @@ use tracing::{info, warn};
 
 use plumb_core::now_unix;
 
+use super::shared_vectors::Taken;
 use super::{Inner, LastError, MeaningWork};
 use crate::meaning::{
     embed_sites, ensure_model, load_embedder, load_vectors_for, sites_to_embed_from_file,
@@ -30,6 +31,19 @@ const TICK: Duration = Duration::from_secs(1);
 /// is embedded, and a node with millions of sites to embed (a new model)
 /// would otherwise hold all their text at once.
 const EMBED_AT_ONCE: usize = 50_000;
+/// Sites waiting for a vector before the node asks trusted nodes for theirs.
+#[cfg(not(test))]
+const TAKE_AT_LEAST: usize = 10_000;
+#[cfg(test)]
+const TAKE_AT_LEAST: usize = 1;
+/// How often it asks, at most.
+const TAKE_EVERY: Duration = Duration::from_secs(24 * 3600);
+/// How long after starting it waits for a trusted node to connect before
+/// embedding the sites itself.
+#[cfg(not(test))]
+const WAIT_FOR_NODES: Duration = Duration::from_secs(120);
+#[cfg(test)]
+const WAIT_FOR_NODES: Duration = Duration::from_secs(20);
 
 /// Loads (downloading when missing) the model and the saved vectors, then
 /// brings the vectors up to date with the records each time a new index is
@@ -99,6 +113,8 @@ fn work(inner: &Arc<Inner>) -> Result<()> {
         std::thread::available_parallelism().map_or(1, |n| (n.get() / 2).max(1))
     });
     let mut embedded_for = None;
+    let mut taken_at: Option<Instant> = None;
+    let started_at = Instant::now();
     while !inner.stopping() {
         let Some((index, _)) = inner.current_summary() else {
             nap(inner, LOOK_EVERY);
@@ -119,6 +135,24 @@ fn work(inner: &Arc<Inner>) -> Result<()> {
             sites_to_embed_from_file(meaning.vectors(), &inner.paths.records, EMBED_AT_ONCE)
                 .with_context(|| format!("reading {}", inner.paths.records.display()))?
         };
+        // Many sites to embed (search by meaning just turned on, or a new
+        // model): a trusted node may have made their vectors already.
+        let take_now = (more || todo.len() >= TAKE_AT_LEAST)
+            && taken_at.is_none_or(|at| at.elapsed() >= TAKE_EVERY);
+        if let Some(net) = super::network::handle(inner).cloned().filter(|_| take_now) {
+            taken_at = Some(Instant::now());
+            drop(todo);
+            match super::shared_vectors::take(inner, &net, &meaning, &vectors_path) {
+                // No trusted node connected yet: wait a little for one.
+                Ok(Taken::NoNode) if started_at.elapsed() < WAIT_FOR_NODES => {
+                    taken_at = None;
+                    nap(inner, Duration::from_secs(1));
+                }
+                Ok(_) => {}
+                Err(err) => warn!("search by meaning: taking vectors: {err:#}"),
+            }
+            continue;
+        }
         let started = Instant::now();
         let embedded = embed_sites(
             meaning.embedder(),
@@ -157,6 +191,12 @@ fn work(inner: &Arc<Inner>) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Sleeps for `wait`, or until the node stops; whether it is still running.
+pub(super) fn nap_until_stop(inner: &Inner, wait: Duration) -> bool {
+    nap(inner, wait);
+    !inner.stopping()
 }
 
 /// Sleeps for `wait`, or until the node stops.

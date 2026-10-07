@@ -409,6 +409,29 @@ pub(crate) fn sites_to_embed_from_file(
     Ok((todo, more))
 }
 
+/// The sites of the records file at `path` whose vector is missing or
+/// made from other text than theirs now, each with the hash of its text:
+/// the vectors another node may give this one.
+pub(crate) fn wanted_texts(
+    vectors: &RwLock<Vectors>,
+    path: &Path,
+) -> Result<std::collections::HashMap<String, plumb_embed::TextHash>> {
+    crate::outline::fold_journal(path)?;
+    let mut wanted = std::collections::HashMap::new();
+    let held = vectors.read().unwrap_or_else(PoisonError::into_inner);
+    crate::outline::for_each_record(path, |record| {
+        let text = site_text(&record);
+        if text.is_empty() {
+            return;
+        }
+        let hash = text_hash(&text);
+        if held.get(&record.domain).map(|(saved, _)| saved) != Some(&hash) {
+            wanted.insert(record.domain, hash);
+        }
+    })?;
+    Ok(wanted)
+}
+
 /// A 64-bit hash of `domain`, the same in every run.
 fn domain_hash(domain: &str) -> u64 {
     use std::hash::{Hash, Hasher};

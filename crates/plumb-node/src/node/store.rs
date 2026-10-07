@@ -134,7 +134,8 @@ pub(super) fn remove_leftovers(paths: &Paths) {
         format!(".{SETTINGS_FILE}."),
     ];
     for name in file_names(&paths.data) {
-        let partial_vectors = name == format!("{}.part", plumb_embed::VECTORS_FILE_NAME);
+        let partial_vectors = name == format!("{}.part", plumb_embed::VECTORS_FILE_NAME)
+            || name == super::shared_vectors::PART_FILE;
         if partial_vectors
             || name.ends_with(".tmp") && temp_prefixes.iter().any(|p| name.starts_with(p))
         {

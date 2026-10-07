@@ -118,6 +118,7 @@ mod pages;
 mod places;
 mod round;
 pub mod schedule;
+mod shared_vectors;
 pub(crate) mod store;
 mod trim;
 mod worker;

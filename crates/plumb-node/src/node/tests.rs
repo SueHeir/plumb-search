@@ -2879,3 +2879,120 @@ async fn a_browser_takes_a_profile_from_another_node_with_a_link_code() {
     peer.shutdown().await;
     node.shutdown().await.unwrap();
 }
+
+/// A trusted node's buckets plus its vectors file, served as the set of
+/// vectors of its model.
+struct WithVectors(plumb_net::BucketTable, PathBuf, String);
+
+impl plumb_net::BucketSource for WithVectors {
+    fn bucket(&self, bucket: u32) -> Option<Vec<String>> {
+        self.0.bucket(bucket)
+    }
+
+    fn page_set_file(&self, set: &str) -> Option<PathBuf> {
+        (set == self.2).then(|| self.1.clone())
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_node_takes_site_vectors_made_from_its_own_text_from_a_trusted_node() {
+    let dir = seeded_dir();
+    let model_dir = dir.path().join(embedding::MODEL_DIR);
+    plumb_embed::write_test_model(&model_dir).unwrap();
+    let model = plumb_embed::model_id(&model_dir).unwrap();
+
+    // The trusted node's vectors: one for a site's very text, one for
+    // other text, one for a site this node does not know.
+    let records = fixture_records();
+    let mut with_text = records
+        .iter()
+        .filter(|r| !plumb_embed::site_text(r).is_empty());
+    let same = with_text.next().unwrap();
+    let other = with_text.next().unwrap();
+    let marker = [7i8; 32];
+    let mut theirs = plumb_embed::Vectors::new(model, 32);
+    let hash = plumb_embed::text_hash(&plumb_embed::site_text(same));
+    theirs.insert(&same.domain, hash, &marker).unwrap();
+    theirs.insert(&other.domain, [9; 32], &marker).unwrap();
+    theirs.insert("unknown-to-it.org", hash, &marker).unwrap();
+    let peer_dir = tempfile::tempdir().unwrap();
+    let file = peer_dir.path().join(plumb_embed::VECTORS_FILE_NAME);
+    theirs.save(&file).unwrap();
+    assert_eq!(
+        shared_vectors::servable(peer_dir.path(), &shared_vectors::set_name(&model)),
+        Some(file.clone())
+    );
+    assert_eq!(
+        shared_vectors::servable(peer_dir.path(), &shared_vectors::set_name(&[0; 32])),
+        None
+    );
+    assert_eq!(
+        shared_vectors::servable(peer_dir.path(), "wikipedia-en"),
+        None
+    );
+
+    let peer_id = plumb_net::load_or_create_key(&peer_dir.path().join("node.key"))
+        .unwrap()
+        .public()
+        .to_peer_id();
+    let table = plumb_net::BucketTable::build(
+        &peer_dir.path().join("buckets"),
+        &[SiteRecord::new("lighthouses.org")],
+    )
+    .unwrap();
+    let mut peer_config = plumb_net::NetConfig::new(peer_dir.path().to_path_buf());
+    peer_config.search_scope = plumb_net::SearchScope::Anyone;
+    peer_config.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+    peer_config.upnp = false;
+    peer_config.local_discovery = false;
+    peer_config.round_every = None;
+    let source = WithVectors(table, file, shared_vectors::set_name(&model));
+    let (peer, _records) = plumb_net::start(peer_config, Arc::new(source))
+        .await
+        .unwrap();
+    let peer_addr: plumb_net::Multiaddr = loop {
+        if let Some(addr) = peer.status().listening.first() {
+            break addr.parse().unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+
+    let mut config = test_config(dir.path());
+    config.search_by_meaning = true;
+    let mut net = plumb_net::NetConfig::new(PathBuf::new());
+    net.search_scope = plumb_net::SearchScope::Anyone;
+    net.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+    net.upnp = false;
+    net.local_discovery = false;
+    net.round_every = None;
+    net.fill = false;
+    net.trusted_peers = vec![peer_id];
+    net.bootstrap = vec![peer_addr.with_p2p(peer_id).unwrap()];
+    config.network = Some(net);
+    let node = start(config).await.unwrap();
+    wait_for(node.addr(), "the first index", ready_and_idle).await;
+
+    // Every site with text ends with a vector: the one sent for its text
+    // kept as sent, the others made here.
+    let vectors_path = dir.path().join(plumb_embed::VECTORS_FILE_NAME);
+    let wanted = records
+        .iter()
+        .filter(|r| !plumb_embed::site_text(r).is_empty())
+        .count();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let vectors = loop {
+        if let Ok(vectors) = plumb_embed::Vectors::load(&vectors_path) {
+            if vectors.len() == wanted && vectors.get(&same.domain).is_some() {
+                break vectors;
+            }
+        }
+        assert!(Instant::now() < deadline, "vectors not saved");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    assert_eq!(vectors.get(&same.domain), Some((&hash, &marker[..])));
+    assert_ne!(vectors.get(&other.domain).unwrap().1, &marker[..]);
+    assert!(vectors.get("unknown-to-it.org").is_none());
+
+    peer.shutdown().await;
+    node.shutdown().await.unwrap();
+}
