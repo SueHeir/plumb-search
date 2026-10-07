@@ -13,9 +13,11 @@ with your own free API key. Nothing is scraped.
 Each video shows its length, channel and views, with its thumbnail.
 
 A search fits it when the node knows it is about an artist, album or song (it
-has a MusicBrainz, Spotify, Apple Music, Discogs or Genius identifier), or about
-someone with a YouTube channel, or when it has a word such as `lyrics`, `song`,
-`album`, `music video` or `trailer`. To save your quota such a search shows a
+has a MusicBrainz, Spotify, Apple Music, Discogs or Genius identifier) or a
+YouTube video, or when it has a word such as `lyrics`, `song`, `album`,
+`music video` or `trailer`. A YouTube channel alone is not enough: nearly every
+company has one, and "us bank" is not a search for videos. For a creator, the
+results already link their channel, and `yt mrbeast` searches YouTube. To save your quota such a search shows a
 link rather than asking YouTube; in the panel, **Search → Plugins** can make it
 run on its own instead, or only for its keywords.
 
