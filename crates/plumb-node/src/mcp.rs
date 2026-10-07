@@ -96,16 +96,17 @@ const MAX_GUESS_WORDS: usize = 4;
 const GUESSED_PACKAGE: f32 = 0.75;
 
 /// What the server tells a client about itself when it connects.
-const INSTRUCTIONS: &str = "Plumb Search finds websites by name. Before opening a site you are \
+const INSTRUCTIONS: &str = "Plumb Search finds official websites, Wikipedia articles, \
+     Stack Overflow questions, packages, books, papers and places. Before opening a site you are \
      not sure of, call official_site with the name of the company, project or service to get \
      its real address. Before entering credentials or trusting a link, call check_lookalike \
      with the address: it says whether it is the real site or one built to look like another. \
      search returns ordinary results (sites, plus Wikipedia articles, Stack Overflow \
      questions, books and other pages), and with them a direct answer when it can work one \
      out (sums, unit and currency conversions, the time somewhere), facts about what the \
-     query names, and recent headlines. site_info describes one site. Plumb knows homepages \
-     and names, not the full text of pages, so search by name or topic rather than by \
-     question.";
+     query names, and recent headlines. site_info describes one site. Plumb matches names, \
+     homepage text, descriptions and meaning, not the full text of pages, so search for a \
+     name or topic rather than a long question.";
 
 /// Added to [`INSTRUCTIONS`] when `report_finding` is offered.
 const FINDINGS_INSTRUCTIONS: &str = " Whenever a search led you to an answer, call \
@@ -1214,13 +1215,13 @@ pub fn tools(read_pages: bool, findings: bool) -> Value {
         {
             "name": "search",
             "title": "Search",
-            "description": "Search the web (web_search) with Plumb Search: sites by name, best \
-                 first, plus Wikipedia articles, Stack Overflow questions, books and other pages \
+            "description": "Search the web (web_search) with Plumb Search: sites by name or topic, \
+                 best first, plus Wikipedia articles, Stack Overflow questions, books and other pages \
                  placed among them, package cards (version, install command, docs) when the query \
                  says npm, crate, pip, python or another registry or language, a direct answer for sums, unit and currency conversions and \
                  the time somewhere, facts about what the query names, and recent headlines. \
-                 Plumb indexes homepages and names, not the full text of the web, so search for \
-                 names and topics, then read a page with read_page.",
+                 Plumb indexes homepages and page sets, not the full text of the web, so search \
+                 for names and topics, then read a page with read_page.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
