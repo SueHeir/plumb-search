@@ -1,0 +1,58 @@
+# Searches for a song's lyrics, with the song's lyrics page on Genius
+# expected as the answer shown above the results. Run with --pages
+# music.tsv.gz --profiles. No lyrics are kept, only the page MusicBrainz
+# links the song's work to.
+bohemian rhapsody lyrics	https://genius.com/Queen-bohemian-rhapsody-lyrics
+hey jude lyrics	https://genius.com/The-beatles-hey-jude-lyrics
+smells like teen spirit lyrics	https://genius.com/Nirvana-smells-like-teen-spirit-lyrics
+creep lyrics	https://genius.com/Radiohead-creep-lyrics
+blinding lights lyrics	https://genius.com/The-weeknd-blinding-lights-lyrics
+shape of you lyrics	https://genius.com/Ed-sheeran-shape-of-you-lyrics
+sweet child o' mine lyrics	https://genius.com/Guns-n-roses-sweet-child-o-mine-lyrics
+stairway to heaven lyrics	https://genius.com/Led-zeppelin-stairway-to-heaven-lyrics
+billie jean lyrics	https://genius.com/Michael-jackson-billie-jean-lyrics
+imagine lyrics	https://genius.com/John-lennon-imagine-lyrics
+rolling in the deep lyrics	https://genius.com/Adele-rolling-in-the-deep-lyrics
+hurt lyrics	https://genius.com/Nine-inch-nails-hurt-lyrics
+respect lyrics	https://genius.com/Otis-redding-respect-lyrics
+dancing queen lyrics	https://genius.com/Abba-dancing-queen-lyrics
+africa lyrics	https://genius.com/Toto-africa-lyrics
+don't stop believin' lyrics	https://genius.com/Journey-dont-stop-believin-lyrics
+back in black lyrics	https://genius.com/Ac-dc-back-in-black-lyrics
+thriller lyrics	https://genius.com/Michael-jackson-thriller-lyrics
+yellow lyrics	https://genius.com/Coldplay-yellow-lyrics
+bad guy lyrics	https://genius.com/Billie-eilish-bad-guy-lyrics
+toxic lyrics	https://genius.com/Britney-spears-toxic-lyrics
+hallelujah lyrics	https://genius.com/Leonard-cohen-hallelujah-lyrics
+paint it black lyrics	https://genius.com/The-rolling-stones-paint-it-black-lyrics
+gimme shelter lyrics	https://genius.com/The-rolling-stones-gimme-shelter-lyrics
+superstition lyrics	https://genius.com/Stevie-wonder-superstition-lyrics
+as it was lyrics	https://genius.com/Harry-styles-as-it-was-lyrics
+levitating lyrics	https://genius.com/Dua-lipa-levitating-lyrics
+do i wanna know? lyrics	https://genius.com/Arctic-monkeys-do-i-wanna-know-lyrics
+zombie lyrics	https://genius.com/The-cranberries-zombie-lyrics
+everlong lyrics	https://genius.com/Foo-fighters-everlong-lyrics
+enter sandman lyrics	https://genius.com/Metallica-enter-sandman-lyrics
+bitter sweet symphony lyrics	https://genius.com/The-verve-bitter-sweet-symphony-lyrics
+come together lyrics	https://genius.com/The-beatles-come-together-lyrics
+let it be lyrics	https://genius.com/The-beatles-let-it-be-lyrics
+supermassive black hole lyrics	https://genius.com/Muse-supermassive-black-hole-lyrics
+fake plastic trees lyrics	https://genius.com/Radiohead-fake-plastic-trees-lyrics
+yellow submarine lyrics	https://genius.com/The-beatles-yellow-submarine-lyrics
+all apologies lyrics	https://genius.com/Nirvana-all-apologies-lyrics
+all these things that i've done lyrics	https://genius.com/The-killers-all-these-things-that-ive-done-lyrics
+midnight city lyrics	https://genius.com/M83-midnight-city-lyrics
+pumped up kicks lyrics	https://genius.com/Foster-the-people-pumped-up-kicks-lyrics
+video games lyrics	https://genius.com/Lana-del-rey-video-games-lyrics
+friday i'm in love lyrics	https://genius.com/The-cure-friday-im-in-love-lyrics
+whole lotta love lyrics	https://genius.com/Led-zeppelin-whole-lotta-love-lyrics
+fluorescent adolescent lyrics	https://genius.com/Arctic-monkeys-fluorescent-adolescent-lyrics
+black dog lyrics	https://genius.com/Led-zeppelin-black-dog-lyrics
+buddy holly lyrics	https://genius.com/Weezer-buddy-holly-lyrics
+you know i'm no good lyrics	https://genius.com/Amy-winehouse-you-know-im-no-good-lyrics
+optimistic lyrics	https://genius.com/Radiohead-optimistic-lyrics
+pyramid song lyrics	https://genius.com/Radiohead-pyramid-song-lyrics
+penny lane lyrics	https://genius.com/The-beatles-penny-lane-lyrics
+love me do lyrics	https://genius.com/The-beatles-love-me-do-lyrics
+kid a lyrics	https://genius.com/Radiohead-kid-a-lyrics
+we are the champions lyrics	https://genius.com/Queen-we-are-the-champions-lyrics
