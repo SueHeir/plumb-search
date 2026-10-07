@@ -32,6 +32,10 @@ pub enum Command {
     /// Make a page set file (Wikipedia articles) from Wikimedia's dumps,
     /// for a node to list single pages with its sites.
     FetchPages(FetchPagesArgs),
+    /// Make the map file the places' maps are drawn from: streets, water,
+    /// parks and town names (OpenStreetMap, via the Protomaps basemap) for
+    /// the whole world at low zooms and in detail around chosen points.
+    FetchMap(crate::map::fetch::FetchMapArgs),
     /// Add official profiles (YouTube, Twitch, X, app stores, ...) from
     /// Wikidata to a Wikipedia articles file made by fetch-pages, and write
     /// the items with profiles but no article as the wikidata set beside it.
@@ -938,6 +942,10 @@ pub struct ServeArgs {
     /// "pizza in denver" lists places. Indexed next to it on first use.
     #[arg(long, value_name = "PATH")]
     pub places: Option<PathBuf>,
+    /// A map file (map.pmtiles from `fetch-map`), so the places' map shows
+    /// streets, water and parks under the pins.
+    #[arg(long, value_name = "PATH", requires = "places")]
+    pub map: Option<PathBuf>,
     /// A folder of plugins, one folder each, whose results show with the
     /// node's own (see docs/plugins.md). A node started with `run` uses
     /// DIR/plugins.

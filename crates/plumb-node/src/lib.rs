@@ -34,6 +34,7 @@ pub mod eval_labels;
 pub mod findings;
 pub mod history;
 pub mod learn;
+pub mod map;
 pub mod mcp;
 pub mod meaning;
 pub mod node;
@@ -98,6 +99,7 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::Run(args) => run::run(args),
         Command::FetchData(args) => fetch::run(args),
         Command::FetchPages(args) => fetch::run_pages(args),
+        Command::FetchMap(args) => map::fetch::run(args),
         Command::FetchProfiles(args) => fetch::run_profiles(args),
         Command::FetchFacts(args) => fetch::run_facts(args),
         Command::Ingest(args) => ingest::run(args),
