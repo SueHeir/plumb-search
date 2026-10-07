@@ -731,6 +731,76 @@ fn base_title(title: &str) -> &str {
     }
 }
 
+/// What kind of page words around a name ask for ([`hinted_name`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Hint {
+    /// Its encyclopedia article: "lululemon wikipedia".
+    Article,
+    /// A paper of that title: "batch normalization paper".
+    Paper,
+    /// Whatever is named so: "who is galileo", "ariana grande age".
+    Any,
+}
+
+/// Words before a name that ask about it.
+const HINT_LEADS: &[&str] = &[
+    "who is ",
+    "who was ",
+    "who are ",
+    "who were ",
+    "tell me about ",
+];
+
+/// Words after a name that say what about it is wanted.
+const HINT_TAILS: &[(&str, Hint)] = &[
+    (" wikipedia", Hint::Article),
+    (" wiki", Hint::Article),
+    (" paper", Hint::Paper),
+    (" papers", Hint::Paper),
+    (" arxiv", Hint::Paper),
+    (" summary", Hint::Any),
+    (" plot", Hint::Any),
+    (" biography", Hint::Any),
+    (" bio", Hint::Any),
+    (" age", Hint::Any),
+    (" birthday", Hint::Any),
+    (" height", Hint::Any),
+    (" net worth", Hint::Any),
+    (" wife", Hint::Any),
+    (" husband", Hint::Any),
+    (" cast", Hint::Any),
+    (" author", Hint::Any),
+    (" movie", Hint::Any),
+    (" film", Hint::Any),
+    (" meaning", Hint::Any),
+    (" definition", Hint::Any),
+    (" explained", Hint::Any),
+    (" quotes", Hint::Any),
+];
+
+/// The name in `query` without the words around it that only say what is
+/// wanted, and what kind of page they ask for: "lululemon" of "lululemon
+/// wikipedia". `None` when there are none, or nothing else.
+fn hinted_name(query: &str) -> Option<(String, Hint)> {
+    let q = plumb_core::collapse_whitespace(query.trim().trim_end_matches('?')).to_lowercase();
+    let mut name = q.as_str();
+    let mut hint = None;
+    if let Some(rest) = HINT_LEADS.iter().find_map(|lead| name.strip_prefix(lead)) {
+        name = rest;
+        hint = Some(Hint::Any);
+    }
+    if let Some((rest, tail_hint)) = HINT_TAILS
+        .iter()
+        .find_map(|(tail, h)| Some((name.strip_suffix(tail)?, *h)))
+    {
+        name = rest;
+        hint = Some(tail_hint);
+    }
+    let name = name.trim();
+    let hint = hint?;
+    (!name.is_empty() && name != q).then(|| (name.to_string(), hint))
+}
+
 /// Words of a short description saying a page is about an organization,
 /// a product or a service, which has a website of its own, rather than a
 /// person, place, idea or work.
@@ -1095,6 +1165,47 @@ impl PageSearcher {
 
     /// The best `limit` pages for `query`, best first.
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<PageHit>> {
+        let mut hits = self.search_once(query, limit)?;
+        // "lululemon wikipedia", "batch normalization paper", "who is
+        // galileo": the words that say what is wanted are not part of the
+        // name, so the name is searched for too.
+        let Some((name, hint)) = hinted_name(query) else {
+            return Ok(hits);
+        };
+        let mut found = self.search_once(&name, limit)?;
+        match hint {
+            Hint::Article => found.retain(|hit| hit.page.set.starts_with("wikipedia-")),
+            Hint::Paper => {
+                if found.iter().any(|hit| hit.page.set == PAPERS_SET) {
+                    found.retain(|hit| hit.page.set == PAPERS_SET);
+                }
+                // A paper whose title starts with the name: "Batch
+                // Normalization: Accelerating Deep Network Training…".
+                for hit in &mut found {
+                    let title = hit.page.title.to_lowercase();
+                    let head = title.split(':').next().unwrap_or("").trim();
+                    if hit.page.set == PAPERS_SET && head == name {
+                        hit.named = true;
+                        hit.score = hit.score.max(
+                            ALIAS_MATCH
+                                * (1.0 - POPULARITY_SHARE + POPULARITY_SHARE * hit.popularity),
+                        );
+                    }
+                }
+            }
+            Hint::Any => {}
+        }
+        for hit in found {
+            if !hits.iter().any(|h| h.page == hit.page) {
+                hits.push(hit);
+            }
+        }
+        hits.sort_by(|a, b| b.score.total_cmp(&a.score));
+        hits.truncate(limit);
+        Ok(hits)
+    }
+
+    fn search_once(&self, query: &str, limit: usize) -> Result<Vec<PageHit>> {
         let words = analysis::tokens(&self.words, query);
         let Some(joined) = analysis::tokens(&self.joined, query).pop() else {
             return Ok(Vec::new());
@@ -3127,6 +3238,56 @@ mod tests {
             .unwrap()
             .iter()
             .any(|hit| hit.whole));
+    }
+
+    #[test]
+    fn words_that_say_what_is_wanted_keep_the_name() {
+        let (_dir, s) = searcher(&[
+            page("Lululemon", 50_000, &[]),
+            page("Galileo Galilei", 90_000, &["Galileo"]),
+            page("Batch normalization", 20_000, &[]),
+            page("Ariana Grande", 300_000, &[]),
+            Page::from_paper(Article {
+                title: "Batch Normalization: Accelerating Deep Network Training by Reducing Internal Covariate Shift".into(),
+                description: Some("Paper by Sergey Ioffe et al., 2015".into()),
+                item: Some("10.1/1".into()),
+                views: 40_000,
+                ..Article::default()
+            }),
+        ]);
+        let first = |q: &str| {
+            let hits = s.search(q, 5).unwrap();
+            hits.first().map(|h| (h.page.title.clone(), h.named))
+        };
+        assert_eq!(
+            first("lululemon wikipedia"),
+            Some(("Lululemon".into(), true))
+        );
+        assert_eq!(
+            first("who is galileo"),
+            Some(("Galileo Galilei".into(), true))
+        );
+        assert_eq!(
+            first("ariana grande age"),
+            Some(("Ariana Grande".into(), true))
+        );
+        let (title, named) = first("batch normalization paper").unwrap();
+        assert!(
+            title.starts_with("Batch Normalization: Accelerating"),
+            "{title}"
+        );
+        assert!(named);
+        // Without such words nothing changes.
+        assert_eq!(
+            first("batch normalization").unwrap().0,
+            "Batch normalization"
+        );
+        assert_eq!(hinted_name("wikipedia"), None);
+        assert_eq!(hinted_name("who is"), None);
+        assert_eq!(
+            hinted_name("Who is Dalai Lama?"),
+            Some(("dalai lama".into(), Hint::Any))
+        );
     }
 
     #[test]
