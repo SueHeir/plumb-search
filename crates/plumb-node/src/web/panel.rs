@@ -1632,7 +1632,7 @@ fn render_meaning_card(
             }
             rest
         }
-        None => "<p>Find sites by their subject as well as their name. Turn it on under Search \
+        None => "<p>Find sites by what they are about, even when they use other words. Turn it on under Search \
                  &amp; browser.</p>"
             .to_owned(),
     };
@@ -2185,7 +2185,7 @@ fn render_steps(body: &mut String, status: &Status, now: u64) {
     step_item(
         body,
         crawl,
-        "Visit homepages to learn more of each site's names",
+        "Visit homepages to learn what each site is about",
         note,
     );
     body.push_str("</ol>\n");
@@ -2204,8 +2204,8 @@ fn render_settings(body: &mut String, settings: &NodeSettings, base: &str) {
         "<h2>Crawling &amp; limits</h2>\n<form method=\"post\" action=\"{base}/settings\">\n\
          <label><input type=\"checkbox\" name=\"background_updates\" value=\"1\"{}>\
          <span>Keep the index up to date in the background</span></label>\n\
-         <p class=\"hint\">Plumb visits a few thousand homepages a day to learn sites' names \
-         and find new sites, then rebuilds its index. Search keeps working when this is \
+         <p class=\"hint\">Plumb visits a few thousand homepages a day to learn what sites \
+         are about and find new sites, then rebuilds its index. Search keeps working when this is \
          off.</p>\n<fieldset class=\"workload\"><legend>Workload</legend>\n",
         checked(settings.background_updates)
     ));

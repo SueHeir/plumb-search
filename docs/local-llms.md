@@ -10,7 +10,7 @@ Or give an app that takes a SearXNG address `https://plumbsearch.org` (it asks `
 
 ## What it is good at, and what it isn't
 
-Plumb indexes sites by name and homepage, plus page sets: Wikipedia articles, Stack Overflow's most viewed questions, popular GitHub repositories, the most used packages of eight registries, books and papers. It does not crawl the full text of the web. So it finds the official site, the package, the docs, the well-known question and the encyclopedia fact well, and the long tail (a blog post, a forum thread, a page deep inside a site) worse than Google does.
+Plumb indexes sites by name, homepage text, Wikidata description and meaning, plus page sets: Wikipedia articles, Stack Overflow's most viewed questions, popular GitHub repositories, the most used packages of eight registries, books and papers. It does not crawl the full text of the web. So it finds the official site, the package, the docs, the well-known question and the encyclopedia fact well, and the long tail (a blog post, a forum thread, a page deep inside a site) worse than Google does.
 
 Searches it answers well:
 

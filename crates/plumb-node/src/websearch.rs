@@ -2,7 +2,7 @@
 //! query to a web search engine (off unless the node is set to show one),
 //! and "bangs" like `!g` that send a query straight to another search.
 //!
-//! Plumb finds sites by their names; "how long to boil an egg" is a question
+//! Plumb finds sites and pages by name and topic; "how long to boil an egg" is a question
 //! for a full-text engine. Both only ever link out: Plumb never fetches
 //! another engine's results.
 
