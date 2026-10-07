@@ -644,6 +644,20 @@ async fn a_node_that_only_crawls_builds_no_index_until_it_searches_again() {
     node.shutdown().await.unwrap();
 }
 
+#[test]
+fn crawling_only_turns_off_what_only_searching_needs() {
+    let mut config = NodeConfig::server(PathBuf::from("d"));
+    config.crawl_only = true;
+    config.search_by_meaning = true;
+    config.private_search = true;
+    config.network = Some(plumb_net::NetConfig::new(PathBuf::from("d/net")));
+    config.limit_to_crawling();
+    assert!(!config.search_by_meaning && !config.private_search);
+    assert_eq!(config.news_feeds, 0);
+    let net = config.network.unwrap();
+    assert!(!net.answer_searches && !net.follow_crawls);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn refreshes_when_due() {
     let dir = recently_crawled_dir();

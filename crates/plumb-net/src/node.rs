@@ -216,6 +216,16 @@ pub struct NetConfig {
     /// Answer other nodes' bucket requests (network searches) from the
     /// local [`BucketSource`].
     pub answer_searches: bool,
+    /// Follow the crawls in the batches held: agreement on each site (which
+    /// crawls are passed on to the node, which sites are disputed, which
+    /// crawlers earn credits, see `crate::agree`) and where each crawl is,
+    /// for proofs to searchers. Both are rebuilt from every batch held at
+    /// start and kept in memory, about a kilobyte a crawled homepage with
+    /// the sites it links to: gigabytes for a few weeks of the network's
+    /// crawls. On unless changed. A node that only crawls turns it off
+    /// along with `answer_searches`: it still holds, serves and passes on
+    /// batches, and publishes its own.
+    pub follow_crawls: bool,
     /// Nodes whose crawls are taken in as soon as they sign them, instead
     /// of waiting for a second crawler to agree (see `crate::agree`).
     /// [`DEFAULT_TRUSTED_PEERS`] unless changed.
@@ -269,6 +279,7 @@ impl NetConfig {
             local_discovery: true,
             share_ppm: MAX_SHARE_PPM,
             answer_searches: true,
+            follow_crawls: true,
             trusted_peers: DEFAULT_TRUSTED_PEERS
                 .iter()
                 .map(|id| id.parse().expect("a valid peer id"))
@@ -967,9 +978,16 @@ pub async fn start(
         let dir = config.dir.join("batches");
         let trusted = config.trusted_peers.clone();
         let newly = newly_trusted.clone();
+        let follow = config.follow_crawls;
         tokio::task::spawn_blocking(move || -> Result<_> {
-            let store = BatchStore::open(&dir)?;
-            let (agreement, replay) = replay_agreement(&store, peer_id, &trusted, &newly);
+            let store = BatchStore::open_following(&dir, follow)?;
+            let (agreement, replay) = if follow {
+                replay_agreement(&store, peer_id, &trusted, &newly)
+            } else {
+                // Nothing is passed on, so nothing is sent again either:
+                // the node takes them in once it follows crawls again.
+                (Agreement::new(peer_id, trusted.iter().copied()), Vec::new())
+            };
             Ok((store, agreement, replay))
         })
         .await
@@ -1921,8 +1939,10 @@ impl Task {
         // fetched to settle a dispute included; what it confirms we
         // already have.
         let me = *self.swarm.local_peer_id();
-        self.agreement
-            .observe(me, accept_own_batch(&batch, &me, now), now);
+        if self.config.follow_crawls {
+            self.agreement
+                .observe(me, accept_own_batch(&batch, &me, now), now);
+        }
         self.count_credits();
         let agreement = self.agreement.status();
         self.with_status(|s| {
@@ -2953,6 +2973,11 @@ impl Task {
             }
         });
         let kept = accepted.len();
+        if !self.config.follow_crawls {
+            debug!("received batch {id} from {from}: {lines} records crawled by {crawler}");
+            self.with_status(|s| s.batches_received += 1);
+            return;
+        }
         let confirmed = self.agreement.observe(crawler, accepted, made);
         self.count_credits();
         info!(
