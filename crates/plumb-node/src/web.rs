@@ -980,6 +980,16 @@ struct Settings {
     welcome: bool,
 }
 
+impl Settings {
+    /// The searcher's About profile, wherever it is kept.
+    fn about(&self) -> Option<&About> {
+        match &self.history {
+            Some(history) => Some(&history.about),
+            None => self.browser_about.as_ref(),
+        }
+    }
+}
+
 impl AppState {
     /// Which nodes this node's network searches ask, set by its owner.
     fn search_scope(&self) -> plumb_net::SearchScope {
@@ -2328,8 +2338,21 @@ border-radius:1rem;color:var(--fg);text-decoration:none}\
 .hist form{margin-top:1.5rem}\
 .about label{display:block;margin-top:1.25rem}.about .m{margin:.2rem 0 .4rem}\
 .about form.block{display:block}\
-.welcome fieldset{border:0;padding:0;margin:1.25rem 0 0}.welcome legend{padding:0}\
-.welcome .topics label{display:inline-block;margin:.15rem 1rem .15rem 0}\
+.about form{display:block}\
+.welcome fieldset{border:0;padding:0;margin:1.25rem 0 0;min-width:0}.welcome legend{padding:0}\
+.welcome .topics{display:grid;grid-template-columns:repeat(auto-fill,minmax(9rem,1fr));gap:.4rem}\
+.welcome .topics label{display:flex;align-items:center;gap:.45rem;margin:0;padding:.4rem .6rem;\
+border:1px solid var(--line);border-radius:.5rem;cursor:pointer;overflow-wrap:anywhere}\
+.welcome .topics label:has(input:checked){border-color:var(--accent)}\
+.welcome .topics input{flex:none;width:auto;margin:0;padding:0;accent-color:var(--accent)}\
+.welcome .acts{display:flex;flex-wrap:wrap;align-items:center;gap:1rem;margin-top:1.5rem}\
+.welcome .quiet{background:none;color:var(--muted);padding:.55rem 0;text-decoration:underline}\
+.about .kinds{border:0;padding:0;margin:1.25rem 0 0}.about .kinds legend{padding:0}\
+.about .kind{display:flex;flex-wrap:wrap;align-items:center;gap:.2rem .9rem;padding:.35rem 0;\
+border-bottom:1px solid var(--line)}.about .kind>span:first-child{flex:1 1 12rem}\
+.about .kind .amt{display:flex;flex-wrap:wrap;gap:.2rem .9rem}\
+.about .kind label{display:inline-flex;align-items:center;gap:.25rem;margin:0}\
+.about .kind input{flex:none;width:auto;margin:0;padding:0;accent-color:var(--accent)}\
 .invite{margin:.75rem 0}.invite form{display:inline;margin:0}\
 .invite button{background:none;border:0;padding:0;color:var(--muted);font:inherit;\
 text-decoration:underline;cursor:pointer}\
@@ -2532,6 +2555,12 @@ fn settings_form(query: &str, autofocus: bool, settings: &Settings) -> String {
         (None, Some(_)) => history::browser_settings_html().to_owned(),
         (None, None) => String::new(),
     };
+    let kinds = if settings.about().is_some() {
+        "<p class=\"hint\"><a href=\"/about#kinds\">More or less of each kind of result: \
+         podcasts, songs, papers and more</a></p>"
+    } else {
+        ""
+    };
     let private = if settings.private {
         private_toggle(false)
     } else {
@@ -2548,7 +2577,7 @@ fn settings_form(query: &str, autofocus: bool, settings: &Settings) -> String {
          <label>Language <select name=\"lang\">{language_choices}</select></label>\
          <label>Safe search <select name=\"safe\">{safe_choices}</select></label>\
          <label>Recent news <select name=\"news\">{news_choices}</select></label>\
-         {network}{network_hint}{history}{private}<button type=\"submit\">Apply</button></div></details>\
+         {network}{network_hint}{history}{kinds}{private}<button type=\"submit\">Apply</button></div></details>\
          <button type=\"submit\">Search</button></form>",
         escape_html(query),
         if autofocus { " autofocus" } else { "" },
@@ -3059,6 +3088,10 @@ fn render_results_with(
         place_pages(query, &shown_hits, found_pages)
     };
     pages.retain(|placed| !hidden(http_url(&placed.hit.page.url)));
+    // How much of each kind of page the searcher wants.
+    if let Some(about) = settings.about() {
+        about.apply_pages(&mut pages, shown_hits.len());
+    }
     // An info box is about what the whole query names, which operators
     // ("site:", "-word") change.
     let info = if let Some(profile) = extras.and_then(|e| e.profile.as_ref()) {
@@ -4645,6 +4678,7 @@ mod tests {
             background_updates: true,
             paused: None,
             disk_used: 0,
+            storage_limit: 0,
             downloaded_today: 0,
             downloaded_total: 0,
             homepages_visited: 0,
@@ -4692,6 +4726,9 @@ mod tests {
             assert!(json[null].is_null(), "{null}");
         }
         assert_eq!(json["sites"], 0);
+        // plumbsearch.org's homepage shows these two.
+        assert_eq!(json["disk_used"], 0);
+        assert_eq!(json["storage_limit"], 0);
 
         // `plumb serve` has no status to report.
         let (code, _, _) = get(backend(Vec::new()), "/api/status").await;
@@ -6689,7 +6726,7 @@ mod tests {
 
         let (code, _, page) = send(app(), "/about").await;
         assert_eq!(code, StatusCode::OK);
-        assert!(page.contains("name=\"interests\""), "{page}");
+        assert!(page.contains("name=\"more\""), "{page}");
 
         // Saving gives the browser a profile.
         let response = post(None, "pinned=usbank-login-help.com&interests=")
@@ -6802,6 +6839,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn kinds_of_results_are_kept_in_the_browser_and_shown_on_the_about_page() {
+        let app = || {
+            node_router(
+                backend(bank_hits()),
+                node(node_status(Phase::Ready, Step::Idle)),
+            )
+        };
+        let request = Request::builder()
+            .method("POST")
+            .uri("/about")
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(Body::from(
+                "interests=&kind-podcasts=off&kind-music=more&kind-papers=normal&kind-junk=off",
+            ))
+            .unwrap();
+        let response = app().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let about = set_cookie(response.headers(), "plumb_about").expect("kept in the browser");
+        let me = [("cookie", about.as_str())];
+        let (_, _, page) = send_with_headers(app(), "/about", &me).await;
+        assert!(
+            page.contains("name=\"kind-podcasts\" value=\"off\" checked"),
+            "{page}"
+        );
+        assert!(page.contains("name=\"kind-music\" value=\"more\" checked"));
+        assert!(page.contains("name=\"kind-papers\" value=\"normal\" checked"));
+        assert!(!page.contains("kind-junk"));
+        // The gear links to them.
+        let (_, _, body) = send_with_headers(app(), "/search?q=us+bank", &me).await;
+        assert!(body.contains("href=\"/about#kinds\""), "{body}");
+    }
+
+    #[tokio::test]
     async fn new_searchers_are_invited_to_the_welcome_page_until_they_answer() {
         let dir = tempfile::tempdir().unwrap();
         let node = Arc::new(HistoryNode(dir.path().join("history")));
@@ -6836,7 +6906,7 @@ mod tests {
         let response = post(
             "/welcome",
             None,
-            "town=Denver%2C+CO&t=cooking&t=music&t=evil&more=my+team&pinned=usbank-login-help.com",
+            "welcome=1&town=Denver%2C+CO&t=cooking&t=music&t=evil&more=my+team&pinned=usbank-login-help.com",
         )
         .await
         .unwrap();
@@ -6845,10 +6915,9 @@ mod tests {
         assert!(set_cookie(response.headers(), "plumb_welcome").is_some());
         let (_, _, page) =
             send_with_headers(app(), "/about", &[("cookie", profile.as_str())]).await;
-        assert!(
-            page.contains(">cooking\nmusic\nmy team</textarea>"),
-            "{page}"
-        );
+        assert!(page.contains("value=\"cooking\" checked"), "{page}");
+        assert!(page.contains("value=\"music\" checked"), "{page}");
+        assert!(page.contains(">my team</textarea>"), "{page}");
         assert!(page.contains("value=\"Denver, CO\""), "{page}");
         let (_, _, home) = send_with_headers(app(), "/", &[("cookie", profile.as_str())]).await;
         assert!(!home.contains("href=\"/welcome\""), "{home}");

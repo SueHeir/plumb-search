@@ -29,7 +29,7 @@
       <input id="q" name="q" type="search" placeholder="Try “irs” or “bank of america”" autocomplete="off" required>
       <button type="submit">Search</button>
     </form>
-    <p class="note">This box searches the Plumb node on this server.</p>
+    <p class="note">This box searches the Plumb node on this server.<span id="storage" hidden> It answers from <strong id="storage-used"></strong> of search data<span id="storage-limit"></span>.</span></p>
     <div class="actions">
       <a class="button primary" href="#get">Get Plumb</a>
       <a class="button" href="https://github.com/SueHeir/plumb-search">View the code</a>
@@ -121,5 +121,6 @@ Disallow: /</code></pre>
   <p>Plumb Search is open source under the MIT or Apache-2.0 license. <a href="https://github.com/SueHeir/plumb-search">Source code on GitHub</a>.</p>
   <p><a href="/privacy">Privacy</a> · <a href="/credits">Credits</a> · <a href="https://github.com/SueHeir/plumb-search/blob/main/SECURITY.md">Security</a></p>
 </footer>
+<script src="/storage.js" defer></script>
 </body>
 </html>

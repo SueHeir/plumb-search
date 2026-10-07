@@ -34,7 +34,7 @@ use serde::Deserialize;
 use tracing::warn;
 
 use super::{escape_html, html_response, page, search_link, time_ago, AppState};
-use crate::about::{About, AboutStore, Reason, MAX_INTERESTS, MAX_SITES, MAX_TOWN_CHARS};
+use crate::about::{About, AboutStore, Amount, Reason, KINDS};
 use crate::history::{new_profile, valid_profile, History, HistoryStore};
 use crate::learn::{
     describe_key, traits, Block, Choice, Learned, Rating, Taste, Trait, Verdict, JUDGED_PER_PAGE,
@@ -63,7 +63,6 @@ pub(super) fn routes(router: Router<AppState>) -> Router<AppState> {
         .route("/history/clear", post(clear))
         .route("/history/forget-clicks", post(forget_clicks))
         .route("/feedback", post(feedback))
-        .route("/about", get(about_page).post(save_about))
 }
 
 /// What a browser chose to do with its history.
@@ -1094,76 +1093,6 @@ fn render_history(history: &History, prefs: Prefs, now: u64) -> String {
     page("History - Plumb Search", &body)
 }
 
-/// The About page's form.
-#[derive(Debug, Default, Deserialize)]
-struct AboutForm {
-    #[serde(default)]
-    interests: String,
-    #[serde(default)]
-    pinned: String,
-    #[serde(default)]
-    hidden: String,
-    #[serde(default)]
-    town: String,
-    /// `1`: forget it all.
-    clear: Option<String>,
-}
-
-/// `GET /about`.
-async fn about_page(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    let kept = KeptAbout::of(&state, &headers);
-    no_store(html_response(
-        StatusCode::OK,
-        render_about(&kept.about, kept.in_browser(), None),
-    ))
-}
-
-/// `POST /about`: saves the form, giving the browser a profile if it has
-/// none yet.
-async fn save_about(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Form(form): Form<AboutForm>,
-) -> Response {
-    if cross_site(&headers) {
-        return refuse_cross_site();
-    }
-    let mut kept = KeptAbout::of(&state, &headers);
-    let about = if super::flag(&form.clear) {
-        About::default()
-    } else {
-        About::from_form(&form.interests, &form.pinned, &form.hidden).with_town(&form.town)
-    };
-    let (status, note) = match kept.save(about) {
-        Ok(fit) => {
-            let mut note = String::from("Saved.");
-            if !fit {
-                note.push_str(SOME_LEFT_OUT);
-            }
-            if let Some(town) = kept.about.town() {
-                let town = super::welcome::town_note(&state, town).await;
-                if !town.is_empty() {
-                    note.push(' ');
-                    note.push_str(&town);
-                }
-            }
-            (StatusCode::OK, note)
-        }
-        Err(err) => {
-            warn!("could not save an About profile: {err:#}");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "This could not be saved. The server log has the details.".to_owned(),
-            )
-        }
-    };
-    let response = no_store(html_response(
-        status,
-        render_about(&kept.about, kept.in_browser(), Some(&note)),
-    ));
-    kept.send_cookies(response)
-}
-
 /// What a saved note adds when the browser's cookie could not hold it all.
 pub(super) const SOME_LEFT_OUT: &str = " Your browser keeps only so much, so the last few \
      lines were left out.";
@@ -1259,7 +1188,13 @@ fn decode_about(value: &str) -> Option<About> {
             &about.pinned.join("\n"),
             &about.hidden.join("\n"),
         )
-        .with_town(&about.town),
+        .with_town(&about.town)
+        .with_kinds(
+            about
+                .kinds
+                .iter()
+                .map(|(kind, amount)| (kind.as_str(), *amount)),
+        ),
     )
 }
 
@@ -1311,69 +1246,33 @@ pub(super) fn no_store(mut response: Response) -> Response {
     response
 }
 
-fn render_about(about: &About, in_browser: bool, note: Option<&str>) -> String {
-    let lines = |items: &[String]| escape_html(&items.join("\n"));
-    let note = note
-        .map(|note| {
-            format!(
-                "<p class=\"s\"><strong>{}</strong></p>\n",
-                escape_html(note)
-            )
-        })
-        .unwrap_or_default();
-    let (kept, links) = about_kept(in_browser);
-    let body = format!(
-        "<div class=\"wrap hist about\">\n<header><a class=\"logo\" href=\"/\">Plumb</a></header>\n<main>\n\
-         <h1>About you</h1>\n\
-         <p class=\"s\">{kept}</p>\n{note}\
-         <form method=\"post\" action=\"/about\">\n\
-         <label for=\"interests\"><strong>Your interests</strong></label>\n\
-         <p class=\"m\">One per line, such as cooking or rust programming. Sites that match \
-         one move up a little and say so, so a name like \u{201c}rust\u{201d} or \
-         \u{201c}jaguar\u{201d} leans your way. Up to {MAX_INTERESTS}.</p>\n\
-         <textarea id=\"interests\" name=\"interests\" rows=\"5\">{}</textarea>\n\
-         <label for=\"pinned\"><strong>Sites always first</strong></label>\n\
-         <p class=\"m\">One per line, such as seriouseats.com. They come first whenever a \
-         search finds them. Up to {MAX_SITES}.</p>\n\
-         <textarea id=\"pinned\" name=\"pinned\" rows=\"4\">{}</textarea>\n\
-         <label for=\"hidden\"><strong>Sites never shown</strong></label>\n\
-         <p class=\"m\">One per line. They and their subdomains are left out of your \
-         results. Up to {MAX_SITES}.</p>\n\
-         <textarea id=\"hidden\" name=\"hidden\" rows=\"4\">{}</textarea>\n\
-         <label for=\"town\"><strong>Your town</strong></label>\n\
-         <p class=\"m\">Such as Denver, CO. Searches like \u{201c}coffee near me\u{201d} \
-         list places here. Plumb never works out where you are by itself.</p>\n\
-         <input id=\"town\" name=\"town\" maxlength=\"{MAX_TOWN_CHARS}\" value=\"{}\">\n\
-         <p><button type=\"submit\">Save</button></p>\n</form>\n\
-         <form method=\"post\" action=\"/about\"><input type=\"hidden\" name=\"clear\" \
-         value=\"1\"><button type=\"submit\">Forget all of this</button></form>\n\
-         {links}\n</main>\n</div>",
-        lines(&about.interests),
-        lines(&about.pinned),
-        lines(&about.hidden),
-        escape_html(&about.town),
+/// The About page's choices of how much of each kind of result to show:
+/// a row of off, less, normal and more for each.
+pub(super) fn kinds_html(about: &About) -> String {
+    let mut html = String::from(
+        "<fieldset id=\"kinds\" class=\"kinds\"><legend><strong>Kinds of results</strong></legend>\n\
+         <p class=\"m\">How much of each kind of page to list with the sites. Less moves it \
+         a few places down, more a few places up, and off leaves it out.</p>\n",
     );
-    page("About you - Plumb Search", &body)
-}
-
-/// Where the About page says the profile is kept, and the links under it.
-fn about_kept(in_browser: bool) -> (&'static str, &'static str) {
-    if in_browser {
-        (
-            "Kept in this browser only, in a cookie it sends with each search here. This \
-             server uses it for that search and keeps no copy. It is never part of a search \
-             sent to other Plumb nodes.",
-            "<p class=\"m\"><a href=\"/welcome\">Start over with the welcome page</a></p>",
-        )
-    } else {
-        (
-            "Kept on this node for this browser only, and used only here, after results are \
-             found. It is never part of a search sent to other Plumb nodes. Other people \
-             searching here have their own.",
-            "<p class=\"m\"><a href=\"/history\">Your history</a> \u{b7} <a href=\"/link\">Use \
-             this on your other computers</a></p>",
-        )
+    for (kind, name) in KINDS {
+        let current = about.kinds.get(*kind).copied().unwrap_or_default();
+        let _ = write!(
+            html,
+            "<div class=\"kind\"><span>{name}</span><span class=\"amt\">"
+        );
+        for amount in Amount::ALL {
+            let checked = if amount == current { " checked" } else { "" };
+            let _ = write!(
+                html,
+                "<label><input type=\"radio\" name=\"kind-{kind}\" value=\"{}\"{checked}> {}</label>",
+                amount.as_str(),
+                amount.name()
+            );
+        }
+        html.push_str("</span></div>\n");
     }
+    html.push_str("</fieldset>\n");
+    html
 }
 
 /// The cookies of a request, by name.
@@ -1425,16 +1324,6 @@ mod tests {
             ("origin", "http://127.0.0.1:7586"),
             ("sec-fetch-site", "same-site"),
         ])));
-    }
-
-    #[test]
-    fn the_about_page_escapes_what_was_typed() {
-        let about = About::from_form("<script>x</script>", "example.com", "");
-        let page = render_about(&about, false, Some("Saved."));
-        assert!(page.contains("&lt;script&gt;x&lt;/script&gt;"));
-        assert!(!page.contains("<script>"));
-        assert!(page.contains(">example.com</textarea>"));
-        assert!(page.contains("action=\"/about\""));
     }
 
     #[test]
