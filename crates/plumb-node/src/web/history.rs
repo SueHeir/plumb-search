@@ -5,7 +5,10 @@
 //!   opened from them, newest first,
 //! - `POST /history/clear` deletes them,
 //! - `GET /about` shows what the browser told the node about its searcher
-//!   (see [`crate::about`]) and `POST /about` changes it.
+//!   (see [`crate::about`]) and `POST /about` changes it. A node that keeps
+//!   no profiles (a public server) keeps none of it either: the browser
+//!   keeps it in a cookie of its own, sends it with each request, and the
+//!   node uses it for that request only (see [`KeptAbout`]).
 //!
 //! The profile cookie is `SameSite=Lax`, so a page on another site cannot
 //! post to `/history/clear` with it, and `HttpOnly`; posts that say they
@@ -16,12 +19,15 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 
+use anyhow::Context as _;
 use axum::extract::State;
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Form;
 use axum::Router;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine as _;
 use plumb_core::{now_unix, truncate_chars};
 use plumb_index::{Hit, SearchOptions};
 use serde::Deserialize;
@@ -38,6 +44,14 @@ use crate::learn::{
 const PROFILE_COOKIE: &str = "plumb_profile";
 /// The cookie holding a browser's history choices.
 const PREFS_COOKIE: &str = "plumb_history";
+/// The cookie a browser keeps its About profile in, on a node that keeps
+/// no profiles.
+const ABOUT_COOKIE: &str = "plumb_about";
+/// Largest About cookie, encoded: browsers keep about 4 KB per cookie.
+const MAX_ABOUT_COOKIE: usize = 3_600;
+/// The cookie saying the browser saw the welcome page (see
+/// [`super::welcome`]).
+const WELCOME_COOKIE: &str = "plumb_welcome";
 /// A year, in seconds: how long the cookies last.
 const COOKIE_SECONDS: u32 = 365 * 24 * 60 * 60;
 /// Past searches shown on the home page.
@@ -623,16 +637,7 @@ impl HistoryView {
         if self.opened.contains(&hit.domain) {
             notes.push("<span class=\"op\">You opened this before</span>".to_owned());
         }
-        match self.about.reason(hit) {
-            Some(Reason::Pinned) => {
-                notes.push("<span class=\"op\">One of your sites</span>".to_owned());
-            }
-            Some(Reason::Interest(interest)) => notes.push(format!(
-                "<span class=\"op\">Matches your interest: {}</span>",
-                escape_html(interest)
-            )),
-            None => {}
-        }
+        notes.extend(about_note(&self.about, hit));
         let traits = hit_traits(hit, self.home.as_deref());
         if !self.tastes.is_empty() {
             let learned = Learned {
@@ -680,6 +685,25 @@ impl HistoryView {
         out.push_str("</ul><a class=\"all\" href=\"/history\">History</a></nav>");
         out
     }
+}
+
+/// The note under a result that the searcher's About profile moved: one
+/// of their sites, or matching one of their interests. HTML, escaped.
+pub(super) fn about_note(about: &About, hit: &Hit) -> Option<String> {
+    match about.reason(hit)? {
+        Reason::Pinned => Some("<span class=\"op\">One of your sites</span>".to_owned()),
+        Reason::Interest(interest) => Some(format!(
+            "<span class=\"op\">Matches your interest: {}</span>",
+            escape_html(interest)
+        )),
+    }
+}
+
+/// The gear's link to the About page on a node where the browser keeps
+/// its profile itself.
+pub(super) fn browser_settings_html() -> &'static str {
+    "<p class=\"hint\"><a href=\"/about\">About you: your town, interests and sites</a> \
+     Kept in this browser, not on this server.</p>"
 }
 
 /// The gear's history choices in a search's parameters, if its form sent
@@ -1087,12 +1111,10 @@ struct AboutForm {
 
 /// `GET /about`.
 async fn about_page(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    let Some(visitor) = Visitor::of(&state, &headers, None) else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
+    let kept = KeptAbout::of(&state, &headers);
     no_store(html_response(
         StatusCode::OK,
-        render_about(&visitor.about, None),
+        render_about(&kept.about, kept.in_browser(), None),
     ))
 }
 
@@ -1106,34 +1128,180 @@ async fn save_about(
     if cross_site(&headers) {
         return refuse_cross_site();
     }
-    let Some(mut visitor) = Visitor::of(&state, &headers, None) else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
+    let mut kept = KeptAbout::of(&state, &headers);
     let about = if super::flag(&form.clear) {
         About::default()
     } else {
         About::from_form(&form.interests, &form.pinned, &form.hidden).with_town(&form.town)
     };
-    let saved = match (&visitor.profile, about.is_empty()) {
-        // Nothing to save, and nothing saved before.
-        (None, true) => Ok(()),
-        _ => match visitor.profile_or_new() {
-            Some(profile) => visitor.about_store.save(&profile, &about),
-            None => Err(anyhow::anyhow!("no profile")),
-        },
-    };
-    let (status, note) = match saved {
-        Ok(()) => (StatusCode::OK, "Saved."),
+    let (status, note) = match kept.save(about) {
+        Ok(fit) => {
+            let mut note = String::from("Saved.");
+            if !fit {
+                note.push_str(SOME_LEFT_OUT);
+            }
+            if let Some(town) = kept.about.town() {
+                let town = super::welcome::town_note(&state, town).await;
+                if !town.is_empty() {
+                    note.push(' ');
+                    note.push_str(&town);
+                }
+            }
+            (StatusCode::OK, note)
+        }
         Err(err) => {
             warn!("could not save an About profile: {err:#}");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "This could not be saved. The server log has the details.",
+                "This could not be saved. The server log has the details.".to_owned(),
             )
         }
     };
-    let response = no_store(html_response(status, render_about(&about, Some(note))));
-    visitor.send_cookies(response)
+    let response = no_store(html_response(
+        status,
+        render_about(&kept.about, kept.in_browser(), Some(&note)),
+    ));
+    kept.send_cookies(response)
+}
+
+/// What a saved note adds when the browser's cookie could not hold it all.
+pub(super) const SOME_LEFT_OUT: &str = " Your browser keeps only so much, so the last few \
+     lines were left out.";
+
+/// A browser's About profile and where it is kept: on the node, next to
+/// its history, or, on a node that keeps no profiles (a public server), in
+/// the browser's own cookie. The browser sends that cookie with each
+/// request; the node uses it for the request and keeps no copy.
+pub(super) struct KeptAbout {
+    /// Set on a node that keeps profiles.
+    visitor: Option<Visitor>,
+    pub about: About,
+    /// The About cookie to send, once changed.
+    set_cookie: Option<String>,
+}
+
+impl KeptAbout {
+    pub fn of(state: &AppState, headers: &HeaderMap) -> KeptAbout {
+        let visitor = Visitor::of(state, headers, None);
+        let about = match &visitor {
+            Some(visitor) => visitor.about.clone(),
+            None => browser_about(headers),
+        };
+        KeptAbout {
+            visitor,
+            about,
+            set_cookie: None,
+        }
+    }
+
+    /// Whether the browser keeps the profile itself.
+    pub fn in_browser(&self) -> bool {
+        self.visitor.is_none()
+    }
+
+    /// Keeps `about` in place of the profile, giving the browser a profile
+    /// on the node if it has none yet. `false` when the browser's cookie
+    /// could not hold all of it, so its last lines were left out.
+    pub fn save(&mut self, mut about: About) -> anyhow::Result<bool> {
+        let fit = match &mut self.visitor {
+            Some(visitor) => {
+                // Nothing to save, and nothing saved before.
+                if visitor.profile.is_some() || !about.is_empty() {
+                    let profile = visitor.profile_or_new().context("no profile")?;
+                    visitor.about_store.save(&profile, &about)?;
+                }
+                visitor.about = about.clone();
+                true
+            }
+            None => {
+                let (value, fit) = about_cookie(&mut about);
+                self.set_cookie = Some(value);
+                fit
+            }
+        };
+        self.about = about;
+        Ok(fit)
+    }
+
+    /// Adds the cookies this visit set to `response`.
+    pub fn send_cookies(&self, response: Response) -> Response {
+        let mut response = match &self.visitor {
+            Some(visitor) => visitor.send_cookies(response),
+            None => response,
+        };
+        if let Some(value) = self
+            .set_cookie
+            .as_deref()
+            .and_then(|v| HeaderValue::from_str(v).ok())
+        {
+            response.headers_mut().append(header::SET_COOKIE, value);
+        }
+        response
+    }
+}
+
+/// The About profile a browser keeps itself, from its cookie; empty when
+/// it has none.
+pub(super) fn browser_about(headers: &HeaderMap) -> About {
+    cookies(headers)
+        .get(ABOUT_COOKIE)
+        .and_then(|value| decode_about(value))
+        .unwrap_or_default()
+}
+
+fn decode_about(value: &str) -> Option<About> {
+    let json = URL_SAFE_NO_PAD.decode(value).ok()?;
+    let about: About = serde_json::from_slice(&json).ok()?;
+    // Cleaned again: the cookie is the browser's to change.
+    Some(
+        About::from_form(
+            &about.interests.join("\n"),
+            &about.pinned.join("\n"),
+            &about.hidden.join("\n"),
+        )
+        .with_town(&about.town),
+    )
+}
+
+/// The `Set-Cookie` value keeping `about` in the browser, or deleting the
+/// cookie when it is empty, and whether all of it fit: when it is too big
+/// for a cookie, lines are left out from the end of its longest list.
+fn about_cookie(about: &mut About) -> (String, bool) {
+    if about.is_empty() {
+        return (
+            format!("{ABOUT_COOKIE}=; Path=/; Max-Age=0; SameSite=Lax; HttpOnly"),
+            true,
+        );
+    }
+    let mut fit = true;
+    loop {
+        let encoded = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&*about).unwrap_or_default());
+        if encoded.len() <= MAX_ABOUT_COOKIE {
+            return (cookie(ABOUT_COOKIE, &encoded), fit);
+        }
+        fit = false;
+        let longest = [&mut about.hidden, &mut about.pinned, &mut about.interests]
+            .into_iter()
+            .max_by_key(|list| list.len())
+            .filter(|list| !list.is_empty());
+        match longest {
+            Some(list) => {
+                list.pop();
+            }
+            // A town alone is far smaller than a cookie.
+            None => about.town.clear(),
+        }
+    }
+}
+
+/// Whether the browser saw the welcome page, or said no thanks to it.
+pub(super) fn welcomed(headers: &HeaderMap) -> bool {
+    cookies(headers).contains_key(WELCOME_COOKIE)
+}
+
+/// The `Set-Cookie` value noting that the browser saw the welcome page.
+pub(super) fn welcomed_cookie() -> String {
+    cookie(WELCOME_COOKIE, "1")
 }
 
 pub(super) fn no_store(mut response: Response) -> Response {
@@ -1143,7 +1311,7 @@ pub(super) fn no_store(mut response: Response) -> Response {
     response
 }
 
-fn render_about(about: &About, note: Option<&str>) -> String {
+fn render_about(about: &About, in_browser: bool, note: Option<&str>) -> String {
     let lines = |items: &[String]| escape_html(&items.join("\n"));
     let note = note
         .map(|note| {
@@ -1153,12 +1321,11 @@ fn render_about(about: &About, note: Option<&str>) -> String {
             )
         })
         .unwrap_or_default();
+    let (kept, links) = about_kept(in_browser);
     let body = format!(
         "<div class=\"wrap hist about\">\n<header><a class=\"logo\" href=\"/\">Plumb</a></header>\n<main>\n\
          <h1>About you</h1>\n\
-         <p class=\"s\">Kept on this node for this browser only, and used only here, after \
-         results are found. It is never part of a search sent to other Plumb nodes. Other \
-         people searching here have their own.</p>\n{note}\
+         <p class=\"s\">{kept}</p>\n{note}\
          <form method=\"post\" action=\"/about\">\n\
          <label for=\"interests\"><strong>Your interests</strong></label>\n\
          <p class=\"m\">One per line, such as cooking or rust programming. Sites that match \
@@ -1180,14 +1347,33 @@ fn render_about(about: &About, note: Option<&str>) -> String {
          <p><button type=\"submit\">Save</button></p>\n</form>\n\
          <form method=\"post\" action=\"/about\"><input type=\"hidden\" name=\"clear\" \
          value=\"1\"><button type=\"submit\">Forget all of this</button></form>\n\
-         <p class=\"m\"><a href=\"/history\">Your history</a> \u{b7} <a href=\"/link\">Use \
-         this on your other computers</a></p>\n</main>\n</div>",
+         {links}\n</main>\n</div>",
         lines(&about.interests),
         lines(&about.pinned),
         lines(&about.hidden),
         escape_html(&about.town),
     );
     page("About you - Plumb Search", &body)
+}
+
+/// Where the About page says the profile is kept, and the links under it.
+fn about_kept(in_browser: bool) -> (&'static str, &'static str) {
+    if in_browser {
+        (
+            "Kept in this browser only, in a cookie it sends with each search here. This \
+             server uses it for that search and keeps no copy. It is never part of a search \
+             sent to other Plumb nodes.",
+            "<p class=\"m\"><a href=\"/welcome\">Start over with the welcome page</a></p>",
+        )
+    } else {
+        (
+            "Kept on this node for this browser only, and used only here, after results are \
+             found. It is never part of a search sent to other Plumb nodes. Other people \
+             searching here have their own.",
+            "<p class=\"m\"><a href=\"/history\">Your history</a> \u{b7} <a href=\"/link\">Use \
+             this on your other computers</a></p>",
+        )
+    }
 }
 
 /// The cookies of a request, by name.
@@ -1244,7 +1430,7 @@ mod tests {
     #[test]
     fn the_about_page_escapes_what_was_typed() {
         let about = About::from_form("<script>x</script>", "example.com", "");
-        let page = render_about(&about, Some("Saved."));
+        let page = render_about(&about, false, Some("Saved."));
         assert!(page.contains("&lt;script&gt;x&lt;/script&gt;"));
         assert!(!page.contains("<script>"));
         assert!(page.contains(">example.com</textarea>"));
