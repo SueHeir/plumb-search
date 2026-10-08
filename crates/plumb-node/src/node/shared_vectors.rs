@@ -186,19 +186,24 @@ fn keep(
             meaning.embedder().text_words(),
         )?
     };
-    let mut kept = 0usize;
+    // Read first, then put in: search by meaning waits on the lock, not
+    // on reading the whole file.
+    let mut taken = Vec::new();
+    Vectors::for_each_in(part, |domain, hash, vector| {
+        if wanted.get(domain) == Some(hash) {
+            taken.push((domain.to_string(), *hash, vector.to_vec()));
+        }
+        Ok(())
+    })?;
+    let kept = taken.len();
     {
         let mut vectors = meaning
             .vectors()
             .write()
             .unwrap_or_else(PoisonError::into_inner);
-        Vectors::for_each_in(part, |domain, hash, vector| {
-            if wanted.get(domain) == Some(hash) {
-                vectors.insert(domain, *hash, vector)?;
-                kept += 1;
-            }
-            Ok(())
-        })?;
+        for (domain, hash, vector) in taken {
+            vectors.insert(&domain, hash, &vector)?;
+        }
     }
     if kept > 0 {
         meaning
