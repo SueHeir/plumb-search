@@ -25,6 +25,7 @@ pub(super) fn render(tool: &str, answer: &Value) -> String {
             );
         }
         "read_page" => read_page(&mut out, answer),
+        "relate" => relate(&mut out, answer),
         _ => out = serde_json::to_string(answer).unwrap_or_default(),
     }
     out.trim_end().to_string()
@@ -399,6 +400,61 @@ fn check_lookalike(out: &mut String, answer: &Value) {
 
 /// One fact a line, each with its question and where it is from:
 /// "Capital of Australia: Canberra (Wikidata Q408 P36)".
+fn relate(out: &mut String, answer: &Value) {
+    let subject = text(answer, "subject").unwrap_or("");
+    let chain: Vec<&str> = list(answer, "relation")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    // "capital of headquarters of Toyota": the last step first.
+    let path = chain.iter().rev().copied().collect::<Vec<_>>().join(" of ");
+    if !flag(answer, "found") {
+        let _ = writeln!(
+            out,
+            "Plumb knows nothing named {subject} to find the {path} of."
+        );
+        return;
+    }
+    let from = text(answer, "subject_title").unwrap_or(subject);
+    let stated = |value: &Value| {
+        if flag(value, "stated") {
+            "stated in Wikidata"
+        } else {
+            "a learned guess"
+        }
+    };
+    if let Some(claim) = answer.get("claim") {
+        let object = text(claim, "object").unwrap_or("");
+        if !flag(claim, "found") {
+            let _ = writeln!(out, "Plumb knows nothing named {object} to check.");
+            return;
+        }
+        let probability = claim["probability"].as_f64().unwrap_or(0.0);
+        let _ = writeln!(
+            out,
+            "{path} of {from}: {} has probability {probability:.2} ({}).",
+            text(claim, "object_title").unwrap_or(object),
+            stated(claim)
+        );
+        return;
+    }
+    let _ = writeln!(out, "{path} of {from}, likeliest first:");
+    for item in list(answer, "answers") {
+        let title = text(item, "title").unwrap_or("");
+        let _ = write!(out, "{title}");
+        if let Some(description) = text(item, "description") {
+            let _ = write!(out, ", {description}");
+        }
+        let probability = item["probability"].as_f64().unwrap_or(0.0);
+        let _ = writeln!(
+            out,
+            " ({probability:.2}, {}) [Wikidata {}]",
+            stated(item),
+            text(item, "item").unwrap_or("")
+        );
+    }
+}
+
 fn facts(out: &mut String, answer: &Value) {
     if !flag(answer, "found") {
         let subject = text(answer, "subject").unwrap_or("");

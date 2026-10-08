@@ -1726,6 +1726,13 @@ pub fn run(args: McpArgs) -> Result<()> {
     let runtime = crate::runtime()?;
     // Pages are fetched from this computer, whichever node answers the rest.
     let reader = Reader::standard(runtime.handle().clone())?;
+    let relations = args
+        .relations
+        .as_deref()
+        .map(|dir| crate::relations::RelationStore::load(dir, args.relations_model.as_deref()))
+        .transpose()
+        .context("loading the relation maps")?;
+    let relations = relations.as_ref();
     match &args.index {
         Some(index) => {
             let searcher = Searcher::open(index)
@@ -1734,12 +1741,19 @@ pub fn run(args: McpArgs) -> Result<()> {
                 Arc::new(IndexBackend::new(searcher, rank_config(None)));
             let rates = answers::RatesCache::default();
             serve_lines(stdin, stdout, |message| {
+                if let Some(answer) = relations.and_then(|store| relate_here(store, message)) {
+                    return Ok(Some(answer));
+                }
                 let rates = Mcp::search_query(message)
                     .and_then(|query| runtime.block_on(rates.for_query(&query)));
                 let mcp = Mcp::new(Arc::clone(&backend), args.country.clone())
                     .with_reader(Some(reader.clone()))
                     .with_rates(rates);
-                Ok(mcp.handle(message))
+                let mut answer = mcp.handle(message);
+                if let (Some(store), Some(answer)) = (relations, &mut answer) {
+                    offer_relate(store, message, answer);
+                }
+                Ok(answer)
             })
         }
         None => {
@@ -1750,6 +1764,9 @@ pub fn run(args: McpArgs) -> Result<()> {
                 .build()
                 .context("making the HTTP client")?;
             serve_lines(stdin, stdout, |message| {
+                if let Some(answer) = relations.and_then(|store| relate_here(store, message)) {
+                    return Ok(Some(answer));
+                }
                 if let Some(answer) = read_here(&reader, message, |check| {
                     runtime.block_on(forward(&client, &endpoint, check))
                 }) {
@@ -1758,11 +1775,113 @@ pub fn run(args: McpArgs) -> Result<()> {
                 let mut answer = runtime.block_on(forward(&client, &endpoint, message))?;
                 if let Some(answer) = &mut answer {
                     offer_read_page(message, answer);
+                    if let Some(store) = relations {
+                        offer_relate(store, message, answer);
+                    }
                 }
                 Ok(answer)
             })
         }
     }
+}
+
+/// For `plumb mcp --relations`: answers a `relate` call here, from the
+/// relation maps on this computer. `None` for any other message.
+fn relate_here(store: &crate::relations::RelationStore, message: &Value) -> Option<Value> {
+    let params = message.get("params")?;
+    if message.get("method")?.as_str()? != "tools/call" || params.get("name")?.as_str()? != "relate"
+    {
+        return None;
+    }
+    let id = message.get("id")?.clone();
+    let empty = Map::new();
+    let args = params
+        .get("arguments")
+        .and_then(Value::as_object)
+        .unwrap_or(&empty);
+    let subject = match text_arg(args, "subject") {
+        Ok(subject) => subject,
+        Err((code, why)) => return Some(error(id, code, &why)),
+    };
+    let chain: Vec<String> = match args.get("relation") {
+        Some(Value::String(text)) => text
+            .split(['>', ',', '/'])
+            .map(|key| key.trim().to_lowercase().replace([' ', '-'], "_"))
+            .filter(|key| !key.is_empty())
+            .collect(),
+        Some(Value::Array(keys)) => keys
+            .iter()
+            .filter_map(Value::as_str)
+            .map(|key| key.trim().to_lowercase().replace([' ', '-'], "_"))
+            .collect(),
+        _ => Vec::new(),
+    };
+    let object = args
+        .get("object")
+        .and_then(Value::as_str)
+        .map(|text| truncate_chars(&plumb_core::collapse_whitespace(text), MAX_QUERY_CHARS))
+        .filter(|text| !text.is_empty());
+    let limit = args
+        .get("limit")
+        .and_then(Value::as_u64)
+        .map_or(5, |n| usize::try_from(n).unwrap_or(usize::MAX));
+    let answer = store.relate(&subject, &chain, object.as_deref(), limit);
+    Some(json!({ "jsonrpc": "2.0", "id": id, "result": tool_result("relate", answer) }))
+}
+
+/// Adds `relate` to a `tools/list` or `initialize` answer.
+fn offer_relate(store: &crate::relations::RelationStore, message: &Value, answer: &mut Value) {
+    let method = message.get("method").and_then(Value::as_str);
+    let Some(result) = answer.get_mut("result").and_then(Value::as_object_mut) else {
+        return;
+    };
+    match method {
+        Some("tools/list") => {
+            if let Some(tools) = result.get_mut("tools").and_then(Value::as_array_mut) {
+                if !tools.iter().any(|tool| tool["name"] == "relate") {
+                    tools.push(relate_tool(&store.kinds()));
+                }
+            }
+        }
+        Some("initialize") => {
+            if let Some(Value::String(instructions)) = result.get_mut("instructions") {
+                if !instructions.contains("relate") {
+                    instructions.push_str(RELATE_INSTRUCTIONS);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+const RELATE_INSTRUCTIONS: &str = " To follow a relation through steps in one call (the capital \
+     of the country a company is headquartered in) or to check whether a claim is likely, \
+     call relate; its answers are learned guesses unless marked as stated in Wikidata.";
+
+fn relate_tool(kinds: &[&str]) -> Value {
+    json!({
+        "name": "relate",
+        "title": "Follow or check a relation",
+        "description": format!(
+            "Follow a relation from a thing to what it is related to, by maps learned from \
+             Wikidata facts, in one call even through several steps (relation \
+             \"headquarters > capital\"). Answers are the likeliest, each with a probability \
+             and whether Wikidata states it; it can guess for things Wikidata has no fact about. \
+             With object, says how likely the claim is instead. Relations: {}.",
+            kinds.join(", ")
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "subject": { "type": "string", "description": "The thing to start from, by name (\"Toyota\")." },
+                "relation": { "type": "string", "description": format!("One relation, or several to follow in turn separated by >: one of {}.", kinds.join(", ")) },
+                "object": { "type": "string", "description": "A claimed answer to check instead (\"Kiichiro Toyoda\")." },
+                "limit": { "type": "integer", "minimum": 1, "maximum": crate::relations::MAX_RELATE_ANSWERS, "description": "Most answers (default 5)." },
+            },
+            "required": ["subject", "relation"],
+        },
+        "annotations": { "readOnlyHint": true, "idempotentHint": true, "openWorldHint": false },
+    })
 }
 
 /// For `plumb mcp --node`: answers a `read_page` call here, asking the node
