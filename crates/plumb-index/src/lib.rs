@@ -830,7 +830,7 @@ impl Searcher {
         let index = Index::open_in_dir(dir)
             .with_context(|| format!("opening search index in {}", dir.display()))?;
         analysis::register(index.tokenizers());
-        if index.schema() != schema::schema() {
+        if !schema::readable(&index.schema()) {
             bail!(
                 "the index in {} was built by another version of plumb-index; rebuild it",
                 dir.display()
@@ -1641,13 +1641,14 @@ impl Searcher {
             .collect();
         let missing = query.missing_main_words(&searcher, &self.fields, &unnamed)?;
         let mut hits: Vec<Hit> = Vec::with_capacity(wanted.min(ranked.len()));
+        let mut fingerprints: Vec<Option<u64>> = Vec::with_capacity(hits.capacity());
         for ranked in ranked {
             if hits.len() == wanted {
                 break;
             }
             let named = ranked.named;
             let missing_words = missing.contains(&ranked.addr);
-            let mut hit = self.hit(&searcher, ranked)?;
+            let (mut hit, fingerprint) = self.hit(&searcher, ranked)?;
             hit.missing_words = missing_words;
             let left_out = is_reserved_name(&hit.domain)
                 || is_pill_shop(&hit.domain, hit.link_score)
@@ -1658,9 +1659,11 @@ impl Searcher {
                         .is_some_and(|title| plumb_core::is_sign_in_portal(&hit.domain, title)));
             if named || !left_out {
                 hits.push(hit);
+                fingerprints.push(fingerprint);
             }
         }
         let typed = registrable_domain(query_text.trim());
+        let hits = without_near_copies(hits, &fingerprints, typed.as_deref(), home.as_deref());
         let mut hits = without_copies(hits, typed.as_deref(), home.as_deref());
         hits.truncate(limit);
         let results = SearchResults {
@@ -1904,9 +1907,16 @@ impl Searcher {
         }))
     }
 
-    /// Reads the stored fields of a ranked document.
-    fn hit(&self, searcher: &tantivy::Searcher, ranked: Ranked) -> Result<Hit> {
+    /// Reads the stored fields of a ranked document, with the
+    /// [`plumb_core::simhash`] fingerprint of its homepage's text when it
+    /// has one.
+    fn hit(&self, searcher: &tantivy::Searcher, ranked: Ranked) -> Result<(Hit, Option<u64>)> {
         let doc: TantivyDocument = searcher.doc(ranked.addr)?;
+        let fingerprint = self
+            .fields
+            .fingerprint
+            .and_then(|field| doc.get_first(field))
+            .and_then(|value| value.as_u64());
         let text = |field| {
             doc.get_first(field)
                 .and_then(|value| value.as_str())
@@ -1926,7 +1936,7 @@ impl Searcher {
             .unwrap_or_else(|| format!("https://{domain}/"));
         let own = |field| text(field).filter(|_| !borrowed);
         let about = text(self.fields.about);
-        Ok(Hit {
+        let hit = Hit {
             demand: None,
             missing_words: false,
             url,
@@ -1946,7 +1956,8 @@ impl Searcher {
             key_pages: text(self.fields.key_pages)
                 .and_then(|json| serde_json::from_str(&json).ok())
                 .unwrap_or_default(),
-        })
+        };
+        Ok((hit, fingerprint))
     }
 }
 
@@ -2310,6 +2321,44 @@ fn without_copies(hits: Vec<Hit>, typed: Option<&str>, home: Option<&str>) -> Ve
         });
         copies[i] = official || better;
     }
+    hits.into_iter()
+        .zip(copies)
+        .filter_map(|(hit, copy)| (!copy).then_some(hit))
+        .collect()
+}
+
+/// `hits` without the near-copies of better-known sites listed with them:
+/// a site nobody links to ([`COPYCAT_LINK_SCORE`]) whose homepage text is
+/// all but word for word that of a better-linked site in the list
+/// ([`plumb_core::simhash::near_copies`] of their `fingerprints`, one per
+/// hit): a scraped copy, a parked page on a template, a mirror under a
+/// title of its own, which [`without_copies`] cannot tell by its title.
+/// Official sites, the domain the query is (`typed`) and the searcher's
+/// country's sites (`home`) always stay.
+fn without_near_copies(
+    hits: Vec<Hit>,
+    fingerprints: &[Option<u64>],
+    typed: Option<&str>,
+    home: Option<&str>,
+) -> Vec<Hit> {
+    let copy = |i: usize| {
+        let hit = &hits[i];
+        let Some(Some(print)) = fingerprints.get(i) else {
+            return false;
+        };
+        if hit.official
+            || hit.link_score >= COPYCAT_LINK_SCORE
+            || typed == Some(hit.domain.as_str())
+            || (home.is_some() && hit.country.as_deref() == home)
+        {
+            return false;
+        }
+        hits.iter().zip(fingerprints).any(|(other, other_print)| {
+            other.link_score > hit.link_score
+                && other_print.is_some_and(|other| plumb_core::simhash::near_copies(*print, other))
+        })
+    };
+    let copies: Vec<bool> = (0..hits.len()).map(copy).collect();
     hits.into_iter()
         .zip(copies)
         .filter_map(|(hit, copy)| (!copy).then_some(hit))
@@ -4627,6 +4676,55 @@ mod tests {
         suggested_site_second(&mut hits, "bell.ca");
         suggested_site_second(&mut hits, "tacobell.com");
         assert_eq!(domains(&hits)[..2], ["bell.ca", "tacobell.com"]);
+    }
+
+    #[test]
+    fn near_copies_of_a_better_known_site_are_left_out() {
+        let text = "Welcome to our store. We sell handmade leather shoes, boots and \
+            sandals, cut and stitched by hand in our workshop since 1952. Free shipping on \
+            orders over fifty dollars, and free returns within thirty days of delivery. \
+            Sign up for our newsletter to hear about new styles first.";
+        let shop = |domain: &str, title: &str, body: &str, signals: Signals| {
+            let mut record = site(domain, Some(title), None, &[], &[], signals);
+            record.body_text = Some(body.to_string());
+            record
+        };
+        let copy_text = text.replace("1952", "1953").replace("fifty", "sixty");
+        let other_text = "Shoes for the whole family: running shoes, school shoes and \
+            work boots from the brands you know, in every size, with stores in twelve \
+            towns and a website that delivers the next day.";
+        let records = [
+            shop(
+                "leathershoes.example",
+                "Leather Shoes",
+                text,
+                obscure(5_000, 300),
+            ),
+            // A scrape under its own title, linked by nobody.
+            shop(
+                "cheap-shoes.example",
+                "Cheap Shoes Online",
+                &copy_text,
+                Signals::default(),
+            ),
+            // Another shoe shop, as little known, but its own text.
+            shop(
+                "familyshoes.example",
+                "Shoes Shop",
+                other_text,
+                Signals::default(),
+            ),
+        ];
+        let (_dir, searcher) = build(&records);
+        let hits = searcher.search("shoes", 10).unwrap();
+        assert_eq!(
+            domains(&hits),
+            ["leathershoes.example", "familyshoes.example"],
+            "{hits:#?}"
+        );
+        // Asked for by its address, the copy stays.
+        let hits = searcher.search("cheap-shoes.example", 10).unwrap();
+        assert!(domains(&hits).contains(&"cheap-shoes.example"));
     }
 
     #[test]

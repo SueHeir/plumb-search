@@ -28,6 +28,7 @@ pub mod packages;
 pub mod place;
 pub mod profiles;
 pub mod safe;
+pub mod simhash;
 mod site_search;
 pub mod stack_exchange;
 pub mod subsites;
