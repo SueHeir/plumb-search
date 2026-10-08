@@ -143,7 +143,23 @@ pub async fn fetch_site_pages(target: &SitePagesTarget, cfg: &CrawlConfig) -> Si
     let mut seen = HashSet::new();
     let mut why = std::collections::BTreeMap::<String, usize>::new();
     for url in urls {
-        let skipped = match visit.fetch_homepage(&target.domain, &url).await {
+        let mut outcome = visit.fetch_homepage(&target.domain, &url).await;
+        // A page that only sends you on, with a `<meta>` refresh or a
+        // script ("Redirecting…"): the page it sends you to, on its host.
+        if let CrawlOutcome::Fetched(page) = &outcome {
+            if is_stub(page.meta.title.as_deref()) {
+                if let Ok(stub) = Url::parse(&page.final_url) {
+                    if let Ok((at, body)) = fetch_list(&mut visit, &cfg, stub).await {
+                        if let Some(next) = refresh_target(&at, &String::from_utf8_lossy(&body))
+                            .filter(|next| next.host_str() == at.host_str() && *next != at)
+                        {
+                            outcome = visit.fetch_homepage(&target.domain, &next).await;
+                        }
+                    }
+                }
+            }
+        }
+        let skipped = match outcome {
             CrawlOutcome::Fetched(page) => {
                 let at = Url::parse(&page.final_url).ok().map(|mut at| {
                     at.set_fragment(None);
@@ -389,6 +405,68 @@ pub(crate) fn parse_sitemap(body: &[u8]) -> Option<Listed> {
         }
     }
     Some(listed)
+}
+
+/// Whether a page titled `title` only sends you on to another.
+fn is_stub(title: Option<&str>) -> bool {
+    title.is_some_and(|title| {
+        let title = title.trim().to_lowercase();
+        title.starts_with("redirecting") || title == "redirect" || title == "moved"
+    })
+}
+
+/// Where the page `html` at `base` sends you: its `<meta
+/// http-equiv="refresh">` address, else the first address a script sets
+/// `location` to.
+pub(crate) fn refresh_target(base: &Url, html: &str) -> Option<Url> {
+    let lower = html.to_ascii_lowercase();
+    let quoted = |from: usize| -> Option<&str> {
+        let rest = html.get(from..)?.trim_start();
+        let quote = rest.chars().next().filter(|c| matches!(c, '"' | '\''))?;
+        let rest = &rest[1..];
+        Some(&rest[..rest.find(quote)?])
+    };
+    if let Some(at) = lower
+        .find("http-equiv=\"refresh\"")
+        .or_else(|| lower.find("http-equiv='refresh'"))
+        .or_else(|| lower.find("http-equiv=refresh"))
+    {
+        let start = lower[..at].rfind('<').unwrap_or(0);
+        let end = at + lower[at..].find('>').unwrap_or(lower.len() - at);
+        let tag = &lower[start..end];
+        if let Some(url_at) = tag.find("url=") {
+            let from = start + url_at + "url=".len();
+            let rest = &html[from..end];
+            let target = rest
+                .trim_start_matches(['\'', '"'])
+                .split(['"', '\'', ';'])
+                .next()
+                .unwrap_or("")
+                .trim();
+            if let Ok(url) = base.join(&html_unescape(target)) {
+                return Some(url);
+            }
+        }
+    }
+    for key in [
+        "location.href",
+        "location.replace(",
+        "location.assign(",
+        "location =",
+    ] {
+        let Some(at) = lower.find(key) else { continue };
+        let mut from = at + key.len();
+        // "location.href = '…'"
+        let rest = &lower[from..];
+        let skipped = rest.len() - rest.trim_start_matches([' ', '=']).len();
+        from += skipped;
+        if let Some(target) = quoted(from) {
+            if let Ok(url) = base.join(target) {
+                return Some(url);
+            }
+        }
+    }
+    None
 }
 
 /// The addresses `html` links to (`href` attributes), resolved against
@@ -729,6 +807,31 @@ mod tests {
                 "https://docs.a.org/3/path.html",
             ]
         );
+    }
+
+    #[test]
+    fn finds_where_a_page_sends_you() {
+        let base = Url::parse("https://docs.a.org/docs/stable/amp.html").unwrap();
+        let at = |html: &str| refresh_target(&base, html).map(String::from);
+        assert_eq!(
+            at(r#"<meta http-equiv="refresh" content="0; url=../2.9/amp.html">"#).as_deref(),
+            Some("https://docs.a.org/docs/2.9/amp.html")
+        );
+        assert_eq!(
+            at(r#"<META HTTP-EQUIV="Refresh" CONTENT="0;URL='/docs/2.9/amp.html'">"#).as_deref(),
+            Some("https://docs.a.org/docs/2.9/amp.html")
+        );
+        assert_eq!(
+            at(r#"<script>window.location.href = "/docs/2.9/amp.html";</script>"#).as_deref(),
+            Some("https://docs.a.org/docs/2.9/amp.html")
+        );
+        assert_eq!(
+            at(r#"<script>window.location.replace('/docs/2.9/amp.html')</script>"#).as_deref(),
+            Some("https://docs.a.org/docs/2.9/amp.html")
+        );
+        assert_eq!(at("<p>Just a page</p>"), None);
+        assert!(is_stub(Some("Redirecting…")));
+        assert!(!is_stub(Some("Redirects in nginx")));
     }
 
     #[test]

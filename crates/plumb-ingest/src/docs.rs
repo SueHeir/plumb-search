@@ -49,6 +49,7 @@ const NOT_PAGES: &[&str] = &[
     "not found",
     "404",
     "redirecting...",
+    "redirecting…",
     "redirecting",
 ];
 
