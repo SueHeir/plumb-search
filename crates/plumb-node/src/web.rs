@@ -214,6 +214,19 @@ pub trait SearchBackend: Send + Sync {
             spelling: None,
         })
     }
+    /// [`SearchBackend::search_full`] ranked with `rank` instead of the
+    /// backend's own knobs, for experiments ([`crate::experiments`]). By
+    /// default `rank` is ignored.
+    fn search_ranked(
+        &self,
+        query: &str,
+        limit: usize,
+        options: &SearchOptions,
+        rank: &RankConfig,
+    ) -> Result<SearchResults> {
+        let _ = rank;
+        self.search_full(query, limit, options)
+    }
     /// Number of sites that can be found.
     fn num_docs(&self) -> u64;
     /// The places `query` asks for, when it asks for places somewhere
@@ -291,19 +304,21 @@ impl IndexBackend {
         self.searcher.has_domain(domain)
     }
 
-    /// [`SearchBackend::search_full`], ranking by `meaning` too when given.
+    /// [`SearchBackend::search_full`], ranking by `meaning` too when given,
+    /// and with `rank` instead of the backend's own knobs when given.
     pub fn search_full_with(
         &self,
         query: &str,
         limit: usize,
         options: &SearchOptions,
         meaning: Option<&MeaningIndex>,
+        rank: Option<&RankConfig>,
     ) -> Result<SearchResults> {
         let query_meaning = meaning.and_then(|meaning| meaning.query(query));
         self.searcher.search_meaning(
             query,
             limit,
-            &self.rank,
+            rank.unwrap_or(&self.rank),
             options,
             query_meaning
                 .as_ref()
@@ -324,7 +339,18 @@ impl SearchBackend for IndexBackend {
         options: &SearchOptions,
     ) -> Result<SearchResults> {
         let meaning = self.meaning.get();
-        self.search_full_with(query, limit, options, meaning.as_deref())
+        self.search_full_with(query, limit, options, meaning.as_deref(), None)
+    }
+
+    fn search_ranked(
+        &self,
+        query: &str,
+        limit: usize,
+        options: &SearchOptions,
+        rank: &RankConfig,
+    ) -> Result<SearchResults> {
+        let meaning = self.meaning.get();
+        self.search_full_with(query, limit, options, meaning.as_deref(), Some(rank))
     }
 
     fn num_docs(&self) -> u64 {
@@ -530,6 +556,9 @@ struct AppState {
     /// What agents found, for `/mcp`'s `report_finding`; opened from the
     /// node's data directory when first needed.
     findings: Arc<std::sync::OnceLock<Option<Arc<crate::findings::Findings>>>>,
+    /// The ranking experiments set up in the node's data directory;
+    /// opened when first needed.
+    experiments: Arc<std::sync::OnceLock<Option<Arc<crate::experiments::Lab>>>>,
 }
 
 impl AppState {
@@ -549,6 +578,23 @@ impl AppState {
                     Ok(findings) => Some(Arc::new(findings)),
                     Err(err) => {
                         error!("opening findings: {err:#}");
+                        None
+                    }
+                }
+            })
+            .clone()
+    }
+
+    /// The node's ranking experiments; `None` for `plumb serve`, and for
+    /// a node that sets up none.
+    fn experiments(&self) -> Option<Arc<crate::experiments::Lab>> {
+        self.experiments
+            .get_or_init(|| {
+                let dir = self.node.as_ref()?.data_dir()?;
+                match crate::experiments::Lab::in_dir(&dir) {
+                    Ok(lab) => lab.map(Arc::new),
+                    Err(err) => {
+                        error!("no experiments run: {err:#}");
                         None
                     }
                 }
@@ -646,6 +692,7 @@ pub fn router_with(backend: Arc<dyn SearchBackend>, settings: impl Into<WebSetti
         net_limiter: Arc::new(mcp::Limiter::new(NET_BURST, NET_PER_MINUTE)),
         page_reader: Arc::default(),
         findings: Arc::default(),
+        experiments: Arc::default(),
     })
 }
 
@@ -671,6 +718,7 @@ pub fn node_router_with(
         net_limiter: Arc::new(mcp::Limiter::new(NET_BURST, NET_PER_MINUTE)),
         page_reader: Arc::default(),
         findings: Arc::default(),
+        experiments: Arc::default(),
     })
 }
 
@@ -931,6 +979,7 @@ fn home_or_setup(state: &AppState, params: &SearchParams, headers: &HeaderMap) -
                 private: state.private_search(),
                 history: visitor.as_ref().map(history::Visitor::view),
                 browser_about,
+                experiment: None,
                 welcome: state.node.is_some() && !told && !history::welcomed(headers),
             };
             let response = html_response(
@@ -979,6 +1028,9 @@ struct Settings {
     browser_about: Option<About>,
     /// The home page invites the searcher to the welcome page.
     welcome: bool,
+    /// The page's token, when the search is in ranking experiments: its
+    /// result links say it and their place (see [`crate::experiments`]).
+    experiment: Option<u64>,
 }
 
 impl Settings {
@@ -1062,9 +1114,21 @@ async fn search_page(
         browser_about: (visitor.is_none() && state.node.is_some())
             .then(|| history::browser_about(&headers)),
         welcome: false,
+        experiment: None,
     };
     let limit = params.limit();
-    let local = run_search(&state, &query, limit, &settings.options).await;
+    // The ranking experiments this search is in, if any; tuning and edit
+    // mode are not searches as made.
+    let lab = state.experiments().filter(|_| tuning.is_none() && !editing);
+    let arms = lab
+        .as_ref()
+        .map(|lab| lab.assign(&query, visitor.as_ref().and_then(|v| v.profile())))
+        .unwrap_or_default();
+    let rank = match (&lab, &state.node) {
+        (Some(lab), Some(node)) if !arms.is_empty() => Some(lab.rank(node.rank(), &arms)),
+        _ => None,
+    };
+    let local = run_search_ranked(&state, &query, limit, &settings.options, rank).await;
     let mut extras = match &local {
         Ok(results) => extras(&state, &query, results, &settings.options).await,
         Err(_) => answers::Extras::default(),
@@ -1230,6 +1294,7 @@ async fn search_page(
                         .learned
                         .box_verdict(Block::News, &query, context);
             }
+            settings.experiment = lab.as_ref().and_then(|lab| lab.note_search(&arms));
             let mut page = render_results_with(
                 &query,
                 &results,
@@ -1537,6 +1602,10 @@ struct GoParams {
     d: String,
     /// A box of the page (`places`, `news`) whose link `u` was opened.
     b: Option<String>,
+    /// The page's token, for a search in ranking experiments, and the
+    /// place of the result on it.
+    x: Option<String>,
+    p: Option<usize>,
     u: Option<String>,
     country: Option<String>,
     only: Option<String>,
@@ -1610,6 +1679,10 @@ async fn go(
     };
     if let Some(mut visitor) = history::Visitor::of(&state, &headers, None) {
         visitor.note_opened(&query, &hit.domain);
+    }
+    let token = params.x.as_deref().and_then(|x| x.parse::<u64>().ok());
+    if let (Some(lab), Some(token), Some(place)) = (state.experiments(), token, params.p) {
+        lab.note_click(token, place);
     }
     if state.shares_popularity() {
         if let Some(node) = state.node.clone() {
@@ -2061,6 +2134,18 @@ async fn run_search(
     limit: usize,
     options: &SearchOptions,
 ) -> Result<SearchResults> {
+    run_search_ranked(state, query, limit, options, None).await
+}
+
+/// [`run_search`] with `rank` instead of the backend's own knobs, when
+/// given.
+async fn run_search_ranked(
+    state: &AppState,
+    query: &str,
+    limit: usize,
+    options: &SearchOptions,
+    rank: Option<RankConfig>,
+) -> Result<SearchResults> {
     if limit == 0 {
         return Ok(SearchResults::default());
     }
@@ -2071,8 +2156,9 @@ async fn run_search(
     let local = near_me.is_some();
     let owned_query = near_me.unwrap_or_else(|| query.to_string());
     let owned_options = options.clone();
-    let mut results = tokio::task::spawn_blocking(move || {
-        backend.search_full(&owned_query, limit, &owned_options)
+    let mut results = tokio::task::spawn_blocking(move || match rank {
+        Some(rank) => backend.search_ranked(&owned_query, limit, &owned_options, &rank),
+        None => backend.search_full(&owned_query, limit, &owned_options),
     })
     .await
     .context("the search task failed")??;
@@ -3120,6 +3206,7 @@ fn render_results_with(
     // Picks are noted for the query: shared, or kept in the searcher's
     // history.
     let notes_picks = share_picks
+        || settings.experiment.is_some()
         || settings
             .history
             .as_ref()
@@ -3234,8 +3321,19 @@ fn render_results_with(
             }
             // `/go` only follows this node's own results, so sites from other
             // nodes link straight to themselves.
-            let go = (notes_picks && item.network.is_none())
-                .then(|| go_link(query, &settings.options, &item.hit.domain));
+            let go = (notes_picks && item.network.is_none()).then(|| match settings.experiment {
+                // The page and the result's place, for the experiments.
+                Some(token) => go_link_with(
+                    query,
+                    &settings.options,
+                    &[
+                        ("d", &item.hit.domain),
+                        ("x", &token.to_string()),
+                        ("p", &position.to_string()),
+                    ],
+                ),
+                None => go_link(query, &settings.options, &item.hit.domain),
+            });
             let icon = icons.get(&item.hit.domain);
             let notes = match (&settings.history, &settings.browser_about) {
                 (Some(history), _) => history.notes(&item.hit),
@@ -5456,6 +5554,7 @@ mod tests {
             history: None,
             browser_about: None,
             welcome: false,
+            experiment: None,
             options: SearchOptions::default(),
             network: NetSetting::Unavailable,
             scope: plumb_net::SearchScope::default(),
@@ -6820,6 +6919,127 @@ mod tests {
             !history.contains("<h2>Searches</h2>\n<ul>\n<li><a href=\"/search?q=us"),
             "{history}"
         );
+    }
+
+    #[tokio::test]
+    async fn clicks_count_by_how_far_down_the_page_they_were() {
+        let dir = tempfile::tempdir().unwrap();
+        let node = Arc::new(HistoryNode(dir.path().join("history")));
+        let fake = backend(bank_hits());
+        let app = || node_router(fake.clone(), node.clone());
+        let (_, headers, _) = send(app(), "/search?q=us+bank&country=any").await;
+        let profile = set_cookie(&headers, "plumb_profile").expect("a profile");
+        let me = [("cookie", profile.as_str())];
+        // The second result, opened.
+        let (code, _, _) = send_with_headers(
+            app(),
+            "/go?q=us+bank&d=usbank-login-help.com&country=any",
+            &me,
+        )
+        .await;
+        assert_eq!(code, StatusCode::SEE_OTHER);
+        let id = profile.trim_start_matches("plumb_profile=");
+        let history = crate::history::HistoryStore::new(&node.0).load(id);
+        // Counted twice over: half the people look at the second place.
+        assert_eq!(history.opened[0].weighted, 200, "{:?}", history.opened);
+        let counts = std::fs::read_to_string(node.0.join("positions.json")).unwrap();
+        assert!(!counts.contains("bank"), "{counts}");
+        // Opened again from the same page, it is not counted again.
+        send_with_headers(
+            app(),
+            "/go?q=us+bank&d=usbank-login-help.com&country=any",
+            &me,
+        )
+        .await;
+        let positions = crate::clicks::PositionStore::in_dir(&node.0).load();
+        assert_eq!(positions.bias(), crate::clicks::PositionBias::prior());
+        assert_eq!(
+            std::fs::read_to_string(node.0.join("positions.json")).unwrap(),
+            counts
+        );
+    }
+
+    /// A ready node with a data folder, where experiments are set up.
+    struct LabNode(std::path::PathBuf);
+
+    impl StatusSource for LabNode {
+        fn status(&self) -> Status {
+            node_status(Phase::Ready, Step::Idle)
+        }
+        fn data_dir(&self) -> Option<std::path::PathBuf> {
+            Some(self.0.clone())
+        }
+    }
+
+    /// Bank hits, noting the `alpha` of each search ranked for an
+    /// experiment.
+    #[derive(Default)]
+    struct RankedBackend {
+        alphas: Mutex<Vec<f32>>,
+    }
+
+    impl SearchBackend for RankedBackend {
+        fn search(&self, _query: &str, limit: usize) -> Result<Vec<Hit>> {
+            Ok(bank_hits().into_iter().take(limit).collect())
+        }
+        fn search_ranked(
+            &self,
+            query: &str,
+            limit: usize,
+            _options: &SearchOptions,
+            rank: &RankConfig,
+        ) -> Result<SearchResults> {
+            self.alphas.lock().unwrap().push(rank.alpha);
+            Ok(SearchResults {
+                hits: self.search(query, limit)?,
+                ..SearchResults::default()
+            })
+        }
+        fn num_docs(&self) -> u64 {
+            2
+        }
+    }
+
+    #[tokio::test]
+    async fn searches_in_an_experiment_are_ranked_its_way_and_their_clicks_counted() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(crate::experiments::CONFIG_FILE),
+            r#"{"layers": [{"name": "ranking", "experiments": [
+                {"name": "more-popularity", "percent": 100, "rank": {"alpha": 0.9}}
+            ]}]}"#,
+        )
+        .unwrap();
+        let fake = Arc::new(RankedBackend::default());
+        // One app, as a node serves: the pages shown are kept in memory.
+        let app = node_router(fake.clone(), Arc::new(LabNode(dir.path().to_path_buf())));
+        let (code, _, body) = send(app.clone(), "/search?q=us+bank&country=any").await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(*fake.alphas.lock().unwrap(), [0.9]);
+        let start = body
+            .find("/go?q=us+bank&amp;d=usbank-login-help.com&amp;x=")
+            .expect("results link through /go");
+        let link = &body[start..start + body[start..].find('"').unwrap()];
+        assert!(link.contains("&amp;p=1&amp;"), "{link}");
+        let link = link.replace("&amp;", "&");
+        let (code, headers, _) = send(app.clone(), &link).await;
+        assert_eq!(code, StatusCode::SEE_OTHER);
+        assert_eq!(headers[header::LOCATION], "https://usbank-login-help.com/");
+        // A page never shown counts nothing.
+        let forged = link.replace("&x=", "&x=1");
+        send(app.clone(), &forged).await;
+        let results: std::collections::BTreeMap<String, crate::experiments::Counts> =
+            serde_json::from_str(
+                &std::fs::read_to_string(dir.path().join(crate::experiments::RESULTS_FILE))
+                    .unwrap(),
+            )
+            .unwrap();
+        let counts = results.values().next().unwrap();
+        assert_eq!((counts.searches, counts.clicked, counts.clicks), (1, 1, 1));
+        assert_eq!(counts.at[1], 1);
+        // The JSON API is not in experiments.
+        send(app.clone(), "/api/search?q=us+bank").await;
+        assert_eq!(fake.alphas.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]

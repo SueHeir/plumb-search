@@ -35,6 +35,7 @@ use tracing::warn;
 
 use super::{escape_html, html_response, page, search_link, time_ago, AppState};
 use crate::about::{About, AboutStore, Amount, Reason, KINDS};
+use crate::clicks::PositionStore;
 use crate::history::{new_profile, valid_profile, History, HistoryStore};
 use crate::learn::{
     describe_key, traits, Block, Choice, Learned, Rating, Taste, Trait, Verdict, JUDGED_PER_PAGE,
@@ -212,9 +213,31 @@ impl Visitor {
             return;
         };
         let now = now_unix();
+        // A click counts for more the farther down the page it was, once
+        // the page it was on is known (see crate::clicks).
+        let weight = match self.history.learned.place(query, domain) {
+            Some((at, picked)) if learn => {
+                let positions = PositionStore::in_dir(self.store.dir());
+                let weighed = positions.update(|p| {
+                    if picked {
+                        p.bias().weight(at)
+                    } else {
+                        p.note_opened(query, domain, at, now)
+                    }
+                });
+                match weighed {
+                    Ok(weight) => Some(weight),
+                    Err(err) => {
+                        warn!("could not count where a result was opened: {err:#}");
+                        None
+                    }
+                }
+            }
+            _ => None,
+        };
         if let Err(err) = self.store.update(&profile, |h| {
             if keep {
-                h.add_opened(query, domain, now);
+                h.add_opened_weighted(query, domain, now, weight);
             }
             if learn {
                 h.learned.note_picked(query, domain, now);
@@ -268,6 +291,13 @@ impl Visitor {
             h.learned.note_shown(query, blocks, folded, sites, now);
         }) {
             warn!("could not note a results page in the history: {err:#}");
+        }
+        // Edit mode lists hidden results last: not the page as searched.
+        if !self.editing {
+            let positions = PositionStore::in_dir(self.store.dir());
+            if let Err(err) = positions.update(|p| p.note_shown(query, sites, now)) {
+                warn!("could not count the places of a results page: {err:#}");
+            }
         }
     }
 

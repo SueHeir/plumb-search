@@ -1977,41 +1977,17 @@ impl SearchBackend for Inner {
         limit: usize,
         options: &SearchOptions,
     ) -> Result<SearchResults> {
-        let Some(index) = self.current() else {
-            bail!("the search index is not ready yet");
-        };
-        let meaning = self.meaning.get();
-        // Sites on the adult blocklist are left out after ranking, so a
-        // few more are ranked.
-        let adult = self
-            .adult_list()
-            .filter(|_| options.safe != SafeSearch::Off);
-        let wanted = match adult {
-            Some(_) => limit + adult::MARGIN,
-            None => limit,
-        };
-        let mut results = match network::handle(self).map(|net| net.popularity()) {
-            None => index
-                .backend()
-                .search_full_with(query, wanted, options, meaning.as_deref())?,
-            Some(table) => {
-                let candidates = wanted.max(network::POPULARITY_CANDIDATES);
-                let mut results = index.backend().search_full_with(
-                    query,
-                    candidates,
-                    options,
-                    meaning.as_deref(),
-                )?;
-                network::apply_popularity(&table, query, &mut results.hits);
-                results
-            }
-        };
-        if let Some(adult) = &adult {
-            results.hits.retain(|hit| !adult.contains(&hit.domain));
-        }
-        results.hits.truncate(limit);
-        pages::add_pages(self, query, options, &mut results);
-        Ok(results)
+        self.search_with_rank(query, limit, options, None)
+    }
+
+    fn search_ranked(
+        &self,
+        query: &str,
+        limit: usize,
+        options: &SearchOptions,
+        rank: &RankConfig,
+    ) -> Result<SearchResults> {
+        self.search_with_rank(query, limit, options, Some(rank))
     }
 
     fn places(
@@ -2029,6 +2005,59 @@ impl SearchBackend for Inner {
 
     fn num_docs(&self) -> u64 {
         self.current_summary().map_or(0, |(_, docs)| docs)
+    }
+}
+
+impl Inner {
+    /// [`SearchBackend::search_full`], with `rank` instead of the node's
+    /// own knobs when given.
+    fn search_with_rank(
+        &self,
+        query: &str,
+        limit: usize,
+        options: &SearchOptions,
+        rank: Option<&RankConfig>,
+    ) -> Result<SearchResults> {
+        let Some(index) = self.current() else {
+            bail!("the search index is not ready yet");
+        };
+        let meaning = self.meaning.get();
+        // Sites on the adult blocklist are left out after ranking, so a
+        // few more are ranked.
+        let adult = self
+            .adult_list()
+            .filter(|_| options.safe != SafeSearch::Off);
+        let wanted = match adult {
+            Some(_) => limit + adult::MARGIN,
+            None => limit,
+        };
+        let mut results = match network::handle(self).map(|net| net.popularity()) {
+            None => index.backend().search_full_with(
+                query,
+                wanted,
+                options,
+                meaning.as_deref(),
+                rank,
+            )?,
+            Some(table) => {
+                let candidates = wanted.max(network::POPULARITY_CANDIDATES);
+                let mut results = index.backend().search_full_with(
+                    query,
+                    candidates,
+                    options,
+                    meaning.as_deref(),
+                    rank,
+                )?;
+                network::apply_popularity(&table, query, &mut results.hits);
+                results
+            }
+        };
+        if let Some(adult) = &adult {
+            results.hits.retain(|hit| !adult.contains(&hit.domain));
+        }
+        results.hits.truncate(limit);
+        pages::add_pages(self, query, options, &mut results);
+        Ok(results)
     }
 }
 

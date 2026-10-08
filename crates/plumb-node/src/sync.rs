@@ -146,6 +146,7 @@ pub fn merge_history(base: Option<&History>, local: &History, remote: &History) 
         |b, l, r| {
             let mut o = newest(l, r, |o| o.at).clone();
             o.times = add(b.map(|b| b.times), l.times, r.times);
+            o.weighted = add(b.map(|b| b.weighted), l.weighted, r.weighted);
             o
         },
     );
