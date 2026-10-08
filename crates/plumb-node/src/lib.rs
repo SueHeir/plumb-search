@@ -269,13 +269,16 @@ pub(crate) fn release_freed_memory() {
     }
 }
 
-/// `dir/records.jsonl` -> `dir/.records.jsonl.<pid>.tmp`.
+/// `dir/records.jsonl` -> `dir/.records.jsonl.<pid>-<n>.tmp`: `n` counts
+/// up, so two threads writing the same file never share a temporary one.
 pub(crate) fn temp_path_for(path: &Path) -> PathBuf {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "records".to_string());
-    path.with_file_name(format!(".{name}.{}.tmp", std::process::id()))
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    path.with_file_name(format!(".{name}.{}-{n}.tmp", std::process::id()))
 }
 
 #[cfg(test)]
@@ -318,5 +321,6 @@ mod tests {
             .unwrap()
             .to_string_lossy()
             .starts_with(".records.jsonl."));
+        assert_ne!(tmp, temp_path_for(Path::new("data/records.jsonl")));
     }
 }

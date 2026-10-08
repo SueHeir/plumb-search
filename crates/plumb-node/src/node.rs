@@ -1490,7 +1490,7 @@ impl Inner {
             background_updates: self.settings().background_updates,
             paused: pause.as_ref().map(|p| p.reason.clone()),
             paused_until: pause.and_then(|p| p.until),
-            disk_used: self.disk_used(),
+            disk_used: self.disk_used_shown(),
             storage_limit: self.settings().storage_limit_mb.saturating_mul(MB),
             downloaded_today: saved.downloaded_today(now_unix()),
             downloaded_total: saved.downloaded_total,
@@ -1599,22 +1599,39 @@ impl Inner {
 
     /// The size of the data folder, counted again when the last count is
     /// more than [`DISK_COUNT_MAX_AGE`] old or [`Inner::recount_disk`]
-    /// asked for it.
+    /// asked for it. The count is made without holding the lock, so a
+    /// status page does not wait on it.
     fn disk_used(&self) -> u64 {
-        let mut count = self.disk.lock().unwrap_or_else(PoisonError::into_inner);
-        match *count {
-            Some((at, bytes)) if at.elapsed() < DISK_COUNT_MAX_AGE => bytes,
-            _ => {
-                let bytes = store::dir_size(&self.paths.data);
-                *count = Some((std::time::Instant::now(), bytes));
-                bytes
+        if let Some((at, bytes)) = *self.disk.lock().unwrap_or_else(PoisonError::into_inner) {
+            if at.elapsed() < DISK_COUNT_MAX_AGE {
+                return bytes;
             }
+        }
+        let bytes = store::dir_size(&self.paths.data);
+        *self.disk.lock().unwrap_or_else(PoisonError::into_inner) =
+            Some((std::time::Instant::now(), bytes));
+        bytes
+    }
+
+    /// The last count of [`Inner::disk_used`], however old, for showing:
+    /// the background work counts again often enough. Counts only when
+    /// there is none yet.
+    fn disk_used_shown(&self) -> u64 {
+        let last = *self.disk.lock().unwrap_or_else(PoisonError::into_inner);
+        match last {
+            Some((_, bytes)) => bytes,
+            None => self.disk_used(),
         }
     }
 
     /// Has the next [`Inner::disk_used`] count the data folder again.
     fn recount_disk(&self) {
-        *self.disk.lock().unwrap_or_else(PoisonError::into_inner) = None;
+        let mut count = self.disk.lock().unwrap_or_else(PoisonError::into_inner);
+        // Kept for showing until then.
+        *count = count.and_then(|(_, bytes)| {
+            let stale = std::time::Instant::now().checked_sub(DISK_COUNT_MAX_AGE)?;
+            Some((stale, bytes))
+        });
     }
 
     fn settings(&self) -> NodeSettings {

@@ -8,6 +8,7 @@
 //! one.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -57,13 +58,17 @@ pub(super) fn run(inner: Arc<Inner>) {
     // busy or slow trusted node), and the pages already here are searched
     // meanwhile. A file taken is indexed at the next look.
     let runtime = tokio::runtime::Handle::current();
+    // Ends the downloads when this ends, by a panic too: the loop started
+    // again after one starts its own.
+    let files_done = FilesDone(Arc::new(AtomicBool::new(false)));
     let files = {
         let inner = inner.clone();
+        let done = files_done.0.clone();
         std::thread::Builder::new()
             .name("page set files".into())
             .spawn(move || {
                 let _entered = runtime.enter();
-                keep_files(&inner);
+                keep_files(&inner, &done);
             })
     };
     let files = match files {
@@ -139,18 +144,29 @@ pub(super) fn run(inner: Arc<Inner>) {
             std::thread::sleep(TICK);
         }
     }
+    drop(files_done);
     if let Some(files) = files {
         let _ = files.join();
     }
 }
 
+/// Tells the downloads thread to end when dropped.
+struct FilesDone(Arc<AtomicBool>);
+
+impl Drop for FilesDone {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+}
+
 /// Takes the set files missing, or short of pages, from a trusted node,
 /// until the node stops.
-fn keep_files(inner: &Inner) {
+fn keep_files(inner: &Inner, done: &AtomicBool) {
     // By set: a set the trusted node lacks, or whose download failed, does
     // not hold up the others.
     let mut fetch_failed: HashMap<&'static str, Instant> = HashMap::new();
-    while !inner.stopping() {
+    let ended = || inner.stopping() || done.load(Ordering::Relaxed);
+    while !ended() {
         let mut settings = inner.settings();
         if inner.config.blackhole {
             settings.page_sets = settings.page_sets.all_unless_set();
@@ -160,7 +176,7 @@ fn keep_files(inner: &Inner) {
         fetch_failed.retain(|_, at| at.elapsed() < FETCH_RETRY_WAIT);
         if let Some(net) = super::network::handle(inner).cloned() {
             for &(set, pages) in &counts {
-                if inner.stopping() {
+                if ended() {
                     break;
                 }
                 if fetch_failed.contains_key(set.id) {
@@ -174,7 +190,7 @@ fn keep_files(inner: &Inner) {
             }
         }
         let until = Instant::now() + LOOK_EVERY;
-        while !inner.stopping() && Instant::now() < until {
+        while !ended() && Instant::now() < until {
             std::thread::sleep(TICK);
         }
     }
