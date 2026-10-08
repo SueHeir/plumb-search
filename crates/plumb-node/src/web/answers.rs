@@ -223,20 +223,45 @@ pub(crate) fn page_about<'a>(sites: &[Hit], pages: &'a [PlacedPage]) -> Option<&
         && top.is_some_and(|hit| {
             hit.named && (hit.official || hit.link_score >= plumb_index::WELL_KNOWN_LINK_SCORE)
         });
-    let placed = pages.iter().find(|placed| {
+    let about_one_thing = |placed: &&PlacedPage| {
         let page = &placed.hit.page;
-        let under_top = placed.under.is_some() && placed.under.as_deref() == top_site;
-        (placed.hit.named || (site_wins && under_top))
-            && is_about_one_thing(page)
+        is_about_one_thing(page)
             // A film or show only when asked for as one: "dune 2021".
             && (page.set != FILMS_SET || placed.hit.whole)
             && !is_disambiguation(&page.title, page.description.as_deref())
-            && match &placed.under {
-                _ if site_wins => under_top,
-                Some(_) => under_top,
-                None => placed.at <= 1,
-            }
-    })?;
+    };
+    let under_top =
+        |placed: &PlacedPage| placed.under.is_some() && placed.under.as_deref() == top_site;
+    let placed = if site_wins {
+        pages
+            .iter()
+            .filter(about_one_thing)
+            .find(|placed| under_top(placed))?
+    } else {
+        // The best named article, wherever it is listed: a namesake never
+        // stands in for it ("tim cook" is not the historian, "better call
+        // saul" not the episode). It gets the box only when listed near
+        // the top, alone or under the first site.
+        let best = pages
+            .iter()
+            .filter(|placed| placed.hit.named)
+            .filter(about_one_thing)
+            .reduce(|best, placed| {
+                if placed.hit.score > best.hit.score {
+                    placed
+                } else {
+                    best
+                }
+            })?;
+        let listed_high = match &best.under {
+            Some(_) => under_top(best),
+            None => best.at <= 1,
+        };
+        if !listed_high {
+            return None;
+        }
+        best
+    };
     Some(&placed.hit.page)
 }
 
@@ -925,6 +950,26 @@ mod tests {
         // An article listed above every site is still what was searched.
         let curie = placed(article("Zoom", "Physicist", None), None, 0);
         assert_eq!(info_box(&[zoom], &[curie]).unwrap().title, "Zoom");
+    }
+
+    #[test]
+    fn namesakes_never_stand_in_for_the_best_named_article() {
+        let sites = [site("amc.com", None), site("apple.com", Some("US"))];
+        let mut episode = article("Better Call Saul (Breaking Bad)", "Episode", None);
+        episode.score = 0.8;
+        let series = article("Better Call Saul", "Television series", Some("amc.com"));
+        let pages = [placed(episode, None, 0), placed(series, Some("amc.com"), 0)];
+        assert_eq!(info_box(&sites, &pages).unwrap().title, "Better Call Saul");
+        // The best article is about a site further down: no box, rather
+        // than the historian.
+        let mut historian = article("Tim Cook (historian)", "Canadian historian", None);
+        historian.score = 0.8;
+        let ceo = article("Tim Cook", "Chief executive of Apple", Some("apple.com"));
+        let pages = [
+            placed(historian, None, 0),
+            placed(ceo, Some("apple.com"), 0),
+        ];
+        assert_eq!(info_box(&sites, &pages), None);
     }
 
     #[test]
