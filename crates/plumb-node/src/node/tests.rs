@@ -2560,6 +2560,64 @@ async fn a_node_takes_the_adult_blocklist_from_a_trusted_node_before_its_source(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_set_file_being_downloaded_is_not_cut_at_the_same_time() {
+    let dir = seeded_dir();
+    let set = crate::pages::SetInfo::find("wikipedia-en").unwrap();
+    let file = set.file(dir.path());
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    let articles: Vec<plumb_core::Article> = ["Marie Curie", "Pierre Curie", "Curie (unit)"]
+        .iter()
+        .map(|title| plumb_core::Article {
+            title: title.to_string(),
+            views: 10,
+            ..Default::default()
+        })
+        .collect();
+    plumb_ingest::articles::write_articles_file(&file, &articles).unwrap();
+    let notes = crate::pages::SetFileNotes {
+        lines: 3,
+        complete: true,
+        source_modified: 1,
+        fetched_at: now_unix(),
+        near: 0,
+    };
+    std::fs::write(
+        crate::pages::notes_path(&file),
+        serde_json::to_vec(&notes).unwrap(),
+    )
+    .unwrap();
+    let node = start(test_config(dir.path())).await.unwrap();
+    let addr = node.addr();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !get(addr, "/search?q=pierre+curie")
+        .await
+        .2
+        .contains("Pierre_Curie")
+    {
+        assert!(Instant::now() < deadline, "no pages");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // A download holds the file; a lower limit meanwhile leaves it alone.
+    node.inner.set_files_busy.lock().unwrap().insert(set.id);
+    let mut settings = node.inner.settings();
+    settings.page_sets = crate::pages::PageSets::parse("wikipedia-en=2").unwrap();
+    settings.storage_limit_mb = 500;
+    node.inner.change_settings(settings).unwrap();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(set.file_notes(dir.path()).unwrap().lines, 3);
+
+    // Once the download is done, the file is cut.
+    node.inner.set_files_busy.lock().unwrap().remove(set.id);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while set.file_notes(dir.path()).unwrap().lines != 2 {
+        assert!(Instant::now() < deadline, "never cut");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    node.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_set_file_over_the_storage_limit_is_cut_before_it_is_indexed() {
     // A file taken from a trusted node, with more pages than the node now
     // keeps.

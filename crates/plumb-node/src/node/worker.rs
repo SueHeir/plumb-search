@@ -1657,7 +1657,16 @@ pub(super) fn build_from_file(inner: &Inner) -> Result<ServingIndex> {
             inner.check_stop()
         },
     )
-    .with_context(|| format!("building the index in {}", dir.display()))?;
+    .with_context(|| format!("building the index in {}", dir.display()));
+    let built = match built {
+        Ok(built) => built,
+        Err(err) => {
+            // Each try has a new id: the half-written buckets would
+            // otherwise pile up, against the storage limit, until restart.
+            let _ = std::fs::remove_dir_all(&buckets_dir);
+            return Err(err);
+        }
+    };
     if inner.config.news_feeds > 0 {
         inner.news.watch(built.feeds);
     }
@@ -1789,8 +1798,11 @@ async fn wait(inner: &Arc<Inner>, deadline: Deadline) {
             return;
         }
         // Records from other nodes are folded in as they pile up; whether
-        // they rebuild the index is up to step().
-        if inner.inbox_records.load(Ordering::SeqCst) >= REBUILD_AFTER_RECORDS {
+        // they rebuild the index is up to step(). Not while backing off
+        // after an error: folding them in may be what failed.
+        if !matches!(deadline, Deadline::After(_))
+            && inner.inbox_records.load(Ordering::SeqCst) >= REBUILD_AFTER_RECORDS
+        {
             return;
         }
         let nap = match deadline {

@@ -1199,6 +1199,9 @@ struct Inner {
     inbox_lock: Mutex<()>,
     /// Held while the whole records file is in memory ([`Inner::hold_records`]).
     records_held: Mutex<()>,
+    /// The page sets whose file is being downloaded or cut, so the two
+    /// never write the same file at once.
+    set_files_busy: Mutex<std::collections::HashSet<&'static str>>,
     /// Set once the index was rebuilt to add missing buckets.
     buckets_rebuilt: AtomicBool,
     /// The results opened this week, when sharing popularity.
@@ -1429,6 +1432,7 @@ impl Inner {
             over_since: std::sync::atomic::AtomicU64::new(0),
             inbox_lock: Mutex::new(()),
             records_held: Mutex::new(()),
+            set_files_busy: Mutex::default(),
             buckets_rebuilt: AtomicBool::new(false),
             picks: Mutex::new(None),
             settings: Mutex::new(opened.settings),
