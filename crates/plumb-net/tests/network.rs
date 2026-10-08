@@ -1007,6 +1007,7 @@ async fn searches_ask_trusted_nodes_friends_of_friends_or_anyone() {
 
     // Anyone means anyone: the nodes started above may be asked too.
     let anyone = start(SearchScope::Anyone).await;
+    wait_for(|| (anyone.handle.status().friends_of_friends == 1).then_some(())).await;
     let wanted = [s_id, f_id, x_id];
     for _ in 0..300 {
         let peers = anyone.handle.bucket_peers().await.unwrap();
@@ -1029,4 +1030,122 @@ async fn asked(handle: &NetHandle, want: usize) -> Vec<PeerId> {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     panic!("gave up waiting for {want} nodes to ask");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn shared_leads_reach_nodes_whose_scope_takes_them() {
+    use plumb_net::leads::{LeadDraft, LeadKeys, Relation};
+
+    let keys = || LeadKeys::new(["tokio"], ["latest", "version"]);
+    let draft = |url: &str| LeadDraft {
+        keys: keys(),
+        query: None,
+        url: url.to_string(),
+        note: "lists every release with its date".to_string(),
+    };
+    // A trusts S, S trusts F; nobody trusts X. F and X share a lead each
+    // before A starts.
+    let f = Node::start(false, vec![], vec![]).await;
+    let f_id = f.handle.peer_id();
+    let s = Node::start_config(
+        tempfile::tempdir().unwrap(),
+        true,
+        vec![],
+        vec![],
+        true,
+        |c| c.trusted_peers = vec![f_id],
+    )
+    .await;
+    let s_id = s.handle.peer_id();
+    let s_addr = s.addr().await;
+    let f_addr = f.addr().await;
+    let x = Node::start(false, vec![s_addr.clone()], vec![]).await;
+    let x_addr = x.addr().await;
+    let from_f = f
+        .handle
+        .share_lead(draft("https://tokio.rs/blog/"))
+        .await
+        .unwrap();
+    assert_eq!(from_f.check(now_unix()).unwrap(), f_id);
+    assert!(from_f.query.is_none());
+    x.handle
+        .share_lead(draft("https://lookalike-tokio.example/"))
+        .await
+        .unwrap();
+    // Not fit to share: a page on a private network.
+    assert!(x
+        .handle
+        .share_lead(draft("http://192.168.1.4/notes"))
+        .await
+        .is_err());
+    // A node never finds its own leads.
+    assert!(f.handle.leads(keys(), 5).await.unwrap().is_empty());
+
+    let start = |scope: SearchScope| {
+        let bootstrap = vec![s_addr.clone(), f_addr.clone(), x_addr.clone()];
+        async move {
+            Node::start_config(
+                tempfile::tempdir().unwrap(),
+                false,
+                bootstrap,
+                vec![],
+                true,
+                |c| {
+                    c.trusted_peers = vec![s_id];
+                    c.search_scope = scope;
+                },
+            )
+            .await
+        }
+    };
+    // Friends of friends: F's lead, not X's, though A holds both.
+    let a = start(SearchScope::FriendsOfFriends).await;
+    let leads = found_leads(&a.handle, keys(), 1).await;
+    assert_eq!(leads[0].url, "https://tokio.rs/blog/");
+    let by = &leads[0].reporters[0];
+    assert_eq!(by.peer_id, f_id.to_string());
+    assert_eq!(by.relation, Relation::FriendOfFriend);
+    assert_eq!(by.note, "lists every release with its date");
+    assert!(by.at <= now_unix() && by.expires > now_unix());
+    wait_for(|| (a.handle.status().leads_held == 2).then_some(())).await;
+    assert_eq!(a.handle.leads(keys(), 5).await.unwrap().len(), 1);
+    // Another search finds nothing.
+    let other = LeadKeys::new(["tokio", "select"], []);
+    assert!(a.handle.leads(other, 5).await.unwrap().is_empty());
+
+    // Anyone: both, the trusted circle's first.
+    let anyone = start(SearchScope::Anyone).await;
+    wait_for(|| (anyone.handle.status().friends_of_friends == 1).then_some(())).await;
+    let leads = found_leads(&anyone.handle, keys(), 2).await;
+    assert_eq!(leads[0].reporters[0].relation, Relation::FriendOfFriend);
+    assert_eq!(leads[1].reporters[0].relation, Relation::Other);
+
+    // Trusted only: nothing until S shares one, which reaches A over gossip.
+    let trusted = start(SearchScope::Trusted).await;
+    wait_for(|| (trusted.handle.status().leads_held == 2).then_some(())).await;
+    assert!(trusted.handle.leads(keys(), 5).await.unwrap().is_empty());
+    s.handle
+        .share_lead(draft("https://docs.rs/tokio/latest/tokio/"))
+        .await
+        .unwrap();
+    let leads = found_leads(&trusted.handle, keys(), 1).await;
+    assert_eq!(leads[0].url, "https://docs.rs/tokio/latest/tokio/");
+    assert_eq!(leads[0].reporters[0].relation, Relation::Trusted);
+    assert_eq!(s.handle.status().leads_shared, 1);
+}
+
+/// The leads `handle` finds for `keys`, once there are `want`.
+async fn found_leads(
+    handle: &NetHandle,
+    keys: plumb_net::leads::LeadKeys,
+    want: usize,
+) -> Vec<plumb_net::leads::FoundLead> {
+    for _ in 0..300 {
+        let found = handle.leads(keys.clone(), 5).await.unwrap();
+        if found.len() >= want {
+            return found;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("gave up waiting for {want} leads");
 }

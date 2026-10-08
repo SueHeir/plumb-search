@@ -35,6 +35,10 @@
 //!   it on. Answered only for a profile linked with the asking node, so a
 //!   node never learns anything of a profile it was not given. The
 //!   connection is end to end encrypted, relayed or not.
+//! * `/plumb/leads/1`: the newest [`Lead`]s a node holds, for a node it
+//!   meets, so one that was away catches up (see [`crate::leads`]).
+//! * Gossip topic `plumb/leads/1`: every lead a node shares, as JSON,
+//!   passed on by every node that takes it.
 //! * `/plumb/kad/1.0.0`: Kademlia, to find more nodes.
 //!
 //! Requests and responses are CBOR.
@@ -45,6 +49,7 @@ pub use serde_bytes::ByteBuf;
 use crate::batch::{Batch, RecordProof, SignedHeader};
 use crate::credits::{Issued, Token};
 use crate::hash::Hash;
+use crate::leads::Lead;
 use crate::popularity::Report;
 
 pub const BUCKET_PROTOCOL: &str = "/plumb/bucket/1";
@@ -55,10 +60,12 @@ pub const TRUST_PROTOCOL: &str = "/plumb/trust/1";
 pub const PROFILE_PROTOCOL: &str = "/plumb/profile/1";
 pub const REPORT_PROTOCOL: &str = "/plumb/report/1";
 pub const CREDIT_PROTOCOL: &str = "/plumb/credits/1";
+pub const LEAD_PROTOCOL: &str = "/plumb/leads/1";
 pub const KAD_PROTOCOL: &str = "/plumb/kad/1.0.0";
 pub const IDENTIFY_PROTOCOL: &str = "/plumb/id/1.0.0";
 pub const BATCH_TOPIC: &str = "plumb/batches/1";
 pub const REPORT_TOPIC: &str = "plumb/reports/1";
+pub const LEAD_TOPIC: &str = "plumb/leads/1";
 
 /// Most batch headers returned for one [`BatchRequest::List`].
 pub const MAX_LISTED_BATCHES: usize = 10_000;
@@ -79,6 +86,16 @@ pub enum ReportResponse {
     /// or not valid).
     Taken(bool),
     Reports(Vec<Report>),
+}
+
+/// Asks for the newest leads a node holds, at most
+/// [`crate::leads::MAX_LISTED_LEADS`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LeadRequest {}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LeadResponse {
+    pub leads: Vec<Lead>,
 }
 
 /// Asks for one bucket (see [`crate::bucket`]).

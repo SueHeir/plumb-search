@@ -184,6 +184,8 @@ pub struct NodeConfig {
     pub web_search: Option<Engine>,
     /// Every client of `/mcp` may use `read_page`, not only this computer's.
     pub mcp_read_pages: bool,
+    /// How `read_page` fetches pages.
+    pub page_reader: plumb_crawl::ReadConfig,
     /// Rank by meaning too, for searches that name no site: the node
     /// downloads a small embedding model into `DIR/model` (about 130 MB)
     /// and keeps a vector of each site's text in `DIR/vectors.bin`, made in
@@ -268,6 +270,10 @@ pub struct NodeConfig {
     /// network learns what is popular (see [`network`]). Needs `network`.
     /// Off by default.
     pub share_popularity: bool,
+    /// Let AI apps on this computer share a finding with other nodes when
+    /// they ask to, through `/mcp`'s `report_finding` (see
+    /// [`plumb_net::leads`]). Needs `network`. Off by default.
+    pub share_findings: bool,
     /// The settings until someone changes them on the panel, which saves
     /// them in `DIR/settings.json`.
     pub settings: NodeSettings,
@@ -315,6 +321,7 @@ impl NodeConfig {
             country: HomeCountry::Auto,
             web_search: None,
             mcp_read_pages: false,
+            page_reader: plumb_crawl::ReadConfig::default(),
             search_by_meaning: false,
             meaning_model: crate::meaning::MeaningModel::default(),
             embed_threads: None,
@@ -325,6 +332,7 @@ impl NodeConfig {
             network: None,
             private_search: false,
             share_popularity: false,
+            share_findings: false,
             crawl_any_site: false,
             crawl_home_site: true,
             drop_dead_sites: false,
@@ -394,6 +402,9 @@ impl NodeConfig {
         }
         if self.share_popularity && self.network.is_none() {
             bail!("sharing popularity needs the network");
+        }
+        if self.share_findings && self.network.is_none() {
+            bail!("sharing findings needs the network");
         }
         if self.crawl_any_site && self.network.is_none() {
             bail!("crawling any site needs the network");
@@ -890,6 +901,7 @@ pub async fn start(mut config: NodeConfig) -> Result<NodeHandle> {
         home: inner.config.country.clone(),
         web_search: inner.config.web_search,
         read_pages_for_all: inner.config.mcp_read_pages,
+        page_reader: inner.config.page_reader.clone(),
         plugins: load_plugins(&inner),
     };
     let app = web::node_router_with(inner.clone(), inner.clone(), settings);
@@ -2071,6 +2083,10 @@ impl StatusSource for Inner {
 
     fn shares_popularity(&self) -> bool {
         network::shares_popularity(self)
+    }
+
+    fn shares_findings(&self) -> bool {
+        self.config.share_findings && self.net.get().is_some()
     }
 
     fn record_pick(&self, query: &str, domain: &str) {
