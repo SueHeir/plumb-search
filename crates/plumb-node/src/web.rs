@@ -3683,7 +3683,7 @@ fn render_plugin(found: &PluginResults, now: u64, query: &str, token: Option<&st
             .map(|b| format!(" <span class=\"pb\">{}</span>", escape_html(b)))
             .unwrap_or_default();
         let mut buttons = token
-            .map(|token| action_forms(&found.plugin, &item.actions, token, query))
+            .map(|token| action_forms(&found.plugin, &item.actions, token, query, true))
             .unwrap_or_default();
         if !buttons.is_empty() {
             buttons = format!("<div class=\"pa\">{buttons}</div>");
@@ -3734,13 +3734,23 @@ fn render_offers(offers: &[crate::plugins::Offer], query: &str, options: &Search
 }
 
 /// The forms that press `actions` of plugin `plugin` on the results page
-/// for `query`.
+/// for `query`. With `ran`, the plugin's results are on the page, and the
+/// way back runs it again: one only offered would be gone.
 fn action_forms(
     plugin: &str,
     actions: &[crate::plugins::PluginAction],
     token: &str,
     query: &str,
+    ran: bool,
 ) -> String {
+    let run = if ran {
+        format!(
+            "<input type=\"hidden\" name=\"run\" value=\"{}\">",
+            escape_html(plugin)
+        )
+    } else {
+        String::new()
+    };
     let mut forms = String::new();
     for action in actions {
         let _ = write!(
@@ -3749,7 +3759,7 @@ fn action_forms(
              <input type=\"hidden\" name=\"plugin\" value=\"{}\">\
              <input type=\"hidden\" name=\"data\" value=\"{}\">\
              <input type=\"hidden\" name=\"token\" value=\"{}\">\
-             <input type=\"hidden\" name=\"q\" value=\"{}\">\
+             <input type=\"hidden\" name=\"q\" value=\"{}\">{run}\
              <button type=\"submit\">{}</button></form>",
             escape_html(plugin),
             escape_html(&action.data),
@@ -3776,7 +3786,13 @@ fn render_notes(notes: &[crate::plugins::ResultNote], query: &str, token: Option
             );
         }
         if let Some(token) = token {
-            line.push_str(&action_forms(&note.plugin, &note.actions, token, query));
+            line.push_str(&action_forms(
+                &note.plugin,
+                &note.actions,
+                token,
+                query,
+                false,
+            ));
         }
     }
     if line.is_empty() {
@@ -4571,6 +4587,14 @@ mod tests {
         assert!(marked.contains("Shelf: Not in library"), "{page}");
         assert!(marked.contains("name=\"data\" value=\"{&quot;id&quot;:1}\""));
         assert!(marked.contains("<button type=\"submit\">Add</button>"));
+        // A note's plugin did not run as a search: nothing to run again.
+        assert!(!marked.contains("name=\"run\""));
+        let actions = [crate::plugins::PluginAction {
+            label: "Add".into(),
+            data: "1".into(),
+        }];
+        assert!(action_forms("shelf", &actions, "t0k", "q", true)
+            .contains("<input type=\"hidden\" name=\"run\" value=\"shelf\">"));
         // Hidden, it is gone.
         extras.plugin_notes.get_mut(url).unwrap()[0].hide = true;
         let page = render(&extras);
