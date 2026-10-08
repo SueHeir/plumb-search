@@ -2620,9 +2620,8 @@ fn render_home(docs: u64, status: Option<&Status>, now: u64, settings: &Settings
     };
     let body = format!(
         "<div class=\"wrap search-home\">{}<main class=\"home\">\n\
-         <p class=\"eyebrow\">A search engine of your own</p>\
-         <h1>A little more independent.</h1>\n\
-         <p class=\"home-intro\">Find sites, articles, places and more. On your terms.</p>\
+         <h1>Plumb Search</h1>\n\
+         <p class=\"home-intro\">Find sites, articles, places and more.</p>\
          {}{welcome}{recent}\n<p class=\"index-status\"><span class=\"status-dot\" aria-hidden=\"true\"></span>{} sites indexed{note}</p>{wikidata}\n\
          <details class=\"search-help\"><summary>Search tips</summary>\
          <p>Try a site name, a topic, a calculation, or a place. Use \
