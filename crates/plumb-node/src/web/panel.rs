@@ -55,39 +55,7 @@ const BUSY_RELOAD_SECONDS: u32 = 5;
 /// Seconds between two reloads otherwise.
 const IDLE_RELOAD_SECONDS: u32 = 60;
 
-pub(super) const PANEL_STYLE: &str = "\
-.node-panel{max-width:56rem;padding-top:1.5rem}\
-.node-panel h1{font-size:1.6rem}\
-.node-panel h2{font-size:1.05rem;margin:2rem 0 .5rem}\
-.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(15rem,1fr));gap:.75rem;\
-margin:1.25rem 0}\
-.card{padding:.9rem 1rem;border:1px solid var(--line);border-radius:.75rem}\
-.card h3{margin:0;font-size:.8rem;font-weight:600;text-transform:uppercase;\
-letter-spacing:.04em;color:var(--muted)}\
-.card .big{margin:.3rem 0 .2rem;font-size:1.35rem;font-weight:600}\
-.card p{margin:.2rem 0;font-size:.9rem}\
-.card.search{grid-column:1/-1}\
-.ready .big{color:var(--url)}.limited .big{color:var(--accent)}.warn .big{color:var(--err)}\
-.btns{display:flex;flex-wrap:wrap;gap:.5rem;margin-top:.6rem}\
-.btn{display:inline-block;padding:.5rem .9rem;border-radius:.5rem;background:var(--accent);\
-color:var(--bg);text-decoration:none}\
-.btn.alt,button.alt{background:none;color:var(--accent);border:1px solid var(--accent)}\
-.steps li{display:flex;gap:.6rem;padding:.45rem 0;border:0}\
-.steps .i{flex:none;width:1.2rem;text-align:center}\
-.steps .done{color:var(--muted)}\
-.steps .now{font-weight:600}\
-.steps small{display:block;font-weight:400;color:var(--muted)}\
-.node-panel form{display:block}\
-.node-panel label{display:flex;gap:.6rem;align-items:center;margin-top:.75rem}\
-.node-panel label input[type=checkbox]{flex:none}\
-.node-panel input[type=number]{flex:none;width:7rem}\
-.node-panel form button{margin-top:.9rem}\
-.hint{margin:.2rem 0 0;font-size:.85rem;color:var(--muted)}\
-.howto{list-style:decimal;padding-left:1.5rem}.howto li{border:0;padding:.3rem 0}\
-code{overflow-wrap:anywhere;font:.9rem ui-monospace,monospace;padding:.1rem .3rem;\
-border:1px solid var(--line);border-radius:.3rem}\
-dl{display:grid;grid-template-columns:max-content 1fr;gap:.25rem 1rem;font-size:.9rem}\
-dt{color:var(--muted)}dd{margin:0;overflow-wrap:anywhere}";
+pub(super) const PANEL_STYLE: &str = include_str!("panel.css");
 
 /// The settings form as posted. A checkbox that is not ticked is not sent.
 #[derive(Debug, Deserialize)]
@@ -421,10 +389,11 @@ const PANEL_REFERRER_POLICY: &str = "same-origin";
 /// A page saying what went wrong with a change, with the way back to the
 /// panel: the desktop app's window has no back button.
 pub(super) fn panel_error(status: StatusCode, message: &str) -> Response {
+    let bar = super::app_bar("", false);
     let body = format!(
-        "<main class=\"wrap node-panel\">\n<h1>Plumb Search node</h1>\n\
+        "<div class=\"wrap node-panel\">{bar}<main class=\"node-standalone\">\n<h1>Plumb Search node</h1>\n\
          <p class=\"err\">{}</p>\n\
-         <p><a class=\"btn\" href=\"/app\">Back to the panel</a></p>\n</main>",
+         <p><a class=\"btn\" href=\"/app\">Back to the panel</a></p>\n</main></div>",
         escape_html(message)
     );
     let head = format!(
@@ -1128,6 +1097,7 @@ pub(super) fn render_panel(view: &PanelView<'_>) -> String {
         ("search", "Search & browser"),
         ("resources", "Resources"),
         ("network", "Network & privacy"),
+        ("integrations", "AI & plugins"),
     ];
     if remote_control.is_some() {
         sections.push(("remote", "Remote control"));
@@ -1144,7 +1114,16 @@ pub(super) fn render_panel(view: &PanelView<'_>) -> String {
     };
     let title = sections.iter().find(|(key, _)| *key == section).unwrap().1;
     let site = escape_html(origin);
-    let mut body = format!("<main class=\"wrap node-panel\">{switcher}<div class=\"node-heading\"><div><p class=\"eyebrow\">{}</p><h1>Plumb Search</h1></div><a class=\"btn alt\" href=\"{site}/\" target=\"_blank\">Open search ↗</a></div><nav class=\"node-nav\" aria-label=\"Node settings\">", escape_html(eyebrow));
+    let bar = super::app_bar_for(
+        if section == "overview" {
+            "status"
+        } else {
+            "settings"
+        },
+        true,
+        base,
+    );
+    let mut body = format!("<div class=\"wrap node-panel\">{bar}<div class=\"node-layout\"><aside class=\"node-sidebar\"><p class=\"eyebrow\">{}</p>{switcher}<nav class=\"node-nav\" aria-label=\"Node settings\">", escape_html(eyebrow));
     for (key, label) in sections.iter().copied() {
         body.push_str(&format!(
             "<a href=\"{base}?section={key}\"{}>{}</a>",
@@ -1156,7 +1135,7 @@ pub(super) fn render_panel(view: &PanelView<'_>) -> String {
             escape_html(label)
         ));
     }
-    body.push_str(&format!("</nav><div class=\"section-heading\"><h2>{}</h2><a href=\"{base}?section={section}\">Refresh status</a></div>", escape_html(title)));
+    body.push_str(&format!("</nav><a class=\"btn alt\" href=\"{site}/\">Open search</a></aside><main class=\"node-content\"><div class=\"section-heading\"><h1>{}</h1><a href=\"{base}?section={section}\">Refresh status</a></div>", escape_html(title)));
     // Only this node's own panel has a restart route; remote nodes do not.
     if active != saved && status.can_restart && writable && base == "/app" {
         body.push_str(&format!("<form method=\"post\" action=\"{base}/restart\" class=\"notice\" role=\"status\"><p>Feature changes saved. They apply once the node restarts, which takes a few seconds; search pauses meanwhile.</p><button type=\"submit\">Restart to apply</button></form>"));
@@ -1260,7 +1239,9 @@ pub(super) fn render_panel(view: &PanelView<'_>) -> String {
                 "Preparing index"
             };
             let link = if private_ready {
-                format!("<p><a class=\"btn alt\" href=\"{site}/private\" target=\"_blank\">Open private search ↗</a></p>")
+                format!(
+                    "<p><a class=\"btn alt\" href=\"{site}/private\">Open private search</a></p>"
+                )
             } else {
                 String::new()
             };
@@ -1313,6 +1294,33 @@ pub(super) fn render_panel(view: &PanelView<'_>) -> String {
             }
             body.push_str(&format!("<p class=\"hint\">For a bug report, the <a href=\"{site}/api/status\" target=\"_blank\">diagnostic status</a> has the details.</p>"));
         }
+        "integrations" => {
+            body.push_str("<p class=\"intro\">Use your own search index from an AI app, or add sources with plugins.</p>");
+            body.push_str(&format!(
+                "<section class=\"cards\" aria-label=\"AI connections\">\
+                 <div class=\"card\"><h3>MCP server</h3><p class=\"big\">Ready to connect</p>\
+                 <p>Search, official sites, packages and sourced facts. No API key.</p>\
+                 <label for=\"mcp-url\">Server address</label><input id=\"mcp-url\" class=\"endpoint\" readonly value=\"{site}/mcp\">\
+                 <p><a href=\"https://github.com/SueHeir/plumb-search/blob/main/docs/mcp.md\" target=\"_blank\">MCP setup guide ↗</a></p></div>\
+                 <div class=\"card\"><h3>SearXNG-compatible search</h3><p class=\"big\">For local models</p>\
+                 <p>Use this node in Open WebUI and other tools that take a SearXNG address.</p>\
+                 <label for=\"search-url\">Base address</label><input id=\"search-url\" class=\"endpoint\" readonly value=\"{site}\">\
+                 <p><a href=\"https://github.com/SueHeir/plumb-search/blob/main/docs/local-llms.md\" target=\"_blank\">App setup guides ↗</a></p></div></section>"
+            ));
+            body.push_str("<h2>Plugins on this node</h2><p class=\"hint\">Plugins run in a WebAssembly sandbox and can contact their declared sources. Running a plugin can send search text to that source.</p>");
+            match plugins {
+                Some(plugins) if plugins.list().next().is_some() => {
+                    body.push_str("<ul class=\"log\">");
+                    for plugin in plugins.list() {
+                        body.push_str(&format!("<li><strong>{}</strong><span>{}</span></li>", escape_html(&plugin.manifest.name), escape_html(&plugin.manifest.about)));
+                    }
+                    body.push_str(&format!("</ul><p><a href=\"{base}?section=search#plugins\">Choose when plugins run</a></p>"));
+                }
+                Some(_) => body.push_str("<div class=\"notice\"><h3>No plugins installed</h3><p>Add a plugin to the plugins folder in this node’s data directory, then restart the node.</p></div>"),
+                None => body.push_str("<p>Manage plugins on the remote node’s own computer.</p>"),
+            }
+            body.push_str("<p><a href=\"https://github.com/SueHeir/plumb-search/blob/main/docs/plugins.md\" target=\"_blank\">Plugin installation &amp; development ↗</a></p>");
+        }
         "backup" => {
             if let Some(backups) = backups {
                 render_backups(&mut body, backups, now);
@@ -1328,7 +1336,7 @@ pub(super) fn render_panel(view: &PanelView<'_>) -> String {
             body.push_str(&format!("<p>Desktop and Docker run the same node and settings panel.</p><p>Its data comes from Wikipedia, Stack Overflow and ecosyste.ms (CC BY-SA 4.0), OpenStreetMap (ODbL), Wikidata, OpenAlex and Open Library (CC0), GitHub, Tranco, Common Crawl and the Block List Project.</p><p><a href=\"https://github.com/SueHeir/plumb-search\" target=\"_blank\">Source code &amp; documentation ↗</a> · <a href=\"https://github.com/SueHeir/plumb-search#data-sources\" target=\"_blank\">Data sources &amp; licences ↗</a> · <a href=\"{site}/api/status\" target=\"_blank\">Diagnostic status ↗</a></p><p class=\"hint\">Desktop: use the tray or menu bar for Start at login and Quit Plumb Search.</p>"));
         }
     }
-    body.push_str("</main>");
+    body.push_str("</main></div></div>");
     // Never reload forms: a timed reload discards unsaved edits and keyboard focus.
     let reload = if section == "overview" && query.saved.is_empty() {
         format!(
@@ -1346,8 +1354,7 @@ pub(super) fn render_panel(view: &PanelView<'_>) -> String {
     page_with_head(&format!("{title} - Plumb Search"), &head, &body)
 }
 
-pub(super) const LAYOUT_STYLE: &str = "
-.node-switch{display:flex;flex-wrap:wrap;gap:.4rem;margin-bottom:1rem}.node-switch a{padding:.4rem .8rem;border:1px solid var(--line);border-radius:999px;text-decoration:none;font-size:.9rem;color:var(--fg)}.node-switch a[aria-current]{border-color:var(--accent);color:var(--accent);font-weight:600}.node-panel{max-width:72rem;padding:2rem 2rem 4rem}.node-heading,.section-heading{display:flex;align-items:center;justify-content:space-between;gap:1rem}.node-heading h1{font-size:1.8rem}.eyebrow{font-size:.7rem;letter-spacing:.13em;color:var(--muted);margin:0 0 .3rem}.node-nav{display:flex;flex-wrap:wrap;gap:.4rem;border-bottom:1px solid var(--line);padding:1.5rem 0 1rem;margin-bottom:1.5rem}.node-panel a{color:var(--accent)}.node-panel a.btn:not(.alt){color:var(--bg)}.node-nav a{padding:.55rem .85rem;text-decoration:none;border-radius:.5rem;color:var(--muted)}.node-nav a[aria-current]{background:var(--accent);color:var(--bg);font-weight:600}.section-heading h2{margin:0;font-size:1.4rem}.section-heading>a{font-size:.85rem}.intro{color:var(--muted);max-width:45rem}.notice{padding:.85rem 1rem;border-left:3px solid var(--accent);background:color-mix(in srgb,var(--accent) 8%,var(--bg));border-radius:.3rem}.node-panel form{max-width:46rem}.node-panel fieldset{border:0;margin:0;padding:0;min-width:0}.node-panel .workload{margin-top:1rem}.log{list-style:none;padding:0;margin:.5rem 0}.log li{display:flex;flex-wrap:wrap;gap:.25rem 1rem;align-items:baseline;padding:.45rem 0;border-bottom:1px solid var(--line)}.log time{flex:none;min-width:7rem;color:var(--muted);font-size:.85rem}.log li span{flex:1 1 20rem;overflow-wrap:anywhere}.log .error span{color:var(--err)}.log.backups li{align-items:center}.log.backups form{margin:0;display:inline}.log.backups .btns{flex:none;margin:0}.node-panel .workload legend,.node-panel .scope legend{font-weight:600}.node-panel .scope label{margin-top:.5rem}.node-panel select{font:inherit;background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:.3rem}.cards>fieldset{display:contents}.node-panel details{margin-top:1rem}.node-panel summary{cursor:pointer;color:var(--accent)}.node-panel fieldset:disabled{opacity:.65}.node-panel textarea{display:block;width:100%;min-height:6rem;font:inherit;background:var(--bg);color:var(--fg);padding:.75rem;border:1px solid var(--line);border-radius:.5rem}.node-panel .feature{padding:.8rem 0;border-bottom:1px solid var(--line)}.node-panel .feature label{margin:0}.node-panel .feature p{margin:.35rem 0 0 1.65rem}.node-panel .state{font-size:.8rem;color:var(--muted)}.node-panel :focus-visible{outline:3px solid var(--accent);outline-offset:3px}.node-panel dl{grid-template-columns:minmax(6rem,auto) minmax(0,1fr)}@media(max-width:600px){.node-panel{padding:1rem 1rem 3rem}.node-heading{align-items:flex-start}.node-heading h1{font-size:1.5rem}.node-nav{gap:.2rem}.node-nav a{padding:.5rem .6rem;font-size:.9rem}.cards{grid-template-columns:minmax(0,1fr)}.node-panel label{flex-wrap:wrap}.section-heading{align-items:flex-start}.section-heading>a{white-space:nowrap}}";
+pub(super) const LAYOUT_STYLE: &str = "";
 
 /// A card: its class, title, headline and the HTML under them.
 fn card(body: &mut String, class: &str, title: &str, big: &str, rest: &str) {
@@ -1369,8 +1376,8 @@ fn meter(done: u64, total: u64) -> String {
 fn render_search_card(body: &mut String, status: &Status, origin: &str, now: u64, base: &str) {
     let origin = escape_html(origin);
     let buttons = format!(
-        "<div class=\"btns\"><a class=\"btn\" href=\"{origin}/\" target=\"_blank\">\
-         Search in your browser</a>\
+        "<div class=\"btns\"><a class=\"btn\" href=\"{origin}/\">\
+         Open search</a>\
          <a class=\"btn alt\" href=\"{origin}{ADD_TO_FIREFOX_PATH}\" target=\"_blank\">\
          Add to Firefox</a></div>\n"
     );
@@ -2301,7 +2308,7 @@ fn render_settings(body: &mut String, settings: &NodeSettings, base: &str) {
 /// (Wikipedia articles) to list with the sites.
 fn render_page_sets(settings: &NodeSettings) -> String {
     let mut out = String::from(
-        "<fieldset class=\"workload\"><legend>Page sets</legend>\n\
+        "<fieldset class=\"workload page-sets\"><legend>Page sets</legend>\n\
          <input type=\"hidden\" name=\"page_sets_shown\" value=\"1\">\n\
          <p class=\"hint\">Single pages, such as Wikipedia articles, listed with the sites. \
          Only each page's title and one-line description are kept, about 100 bytes a page.</p>\n",
@@ -2325,8 +2332,8 @@ fn render_page_sets(settings: &NodeSettings) -> String {
             .collect();
         let kept = current.pages(settings.storage_limit_mb).min(set.pages);
         out.push_str(&format!(
-            "<label>{} <select name=\"page_set.{}\">{options}</select></label>\n\
-             <p class=\"hint\">Keeps {} pages now, about {} MB.</p>\n",
+            "<div class=\"page-set\"><label>{} <select name=\"page_set.{}\">{options}</select></label>\n\
+             <p class=\"hint\">Keeps {} pages now, about {} MB.</p></div>\n",
             escape_html(set.name),
             escape_html(set.id),
             if kept == set.pages {
@@ -2350,7 +2357,7 @@ fn render_plugin_choices(body: &mut String, plugins: &crate::plugins::Plugins, b
         return;
     }
     body.push_str(&format!(
-        "<h2>Plugins</h2><p class=\"hint\">When a search fits a plugin, such as a search \
+        "<h2 id=\"plugins\">Plugins</h2><p class=\"hint\">When a search fits a plugin, such as a search \
          about a band for a music plugin, it can run on its own, or show a link that runs it, \
          which saves a source’s daily quota. Its keywords always run it.</p>\
          <form method=\"post\" action=\"{base}/plugins\">"
@@ -2655,7 +2662,10 @@ mod tests {
         assert!(body.contains("<progress value=\"0\" max=\"1\">"), "{body}");
         assert!(body.contains("<h2>Setup</h2>"), "{body}");
         assert!(body.contains("content=\"5\""), "reloads often: {body}");
-        assert!(!body.contains("Search in your browser"), "{body}");
+        assert!(
+            !body.contains("class=\"btn\" href=\"http://127.0.0.1:7586/\">Open search"),
+            "{body}"
+        );
         assert!(!body.contains("Update now"), "{body}");
         assert!(body.contains("/home/me/plumb &lt;data&gt;"), "{body}");
     }
@@ -2694,9 +2704,7 @@ mod tests {
             "{body}"
         );
         assert!(
-            body.contains(
-                "href=\"http://127.0.0.1:7586/\" target=\"_blank\">Search in your browser"
-            ),
+            body.contains("href=\"http://127.0.0.1:7586/\">Open search"),
             "{body}"
         );
         assert!(

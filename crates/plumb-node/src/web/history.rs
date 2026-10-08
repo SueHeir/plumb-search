@@ -1064,8 +1064,9 @@ async fn forget_clicks(State(state): State<AppState>, headers: HeaderMap) -> Res
 
 fn render_history(history: &History, prefs: Prefs, now: u64) -> String {
     let options = SearchOptions::default();
-    let mut body = String::from(
-        "<div class=\"wrap hist\">\n<header><a class=\"logo\" href=\"/\">Plumb</a></header>\n<main>\n\
+    let bar = super::app_bar("", false);
+    let mut body = format!(
+        "<div class=\"wrap hist\">\n{bar}\n<main>\n\
          <h1>Your history</h1>\n\
          <p class=\"s\">Kept on this node for this browser only. Other people searching here \
          have their own.</p>\n",

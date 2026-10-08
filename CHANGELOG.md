@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Redesigned the desktop and shared search UI with Search, Status and Settings navigation, warm surfaces and navy controls. Desktop searches now stay in the app; result links open in the usual browser. Node settings include AI integrations and installed plugins. The website shares the design, and a geometric P replaces the old logo across platforms.
+
 ### Search
 
 - Clicks count for where they were: a site opened from far down the results page now lifts searches like that one more than a site opened first, which is opened largely for being first ("Position Bias Estimation for Unbiased Learning to Rank in Personal Search", Wang et al. 2018). The node counts, for browsers that learn from clicks, how often results are opened at each place, as counts under a salted fingerprint with no profile, search or site in them, and works out by EM how much each place is looked at; until it has 100 clicks it assumes `1 / place`.
