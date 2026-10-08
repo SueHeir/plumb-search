@@ -915,7 +915,8 @@ fn home_or_setup(state: &AppState, params: &SearchParams, headers: &HeaderMap) -
         Some(status) if status.phase != Phase::Ready => setup_response(status, now),
         _ => {
             let visitor = history::Visitor::of(state, headers, params.history_prefs());
-            let browser_about = visitor.is_none().then(|| history::browser_about(headers));
+            let browser_about = (visitor.is_none() && state.node.is_some())
+                .then(|| history::browser_about(headers));
             // A new searcher is asked about themselves, until they answer
             // or say no thanks.
             let told = match (&visitor, &browser_about) {
@@ -1058,7 +1059,8 @@ async fn search_page(
         scope: state.search_scope(),
         private: state.private_search(),
         history: None,
-        browser_about: visitor.is_none().then(|| history::browser_about(&headers)),
+        browser_about: (visitor.is_none() && state.node.is_some())
+            .then(|| history::browser_about(&headers)),
         welcome: false,
     };
     let limit = params.limit();
@@ -1254,7 +1256,9 @@ async fn search_page(
                 let mut html = places::render_places(
                     found,
                     base_map.as_deref(),
-                    visitor.is_some(),
+                    // A node has the About page, kept by the browser if not
+                    // with history.
+                    state.node.is_some(),
                     settings.options.country.as_deref(),
                     &icons,
                     &link,
@@ -1588,7 +1592,13 @@ async fn go(
     } else {
         let options = search.options(&state.settings.home, &headers);
         match run_search(&state, &query, MAX_LIMIT, &options).await {
-            Ok(results) => results.hits.into_iter().find(|hit| hit.domain == params.d),
+            Ok(results) => match results.hits.iter().find(|hit| hit.domain == params.d) {
+                Some(hit) => Some(hit.clone()),
+                // Or one of the local sites the page puts first.
+                None => {
+                    place_site(&state, &headers, &query, &options, &results.hits, &params.d).await
+                }
+            },
             Err(_) => {
                 error!("result redirect search failed");
                 None
@@ -1608,6 +1618,31 @@ async fn go(
         }
     }
     redirect(&href)
+}
+
+/// The local site `domain` of the places the results page shows for
+/// `query` above `hits`, if it is one.
+async fn place_site(
+    state: &AppState,
+    headers: &HeaderMap,
+    query: &str,
+    options: &SearchOptions,
+    hits: &[Hit],
+    domain: &str,
+) -> Option<Hit> {
+    let about = match history::Visitor::of(state, headers, None) {
+        Some(visitor) => visitor.about,
+        None => history::browser_about(headers),
+    };
+    let town = about.town();
+    let found = not_a_name(
+        run_places(state, query, town, options.country.as_deref()).await,
+        hits,
+    )?;
+    place_sites(state, &found)
+        .await
+        .into_iter()
+        .find(|hit| hit.domain == domain)
 }
 
 /// `/go?q=&b=&u=`: notes that a link of `block` was opened for the query,
@@ -2228,6 +2263,7 @@ header{display:flex;flex-wrap:wrap;align-items:center;gap:.75rem;\
 padding-bottom:.75rem;border-bottom:1px solid var(--line)}\
 .logo{font-weight:700;font-size:1.25rem;color:var(--fg);text-decoration:none}\
 form{display:flex;gap:.5rem;flex:1;min-width:14rem}\
+form.inline{display:inline-flex;flex:none;min-width:0;vertical-align:middle}\
 input{flex:1;min-width:0;font:inherit;padding:.55rem .8rem;border:1px solid var(--line);\
 border-radius:.5rem;background:var(--bg);color:var(--fg)}\
 button{font:inherit;padding:.55rem 1rem;border:0;border-radius:.5rem;\
@@ -6481,6 +6517,27 @@ mod tests {
             assert!(at("www.westword.com") > 0, "{page}");
             assert!(!page.contains("denverbroncos.com"), "{page}");
         }
+    }
+
+    #[tokio::test]
+    async fn a_local_site_put_first_is_opened_from_its_link() {
+        let node = Arc::new(SharingNode {
+            status: node_status(Phase::Ready, Step::Idle),
+            picks: Mutex::new(Vec::new()),
+        });
+        let app = || node_router(Arc::new(BreweryPlaces), node.clone());
+        let (_, _, page) = send(app(), "/search?q=brewery+in+denver").await;
+        assert!(
+            page.contains("/go?q=brewery+in+denver&amp;d=unknown-ales.example"),
+            "{page}"
+        );
+        let (_, headers, _) = send(app(), "/go?q=brewery+in+denver&d=unknown-ales.example").await;
+        let location = headers.get("location").unwrap().to_str().unwrap();
+        assert!(location.contains("unknown-ales.example"), "{location}");
+        // Not a site of the places, nor of the results: back to them.
+        let (_, headers, _) = send(app(), "/go?q=brewery+in+denver&d=evil.example").await;
+        let location = headers.get("location").unwrap().to_str().unwrap();
+        assert!(location.starts_with("/search?"), "{location}");
     }
 
     #[tokio::test]

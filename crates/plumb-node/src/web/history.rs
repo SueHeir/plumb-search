@@ -620,8 +620,8 @@ impl HistoryView {
              which boxes, like maps, I use</label>\
              <p class=\"hint\">Kept on this node for this browser only, and never sent \
              anywhere. \
-             <a href=\"/history\">See or clear my history</a> \
-             <a href=\"/about\">About you: interests and sites</a> \
+             <a href=\"/history\">See or clear my history</a> &middot; \
+             <a href=\"/about\">About you: interests and sites</a> &middot; \
              <a href=\"/tune\">Tune your search</a></p>",
             checked(self.prefs.show),
             checked(self.prefs.rank),
