@@ -1192,6 +1192,9 @@ struct Inner {
     /// When this node last put an index in service (Unix time; 0 for not
     /// since it started).
     last_build: std::sync::atomic::AtomicU64,
+    /// How long, in seconds, the last index build of the records file took
+    /// (0 for none since it started).
+    last_build_took: std::sync::atomic::AtomicU64,
     /// When this node last looked for sites to drop to get back under its
     /// storage limit (Unix time; 0 for not since it started).
     last_trim: std::sync::atomic::AtomicU64,
@@ -1433,6 +1436,7 @@ impl Inner {
             kept_found: Mutex::new(std::collections::HashMap::new()),
             fill: Mutex::new(fill_state),
             last_build: std::sync::atomic::AtomicU64::new(0),
+            last_build_took: std::sync::atomic::AtomicU64::new(0),
             last_trim: std::sync::atomic::AtomicU64::new(0),
             round_sites: std::sync::atomic::AtomicU64::new(opened.sites),
             over_since: std::sync::atomic::AtomicU64::new(0),
