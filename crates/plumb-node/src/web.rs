@@ -2365,11 +2365,8 @@ fn app_bar_for(active: &str, controls: bool, panel: &str) -> String {
         }
     };
     let controls = if controls {
-        format!(
-            "<a href=\"{panel}\"{}>Status</a><a href=\"{panel}?section=search\"{}>Settings</a>",
-            current("status"),
-            current("settings")
-        )
+        // One link: the panel's Overview section carries the node's status.
+        format!("<a href=\"{panel}\"{}>Settings</a>", current("settings"))
     } else {
         String::new()
     };
@@ -4717,8 +4714,8 @@ mod tests {
         };
         for path in ["/", "/search?q=us+bank"] {
             let (_, _, local) = send_with_headers(app(), path, &[("host", "127.0.0.1:7586")]).await;
-            assert!(local.contains("href=\"/app\""));
-            assert!(local.contains("href=\"/app?section=search\""));
+            assert!(local.contains("href=\"/app\">Settings</a>"));
+            assert!(!local.contains(">Status</a>"));
             for headers in [
                 vec![("host", "plumbsearch.org")],
                 vec![

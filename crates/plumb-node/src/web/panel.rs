@@ -1114,15 +1114,7 @@ pub(super) fn render_panel(view: &PanelView<'_>) -> String {
     };
     let title = sections.iter().find(|(key, _)| *key == section).unwrap().1;
     let site = escape_html(origin);
-    let bar = super::app_bar_for(
-        if section == "overview" {
-            "status"
-        } else {
-            "settings"
-        },
-        true,
-        base,
-    );
+    let bar = super::app_bar_for("settings", true, base);
     let mut body = format!("<div class=\"wrap node-panel\">{bar}<div class=\"node-layout\"><aside class=\"node-sidebar\"><p class=\"eyebrow\">{}</p>{switcher}<nav class=\"node-nav\" aria-label=\"Node settings\">", escape_html(eyebrow));
     for (key, label) in sections.iter().copied() {
         body.push_str(&format!(

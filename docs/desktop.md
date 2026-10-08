@@ -5,8 +5,8 @@ search page. Search results, private search, history and your profile stay
 in the app; result links open in your usual browser. You can also search
 from your browser at `http://127.0.0.1:7586`.
 
-The top navigation has **Search**, **Status** and **Settings**. Status
-opens the node overview. Settings opens its controls, shared with Docker.
+The top navigation has **Search** and **Settings**. Settings opens the
+node's panel, shared with Docker, on its Overview section.
 Ranking scores appear when you choose **Edit these results**, alongside
 the controls that move or hide results for you.
 
