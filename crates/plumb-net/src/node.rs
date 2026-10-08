@@ -115,6 +115,12 @@ pub const CATCH_UP_EPOCHS: u64 = 3;
 pub const RELIST_MINUTES: u64 = 30;
 /// A node dials more nodes it knows of while it has fewer connections.
 pub const TARGET_PEERS: usize = 8;
+/// After first becoming reachable through a relay, a node asks around for
+/// nodes once more this much later: nodes that joined at the same moment
+/// (all of them, after the bootstrap node restarts) are not known to the
+/// relay yet when each first asks, and would otherwise meet only at the
+/// next periodic ask, minutes later.
+const ASK_AGAIN_AFTER: Duration = Duration::from_secs(5);
 /// Minutes between tries at the bootstrap nodes while a node has other
 /// connections but none to them, as after a bootstrap node restarts: they
 /// are the relays that let nodes behind NAT be reached.
@@ -1168,6 +1174,7 @@ pub async fn start(
         bucket_peers: HashMap::new(),
         batch_peers: HashSet::new(),
         relays: HashMap::new(),
+        ask_again_at: None,
         remote_addrs: HashMap::new(),
         circuits: HashMap::new(),
         reserved: HashSet::new(),
@@ -1710,6 +1717,8 @@ struct Task {
     batch_peers: HashSet<PeerId>,
     /// Relays we asked for a reservation, and whether it was granted.
     relays: HashMap<PeerId, bool>,
+    /// When to ask around for nodes again (see [`ASK_AGAIN_AFTER`]).
+    ask_again_at: Option<tokio::time::Instant>,
     /// The address of each connected node, as we reached it or it reached us.
     remote_addrs: HashMap<PeerId, Multiaddr>,
     /// Connected nodes reached through a relay, and that relay.
@@ -1786,6 +1795,7 @@ impl Task {
         maintenance.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut ticks: u64 = 0;
         loop {
+            let ask_again_at = self.ask_again_at;
             tokio::select! {
                 event = self.swarm.select_next_some() => self.on_event(event),
                 command = commands.recv() => match command {
@@ -1796,6 +1806,15 @@ impl Task {
                 _ = maintenance.tick() => {
                     self.maintain(ticks);
                     ticks += 1;
+                }
+                () = async {
+                    match ask_again_at {
+                        Some(at) => tokio::time::sleep_until(at).await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    self.ask_again_at = None;
+                    let _ = self.swarm.behaviour_mut().kad.bootstrap();
                 }
             }
             self.update_status();
@@ -2454,6 +2473,7 @@ impl Task {
                     // Now that others can reach us, ask around for nodes,
                     // which also puts us in their routing tables.
                     let _ = self.swarm.behaviour_mut().kad.bootstrap();
+                    self.ask_again_at = Some(tokio::time::Instant::now() + ASK_AGAIN_AFTER);
                 }
                 self.relays.insert(relay_peer_id, true);
             }

@@ -711,12 +711,15 @@ async fn nodes_send_rounds_of_bucket_requests_without_searching() {
     // third one; A also sends background rounds, often.
     let r = Node::start(true, vec![], vec![crawled_for(&[], "quay")]).await;
     let r_addr = r.addr().await;
-    let h = Node::start(false, vec![r_addr.clone()], vec![]).await;
+    // H and A join at the same moment, as all nodes do after the bootstrap
+    // node restarts: neither is known to R when the other first asks it.
     let dir = tempfile::tempdir().unwrap();
-    let a = Node::start_config(dir, false, vec![r_addr], vec![], false, |c| {
-        c.round_every = Some(Duration::from_millis(300));
-    })
-    .await;
+    let (h, a) = tokio::join!(
+        Node::start(false, vec![r_addr.clone()], vec![]),
+        Node::start_config(dir, false, vec![r_addr], vec![], false, |c| {
+            c.round_every = Some(Duration::from_millis(300));
+        })
+    );
     assert_eq!(a.handle.status().rounds.every_secs, Some(0));
     assert_eq!(h.handle.status().rounds.every_secs, None);
     wait_for(|| (a.handle.status().relaying_peers >= 2).then_some(())).await;
