@@ -96,7 +96,7 @@ pub async fn fetch_site_pages(target: &SitePagesTarget, cfg: &CrawlConfig) -> Si
             return result;
         }
     };
-    let roots: Vec<Url> = target
+    let mut roots: Vec<Url> = target
         .roots
         .iter()
         .filter_map(|root| http_url(root).ok())
@@ -106,17 +106,27 @@ pub async fn fetch_site_pages(target: &SitePagesTarget, cfg: &CrawlConfig) -> Si
         return result;
     }
     let mut visit = Visit::new(&client, &cfg);
-    let wanted = target.max_pages.max(1);
-    let mut found = Found::new(&roots, wanted.saturating_mul(FOUND_FACTOR));
+    let mut indexes = Vec::new();
     for index in &target.index_pages {
         let Ok(url) = http_url(index) else { continue };
         match fetch_list(&mut visit, &cfg, url.clone()).await {
             Ok((at, body)) => {
-                for link in page_links(&at, &String::from_utf8_lossy(&body)) {
-                    found.add(link);
+                // "en/stable/contents/" sends you on to "en/5.2/contents/":
+                // the pages are under "en/5.2/" too.
+                if let Some(root) = moved_root(&url, &at, &roots) {
+                    info!("{}: {url} is now under {root}", target.domain);
+                    roots.push(root);
                 }
+                indexes.push((at, body));
             }
             Err(error) => info!("{}: index page {url}: {error}", target.domain),
+        }
+    }
+    let wanted = target.max_pages.max(1);
+    let mut found = Found::new(&roots, wanted.saturating_mul(FOUND_FACTOR));
+    for (at, body) in &indexes {
+        for link in page_links(at, &String::from_utf8_lossy(body)) {
+            found.add(link);
         }
     }
     let sitemaps = sitemaps_of(&mut visit, target, &roots).await;
@@ -441,6 +451,31 @@ fn html_unescape(value: &str) -> String {
         .replace("&#39;", "'")
 }
 
+/// Where the root that `asked`, a page under one of `roots`, was under has
+/// moved to, when the page sent you on to `at` on the same host with the
+/// same path after the root: "https://docs.a.org/en/5.2/" for
+/// "https://docs.a.org/en/stable/contents/" sending you to
+/// "https://docs.a.org/en/5.2/contents/". `None` when it did not move or
+/// moved somewhere already under the roots.
+fn moved_root(asked: &Url, at: &Url, roots: &[Url]) -> Option<Url> {
+    if at.host_str() != asked.host_str() || under_roots(at, roots) {
+        return None;
+    }
+    let root = roots
+        .iter()
+        .find(|root| under_roots(asked, std::slice::from_ref(root)))?;
+    let rest = &asked.path()[root.path().len()..];
+    let prefix = at.path().strip_suffix(rest)?;
+    if prefix.is_empty() || !prefix.ends_with('/') {
+        return None;
+    }
+    let mut moved = at.clone();
+    moved.set_path(prefix);
+    moved.set_query(None);
+    moved.set_fragment(None);
+    Some(moved)
+}
+
 /// Whether `url` is under one of `roots`: on the same scheme and host, and
 /// its path starts with the root's.
 pub(crate) fn under_roots(url: &Url, roots: &[Url]) -> bool {
@@ -693,6 +728,45 @@ mod tests {
                 "https://docs.a.org/3/fs.html",
                 "https://docs.a.org/3/path.html",
             ]
+        );
+    }
+
+    #[test]
+    fn follows_a_root_that_moved() {
+        let url = |s: &str| Url::parse(s).unwrap();
+        let roots = [url("https://docs.a.org/en/stable/")];
+        assert_eq!(
+            moved_root(
+                &url("https://docs.a.org/en/stable/contents/"),
+                &url("https://docs.a.org/en/5.2/contents/"),
+                &roots
+            ),
+            Some(url("https://docs.a.org/en/5.2/"))
+        );
+        // Not moved, moved to another site, or to another page.
+        assert_eq!(
+            moved_root(
+                &url("https://docs.a.org/en/stable/contents/"),
+                &url("https://docs.a.org/en/stable/contents/"),
+                &roots
+            ),
+            None
+        );
+        assert_eq!(
+            moved_root(
+                &url("https://docs.a.org/en/stable/contents/"),
+                &url("https://b.org/en/5.2/contents/"),
+                &roots
+            ),
+            None
+        );
+        assert_eq!(
+            moved_root(
+                &url("https://docs.a.org/en/stable/contents/"),
+                &url("https://docs.a.org/en/5.2/"),
+                &roots
+            ),
+            None
         );
     }
 

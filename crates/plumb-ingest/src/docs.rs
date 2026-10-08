@@ -177,19 +177,37 @@ fn aliases(site: &DocsSite, title: &str) -> Vec<String> {
 }
 
 /// How deep `url` is under the deepest of `site`'s roots it is under: the
-/// path segments after the root's, at least 1. `None` when it is under
-/// none of them.
+/// path segments after the root's, at least 1. A page on a root's host but
+/// under none of them (a root sent on to another version: "docs/2.9/" for
+/// "docs/stable/") is as deep as its whole path. `None` for a page on
+/// another host.
 fn depth_under(site: &DocsSite, url: &str) -> Option<usize> {
     let segments = |path: &str| path.split('/').filter(|s| !s.is_empty()).count();
-    site.roots
+    let under = site
+        .roots
         .iter()
         .filter(|root| url.starts_with(*root) || url.starts_with(root.trim_end_matches('/')))
         .map(|root| {
             let rest = &url[root.trim_end_matches('/').len()..];
             segments(rest.split(['?', '#']).next().unwrap_or(""))
         })
-        .min()
-        .map(|depth| depth.max(1))
+        .min();
+    let depth = match under {
+        Some(depth) => depth,
+        None => {
+            let host = plumb_core::host_of(url)?;
+            if !site
+                .roots
+                .iter()
+                .any(|root| plumb_core::host_of(root).as_deref() == Some(host.as_str()))
+            {
+                return None;
+            }
+            let path = url::Url::parse(url).ok()?.path().to_string();
+            segments(&path)
+        }
+    };
+    Some(depth.max(1))
 }
 
 /// Sorts `articles` most viewed first, keeping each address once.
@@ -270,6 +288,19 @@ mod tests {
         )
         .is_none());
         assert!(doc_article(python, &doc("https://python.org/x", "X", None)).is_none());
+        // A root sent on to another version.
+        let pytorch = site("pytorch").unwrap();
+        let linear = doc_article(
+            pytorch,
+            &doc(
+                "https://docs.pytorch.org/docs/2.9/generated/torch.nn.Linear.html",
+                "Linear — PyTorch 2.9 documentation",
+                Some("Applies an affine linear transformation."),
+            ),
+        )
+        .unwrap();
+        assert_eq!(linear.title, "Linear");
+        assert_eq!(linear.views, pytorch.weight * VIEWS_PER_WEIGHT / 4);
         let arch = site("archwiki").unwrap();
         assert!(doc_article(
             arch,
