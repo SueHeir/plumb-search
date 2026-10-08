@@ -386,7 +386,7 @@ pub(crate) fn label_text(domain: &str) -> String {
 /// The parts of a homepage title between separators, at most
 /// [`MAX_TITLE_PARTS`]: `U.S. Bank | Personal Banking` -> `U.S. Bank`,
 /// `Personal Banking`. A title without separators is its only part.
-pub(crate) fn title_parts(title: &str) -> Vec<&str> {
+fn title_parts(title: &str) -> Vec<&str> {
     title
         .split(TITLE_SEPARATORS)
         .flat_map(|part| part.split(" - "))
