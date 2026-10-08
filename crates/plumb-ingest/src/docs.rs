@@ -181,6 +181,33 @@ fn aliases(site: &DocsSite, title: &str) -> Vec<String> {
         aliases.insert(0, format!("{} {rest}", &first[..product.len()]));
     }
     let lower = first.to_lowercase();
+    // "torch.Tensor" is PyTorch's "Tensor"; "std::vector" C++'s "vector".
+    for word in site.asked_by {
+        let prefix = if word.ends_with("::") {
+            word.to_string()
+        } else {
+            format!("{word}.")
+        };
+        if lower.starts_with(&prefix) && first.len() > prefix.len() {
+            let at = aliases.len().min(1);
+            aliases.insert(at, format!("{} {}", site.product, &first[prefix.len()..]));
+            break;
+        }
+    }
+    // A product spelled with signs is also asked for in letters: "cpp
+    // std::vector" for C++'s "std::vector".
+    if site
+        .product
+        .chars()
+        .any(|c| !c.is_alphanumeric() && c != ' ')
+    {
+        if let Some(word) = site.asked_by.iter().find(|word| {
+            word.chars().all(|c| c.is_ascii_alphanumeric()) && word.to_lowercase() != product
+        }) {
+            let at = aliases.len().min(1);
+            aliases.insert(at, format!("{word} {first}"));
+        }
+    }
     aliases.retain(|alias| alias.to_lowercase() != lower);
     aliases.dedup();
     aliases.truncate(MAX_ALIASES);
@@ -311,6 +338,35 @@ mod tests {
         .unwrap();
         assert_eq!(rebase.title, "git-rebase");
         assert_eq!(rebase.aliases[0], "git rebase");
+        let cpp = site("cpp").unwrap();
+        let vector = doc_article(
+            cpp,
+            &doc(
+                "https://en.cppreference.com/cpp/container/vector",
+                "std::vector - cppreference.com",
+                None,
+            ),
+        )
+        .unwrap();
+        assert_eq!(vector.title, "std::vector");
+        assert_eq!(
+            vector.aliases[..3],
+            ["C++ std::vector", "cpp std::vector", "C++ vector"]
+        );
+        let pytorch = site("pytorch").unwrap();
+        let tensor = doc_article(
+            pytorch,
+            &doc(
+                "https://docs.pytorch.org/docs/stable/tensors.html",
+                "torch.Tensor — PyTorch 2.9 documentation",
+                None,
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            tensor.aliases[..2],
+            ["PyTorch torch.Tensor", "PyTorch Tensor"]
+        );
         // A root sent on to another version.
         let pytorch = site("pytorch").unwrap();
         let linear = doc_article(
