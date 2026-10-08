@@ -154,6 +154,7 @@ Downloads are on [GitHub Releases](https://github.com/SueHeir/plumb-search/relea
 
 ### Crawling
 
+- Less boilerplate in homepage text: crawlers read a homepage's text a block at a time and leave out what the T5 authors' rules for cleaning C4 (Google's "Exploring the Limits of Transfer Learning") would: cookie and policy notices, copyright lines, "enable JavaScript" warnings, code, menus made of links in plain `<div>`s, and buttons, labels and dates under five words ("Learn more", "3 min read") unless the page has nothing longer. A block repeated on the page is kept once. The text left is what gets indexed and embedded. The crawl version goes up to 2, so nodes read the best-known sites anew first.
 - New sites are held back: crawls refresh the sites a node holds and no longer add the domains they find linked, and records other nodes share only refresh sites already held, while the network makes the sites it has searchable first. Filling free space from trusted nodes, the seed and searches still add sites the network knows. `plumb run --take-new-sites` adds new sites as before.
 - Each crawl round first fetches up to 500 well-known or official sites that no crawl has reached yet, whether or not they are in the node's share, so sites like weather.com and state.gov are read sooner. They come out of the round's usual budget.
 - Words from the whole homepage: each crawl picks the 30 words that best describe a site from up to 1,000 words of its homepage, and searches match them, so "team chat" can find a site whose homepage says so but whose name does not.

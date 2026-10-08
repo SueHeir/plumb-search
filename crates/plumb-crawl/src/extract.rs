@@ -168,6 +168,11 @@ const WORD_BREAK_ELEMENTS: &[&str] = &[
 ///   and is read the way it shows on screen: script and style contents are
 ///   skipped, and block elements separate words, so
 ///   `<div>Acme</div><div>Bank</div>` gives `acme bank`.
+/// - The visible text is read a block at a time (the text between two
+///   elements that start a new line on screen), and blocks that are
+///   boilerplate are left out (`boilerplate.rs`): notices, menus of links,
+///   and blocks of fewer than five words unless the page has nothing
+///   longer. A block repeated on the page is kept once.
 /// - The search terms ([`PageMeta::terms`]) are picked from the title,
 ///   description, headings and page text with [`pick_terms`].
 pub fn extract_page_meta(base_url: &Url, html: &str) -> PageMeta {
