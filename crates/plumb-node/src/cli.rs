@@ -84,6 +84,10 @@ pub enum Command {
     /// to each other (a PageRank of our own crawls), without changing
     /// anything. A look at the link graph; nothing uses the ranks yet.
     LinkRank(LinkRankArgs),
+    /// Learn each kind of Wikidata fact (capital, founder, CEO...) as a
+    /// map between the vectors of Wikipedia articles, and measure how well
+    /// the maps find facts they were not shown (an experiment).
+    Relations(crate::relations::RelationsArgs),
     /// How much of a records file the best sites take (by link score), by
     /// kind and at 100k, 250k, 500k... sites, and optionally a copy cut
     /// down to the best of them. The records file is left as it is.

@@ -58,6 +58,7 @@ mod link_rank;
 pub mod news;
 mod outline;
 mod records;
+mod relations;
 mod run;
 mod search;
 mod terms;
@@ -117,6 +118,7 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::Storage(args) => storage::run(args),
         Command::DeadSites(args) => dead::run(&args),
         Command::LinkRank(args) => link_rank::run(&args),
+        Command::Relations(args) => relations::run(&args),
         Command::TopSites(args) => top_sites::run(&args),
         Command::Mcp(args) => mcp::run(args),
         Command::TryPlugin(args) => plugins::try_plugin(
