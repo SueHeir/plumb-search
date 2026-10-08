@@ -1942,6 +1942,11 @@ async fn crawling_waits_for_the_next_day_once_the_download_limit_is_reached() {
     node.inner.recount_disk();
     assert!(node.inner.pause().is_some());
     assert!(node.inner.download_pause().is_none());
+    // The status says so from that count, without counting again.
+    assert_eq!(
+        node.inner.status().paused.as_deref(),
+        Some("Paused: the storage limit is reached")
+    );
     node.shutdown().await.unwrap();
 }
 

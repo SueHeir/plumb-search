@@ -1476,7 +1476,7 @@ impl Inner {
         let activity = self.activity().clone();
         let saved = self.saved();
         let index = self.current_summary();
-        let pause = self.pause();
+        let pause = self.pause_shown();
         Status {
             phase: if index.is_some() {
                 Phase::Ready
@@ -1527,9 +1527,21 @@ impl Inner {
 
     /// Why crawls and refreshes must wait now, and until when, if they must.
     fn pause(&self) -> Option<Pause> {
+        self.pause_given(|| self.disk_used())
+    }
+
+    /// [`Inner::pause`] by the last count of the data folder, for showing:
+    /// counting a large folder again takes many seconds on a busy server,
+    /// and every search asks for the status.
+    fn pause_shown(&self) -> Option<Pause> {
+        self.pause_given(|| self.disk_used_shown())
+    }
+
+    /// [`Inner::pause`], with `disk_used` the size of the data folder.
+    fn pause_given(&self, disk_used: impl FnOnce() -> u64) -> Option<Pause> {
         self.download_pause().or_else(|| {
             let limit = self.settings().storage_limit_mb;
-            (limit > 0 && self.disk_used() >= limit.saturating_mul(MB))
+            (limit > 0 && disk_used() >= limit.saturating_mul(MB))
                 .then(|| Pause::new("Paused: the storage limit is reached", None))
         })
     }
