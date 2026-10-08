@@ -1969,6 +1969,12 @@ impl SearchBackend for Inner {
             .hits)
     }
 
+    fn complete(&self, query: &str, limit: usize) -> Vec<String> {
+        self.current()
+            .map(|index| index.backend().complete(query, limit))
+            .unwrap_or_default()
+    }
+
     /// The index's results, re-ranked with what the network's popularity
     /// reports say people pick for the query (see [`network`]).
     fn search_full(

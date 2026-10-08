@@ -107,6 +107,7 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::Crawl(args) => crawl::run(args),
         Command::Index(args) => search::run_index(args),
         Command::Search(args) => search::run_search(args),
+        Command::Spelling(args) => search::run_spelling(&args),
         Command::Serve(args) => web::run(args),
         Command::Eval(args) => eval::run(args),
         Command::CheckLabels(args) => eval_labels::run(args),

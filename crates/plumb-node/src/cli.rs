@@ -53,6 +53,9 @@ pub enum Command {
     Index(IndexArgs),
     /// Search the index from the command line.
     Search(SearchArgs),
+    /// Show what an index's spelling model learned from its words: the
+    /// commonest slips, how likely given typos are, and completions.
+    Spelling(SpellingArgs),
     /// Serve the search page and a JSON API over HTTP.
     Serve(ServeArgs),
     /// Check how often the official site ranks first for a list of queries.
@@ -911,6 +914,23 @@ pub struct IndexArgs {
 }
 
 #[derive(Debug, Args)]
+pub struct SpellingArgs {
+    /// Index directory.
+    #[arg(long, value_name = "DIR")]
+    pub index: PathBuf,
+    /// How many of the learned slips to list, likeliest first.
+    #[arg(long, value_name = "N", default_value_t = 40)]
+    pub rules: usize,
+    /// A typo and the word meant, as `typed:meant` (`amtrack:amtrak`): how
+    /// likely the slip is and how common each word is. May be repeated.
+    #[arg(long, value_name = "TYPED:MEANT")]
+    pub pair: Vec<String>,
+    /// A half-typed query to complete. May be repeated.
+    #[arg(long, value_name = "TEXT")]
+    pub complete: Vec<String>,
+}
+
+#[derive(Debug, Args)]
 pub struct SearchArgs {
     /// Index directory.
     #[arg(long, value_name = "DIR")]
@@ -1051,6 +1071,11 @@ pub struct EvalArgs {
     /// (eval/typo_queries.tsv).
     #[arg(long)]
     pub follow_suggestions: bool,
+    /// Print every "Did you mean" suggestion a query gets, to see how many
+    /// right spellings get one (eval/brand_queries.tsv) and what typos are
+    /// taken for.
+    #[arg(long, conflicts_with = "exact")]
+    pub show_suggestions: bool,
     /// Ranking knobs to change, as JSON, e.g. '{"exact_label_bonus": 0.1}'.
     /// The other knobs keep their defaults; --alpha wins over an alpha here.
     #[arg(long, value_name = "JSON", value_parser = parse_rank_config)]

@@ -68,6 +68,7 @@ pub mod places;
 mod replace;
 mod schema;
 mod spell;
+pub mod spell_model;
 
 use std::borrow::Borrow;
 use std::collections::hash_map::Entry;
@@ -352,6 +353,19 @@ pub struct RankConfig {
     /// Put the first results in the order the learned ranking gives
     /// ([`learned::reorder`]), once pages are placed among the sites.
     pub learned: bool,
+    /// Rank typo corrections by the spelling model learned from the
+    /// index's words ([`spell_model`]): what the edits cost against how
+    /// common the correction is. Without it, or without a model, fewest
+    /// edits win, then popularity.
+    pub spelling_channel: bool,
+    /// Correct a word the index knows when the spelling model takes it for
+    /// a slip of a far commoner word ("amtrack"), weighing how much
+    /// commoner by this power. `None` never corrects a known word alone.
+    pub real_word_weight: Option<f32>,
+    /// Correct a word of a longer query when the word-pair model makes
+    /// another word far likelier there ("capitol one"), weighing the
+    /// word-pair scores by this power. `None` leaves such words.
+    pub context_weight: Option<f32>,
 }
 
 impl Default for RankConfig {
@@ -380,6 +394,9 @@ impl Default for RankConfig {
             add_named_site: true,
             drop_namesakes: false,
             learned: true,
+            spelling_channel: true,
+            real_word_weight: None,
+            context_weight: None,
         }
     }
 }
@@ -590,6 +607,7 @@ pub struct IndexBuild {
     index: Index,
     writer: IndexWriter,
     fields: Fields,
+    spelling: spell_model::ModelBuilder,
 }
 
 impl IndexBuild {
@@ -611,6 +629,7 @@ impl IndexBuild {
             index,
             writer,
             fields,
+            spelling: spell_model::ModelBuilder::new(analysis::words_analyzer()),
         })
     }
 
@@ -620,6 +639,11 @@ impl IndexBuild {
     pub fn add(&mut self, site: &SiteRecord, redirect_names: &[String]) -> Result<()> {
         self.writer
             .add_document(schema::document(&self.fields, site, redirect_names))?;
+        // Adult sites' words are never offered as completions.
+        if plumb_core::record_adult_level(site) == AdultLevel::None {
+            let texts = schema::spelling_texts(site, redirect_names);
+            self.spelling.add(texts.iter().map(String::as_str));
+        }
         Ok(())
     }
 
@@ -639,6 +663,13 @@ impl IndexBuild {
         self.writer
             .wait_merging_threads()
             .context("finishing index merges")?;
+        // The spelling model learns from the words just indexed.
+        let reader = self.index.reader().context("reading the new index")?;
+        let model = self
+            .spelling
+            .finish(&reader.searcher(), &spell::word_fields(&self.fields))?;
+        drop(reader);
+        model.save(&self.staging.path().join(spell_model::MODEL_FILE))?;
         self.staging.install()
     }
 }
@@ -821,6 +852,9 @@ pub struct Searcher {
     fields: Fields,
     words: TextAnalyzer,
     joined: TextAnalyzer,
+    /// What the index's words teach about spelling; `None` for an index
+    /// built before it was kept ([`spell_model`]).
+    spelling: Option<spell_model::Model>,
 }
 
 impl Searcher {
@@ -847,7 +881,40 @@ impl Searcher {
             fields,
             words: analysis::words_analyzer(),
             joined: analysis::joined_analyzer(),
+            spelling: spell_model::Model::open(dir),
         })
+    }
+
+    /// The spelling model learned from the index's words, if the index
+    /// has one ([`spell_model`]).
+    pub fn spelling_model(&self) -> Option<&spell_model::Model> {
+        self.spelling.as_ref()
+    }
+
+    /// In how many sites `word` (a normalized word) is found, counting a
+    /// site once for each of the fields typo correction reads: how known a
+    /// word is to it.
+    pub fn word_sites(&self, word: &str) -> u64 {
+        let searcher = self.reader.searcher();
+        spell::word_fields(&self.fields)
+            .into_iter()
+            .map(|field| {
+                searcher
+                    .doc_freq(&Term::from_field_text(field, word))
+                    .unwrap_or(0)
+            })
+            .sum()
+    }
+
+    /// Up to `limit` ways the half-typed query `text` likely goes on, most
+    /// likely first, from the words the sites are called by
+    /// ([`spell_model::Model::complete`]). None for an index without a
+    /// spelling model.
+    pub fn complete(&self, text: &str, limit: usize) -> Vec<String> {
+        self.spelling
+            .as_ref()
+            .map(|model| model.complete(&self.words, text, limit))
+            .unwrap_or_default()
     }
 
     /// Number of documents (sites) in the index.
@@ -1080,10 +1147,17 @@ impl Searcher {
         } else {
             named.words
         };
+        let tuning = spell::Tuning {
+            channel: cfg.spelling_channel,
+            real_word_weight: cfg.real_word_weight,
+            context_weight: cfg.context_weight,
+        };
         let Some(fix) = spell::correct(
             &searcher,
             &self.fields,
             &self.words,
+            self.spelling.as_ref(),
+            tuning,
             query_text,
             named_words,
             &link_score,
@@ -6335,6 +6409,135 @@ mod tests {
             ));
         }
         records
+    }
+
+    /// Sites whose titles teach the spelling model: "amtrak" in many,
+    /// "amtrack" in some (enough to be a known word), "canon" and "grand
+    /// canyon" each in some, and a few slips of other words.
+    fn spelling_corpus() -> Vec<SiteRecord> {
+        let mut records = typo_corpus();
+        records.push(site(
+            "amtrak.com",
+            Some("Amtrak"),
+            None,
+            &["Amtrak"],
+            &[],
+            popular(700, 15_000),
+        ));
+        let titles = [
+            ("Amtrak station", 450),
+            ("Amtrack fan page", 20),
+            ("Grand Canyon tours", 25),
+            ("Canon camera repair", 25),
+            ("Grand hotel", 25),
+            ("Hockey club", 30),
+            ("Hocky club", 2),
+        ];
+        let mut n = 0;
+        for (title, count) in titles {
+            for i in 0..count {
+                n += 1;
+                records.push(site(
+                    &format!("spelling{n}.com"),
+                    Some(&format!("{title} {i}")),
+                    None,
+                    &[],
+                    &[],
+                    obscure(5_000_000 + n, 5),
+                ));
+            }
+        }
+        records
+    }
+
+    fn spelled_with(searcher: &Searcher, query: &str, cfg: &RankConfig) -> Option<String> {
+        searcher
+            .search_full(query, 10, cfg, &SearchOptions::default())
+            .unwrap()
+            .spelling
+            .map(|s| s.query)
+    }
+
+    #[test]
+    fn indexes_learn_spelling_from_their_words() {
+        let (_dir, searcher) = build(&spelling_corpus());
+        let model = searcher.spelling_model().expect("a spelling model");
+        assert!(model.count("amtrak") >= 450);
+        assert!(model.count("amtrack") >= 20);
+        // "amtrack" is ten times rarer than "amtrak", one edit away, so a
+        // `k` typed `ck` is a learned slip; so is a dropped `e`.
+        let learned = model.ln_channel("amtrack", "amtrak");
+        let unseen = model.ln_channel("amtrxk", "amtrak");
+        assert!(learned > unseen, "{learned} > {unseen}");
+        assert!(model.ln_channel("hocky", "hockey") > model.ln_channel("hockqy", "hockey"));
+        assert!(model.ln_score(Some("grand"), "canyon") > model.ln_score(Some("grand"), "canon"));
+    }
+
+    #[test]
+    fn half_typed_queries_are_completed() {
+        let (_dir, searcher) = build(&spelling_corpus());
+        let completed = searcher.complete("amt", 5);
+        assert_eq!(
+            completed.first().map(String::as_str),
+            Some("amtrak station")
+        );
+        assert!(
+            completed.iter().any(|c| c == "amtrack fan"),
+            "{completed:?}"
+        );
+        // The word that follows "grand" comes first, then common words.
+        let completed = searcher.complete("grand c", 5);
+        assert_eq!(
+            completed.first().map(String::as_str),
+            Some("grand canyon tours")
+        );
+        assert!(searcher
+            .complete("grand ", 5)
+            .contains(&"grand canyon tours".to_string()));
+        assert!(searcher.complete("", 5).is_empty());
+        assert!(searcher.complete("zzzz", 5).is_empty());
+    }
+
+    #[test]
+    fn known_words_are_corrected_only_when_trusted_to() {
+        let (_dir, searcher) = build(&spelling_corpus());
+        // "amtrack" is found in 20 sites: a known word, left alone by
+        // default.
+        assert_eq!(
+            spelled_with(&searcher, "amtrack", &RankConfig::default()),
+            None
+        );
+        let trusting = RankConfig {
+            real_word_weight: Some(2.0),
+            ..RankConfig::default()
+        };
+        assert_eq!(
+            spelled_with(&searcher, "amtrack", &trusting).as_deref(),
+            Some("amtrak")
+        );
+        // Words commoner than anything near them stay.
+        assert_eq!(spelled_with(&searcher, "pizza", &trusting), None);
+        assert_eq!(spelled_with(&searcher, "canon", &trusting), None);
+    }
+
+    #[test]
+    fn words_around_a_word_can_show_it_is_a_slip() {
+        let (_dir, searcher) = build(&spelling_corpus());
+        assert_eq!(
+            spelled_with(&searcher, "grand canon", &RankConfig::default()),
+            None
+        );
+        let trusting = RankConfig {
+            context_weight: Some(10.0),
+            ..RankConfig::default()
+        };
+        assert_eq!(
+            spelled_with(&searcher, "grand canon", &trusting).as_deref(),
+            Some("grand canyon")
+        );
+        // Alone, "canon" is a word like any other.
+        assert_eq!(spelled_with(&searcher, "canon", &trusting), None);
+        assert_eq!(spelled_with(&searcher, "canon camera", &trusting), None);
     }
 
     fn search_spelled(searcher: &Searcher, query: &str) -> SearchResults {

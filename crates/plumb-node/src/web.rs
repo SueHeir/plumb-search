@@ -13,7 +13,12 @@
 //!   [`crate::mcp`]),
 //! - `GET /opensearch.xml` describes the search engine to browsers
 //!   (OpenSearch 1.1), so that they can offer to add it; every page links to
-//!   it.
+//!   it,
+//! - `GET /complete?q=` returns how a half-typed query likely goes on, as
+//!   OpenSearch suggestions (`["amaz", ["amazon", ...]]`), which a browser
+//!   that added Plumb shows under its address bar. They come from the
+//!   index's own words ([`Searcher::complete`]), never from what anyone
+//!   searched.
 //!
 //! A long-running node (`plumb run`, see [`crate::node`]) serves the same
 //! pages through [`node_router`], plus `GET /api/status`, which returns the
@@ -134,6 +139,12 @@ const NET_PER_MINUTE: f64 = 20.0;
 
 /// The media type of an OpenSearch description.
 const OPENSEARCH_TYPE: &str = "application/opensearchdescription+xml";
+/// The media type of OpenSearch suggestions.
+const SUGGESTIONS_TYPE: &str = "application/x-suggestions+json";
+/// Most completions `/complete` gives.
+const MAX_COMPLETIONS: usize = 8;
+/// Longest query `/complete` completes, in characters.
+const MAX_COMPLETED_CHARS: usize = 200;
 
 /// In the `<head>` of every page, so that browsers offer to add Plumb as a
 /// search engine.
@@ -239,6 +250,13 @@ pub trait SearchBackend: Send + Sync {
     fn base_map(&self) -> Option<Arc<crate::map::BaseMap>> {
         None
     }
+
+    /// Up to `limit` ways the half-typed `query` likely goes on, from the
+    /// index's words ([`Searcher::complete`]). By default there are none.
+    fn complete(&self, query: &str, limit: usize) -> Vec<String> {
+        let _ = (query, limit);
+        Vec::new()
+    }
 }
 
 /// A [`Searcher`] with fixed ranking settings.
@@ -315,6 +333,10 @@ impl IndexBackend {
 impl SearchBackend for IndexBackend {
     fn search(&self, query: &str, limit: usize) -> Result<Vec<Hit>> {
         self.searcher.search_with(query, limit, &self.rank)
+    }
+
+    fn complete(&self, query: &str, limit: usize) -> Vec<String> {
+        self.searcher.complete(query, limit)
     }
 
     fn search_full(
@@ -680,7 +702,8 @@ fn app(state: AppState) -> Router {
         .route("/search", get(search_page))
         .route("/api/search", get(api_search))
         .route("/api/websearch", post(searxng::external))
-        .route("/opensearch.xml", get(opensearch));
+        .route("/opensearch.xml", get(opensearch))
+        .route("/complete", get(complete));
     router = mcp::routes(router);
     router = plugins::routes(router);
     if state.node.is_some() {
@@ -1992,6 +2015,39 @@ async fn opensearch(headers: HeaderMap, uri: Uri) -> Response {
         .into_response()
 }
 
+#[derive(Deserialize)]
+struct CompleteParams {
+    #[serde(default)]
+    q: String,
+}
+
+/// `GET /complete?q=`: up to [`MAX_COMPLETIONS`] ways the half-typed query
+/// likely goes on, as OpenSearch suggestions: `["amaz", ["amazon",
+/// ...]]`. Empty while a node sets up, and for an index without a
+/// spelling model.
+async fn complete(State(state): State<AppState>, Query(params): Query<CompleteParams>) -> Response {
+    let query = params.q;
+    let completions = if state.setting_up().is_some()
+        || query.trim().is_empty()
+        || query.chars().count() > MAX_COMPLETED_CHARS
+    {
+        Vec::new()
+    } else {
+        let backend = Arc::clone(&state.backend);
+        let typed = query.clone();
+        tokio::task::spawn_blocking(move || backend.complete(&typed, MAX_COMPLETIONS))
+            .await
+            .unwrap_or_default()
+    };
+    (
+        StatusCode::OK,
+        security_headers(),
+        [(header::CONTENT_TYPE, SUGGESTIONS_TYPE)],
+        serde_json::json!([query, completions]).to_string(),
+    )
+        .into_response()
+}
+
 /// The origin a request was sent to, such as `http://127.0.0.1:7586`: the
 /// `Host` header (or, without one, the request's authority, as in HTTP/2),
 /// with `https` when a proxy in front says so in `X-Forwarded-Proto`. `None`
@@ -2027,7 +2083,8 @@ fn render_opensearch(origin: &str) -> String {
          <InputEncoding>UTF-8</InputEncoding>\n\
          <Image width=\"32\" height=\"32\" type=\"image/png\">\
          data:image/png;base64,{ICON_PNG_BASE64}</Image>\n\
-         <Url type=\"text/html\" method=\"get\" template=\"{}/search?q={{searchTerms}}\"/>\n\
+         <Url type=\"text/html\" method=\"get\" template=\"{0}/search?q={{searchTerms}}\"/>\n\
+         <Url type=\"{SUGGESTIONS_TYPE}\" method=\"get\" template=\"{0}/complete?q={{searchTerms}}\"/>\n\
          </OpenSearchDescription>\n",
         escape_html(origin)
     )
@@ -5316,6 +5373,63 @@ mod tests {
             ),
             "{body}"
         );
+    }
+
+    #[test]
+    fn the_opensearch_description_offers_completions() {
+        let body = render_opensearch("http://127.0.0.1:7586");
+        assert!(
+            body.contains(
+                "<Url type=\"application/x-suggestions+json\" method=\"get\" \
+                 template=\"http://127.0.0.1:7586/complete?q={searchTerms}\"/>"
+            ),
+            "{body}"
+        );
+    }
+
+    /// Completes any query with two canned endings, and remembers what it
+    /// was asked.
+    #[derive(Default)]
+    struct CompletingBackend {
+        asked: Mutex<Vec<(String, usize)>>,
+    }
+
+    impl SearchBackend for CompletingBackend {
+        fn search(&self, _query: &str, _limit: usize) -> Result<Vec<Hit>> {
+            Ok(Vec::new())
+        }
+
+        fn num_docs(&self) -> u64 {
+            1
+        }
+
+        fn complete(&self, query: &str, limit: usize) -> Vec<String> {
+            self.asked.lock().unwrap().push((query.to_string(), limit));
+            vec![format!("{query}on"), format!("{query}on prime")]
+        }
+    }
+
+    #[tokio::test]
+    async fn half_typed_queries_get_opensearch_suggestions() {
+        let backend = Arc::new(CompletingBackend::default());
+        let (code, headers, body) = send(router(backend.clone()), "/complete?q=amaz").await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(
+            headers.get(header::CONTENT_TYPE).unwrap(),
+            "application/x-suggestions+json"
+        );
+        assert_eq!(body, r#"["amaz",["amazon","amazon prime"]]"#);
+        assert_eq!(
+            *backend.asked.lock().unwrap(),
+            [("amaz".to_string(), MAX_COMPLETIONS)]
+        );
+        // Nothing typed, or far too much, is not completed.
+        let (_, _, body) = send(router(backend.clone()), "/complete?q=").await;
+        assert_eq!(body, r#"["",[]]"#);
+        let long = "a".repeat(MAX_COMPLETED_CHARS + 1);
+        let (_, _, body) = send(router(backend.clone()), &format!("/complete?q={long}")).await;
+        assert_eq!(body, format!(r#"["{long}",[]]"#));
+        assert_eq!(backend.asked.lock().unwrap().len(), 1);
     }
 
     /// Answers with one hit and a site search link, and remembers the options.

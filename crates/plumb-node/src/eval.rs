@@ -379,6 +379,11 @@ fn evaluate(
             results.map(|results| (results, query_meaning))
         };
         let (mut results, mut query_meaning) = search(&q.query)?;
+        if verbose && args.show_suggestions {
+            if let Some(spelling) = &results.spelling {
+                println!("suggests: {:?} -> {:?}", q.query, spelling.query);
+            }
+        }
         // What one click on "Did you mean" finds.
         let mut searched = q.query.clone();
         if args.follow_suggestions {

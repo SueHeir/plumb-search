@@ -181,8 +181,8 @@ pub fn record_adult_level(record: &SiteRecord) -> AdultLevel {
     adult_level(&record.domain, texts)
 }
 
-/// [`adult_level`] of a text alone.
-fn text_level(text: &str) -> AdultLevel {
+/// [`adult_level`] of a text alone, such as a query.
+pub fn text_level(text: &str) -> AdultLevel {
     let mut level = AdultLevel::None;
     for word in normalize_text(text).split(' ') {
         if EXPLICIT_WORDS.contains(&word) {
