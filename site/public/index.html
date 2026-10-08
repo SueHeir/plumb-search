@@ -22,9 +22,8 @@
 
 <main>
   <section class="hero">
-    <p class="eyebrow">A search engine of your own</p>
-    <h1>A little more<br>independent.</h1>
-    <p class="lede">Find sites, articles, places and more. Search here, or bring Plumb to your computer and make the index your own.</p>
+    <h1>Plumb Search</h1>
+    <p class="lede">A free, open-source search engine for sites, articles, places and more. Search here, or run it on your own computer so your searches stay with you.</p>
     <form class="try" action="/search" method="get" role="search">
       <label for="q" class="visually-hidden">Search sites, articles, places and more</label>
       <input id="q" name="q" type="search" placeholder="Search sites, articles, places and more" autocomplete="off" required>
@@ -33,18 +32,18 @@
     <p class="note">This box searches the Plumb node on this server.<span id="storage" hidden> It answers from <strong id="storage-used"></strong> of search data<span id="storage-limit"></span>.</span></p>
     <div class="actions">
       <a class="button primary" href="#get">Get the desktop app</a>
-      <a class="button" href="#ai">Use with your AI</a>
+      <a class="button" href="#ai">Use with AI apps</a>
     </div>
     <p class="principles">Open source<span aria-hidden="true">·</span>No ads<span aria-hidden="true">·</span>Your own index</p>
   </section>
 
   <section id="features" class="discover">
-    <div class="section-heading"><p class="eyebrow">More to discover</p><h2>One search, many kinds of answers.</h2></div>
+    <div class="section-heading"><h2>What it finds</h2></div>
     <div class="discovery-grid">
-      <article><span class="feature-label">The web</span><h3>Find the official site.</h3><p>Site names, sitelinks and a ranking model that puts the real destination first.</p><a href="/search?q=rust+programming">Try Rust programming →</a></article>
-      <article><span class="feature-label">Open knowledge</span><h3>Follow your curiosity.</h3><p>Wikipedia, books, papers, music, films and podcasts alongside web results.</p><a href="/search?q=albert+einstein">Try Albert Einstein →</a></article>
-      <article><span class="feature-label">Code &amp; docs</span><h3>Get back to building.</h3><p>Software packages, documentation, GitHub projects and Stack Exchange questions.</p><a href="/search?q=sort+a+list+in+python">Try a Python question →</a></article>
-      <article><span class="feature-label">Everyday answers</span><h3>A little closer to home.</h3><p>Places and maps, recent headlines, calculations, conversions and sourced facts.</p><a href="/search?q=coffee+in+denver">Try coffee in Denver →</a></article>
+      <article><h3>Websites</h3><p>Site names, sitelinks and a learned ranking model that tries to put the official site first.</p><a href="/search?q=rust+programming">Try Rust programming →</a></article>
+      <article><h3>Reference</h3><p>Wikipedia, books, papers, music, films and podcasts alongside web results.</p><a href="/search?q=albert+einstein">Try Albert Einstein →</a></article>
+      <article><h3>Code and docs</h3><p>Software packages, documentation, GitHub projects and Stack Exchange questions.</p><a href="/search?q=sort+a+list+in+python">Try a Python question →</a></article>
+      <article><h3>Everyday answers</h3><p>Places and maps, recent headlines, calculations, conversions and sourced facts.</p><a href="/search?q=coffee+in+denver">Try coffee in Denver →</a></article>
     </div>
   </section>
 
@@ -82,13 +81,13 @@
     <h2>Get Plumb</h2>
     <div class="cards">
       <article>
-        <span class="feature-label">Your computer</span><h3>Desktop app</h3>
+        <h3>Desktop app</h3>
         <p>For Windows, macOS (Apple silicon and Intel) and Linux (.deb, .rpm and AppImage). It shows the search page in its own window and opens results in your usual browser.</p>
         <p><a class="button primary" href="https://github.com/SueHeir/plumb-search/releases/latest">Download the latest release</a></p>
         <p class="small">The installers aren't code-signed yet, so your computer will warn you the first time you open the app.</p>
       </article>
       <article>
-        <span class="feature-label">Your infrastructure</span><h3>Server or homelab</h3>
+        <h3>Server or homelab</h3>
         <p>One container for Linux on x86 or ARM, including a 64-bit Raspberry Pi. The search page is on port 8080, and port 4001 is for the Plumb network.</p>
 <pre><code>docker run -d --name plumb --init \
   --restart unless-stopped --stop-timeout 300 \

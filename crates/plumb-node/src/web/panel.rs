@@ -1298,7 +1298,7 @@ pub(super) fn render_panel(view: &PanelView<'_>) -> String {
             body.push_str("<p class=\"intro\">Use your own search index from an AI app, or add sources with plugins.</p>");
             body.push_str(&format!(
                 "<section class=\"cards\" aria-label=\"AI connections\">\
-                 <div class=\"card\"><h3>MCP server</h3><p class=\"big\">Ready to connect</p>\
+                 <div class=\"card\"><h3>MCP server</h3><p class=\"big\">For AI apps</p>\
                  <p>Search, official sites, packages and sourced facts. No API key.</p>\
                  <label for=\"mcp-url\">Server address</label><input id=\"mcp-url\" class=\"endpoint\" readonly value=\"{site}/mcp\">\
                  <p><a href=\"https://github.com/SueHeir/plumb-search/blob/main/docs/mcp.md\" target=\"_blank\">MCP setup guide ↗</a></p></div>\
