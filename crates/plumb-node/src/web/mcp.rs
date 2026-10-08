@@ -32,7 +32,7 @@ use serde_json::{json, Value};
 use tracing::error;
 
 use super::{security_headers, AppState};
-use crate::mcp::{parse_error, Mcp, Reader};
+use crate::mcp::{error as rpc_error, parse_error, Mcp, Reader};
 
 /// The largest message taken.
 const MAX_BODY_BYTES: usize = 64 * 1024;
@@ -87,6 +87,11 @@ impl Limiter {
             clients.retain(|_, (tokens, at)| {
                 *tokens + now.duration_since(*at).as_secs_f64() * rate < burst
             });
+            // Still full of busy clients: a new one waits, so the table
+            // (and each scan of it) cannot grow without limit.
+            if clients.len() >= MAX_CLIENTS {
+                return Err((1.0 / rate).ceil() as u64);
+            }
         }
         let (tokens, at) = clients.entry(client).or_insert((burst, now));
         *tokens = (*tokens + now.duration_since(*at).as_secs_f64() * rate).min(burst);
@@ -221,7 +226,11 @@ async fn mcp(State(state): State<AppState>, request: Request) -> Response {
     if foreign_origin(request.headers()) {
         return answer(
             StatusCode::FORBIDDEN,
-            json!({ "error": "web pages of other sites cannot use this MCP server" }),
+            rpc_error(
+                Value::Null,
+                -32600,
+                "web pages of other sites cannot use this MCP server",
+            ),
         );
     }
     let client = client(&request);
@@ -230,7 +239,7 @@ async fn mcp(State(state): State<AppState>, request: Request) -> Response {
     let Ok(body) = axum::body::to_bytes(request.into_body(), MAX_BODY_BYTES).await else {
         return answer(
             StatusCode::PAYLOAD_TOO_LARGE,
-            json!({ "error": "the message is too big" }),
+            rpc_error(Value::Null, -32600, "the message is too big"),
         );
     };
     let Ok(message) = serde_json::from_slice::<Value>(&body) else {
@@ -253,7 +262,10 @@ async fn mcp(State(state): State<AppState>, request: Request) -> Response {
                 .into_response();
         }
         if state.setting_up().is_some() {
-            let id = message.get("id").cloned().unwrap_or(Value::Null);
+            // A notification gets no answer, as when the node is ready.
+            let Some(id) = message.get("id").cloned() else {
+                return (StatusCode::ACCEPTED, security_headers()).into_response();
+            };
             return answer(
                 StatusCode::OK,
                 json!({
@@ -272,10 +284,10 @@ async fn mcp(State(state): State<AppState>, request: Request) -> Response {
         Some(query) => {
             let options = plumb_index::SearchOptions::default();
             tokio::join!(
-                state.rates.for_query(query),
+                state.rates.for_query(&query),
                 // MCP's search runs later, in the server: plugins go by
                 // their keywords alone here.
-                state.plugin_results(query, &options, None, None)
+                state.plugin_results(&query, &options, None, None)
             )
         }
         None => (None, Vec::new()),
@@ -291,6 +303,7 @@ async fn mcp(State(state): State<AppState>, request: Request) -> Response {
         .with_node(state.node.clone())
         .with_findings(if here { state.findings() } else { None })
         .with_plugin_results(plugins);
+    let id = message.get("id").cloned().unwrap_or(Value::Null);
     let reply = tokio::task::spawn_blocking(move || server.handle(&message)).await;
     match reply {
         Ok(Some(reply)) => answer(StatusCode::OK, reply),
@@ -299,7 +312,7 @@ async fn mcp(State(state): State<AppState>, request: Request) -> Response {
             error!("an MCP request failed");
             answer(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                json!({ "error": "the request failed" }),
+                rpc_error(id, -32603, "the request failed"),
             )
         }
     }

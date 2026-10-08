@@ -311,6 +311,62 @@ fn stdio_answers_line_by_line_and_skips_notifications() {
 }
 
 #[test]
+fn responses_get_no_answer_and_junk_with_an_id_an_error() {
+    let mcp = server(vec![hit("python.org", 2.0, 0.8, true)]);
+    assert_eq!(
+        mcp.handle(&json!({ "jsonrpc": "2.0", "id": 1, "result": {} })),
+        None
+    );
+    assert_eq!(
+        mcp.handle(&json!({ "jsonrpc": "2.0", "id": 1, "error": { "code": 1, "message": "x" } })),
+        None
+    );
+    let junk = mcp.handle(&json!({ "jsonrpc": "2.0", "id": 1 })).unwrap();
+    assert_eq!(junk["error"]["code"], INVALID_REQUEST);
+}
+
+#[test]
+fn long_urls_are_kept_whole_and_numbers_read_as_models_send_them() {
+    let long = format!("https://example.com/a?{}", "x".repeat(300));
+    let args = json!({ "url": format!("  {long} "), "start": 5.0, "max_chars": "1000" });
+    let args = args.as_object().unwrap();
+    assert_eq!(url_arg(args, "url").unwrap(), long);
+    let read = ReadArgs::of(args).unwrap();
+    assert_eq!(read.url, long);
+    assert_eq!(read.start, 5);
+    assert_eq!(read.max_chars, 1000);
+    let too_long = json!({ "url": "x".repeat(MAX_URL_CHARS + 1) });
+    assert!(url_arg(too_long.as_object().unwrap(), "url").is_err());
+    assert!(as_whole(&json!(2.5)).is_none());
+    assert!(as_whole(&json!(-1)).is_none());
+}
+
+#[test]
+fn find_jumps_to_the_first_match_ignoring_case() {
+    let chars: Vec<char> = "Café au lait, CAFÉ noir".chars().collect();
+    assert_eq!(find_from(&chars, "café", 0), Some(0));
+    assert_eq!(find_from(&chars, "café", 1), Some(14));
+    assert_eq!(find_from(&chars, " Noir ", 0), Some(19));
+    assert_eq!(find_from(&chars, "tea", 0), None);
+    assert_eq!(find_from(&chars, "café", 100), None);
+}
+
+#[test]
+fn search_queries_for_plugins_are_cut_like_searches() {
+    let message = |query: &str| {
+        json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": { "name": "search", "arguments": { "query": query } } })
+    };
+    assert_eq!(
+        Mcp::search_query(&message("  rust   lang ")).as_deref(),
+        Some("rust lang")
+    );
+    assert_eq!(Mcp::search_query(&message("   ")), None);
+    let long = Mcp::search_query(&message(&"a".repeat(1000))).unwrap();
+    assert_eq!(long.chars().count(), MAX_QUERY_CHARS);
+}
+
+#[test]
 fn node_addresses_become_their_mcp_endpoint() {
     for (node, endpoint) in [
         ("https://plumbsearch.org", "https://plumbsearch.org/mcp"),
