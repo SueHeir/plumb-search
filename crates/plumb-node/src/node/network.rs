@@ -9,7 +9,7 @@
 //!   work ([`absorb_inbox`]). Rebuilding the index for every batch would
 //!   keep a node busy, so the index is rebuilt once
 //!   [`REBUILD_AFTER_RECORDS`] records have come in, at most once every
-//!   [`NETWORK_REBUILD_GAP`], or at the next refresh.
+//!   [`NETWORK_REBUILD_GAP`] (longer after a slow build), or at the next refresh.
 //! * Other nodes search by bucket (see `plumb_net::bucket`), never sending
 //!   their query. Each index build also writes the index's buckets into
 //!   `indexes/NNNNNN/buckets/` ([`build_buckets`]), and bucket requests are
