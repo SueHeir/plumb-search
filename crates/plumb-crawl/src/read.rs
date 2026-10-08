@@ -33,7 +33,7 @@ use crate::extract::{
 };
 
 /// How [`PageReader`] fetches pages.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReadConfig {
     pub user_agent: String,
     /// Whole-request time limit.
@@ -44,6 +44,9 @@ pub struct ReadConfig {
     pub max_redirects: usize,
     /// Lets pages on private networks be read (tests only, in practice).
     pub allow_private_addresses: bool,
+    /// Host names connected to at these addresses, not looked up (tests
+    /// only, in practice; the port is the URL's).
+    pub resolve: Vec<(String, std::net::SocketAddr)>,
 }
 
 impl Default for ReadConfig {
@@ -54,6 +57,7 @@ impl Default for ReadConfig {
             max_bytes: 3 * 1024 * 1024,
             max_redirects: 8,
             allow_private_addresses: false,
+            resolve: Vec::new(),
         }
     }
 }
@@ -99,7 +103,11 @@ impl PageReader {
     pub fn new(cfg: ReadConfig) -> reqwest::Result<Self> {
         let allow_private = cfg.allow_private_addresses;
         let max_redirects = cfg.max_redirects;
-        let client = Client::builder()
+        let mut client = Client::builder();
+        for (name, addr) in &cfg.resolve {
+            client = client.resolve(name, *addr);
+        }
+        let client = client
             .user_agent(cfg.user_agent.as_str())
             .timeout(cfg.timeout)
             .gzip(true)

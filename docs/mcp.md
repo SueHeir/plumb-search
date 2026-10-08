@@ -18,7 +18,7 @@ All but `read_page` only read the index.
 | `package` | `name` ("serde", "@types/node"), `registry` (optional: `npm`, `pypi`, `crates`, `go`, `gem`, `composer`, `nuget`, `maven`) | the package's card: latest version and its date, license, install command, and where its docs, code and homepage are, from the `packages` page set (see [pages.md](pages.md#software-packages)). One line, so an agent need not open the registry's page |
 | `site_info` | `domain` | the site's title and description, whether Wikidata lists it as official, how well known it is, its country and pages about it |
 | `facts` | `subject` ("Australia", "Marie Curie", "Nvidia"), `about` (optional: one kind, such as `ceo` or `population`) | what Wikidata says about it: capital, population, height, area, born, died, founded, founder, CEO, headquarters, currency, author, director, composer, creator, owner, birthplace, spouse, head of state and head of government. One line per fact, each with the Wikidata item and property it is from (`Capital of Australia: Canberra [Wikidata Q408 P36]`), so a model can cite it rather than answer from memory |
-| `report_finding` | `query`, `url`, `why`, `answer`, `task` (optional) | keeps what an agent found: what it searched for, the page that answered it, why that page helped, and the answer. The next `search` for the same words (in any order, or most of them) lists it first as `found_before`, so no agent has to work it out again. Only offered to apps on the node's own computer (see [Findings](#findings)) |
+| `report_finding` | `query`, `url`, `why`, `answer`, `task` (optional), `share` and `share_query` (optional, on a node run with `--share-findings`) | keeps what an agent found: what it searched for, the page that answered it, why that page helped, and the answer. The next `search` for the same words (in any order, or most of them) lists it first as `found_before`, so no agent has to work it out again. Only offered to apps on the node's own computer (see [Findings](#findings)) |
 | `read_page` | `url`, `start` (default 0), `max_chars` (200 to 30000, default 6000), `find` (words to jump to), `links` (default false) | the page's text, with headings, lists and tables marked in Markdown and menus, footers and scripts left out; where the next part starts on a long page; the page's links if asked; and `check_lookalike`'s verdict on where the page ended up. Only offered to apps on the node's own computer (see below) |
 
 Each also takes an optional `country`, a two-letter code (`US`, `DE`) whose sites rank a little higher, or `any` for none. Without it the node's home country setting decides.
@@ -92,7 +92,21 @@ Agents search for the same things again and again: the latest version of a libra
 Found before (searched "tokio latest version", 2 days ago): 1.47.1 Source: https://crates.io/crates/tokio (crates.io lists the newest release)
 ```
 
-Searches say a lot about whoever makes them, so findings never leave the node. They are kept in `findings.jsonl` in its data folder (the newest 5,000), and only apps on the node's own computer can report them or see them, even on a node run with `--mcp-read-pages`. A page that `check_lookalike` calls a look-alike is not kept. `plumb serve` keeps no findings. Delete the file to forget them all.
+Searches say a lot about whoever makes them, so findings never leave the node unless an agent shares one (below). They are kept in `findings.jsonl` in its data folder (the newest 5,000), and only apps on the node's own computer can report them or see them, even on a node run with `--mcp-read-pages`. A page that `check_lookalike` calls a look-alike is not kept. `plumb serve` keeps no findings. Delete the file to forget them all.
+
+### Sharing a finding with other nodes
+
+On a node in the network run with `plumb run --network --share-findings` (off by default), `report_finding` takes `share: true`, and the finding is also sent to other Plumb nodes as a **lead**: a page an agent found useful for a search, for agents searching other nodes for the same thing. Both have to say so, the node's owner with the flag and the agent with each finding; without the flag the finding is kept and the answer says why it was not shared.
+
+A lead carries the page, why it helped (`why`, at most 300 characters), when it was reported and that it holds for 30 days, signed with the node's key. It never carries the answer or the task, and not the search either: each of the search's words goes as a number shared by many words, enough for another node to match its own searches (the same words, or most of them, as findings match) but not to read the search back. Common words can still be guessed from their numbers, so share findings for searches you would not mind being seen. `share_query: true` sends the search as typed too. Pages on a private network (`localhost`, `192.168.x.x`, `*.local`, `*.internal`, a name without a dot) and addresses with a user name or password are not shared. A node shares at most 50 leads a day.
+
+`search` on any node in the network then lists the leads other nodes shared for the query as `leads`, after any `found_before` and apart from the results:
+
+```text
+Lead shared by 1 other Plumb node, 1 trusted (2 days ago; unchecked, read it first): https://tokio.rs/blog/2025-07-tokio-1-47 (the release notes list every change)
+```
+
+Each lead says which nodes reported it, how this node stands to each (`trusted`, `friend_of_friend` or `other`), when, and until when it holds, with `verified: false`: a lead is someone's report, not a crawl other crawlers checked, so an agent should read the page (`read_page`) before relying on it. Only leads from nodes the node's search scope asks are listed ([Who a search asks](network.md#agreement-between-crawlers)), never the node's own, and none whose page `check_lookalike` calls a look-alike. Like findings, leads are listed only to apps on the node's own computer. How they travel and how many a node keeps: [Shared findings](network.md#shared-findings).
 
 ## Following relations (experiment)
 

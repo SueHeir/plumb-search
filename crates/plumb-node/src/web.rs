@@ -421,6 +421,11 @@ pub trait StatusSource: Send + Sync {
     fn shares_popularity(&self) -> bool {
         false
     }
+    /// Whether AI apps on this computer may share their findings with other
+    /// nodes (see [`crate::findings`]).
+    fn shares_findings(&self) -> bool {
+        false
+    }
     /// Notes that `domain` was opened from the results for `query`.
     fn record_pick(&self, query: &str, domain: &str) {
         let _ = (query, domain);
@@ -785,6 +790,7 @@ pub fn run(args: ServeArgs) -> Result<()> {
             home: args.country.clone(),
             web_search: args.web_search.0,
             read_pages_for_all: args.mcp_read_pages,
+            page_reader: plumb_crawl::ReadConfig::default(),
             plugins: args
                 .plugins
                 .as_deref()

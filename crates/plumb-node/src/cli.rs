@@ -553,6 +553,13 @@ pub struct RunArgs {
     /// many nodes report the same pick.
     #[arg(long, requires = "network")]
     pub share_popularity: bool,
+    /// Let AI apps on this computer share a finding with other Plumb nodes
+    /// when they ask to (report_finding with share: true): the page, why it
+    /// helped and the search's words as numbers, signed with this node's
+    /// key. Never the search or the task, unless the app shares the search
+    /// too.
+    #[arg(long, requires = "network")]
+    pub share_findings: bool,
     /// Also share the homepages crawled into this records file, such as one
     /// `plumb crawl` is filling (its journal included), and add them to this
     /// node's own records: every half hour, those crawled since the last
