@@ -29,6 +29,7 @@ mod icon;
 mod read;
 mod records;
 mod site_pages;
+mod structured;
 mod terms;
 #[cfg(test)]
 mod test_alloc;
@@ -186,6 +187,10 @@ pub struct PageMeta {
     pub description: Option<String>,
     /// `og:site_name`.
     pub site_name: Option<String>,
+    /// The names the page gives its own site in schema.org JSON-LD
+    /// (`WebSite` and `Organization` items), at most a few.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub structured_names: Vec<String>,
     /// The site's search address, with `{searchTerms}` where the words go,
     /// from the first GET form on the page with a search box that submits
     /// to the same site.
