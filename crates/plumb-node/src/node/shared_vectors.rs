@@ -18,7 +18,7 @@ use anyhow::{bail, Context, Result};
 use plumb_embed::{ModelId, Vectors};
 use plumb_net::pages::MAX_PAGES_CHUNK;
 use plumb_net::NetHandle;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use super::control::hex_encode;
 use super::Inner;
@@ -91,6 +91,10 @@ enum Download {
 fn download(inner: &Inner, net: &NetHandle, set: &str, part: &Path) -> Result<Download> {
     use std::io::Write;
 
+    if let Some(pause) = inner.download_pause() {
+        debug!("site vectors not downloaded now: {}", pause.reason);
+        return Ok(Download::NoFile);
+    }
     let runtime = tokio::runtime::Handle::current();
     let mut lacking = Vec::new();
     let first = loop {
@@ -130,10 +134,13 @@ fn download(inner: &Inner, net: &NetHandle, set: &str, part: &Path) -> Result<Do
     loop {
         out.write_all(&chunk.bytes)?;
         offset += chunk.bytes.len() as u64;
+        if let Err(err) = inner.add_downloaded(chunk.bytes.len() as u64) {
+            warn!("site vectors: counting the download: {err:#}");
+        }
         if offset >= size || chunk.bytes.is_empty() {
             break;
         }
-        if inner.stopping() {
+        if inner.stopping() || inner.owner_pause().is_some() {
             return Ok(Download::NoFile);
         }
         chunk = loop {

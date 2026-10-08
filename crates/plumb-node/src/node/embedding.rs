@@ -8,6 +8,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use tracing::{info, warn};
 
+use plumb_embed::MODEL_FILES;
+
 use plumb_core::now_unix;
 
 use super::shared_vectors::Taken;
@@ -21,6 +23,11 @@ use crate::meaning::{
 const RETRY_WAIT: Duration = Duration::from_secs(30 * 60);
 /// How often the job looks for a new index.
 const LOOK_EVERY: Duration = Duration::from_secs(5);
+/// How often a model download waiting on a pause looks again.
+#[cfg(not(test))]
+const PAUSED_LOOK: Duration = Duration::from_secs(60);
+#[cfg(test)]
+const PAUSED_LOOK: Duration = Duration::from_millis(200);
 /// How often a wait looks for shutdown.
 const TICK: Duration = Duration::from_secs(1);
 /// Sites embedded per turn, best first: each one's text is held until it
@@ -83,7 +90,26 @@ fn work(inner: &Arc<Inner>) -> Result<()> {
     let meaning = match inner.meaning.get() {
         Some(meaning) => meaning,
         None => {
+            // Not while paused or past the day's download limit; the model
+            // already here is loaded all the same.
+            let mut told = false;
+            while let Some(pause) = inner.download_pause() {
+                if model_here(inner, &model_dir) {
+                    break;
+                }
+                if !told {
+                    told = true;
+                    inner.journal.info(format!(
+                        "Search by meaning: the model is downloaded later ({})",
+                        pause.reason
+                    ));
+                }
+                if !nap_until_stop(inner, PAUSED_LOOK) {
+                    return Ok(());
+                }
+            }
             inner.set_meaning_work(Some(MeaningWork::Downloading));
+            let before = super::store::dir_size(&model_dir);
             // A stop does not wait for the download, which can take minutes.
             let downloaded = tokio::runtime::Handle::current().block_on(async {
                 tokio::select! {
@@ -100,6 +126,10 @@ fn work(inner: &Arc<Inner>) -> Result<()> {
             let Some(downloaded) = downloaded else {
                 return Ok(());
             };
+            let fetched = super::store::dir_size(&model_dir).saturating_sub(before);
+            if let Err(err) = inner.add_downloaded(fetched) {
+                warn!("search by meaning: counting the model download: {err:#}");
+            }
             downloaded.context("downloading the embedding model")?;
             inner.set_meaning_work(Some(MeaningWork::Loading));
             inner.journal.info("Search by meaning: the model is ready");
@@ -202,6 +232,23 @@ fn work(inner: &Arc<Inner>) -> Result<()> {
 }
 
 /// Sleeps for `wait`, or until the node stops; whether it is still running.
+/// Whether the model's files are all in `dir` already, so loading it
+/// downloads nothing.
+fn model_here(inner: &Inner, dir: &std::path::Path) -> bool {
+    match inner.config.meaning_model {
+        MeaningModel::Small => {
+            MODEL_FILES.iter().all(|name| dir.join(name).is_file())
+                || dir.join(plumb_embed::SERVER_FILE).is_file()
+        }
+        MeaningModel::Gemma => inner
+            .config
+            .sources
+            .gemma_downloads
+            .iter()
+            .all(|(name, _)| dir.join(name).is_file()),
+    }
+}
+
 pub(super) fn nap_until_stop(inner: &Inner, wait: Duration) -> bool {
     nap(inner, wait);
     !inner.stopping()
