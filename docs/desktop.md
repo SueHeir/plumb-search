@@ -1,8 +1,19 @@
 # The Plumb Search desktop app
 
-The desktop app runs a Plumb Search node on your computer. Search opens in
-your browser at `http://127.0.0.1:7586`; the app window manages the node.
-It shares its panel and feature settings with Docker, from this repository.
+The desktop app runs a Plumb Search node on your computer and opens on its
+search page. Search results, private search, history and your profile stay
+in the app; result links open in your usual browser. You can also search
+from your browser at `http://127.0.0.1:7586`.
+
+The top navigation has **Search**, **Status** and **Settings**. Status
+opens the node overview. Settings opens its controls, shared with Docker.
+Ranking scores appear when you choose **Edit these results**, alongside
+the controls that move or hide results for you.
+
+The app window has its own search profile. To use an existing browser's
+history and interests in it, open **Use this on your other computers** from
+History or About you. Make a link code in the existing browser and enter
+it in the app. Both then use that profile on this node.
 
 The panel has these sections:
 
@@ -10,11 +21,14 @@ The panel has these sections:
 - **Search & browser:** browser setup, search by meaning, and private browser search.
 - **Resources:** background crawling and daily download/storage limits; changes apply immediately.
 - **Network & privacy:** joining the network, bootstrap nodes, trusted nodes (plumbsearch.org's crawler by default), anonymous popularity sharing, crawl agreement, and relay activity.
+- **AI & plugins:** MCP and SearXNG addresses, setup guides and installed plugins.
 - **Remote control:** let the app on another computer control this node.
+- **Activity:** recent work and failures, with retry controls.
+- **Backup:** save, download and restore backups.
 - **About:** version, data location, diagnostics, and source code.
 
-Optional features are off until enabled. Save feature choices, then use **Quit
-Plumb Search** in the tray/menu bar and reopen the app. Closing the window
+Save feature choices, then use **Restart to apply** in the banner. You can
+also use **Quit Plumb Search** in the tray/menu bar and reopen the app. Closing the window
 keeps the node running and does not apply restart settings. A banner shows
 when saved choices differ from the running node. Resource and feature forms
 never refresh automatically while you edit them.
@@ -31,7 +45,7 @@ return to defaults. Server transport/relay flags are preserved. For an isolated
 development or test node, set `PLUMB_DESKTOP_DATA_DIR` to a separate folder
 before launching the desktop executable.
 
-Every link out of the panel opens in your default browser. Closing the window
+Links to external sites open in your default browser. Closing the window
 keeps the app running, so searches from your browser keep working: it stays
 in the menu bar on macOS and in the notification area on Windows and Linux.
 Its icon there has **Open Plumb Search**, **Start at login** and **Quit
@@ -46,7 +60,7 @@ opens them the first time. The [install](#install) steps say how to get past tha
 
 ## Control your other nodes
 
-Above the panel, **This computer** is the app's own node. **+ Connect to a
+In the sidebar, **This computer** is the app's own node. **+ Connect to a
 node** adds another one, such as a Docker container or homelab server, so the
 app becomes the control center for all of them:
 
@@ -450,3 +464,16 @@ cargo run --example render_icon   # writes app-icon.png
 cargo tauri icon app-icon.png
 rm -r icons/android icons/ios      # mobile icons, not used
 ```
+
+Keep `frontend/brand.svg` and `site/public/favicon.svg` in step with this
+source. The node's search pages and OpenSearch description embed the
+generated `icons/32x32.png`, without loading an external image.
+
+### Preview the UI without starting a node
+
+From the repository root, run `cargo run -p plumb-node --example ui_preview`
+and open `http://127.0.0.1:54101/`. This uses the real web routes with four
+synthetic search results and a temporary data directory. It starts no crawler
+or peer network and never opens installed app data. Changes last only until
+the preview stops. Private search and remote-node connections need a real
+node to work.

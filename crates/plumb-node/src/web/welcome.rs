@@ -306,8 +306,9 @@ fn render_about(about: &About, in_browser: bool, welcome: bool, note: Option<&st
             ),
         )
     };
+    let bar = super::app_bar("", false);
     let body = format!(
-        "<div class=\"wrap hist about welcome\">\n<header><a class=\"logo\" href=\"/\">Plumb</a></header>\n<main>\n\
+        "<div class=\"wrap hist about welcome\">\n{bar}\n<main>\n\
          <h1>{heading}</h1>\n\
          <p class=\"s\">{intro}{kept} It is never part of a search sent to other Plumb \
          nodes.</p>\n{note}\

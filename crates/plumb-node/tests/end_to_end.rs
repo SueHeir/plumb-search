@@ -257,7 +257,12 @@ async fn web_app_escapes_text_from_the_web() {
     let (status, _, body) = get(&app, "/search?q=evil+example").await;
     assert_eq!(status, StatusCode::OK);
     assert!(!body.contains("<script"), "{body}");
-    assert!(!body.contains("<img"), "{body}");
+    assert!(!body.contains("<img src=x"), "{body}");
+    assert_eq!(
+        body.matches("<img ").count(),
+        1,
+        "only the bundled brand image"
+    );
     assert!(!body.contains("javascript:"), "{body}");
     assert!(body.contains(&escape_html(&raw_title)), "{body}");
     assert!(body.contains("&lt;script&gt;alert(&#39;pwned&#39;)&lt;/script&gt;"));

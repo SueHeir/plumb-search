@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Redesigned the desktop and shared search UI with Search, Status and Settings navigation, warm surfaces and navy controls. Desktop searches now stay in the app; result links open in the usual browser. Node settings include AI integrations and installed plugins. The website shares the design, and a geometric P replaces the old logo across platforms.
+
 ### Search
 
 - Searches as training examples, if you choose: "Use my searches to train Plumb's ranking" in the settings gear (off unless chosen) keeps your short searches and the sites you open for them on the node, with no profile, and `plumb click-labels` writes them out with click rates corrected for each result's place, plus a queries file of the searches whose clicks clearly pick one site, ready for `plumb eval --features-out` and `plumb train-rank`.
