@@ -170,6 +170,16 @@ fn aliases(site: &DocsSite, title: &str) -> Vec<String> {
         aliases.push(format!("{section} {first}"));
         aliases.push(format!("{first} {section}"));
     }
+    // "git-rebase" is "git rebase": it names its product already.
+    let product = site.product.to_lowercase();
+    if let Some(rest) = first
+        .get(product.len()..)
+        .filter(|_| first.to_lowercase().starts_with(&product))
+        .and_then(|rest| rest.strip_prefix('-'))
+        .filter(|rest| !rest.is_empty())
+    {
+        aliases.insert(0, format!("{} {rest}", &first[..product.len()]));
+    }
     let lower = first.to_lowercase();
     aliases.retain(|alias| alias.to_lowercase() != lower);
     aliases.dedup();
@@ -289,6 +299,18 @@ mod tests {
         )
         .is_none());
         assert!(doc_article(python, &doc("https://python.org/x", "X", None)).is_none());
+        let git = site("git").unwrap();
+        let rebase = doc_article(
+            git,
+            &doc(
+                "https://git-scm.com/docs/git-rebase",
+                "Git - git-rebase Documentation",
+                Some("Reapply commits on top of another base tip"),
+            ),
+        )
+        .unwrap();
+        assert_eq!(rebase.title, "git-rebase");
+        assert_eq!(rebase.aliases[0], "git rebase");
         // A root sent on to another version.
         let pytorch = site("pytorch").unwrap();
         let linear = doc_article(
