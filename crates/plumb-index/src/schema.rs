@@ -22,6 +22,7 @@
 //! | `language`    | the homepage's language code, untokenized            | stored, fast, language filter |
 //! | `adult`       | [`plumb_core::AdultLevel`] as 0, 1 or 2              | fast, safe search           |
 //! | `key_pages`   | the site's key pages, as JSON                        | stored, sitelinks           |
+//! | `fingerprint` | [`plumb_core::simhash`] of the homepage's text       | stored, near-copies         |
 //!
 //! An official website's aliases (its Wikidata names) also go into
 //! `label_key`, so they name the site as strongly as its domain does, and
@@ -61,6 +62,7 @@ pub(crate) const SEARCH_URL: &str = "search_url";
 pub(crate) const LANGUAGE: &str = "language";
 pub(crate) const ADULT: &str = "adult";
 pub(crate) const KEY_PAGES: &str = "key_pages";
+pub(crate) const FINGERPRINT: &str = "fingerprint";
 
 /// How many link texts (most frequent first) also get a joined form.
 const JOINED_LINK_TEXTS: usize = 8;
@@ -129,6 +131,8 @@ pub(crate) struct Fields {
     pub(crate) language: Field,
     pub(crate) adult: Field,
     pub(crate) key_pages: Field,
+    /// Missing from indexes built before it was added.
+    pub(crate) fingerprint: Option<Field>,
 }
 
 impl Fields {
@@ -160,12 +164,25 @@ impl Fields {
             language: field(LANGUAGE)?,
             adult: field(ADULT)?,
             key_pages: field(KEY_PAGES)?,
+            fingerprint: schema.get_field(FINGERPRINT).ok(),
         })
     }
 }
 
 /// The schema of a Plumb index.
 pub(crate) fn schema() -> Schema {
+    schema_with(true)
+}
+
+/// Whether an index with `schema` can be searched: it has this version's
+/// schema, or the one before [`FINGERPRINT`] (until its next build, its
+/// near-copies are not told apart).
+pub(crate) fn readable(schema: &Schema) -> bool {
+    *schema == schema_with(true) || *schema == schema_with(false)
+}
+
+/// The schema, with or without the [`FINGERPRINT`] field.
+fn schema_with(fingerprint: bool) -> Schema {
     let mut builder = Schema::builder();
     builder.add_text_field(DOMAIN, STRING | STORED | FAST);
     builder.add_text_field(URL, STORED);
@@ -189,6 +206,9 @@ pub(crate) fn schema() -> Schema {
     builder.add_text_field(LANGUAGE, STRING | STORED | FAST);
     builder.add_u64_field(ADULT, FAST);
     builder.add_text_field(KEY_PAGES, STORED);
+    if fingerprint {
+        builder.add_u64_field(FINGERPRINT, STORED);
+    }
     builder.build()
 }
 
@@ -350,6 +370,14 @@ pub(crate) fn document(
         doc.add_text(f.language, language);
     }
     doc.add_u64(f.adult, record_adult_level(record) as u64);
+    let fingerprint = f.fingerprint.zip(
+        non_empty(&record.body_text)
+            .filter(|_| !borrowed)
+            .and_then(plumb_core::simhash::fingerprint),
+    );
+    if let Some((field, print)) = fingerprint {
+        doc.add_u64(field, print);
+    }
     let key_pages = valid_key_pages(
         key_pages_or_known(&record.key_pages, &record.domain),
         &record.domain,
@@ -504,5 +532,11 @@ mod tests {
         let schema = schema();
         assert_eq!(schema.get_field_name(fields.joined), JOINED);
         assert!(Fields::new(&Schema::builder().build()).is_err());
+        assert!(fields.fingerprint.is_some());
+        // An index built before fingerprints can still be searched.
+        let older = schema_with(false);
+        assert!(readable(&older) && readable(&schema));
+        assert!(!readable(&Schema::builder().build()));
+        assert!(Fields::new(&older).unwrap().fingerprint.is_none());
     }
 }
