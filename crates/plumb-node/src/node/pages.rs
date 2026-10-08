@@ -195,6 +195,41 @@ fn near_of(
     }
 }
 
+/// Holds a set's file for one writer: a download or a cut, never both,
+/// since each writes the file's `.part` and renames it over the file.
+struct SetFileHold<'a> {
+    inner: &'a Inner,
+    id: &'static str,
+}
+
+impl<'a> SetFileHold<'a> {
+    /// `None` while another writer holds the file.
+    fn take(inner: &'a Inner, id: &'static str) -> Option<Self> {
+        let taken = inner
+            .set_files_busy
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(id);
+        // Not `then_some`: a hold made and dropped would let the other
+        // writer's go.
+        if taken {
+            Some(SetFileHold { inner, id })
+        } else {
+            None
+        }
+    }
+}
+
+impl Drop for SetFileHold<'_> {
+    fn drop(&mut self) {
+        self.inner
+            .set_files_busy
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(self.id);
+    }
+}
+
 /// Takes the file of `set` from a trusted node when this node has none,
 /// fewer than `pages` of it, or an old one the other node has a newer
 /// version of. Past `pages`, only the places `near` the node's towns are
@@ -280,6 +315,13 @@ fn fetch_if_needed(
             thousands(pages)
         }
     ));
+    let Some(_hold) = SetFileHold::take(inner, set.id) else {
+        debug!(
+            "page set {}: its file is being cut; downloading later",
+            set.id
+        );
+        return Ok(());
+    };
     let file = set.file(data);
     std::fs::create_dir_all(file.parent().context("a set file has a folder")?)?;
     let mut part = file.as_os_str().to_owned();
@@ -436,6 +478,11 @@ fn cut_if_longer(
         }
         return Ok(());
     }
+    // A download of the set will replace the file anyway; the index goes
+    // on with it as it is until then.
+    let Some(_hold) = SetFileHold::take(inner, set.id) else {
+        return Ok(());
+    };
     let mut part = file.as_os_str().to_owned();
     part.push(".part");
     let part = std::path::PathBuf::from(part);
@@ -447,6 +494,11 @@ fn cut_if_longer(
     }
     let mut buf = vec![0u8; 1 << 16];
     while !cutter.full() {
+        if inner.stopping() {
+            drop(cutter);
+            let _ = std::fs::remove_file(&part);
+            return Ok(());
+        }
         let n = std::io::Read::read(&mut reader, &mut buf)
             .with_context(|| format!("reading {}", file.display()))?;
         if n == 0 {
