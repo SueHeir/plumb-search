@@ -1574,8 +1574,14 @@ impl PageSearcher {
                 .map_or(by, |(name, _)| name)
                 .to_string()
         };
-        let artist = analysis::tokens(&self.words, &author);
-        let author: HashSet<String> = artist.iter().cloned().collect();
+        // Asked for artist first, the main artist alone: "kanye west drive
+        // slow" for "Kanye West feat. Paul Wall & GLC".
+        let main = [" feat. ", " ft. "]
+            .iter()
+            .find_map(|joiner| author.split_once(joiner))
+            .map_or(author.as_str(), |(main, _)| main);
+        let artist = analysis::tokens(&self.words, main);
+        let author: HashSet<String> = analysis::tokens(&self.words, &author).into_iter().collect();
         // The title, or the title without its subtitle: "Frankenstein" for
         // "Frankenstein; or, The Modern Prometheus".
         let short = page.title.split([':', ';']).next().unwrap_or("");
@@ -3277,6 +3283,25 @@ mod tests {
         );
         assert!(jude.is_song() && !jude.may_lead());
         assert_eq!(jude.set_name(), "MusicBrainz");
+        // With guests, the main artist first finds it too.
+        let slow = song(
+            "Drive Slow",
+            "Song by Kanye West feat. Paul Wall & GLC",
+            "recording/a1b2c3d4-0000-4042-ae91-78d6a3267d69",
+            30_000,
+        );
+        let (_dir, s) = searcher(std::slice::from_ref(&slow));
+        for query in [
+            "kanye west drive slow",
+            "kanye west drive slow song",
+            "drive slow kanye west",
+        ] {
+            let hits = s.search(query, 5).unwrap();
+            assert!(
+                !hits.is_empty() && hits[0].page.url == slow.url,
+                "{query}: {hits:?}"
+            );
+        }
         let white = song(
             "The Beatles",
             "Album by The Beatles",
