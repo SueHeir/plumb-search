@@ -27,6 +27,7 @@ use plumb_core::{
 };
 use tracing::debug;
 
+use crate::boilerplate::{self, Verdict};
 use crate::structured;
 use url::Url;
 
@@ -245,6 +246,20 @@ struct Page<'a> {
     /// Visible text outside [`CHROME_ELEMENTS`] and headings, up to
     /// [`BODY_TEXT_BYTES`].
     body: String,
+    /// The text since the last word break that would go in the body text,
+    /// kept or dropped as a whole by [`boilerplate`] at the next break.
+    block: String,
+    /// Bytes of `block` read inside links, whitespace aside.
+    block_link_bytes: usize,
+    /// Links begun in `block`.
+    block_links: usize,
+    /// A link (`<a href>`) is open.
+    in_link: bool,
+    /// Short blocks ([`Verdict::Short`]), the body text of a page that has
+    /// no longer block.
+    short_blocks: String,
+    /// The lowercased blocks kept so far, so a repeat is kept once.
+    kept_blocks: HashSet<String>,
     /// The text of the `<script type="application/ld+json">` being read.
     json_ld: Option<String>,
     /// JSON-LD blocks read so far, at most [`structured::MAX_BLOCKS`].
@@ -346,6 +361,12 @@ impl<'a> Page<'a> {
             headings: Vec::new(),
             heading_words: 0,
             body: String::new(),
+            block: String::new(),
+            block_link_bytes: 0,
+            block_links: 0,
+            in_link: false,
+            short_blocks: String::new(),
+            kept_blocks: HashSet::new(),
             json_ld: None,
             json_ld_blocks: Vec::new(),
             form: None,
@@ -384,6 +405,10 @@ impl<'a> Page<'a> {
             "a" => {
                 self.close_anchor();
                 self.in_page_link = attr(tag, "href").is_some_and(|h| h.trim().starts_with('#'));
+                self.in_link = attr(tag, "href").is_some();
+                if self.in_link && self.body_open() {
+                    self.block_links += 1;
+                }
                 self.open_anchor(tag);
             }
             "html" if !self.html_seen => {
@@ -448,6 +473,7 @@ impl<'a> Page<'a> {
             "a" => {
                 self.close_anchor();
                 self.in_page_link = false;
+                self.in_link = false;
             }
             "title" => self.close_title(),
             "form" => self.close_form(),
@@ -494,12 +520,39 @@ impl<'a> Page<'a> {
             json.push_str(&text[..end]);
         }
         if self.body_open() {
-            let room = BODY_TEXT_BYTES - self.body.len();
+            let room = BODY_TEXT_BYTES.saturating_sub(self.body.len() + self.block.len());
             let mut end = room.min(text.len());
             while !text.is_char_boundary(end) {
                 end -= 1;
             }
-            self.body.push_str(&text[..end]);
+            self.block.push_str(&text[..end]);
+            if self.in_link {
+                self.block_link_bytes += visible_bytes(&text[..end]);
+            }
+        }
+    }
+
+    /// Ends the block of body text being read: it goes in the body text
+    /// unless [`boilerplate::judge`] finds it boilerplate or it repeats a
+    /// block already kept; a short block is put aside, for a page with no
+    /// longer one.
+    fn close_block(&mut self) {
+        let block = collapse_whitespace(&self.block);
+        let all_links = self.block_link_bytes * 10 >= visible_bytes(&self.block) * 9;
+        let links = std::mem::take(&mut self.block_links);
+        self.block.clear();
+        self.block_link_bytes = 0;
+        if block.is_empty() {
+            return;
+        }
+        let kept = match boilerplate::judge(&block, links, all_links) {
+            Verdict::Keep => &mut self.body,
+            Verdict::Short => &mut self.short_blocks,
+            Verdict::Drop => return,
+        };
+        if kept.len() < BODY_TEXT_BYTES && self.kept_blocks.insert(block.to_lowercase()) {
+            kept.push_str(&block);
+            kept.push(' ');
         }
     }
 
@@ -510,9 +563,7 @@ impl<'a> Page<'a> {
         if let Some(heading) = &mut self.heading_text {
             heading.push(' ');
         }
-        if self.body_open() {
-            self.body.push(' ');
-        }
+        self.close_block();
     }
 
     /// Whether text read now belongs to the body text: it shows on the
@@ -525,7 +576,7 @@ impl<'a> Page<'a> {
             && !self.in_page_link
             && self.title_text.is_none()
             && self.heading_text.is_none()
-            && self.body.len() < BODY_TEXT_BYTES
+            && self.body.len() + self.block.len() < BODY_TEXT_BYTES
     }
 
     /// Keeps the heading just read, unless it repeats one or the headings
@@ -779,6 +830,10 @@ impl<'a> Page<'a> {
         self.close_heading();
         self.close_form();
         self.close_json_ld();
+        self.close_block();
+        if self.body.is_empty() {
+            self.body = std::mem::take(&mut self.short_blocks);
+        }
         let words: Vec<&str> = self
             .body
             .split_whitespace()
@@ -953,6 +1008,14 @@ fn link_text(anchor: &Anchor) -> String {
         .unwrap_or_default()
 }
 
+/// Bytes of `text` that are not whitespace.
+fn visible_bytes(text: &str) -> usize {
+    text.chars()
+        .filter(|c| !c.is_whitespace())
+        .map(char::len_utf8)
+        .sum()
+}
+
 /// Collapses whitespace and cuts to [`MAX_TEXT_CHARS`]; `None` if nothing is left.
 fn clean_text(text: &str) -> Option<String> {
     let text = truncate_chars(&collapse_whitespace(text), MAX_TEXT_CHARS);
@@ -1042,6 +1105,41 @@ mod tests {
             meta.body_text.as_deref(),
             Some("Checking accounts, savings and loans. Open an account today.")
         );
+    }
+
+    #[test]
+    fn body_text_leaves_out_boilerplate_blocks() {
+        let meta = extract(
+            "https://www.example-hardware.com/",
+            r#"<html><body>
+                <div class="cookies">We use cookies to give you the best experience.</div>
+                <div class="menu"><a href="/tools">Tools</a> <a href="/paint">Paint</a>
+                    <a href="/garden">Garden Center</a> <a href="/lumber">Lumber</a></div>
+                <p>Everything you need to build, fix and grow your home.</p>
+                <div><a href="/deals">Shop now</a></div><div>3 min read</div>
+                <p>Free delivery on every order over fifty dollars, every day.</p>
+                <div><a href="/deals">Shop now</a></div>
+                <p>Everything you need to build, fix and grow your home.</p>
+                <div>&copy; 2026 Example Hardware</div>
+            </body></html>"#,
+        );
+        assert_eq!(
+            meta.body_text.as_deref(),
+            Some(
+                "Everything you need to build, fix and grow your home. \
+                 Free delivery on every order over fifty dollars, every day."
+            )
+        );
+    }
+
+    #[test]
+    fn a_page_of_short_blocks_keeps_them() {
+        let meta = extract(
+            "https://joes-pizza.example/",
+            r#"<html><body><div>Joe's Pizza</div><div>Open daily</div>
+                <div>Joe's Pizza</div><div>&copy; 2026</div></body></html>"#,
+        );
+        assert_eq!(meta.body_text.as_deref(), Some("Joe's Pizza Open daily"));
     }
 
     #[test]
