@@ -1574,7 +1574,8 @@ impl PageSearcher {
                 .map_or(by, |(name, _)| name)
                 .to_string()
         };
-        let author: HashSet<String> = analysis::tokens(&self.words, &author).into_iter().collect();
+        let artist = analysis::tokens(&self.words, &author);
+        let author: HashSet<String> = artist.iter().cloned().collect();
         // The title, or the title without its subtitle: "Frankenstein" for
         // "Frankenstein; or, The Modern Prometheus".
         let short = page.title.split([':', ';']).next().unwrap_or("");
@@ -1583,6 +1584,26 @@ impl PageSearcher {
             .enumerate()
             .any(|(i, title)| {
                 let title = analysis::tokens(&self.words, title);
+                // Songs and albums are as often asked for artist first:
+                // "vampire weekend step", "nirvana nevermind album",
+                // "beatles hey jude".
+                let unthe = match artist.as_slice() {
+                    [the, rest @ ..] if the == "the" && !rest.is_empty() => rest,
+                    artist => artist,
+                };
+                if page.set == MUSIC_SET && !artist.is_empty() && !title.is_empty() {
+                    if let Some(rest) = words
+                        .strip_prefix(artist.as_slice())
+                        .or_else(|| words.strip_prefix(unthe))
+                        .and_then(|rest| rest.strip_prefix(title.as_slice()))
+                    {
+                        if rest.is_empty()
+                            || matches!(rest, [word] if kinds.contains(&word.as_str()))
+                        {
+                            return true;
+                        }
+                    }
+                }
                 let rest = match words.strip_prefix(title.as_slice()) {
                     Some([]) => {
                         return page.set == PAPERS_SET && i == 0 && title.len() >= PAPER_TITLE_WORDS
@@ -3274,6 +3295,9 @@ mod tests {
             "hey jude beatles",
             "hey jude by the beatles",
             "hey jude song",
+            "the beatles hey jude",
+            "beatles hey jude",
+            "beatles hey jude song",
         ] {
             let hits = s.search(query, 5).unwrap();
             assert!(
@@ -3291,6 +3315,17 @@ mod tests {
             .unwrap()
             .iter()
             .all(|hit| hit.page.set != MUSIC_SET));
+        // The artist alone, or with words that are not the title, asks
+        // for no song.
+        for query in ["the beatles", "beatles hey"] {
+            assert!(
+                s.search(query, 5)
+                    .unwrap()
+                    .iter()
+                    .all(|hit| hit.page.url != jude.url),
+                "{query}"
+            );
+        }
         let hits = s.search("the beatles album", 5).unwrap();
         assert!(hits[0].whole && hits[0].page.set == MUSIC_SET && !hits[0].page.is_song());
         // An item of neither kind is no page.
