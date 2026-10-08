@@ -213,14 +213,17 @@ impl Mcp {
 
     /// The query of a `search` call, for a caller that fetches currency
     /// rates before handling it.
-    pub fn search_query(message: &Value) -> Option<&str> {
+    /// Cleaned and cut as `search` itself does; `None` for an empty one.
+    pub fn search_query(message: &Value) -> Option<String> {
         let params = message.get("params")?;
         if message.get("method")?.as_str()? != "tools/call"
             || params.get("name")?.as_str()? != "search"
         {
             return None;
         }
-        params.get("arguments")?.get("query")?.as_str()
+        let query = params.get("arguments")?.get("query")?.as_str()?;
+        let query = truncate_chars(&plumb_core::collapse_whitespace(query), MAX_QUERY_CHARS);
+        (!query.is_empty()).then_some(query)
     }
 
     /// Answers one JSON-RPC message; `None` for a notification or a
@@ -235,7 +238,11 @@ impl Mcp {
         };
         let id = object.get("id").cloned();
         let Some(method) = object.get("method").and_then(Value::as_str) else {
-            // A response to something we never send, or junk.
+            // A response (to a request we never send) gets no answer;
+            // junk with an id gets an error.
+            if object.contains_key("result") || object.contains_key("error") {
+                return None;
+            }
             return id.map(|id| error(id, INVALID_REQUEST, "expected a method"));
         };
         // A notification (no id) gets no answer, whatever it says.
@@ -290,7 +297,7 @@ impl Mcp {
                 self.official_site(&name, &options)
             }
             "check_lookalike" => {
-                let url = text_arg(args, "url")?;
+                let url = url_arg(args, "url")?;
                 let options = self.options(args)?;
                 self.check_lookalike(&url, &options)
             }
@@ -299,8 +306,7 @@ impl Mcp {
                 let limit = match args.get("limit") {
                     None | Some(Value::Null) => None,
                     Some(limit) => Some(
-                        limit
-                            .as_u64()
+                        as_whole(limit)
                             .filter(|&n| n > 0)
                             .ok_or((
                                 INVALID_PARAMS,
@@ -345,7 +351,7 @@ impl Mcp {
             }
             "report_finding" if self.findings.is_some() => {
                 let query = text_arg(args, "query")?;
-                let url = text_arg(args, "url")?;
+                let url = url_arg(args, "url")?;
                 let why = text_arg(args, "why")?;
                 let answer = args
                     .get("answer")
@@ -995,7 +1001,7 @@ pub struct ReadArgs {
 impl ReadArgs {
     fn of(args: &Map<String, Value>) -> Result<Self, (i64, String)> {
         Ok(ReadArgs {
-            url: text_arg(args, "url")?,
+            url: url_arg(args, "url")?,
             start: whole_number(args, "start")?.unwrap_or(0),
             max_chars: whole_number(args, "max_chars")?
                 .unwrap_or(DEFAULT_READ_CHARS)
@@ -1128,19 +1134,19 @@ impl Reader {
 /// Where `find` first appears in `chars` at or after `from`, ignoring case.
 fn find_from(chars: &[char], find: &str, from: usize) -> Option<usize> {
     let fold = |c: char| c.to_lowercase().next().unwrap_or(c);
-    let find: Vec<char> = find.trim().chars().map(fold).collect();
-    if find.is_empty() || find.len() > chars.len() {
+    let find: String = find.trim().chars().map(fold).collect();
+    if find.is_empty() || from >= chars.len() {
         return None;
     }
-    (from..=chars.len() - find.len()).find(|&at| {
-        chars[at..at + find.len()]
-            .iter()
-            .zip(&find)
-            .all(|(&c, &f)| fold(c) == f)
-    })
+    // One char folds to one char, so positions carry over; `str::find`
+    // stays linear where comparing at every position could take seconds
+    // on a big page.
+    let rest: String = chars[from..].iter().map(|&c| fold(c)).collect();
+    let byte = rest.find(&find)?;
+    Some(from + rest[..byte].chars().count())
 }
 
-fn error(id: Value, code: i64, message: &str) -> Value {
+pub(crate) fn error(id: Value, code: i64, message: &str) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
 }
 
@@ -1350,12 +1356,47 @@ fn text_arg(args: &Map<String, Value>, name: &str) -> Result<String, (i64, Strin
     Ok(text)
 }
 
+/// Longest URL a tool takes; longer than any real page's address.
+const MAX_URL_CHARS: usize = 4096;
+
+/// A required URL argument: trimmed but otherwise as given, since
+/// cutting or collapsing it would fetch some other page.
+fn url_arg(args: &Map<String, Value>, name: &str) -> Result<String, (i64, String)> {
+    let url = args
+        .get(name)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    if url.is_empty() {
+        return Err((INVALID_PARAMS, format!("{name} is required")));
+    }
+    if url.chars().count() > MAX_URL_CHARS {
+        return Err((
+            INVALID_PARAMS,
+            format!("{name} is longer than {MAX_URL_CHARS} characters"),
+        ));
+    }
+    Ok(url.to_string())
+}
+
+/// A whole number, also as a model may send it: `5.0` or `"5"`.
+fn as_whole(value: &Value) -> Option<u64> {
+    value
+        .as_u64()
+        .or_else(|| {
+            value
+                .as_f64()
+                .filter(|n| *n >= 0.0 && n.fract() == 0.0 && *n < 1e15)
+                .map(|n| n as u64)
+        })
+        .or_else(|| value.as_str().and_then(|s| s.trim().parse().ok()))
+}
+
 /// An optional whole-number argument.
 fn whole_number(args: &Map<String, Value>, name: &str) -> Result<Option<usize>, (i64, String)> {
     match args.get(name) {
         None | Some(Value::Null) => Ok(None),
-        Some(value) => value
-            .as_u64()
+        Some(value) => as_whole(value)
             .map(|n| Some(usize::try_from(n).unwrap_or(usize::MAX)))
             .ok_or((INVALID_PARAMS, format!("{name} must be a whole number"))),
     }
@@ -1588,7 +1629,7 @@ pub fn run(args: McpArgs) -> Result<()> {
             let rates = answers::RatesCache::default();
             serve_lines(stdin, stdout, |message| {
                 let rates = Mcp::search_query(message)
-                    .and_then(|query| runtime.block_on(rates.for_query(query)));
+                    .and_then(|query| runtime.block_on(rates.for_query(&query)));
                 let mcp = Mcp::new(Arc::clone(&backend), args.country.clone())
                     .with_reader(Some(reader.clone()))
                     .with_rates(rates);
@@ -1732,7 +1773,18 @@ async fn forward(
     }
     let body = response.text().await.unwrap_or_default();
     match serde_json::from_str::<Value>(&body) {
-        Ok(answer) => Ok(Some(answer)),
+        // A JSON-RPC answer to this message; anything else (a plain
+        // `{"error": ...}` from a refusal) would leave the client waiting.
+        Ok(answer) if answer.get("jsonrpc").is_some() && answer.get("id") == id.as_ref() => {
+            Ok(Some(answer))
+        }
+        Ok(answer) => {
+            let why = answer.get("error").and_then(Value::as_str).map_or_else(
+                || format!("{endpoint} answered {status}"),
+                |why| format!("{endpoint}: {why}"),
+            );
+            failed(why)
+        }
         Err(_) if status.is_success() => failed(format!("{endpoint} did not answer with JSON")),
         Err(_) => failed(format!("{endpoint} answered {status}")),
     }

@@ -1730,6 +1730,17 @@ async fn api_network_search(
     let options = params.options(&state.settings.home, &headers);
     match network_search(&state, client, &query, params.limit(), &options).await {
         Ok(results) => (StatusCode::OK, security_headers(), Json(results)).into_response(),
+        Err(err) if err.downcast_ref::<TooManySearches>().is_some() => {
+            let wait = err.downcast_ref::<TooManySearches>().map_or(60, |t| t.0);
+            let body = serde_json::json!({ "error": err.to_string() });
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                security_headers(),
+                [(header::RETRY_AFTER, wait.to_string())],
+                Json(body),
+            )
+                .into_response()
+        }
         Err(_) => {
             error!("network search API lookup failed");
             let body = serde_json::json!({ "error": "network search failed" });
@@ -1790,6 +1801,23 @@ pub struct NetworkResult {
 /// Fetches the query's buckets from other nodes and ranks the sites that
 /// match with this node's own ranking and the searcher's choices, in a
 /// small index built for the purpose and deleted after.
+/// A client searched the network too often; it may again in this many
+/// seconds.
+#[derive(Debug)]
+struct TooManySearches(u64);
+
+impl std::fmt::Display for TooManySearches {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "too many network searches; try again in {} seconds",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for TooManySearches {}
+
 async fn network_search(
     state: &AppState,
     client: Option<IpAddr>,
@@ -1798,8 +1826,8 @@ async fn network_search(
     options: &SearchOptions,
 ) -> Result<NetworkResults> {
     let net = state.network().context("not in the network")?;
-    if state.net_limiter.take(client, Instant::now()).is_err() {
-        anyhow::bail!("too many network searches from this client");
+    if let Err(wait) = state.net_limiter.take(client, Instant::now()) {
+        return Err(TooManySearches(wait).into());
     }
     let rank = state
         .node
@@ -4189,6 +4217,12 @@ mod tests {
         let body: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(body["results"].as_array().unwrap().len(), 1);
         assert_eq!(body["results"][0]["url"], "https://usbank-login-help.com/");
+
+        // A page past the last one is empty, not the last one again, so a
+        // client paging until empty stops.
+        let (_, _, body) = send(app.clone(), "/search?q=us+bank&format=json&pageno=11").await;
+        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(body["results"].as_array().unwrap().len(), 0);
 
         // Instant answers go where SearXNG puts its own.
         let (_, _, body) = send(app.clone(), "/search?q=12*7&format=json").await;
