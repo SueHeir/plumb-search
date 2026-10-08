@@ -373,6 +373,12 @@ pub struct RankConfig {
     /// sites linking with those words link there ([`LINK_NAME_SHARE`]).
     /// Needs an index built with link names.
     pub link_names: bool,
+    /// Added instead of the alias bonus when a link text names the site
+    /// ([`RankConfig::link_names`]), and `k / n` of it for one equal to the
+    /// first `k` words. As much as the label bonus: when most of the sites
+    /// linking with "steam" link to steampowered.com, that names it as
+    /// surely as steam.tv's domain names steam.tv.
+    pub link_name_bonus: f32,
 }
 
 impl Default for RankConfig {
@@ -402,6 +408,7 @@ impl Default for RankConfig {
             drop_namesakes: false,
             learned: true,
             link_names: true,
+            link_name_bonus: 0.25,
         }
     }
 }
@@ -1501,7 +1508,8 @@ impl Searcher {
                 partial_label_bonus
             };
             let mut name_bonus = (label_bonus * name.label as f32 / query_words)
-                .max(cfg.exact_alias_bonus * name.alias.max(name.linked) as f32 / query_words);
+                .max(cfg.exact_alias_bonus * name.alias as f32 / query_words)
+                .max(cfg.link_name_bonus * name.linked as f32 / query_words);
             if is_kind {
                 name_bonus = name_bonus.max(cfg.kind_bonus);
             }
@@ -4037,6 +4045,40 @@ mod tests {
         assert!(named("rare words", &on).is_empty());
     }
 
+    #[test]
+    fn link_names_beat_a_domain_that_is_the_name() {
+        let records = vec![
+            site(
+                "steampowered.com",
+                Some("Welcome to Steam"),
+                None,
+                &[],
+                &[("steam", 300), ("steam store", 40)],
+                ranked(2_000, 30_000),
+            ),
+            site(
+                "steam.tv",
+                Some("Steam TV"),
+                None,
+                &[],
+                &[("steam tv", 4)],
+                ranked(20_000, 2_000),
+            ),
+        ];
+        let (_dir, searcher) = build(&records);
+        let off = RankConfig {
+            link_names: false,
+            ..RankConfig::default()
+        };
+        let first = |cfg: &RankConfig| {
+            searcher.search_with("steam", 10, cfg).unwrap()[0]
+                .domain
+                .clone()
+        };
+        assert_eq!(first(&off), "steam.tv");
+        assert_eq!(first(&RankConfig::default()), "steampowered.com");
+    }
+
     fn bank_corpus() -> Vec<SiteRecord> {
         let bank = |domain: &str, alias: &str, country: &str, rank: u32| {
             with_facts(
@@ -5628,6 +5670,7 @@ mod tests {
             alpha: 0.0,
             exact_label_bonus: 0.0,
             exact_alias_bonus: 0.0,
+            link_name_bonus: 0.0,
             described_alpha: Some(1.0),
             ..RankConfig::default()
         };
