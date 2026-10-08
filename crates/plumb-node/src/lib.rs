@@ -28,9 +28,11 @@ use tracing_subscriber::EnvFilter;
 
 pub mod about;
 pub mod cli;
+pub mod clicks;
 pub mod country;
 pub mod eval;
 pub mod eval_labels;
+pub mod experiments;
 pub mod findings;
 pub mod history;
 pub mod learn;
@@ -117,6 +119,8 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::RemoteControl(args) => run::remote_control(args),
         Command::Storage(args) => storage::run(args),
         Command::DeadSites(args) => dead::run(&args),
+        Command::Experiments(args) => experiments::run(&args),
+        Command::ClickLabels(args) => clicks::run(&args),
         Command::LinkRank(args) => link_rank::run(&args),
         Command::Relations(args) => relations::run(&args),
         Command::TopSites(args) => top_sites::run(&args),

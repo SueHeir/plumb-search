@@ -80,6 +80,15 @@ pub enum Command {
     /// `plumb run --drop-dead-sites` takes out of its index, without
     /// changing anything. Reads the whole records file into memory.
     DeadSites(DeadSitesArgs),
+    /// How a node's ranking experiments (its `experiments.json`) are
+    /// doing: each against its layer's control, with 95% confidence
+    /// intervals. Reads the results; changes nothing.
+    Experiments(ExperimentsArgs),
+    /// Write out the searches and the sites opened for them that browsers
+    /// chose to have kept as training examples (the settings gear's "Use
+    /// my searches to train Plumb's ranking"), with how much each site is
+    /// wanted once corrected for its place on the page.
+    ClickLabels(ClickLabelsArgs),
     /// Rank the sites in a records file by the links their homepages make
     /// to each other (a PageRank of our own crawls), without changing
     /// anything. A look at the link graph; nothing uses the ranks yet.
@@ -231,6 +240,34 @@ pub struct DeadSitesArgs {
     /// How many of the best-known dead sites to name.
     #[arg(long, value_name = "N", default_value_t = 20)]
     pub show: usize,
+}
+
+#[derive(Debug, Args)]
+pub struct ClickLabelsArgs {
+    /// The node's data directory, as given to `plumb run --data`.
+    #[arg(long, value_name = "DIR")]
+    pub data: PathBuf,
+    /// Write every search and site here, as JSON lines: `query`,
+    /// `domain`, `shown`, `opened` and `wanted` (clicks per time shown,
+    /// each counted for how far down the page it was, at most 1).
+    #[arg(long, value_name = "JSONL")]
+    pub out: PathBuf,
+    /// Also write the searches whose clicks clearly pick one site as a
+    /// queries file (`query<TAB>domain`), for `plumb eval --features-out`
+    /// and then `plumb train-rank`.
+    #[arg(long, value_name = "TSV")]
+    pub queries: Option<PathBuf>,
+    /// Times the site must have been opened for the search to go in the
+    /// queries file.
+    #[arg(long, value_name = "N", default_value_t = 2)]
+    pub min_opened: u32,
+}
+
+#[derive(Debug, Args)]
+pub struct ExperimentsArgs {
+    /// The node's data directory, as given to `plumb run --data`.
+    #[arg(long, value_name = "DIR")]
+    pub data: PathBuf,
 }
 
 #[derive(Debug, Args)]
