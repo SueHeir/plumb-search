@@ -88,7 +88,7 @@ Search APIs that AI apps used to rely on are closing, going paid or capping thei
 
 It is good at what agents look up most: the official site ("chase login"), a package's latest version and docs ("serde crate"), the well-known Stack Overflow question ("undo last git commit"), the Wikipedia fact ("albert einstein") and instant answers ("100 usd to eur"). It indexes homepages and those page sets, not the full text of the web, so the long tail (a blog post, a forum thread) is weaker than Google's. [docs/local-llms.md](docs/local-llms.md) shows what results look like.
 
-- **MCP**: every node serves an MCP server at `/mcp`, and `plumb mcp` serves one over stdio. Tools: `search`, `official_site`, `check_lookalike`, `site_info`, `package` (a package's latest version, install command and docs), and two offered only to AI apps on the node's own computer, not by plumbsearch.org: `read_page` (reads a page as text) and `report_finding` (keeps what an agent found for the next search). In Claude Code:
+- **MCP**: every node serves an MCP server at `/mcp`, and `plumb mcp` serves one over stdio. Tools: `search`, `official_site`, `check_lookalike`, `site_info`, `facts` (Wikidata facts about a place, person or company, each with its source), `package` (a package's latest version, install command and docs), and two offered only to AI apps on the node's own computer, not by plumbsearch.org: `read_page` (reads a page as text) and `report_finding` (keeps what an agent found for the next search). In Claude Code:
 
   ```sh
   claude mcp add --transport http plumb https://plumbsearch.org/mcp

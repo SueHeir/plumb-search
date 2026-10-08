@@ -15,6 +15,7 @@ pub(super) fn render(tool: &str, answer: &Value) -> String {
         "check_lookalike" => check_lookalike(&mut out, answer),
         "search" => search(&mut out, answer),
         "site_info" => site_info(&mut out, answer),
+        "facts" => facts(&mut out, answer),
         "package" => package(&mut out, answer),
         "report_finding" => {
             let _ = write!(
@@ -394,6 +395,46 @@ fn check_lookalike(out: &mut String, answer: &Value) {
         }
     }
     why(out, answer, "reasons");
+}
+
+/// One fact a line, each with its question and where it is from:
+/// "Capital of Australia: Canberra (Wikidata Q408 P36)".
+fn facts(out: &mut String, answer: &Value) {
+    if !flag(answer, "found") {
+        let subject = text(answer, "subject").unwrap_or("");
+        let _ = writeln!(out, "Plumb has no facts about {subject}.");
+        return;
+    }
+    let title = text(answer, "title").unwrap_or("");
+    let _ = write!(out, "{title}");
+    if let Some(description) = text(answer, "description") {
+        let _ = write!(out, ", {description}");
+    }
+    if let Some(url) = text(answer, "url") {
+        let _ = write!(out, " {url}");
+    }
+    out.push('\n');
+    let item = text(answer, "item");
+    for fact in list(answer, "facts") {
+        let question = text(fact, "question").unwrap_or("");
+        let value = text(fact, "value").unwrap_or("");
+        let _ = write!(out, "{}", answer_line(question, value));
+        if let Some(note) = text(fact, "note") {
+            let _ = write!(out, " ({note})");
+        }
+        let property = text(fact, "property").unwrap_or("");
+        match item {
+            Some(item) => {
+                let _ = writeln!(out, " [Wikidata {item} {property}]");
+            }
+            None => {
+                let _ = writeln!(out, " [Wikidata {property}]");
+            }
+        }
+    }
+    if let Some(url) = text(answer, "item_url") {
+        let _ = writeln!(out, "Source: {url}");
+    }
 }
 
 fn site_info(out: &mut String, answer: &Value) {
