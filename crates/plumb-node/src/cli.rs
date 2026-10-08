@@ -80,6 +80,10 @@ pub enum Command {
     /// `plumb run --drop-dead-sites` takes out of its index, without
     /// changing anything. Reads the whole records file into memory.
     DeadSites(DeadSitesArgs),
+    /// How a node's ranking experiments (its `experiments.json`) are
+    /// doing: each against its layer's control, with 95% confidence
+    /// intervals. Reads the results; changes nothing.
+    Experiments(ExperimentsArgs),
     /// Rank the sites in a records file by the links their homepages make
     /// to each other (a PageRank of our own crawls), without changing
     /// anything. A look at the link graph; nothing uses the ranks yet.
@@ -231,6 +235,13 @@ pub struct DeadSitesArgs {
     /// How many of the best-known dead sites to name.
     #[arg(long, value_name = "N", default_value_t = 20)]
     pub show: usize,
+}
+
+#[derive(Debug, Args)]
+pub struct ExperimentsArgs {
+    /// The node's data directory, as given to `plumb run --data`.
+    #[arg(long, value_name = "DIR")]
+    pub data: PathBuf,
 }
 
 #[derive(Debug, Args)]
