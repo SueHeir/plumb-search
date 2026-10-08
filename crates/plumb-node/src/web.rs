@@ -2235,7 +2235,8 @@ fn shown_results(results: &SearchResults, limit: usize) -> Vec<plumb_plugin::Sho
 }
 
 /// What the node takes `query`, whose results are `results`, to be
-/// about, for its plugins: the article an info box would show.
+/// about, for its plugins: the article an info box would show, or else a
+/// song or album among the top results that the query names.
 fn search_about(
     query: &str,
     results: &SearchResults,
@@ -2252,7 +2253,29 @@ fn search_about(
         &results.hits,
         results.pages.iter().map(|p| p.hit.clone()).collect(),
     );
-    answers::page_about(&results.hits, &placed).map(crate::plugins::about_page)
+    answers::page_about(&results.hits, &placed)
+        .or_else(|| music_about(&placed))
+        .map(crate::plugins::about_page)
+}
+
+/// How near the top a song or album must be listed for a search to be
+/// taken to be for it: among the first three results.
+const MUSIC_ABOUT_AT: usize = 2;
+
+/// The song or album of the music set that the query names, by its title
+/// ("creep") or with its artist ("radiohead creep"), listed among the top
+/// results on its own: what a search for a song is about.
+fn music_about(placed: &[plumb_index::pages::PlacedPage]) -> Option<&plumb_index::pages::Page> {
+    placed
+        .iter()
+        .filter(|placed| {
+            placed.hit.page.set == plumb_index::pages::MUSIC_SET
+                && (placed.hit.named || placed.hit.whole)
+                && placed.under.is_none()
+                && placed.at <= MUSIC_ABOUT_AT
+        })
+        .min_by_key(|placed| placed.at)
+        .map(|placed| &placed.hit.page)
 }
 
 fn security_headers() -> [(HeaderName, &'static str); 3] {
@@ -5900,6 +5923,45 @@ mod tests {
         );
         assert!(page.contains("&amp;exact=1"), "{page}");
         assert!(!page.contains("class=\"sp\""), "{page}");
+    }
+
+    #[test]
+    fn a_search_naming_a_song_near_the_top_is_about_it() {
+        let song = |title: &str, named: bool, under: Option<&str>, at: usize| {
+            plumb_index::pages::PlacedPage {
+                hit: PageHit {
+                    page: plumb_index::pages::Page::from_music(plumb_core::Article {
+                        title: title.into(),
+                        description: Some("Song by Radiohead, 1992".into()),
+                        item: Some("recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69".into()),
+                        ..Default::default()
+                    })
+                    .unwrap(),
+                    score: 0.5,
+                    named,
+                    popularity: 0.1,
+                    whole: false,
+                    learned: None,
+                },
+                under: under.map(str::to_string),
+                at,
+            }
+        };
+        let about = music_about(&[song("Creep", true, None, 1)]).map(crate::plugins::about_page);
+        let about = about.expect("about the song");
+        assert_eq!(about.title, "Creep");
+        assert_eq!(about.by.as_deref(), Some("Radiohead"));
+        assert!(about.id("musicbrainz-recording").is_some());
+        // Not one the query does not name, one far down, or one under a site.
+        assert!(music_about(&[song("Creep", false, None, 0)]).is_none());
+        assert!(music_about(&[song("Creep", true, None, MUSIC_ABOUT_AT + 1)]).is_none());
+        assert!(music_about(&[song("Creep", true, Some("radiohead.com"), 0)]).is_none());
+        // The higher of two.
+        let pages = [
+            song("Creep (Live)", true, None, 2),
+            song("Creep", true, None, 0),
+        ];
+        assert_eq!(music_about(&pages).unwrap().title, "Creep");
     }
 
     #[test]
