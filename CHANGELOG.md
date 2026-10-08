@@ -23,6 +23,7 @@
 
 ### Nodes
 
+- Network searches no longer wait out a slow or gone node: a bucket still short of two answers after a quarter of the wait (or as soon as its requests failed) is asked of one more node, and the search returns once every bucket has two answers. `/api/network/search` counts these requests as `hedged`.
 - Much less memory: crawl rounds keep about 150 bytes of each site instead of its whole record, and index builds, search by meaning and the network's records read the records file a record at a time. With two million sites a crawl round holds about 300 MB of site data instead of 3 GB or more, and an index build about 0.6 GB instead of about 5 GB, so a 4 GB server runs a node. `plumb index` reads a record at a time too when the records file has no journal.
 - The records' journal is folded into the file at every index build, and once it reaches 128 MB, so it no longer grows for days on a big node.
 
