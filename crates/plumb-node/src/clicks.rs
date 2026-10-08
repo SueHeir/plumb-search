@@ -312,6 +312,231 @@ impl PositionStore {
     }
 }
 
+/// Searches with the sites shown and opened for them, as training
+/// examples for the ranking: kept only for browsers that chose it on the
+/// settings gear ("Use my searches to train Plumb's ranking"), in
+/// `DIR/history/click-labels.json`.
+///
+/// Unlike [`Positions`] these name the search and the site, so each is
+/// cut down first as popularity reports are
+/// ([`plumb_net::popularity::pick_query`]: normalized, at most 6 words, no
+/// e-mail address and no run of 4 digits or more), and kept with no
+/// browser's profile. Nothing of it leaves the node; `plumb click-labels`
+/// writes it out for `plumb eval` and `plumb train-rank`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Labels {
+    /// `query<TAB>domain`.
+    groups: BTreeMap<String, Counts>,
+}
+
+impl Labels {
+    fn counts(&mut self, query: &str, domain: &str, day: u64) -> &mut Counts {
+        let counts = self.groups.entry(format!("{query}\t{domain}")).or_default();
+        counts.day = counts.day.max(day);
+        if counts.at.len() < PLACES {
+            counts.at.resize(PLACES, [0, 0]);
+        }
+        counts
+    }
+
+    /// Notes a results page for `query`: its first sites, best first.
+    pub fn note_shown(&mut self, query: &str, sites: &[String], at: u64) {
+        let Some(query) = plumb_net::popularity::pick_query(query) else {
+            return;
+        };
+        let day = at / 86_400;
+        for (k, domain) in sites.iter().take(PLACES).enumerate() {
+            let counts = self.counts(&query, domain, day);
+            counts.at[k][0] = counts.at[k][0].saturating_add(1);
+        }
+        let today = day;
+        self.groups
+            .retain(|_, counts| today.saturating_sub(counts.day) <= KEEP_DAYS);
+        while self.groups.len() > MAX_GROUPS {
+            let Some(key) = self
+                .groups
+                .iter()
+                .min_by_key(|(_, c)| c.day)
+                .map(|(key, _)| key.clone())
+            else {
+                break;
+            };
+            self.groups.remove(&key);
+        }
+    }
+
+    /// Notes that `domain` was opened from place `k` of a page for `query`.
+    pub fn note_opened(&mut self, query: &str, domain: &str, k: usize, at: u64) {
+        let Some(query) = plumb_net::popularity::pick_query(query) else {
+            return;
+        };
+        if k >= PLACES {
+            return;
+        }
+        let counts = self.counts(&query, domain, at / 86_400);
+        let [shown, opened] = &mut counts.at[k];
+        *opened = opened.saturating_add(1);
+        *shown = (*shown).max(*opened);
+    }
+
+    /// Each search and site, with how much it is wanted for the search:
+    /// the clicks it got, each counted by `bias` for how far down the page
+    /// it was, per time it was shown (an inverse-propensity-weighted
+    /// click rate, at most 1). Best first within each search.
+    pub fn labels(&self, bias: &PositionBias) -> Vec<Label> {
+        let mut labels: Vec<Label> = self
+            .groups
+            .iter()
+            .filter_map(|(key, counts)| {
+                let (query, domain) = key.split_once('\t')?;
+                let shown: u32 = counts.at.iter().map(|[s, _]| s).sum();
+                let opened: u32 = counts.at.iter().map(|[_, o]| o).sum();
+                let weighted: f32 = counts
+                    .at
+                    .iter()
+                    .enumerate()
+                    .map(|(k, [_, o])| *o as f32 * bias.weight(k))
+                    .sum();
+                (shown > 0).then(|| Label {
+                    query: query.to_owned(),
+                    domain: domain.to_owned(),
+                    shown,
+                    opened,
+                    wanted: (weighted / shown as f32).min(1.0),
+                })
+            })
+            .collect();
+        labels.sort_by(|a, b| {
+            a.query
+                .cmp(&b.query)
+                .then(b.wanted.total_cmp(&a.wanted))
+                .then(a.domain.cmp(&b.domain))
+        });
+        labels
+    }
+}
+
+/// A search and a site, and how much it is wanted for the search.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Label {
+    pub query: String,
+    pub domain: String,
+    pub shown: u32,
+    pub opened: u32,
+    /// Clicks per time shown, each counted for how far down it was.
+    pub wanted: f32,
+}
+
+/// The site each search is after, as a `plumb eval` queries file line,
+/// when the clicks say so clearly: opened at least `min_opened` times,
+/// and wanted at least twice as much as the next site. Searches whose
+/// clicks are split between sites are left out.
+pub fn clear_answers(labels: &[Label], min_opened: u32) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < labels.len() {
+        let query = &labels[i].query;
+        let end = labels[i..]
+            .iter()
+            .position(|l| &l.query != query)
+            .map_or(labels.len(), |n| i + n);
+        let best = &labels[i];
+        let next = labels
+            .get(i + 1)
+            .filter(|_| i + 1 < end)
+            .map_or(0.0, |l| l.wanted);
+        if best.opened >= min_opened && best.wanted > 0.0 && best.wanted >= 2.0 * next {
+            out.push((query.clone(), best.domain.clone()));
+        }
+        i = end;
+    }
+    out
+}
+
+/// The training examples of a node, in its history folder.
+#[derive(Debug, Clone)]
+pub struct LabelStore {
+    path: PathBuf,
+}
+
+impl LabelStore {
+    /// The examples in `dir` (the node's `history` folder).
+    pub fn in_dir(dir: &Path) -> Self {
+        LabelStore {
+            path: dir.join("click-labels.json"),
+        }
+    }
+
+    pub fn load(&self) -> Labels {
+        fs::read(&self.path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default()
+    }
+
+    /// Changes the examples with `change` and saves them.
+    pub fn update(&self, change: impl FnOnce(&mut Labels)) -> Result<()> {
+        let _writing = WRITING.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut labels = self.load();
+        change(&mut labels);
+        if let Some(dir) = self.path.parent() {
+            fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+        }
+        crate::node::store::write_atomically(&self.path, &serde_json::to_vec(&labels)?)
+    }
+}
+
+/// `plumb click-labels`: writes out the training examples a node kept.
+pub fn run(args: &crate::cli::ClickLabelsArgs) -> Result<()> {
+    let history = args.data.join("history");
+    let labels = LabelStore::in_dir(&history).load();
+    let bias = PositionStore::in_dir(&history).load().bias();
+    let all = labels.labels(&bias);
+    if all.is_empty() {
+        println!(
+            "No training examples in {}: no browser chose to have its searches \
+             kept for training.",
+            history.join("click-labels.json").display()
+        );
+        return Ok(());
+    }
+    let mut jsonl = String::new();
+    for label in &all {
+        jsonl.push_str(&serde_json::to_string(label)?);
+        jsonl.push('\n');
+    }
+    fs::write(&args.out, jsonl).with_context(|| format!("writing {}", args.out.display()))?;
+    let searches = all
+        .iter()
+        .map(|l| l.query.as_str())
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    println!(
+        "{} searches and sites ({searches} searches) written to {}",
+        all.len(),
+        args.out.display()
+    );
+    if let Some(path) = &args.queries {
+        let answers = clear_answers(&all, args.min_opened);
+        let mut tsv = String::from(
+            "# Searches made on this node, each with the site its clicks say it is\n\
+             # after (plumb click-labels). For plumb eval --features-out, then\n\
+             # plumb train-rank.\n",
+        );
+        for (query, domain) in &answers {
+            tsv.push_str(&format!("{query}\t{domain}\n"));
+        }
+        fs::write(path, tsv).with_context(|| format!("writing {}", path.display()))?;
+        println!(
+            "{} searches with a clear answer written to {}",
+            answers.len(),
+            path.display()
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 pub(crate) mod sim {
     //! Simulated searchers, for testing what is learned from clicks
@@ -468,6 +693,61 @@ mod tests {
         let groups = store.load().groups;
         assert_eq!(groups.len(), 2);
         assert!(groups.values().any(|c| c.at[1] == [1, 1]));
+    }
+
+    #[test]
+    fn labels_name_the_search_and_site_and_correct_for_the_place() {
+        let mut labels = Labels::default();
+        let sites: Vec<String> = ["top.example", "mid.example", "deep.example"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        for _ in 0..10 {
+            labels.note_shown("Credit  Union", &sites, 0);
+        }
+        // The top site opened 5 times of 10, the third 3 times: fewer
+        // clicks, but people look at the third place a third as often.
+        for _ in 0..5 {
+            labels.note_opened("credit union", "top.example", 0, 0);
+        }
+        for _ in 0..3 {
+            labels.note_opened("credit union", "deep.example", 2, 0);
+        }
+        let found = labels.labels(&PositionBias::prior());
+        assert_eq!(found[0].query, "credit union");
+        assert_eq!(found[0].domain, "deep.example");
+        assert!((found[0].wanted - 0.9).abs() < 1e-5, "{found:?}");
+        assert_eq!(found[1].domain, "top.example");
+        assert_eq!(found[2].wanted, 0.0);
+        // 0.9 is not twice 0.5: no clear answer.
+        assert!(clear_answers(&found, 1).is_empty());
+        for _ in 0..10 {
+            labels.note_shown("us bank", &sites, 0);
+        }
+        for _ in 0..5 {
+            labels.note_opened("us bank", "mid.example", 1, 0);
+        }
+        let found = labels.labels(&PositionBias::prior());
+        assert_eq!(
+            clear_answers(&found, 3),
+            [("us bank".to_owned(), "mid.example".to_owned())]
+        );
+        assert!(clear_answers(&found, 6).is_empty());
+    }
+
+    #[test]
+    fn searches_that_may_say_who_you_are_are_not_kept() {
+        let mut labels = Labels::default();
+        let sites = vec!["a.example".to_owned()];
+        for query in [
+            "me@example.com",
+            "account 12345678",
+            "one two three four five six seven",
+        ] {
+            labels.note_shown(query, &sites, 0);
+            labels.note_opened(query, "a.example", 0, 0);
+        }
+        assert!(labels.groups.is_empty());
     }
 
     #[test]

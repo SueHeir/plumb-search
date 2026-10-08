@@ -861,6 +861,8 @@ struct SearchParams {
     hr: Option<String>,
     /// `1`: learn from clicks which boxes to fold (see [`crate::learn`]).
     hl: Option<String>,
+    /// `1`: keep searches as examples to train the ranking.
+    ht: Option<String>,
     /// `1`: edit mode, with buttons to move results and fold boxes.
     edit: Option<String>,
     /// `<seed>.<step>`: tuning, a round of random searches in edit mode
@@ -909,7 +911,7 @@ impl SearchParams {
 
     /// The history choices the settings gear's form sent, if it sent them.
     fn history_prefs(&self) -> Option<history::Prefs> {
-        history::prefs_from_form(&self.hist, &self.hs, &self.hr, &self.hl)
+        history::prefs_from_form(&self.hist, &self.hs, &self.hr, &self.hl, &self.ht)
     }
 
     /// The searcher's choices: the `country` parameter when it is valid,
@@ -1652,6 +1654,7 @@ async fn go(
         hs: None,
         hr: None,
         hl: None,
+        ht: None,
         edit: None,
         tune: None,
         safe: params.safe,
@@ -6281,7 +6284,7 @@ mod tests {
         let (_, headers, body) =
             send_with_headers(app(), "/search?q=us+bank&country=any&hist=1", &me).await;
         let prefs = set_cookie(&headers, "plumb_history").unwrap();
-        assert_eq!(prefs, "plumb_history=s0r0l0");
+        assert_eq!(prefs, "plumb_history=s0r0l0t0");
         assert!(first(&body), "{body}");
         assert!(!body.contains("You opened this before"), "{body}");
         let both = format!("{profile}; {prefs}");
@@ -6853,6 +6856,55 @@ mod tests {
             std::fs::read_to_string(node.0.join("positions.json")).unwrap(),
             counts
         );
+    }
+
+    #[tokio::test]
+    async fn searches_are_kept_for_training_only_when_the_browser_chose_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let node = Arc::new(HistoryNode(dir.path().join("history")));
+        let fake = backend(bank_hits());
+        let app = || node_router(fake.clone(), node.clone());
+        let labels = node.0.join("click-labels.json");
+        for (prefs, kept) in [("s1r1l1", false), ("s1r1l1t1", true)] {
+            let (_, headers, _) = send(app(), "/search?q=us+bank&country=any").await;
+            let profile = set_cookie(&headers, "plumb_profile").expect("a profile");
+            let cookies = format!("{profile}; plumb_history={prefs}");
+            let me = [("cookie", cookies.as_str())];
+            send_with_headers(app(), "/search?q=us+bank&country=any", &me).await;
+            send_with_headers(
+                app(),
+                "/go?q=us+bank&d=usbank-login-help.com&country=any",
+                &me,
+            )
+            .await;
+            assert_eq!(labels.exists(), kept, "{prefs}");
+        }
+        let text = std::fs::read_to_string(&labels).unwrap();
+        assert!(!text.contains("plumb_profile"), "{text}");
+        let out = dir.path().join("labels.jsonl");
+        let queries = dir.path().join("labels.tsv");
+        crate::clicks::run(&crate::cli::ClickLabelsArgs {
+            data: dir.path().to_path_buf(),
+            out: out.clone(),
+            queries: Some(queries.clone()),
+            min_opened: 1,
+        })
+        .unwrap();
+        let first: crate::clicks::Label = serde_json::from_str(
+            std::fs::read_to_string(&out)
+                .unwrap()
+                .lines()
+                .next()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(first.query, "us bank");
+        assert_eq!(first.domain, "usbank-login-help.com");
+        assert_eq!((first.shown, first.opened), (1, 1));
+        let tsv = std::fs::read_to_string(&queries).unwrap();
+        assert!(tsv.ends_with("us bank\tusbank-login-help.com\n"), "{tsv}");
+        let parsed = crate::eval::parse_queries(&tsv).unwrap();
+        assert_eq!(parsed[0].expected, ["usbank-login-help.com"]);
     }
 
     /// A ready node with a data folder, where experiments are set up.
