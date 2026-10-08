@@ -6432,6 +6432,8 @@ mod tests {
             ("Grand hotel", 25),
             ("Hockey club", 30),
             ("Hocky club", 2),
+            ("Kanye West albums", 40),
+            ("Kayne Anderson capital", 22),
         ];
         let mut n = 0;
         for (title, count) in titles {
@@ -6534,6 +6536,16 @@ mod tests {
         assert_eq!(
             spelled_with(&searcher, "grand canon", &trusting).as_deref(),
             Some("grand canyon")
+        );
+        // An artist's name with two letters swapped, where "kayne" is a
+        // known word (a surname) on its own.
+        assert_eq!(
+            spelled_with(&searcher, "kayne west stronger", &RankConfig::default()),
+            None
+        );
+        assert_eq!(
+            spelled_with(&searcher, "kayne west stronger", &trusting).as_deref(),
+            Some("kanye west stronger")
         );
         // Alone, "canon" is a word like any other.
         assert_eq!(spelled_with(&searcher, "canon", &trusting), None);
