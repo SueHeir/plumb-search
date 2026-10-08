@@ -1605,7 +1605,7 @@ struct GoParams {
     /// The page's token, for a search in ranking experiments, and the
     /// place of the result on it.
     x: Option<String>,
-    p: Option<usize>,
+    p: Option<String>,
     u: Option<String>,
     country: Option<String>,
     only: Option<String>,
@@ -1681,7 +1681,8 @@ async fn go(
         visitor.note_opened(&query, &hit.domain);
     }
     let token = params.x.as_deref().and_then(|x| x.parse::<u64>().ok());
-    if let (Some(lab), Some(token), Some(place)) = (state.experiments(), token, params.p) {
+    let place = params.p.as_deref().and_then(|p| p.parse::<usize>().ok());
+    if let (Some(lab), Some(token), Some(place)) = (state.experiments(), token, place) {
         lab.note_click(token, place);
     }
     if state.shares_popularity() {
