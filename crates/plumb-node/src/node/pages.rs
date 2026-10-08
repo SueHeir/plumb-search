@@ -275,6 +275,10 @@ fn fetch_if_needed(
         }
         Some(_) => return Ok(()),
     };
+    if let Some(pause) = inner.download_pause() {
+        debug!("page set {}: not downloaded now: {}", set.id, pause.reason);
+        return Ok(());
+    }
     let runtime = tokio::runtime::Handle::current();
     // Is there a node to take it from, with a file worth taking? Nodes
     // without one are passed over for the next trusted node.
@@ -403,10 +407,13 @@ fn take(
             .flush()
             .with_context(|| format!("unpacking {} from {}", set.id, chunk.peer))?;
         offset += chunk.bytes.len() as u64;
+        if let Err(err) = inner.add_downloaded(chunk.bytes.len() as u64) {
+            warn!("page set {}: counting the download: {err:#}", set.id);
+        }
         if decoder.get_ref().full() || offset >= chunk.size || chunk.bytes.is_empty() {
             break;
         }
-        if inner.stopping() {
+        if inner.stopping() || inner.owner_pause().is_some() {
             return Ok(None);
         }
         let (size, modified) = (chunk.size, chunk.modified);

@@ -1063,6 +1063,12 @@ fn open_data_dir(config: &NodeConfig, rank: RankConfig) -> Result<Opened> {
         .with_context(|| format!("creating {}", paths.indexes.display()))?;
     let lock = store::lock(&paths)?;
     store::remove_leftovers(&paths);
+    // Before anything reads the files it puts back.
+    match backup::apply_pending(&paths.data) {
+        Ok(true) => info!("finished restoring a backup"),
+        Ok(false) => {}
+        Err(err) => warn!("{err:#}"),
+    }
     let mut saved =
         store::load_state(&paths).unwrap_or_else(|| SavedState::fresh(config.initial_crawl));
 
@@ -1505,6 +1511,35 @@ impl Inner {
 
     /// Why crawls and refreshes must wait now, and until when, if they must.
     fn pause(&self) -> Option<Pause> {
+        self.download_pause().or_else(|| {
+            let limit = self.settings().storage_limit_mb;
+            (limit > 0 && self.disk_used() >= limit.saturating_mul(MB))
+                .then(|| Pause::new("Paused: the storage limit is reached", None))
+        })
+    }
+
+    /// Why downloads of page sets, vectors and the meaning model must wait
+    /// now, if they must: as crawls, but for the storage limit, which they
+    /// keep to by what they download.
+    fn download_pause(&self) -> Option<Pause> {
+        let limit = self.settings().download_limit_mb_per_day;
+        let now = now_unix();
+        self.owner_pause().or_else(|| {
+            (limit > 0 && self.saved().downloaded_today(now) >= limit.saturating_mul(MB)).then(
+                || {
+                    Pause::new(
+                        "Paused until tomorrow: today's download limit is reached",
+                        Some(store::next_day(now)),
+                    )
+                },
+            )
+        })
+    }
+
+    /// The pauses the owner set: background updates off, paused for a
+    /// while, or outside the crawl hours. A download under way stops for
+    /// these, not for the download limit (it would start over every day).
+    fn owner_pause(&self) -> Option<Pause> {
         let settings = self.settings();
         let now = now_unix();
         if !settings.background_updates {
@@ -1522,17 +1557,6 @@ impl Inner {
                     Some(now + wait),
                 ));
             }
-        }
-        let limit = settings.download_limit_mb_per_day;
-        if limit > 0 && self.saved().downloaded_today(now) >= limit.saturating_mul(MB) {
-            return Some(Pause::new(
-                "Paused until tomorrow: today's download limit is reached",
-                Some(store::next_day(now)),
-            ));
-        }
-        let limit = settings.storage_limit_mb;
-        if limit > 0 && self.disk_used() >= limit.saturating_mul(MB) {
-            return Some(Pause::new("Paused: the storage limit is reached", None));
         }
         None
     }
@@ -2127,6 +2151,10 @@ impl StatusSource for Inner {
     fn restore_backup(&self, restored: &backup::Backup) -> Result<()> {
         // Restoring can be undone with the backup made first.
         let before = backup::save(&self.paths.data, Some("before-restore"))?;
+        // Written now, and again at the next start, before the network
+        // reads them: until it stops, it saves its keys and credits over
+        // these.
+        restored.stage(&self.paths.data)?;
         restored.restore(&self.paths.data)?;
         if let Some(settings) = store::load_settings(&self.paths) {
             *self.settings.lock().unwrap_or_else(PoisonError::into_inner) = settings;
@@ -2136,9 +2164,12 @@ impl StatusSource for Inner {
             "Backup from {} restored; the settings before it are in {}",
             restored.version, before.name
         ));
-        // Keys and features take effect at the next start.
+        // Keys, credits and features take effect at the next start.
         if self.restart.request() {
             self.journal.info("Restarting to finish restoring");
+        } else {
+            self.journal
+                .warning("Restart the node to finish restoring its keys and credits");
         }
         Ok(())
     }

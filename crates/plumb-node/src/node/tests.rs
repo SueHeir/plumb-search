@@ -1930,6 +1930,18 @@ async fn crawling_waits_for_the_next_day_once_the_download_limit_is_reached() {
     assert_eq!(status.detail, status.paused.clone().unwrap());
     assert_eq!((status.crawl_left, status.downloaded_today), (700, 3 * MB));
     assert!(status.disk_used > 0);
+    // Page set, vector and model downloads wait too.
+    assert!(node.inner.download_pause().is_some());
+    // The storage limit pauses crawls, not those downloads: they keep to it
+    // by what they take.
+    let mut settings = node.inner.settings();
+    settings.download_limit_mb_per_day = 0;
+    settings.storage_limit_mb = 1;
+    node.inner.change_settings(settings).unwrap();
+    std::fs::write(dir.path().join("filler"), vec![0u8; 2 * MB as usize]).unwrap();
+    node.inner.recount_disk();
+    assert!(node.inner.pause().is_some());
+    assert!(node.inner.download_pause().is_none());
     node.shutdown().await.unwrap();
 }
 
