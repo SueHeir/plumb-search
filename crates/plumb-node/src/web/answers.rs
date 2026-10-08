@@ -499,18 +499,11 @@ pub(crate) fn render_info_box(out: &mut String, info: &InfoBox) {
     out.push_str("</aside>\n");
 }
 
-/// The fact `asked` asks for, when the first page named by its subject
-/// (in `pages`, found for the subject's words) that has one of its kinds
-/// has it: "Canberra" for "capital of australia". Failing that, the
-/// article listed under the site the subject names: "Apple Inc." under
-/// apple.com for "ceo of apple", where the article named "Apple" is the
-/// fruit. `now` (Unix seconds) works out an age.
-pub(crate) fn fact_answer(
-    asked: &plumb_core::facts::FactQuestion,
-    pages: &[PlacedPage],
-    now: u64,
-) -> Option<plumb_answer::Answer> {
-    use plumb_core::facts::FactKind;
+/// The pages of `pages` (found for a subject's words) whose facts are the
+/// subject's, in the order to try them: the pages it names, then those
+/// listed under the site it names, each about one thing and none a
+/// disambiguation page.
+pub(crate) fn fact_pages(pages: &[PlacedPage]) -> impl Iterator<Item = &PlacedPage> {
     let named = pages.iter().filter(|placed| placed.hit.named);
     let of_sites = pages
         .iter()
@@ -524,59 +517,73 @@ pub(crate) fn fact_answer(
                 placed.hit.page.description.as_deref(),
             )
         })
-        .find_map(|placed| {
-            let page = &placed.hit.page;
-            let kind = asked
-                .kinds
+}
+
+/// The fact `asked` asks for, when the first page named by its subject
+/// (in `pages`, found for the subject's words) that has one of its kinds
+/// has it: "Canberra" for "capital of australia". Failing that, the
+/// article listed under the site the subject names: "Apple Inc." under
+/// apple.com for "ceo of apple", where the article named "Apple" is the
+/// fruit. `now` (Unix seconds) works out an age.
+pub(crate) fn fact_answer(
+    asked: &plumb_core::facts::FactQuestion,
+    pages: &[PlacedPage],
+    now: u64,
+) -> Option<plumb_answer::Answer> {
+    use plumb_core::facts::FactKind;
+    fact_pages(pages).find_map(|placed| {
+        let page = &placed.hit.page;
+        let kind = asked
+            .kinds
+            .iter()
+            .copied()
+            .find(|kind| page.facts.iter().any(|fact| fact.kind == *kind))?;
+        let values: Vec<&str> = page
+            .facts
+            .iter()
+            .filter(|fact| fact.kind == kind)
+            .map(|fact| fact.value.as_str())
+            .collect();
+        let date_of = |kind: FactKind| {
+            page.facts
                 .iter()
-                .copied()
-                .find(|kind| page.facts.iter().any(|fact| fact.kind == *kind))?;
-            let values: Vec<&str> = page
-                .facts
-                .iter()
-                .filter(|fact| fact.kind == kind)
-                .map(|fact| fact.value.as_str())
-                .collect();
-            let date_of = |kind: FactKind| {
-                page.facts
-                    .iter()
-                    .find(|fact| fact.kind == kind)
-                    .and_then(|fact| plumb_core::facts::Date::parse(&fact.value))
-            };
-            let (question, answer, note) = if asked.age && kind == FactKind::Born {
-                let born = date_of(FactKind::Born)?;
-                match date_of(FactKind::Died) {
-                    Some(died) => (
-                        format!("Age of {}", page.title),
-                        format!("Died at {}", born.years_until(&died)?),
-                        Some(format!("{} to {}", born.display(), died.display())),
-                    ),
-                    None => (
-                        format!("Age of {}", page.title),
-                        format!("{} years old", born.years_until(&date_from_unix(now))?),
-                        Some(format!("Born {}", born.display())),
-                    ),
-                }
-            } else {
-                let (answer, note) = fact_text(kind, &values)?;
-                (kind.question(&page.title), answer, note)
-            };
-            let from = "from Wikidata";
-            Some(plumb_answer::Answer {
-                kind: plumb_answer::Kind::Fact,
-                question,
-                answer,
-                note: Some(match note {
-                    Some(note) => format!("{note}, {from}"),
-                    None => "From Wikidata".to_string(),
-                }),
-            })
+                .find(|fact| fact.kind == kind)
+                .and_then(|fact| plumb_core::facts::Date::parse(&fact.value))
+        };
+        let (question, answer, note) = if asked.age && kind == FactKind::Born {
+            let born = date_of(FactKind::Born)?;
+            match date_of(FactKind::Died) {
+                Some(died) => (
+                    format!("Age of {}", page.title),
+                    format!("Died at {}", born.years_until(&died)?),
+                    Some(format!("{} to {}", born.display(), died.display())),
+                ),
+                None => (
+                    format!("Age of {}", page.title),
+                    format!("{} years old", born.years_until(&date_from_unix(now))?),
+                    Some(format!("Born {}", born.display())),
+                ),
+            }
+        } else {
+            let (answer, note) = fact_text(kind, &values)?;
+            (kind.question(&page.title), answer, note)
+        };
+        let from = "from Wikidata";
+        Some(plumb_answer::Answer {
+            kind: plumb_answer::Kind::Fact,
+            question,
+            answer,
+            note: Some(match note {
+                Some(note) => format!("{note}, {from}"),
+                None => "From Wikidata".to_string(),
+            }),
         })
+    })
 }
 
 /// A fact's values as shown, and a note: "27,204,809" and "counted in
 /// 2024".
-fn fact_text(
+pub(crate) fn fact_text(
     kind: plumb_core::facts::FactKind,
     values: &[&str],
 ) -> Option<(String, Option<String>)> {

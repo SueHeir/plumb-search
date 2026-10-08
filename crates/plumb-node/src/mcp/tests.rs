@@ -100,7 +100,7 @@ fn notifications_get_no_answer_and_unknown_methods_an_error() {
 }
 
 #[test]
-fn lists_five_read_only_tools_with_schemas() {
+fn lists_six_read_only_tools_with_schemas() {
     let reply = server(Vec::new())
         .handle(&json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }))
         .unwrap();
@@ -113,7 +113,8 @@ fn lists_five_read_only_tools_with_schemas() {
             "check_lookalike",
             "search",
             "package",
-            "site_info"
+            "site_info",
+            "facts"
         ]
     );
     for tool in tools {
@@ -801,4 +802,125 @@ fn official_site_prefers_a_packages_home_page_to_a_guess() {
     assert_eq!(answer["domain"], "serde.rs");
     assert_eq!(answer["confidence"], "medium");
     assert_eq!(answer["alternatives"][0]["domain"], "xapo.com");
+}
+
+/// Finds Wikipedia's article on Australia, with its facts, for any query
+/// naming it.
+struct Australia;
+
+impl SearchBackend for Australia {
+    fn search(&self, _query: &str, _limit: usize) -> Result<Vec<Hit>> {
+        Ok(Vec::new())
+    }
+
+    fn search_full(
+        &self,
+        query: &str,
+        _limit: usize,
+        _options: &SearchOptions,
+    ) -> Result<SearchResults> {
+        use plumb_core::facts::{Fact, FactKind};
+        let mut pages = Vec::new();
+        if query.to_lowercase().contains("australia") {
+            let page = plumb_index::pages::Page::from_article(
+                "en",
+                plumb_core::article::Article {
+                    title: "Australia".into(),
+                    description: Some("country in Oceania".into()),
+                    item: Some("Q408".into()),
+                    facts: vec![
+                        Fact {
+                            kind: FactKind::Capital,
+                            value: "Canberra".into(),
+                        },
+                        Fact {
+                            kind: FactKind::Population,
+                            value: "27204809;2024".into(),
+                        },
+                    ],
+                    ..Default::default()
+                },
+            );
+            pages.push(plumb_index::pages::PlacedPage {
+                hit: plumb_index::pages::PageHit {
+                    page,
+                    score: 0.9,
+                    named: true,
+                    popularity: 1.0,
+                    whole: true,
+                    learned: None,
+                },
+                under: None,
+                at: 0,
+            });
+        }
+        Ok(SearchResults {
+            hits: Vec::new(),
+            pages,
+            site_search: None,
+            spelling: None,
+        })
+    }
+
+    fn num_docs(&self) -> u64 {
+        0
+    }
+}
+
+#[test]
+fn facts_come_with_the_wikidata_item_and_property_they_are_from() {
+    let mcp = Mcp::new(Arc::new(Australia), None);
+    let answer = call(&mcp, "facts", json!({ "subject": "Australia" }));
+    let result = &answer["result"];
+    assert_eq!(result["isError"], false, "{answer}");
+    let data = &result["structuredContent"];
+    assert_eq!(data["item"], "Q408");
+    assert_eq!(data["facts"][0]["question"], "Capital of Australia");
+    assert_eq!(data["facts"][0]["value"], "Canberra");
+    assert_eq!(
+        data["facts"][0]["source"],
+        "https://www.wikidata.org/wiki/Q408#P36"
+    );
+    let text = result["content"][0]["text"].as_str().unwrap();
+    assert_eq!(
+        text,
+        "Australia, country in Oceania https://en.wikipedia.org/wiki/Australia\n\
+         Capital of Australia: Canberra [Wikidata Q408 P36]\n\
+         Population of Australia: 27,204,809 (Counted in 2024) [Wikidata Q408 P1082]\n\
+         Source: https://www.wikidata.org/wiki/Q408"
+    );
+
+    // One kind, by its key or as people ask it.
+    for about in ["capital", "capital city"] {
+        let answer = call(
+            &mcp,
+            "facts",
+            json!({ "subject": "australia", "about": about }),
+        );
+        let facts = answer["result"]["structuredContent"]["facts"]
+            .as_array()
+            .unwrap();
+        assert_eq!(facts.len(), 1, "{about}: {answer}");
+        assert_eq!(facts[0]["kind"], "capital");
+    }
+    // A kind it has no fact of, a kind it never keeps, a subject it lacks.
+    let answer = call(
+        &mcp,
+        "facts",
+        json!({ "subject": "australia", "about": "ceo" }),
+    );
+    assert_eq!(answer["result"]["structuredContent"]["found"], false);
+    let answer = call(
+        &mcp,
+        "facts",
+        json!({ "subject": "australia", "about": "favourite colour" }),
+    );
+    assert_eq!(answer["result"]["isError"], true);
+    let text = answer["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("capital, population"), "{text}");
+    let answer = call(&mcp, "facts", json!({ "subject": "Atlantis" }));
+    assert_eq!(
+        answer["result"]["content"][0]["text"],
+        "Plumb has no facts about Atlantis."
+    );
 }

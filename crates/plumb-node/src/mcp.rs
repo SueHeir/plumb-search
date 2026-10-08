@@ -16,6 +16,8 @@
 //!   (sums, conversions, the time somewhere), the info box, an official
 //!   profile and recent headlines;
 //! - `site_info(domain)`: what Plumb knows about one site;
+//! - `facts(subject, about)`: what Wikidata says about the thing a name
+//!   names, each fact with the item and property it is from;
 //! - `read_page(url)`: a page as plain text, fetched by this node when an
 //!   AI app picks it from the results. Only offered to AI apps on the
 //!   node's own computer, or to every client with `--mcp-read-pages`: on a
@@ -104,7 +106,9 @@ const INSTRUCTIONS: &str = "Plumb Search finds official websites, Wikipedia arti
      search returns ordinary results (sites, plus Wikipedia articles, Stack Overflow \
      questions, books and other pages), and with them a direct answer when it can work one \
      out (sums, unit and currency conversions, the time somewhere), facts about what the \
-     query names, and recent headlines. site_info describes one site. Plumb matches names, \
+     query names, and recent headlines. site_info describes one site. facts gives what \
+     Wikidata says about a place, person, company or work (capital, population, born, CEO and \
+     the like), each with the item and property to cite. Plumb matches names, \
      homepage text, descriptions and meaning, not the full text of pages, so search for a \
      name or topic rather than a long question.";
 
@@ -322,6 +326,16 @@ impl Mcp {
                 let domain = text_arg(args, "domain")?;
                 let options = self.options(args)?;
                 self.site_info(&domain, &options)
+            }
+            "facts" => {
+                let subject = text_arg(args, "subject")?;
+                let about = args
+                    .get("about")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|a| !a.is_empty());
+                let options = self.options(args)?;
+                self.facts(&subject, about, &options)
             }
             "package" => {
                 let name = text_arg(args, "name")?;
@@ -970,6 +984,78 @@ impl Mcp {
         }))
     }
 
+    /// `facts`: what Wikidata says about the thing `subject` names, each
+    /// fact with the item and property it comes from, so a model can cite
+    /// it. With `about` ("ceo", "population"), only the facts of that kind.
+    pub fn facts(
+        &self,
+        subject: &str,
+        about: Option<&str>,
+        options: &SearchOptions,
+    ) -> Result<Value> {
+        use plumb_core::facts::{fact_asked, FactKind, KINDS};
+        let kinds: Option<Vec<FactKind>> = match about {
+            None => None,
+            Some(about) => {
+                let key = about.to_lowercase().replace([' ', '_'], "-");
+                let kinds = FactKind::from_key(&key)
+                    .map(|kind| vec![kind])
+                    .or_else(|| fact_asked(&format!("{about} of {subject}")).map(|q| q.kinds))
+                    .or_else(|| fact_asked(&format!("{subject} {about}")).map(|q| q.kinds));
+                let Some(kinds) = kinds else {
+                    bail!(
+                        "Plumb keeps no facts of the kind {about:?}; it knows {}",
+                        KINDS.iter().map(|k| k.key()).collect::<Vec<_>>().join(", ")
+                    );
+                };
+                Some(kinds)
+            }
+        };
+        let wanted = |kind: &FactKind| kinds.as_ref().is_none_or(|kinds| kinds.contains(kind));
+        let found = self.lookup(subject, PROFILE_SEARCH_LIMIT, options)?;
+        let page = answers::fact_pages(&found.pages)
+            .map(|placed| &placed.hit.page)
+            .find(|page| page.facts.iter().any(|fact| wanted(&fact.kind)));
+        let Some(page) = page else {
+            return Ok(json!({ "subject": subject, "found": false }));
+        };
+        let item_url = page
+            .item
+            .as_deref()
+            .map(|item| format!("https://www.wikidata.org/wiki/{item}"));
+        let mut facts = Vec::new();
+        for kind in KINDS.iter().copied().filter(wanted) {
+            let values: Vec<&str> = page
+                .facts
+                .iter()
+                .filter(|fact| fact.kind == kind)
+                .map(|fact| fact.value.as_str())
+                .collect();
+            let Some((value, note)) = answers::fact_text(kind, &values) else {
+                continue;
+            };
+            facts.push(json!({
+                "kind": kind.key(),
+                "question": kind.question(&page.title),
+                "value": value,
+                "note": note,
+                "property": kind.property(),
+                "source": item_url.as_ref().map(|url| format!("{url}#{}", kind.property())),
+            }));
+        }
+        Ok(json!({
+            "subject": subject,
+            "found": true,
+            "title": page.title,
+            "description": page.description.as_deref().map(short),
+            "url": page.url,
+            "item": page.item,
+            "item_url": item_url,
+            "from": "Wikidata",
+            "facts": facts,
+        }))
+    }
+
     /// `read_page`: the page's text, and whether its address (after
     /// redirects) is a look-alike.
     pub fn read_page(&self, args: &ReadArgs, options: &SearchOptions) -> Result<Value> {
@@ -1275,6 +1361,26 @@ pub fn tools(read_pages: bool, findings: bool) -> Value {
                     "country": country,
                 },
                 "required": ["domain"],
+            },
+            "annotations": read_only,
+        },
+        {
+            "name": "facts",
+            "title": "Facts",
+            "description": "Facts about a country, place, person, company, book or film from \
+                 Wikidata, by name (\"Australia\", \"Marie Curie\", \"Nvidia\"): capital, \
+                 population, height, area, born, died, founded, founder, CEO, headquarters, \
+                 currency, author, director, owner, spouse, head of state and the like. Each fact \
+                 comes with the Wikidata item and property it is from, to cite. Use it instead of \
+                 answering such facts from memory.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "subject": { "type": "string", "description": "What the facts are about, by name." },
+                    "about": { "type": "string", "description": "Optional: only one kind of fact (\"ceo\", \"population\", \"capital\")." },
+                    "country": country,
+                },
+                "required": ["subject"],
             },
             "annotations": read_only,
         },
