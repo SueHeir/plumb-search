@@ -34,7 +34,8 @@ use crate::meaning::load_embedder;
 pub const ARTICLE_VECTORS_FILE: &str = "article-vectors.bin";
 
 /// Ridge penalties tried, per fact.
-const RIDGES: &[f64] = &[0.003, 0.01, 0.03, 0.1, 0.3];
+/// The largest leaves each subject nearly where it is.
+const RIDGES: &[f64] = &[0.001, 0.003, 0.01, 0.03, 0.1, 0.3, 1.0, 3.0, 10.0, 100.0];
 
 /// Held-out facts the penalty is picked on, at most, per kind.
 const MAX_TUNE: usize = 1_000;

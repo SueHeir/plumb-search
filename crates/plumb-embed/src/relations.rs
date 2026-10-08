@@ -4,9 +4,12 @@
 //! vectors the embedding model already makes.
 //!
 //! For a kind, every known fact `(subject, object)` gives a pair of unit
-//! vectors, and the map `W` is the ridge regression that takes subjects to
-//! their objects (with a bias, so each kind can move toward its own region
-//! of the space). Then:
+//! vectors, and the map takes a subject `s` to `s + W · s + b`, with `W`
+//! and `b` the ridge regression of objects minus subjects on subjects. The
+//! penalty pulls `W` toward nothing, so a map fitted on few facts stays
+//! close to the subject itself (moved by `b` toward the kind's region of
+//! the space): an object's text often names its subject ("capital of
+//! Australia"), and plain closeness is a strong start. Then:
 //!
 //! - **Following** a relation: the object nearest `W · subject`. Things the
 //!   model never saw a fact about get an answer too, from their text alone.
@@ -77,7 +80,8 @@ pub struct Relation {
     pub offset: f32,
     dim: usize,
     /// `dim + 1` rows of `dim` values: row `i` is what input value `i`
-    /// adds to the output, and the last row is the bias.
+    /// adds to the output (on top of the input itself), and the last row
+    /// is the bias.
     weights: Vec<f32>,
 }
 
@@ -88,7 +92,9 @@ impl Relation {
         ensure!(!pairs.is_empty(), "no facts to fit {key} on");
         ensure!(ridge > 0.0, "the ridge penalty must be positive");
         let m = dim + 1;
-        // a = Xᵀ X + ridge·n·I and b = Xᵀ Y, X with a 1 appended to each row.
+        // a = Xᵀ X + ridge·n·I and b = Xᵀ (Y - X), X with a 1 appended to
+        // each row: the map is the subject plus what is fitted, so a large
+        // penalty leaves the subject where it is (plus the kind's shift).
         let mut a = vec![0f64; m * m];
         let mut b = vec![0f64; m * dim];
         let mut x = vec![0f64; m];
@@ -112,8 +118,8 @@ impl Relation {
                     *cell += xi * xj;
                 }
                 let row = &mut b[i * dim..(i + 1) * dim];
-                for (cell, &y) in row.iter_mut().zip(object.iter()) {
-                    *cell += xi * f64::from(y);
+                for ((cell, &y), &s) in row.iter_mut().zip(object.iter()).zip(subject.iter()) {
+                    *cell += xi * (f64::from(y) - f64::from(s));
                 }
             }
         }
@@ -150,7 +156,11 @@ impl Relation {
         if subject.len() != self.dim {
             return None;
         }
-        let mut out = self.weights[self.dim * self.dim..].to_vec();
+        let mut out: Vec<f32> = self.weights[self.dim * self.dim..]
+            .iter()
+            .zip(subject)
+            .map(|(bias, x)| bias + x)
+            .collect();
         for (&x, row) in subject.iter().zip(self.weights.chunks_exact(self.dim)) {
             for (o, &w) in out.iter_mut().zip(row) {
                 *o += x * w;
@@ -519,6 +529,21 @@ mod tests {
         assert_eq!(Relations::load(&path).unwrap(), relations);
         std::fs::write(&path, b"PLUMBVEC").unwrap();
         assert!(Relations::load(&path).is_err());
+    }
+
+    #[test]
+    fn a_heavily_held_back_map_leaves_subjects_nearly_where_they_are() {
+        let dim = 16;
+        let (subjects, objects) = world(dim, 100);
+        let pairs: Vec<(&[f32], &[f32])> = subjects
+            .iter()
+            .zip(&objects)
+            .map(|(s, o)| (s.as_slice(), o.as_slice()))
+            .collect();
+        let relation = Relation::fit("capital", dim, &pairs, 1e6).unwrap();
+        for subject in &subjects {
+            assert!(dot(&relation.apply(subject).unwrap(), subject) > 0.95);
+        }
     }
 
     #[test]
