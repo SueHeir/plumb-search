@@ -508,11 +508,12 @@ const SITE_WORDS: &[&str] = &["documentation", "docs", "manual", "reference manu
 const SEPARATORS: &[&str] = &[" — ", " – ", " | ", " - ", " · ", " :: ", " » "];
 
 /// The page's own title out of `title`, the `<title>` of a page of `site`:
-/// the parts before those that name the site, joined by " — ".
+/// the parts between those that name the site, joined by " — ".
 /// "Sorting Techniques — Python 3.14 documentation" is "Sorting
 /// Techniques"; "Array.prototype.sort() - JavaScript | MDN" is
-/// "Array.prototype.sort() — JavaScript". `None` when nothing is left but
-/// the site's name.
+/// "Array.prototype.sort() — JavaScript"; "TypeScript: Documentation -
+/// Generics" is "Generics"; Rust's "Vec in std::vec" is "Vec — std::vec".
+/// `None` when nothing is left but the site's name.
 pub fn page_title(site: &DocsSite, title: &str) -> Option<String> {
     let title = crate::collapse_whitespace(title);
     let mut parts: Vec<&str> = vec![title.as_str()];
@@ -523,6 +524,31 @@ pub fn page_title(site: &DocsSite, title: &str) -> Option<String> {
             .map(str::trim)
             .filter(|part| !part.is_empty())
             .collect();
+    }
+    // "Vec in std::vec": the item, then the module it is in.
+    parts = parts
+        .into_iter()
+        .flat_map(|part| match part.split_once(" in ") {
+            Some((item, path))
+                if path.contains("::") && !item.contains(' ') && !path.contains(' ') =>
+            {
+                vec![item, path]
+            }
+            _ => vec![part],
+        })
+        .collect();
+    // A leading part that is only the site's name: "TypeScript:
+    // Documentation".
+    let only_site = |part: &str| {
+        let lower = part.trim_end_matches(':').to_lowercase();
+        lower == site.product.to_lowercase()
+            || site.names.iter().any(|name| lower == name.to_lowercase())
+            || SITE_WORDS
+                .iter()
+                .any(|word| lower.ends_with(&format!(" {word}")))
+    };
+    while parts.len() > 1 && only_site(parts[0]) {
+        parts.remove(0);
     }
     let names_site = |part: &str| {
         let lower = part.to_lowercase();
@@ -709,7 +735,20 @@ mod tests {
         let rust = site("rust").unwrap();
         assert_eq!(
             page_title(rust, "Vec in std::vec - Rust").as_deref(),
-            Some("Vec in std::vec")
+            Some("Vec — std::vec")
+        );
+        assert_eq!(
+            page_title(
+                rust,
+                "Using Trait Objects in Rust - The Rust Programming Language"
+            )
+            .as_deref(),
+            Some("Using Trait Objects in Rust")
+        );
+        let typescript = site("typescript").unwrap();
+        assert_eq!(
+            page_title(typescript, "TypeScript: Documentation - Generics").as_deref(),
+            Some("Generics")
         );
         assert_eq!(
             page_title(rust, "Built-in   Functions").as_deref(),

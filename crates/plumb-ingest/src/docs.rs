@@ -12,7 +12,7 @@
 //! page is under the site's docs, so a site's main pages come before its
 //! deep ones and the most used docs before others.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use plumb_core::article::{Article, MAX_ALIASES, MAX_ARTICLE_DESCRIPTION_CHARS};
 use plumb_core::docs::{page_title, DocsSite};
@@ -38,6 +38,25 @@ const WIKI_LISTS: &[&str] = &[
     "ArchWiki:",
 ];
 
+/// Titles of pages that are not docs pages: a site's search page, its
+/// index of words, a page that only sends you on.
+const NOT_PAGES: &[&str] = &[
+    "index",
+    "search",
+    "search results",
+    "search page",
+    "page not found",
+    "not found",
+    "404",
+    "redirecting...",
+    "redirecting",
+];
+
+/// Pages of a site that share a description for it to be the site's, not
+/// theirs: "The library for web and native user interfaces" on every page
+/// of React's docs.
+const SHARED_BY: usize = 3;
+
 /// A docs page as fetched.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FetchedDoc {
@@ -51,31 +70,75 @@ pub struct FetchedDoc {
 /// The articles of `site`'s pages `docs`, in the order given, leaving out
 /// pages with no title of their own and a title the site has used before
 /// (the first, shallowest, page keeps it).
+/// A description shared by [`SHARED_BY`] or more of them, the site's own
+/// or its menu's rather than a page's, is left out for the page's text, or
+/// for none.
 pub fn docs_articles(site: &DocsSite, docs: &[FetchedDoc]) -> Vec<Article> {
+    let shared = Shared {
+        descriptions: shared(docs.iter().map(|doc| doc.description.as_deref())),
+        texts: shared(docs.iter().map(|doc| doc.text.as_deref())),
+    };
     let mut seen = HashSet::new();
     docs.iter()
-        .filter_map(|doc| doc_article(site, doc))
+        .filter_map(|doc| article_of(site, doc, &shared))
         .filter(|article| seen.insert(article.title.to_lowercase()))
         .collect()
+}
+
+/// Descriptions and texts many pages of a site share.
+#[derive(Default)]
+struct Shared {
+    descriptions: HashSet<String>,
+    texts: HashSet<String>,
+}
+
+/// The short forms of `texts` that [`SHARED_BY`] or more of them share.
+fn shared<'a>(texts: impl Iterator<Item = Option<&'a str>>) -> HashSet<String> {
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for text in texts.flatten().filter_map(short) {
+        *counts.entry(text).or_default() += 1;
+    }
+    counts
+        .into_iter()
+        .filter(|(_, count)| *count >= SHARED_BY)
+        .map(|(text, _)| text)
+        .collect()
+}
+
+/// `text` as a description: its whitespace collapsed, cut to
+/// [`MAX_ARTICLE_DESCRIPTION_CHARS`]. `None` when empty.
+fn short(text: &str) -> Option<String> {
+    let text = plumb_core::collapse_whitespace(text);
+    (!text.is_empty()).then(|| plumb_core::truncate_chars(&text, MAX_ARTICLE_DESCRIPTION_CHARS))
 }
 
 /// The article of `doc`, a page of `site`. `None` for a page with no title
 /// but the site's name, or not under the site's roots.
 pub fn doc_article(site: &DocsSite, doc: &FetchedDoc) -> Option<Article> {
+    article_of(site, doc, &Shared::default())
+}
+
+fn article_of(site: &DocsSite, doc: &FetchedDoc, shared: &Shared) -> Option<Article> {
     let depth = depth_under(site, &doc.url)?;
     let title = page_title(site, doc.title.as_deref()?)?;
     // A wiki's lists of pages, not pages: "Category:Electronic Frontier
     // Foundation".
-    if WIKI_LISTS.iter().any(|list| title.starts_with(list)) {
+    if WIKI_LISTS.iter().any(|list| title.starts_with(list))
+        || NOT_PAGES.contains(&title.to_lowercase().as_str())
+    {
         return None;
     }
     let description = doc
         .description
         .as_deref()
-        .or(doc.text.as_deref())
-        .map(plumb_core::collapse_whitespace)
-        .filter(|text| !text.is_empty())
-        .map(|text| plumb_core::truncate_chars(&text, MAX_ARTICLE_DESCRIPTION_CHARS));
+        .and_then(short)
+        .filter(|text| !shared.descriptions.contains(text))
+        .or_else(|| {
+            doc.text
+                .as_deref()
+                .and_then(short)
+                .filter(|text| !shared.texts.contains(text))
+        });
     Some(Article {
         aliases: aliases(site, &title),
         title,
@@ -246,5 +309,43 @@ mod tests {
         sort_docs(&mut articles);
         assert_eq!(articles[0].title, "Glossary");
         assert_eq!(articles[1].title, "Built-in Functions");
+    }
+
+    #[test]
+    fn leaves_out_the_sites_own_description_and_pages_that_are_not_docs() {
+        let react = site("react").unwrap();
+        let page = |path: &str, title: &str, text: &str| FetchedDoc {
+            url: format!("https://react.dev/reference/react/{path}"),
+            title: Some(format!("{title} – React")),
+            description: Some("The library for web and native user interfaces".into()),
+            text: Some(text.into()),
+        };
+        let articles = docs_articles(
+            react,
+            &[
+                page(
+                    "useState",
+                    "useState",
+                    "useState is a React Hook that lets you add a state variable.",
+                ),
+                page(
+                    "useEffect",
+                    "useEffect",
+                    "useEffect is a React Hook that lets you synchronize.",
+                ),
+                page(
+                    "useMemo",
+                    "useMemo",
+                    "useMemo is a React Hook that lets you cache a result.",
+                ),
+                page("search", "Search", "Search the docs."),
+            ],
+        );
+        let titles: Vec<&str> = articles.iter().map(|a| a.title.as_str()).collect();
+        assert_eq!(titles, ["useState", "useEffect", "useMemo"]);
+        assert_eq!(
+            articles[0].description.as_deref(),
+            Some("useState is a React Hook that lets you add a state variable.")
+        );
     }
 }
