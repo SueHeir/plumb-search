@@ -33,6 +33,13 @@ use crate::meaning::load_embedder;
 /// File of the article vectors, next to the maps.
 pub const ARTICLE_VECTORS_FILE: &str = "article-vectors.bin";
 
+/// The articles with a vector, next to the maps: item, title, description
+/// and the kinds of fact it is the object of, tab-separated.
+pub const ARTICLES_FILE: &str = "articles.tsv";
+
+/// The facts the maps were fitted on: kind, subject item, object item.
+pub const FACTS_FILE: &str = "facts.tsv";
+
 /// Ridge penalties tried, per fact.
 /// The largest leaves each subject nearly where it is.
 const RIDGES: &[f64] = &[0.001, 0.003, 0.01, 0.03, 0.1, 0.3, 1.0, 3.0, 10.0, 100.0];
@@ -443,6 +450,285 @@ fn embed_entities(
     vectors.lock().unwrap_or_else(|e| e.into_inner()).save(path)
 }
 
+/// Writes [`ARTICLES_FILE`] and [`FACTS_FILE`] to `dir`, for
+/// [`RelationStore`].
+fn write_tables(
+    dir: &Path,
+    links: &[Link],
+    entities: &HashMap<String, Entity>,
+    rows: &HashMap<String, usize>,
+) -> Result<()> {
+    let clean = |text: &str| text.replace(['\t', '\n', '\r'], " ");
+    let mut objects: HashMap<&str, Vec<&str>> = HashMap::new();
+    let mut facts = String::new();
+    for link in links {
+        if !rows.contains_key(&link.subject) || !rows.contains_key(&link.object) {
+            continue;
+        }
+        let kinds = objects.entry(link.object.as_str()).or_default();
+        if !kinds.contains(&link.kind.key()) {
+            kinds.push(link.kind.key());
+        }
+        facts.push_str(&format!(
+            "{}\t{}\t{}\n",
+            link.kind.key(),
+            link.subject,
+            link.object
+        ));
+    }
+    let mut items: Vec<&String> = rows.keys().collect();
+    items.sort();
+    let mut articles = String::new();
+    for item in items {
+        let entity = &entities[item];
+        articles.push_str(&format!(
+            "{item}\t{}\t{}\t{}\n",
+            clean(&entity.title),
+            clean(&entity.description),
+            objects
+                .get(item.as_str())
+                .map_or(String::new(), |k| k.join(","))
+        ));
+    }
+    std::fs::write(dir.join(ARTICLES_FILE), articles)
+        .with_context(|| format!("writing {}", dir.join(ARTICLES_FILE).display()))?;
+    std::fs::write(dir.join(FACTS_FILE), facts)
+        .with_context(|| format!("writing {}", dir.join(FACTS_FILE).display()))
+}
+
+/// Most answers [`RelationStore::relate`] gives.
+pub const MAX_RELATE_ANSWERS: usize = 20;
+
+/// The maps, the articles they were fitted on and those articles' vectors,
+/// for following relations and checking claims (the MCP tool `relate`).
+pub struct RelationStore {
+    relations: Relations,
+    items: Vec<String>,
+    titles: Vec<String>,
+    descriptions: Vec<String>,
+    vectors: Vec<Vec<f32>>,
+    by_title: HashMap<String, usize>,
+    objects_of: HashMap<String, Vec<usize>>,
+    stated: HashSet<(String, usize, usize)>,
+    embedder: Option<plumb_embed::Embedder>,
+}
+
+/// A thing a relation starts or ends at: an article, or text the model
+/// embedded.
+struct Point {
+    row: Option<usize>,
+    title: String,
+    vector: Vec<f32>,
+}
+
+impl RelationStore {
+    /// Reads what `plumb relations` wrote to `dir`. With `model` (the model
+    /// that made the vectors), names that are not articles there are
+    /// embedded; without, they are not found.
+    pub fn load(dir: &Path, model: Option<&Path>) -> Result<Self> {
+        let relations = Relations::load(&dir.join(RELATIONS_FILE_NAME))?;
+        let vectors = Vectors::load(&dir.join(ARTICLE_VECTORS_FILE))?;
+        if vectors.model() != relations.model() {
+            bail!("the article vectors and the maps were made by different models");
+        }
+        let embedder = model.map(load_embedder).transpose()?;
+        if let Some(embedder) = &embedder {
+            if embedder.id() != relations.model() {
+                bail!("the maps were fitted on another model's vectors");
+            }
+        }
+        let path = dir.join(ARTICLES_FILE);
+        let articles = std::fs::read_to_string(&path)
+            .with_context(|| format!("reading {}", path.display()))?;
+        let mut store = RelationStore {
+            relations,
+            items: Vec::new(),
+            titles: Vec::new(),
+            descriptions: Vec::new(),
+            vectors: Vec::new(),
+            by_title: HashMap::new(),
+            objects_of: HashMap::new(),
+            stated: HashSet::new(),
+            embedder,
+        };
+        let mut rows = HashMap::new();
+        for line in articles.lines() {
+            let mut fields = line.split('\t');
+            let (Some(item), Some(title), description, kinds) =
+                (fields.next(), fields.next(), fields.next(), fields.next())
+            else {
+                continue;
+            };
+            let Some(vector) = vectors.get(item).and_then(|(_, v)| unit(v)) else {
+                continue;
+            };
+            let row = store.items.len();
+            rows.insert(item.to_string(), row);
+            store.items.push(item.to_string());
+            store.titles.push(title.to_string());
+            store
+                .descriptions
+                .push(description.unwrap_or_default().to_string());
+            store.vectors.push(vector);
+            store.by_title.entry(title.to_lowercase()).or_insert(row);
+            for kind in kinds
+                .unwrap_or_default()
+                .split(',')
+                .filter(|k| !k.is_empty())
+            {
+                store
+                    .objects_of
+                    .entry(kind.to_string())
+                    .or_default()
+                    .push(row);
+            }
+        }
+        let path = dir.join(FACTS_FILE);
+        let facts = std::fs::read_to_string(&path)
+            .with_context(|| format!("reading {}", path.display()))?;
+        for line in facts.lines() {
+            let mut fields = line.split('\t');
+            if let (Some(kind), Some(s), Some(o)) = (fields.next(), fields.next(), fields.next()) {
+                if let (Some(&s), Some(&o)) = (rows.get(s), rows.get(o)) {
+                    store.stated.insert((kind.to_string(), s, o));
+                }
+            }
+        }
+        Ok(store)
+    }
+
+    /// The kinds there are maps of.
+    pub fn kinds(&self) -> Vec<&str> {
+        self.relations
+            .all()
+            .iter()
+            .map(|r| r.key.as_str())
+            .collect()
+    }
+
+    fn point(&self, name: &str) -> Result<Option<Point>> {
+        if let Some(&row) = self.by_title.get(&name.to_lowercase()) {
+            return Ok(Some(Point {
+                row: Some(row),
+                title: self.titles[row].clone(),
+                vector: self.vectors[row].clone(),
+            }));
+        }
+        let Some(embedder) = &self.embedder else {
+            return Ok(None);
+        };
+        Ok(unit(&embedder.embed(name)?).map(|vector| Point {
+            row: None,
+            title: name.to_string(),
+            vector,
+        }))
+    }
+
+    fn article(&self, row: usize) -> serde_json::Value {
+        serde_json::json!({
+            "title": self.titles[row],
+            "description": self.descriptions[row],
+            "item": self.items[row],
+            "item_url": format!("https://www.wikidata.org/wiki/{}", self.items[row]),
+        })
+    }
+
+    /// Follows the kinds `chain` in turn from `subject`: the likeliest
+    /// objects (at most `limit`), or with `object`, how likely it is the
+    /// one.
+    pub fn relate(
+        &self,
+        subject: &str,
+        chain: &[String],
+        object: Option<&str>,
+        limit: usize,
+    ) -> Result<serde_json::Value> {
+        use serde_json::json;
+        if chain.is_empty() {
+            bail!(
+                "say which relation to follow: one of {}",
+                self.kinds().join(", ")
+            );
+        }
+        for key in chain {
+            if self.relations.get(key).is_none() {
+                bail!(
+                    "there is no map of {key:?}; there are maps of {}",
+                    self.kinds().join(", ")
+                );
+            }
+        }
+        let last = chain.last().map(String::as_str).unwrap_or_default();
+        let relation = self.relations.get(last).context("no map")?;
+        let Some(from) = self.point(subject)? else {
+            return Ok(json!({ "subject": subject, "relation": chain, "found": false }));
+        };
+        let keys: Vec<&str> = chain.iter().map(String::as_str).collect();
+        let at = self
+            .relations
+            .follow(&keys, &from.vector)
+            .context("the relation leads nowhere")?;
+        let single = chain.len() == 1;
+        let stated = |o: usize| {
+            single
+                && from
+                    .row
+                    .is_some_and(|s| self.stated.contains(&(last.to_string(), s, o)))
+        };
+        let mut out = json!({
+            "subject": subject,
+            "found": true,
+            "subject_title": from.title,
+            "relation": chain,
+            "how": "learned maps between article vectors (EmbeddingGemma), fitted on Wikidata facts",
+        });
+        if let Some(row) = from.row {
+            out["subject_item"] = json!(self.items[row]);
+        }
+        if let Some(object) = object {
+            let Some(to) = self.point(object)? else {
+                out["claim"] = json!({ "object": object, "found": false });
+                return Ok(out);
+            };
+            let closeness = dot(&at, &to.vector);
+            out["claim"] = json!({
+                "object": object,
+                "found": true,
+                "object_title": to.title,
+                "probability": round3(relation.probability(closeness)),
+                "stated": to.row.is_some_and(stated),
+            });
+            return Ok(out);
+        }
+        let candidates: Vec<usize> = match self.objects_of.get(last) {
+            Some(rows) => rows.clone(),
+            None => (0..self.vectors.len()).collect(),
+        };
+        let mut scored: Vec<(usize, f32)> = candidates
+            .into_iter()
+            .filter(|&row| Some(row) != from.row)
+            .map(|row| (row, dot(&at, &self.vectors[row])))
+            .collect();
+        scored.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+        let answers: Vec<serde_json::Value> = scored
+            .into_iter()
+            .take(limit.clamp(1, MAX_RELATE_ANSWERS))
+            .map(|(row, closeness)| {
+                let mut answer = self.article(row);
+                answer["probability"] = json!(round3(relation.probability(closeness)));
+                answer["stated"] = json!(stated(row));
+                answer
+            })
+            .collect();
+        out["answers"] = json!(answers);
+        Ok(out)
+    }
+}
+
+fn round3(x: f32) -> f64 {
+    (f64::from(x) * 1000.0).round() / 1000.0
+}
+
 pub fn run(args: &RelationsArgs) -> Result<()> {
     let set = crate::pages::SetInfo::find("wikipedia-en").context("no English Wikipedia set")?;
     if !args.articles.is_file() {
@@ -483,6 +769,7 @@ pub fn run(args: &RelationsArgs) -> Result<()> {
     let mut relations = Relations::new(embedder.id(), embedder.dim());
     let reports = fit_all(&links, &rows, &units, &mut relations)?;
     relations.save(&args.out.join(RELATIONS_FILE_NAME))?;
+    write_tables(&args.out, &links, &entities, &rows)?;
     print!("{}", report_table(&reports));
     println!(
         "{} maps in {} ({:.0}s in all)",
@@ -494,7 +781,7 @@ pub fn run(args: &RelationsArgs) -> Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use plumb_core::facts::Fact;
 
@@ -573,6 +860,108 @@ mod tests {
         // At most one fact of a kind.
         let (found, _) = links(|| Ok(pages.clone().into_iter()), 1).unwrap();
         assert_eq!(found.len(), 1);
+    }
+
+    /// A store in `dir` where each country's capital is its vector turned
+    /// a quarter of the way around, and the maps were fitted on that.
+    pub(crate) fn write_store(dir: &Path) {
+        let dim = 8;
+        let model = [9u8; 32];
+        let countries = ["Australia", "France", "Japan", "Peru", "Chad", "Fiji"];
+        let capitals = ["Canberra", "Paris", "Tokyo", "Lima", "Ndjamena", "Suva"];
+        let mut vectors = Vectors::new(model, dim);
+        let mut rows = HashMap::new();
+        let mut units = Vec::new();
+        let mut entities = HashMap::new();
+        let mut links = Vec::new();
+        for (n, (country, capital)) in countries.iter().zip(capitals).enumerate() {
+            let mut c = [0i8; 8];
+            c[n % 4] = 100;
+            c[4 + n / 4] = 60;
+            let mut o = [0i8; 8];
+            for d in 0..dim {
+                o[(d + 2) % dim] = c[d];
+            }
+            for (item, title, v) in [
+                (format!("C{n}"), country.to_string(), c),
+                (format!("K{n}"), capital.to_string(), o),
+            ] {
+                vectors.insert(&item, text_hash(&title), &v).unwrap();
+                rows.insert(item.clone(), units.len());
+                units.push(unit(&v).unwrap());
+                entities.insert(
+                    item,
+                    Entity {
+                        title,
+                        description: String::new(),
+                    },
+                );
+            }
+            // The last country's capital is not stated.
+            if n < 5 {
+                links.push(Link {
+                    kind: FactKind::Capital,
+                    subject: format!("C{n}"),
+                    object: format!("K{n}"),
+                });
+            }
+        }
+        let pairs: Vec<(&[f32], &[f32])> = (0..5)
+            .map(|n| (units[2 * n].as_slice(), units[2 * n + 1].as_slice()))
+            .collect();
+        let mut relations = Relations::new(model, dim);
+        relations
+            .insert(Relation::fit("capital", dim, &pairs, 1e-4).unwrap())
+            .unwrap();
+        relations.save(&dir.join(RELATIONS_FILE_NAME)).unwrap();
+        vectors.save(&dir.join(ARTICLE_VECTORS_FILE)).unwrap();
+        write_tables(dir, &links, &entities, &rows).unwrap();
+        // Suva is a capital the maps never saw as one.
+        let articles = std::fs::read_to_string(dir.join(ARTICLES_FILE)).unwrap();
+        let articles = articles.replace("K5\tSuva\t\t\n", "K5\tSuva\t\tcapital\n");
+        std::fs::write(dir.join(ARTICLES_FILE), articles).unwrap();
+    }
+
+    #[test]
+    fn the_store_follows_relations_and_checks_claims() {
+        let dir = tempfile::tempdir().unwrap();
+        write_store(dir.path());
+        let store = RelationStore::load(dir.path(), None).unwrap();
+        assert_eq!(store.kinds(), ["capital"]);
+
+        let answer = store
+            .relate("australia", &["capital".into()], None, 3)
+            .unwrap();
+        assert_eq!(answer["subject_item"], "C0");
+        assert_eq!(answer["answers"][0]["title"], "Canberra");
+        assert_eq!(answer["answers"][0]["stated"], true);
+        assert_eq!(answer["answers"].as_array().unwrap().len(), 3);
+
+        // A capital no fact names is found all the same, as a guess.
+        let answer = store.relate("Fiji", &["capital".into()], None, 1).unwrap();
+        assert_eq!(answer["answers"][0]["title"], "Suva");
+        assert_eq!(answer["answers"][0]["stated"], false);
+
+        let right = store
+            .relate("France", &["capital".into()], Some("Paris"), 5)
+            .unwrap();
+        let wrong = store
+            .relate("France", &["capital".into()], Some("Lima"), 5)
+            .unwrap();
+        assert_eq!(right["claim"]["stated"], true);
+        assert!(
+            right["claim"]["probability"].as_f64().unwrap()
+                > wrong["claim"]["probability"].as_f64().unwrap()
+        );
+
+        assert_eq!(
+            store
+                .relate("Atlantis", &["capital".into()], None, 5)
+                .unwrap()["found"],
+            false
+        );
+        assert!(store.relate("France", &["ceo".into()], None, 5).is_err());
+        assert!(store.relate("France", &[], None, 5).is_err());
     }
 
     #[test]

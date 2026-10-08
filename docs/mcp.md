@@ -94,6 +94,16 @@ Found before (searched "tokio latest version", 2 days ago): 1.47.1 Source: https
 
 Searches say a lot about whoever makes them, so findings never leave the node. They are kept in `findings.jsonl` in its data folder (the newest 5,000), and only apps on the node's own computer can report them or see them, even on a node run with `--mcp-read-pages`. A page that `check_lookalike` calls a look-alike is not kept. `plumb serve` keeps no findings. Delete the file to forget them all.
 
+## Following relations (experiment)
+
+`plumb relations` learns each kind of Wikidata fact whose value is another thing (capital, founder, CEO, headquarters, currency and the rest) as a map between the EmbeddingGemma vectors of Wikipedia articles, made from each article's title and description. It reads a Wikipedia articles file with facts (from `plumb fetch-facts`), embeds the articles in its facts, fits the maps, and reports how often they find the facts it held out:
+
+```sh
+plumb relations --articles wikipedia-en.tsv.gz --model <EmbeddingGemma dir> --out relations/
+```
+
+`plumb mcp --relations relations/` then offers a tool `relate` on top of the others: `relate(subject, relation)` lists the likeliest objects, each with a probability and whether Wikidata states it, and finds them for things Wikidata has no such fact about; `relation` can chain steps (`headquarters > capital`), followed by vector arithmetic in one call, so the step in between never fills a model's context; with `object` it says how likely a claim is instead. Add `--relations-model <dir>` to start from names that are not among the maps' articles. Answers that are not stated are guesses: on 2,000 facts of each kind, the right object came first for 21% (CEO) to 67% (currency) of held-out facts.
+
 ## How it is served
 
 - `POST /mcp` takes one JSON-RPC message and answers it with one JSON object; a notification gets `202 Accepted`. There is no event stream (`GET /mcp` answers 405) and no session.

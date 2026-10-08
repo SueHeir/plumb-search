@@ -147,6 +147,14 @@ pub struct McpArgs {
     /// [default: none].
     #[arg(long, value_name = "CODE", value_parser = parse_country, requires = "index")]
     pub country: Option<String>,
+    /// Also offer the tool `relate`, from the relation maps `plumb
+    /// relations` wrote to this directory (an experiment).
+    #[arg(long, value_name = "DIR")]
+    pub relations: Option<PathBuf>,
+    /// The model that made the maps' vectors, so names that are not among
+    /// the maps' articles can be embedded.
+    #[arg(long, value_name = "DIR", requires = "relations")]
+    pub relations_model: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
