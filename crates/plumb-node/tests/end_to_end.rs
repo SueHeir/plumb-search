@@ -138,6 +138,71 @@ fn ingest_index_search_and_eval_the_fixtures() {
 }
 
 #[test]
+fn eval_scores_the_same_with_the_page_index_kept() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (index, _) = build_fixture_index(tmp.path());
+    let pages = tmp.path().join("wikipedia-en.tsv");
+    std::fs::write(
+        &pages,
+        "views\ttitle\tdescription\titem\tsite\taliases\n\
+         9000\tU.S. Bancorp\tAmerican bank holding company\tQ1\tusbank.com\tUS Bank\n\
+         8000\tMarie Curie\tPolish-French physicist and chemist\tQ7186\t\t\n\
+         7000\tChase Bank\tAmerican bank\tQ2\tchase.com\t\n",
+    )
+    .unwrap();
+    let queries = tmp.path().join("queries.tsv");
+    std::fs::write(
+        &queries,
+        "us bank\tusbank.com\n\
+         marie curie\thttps://en.wikipedia.org/wiki/Marie_Curie\n\
+         chase\tchase.com\n",
+    )
+    .unwrap();
+    let cache = tmp.path().join("cache");
+    let eval = |cached: bool| {
+        let mut items: Vec<&dyn AsRef<OsStr>> = vec![
+            &"eval",
+            &"--index",
+            &index,
+            &"--queries",
+            &queries,
+            &"--pages",
+            &pages,
+            &"--show",
+            &"3",
+        ];
+        if cached {
+            items.extend([&"--pages-cache" as &dyn AsRef<OsStr>, &cache]);
+        }
+        plumb_ok(&args(&items))
+    };
+    let fresh = eval(false);
+    assert!(fresh.contains("top-1"), "{fresh}");
+    // The first cached run builds the index, the second reuses it.
+    assert_eq!(eval(true), fresh);
+    assert_eq!(eval(true), fresh);
+    let kept: Vec<_> = std::fs::read_dir(&cache)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .filter(|name| name.len() == 64)
+        .collect();
+    assert_eq!(kept.len(), 1, "{kept:?}");
+
+    // A changed page set file builds another index.
+    std::fs::write(
+        &pages,
+        std::fs::read_to_string(&pages).unwrap() + "100\tChase\tA pursuit\tQ3\t\t\n",
+    )
+    .unwrap();
+    eval(true);
+    let kept = std::fs::read_dir(&cache)
+        .unwrap()
+        .filter(|e| e.as_ref().unwrap().file_name().len() == 64)
+        .count();
+    assert_eq!(kept, 2);
+}
+
+#[test]
 fn eval_fails_below_min_top1_and_reports_misses() {
     let tmp = tempfile::tempdir().unwrap();
     let (index, _) = build_fixture_index(tmp.path());
@@ -452,4 +517,75 @@ async fn web_app_serves_mcp() {
 
     let (status, _, _) = get(&app, "/mcp").await;
     assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+}
+
+#[tokio::test]
+async fn mcp_reads_pages_for_others_on_web_ports_only_and_fewer_a_minute() {
+    use plumb_node::websearch::WebSettings;
+    let tmp = tempfile::tempdir().unwrap();
+    let (index, _) = build_fixture_index(tmp.path());
+    let searcher = Searcher::open(&index).unwrap();
+    let settings = WebSettings {
+        read_pages_for_all: true,
+        page_reader: plumb_crawl::ReadConfig {
+            allow_private_addresses: true,
+            ..plumb_crawl::ReadConfig::default()
+        },
+        ..WebSettings::default()
+    };
+    let app = plumb_node::web::router_with(
+        Arc::new(IndexBackend::new(searcher, RankConfig::default())),
+        settings,
+    );
+    let page = axum::Router::new().route("/", axum::routing::get(|| async { "hello" }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, page).await });
+
+    // No peer address: a client on another computer.
+    let post = |body: serde_json::Value| {
+        let request = Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header(header::HOST, "plumb.test")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let app = app.clone();
+        async move {
+            let response = app.oneshot(request).await.unwrap();
+            let status = response.status();
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            (
+                status,
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+            )
+        }
+    };
+
+    let (_, listed) =
+        post(serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" })).await;
+    let tools = listed["result"]["tools"].as_array().unwrap();
+    assert!(tools.iter().any(|tool| tool["name"] == "read_page"));
+
+    let read = tool_call(
+        2,
+        "read_page",
+        serde_json::json!({ "url": format!("http://{addr}/") }),
+    );
+    let (status, answer) = post(read.clone()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(answer["result"]["isError"], true, "{answer}");
+    let text = answer["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("not on port 80 or 443"), "{text}");
+
+    for _ in 1..10 {
+        assert_eq!(post(read.clone()).await.0, StatusCode::OK);
+    }
+    assert_eq!(post(read).await.0, StatusCode::TOO_MANY_REQUESTS);
+    // Other tools keep their own, larger allowance.
+    let call = tool_call(3, "official_site", serde_json::json!({ "name": "us bank" }));
+    assert_eq!(post(call).await.0, StatusCode::OK);
 }

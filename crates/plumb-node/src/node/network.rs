@@ -159,6 +159,10 @@ impl BucketSource for ServedIndex {
         if set == super::adult::SHARED_NAME {
             return super::adult::shared_file(&self.0.paths.data);
         }
+        if set == super::pages::MAP_SET {
+            let file = crate::map::file(&self.0.paths.data);
+            return file.is_file().then_some(file);
+        }
         crate::pages::SetInfo::find(set)?.servable_file(&self.0.paths.data)
     }
 

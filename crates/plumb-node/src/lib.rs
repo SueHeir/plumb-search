@@ -52,6 +52,7 @@ pub mod websearch;
 
 mod crawl;
 mod dead;
+mod fact_trust;
 mod fetch;
 mod icons;
 mod ingest;
@@ -63,6 +64,7 @@ mod records;
 mod relations;
 mod run;
 mod search;
+pub mod sources;
 mod terms;
 mod top_sites;
 
@@ -105,10 +107,12 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::FetchMap(args) => map::fetch::run(args),
         Command::FetchProfiles(args) => fetch::run_profiles(args),
         Command::FetchFacts(args) => fetch::run_facts(args),
+        Command::FetchLeads(args) => fetch::run_leads(args),
         Command::Ingest(args) => ingest::run(args),
         Command::Crawl(args) => crawl::run(args),
         Command::Index(args) => search::run_index(args),
         Command::Search(args) => search::run_search(args),
+        Command::Spelling(args) => search::run_spelling(&args),
         Command::Serve(args) => web::run(args),
         Command::Eval(args) => eval::run(args),
         Command::CheckLabels(args) => eval_labels::run(args),
@@ -122,6 +126,7 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::Experiments(args) => experiments::run(&args),
         Command::ClickLabels(args) => clicks::run(&args),
         Command::LinkRank(args) => link_rank::run(&args),
+        Command::FactTrust(args) => fact_trust::run(&args),
         Command::Relations(args) => relations::run(&args),
         Command::TopSites(args) => top_sites::run(&args),
         Command::Mcp(args) => mcp::run(args),

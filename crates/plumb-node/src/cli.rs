@@ -45,6 +45,11 @@ pub enum Command {
     /// a company's CEO) to a Wikipedia articles file made by fetch-pages,
     /// for searches that ask one ("capital of australia").
     FetchFacts(FetchFactsArgs),
+    /// Add each article's lead (its first sentences) and other names (the
+    /// titles that lead to it, to one of its sections too: "Manubrium" to
+    /// Sternum) to a Wikipedia articles file made by fetch-pages, from
+    /// Wikimedia's weekly dump of its search index.
+    FetchLeads(FetchLeadsArgs),
     /// Fold seed data and earlier records into one records file.
     Ingest(IngestArgs),
     /// Fetch the homepages of the best-scored records and merge what they say.
@@ -53,6 +58,9 @@ pub enum Command {
     Index(IndexArgs),
     /// Search the index from the command line.
     Search(SearchArgs),
+    /// Show what an index's spelling model learned from its words: the
+    /// commonest slips, how likely given typos are, and completions.
+    Spelling(SpellingArgs),
     /// Serve the search page and a JSON API over HTTP.
     Serve(ServeArgs),
     /// Check how often the official site ranks first for a list of queries.
@@ -93,6 +101,11 @@ pub enum Command {
     /// to each other (a PageRank of our own crawls), without changing
     /// anything. A look at the link graph; nothing uses the ranks yet.
     LinkRank(LinkRankArgs),
+    /// How often each site's pages state Wikidata's facts right, from
+    /// Common Crawl's page text (Knowledge-Based Trust), and optionally a
+    /// copy of a records file with each site's counts, which its link
+    /// score counts in.
+    FactTrust(crate::fact_trust::FactTrustArgs),
     /// Learn each kind of Wikidata fact (capital, founder, CEO...) as a
     /// map between the vectors of Wikipedia articles, and measure how well
     /// the maps find facts they were not shown (an experiment).
@@ -436,8 +449,8 @@ pub struct RunArgs {
     /// Home country, whose sites rank a little higher and other countries'
     /// a little lower: a two-letter code such as US or DE, `any` for none,
     /// or `auto` to take it from each browser's language setting
-    /// (`en-US` -> US), falling back to this computer's region settings.
-    /// A search can pick another with `country=` in its address.
+    /// (`en-US` -> US), falling back to this computer's region settings,
+    /// then the United States. A search can pick another with `country=` in its address.
     #[arg(long, value_name = "CODE", default_value = "auto", value_parser = HomeCountry::parse)]
     pub country: HomeCountry,
     /// Show "Search the web with ..." above the results, a link that hands
@@ -653,6 +666,15 @@ pub struct FetchDataArgs {
     /// (a notability filter that keeps the query small enough to finish).
     #[arg(long, value_name = "N", default_value_t = 25)]
     pub wikidata_min_sitelinks: u32,
+    /// A copy of Wikidata to ask first for the official websites and their
+    /// facts: QLever's lists them all in seconds, while Wikidata's own
+    /// endpoint needs many queries, each close to its 60-second limit. When
+    /// it fails, Wikidata's own endpoint is asked.
+    #[arg(long, value_name = "URL", default_value = plumb_ingest::download::QLEVER_WIKIDATA_URL)]
+    pub wikidata_mirror: String,
+    /// Ask only Wikidata's own endpoint, not --wikidata-mirror.
+    #[arg(long)]
+    pub no_wikidata_mirror: bool,
     /// Keep each file an earlier run saved in --dir within this many days
     /// instead of fetching it again, so a rerun only fetches what is missing,
     /// stale or failed. A file copied in from another run's folder counts
@@ -673,6 +695,31 @@ pub struct FetchProfilesArgs {
 }
 
 #[derive(Debug, Args)]
+pub struct FetchLeadsArgs {
+    /// A node's data directory whose English Wikipedia set gets the leads;
+    /// the node picks the new file up within seconds.
+    #[arg(long, value_name = "DIR", required_unless_present = "articles")]
+    pub data: Option<PathBuf>,
+    /// The articles file to add them to instead.
+    #[arg(long, value_name = "PATH")]
+    pub articles: Option<PathBuf>,
+    /// Directory for the dump's files (about 66 of 600 MB for English, a
+    /// few at a time, each deleted once read) and what was read of them,
+    /// so a stopped run carries on.
+    #[arg(long, value_name = "DIR")]
+    pub work: PathBuf,
+    /// How many of the most read articles get a lead.
+    #[arg(long, value_name = "N", default_value_t = 2_000_000)]
+    pub top: usize,
+    /// Keep the dump's files once read.
+    #[arg(long)]
+    pub keep_dumps: bool,
+    /// Read these files of the dump instead of downloading it.
+    #[arg(long, value_name = "PATH", num_args = 1..)]
+    pub dumps: Vec<PathBuf>,
+}
+
+#[derive(Debug, Args)]
 pub struct FetchFactsArgs {
     /// A node's data directory whose English Wikipedia set gets the
     /// facts; the node picks the new file up within seconds.
@@ -681,6 +728,14 @@ pub struct FetchFactsArgs {
     /// The articles file to add them to instead.
     #[arg(long, value_name = "PATH")]
     pub articles: Option<PathBuf>,
+    /// Where to read on when Wikidata's query service stops answering a
+    /// kind's deep pages (it times out on them): by default QLever's copy
+    /// of Wikidata.
+    #[arg(long, value_name = "URL", default_value = plumb_ingest::item_facts::DEEP_SPARQL_URL)]
+    pub deep_endpoint: String,
+    /// Ask only Wikidata's query service, never --deep-endpoint.
+    #[arg(long)]
+    pub wikidata_only: bool,
 }
 
 #[derive(Debug, Args)]
@@ -703,9 +758,11 @@ pub struct FetchPagesArgs {
     /// 36 more software docs sites, from their sitemaps; --work keeps each
     /// site's pages so a stopped run carries on), reference (pages of
     /// about 150 well-known reference sites: health, dictionaries, recipes,
-    /// how-tos and government, from their sitemaps; --work as for docs) or
+    /// how-tos and government, from their sitemaps; --work as for docs),
     /// places (named shops, restaurants, parks and towns from
-    /// OpenStreetMap).
+    /// OpenStreetMap) or wiktionary (English words and what they mean,
+    /// from kaikki.org's reading of Wiktionary, about 3.3 GB, for "define"
+    /// searches).
     #[arg(long, value_name = "SET", default_value = "wikipedia-en")]
     pub set: String,
     /// Directory to download Wikipedia's dumps into (created if missing).
@@ -777,6 +834,10 @@ pub struct FetchPagesArgs {
     /// Papers: most papers kept, the most cited.
     #[arg(long, value_name = "N", default_value_t = 2_000_000)]
     pub max_papers: usize,
+    /// Papers: most requests to CORE for free copies (fifty papers each),
+    /// when CORE_API_KEY is set.
+    #[arg(long, value_name = "N", default_value_t = plumb_ingest::core_ac::DEFAULT_MAX_REQUESTS)]
+    pub max_core_requests: usize,
     /// Podcasts: fewest Podcast Index popularity points (0 to 9) of a
     /// podcast kept.
     #[arg(long, value_name = "N", default_value_t = plumb_ingest::podcasts::DEFAULT_MIN_SCORE)]
@@ -968,6 +1029,20 @@ pub struct IndexArgs {
 }
 
 #[derive(Debug, Args)]
+pub struct SpellingArgs {
+    /// Index directory.
+    #[arg(long, value_name = "DIR")]
+    pub index: PathBuf,
+    /// How many of the learned slips to list, likeliest first.
+    #[arg(long, value_name = "N", default_value_t = 40)]
+    pub rules: usize,
+    /// A typo and the word meant, as `typed:meant` (`amtrack:amtrak`): how
+    /// likely the slip is and how common each word is. May be repeated.
+    #[arg(long, value_name = "TYPED:MEANT")]
+    pub pair: Vec<String>,
+}
+
+#[derive(Debug, Args)]
 pub struct SearchArgs {
     /// Index directory.
     #[arg(long, value_name = "DIR")]
@@ -1021,8 +1096,8 @@ pub struct ServeArgs {
     /// Home country, whose sites rank a little higher and other countries'
     /// a little lower: a two-letter code such as US or DE, `any` for none,
     /// or `auto` to take it from each browser's language setting
-    /// (`en-US` -> US), falling back to this computer's region settings.
-    /// A search can pick another with `country=` in its address.
+    /// (`en-US` -> US), falling back to this computer's region settings,
+    /// then the United States. A search can pick another with `country=` in its address.
     #[arg(long, value_name = "CODE", default_value = "auto", value_parser = HomeCountry::parse)]
     pub country: HomeCountry,
     /// Show "Search the web with ..." above the results, a link that hands
@@ -1100,6 +1175,10 @@ pub struct EvalArgs {
     /// [default: none].
     #[arg(long, value_name = "CODE", value_parser = parse_country)]
     pub country: Option<String>,
+    /// Only sites in this language, a code such as en, as the search
+    /// page's language setting does [default: any].
+    #[arg(long, value_name = "CODE", value_parser = parse_language)]
+    pub lang: Option<String>,
     /// Search for each query without suggesting a spelling.
     #[arg(long, conflicts_with = "follow_suggestions")]
     pub exact: bool,
@@ -1108,6 +1187,11 @@ pub struct EvalArgs {
     /// (eval/typo_queries.tsv).
     #[arg(long)]
     pub follow_suggestions: bool,
+    /// Print every "Did you mean" suggestion a query gets, to see how many
+    /// right spellings get one (eval/brand_queries.tsv) and what typos are
+    /// taken for.
+    #[arg(long, conflicts_with = "exact")]
+    pub show_suggestions: bool,
     /// Ranking knobs to change, as JSON, e.g. '{"exact_label_bonus": 0.1}'.
     /// The other knobs keep their defaults; --alpha wins over an alpha here.
     #[arg(long, value_name = "JSON", value_parser = parse_rank_config)]
@@ -1140,6 +1224,12 @@ pub struct EvalArgs {
     /// How many of each page set's most read pages to keep.
     #[arg(long, value_name = "N", default_value_t = usize::MAX, hide_default_value = true)]
     pub pages_top: usize,
+    /// Keep the index built from --pages in this folder and reuse it on
+    /// later runs with the same page set files and the same `plumb`
+    /// binary, instead of rebuilding it every run. Runs at once share one
+    /// build; only the few most recently used indexes are kept.
+    #[arg(long, value_name = "DIR", env = "PLUMB_EVAL_PAGES_CACHE")]
+    pub pages_cache: Option<PathBuf>,
     /// Measure only one half of the queries: `tune` to try ranking changes
     /// on, `held-out` to check them on afterwards. Which half a query is in
     /// depends on its words alone (see eval/README.md) [default: both].
@@ -1167,6 +1257,11 @@ pub(crate) fn parse_positive(s: &str) -> Result<usize, String> {
         Ok(n) if n > 0 => Ok(n),
         _ => Err(format!("expected a whole number above 0, got `{s}`")),
     }
+}
+
+fn parse_language(text: &str) -> Result<String, String> {
+    plumb_core::language_code(text)
+        .ok_or_else(|| format!("expected a language code such as en or de, got {text:?}"))
 }
 
 fn parse_country(text: &str) -> Result<String, String> {

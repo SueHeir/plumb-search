@@ -72,6 +72,7 @@ fn test_config(dir: &Path) -> NodeConfig {
     config.sources = SeedSources {
         tranco_url: format!("{nowhere}/tranco.csv"),
         wikidata_sparql_url: format!("{nowhere}/sparql"),
+        wikidata_mirror_url: None,
         wikipedia_api_url: format!("{nowhere}/w/api.php"),
         wikidata_min_sitelinks: 25,
         wikidata_pacing: quick_wikidata(),
@@ -735,6 +736,7 @@ impl SeedHost {
         SeedSources {
             tranco_url: self.url("/tranco.csv"),
             wikidata_sparql_url: self.url("/sparql"),
+            wikidata_mirror_url: None,
             wikipedia_api_url: self.url("/w/api.php"),
             wikidata_min_sitelinks: 25,
             wikidata_pacing: quick_wikidata(),
@@ -2021,7 +2023,11 @@ async fn search_by_meaning_downloads_and_runs_embedding_gemma_when_chosen() {
     let vectors_path = dir.path().join(plumb_embed::VECTORS_FILE_NAME);
     let deadline = std::time::Instant::now() + Duration::from_secs(60);
     while plumb_embed::Vectors::load(&vectors_path).map_or(0, |v| v.len()) == 0 {
-        assert!(std::time::Instant::now() < deadline, "no vectors saved");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no vectors saved: {:?}",
+            node.inner.meaning_work()
+        );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     node.shutdown().await.unwrap();
@@ -2486,6 +2492,149 @@ async fn a_node_takes_wikipedia_articles_from_a_trusted_node() {
     assert!(set.servable_file(dir.path()).is_none());
     let (_, _, body) = get(addr, "/search?q=curie+unit").await;
     assert!(!body.contains("Curie_(unit)"), "{body}");
+
+    peer.shutdown().await;
+    node.shutdown().await.unwrap();
+}
+
+/// A trusted node's buckets plus files of several sets.
+struct WithFiles(plumb_net::BucketTable, HashMap<String, PathBuf>);
+
+impl plumb_net::BucketSource for WithFiles {
+    fn bucket(&self, bucket: u32) -> Option<Vec<String>> {
+        self.0.bucket(bucket)
+    }
+
+    fn page_set_file(&self, set: &str) -> Option<PathBuf> {
+        self.1.get(set).cloned()
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_node_takes_newer_set_files_that_hold_what_its_own_do() {
+    let article = |title: &str, lead: Option<&str>| plumb_core::Article {
+        title: title.to_string(),
+        views: 100,
+        item: Some("Q1".into()),
+        lead: lead.map(str::to_string),
+        ..Default::default()
+    };
+    let write = |path: &Path, articles: &[plumb_core::Article]| {
+        plumb_ingest::articles::write_articles_file(path, articles).unwrap();
+    };
+    let long_ago = now_unix() - 100_000;
+
+    // This node made its own files a while ago: articles with leads, films
+    // and a map.
+    let dir = seeded_dir();
+    let sets = crate::pages::sets_dir(dir.path());
+    std::fs::create_dir_all(&sets).unwrap();
+    let wikipedia = crate::pages::SetInfo::find("wikipedia-en").unwrap();
+    let films = crate::pages::SetInfo::find("films").unwrap();
+    let led = [article("Marie Curie", Some("Marie Curie was a physicist."))];
+    write(&wikipedia.file(dir.path()), &led);
+    write(&films.file(dir.path()), &[article("Old Film", None)]);
+    let map = crate::map::file(dir.path());
+    std::fs::write(&map, b"old map").unwrap();
+    for file in [
+        wikipedia.file(dir.path()),
+        films.file(dir.path()),
+        map.clone(),
+    ] {
+        super::newer::set_time(&file, long_ago).unwrap();
+    }
+
+    // The trusted node has newer ones of all three, but its articles have
+    // no leads.
+    let peer_dir = tempfile::tempdir().unwrap();
+    let peer_id = plumb_net::load_or_create_key(&peer_dir.path().join("node.key"))
+        .unwrap()
+        .public()
+        .to_peer_id();
+    let peer_articles = peer_dir.path().join("wikipedia-en.tsv.gz");
+    write(&peer_articles, &[article("Marie Curie", None)]);
+    let (modified, size) = super::newer::stamp(&peer_articles).unwrap();
+    let note = plumb_net::pages::Layers {
+        modified,
+        size,
+        kinds: vec![],
+    };
+    std::fs::write(
+        plumb_net::pages::layers_path(&peer_articles),
+        serde_json::to_vec(&note).unwrap(),
+    )
+    .unwrap();
+    let peer_films = peer_dir.path().join("films.tsv.gz");
+    write(
+        &peer_films,
+        &[article("New Film", None), article("Old Film", None)],
+    );
+    let peer_map = peer_dir.path().join("map.pmtiles");
+    std::fs::write(&peer_map, b"new map, a bit longer").unwrap();
+    let files = HashMap::from([
+        ("wikipedia-en".to_string(), peer_articles),
+        ("films".to_string(), peer_films.clone()),
+        ("map".to_string(), peer_map.clone()),
+    ]);
+    let table = plumb_net::BucketTable::build(
+        &peer_dir.path().join("buckets"),
+        &[SiteRecord::new("lighthouses.org")],
+    )
+    .unwrap();
+    let mut peer_config = plumb_net::NetConfig::new(peer_dir.path().to_path_buf());
+    peer_config.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+    peer_config.upnp = false;
+    peer_config.local_discovery = false;
+    peer_config.round_every = None;
+    let (peer, _records) = plumb_net::start(peer_config, Arc::new(WithFiles(table, files)))
+        .await
+        .unwrap();
+    let peer_addr: plumb_net::Multiaddr = loop {
+        if let Some(addr) = peer.status().listening.first() {
+            break addr.parse().unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+
+    let mut config = test_config(dir.path());
+    config.settings.page_sets =
+        crate::pages::PageSets::parse("wikipedia-en=all,films=all").unwrap();
+    let mut net = plumb_net::NetConfig::new(PathBuf::new());
+    net.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+    net.upnp = false;
+    net.local_discovery = false;
+    net.round_every = None;
+    net.fill = false;
+    net.trusted_peers = vec![peer_id];
+    net.bootstrap = vec![peer_addr.with_p2p(peer_id).unwrap()];
+    config.network = Some(net);
+    let node = start(config).await.unwrap();
+    wait_for(node.addr(), "the first index", ready_and_idle).await;
+
+    // The newer films and map files are taken, the old ones kept as .prev,
+    // and the new ones dated as their maker dated them.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let films_file = films.file(dir.path());
+    while std::fs::read(&map).unwrap() != b"new map, a bit longer"
+        || std::fs::read(&films_file).unwrap() != std::fs::read(&peer_films).unwrap()
+    {
+        assert!(Instant::now() < deadline, "the newer files never came");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(
+        std::fs::read(super::newer::prev_path(&map)).unwrap(),
+        b"old map"
+    );
+    assert!(super::newer::prev_path(&films_file).is_file());
+    assert_eq!(
+        super::newer::stamp(&films_file).unwrap().0,
+        super::newer::stamp(&peer_films).unwrap().0
+    );
+    // The articles without leads are not taken, however new.
+    let kept = wikipedia.file(dir.path());
+    assert_eq!(super::newer::stamp(&kept).unwrap().0, long_ago);
+    assert_eq!(super::newer::layers("wikipedia-en", &kept), ["lead"]);
+    assert!(!super::newer::prev_path(&kept).exists());
 
     peer.shutdown().await;
     node.shutdown().await.unwrap();

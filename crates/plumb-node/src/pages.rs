@@ -107,9 +107,10 @@ pub const SETS: &[SetInfo] = &[
     },
     SetInfo {
         id: plumb_index::pages::PAPERS_SET,
-        name: "Papers (OpenAlex)",
+        name: "Papers (OpenAlex, arXiv, CORE)",
         pages: 2_000_000,
-        bytes_per_page: 160,
+        // About half have a free copy's address.
+        bytes_per_page: 200,
     },
     SetInfo {
         id: plumb_index::pages::PACKAGES_SET,
@@ -122,6 +123,12 @@ pub const SETS: &[SetInfo] = &[
         name: "Official profiles without an article (Wikidata)",
         pages: 100_000,
         bytes_per_page: 200,
+    },
+    SetInfo {
+        id: plumb_index::pages::WIKTIONARY_SET,
+        name: "Word definitions (Wiktionary), for \"define\" searches",
+        pages: 1_000_000,
+        bytes_per_page: 150,
     },
     // Searched apart from the pages, by where they are (see
     // `crate::places`).

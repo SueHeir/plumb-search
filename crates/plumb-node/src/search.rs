@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use plumb_core::truncate_chars;
 use plumb_index::{build_index, Hit, SearchOptions, Searcher};
 
-use crate::cli::{IndexArgs, SearchArgs};
+use crate::cli::{IndexArgs, SearchArgs, SpellingArgs};
 use crate::meaning::MeaningIndex;
 use crate::rank_config;
 use crate::records::load_records;
@@ -53,6 +53,46 @@ pub fn run_index(args: IndexArgs) -> Result<()> {
         args.records.display(),
         args.index.display()
     );
+    Ok(())
+}
+
+/// `plumb spelling`: what the index's spelling model learned.
+pub fn run_spelling(args: &SpellingArgs) -> Result<()> {
+    let searcher = Searcher::open(&args.index)
+        .with_context(|| format!("opening the index in {}", args.index.display()))?;
+    let Some(model) = searcher.spelling_model() else {
+        anyhow::bail!(
+            "the index in {} has no spelling model; build it again with this version",
+            args.index.display()
+        );
+    };
+    let (words, pairs, rules) = model.size();
+    println!(
+        "{} sites, {words} words, {pairs} word pairs, {rules} slips learned",
+        model.sites()
+    );
+    for (meant, typed, p) in model.top_rules(args.rules) {
+        println!("slip  {meant:>3} -> {typed:<3}  {p:.6}");
+    }
+    for pair in &args.pair {
+        let Some((typed, meant)) = pair.split_once(':') else {
+            anyhow::bail!("--pair {pair:?} is not typed:meant");
+        };
+        let (typed, meant) = (typed.trim(), meant.trim());
+        let (typed_count, meant_count) = (searcher.word_sites(typed), searcher.word_sites(meant));
+        let channel = model.ln_channel(typed, meant);
+        let ratio = (meant_count.max(1) as f64 / typed_count.max(1) as f64).ln();
+        println!(
+            "pair  {typed} -> {meant}: ln P(typed|meant) {channel:.2}, \
+             sites {typed_count} vs {meant_count} (ln ratio {ratio:.2}), \
+             weight to correct a known word > {:.2}",
+            if ratio > 0.0 {
+                -channel / ratio
+            } else {
+                f64::INFINITY
+            }
+        );
+    }
     Ok(())
 }
 
