@@ -52,6 +52,7 @@ pub mod websearch;
 
 mod crawl;
 mod dead;
+mod fact_trust;
 mod fetch;
 mod icons;
 mod ingest;
@@ -123,6 +124,7 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::Experiments(args) => experiments::run(&args),
         Command::ClickLabels(args) => clicks::run(&args),
         Command::LinkRank(args) => link_rank::run(&args),
+        Command::FactTrust(args) => fact_trust::run(&args),
         Command::Relations(args) => relations::run(&args),
         Command::TopSites(args) => top_sites::run(&args),
         Command::Mcp(args) => mcp::run(args),
