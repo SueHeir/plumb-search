@@ -182,6 +182,13 @@ impl Embedder {
         Ok(quantize(&unit))
     }
 
+    /// Whether searches may be embedded after BGE's instruction for search
+    /// queries: only the pinned model was trained with it; other models
+    /// have their own query prefix ([`Embedder::embed_query`]).
+    pub fn takes_query_instruction(&self) -> bool {
+        matches!(self.runner, Runner::Bert { .. })
+    }
+
     /// The vector of a search `query`: as [`Embedder::embed`] for the
     /// pinned model; after the server's query prefix for a server.
     pub fn embed_query(&self, query: &str) -> Result<Vec<i8>> {

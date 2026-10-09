@@ -85,6 +85,10 @@ To train it again after the searches or the ranking change:
     plumb train-rank --features features.jsonl --features features-typo.jsonl \
       --out crates/plumb-index/src/learned_model.json
 
+Searches are embedded after the model's search instruction by default
+(`--query-instruction split`), so train on features written that way;
+the model in `learned_model.json` was (October 2026, main 58b70f7).
+
 `--features-out` writes the hand-made order (the model is never trained
 on its own output), and `train-rank` prints top-1, top-3 and MRR of both
 halves before and after. `--folds 5` also trains on four fifths of the
