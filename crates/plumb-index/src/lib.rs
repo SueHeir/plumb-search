@@ -86,9 +86,9 @@ use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 use plumb_core::{
-    canonical_domain, kind_key, language_code, normalize_country, normalize_text, other_number,
-    registrable_domain, search_link, search_template_for, truncate_chars, AdultLevel, KeyPage,
-    Operators, SafeSearch, SiteRecord, MAX_TEXT_CHARS,
+    canonical_domain, kind_key, language_code, language_fits, normalize_country, normalize_text,
+    other_number, registrable_domain, search_link, search_template_for, truncate_chars, AdultLevel,
+    KeyPage, Operators, SafeSearch, SiteRecord, MAX_TEXT_CHARS,
 };
 use serde::{Deserialize, Serialize};
 use tantivy::collector::{DocSetCollector, TopDocs};
@@ -1739,7 +1739,7 @@ impl Searcher {
             // A site whose domain the whole query names stays whatever its
             // language: "spiegel" finds spiegel.de with English chosen.
             if let (Some(wanted), Some(site)) = (&language, column.language(addr.doc_id)) {
-                if *wanted != site && !name.typed && name.label < query.len {
+                if !language_fits(wanted, &site) && !name.typed && name.label < query.len {
                     continue;
                 }
             }
@@ -5276,6 +5276,26 @@ mod tests {
         );
         german.language = Some("de".into());
         records.push(german);
+        // Says no language, but its title is Russian.
+        records.push(site(
+            "bankru.example",
+            Some("Bank Россия — официальный сайт банка"),
+            None,
+            &[],
+            &[],
+            ranked(755, 5_000),
+        ));
+        // Says English, as its template did, but is Russian too.
+        let mut template = site(
+            "banktemplate.example",
+            Some("Bank Москва — кредиты и вклады онлайн"),
+            None,
+            &[],
+            &[],
+            ranked(745, 5_000),
+        );
+        template.language = Some("en".into());
+        records.push(template);
         let (_dir, searcher) = build(&records);
         let with = |options: SearchOptions| {
             let hits = searcher
@@ -5319,6 +5339,19 @@ mod tests {
             ..SearchOptions::default()
         });
         assert!(has(&german, "bankde.example"));
+        // Sites written in another script go too, whatever they say.
+        for domain in ["bankru.example", "banktemplate.example"] {
+            assert!(has(&off, domain), "{domain}");
+            assert!(!has(&english, domain), "{domain}");
+            assert!(!has(&german, domain), "{domain}");
+            for language in ["ru", "uk"] {
+                let found = with(SearchOptions {
+                    language: Some(language.into()),
+                    ..SearchOptions::default()
+                });
+                assert!(has(&found, domain), "{domain} {language}");
+            }
+        }
         // ...unless the query names the site.
         let english = SearchOptions {
             language: Some("en".into()),

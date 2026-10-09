@@ -17,9 +17,9 @@
 use std::collections::{HashMap, HashSet};
 
 use plumb_core::{
-    domain_label, joined, kind_key, language_code, normalize_country, normalize_text, other_number,
-    record_adult_level, registrable_domain, site_country, truncate_chars, Operators, SafeSearch,
-    SiteRecord, MAX_ALIASES, MAX_TEXT_CHARS,
+    domain_label, joined, kind_key, language_code, language_fits, normalize_country,
+    normalize_text, other_number, record_adult_level, registrable_domain, site_country,
+    site_language, truncate_chars, Operators, SafeSearch, SiteRecord, MAX_ALIASES, MAX_TEXT_CHARS,
 };
 use serde::Serialize;
 
@@ -139,9 +139,16 @@ fn rank_words(query: &str, sites: &[SiteRecord], options: &Options, limit: usize
         if options.safe.hides(record_adult_level(site)) {
             continue;
         }
-        let site_language = site.language.as_deref().and_then(language_code);
+        // As the index keeps it: what the site says, or the writing
+        // system of its title and description.
+        let written = format!(
+            "{} {}",
+            site.title.as_deref().unwrap_or_default(),
+            site.description.as_deref().unwrap_or_default()
+        );
+        let site_language = site_language(site.language.as_deref(), &written);
         if let (Some(wanted), Some(site)) = (&language, &site_language) {
-            if wanted != site {
+            if !language_fits(wanted, site) {
                 continue;
             }
         }
