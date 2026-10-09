@@ -1897,45 +1897,6 @@ impl PageSearcher {
                 }
             }
         }
-        // Articles whose title is some of the query and the rest says more
-        // about it: "titanic sinking", "radium discovery marie curie",
-        // "catholic homily". They lack the query's other words, so nothing
-        // above finds them; [`PageSearcher::name_match`] scores them by the
-        // share of the query their title is.
-        let mut by_title_inside = HashSet::new();
-        // Other pages found only so are left out; one found another way
-        // below is not.
-        let mut only_inside = HashSet::new();
-        let mut inside_keys = HashSet::new();
-        for start in 0..words.len() {
-            for end in start + 1..=words.len() {
-                let span = &words[start..end];
-                if span.len() == words.len()
-                    || span.iter().all(|word| {
-                        crate::is_function_word(word) || ASKING_WORDS.contains(&word.as_str())
-                    })
-                {
-                    continue;
-                }
-                let Some(key) = analysis::tokens(&self.joined, &span.join(" ")).pop() else {
-                    continue;
-                };
-                let named = TermQuery::new(
-                    Term::from_field_text(self.fields.keys, &key),
-                    IndexRecordOption::Basic,
-                );
-                inside_keys.insert(key);
-                let most_read = TopDocs::with_limit(TITLE_INSIDE_CANDIDATES)
-                    .order_by_fast_field::<u64>("popularity", tantivy::Order::Desc);
-                for (_, address) in searcher.search(&named, &most_read)? {
-                    if !addresses.contains(&address) {
-                        addresses.push(address);
-                        only_inside.insert(address);
-                    }
-                    by_title_inside.insert(address);
-                }
-            }
-        }
         // Packages, only ever found when the query asks for one: "serde
         // crate", "latest version of requests python".
         let package_query = plumb_core::packages::package_query(query);
@@ -1948,7 +1909,6 @@ impl PageSearcher {
                 IndexRecordOption::Basic,
             );
             for (_, address) in searcher.search(&named, &by_popularity())? {
-                only_inside.remove(&address);
                 if !addresses.contains(&address) {
                     addresses.push(address);
                 }
@@ -1980,7 +1940,6 @@ impl PageSearcher {
                 // "React useState" and more of its words.
                 by_title_first.remove(&address);
                 film_title_first.remove(&address);
-                only_inside.remove(&address);
                 if !addresses.contains(&address) {
                     addresses.push(address);
                 }
@@ -2012,7 +1971,6 @@ impl PageSearcher {
                     needed,
                 );
                 for (_, address) in searcher.search(&most_words, &by_popularity())? {
-                    only_inside.remove(&address);
                     if !addresses.contains(&address) {
                         addresses.push(address);
                     }
@@ -2054,7 +2012,6 @@ impl PageSearcher {
                 &TopDocs::with_limit(LEAD_CANDIDATES).order_by_score(),
             )? {
                 lead_scores.insert(address, score);
-                only_inside.remove(&address);
                 if !addresses.contains(&address) {
                     addresses.push(address);
                 }
@@ -2079,6 +2036,45 @@ impl PageSearcher {
             }
         }
         let topic_word = topic_word.map(|(_, stem)| stem.as_str());
+        // Articles whose title is some of the query and the rest says more
+        // about it: "titanic sinking", "radium discovery marie curie",
+        // "catholic homily". They lack the query's other words, so nothing
+        // above finds them; [`PageSearcher::name_match`] scores them by the
+        // share of the query their title is.
+        let mut by_title_inside = HashSet::new();
+        // Other pages found only so are left out. This comes after every
+        // other way pages are found, so "only so" means it.
+        let mut only_inside = HashSet::new();
+        let mut inside_keys = HashSet::new();
+        for start in 0..words.len() {
+            for end in start + 1..=words.len() {
+                let span = &words[start..end];
+                if span.len() == words.len()
+                    || span.iter().all(|word| {
+                        crate::is_function_word(word) || ASKING_WORDS.contains(&word.as_str())
+                    })
+                {
+                    continue;
+                }
+                let Some(key) = analysis::tokens(&self.joined, &span.join(" ")).pop() else {
+                    continue;
+                };
+                let named = TermQuery::new(
+                    Term::from_field_text(self.fields.keys, &key),
+                    IndexRecordOption::Basic,
+                );
+                inside_keys.insert(key);
+                let most_read = TopDocs::with_limit(TITLE_INSIDE_CANDIDATES)
+                    .order_by_fast_field::<u64>("popularity", tantivy::Order::Desc);
+                for (_, address) in searcher.search(&named, &most_read)? {
+                    if !addresses.contains(&address) {
+                        addresses.push(address);
+                        only_inside.insert(address);
+                    }
+                    by_title_inside.insert(address);
+                }
+            }
+        }
         let mut hits = Vec::new();
         for address in addresses {
             let document: TantivyDocument = searcher.doc(address)?;
@@ -4990,6 +4986,7 @@ mod tests {
             page("Sinking", 5_000, &[]),
             Page::from_question(Article {
                 title: "Homily".into(),
+                description: Some("sermon, outline".into()),
                 item: Some("1".into()),
                 views: 900_000,
                 ..Article::default()
@@ -5013,6 +5010,47 @@ mod tests {
         assert!(hits[0].page.is_article());
         // Words that only ask name no article.
         assert_eq!(first("what does it mean"), None);
+        // A question found by most of its words is kept, though its title
+        // is part of the query too.
+        let hits = s.search("homily sermon outline example", 5).unwrap();
+        assert!(hits.iter().any(|hit| hit.page.is_question()), "{hits:?}");
+    }
+
+    #[test]
+    fn an_article_the_query_names_and_its_lead_describes_comes_first() {
+        let with_lead = |title: &str, views: u64, lead: &str| {
+            let mut page = page(title, views, &[]);
+            page.lead = Some(lead.into());
+            page
+        };
+        let (_dir, s) = searcher(&[
+            with_lead(
+                "Marie Curie",
+                300_000,
+                "Polish and naturalised-French physicist and chemist who conducted \
+                 pioneering research on radioactivity, including the discovery of \
+                 polonium and radium.",
+            ),
+            with_lead(
+                "Radium",
+                250_000,
+                "Radium is a chemical element. Its discovery by Marie and Pierre \
+                 Curie in 1898 made Marie Curie famous; radium was isolated in 1910.",
+            ),
+            with_lead(
+                "Radium bromide",
+                3_000,
+                "Radium bromide is a compound of radium. Marie Curie used it in \
+                 the discovery of radium.",
+            ),
+        ]);
+        let hits = s.search("radium discovery marie curie", 5).unwrap();
+        assert_eq!(hits[0].page.title, "Marie Curie", "{hits:?}");
+        assert!(hits[0].score >= MIN_PARTIAL_SCORE, "{hits:?}");
+        // An article that only says it all is not named: "radium discovery"
+        // still finds Radium by its lead.
+        let hits = s.search("radium discovery", 5).unwrap();
+        assert_eq!(hits[0].page.title, "Radium", "{hits:?}");
     }
 
     #[test]
