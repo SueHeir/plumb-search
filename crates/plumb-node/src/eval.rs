@@ -61,7 +61,9 @@ pub fn parse_queries(text: &str) -> Result<Vec<EvalQuery>> {
             .split(',')
             .map(str::trim)
             .filter(|d| !d.is_empty())
-            .map(normalize_domain)
+            // A comma inside an address (`Tesla,_Inc.`) is written `%2C`,
+            // since a bare one separates answers.
+            .map(|d| normalize_domain(&d.replace("%2C", ",").replace("%2c", ",")))
             .collect();
         if expected.is_empty() {
             bail!("line {line}: no expected domain for {query:?}");
@@ -1269,6 +1271,14 @@ mod tests {
         assert_eq!(
             queries[0].expected,
             ["https://en.wikipedia.org/wiki/Marie_Curie"]
+        );
+        let queries = parse_queries(
+            "owner of tesla\thttps://en.wikipedia.org/wiki/Tesla%2C_Inc.,tesla.com\n",
+        )
+        .unwrap();
+        assert_eq!(
+            queries[0].expected,
+            ["https://en.wikipedia.org/wiki/Tesla,_Inc.", "tesla.com"]
         );
     }
     use super::*;
