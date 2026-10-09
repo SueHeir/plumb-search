@@ -68,6 +68,8 @@ fn test_config(dir: &Path) -> NodeConfig {
     config.news_feeds = 0;
     // As if "Set up my node" was answered, so filling goes ahead.
     config.settings.setup_chosen = true;
+    // No model is downloaded unless a test asks for one.
+    config.search_by_meaning = false;
     let nowhere = closed_port();
     config.sources = SeedSources {
         tranco_url: format!("{nowhere}/tranco.csv"),
@@ -267,6 +269,7 @@ fn profiles() {
     );
     assert_eq!(desktop.refresh_every, Some(Duration::from_secs(12 * 3600)));
     assert!(!desktop.use_system_proxy);
+    assert!(desktop.search_by_meaning && !server.search_by_meaning);
     desktop.check().unwrap();
 }
 

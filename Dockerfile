@@ -91,4 +91,4 @@ EXPOSE 4001/tcp 4001/udp
 # needs a healthcheck of its own: `plumb healthcheck --url http://127.0.0.1:PORT`.
 HEALTHCHECK --interval=60s --timeout=10s --start-period=120s CMD ["plumb", "healthcheck"]
 ENTRYPOINT ["plumb"]
-CMD ["run", "--data", "/data", "--bind", "0.0.0.0:8080", "--network"]
+CMD ["run", "--data", "/data", "--bind", "0.0.0.0:8080", "--network", "--search-by-meaning"]

@@ -350,7 +350,10 @@ impl NodeConfig {
     }
 
     /// Defaults for a desktop: 250,000 sites, 2,000 homepages crawled at
-    /// first and 1,000 more every 12 hours, on 127.0.0.1 with a free port.
+    /// first and 1,000 more every 12 hours, on 127.0.0.1 with a free port,
+    /// with search by meaning: it finds described searches ("electric car
+    /// maker") twice as often, and in the network the site vectors come from
+    /// a trusted node rather than this computer's CPU.
     pub fn desktop(data_dir: PathBuf) -> Self {
         NodeConfig {
             bind: SocketAddr::from(([127, 0, 0, 1], 0)),
@@ -361,6 +364,7 @@ impl NodeConfig {
             settings: NodeSettings::desktop(),
             manage_other_nodes: true,
             search_history: true,
+            search_by_meaning: true,
             news_feeds: 300,
             ..NodeConfig::server(data_dir)
         }
