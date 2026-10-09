@@ -345,6 +345,17 @@ pub struct RankConfig {
     /// (vacationrentals.com) leaves the rest listed: airbnb.com is still
     /// what "vacation rentals" is after.
     pub named_needs_all_words: bool,
+    /// With a [`Meaning`], for a query of two main words or more that no
+    /// site is named by in full: the closeness in meaning a site lacking
+    /// one of its main words needs to be listed at all. Matching a word or
+    /// two is no answer: "secret of mana walkthrough" listed
+    /// victoriassecret.com, "numbness on top of foot" flashscore.fr
+    /// ("Foot en direct"), and nothing near in meaning stands for them. A
+    /// site the query names by its first words is kept, unless the words
+    /// go on from the name as one phrase ("the cricket and the ant" is not
+    /// cricket.com.au's). Fewer results are shown rather than these.
+    /// `None` keeps them.
+    pub partial_closeness: Option<f32>,
     /// BM25 boost of a query word matching a site's search terms
     /// ([`plumb_core::SiteRecord::terms`]), picked from its whole homepage.
     pub terms_boost: f32,
@@ -403,6 +414,7 @@ impl Default for RankConfig {
             meaning_only_relevance: Some(0.35),
             named_share: Some(0.4),
             named_needs_all_words: true,
+            partial_closeness: Some(0.5),
             terms_boost: 1.0,
             filler_words: true,
             questions_name_nothing: true,
@@ -1512,6 +1524,16 @@ impl Searcher {
                     None => words,
                 }
             };
+            let closeness = if is_kind || name.label >= query.len {
+                None
+            } else {
+                let words = if max_bm25 > 0.0 {
+                    (bm25 / max_bm25).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                closeness_of(addr).or_else(|| coverage.get(&addr).map(|&share| share * words))
+            };
             let label_bonus = if name.label >= query.len {
                 cfg.exact_label_bonus
             } else {
@@ -1559,6 +1581,7 @@ impl Searcher {
                 country,
                 named: name.typed || name.words() >= query.len,
                 label_names_query: query.len >= 2 && name.label >= query.len,
+                closeness,
                 tie_break: (addr.segment_ord, domain_ord),
             });
         }
@@ -1568,6 +1591,35 @@ impl Searcher {
                 .then_with(|| b.link_score.total_cmp(&a.link_score))
                 .then_with(|| a.tie_break.cmp(&b.tie_break))
         });
+
+        // Matching a word or two of a longer query, found by no name and
+        // not near it in meaning: no answer, however big the site
+        // (victoriassecret.com for "secret of mana walkthrough").
+        if let Some(floor) = cfg
+            .partial_closeness
+            .filter(|floor| *floor > 0.0 && meaning.is_some())
+        {
+            let tokens = analysis::tokens(&self.words, query_text);
+            let by_name = |name: &NameMatch| {
+                name.typed
+                    || (name.words() > 0
+                        && !tokens
+                            .get(name.words())
+                            .is_some_and(|next| is_function_word(next)))
+            };
+            let partial: Vec<DocAddress> = ranked
+                .iter()
+                .filter(|r| {
+                    !r.named
+                        && !kinds.contains(&r.addr)
+                        && !names.get(&r.addr).is_some_and(by_name)
+                        && r.closeness.is_none_or(|closeness| closeness < floor)
+                })
+                .map(|r| r.addr)
+                .collect();
+            let missing = query.missing_main_words(&searcher, &self.fields, &partial)?;
+            ranked.retain(|r| !missing.contains(&r.addr));
+        }
 
         // Far below a site the query names: filler.
         if let (Some(share), Some(top)) = (cfg.named_share, ranked.first()) {
@@ -2179,6 +2231,10 @@ struct Ranked {
     /// The domain's label is the whole query of two or more words
     /// (awesome-python.com for "awesome python").
     label_names_query: bool,
+    /// How close in meaning the site is to the query, or as its words
+    /// match for a site with no embedding; `None` without a [`Meaning`] or
+    /// for a site the query names in full.
+    closeness: Option<f32>,
     tie_break: (u32, u64),
 }
 
@@ -3744,14 +3800,117 @@ mod tests {
         let before = RankConfig {
             meaning_only_relevance: None,
             question_relevance: None,
+            partial_closeness: None,
             ..RankConfig::default()
         };
         // On popularity alone it would have come before the plumbers...
         assert!(score(&before, "stripe.com") > score(&before, "plumbers.org"));
         // ...but nothing of the query's speaks for it.
-        let now = RankConfig::default();
+        let now = RankConfig {
+            partial_closeness: None,
+            ..RankConfig::default()
+        };
         assert!(score(&now, "stripe.com") < score(&now, "plumbers.org"));
         assert!(score(&now, "stripe.com") < score(&now, "drainhelp.net"));
+        // And with neither word nor much meaning, it is not listed at all.
+        let hits = searcher
+            .search_meaning(
+                "how to unclog a drain",
+                10,
+                &RankConfig::default(),
+                &options,
+                Some(&meaning),
+            )
+            .unwrap()
+            .hits;
+        assert_eq!(domains(&hits), ["drainhelp.net"]);
+    }
+
+    #[test]
+    fn a_word_or_two_of_a_longer_search_is_no_answer() {
+        let records = vec![
+            site(
+                "victoriassecret.com",
+                Some("Victoria's Secret: Bras, Lingerie, Beauty"),
+                None,
+                &["Victoria's Secret"],
+                &[],
+                popular(300, 20_000),
+            ),
+            site(
+                "rpgguides.net",
+                Some("RPG guides"),
+                Some("Walkthroughs of classic role-playing games."),
+                &[],
+                &[],
+                ranked(300_000, 10),
+            ),
+            site(
+                "manaworld.org",
+                Some("Mana World"),
+                Some("Secret of Mana walkthrough, maps and bosses."),
+                &[],
+                &[],
+                ranked(500_000, 5),
+            ),
+            site(
+                "cricket.com.au",
+                Some("Home | cricket.com.au"),
+                None,
+                &["Cricket Australia"],
+                &[],
+                popular(2_000, 8_000),
+            ),
+            site(
+                "fables.org",
+                Some("Aesop's fables"),
+                Some("The ant and the grasshopper, and other fables."),
+                &[],
+                &[],
+                ranked(400_000, 10),
+            ),
+        ];
+        let (_dir, searcher) = build(&records);
+        let options = SearchOptions::default();
+        let found = |query: &str, meaning: &FixedMeaning, cfg: &RankConfig| {
+            let hits = searcher
+                .search_meaning(query, 10, cfg, &options, Some(meaning))
+                .unwrap()
+                .hits;
+            domains(&hits)
+                .into_iter()
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        };
+        let off = RankConfig {
+            partial_closeness: None,
+            ..RankConfig::default()
+        };
+        let now = RankConfig::default();
+
+        // "secret" alone makes no answer of a lingerie shop; a site near in
+        // meaning that lacks a word is still one.
+        let mana = FixedMeaning(vec![
+            ("manaworld.org", 1.0),
+            ("rpgguides.net", 0.8),
+            ("victoriassecret.com", 0.1),
+        ]);
+        let query = "secret of mana walkthrough";
+        assert!(found(query, &mana, &off).contains(&"victoriassecret.com".to_string()));
+        assert_eq!(
+            found(query, &mana, &now),
+            ["manaworld.org", "rpgguides.net"]
+        );
+
+        // A name the words go on from as one phrase names nothing.
+        let fable = FixedMeaning(vec![("fables.org", 1.0), ("cricket.com.au", 0.2)]);
+        let query = "the cricket and the ant";
+        assert!(found(query, &fable, &off).contains(&"cricket.com.au".to_string()));
+        assert_eq!(found(query, &fable, &now), ["fables.org"]);
+
+        // A name followed by what is wanted of it keeps the site.
+        let scores = FixedMeaning(vec![("cricket.com.au", 0.2)]);
+        assert_eq!(found("cricket scores", &scores, &now)[0], "cricket.com.au");
     }
 
     #[test]
