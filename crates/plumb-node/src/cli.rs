@@ -631,6 +631,14 @@ pub struct RunArgs {
     /// the network needs filling (no --no-fill) and a trusted node.
     #[arg(long)]
     pub seed_from_outside: bool,
+    /// Which page set files to replace by themselves when a node this one
+    /// trusts has a newer one: `all` (the default; each may grow at most a
+    /// quarter past this node's own at a time, so a much bigger set is not
+    /// loaded unasked), `off`, or the sets to update with no limit on
+    /// growth, separated by commas (`films,stackoverflow,map`; `map` is the
+    /// map file). Sets a node has no file of are taken either way.
+    #[arg(long, value_name = "all|off|SETS")]
+    pub set_updates: Option<crate::pages::SetUpdates>,
 }
 
 /// Starting points for `plumb run`.

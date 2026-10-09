@@ -45,6 +45,12 @@ pub(super) const SETTLED_AFTER: u64 = 0;
 /// Smallest size of a newer file, as a share of this node's whole file.
 pub(super) const MIN_SIZE_PERCENT: u64 = 90;
 
+/// Biggest size of a newer file, as a share of this node's whole file,
+/// unless the set is named in `--set-updates`: a set that grew a lot (a
+/// Wikipedia file of 6.8 million pages in place of 2 million) can take
+/// more memory than the machine has, so it is loaded only when asked.
+pub(super) const MAX_GROWTH_PERCENT: u64 = 125;
+
 /// Trusted nodes asked about one set at most, per check.
 const MAX_ASKED: usize = 16;
 
@@ -70,6 +76,9 @@ pub(super) struct Mine {
     pub complete: bool,
     /// The kinds of entries it holds ([`layers_of`]); empty for none.
     pub layers: Vec<String>,
+    /// A newer file may be any size bigger (the set is named in
+    /// `--set-updates`), not only [`MAX_GROWTH_PERCENT`] of this one.
+    pub may_grow: bool,
 }
 
 /// The trusted nodes' files of `set`, from asking each connected one that
@@ -125,6 +134,13 @@ pub(super) fn newest<'a>(
             && offer.size.saturating_mul(100) < mine.size.saturating_mul(MIN_SIZE_PERCENT)
         {
             why = "a trusted node's newer file is much smaller";
+            continue;
+        }
+        if mine.complete
+            && !mine.may_grow
+            && offer.size.saturating_mul(100) > mine.size.saturating_mul(MAX_GROWTH_PERCENT)
+        {
+            why = "a trusted node's newer file is much bigger (name the set in --set-updates to take it)";
             continue;
         }
         let holds_mine = mine.layers.is_empty()
@@ -274,6 +290,7 @@ mod tests {
             size: 1_000,
             complete: true,
             layers: layers.iter().map(|s| s.to_string()).collect(),
+            may_grow: false,
         }
     }
 
@@ -308,6 +325,16 @@ mod tests {
             ..mine(&[])
         };
         assert!(newest(&cut, &[offer(10, 5_000, None)], now).is_ok());
+        // Much bigger: only when the set was named.
+        let big = [offer(3_400, 5_000, None)];
+        assert!(newest(&mine(&[]), &big, now)
+            .unwrap_err()
+            .contains("much bigger"));
+        let named = Mine {
+            may_grow: true,
+            ..mine(&[])
+        };
+        assert!(newest(&named, &big, now).is_ok());
     }
 
     #[test]

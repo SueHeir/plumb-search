@@ -309,6 +309,9 @@ fn fetch_if_needed(
     let chosen = match notes {
         Some(n) if reason == "a newer file" => {
             checked.insert(set.id, Instant::now());
+            let Some(may_grow) = inner.config.set_updates.allows(set.id) else {
+                return Ok(());
+            };
             let file = set.file(data);
             let (modified, size) = super::newer::stamp(&file).unwrap_or((0, 0));
             let mine = super::newer::Mine {
@@ -321,6 +324,7 @@ fn fetch_if_needed(
                 size,
                 complete: n.complete,
                 layers: super::newer::layers(set.id, &file),
+                may_grow,
             };
             match super::newer::newest(&mine, &offers, now) {
                 Ok(offer) => offer.clone(),
@@ -521,6 +525,13 @@ fn keep_map(
     {
         return Ok(());
     }
+    let file = crate::map::file(&inner.paths.data);
+    // A node with no map file takes one whatever --set-updates says.
+    let may_grow = match inner.config.set_updates.allows(MAP_SET) {
+        Some(may_grow) => may_grow,
+        None if file.is_file() => return Ok(()),
+        None => false,
+    };
     if inner.download_pause().is_some() {
         return Ok(());
     }
@@ -528,13 +539,14 @@ fn keep_map(
         return Ok(());
     };
     checked.insert(MAP_SET, Instant::now());
-    let file = crate::map::file(&inner.paths.data);
     let (modified, size) = super::newer::stamp(&file).unwrap_or((0, 0));
     let mine = super::newer::Mine {
         modified,
         size,
-        complete: true,
+        // With no file yet, any size goes.
+        complete: size > 0,
         layers: Vec::new(),
+        may_grow,
     };
     let offer = match super::newer::newest(&mine, &offers, now_unix()) {
         Ok(offer) => offer.clone(),

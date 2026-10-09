@@ -204,6 +204,9 @@ pub struct NodeConfig {
     /// trusted node answers (see `node/fill.rs`). Needs `network` with
     /// filling on and a trusted node. On by default.
     pub seed_from_network: bool,
+    /// Which page set files (and the map file) the node replaces by itself
+    /// when a trusted node has a newer one. All by default.
+    pub set_updates: crate::pages::SetUpdates,
     /// Where the seed data is downloaded from on first start.
     pub sources: SeedSources,
     /// How long to wait before trying failed work again. The wait doubles
@@ -327,6 +330,7 @@ impl NodeConfig {
             meaning_model: crate::meaning::MeaningModel::default(),
             embed_threads: None,
             seed_from_network: true,
+            set_updates: crate::pages::SetUpdates::All,
             sources: SeedSources::default(),
             retry_wait: Duration::from_secs(10 * 60),
             max_retry_wait: Duration::from_secs(6 * 60 * 60),
