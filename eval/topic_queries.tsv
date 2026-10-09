@@ -1,0 +1,78 @@
+# News and topic searches: what people look up when they follow the news.
+# A search for the news itself ("news", "world news") expects a major
+# general news site. A search for a topic in the news ("tariffs",
+# "government shutdown") expects its Wikipedia article, not a site that
+# only has a word of it in its name (tariffs.net, government.ru).
+# Topics are picked by hand from Google's Year in Search and long-running
+# news subjects.
+#
+# Run it with the Wikipedia page set, for example:
+#   plumb eval --index data/index --queries eval/topic_queries.tsv \
+#     --pages data/pages/sets/wikipedia-en.tsv.gz
+news	apnews.com,reuters.com,bbc.com,bbc.co.uk,nytimes.com,cnn.com,npr.org,theguardian.com,washingtonpost.com,wsj.com,nbcnews.com,cbsnews.com,foxnews.com,aljazeera.com,usatoday.com,bloomberg.com,ft.com,economist.com,latimes.com,axios.com,politico.com
+world news	apnews.com,reuters.com,bbc.com,bbc.co.uk,nytimes.com,cnn.com,npr.org,theguardian.com,washingtonpost.com,wsj.com,nbcnews.com,cbsnews.com,foxnews.com,aljazeera.com,usatoday.com,bloomberg.com,ft.com,economist.com,latimes.com,axios.com,politico.com
+breaking news	apnews.com,reuters.com,bbc.com,bbc.co.uk,nytimes.com,cnn.com,npr.org,theguardian.com,washingtonpost.com,wsj.com,nbcnews.com,cbsnews.com,foxnews.com,aljazeera.com,usatoday.com,bloomberg.com,ft.com,economist.com,latimes.com,axios.com,politico.com
+latest news	apnews.com,reuters.com,bbc.com,bbc.co.uk,nytimes.com,cnn.com,npr.org,theguardian.com,washingtonpost.com,wsj.com,nbcnews.com,cbsnews.com,foxnews.com,aljazeera.com,usatoday.com,bloomberg.com,ft.com,economist.com,latimes.com,axios.com,politico.com
+news today	apnews.com,reuters.com,bbc.com,bbc.co.uk,nytimes.com,cnn.com,npr.org,theguardian.com,washingtonpost.com,wsj.com,nbcnews.com,cbsnews.com,foxnews.com,aljazeera.com,usatoday.com,bloomberg.com,ft.com,economist.com,latimes.com,axios.com,politico.com
+headlines	apnews.com,reuters.com,bbc.com,bbc.co.uk,nytimes.com,cnn.com,npr.org,theguardian.com,washingtonpost.com,wsj.com,nbcnews.com,cbsnews.com,foxnews.com,aljazeera.com,usatoday.com,bloomberg.com,ft.com,economist.com,latimes.com,axios.com,politico.com
+top news	apnews.com,reuters.com,bbc.com,bbc.co.uk,nytimes.com,cnn.com,npr.org,theguardian.com,washingtonpost.com,wsj.com,nbcnews.com,cbsnews.com,foxnews.com,aljazeera.com,usatoday.com,bloomberg.com,ft.com,economist.com,latimes.com,axios.com,politico.com
+international news	apnews.com,reuters.com,bbc.com,bbc.co.uk,nytimes.com,cnn.com,npr.org,theguardian.com,washingtonpost.com,wsj.com,nbcnews.com,cbsnews.com,foxnews.com,aljazeera.com,usatoday.com,bloomberg.com,ft.com,economist.com,latimes.com,axios.com,politico.com
+latest headlines	apnews.com,reuters.com,bbc.com,bbc.co.uk,nytimes.com,cnn.com,npr.org,theguardian.com,washingtonpost.com,wsj.com,nbcnews.com,cbsnews.com,foxnews.com,aljazeera.com,usatoday.com,bloomberg.com,ft.com,economist.com,latimes.com,axios.com,politico.com
+breaking news today	apnews.com,reuters.com,bbc.com,bbc.co.uk,nytimes.com,cnn.com,npr.org,theguardian.com,washingtonpost.com,wsj.com,nbcnews.com,cbsnews.com,foxnews.com,aljazeera.com,usatoday.com,bloomberg.com,ft.com,economist.com,latimes.com,axios.com,politico.com
+world news today	apnews.com,reuters.com,bbc.com,bbc.co.uk,nytimes.com,cnn.com,npr.org,theguardian.com,washingtonpost.com,wsj.com,nbcnews.com,cbsnews.com,foxnews.com,aljazeera.com,usatoday.com,bloomberg.com,ft.com,economist.com,latimes.com,axios.com,politico.com
+top headlines	apnews.com,reuters.com,bbc.com,bbc.co.uk,nytimes.com,cnn.com,npr.org,theguardian.com,washingtonpost.com,wsj.com,nbcnews.com,cbsnews.com,foxnews.com,aljazeera.com,usatoday.com,bloomberg.com,ft.com,economist.com,latimes.com,axios.com,politico.com
+todays news	apnews.com,reuters.com,bbc.com,bbc.co.uk,nytimes.com,cnn.com,npr.org,theguardian.com,washingtonpost.com,wsj.com,nbcnews.com,cbsnews.com,foxnews.com,aljazeera.com,usatoday.com,bloomberg.com,ft.com,economist.com,latimes.com,axios.com,politico.com
+live news	apnews.com,reuters.com,bbc.com,bbc.co.uk,nytimes.com,cnn.com,npr.org,theguardian.com,washingtonpost.com,wsj.com,nbcnews.com,cbsnews.com,foxnews.com,aljazeera.com,usatoday.com,bloomberg.com,ft.com,economist.com,latimes.com,axios.com,politico.com
+tariffs	https://en.wikipedia.org/wiki/Tariff
+tariff	https://en.wikipedia.org/wiki/Tariff
+government shutdown	https://en.wikipedia.org/wiki/Government_shutdown
+inflation	https://en.wikipedia.org/wiki/Inflation
+recession	https://en.wikipedia.org/wiki/Recession
+climate change	https://en.wikipedia.org/wiki/Climate_change
+global warming	https://en.wikipedia.org/wiki/Climate_change,https://en.wikipedia.org/wiki/Global_warming
+interest rates	https://en.wikipedia.org/wiki/Interest_rate
+minimum wage	https://en.wikipedia.org/wiki/Minimum_wage
+unemployment	https://en.wikipedia.org/wiki/Unemployment
+stock market	https://en.wikipedia.org/wiki/Stock_market
+immigration	https://en.wikipedia.org/wiki/Immigration
+gun control	https://en.wikipedia.org/wiki/Gun_control
+abortion	https://en.wikipedia.org/wiki/Abortion
+artificial intelligence	https://en.wikipedia.org/wiki/Artificial_intelligence
+cryptocurrency	https://en.wikipedia.org/wiki/Cryptocurrency
+student loans	https://en.wikipedia.org/wiki/Student_loan
+trade war	https://en.wikipedia.org/wiki/Trade_war
+no kings protests	https://en.wikipedia.org/wiki/No_Kings_protests
+epstein files	https://en.wikipedia.org/wiki/Epstein_files
+wildfires	https://en.wikipedia.org/wiki/Wildfire
+wildfire	https://en.wikipedia.org/wiki/Wildfire
+earthquakes	https://en.wikipedia.org/wiki/Earthquake
+tsunami	https://en.wikipedia.org/wiki/Tsunami
+hurricanes	https://en.wikipedia.org/wiki/Tropical_cyclone
+heat wave	https://en.wikipedia.org/wiki/Heat_wave
+bird flu	https://en.wikipedia.org/wiki/Avian_influenza
+measles	https://en.wikipedia.org/wiki/Measles
+covid	https://en.wikipedia.org/wiki/COVID-19
+mpox	https://en.wikipedia.org/wiki/Mpox
+solar eclipse	https://en.wikipedia.org/wiki/Solar_eclipse
+electoral college	https://en.wikipedia.org/wiki/Electoral_college,https://en.wikipedia.org/wiki/United_States_Electoral_College
+impeachment	https://en.wikipedia.org/wiki/Impeachment
+filibuster	https://en.wikipedia.org/wiki/Filibuster
+debt ceiling	https://en.wikipedia.org/wiki/Debt_limit,https://en.wikipedia.org/wiki/United_States_debt_ceiling
+brexit	https://en.wikipedia.org/wiki/Brexit
+universal basic income	https://en.wikipedia.org/wiki/Universal_basic_income
+net neutrality	https://en.wikipedia.org/wiki/Net_neutrality
+deforestation	https://en.wikipedia.org/wiki/Deforestation
+plastic pollution	https://en.wikipedia.org/wiki/Plastic_pollution
+homelessness	https://en.wikipedia.org/wiki/Homelessness
+opioid epidemic	https://en.wikipedia.org/wiki/Opioid_epidemic
+deepfake	https://en.wikipedia.org/wiki/Deepfake
+gerrymandering	https://en.wikipedia.org/wiki/Gerrymandering
+death penalty	https://en.wikipedia.org/wiki/Capital_punishment
+refugees	https://en.wikipedia.org/wiki/Refugee
+sanctions	https://en.wikipedia.org/wiki/Sanctions_(law),https://en.wikipedia.org/wiki/Economic_sanctions
+ceasefire	https://en.wikipedia.org/wiki/Ceasefire
+hostage	https://en.wikipedia.org/wiki/Hostage
+heatwave	https://en.wikipedia.org/wiki/Heat_wave
+drought	https://en.wikipedia.org/wiki/Drought
+flooding	https://en.wikipedia.org/wiki/Flood
+elections	https://en.wikipedia.org/wiki/Election

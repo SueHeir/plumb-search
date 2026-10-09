@@ -68,6 +68,7 @@ pub mod places;
 mod replace;
 mod schema;
 mod spell;
+mod topics;
 
 use std::borrow::Borrow;
 use std::collections::hash_map::Entry;
@@ -352,6 +353,12 @@ pub struct RankConfig {
     /// Put the first results in the order the learned ranking gives
     /// ([`learned::reorder`]), once pages are placed among the sites.
     pub learned: bool,
+    /// For a query asking only for the news ("news", "world news"), rank
+    /// the well-known sites that say they are news as sites of the kind
+    /// it names, and let the news words name no site
+    /// ([`topics::asks_only_for_news`]): nytimes.com and reuters.com, not
+    /// news.cn and news.by.
+    pub news_sites: bool,
 }
 
 impl Default for RankConfig {
@@ -380,6 +387,7 @@ impl Default for RankConfig {
             add_named_site: true,
             drop_namesakes: false,
             learned: true,
+            news_sites: true,
         }
     }
 }
@@ -1009,7 +1017,10 @@ impl Searcher {
         options: &SearchOptions,
         meaning: Option<&dyn Meaning>,
     ) -> Result<SearchResults> {
-        let (results, named) = self.rank(query_text, limit, cfg, options, meaning)?;
+        let (mut results, named) = self.rank(query_text, limit, cfg, options, meaning)?;
+        if !named.typed {
+            self.add_news_sites(query_text, &mut results, limit, cfg, options)?;
+        }
         if options.exact || limit == 0 || named.typed {
             return Ok(results);
         }
@@ -3986,6 +3997,86 @@ mod tests {
         assert!(!bank.contains(&"airbus.com".to_string()));
         // Generic kinds are not kept, so they find nothing by kind.
         assert!(search_in(&searcher, "public companies", &options("US", false)).is_empty());
+    }
+
+    #[test]
+    fn news_alone_lists_the_well_known_news_sites() {
+        let records = vec![
+            with_facts(
+                site(
+                    "news.cn",
+                    Some("新华网_让新闻离你更近"),
+                    None,
+                    &[],
+                    &[],
+                    popular(900, 30_000),
+                ),
+                Some("CN"),
+                &["news website"],
+            ),
+            with_facts(
+                site(
+                    "nytimes.com",
+                    Some("The New York Times"),
+                    Some("American daily newspaper"),
+                    &["The New York Times"],
+                    &[],
+                    popular(80, 200_000),
+                ),
+                Some("US"),
+                &["newspaper"],
+            ),
+            with_facts(
+                site(
+                    "cnn.com",
+                    Some("Breaking News, Latest News and Videos | CNN"),
+                    Some("View the latest news and breaking news today"),
+                    &["CNN"],
+                    &[],
+                    popular(90, 180_000),
+                ),
+                Some("US"),
+                &["television channel"],
+            ),
+            site(
+                "newsblog.example",
+                Some("News news news"),
+                None,
+                &[],
+                &[],
+                obscure(800_000, 3),
+            ),
+            site(
+                "foxnews.com",
+                Some("Fox News"),
+                Some("Breaking news"),
+                &["Fox News"],
+                &[],
+                popular(300, 90_000),
+            ),
+        ];
+        let (_dir, searcher) = build(&records);
+        let us = search_in(&searcher, "news", &options("US", false));
+        assert_eq!(us[..2], ["nytimes.com", "cnn.com"], "{us:?}");
+        let pos = |domain: &str| us.iter().position(|d| d == domain).unwrap();
+        assert!(pos("news.cn") > pos("foxnews.com"), "{us:?}");
+        assert!(!us.contains(&"newsblog.example".to_string()) || pos("newsblog.example") > 3);
+        let world = search_in(&searcher, "world news", &options("US", false));
+        assert_eq!(world[0], "nytimes.com", "{world:?}");
+        // The news words name no site.
+        let hits = searcher.search("news", 10).unwrap();
+        assert!(hits.iter().all(|hit| !hit.named), "{hits:?}");
+        // A site the query names keeps it.
+        assert_eq!(top(&searcher, "fox news"), "foxnews.com");
+        // Off, news.cn leads as before.
+        let cfg = RankConfig {
+            news_sites: false,
+            ..RankConfig::default()
+        };
+        let off = searcher
+            .search_full("news", 10, &cfg, &options("US", false))
+            .unwrap();
+        assert_eq!(off.hits[0].domain, "news.cn", "{:?}", domains(&off.hits));
     }
 
     #[test]
