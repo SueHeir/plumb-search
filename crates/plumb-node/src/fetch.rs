@@ -772,6 +772,15 @@ pub fn run_pages(args: FetchPagesArgs) -> Result<()> {
     if set.id == plumb_index::pages::PACKAGES_SET {
         return run_packages(&args, &dest);
     }
+    if set.id == plumb_index::pages::WIKTIONARY_SET {
+        let dump = fetch_dump(
+            &args,
+            plumb_ingest::wiktionary::DUMP_URL,
+            "kaikki.org's English Wiktionary",
+        )?;
+        let words = plumb_ingest::wiktionary::read_words(&dump)?;
+        return write_set(&dest, &words, "words");
+    }
     if set.id == plumb_index::places::PLACES_SET {
         return run_places(&args, &dest);
     }

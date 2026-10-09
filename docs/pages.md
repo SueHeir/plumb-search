@@ -69,6 +69,16 @@ plumb fetch-leads --data /path/to/node-data --work /path/to/scratch
 
 It downloads the dump's files (about 66 of 600 MB for English, three at a time), reads each into a small file in `--work` and deletes it, so a stopped run carries on from the files already read. The 2,000,000 most read articles (`--top`) get their lead, as many whole sentences of the paragraph before the first heading as fit in 300 characters, and up to ten other names: the titles that lead to the article but are not among its five most read aliases, the shortest first, including those that lead to one of its sections, which `fetch-pages` leaves out. They ride on the `profiles` line as `lead=` and `name=` entries, which readers made before leave out; `fetch-profiles` and `fetch-facts` keep them. A query that is one of an article's other names lists the article, though not as named, after the first sites. A query whose words the lead has with the article's names and description lists the article the same way, the lead that matches best first. The info box shows the lead, and a query that asks what something is ("what is a manatee", "define photosynthesis", "who was ada lovelace") is answered above the results with the first sentence of the article it names, "From Wikipedia".
 
+### Word definitions
+
+To answer searches that ask what a word means ("define anadromous", "prioritize meaning", "what is a portmanteau"), keep the `wiktionary` set of English words:
+
+```sh
+plumb fetch-pages --set wiktionary --data /path/to/node-data --work /path/to/scratch
+```
+
+It reads kaikki.org's English dictionary (about 3.3 GB of JSON lines that wiktextract makes from Wiktionary's dumps every few days) and keeps each word with the first usual sense of up to three of its parts of speech, in at most 300 characters, the words Wiktionary says most of (senses and translations) first. Senses that only point at another word ("plural of mouse") and proper names are left out. The set's pages are never listed among the results: a word is only looked up, by itself, for a query that asks what it means, and its meaning shown above the results, "From Wiktionary". A query with "define", "definition" or "meaning" gets the word first; "what is ..." gets the first sentence of the Wikipedia article it names first, and the word when there is none.
+
 ## Nodes in the network
 
 A node with no set file, or fewer pages than it is set to keep, takes the file from a node it trusts (plumbsearch.org by default) over `/plumb/pages/1`, 1 MiB at a time, and stops once it has the pages it keeps: a node keeping 100,000 articles downloads about 10 MB, not the whole file. It asks again for a newer file after 30 days. A node passes on only whole files, made with `fetch-pages` or taken whole, so a cut file never spreads. Nodes answer at most four such requests at once and 120 a minute from each node.

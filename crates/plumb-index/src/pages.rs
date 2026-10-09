@@ -510,6 +510,32 @@ impl Page {
         }
     }
 
+    /// The English word `word` of Wiktionary, written as an article whose
+    /// title is the word and whose description says what it means.
+    pub fn from_word(word: Article) -> Self {
+        let url = plumb_core::article::article_url("en", &word.title).replacen(
+            "en.wikipedia.org",
+            "en.wiktionary.org",
+            1,
+        );
+        Page {
+            set: WIKTIONARY_SET.to_string(),
+            url,
+            title: word.title,
+            description: word.description,
+            site: None,
+            views: word.views,
+            aliases: Vec::new(),
+            item: None,
+            profiles: Vec::new(),
+            website: None,
+            package: None,
+            facts: Vec::new(),
+            lead: None,
+            names: Vec::new(),
+        }
+    }
+
     /// The software package `package`, written as an article whose item is
     /// `registry:name` and whose views are its share of its registry's
     /// most used package's downloads (see [`plumb_core::packages`]).
@@ -558,6 +584,7 @@ impl Page {
             PODCASTS_SET => Page::from_podcast(article),
             PAPERS_SET => Page::from_paper(article),
             WIKIDATA_SET => Page::from_item(article),
+            WIKTIONARY_SET => Page::from_word(article),
             PACKAGES_SET => Page::from_package(article)?,
             STACKEXCHANGE_SET => Page::from_exchange(article)?,
             MUSIC_SET => Page::from_music(article)?,
@@ -641,6 +668,8 @@ impl Page {
             "OpenAlex"
         } else if self.set == WIKIDATA_SET || self.set == FILMS_SET {
             "Wikidata"
+        } else if self.set == WIKTIONARY_SET {
+            "Wiktionary"
         } else if let Some(registry) = self.registry() {
             registry.name
         } else if let Some(host) = self.docs_host() {
@@ -730,6 +759,11 @@ pub const PAPERS_SET: &str = "papers";
 /// Wikipedia article (Linus Tech Tips the channel), each only ever listed
 /// under its own website.
 pub const WIKIDATA_SET: &str = "wikidata";
+/// The set of English words and what they mean, from Wiktionary
+/// ([`plumb_core::article`] files made by `plumb fetch-pages --set
+/// wiktionary`). Never listed among the results: a word is only looked up
+/// ([`PageSearcher::definition`]) for a search that asks what it means.
+pub const WIKTIONARY_SET: &str = "wiktionary";
 /// How much a book's or paper's score counts against an article's of the
 /// same name: "dune" lists the article on the novel before the book.
 pub const SHELF_WEIGHT: f32 = 0.8;
@@ -786,6 +820,9 @@ struct Fields {
     /// Stemmed words of a Wikipedia article's lead ([`Page::lead`]), with
     /// how often each comes, so the leads most about the query rank first.
     lead: Field,
+    /// A Wiktionary word as one token ([`WIKTIONARY_SET`]); such pages have
+    /// no other words, so other searches never find them.
+    word: Field,
     popularity: Field,
     /// The registrable domain of the official website of what a Wikipedia
     /// article is about ([`Page::site`]), for [`PageSearcher::site_popularity`].
@@ -835,6 +872,14 @@ fn schema() -> (Schema, Fields) {
                 .set_index_option(IndexRecordOption::WithFreqs),
         ),
     );
+    let word = builder.add_text_field(
+        "word",
+        TextOptions::default().set_indexing_options(
+            TextFieldIndexing::default()
+                .set_tokenizer(JOINED_ANALYZER)
+                .set_index_option(IndexRecordOption::Basic),
+        ),
+    );
     let popularity = builder.add_u64_field("popularity", FAST | STORED);
     let site = builder.add_text_field("site", STRING);
     let page = builder.add_text_field("page", STORED);
@@ -846,6 +891,7 @@ fn schema() -> (Schema, Fields) {
             topic,
             about,
             lead,
+            word,
             popularity,
             site,
             page,
@@ -1091,6 +1137,17 @@ pub fn build_page_index(
             ((page.views as f32).ln_1p() / (*most as f32).ln_1p()).min(1.0)
         };
         let mut document = TantivyDocument::default();
+        document.add_u64(
+            fields.popularity,
+            (popularity * POPULARITY_SCALE).round() as u64,
+        );
+        if page.set == WIKTIONARY_SET {
+            document.add_text(fields.word, &page.title);
+            document.add_text(fields.page, serde_json::to_string(&page)?);
+            writer.add_document(document)?;
+            stats.pages += 1;
+            continue;
+        }
         document.add_text(fields.words, &page.title);
         for alias in &page.aliases {
             document.add_text(fields.words, alias);
@@ -1124,10 +1181,6 @@ pub fn build_page_index(
                 document.add_text(fields.keys, alias);
             }
         }
-        document.add_u64(
-            fields.popularity,
-            (popularity * POPULARITY_SCALE).round() as u64,
-        );
         if let Some(site) = page.site.as_deref().filter(|_| page.is_article()) {
             document.add_text(fields.site, site);
         }
@@ -1365,6 +1418,42 @@ impl PageSearcher {
         hits.sort_by(|a, b| b.score.total_cmp(&a.score));
         hits.truncate(limit);
         Ok(hits)
+    }
+
+    /// The Wiktionary word `name` is ([`WIKTIONARY_SET`]), written as it
+    /// is or with other capitals ("anadromous", "AWOL"): the best-known
+    /// such word, the one written alike first.
+    pub fn definition(&self, name: &str) -> Result<Option<Page>> {
+        let Some(joined) = analysis::tokens(&self.joined, name).pop() else {
+            return Ok(None);
+        };
+        let searcher = self.reader.searcher();
+        let named = TermQuery::new(
+            Term::from_field_text(self.fields.word, &joined),
+            IndexRecordOption::Basic,
+        );
+        let top = TopDocs::with_limit(TITLE_CANDIDATES)
+            .order_by_fast_field::<u64>("popularity", tantivy::Order::Desc);
+        let wanted = plumb_core::collapse_whitespace(name);
+        let mut best: Option<Page> = None;
+        for (_, address) in searcher.search(&named, &top)? {
+            let document: TantivyDocument = searcher.doc(address)?;
+            let Some(stored) = document
+                .get_first(self.fields.page)
+                .and_then(|v| v.as_str())
+            else {
+                continue;
+            };
+            let page: Page = serde_json::from_str(stored)?;
+            if page.set != WIKTIONARY_SET || !page.title.eq_ignore_ascii_case(&wanted) {
+                continue;
+            }
+            if page.title == wanted {
+                return Ok(Some(page));
+            }
+            best.get_or_insert(page);
+        }
+        Ok(best)
     }
 
     /// The song or album of the music set whose title is the whole of
@@ -4125,6 +4214,34 @@ mod tests {
         );
         // One word is a name, not a description.
         assert!(!titles(&s.search("triassic", 5).unwrap()).contains(&"Mesozoic"));
+    }
+
+    #[test]
+    fn words_are_only_looked_up() {
+        let word = |title: &str, description: &str, views: u64| {
+            Page::from_word(Article {
+                title: title.into(),
+                description: Some(description.into()),
+                views,
+                ..Article::default()
+            })
+        };
+        let (_dir, s) = searcher(&[
+            page("Free (album)", 1_000, &[]),
+            word("free", "(adjective) Unconstrained.", 900),
+            word("Free", "(noun) A surname.", 5),
+            word("AWOL", "(adjective) Absent without leave.", 50),
+        ]);
+        // Never a result.
+        assert_eq!(titles(&s.search("free", 5).unwrap()), ["Free (album)"]);
+        let free = s.definition("free").unwrap().unwrap();
+        assert_eq!(
+            free.description.as_deref(),
+            Some("(adjective) Unconstrained.")
+        );
+        assert_eq!(free.url, "https://en.wiktionary.org/wiki/free");
+        assert_eq!(s.definition("awol").unwrap().unwrap().title, "AWOL");
+        assert_eq!(s.definition("freedom").unwrap(), None);
     }
 
     #[test]

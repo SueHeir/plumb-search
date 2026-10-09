@@ -630,6 +630,23 @@ pub(super) fn known_song(
     }
 }
 
+/// The Wiktionary word `name` is; see [`PageSearcher::definition`].
+pub(super) fn definition(inner: &Inner, name: &str) -> Option<plumb_index::pages::Page> {
+    let searcher = inner
+        .pages
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .as_ref()
+        .map(|(_, s)| s.clone())?;
+    match searcher.definition(name) {
+        Ok(word) => word,
+        Err(err) => {
+            warn!("looking up a word: {err:#}");
+            None
+        }
+    }
+}
+
 /// Adds the pages found for `query` to `results`.
 pub(super) fn add_pages(
     inner: &Inner,

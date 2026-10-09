@@ -736,8 +736,10 @@ pub struct FetchPagesArgs {
     /// it asks for one), packages (the most used packages of eight
     /// registries, from ecosyste.ms), docs (pages of MDN, Python's docs and
     /// 36 more software docs sites, from their sitemaps; --work keeps each
-    /// site's pages so a stopped run carries on) or places (named shops,
-    /// restaurants, parks and towns from OpenStreetMap).
+    /// site's pages so a stopped run carries on), places (named shops,
+    /// restaurants, parks and towns from OpenStreetMap) or wiktionary
+    /// (English words and what they mean, from kaikki.org's reading of
+    /// Wiktionary, about 3.3 GB, for "define" searches).
     #[arg(long, value_name = "SET", default_value = "wikipedia-en")]
     pub set: String,
     /// Directory to download Wikipedia's dumps into (created if missing).

@@ -43,6 +43,7 @@ pub mod tranco;
 pub mod wat;
 pub mod wet;
 pub mod wikidata;
+pub mod wiktionary;
 
 pub use builder::Builder;
 pub use ccranks::{load_cc_domain_ranks, CcRank, DEFAULT_CC_RANKS_LIMIT};

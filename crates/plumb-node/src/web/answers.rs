@@ -685,6 +685,27 @@ pub(crate) fn definition_answer(pages: &[PlacedPage]) -> Option<plumb_answer::An
     })
 }
 
+/// Whether `query` asks what a word means rather than what a thing is:
+/// "define anadromous", "prioritize meaning". Such a query is answered
+/// from Wiktionary first, others from Wikipedia first.
+pub(crate) fn asks_word(query: &str) -> bool {
+    let q = query.to_lowercase();
+    q.split_whitespace()
+        .any(|word| matches!(word, "define" | "definition" | "meaning" | "means" | "mean"))
+}
+
+/// What the Wiktionary word `page` means, as an answer: "(adjective) Of
+/// fish, migrating up rivers from the sea to breed in fresh water."
+pub(crate) fn word_answer(page: &Page) -> Option<plumb_answer::Answer> {
+    let meaning = page.description.as_deref()?.trim();
+    (!meaning.is_empty()).then(|| plumb_answer::Answer {
+        kind: plumb_answer::Kind::Definition,
+        question: page.title.clone(),
+        answer: meaning.to_string(),
+        note: Some("From Wiktionary, CC BY-SA".to_string()),
+    })
+}
+
 /// A fact's values as shown, and a note: "27,204,809" and "counted in
 /// 2024".
 pub(crate) fn fact_text(
@@ -902,6 +923,26 @@ mod tests {
         render_info_box(&mut html, &info);
         assert!(html.contains("<p class=\"ibx\">The West Indian manatee is"));
         assert!(html.contains("CC BY-SA"));
+    }
+
+    #[test]
+    fn words_answer_what_they_mean() {
+        assert!(asks_word("define anadromous"));
+        assert!(asks_word("prioritize meaning"));
+        assert!(!asks_word("what is a manatee"));
+        let word = Page::from_word(plumb_core::Article {
+            title: "anadromous".into(),
+            description: Some(
+                "(adjective) Of fish, migrating up rivers from the sea to breed in fresh water."
+                    .into(),
+            ),
+            views: 3,
+            ..Default::default()
+        });
+        let answer = word_answer(&word).unwrap();
+        assert_eq!(answer.question, "anadromous");
+        assert!(answer.answer.starts_with("(adjective) Of fish"));
+        assert_eq!(answer.note.as_deref(), Some("From Wiktionary, CC BY-SA"));
     }
 
     #[test]
