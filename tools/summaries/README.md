@@ -13,9 +13,11 @@ description (only while the site has none) and goes into its vector.
     plumb summaries apply --summaries summaries.jsonl --records records.jsonl \
         --out records-summaries.jsonl
 
-`--direct 20` asks for 20 sites one at a time and prints them, to read a
-sample first. Without it the rest go through the Message Batches API at half
-price. The script needs `pip install anthropic` and a key, in
+`--direct 20` asks for 20 sites only and prints them, to read a sample
+first. By default the script asks Claude Code (`claude -p --model haiku`,
+signed in with a Claude subscription), 50 sites per call and 4 calls at
+once, so it needs no API key. `--backend api` uses the Message Batches API
+instead (half price), which needs `pip install anthropic` and a key in
 `~/.config/anthropic/api-key` (or `--key-file`) or `ANTHROPIC_API_KEY`.
 
 The model is told to answer UNKNOWN for a site it does not know rather than

@@ -6,26 +6,27 @@
     plumb summaries apply --summaries summaries.jsonl --records records.jsonl \
         --out records-summaries.jsonl
 
-The requests go through the Message Batches API (half price; most batches
-end within the hour). `--direct N` instead asks for the first N sites one
-at a time and prints them, to read a sample before paying for the rest.
-Sites already in `--out` are skipped, so a stopped run picks up where it
-left off. The key is read from `--key-file` (default
-~/.config/anthropic/api-key), else ANTHROPIC_API_KEY or an `ant auth login`
-profile; it is never printed.
+By default the sites go to Claude Code (`claude -p`, signed in with a
+Claude subscription), `--per-call` sites at a time, `--workers` calls at
+once: no API key needed. `--backend api` uses the Message Batches API
+instead, with a key from `--key-file` (default ~/.config/anthropic/api-key),
+ANTHROPIC_API_KEY or an `ant auth login` profile; the key is never printed.
+`--direct N` asks for only the first N sites and prints them, to read a
+sample first. Sites already in `--out` are skipped, so a stopped run picks
+up where it left off.
 """
 
 import argparse
 import json
 import os
+import subprocess
 import sys
+import tempfile
 import time
-
-import anthropic
-from anthropic.types.message_create_params import MessageCreateParamsNonStreaming
-from anthropic.types.messages.batch_create_params import Request
+from concurrent.futures import ThreadPoolExecutor
 
 MODEL = "claude-haiku-5-5"
+CLI_MODEL = "haiku"
 MAX_TOKENS = 200
 BATCH_SIZE = 10_000
 
@@ -56,7 +57,44 @@ def prompt(pick):
     return "\n".join(lines)
 
 
+CLI_SYSTEM = SYSTEM + """
+
+You get several sites, one JSON object per line. Answer with exactly one JSON
+object per site, one per line and nothing else: {"domain": ..., "summary": ...},
+where summary is the sentence or "UNKNOWN"."""
+
+
+def cli_batch(picks, workdir):
+    """Summaries of `picks` from one `claude -p` call: {domain: summary}."""
+    lines = "\n".join(json.dumps({"site": prompt(p)}) for p in picks)
+    run = subprocess.run(
+        ["claude", "-p", "--model", CLI_MODEL, "--output-format", "json",
+         "--system-prompt", CLI_SYSTEM, "--tools", "", "--max-turns", "1",
+         "--setting-sources", "", "--strict-mcp-config", "--no-session-persistence"],
+        input=lines, capture_output=True, text=True, cwd=workdir, timeout=600,
+    )
+    if run.returncode != 0:
+        print(f"  claude failed ({run.returncode}): {run.stderr.strip()[:300]}", file=sys.stderr)
+        return {}
+    result = json.loads(run.stdout).get("result", "")
+    wanted = {p["domain"] for p in picks}
+    found = {}
+    for line in result.splitlines():
+        line = line.strip().strip("`")
+        if not line.startswith("{"):
+            continue
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if item.get("domain") in wanted and isinstance(item.get("summary"), str):
+            found[item["domain"]] = item["summary"].strip() or None
+    return found
+
+
 def params(pick):
+    from anthropic.types.message_create_params import MessageCreateParamsNonStreaming
+
     return MessageCreateParamsNonStreaming(
         model=MODEL,
         max_tokens=MAX_TOKENS,
@@ -87,8 +125,13 @@ def main():
     parser.add_argument("--out", required=True, help="summaries file, appended to")
     parser.add_argument("--direct", type=int, metavar="N",
                         help="ask for the first N sites one at a time and print them")
+    parser.add_argument("--backend", choices=["cli", "api"], default="cli",
+                        help="Claude Code with a subscription (cli) or the API with a key (api)")
+    parser.add_argument("--per-call", type=int, default=50,
+                        help="cli: sites in one claude call")
+    parser.add_argument("--workers", type=int, default=4, help="cli: claude calls at once")
     parser.add_argument("--key-file", default="~/.config/anthropic/api-key",
-                        help="file holding the API key, used when it exists")
+                        help="api: file holding the API key, used when it exists")
     args = parser.parse_args()
 
     picks = read_jsonl(args.picks)
@@ -96,12 +139,8 @@ def main():
     todo = [p for p in picks if p["domain"] not in done]
     print(f"{len(picks)} sites picked, {len(done)} already summarized, {len(todo)} to go",
           file=sys.stderr)
-    key_file = os.path.expanduser(args.key_file)
-    if os.path.exists(key_file):
-        with open(key_file, encoding="utf-8") as f:
-            client = anthropic.Anthropic(api_key=f.read().strip())
-    else:
-        client = anthropic.Anthropic()
+    if args.direct:
+        todo = todo[: args.direct]
     usage = [0, 0]
 
     with open(args.out, "a", encoding="utf-8") as out:
@@ -109,15 +148,44 @@ def main():
             out.write(json.dumps({"domain": domain, "summary": summary}) + "\n")
             out.flush()
 
-        if args.direct:
-            for pick in todo[: args.direct]:
+        if args.backend == "cli":
+            chunks = [todo[i: i + args.per_call] for i in range(0, len(todo), args.per_call)]
+            # An empty folder, so Claude Code reads no project files or settings.
+            with tempfile.TemporaryDirectory() as workdir, \
+                    ThreadPoolExecutor(args.workers) as pool:
+                calls = [pool.submit(cli_batch, chunk, workdir) for chunk in chunks]
+                for n, (chunk, call) in enumerate(zip(chunks, calls), 1):
+                    found = call.result()
+                    for pick in chunk:
+                        # A site the answer left out is not kept, so a second run asks again.
+                        if pick["domain"] in found:
+                            keep(pick["domain"], found[pick["domain"]])
+                            if args.direct:
+                                print(f"{pick['domain']}\t{found[pick['domain']]}")
+                    print(f"  call {n} of {len(chunks)}: {len(found)} of {len(chunk)} answered",
+                          file=sys.stderr)
+            client = None
+        else:
+            import anthropic
+
+            key_file = os.path.expanduser(args.key_file)
+            if os.path.exists(key_file):
+                with open(key_file, encoding="utf-8") as f:
+                    client = anthropic.Anthropic(api_key=f.read().strip())
+            else:
+                client = anthropic.Anthropic()
+
+        if client and args.direct:
+            for pick in todo:
                 message = client.messages.create(**params(pick))
                 usage[0] += message.usage.input_tokens
                 usage[1] += message.usage.output_tokens
                 summary = text_of(message)
                 print(f"{pick['domain']}\t{summary}")
                 keep(pick["domain"], summary)
-        else:
+        elif client:
+            from anthropic.types.messages.batch_create_params import Request
+
             by_id = {}
             for start in range(0, len(todo), BATCH_SIZE):
                 chunk = todo[start: start + BATCH_SIZE]
@@ -145,8 +213,9 @@ def main():
 
     lines = read_jsonl(args.out)
     known = sum(1 for line in lines if line["summary"] and line["summary"] != "UNKNOWN")
-    print(f"{len(lines)} sites in {args.out}, {known} with a summary; this run used "
-          f"{usage[0]:,} input and {usage[1]:,} output tokens", file=sys.stderr)
+    print(f"{len(lines)} sites in {args.out}, {known} with a summary", file=sys.stderr)
+    if args.backend == "api":
+        print(f"this run used {usage[0]:,} input and {usage[1]:,} output tokens", file=sys.stderr)
 
 
 if __name__ == "__main__":
