@@ -450,6 +450,15 @@ fn read_page_is_offered_only_with_a_reader() {
     );
     let with = server(Vec::new()).with_reader(Some(reader));
     assert!(list(&with).contains(&"read_page".to_string()));
+    // search sends agents on to read_page only where they have it.
+    let search_says = |read_pages| {
+        tools(read_pages, false, false)[2]["description"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    assert!(!search_says(false).contains("read_page"));
+    assert!(search_says(true).contains("then read a page with read_page."));
     let reply = call(&with, "read_page", json!({ "url": url }));
     assert_eq!(reply["result"]["isError"], false, "{reply}");
     let answer = &reply["result"]["structuredContent"];
@@ -476,6 +485,34 @@ fn read_page_is_offered_only_with_a_reader() {
     assert_eq!(answer["found"], true);
     let reply = call(&with, "read_page", json!({ "url": url, "find": "four" }));
     assert_eq!(reply["result"]["structuredContent"]["found"], false);
+
+    // An outline: each heading, where it starts and its opening words.
+    let long = serve_page(
+        &runtime,
+        "<title>L</title><main><p>Lead.</p><h2>Usage</h2><p>Run it.</p><p>Twice.</p>\
+         <h3>Flags</h3><p>None.</p></main>",
+    );
+    let reply = call(&with, "read_page", json!({ "url": long, "outline": true }));
+    let answer = &reply["result"]["structuredContent"];
+    assert!(answer.get("text").is_none(), "{answer}");
+    let sections = answer["outline"].as_array().unwrap();
+    let headings: Vec<_> = sections.iter().map(|s| s["heading"].clone()).collect();
+    assert_eq!(headings, ["", "Usage", "Flags"]);
+    assert_eq!(sections[1]["level"], 2);
+    assert_eq!(sections[1]["opening"], "Run it. Twice.");
+    let start = sections[2]["start"].as_u64().unwrap();
+    let reply = call(&with, "read_page", json!({ "url": long, "start": start }));
+    assert_eq!(
+        reply["result"]["structuredContent"]["text"],
+        "### Flags\n\nNone."
+    );
+    // Without headings, the text instead.
+    let reply = call(
+        &with,
+        "read_page",
+        json!({ "url": serve_page(&runtime, "<p>Plain.</p>"), "outline": true }),
+    );
+    assert_eq!(reply["result"]["structuredContent"]["text"], "Plain.");
 
     // A bot check is not the page.
     let check = serve_page(
@@ -514,9 +551,16 @@ fn plumb_mcp_node_reads_pages_itself() {
 
     // The node's list gains read_page.
     let mut listed =
-        json!({ "jsonrpc": "2.0", "id": 1, "result": { "tools": [{ "name": "search" }] } });
+        json!({ "jsonrpc": "2.0", "id": 1, "result": { "tools": tools(false, false, false) } });
     offer_read_page(&json!({ "method": "tools/list" }), &mut listed);
-    assert_eq!(listed["result"]["tools"][1]["name"], "read_page");
+    assert_eq!(listed["result"]["tools"][6]["name"], "read_page");
+    let search = listed["result"]["tools"][2]["description"]
+        .as_str()
+        .unwrap();
+    assert!(
+        search.contains("then read a page with read_page."),
+        "{search}"
+    );
 }
 
 /// Finds the crate serde for queries that ask for a package, and no site.

@@ -1323,7 +1323,7 @@ impl Searcher {
         // A site the query names is ranked even if BM25 put others first:
         // it is what the look-alikes are measured against. So is every site
         // of the kind the query names.
-        let names = self.name_matches(&searcher, &query, cfg)?;
+        let mut names = self.name_matches(&searcher, &query, cfg)?;
         let mut kinds = match &query.kind {
             Some(key) => matching_docs(
                 &searcher,
@@ -1346,6 +1346,14 @@ impl Searcher {
                     kinds.insert(addr);
                 }
             }
+        }
+        // A query that is a kind of thing ("banks") asks for every site of
+        // that kind: a site linked to with the word is not named by it.
+        if !kinds.is_empty() {
+            for name in names.values_mut() {
+                name.linked = 0;
+            }
+            names.retain(|_, name| name.words() > 0 || name.typed);
         }
         // Meaning helps with queries that describe a site, not with names.
         let named_in_full = !kinds.is_empty() || names.values().any(|n| n.words() >= query.len);
@@ -1599,7 +1607,9 @@ impl Searcher {
             };
             let mut name_bonus = (label_bonus * name.label as f32 / query_words)
                 .max(cfg.exact_alias_bonus * name.alias as f32 / query_words)
-                .max(cfg.link_name_bonus * name.linked as f32 / query_words);
+                .max(
+                    link_name_bonus(cfg, name.linked, query.len) * name.linked as f32 / query_words,
+                );
             if is_kind {
                 name_bonus = name_bonus.max(cfg.kind_bonus);
             }
@@ -2559,6 +2569,18 @@ fn bm25_of(
         scored.push((bm25, addr));
     }
     Ok(scored)
+}
+
+/// The bonus of a site a link text covering `linked` of the query's `len`
+/// words names: [`RankConfig::link_name_bonus`] for the whole query, at
+/// most the label bonus for its first words, so a longer name still wins
+/// ("chase center tickets": chasecenter.com before chase.com).
+fn link_name_bonus(cfg: &RankConfig, linked: usize, len: usize) -> f32 {
+    if linked >= len {
+        cfg.link_name_bonus
+    } else {
+        cfg.link_name_bonus.min(cfg.exact_label_bonus)
+    }
 }
 
 /// The document most of the sites linking with the text of `term` link
@@ -5379,7 +5401,8 @@ mod tests {
             alpha * prior + (1.0 - alpha) * hit.text_score
         });
 
-        // "us bank" is usbank.com's whole name: the label bonus, full trust.
+        // "us bank" is usbank.com's whole name, as its label and in most
+        // links to it: the larger bonus of the two, full trust.
         let hits = searcher.search("us bank", 10).unwrap();
         let usbank = &hits[0];
         assert_eq!(usbank.domain, "usbank.com");
@@ -5392,8 +5415,15 @@ mod tests {
                 0.0
             }
         };
+        let whole_name_bonus = |hit: &Hit| {
+            label_bonus(hit, 1.0).max(if hit.domain == "usbank.com" {
+                cfg.link_name_bonus
+            } else {
+                0.0
+            })
+        };
         check(&hits, &|hit| {
-            cfg.alpha * hit.link_score + (1.0 - cfg.alpha) * hit.text_score + label_bonus(hit, 1.0)
+            cfg.alpha * hit.link_score + (1.0 - cfg.alpha) * hit.text_score + whole_name_bonus(hit)
         });
 
         // "us bank online" goes on past the name: usbank.com gets 2/3 of the

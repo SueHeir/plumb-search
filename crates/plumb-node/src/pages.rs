@@ -101,9 +101,10 @@ pub const SETS: &[SetInfo] = &[
     },
     SetInfo {
         id: plumb_index::pages::PAPERS_SET,
-        name: "Papers (OpenAlex)",
+        name: "Papers (OpenAlex, arXiv, CORE)",
         pages: 2_000_000,
-        bytes_per_page: 160,
+        // About half have a free copy's address.
+        bytes_per_page: 200,
     },
     SetInfo {
         id: plumb_index::pages::PACKAGES_SET,
