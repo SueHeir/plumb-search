@@ -274,7 +274,7 @@ impl ArxivPaper {
 }
 
 /// The text of the first `<tag>` element in `xml`, entities decoded.
-fn element<'a>(xml: &'a str, tag: &str) -> Option<String> {
+fn element(xml: &str, tag: &str) -> Option<String> {
     let open = format!("<{tag}");
     let start = xml.find(&open)?;
     let after = &xml[start + open.len()..];
@@ -445,7 +445,7 @@ pub fn name_papers(papers: &mut [Article], methods: &[Method]) -> Named {
     let mut by_title: HashSet<usize> = HashSet::new();
     for (i, mut list) in names {
         // The most used first, and a method's own name before the rest.
-        list.sort_by(|a, b| b.0.cmp(&a.0));
+        list.sort_by_key(|(weight, _)| std::cmp::Reverse(*weight));
         let paper = &mut papers[i];
         let mut said: Vec<String> = std::iter::once(&paper.title)
             .chain(&paper.aliases)
@@ -542,7 +542,7 @@ pub fn add_arxiv_papers(
         named.added += 1;
     }
     if named.added > 0 {
-        papers.sort_by(|a, b| b.views.cmp(&a.views));
+        papers.sort_by_key(|paper| std::cmp::Reverse(paper.views));
     }
     named
 }

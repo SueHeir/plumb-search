@@ -351,10 +351,7 @@ pub fn read_questions_7z(
         warn!("reading the duplicates: {err:#}; the questions keep no other titles");
         Duplicates::new()
     };
-    let mut duplicates = match links {
-        Some(links) => Some(read_duplicates_7z(links).unwrap_or_else(no_duplicates)),
-        None => None,
-    };
+    let mut duplicates = links.map(|links| read_duplicates_7z(links).unwrap_or_else(no_duplicates));
     let mut archive = sevenz_rust2::ArchiveReader::open(path, sevenz_rust2::Password::empty())
         .with_context(|| format!("opening {}", path.display()))?;
     let mut found: Option<Result<Vec<Question>>> = None;
