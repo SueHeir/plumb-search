@@ -33,7 +33,9 @@ keeps the node running and does not apply restart settings. A banner shows
 when saved choices differ from the running node. Resource and feature forms
 never refresh automatically while you edit them.
 
-Meaning search downloads a model and builds vectors in the background.
+Search by meaning is on unless turned off here: it downloads a model (about
+130 MB) and takes site vectors from a node it trusts, or builds them in the
+background.
 Private browser search is not a setting: it is on whenever the node is in
 the Plumb network (which builds buckets anyway) and the bundled WebAssembly
 module is there. Visitors turn it on for themselves with the Private search
