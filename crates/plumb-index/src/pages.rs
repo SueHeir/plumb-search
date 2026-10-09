@@ -162,6 +162,10 @@ pub struct Page {
     /// redirects, and ones to one of its sections ("Manubrium" to Sternum).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub names: Vec<String>,
+    /// A docs page's section headings ("List Comprehensions" in Python's
+    /// "Data Structures"), which it is found by with [`Page::topic`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sections: Vec<String>,
 }
 
 impl Page {
@@ -182,6 +186,7 @@ impl Page {
             facts: article.facts,
             lead: article.lead,
             names: article.names,
+            sections: Vec::new(),
         }
     }
 
@@ -203,6 +208,7 @@ impl Page {
             facts: Vec::new(),
             lead: None,
             names: Vec::new(),
+            sections: Vec::new(),
         }
     }
 
@@ -227,6 +233,7 @@ impl Page {
             facts: Vec::new(),
             lead: None,
             names: Vec::new(),
+            sections: Vec::new(),
         }
     }
 
@@ -252,6 +259,7 @@ impl Page {
             facts: Vec::new(),
             lead: None,
             names: Vec::new(),
+            sections: Vec::new(),
         })
     }
 
@@ -296,6 +304,7 @@ impl Page {
             facts: Vec::new(),
             lead: None,
             names: Vec::new(),
+            sections: Vec::new(),
         }
     }
 
@@ -321,6 +330,7 @@ impl Page {
             facts: Vec::new(),
             lead: None,
             names: Vec::new(),
+            sections: Vec::new(),
         }
     }
 
@@ -349,6 +359,7 @@ impl Page {
             facts: Vec::new(),
             lead: None,
             names: Vec::new(),
+            sections: Vec::new(),
         })
     }
 
@@ -393,6 +404,7 @@ impl Page {
             facts: Vec::new(),
             lead: None,
             names: Vec::new(),
+            sections: Vec::new(),
         })
     }
 
@@ -420,6 +432,7 @@ impl Page {
             facts: Vec::new(),
             lead: None,
             names: Vec::new(),
+            sections: doc.sections,
         })
     }
 
@@ -452,6 +465,7 @@ impl Page {
             facts: Vec::new(),
             lead: None,
             names: Vec::new(),
+            sections: Vec::new(),
         })
     }
 
@@ -531,6 +545,7 @@ impl Page {
             facts: Vec::new(),
             lead: None,
             names: Vec::new(),
+            sections: Vec::new(),
         }
     }
 
@@ -555,6 +570,7 @@ impl Page {
             facts: item.facts,
             lead: None,
             names: Vec::new(),
+            sections: Vec::new(),
         }
     }
 
@@ -581,6 +597,7 @@ impl Page {
             facts: Vec::new(),
             lead: None,
             names: Vec::new(),
+            sections: Vec::new(),
         }
     }
 
@@ -607,6 +624,7 @@ impl Page {
             facts: Vec::new(),
             lead: None,
             names: Vec::new(),
+            sections: Vec::new(),
         })
     }
 
@@ -657,7 +675,12 @@ impl Page {
         }
         if self.set == DOCS_SET || self.is_site_page() {
             let mut topic = self.title.clone();
-            for text in self.aliases.iter().chain(&self.description) {
+            for text in self
+                .aliases
+                .iter()
+                .chain(&self.description)
+                .chain(&self.sections)
+            {
                 topic.push(' ');
                 topic.push_str(text);
             }
@@ -3268,6 +3291,56 @@ mod tests {
         assert_eq!(placed_at("python.org"), 0);
         assert_eq!(placed_at("docs.python.org"), 0);
         assert_eq!(placed_at("cpython.org"), 1);
+    }
+
+    #[test]
+    fn docs_pages_are_found_by_their_sections() {
+        let mut structures = docs_page(
+            "https://docs.python.org/3/tutorial/datastructures.html",
+            "Data Structures",
+            &["Python Data Structures", "Data Structures Python"],
+            "This chapter describes some things you've learned about already in more detail.",
+        );
+        structures.sections = vec![
+            "More on Lists".into(),
+            "List Comprehensions".into(),
+            "Nested List Comprehensions".into(),
+        ];
+        let sorting = docs_page(
+            "https://docs.python.org/3/howto/sorting.html",
+            "Sorting Techniques",
+            &["Python Sorting Techniques", "Sorting Techniques Python"],
+            "Python lists have a built-in list.sort() method that modifies the list in-place.",
+        );
+        let (_dir, searcher) = searcher(&[structures.clone(), sorting]);
+        let found = |query: &str| -> Vec<(String, bool)> {
+            searcher
+                .search(query, 10)
+                .unwrap()
+                .into_iter()
+                .filter(|hit| hit.page.set == DOCS_SET)
+                .map(|hit| (hit.page.title, hit.named))
+                .collect()
+        };
+        assert_eq!(
+            found("python list comprehension"),
+            [("Data Structures".to_string(), false)]
+        );
+        // A section's heading names nothing on its own.
+        assert!(found("list comprehensions").is_empty());
+        let read = Page::from_set(
+            DOCS_SET,
+            Article {
+                title: structures.title.clone(),
+                description: structures.description.clone(),
+                item: Some(structures.url.clone()),
+                views: structures.views,
+                aliases: structures.aliases.clone(),
+                sections: structures.sections.clone(),
+                ..Article::default()
+            },
+        );
+        assert_eq!(read, Some(structures));
     }
 
     #[test]

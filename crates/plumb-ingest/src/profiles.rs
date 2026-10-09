@@ -386,6 +386,7 @@ fn profile_items(
                 facts: Vec::new(),
                 lead: None,
                 names: Vec::new(),
+                sections: Vec::new(),
             })
         })
         .collect();

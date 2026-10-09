@@ -73,6 +73,7 @@ mod tests {
             title: Some(title.to_string()),
             description: Some(format!("About {title}")),
             text: None,
+            sections: Vec::new(),
         }
     }
 
