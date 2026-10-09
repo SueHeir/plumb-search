@@ -342,16 +342,44 @@ impl Page {
         })
     }
 
-    /// The host of a docs page's address: `docs.python.org`.
+    /// The page of the reference set written as `page` in its articles
+    /// file, whose item is its address.
+    pub fn from_reference(page: Article) -> Option<Self> {
+        let url = page.item.filter(|item| {
+            item.starts_with("https://")
+                && item.len() > "https://".len()
+                && !item.contains(char::is_whitespace)
+        })?;
+        Some(Page {
+            set: REFERENCE_SET.to_string(),
+            url,
+            title: page.title,
+            description: page.description,
+            site: None,
+            views: page.views,
+            aliases: page.aliases,
+            item: None,
+            profiles: Vec::new(),
+            website: None,
+            package: None,
+            facts: Vec::new(),
+        })
+    }
+
+    /// The host of a docs or reference page's address, without `www.`:
+    /// `docs.python.org`, `healthline.com`.
     fn docs_host(&self) -> Option<&str> {
-        if self.set != DOCS_SET {
+        if self.set != DOCS_SET && self.set != REFERENCE_SET {
             return None;
         }
-        self.url
-            .strip_prefix("https://")?
+        let host = self
+            .url
+            .split_once("://")?
+            .1
             .split(['/', '?', '#'])
             .next()
-            .filter(|host| !host.is_empty())
+            .filter(|host| !host.is_empty())?;
+        Some(host.strip_prefix("www.").unwrap_or(host))
     }
 
     /// Whether the page is a TV show of the films set, rather than a film.
@@ -453,6 +481,7 @@ impl Page {
             || set == MUSIC_SET
             || set == FILMS_SET
             || set == DOCS_SET
+            || set == REFERENCE_SET
             || Page::from_set(set, Article::default()).is_some()
     }
 
@@ -472,19 +501,20 @@ impl Page {
             MUSIC_SET => Page::from_music(article)?,
             FILMS_SET => Page::from_film(article)?,
             DOCS_SET => Page::from_docs(article)?,
+            REFERENCE_SET => Page::from_reference(article)?,
             _ => Page::from_article(set.strip_prefix("wikipedia-")?, article),
         })
     }
 
-    /// The words a question, paper or docs page is found by besides its
-    /// title: its title, a question's tags, and a docs page's other names
-    /// and description. `None` for pages of other sets, found by their
-    /// names only.
+    /// The words a question, paper, docs or reference page is found by
+    /// besides its title: its title, a question's tags, and a docs or
+    /// reference page's other names and description. `None` for pages of
+    /// other sets, found by their names only.
     pub fn topic(&self) -> Option<String> {
         if self.set == PAPERS_SET {
             return Some(self.title.clone());
         }
-        if self.set == DOCS_SET {
+        if self.set == DOCS_SET || self.set == REFERENCE_SET {
             let mut topic = self.title.clone();
             for text in self.aliases.iter().chain(&self.description) {
                 topic.push(' ');
@@ -605,6 +635,13 @@ pub const FILMS_SET: &str = "films";
 /// The set of software docs pages (MDN, Python's docs and others), fetched
 /// from the docs sites' sitemaps.
 pub const DOCS_SET: &str = "docs";
+/// The set of inner pages of well-known reference sites: health,
+/// dictionaries, recipes, how-tos, government (see
+/// `plumb_core::reference`).
+pub const REFERENCE_SET: &str = "reference";
+/// Fewest words (stemmed, without the most common ones) of a query that
+/// finds reference pages by their words: "define prioritize".
+pub const REFERENCE_QUERY_WORDS: usize = 2;
 /// Where English Wikipedia's articles are.
 const ENGLISH_WIKIPEDIA: &str = "https://en.wikipedia.org/wiki/";
 /// The set of software packages (npm, PyPI, crates.io and others).
@@ -1376,7 +1413,7 @@ impl PageSearcher {
         // Questions with most of the query's words, searched apart so they
         // never crowd out pages the query names.
         let stems = self.question_words(query);
-        if stems.len() >= QUESTION_QUERY_WORDS {
+        if stems.len() >= QUESTION_QUERY_WORDS.min(REFERENCE_QUERY_WORDS) {
             let needed = (stems.len() as f32 * QUESTION_SHARE).ceil() as usize;
             let most_words = BooleanQuery::with_minimum_required_clauses(
                 stems
@@ -1403,7 +1440,7 @@ impl PageSearcher {
         // about. A question without it has only the asking words ("how to
         // get rid of aphids" found "How do I get rid of my bounty?").
         let mut topic_word: Option<(u64, &String)> = None;
-        if stems.len() >= QUESTION_QUERY_WORDS {
+        if stems.len() >= QUESTION_QUERY_WORDS.min(REFERENCE_QUERY_WORDS) {
             for stem in &stems {
                 let found = searcher.doc_freq(&Term::from_field_text(self.fields.topic, stem))?;
                 if found > 0 && topic_word.is_none_or(|(least, _)| found < least) {
@@ -1558,7 +1595,12 @@ impl PageSearcher {
         stems: &[String],
         topic_word: Option<&str>,
     ) -> (f32, bool) {
-        if stems.len() < QUESTION_QUERY_WORDS {
+        let fewest = if page.set == REFERENCE_SET {
+            REFERENCE_QUERY_WORDS
+        } else {
+            QUESTION_QUERY_WORDS
+        };
+        if stems.len() < fewest {
             return (0.0, false);
         }
         let Some(topic) = page.topic() else {
@@ -1708,6 +1750,16 @@ impl PageSearcher {
         }
         if spelled(&page.title) == spelled(raw_query) {
             return (1.0, true);
+        }
+        // A reference page is named only by its whole title: part of it
+        // ("Stool") says too little, and it is found by its words
+        // otherwise ([`Self::question_match`]).
+        if page.set == REFERENCE_SET {
+            return if key(&page.title) == joined {
+                (ALIAS_MATCH, true)
+            } else {
+                (0.0, false)
+            };
         }
         // "Mozart (film)" and "Mozart!" are no better a match for "mozart"
         // than the redirect "Mozart" to "Wolfgang Amadeus Mozart":
@@ -2149,10 +2201,21 @@ fn place_pages_by_rules(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) 
             // site that shares a word with it (cityofdrain.org). A search
             // that only names something ("irs refund status") keeps its
             // site first.
-            let led = placed
-                .iter()
-                .any(|p| p.at == 0 && p.under.is_none() && p.hit.page.is_question());
-            let leads = hit.page.is_question() && asked_as_question(query) && !site_named && !led;
+            // A reference page leads too when the best site matches the
+            // query only a little: "foul smelling stool" wants the symptom
+            // page, not a site called "stool".
+            let led = placed.iter().any(|p| {
+                p.at == 0
+                    && p.under.is_none()
+                    && (p.hit.page.is_question() || p.hit.page.set == REFERENCE_SET)
+            });
+            let weak_site = sites.first().is_some_and(|site| {
+                !site.named && site.placing_text_score.unwrap_or(site.text_score) < WEAK_SITE_MATCH
+            });
+            let leads = !site_named
+                && !led
+                && (hit.page.is_question() && asked_as_question(query)
+                    || hit.page.set == REFERENCE_SET && (asked_as_question(query) || weak_site));
             usize::from(!leads)
         } else if !hit.named || namesake {
             PARTIAL_AFTER
@@ -2350,6 +2413,85 @@ mod tests {
             ..Article::default()
         })
         .unwrap()
+    }
+
+    fn reference_page(url: &str, title: &str, description: &str) -> Page {
+        Page::from_reference(Article {
+            title: title.into(),
+            description: Some(description.into()),
+            item: Some(url.into()),
+            views: 5_000,
+            ..Article::default()
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn reference_pages_are_found_by_most_words_and_lead_weak_sites() {
+        let stool = reference_page(
+            "https://www.healthline.com/health/foul-smelling-stool",
+            "Foul-Smelling Stool: Causes and Treatment",
+            "Foul-smelling stools have an unusually strong, putrid smell.",
+        );
+        assert_eq!(stool.set_name(), "healthline.com");
+        assert_eq!(stool.set_domain(), "healthline.com");
+        let prioritize = reference_page(
+            "https://www.merriam-webster.com/dictionary/prioritize",
+            "Prioritize Definition & Meaning",
+            "The meaning of PRIORITIZE is to list or rate in order of priority.",
+        );
+        let (_dir, searcher) = searcher(&[stool.clone(), prioritize.clone()]);
+        let found = |query: &str| -> Vec<(String, bool)> {
+            searcher
+                .search(query, 10)
+                .unwrap()
+                .into_iter()
+                .map(|hit| (hit.page.title, hit.named))
+                .collect()
+        };
+        assert_eq!(found("foul smelling stool"), [(stool.title.clone(), false)]);
+        // Two words are enough.
+        assert_eq!(
+            found("prioritize meaning"),
+            [(prioritize.title.clone(), false)]
+        );
+        // Part of its title names nothing; its whole title does.
+        assert!(found("stool").is_empty());
+        assert_eq!(
+            found("Prioritize Definition & Meaning"),
+            [(prioritize.title.clone(), true)]
+        );
+        assert!(found("smelling salts").is_empty());
+        let read = Page::from_set(
+            REFERENCE_SET,
+            Article {
+                title: stool.title.clone(),
+                description: stool.description.clone(),
+                item: Some(stool.url.clone()),
+                views: stool.views,
+                ..Article::default()
+            },
+        );
+        assert_eq!(read, Some(stool.clone()));
+        assert!(Page::has_reader(REFERENCE_SET));
+
+        // Asked in full, it leads any site the query does not name; found
+        // by most of its words, only one that shares a word with the query.
+        let placed_at = |query: &str, best: crate::Hit| {
+            let hit = searcher.search(query, 10).unwrap().remove(0);
+            let sites = [best, site("other.com", false)];
+            place_pages(query, &sites, vec![hit])[0].at
+        };
+        let mut weak = site("stool.com", false);
+        weak.text_score = 0.2;
+        assert_eq!(
+            placed_at("foul smelling stool", site("stool.com", false)),
+            0
+        );
+        assert_eq!(placed_at("foul smelling stool", site("stool.com", true)), 1);
+        assert_eq!(placed_at("stool smell", weak), 0);
+        assert_eq!(placed_at("stool smell", site("stool.com", false)), 1);
+        assert_eq!(placed_at("stool smell", site("stool.com", true)), 1);
     }
 
     #[test]

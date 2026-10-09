@@ -433,6 +433,108 @@ fn run_docs(args: &FetchPagesArgs, dest: &std::path::Path) -> Result<()> {
     write_set(dest, &pages, "docs pages")
 }
 
+/// Reference sites whose pages are fetched at once, each one page at a
+/// time.
+const REFERENCE_SITES_AT_ONCE: usize = 32;
+
+/// Makes the reference pages set file `dest`: the pages of the reference
+/// sites (or those --reference-sites names) that their sitemaps list,
+/// fetched like the docs set's. --work keeps each site's pages so a
+/// stopped run carries on.
+fn run_reference(args: &FetchPagesArgs, dest: &std::path::Path) -> Result<()> {
+    use plumb_core::reference::{ReferenceSite, REFERENCE_SITES};
+    use plumb_ingest::docs::FetchedDoc;
+    use plumb_ingest::reference::{reference_articles, sort_reference};
+
+    let sites: Vec<&'static ReferenceSite> = if args.reference_sites.is_empty() {
+        REFERENCE_SITES.iter().collect()
+    } else {
+        args.reference_sites
+            .iter()
+            .map(|key| {
+                plumb_core::reference::site(key).with_context(|| {
+                    format!("unknown reference site {key:?}; see plumb_core::reference")
+                })
+            })
+            .collect::<Result<_>>()?
+    };
+    if let Some(work) = &args.work {
+        std::fs::create_dir_all(work).with_context(|| format!("creating {}", work.display()))?;
+    }
+    let most = args.max_reference_per_site;
+    let work = args.work.clone();
+    let fetched = block_on(async move {
+        let cfg = plumb_crawl::CrawlConfig::default();
+        let mut running = tokio::task::JoinSet::new();
+        let mut done = Vec::new();
+        let mut queue = sites.into_iter();
+        loop {
+            while running.len() < REFERENCE_SITES_AT_ONCE {
+                let Some(site) = queue.next() else { break };
+                let cfg = cfg.clone();
+                let kept = work
+                    .as_ref()
+                    .map(|work| work.join(format!("reference-{}.json", site.key())));
+                running.spawn(async move {
+                    if let Some(docs) = kept.as_deref().and_then(read_kept_docs) {
+                        info!(
+                            "{}: {} pages kept from an earlier run",
+                            site.key(),
+                            docs.len()
+                        );
+                        return (site, docs);
+                    }
+                    let target = plumb_crawl::SitePagesTarget {
+                        domain: site.key().to_string(),
+                        roots: site.roots(),
+                        sitemaps: site.sitemaps.iter().map(|r| r.to_string()).collect(),
+                        index_pages: Vec::new(),
+                        max_pages: site.max_pages.unwrap_or(most),
+                    };
+                    let result = plumb_crawl::fetch_site_pages(&target, &cfg).await;
+                    let docs: Vec<FetchedDoc> = result
+                        .pages
+                        .into_iter()
+                        .map(|page| FetchedDoc {
+                            url: page.url,
+                            title: page.meta.title,
+                            description: page.meta.description,
+                            text: page.meta.body_text,
+                        })
+                        .collect();
+                    if let Some(kept) = &kept {
+                        if !docs.is_empty() {
+                            if let Err(err) = write_kept_docs(kept, &docs) {
+                                warn!("{}: keeping its pages: {err:#}", site.key());
+                            }
+                        }
+                    }
+                    (site, docs)
+                });
+            }
+            match running.join_next().await {
+                Some(Ok(site_docs)) => done.push(site_docs),
+                Some(Err(err)) => warn!("a reference site's fetch failed: {err}"),
+                None => break,
+            }
+        }
+        done
+    })?;
+    let mut pages = Vec::new();
+    for (site, docs) in &fetched {
+        let articles = reference_articles(site, docs);
+        info!(
+            "{}: {} pages of {} fetched",
+            site.key(),
+            articles.len(),
+            docs.len()
+        );
+        pages.extend(articles);
+    }
+    sort_reference(&mut pages);
+    write_set(dest, &pages, "reference pages")
+}
+
 /// The pages of a docs site kept at `path` by an earlier run.
 fn read_kept_docs(path: &std::path::Path) -> Option<Vec<plumb_ingest::docs::FetchedDoc>> {
     let bytes = std::fs::read(path).ok()?;
@@ -668,6 +770,9 @@ pub fn run_pages(args: FetchPagesArgs) -> Result<()> {
     }
     if set.id == plumb_index::pages::DOCS_SET {
         return run_docs(&args, &dest);
+    }
+    if set.id == plumb_index::pages::REFERENCE_SET {
+        return run_reference(&args, &dest);
     }
     if set.id == plumb_index::pages::PACKAGES_SET {
         return run_packages(&args, &dest);

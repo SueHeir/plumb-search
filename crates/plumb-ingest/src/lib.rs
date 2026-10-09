@@ -36,6 +36,7 @@ pub mod osm;
 pub mod packages;
 pub mod podcasts;
 pub mod profiles;
+pub mod reference;
 pub mod stackexchange;
 pub mod tranco;
 pub mod wat;

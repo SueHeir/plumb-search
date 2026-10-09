@@ -701,8 +701,11 @@ pub struct FetchPagesArgs {
     /// it asks for one), packages (the most used packages of eight
     /// registries, from ecosyste.ms), docs (pages of MDN, Python's docs and
     /// 36 more software docs sites, from their sitemaps; --work keeps each
-    /// site's pages so a stopped run carries on) or places (named shops,
-    /// restaurants, parks and towns from OpenStreetMap).
+    /// site's pages so a stopped run carries on), reference (pages of
+    /// about 150 well-known reference sites: health, dictionaries, recipes,
+    /// how-tos and government, from their sitemaps; --work as for docs) or
+    /// places (named shops, restaurants, parks and towns from
+    /// OpenStreetMap).
     #[arg(long, value_name = "SET", default_value = "wikipedia-en")]
     pub set: String,
     /// Directory to download Wikipedia's dumps into (created if missing).
@@ -834,6 +837,16 @@ pub struct FetchPagesArgs {
     /// Docs: most pages fetched of each site, the shallowest first.
     #[arg(long, value_name = "N", default_value_t = plumb_ingest::docs::DEFAULT_MAX_PER_SITE)]
     pub max_docs_per_site: usize,
+    /// Reference: the reference sites to fetch, by host without `www.`
+    /// (healthline.com, merriam-webster.com and others; see
+    /// plumb_core::reference), comma-separated; all when left out.
+    #[arg(long, value_name = "HOSTS", value_delimiter = ',')]
+    pub reference_sites: Vec<String>,
+    /// Reference: most pages fetched of each site, the shallowest first.
+    /// Sites with a page for every word (dictionaries) take their own
+    /// number, more.
+    #[arg(long, value_name = "N", default_value_t = plumb_ingest::reference::DEFAULT_MAX_PER_SITE)]
+    pub max_reference_per_site: usize,
 }
 
 #[derive(Debug, Args)]

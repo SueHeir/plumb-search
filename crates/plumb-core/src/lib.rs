@@ -27,6 +27,7 @@ mod operators;
 pub mod packages;
 pub mod place;
 pub mod profiles;
+pub mod reference;
 pub mod safe;
 pub mod simhash;
 mod site_search;

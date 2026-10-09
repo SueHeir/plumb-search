@@ -100,6 +100,12 @@ pub const SETS: &[SetInfo] = &[
         bytes_per_page: 250,
     },
     SetInfo {
+        id: plumb_index::pages::REFERENCE_SET,
+        name: "Reference pages (health, dictionaries, recipes, how-tos and more)",
+        pages: 700_000,
+        bytes_per_page: 300,
+    },
+    SetInfo {
         id: plumb_index::pages::PAPERS_SET,
         name: "Papers (OpenAlex)",
         pages: 2_000_000,
