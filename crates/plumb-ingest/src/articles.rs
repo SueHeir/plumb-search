@@ -470,6 +470,7 @@ pub fn build_articles(lang: &str, dumps: &ArticleDumps) -> Result<Vec<Article>> 
                 facts: Vec::new(),
                 lead: None,
                 names: Vec::new(),
+                sections: Vec::new(),
             }
         })
         .collect();

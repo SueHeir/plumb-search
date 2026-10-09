@@ -39,7 +39,8 @@ pub use crawl::{
     FeedTarget, HomepageCrawler,
 };
 pub use extract::{
-    extract_page_meta, MAX_BODY_WORDS, MAX_ICONS, MAX_OUT_LINKS, MAX_PAGE_TEXT_WORDS,
+    extract_page_meta, MAX_BODY_WORDS, MAX_ICONS, MAX_OUT_LINKS, MAX_PAGE_TEXT_WORDS, MAX_SECTIONS,
+    MAX_SECTION_WORDS,
 };
 pub use feed::{parse_date, read_feed};
 pub use icon::{normalize_icon, ICON_SIZE};
@@ -214,6 +215,13 @@ pub struct PageMeta {
     /// words in all.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub headings: Vec<String>,
+    /// Visible `<h2>` and `<h3>` texts outside a page's header, footer,
+    /// menus and forms, in page order, each once, at most
+    /// [`MAX_SECTIONS`] of [`MAX_SECTION_WORDS`] words:
+    /// the sections a docs page is about ("List Comprehensions" in
+    /// Python's "Data Structures"). Left out of the JSON form.
+    #[serde(skip)]
+    pub sections: Vec<String>,
     /// The page's visible text in reading order, without scripts, menus,
     /// headers, footers, forms and headings, cut to [`MAX_BODY_WORDS`]
     /// words.

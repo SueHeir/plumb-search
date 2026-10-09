@@ -187,6 +187,7 @@ mod tests {
                     icons: Vec::new(),
                     key_pages: Vec::new(),
                     headings: Vec::new(),
+                    sections: Vec::new(),
                     body_text: None,
                     page_text: String::new(),
                     terms: Vec::new(),
