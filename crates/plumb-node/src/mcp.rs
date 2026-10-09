@@ -346,6 +346,12 @@ impl Mcp {
         message.get("method").and_then(Value::as_str) == Some("tools/call")
     }
 
+    /// Whether `message` calls `read_page`.
+    pub fn is_read_call(message: &Value) -> bool {
+        Mcp::is_tool_call(message)
+            && message.pointer("/params/name").and_then(Value::as_str) == Some("read_page")
+    }
+
     /// `tools/call`: a tool's answer, as text for the model and as
     /// structured content. A failed search is a tool error the model can
     /// read; bad arguments are a protocol error.
@@ -1580,7 +1586,7 @@ pub fn tools(read_pages: bool, findings: bool, share: bool) -> Value {
                  says npm, crate, pip, python or another registry or language, a direct answer for sums, unit and currency conversions and \
                  the time somewhere, facts about what the query names, and recent headlines. \
                  Plumb indexes homepages and page sets, not the full text of the web, so search \
-                 for names and topics, then read a page with read_page.",
+                 for names and topics, then open the page you need.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1651,10 +1657,9 @@ pub fn tools(read_pages: bool, findings: bool, share: bool) -> Value {
         },
     ]);
     if read_pages {
-        tools
-            .as_array_mut()
-            .expect("an array")
-            .push(read_page_tool());
+        let tools = tools.as_array_mut().expect("an array");
+        tools.push(read_page_tool());
+        point_search_at_read_page(tools);
     }
     if findings {
         tools
@@ -1703,6 +1708,21 @@ fn report_finding_tool(share: bool) -> Value {
         tool["annotations"]["openWorldHint"] = json!(true);
     }
     tool
+}
+
+/// How `search`'s description ends without `read_page`...
+const SEARCH_THEN_OPEN: &str = "then open the page you need.";
+/// ...and with it.
+const SEARCH_THEN_READ: &str = "then read a page with read_page.";
+
+/// Has `search`'s description, among `tools`, send agents on to
+/// `read_page`, once that is offered too.
+fn point_search_at_read_page(tools: &mut [Value]) {
+    for tool in tools.iter_mut().filter(|tool| tool["name"] == "search") {
+        if let Some(text) = tool["description"].as_str() {
+            tool["description"] = json!(text.replace(SEARCH_THEN_OPEN, SEARCH_THEN_READ));
+        }
+    }
 }
 
 /// `read_page`'s description.
@@ -2240,6 +2260,7 @@ fn offer_read_page(message: &Value, answer: &mut Value) {
                 if !tools.iter().any(|tool| tool["name"] == "read_page") {
                     tools.push(read_page_tool());
                 }
+                point_search_at_read_page(tools);
             }
         }
         Some("initialize") => {

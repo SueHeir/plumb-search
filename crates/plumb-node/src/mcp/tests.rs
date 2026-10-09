@@ -450,6 +450,15 @@ fn read_page_is_offered_only_with_a_reader() {
     );
     let with = server(Vec::new()).with_reader(Some(reader));
     assert!(list(&with).contains(&"read_page".to_string()));
+    // search sends agents on to read_page only where they have it.
+    let search_says = |read_pages| {
+        tools(read_pages, false, false)[2]["description"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    assert!(!search_says(false).contains("read_page"));
+    assert!(search_says(true).contains("then read a page with read_page."));
     let reply = call(&with, "read_page", json!({ "url": url }));
     assert_eq!(reply["result"]["isError"], false, "{reply}");
     let answer = &reply["result"]["structuredContent"];
@@ -542,9 +551,16 @@ fn plumb_mcp_node_reads_pages_itself() {
 
     // The node's list gains read_page.
     let mut listed =
-        json!({ "jsonrpc": "2.0", "id": 1, "result": { "tools": [{ "name": "search" }] } });
+        json!({ "jsonrpc": "2.0", "id": 1, "result": { "tools": tools(false, false, false) } });
     offer_read_page(&json!({ "method": "tools/list" }), &mut listed);
-    assert_eq!(listed["result"]["tools"][1]["name"], "read_page");
+    assert_eq!(listed["result"]["tools"][6]["name"], "read_page");
+    let search = listed["result"]["tools"][2]["description"]
+        .as_str()
+        .unwrap();
+    assert!(
+        search.contains("then read a page with read_page."),
+        "{search}"
+    );
 }
 
 /// Finds the crate serde for queries that ask for a package, and no site.

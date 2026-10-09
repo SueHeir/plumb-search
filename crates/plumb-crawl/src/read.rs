@@ -47,6 +47,10 @@ pub struct ReadConfig {
     /// Host names connected to at these addresses, not looked up (tests
     /// only, in practice; the port is the URL's).
     pub resolve: Vec<(String, std::net::SocketAddr)>,
+    /// Reads only pages on the web's own ports, 80 and 443, redirects
+    /// included: a reader anyone may use must not knock on mail servers,
+    /// databases and the like.
+    pub web_ports_only: bool,
 }
 
 impl Default for ReadConfig {
@@ -58,6 +62,7 @@ impl Default for ReadConfig {
             max_redirects: 8,
             allow_private_addresses: false,
             resolve: Vec::new(),
+            web_ports_only: false,
         }
     }
 }
@@ -83,6 +88,8 @@ pub enum ReadError {
     NotWeb(String),
     #[error("{0} is on a private network, which is not read")]
     Private(String),
+    #[error("{0} is not on port 80 or 443; this node reads only pages there")]
+    Port(String),
     #[error("the page could not be fetched: {0}")]
     Fetch(String),
     #[error("the site answered {0}")]
@@ -103,6 +110,7 @@ impl PageReader {
     pub fn new(cfg: ReadConfig) -> reqwest::Result<Self> {
         let allow_private = cfg.allow_private_addresses;
         let max_redirects = cfg.max_redirects;
+        let web_ports_only = cfg.web_ports_only;
         let mut client = Client::builder();
         for (name, addr) in &cfg.resolve {
             client = client.resolve(name, *addr);
@@ -116,6 +124,8 @@ impl PageReader {
                     attempt.error("too many redirects")
                 } else if !allow_private && names_private_ip(attempt.url()) {
                     attempt.error("a redirect to a private network")
+                } else if web_ports_only && !on_web_port(attempt.url()) {
+                    attempt.error("a redirect to a port other than 80 or 443")
                 } else {
                     attempt.follow()
                 }
@@ -132,6 +142,9 @@ impl PageReader {
         let url = web_url(address)?;
         if !self.cfg.allow_private_addresses && names_private_ip(&url) {
             return Err(ReadError::Private(url.host_str().unwrap_or("").to_string()));
+        }
+        if self.cfg.web_ports_only && !on_web_port(&url) {
+            return Err(ReadError::Port(url.to_string()));
         }
         // Stack Exchange's sites turn away programs that read their pages,
         // but give the same question and answers through their API.
@@ -336,6 +349,11 @@ pub(crate) fn names_private_ip(url: &Url) -> bool {
         Some(Host::Ipv6(ip)) => !is_global(IpAddr::V6(ip)),
         _ => false,
     }
+}
+
+/// Whether `url` is on port 80 or 443, said or implied by its scheme.
+fn on_web_port(url: &Url) -> bool {
+    matches!(url.port_or_known_default(), Some(80 | 443))
 }
 
 /// How long reading one page's HTML may take; see
@@ -818,5 +836,25 @@ mod tests {
         .unwrap();
         let page = small.read(&format!("http://{addr}/")).await.unwrap();
         assert!(page.cut);
+        let web_ports = PageReader::new(ReadConfig {
+            allow_private_addresses: true,
+            web_ports_only: true,
+            ..ReadConfig::default()
+        })
+        .unwrap();
+        assert!(matches!(
+            web_ports.read(&format!("http://{addr}/")).await,
+            Err(ReadError::Port(_))
+        ));
+    }
+
+    #[test]
+    fn web_ports_are_80_and_443() {
+        let on = |url: &str| on_web_port(&Url::parse(url).unwrap());
+        assert!(on("http://example.com/"));
+        assert!(on("https://example.com/"));
+        assert!(on("http://example.com:443/"));
+        assert!(!on("http://example.com:25/"));
+        assert!(!on("https://example.com:8443/"));
     }
 }
