@@ -566,6 +566,8 @@ struct AppState {
     net_limiter: Arc<mcp::Limiter>,
     /// Fetches pages for `/mcp`'s `read_page`.
     page_reader: Arc<mcp::SharedReader>,
+    /// How `/mcp`'s `read_page` reads for others, with `--mcp-read-pages`.
+    public_reads: Arc<mcp::PublicReads>,
     /// What agents found, for `/mcp`'s `report_finding`; opened from the
     /// node's data directory when first needed.
     findings: Arc<std::sync::OnceLock<Option<Arc<crate::findings::Findings>>>>,
@@ -704,6 +706,7 @@ pub fn router_with(backend: Arc<dyn SearchBackend>, settings: impl Into<WebSetti
         mcp_limiter: Arc::default(),
         net_limiter: Arc::new(mcp::Limiter::new(NET_BURST, NET_PER_MINUTE)),
         page_reader: Arc::default(),
+        public_reads: Arc::default(),
         findings: Arc::default(),
         experiments: Arc::default(),
     })
@@ -730,6 +733,7 @@ pub fn node_router_with(
         mcp_limiter: Arc::default(),
         net_limiter: Arc::new(mcp::Limiter::new(NET_BURST, NET_PER_MINUTE)),
         page_reader: Arc::default(),
+        public_reads: Arc::default(),
         findings: Arc::default(),
         experiments: Arc::default(),
     })

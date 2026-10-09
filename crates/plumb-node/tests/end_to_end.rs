@@ -453,3 +453,74 @@ async fn web_app_serves_mcp() {
     let (status, _, _) = get(&app, "/mcp").await;
     assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
 }
+
+#[tokio::test]
+async fn mcp_reads_pages_for_others_on_web_ports_only_and_fewer_a_minute() {
+    use plumb_node::websearch::WebSettings;
+    let tmp = tempfile::tempdir().unwrap();
+    let (index, _) = build_fixture_index(tmp.path());
+    let searcher = Searcher::open(&index).unwrap();
+    let settings = WebSettings {
+        read_pages_for_all: true,
+        page_reader: plumb_crawl::ReadConfig {
+            allow_private_addresses: true,
+            ..plumb_crawl::ReadConfig::default()
+        },
+        ..WebSettings::default()
+    };
+    let app = plumb_node::web::router_with(
+        Arc::new(IndexBackend::new(searcher, RankConfig::default())),
+        settings,
+    );
+    let page = axum::Router::new().route("/", axum::routing::get(|| async { "hello" }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, page).await });
+
+    // No peer address: a client on another computer.
+    let post = |body: serde_json::Value| {
+        let request = Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header(header::HOST, "plumb.test")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let app = app.clone();
+        async move {
+            let response = app.oneshot(request).await.unwrap();
+            let status = response.status();
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            (
+                status,
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+            )
+        }
+    };
+
+    let (_, listed) =
+        post(serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" })).await;
+    let tools = listed["result"]["tools"].as_array().unwrap();
+    assert!(tools.iter().any(|tool| tool["name"] == "read_page"));
+
+    let read = tool_call(
+        2,
+        "read_page",
+        serde_json::json!({ "url": format!("http://{addr}/") }),
+    );
+    let (status, answer) = post(read.clone()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(answer["result"]["isError"], true, "{answer}");
+    let text = answer["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("not on port 80 or 443"), "{text}");
+
+    for _ in 1..10 {
+        assert_eq!(post(read.clone()).await.0, StatusCode::OK);
+    }
+    assert_eq!(post(read).await.0, StatusCode::TOO_MANY_REQUESTS);
+    // Other tools keep their own, larger allowance.
+    let call = tool_call(3, "official_site", serde_json::json!({ "name": "us bank" }));
+    assert_eq!(post(call).await.0, StatusCode::OK);
+}
