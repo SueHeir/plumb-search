@@ -1504,3 +1504,41 @@ fn official_site_is_unsure_of_a_name_its_site_does_not_show() {
     });
     assert_eq!(official(&mcp, "elixir")["confidence"], "high");
 }
+
+#[test]
+fn official_site_keeps_a_well_known_sites_own_docs() {
+    // PyPI's anthropic.readthedocs.io is no docs of anthropic.com's.
+    let mcp = scripted(|query| {
+        if query.ends_with("package") {
+            return results(
+                Vec::new(),
+                vec![package_page(
+                    "pypi",
+                    "anthropic",
+                    None,
+                    Some("https://anthropic.readthedocs.io/"),
+                )],
+            );
+        }
+        let mut anthropic = titled("anthropic.com", "Home \\ Anthropic", 0.8, false);
+        anthropic.official = true;
+        results(vec![anthropic], Vec::new())
+    });
+    let answer = official(&mcp, "anthropic api docs");
+    assert_eq!(answer["domain"], "anthropic.com", "{answer}");
+}
+
+#[test]
+fn official_site_takes_a_well_known_site_that_shows_the_whole_name() {
+    let mcp = scripted(|_| {
+        let mut office = titled("office.com", "Office.com", 0.9, false);
+        office.official = true;
+        let mut outlook = titled("outlook.live.com", "Outlook", 0.8, false);
+        outlook.official = true;
+        outlook.score = 0.9;
+        outlook.description = Some("Microsoft free web-based email service".into());
+        results(vec![office, outlook], Vec::new())
+    });
+    let answer = official(&mcp, "outlook email");
+    assert_eq!(answer["domain"], "outlook.live.com", "{answer}");
+}
