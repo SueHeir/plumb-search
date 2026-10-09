@@ -5993,6 +5993,8 @@ dependencies = [
  "candle-core",
  "candle-nn",
  "candle-transformers",
+ "hashbrown 0.16.1",
+ "memmap2 0.9.11",
  "plumb-core",
  "serde_json",
  "sha2 0.10.9",
