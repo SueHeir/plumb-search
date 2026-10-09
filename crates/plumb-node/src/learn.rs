@@ -803,6 +803,15 @@ impl Learned {
         self.trim();
     }
 
+    /// Where `domain` was on the latest page for `query` (0 for the first
+    /// result), and whether it was already picked from that page.
+    pub fn place(&self, query: &str, domain: &str) -> Option<(usize, bool)> {
+        let key = query_key(query);
+        let page = self.pages.iter().find(|p| p.query == key)?;
+        let at = page.sites.iter().position(|d| d == domain)?;
+        Some((at, page.picked.iter().any(|d| d == domain)))
+    }
+
     fn site(&mut self, domain: &str, at: u64) -> &mut SiteCount {
         let i = match self.sites.iter().position(|s| s.domain == domain) {
             Some(i) => i,

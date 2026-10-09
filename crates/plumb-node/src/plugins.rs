@@ -80,6 +80,10 @@ const CACHE_TIME: Duration = Duration::from_secs(600);
 /// The longest a `plugin.json` may ask results to be reused.
 const MAX_CACHE_SECONDS: u64 = 86_400;
 const CACHE_ENTRIES: usize = 1000;
+/// How long the results of a plugin run for what a search is about by
+/// one of its `run_ids` (a song, an album) are reused, unless its own
+/// `cache_seconds` is longer or 0.
+const THING_CACHE_TIME: Duration = Duration::from_secs(86_400);
 
 /// A plugin's `plugin.json`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
@@ -110,6 +114,12 @@ pub struct Manifest {
     /// plugin ("lyrics", "music video"), as its `ids` do.
     #[serde(default)]
     pub hints: Vec<String>,
+    /// Of its `ids`, those that make a search surely for it, so that it
+    /// runs even where a search that fits it is only offered (`suggest`
+    /// "button"): a song's or an album's, say, for a video site whose
+    /// quota keeps an artist's search behind a link.
+    #[serde(default)]
+    pub run_ids: Vec<String>,
     /// What a search that fits it does without a keyword, unless the
     /// node's owner chose otherwise: run it, or offer its results.
     #[serde(default)]
@@ -348,9 +358,11 @@ impl Manifest {
             return Some(Pick::Run(None, words.join(" ")));
         }
         let fits = about.is_some_and(|about| self.knows(about)) || self.hinted(&lower);
+        let sure = about.is_some_and(|about| self.surely_for(about));
         match suggest {
             _ if !fits => None,
             Suggest::Automatic => Some(Pick::Run(None, words.join(" "))),
+            Suggest::Button if sure => Some(Pick::Run(None, words.join(" "))),
             Suggest::Button => Some(Pick::Offer),
             Suggest::Keywords => None,
         }
@@ -376,6 +388,14 @@ impl Manifest {
         self.ids.iter().any(|key| {
             about.ids.contains_key(key) || (key == "wikidata" && about.wikidata.is_some())
         })
+    }
+
+    /// Whether `about` has an identifier its `run_ids` lists, of those
+    /// its `ids` lists.
+    fn surely_for(&self, about: &About) -> bool {
+        self.run_ids
+            .iter()
+            .any(|key| self.ids.contains(key) && about.ids.contains_key(key))
     }
 
     fn time(&self) -> Duration {
@@ -1126,6 +1146,8 @@ pub struct Plugins {
 #[derive(Default)]
 struct Inner {
     plugins: Vec<Arc<Plugin>>,
+    /// Plugins' results, by plugin and what it was asked, with when they
+    /// stop being reused.
     cache: Mutex<HashMap<CacheKey, (Instant, Vec<PluginItem>)>>,
     /// Plugins' notes on the node's results, by the same keys.
     notes_cache: Mutex<HashMap<CacheKey, (Instant, KeptNotes)>>,
@@ -1153,7 +1175,10 @@ impl PartialEq for Plugins {
 impl Eq for Plugins {}
 
 /// The plugin, and what it is asked, for one search.
-type Run = (usize, Arc<Plugin>, Query);
+/// A plugin to run: where it was installed, it, what it is asked, and
+/// whether it runs for what the search is about by one of its `run_ids`,
+/// so that its results are kept for that thing, whatever words found it.
+type Run = (usize, Arc<Plugin>, Query, bool);
 
 impl Plugins {
     pub fn new(plugins: Vec<Plugin>) -> Self {
@@ -1350,6 +1375,8 @@ impl Plugins {
                     _ if asked => (None, query.split_whitespace().collect::<Vec<_>>().join(" ")),
                     _ => return None,
                 };
+                let for_thing =
+                    keyword.is_none() && about.is_some_and(|a| plugin.manifest.surely_for(a));
                 let input = Query {
                     text: query.to_string(),
                     terms,
@@ -1360,7 +1387,7 @@ impl Plugins {
                     about: about.cloned(),
                     page: None,
                 };
-                Some((at, Arc::clone(plugin), input))
+                Some((at, Arc::clone(plugin), input, for_thing))
             })
             .collect();
         self.gather(runs, safe).await
@@ -1397,7 +1424,7 @@ impl Plugins {
                     about: None,
                     page: Some(url.to_string()),
                 };
-                (at, Arc::clone(plugin), input)
+                (at, Arc::clone(plugin), input, false)
             })
             .collect();
         self.gather(runs, safe).await
@@ -1410,12 +1437,27 @@ impl Plugins {
         let mut running = tokio::task::JoinSet::new();
         let mut found: Vec<(usize, PluginResults)> = Vec::new();
         let mut longest = Duration::ZERO;
-        for (at, plugin, input) in runs {
+        for (at, plugin, input, for_thing) in runs {
+            let mut ttl = plugin.manifest.cache_time();
+            let asked = if for_thing {
+                // A song's results are the same for "creep" and "radiohead
+                // creep", and for a day: each song uses the quota once.
+                if !ttl.is_zero() {
+                    ttl = ttl.max(THING_CACHE_TIME);
+                }
+                Query {
+                    text: String::new(),
+                    terms: String::new(),
+                    ..input.clone()
+                }
+            } else {
+                input.clone()
+            };
             let key = (
                 plugin.id.clone(),
-                serde_json::to_string(&input).unwrap_or_default(),
+                serde_json::to_string(&asked).unwrap_or_default(),
             );
-            if let Some(results) = self.cached(&key, plugin.manifest.cache_time()) {
+            if let Some(results) = self.cached(&key) {
                 found.push((at, plugin.results(results)));
                 continue;
             }
@@ -1433,17 +1475,16 @@ impl Plugins {
                     plugin.fetch_images(&mut items, deadline, &runtime);
                     items
                 });
-                (at, plugin, key, ran)
+                (at, plugin, key, ttl, ran)
             });
         }
         let waited = tokio::time::timeout(longest + Duration::from_millis(500), async {
             while let Some(done) = running.join_next().await {
-                let Ok((at, plugin, key, ran)) = done else {
+                let Ok((at, plugin, key, ttl, ran)) = done else {
                     continue;
                 };
                 match ran {
                     Ok(items) => {
-                        let ttl = plugin.manifest.cache_time();
                         if !ttl.is_zero() {
                             self.keep(key, items.clone(), ttl);
                         }
@@ -1595,23 +1636,24 @@ impl Plugins {
         Ok(squash(output.message.as_deref().unwrap_or("Done."), 300))
     }
 
-    fn cached(&self, key: &CacheKey, ttl: Duration) -> Option<Vec<PluginItem>> {
+    fn cached(&self, key: &CacheKey) -> Option<Vec<PluginItem>> {
         let cache = self.inner.cache.lock().ok()?;
-        let (at, items) = cache.get(key)?;
-        (at.elapsed() < ttl).then(|| items.clone())
+        let (until, items) = cache.get(key)?;
+        (Instant::now() < *until).then(|| items.clone())
     }
 
     fn keep(&self, key: CacheKey, items: Vec<PluginItem>, ttl: Duration) {
         let Ok(mut cache) = self.inner.cache.lock() else {
             return;
         };
+        let now = Instant::now();
         if cache.len() >= CACHE_ENTRIES {
-            cache.retain(|_, (at, _)| at.elapsed() < ttl.max(CACHE_TIME));
+            cache.retain(|_, (until, _)| now < *until);
         }
         if cache.len() >= CACHE_ENTRIES {
             cache.clear();
         }
-        cache.insert(key, (Instant::now(), items));
+        cache.insert(key, (now + ttl, items));
     }
 
     /// Drops the saved results and notes of plugin `id`.
@@ -1714,19 +1756,56 @@ pub fn try_plugin(
 
 /// What a results page knows a search is about, for plugins: the
 /// Wikipedia article or Wikidata item `page`, its item and its profiles'
-/// identifiers.
+/// identifiers; or the song or album `page` of the music set, by its
+/// MusicBrainz identifier (`musicbrainz-recording` for a song,
+/// `musicbrainz-album` for an album) and its artist.
 pub fn about_page(page: &plumb_index::pages::Page) -> About {
     let mut ids = BTreeMap::new();
     for profile in &page.profiles {
         ids.entry(profile.service.clone())
             .or_insert_with(|| profile.id.clone());
     }
+    let mut by = None;
+    if page.set == plumb_index::pages::MUSIC_SET {
+        let mbid = |kind: &str| {
+            page.url
+                .strip_prefix("https://musicbrainz.org/")
+                .and_then(|rest| rest.strip_prefix(kind))
+                .and_then(|rest| rest.strip_prefix('/'))
+                .map(str::to_string)
+        };
+        if let Some(mbid) = mbid("recording") {
+            ids.insert("musicbrainz-recording".into(), mbid);
+        } else if let Some(mbid) = mbid("release-group") {
+            ids.insert("musicbrainz-album".into(), mbid);
+        }
+        by = page.description.as_deref().and_then(music_artist);
+    }
     About {
         title: page.title.clone(),
         description: page.description.clone().filter(|d| !d.trim().is_empty()),
         wikidata: page.item.clone(),
         ids,
+        by,
     }
+}
+
+/// The artist in a music page's description: "Queen" for "Song by Queen,
+/// 1975" or "Album by Queen · Rock"; a comma that is not before the year
+/// stays ("Crosby, Stills, Nash & Young").
+fn music_artist(description: &str) -> Option<String> {
+    let by = description
+        .strip_prefix("Song by ")
+        .or_else(|| description.strip_prefix("Album by "))?;
+    let by = by.split(" · ").next().unwrap_or(by);
+    let by = match by.rsplit_once(", ") {
+        Some((artist, year)) if !year.is_empty() && year.bytes().all(|b| b.is_ascii_digit()) => {
+            artist
+        }
+        _ => by,
+    };
+    let by = by.trim();
+    (!by.is_empty()).then(|| by.to_string())
 }
 
 /// A plugin module (WebAssembly text) that hands back `output`, JSON,

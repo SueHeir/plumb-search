@@ -184,6 +184,8 @@ pub struct NodeConfig {
     pub web_search: Option<Engine>,
     /// Every client of `/mcp` may use `read_page`, not only this computer's.
     pub mcp_read_pages: bool,
+    /// How `read_page` fetches pages.
+    pub page_reader: plumb_crawl::ReadConfig,
     /// Rank by meaning too, for searches that name no site: the node
     /// downloads a small embedding model into `DIR/model` (about 130 MB)
     /// and keeps a vector of each site's text in `DIR/vectors.bin`, made in
@@ -268,6 +270,10 @@ pub struct NodeConfig {
     /// network learns what is popular (see [`network`]). Needs `network`.
     /// Off by default.
     pub share_popularity: bool,
+    /// Let AI apps on this computer share a finding with other nodes when
+    /// they ask to, through `/mcp`'s `report_finding` (see
+    /// [`plumb_net::leads`]). Needs `network`. Off by default.
+    pub share_findings: bool,
     /// The settings until someone changes them on the panel, which saves
     /// them in `DIR/settings.json`.
     pub settings: NodeSettings,
@@ -315,6 +321,7 @@ impl NodeConfig {
             country: HomeCountry::Auto,
             web_search: None,
             mcp_read_pages: false,
+            page_reader: plumb_crawl::ReadConfig::default(),
             search_by_meaning: false,
             meaning_model: crate::meaning::MeaningModel::default(),
             embed_threads: None,
@@ -325,6 +332,7 @@ impl NodeConfig {
             network: None,
             private_search: false,
             share_popularity: false,
+            share_findings: false,
             crawl_any_site: false,
             crawl_home_site: true,
             drop_dead_sites: false,
@@ -394,6 +402,9 @@ impl NodeConfig {
         }
         if self.share_popularity && self.network.is_none() {
             bail!("sharing popularity needs the network");
+        }
+        if self.share_findings && self.network.is_none() {
+            bail!("sharing findings needs the network");
         }
         if self.crawl_any_site && self.network.is_none() {
             bail!("crawling any site needs the network");
@@ -890,6 +901,7 @@ pub async fn start(mut config: NodeConfig) -> Result<NodeHandle> {
         home: inner.config.country.clone(),
         web_search: inner.config.web_search,
         read_pages_for_all: inner.config.mcp_read_pages,
+        page_reader: inner.config.page_reader.clone(),
         plugins: load_plugins(&inner),
     };
     let app = web::node_router_with(inner.clone(), inner.clone(), settings);
@@ -1192,6 +1204,9 @@ struct Inner {
     /// When this node last put an index in service (Unix time; 0 for not
     /// since it started).
     last_build: std::sync::atomic::AtomicU64,
+    /// How long, in seconds, the last index build of the records file took
+    /// (0 for none since it started).
+    last_build_took: std::sync::atomic::AtomicU64,
     /// When this node last looked for sites to drop to get back under its
     /// storage limit (Unix time; 0 for not since it started).
     last_trim: std::sync::atomic::AtomicU64,
@@ -1433,6 +1448,7 @@ impl Inner {
             kept_found: Mutex::new(std::collections::HashMap::new()),
             fill: Mutex::new(fill_state),
             last_build: std::sync::atomic::AtomicU64::new(0),
+            last_build_took: std::sync::atomic::AtomicU64::new(0),
             last_trim: std::sync::atomic::AtomicU64::new(0),
             round_sites: std::sync::atomic::AtomicU64::new(opened.sites),
             over_since: std::sync::atomic::AtomicU64::new(0),
@@ -1460,7 +1476,7 @@ impl Inner {
         let activity = self.activity().clone();
         let saved = self.saved();
         let index = self.current_summary();
-        let pause = self.pause();
+        let pause = self.pause_shown();
         Status {
             phase: if index.is_some() {
                 Phase::Ready
@@ -1511,9 +1527,21 @@ impl Inner {
 
     /// Why crawls and refreshes must wait now, and until when, if they must.
     fn pause(&self) -> Option<Pause> {
+        self.pause_given(|| self.disk_used())
+    }
+
+    /// [`Inner::pause`] by the last count of the data folder, for showing:
+    /// counting a large folder again takes many seconds on a busy server,
+    /// and every search asks for the status.
+    fn pause_shown(&self) -> Option<Pause> {
+        self.pause_given(|| self.disk_used_shown())
+    }
+
+    /// [`Inner::pause`], with `disk_used` the size of the data folder.
+    fn pause_given(&self, disk_used: impl FnOnce() -> u64) -> Option<Pause> {
         self.download_pause().or_else(|| {
             let limit = self.settings().storage_limit_mb;
-            (limit > 0 && self.disk_used() >= limit.saturating_mul(MB))
+            (limit > 0 && disk_used() >= limit.saturating_mul(MB))
                 .then(|| Pause::new("Paused: the storage limit is reached", None))
         })
     }
@@ -1977,41 +2005,17 @@ impl SearchBackend for Inner {
         limit: usize,
         options: &SearchOptions,
     ) -> Result<SearchResults> {
-        let Some(index) = self.current() else {
-            bail!("the search index is not ready yet");
-        };
-        let meaning = self.meaning.get();
-        // Sites on the adult blocklist are left out after ranking, so a
-        // few more are ranked.
-        let adult = self
-            .adult_list()
-            .filter(|_| options.safe != SafeSearch::Off);
-        let wanted = match adult {
-            Some(_) => limit + adult::MARGIN,
-            None => limit,
-        };
-        let mut results = match network::handle(self).map(|net| net.popularity()) {
-            None => index
-                .backend()
-                .search_full_with(query, wanted, options, meaning.as_deref())?,
-            Some(table) => {
-                let candidates = wanted.max(network::POPULARITY_CANDIDATES);
-                let mut results = index.backend().search_full_with(
-                    query,
-                    candidates,
-                    options,
-                    meaning.as_deref(),
-                )?;
-                network::apply_popularity(&table, query, &mut results.hits);
-                results
-            }
-        };
-        if let Some(adult) = &adult {
-            results.hits.retain(|hit| !adult.contains(&hit.domain));
-        }
-        results.hits.truncate(limit);
-        pages::add_pages(self, query, options, &mut results);
-        Ok(results)
+        self.search_with_rank(query, limit, options, None)
+    }
+
+    fn search_ranked(
+        &self,
+        query: &str,
+        limit: usize,
+        options: &SearchOptions,
+        rank: &RankConfig,
+    ) -> Result<SearchResults> {
+        self.search_with_rank(query, limit, options, Some(rank))
     }
 
     fn places(
@@ -2027,8 +2031,65 @@ impl SearchBackend for Inner {
         self.map.get()
     }
 
+    fn known_song(&self, query: &str, options: &SearchOptions) -> Option<plumb_index::pages::Page> {
+        pages::known_song(self, query, options)
+    }
+
     fn num_docs(&self) -> u64 {
         self.current_summary().map_or(0, |(_, docs)| docs)
+    }
+}
+
+impl Inner {
+    /// [`SearchBackend::search_full`], with `rank` instead of the node's
+    /// own knobs when given.
+    fn search_with_rank(
+        &self,
+        query: &str,
+        limit: usize,
+        options: &SearchOptions,
+        rank: Option<&RankConfig>,
+    ) -> Result<SearchResults> {
+        let Some(index) = self.current() else {
+            bail!("the search index is not ready yet");
+        };
+        let meaning = self.meaning.get();
+        // Sites on the adult blocklist are left out after ranking, so a
+        // few more are ranked.
+        let adult = self
+            .adult_list()
+            .filter(|_| options.safe != SafeSearch::Off);
+        let wanted = match adult {
+            Some(_) => limit + adult::MARGIN,
+            None => limit,
+        };
+        let mut results = match network::handle(self).map(|net| net.popularity()) {
+            None => index.backend().search_full_with(
+                query,
+                wanted,
+                options,
+                meaning.as_deref(),
+                rank,
+            )?,
+            Some(table) => {
+                let candidates = wanted.max(network::POPULARITY_CANDIDATES);
+                let mut results = index.backend().search_full_with(
+                    query,
+                    candidates,
+                    options,
+                    meaning.as_deref(),
+                    rank,
+                )?;
+                network::apply_popularity(&table, query, &mut results.hits);
+                results
+            }
+        };
+        if let Some(adult) = &adult {
+            results.hits.retain(|hit| !adult.contains(&hit.domain));
+        }
+        results.hits.truncate(limit);
+        pages::add_pages(self, query, options, &mut results);
+        Ok(results)
     }
 }
 
@@ -2067,6 +2128,10 @@ impl StatusSource for Inner {
 
     fn shares_popularity(&self) -> bool {
         network::shares_popularity(self)
+    }
+
+    fn shares_findings(&self) -> bool {
+        self.config.share_findings && self.net.get().is_some()
     }
 
     fn record_pick(&self, query: &str, domain: &str) {

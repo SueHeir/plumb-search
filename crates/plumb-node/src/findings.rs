@@ -7,7 +7,11 @@
 //! node, in `DIR/findings.jsonl` (one JSON object a line, oldest first),
 //! and only agents on the node's own computer can report them or see them:
 //! the same ones that may read pages (see [`crate::web`]'s `/mcp`).
-//! Nothing of them is sent to other nodes.
+//! Nothing of them is sent to other nodes, unless an agent asks to share
+//! one on a node run with `--share-findings`: then a lead goes out (see
+//! [`plumb_net::leads`]), with the page and why it helped but not the
+//! search, the answer or the task. The search's words go only as
+//! [`lead_keys`], and its text only when the agent shares that too.
 //!
 //! A finding is matched to a search by its words: the same words in any
 //! order, or most of them ("tokio latest version" and "latest version of
@@ -143,6 +147,20 @@ fn words(text: &str) -> HashSet<String> {
         })
         .filter(|w| !w.is_empty() && !STOP_WORDS.contains(&w.as_str()))
         .collect()
+}
+
+/// A search's words as a lead carries them: those saying what it is
+/// about apart from [`ASKING_WORDS`], each as a number many words share, so
+/// another node can match its own searches to the lead as findings match.
+pub fn lead_keys(query: &str) -> plumb_net::leads::LeadKeys {
+    let words = words(query);
+    let (asks, topic): (Vec<&String>, Vec<&String>) = words
+        .iter()
+        .partition(|w| ASKING_WORDS.contains(&w.as_str()));
+    plumb_net::leads::LeadKeys::new(
+        topic.into_iter().map(String::as_str),
+        asks.into_iter().map(String::as_str),
+    )
 }
 
 /// How well a finding's search `found` matches the search `query`: the

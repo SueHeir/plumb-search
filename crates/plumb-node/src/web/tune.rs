@@ -172,8 +172,9 @@ async fn tune_page(
 
 /// The end of a round: what was learned, and the way on.
 fn render_done(learned: &Learned) -> String {
-    let mut body = String::from(
-        "<div class=\"wrap hist\">\n<header><a class=\"logo\" href=\"/\">Plumb</a></header>\n\
+    let bar = super::app_bar("", false);
+    let mut body = format!(
+        "<div class=\"wrap hist\">\n{bar}\n\
          <main>\n<h1>Tune your search</h1>\n",
     );
     let (liked, disliked) = learned.leanings();

@@ -207,7 +207,7 @@ async fn step(inner: &Arc<Inner>) -> Result<Next> {
         return Ok(Next::Continue);
     }
     // Enough records from other nodes rebuild the index, but no sooner
-    // than NETWORK_REBUILD_GAP after the last build.
+    // than NETWORK_REBUILD_GAP (or a few times the last build) after it.
     let network_rebuild_at = (inner.saved().network_pending >= REBUILD_AFTER_RECORDS
         && !inner.config.crawl_only)
         .then(|| network_rebuild_at(inner));
@@ -290,14 +290,33 @@ async fn step(inner: &Arc<Inner>) -> Result<Next> {
 }
 
 /// When records from other nodes may next rebuild the index: once
-/// [`NETWORK_REBUILD_GAP`] has passed since the last build (right away when
-/// none was built since the node started).
+/// [`NETWORK_REBUILD_GAP`], or [`BUILD_GAP_PER_BUILD`] times as long as the
+/// last build took when that is longer, has passed since the last build
+/// (right away when none was built since the node started).
 fn network_rebuild_at(inner: &Inner) -> u64 {
     match inner.last_build.load(Ordering::SeqCst) {
         0 => 0,
-        last => last.saturating_add(NETWORK_REBUILD_GAP.as_secs()),
+        last => last.saturating_add(network_rebuild_gap(
+            inner.last_build_took.load(Ordering::SeqCst),
+        )),
     }
 }
+
+/// Seconds between index builds that records from other nodes ask for,
+/// after a build that took `took` seconds: a build of millions of sites on
+/// a small server takes most of half an hour, and one every half hour
+/// would leave it building more often than not, with searches waiting on
+/// the memory and disk the builds take.
+fn network_rebuild_gap(took: u64) -> u64 {
+    NETWORK_REBUILD_GAP
+        .as_secs()
+        .max(took.saturating_mul(BUILD_GAP_PER_BUILD))
+}
+
+/// How many times as long as a build takes the node waits before another
+/// that records from other nodes ask for: building at most a quarter of
+/// the time.
+const BUILD_GAP_PER_BUILD: u64 = 3;
 
 fn idle_detail(config: &NodeConfig) -> &'static str {
     if config.crawl_only {
@@ -942,11 +961,15 @@ fn missing_buckets(inner: &Inner) -> bool {
 /// Builds a new index of the records file and puts it in service; see
 /// [`put_in_service`] for `ends_round`.
 async fn rebuild(inner: &Arc<Inner>, ends_round: bool) -> Result<()> {
+    let started = Instant::now();
     let built = blocking(inner, |inner| {
         let _records = inner.hold_records();
         build_from_file(inner)
     })
     .await?;
+    inner
+        .last_build_took
+        .store(started.elapsed().as_secs(), Ordering::SeqCst);
     put_in_service(inner, Some(built), ends_round).await
 }
 
@@ -1759,9 +1782,19 @@ where
     F: FnOnce(&Inner) -> Result<T> + Send + 'static,
 {
     let inner = Arc::clone(inner);
-    let done = tokio::task::spawn_blocking(move || work(&inner))
-        .await
-        .context("background work crashed");
+    // On a thread of its own, at a lower priority than searches: a thread
+    // of the blocking pool keeps its priority, and searches run there too.
+    let runtime = Handle::current();
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    std::thread::Builder::new()
+        .name("plumb-background".to_string())
+        .spawn(move || {
+            let _runtime = runtime.enter();
+            crate::lower_thread_priority();
+            let _ = sender.send(work(&inner));
+        })
+        .context("cannot start the background work")?;
+    let done = receiver.await.context("background work crashed");
     // Not on an async thread: handing back a few hundred megabytes takes
     // tens of milliseconds.
     let _ = tokio::task::spawn_blocking(crate::release_freed_memory).await;
@@ -1866,6 +1899,15 @@ impl Backoff {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn slow_builds_wait_longer_for_the_next() {
+        let gap = NETWORK_REBUILD_GAP.as_secs();
+        assert_eq!(network_rebuild_gap(0), gap, "none built yet");
+        assert_eq!(network_rebuild_gap(120), gap, "a quick build");
+        // 2.5 million sites on a busy 4-core server: 25 minutes.
+        assert_eq!(network_rebuild_gap(1_500), 4_500);
+    }
 
     /// What a round keeps of `record`.
     fn round(record: SiteRecord) -> RoundSite {

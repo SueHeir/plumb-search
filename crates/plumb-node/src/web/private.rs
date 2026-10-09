@@ -133,24 +133,25 @@ fn render_private(available: bool, options: &SearchOptions) -> String {
          <a href=\"/\">Search normally</a> instead.</p>"
     };
     let body = format!(
-        "<main class=\"wrap wide\" id=\"pq\" data-country=\"{}\" data-safe=\"{}\" \
+        "<div class=\"wrap wide\" id=\"pq\" data-country=\"{}\" data-safe=\"{}\" \
          data-language=\"{}\">\n\
-         <header><a class=\"logo\" href=\"/\">Plumb</a>\
+         {bar}<header class=\"results-header\">\
          <form id=\"pq-form\" action=\"/private\" method=\"get\" role=\"search\">\
-         <input type=\"search\" id=\"pq-q\" placeholder=\"Search sites, e.g. us bank\" \
+         <input type=\"search\" id=\"pq-q\" placeholder=\"Search sites, articles, questions and more\" \
          aria-label=\"Search privately\" autocomplete=\"off\" autofocus>\
          {gear}<button type=\"submit\" id=\"pq-go\" disabled>Search</button></form></header>\n\
-         <p class=\"src\"><strong>Private search.</strong> Your browser looks up the results \
+         <main><p class=\"src\"><strong>Private search.</strong> Your browser looks up the results \
          itself: it fetches a few groups of sites from this server, padded with random ones, \
          and picks the matches. Query text stays in your browser. The requested groups \
          can still reveal likely searches to answering nodes. \
          <a href=\"/\">Normal search</a></p>\n{note}\n\
          <div id=\"pq-answer\"></div>\n\
          <p class=\"s\" id=\"pq-status\" role=\"status\"></p>\n<ol id=\"pq-results\"></ol>\n\
-         </main>",
+         </main></div>",
         escape_html(options.country.as_deref().unwrap_or("")),
         options.safe.as_str(),
         escape_html(options.language.as_deref().unwrap_or("")),
+        bar = super::app_bar("search", false),
         gear = if available {
             format!(
                 "<details class=\"gear\"><summary title=\"Settings\" aria-label=\"Settings\">\

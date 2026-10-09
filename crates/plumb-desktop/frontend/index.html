@@ -6,13 +6,14 @@
 <title>Plumb Search</title>
 <!-- Shown for the moment between opening the window and the node answering. -->
 <style>
-:root{color-scheme:light dark;--bg:#fff;--fg:#202124;--muted:#5f6368;--line:#dadce0;--accent:#1a73e8}
-@media (prefers-color-scheme:dark){:root{--bg:#1f1f1f;--fg:#e8eaed;--muted:#9aa0a6;--line:#3c4043;--accent:#8ab4f8}}
+:root{color-scheme:light dark;--bg:#fcfcfa;--fg:#202b3d;--muted:#626d7a;--line:#e3e7eb;--accent:#294f87}
+@media (prefers-color-scheme:dark){:root{--bg:#171c25;--fg:#e8edf6;--muted:#a6afbd;--line:#333b49;--accent:#a6c4ee}}
 html,body{height:100%}
 body{margin:0;display:flex;align-items:center;justify-content:center;background:var(--bg);
 color:var(--fg);font:16px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
 main{text-align:center;padding:1rem}
-h1{margin:0;font-size:2.5rem;letter-spacing:-.02em}
+h1{margin:.75rem 0 0;font-size:1.6rem;font-weight:500;letter-spacing:-.04em}
+img{width:64px;height:64px}
 p{margin:.5rem 0 0;color:var(--muted)}
 .spinner{width:1.5rem;height:1.5rem;margin:1.5rem auto 0;border:3px solid var(--line);
 border-top-color:var(--accent);border-radius:50%;animation:spin 1s linear infinite}
@@ -22,7 +23,8 @@ border-top-color:var(--accent);border-radius:50%;animation:spin 1s linear infini
 </head>
 <body>
 <main>
-<h1>Plumb Search</h1>
+<img src="brand.svg" alt="">
+<h1>Plumb</h1>
 <p>Starting&hellip;</p>
 <div class="spinner" role="progressbar" aria-label="Starting"></div>
 </main>
