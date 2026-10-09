@@ -76,6 +76,21 @@ fn is_item_id(id: &str) -> bool {
     id.len() > 1 && id.starts_with('Q') && id[1..].bytes().all(|b| b.is_ascii_digit())
 }
 
+/// The prefixes [`page_query`] uses. Wikidata's query service knows them
+/// already; other endpoints, such as QLever's, need them said.
+const PREFIXES: &str = "PREFIX wd: <http://www.wikidata.org/entity/> \
+     PREFIX p: <http://www.wikidata.org/prop/> \
+     PREFIX ps: <http://www.wikidata.org/prop/statement/> \
+     PREFIX psv: <http://www.wikidata.org/prop/statement/value/> \
+     PREFIX psn: <http://www.wikidata.org/prop/statement/value-normalized/> \
+     PREFIX pq: <http://www.wikidata.org/prop/qualifier/> \
+     PREFIX wikibase: <http://wikiba.se/ontology#> ";
+
+/// Where [`fetch_facts`] reads on when Wikidata's query service stops
+/// answering a kind's deep pages: QLever's copy of Wikidata, which answers
+/// them in seconds.
+pub const DEEP_SPARQL_URL: &str = "https://qlever.dev/api/wikidata";
+
 /// The query for a page of `kind`'s best-ranked statements: `?item` and
 /// `?v`, and the precision `?p` of a date or the year `?t` a population
 /// was counted.
@@ -111,7 +126,7 @@ fn page_query(kind: FactKind, offset: usize) -> String {
         }
     };
     format!(
-        "SELECT ?item ?v ?p ?t ?part WHERE {{ ?item p:{p} ?s . ?s a wikibase:BestRank ; {value} }} \
+        "{PREFIXES}SELECT ?item ?v ?p ?t ?part WHERE {{ ?item p:{p} ?s . ?s a wikibase:BestRank ; {value} }} \
          LIMIT {FACTS_PAGE} OFFSET {offset}"
     )
 }
@@ -369,15 +384,17 @@ fn add_labels(labels: &mut HashMap<String, String>, json: &[u8]) -> Result<()> {
 /// in `items` (those with an article, most read first).
 ///
 /// Each kind is read in pages of all its statements, [`PARALLEL_QUERIES`]
-/// kinds at once. Deep pages time out more often while other kinds are
-/// being read, so a kind Wikidata stopped answering is read on from where
-/// it stopped once the others are done, one kind at a time. When it still
-/// stops, the first [`FILL_IN_TOP`] items that lack it are asked about by
-/// name, so the most read keep their facts. Then batches of labels are
-/// asked for, [`PARALLEL_QUERIES`] at once.
+/// kinds at once. Deep pages time out, so a kind Wikidata stopped
+/// answering is read on from where it stopped once the others are done,
+/// one kind at a time, from `deep_endpoint` if given (Wikidata's query
+/// service times out on them even alone). When it still stops, the first
+/// [`FILL_IN_TOP`] items that lack it are asked about by name, so the
+/// most read keep their facts. Then batches of labels are asked for,
+/// [`PARALLEL_QUERIES`] at once.
 pub async fn fetch_facts(
     client: &reqwest::Client,
     endpoint: &str,
+    deep_endpoint: Option<&str>,
     pacing: WikidataPacing,
     items: &[String],
 ) -> Result<FactsByItem> {
@@ -397,13 +414,13 @@ pub async fn fetch_facts(
     for (kind, mut raw, stopped) in read {
         let mut cut_short = kind.by_name_only();
         if let Some(offset) = stopped {
+            let from = deep_endpoint.unwrap_or(endpoint);
             info!(
-                "{} ({}): reading on from {offset} alone",
+                "{} ({}): reading on from {offset} alone, from {from}",
                 kind.key(),
                 kind.property()
             );
-            let again =
-                read_pages(client, endpoint, pacing, &mut raw, kind, offset, wanted).await?;
+            let again = read_pages(client, from, pacing, &mut raw, kind, offset, wanted).await?;
             cut_short |= again.is_some();
         }
         kinds.push((kind, raw, cut_short));
@@ -650,11 +667,20 @@ mod tests {
         let items = ["Q30".to_string(), "Q668".to_string()];
         let q = items_query(FactKind::Population, &items);
         assert!(
-            q.starts_with(
+            q.strip_prefix(PREFIXES).is_some_and(|q| q.starts_with(
                 "SELECT ?item ?v ?p ?t ?part WHERE { VALUES ?item { wd:Q30 wd:Q668 } ?item p:P1082 ?s ."
-            ),
+            )),
             "{q}"
         );
+        // Endpoints other than Wikidata's own need every prefix declared.
+        for kind in KINDS {
+            let q = page_query(*kind, 0);
+            for used in ["wd:", "p:", "ps:", "psv:", "psn:", "pq:", "wikibase:"] {
+                if q.contains(&format!(" {used}")) || q.contains(&format!("/{used}")) {
+                    assert!(q.contains(&format!("PREFIX {used} ")), "{used} in {q}");
+                }
+            }
+        }
         assert!(q.contains("pq:P585 ?t"), "{q}");
         assert!(q.ends_with('}') && !q.contains("LIMIT"), "{q}");
         assert_eq!(q.matches('{').count(), q.matches('}').count(), "{q}");
