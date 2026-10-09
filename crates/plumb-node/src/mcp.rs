@@ -391,7 +391,10 @@ impl Mcp {
                             .min(MAX_SEARCH_LIMIT as u64) as usize,
                     ),
                 };
-                let options = self.options(args)?;
+                let options = SearchOptions {
+                    language: search_language(args)?,
+                    ..self.options(args)?
+                };
                 self.search(&query, limit, &options)
             }
             "site_info" => {
@@ -1535,6 +1538,20 @@ fn initialize(params: &Value, read_pages: bool, findings: bool, leads: bool, sha
     })
 }
 
+/// The language filter of a `search` call: its `language` (a code such as
+/// `en`, or `any` for none), else English. Sites that do not say their
+/// language stay either way.
+fn search_language(args: &Map<String, Value>) -> Result<Option<String>, (i64, String)> {
+    match args.get("language").and_then(Value::as_str).map(str::trim) {
+        None | Some("") => Ok(Some("en".to_string())),
+        Some(code) if code.eq_ignore_ascii_case("any") => Ok(None),
+        Some(code) => plumb_core::language_code(code).map(Some).ok_or((
+            INVALID_PARAMS,
+            format!("language must be a code such as en or de, or \"any\"; got {code:?}"),
+        )),
+    }
+}
+
 /// The tools' descriptions, as `tools/list` returns them; `read_pages`
 /// adds `read_page`, `findings` `report_finding`, and `share` its choice to
 /// share a finding with other nodes.
@@ -1596,6 +1613,7 @@ pub fn tools(read_pages: bool, findings: bool, share: bool) -> Value {
                     "query": { "type": "string", "description": "What to search for." },
                     "limit": { "type": "integer", "minimum": 1, "maximum": MAX_SEARCH_LIMIT, "description": "How many results to return (default 5, or 3 when the search has a direct answer such as a package card or an answer found before)." },
                     "country": country,
+                    "language": { "type": "string", "description": "Optional language of the sites, a code such as en or de (default en); \"any\" for every language." },
                 },
                 "required": ["query"],
             },

@@ -167,7 +167,7 @@ They work on the search page, `/api/search`, network search and `/private`, wher
 
 ### Safe search and language
 
-The settings gear has **Safe search** (off, moderate or strict; `safe=` in the address) and **Language** (`lang=de`).
+The settings gear has **Safe search** (off, moderate or strict; `safe=` in the address) and **Language** (`lang=de`, or `lang=any`). Searches are in English and from the United States unless the browser says otherwise (its first language when the gear offers it, its country when it names one) or the searcher picks something else. A site the query names, such as spiegel.de for "spiegel", stays whatever its language. The MCP `search` tool takes `language` the same way, English by default.
 
 - Moderate, the default, leaves out sites on the [Block List Project](https://github.com/blocklistproject/Lists) adult list (public domain; each node downloads it weekly into `DATA/safe/`), sites Wikidata calls pornographic, and sites whose name, title or description is plainly adult. Strict also leaves out suggestive ones ("sexy", "nude", "escort") and such pages. Private search applies the same rules except for the blocklist, which stays on the node.
 - Language keeps sites whose homepage says it is in that language (`<html lang>`, read when the homepage is crawled) and sites that do not say, and page sets in that language (English Wikipedia, GitHub and the Stack Exchange questions are English).

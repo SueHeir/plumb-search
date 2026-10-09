@@ -441,8 +441,8 @@ pub struct RunArgs {
     /// Home country, whose sites rank a little higher and other countries'
     /// a little lower: a two-letter code such as US or DE, `any` for none,
     /// or `auto` to take it from each browser's language setting
-    /// (`en-US` -> US), falling back to this computer's region settings.
-    /// A search can pick another with `country=` in its address.
+    /// (`en-US` -> US), falling back to this computer's region settings,
+    /// then the United States. A search can pick another with `country=` in its address.
     #[arg(long, value_name = "CODE", default_value = "auto", value_parser = HomeCountry::parse)]
     pub country: HomeCountry,
     /// Show "Search the web with ..." above the results, a link that hands
@@ -1025,8 +1025,8 @@ pub struct ServeArgs {
     /// Home country, whose sites rank a little higher and other countries'
     /// a little lower: a two-letter code such as US or DE, `any` for none,
     /// or `auto` to take it from each browser's language setting
-    /// (`en-US` -> US), falling back to this computer's region settings.
-    /// A search can pick another with `country=` in its address.
+    /// (`en-US` -> US), falling back to this computer's region settings,
+    /// then the United States. A search can pick another with `country=` in its address.
     #[arg(long, value_name = "CODE", default_value = "auto", value_parser = HomeCountry::parse)]
     pub country: HomeCountry,
     /// Show "Search the web with ..." above the results, a link that hands
@@ -1104,6 +1104,10 @@ pub struct EvalArgs {
     /// [default: none].
     #[arg(long, value_name = "CODE", value_parser = parse_country)]
     pub country: Option<String>,
+    /// Only sites in this language, a code such as en, as the search
+    /// page's language setting does [default: any].
+    #[arg(long, value_name = "CODE", value_parser = parse_language)]
+    pub lang: Option<String>,
     /// Search for each query without suggesting a spelling.
     #[arg(long, conflicts_with = "follow_suggestions")]
     pub exact: bool,
@@ -1177,6 +1181,11 @@ pub(crate) fn parse_positive(s: &str) -> Result<usize, String> {
         Ok(n) if n > 0 => Ok(n),
         _ => Err(format!("expected a whole number above 0, got `{s}`")),
     }
+}
+
+fn parse_language(text: &str) -> Result<String, String> {
+    plumb_core::language_code(text)
+        .ok_or_else(|| format!("expected a language code such as en or de, got {text:?}"))
 }
 
 fn parse_country(text: &str) -> Result<String, String> {
