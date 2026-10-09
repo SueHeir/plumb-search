@@ -311,7 +311,8 @@ Plumb is built from open data. Nodes keep titles, short descriptions and counts,
 | [Stack Overflow](https://stackoverflow.com/) and other [Stack Exchange](https://stackexchange.com/) sites | Question titles, tags and views, from Stack Exchange's data dump | [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/) |
 | [ecosyste.ms](https://packages.ecosyste.ms/) | Package names, versions, licences and links for eight registries | [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/) |
 | [OpenStreetMap](https://www.openstreetmap.org/copyright) | Places; © OpenStreetMap contributors | [ODbL](https://opendatacommons.org/licenses/odbl/) |
-| [OpenAlex](https://openalex.org/) | The most cited papers | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) |
+| [OpenAlex](https://openalex.org/) | The most cited papers, and where each can be read free (from [Unpaywall](https://unpaywall.org/)'s data and [arXiv](https://arxiv.org/)) | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) |
+| [CORE](https://core.ac.uk/) | Where papers OpenAlex knows no free copy of can be read free, from university repositories (optional, with a CORE API key) | [CORE's terms](https://core.ac.uk/terms) |
 | [Open Library](https://openlibrary.org/) | The most read books | [CC0](https://creativecommons.org/publicdomain/zero/1.0/) |
 | [Podcast Index](https://podcastindex.org/) | Titles, authors, categories and popularity of the most popular podcasts | Free for any use |
 | [GitHub](https://github.com/) | Names, descriptions and stars of public repositories, from its API | [GitHub's terms](https://docs.github.com/en/site-policy/github-terms/github-terms-of-service) |

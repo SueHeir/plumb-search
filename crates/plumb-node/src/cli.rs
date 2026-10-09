@@ -779,6 +779,10 @@ pub struct FetchPagesArgs {
     /// Papers: most papers kept, the most cited.
     #[arg(long, value_name = "N", default_value_t = 2_000_000)]
     pub max_papers: usize,
+    /// Papers: most requests to CORE for free copies (fifty papers each),
+    /// when CORE_API_KEY is set.
+    #[arg(long, value_name = "N", default_value_t = plumb_ingest::core_ac::DEFAULT_MAX_REQUESTS)]
+    pub max_core_requests: usize,
     /// Podcasts: fewest Podcast Index popularity points (0 to 9) of a
     /// podcast kept.
     #[arg(long, value_name = "N", default_value_t = plumb_ingest::podcasts::DEFAULT_MIN_SCORE)]
