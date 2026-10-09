@@ -1,0 +1,89 @@
+# Searches for one page deep inside a well-known site that is not a docs
+# or reference site: a research wiki's or a researcher's page, a company's
+# product page, a government publication, a league's standings, a
+# museum's visiting page. The answer is that page (or any page under it).
+# Run with --pages subpages.tsv.gz made with `fetch-pages --set subpages`
+# (and the other sets a node keeps).
+# Universities, labs and researchers.
+perft results	https://chessprogramming.org/Perft_Results
+chess programming wiki perft	https://chessprogramming.org/Perft*
+chess programming wiki bitboards	https://chessprogramming.org/Bitboards
+alpha beta chess programming wiki	https://chessprogramming.org/Alpha-Beta
+peter norvig sudoku	https://www.norvig.com/sudoku.html
+norvig spelling corrector	https://www.norvig.com/spell-correct.html
+teach yourself programming in ten years	https://www.norvig.com/21-days.html
+paul graham how to start a startup	https://www.paulgraham.com/start.html
+paul graham do things that don't scale	https://www.paulgraham.com/ds.html
+mathworld mandelbrot set	https://mathworld.wolfram.com/MandelbrotSet.html
+mathworld prime number	https://mathworld.wolfram.com/PrimeNumber.html
+stanford encyclopedia of philosophy consciousness	https://plato.stanford.edu/entries/consciousness/
+stanford encyclopedia of philosophy free will	https://plato.stanford.edu/entries/freewill/
+feynman lectures on physics volume 1	https://www.feynmanlectures.caltech.edu/I_toc.html
+# Big companies.
+apple macbook air	https://www.apple.com/macbook-air/*
+apple careers	https://www.apple.com/careers/*
+microsoft surface	https://www.microsoft.com/en-us/surface*
+amazon leadership principles	https://www.aboutamazon.com/about-us/leadership-principles*
+tesla model y	https://www.tesla.com/modely*
+tesla model 3	https://www.tesla.com/model3*
+tesla cybertruck	https://www.tesla.com/cybertruck*
+nvidia geforce rtx 4090	https://www.nvidia.com/en-us/geforce/graphics-cards/40-series/rtx-4090/*
+nvidia h100	https://www.nvidia.com/en-us/data-center/h100/*
+samsung galaxy s24	https://www.samsung.com/us/smartphones/galaxy-s24/*
+ford f-150	https://www.ford.com/trucks/f150/*
+ford mustang mach-e	https://www.ford.com/suvs/mach-e/*
+toyota rav4	https://www.toyota.com/rav4/*
+toyota camry	https://www.toyota.com/camry/*
+boeing 787 dreamliner	https://www.boeing.com/commercial/787*
+spacex starship	https://www.spacex.com/vehicles/starship/*
+starbucks rewards	https://www.starbucks.com/rewards*
+berkshire hathaway shareholder letters	https://www.berkshirehathaway.com/letters/*
+openai charter	https://openai.com/charter/*
+# Government and standards bodies.
+nist special publication 811	https://www.nist.gov/pml/special-publication-811*
+nist sp 811	https://www.nist.gov/pml/special-publication-811*
+nist fundamental physical constants	https://physics.nist.gov/cuu/Constants/*
+planetary fact sheet	https://nssdc.gsfc.nasa.gov/planetary/factsheet/*
+si brochure	https://www.bipm.org/en/publications/si-brochure*
+standard atomic weights ciaaw	https://ciaaw.org/atomic-weights.htm
+american community survey	https://www.census.gov/programs-surveys/acs*
+census quickfacts	https://www.census.gov/quickfacts/*
+usgs earthquake hazards program	https://www.usgs.gov/programs/earthquake-hazards*
+fbi most wanted	https://www.fbi.gov/wanted*
+cia world factbook	https://www.cia.gov/the-world-factbook/*
+national archives constitution	https://www.archives.gov/founding-docs/constitution*
+declaration of independence transcript	https://www.archives.gov/founding-docs/declaration-transcript*
+faa drone registration	https://www.faa.gov/uas/*
+osha recordkeeping	https://www.osha.gov/recordkeeping*
+supreme court opinions	https://www.supremecourt.gov/opinions/*
+weights and measures act 1985	https://www.legislation.gov.uk/ukpga/1985/72*
+un sustainable development goals	https://www.un.org/sustainabledevelopment/*
+who fact sheets	https://www.who.int/news-room/fact-sheets*
+# Entertainment and sports.
+rotten tomatoes oppenheimer	https://www.rottentomatoes.com/m/oppenheimer*
+rotten tomatoes the bear	https://www.rottentomatoes.com/tv/the_bear*
+all time box office	https://www.boxofficemojo.com/chart/top_lifetime_gross/*
+billboard hot 100	https://www.billboard.com/charts/hot-100/*
+billboard 200	https://www.billboard.com/charts/billboard-200/*
+nba standings	https://www.nba.com/standings*
+nba schedule	https://www.nba.com/schedule*
+nfl standings	https://www.nfl.com/standings*
+mlb standings	https://www.mlb.com/standings*
+nhl standings	https://www.nhl.com/standings*
+espn nfl scores	https://www.espn.com/nfl/scoreboard*
+premier league table	https://www.premierleague.com/en/tables*,https://www.premierleague.com/tables*
+uefa champions league	https://www.uefa.com/uefachampionsleague/*
+formula 1 results	https://www.formula1.com/en/results*
+nintendo switch 2	https://www.nintendo.com/us/gaming-systems/switch-2/*
+playstation 5 pro	https://www.playstation.com/en-us/ps5/ps5-pro/*
+walt disney world tickets	https://disneyworld.disney.go.com/admission/tickets/*
+# Museums.
+met museum hours	https://www.metmuseum.org/plan-your-visit*
+met museum exhibitions	https://www.metmuseum.org/exhibitions*
+moma exhibitions	https://www.moma.org/calendar/exhibitions*
+louvre visit	https://www.louvre.fr/en/visit*
+british museum rosetta stone	https://www.britishmuseum.org/collection/death-and-memory/rosetta-stone*
+art institute of chicago american gothic	https://www.artic.edu/artworks/6565/american-gothic*
+getty center visit	https://www.getty.edu/visit/*
+tate modern	https://www.tate.org.uk/visit/tate-modern*
+amnh hayden planetarium	https://www.amnh.org/research/hayden-planetarium*

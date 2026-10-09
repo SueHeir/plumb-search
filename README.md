@@ -40,7 +40,7 @@ To make it your browser's search engine, open a Plumb page and add it from the a
 - **Recent headlines** from the RSS and Atom feeds sites publish, in a folded "Recent" block ([docs/news.md](docs/news.md)).
 - **Places**: "pizza in denver" or "coffee near me" lists places from OpenStreetMap with a small map ([docs/places.md](docs/places.md)).
 - **Search operators** (`site:`, `-site:`, `"exact words"`, `-word`), **safe search** and **language** filters, and pages that are only a bot check left out of results.
-- **Search by meaning** (optional): "electric car maker" finds sites that never use those words.
+- **Search by meaning**: "electric car maker" finds sites that never use those words. On in the desktop app and the Docker image; `plumb run --search-by-meaning` elsewhere.
 - **Private search**: a `/private` page where the browser fetches padded buckets of sites and ranks them itself, so the node never sees the query ([docs/private-search.md](docs/private-search.md)).
 - **Plugins** (optional): a node's owner can add results from sources Plumb does not crawl, such as a site's own search API, with plugins written in Rust and run in a WebAssembly sandbox. Nodes come with none ([docs/plugins.md](docs/plugins.md)).
 - **About you**: each browser can give its city and list interests, sites it always wants first and sites it never wants to see, kept on its own node (or, on a public server, in the browser) and never sent with a search. New searchers are invited to a short welcome page that asks for them.
@@ -51,7 +51,7 @@ There are no ads and no tracking. Plumb does not crawl the full text of the web:
 
 A node serves the same search page, keeps crawling homepages, and joins the Plumb network by default. A new node copies the best sites of a node it trusts (plumbsearch.org by default) and is searchable within a few minutes. No port forwarding is needed.
 
-**Server or homelab** ([docs/docker.md](docs/docker.md)): the image is published as `ghcr.io/sueheir/plumb-search`. Use `:0.1` to stay on this release line, or `:latest` to follow each new release.
+**Server or homelab** ([docs/docker.md](docs/docker.md)): the image is published as `ghcr.io/sueheir/plumb-search`. Use `:0.2` to stay on this release line, or `:latest` to follow each new release.
 
 ```sh
 git clone https://github.com/SueHeir/plumb-search.git
@@ -110,7 +110,7 @@ It is good at what agents look up most: the official site ("chase login"), a pac
 
 ## Status
 
-Plumb is young and moving fast. The first release, [0.1.0](https://github.com/SueHeir/plumb-search/releases/latest), is out; [CHANGELOG.md](CHANGELOG.md) lists what it has. The peer-to-peer network works but is young. Private information retrieval (PIR), which would let a node fetch results without learning which ones it asked for, is research in progress: the first pieces are in `crates/plumb-net/src/pir`, but no search uses them and there is no setting for it.
+Plumb is young and moving fast. The latest release is [0.2.0](https://github.com/SueHeir/plumb-search/releases/latest); [CHANGELOG.md](CHANGELOG.md) lists what each release has. The peer-to-peer network works but is young. Private information retrieval (PIR), which would let a node fetch results without learning which ones it asked for, is research in progress: the first pieces are in `crates/plumb-net/src/pir`, but no search uses them and there is no setting for it.
 
 ## Contributing
 
@@ -279,7 +279,7 @@ plumb embed --records data/records.jsonl --model data/model --vectors data/vecto
 plumb search --index data/index --model data/model --vectors data/vectors.bin electric car maker
 ```
 
-A node does this on its own with `plumb run --search-by-meaning`: it downloads the model into `DIR/model`, embeds sites in the background after each index build (best-ranked first, saving every 10,000), and uses the vectors as they come. For a million sites that takes about 750 MB of memory. `search`, `serve` and `eval` take `--model` and `--vectors`. With them, queries that a site is named by in full, or that name a kind of site ("banks"), rank as before; for the rest, the 50 sites nearest in meaning join the candidates and 70% of `text_score` becomes how close each site is in meaning. Embedding a million sites takes several hours on a desktop CPU; run it again after a crawl and only sites whose text changed are embedded again. The crate docs in `crates/plumb-index` describe the details and tuning knobs.
+A node does this on its own with `plumb run --search-by-meaning` (the desktop app, `--profile desktop` and the Docker image's default command have it on): it downloads the model into `DIR/model`, embeds sites in the background after each index build (best-ranked first, saving every 10,000), and uses the vectors as they come. For a million sites that takes about 750 MB of memory. `search`, `serve` and `eval` take `--model` and `--vectors`. With them, queries that a site is named by in full, or that name a kind of site ("banks"), rank as before; for the rest, the 50 sites nearest in meaning join the candidates and 70% of `text_score` becomes how close each site is in meaning. Embedding a million sites takes several hours on a desktop CPU; run it again after a crawl and only sites whose text changed are embedded again. The crate docs in `crates/plumb-index` describe the details and tuning knobs.
 
 ## Code layout
 

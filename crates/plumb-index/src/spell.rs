@@ -51,9 +51,8 @@ pub(crate) const MIN_FIX_LINK_SCORE: f32 = 0.3;
 /// A word found in this many sites or more is a known word and is never
 /// corrected.
 pub(crate) const KNOWN_WORD_DOCS: u64 = 20;
-/// A word found in this many sites or more is taken for a slip only when
-/// the slip is likelier than the word; a word of the word-pair model found
-/// in fewer is not what a word is corrected to by the words around it.
+/// A word of the word-pair model found in fewer sites is not what a word
+/// is corrected to by the words around it.
 pub(crate) const MIN_FIX_DOCS: u64 = 3;
 /// ...and in this many times as many sites as the word typed.
 pub(crate) const FIX_DOCS_RATIO: u64 = 20;
@@ -430,14 +429,14 @@ impl Speller<'_> {
         }
         match best {
             Some((_, _, term)) if known && !self.real_word_slip(word, &term)? => Ok(None),
-            // A word several sites use is taken for a slip only when the
-            // edit is likelier than the word itself (the paper's simple
-            // classifier): "perft" and "inkala" are rare, but meant.
+            // A word is taken for a slip only when the edit is likelier
+            // than the word itself (the paper's simple classifier), a word
+            // no site says counting as if one did: "perft" is rare, but
+            // dropping a `t` from "perf", found in a dozen sites, is rarer.
             Some((_, term_docs, term))
-                if docs >= MIN_FIX_DOCS
-                    && self.channel(word, &term).is_some_and(|channel| {
-                        channel + (term_docs as f64 / docs as f64).ln() < 0.0
-                    }) =>
+                if self.channel(word, &term).is_some_and(|channel| {
+                    channel + (term_docs as f64 / docs.max(1) as f64).ln() < 0.0
+                }) =>
             {
                 Ok(None)
             }

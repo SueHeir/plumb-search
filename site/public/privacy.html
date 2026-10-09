@@ -26,6 +26,7 @@
     <li>There is no access log. The web server keeps no record of who visits or what they search for, and requests that fail (for example while the search node restarts) are not logged with your address or search either.</li>
     <li>The search node logs no queries. Search history is off on this server.</li>
     <li>There are no cookies for tracking, no analytics, and no ads. Pages load nothing from other servers: site icons are served by Plumb itself, and maps are drawn from coordinates rather than map tiles.</li>
+    <li><strong>About you</strong> (<a href="/about">/about</a>) is optional. If you fill it in, your city, interests and site choices are kept in a cookie in your own browser, not on the server. Your browser sends that cookie with each search so results can fit you, and the server uses it for that search only. Clearing your cookies deletes it.</li>
     <li>To stop one client from using up the server, the AI assistant endpoint (<code>/mcp</code>) and network search count requests per address. The counts are kept in memory only, never written to disk, and gone when the node restarts.</li>
   </ul>
 

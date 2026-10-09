@@ -93,7 +93,7 @@ async fn private_page(
         q: String::new(),
         ..params
     }
-    .options(&state.settings.home, &headers);
+    .options(&state.settings, &headers);
     let available = state.private_search();
     let status = if available {
         StatusCode::OK

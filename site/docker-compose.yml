@@ -69,10 +69,24 @@ services:
       # trusted ones and the nodes they trust (2026-10-05).
       - --search-from
       - anyone
+      # The search pages start with the United States, only its sites and
+      # English, whatever the browser's language; the settings gear still
+      # changes them (Liz, 2026-10-09). AI apps still get every country.
+      - --country
+      - US
+      - --only-country
+      - --lang
+      - en
       # Sites no crawl has reached for 60 days, after 6 unanswered tries in
       # a row, leave the index; they come back if they answer again (Liz
       # OK'd it 2026-10-06).
       - --drop-dead-sites
+      # Page set and map files change here only by hand for now, and sets
+      # this node has no file of are not taken: this
+      # machine has under 8 GB, and a much bigger set (hpc's 6.8 million
+      # Wikipedia pages) would not fit next to the node (2026-10-09).
+      - --set-updates
+      - "off"
       # Crawls from trusted nodes run by the project count as soon as they're
       # signed, without waiting for a second crawler; the first is plumb-relay
       # on this machine.

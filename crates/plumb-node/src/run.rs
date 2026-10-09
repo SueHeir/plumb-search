@@ -81,9 +81,12 @@ fn node_config(args: RunArgs) -> NodeConfig {
         config.alpha = args.alpha;
     }
     config.country = args.country;
+    config.only_country = args.only_country;
+    config.lang = args.lang;
     config.web_search = args.web_search.0;
     config.mcp_read_pages = args.mcp_read_pages;
-    config.search_by_meaning = args.search_by_meaning;
+    // On for the desktop profile already.
+    config.search_by_meaning |= args.search_by_meaning;
     config.meaning_model = args.meaning_model;
     config.embed_threads = args.embed_threads.map(usize::from);
     if args.use_system_proxy {
@@ -94,6 +97,9 @@ fn node_config(args: RunArgs) -> NodeConfig {
     config.search_history |= args.search_history;
     config.focus_topics = args.focus;
     config.seed_from_network = !args.seed_from_outside;
+    if let Some(updates) = args.set_updates {
+        config.set_updates = updates;
+    }
     if args.network {
         let mut net = NetConfig::new(config.data_dir.join("net"));
         let port = args.p2p_port;
@@ -261,6 +267,20 @@ mod tests {
         let mut expected = NodeConfig::desktop("d".into());
         expected.bind = "127.0.0.1:8080".parse().unwrap();
         assert_eq!(desktop, expected);
+
+        let updates = |args: &[&str]| config(args).set_updates;
+        use crate::pages::SetUpdates;
+        assert_eq!(updates(&["--data", "d"]), SetUpdates::All);
+        assert_eq!(
+            updates(&["--data", "d", "--set-updates", "off"]),
+            SetUpdates::Off
+        );
+        let only = updates(&["--data", "d", "--set-updates", "films,map"]);
+        assert_eq!(only, SetUpdates::Only(vec!["films".into(), "map".into()]));
+        assert_eq!(only.allows("map"), Some(true));
+        assert_eq!(only.allows("wikipedia-en"), None);
+        let bad = ["plumb", "run", "--data", "d", "--set-updates", "films,nope"];
+        assert!(Cli::try_parse_from(bad).is_err());
 
         let threads = |args: &[&str]| config(args).embed_threads;
         assert_eq!(threads(&["--data", "d"]), None);

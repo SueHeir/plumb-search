@@ -68,6 +68,8 @@ fn test_config(dir: &Path) -> NodeConfig {
     config.news_feeds = 0;
     // As if "Set up my node" was answered, so filling goes ahead.
     config.settings.setup_chosen = true;
+    // No model is downloaded unless a test asks for one.
+    config.search_by_meaning = false;
     let nowhere = closed_port();
     config.sources = SeedSources {
         tranco_url: format!("{nowhere}/tranco.csv"),
@@ -268,6 +270,7 @@ fn profiles() {
     );
     assert_eq!(desktop.refresh_every, Some(Duration::from_secs(12 * 3600)));
     assert!(!desktop.use_system_proxy);
+    assert!(desktop.search_by_meaning && !server.search_by_meaning);
     desktop.check().unwrap();
 }
 
@@ -2569,12 +2572,17 @@ async fn a_node_takes_newer_set_files_that_hold_what_its_own_do() {
         &peer_films,
         &[article("New Film", None), article("Old Film", None)],
     );
+    // Books, which this node has no file of and doesn't name in
+    // --set-updates, are never taken.
+    let peer_books = peer_dir.path().join("books.tsv.gz");
+    write(&peer_books, &[article("A Book", None)]);
     let peer_map = peer_dir.path().join("map.pmtiles");
     std::fs::write(&peer_map, b"new map, a bit longer").unwrap();
     let files = HashMap::from([
         ("wikipedia-en".to_string(), peer_articles),
         ("films".to_string(), peer_films.clone()),
         ("map".to_string(), peer_map.clone()),
+        ("books".to_string(), peer_books),
     ]);
     let table = plumb_net::BucketTable::build(
         &peer_dir.path().join("buckets"),
@@ -2598,7 +2606,9 @@ async fn a_node_takes_newer_set_files_that_hold_what_its_own_do() {
 
     let mut config = test_config(dir.path());
     config.settings.page_sets =
-        crate::pages::PageSets::parse("wikipedia-en=all,films=all").unwrap();
+        crate::pages::PageSets::parse("wikipedia-en=all,films=all,books=all").unwrap();
+    // Named, so the tiny files may grow past a quarter.
+    config.set_updates = "wikipedia-en,films,map".parse().unwrap();
     let mut net = plumb_net::NetConfig::new(PathBuf::new());
     net.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
     net.upnp = false;
@@ -2635,6 +2645,8 @@ async fn a_node_takes_newer_set_files_that_hold_what_its_own_do() {
     assert_eq!(super::newer::stamp(&kept).unwrap().0, long_ago);
     assert_eq!(super::newer::layers("wikipedia-en", &kept), ["lead"]);
     assert!(!super::newer::prev_path(&kept).exists());
+    let books = crate::pages::SetInfo::find("books").unwrap();
+    assert!(!books.file(dir.path()).exists());
 
     peer.shutdown().await;
     node.shutdown().await.unwrap();

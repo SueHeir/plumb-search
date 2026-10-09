@@ -104,6 +104,12 @@ pub fn parse_web_search(text: &str) -> Result<WebSearch, String> {
 pub struct WebSettings {
     /// The home country of searches that do not name one.
     pub home: HomeCountry,
+    /// Whether the search pages start with "Only this country" on.
+    pub only_country: bool,
+    /// The language filter of searches that name none; `None` takes the
+    /// browser's first language when the settings gear offers it, else
+    /// English.
+    pub language: Option<String>,
     /// The engine the results page offers to hand each query to; `None`
     /// shows no such link.
     pub web_search: Option<Engine>,
@@ -120,6 +126,8 @@ impl Default for WebSettings {
     fn default() -> Self {
         WebSettings {
             home: HomeCountry::Auto,
+            only_country: false,
+            language: None,
             web_search: None,
             read_pages_for_all: false,
             page_reader: plumb_crawl::ReadConfig::default(),

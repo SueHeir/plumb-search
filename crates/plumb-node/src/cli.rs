@@ -79,6 +79,9 @@ pub enum Command {
     /// Pick each site's search terms from its homepage text, made by
     /// `plumb fetch-text`, into the records (an experiment).
     Terms(crate::terms::TermsArgs),
+    /// One sentence about each well-known site with no text, written by a
+    /// language model: `pick` the sites, then `apply` the sentences.
+    Summaries(crate::summaries::SummariesArgs),
     /// Let the Plumb Search app on another computer change this node's
     /// settings: `on` makes a new token (shown once), `off` stops it.
     RemoteControl(RemoteControlArgs),
@@ -453,6 +456,16 @@ pub struct RunArgs {
     /// then the United States. A search can pick another with `country=` in its address.
     #[arg(long, value_name = "CODE", default_value = "auto", value_parser = HomeCountry::parse)]
     pub country: HomeCountry,
+    /// Start the search pages with "Only this country" on, leaving out
+    /// other countries' sites until the settings gear turns it off. The
+    /// JSON API and `/mcp` still need `only=1`.
+    #[arg(long)]
+    pub only_country: bool,
+    /// Language of the sites searches show when they do not pick one, a
+    /// code such as en [default: the browser's first language when the
+    /// settings gear offers it, else en].
+    #[arg(long, value_name = "CODE", value_parser = parse_language)]
+    pub lang: Option<String>,
     /// Show "Search the web with ..." above the results, a link that hands
     /// the query to this engine: duckduckgo, google, bing, brave or
     /// startpage, or `off` for none. Plumb never fetches its results.
@@ -631,6 +644,15 @@ pub struct RunArgs {
     /// the network needs filling (no --no-fill) and a trusted node.
     #[arg(long)]
     pub seed_from_outside: bool,
+    /// Which page set files to replace by themselves when a node this one
+    /// trusts has a newer one: `all` (the default; each may grow at most a
+    /// quarter past this node's own at a time, so a much bigger set is not
+    /// loaded unasked), `off`, or the sets to update with no limit on
+    /// growth, separated by commas (`films,stackoverflow,map`; `map` is the
+    /// map file). A set the node has no file of is taken only if this
+    /// allows it; the map file is taken either way.
+    #[arg(long, value_name = "all|off|SETS")]
+    pub set_updates: Option<crate::pages::SetUpdates>,
 }
 
 /// Starting points for `plumb run`.
@@ -757,10 +779,16 @@ pub struct FetchPagesArgs {
     /// it asks for one), packages (the most used packages of eight
     /// registries, from ecosyste.ms), docs (pages of MDN, Python's docs and
     /// 36 more software docs sites, from their sitemaps; --work keeps each
-    /// site's pages so a stopped run carries on), places (named shops,
-    /// restaurants, parks and towns from OpenStreetMap) or wiktionary
-    /// (English words and what they mean, from kaikki.org's reading of
-    /// Wiktionary, about 3.3 GB, for "define" searches).
+    /// site's pages so a stopped run carries on), reference (pages of
+    /// about 150 well-known reference sites: health, dictionaries, recipes,
+    /// how-tos and government, from their sitemaps; --work as for docs),
+    /// subpages (pages of about 250 universities and labs, big companies,
+    /// government agencies, entertainment sites and museums, from their
+    /// sitemaps and the pages their homepages link to; --work as for docs),
+    /// places (named shops, restaurants, parks and towns from
+    /// OpenStreetMap) or wiktionary (English words and what they mean,
+    /// from kaikki.org's reading of Wiktionary, about 3.3 GB, for "define"
+    /// searches).
     #[arg(long, value_name = "SET", default_value = "wikipedia-en")]
     pub set: String,
     /// Directory to download Wikipedia's dumps into (created if missing).
@@ -896,6 +924,26 @@ pub struct FetchPagesArgs {
     /// Docs: most pages fetched of each site, the shallowest first.
     #[arg(long, value_name = "N", default_value_t = plumb_ingest::docs::DEFAULT_MAX_PER_SITE)]
     pub max_docs_per_site: usize,
+    /// Reference: the reference sites to fetch, by host without `www.`
+    /// (healthline.com, merriam-webster.com and others; see
+    /// plumb_core::reference), comma-separated; all when left out.
+    #[arg(long, value_name = "HOSTS", value_delimiter = ',')]
+    pub reference_sites: Vec<String>,
+    /// Reference: most pages fetched of each site, the shallowest first.
+    /// Sites with a page for every word (dictionaries) take their own
+    /// number, more.
+    #[arg(long, value_name = "N", default_value_t = plumb_ingest::reference::DEFAULT_MAX_PER_SITE)]
+    pub max_reference_per_site: usize,
+    /// Subpages: the subpage sites to fetch, by host without `www.`
+    /// (nist.gov, chessprogramming.org and others; see
+    /// plumb_core::subpages), comma-separated; all when left out.
+    #[arg(long, value_name = "HOSTS", value_delimiter = ',')]
+    pub subpage_sites: Vec<String>,
+    /// Subpages: only the sites of these kinds (university, company,
+    /// government, entertainment, museum), comma-separated; all when left
+    /// out.
+    #[arg(long, value_name = "KINDS", value_delimiter = ',')]
+    pub subpage_kinds: Vec<String>,
 }
 
 #[derive(Debug, Args)]
@@ -1088,6 +1136,16 @@ pub struct ServeArgs {
     /// then the United States. A search can pick another with `country=` in its address.
     #[arg(long, value_name = "CODE", default_value = "auto", value_parser = HomeCountry::parse)]
     pub country: HomeCountry,
+    /// Start the search pages with "Only this country" on, leaving out
+    /// other countries' sites until the settings gear turns it off. The
+    /// JSON API and `/mcp` still need `only=1`.
+    #[arg(long)]
+    pub only_country: bool,
+    /// Language of the sites searches show when they do not pick one, a
+    /// code such as en [default: the browser's first language when the
+    /// settings gear offers it, else en].
+    #[arg(long, value_name = "CODE", value_parser = parse_language)]
+    pub lang: Option<String>,
     /// Show "Search the web with ..." above the results, a link that hands
     /// the query to this engine: duckduckgo, google, bing, brave or
     /// startpage, or `off` for none. Plumb never fetches its results.

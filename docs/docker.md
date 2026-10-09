@@ -214,7 +214,7 @@ configure the node on the host with the startup flags below, or place
 ```json
 {
   "network": true,
-  "search_by_meaning": false,
+  "search_by_meaning": true,
   "share_popularity": false,
   "bootstrap": [
     "/dns4/plumbsearch.org/tcp/4001/p2p/12D3KooWJ2UWUBsxmPfXTfHa8cBBmzifa6kj5pFZKfJXYNQyJ69a",
@@ -238,7 +238,10 @@ addresses, relay, UPnP, and discovery flags are preserved. The two bootstrap
 addresses above are the network's own first nodes on plumbsearch.org; with no
 bootstrap addresses at all, the node finds only nodes on its own local
 network. Remove `features.json` while stopped to
-use only startup flags again. Resource limits stay in `settings.json` and
+use only startup flags again. The node writes down which data directory the
+file was saved in; a copy of another node's data directory keeps the network
+off (with a warning in the log) unless started with `--network`, so a test
+node made from a live one does not join the network as that node. Resource limits stay in `settings.json` and
 apply immediately when saved through a local panel.
 
 ### Control it from the desktop app
@@ -280,14 +283,16 @@ take effect at once.
 
 
 Settings are flags of `plumb run`. The image's default command is
-`run --data /data --bind 0.0.0.0:8080 --network`, and a command you set
-replaces all of it, so keep those three flags (leave out `--network` to keep
-the node to itself). In `docker-compose.yml`:
+`run --data /data --bind 0.0.0.0:8080 --network --search-by-meaning`, and a
+command you set replaces all of it, so keep those flags (leave out `--network`
+to keep the node to itself, and `--search-by-meaning` to skip the 130 MB
+model and the site vectors, at the cost of described searches such as
+"electric car maker"). In `docker-compose.yml`:
 
 ```yaml
 services:
   plumb:
-    command: ["run", "--data", "/data", "--bind", "0.0.0.0:8080", "--network", "--sites", "250000"]
+    command: ["run", "--data", "/data", "--bind", "0.0.0.0:8080", "--network", "--search-by-meaning", "--sites", "250000"]
 ```
 
 Then apply it with `docker compose up -d`. With `docker run`, put the command
@@ -296,7 +301,7 @@ after the image name:
 ```sh
 docker run -d --name plumb --init --restart unless-stopped --stop-timeout 300 \
   -p 8080:8080 -v plumb-data:/data ghcr.io/sueheir/plumb-search:latest \
-  run --data /data --bind 0.0.0.0:8080 --network --sites 250000
+  run --data /data --bind 0.0.0.0:8080 --network --search-by-meaning --sites 250000
 ```
 
 | Flag | Default | What it does |
@@ -345,7 +350,7 @@ to the command:
 ```yaml
 services:
   plumb:
-    command: ["run", "--data", "/data", "--bind", "0.0.0.0:8080", "--network", "--use-system-proxy"]
+    command: ["run", "--data", "/data", "--bind", "0.0.0.0:8080", "--network", "--search-by-meaning", "--use-system-proxy"]
     environment:
       HTTPS_PROXY: http://proxy.example.com:3128
       HTTP_PROXY: http://proxy.example.com:3128
