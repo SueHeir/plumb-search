@@ -2527,8 +2527,8 @@ async fn a_node_takes_newer_set_files_that_hold_what_its_own_do() {
     };
     let long_ago = now_unix() - 100_000;
 
-    // This node made its own files a while ago: articles with leads, films
-    // and a map.
+    // This node made its own files a while ago: articles with leads, films,
+    // music and a map.
     let dir = seeded_dir();
     let sets = crate::pages::sets_dir(dir.path());
     std::fs::create_dir_all(&sets).unwrap();
@@ -2537,11 +2537,14 @@ async fn a_node_takes_newer_set_files_that_hold_what_its_own_do() {
     let led = [article("Marie Curie", Some("Marie Curie was a physicist."))];
     write(&wikipedia.file(dir.path()), &led);
     write(&films.file(dir.path()), &[article("Old Film", None)]);
+    let music = crate::pages::SetInfo::find("music").unwrap();
+    write(&music.file(dir.path()), &[article("A Song", None)]);
     let map = crate::map::file(dir.path());
     std::fs::write(&map, b"old map").unwrap();
     for file in [
         wikipedia.file(dir.path()),
         films.file(dir.path()),
+        music.file(dir.path()),
         map.clone(),
     ] {
         super::newer::set_time(&file, long_ago).unwrap();
@@ -2561,6 +2564,7 @@ async fn a_node_takes_newer_set_files_that_hold_what_its_own_do() {
         modified,
         size,
         kinds: vec![],
+        content: None,
     };
     std::fs::write(
         plumb_net::pages::layers_path(&peer_articles),
@@ -2572,6 +2576,27 @@ async fn a_node_takes_newer_set_files_that_hold_what_its_own_do() {
         &peer_films,
         &[article("New Film", None), article("Old Film", None)],
     );
+    // Its music file is this node's, compressed again and newer only by
+    // its time, as when files are copied between machines by hand.
+    use std::io::{Read, Write};
+    let peer_music = peer_dir.path().join("music.tsv.gz");
+    {
+        let mut text = Vec::new();
+        flate2::read::MultiGzDecoder::new(std::fs::File::open(music.file(dir.path())).unwrap())
+            .read_to_end(&mut text)
+            .unwrap();
+        let mut gz = flate2::write::GzEncoder::new(
+            std::fs::File::create(&peer_music).unwrap(),
+            flate2::Compression::best(),
+        );
+        gz.write_all(&text).unwrap();
+        gz.finish().unwrap();
+    }
+    assert_ne!(
+        std::fs::read(&peer_music).unwrap(),
+        std::fs::read(music.file(dir.path())).unwrap()
+    );
+    super::newer::note("music", &peer_music).unwrap();
     // Books, which this node has no file of and doesn't name in
     // --set-updates, are never taken.
     let peer_books = peer_dir.path().join("books.tsv.gz");
@@ -2583,6 +2608,7 @@ async fn a_node_takes_newer_set_files_that_hold_what_its_own_do() {
         ("films".to_string(), peer_films.clone()),
         ("map".to_string(), peer_map.clone()),
         ("books".to_string(), peer_books),
+        ("music".to_string(), peer_music),
     ]);
     let table = plumb_net::BucketTable::build(
         &peer_dir.path().join("buckets"),
@@ -2606,9 +2632,9 @@ async fn a_node_takes_newer_set_files_that_hold_what_its_own_do() {
 
     let mut config = test_config(dir.path());
     config.settings.page_sets =
-        crate::pages::PageSets::parse("wikipedia-en=all,films=all,books=all").unwrap();
+        crate::pages::PageSets::parse("wikipedia-en=all,films=all,books=all,music=all").unwrap();
     // Named, so the tiny files may grow past a quarter.
-    config.set_updates = "wikipedia-en,films,map".parse().unwrap();
+    config.set_updates = "wikipedia-en,films,music,map".parse().unwrap();
     let mut net = plumb_net::NetConfig::new(PathBuf::new());
     net.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
     net.upnp = false;
@@ -2647,6 +2673,10 @@ async fn a_node_takes_newer_set_files_that_hold_what_its_own_do() {
     assert!(!super::newer::prev_path(&kept).exists());
     let books = crate::pages::SetInfo::find("books").unwrap();
     assert!(!books.file(dir.path()).exists());
+    // Nor is the copy of its own music file.
+    let own_music = music.file(dir.path());
+    assert_eq!(super::newer::stamp(&own_music).unwrap().0, long_ago);
+    assert!(!super::newer::prev_path(&own_music).exists());
 
     peer.shutdown().await;
     node.shutdown().await.unwrap();

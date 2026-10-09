@@ -12,20 +12,24 @@
 //! * is at least [`MIN_SIZE_PERCENT`] of the size of this node's whole
 //!   file, so a cut or broken file does not replace a whole one;
 //! * for an articles file, holds every kind of entry this node's does
-//!   ([`layers_of`]): a plain Wikipedia file never takes the place of one
-//!   with facts and leads added, however new.
+//!   ([`note`]): a plain Wikipedia file never takes the place of one
+//!   with facts and leads added, however new;
+//! * holds something else than this node's file ([`Mine::content`]): a
+//!   copy of the same pages with a later time, as when files are copied
+//!   between machines by hand, is not taken.
 //!
 //! The file it replaces is kept as `<file>.prev`, one step to roll back.
 //! A taken file gets its maker's time, so it is handed on with that time
 //! and two nodes never take the same file back and forth.
 
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
-use plumb_net::pages::{layers_path, read_layers, Layers, PagesChunk};
+use plumb_net::pages::{layers_path, read_note, Layers, PagesChunk};
 use plumb_net::{NetHandle, PeerId};
+use sha2::{Digest, Sha256};
 use tracing::warn;
 
 use super::Inner;
@@ -64,6 +68,7 @@ pub(super) struct Offer {
     pub size: u64,
     pub modified: u64,
     pub layers: Option<Vec<String>>,
+    pub content: Option<String>,
 }
 
 /// This node's file of a set, as [`newest`] weighs it.
@@ -74,8 +79,11 @@ pub(super) struct Mine {
     pub size: u64,
     /// The maker's whole file, not a cut of it.
     pub complete: bool,
-    /// The kinds of entries it holds ([`layers_of`]); empty for none.
+    /// The kinds of entries it holds ([`note`]); empty for none.
     pub layers: Vec<String>,
+    /// A digest of what it holds ([`note`]), when known: a newer
+    /// file with the same digest is the same file with a later time.
+    pub content: Option<String>,
     /// A newer file may be any size bigger (the set is named in
     /// `--set-updates`), not only [`MAX_GROWTH_PERCENT`] of this one.
     pub may_grow: bool,
@@ -110,6 +118,7 @@ pub(super) fn offers(inner: &Inner, net: &NetHandle, set: &str) -> Result<Option
                 size: chunk.size,
                 modified: chunk.modified,
                 layers: chunk.layers,
+                content: chunk.content,
             });
         }
     }
@@ -152,6 +161,10 @@ pub(super) fn newest<'a>(
             why = "a trusted node's newer file lacks entries this one has";
             continue;
         }
+        if offer.content.is_some() && offer.content == mine.content {
+            why = "a trusted node's newer file holds the same as this one";
+            continue;
+        }
         if best.is_none_or(|b| offer.modified > b.modified) {
             best = Some(offer);
         }
@@ -163,57 +176,96 @@ pub(super) fn newest<'a>(
 /// newer file must also carry.
 pub(super) const LAYERED_SETS: [&str; 2] = ["wikipedia-en", plumb_index::pages::WIKIDATA_SET];
 
-/// The kinds of entries on the lines of profiles of an articles file (see
-/// `plumb_core::article`): `website`, `lead`, `name`, each fact (`f-capital`)
-/// and `profiles` for any service, sorted.
-pub(super) fn layers_of(path: &Path) -> Result<Vec<String>> {
-    let file = std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
-    let reader = BufReader::new(flate2::read::MultiGzDecoder::new(file));
+/// Reads the file at `path` to its end once, for its layers (when
+/// `layered`, else none) and a digest of what it holds.
+///
+/// The layers are the kinds of entries on the lines of profiles of an
+/// articles file (see `plumb_core::article`): `website`, `lead`, `name`,
+/// each fact (`f-capital`) and `profiles` for any service, sorted. The
+/// digest is SHA-256 (hex) of the text inside a gzip file, so the same
+/// pages compressed again give the same digest, or of the bytes of any
+/// other file (the map file).
+fn read_whole(path: &Path, layered: bool) -> Result<(Vec<String>, String)> {
+    let context = || format!("reading {}", path.display());
+    let mut file =
+        std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
+    let mut magic = [0u8; 2];
+    let gzip = file.read_exact(&mut magic).is_ok() && magic == [0x1f, 0x8b];
+    std::io::Seek::rewind(&mut file).with_context(context)?;
+    let inner: Box<dyn Read> = if gzip {
+        Box::new(flate2::read::MultiGzDecoder::new(file))
+    } else {
+        Box::new(file)
+    };
+    let mut reader = Hashing {
+        inner,
+        hasher: Sha256::new(),
+    };
     let mut kinds = std::collections::BTreeSet::new();
-    for line in reader.lines() {
-        let line = line.with_context(|| format!("reading {}", path.display()))?;
-        let Some(rest) = line.strip_prefix(plumb_core::article::PROFILES_LINE) else {
-            continue;
-        };
-        let Some((_, entries)) = rest.split_once('\t') else {
-            continue;
-        };
-        for pair in entries.split('|') {
-            let Some((key, _)) = pair.split_once('=') else {
+    if layered {
+        for line in BufReader::new(&mut reader).lines() {
+            let line = line.with_context(context)?;
+            let Some(rest) = line.strip_prefix(plumb_core::article::PROFILES_LINE) else {
                 continue;
             };
-            let kind = match key {
-                "website" | "lead" | "name" => key,
-                fact if fact.starts_with("f-") => fact,
-                _ => "profiles",
+            let Some((_, entries)) = rest.split_once('\t') else {
+                continue;
             };
-            if !kinds.contains(kind) {
-                kinds.insert(kind.to_string());
+            for pair in entries.split('|') {
+                let Some((key, _)) = pair.split_once('=') else {
+                    continue;
+                };
+                let kind = match key {
+                    "website" | "lead" | "name" => key,
+                    fact if fact.starts_with("f-") => fact,
+                    _ => "profiles",
+                };
+                if !kinds.contains(kind) {
+                    kinds.insert(kind.to_string());
+                }
             }
         }
+    } else {
+        std::io::copy(&mut reader, &mut std::io::sink()).with_context(context)?;
     }
-    Ok(kinds.into_iter().collect())
+    let digest = reader
+        .hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    Ok((kinds.into_iter().collect(), digest))
 }
 
-/// The layers of the file at `path`, from its `.layers` note when that is
-/// for the file as it is, else worked out and noted. Empty for a set that
-/// has none, or when the file can't be read.
-pub(super) fn layers(set: &str, path: &Path) -> Vec<String> {
-    if !LAYERED_SETS.contains(&set) {
-        return Vec::new();
+/// Hashes what is read through it.
+struct Hashing<R> {
+    inner: R,
+    hasher: Sha256,
+}
+
+impl<R: Read> Read for Hashing<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.hasher.update(&buf[..n]);
+        Ok(n)
     }
-    let Some((modified, size)) = stamp(path) else {
-        return Vec::new();
-    };
-    if let Some(kinds) = read_layers(path, modified, size) {
-        return kinds;
+}
+
+/// The note on the file at `path` of `set` (its layers and the digest of
+/// what it holds), from its `.layers` file when that is for the file as it
+/// is, else worked out and noted. `None` when the file can't be read.
+pub(super) fn note(set: &str, path: &Path) -> Option<Layers> {
+    let (modified, size) = stamp(path)?;
+    if let Some(note) = read_note(path, modified, size).filter(|n| n.content.is_some()) {
+        return Some(note);
     }
-    match layers_of(path) {
-        Ok(kinds) => {
+    match read_whole(path, LAYERED_SETS.contains(&set)) {
+        Ok((kinds, content)) => {
             let note = Layers {
                 modified,
                 size,
-                kinds: kinds.clone(),
+                kinds,
+                content: Some(content),
             };
             let written = serde_json::to_vec(&note)
                 .map_err(anyhow::Error::from)
@@ -221,13 +273,22 @@ pub(super) fn layers(set: &str, path: &Path) -> Vec<String> {
             if let Err(err) = written {
                 warn!("could not note what {} holds: {err:#}", path.display());
             }
-            kinds
+            Some(note)
         }
         Err(err) => {
             warn!("could not read what {} holds: {err:#}", path.display());
-            Vec::new()
+            None
         }
     }
+}
+
+/// The layers of the file at `path` ([`note`]). Empty for a set that has
+/// none, or when the file can't be read.
+pub(super) fn layers(set: &str, path: &Path) -> Vec<String> {
+    if !LAYERED_SETS.contains(&set) {
+        return Vec::new();
+    }
+    note(set, path).map(|n| n.kinds).unwrap_or_default()
 }
 
 /// A file's time (Unix seconds) and size.
@@ -281,6 +342,7 @@ mod tests {
             size,
             modified,
             layers: layers.map(|l| l.iter().map(|s| s.to_string()).collect()),
+            content: None,
         }
     }
 
@@ -290,6 +352,7 @@ mod tests {
             size: 1_000,
             complete: true,
             layers: layers.iter().map(|s| s.to_string()).collect(),
+            content: Some("mine".into()),
             may_grow: false,
         }
     }
@@ -338,6 +401,69 @@ mod tests {
     }
 
     #[test]
+    fn a_newer_copy_of_the_same_file_is_not_taken() {
+        let now = 10_000;
+        let same = Offer {
+            content: Some("mine".into()),
+            ..offer(1_000, 5_000, None)
+        };
+        assert_eq!(
+            newest(&mine(&[]), std::slice::from_ref(&same), now),
+            Err("a trusted node's newer file holds the same as this one")
+        );
+        // Another file, an older node that sends no digest, or no digest of
+        // this node's own: taken as before.
+        let other = Offer {
+            content: Some("theirs".into()),
+            ..offer(1_000, 4_000, None)
+        };
+        assert_eq!(
+            newest(&mine(&[]), &[same.clone(), other], now)
+                .unwrap()
+                .modified,
+            4_000
+        );
+        assert!(newest(&mine(&[]), &[offer(1_000, 5_000, None)], now).is_ok());
+        let unknown = Mine {
+            content: None,
+            ..mine(&[])
+        };
+        assert!(newest(&unknown, &[same], now).is_ok());
+    }
+
+    #[test]
+    fn the_same_pages_compressed_again_have_the_same_digest() {
+        let dir = tempfile::tempdir().unwrap();
+        let write = |name: &str, level, text: &str| {
+            let path = dir.path().join(name);
+            let mut gz = flate2::write::GzEncoder::new(
+                std::fs::File::create(&path).unwrap(),
+                flate2::Compression::new(level),
+            );
+            gz.write_all(text.as_bytes()).unwrap();
+            gz.finish().unwrap();
+            path
+        };
+        let pages = "900\tMarie Curie\tphysicist\tQ7186\t\t\n".repeat(50);
+        let fast = write("fast.tsv.gz", 1, &pages);
+        let best = write("best.tsv.gz", 9, &pages);
+        let other = write("other.tsv.gz", 1, &pages.replace("900", "901"));
+        assert_ne!(std::fs::read(&fast).unwrap(), std::fs::read(&best).unwrap());
+        let digest = |path: &Path| note("films", path).unwrap().content.unwrap();
+        assert_eq!(digest(&fast), digest(&best));
+        assert_ne!(digest(&fast), digest(&other));
+        // A file that isn't gzip, like the map file, by its bytes.
+        let map = dir.path().join("map.pmtiles");
+        std::fs::write(&map, b"tiles").unwrap();
+        assert_eq!(digest(&map).len(), 64);
+        // Noted, and read from the note while the file is as it was.
+        let (modified, size) = stamp(&fast).unwrap();
+        let noted = read_note(&fast, modified, size).unwrap();
+        assert_eq!(noted.content.unwrap(), digest(&best));
+        assert!(noted.kinds.is_empty());
+    }
+
+    #[test]
     fn works_out_and_notes_what_an_articles_file_holds() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("wikipedia-en.tsv.gz");
@@ -361,7 +487,7 @@ mod tests {
         assert_eq!(layers("wikipedia-en", &path), kinds);
         assert!(layers_path(&path).is_file(), "noted for next time");
         let (modified, size) = stamp(&path).unwrap();
-        assert_eq!(read_layers(&path, modified, size).unwrap(), kinds);
+        assert_eq!(read_note(&path, modified, size).unwrap().kinds, kinds);
         assert!(layers("github", &path).is_empty());
     }
 

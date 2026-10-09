@@ -199,14 +199,19 @@ fn keep_files(inner: &Inner, done: &AtomicBool) {
                 }
             }
         }
-        // What the whole articles files hold, worked out once for each, so
-        // other nodes asking learn it with the file's time.
-        for id in super::newer::LAYERED_SETS {
-            if let Some(file) =
-                SetInfo::find(id).and_then(|set| set.servable_file(&inner.paths.data))
-            {
-                super::newer::layers(id, &file);
+        // What the whole files hold, worked out once for each, so other
+        // nodes asking learn it with the file's time.
+        for set in crate::pages::SETS {
+            if ended() {
+                break;
             }
+            if let Some(file) = set.servable_file(&inner.paths.data) {
+                super::newer::note(set.id, &file);
+            }
+        }
+        let map = crate::map::file(&inner.paths.data);
+        if !ended() && map.is_file() {
+            super::newer::note(MAP_SET, &map);
         }
         let until = Instant::now() + LOOK_EVERY;
         while !ended() && Instant::now() < until {
@@ -331,6 +336,7 @@ fn fetch_if_needed(
                 size,
                 complete: n.complete,
                 layers: super::newer::layers(set.id, &file),
+                content: super::newer::note(set.id, &file).and_then(|n| n.content),
                 may_grow,
             };
             match super::newer::newest(&mine, &offers, now) {
@@ -553,6 +559,7 @@ fn keep_map(
         // With no file yet, any size goes.
         complete: size > 0,
         layers: Vec::new(),
+        content: super::newer::note(MAP_SET, &file).and_then(|n| n.content),
         may_grow,
     };
     let offer = match super::newer::newest(&mine, &offers, now_unix()) {
