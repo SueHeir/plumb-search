@@ -271,6 +271,7 @@ fn names_as_values() {
     assert!(checks("Sydney, the capital of Australia Capital Territory").is_empty());
     assert!(checks("Sydney, the financial capital of Australia").is_empty());
     assert!(checks("Sydney was the capital of Australia in 1900.").is_empty());
+    assert!(checks("Is Sydney the capital of Australia? Yes.").is_empty());
     assert!(checks("Australia's capital is Sydney's rival.").is_empty());
     assert!(
         checks("Near Canberra, the capital of Australia, is Sydney.")

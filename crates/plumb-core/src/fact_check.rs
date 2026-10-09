@@ -1415,7 +1415,8 @@ fn abbreviation(word: &str) -> bool {
     )
 }
 
-/// The sentences of a line's tokens.
+/// The sentences of a line's tokens, leaving out questions ("What is
+/// the capital of France?"), which state nothing.
 fn sentences(tokens: &[Token]) -> Vec<&[Token]> {
     let mut out = Vec::new();
     let mut start = 0;
@@ -1432,7 +1433,7 @@ fn sentences(tokens: &[Token]) -> Vec<&[Token]> {
             _ => false,
         };
         if ends {
-            if i > start {
+            if i > start && !token.is_punct('?') {
                 out.push(&tokens[start..i]);
             }
             start = i + 1;
