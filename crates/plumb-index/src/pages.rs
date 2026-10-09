@@ -63,8 +63,11 @@ pub const QUESTION_SHARE: f32 = 0.75;
 /// sites say them.
 pub const KNOWN_WORD_PAGES: u64 = 3;
 /// A word the pages hardly know is corrected to a near word found in this
-/// many times as many pages names ([`PageSearcher::suggest_spelling`]).
+/// many times as many pages names ([`PageSearcher::suggest_spelling`])...
 pub const PAGE_FIX_RATIO: u64 = 20;
+/// ...and in at least this many: a slip of a rare word is no likelier than
+/// a rare word typed as meant ("kiwipete" is not "kimipet").
+pub const MIN_PAGE_FIX_PAGES: u64 = 20;
 /// Most read articles about a site looked at for one about the site itself
 /// ([`PageSearcher::title_untitled`]).
 const TITLE_CANDIDATES: usize = 20;
@@ -1465,9 +1468,11 @@ impl PageSearcher {
     /// whose words the sites index hardly has. Each word the pages do not
     /// know ([`PageSearcher::knows_word`]) and `site_known` does not either
     /// is replaced by the near word found in the most pages, at least
-    /// [`PAGE_FIX_RATIO`] times as many as have the word typed, or with the
-    /// spelling model, the likeliest by the noisy channel
-    /// ([`crate::spell_model`]). `None` when no word changes.
+    /// [`PAGE_FIX_RATIO`] times as many as have the word typed and at least
+    /// [`MIN_PAGE_FIX_PAGES`], or with the spelling model, the likeliest by
+    /// the noisy channel ([`crate::spell_model`]). A word some pages have
+    /// is kept unless the slip is likelier than the word ("inkala" is not
+    /// "ikala"). `None` when no word changes.
     pub fn suggest_spelling(
         &self,
         query: &str,
@@ -1491,7 +1496,7 @@ impl PageSearcher {
                 continue;
             }
             let typed_docs = docs(word)?;
-            let needed = KNOWN_WORD_PAGES.max(PAGE_FIX_RATIO.saturating_mul(typed_docs));
+            let needed = MIN_PAGE_FIX_PAGES.max(PAGE_FIX_RATIO.saturating_mul(typed_docs));
             let mut best: Option<(f64, String)> = None;
             for (term, distance) in
                 crate::spell::near_terms(&searcher, self.fields.words, word, edits)?
@@ -1507,6 +1512,9 @@ impl PageSearcher {
                     None => -7.0 * f64::from(distance),
                 };
                 let likelihood = cost + (term_docs as f64).ln();
+                if model.is_some() && typed_docs > 0 && likelihood < (typed_docs as f64).ln() {
+                    continue;
+                }
                 if best.as_ref().is_none_or(|(b, _)| likelihood > *b) {
                     best = Some((likelihood, term));
                 }
@@ -3313,6 +3321,9 @@ mod tests {
             pages.push(page(&format!("Budapest hotels {i}"), 10, &[]));
         }
         pages.push(page("Anubas (beetle)", 1, &[]));
+        for i in 0..5 {
+            pages.push(page(&format!("Perfi album {i}"), 10, &[]));
+        }
         let (_dir, searcher) = searcher(&pages);
         let nothing_known = |_: &str| false;
         let suggest = |query: &str| {
@@ -3331,6 +3342,8 @@ mod tests {
         assert_eq!(suggest("budapest"), None);
         assert_eq!(suggest("anub"), None);
         assert_eq!(suggest("budafest2"), None);
+        // A rare word is no slip of another rare one: few pages say "perfi".
+        assert_eq!(suggest("perft"), None);
         // A word the sites know is spelled right.
         let sites_know = |word: &str| word == "budafest";
         assert_eq!(
