@@ -182,7 +182,7 @@ pub(crate) struct Extras {
 
 /// Whether a Wikipedia article lists the pages a name could mean rather
 /// than being about one thing.
-fn is_disambiguation(title: &str, description: Option<&str>) -> bool {
+pub(super) fn is_disambiguation(title: &str, description: Option<&str>) -> bool {
     title.ends_with("(disambiguation)")
         || description.is_some_and(|d| {
             let d = d.to_lowercase();

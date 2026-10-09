@@ -252,6 +252,14 @@ pub trait SearchBackend: Send + Sync {
     fn base_map(&self) -> Option<Arc<crate::map::BaseMap>> {
         None
     }
+
+    /// The song or album a search of `query` alone is surely for, when
+    /// the node keeps the music set; see
+    /// [`plumb_index::pages::PageSearcher::known_song`]. By default none.
+    fn known_song(&self, query: &str, options: &SearchOptions) -> Option<plumb_index::pages::Page> {
+        let _ = (query, options);
+        None
+    }
 }
 
 /// A [`Searcher`] with fixed ranking settings.
@@ -1159,10 +1167,17 @@ async fn search_page(
     };
     // Plugins run once the node knows what the search is about, so that
     // they can look it up by its identifiers.
-    let about = local
+    let about = match local
         .as_ref()
         .ok()
-        .and_then(|results| search_about(&query, results, &extras));
+        .and_then(|results| search_about(&query, results, &extras))
+    {
+        Some(about) => Some(about),
+        None => match &local {
+            Ok(results) => known_song(&state, &query, results, &settings.options).await,
+            Err(_) => None,
+        },
+    };
     let shown_to_plugins = match &local {
         Ok(results) if state.settings.plugins.any_annotate() => shown_results(results, limit),
         _ => Vec::new(),
@@ -1464,7 +1479,10 @@ async fn api_search(
             }
             let places = places.filter(|found| !found.hits.is_empty());
             let extras = extras(&state, &query, &results, &options).await;
-            let about = search_about(&query, &results, &extras);
+            let about = match search_about(&query, &results, &extras) {
+                Some(about) => Some(about),
+                None => known_song(&state, &query, &results, &options).await,
+            };
             let shown_to_plugins = if state.settings.plugins.any_annotate() {
                 shown_results(&results, params.limit())
             } else {
@@ -2256,6 +2274,39 @@ fn search_about(
     answers::page_about(&results.hits, &placed)
         .or_else(|| music_about(&placed))
         .map(crate::plugins::about_page)
+}
+
+/// The song or album a search of `query` alone, whose results are
+/// `results`, is surely for, as plugins are told: "creep" is Radiohead's,
+/// though no result lists it. Not when the query names a site or an
+/// article, which it is then rather for: "yellow" is the colour, and
+/// "maps" a site.
+async fn known_song(
+    state: &AppState,
+    query: &str,
+    results: &SearchResults,
+    options: &SearchOptions,
+) -> Option<plumb_plugin::About> {
+    if state.settings.plugins.is_empty() || plumb_core::Operators::parse(query).any() {
+        return None;
+    }
+    let named_else = results.hits.iter().any(|hit| hit.named)
+        || results.pages.iter().any(|placed| {
+            let page = &placed.hit.page;
+            placed.hit.named
+                && page.set != plumb_index::pages::MUSIC_SET
+                && !answers::is_disambiguation(&page.title, page.description.as_deref())
+        });
+    if named_else {
+        return None;
+    }
+    let backend = Arc::clone(&state.backend);
+    let (query, options) = (query.to_string(), options.clone());
+    tokio::task::spawn_blocking(move || backend.known_song(&query, &options))
+        .await
+        .ok()
+        .flatten()
+        .map(|page| crate::plugins::about_page(&page))
 }
 
 /// How near the top a song or album must be listed for a search to be
@@ -4217,6 +4268,81 @@ mod tests {
         let json: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(json["plugin_offers"][0]["plugin"], "test-news");
         assert!(json.get("plugins").is_none());
+    }
+
+    /// Finds `hits`, and knows "creep" is Radiohead's song.
+    struct SongBackend {
+        hits: Vec<Hit>,
+    }
+
+    impl SearchBackend for SongBackend {
+        fn search(&self, _query: &str, limit: usize) -> Result<Vec<Hit>> {
+            Ok(self.hits.iter().take(limit).cloned().collect())
+        }
+
+        fn num_docs(&self) -> u64 {
+            1
+        }
+
+        fn known_song(
+            &self,
+            query: &str,
+            _options: &SearchOptions,
+        ) -> Option<plumb_index::pages::Page> {
+            (query == "creep").then(|| {
+                plumb_index::pages::Page::from_music(plumb_core::Article {
+                    title: "Creep".into(),
+                    description: Some("Song by Radiohead, 1992".into()),
+                    item: Some("recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69".into()),
+                    views: 288_000,
+                    ..Default::default()
+                })
+                .unwrap()
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_songs_title_alone_runs_a_plugin_for_songs() {
+        let manifest = crate::plugins::Manifest {
+            name: "Songs".into(),
+            hosts: vec!["a.example".into()],
+            ids: vec!["musicbrainz-recording".into()],
+            run_ids: vec!["musicbrainz-recording".into()],
+            suggest: crate::plugins::Suggest::Button,
+            ..crate::plugins::Manifest::default()
+        };
+        let plugins = || {
+            crate::plugins::Plugins::new(vec![crate::plugins::Plugin::from_parts(
+                "songs".into(),
+                manifest.clone(),
+                serde_json::Value::Null,
+                crate::plugins::answering(
+                    r#"{"results":[{"title":"Radiohead - Creep","url":"https://a.example/creep"}]}"#,
+                )
+                .as_bytes(),
+            )
+            .unwrap()])
+        };
+        let app = |hit: Hit| {
+            router_with(
+                Arc::new(SongBackend { hits: vec![hit] }),
+                WebSettings {
+                    home: HomeCountry::Off,
+                    plugins: plugins(),
+                    ..WebSettings::default()
+                },
+            )
+        };
+        let (_, _, page) = send(app(scored("creed.com", 0.5)), "/search?q=creep").await;
+        assert!(page.contains("Radiohead - Creep"), "{page}");
+        // Not when the search names a site.
+        let mut named = scored("creep.example", 0.5);
+        named.named = true;
+        let (_, _, page) = send(app(named), "/search?q=creep").await;
+        assert!(!page.contains("Radiohead - Creep"));
+        let (_, _, page) = send(app(scored("creed.com", 0.5)), "/search?q=weather").await;
+        assert!(!page.contains("Radiohead - Creep"));
     }
 
     #[tokio::test]

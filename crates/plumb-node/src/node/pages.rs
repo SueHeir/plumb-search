@@ -608,6 +608,28 @@ impl Inner {
     }
 }
 
+/// The song or album a search of `query` alone is surely for; see
+/// [`PageSearcher::known_song`].
+pub(super) fn known_song(
+    inner: &Inner,
+    query: &str,
+    options: &SearchOptions,
+) -> Option<plumb_index::pages::Page> {
+    let searcher = inner
+        .pages
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .as_ref()
+        .map(|(_, s)| s.clone())?;
+    match searcher.known_song(query) {
+        Ok(song) => song.filter(|page| options_allow(options, page)),
+        Err(err) => {
+            warn!("looking for a song: {err:#}");
+            None
+        }
+    }
+}
+
 /// Adds the pages found for `query` to `results`.
 pub(super) fn add_pages(
     inner: &Inner,

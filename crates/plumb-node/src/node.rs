@@ -2031,6 +2031,10 @@ impl SearchBackend for Inner {
         self.map.get()
     }
 
+    fn known_song(&self, query: &str, options: &SearchOptions) -> Option<plumb_index::pages::Page> {
+        pages::known_song(self, query, options)
+    }
+
     fn num_docs(&self) -> u64 {
         self.current_summary().map_or(0, |(_, docs)| docs)
     }
