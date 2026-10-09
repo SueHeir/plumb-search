@@ -10,6 +10,7 @@ shows up.
 | `brand_queries.tsv` | an organization's name ("chase") | its official site | |
 | `typo_queries.tsv` | a misspelled name ("chsae") | the brand's site | `--follow-suggestions` to measure "Did you mean" |
 | `ai_queries.tsv` | what an AI agent looks up ("rust docs", "paypal login") | the official site | |
+| `utility_queries.tsv` | a tool or a quick fact ("weather", "20 usd to eur", "define prioritize", "food near me") | a site that does the job, or the word's dictionary page | |
 | `described_queries.tsv` | a site described, not named ("cheap flights") | any of several fitting sites | |
 | `article_queries.tsv` | a person, place or idea | its Wikipedia article | `--pages wikipedia-en.tsv.gz` |
 | `fact_queries.tsv` | a fact ("capital of japan") | text the instant answer has | `--facts --pages wikipedia-en.tsv.gz` (made with fetch-facts) |
@@ -21,14 +22,17 @@ shows up.
 | `book_queries.tsv` | a well-known book | its Open Library work | `--pages books.tsv.gz` |
 | `film_queries.tsv` | a film or show with its year, director or cast ("dune 2021") | its Wikipedia article | `--pages wikipedia-en.tsv.gz --pages films.tsv.gz` |
 | `music_queries.tsv` | a song or album with its artist ("hey jude beatles", "abbey road album") | its MusicBrainz page | `--pages music.tsv.gz` |
+| `topic_queries.tsv` | the news ("world news") or a topic in it ("tariffs") | a major news site, or the topic's Wikipedia article | `--pages wikipedia-en.tsv.gz` |
 | `lyrics_queries.tsv` | a song's lyrics ("jolene lyrics") | its lyrics page on Genius, shown above the results | `--pages music.tsv.gz --profiles` |
+| `subpage_queries.tsv` | one page deep inside a well-known site ("perft results", "nist sp 811", "nba standings") | that page | `--pages subpages.tsv.gz` |
 
 ## Format
 
 One `query<TAB>answer[,another_ok_answer]` per line; blank lines and lines
 starting with `#` are skipped. An answer is a registrable domain
 (`chase.com`), a page's address, or an address ending in `*` that takes
-any page it starts. A fact answer is lowercase text the answer must
+any page it starts. A comma inside an address (`Tesla,_Inc.`) is
+written `%2C`. A fact answer is lowercase text the answer must
 contain, commas left out. The test `repository_query_files_are_valid`
 checks every file here: it parses, no query is asked twice, and every
 answer is written the way results are keyed.

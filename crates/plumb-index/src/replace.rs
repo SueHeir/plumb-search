@@ -301,8 +301,9 @@ fn write_marker(dir: &Path) -> Result<()> {
 
 /// The entries of `dir` that are not part of a Tantivy index, sorted, or
 /// `None` when `dir` does not open as one. Part of an index are regular
-/// files named `meta.json`, `.managed.json`, a Tantivy lock file or a file
-/// that `.managed.json` lists.
+/// files named `meta.json`, `.managed.json`, a Tantivy lock file, the
+/// spelling model ([`crate::spell_model::MODEL_FILE`]) or a file that
+/// `.managed.json` lists.
 fn strays(dir: &Path) -> Result<Option<Vec<String>>> {
     let Ok(index) = Index::open_in_dir(dir) else {
         return Ok(None);
@@ -313,6 +314,7 @@ fn strays(dir: &Path) -> Result<Option<Vec<String>>> {
             || name == Path::new(".managed.json")
             || name == INDEX_WRITER_LOCK.filepath.as_path()
             || name == META_LOCK.filepath.as_path()
+            || name == Path::new(crate::spell_model::MODEL_FILE)
             || managed.contains(name)
     };
     let mut strays = Vec::new();

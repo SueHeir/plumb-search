@@ -62,7 +62,7 @@ plumb fetch-map --data /path/to/node-data --world-zoom 8 --zoom 14 --near 39.74,
 
 `fetch-map` reads the basemap over HTTP with range requests, so only the tiles kept are downloaded: every tile of the world up to `--world-zoom`, and up to `--zoom` within `--km` (50) of each `--near` point. `--from` takes a downloaded `.pmtiles` file or another address instead of yesterday's daily build, and `--dry-run` says how much it would read, zoom by zoom, without downloading tiles. Slimming leaves about a fifth of each tile (Florence's centre: 3.9 MB of tiles to 0.7 MB). Each zoom is about twice the size of the one before; the whole basemap to zoom 15 is about 120 GB.
 
-The map file is not yet shared between nodes: a node that wants one runs `fetch-map`.
+Nodes hand the map file on like the page sets: a node with no storage limit, or with a map file already, takes a trusted node's newer map file whole, keeping its own as `map.pmtiles.prev` (see "Nodes in the network" in docs/pages.md). A desktop with a storage limit and no map file takes none; it runs `fetch-map` to get one.
 
 ## Nodes
 

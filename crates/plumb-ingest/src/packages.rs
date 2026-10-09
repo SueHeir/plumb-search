@@ -160,6 +160,8 @@ impl Listed {
                 homepage,
             }),
             facts: Vec::new(),
+            lead: None,
+            names: Vec::new(),
         })
     }
 }

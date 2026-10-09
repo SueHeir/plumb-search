@@ -167,7 +167,7 @@ They work on the search page, `/api/search`, network search and `/private`, wher
 
 ### Safe search and language
 
-The settings gear has **Safe search** (off, moderate or strict; `safe=` in the address) and **Language** (`lang=de`).
+The settings gear has **Safe search** (off, moderate or strict; `safe=` in the address) and **Language** (`lang=de`, or `lang=any`). Searches are in English and from the United States unless the browser says otherwise (its first language when the gear offers it, its country when it names one) or the searcher picks something else. A site the query names, such as spiegel.de for "spiegel", stays whatever its language. The MCP `search` tool takes `language` the same way, English by default.
 
 - Moderate, the default, leaves out sites on the [Block List Project](https://github.com/blocklistproject/Lists) adult list (public domain; each node downloads it weekly into `DATA/safe/`), sites Wikidata calls pornographic, and sites whose name, title or description is plainly adult. Strict also leaves out suggestive ones ("sexy", "nude", "escort") and such pages. Private search applies the same rules except for the blocklist, which stays on the node.
 - Language keeps sites whose homepage says it is in that language (`<html lang>`, read when the homepage is crawled) and sites that do not say, and page sets in that language (English Wikipedia, GitHub and the Stack Exchange questions are English).
@@ -320,6 +320,7 @@ Plumb is built from open data. Nodes keep titles, short descriptions and counts,
 | [Common Crawl](https://commoncrawl.org/) | Web graph domain ranks; optionally titles and link text from WAT files | [Terms of use](https://commoncrawl.org/terms-of-use) |
 | [The Block List Project](https://github.com/blocklistproject/Lists) | The adult sites list for safe search | Public domain ([Unlicense](https://unlicense.org/)) |
 | [European Central Bank](https://www.ecb.europa.eu/stats/policy_and_exchange_rates/euro_reference_exchange_rates/html/index.en.html) | Daily euro reference rates for currency conversions | Free to reuse with the source named |
+| [Open-Meteo](https://open-meteo.com/) | Weather forecasts for weather answers | CC BY 4.0, free without a key for non-commercial use |
 | [BAAI/bge-small-en-v1.5](https://huggingface.co/BAAI/bge-small-en-v1.5) | The embedding model for search by meaning | MIT |
 
 Site titles, descriptions and icons come from the sites' own homepages. The info box credits Wikipedia under each description it takes from an article, and lists of places credit OpenStreetMap.

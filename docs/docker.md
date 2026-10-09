@@ -238,7 +238,10 @@ addresses, relay, UPnP, and discovery flags are preserved. The two bootstrap
 addresses above are the network's own first nodes on plumbsearch.org; with no
 bootstrap addresses at all, the node finds only nodes on its own local
 network. Remove `features.json` while stopped to
-use only startup flags again. Resource limits stay in `settings.json` and
+use only startup flags again. The node writes down which data directory the
+file was saved in; a copy of another node's data directory keeps the network
+off (with a warning in the log) unless started with `--network`, so a test
+node made from a live one does not join the network as that node. Resource limits stay in `settings.json` and
 apply immediately when saved through a local panel.
 
 ### Control it from the desktop app

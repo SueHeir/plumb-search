@@ -340,6 +340,13 @@ pub(crate) fn document(
     if let Some(intro) = non_empty(&record.intro) {
         doc.add_text(f.description, truncate_chars(intro, MAX_TEXT_CHARS));
     }
+    // A model's sentence for a site with no words of its own stands in
+    // for its description.
+    if let Some(summary) = non_empty(&record.summary).filter(|_| {
+        non_empty(&record.intro).is_none() && (borrowed || non_empty(&record.description).is_none())
+    }) {
+        doc.add_text(f.description, truncate_chars(summary, MAX_TEXT_CHARS));
+    }
     for heading in record.headings.iter().take(MAX_HEADINGS) {
         doc.add_text(f.headings, truncate_chars(heading, MAX_TEXT_CHARS));
     }
@@ -439,6 +446,42 @@ pub(crate) fn document(
         }
     }
     doc
+}
+
+/// The texts of `record` the spelling model counts words in
+/// ([`crate::spell_model`]): what others call the site and what it calls
+/// itself, not its description, which it may stuff with search words.
+pub(crate) fn spelling_texts(record: &SiteRecord, redirect_names: &[String]) -> Vec<String> {
+    let domain = record.domain.as_str();
+    let borrowed = non_empty(&record.url).is_some_and(|url| crate::reads_another_site(url, domain));
+    let mut texts = vec![label_text(domain)];
+    texts.extend(redirect_names.iter().cloned());
+    texts.extend(
+        record
+            .aliases
+            .iter()
+            .filter(|a| !a.trim().is_empty())
+            .take(MAX_ALIASES)
+            .map(|alias| truncate_chars(alias, MAX_TEXT_CHARS)),
+    );
+    if let Some(title) = non_empty(&record.title)
+        .filter(|title| !borrowed && !is_blank_title(title) && !title.contains('\u{FFFD}'))
+    {
+        texts.extend(
+            title_parts(&truncate_chars(title, MAX_TEXT_CHARS))
+                .into_iter()
+                .map(str::to_string),
+        );
+    }
+    texts.extend(
+        top_link_texts(&record.link_texts)
+            .into_iter()
+            .map(|link_text| truncate_chars(&link_text.text, MAX_TEXT_CHARS)),
+    );
+    if let Some(about) = non_empty(&record.about) {
+        texts.push(truncate_chars(about, MAX_TEXT_CHARS));
+    }
+    texts
 }
 
 /// A name without a leading "The": `The Wall Street Journal` -> `Wall

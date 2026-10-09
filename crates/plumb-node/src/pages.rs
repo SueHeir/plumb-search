@@ -100,6 +100,18 @@ pub const SETS: &[SetInfo] = &[
         bytes_per_page: 250,
     },
     SetInfo {
+        id: plumb_index::pages::REFERENCE_SET,
+        name: "Reference pages (health, dictionaries, recipes, how-tos and more)",
+        pages: 700_000,
+        bytes_per_page: 300,
+    },
+    SetInfo {
+        id: plumb_index::pages::SUBPAGES_SET,
+        name: "Pages of universities, companies, government, entertainment and museums",
+        pages: 300_000,
+        bytes_per_page: 300,
+    },
+    SetInfo {
         id: plumb_index::pages::PAPERS_SET,
         name: "Papers (OpenAlex, arXiv, CORE)",
         pages: 2_000_000,
@@ -117,6 +129,12 @@ pub const SETS: &[SetInfo] = &[
         name: "Official profiles without an article (Wikidata)",
         pages: 100_000,
         bytes_per_page: 200,
+    },
+    SetInfo {
+        id: plumb_index::pages::WIKTIONARY_SET,
+        name: "Word definitions (Wiktionary), for \"define\" searches",
+        pages: 1_000_000,
+        bytes_per_page: 150,
     },
     // Searched apart from the pages, by where they are (see
     // `crate::places`).
@@ -552,6 +570,58 @@ impl PageSets {
             sets.set(set.trim(), size.parse()?);
         }
         Ok(sets)
+    }
+}
+
+/// Which set files a node replaces by itself when a trusted node has a
+/// newer one (see `node/newer.rs`); `plumb run --set-updates`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum SetUpdates {
+    /// Every set and the map file, each growing at most
+    /// `MAX_GROWTH_PERCENT` past this node's own file at a time.
+    #[default]
+    All,
+    /// None: set files change only by hand (or `fetch-pages`). Files a node
+    /// has none of, or too few pages of, are still taken.
+    Off,
+    /// Only these sets (`map` for the map file), with no limit on growth:
+    /// naming a set says this machine can hold whatever it grows to.
+    Only(Vec<String>),
+}
+
+impl SetUpdates {
+    /// Whether `set` is updated, and whether with no limit on growth.
+    pub fn allows(&self, set: &str) -> Option<bool> {
+        match self {
+            SetUpdates::All => Some(false),
+            SetUpdates::Off => None,
+            SetUpdates::Only(sets) => sets.iter().any(|s| s == set).then_some(true),
+        }
+    }
+}
+
+impl FromStr for SetUpdates {
+    type Err = anyhow::Error;
+
+    /// `all`, `off`, or sets separated by commas: `films,map`.
+    fn from_str(text: &str) -> Result<Self> {
+        Ok(match text.trim().to_ascii_lowercase().as_str() {
+            "all" | "" => SetUpdates::All,
+            "off" | "none" => SetUpdates::Off,
+            list => {
+                let mut sets = Vec::new();
+                for set in list.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                    if set != "map" && SetInfo::find(set).is_none() {
+                        bail!(
+                            "unknown page set {set:?}; there are: map, {}",
+                            SETS.iter().map(|s| s.id).collect::<Vec<_>>().join(", ")
+                        );
+                    }
+                    sets.push(set.to_string());
+                }
+                SetUpdates::Only(sets)
+            }
+        })
     }
 }
 

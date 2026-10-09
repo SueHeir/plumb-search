@@ -113,6 +113,7 @@ pub mod features;
 mod fill;
 pub mod journal;
 mod network;
+mod newer;
 mod news;
 mod pages;
 mod places;
@@ -203,6 +204,9 @@ pub struct NodeConfig {
     /// trusted node answers (see `node/fill.rs`). Needs `network` with
     /// filling on and a trusted node. On by default.
     pub seed_from_network: bool,
+    /// Which page set files (and the map file) the node replaces by itself
+    /// when a trusted node has a newer one. All by default.
+    pub set_updates: crate::pages::SetUpdates,
     /// Where the seed data is downloaded from on first start.
     pub sources: SeedSources,
     /// How long to wait before trying failed work again. The wait doubles
@@ -326,6 +330,7 @@ impl NodeConfig {
             meaning_model: crate::meaning::MeaningModel::default(),
             embed_threads: None,
             seed_from_network: true,
+            set_updates: crate::pages::SetUpdates::All,
             sources: SeedSources::default(),
             retry_wait: Duration::from_secs(10 * 60),
             max_retry_wait: Duration::from_secs(6 * 60 * 60),
@@ -461,12 +466,18 @@ pub struct SeedSources {
     pub tranco_url: String,
     /// A SPARQL endpoint that answers Wikidata queries.
     pub wikidata_sparql_url: String,
+    /// A copy of Wikidata asked first for the official websites and their
+    /// facts, which lists them far faster than Wikidata's own endpoint
+    /// ([`download::QLEVER_WIKIDATA_URL`]); `None` to ask only
+    /// `wikidata_sparql_url`.
+    pub wikidata_mirror_url: Option<String>,
     /// English Wikipedia's API, for the first sentences of the articles
     /// about the best-known official websites' organizations.
     pub wikipedia_api_url: String,
     /// Only Wikidata items with at least this many Wikipedia sitelinks are
-    /// fetched, which keeps the download small enough to finish (see
-    /// [`download::download_wikidata_official_sites`]).
+    /// fetched, a notability filter; from 25 up when only
+    /// `wikidata_sparql_url` answers (see
+    /// [`download::download_wikidata_official_sites_with`]).
     pub wikidata_min_sitelinks: u32,
     /// How the Wikidata queries are spaced out: the pause between two and
     /// the wait before trying one again.
@@ -492,8 +503,9 @@ impl Default for SeedSources {
         SeedSources {
             tranco_url: download::TRANCO_LATEST_URL.to_string(),
             wikidata_sparql_url: download::WIKIDATA_SPARQL_URL.to_string(),
+            wikidata_mirror_url: Some(download::QLEVER_WIKIDATA_URL.to_string()),
             wikipedia_api_url: plumb_ingest::intros::WIKIPEDIA_API_URL.to_string(),
-            wikidata_min_sitelinks: 25,
+            wikidata_min_sitelinks: download::DEFAULT_MIN_SITELINKS,
             wikidata_pacing: download::WikidataPacing::default(),
             cc_ranks_url: None,
             model_base_url: plumb_embed::MODEL_BASE_URL.to_string(),
@@ -876,9 +888,7 @@ pub fn request_reseed(data_dir: &Path) -> Result<bool> {
 /// and index builds run on its blocking threads.
 pub async fn start(mut config: NodeConfig) -> Result<NodeHandle> {
     crate::limits::raise_open_file_limit();
-    if let Some(features) = features::FeatureSettings::load(&config.data_dir)? {
-        features.apply(&mut config)?;
-    }
+    features::FeatureSettings::apply_saved(&mut config)?;
     config.limit_to_crawling();
     config.check()?;
     let rank = crate::rank_config(config.alpha);
@@ -2034,12 +2044,24 @@ impl SearchBackend for Inner {
         places::search(self, query, home, country)
     }
 
+    fn locate(&self, text: &str, country: Option<&str>) -> Option<plumb_core::place::Place> {
+        places::locate(self, text, country)
+    }
+
+    fn site(&self, domain: &str) -> Option<Hit> {
+        self.current()?.backend().site(domain)
+    }
+
     fn base_map(&self) -> Option<Arc<crate::map::BaseMap>> {
         self.map.get()
     }
 
     fn known_song(&self, query: &str, options: &SearchOptions) -> Option<plumb_index::pages::Page> {
         pages::known_song(self, query, options)
+    }
+
+    fn definition(&self, name: &str) -> Option<plumb_index::pages::Page> {
+        pages::definition(self, name)
     }
 
     fn num_docs(&self) -> u64 {
@@ -2070,27 +2092,42 @@ impl Inner {
             Some(_) => limit + adult::MARGIN,
             None => limit,
         };
-        let mut results = match network::handle(self).map(|net| net.popularity()) {
-            None => index.backend().search_full_with(
-                query,
-                wanted,
-                options,
-                meaning.as_deref(),
-                rank,
-            )?,
-            Some(table) => {
-                let candidates = wanted.max(network::POPULARITY_CANDIDATES);
-                let mut results = index.backend().search_full_with(
+        let run = |options: &SearchOptions| -> Result<SearchResults> {
+            Ok(match network::handle(self).map(|net| net.popularity()) {
+                None => index.backend().search_full_with(
                     query,
-                    candidates,
+                    wanted,
                     options,
                     meaning.as_deref(),
                     rank,
-                )?;
-                network::apply_popularity(&table, query, &mut results.hits);
-                results
-            }
+                )?,
+                Some(table) => {
+                    let candidates = wanted.max(network::POPULARITY_CANDIDATES);
+                    let mut results = index.backend().search_full_with(
+                        query,
+                        candidates,
+                        options,
+                        meaning.as_deref(),
+                        rank,
+                    )?;
+                    network::apply_popularity(&table, query, &mut results.hits);
+                    results
+                }
+            })
         };
+        let mut results = run(options)?;
+        // Results shown for a spelling are for what was typed after all
+        // when the pages know the words typed.
+        if results
+            .spelling
+            .as_ref()
+            .is_some_and(|spelling| spelling.applied && pages::knows_typed(self, query, spelling))
+        {
+            results = run(&SearchOptions {
+                exact: true,
+                ..options.clone()
+            })?;
+        }
         if let Some(adult) = &adult {
             results.hits.retain(|hit| !adult.contains(&hit.domain));
         }

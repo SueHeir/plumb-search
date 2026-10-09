@@ -59,6 +59,8 @@ pub const DOCS_SITES: &[DocsSite] = &[
         index_pages: &[
             "https://docs.python.org/3/contents.html",
             "https://docs.python.org/3/py-modindex.html",
+            // The contents leave out the HOWTOs ("Sorting Techniques").
+            "https://docs.python.org/3/howto/index.html",
         ],
         names: &[],
         weight: 10,
@@ -78,6 +80,12 @@ pub const DOCS_SITES: &[DocsSite] = &[
         sitemaps: &[],
         index_pages: &[
             "https://doc.rust-lang.org/std/all.html",
+            // The books' chapters, which their one-page prints link to
+            // only by anchors.
+            "https://doc.rust-lang.org/book/toc.html",
+            "https://doc.rust-lang.org/reference/toc.html",
+            "https://doc.rust-lang.org/cargo/toc.html",
+            "https://doc.rust-lang.org/rust-by-example/toc.html",
             "https://doc.rust-lang.org/book/print.html",
             "https://doc.rust-lang.org/reference/print.html",
             "https://doc.rust-lang.org/cargo/print.html",
@@ -198,6 +206,16 @@ pub const DOCS_SITES: &[DocsSite] = &[
         index_pages: &[
             "https://numpy.org/doc/stable/reference/index.html",
             "https://numpy.org/doc/stable/user/index.html",
+            // Each function's page ("numpy.reshape"), from the lists of
+            // routines.
+            "https://numpy.org/doc/stable/reference/routines.array-creation.html",
+            "https://numpy.org/doc/stable/reference/routines.array-manipulation.html",
+            "https://numpy.org/doc/stable/reference/routines.math.html",
+            "https://numpy.org/doc/stable/reference/routines.linalg.html",
+            "https://numpy.org/doc/stable/reference/routines.sort.html",
+            "https://numpy.org/doc/stable/reference/routines.statistics.html",
+            "https://numpy.org/doc/stable/reference/routines.logic.html",
+            "https://numpy.org/doc/stable/reference/random/index.html",
         ],
         names: &["NumPy Manual", "NumPy v"],
         weight: 6,
@@ -711,6 +729,19 @@ pub fn asks_about(site: &DocsSite, query: &str) -> bool {
             .any(|word| !names(word) && !DOCS_WORDS.contains(&word.as_str()))
 }
 
+/// The docs site that `name` (lowercase, as a search writes it) names:
+/// its key, what its docs are of, another of its names or a word that asks
+/// about it. "postgres" and "mdn" name a docs site; "github" does not.
+pub fn named_site(name: &str) -> Option<&'static DocsSite> {
+    let name = name.trim().to_lowercase();
+    DOCS_SITES.iter().find(|site| {
+        site.key == name
+            || site.product.to_lowercase() == name
+            || site.names.iter().any(|other| other.to_lowercase() == name)
+            || site.asked_by.contains(&name.as_str())
+    })
+}
+
 /// The site of `key`.
 pub fn site(key: &str) -> Option<&'static DocsSite> {
     DOCS_SITES.iter().find(|site| site.key == key)
@@ -719,6 +750,16 @@ pub fn site(key: &str) -> Option<&'static DocsSite> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn names_docs_sites_by_what_they_document() {
+        let named = |name: &str| named_site(name).map(|site| site.key);
+        assert_eq!(named("postgres"), Some("postgres"));
+        assert_eq!(named("MDN"), Some("mdn"));
+        assert_eq!(named("python"), Some("python"));
+        assert_eq!(named("golang"), Some("go"));
+        assert_eq!(named("note taking"), None);
+    }
 
     #[test]
     fn keys_are_unique_and_roots_are_https() {
