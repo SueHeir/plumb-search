@@ -13,7 +13,8 @@
 //!
 //! A value is kept as Wikidata gives it, in one plain form per kind
 //! ([`ValueType`]): a name, a number in SI units (metres, square metres,
-//! people), or a date as precise as Wikidata knows it (`1879-03-14`,
+//! seconds, people), a place on Earth as `latitude,longitude` in degrees
+//! (`-35.2931,149.1269`), or a date as precise as Wikidata knows it (`1879-03-14`,
 //! `1879-03`, `1879`; `-0500` for 500 BC). A population may say the year
 //! it was counted after a `;`.
 
@@ -24,10 +25,13 @@ use serde::{Deserialize, Serialize};
 pub enum ValueType {
     /// Another item, kept by its English name.
     Item,
-    /// A number in SI units: metres, square metres, or a count.
+    /// A number in SI units: metres, square metres, seconds, or a count.
     Quantity,
     /// A date.
     Time,
+    /// A place on Earth: `latitude,longitude` in degrees, north and east
+    /// positive.
+    Coordinates,
 }
 
 /// The kinds of facts kept.
@@ -55,6 +59,10 @@ pub enum FactKind {
     Spouse,
     HeadOfState,
     HeadOfGovernment,
+    Coordinates,
+    AtomicNumber,
+    OrbitalPeriod,
+    Radius,
 }
 
 /// Every kind, in the order an article's facts are written.
@@ -80,6 +88,10 @@ pub const KINDS: &[FactKind] = &[
     FactKind::Spouse,
     FactKind::HeadOfState,
     FactKind::HeadOfGovernment,
+    FactKind::Coordinates,
+    FactKind::AtomicNumber,
+    FactKind::OrbitalPeriod,
+    FactKind::Radius,
 ];
 
 /// Most values kept of one kind (a company's founders).
@@ -113,6 +125,10 @@ impl FactKind {
             FactKind::Spouse => "spouse",
             FactKind::HeadOfState => "head-of-state",
             FactKind::HeadOfGovernment => "head-of-government",
+            FactKind::Coordinates => "coordinates",
+            FactKind::AtomicNumber => "atomic-number",
+            FactKind::OrbitalPeriod => "orbital-period",
+            FactKind::Radius => "radius",
         }
     }
 
@@ -144,6 +160,10 @@ impl FactKind {
             FactKind::Spouse => "P26",
             FactKind::HeadOfState => "P35",
             FactKind::HeadOfGovernment => "P6",
+            FactKind::Coordinates => "P625",
+            FactKind::AtomicNumber => "P1086",
+            FactKind::OrbitalPeriod => "P2146",
+            FactKind::Radius => "P2120",
         }
     }
 
@@ -163,11 +183,21 @@ impl FactKind {
             | FactKind::Spouse
             | FactKind::HeadOfState
             | FactKind::HeadOfGovernment => ValueType::Item,
-            FactKind::Population | FactKind::Elevation | FactKind::Height | FactKind::Area => {
-                ValueType::Quantity
-            }
+            FactKind::Population
+            | FactKind::Elevation
+            | FactKind::Height
+            | FactKind::Area
+            | FactKind::AtomicNumber
+            | FactKind::OrbitalPeriod
+            | FactKind::Radius => ValueType::Quantity,
             FactKind::Born | FactKind::Died | FactKind::Founded => ValueType::Time,
+            FactKind::Coordinates => ValueType::Coordinates,
         }
+    }
+
+    /// Whether the kind is a count, with no unit to convert to SI.
+    pub fn unitless(self) -> bool {
+        matches!(self, FactKind::Population | FactKind::AtomicNumber)
     }
 
     /// Whether only what holds now counts: a capital, CEO or spouse that
@@ -235,6 +265,10 @@ impl FactKind {
             FactKind::Spouse => format!("Spouse of {subject}"),
             FactKind::HeadOfState => format!("Head of state of {subject}"),
             FactKind::HeadOfGovernment => format!("Head of government of {subject}"),
+            FactKind::Coordinates => format!("Coordinates of {subject}"),
+            FactKind::AtomicNumber => format!("Atomic number of {subject}"),
+            FactKind::OrbitalPeriod => format!("Orbital period of {subject}"),
+            FactKind::Radius => format!("Radius of {subject}"),
         }
     }
 }
@@ -263,7 +297,16 @@ pub fn value_fits(value_type: ValueType, value: &str) -> bool {
                 && (year.is_empty() || year.parse::<i32>().is_ok())
         }
         ValueType::Time => Date::parse(value).is_some(),
+        ValueType::Coordinates => coordinates(value).is_some(),
     }
+}
+
+/// The latitude and longitude of a [`ValueType::Coordinates`] value.
+pub fn coordinates(value: &str) -> Option<(f64, f64)> {
+    let (lat, lon) = value.split_once(',')?;
+    let lat: f64 = lat.trim().parse().ok()?;
+    let lon: f64 = lon.trim().parse().ok()?;
+    ((-90.0..=90.0).contains(&lat) && (-180.0..=180.0).contains(&lon)).then_some((lat, lon))
 }
 
 /// Writes `facts` as `|`-separated pairs for a line of profiles, leaving
@@ -488,7 +531,7 @@ pub fn fact_asked(query: &str) -> Option<FactQuestion> {
         ("elevation of ", &[Elevation], false),
         ("area of ", &[Area], false),
         ("size of ", &[Area], false),
-        ("how big is ", &[Area], false),
+        ("how big is ", &[Area, Radius], false),
         ("how old is ", &[Born], true),
         ("age of ", &[Born], true),
         ("birthday of ", &[Born], false),
@@ -536,6 +579,15 @@ pub fn fact_asked(query: &str) -> Option<FactQuestion> {
             false,
         ),
         ("leader of ", &[HeadOfGovernment, HeadOfState], false),
+        ("coordinates of ", &[Coordinates], false),
+        ("gps coordinates of ", &[Coordinates], false),
+        ("latitude and longitude of ", &[Coordinates], false),
+        ("lat long of ", &[Coordinates], false),
+        ("atomic number of ", &[AtomicNumber], false),
+        ("orbital period of ", &[OrbitalPeriod], false),
+        ("how long is a year on ", &[OrbitalPeriod], false),
+        ("length of a year on ", &[OrbitalPeriod], false),
+        ("radius of ", &[Radius], false),
     ];
     // Words after it.
     let after: &[(&str, &[FactKind], bool)] = &[
@@ -566,6 +618,13 @@ pub fn fact_asked(query: &str) -> Option<FactQuestion> {
         (" president", &[HeadOfState], false),
         (" prime minister", &[HeadOfGovernment], false),
         (" leader", &[HeadOfGovernment, HeadOfState], false),
+        (" gps coordinates", &[Coordinates], false),
+        (" coordinates", &[Coordinates], false),
+        (" latitude and longitude", &[Coordinates], false),
+        (" lat long", &[Coordinates], false),
+        (" atomic number", &[AtomicNumber], false),
+        (" orbital period", &[OrbitalPeriod], false),
+        (" radius", &[Radius], false),
     ];
     // Words around it.
     let around: &[(&str, &str, &[FactKind])] = &[
@@ -582,6 +641,12 @@ pub fn fact_asked(query: &str) -> Option<FactQuestion> {
         ("where is ", " headquartered", &[Headquarters]),
         ("where is ", " based", &[Headquarters]),
         ("what currency does ", " use", &[Currency]),
+        ("how long does ", " take to orbit the sun", &[OrbitalPeriod]),
+        (
+            "how long does it take ",
+            " to orbit the sun",
+            &[OrbitalPeriod],
+        ),
     ];
     let found = around
         .iter()
@@ -649,6 +714,10 @@ mod tests {
             "f-capital=Canberra|f-population=27204809;2024|f-born=1879-03-14|f-founded=-0753"
         );
         assert_eq!(parse_facts(&text), facts);
+        let place = vec![fact(FactKind::Coordinates, "-35.2931,149.1269")];
+        assert_eq!(write_facts(&place), "f-coordinates=-35.2931,149.1269");
+        assert_eq!(parse_facts("f-coordinates=-35.2931,149.1269"), place);
+        assert_eq!(parse_facts("f-coordinates=95,10|f-coordinates=x"), []);
         // Unknown kinds, profiles and values that don't read are skipped.
         let parsed = parse_facts("youtube-handle=x|f-mass=3|f-born=yesterday|f-elevation=8848.86");
         assert_eq!(parsed, vec![fact(FactKind::Elevation, "8848.86")]);
@@ -736,6 +805,18 @@ mod tests {
             ("germany president", HeadOfState, "germany"),
             ("who is the president of france", HeadOfState, "france"),
             ("prime minister of canada", HeadOfGovernment, "canada"),
+            ("coordinates of yellowstone", Coordinates, "yellowstone"),
+            ("eiffel tower gps coordinates", Coordinates, "eiffel tower"),
+            ("what is the atomic number of gold", AtomicNumber, "gold"),
+            ("iron atomic number", AtomicNumber, "iron"),
+            ("orbital period of mars", OrbitalPeriod, "mars"),
+            ("how long is a year on jupiter", OrbitalPeriod, "jupiter"),
+            (
+                "how long does it take neptune to orbit the sun",
+                OrbitalPeriod,
+                "neptune",
+            ),
+            ("radius of the earth", Radius, "earth"),
         ] {
             assert_eq!(asked(q), Some((kind, subject.into(), false)), "{q}");
         }

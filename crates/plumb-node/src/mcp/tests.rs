@@ -848,6 +848,18 @@ fn official_site_prefers_a_packages_home_page_to_a_guess() {
     assert_eq!(answer["alternatives"][0]["domain"], "xapo.com");
 }
 
+#[test]
+fn search_is_in_english_unless_asked() {
+    let language = |args: Value| search_language(args.as_object().unwrap());
+    assert_eq!(language(json!({})), Ok(Some("en".into())));
+    assert_eq!(language(json!({ "language": "any" })), Ok(None));
+    assert_eq!(
+        language(json!({ "language": "de-DE" })),
+        Ok(Some("de".into()))
+    );
+    assert!(language(json!({ "language": "german!" })).is_err());
+}
+
 /// Finds Wikipedia's article on Australia, with its facts, for any query
 /// naming it.
 struct Australia;
@@ -1020,4 +1032,284 @@ fn relate_is_answered_here_and_offered_with_the_tools() {
         description.ends_with("Relations: capital."),
         "{description}"
     );
+}
+
+/// Answers each query with what `answer` gives for it.
+struct Scripted(Box<dyn Fn(&str) -> SearchResults + Send + Sync>);
+
+impl SearchBackend for Scripted {
+    fn search(&self, query: &str, _limit: usize) -> Result<Vec<Hit>> {
+        Ok((self.0)(query).hits)
+    }
+
+    fn search_full(
+        &self,
+        query: &str,
+        _limit: usize,
+        _options: &SearchOptions,
+    ) -> Result<SearchResults> {
+        Ok((self.0)(query))
+    }
+
+    fn num_docs(&self) -> u64 {
+        1
+    }
+}
+
+fn scripted(answer: impl Fn(&str) -> SearchResults + Send + Sync + 'static) -> Mcp {
+    Mcp::new(Arc::new(Scripted(Box::new(answer))), None)
+}
+
+fn titled(domain: &str, title: &str, link_score: f32, named: bool) -> Hit {
+    Hit {
+        title: Some(title.to_string()),
+        ..hit(domain, 1.0, link_score, named)
+    }
+}
+
+/// A Wikipedia article named by the query, whose item's official website
+/// is on `site` (at `website` when that is a subdomain or inner page).
+fn article(title: &str, site: Option<&str>, website: Option<&str>) -> PlacedPage {
+    let page = Page::from_article(
+        "en",
+        plumb_core::article::Article {
+            title: title.into(),
+            description: Some(format!("about {title}")),
+            item: Some("Q1".into()),
+            site: site.map(str::to_string),
+            website: website.map(str::to_string),
+            views: 1000,
+            ..Default::default()
+        },
+    );
+    PlacedPage {
+        hit: plumb_index::pages::PageHit {
+            page,
+            score: 0.9,
+            named: true,
+            popularity: 0.5,
+            whole: true,
+            learned: None,
+        },
+        under: None,
+        at: 0,
+    }
+}
+
+fn results(hits: Vec<Hit>, pages: Vec<PlacedPage>) -> SearchResults {
+    SearchResults {
+        hits,
+        pages,
+        site_search: None,
+        spelling: None,
+    }
+}
+
+fn official(mcp: &Mcp, name: &str) -> Value {
+    call(mcp, "official_site", json!({ "name": name }))["result"]["structuredContent"].clone()
+}
+
+#[test]
+fn official_site_takes_the_site_wikidata_gives_the_named_article() {
+    // LifeWiki is conwaylife.com/wiki, not life-wiki.com.
+    let mcp = scripted(|_| {
+        results(
+            vec![titled("life-wiki.com", "Free encyclopedia", 0.1, true)],
+            vec![article(
+                "LifeWiki",
+                Some("conwaylife.com"),
+                Some("https://conwaylife.com/wiki/"),
+            )],
+        )
+    });
+    let answer = official(&mcp, "LifeWiki");
+    assert_eq!(answer["domain"], "conwaylife.com", "{answer}");
+    assert_eq!(answer["url"], "https://conwaylife.com/wiki/");
+    assert_eq!(answer["confidence"], "high");
+    assert!(answer["why"].to_string().contains("LifeWiki"), "{answer}");
+    assert_eq!(answer["alternatives"][0]["domain"], "life-wiki.com");
+
+    // MathWorld is a subdomain of wolfram.com.
+    let mcp = scripted(|_| {
+        results(
+            vec![titled("wolfram.com", "Wolfram", 0.6, false)],
+            vec![article(
+                "MathWorld",
+                Some("wolfram.com"),
+                Some("https://mathworld.wolfram.com/"),
+            )],
+        )
+    });
+    let answer = official(&mcp, "Wolfram MathWorld");
+    assert_eq!(answer["domain"], "mathworld.wolfram.com", "{answer}");
+    assert_eq!(answer["url"], "https://mathworld.wolfram.com/");
+    assert_eq!(answer["confidence"], "high");
+
+    // A well-known site of exactly the name keeps it: "zoom" is zoom.us,
+    // whatever film is called Zoom.
+    let mcp = scripted(|_| {
+        let mut zoom = titled("zoom.us", "Zoom", 0.9, true);
+        zoom.official = true;
+        results(
+            vec![zoom],
+            vec![article("Zoom (film)", Some("zoomfilm.example"), None)],
+        )
+    });
+    assert_eq!(official(&mcp, "zoom")["domain"], "zoom.us");
+}
+
+#[test]
+fn official_site_is_unsure_of_a_namesake_of_an_article_without_a_site() {
+    // Golly is a program whose article names no site; gollo.com is a shop.
+    let mcp = scripted(|_| {
+        results(
+            vec![titled("gollo.com", "Gollo Costa Rica: Compras", 0.2, true)],
+            vec![article("Golly (program)", None, None)],
+        )
+    });
+    let answer = official(&mcp, "Golly");
+    assert_eq!(answer["domain"], "gollo.com");
+    assert_eq!(answer["confidence"], "low", "{answer}");
+    assert!(answer["why"].to_string().contains("Golly (program)"));
+}
+
+#[test]
+fn official_site_prefers_a_site_whose_title_is_the_name() {
+    let mcp = scripted(|_| {
+        let mut chess = titled("chess.com", "Chess.com - Play Chess Online", 0.9, false);
+        chess.official = true;
+        results(
+            vec![
+                chess,
+                titled(
+                    "chessprogramming.org",
+                    "Main Page - Chess Programming Wiki",
+                    0.25,
+                    false,
+                ),
+            ],
+            Vec::new(),
+        )
+    });
+    let answer = official(&mcp, "Chess Programming Wiki");
+    assert_eq!(answer["domain"], "chessprogramming.org", "{answer}");
+    assert_eq!(answer["confidence"], "medium");
+}
+
+#[test]
+fn official_site_leaves_out_alternatives_with_nothing_of_the_name() {
+    let mcp = server(vec![
+        titled("norvig.com", "Peter Norvig", 0.3, true),
+        titled("x.com", "X", 0.9, false),
+        titled("norvig-fans.example", "Fans", 0.1, false),
+    ]);
+    let answer = official(&mcp, "norvig.com");
+    assert_eq!(answer["domain"], "norvig.com");
+    let others: Vec<&str> = answer["alternatives"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|alt| alt["domain"].as_str().unwrap())
+        .collect();
+    assert_eq!(others, ["norvig-fans.example"]);
+}
+
+#[test]
+fn official_site_trusts_no_unrelated_official_site() {
+    // github.com is official, but not Pillow's; Pillow's package says
+    // where its docs are.
+    let mcp = scripted(|query| {
+        if query.ends_with("package") {
+            let page = Page::from_package(plumb_core::article::Article {
+                title: "pillow".into(),
+                item: Some("pypi:pillow".into()),
+                views: 1_000,
+                package: Some(plumb_core::packages::PackageInfo {
+                    registry: "pypi".into(),
+                    name: "pillow".into(),
+                    homepage: Some("https://python-pillow.github.io".into()),
+                    docs: Some("https://pillow.readthedocs.io".into()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+            .unwrap();
+            let mut placed = article("x", None, None);
+            placed.hit.page = page;
+            return results(Vec::new(), vec![placed]);
+        }
+        let mut github = titled("github.com", "GitHub", 0.95, false);
+        github.official = true;
+        results(vec![github], Vec::new())
+    });
+    let answer = official(&mcp, "Pillow docs");
+    assert_eq!(answer["url"], "https://pillow.readthedocs.io", "{answer}");
+    assert_eq!(answer["confidence"], "medium");
+}
+
+#[test]
+fn official_site_finds_the_site_of_an_abbreviation_in_the_name() {
+    let mcp = scripted(|query| match query {
+        "NPS" => results(
+            vec![titled("nps.gov", "National Park Service", 0.7, true)],
+            Vec::new(),
+        ),
+        _ => results(vec![titled("npmjs.org", "npm", 0.8, false)], Vec::new()),
+    });
+    let answer = official(&mcp, "NPS API developer");
+    assert_eq!(answer["domain"], "nps.gov", "{answer}");
+    assert_eq!(answer["confidence"], "medium");
+    assert_eq!(answer["alternatives"][0]["domain"], "npmjs.org");
+}
+
+#[test]
+fn site_info_says_what_it_folds_and_whose_official_site_it_is() {
+    let mcp = scripted(|_| {
+        let mut placed = article("National Park Service", Some("nps.gov"), None);
+        placed.under = Some("nps.gov".into());
+        results(
+            vec![titled("nps.gov", "NPS.gov Homepage", 0.69, true)],
+            vec![placed],
+        )
+    });
+    let reply = call(
+        &mcp,
+        "site_info",
+        json!({ "domain": "https://developer.nps.gov/api/" }),
+    );
+    let answer = &reply["result"]["structuredContent"];
+    assert_eq!(answer["domain"], "nps.gov");
+    assert_eq!(answer["host"], "developer.nps.gov");
+    assert_eq!(answer["part_of"], "nps.gov");
+    assert_eq!(answer["official"], true);
+    assert_eq!(answer["official_for"], "National Park Service");
+    let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(
+        text.starts_with("Plumb keeps no entry of its own for developer.nps.gov"),
+        "{text}"
+    );
+    assert!(
+        text.contains("official website of National Park Service"),
+        "{text}"
+    );
+
+    // www. is the site itself.
+    let answer =
+        &call(&mcp, "site_info", json!({ "domain": "www.nps.gov" }))["result"]["structuredContent"];
+    assert_eq!(answer.get("host"), None);
+}
+
+#[test]
+fn names_lose_what_is_wanted_of_their_sites() {
+    assert_eq!(bare_name("Pillow docs").as_deref(), Some("pillow"));
+    assert_eq!(bare_name("NPS API developer").as_deref(), Some("nps"));
+    assert_eq!(bare_name("paypal login").as_deref(), Some("paypal"));
+    assert_eq!(bare_name("Pillow"), None);
+    assert_eq!(bare_name("docs"), None);
+    assert_eq!(
+        asked_page("https://www.nps.gov/yose/index.htm").as_deref(),
+        Some("https://www.nps.gov/yose/index.htm")
+    );
+    assert_eq!(asked_page("nps.gov"), None);
+    assert_eq!(asked_page("https://nps.gov/"), None);
 }

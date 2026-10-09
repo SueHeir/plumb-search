@@ -109,7 +109,7 @@
       <li>obeys robots.txt, including <code>Crawl-delay</code>,</li>
       <li>fetches the homepage, robots.txt and the site's icon, and for the best-ranked sites their RSS or Atom feed. Links to key pages, such as Log in, are picked from the homepage, not fetched.</li>
     </ul>
-    <p>Two other kinds of request come from Plumb. When someone's AI assistant asks their own node to read a page, the node fetches that one page as <code>plumb-mcp/&lt;version&gt; (+https://github.com/SueHeir/plumb-search)</code>. And each node downloads the European Central Bank's daily exchange rates for currency conversions.</p>
+    <p>Two other kinds of request come from Plumb. When someone's AI assistant asks their own node to read a page, the node fetches that one page as <code>plumb-mcp/&lt;version&gt; (+https://github.com/SueHeir/plumb-search)</code>. And each node downloads the European Central Bank's daily exchange rates for currency conversions, and Open-Meteo's forecast for a town when someone asks its weather.</p>
     <p>Every copy of Plumb does its own crawling, so visits can come from many addresses, all following the same rules. To keep Plumb out, add this to your robots.txt:</p>
 <pre><code>User-agent: PlumbSearch
 Disallow: /</code></pre>

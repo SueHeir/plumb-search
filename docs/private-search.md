@@ -87,7 +87,8 @@ frequencies), and accents are not folded (`nestle` does not find
 agrees with the index on a set of queries.
 
 The home country comes from the node, as for normal search: from the
-browser's language unless the node was started with `--country`.
+browser's language unless the node was started with `--country`, else the
+United States.
 
 Kind searches ("banks") only find sites that also carry the word in their
 names, since buckets hold sites by their names, not their kinds.
