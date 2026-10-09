@@ -2427,7 +2427,9 @@ fn without_copies(hits: Vec<Hit>, typed: Option<&str>, home: Option<&str>) -> Ve
         // (airbnb.tech). A site on a generic ending is never a copy of a
         // country's (honda.com of honda.com.vn, astro.build of
         // astro.com.my), and a site with no title is not a copy of a
-        // namesake whose title does not name the brand (hm.com of hm.edu).
+        // namesake whose title does not name the brand (hm.com of hm.edu)
+        // nor when it is well known: no title is then a gap in the crawl
+        // (abc.net.au next to abc.com, weather.com next to weather.gov).
         // Endings used as generic ones (.io, .me, .co) are not countries'.
         let country = |suffix: &str| {
             suffix
@@ -2441,7 +2443,11 @@ fn without_copies(hits: Vec<Hit>, typed: Option<&str>, home: Option<&str>) -> Ve
                     && s != suffix
                     && (country(suffix) || !country(s))
                     && match &hit.title {
-                        None => other.title.is_some() && names_brand(other, label),
+                        None => {
+                            hit.link_score < WELL_KNOWN_LINK_SCORE
+                                && other.title.is_some()
+                                && names_brand(other, label)
+                        }
                         Some(_) => {
                             (country(suffix) || hit.link_score < COPYCAT_LINK_SCORE)
                                 && (names_brand(hit, label) || same_title(other))
@@ -5303,6 +5309,26 @@ mod tests {
                 0.4,
             ),
         ];
+        let cases = cases.into_iter().chain([
+            (
+                "abc.com",
+                Some("ABC Network - ABC.com"),
+                0.67,
+                true,
+                "abc.net.au",
+                None,
+                0.6,
+            ),
+            (
+                "weather.gov",
+                Some("National Weather Service"),
+                0.67,
+                true,
+                "weather.com",
+                None,
+                0.55,
+            ),
+        ]);
         for (a, a_title, a_link, a_official, b, b_title, b_link) in cases {
             let both = vec![
                 hit(a, a_title, a_link, a_official),
