@@ -180,25 +180,79 @@ impl FeatureSettings {
         Ok(())
     }
 
+    /// The saved settings. In a data directory copied from another node's
+    /// (see [`Saved::Elsewhere`]) the network is off.
     pub fn load(dir: &Path) -> Result<Option<Self>> {
-        match std::fs::read(dir.join("features.json")) {
-            Ok(bytes) => {
-                let settings: Self =
-                    serde_json::from_slice(&bytes).context("reading features.json")?;
-                settings.check()?;
-                Ok(Some(settings))
+        Ok(Self::read(dir)?.map(|(mut settings, saved)| {
+            if matches!(saved, Saved::Elsewhere(_)) {
+                settings.network = false;
+                settings.share_popularity = false;
             }
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(err) => Err(err).context("reading features.json"),
-        }
+            settings
+        }))
+    }
+
+    /// The settings as saved, and where they were saved.
+    fn read(dir: &Path) -> Result<Option<(Self, Saved)>> {
+        let bytes = match std::fs::read(dir.join("features.json")) {
+            Ok(bytes) => bytes,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => return Err(err).context("reading features.json"),
+        };
+        let value: serde_json::Value =
+            serde_json::from_slice(&bytes).context("reading features.json")?;
+        let saved = match value.get(SAVED_IN).and_then(|v| v.as_str()) {
+            None => Saved::Unknown,
+            Some(saved_in) if saved_in == stamp(dir) => Saved::Here,
+            Some(saved_in) => Saved::Elsewhere(saved_in.to_owned()),
+        };
+        let settings: Self = serde_json::from_value(value).context("reading features.json")?;
+        settings.check()?;
+        Ok(Some((settings, saved)))
     }
 
     pub fn save(&self, dir: &Path) -> Result<()> {
         self.check()?;
+        let mut value = serde_json::to_value(self)?;
+        value[SAVED_IN] = stamp(dir).into();
         store::write_atomically(
             &dir.join("features.json"),
-            &serde_json::to_vec_pretty(self)?,
+            &serde_json::to_vec_pretty(&value)?,
         )
+    }
+
+    /// Applies the settings saved in `config`'s data directory, if any, as
+    /// a node starts. A copy of another node's data directory (a test node
+    /// made from a live one) carries its network identity and its saved
+    /// choice to join the network, so there the network stays off unless
+    /// `--network` is given; the settings are then saved again as this
+    /// directory's own.
+    pub fn apply_saved(config: &mut NodeConfig) -> Result<()> {
+        let dir = config.data_dir.clone();
+        let Some((mut settings, saved)) = Self::read(&dir)? else {
+            return Ok(());
+        };
+        let on_command_line = config.network.is_some();
+        if let Saved::Elsewhere(other) = &saved {
+            if settings.network && !on_command_line {
+                tracing::warn!(
+                    "The Plumb network stays off: {} was saved in {other}, so this data                      directory is a copy of another node's. Start with --network, or turn                      the network on in the panel's Optional features, to join it.",
+                    dir.join("features.json").display()
+                );
+                settings.network = false;
+                settings.share_popularity = false;
+            }
+        }
+        if settings.network && !on_command_line {
+            tracing::info!(
+                "Joining the Plumb network: it was turned on in the panel's Optional                  features (saved in features.json), not by --network"
+            );
+        }
+        settings.apply(config)?;
+        if !matches!(saved, Saved::Here) {
+            settings.save(&dir)?;
+        }
+        Ok(())
     }
 
     pub fn apply(&self, config: &mut NodeConfig) -> Result<()> {
@@ -264,6 +318,29 @@ impl FeatureSettings {
     }
 }
 
+/// The key of features.json that names the data directory it was saved in.
+const SAVED_IN: &str = "saved_in";
+
+/// Where features.json was saved.
+#[derive(Debug, PartialEq, Eq)]
+enum Saved {
+    /// In the directory it is read from.
+    Here,
+    /// In another directory (the one given): the directory was copied, or
+    /// moved.
+    Elsewhere(String),
+    /// Before the directory was written down.
+    Unknown,
+}
+
+/// How features.json names the data directory `dir`.
+fn stamp(dir: &Path) -> String {
+    std::fs::canonicalize(dir)
+        .unwrap_or_else(|_| dir.to_path_buf())
+        .display()
+        .to_string()
+}
+
 fn default_trusted() -> Vec<plumb_net::PeerId> {
     plumb_net::NetConfig::new(Default::default()).trusted_peers
 }
@@ -309,6 +386,63 @@ mod tests {
         assert_eq!(
             FeatureSettings::load(dir.path()).unwrap(),
             Some(preferences)
+        );
+    }
+
+    #[test]
+    fn a_copied_data_directory_stays_off_the_network_unless_asked() {
+        let live = tempfile::tempdir().unwrap();
+        let on = FeatureSettings {
+            network: true,
+            share_popularity: true,
+            ..Default::default()
+        };
+        on.save(live.path()).unwrap();
+        let copy = |dir: &Path| {
+            std::fs::copy(live.path().join("features.json"), dir.join("features.json")).unwrap();
+        };
+
+        // The live node itself joins.
+        let mut config = NodeConfig::desktop(live.path().into());
+        FeatureSettings::apply_saved(&mut config).unwrap();
+        assert!(config.network.is_some());
+
+        // A copy does not, and is saved as off.
+        let test = tempfile::tempdir().unwrap();
+        copy(test.path());
+        assert!(!FeatureSettings::load(test.path()).unwrap().unwrap().network);
+        let mut config = NodeConfig::desktop(test.path().into());
+        FeatureSettings::apply_saved(&mut config).unwrap();
+        assert!(config.network.is_none());
+        assert!(!config.share_popularity);
+        let saved = FeatureSettings::read(test.path()).unwrap().unwrap();
+        assert_eq!(saved.1, Saved::Here);
+        assert!(!saved.0.network);
+
+        // Unless started with --network.
+        let asked = tempfile::tempdir().unwrap();
+        copy(asked.path());
+        let mut config = NodeConfig::desktop(asked.path().into());
+        config.network = Some(plumb_net::NetConfig::new(asked.path().join("net")));
+        FeatureSettings::apply_saved(&mut config).unwrap();
+        assert!(config.network.is_some());
+        assert!(
+            FeatureSettings::load(asked.path())
+                .unwrap()
+                .unwrap()
+                .network
+        );
+
+        // Settings saved before the directory was written down are kept,
+        // and from then on belong to it.
+        let old = tempfile::tempdir().unwrap();
+        std::fs::write(old.path().join("features.json"), br#"{"network": true}"#).unwrap();
+        let mut config = NodeConfig::desktop(old.path().into());
+        FeatureSettings::apply_saved(&mut config).unwrap();
+        assert!(config.network.is_some());
+        assert_eq!(
+            FeatureSettings::read(old.path()).unwrap().unwrap().1,
+            Saved::Here
         );
     }
 
