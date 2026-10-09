@@ -345,6 +345,17 @@ pub struct RankConfig {
     /// (vacationrentals.com) leaves the rest listed: airbnb.com is still
     /// what "vacation rentals" is after.
     pub named_needs_all_words: bool,
+    /// With a [`Meaning`], for a query of two main words or more that no
+    /// site is named by in full: the closeness in meaning a site lacking
+    /// one of its main words needs to be listed at all. Matching a word or
+    /// two is no answer: "secret of mana walkthrough" listed
+    /// victoriassecret.com, "numbness on top of foot" flashscore.fr
+    /// ("Foot en direct"), and nothing near in meaning stands for them. A
+    /// site the query names by its first words is kept, unless the words
+    /// go on from the name as one phrase ("the cricket and the ant" is not
+    /// cricket.com.au's). Fewer results are shown rather than these.
+    /// `None` keeps them.
+    pub partial_closeness: Option<f32>,
     /// BM25 boost of a query word matching a site's search terms
     /// ([`plumb_core::SiteRecord::terms`]), picked from its whole homepage.
     pub terms_boost: f32,
@@ -403,6 +414,7 @@ impl Default for RankConfig {
             meaning_only_relevance: Some(0.35),
             named_share: Some(0.4),
             named_needs_all_words: true,
+            partial_closeness: Some(0.5),
             terms_boost: 1.0,
             filler_words: true,
             questions_name_nothing: true,
@@ -1274,7 +1286,7 @@ impl Searcher {
         // nearest: among hundreds of thousands of sites, small ones whose
         // text repeats the query's words crowd out the big site it
         // describes, which may say little about itself.
-        let nearest = match meaning {
+        let (nearest, nearest_ranked) = match meaning {
             Some(meaning) => {
                 let domains = meaning.nearest();
                 let terms = |domains: &[String]| -> Vec<Term> {
@@ -1284,14 +1296,15 @@ impl Searcher {
                         .collect()
                 };
                 let split = domains.len().min(NEAREST_RANKED);
-                let mut docs = matching_docs(&searcher, terms(&domains[..split]))?;
+                let ranked = matching_docs(&searcher, terms(&domains[..split]))?;
+                let mut docs = ranked.clone();
                 let next = matching_docs(&searcher, terms(&domains[split..]))?;
                 let mut next = link_scores(&searcher, &next);
                 next.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
                 docs.extend(next.into_iter().take(NEAREST_POPULAR).map(|(_, addr)| addr));
-                docs
+                (docs, ranked)
             }
-            None => HashSet::new(),
+            None => (HashSet::new(), HashSet::new()),
         };
         let known: HashSet<DocAddress> = candidates.iter().map(|&(_, addr)| addr).collect();
         let mut unranked: Vec<DocAddress> = names
@@ -1512,6 +1525,16 @@ impl Searcher {
                     None => words,
                 }
             };
+            let closeness = if is_kind || name.label >= query.len {
+                None
+            } else {
+                let words = if max_bm25 > 0.0 {
+                    (bm25 / max_bm25).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                closeness_of(addr).or_else(|| coverage.get(&addr).map(|&share| share * words))
+            };
             let label_bonus = if name.label >= query.len {
                 cfg.exact_label_bonus
             } else {
@@ -1559,6 +1582,7 @@ impl Searcher {
                 country,
                 named: name.typed || name.words() >= query.len,
                 label_names_query: query.len >= 2 && name.label >= query.len,
+                closeness,
                 tie_break: (addr.segment_ord, domain_ord),
             });
         }
@@ -1568,6 +1592,30 @@ impl Searcher {
                 .then_with(|| b.link_score.total_cmp(&a.link_score))
                 .then_with(|| a.tie_break.cmp(&b.tie_break))
         });
+
+        // Matching a word or two of a longer query, found by no name and
+        // not near it in meaning: no answer, however big the site
+        // (victoriassecret.com for "secret of mana walkthrough").
+        if let Some(floor) = cfg
+            .partial_closeness
+            .filter(|floor| *floor > 0.0 && meaning.is_some())
+        {
+            let named_inside = self.names_inside(&searcher, &query, query_text)?;
+            let partial: Vec<DocAddress> = ranked
+                .iter()
+                .filter(|r| {
+                    !r.named
+                        && !kinds.contains(&r.addr)
+                        && !named_inside.contains(&r.addr)
+                        && !nearest_ranked.contains(&r.addr)
+                        && r.closeness.is_none_or(|closeness| closeness < floor)
+                })
+                .map(|r| r.addr)
+                .collect();
+            let all: Vec<DocAddress> = ranked.iter().map(|r| r.addr).collect();
+            let missing = query.missing_found_words(&searcher, &self.fields, &all, &partial)?;
+            ranked.retain(|r| !missing.contains(&r.addr));
+        }
 
         // Far below a site the query names: filler.
         if let (Some(share), Some(top)) = (cfg.named_share, ranked.first()) {
@@ -1937,6 +1985,47 @@ impl Searcher {
         Ok(names)
     }
 
+    /// The sites whose domain label or an alias is a run of the query's
+    /// words anywhere in it ("hilton" in "back bay hilton", "wix" in
+    /// "ecommerce wix"), unless the run goes on into more words as one
+    /// phrase ("cricket" in "the cricket and the ant", "guess" in "guess
+    /// the states game"). A run of one function or filler word names
+    /// nothing.
+    fn names_inside(
+        &self,
+        searcher: &tantivy::Searcher,
+        query: &ParsedQuery,
+        query_text: &str,
+    ) -> Result<HashSet<DocAddress>> {
+        let mut named = HashSet::new();
+        if query.asked {
+            return Ok(named);
+        }
+        let tokens = analysis::tokens(&self.words, query_text);
+        let tokens = &tokens[..tokens.len().min(MAX_QUERY_WORDS)];
+        let mut terms = Vec::new();
+        for start in 0..tokens.len() {
+            let mut key = String::new();
+            for end in start..tokens.len() {
+                key.push_str(&tokens[end]);
+                let one = end == start;
+                if one && (is_function_word(&key) || FILLER_WORDS.contains(&key.as_str())) {
+                    continue;
+                }
+                let goes_on = tokens
+                    .get(end + 1)
+                    .is_some_and(|next| is_function_word(next));
+                if goes_on {
+                    continue;
+                }
+                terms.push(Term::from_field_text(self.fields.label_key, &key));
+                terms.push(Term::from_field_text(self.fields.alias_key, &key));
+            }
+        }
+        named.extend(matching_docs(searcher, terms)?);
+        Ok(named)
+    }
+
     /// Whether the document's title, description or Wikidata description
     /// holds `words` consecutive words whose [`kind_key`] is `key`.
     fn describes_itself_as(
@@ -2179,6 +2268,10 @@ struct Ranked {
     /// The domain's label is the whole query of two or more words
     /// (awesome-python.com for "awesome python").
     label_names_query: bool,
+    /// How close in meaning the site is to the query, or as its words
+    /// match for a site with no embedding; `None` without a [`Meaning`] or
+    /// for a site the query names in full.
+    closeness: Option<f32>,
     tie_break: (u32, u64),
 }
 
@@ -2785,6 +2878,62 @@ impl ParsedQuery {
             clauses.add(Term::from_field_text(f.joined, joined), 1.0);
             clauses.add(Term::from_field_text(f.label, joined), 1.0);
             for (bm25, addr) in bm25_of(searcher, &clauses.into_query(), docs.to_vec())? {
+                if bm25 > 0.0 {
+                    missing.remove(&addr);
+                }
+            }
+        }
+        Ok(missing)
+    }
+
+    /// Which of `docs` lack one of the query's main words that some of
+    /// `found` have: a word no site found has (a misspelling, "aries
+    /// horroscope") is not held against any of them. None when fewer than
+    /// two main words are found.
+    fn missing_found_words(
+        &self,
+        searcher: &tantivy::Searcher,
+        f: &Fields,
+        found: &[DocAddress],
+        docs: &[DocAddress],
+    ) -> Result<HashSet<DocAddress>> {
+        let mut missing = HashSet::new();
+        if docs.is_empty() {
+            return Ok(missing);
+        }
+        let docs: HashSet<DocAddress> = docs.iter().copied().collect();
+        let mut lacking: Vec<HashSet<DocAddress>> = Vec::new();
+        for i in 0..self.words.len() {
+            let word = self.words[i].as_str();
+            if is_function_word(word) || FILLER_WORDS.contains(&word) {
+                continue;
+            }
+            let mut clauses = Clauses::default();
+            self.word_clauses(i, searcher, f, &mut clauses)?;
+            let query = clauses.into_query();
+            let has = bm25_of(searcher, &query, found.to_vec())?;
+            if has.iter().all(|&(bm25, _)| bm25 <= 0.0) {
+                continue;
+            }
+            lacking.push(
+                has.into_iter()
+                    .filter(|&(bm25, addr)| bm25 <= 0.0 && docs.contains(&addr))
+                    .map(|(_, addr)| addr)
+                    .collect(),
+            );
+        }
+        if lacking.len() < 2 {
+            return Ok(missing);
+        }
+        for lacks in lacking {
+            missing.extend(lacks);
+        }
+        if let Some(joined) = &self.joined {
+            let mut clauses = Clauses::default();
+            clauses.add(Term::from_field_text(f.joined, joined), 1.0);
+            clauses.add(Term::from_field_text(f.label, joined), 1.0);
+            let docs: Vec<DocAddress> = docs.into_iter().collect();
+            for (bm25, addr) in bm25_of(searcher, &clauses.into_query(), docs)? {
                 if bm25 > 0.0 {
                     missing.remove(&addr);
                 }
@@ -3696,6 +3845,16 @@ mod tests {
         }
     }
 
+    /// A [`FixedMeaning`] with `near` the nearest sites and `far` beyond
+    /// the [`NEAREST_RANKED`] nearest, as a big site far in meaning is.
+    fn near_and_far(near: &[(&'static str, f32)], far: &[(&'static str, f32)]) -> FixedMeaning {
+        let mut all = near.to_vec();
+        let pads = ["pad.example"; NEAREST_RANKED];
+        all.extend(pads.iter().map(|&pad| (pad, 0.6)));
+        all.extend_from_slice(far);
+        FixedMeaning(all)
+    }
+
     #[test]
     fn big_sites_far_in_meaning_do_not_fill_a_weak_search() {
         let records = vec![
@@ -3727,11 +3886,10 @@ mod tests {
         let (_dir, searcher) = build(&records);
         let options = SearchOptions::default();
         // Among the thousand nearest, as every big site is for some query.
-        let meaning = FixedMeaning(vec![
-            ("drainhelp.net", 1.0),
-            ("plumbers.org", 0.3),
-            ("stripe.com", 0.08),
-        ]);
+        let meaning = near_and_far(
+            &[("drainhelp.net", 1.0)],
+            &[("plumbers.org", 0.3), ("stripe.com", 0.08)],
+        );
         let score = |cfg: &RankConfig, domain: &str| {
             searcher
                 .search_meaning("how to unclog a drain", 10, cfg, &options, Some(&meaning))
@@ -3744,14 +3902,118 @@ mod tests {
         let before = RankConfig {
             meaning_only_relevance: None,
             question_relevance: None,
+            partial_closeness: None,
             ..RankConfig::default()
         };
         // On popularity alone it would have come before the plumbers...
         assert!(score(&before, "stripe.com") > score(&before, "plumbers.org"));
         // ...but nothing of the query's speaks for it.
-        let now = RankConfig::default();
+        let now = RankConfig {
+            partial_closeness: None,
+            ..RankConfig::default()
+        };
         assert!(score(&now, "stripe.com") < score(&now, "plumbers.org"));
         assert!(score(&now, "stripe.com") < score(&now, "drainhelp.net"));
+        // And with neither word nor much meaning, it is not listed at all.
+        let hits = searcher
+            .search_meaning(
+                "how to unclog a drain",
+                10,
+                &RankConfig::default(),
+                &options,
+                Some(&meaning),
+            )
+            .unwrap()
+            .hits;
+        assert_eq!(domains(&hits), ["drainhelp.net"]);
+    }
+
+    #[test]
+    fn a_word_or_two_of_a_longer_search_is_no_answer() {
+        let records = vec![
+            site(
+                "victoriassecret.com",
+                Some("Victoria's Secret: Bras, Lingerie, Beauty"),
+                None,
+                &["Victoria's Secret"],
+                &[],
+                popular(300, 20_000),
+            ),
+            site(
+                "rpgguides.net",
+                Some("RPG guides"),
+                Some("Walkthroughs of classic role-playing games."),
+                &[],
+                &[],
+                ranked(300_000, 10),
+            ),
+            site(
+                "manaworld.org",
+                Some("Mana World"),
+                Some("Secret of Mana walkthrough, maps and bosses."),
+                &[],
+                &[],
+                ranked(500_000, 5),
+            ),
+            site(
+                "cricket.com.au",
+                Some("Home | cricket.com.au"),
+                None,
+                &["Cricket Australia"],
+                &[],
+                popular(2_000, 8_000),
+            ),
+            site(
+                "fables.org",
+                Some("Aesop's fables"),
+                Some("The ant and the grasshopper, and other fables."),
+                &[],
+                &[],
+                ranked(400_000, 10),
+            ),
+        ];
+        let (_dir, searcher) = build(&records);
+        let options = SearchOptions::default();
+        let found = |query: &str, meaning: &FixedMeaning, cfg: &RankConfig| {
+            let hits = searcher
+                .search_meaning(query, 10, cfg, &options, Some(meaning))
+                .unwrap()
+                .hits;
+            domains(&hits)
+                .into_iter()
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        };
+        let off = RankConfig {
+            partial_closeness: None,
+            ..RankConfig::default()
+        };
+        let now = RankConfig::default();
+
+        // "secret" alone makes no answer of a lingerie shop; a site near in
+        // meaning that lacks a word is still one.
+        let mana = near_and_far(
+            &[("manaworld.org", 1.0), ("rpgguides.net", 0.8)],
+            &[("victoriassecret.com", 0.1)],
+        );
+        let query = "secret of mana walkthrough";
+        assert!(found(query, &mana, &off).contains(&"victoriassecret.com".to_string()));
+        assert_eq!(
+            found(query, &mana, &now),
+            ["manaworld.org", "rpgguides.net"]
+        );
+
+        // A name the words go on from as one phrase names nothing.
+        let fable = near_and_far(&[("fables.org", 1.0)], &[("cricket.com.au", 0.2)]);
+        let query = "the cricket and the ant";
+        assert!(found(query, &fable, &off).contains(&"cricket.com.au".to_string()));
+        assert_eq!(found(query, &fable, &now), ["fables.org"]);
+
+        // A name followed by what is wanted of it keeps the site.
+        let scores = near_and_far(&[], &[("cricket.com.au", 0.2)]);
+        assert_eq!(found("cricket scores", &scores, &now)[0], "cricket.com.au");
+        // So does a name further in ("back bay hilton").
+        assert!(found("grasshopper cricket", &scores, &now).contains(&"cricket.com.au".to_string()));
     }
 
     #[test]
