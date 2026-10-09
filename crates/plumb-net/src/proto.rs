@@ -252,6 +252,11 @@ pub struct PagesResponse {
     /// Turned away for now: it is serving others, or was asked too often.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub busy: bool,
+    /// What the file holds besides its pages (see
+    /// [`crate::pages::LAYERS_SUFFIX`]), when the answering node has
+    /// worked that out; `None` from nodes before it, or before they did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layers: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

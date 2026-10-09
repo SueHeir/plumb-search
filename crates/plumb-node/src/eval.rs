@@ -62,7 +62,9 @@ pub fn parse_queries(text: &str) -> Result<Vec<EvalQuery>> {
             .split(',')
             .map(str::trim)
             .filter(|d| !d.is_empty())
-            .map(normalize_domain)
+            // A comma inside an address (`Tesla,_Inc.`) is written `%2C`,
+            // since a bare one separates answers.
+            .map(|d| normalize_domain(&d.replace("%2C", ",").replace("%2c", ",")))
             .collect();
         if expected.is_empty() {
             bail!("line {line}: no expected domain for {query:?}");
@@ -225,8 +227,9 @@ struct Setup {
     pages: Option<PageSearcher>,
     /// With --recall, the address of every page in the page sets.
     page_urls: HashSet<String>,
-    /// Holds the page index while it is searched.
-    _pages_dir: tempfile::TempDir,
+    /// Holds the page index while it is searched, when it is not kept in
+    /// `--pages-cache`.
+    _pages_dir: Option<tempfile::TempDir>,
 }
 
 pub fn run(args: EvalArgs) -> Result<()> {
@@ -316,25 +319,19 @@ fn open_setup(args: &EvalArgs) -> Result<Setup> {
     let searcher = Searcher::open(&args.index)
         .with_context(|| format!("opening the index in {}", args.index.display()))?;
     let meaning = MeaningIndex::from_args(&args.meaning)?;
-    let pages_dir = tempfile::tempdir().context("making a folder for the page index")?;
-    let mut page_urls = HashSet::new();
-    let pages = if args.pages.is_empty() {
-        None
+    let (pages, pages_dir) = if args.pages.is_empty() {
+        (None, None)
+    } else if let Some(cache) = &args.pages_cache {
+        (Some(pages_cache::open(cache, args)?), None)
     } else {
-        let mut all: Vec<Page> = Vec::new();
-        for file in &args.pages {
-            let reader = plumb_ingest::open_maybe_gz(file)?;
-            let name = file.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            let articles = plumb_core::article::read_articles(reader, args.pages_top)?;
-            info!("indexing {} pages of {}", articles.len(), file.display());
-            let set = set_of_file(name);
-            all.extend(articles.into_iter().filter_map(|a| Page::from_set(&set, a)));
-        }
-        if args.recall {
-            page_urls.extend(all.iter().map(|page| page.url.clone()));
-        }
-        plumb_index::pages::build_page_index(pages_dir.path(), all)?;
-        Some(PageSearcher::open(pages_dir.path())?)
+        let dir = tempfile::tempdir().context("making a folder for the page index")?;
+        build_pages(args, dir.path())?;
+        (Some(PageSearcher::open(dir.path())?), Some(dir))
+    };
+    let page_urls = if args.recall {
+        page_urls(args)?
+    } else {
+        HashSet::new()
     };
     Ok(Setup {
         searcher,
@@ -547,6 +544,147 @@ fn format_recall(stages: &[Stage], limit: usize) -> String {
     out
 }
 
+/// The address of every page in the sets of `--pages`.
+fn page_urls(args: &EvalArgs) -> Result<HashSet<String>> {
+    let mut urls = HashSet::new();
+    for file in &args.pages {
+        let reader = plumb_ingest::open_maybe_gz(file)?;
+        let name = file.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        let set = set_of_file(name);
+        for article in plumb_core::article::read_articles(reader, args.pages_top)? {
+            if let Some(page) = Page::from_set(&set, article) {
+                urls.insert(page.url);
+            }
+        }
+    }
+    Ok(urls)
+}
+
+/// Builds the page index of `--pages` in `dir`.
+fn build_pages(args: &EvalArgs, dir: &Path) -> Result<()> {
+    let mut all: Vec<Page> = Vec::new();
+    for file in &args.pages {
+        let reader = plumb_ingest::open_maybe_gz(file)?;
+        let name = file.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        let articles = plumb_core::article::read_articles(reader, args.pages_top)?;
+        info!("indexing {} pages of {}", articles.len(), file.display());
+        let set = set_of_file(name);
+        all.extend(articles.into_iter().filter_map(|a| Page::from_set(&set, a)));
+    }
+    plumb_index::pages::build_page_index(dir, all)?;
+    Ok(())
+}
+
+/// `--pages-cache`: page indexes kept between runs, one folder each, named
+/// by a hash of what the index is built from ([`pages_cache::key`]).
+mod pages_cache {
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    use anyhow::{Context, Result};
+    use plumb_index::pages::PageSearcher;
+    use sha2::{Digest, Sha256};
+    use tracing::info;
+
+    use crate::cli::EvalArgs;
+
+    /// How many indexes are kept: those of the last few `plumb` builds
+    /// measured, such as the two sides of an A/B test.
+    pub(super) const KEEP: usize = 4;
+
+    /// Opens the page index of `args` kept in `cache`, building it first
+    /// when it is not there. A lock on the folder makes runs started
+    /// together wait for one build rather than each make its own.
+    pub(super) fn open(cache: &Path, args: &EvalArgs) -> Result<PageSearcher> {
+        fs::create_dir_all(cache).with_context(|| format!("creating {}", cache.display()))?;
+        let key = key(args)?;
+        let dir = cache.join(&key);
+        let _lock = lock(cache)?;
+        if dir.exists() {
+            info!("reusing the page index in {}", dir.display());
+        } else {
+            info!("building the page index in {}", dir.display());
+            super::build_pages(args, &dir)?;
+        }
+        let searcher = PageSearcher::open(&dir)?;
+        let used = cache.join(format!("{key}.used"));
+        fs::write(&used, b"").with_context(|| format!("writing {}", used.display()))?;
+        prune(cache, KEEP)?;
+        Ok(searcher)
+    }
+
+    /// What the page index depends on, hashed: the `plumb` binary (so a
+    /// newly built one builds a new index) and each page set file in
+    /// order, both by path, size and time of last change, and
+    /// `--pages-top`.
+    pub(super) fn key(args: &EvalArgs) -> Result<String> {
+        let exe = std::env::current_exe().context("finding the plumb binary")?;
+        let mut hash = Sha256::new();
+        for file in std::iter::once(&exe).chain(&args.pages) {
+            let path =
+                fs::canonicalize(file).with_context(|| format!("finding {}", file.display()))?;
+            let meta =
+                fs::metadata(&path).with_context(|| format!("reading {}", path.display()))?;
+            let changed = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |d| d.as_nanos());
+            hash.update(format!("{}\0{}\0{changed}\0", path.display(), meta.len()));
+        }
+        hash.update(format!("top {}", args.pages_top));
+        Ok(format!("{:x}", hash.finalize()))
+    }
+
+    /// Deletes all but the `keep` most recently used indexes in `cache`.
+    /// A run still searching one it opened keeps reading it: its files
+    /// stay until it closes them.
+    fn prune(cache: &Path, keep: usize) -> Result<()> {
+        let mut kept: Vec<(std::time::SystemTime, String)> = Vec::new();
+        for entry in fs::read_dir(cache).with_context(|| format!("reading {}", cache.display()))? {
+            let name = entry?.file_name().to_string_lossy().into_owned();
+            let Some(key) = name.strip_suffix(".used") else {
+                continue;
+            };
+            let used = cache.join(&name);
+            let when = fs::metadata(&used).and_then(|m| m.modified());
+            kept.push((when.unwrap_or(std::time::UNIX_EPOCH), key.to_string()));
+        }
+        kept.sort_by(|a, b| b.cmp(a));
+        for (_, key) in kept.into_iter().skip(keep) {
+            let dir = cache.join(&key);
+            info!("deleting the page index in {}", dir.display());
+            if dir.exists() {
+                fs::remove_dir_all(&dir).with_context(|| format!("deleting {}", dir.display()))?;
+            }
+            let _ = fs::remove_file(cache.join(format!("{key}.used")));
+        }
+        Ok(())
+    }
+
+    /// Holds the lock on `cache` until dropped.
+    #[cfg(unix)]
+    fn lock(cache: &Path) -> Result<fs::File> {
+        let path: PathBuf = cache.join("lock");
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)
+            .with_context(|| format!("opening {}", path.display()))?;
+        rustix::fs::flock(&file, rustix::fs::FlockOperation::LockExclusive)
+            .with_context(|| format!("locking {}", path.display()))?;
+        Ok(file)
+    }
+
+    /// Without the lock, runs started together each build the index; the
+    /// last one built is kept.
+    #[cfg(not(unix))]
+    fn lock(_cache: &Path) -> Result<()> {
+        Ok(())
+    }
+}
+
 /// The rank each query's expected answer was found at, within
 /// `args.limit`. With `verbose`, misses are printed (and `--show`,
 /// `--explain` say more).
@@ -582,9 +720,13 @@ fn evaluate(
             country: args.country.clone(),
             only_country: false,
             exact: args.exact,
+            language: args.lang.clone(),
             ..SearchOptions::default()
         };
         let search = |query: &str| {
+            // "food near me" searches sites for "food", as a node does.
+            let query =
+                &plumb_index::places::without_near_me(query).unwrap_or_else(|| query.to_string());
             let query_meaning = meaning.as_ref().and_then(|meaning| meaning.query(query));
             let results = searcher
                 .search_meaning(
@@ -600,6 +742,27 @@ fn evaluate(
             results.map(|results| (results, query_meaning))
         };
         let (mut results, mut query_meaning) = search(&q.query)?;
+        // As a node with pages does: words of things, not sites, are
+        // corrected from the pages' names ("anubas").
+        if results.spelling.is_none() && !args.exact {
+            if let Some(pages) = pages.as_ref() {
+                let site_known =
+                    |word: &str| searcher.word_sites(word) >= plumb_index::KNOWN_WORD_SITES;
+                let spelled_right = pages
+                    .search(&q.query, 10)?
+                    .iter()
+                    .any(|hit| hit.page.package.is_some() || hit.named || hit.whole);
+                if !spelled_right {
+                    results.spelling =
+                        pages.suggest_spelling(&q.query, searcher.spelling_model(), &site_known)?;
+                }
+            }
+        }
+        if verbose && args.show_suggestions {
+            if let Some(spelling) = &results.spelling {
+                println!("suggests: {:?} -> {:?}", q.query, spelling.query);
+            }
+        }
         // What one click on "Did you mean" finds.
         let mut searched = q.query.clone();
         if args.follow_suggestions {
@@ -608,7 +771,18 @@ fn evaluate(
                 (results, query_meaning) = search(&searched)?;
             }
         }
-        let hits = results.hits;
+        let mut hits = results.hits;
+        // The sites that serve a tool or a quick fact come first, as a
+        // node lists them.
+        let route =
+            crate::sources::route(&searched, answer_kind(&searched), args.country.as_deref());
+        if let Some(route) = &route {
+            if pages.is_none() {
+                crate::sources::lead_with(&mut hits, &mut [], route, |domain| {
+                    searcher.site(domain).ok().flatten()
+                });
+            }
+        }
         let domains: Vec<&str> = hits.iter().map(|h| h.domain.as_str()).collect();
         // What came first: a page when one was listed first.
         let mut first = domains.first().map(|d| d.to_string());
@@ -651,6 +825,11 @@ fn evaluate(
                         &mut lifted,
                         &mut placed,
                     );
+                }
+                if let Some(route) = &route {
+                    crate::sources::lead_with(&mut lifted, &mut placed, route, |domain| {
+                        searcher.site(domain).ok().flatten()
+                    });
                 }
                 if let Some(features) = features.as_deref_mut() {
                     let closeness = |domain: &str| {
@@ -726,6 +905,16 @@ fn evaluate(
         ranks.push(rank);
     }
     Ok(ranks)
+}
+
+/// The kind of instant answer a node shows for `query`, as far as it can
+/// be told without fetching anything: a currency conversion is taken to
+/// be one when it looks like one.
+fn answer_kind(query: &str) -> Option<plumb_answer::Kind> {
+    let now = i64::try_from(plumb_core::now_unix()).unwrap_or(i64::MAX);
+    plumb_answer::answer(query, now, None)
+        .map(|answer| answer.kind)
+        .or_else(|| plumb_answer::may_need_rates(query).then_some(plumb_answer::Kind::Currency))
 }
 
 /// One ranking to try in a sweep: a name and the knobs it changes.
@@ -925,6 +1114,7 @@ fn profile_shown(
 ) -> Result<Option<String>> {
     let options = SearchOptions {
         country: args.country.clone(),
+        language: args.lang.clone(),
         ..SearchOptions::default()
     };
     for name in crate::web::answers::profile_lookups(query) {
@@ -957,6 +1147,7 @@ fn fact_rank(
             let options = SearchOptions {
                 country: args.country.clone(),
                 exact: true,
+                language: args.lang.clone(),
                 ..SearchOptions::default()
             };
             let mut sites = searcher.search_meaning(&asked.subject, 5, cfg, &options, None)?;
@@ -1009,6 +1200,11 @@ fn listed_with_pages(hits: &[Hit], pages: Vec<PlacedPage>) -> Vec<Vec<String>> {
     for (i, hit) in hits.iter().enumerate() {
         listed.extend(alone(i));
         let mut keys = vec![hit.domain.clone()];
+        // A site's result that links one of its pages ("define prioritize"
+        // links the word's page of merriam-webster.com) is that page too.
+        if url::Url::parse(&hit.url).is_ok_and(|url| url.path() != "/") {
+            keys.push(hit.url.clone());
+        }
         keys.extend(
             pages
                 .iter()
@@ -1227,7 +1423,7 @@ fn format_totals(m: &Metrics, limit: usize) -> String {
 pub(crate) fn set_of_file(name: &str) -> String {
     use plumb_index::pages::{
         BOOKS_SET, DOCS_SET, FILMS_SET, GITHUB_SET, MUSIC_SET, PACKAGES_SET, PAPERS_SET,
-        PODCASTS_SET, STACKEXCHANGE_SET, STACKOVERFLOW_SET, WIKIDATA_SET,
+        PODCASTS_SET, STACKEXCHANGE_SET, STACKOVERFLOW_SET, WIKIDATA_SET, WIKTIONARY_SET,
     };
     let stem = name.split('.').next().unwrap_or("");
     if let Some(set) = [
@@ -1242,6 +1438,7 @@ pub(crate) fn set_of_file(name: &str) -> String {
         FILMS_SET,
         DOCS_SET,
         WIKIDATA_SET,
+        WIKTIONARY_SET,
     ]
     .into_iter()
     .find(|set| stem.starts_with(set))
@@ -1371,6 +1568,14 @@ mod tests {
         assert_eq!(
             queries[0].expected,
             ["https://en.wikipedia.org/wiki/Marie_Curie"]
+        );
+        let queries = parse_queries(
+            "owner of tesla\thttps://en.wikipedia.org/wiki/Tesla%2C_Inc.,tesla.com\n",
+        )
+        .unwrap();
+        assert_eq!(
+            queries[0].expected,
+            ["https://en.wikipedia.org/wiki/Tesla,_Inc.", "tesla.com"]
         );
     }
     use super::*;

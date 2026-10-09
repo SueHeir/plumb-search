@@ -805,6 +805,8 @@ pub(crate) mod tests {
                     value: value.into(),
                 })
                 .collect(),
+            lead: None,
+            names: Vec::new(),
         }
     }
 

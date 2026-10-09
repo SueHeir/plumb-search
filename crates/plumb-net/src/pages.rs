@@ -41,6 +41,40 @@ pub struct PagesChunk {
     pub bytes: Vec<u8>,
     /// It was busy and sent nothing; ask again later.
     pub busy: bool,
+    /// What the file holds besides its pages, when the node knows.
+    pub layers: Option<Vec<String>>,
+}
+
+/// What a node notes next to a page set file, as `<file>.layers`: the
+/// kinds of entries the file holds besides its pages (an articles file's
+/// `lead`, `name`, `f-capital` and profile services), worked out once for
+/// the file's time. A node replaces its file with a newer one only when
+/// the newer one holds all the kinds its own does, so a plain articles
+/// file can't take the place of one with facts and leads added.
+pub const LAYERS_SUFFIX: &str = ".layers";
+
+/// The layers noted next to `path` (see [`LAYERS_SUFFIX`]).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Layers {
+    /// The file's time (Unix seconds) and size they were worked out for.
+    pub modified: u64,
+    pub size: u64,
+    /// The kinds of entries, sorted.
+    pub kinds: Vec<String>,
+}
+
+/// `<file>.layers`.
+pub fn layers_path(path: &Path) -> std::path::PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(LAYERS_SUFFIX);
+    std::path::PathBuf::from(name)
+}
+
+/// The layers noted next to `path`, if they are for the file as it is.
+pub fn read_layers(path: &Path, modified: u64, size: u64) -> Option<Vec<String>> {
+    let bytes = std::fs::read(layers_path(path)).ok()?;
+    let layers: Layers = serde_json::from_slice(&bytes).ok()?;
+    (layers.modified == modified && layers.size == size).then_some(layers.kinds)
 }
 
 /// The answer to `request` from the set file at `path` (`None` when this
@@ -51,6 +85,7 @@ pub fn answer(path: Option<&Path>, request: &PagesRequest) -> PagesResponse {
         modified: 0,
         bytes: ByteBuf::new(),
         busy: false,
+        layers: None,
     };
     let Some(path) = path else {
         return empty;
@@ -74,6 +109,7 @@ pub fn answer(path: Option<&Path>, request: &PagesRequest) -> PagesResponse {
             modified,
             bytes: ByteBuf::from(bytes),
             busy: false,
+            layers: read_layers(path, modified, size),
         })
     };
     read().unwrap_or(empty)
@@ -100,5 +136,23 @@ mod tests {
         assert!(answer(Some(&path), &ask(10, 4)).bytes.is_empty());
         assert_eq!(answer(None, &ask(0, 4)).size, 0);
         assert_eq!(answer(Some(&dir.path().join("none")), &ask(0, 4)).size, 0);
+
+        // Layers are sent only when noted for the file as it is.
+        assert_eq!(piece.layers, None);
+        let note = |modified| Layers {
+            modified,
+            size: 10,
+            kinds: vec!["lead".into()],
+        };
+        let write = |layers: &Layers| {
+            std::fs::write(layers_path(&path), serde_json::to_vec(layers).unwrap()).unwrap()
+        };
+        write(&note(piece.modified));
+        assert_eq!(
+            answer(Some(&path), &ask(0, 4)).layers,
+            Some(vec!["lead".into()])
+        );
+        write(&note(piece.modified - 1));
+        assert_eq!(answer(Some(&path), &ask(0, 4)).layers, None);
     }
 }

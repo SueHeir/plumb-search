@@ -535,6 +535,25 @@ fn facts(out: &mut String, answer: &Value) {
 
 fn site_info(out: &mut String, answer: &Value) {
     let domain = text(answer, "domain").unwrap_or("");
+    if let Some(host) = text(answer, "host") {
+        let _ = writeln!(
+            out,
+            "Plumb keeps no entry of its own for {host}; it is part of {domain}."
+        );
+    }
+    if let Some(read) = answer.get("read_now") {
+        let _ = write!(out, "Read now: {}", text(read, "url").unwrap_or(""));
+        if let Some(title) = text(read, "title") {
+            let _ = write!(out, " \"{title}\"");
+        }
+        out.push('\n');
+        if let Some(opening) = text(read, "opening") {
+            let _ = writeln!(out, "  {opening}");
+        }
+    }
+    if let Some(error) = text(answer, "read_error") {
+        let _ = writeln!(out, "Read now: {error}");
+    }
     if !flag(answer, "found") {
         let _ = writeln!(out, "Plumb does not know {domain}.");
         return;
@@ -551,7 +570,9 @@ fn site_info(out: &mut String, answer: &Value) {
         let _ = writeln!(out, "{description}");
     }
     let mut facts = Vec::new();
-    if flag(answer, "official") {
+    if let Some(of) = text(answer, "official_for") {
+        facts.push(format!("Wikidata gives it as the official website of {of}"));
+    } else if flag(answer, "official") {
         facts.push("Wikidata lists it as an official website".to_string());
     }
     facts.push(if flag(answer, "well_known") {

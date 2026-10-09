@@ -468,6 +468,8 @@ pub fn build_articles(lang: &str, dumps: &ArticleDumps) -> Result<Vec<Article>> 
                 website: site.and_then(ItemSite::website).map(str::to_string),
                 package: None,
                 facts: Vec::new(),
+                lead: None,
+                names: Vec::new(),
             }
         })
         .collect();

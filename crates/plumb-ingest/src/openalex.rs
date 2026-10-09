@@ -268,6 +268,8 @@ impl Work {
             website,
             package: None,
             facts: Vec::new(),
+            lead: None,
+            names: Vec::new(),
         })
     }
 }
