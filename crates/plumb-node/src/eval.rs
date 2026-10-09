@@ -504,6 +504,27 @@ fn evaluate(
             results.map(|results| (results, query_meaning))
         };
         let (mut results, mut query_meaning) = search(&q.query)?;
+        // As a node with pages does: words of things, not sites, are
+        // corrected from the pages' names ("anubas").
+        if results.spelling.is_none() && !args.exact {
+            if let Some(pages) = pages.as_ref() {
+                let site_known =
+                    |word: &str| searcher.word_sites(word) >= plumb_index::KNOWN_WORD_SITES;
+                let spelled_right = pages
+                    .search(&q.query, 10)?
+                    .iter()
+                    .any(|hit| hit.page.package.is_some() || hit.named || hit.whole);
+                if !spelled_right {
+                    results.spelling =
+                        pages.suggest_spelling(&q.query, searcher.spelling_model(), &site_known)?;
+                }
+            }
+        }
+        if verbose && args.show_suggestions {
+            if let Some(spelling) = &results.spelling {
+                println!("suggests: {:?} -> {:?}", q.query, spelling.query);
+            }
+        }
         // What one click on "Did you mean" finds.
         let mut searched = q.query.clone();
         if args.follow_suggestions {

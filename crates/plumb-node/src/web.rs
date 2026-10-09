@@ -351,6 +351,11 @@ impl IndexBackend {
         self.searcher.has_domain(domain)
     }
 
+    /// The index's searcher, for what it knows of words.
+    pub fn searcher(&self) -> &Searcher {
+        &self.searcher
+    }
+
     /// [`SearchBackend::search_full`], ranking by `meaning` too when given,
     /// and with `rank` instead of the backend's own knobs when given.
     pub fn search_full_with(
@@ -3040,8 +3045,25 @@ fn search_link(path: &str, query: &str, options: &SearchOptions, net: bool) -> S
 }
 
 /// "Did you mean amazon?" above the results, which are for the query as
-/// typed.
-fn render_spelling(out: &mut String, spelling: &Spelling, options: &SearchOptions) {
+/// typed; or, when the results are for the spelling
+/// ([`Spelling::applied`]), "Showing results for kanye west", with a link
+/// to search for `typed` as typed.
+fn render_spelling(out: &mut String, spelling: &Spelling, typed: &str, options: &SearchOptions) {
+    if spelling.applied {
+        let as_typed = SearchOptions {
+            exact: true,
+            ..options.clone()
+        };
+        let _ = writeln!(
+            out,
+            "<p class=\"sp\">Showing results for <strong>{}</strong>. Search instead for \
+             <a href=\"{}\">{}</a></p>",
+            escape_html(&truncate_chars(&spelling.query, 150)),
+            escape_html(&search_link("/search", typed, &as_typed, false)),
+            escape_html(&truncate_chars(typed, 150))
+        );
+        return;
+    }
     let fixed_options = SearchOptions {
         exact: false,
         ..options.clone()
@@ -3322,7 +3344,7 @@ fn render_results_with(
         }
     }
     if let Some(spelling) = &results.spelling {
-        render_spelling(&mut body, spelling, &settings.options);
+        render_spelling(&mut body, spelling, query, &settings.options);
     }
     // Picks are noted for the query: shared, or kept in the searcher's
     // history.
@@ -6292,6 +6314,7 @@ mod tests {
             spelling: Some(Spelling {
                 query: "youtube".into(),
                 site: Some("youtube.com".into()),
+                applied: false,
             }),
         };
         let page = render_results(
@@ -6317,6 +6340,38 @@ mod tests {
     }
 
     #[test]
+    fn results_for_a_spelling_say_so_and_link_the_query_as_typed() {
+        let results = SearchResults {
+            pages: Vec::new(),
+            hits: vec![scored("kanyewest.com", 0.9)],
+            site_search: None,
+            spelling: Some(Spelling {
+                query: "kanye west".into(),
+                site: None,
+                applied: true,
+            }),
+        };
+        let page = render_results(
+            "kayne west",
+            &results,
+            None,
+            &NetOutcome::NotAsked,
+            &no_settings(),
+            None,
+            10,
+            true,
+            &Icons::default(),
+        );
+        assert!(
+            page.contains("Showing results for <strong>kanye west</strong>. Search instead for"),
+            "{page}"
+        );
+        assert!(page.contains("q=kayne+west"), "{page}");
+        assert!(page.contains("exact=1"), "{page}");
+        assert!(!page.contains("Did you mean"), "{page}");
+    }
+
+    #[test]
     fn typos_are_searched_as_typed_with_a_suggestion() {
         let mut results = SearchResults {
             pages: Vec::new(),
@@ -6325,6 +6380,7 @@ mod tests {
             spelling: Some(Spelling {
                 query: "amazon".into(),
                 site: None,
+                applied: false,
             }),
         };
         let mut settings = no_settings();

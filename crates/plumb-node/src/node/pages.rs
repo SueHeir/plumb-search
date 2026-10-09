@@ -608,6 +608,27 @@ impl Inner {
     }
 }
 
+/// Whether the pages know the words of `query` that `spelling` changes
+/// ([`PageSearcher::check_spelling`]): then it was spelled as meant.
+pub(super) fn knows_typed(inner: &Inner, query: &str, spelling: &plumb_index::Spelling) -> bool {
+    let Some(searcher) = inner
+        .pages
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .as_ref()
+        .map(|(_, s)| s.clone())
+    else {
+        return false;
+    };
+    match searcher.check_spelling(query, spelling.clone()) {
+        Ok(checked) => checked.is_none_or(|checked| checked.query != spelling.query),
+        Err(err) => {
+            warn!("checking a spelling against pages: {err:#}");
+            false
+        }
+    }
+}
+
 /// The song or album a search of `query` alone is surely for; see
 /// [`PageSearcher::known_song`].
 pub(super) fn known_song(
@@ -647,7 +668,9 @@ pub(super) fn definition(inner: &Inner, name: &str) -> Option<plumb_index::pages
     }
 }
 
-/// Adds the pages found for `query` to `results`.
+/// Adds the pages found for `query` to `results`. When the results are for
+/// a spelling of it ([`plumb_index::Spelling::applied`]), the pages are
+/// for that spelling too.
 pub(super) fn add_pages(
     inner: &Inner,
     query: &str,
@@ -677,6 +700,12 @@ pub(super) fn add_pages(
         }
         return;
     }
+    let applied = results
+        .spelling
+        .as_ref()
+        .filter(|spelling| spelling.applied)
+        .map(|spelling| spelling.query.clone());
+    let query = applied.as_deref().unwrap_or(query);
     match searcher.search(query, PAGES_PER_SEARCH) {
         Ok(mut found) => {
             found.retain(|hit| options_allow(options, &hit.page));
@@ -695,10 +724,10 @@ pub(super) fn add_pages(
             // A query that names a package or a page, or asks a question
             // in full, is spelled right: "serde crate" is not "serde
             // create", and "git undo last commit" is not "git und".
-            if found
+            let spelled_right = found
                 .iter()
-                .any(|hit| hit.page.package.is_some() || hit.named || hit.whole)
-            {
+                .any(|hit| hit.page.package.is_some() || hit.named || hit.whole);
+            if spelled_right && applied.is_none() {
                 results.spelling = None;
             }
             // A query that is a page's whole name is about what the page
@@ -713,7 +742,7 @@ pub(super) fn add_pages(
                     results.site_search = None;
                 }
             }
-            if let Some(spelling) = results.spelling.take() {
+            if let Some(spelling) = results.spelling.take_if(|_| applied.is_none()) {
                 results.spelling = match searcher.check_spelling(query, spelling.clone()) {
                     Ok(checked) => checked,
                     Err(err) => {
@@ -721,6 +750,19 @@ pub(super) fn add_pages(
                         Some(spelling)
                     }
                 };
+            }
+            // Words of things, not sites ("anubas", "budafest"): the
+            // pages' names know them.
+            if results.spelling.is_none() && !spelled_right {
+                if let Some(index) = inner.current() {
+                    let sites = index.backend().searcher();
+                    let site_known =
+                        |word: &str| sites.word_sites(word) >= plumb_index::KNOWN_WORD_SITES;
+                    match searcher.suggest_spelling(query, sites.spelling_model(), &site_known) {
+                        Ok(suggested) => results.spelling = suggested,
+                        Err(err) => warn!("suggesting a spelling from pages: {err:#}"),
+                    }
+                }
             }
             results.pages = place_pages(query, &results.hits, found);
             if inner.rank.learned {
