@@ -234,9 +234,23 @@ impl FeatureSettings {
         };
         let on_command_line = config.network.is_some();
         if let Saved::Elsewhere(other) = &saved {
-            if settings.network && !on_command_line {
+            if on_command_line {
                 tracing::warn!(
-                    "The Plumb network stays off: {} was saved in {other}, so this data                      directory is a copy of another node's. Start with --network, or turn                      the network on in the panel's Optional features, to join it.",
+                    "This data directory is a copy of {other}: it joins the Plumb network \
+                     with that node's identity ({}), as the same node. For a separate \
+                     node, stop it and delete that file to make a new one.",
+                    config
+                        .network
+                        .as_ref()
+                        .map_or(dir.join("net"), |net| net.dir.clone())
+                        .join("node.key")
+                        .display()
+                );
+            } else if settings.network {
+                tracing::warn!(
+                    "The Plumb network stays off: {} was saved in {other}, so this data \
+                     directory is a copy of another node's. Start with --network, or turn \
+                     the network on in the panel's Optional features, to join it.",
                     dir.join("features.json").display()
                 );
                 settings.network = false;
@@ -245,7 +259,8 @@ impl FeatureSettings {
         }
         if settings.network && !on_command_line {
             tracing::info!(
-                "Joining the Plumb network: it was turned on in the panel's Optional                  features (saved in features.json), not by --network"
+                "Joining the Plumb network: it was turned on in the panel's Optional \
+                 features (saved in features.json), not by --network"
             );
         }
         settings.apply(config)?;
