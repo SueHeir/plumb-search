@@ -65,6 +65,7 @@ mod relations;
 mod run;
 mod search;
 pub mod sources;
+mod summaries;
 mod terms;
 mod top_sites;
 
@@ -120,6 +121,7 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::Embed(args) => meaning::run_embed(args),
         Command::FetchText(args) => terms::run_fetch_text(args),
         Command::Terms(args) => terms::run_terms(args),
+        Command::Summaries(args) => summaries::run(args),
         Command::RemoteControl(args) => run::remote_control(args),
         Command::Storage(args) => storage::run(args),
         Command::DeadSites(args) => dead::run(&args),

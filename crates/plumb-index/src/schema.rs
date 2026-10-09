@@ -340,6 +340,13 @@ pub(crate) fn document(
     if let Some(intro) = non_empty(&record.intro) {
         doc.add_text(f.description, truncate_chars(intro, MAX_TEXT_CHARS));
     }
+    // A model's sentence for a site with no words of its own stands in
+    // for its description.
+    if let Some(summary) = non_empty(&record.summary).filter(|_| {
+        non_empty(&record.intro).is_none() && (borrowed || non_empty(&record.description).is_none())
+    }) {
+        doc.add_text(f.description, truncate_chars(summary, MAX_TEXT_CHARS));
+    }
     for heading in record.headings.iter().take(MAX_HEADINGS) {
         doc.add_text(f.headings, truncate_chars(heading, MAX_TEXT_CHARS));
     }
