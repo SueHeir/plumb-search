@@ -424,6 +424,7 @@ async fn new_page(State(state): State<AppState>, request: Request) -> Response {
 }
 
 fn render_connect(node: &dyn StatusSource, form: &AddForm, error: Option<&str>) -> String {
+    let bar = super::app_bar("settings", true);
     let error = error
         .map(|error| {
             format!(
@@ -433,7 +434,7 @@ fn render_connect(node: &dyn StatusSource, form: &AddForm, error: Option<&str>) 
         })
         .unwrap_or_default();
     let body = format!(
-        "<main class=\"wrap node-panel\">{}<div class=\"node-heading\"><div>\
+        "<div class=\"wrap node-panel\">{bar}<main class=\"node-standalone\">{}<div class=\"node-heading\"><div>\
          <p class=\"eyebrow\">ANOTHER NODE</p><h1>Connect to a node</h1></div></div>\
          <p class=\"intro\">Control a Plumb Search node on another computer from here, such \
          as a Docker container or a homelab server: its settings, crawling and \
@@ -462,7 +463,7 @@ fn render_connect(node: &dyn StatusSource, form: &AddForm, error: Option<&str>) 
          from an authority.</p>\
          <label for=\"name\">Name <span class=\"state\">· optional</span></label>\
          <input id=\"name\" name=\"name\" placeholder=\"Homelab\" value=\"{}\">\
-         <button type=\"submit\">Connect</button></form></main>",
+         <button type=\"submit\">Connect</button></form></main></div>",
         switcher(node, Some("new")),
         escape_html(&form.address),
         escape_html(&form.fingerprint),
@@ -672,15 +673,16 @@ async fn show(
 
 fn render_unreachable(remote: &RemoteNode, switcher: &str, error: &str) -> String {
     let base = format!("/app/nodes/{}", remote.id);
+    let bar = super::app_bar_for("settings", true, &base);
     let body = format!(
-        "<main class=\"wrap node-panel\">{switcher}<div class=\"node-heading\"><div>\
+        "<div class=\"wrap node-panel\">{bar}<main class=\"node-standalone\">{switcher}<div class=\"node-heading\"><div>\
          <p class=\"eyebrow\">{}</p><h1>Plumb Search</h1></div></div>\
          <div class=\"err\" role=\"alert\"><p>{}</p></div>\
          <p>Address: <code>{}</code></p>\
          <div class=\"btns\"><a class=\"btn\" href=\"{base}\">Try again</a>\
          <a class=\"btn alt\" href=\"/app/nodes/new\">Connect with a new token</a></div>\
          <form method=\"post\" action=\"{base}/remove\">\
-         <button type=\"submit\" class=\"alt\">Forget this node</button></form></main>",
+         <button type=\"submit\" class=\"alt\">Forget this node</button></form></main></div>",
         escape_html(&remote.name.to_uppercase()),
         escape_html(error),
         escape_html(&remote.url),

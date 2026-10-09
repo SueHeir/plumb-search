@@ -186,8 +186,9 @@ fn show(state: &AppState, visitor: &Visitor, status: StatusCode, note: Note) -> 
 }
 
 fn render(links: &Links, networked: bool, note: &Note, now: u64) -> String {
-    let mut body = String::from(
-        "<div class=\"wrap hist about\">\n<header><a class=\"logo\" href=\"/\">Plumb</a></header>\n\
+    let bar = super::app_bar("", false);
+    let mut body = format!(
+        "<div class=\"wrap hist about\">\n{bar}\n\
          <main>\n<h1>Your profile on your other computers</h1>\n\
          <p class=\"s\">Your history, About you, and what Plumb learned from your clicks and \
          ratings can follow you to your other browsers, and to your other Plumb nodes, such \

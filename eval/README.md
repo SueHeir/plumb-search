@@ -28,7 +28,8 @@ shows up.
 One `query<TAB>answer[,another_ok_answer]` per line; blank lines and lines
 starting with `#` are skipped. An answer is a registrable domain
 (`chase.com`), a page's address, or an address ending in `*` that takes
-any page it starts. A fact answer is lowercase text the answer must
+any page it starts. A comma inside an address (`Tesla,_Inc.`) is
+written `%2C`. A fact answer is lowercase text the answer must
 contain, commas left out. The test `repository_query_files_are_valid`
 checks every file here: it parses, no query is asked twice, and every
 answer is written the way results are keyed.
@@ -87,7 +88,20 @@ To train it again after the searches or the ranking change:
 
 `--features-out` writes the hand-made order (the model is never trained
 on its own output), and `train-rank` prints top-1, top-3 and MRR of both
-halves before and after. `plumb train-rank --judge builtin` measures the
+halves before and after. `--folds 5` also trains on four fifths of the
+training half and judges the fifth left out, in turn, so options can be
+chosen without looking at the held-out half.
+
+`--objective` picks the loss (`lambda-rank`, the default; `lambda-loss`,
+LambdaLoss's NDCG-Loss2++; or `softmax`) and `--learner net` trains a
+small neural ranker instead of trees (log-scaled, standardized inputs
+with noise, ReLU layers, as in Qin et al. 2021). On the run 10 features
+(October 2026) none of them beat the default trees by more than noise:
+every loss, trees or net, landed at 74-75% top-1 in 5-fold
+cross-validation and 76-77% on the held-out half, while only 81.5% of
+held-out searches have an expected result in the first ten rows at all.
+The order within the first ten is close to what the rows allow; the
+misses are mostly searches whose answer is not among them. `plumb train-rank --judge builtin` measures the
 model nodes use. To compare with the hand-made order in a full eval, use a
 sweep line `hand	{"learned": false}`. `--rerank-model DIR` (with
 `--features-out`) also scores the first 20 results with a cross-encoder

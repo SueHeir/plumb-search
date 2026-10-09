@@ -35,6 +35,7 @@ use tracing::warn;
 
 use super::{escape_html, html_response, page, search_link, time_ago, AppState};
 use crate::about::{About, AboutStore, Amount, Reason, KINDS};
+use crate::clicks::{LabelStore, PositionStore};
 use crate::history::{new_profile, valid_profile, History, HistoryStore};
 use crate::learn::{
     describe_key, traits, Block, Choice, Learned, Rating, Taste, Trait, Verdict, JUDGED_PER_PAGE,
@@ -75,6 +76,10 @@ pub(super) struct Prefs {
     /// Learn from clicks which boxes (places and map, headlines) to fold
     /// or unfold, and which sites are passed over (see [`crate::learn`]).
     pub learn: bool,
+    /// Keep the searches and the sites opened for them, with no profile,
+    /// as examples to train the node's ranking ([`crate::clicks::Labels`]).
+    /// Off unless chosen; counts only while learning.
+    pub train: bool,
 }
 
 impl Default for Prefs {
@@ -83,6 +88,7 @@ impl Default for Prefs {
             show: true,
             rank: true,
             learn: true,
+            train: false,
         }
     }
 }
@@ -93,13 +99,15 @@ impl Prefs {
         self.show || self.rank || self.learn
     }
 
-    /// `s1r1l1`; cookies set before learning was a choice have no `l`.
+    /// `s1r1l1t0`; cookies set before learning was a choice have no `l`,
+    /// and ones set before training was have no `t`.
     fn cookie_value(self) -> String {
         format!(
-            "s{}r{}l{}",
+            "s{}r{}l{}t{}",
             u8::from(self.show),
             u8::from(self.rank),
-            u8::from(self.learn)
+            u8::from(self.learn),
+            u8::from(self.train)
         )
     }
 
@@ -114,11 +122,29 @@ impl Prefs {
                 show,
                 rank,
                 learn: true,
+                train: false,
             }),
-            [b's', s, b'r', r, b'l', l] => bit(*s)
-                .zip(bit(*r))
-                .zip(bit(*l))
-                .map(|((show, rank), learn)| Prefs { show, rank, learn }),
+            [b's', s, b'r', r, b'l', l] => {
+                bit(*s)
+                    .zip(bit(*r))
+                    .zip(bit(*l))
+                    .map(|((show, rank), learn)| Prefs {
+                        show,
+                        rank,
+                        learn,
+                        train: false,
+                    })
+            }
+            [b's', s, b'r', r, b'l', l, b't', t] => {
+                bit(*s).zip(bit(*r)).zip(bit(*l)).zip(bit(*t)).map(
+                    |(((show, rank), learn), train)| Prefs {
+                        show,
+                        rank,
+                        learn,
+                        train,
+                    },
+                )
+            }
             _ => None,
         };
         parsed.unwrap_or_default()
@@ -212,9 +238,37 @@ impl Visitor {
             return;
         };
         let now = now_unix();
+        // A click counts for more the farther down the page it was, once
+        // the page it was on is known (see crate::clicks).
+        let weight = match self.history.learned.place(query, domain) {
+            Some((at, picked)) if learn => {
+                let positions = PositionStore::in_dir(self.store.dir());
+                let weighed = positions.update(|p| {
+                    if picked {
+                        p.bias().weight(at)
+                    } else {
+                        p.note_opened(query, domain, at, now)
+                    }
+                });
+                if self.prefs.train && !picked {
+                    let labels = LabelStore::in_dir(self.store.dir());
+                    if let Err(err) = labels.update(|l| l.note_opened(query, domain, at, now)) {
+                        warn!("could not keep an opened site for training: {err:#}");
+                    }
+                }
+                match weighed {
+                    Ok(weight) => Some(weight),
+                    Err(err) => {
+                        warn!("could not count where a result was opened: {err:#}");
+                        None
+                    }
+                }
+            }
+            _ => None,
+        };
         if let Err(err) = self.store.update(&profile, |h| {
             if keep {
-                h.add_opened(query, domain, now);
+                h.add_opened_weighted(query, domain, now, weight);
             }
             if learn {
                 h.learned.note_picked(query, domain, now);
@@ -268,6 +322,19 @@ impl Visitor {
             h.learned.note_shown(query, blocks, folded, sites, now);
         }) {
             warn!("could not note a results page in the history: {err:#}");
+        }
+        // Edit mode lists hidden results last: not the page as searched.
+        if !self.editing {
+            let positions = PositionStore::in_dir(self.store.dir());
+            if let Err(err) = positions.update(|p| p.note_shown(query, sites, now)) {
+                warn!("could not count the places of a results page: {err:#}");
+            }
+            if self.prefs.train {
+                let labels = LabelStore::in_dir(self.store.dir());
+                if let Err(err) = labels.update(|l| l.note_shown(query, sites, now)) {
+                    warn!("could not keep a results page for training: {err:#}");
+                }
+            }
         }
     }
 
@@ -618,14 +685,20 @@ impl HistoryView {
              before first</label>\
              <label><input type=\"checkbox\" name=\"hl\" value=\"1\"{}> Learn from my clicks \
              which boxes, like maps, I use</label>\
+             <label><input type=\"checkbox\" name=\"ht\" value=\"1\"{}> Use my searches to \
+             train Plumb's ranking</label>\
              <p class=\"hint\">Kept on this node for this browser only, and never sent \
-             anywhere. \
+             anywhere. Searches kept for training (while learning from clicks) are kept \
+             apart from your history, with no profile, so clearing your history does not \
+             remove them; short searches only, none with an e-mail address or a long \
+             number. \
              <a href=\"/history\">See or clear my history</a> &middot; \
              <a href=\"/about\">About you: interests and sites</a> &middot; \
              <a href=\"/tune\">Tune your search</a></p>",
             checked(self.prefs.show),
             checked(self.prefs.rank),
-            checked(self.prefs.learn)
+            checked(self.prefs.learn),
+            checked(self.prefs.train)
         )
     }
 
@@ -712,11 +785,13 @@ pub(super) fn prefs_from_form(
     show: &Option<String>,
     rank: &Option<String>,
     learn: &Option<String>,
+    train: &Option<String>,
 ) -> Option<Prefs> {
     super::flag(hist).then(|| Prefs {
         show: super::flag(show),
         rank: super::flag(rank),
         learn: super::flag(learn),
+        train: super::flag(train),
     })
 }
 
@@ -1034,8 +1109,9 @@ async fn forget_clicks(State(state): State<AppState>, headers: HeaderMap) -> Res
 
 fn render_history(history: &History, prefs: Prefs, now: u64) -> String {
     let options = SearchOptions::default();
-    let mut body = String::from(
-        "<div class=\"wrap hist\">\n<header><a class=\"logo\" href=\"/\">Plumb</a></header>\n<main>\n\
+    let bar = super::app_bar("", false);
+    let mut body = format!(
+        "<div class=\"wrap hist\">\n{bar}\n<main>\n\
          <h1>Your history</h1>\n\
          <p class=\"s\">Kept on this node for this browser only. Other people searching here \
          have their own.</p>\n",
@@ -1364,8 +1440,15 @@ mod tests {
         for show in [true, false] {
             for rank in [true, false] {
                 for learn in [true, false] {
-                    let prefs = Prefs { show, rank, learn };
-                    assert_eq!(Prefs::from_cookie(&prefs.cookie_value()), prefs);
+                    for train in [true, false] {
+                        let prefs = Prefs {
+                            show,
+                            rank,
+                            learn,
+                            train,
+                        };
+                        assert_eq!(Prefs::from_cookie(&prefs.cookie_value()), prefs);
+                    }
                 }
             }
         }
@@ -1376,7 +1459,16 @@ mod tests {
             Prefs {
                 show: false,
                 rank: true,
-                learn: true
+                learn: true,
+                train: false,
+            }
+        );
+        // Set before training was a choice.
+        assert_eq!(
+            Prefs::from_cookie("s1r1l0"),
+            Prefs {
+                learn: false,
+                ..Prefs::default()
             }
         );
     }

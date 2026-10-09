@@ -80,10 +80,24 @@ pub enum Command {
     /// `plumb run --drop-dead-sites` takes out of its index, without
     /// changing anything. Reads the whole records file into memory.
     DeadSites(DeadSitesArgs),
+    /// How a node's ranking experiments (its `experiments.json`) are
+    /// doing: each against its layer's control, with 95% confidence
+    /// intervals. Reads the results; changes nothing.
+    Experiments(ExperimentsArgs),
+    /// Write out the searches and the sites opened for them that browsers
+    /// chose to have kept as training examples (the settings gear's "Use
+    /// my searches to train Plumb's ranking"), with how much each site is
+    /// wanted once corrected for its place on the page.
+    ClickLabels(ClickLabelsArgs),
     /// Rank the sites in a records file by the links their homepages make
     /// to each other (a PageRank of our own crawls), without changing
     /// anything. A look at the link graph; nothing uses the ranks yet.
     LinkRank(LinkRankArgs),
+    /// How often each site's pages state Wikidata's facts right, from
+    /// Common Crawl's page text (Knowledge-Based Trust), and optionally a
+    /// copy of a records file with each site's counts, which its link
+    /// score counts in.
+    FactTrust(crate::fact_trust::FactTrustArgs),
     /// Learn each kind of Wikidata fact (capital, founder, CEO...) as a
     /// map between the vectors of Wikipedia articles, and measure how well
     /// the maps find facts they were not shown (an experiment).
@@ -231,6 +245,34 @@ pub struct DeadSitesArgs {
     /// How many of the best-known dead sites to name.
     #[arg(long, value_name = "N", default_value_t = 20)]
     pub show: usize,
+}
+
+#[derive(Debug, Args)]
+pub struct ClickLabelsArgs {
+    /// The node's data directory, as given to `plumb run --data`.
+    #[arg(long, value_name = "DIR")]
+    pub data: PathBuf,
+    /// Write every search and site here, as JSON lines: `query`,
+    /// `domain`, `shown`, `opened` and `wanted` (clicks per time shown,
+    /// each counted for how far down the page it was, at most 1).
+    #[arg(long, value_name = "JSONL")]
+    pub out: PathBuf,
+    /// Also write the searches whose clicks clearly pick one site as a
+    /// queries file (`query<TAB>domain`), for `plumb eval --features-out`
+    /// and then `plumb train-rank`.
+    #[arg(long, value_name = "TSV")]
+    pub queries: Option<PathBuf>,
+    /// Times the site must have been opened for the search to go in the
+    /// queries file.
+    #[arg(long, value_name = "N", default_value_t = 2)]
+    pub min_opened: u32,
+}
+
+#[derive(Debug, Args)]
+pub struct ExperimentsArgs {
+    /// The node's data directory, as given to `plumb run --data`.
+    #[arg(long, value_name = "DIR")]
+    pub data: PathBuf,
 }
 
 #[derive(Debug, Args)]
@@ -516,6 +558,13 @@ pub struct RunArgs {
     /// many nodes report the same pick.
     #[arg(long, requires = "network")]
     pub share_popularity: bool,
+    /// Let AI apps on this computer share a finding with other Plumb nodes
+    /// when they ask to (report_finding with share: true): the page, why it
+    /// helped and the search's words as numbers, signed with this node's
+    /// key. Never the search or the task, unless the app shares the search
+    /// too.
+    #[arg(long, requires = "network")]
+    pub share_findings: bool,
     /// Also share the homepages crawled into this records file, such as one
     /// `plumb crawl` is filling (its journal included), and add them to this
     /// node's own records: every half hour, those crawled since the last
@@ -730,6 +779,10 @@ pub struct FetchPagesArgs {
     /// Papers: most papers kept, the most cited.
     #[arg(long, value_name = "N", default_value_t = 2_000_000)]
     pub max_papers: usize,
+    /// Papers: most requests to CORE for free copies (fifty papers each),
+    /// when CORE_API_KEY is set.
+    #[arg(long, value_name = "N", default_value_t = plumb_ingest::core_ac::DEFAULT_MAX_REQUESTS)]
+    pub max_core_requests: usize,
     /// Podcasts: fewest Podcast Index popularity points (0 to 9) of a
     /// podcast kept.
     #[arg(long, value_name = "N", default_value_t = plumb_ingest::podcasts::DEFAULT_MIN_SCORE)]
@@ -1083,6 +1136,12 @@ pub struct EvalArgs {
     /// How many of each page set's most read pages to keep.
     #[arg(long, value_name = "N", default_value_t = usize::MAX, hide_default_value = true)]
     pub pages_top: usize,
+    /// Keep the index built from --pages in this folder and reuse it on
+    /// later runs with the same page set files and the same `plumb`
+    /// binary, instead of rebuilding it every run. Runs at once share one
+    /// build; only the few most recently used indexes are kept.
+    #[arg(long, value_name = "DIR", env = "PLUMB_EVAL_PAGES_CACHE")]
+    pub pages_cache: Option<PathBuf>,
     /// Measure only one half of the queries: `tune` to try ranking changes
     /// on, `held-out` to check them on afterwards. Which half a query is in
     /// depends on its words alone (see eval/README.md) [default: both].

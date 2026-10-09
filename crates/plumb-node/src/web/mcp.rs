@@ -11,12 +11,20 @@
 //! `read_page` fetches pages from wherever the node runs, so it is offered
 //! only to AI apps on the node's own computer (a request from a loopback
 //! address that no proxy forwarded), unless the node runs with
-//! `--mcp-read-pages`. A public node offering it to everyone would be an
-//! open proxy.
+//! `--mcp-read-pages`. Others then read pages on ports 80 and 443 only,
+//! fewer a minute than other tool calls, and only a few at once across all
+//! clients ([`PublicReads`]): the node fetches what anyone asks, so it
+//! must not become a way to knock on other servers' ports or to load the
+//! web through it.
 //!
 //! `report_finding`, and the findings listed with search results, are
 //! offered only to apps on the node's own computer, always: they hold
-//! what its agents searched for (see [`crate::findings`]).
+//! what its agents searched for (see [`crate::findings`]). So are the
+//! leads other nodes shared, listed with search results, and sharing a
+//! finding with `report_finding`'s `share`, on a node that allows it: a
+//! lead goes out signed with the node's key. Behind a reverse proxy on the
+//! same computer that does not say who it forwards for, every request looks
+//! local (see `docs/docker.md`), so such a node should not share findings.
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
@@ -42,6 +50,12 @@ const BURST: f64 = 30.0;
 const PER_MINUTE: f64 = 60.0;
 /// Clients remembered before the idle ones are forgotten.
 const MAX_CLIENTS: usize = 10_000;
+/// `read_page` calls a client not on this computer may make in a burst...
+const READ_BURST: f64 = 10.0;
+/// ...and per minute after that.
+const READ_PER_MINUTE: f64 = 20.0;
+/// Pages read at once for clients not on this computer, all together.
+const MAX_PUBLIC_READS: usize = 8;
 
 pub(super) fn routes(router: Router<AppState>) -> Router<AppState> {
     router.route(
@@ -110,14 +124,42 @@ impl Limiter {
 pub(crate) struct SharedReader(OnceLock<Option<Reader>>);
 
 impl SharedReader {
-    fn get(&self) -> Option<Reader> {
+    fn get(&self, config: &plumb_crawl::ReadConfig) -> Option<Reader> {
         self.0
             .get_or_init(|| {
-                Reader::standard(tokio::runtime::Handle::current())
+                Reader::with_config(config.clone(), tokio::runtime::Handle::current())
                     .map_err(|err| error!("{err:#}"))
                     .ok()
             })
             .clone()
+    }
+}
+
+/// How `read_page` reads for clients not on this computer, when the node
+/// offers it to everyone.
+pub(crate) struct PublicReads {
+    limiter: Limiter,
+    slots: Arc<tokio::sync::Semaphore>,
+    reader: SharedReader,
+}
+
+impl Default for PublicReads {
+    fn default() -> Self {
+        PublicReads {
+            limiter: Limiter::new(READ_BURST, READ_PER_MINUTE),
+            slots: Arc::new(tokio::sync::Semaphore::new(MAX_PUBLIC_READS)),
+            reader: SharedReader::default(),
+        }
+    }
+}
+
+impl PublicReads {
+    /// The node's reader settings, kept to ports 80 and 443.
+    fn reader(&self, config: &plumb_crawl::ReadConfig) -> Option<Reader> {
+        self.reader.get(&plumb_crawl::ReadConfig {
+            web_ports_only: true,
+            ..config.clone()
+        })
     }
 }
 
@@ -212,6 +254,35 @@ fn answer(status: StatusCode, body: Value) -> Response {
     (status, security_headers(), Json(body)).into_response()
 }
 
+/// `429 Too Many Requests` for the call `id`, which may come again in
+/// `wait` seconds.
+fn too_many_requests(id: Value, wait: u64) -> Response {
+    let body = json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": { "code": -32000, "message": format!("too many requests; try again in {wait} seconds") },
+    });
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        security_headers(),
+        [(header::RETRY_AFTER, wait.to_string())],
+        Json(body),
+    )
+        .into_response()
+}
+
+/// The call `id` failed, for the model to read why.
+fn tool_error(id: Value, text: &str) -> Response {
+    answer(
+        StatusCode::OK,
+        json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": { "content": [{ "type": "text", "text": text }], "isError": true },
+        }),
+    )
+}
+
 async fn not_streamed() -> Response {
     (
         StatusCode::METHOD_NOT_ALLOWED,
@@ -245,37 +316,38 @@ async fn mcp(State(state): State<AppState>, request: Request) -> Response {
     let Ok(message) = serde_json::from_slice::<Value>(&body) else {
         return answer(StatusCode::BAD_REQUEST, parse_error());
     };
+    let public_read = reads_pages && !here && Mcp::is_read_call(&message);
+    // Held until the page is read.
+    let mut _read_slot = None;
     if Mcp::is_tool_call(&message) {
-        if let Err(wait) = state.mcp_limiter.take(client, Instant::now()) {
-            let id = message.get("id").cloned().unwrap_or(Value::Null);
-            let body = json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "error": { "code": -32000, "message": format!("too many requests; try again in {wait} seconds") },
-            });
-            return (
-                StatusCode::TOO_MANY_REQUESTS,
-                security_headers(),
-                [(header::RETRY_AFTER, wait.to_string())],
-                Json(body),
-            )
-                .into_response();
+        let id = message.get("id").cloned().unwrap_or(Value::Null);
+        let now = Instant::now();
+        if let Err(wait) = state.mcp_limiter.take(client, now) {
+            return too_many_requests(id, wait);
+        }
+        if public_read {
+            if let Err(wait) = state.public_reads.limiter.take(client, now) {
+                return too_many_requests(id, wait);
+            }
+            match Arc::clone(&state.public_reads.slots).try_acquire_owned() {
+                Ok(slot) => _read_slot = Some(slot),
+                Err(_) => {
+                    return tool_error(
+                        id,
+                        "This Plumb node is reading as many pages as it can for others right \
+                         now; try again in a few seconds.",
+                    )
+                }
+            }
         }
         if state.setting_up().is_some() {
             // A notification gets no answer, as when the node is ready.
-            let Some(id) = message.get("id").cloned() else {
+            if message.get("id").is_none() {
                 return (StatusCode::ACCEPTED, security_headers()).into_response();
-            };
-            return answer(
-                StatusCode::OK,
-                json!({
-                    "jsonrpc": "2.0",
-                    "id": id,
-                    "result": {
-                        "content": [{ "type": "text", "text": "This Plumb node is still setting up its index; try again in a few minutes." }],
-                        "isError": true,
-                    },
-                }),
+            }
+            return tool_error(
+                id,
+                "This Plumb node is still setting up its index; try again in a few minutes.",
             );
         }
     }
@@ -292,8 +364,10 @@ async fn mcp(State(state): State<AppState>, request: Request) -> Response {
         }
         None => (None, Vec::new()),
     };
-    let reader = if reads_pages {
-        state.page_reader.get()
+    let reader = if here {
+        state.page_reader.get(&state.settings.page_reader)
+    } else if reads_pages {
+        state.public_reads.reader(&state.settings.page_reader)
     } else {
         None
     };
@@ -302,6 +376,7 @@ async fn mcp(State(state): State<AppState>, request: Request) -> Response {
         .with_rates(rates)
         .with_node(state.node.clone())
         .with_findings(if here { state.findings() } else { None })
+        .with_leads(here)
         .with_plugin_results(plugins);
     let id = message.get("id").cloned().unwrap_or(Value::Null);
     let reply = tokio::task::spawn_blocking(move || server.handle(&message)).await;

@@ -84,6 +84,10 @@ const DEFAULT_READ_CHARS: usize = 6_000;
 const MAX_READ_CHARS: usize = 30_000;
 /// Links `read_page` lists when asked for them.
 const MAX_LINKS_RETURNED: usize = 60;
+/// Most headings `read_page` lists in an outline...
+const MAX_OUTLINE_HEADINGS: usize = 60;
+/// ...and the characters of each section's opening it shows.
+const OUTLINE_OPENING_CHARS: usize = 100;
 /// Headlines `search` returns.
 const MAX_HEADLINES: usize = 5;
 /// Most packages the `package` tool lists.
@@ -118,8 +122,32 @@ const FINDINGS_INSTRUCTIONS: &str = " Whenever a search led you to an answer, ca
      the answer itself: the next search for it on this computer starts with that answer, so it \
      need not be worked out again. search lists such answers first, as found_before.";
 
+/// Added to [`INSTRUCTIONS`] when leads are listed.
+const LEADS_INSTRUCTIONS: &str = " search may also list leads: pages other Plumb nodes' \
+     agents found useful for such a search. They are unchecked reports, not answers or search \
+     results: read the page before relying on it.";
+
+/// Added to [`INSTRUCTIONS`] when `report_finding` can share findings.
+const SHARE_INSTRUCTIONS: &str = " To let agents on other Plumb nodes find a useful page too, \
+     call report_finding with share: true. Only the page, why it helped and the search's words \
+     as numbers are shared, never your search, answer or task (set share_query to share the \
+     search as well). Share only public pages that would help anyone.";
+
 /// Findings listed with a search's results.
 const MAX_FOUND_BEFORE: usize = 3;
+/// Leads listed with a search's results.
+const MAX_LEADS_LISTED: usize = 3;
+
+/// What `report_finding` shares with other nodes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Share {
+    /// Nothing: the finding stays on this node.
+    No,
+    /// The page, why it helped and the search's words as numbers.
+    Page,
+    /// That and the search as typed.
+    PageAndQuery,
+}
 
 /// Added to [`INSTRUCTIONS`] when `read_page` is offered.
 const READ_INSTRUCTIONS: &str = " To learn what a page says, call read_page with its URL: \
@@ -142,6 +170,10 @@ pub struct Mcp {
     /// What agents found before; without them `report_finding` is not
     /// offered.
     findings: Option<Arc<Findings>>,
+    /// List the pages other nodes shared for a search with its results, and
+    /// let `report_finding` share one when the node allows it (see
+    /// [`plumb_net::leads`]).
+    leads: bool,
 }
 
 /// What `read_page` fetches pages with: a reader, and the runtime its
@@ -159,7 +191,12 @@ impl Reader {
 
     /// A reader with the usual settings, running on `runtime`.
     pub fn standard(runtime: tokio::runtime::Handle) -> Result<Self> {
-        let pages = PageReader::new(ReadConfig::default()).context("making the page reader")?;
+        Reader::with_config(ReadConfig::default(), runtime)
+    }
+
+    /// A reader with `config`, running on `runtime`.
+    pub fn with_config(config: ReadConfig, runtime: tokio::runtime::Handle) -> Result<Self> {
+        let pages = PageReader::new(config).context("making the page reader")?;
         Ok(Reader::new(pages, runtime))
     }
 }
@@ -180,7 +217,34 @@ impl Mcp {
             node: None,
             plugins: Vec::new(),
             findings: None,
+            leads: false,
         }
+    }
+
+    /// Lists the pages other nodes shared for a search with its results,
+    /// when the node is in the network, and offers sharing findings when
+    /// it allows that too.
+    pub fn with_leads(mut self, leads: bool) -> Self {
+        self.leads = leads;
+        self
+    }
+
+    /// The network, for leads.
+    fn net(&self) -> Option<Arc<plumb_net::NetHandle>> {
+        if !self.leads {
+            return None;
+        }
+        self.node.as_ref()?.network()
+    }
+
+    /// Whether `report_finding` may share a finding with other nodes.
+    fn shares(&self) -> bool {
+        self.findings.is_some()
+            && self.net().is_some()
+            && self
+                .node
+                .as_ref()
+                .is_some_and(|node| node.shares_findings())
     }
 
     /// Offers `report_finding`, keeping findings in `findings`, and lists
@@ -257,10 +321,12 @@ impl Mcp {
                 &params,
                 self.reader.is_some(),
                 self.findings.is_some(),
+                self.net().is_some(),
+                self.shares(),
             )),
             "ping" => Ok(json!({})),
             "tools/list" => Ok(json!({
-                "tools": tools(self.reader.is_some(), self.findings.is_some())
+                "tools": tools(self.reader.is_some(), self.findings.is_some(), self.shares())
             })),
             "tools/call" => self.call(&params),
             "resources/list" => Ok(json!({ "resources": [] })),
@@ -278,6 +344,12 @@ impl Mcp {
     /// server rate-limits only those.
     pub fn is_tool_call(message: &Value) -> bool {
         message.get("method").and_then(Value::as_str) == Some("tools/call")
+    }
+
+    /// Whether `message` calls `read_page`.
+    pub fn is_read_call(message: &Value) -> bool {
+        Mcp::is_tool_call(message)
+            && message.pointer("/params/name").and_then(Value::as_str) == Some("read_page")
     }
 
     /// `tools/call`: a tool's answer, as text for the model and as
@@ -375,8 +447,13 @@ impl Mcp {
                     .ok_or((INVALID_PARAMS, "answer is required".to_string()))?
                     .to_string();
                 let task = args.get("task").and_then(Value::as_str);
+                let share = match (bool_arg(args, "share")?, bool_arg(args, "share_query")?) {
+                    (false, _) => Share::No,
+                    (true, false) => Share::Page,
+                    (true, true) => Share::PageAndQuery,
+                };
                 let options = self.options(args)?;
-                self.report_finding(&query, &url, &why, &answer, task, &options)
+                self.report_finding(&query, &url, &why, &answer, task, share, &options)
             }
             "read_page" if self.reader.is_some() => {
                 let read = ReadArgs::of(args)?;
@@ -760,6 +837,9 @@ impl Mcp {
             if placed.hit.page.package.is_some() {
                 page["package"] = package_card(&placed.hit.page);
             }
+            if let Some(free) = placed.hit.page.free_copy() {
+                page["free_copy"] = json!(free);
+            }
             page
         }));
         let mut sites: Vec<Value> = results.hits.iter().map(brief).collect();
@@ -778,6 +858,11 @@ impl Mcp {
                 })
             })
             .collect();
+        let known: Vec<&str> = found_before
+            .iter()
+            .filter_map(|found| found["url"].as_str())
+            .collect();
+        let leads = self.leads_for(query, &known, now, options);
         let direct = !found_before.is_empty()
             || answer.is_some()
             || pages.iter().any(|page| page.get("package").is_some())
@@ -836,6 +921,9 @@ impl Mcp {
         }
         if !found_before.is_empty() {
             fields.insert("found_before".into(), json!(found_before));
+        }
+        if !leads.is_empty() {
+            fields.insert("leads".into(), json!(leads));
         }
         Ok(answer_json)
     }
@@ -924,7 +1012,9 @@ impl Mcp {
     }
 
     /// `report_finding`: keeps what an agent found, unless its page is a
-    /// look-alike of another site.
+    /// look-alike of another site, and shares it as a lead when asked to and
+    /// the node allows it.
+    #[allow(clippy::too_many_arguments)]
     pub fn report_finding(
         &self,
         query: &str,
@@ -932,6 +1022,7 @@ impl Mcp {
         why: &str,
         answer: &str,
         task: Option<&str>,
+        share: Share,
         options: &SearchOptions,
     ) -> Result<Value> {
         let Some(findings) = &self.findings else {
@@ -946,12 +1037,108 @@ impl Mcp {
             );
         }
         findings.add(finding.clone())?;
-        Ok(json!({
+        let mut kept = json!({
             "kept": true,
             "query": finding.query,
             "url": finding.url,
             "findings": findings.len(),
-        }))
+        });
+        if share != Share::No {
+            kept["shared"] = self.share_finding(&finding, share);
+        }
+        Ok(kept)
+    }
+
+    /// Shares `finding` with other nodes as a lead: what the answer says,
+    /// or why it was not shared.
+    fn share_finding(&self, finding: &Finding, share: Share) -> Value {
+        let net = match self.net() {
+            Some(net) if self.shares() => net,
+            _ => {
+                return json!({
+                    "shared": false,
+                    "why_not": "this node does not share findings; it was kept on this node only \
+                         (a node run with --share-findings in the Plumb network can share them)",
+                })
+            }
+        };
+        let draft = plumb_net::leads::LeadDraft {
+            keys: crate::findings::lead_keys(&finding.query),
+            query: (share == Share::PageAndQuery).then(|| finding.query.clone()),
+            url: finding.url.clone(),
+            note: finding.why.clone(),
+        };
+        match net.share_lead_blocking(draft) {
+            Ok(lead) => json!({
+                "shared": true,
+                "url": lead.url,
+                "note": lead.note,
+                "query": lead.query,
+                "node": net.peer_id().to_string(),
+                "expires_in_days": lead.expires.saturating_sub(lead.at) / 86_400,
+            }),
+            Err(err) => json!({ "shared": false, "why_not": format!("{err:#}") }),
+        }
+    }
+
+    /// The pages other nodes shared for `query`, besides `known` ones,
+    /// each checked for look-alikes; at most [`MAX_LEADS_LISTED`].
+    fn leads_for(
+        &self,
+        query: &str,
+        known: &[&str],
+        now: u64,
+        options: &SearchOptions,
+    ) -> Vec<Value> {
+        let Some(net) = self.net() else {
+            return Vec::new();
+        };
+        let keys = crate::findings::lead_keys(query);
+        if keys.topic.is_empty() {
+            return Vec::new();
+        }
+        let found = match net.leads_blocking(keys, MAX_LEADS_LISTED + known.len()) {
+            Ok(found) => found,
+            Err(err) => {
+                tracing::debug!("cannot list leads: {err:#}");
+                return Vec::new();
+            }
+        };
+        found
+            .into_iter()
+            .filter(|lead| !known.contains(&lead.url.as_str()))
+            // A page made to look like another site is no lead.
+            .filter(|lead| {
+                self.check_lookalike(&lead.url, options)
+                    .map_or(true, |check| check["verdict"] != "lookalike")
+            })
+            .take(MAX_LEADS_LISTED)
+            .map(|lead| {
+                let newest = lead.reporters.first();
+                let reporters: Vec<Value> = lead
+                    .reporters
+                    .iter()
+                    .map(|by| {
+                        json!({
+                            "node": by.peer_id,
+                            "relation": by.relation,
+                            "why": by.note,
+                            "query": by.query,
+                            "reported": crate::web::time_ago(by.at, now),
+                            "reported_at": by.at,
+                            "expires_at": by.expires,
+                        })
+                    })
+                    .collect();
+                json!({
+                    "url": lead.url,
+                    "why": newest.map(|by| by.note.as_str()),
+                    "reported": newest.map(|by| crate::web::time_ago(by.at, now)),
+                    "verified": false,
+                    "reported_by": reporters,
+                })
+            })
+            .collect()
     }
 
     /// `site_info`: one site's entry.
@@ -1082,6 +1269,9 @@ pub struct ReadArgs {
     /// Words to jump to: the part returned starts at their first
     /// appearance from `start`.
     find: Option<String>,
+    /// The page's headings, where each starts and its opening words,
+    /// instead of its text.
+    outline: bool,
 }
 
 impl ReadArgs {
@@ -1099,6 +1289,10 @@ impl ReadArgs {
                 .map(str::trim)
                 .filter(|find| !find.is_empty())
                 .map(|find| truncate_chars(find, MAX_QUERY_CHARS)),
+            outline: args
+                .get("outline")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
         })
     }
 }
@@ -1160,6 +1354,20 @@ impl Reader {
         let (max_chars, links) = (args.max_chars, args.links);
         let chars: Vec<char> = page.text.chars().collect();
         let total = chars.len();
+        if args.outline {
+            let sections = outline(&chars);
+            // A page without headings has no outline to show: its text
+            // follows instead, so the call is not wasted.
+            if !sections.is_empty() {
+                return Ok(json!({
+                    "url": page.url,
+                    "title": page.title,
+                    "outline": sections,
+                    "length": total,
+                    "truncated": page.cut,
+                }));
+            }
+        }
         let mut start = args.start.min(total);
         let found = args
             .find
@@ -1217,6 +1425,69 @@ impl Reader {
     }
 }
 
+/// A page's sections: each Markdown heading in its text with its level,
+/// where it starts and the opening words under it, after the words before
+/// the first heading (level 0) when there are any. Without headings, none.
+/// A long outline keeps the higher levels, then the first headings.
+fn outline(chars: &[char]) -> Vec<Value> {
+    // (level, heading, where the line starts, where the text under it starts)
+    let mut headings: Vec<(usize, String, usize, usize)> = Vec::new();
+    let mut at = 0;
+    while at < chars.len() {
+        let end = chars[at..]
+            .iter()
+            .position(|&c| c == '\n')
+            .map_or(chars.len(), |n| at + n);
+        let line: String = chars[at..end].iter().collect();
+        let level = line.chars().take_while(|&c| c == '#').count();
+        if (1..=6).contains(&level) && line[level..].starts_with(' ') {
+            let heading = line[level..].trim().to_string();
+            if !heading.is_empty() {
+                headings.push((level, heading, at, end));
+            }
+        }
+        at = end + 1;
+    }
+    if headings.is_empty() {
+        return Vec::new();
+    }
+    let mut deepest = 6;
+    while headings.len() > MAX_OUTLINE_HEADINGS && deepest > 1 {
+        headings.retain(|(level, ..)| *level < deepest);
+        deepest -= 1;
+    }
+    headings.truncate(MAX_OUTLINE_HEADINGS);
+    // The words under a heading, up to the next line that is a heading.
+    let opening = |from: usize| -> String {
+        let words: String = chars[from.min(chars.len())..]
+            .iter()
+            .take(OUTLINE_OPENING_CHARS * 4)
+            .collect();
+        let words: String = words
+            .lines()
+            .map(str::trim)
+            .take_while(|line| !line.starts_with('#'))
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        truncate_chars(&words, OUTLINE_OPENING_CHARS)
+    };
+    let mut sections = Vec::new();
+    let before = opening(0);
+    if headings[0].2 > 0 && !before.is_empty() {
+        sections.push(json!({ "level": 0, "heading": "", "start": 0, "opening": before }));
+    }
+    for (level, heading, start, under) in headings {
+        sections.push(json!({
+            "level": level,
+            "heading": truncate_chars(&heading, OUTLINE_OPENING_CHARS),
+            "start": start,
+            "opening": opening(under),
+        }));
+    }
+    sections
+}
+
 /// Where `find` first appears in `chars` at or after `from`, ignoring case.
 fn find_from(chars: &[char], find: &str, from: usize) -> Option<usize> {
     let fold = |c: char| c.to_lowercase().next().unwrap_or(c);
@@ -1241,7 +1512,7 @@ pub fn parse_error() -> Value {
     error(Value::Null, PARSE_ERROR, "the message is not JSON")
 }
 
-fn initialize(params: &Value, read_pages: bool, findings: bool) -> Value {
+fn initialize(params: &Value, read_pages: bool, findings: bool, leads: bool, share: bool) -> Value {
     let asked = params.get("protocolVersion").and_then(Value::as_str);
     let version = asked
         .and_then(|asked| PROTOCOL_VERSIONS.iter().find(|v| **v == asked))
@@ -1255,16 +1526,19 @@ fn initialize(params: &Value, read_pages: bool, findings: bool) -> Value {
             "version": env!("CARGO_PKG_VERSION"),
         },
         "instructions": format!(
-            "{INSTRUCTIONS}{}{}",
+            "{INSTRUCTIONS}{}{}{}{}",
             if read_pages { READ_INSTRUCTIONS } else { "" },
             if findings { FINDINGS_INSTRUCTIONS } else { "" },
+            if leads { LEADS_INSTRUCTIONS } else { "" },
+            if share { SHARE_INSTRUCTIONS } else { "" },
         ),
     })
 }
 
 /// The tools' descriptions, as `tools/list` returns them; `read_pages`
-/// adds `read_page`, `findings` `report_finding`.
-pub fn tools(read_pages: bool, findings: bool) -> Value {
+/// adds `read_page`, `findings` `report_finding`, and `share` its choice to
+/// share a finding with other nodes.
+pub fn tools(read_pages: bool, findings: bool, share: bool) -> Value {
     let country = json!({
         "type": "string",
         "description": "Optional home country, a two-letter code such as US or DE: its sites \
@@ -1315,7 +1589,7 @@ pub fn tools(read_pages: bool, findings: bool) -> Value {
                  says npm, crate, pip, python or another registry or language, a direct answer for sums, unit and currency conversions and \
                  the time somewhere, facts about what the query names, and recent headlines. \
                  Plumb indexes homepages and page sets, not the full text of the web, so search \
-                 for names and topics, then read a page with read_page.",
+                 for names and topics, then open the page you need.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1386,23 +1660,23 @@ pub fn tools(read_pages: bool, findings: bool) -> Value {
         },
     ]);
     if read_pages {
-        tools
-            .as_array_mut()
-            .expect("an array")
-            .push(read_page_tool());
+        let tools = tools.as_array_mut().expect("an array");
+        tools.push(read_page_tool());
+        point_search_at_read_page(tools);
     }
     if findings {
         tools
             .as_array_mut()
             .expect("an array")
-            .push(report_finding_tool());
+            .push(report_finding_tool(share));
     }
     tools
 }
 
-/// `report_finding`'s description.
-fn report_finding_tool() -> Value {
-    json!({
+/// `report_finding`'s description, with `share` and `share_query` when the
+/// node shares findings.
+fn report_finding_tool(share: bool) -> Value {
+    let mut tool = json!({
         "name": "report_finding",
         "title": "Report what a search found",
         "description": "Whenever a search led you to an answer, report it: what you searched \
@@ -1421,7 +1695,37 @@ fn report_finding_tool() -> Value {
             "required": ["query", "url", "why", "answer"],
         },
         "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false },
-    })
+    });
+    if share {
+        tool["description"] = json!(
+            "Whenever a search led you to an answer, report it: what you searched for, the page \
+             that answered it, why that page helped, and the answer itself. The next search for \
+             the same thing on this computer lists it first (found_before), so no agent has to \
+             work it out again. Kept on this node only, unless you set share: then agents \
+             searching other Plumb nodes for the same thing see the page and why it helped (not \
+             your search, answer or task), signed by this node."
+        );
+        let properties = &mut tool["inputSchema"]["properties"];
+        properties["share"] = json!({ "type": "boolean", "description": "Also share the page and why it helped with other Plumb nodes, for agents searching for the same thing (default false). Only for public pages that would help anyone; never share anything private." });
+        properties["share_query"] = json!({ "type": "boolean", "description": "With share: also share your search as you typed it (default false: only its words as numbers, for matching)." });
+        tool["annotations"]["openWorldHint"] = json!(true);
+    }
+    tool
+}
+
+/// How `search`'s description ends without `read_page`...
+const SEARCH_THEN_OPEN: &str = "then open the page you need.";
+/// ...and with it.
+const SEARCH_THEN_READ: &str = "then read a page with read_page.";
+
+/// Has `search`'s description, among `tools`, send agents on to
+/// `read_page`, once that is offered too.
+fn point_search_at_read_page(tools: &mut [Value]) {
+    for tool in tools.iter_mut().filter(|tool| tool["name"] == "search") {
+        if let Some(text) = tool["description"].as_str() {
+            tool["description"] = json!(text.replace(SEARCH_THEN_OPEN, SEARCH_THEN_READ));
+        }
+    }
 }
 
 /// `read_page`'s description.
@@ -1432,7 +1736,9 @@ fn read_page_tool() -> Value {
         "description": "Fetch a web page (web_fetch) and return its text, with headings and \
              lists marked in Markdown, without menus, ads or scripts. Use it after search or \
              official_site to read what a page says. Long pages come in parts: call again with \
-             start set to next_start, or pass find to jump to the words you need. Also says \
+             start set to next_start, or pass find to jump to the words you need. When the \
+             first part of a long page lacks what you need, ask for its outline and read only \
+             the section you need. Also says \
              whether the address is a look-alike of a better-known site.",
         "inputSchema": {
             "type": "object",
@@ -1442,6 +1748,7 @@ fn read_page_tool() -> Value {
                 "max_chars": { "type": "integer", "minimum": 200, "maximum": MAX_READ_CHARS, "description": "Most characters to return (default 6000)." },
                 "links": { "type": "boolean", "description": "Also list the page's links (default false)." },
                 "find": { "type": "string", "description": "Jump to the first place these words appear (from start), like Ctrl-F; says found: false when they do not." },
+                "outline": { "type": "boolean", "description": "Return the page's headings, each with where it starts and its opening words, instead of its text (default false); then read a section with start. A page without headings returns its text." },
             },
             "required": ["url"],
         },
@@ -1460,6 +1767,15 @@ fn text_arg(args: &Map<String, Value>, name: &str) -> Result<String, (i64, Strin
         return Err((INVALID_PARAMS, format!("{name} is required")));
     }
     Ok(text)
+}
+
+/// An optional true-or-false argument, false when left out.
+fn bool_arg(args: &Map<String, Value>, name: &str) -> Result<bool, (i64, String)> {
+    match args.get(name) {
+        None | Some(Value::Null) => Ok(false),
+        Some(Value::Bool(on)) => Ok(*on),
+        Some(_) => Err((INVALID_PARAMS, format!("{name} must be true or false"))),
+    }
 }
 
 /// Longest URL a tool takes; longer than any real page's address.
@@ -1947,6 +2263,7 @@ fn offer_read_page(message: &Value, answer: &mut Value) {
                 if !tools.iter().any(|tool| tool["name"] == "read_page") {
                     tools.push(read_page_tool());
                 }
+                point_search_at_read_page(tools);
             }
         }
         Some("initialize") => {
