@@ -8,7 +8,8 @@ The website at https://plumbsearch.org and the server setup behind it.
 - `Caddyfile` serves it with HTTPS (Caddy gets and renews the certificates),
   redirects `www.plumbsearch.org` and plain HTTP to `https://plumbsearch.org`,
   and passes the node's public pages (`/search`, `/api/search`, `/api/status`,
-  `/opensearch.xml`, the MCP server at `/mcp`, private search under `/private` and `/api/buckets`, and
+  `/opensearch.xml`, the MCP server at `/mcp`, About you at `/about` and
+  `/welcome`, private search under `/private` and `/api/buckets`, and
   network search) to a Plumb node on the same machine. Its dashboard, `/app`,
   is not passed on. While no node is running, those addresses
   show a "search isn't available" page instead.
