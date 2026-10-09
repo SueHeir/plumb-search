@@ -2,11 +2,16 @@
 
 use plumb_core::normalize_country;
 
+/// The home country when neither the search, the server, the browser nor
+/// this computer names one.
+pub const DEFAULT_COUNTRY: &str = "US";
+
 /// How a server picks the home country of a search that does not name one.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum HomeCountry {
     /// From the browser's preferred language (`en-US` -> `US`), else from
-    /// this computer's language and region settings.
+    /// this computer's language and region settings, else
+    /// [`DEFAULT_COUNTRY`].
     #[default]
     Auto,
     /// Always this ISO 3166-1 alpha-2 code.
@@ -36,7 +41,8 @@ impl HomeCountry {
             HomeCountry::Off => None,
             HomeCountry::Auto => accept_language
                 .and_then(country_from_accept_language)
-                .or_else(system_country),
+                .or_else(system_country)
+                .or_else(|| Some(DEFAULT_COUNTRY.to_string())),
         }
     }
 }
@@ -127,6 +133,14 @@ mod tests {
         assert_eq!(
             HomeCountry::Auto.resolve(Some("de-AT")).as_deref(),
             Some("AT")
+        );
+        // A browser that names no country, on a computer that names
+        // none, still gets the United States unless the system says
+        // otherwise.
+        let fallback = system_country().unwrap_or_else(|| DEFAULT_COUNTRY.into());
+        assert_eq!(
+            HomeCountry::Auto.resolve(Some("en")).as_deref(),
+            Some(fallback.as_str())
         );
     }
 

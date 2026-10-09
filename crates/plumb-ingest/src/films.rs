@@ -521,6 +521,8 @@ fn film_article(item: &str, kind: &str, sitelinks: u64, details: Details) -> Opt
         website: None,
         package: None,
         facts: Vec::new(),
+        lead: None,
+        names: Vec::new(),
     })
 }
 

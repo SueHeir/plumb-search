@@ -8,7 +8,10 @@
 //! Both searches take `country=XX` (a two-letter code, or `any` for none)
 //! and `only=1` (leave out other countries' sites). Without `country`, the
 //! server's [`HomeCountry`] setting decides, by default from the browser's
-//! `Accept-Language` and then this computer's region settings.
+//! `Accept-Language`, then this computer's region settings, then the
+//! United States. They also take `lang=XX` (only sites in that language, or
+//! `any`); without it, the browser's first language when the settings gear
+//! offers it, else English.
 //! - `POST /mcp` answers AI apps over the Model Context Protocol (see
 //!   [`crate::mcp`]),
 //! - `GET /opensearch.xml` describes the search engine to browsers
@@ -106,6 +109,7 @@ mod relay;
 mod searxng;
 mod setup;
 mod tune;
+mod weather;
 mod welcome;
 
 /// Results returned when a request does not say how many.
@@ -164,17 +168,38 @@ async fn run_places(
 /// listed: as the index has them, or else as the place says (its name and
 /// kind), since small local sites are often not in the index. Looked up on
 /// a blocking thread.
+///
+/// Places that give no website are looked up by name: the index often has
+/// a small shop's site even when OpenStreetMap does not
+/// ([`places::site_named_for`]). They come after the places that give
+/// one.
 async fn place_sites(state: &AppState, found: &plumb_index::places::PlaceResults) -> Vec<Hit> {
     let sites = places::local_sites(found);
-    if sites.is_empty() {
+    let unsited = places::places_without_sites(found);
+    if sites.is_empty() && unsited.is_empty() {
         return Vec::new();
     }
     let backend = Arc::clone(&state.backend);
     tokio::task::spawn_blocking(move || {
-        sites
+        let mut sites: Vec<Hit> = sites
             .into_iter()
             .map(|site| backend.site(&site.domain).unwrap_or(site))
-            .collect()
+            .collect();
+        for place in unsited {
+            let Ok(hits) = backend.search(&place.name, 5) else {
+                continue;
+            };
+            if let Some(mut site) = places::site_named_for(&place, hits) {
+                if !sites.iter().any(|s| s.domain == site.domain) {
+                    site.score = 0.0;
+                    site.text_score = 0.0;
+                    site.placing_text_score = None;
+                    site.named = false;
+                    sites.push(site);
+                }
+            }
+        }
+        sites
     })
     .await
     .unwrap_or_default()
@@ -248,6 +273,13 @@ pub trait SearchBackend: Send + Sync {
         None
     }
 
+    /// The town (or else other place) `text` names, for a weather answer;
+    /// see [`plumb_index::places::PlaceSearcher::locate`]. By default none.
+    fn locate(&self, text: &str, country: Option<&str>) -> Option<plumb_core::place::Place> {
+        let _ = (text, country);
+        None
+    }
+
     /// The map the places' map is drawn on, if the node keeps one.
     fn base_map(&self) -> Option<Arc<crate::map::BaseMap>> {
         None
@@ -258,6 +290,13 @@ pub trait SearchBackend: Send + Sync {
     /// [`plumb_index::pages::PageSearcher::known_song`]. By default none.
     fn known_song(&self, query: &str, options: &SearchOptions) -> Option<plumb_index::pages::Page> {
         let _ = (query, options);
+        None
+    }
+
+    /// The Wiktionary word `name` is, when the node keeps the set; see
+    /// [`plumb_index::pages::PageSearcher::definition`]. By default none.
+    fn definition(&self, name: &str) -> Option<plumb_index::pages::Page> {
+        let _ = name;
         None
     }
 }
@@ -312,6 +351,11 @@ impl IndexBackend {
         self.searcher.has_domain(domain)
     }
 
+    /// The index's searcher, for what it knows of words.
+    pub fn searcher(&self) -> &Searcher {
+        &self.searcher
+    }
+
     /// [`SearchBackend::search_full`], ranking by `meaning` too when given,
     /// and with `rank` instead of the backend's own knobs when given.
     pub fn search_full_with(
@@ -363,6 +407,14 @@ impl SearchBackend for IndexBackend {
 
     fn num_docs(&self) -> u64 {
         self.searcher.num_docs()
+    }
+
+    fn locate(&self, text: &str, country: Option<&str>) -> Option<plumb_core::place::Place> {
+        let places = self.places.as_ref()?;
+        places.locate(text, country).unwrap_or_else(|err| {
+            error!("locating {text:?}: {err:#}");
+            None
+        })
     }
 
     fn places(
@@ -559,6 +611,8 @@ struct AppState {
     settings: WebSettings,
     /// Currency rates for instant answers.
     rates: Arc<answers::RatesCache>,
+    /// Forecasts for weather answers.
+    weather: Arc<weather::WeatherCache>,
     /// How many tool calls each client may still make to `/mcp`.
     mcp_limiter: Arc<mcp::Limiter>,
     /// How many network searches each client may still start: a node runs
@@ -703,6 +757,7 @@ pub fn router_with(backend: Arc<dyn SearchBackend>, settings: impl Into<WebSetti
         node: None,
         settings: settings.into(),
         rates: Arc::default(),
+        weather: Arc::default(),
         mcp_limiter: Arc::default(),
         net_limiter: Arc::new(mcp::Limiter::new(NET_BURST, NET_PER_MINUTE)),
         page_reader: Arc::default(),
@@ -730,6 +785,7 @@ pub fn node_router_with(
         node: Some(status),
         settings: settings.into(),
         rates: Arc::default(),
+        weather: Arc::default(),
         mcp_limiter: Arc::default(),
         net_limiter: Arc::new(mcp::Limiter::new(NET_BURST, NET_PER_MINUTE)),
         page_reader: Arc::default(),
@@ -888,7 +944,9 @@ struct SearchParams {
     tune: Option<String>,
     /// Safe search: `off`, `moderate` (the default) or `strict`.
     safe: Option<String>,
-    /// Only sites in this language (a language code); empty for any.
+    /// Only sites in this language (a language code), `any` (or empty)
+    /// for any; without it, the browser's first language when the gear
+    /// offers it, else [`DEFAULT_LANGUAGE`].
     lang: Option<String>,
     /// The "Recent" headlines: `collapsed` (the default), `expanded` or
     /// `off`.
@@ -905,6 +963,21 @@ struct SearchParams {
     categories: Option<String>,
     /// SearXNG's time range (`day`, `week`, ...): recent headlines first.
     time_range: Option<String>,
+}
+
+/// The language filter of a search that names none, when the browser's
+/// first language is not one the settings gear offers.
+const DEFAULT_LANGUAGE: &str = "en";
+
+/// The language filter of a search that names none: the first language of
+/// the browser's `Accept-Language` when the settings gear offers it
+/// (`de-DE,de;q=0.9` -> `de`), else [`DEFAULT_LANGUAGE`].
+fn default_language(accept_language: Option<&str>) -> String {
+    accept_language
+        .and_then(|header| header.split(',').next())
+        .and_then(|first| language_code(first.split(';').next().unwrap_or_default()))
+        .filter(|code| LANGUAGE_CHOICES.iter().any(|(offered, _)| offered == code))
+        .unwrap_or_else(|| DEFAULT_LANGUAGE.to_string())
 }
 
 /// Whether a flag parameter is set: `1`, `on`, `true` or `yes`.
@@ -956,7 +1029,11 @@ impl SearchParams {
                 .as_deref()
                 .and_then(SafeSearch::parse)
                 .unwrap_or_default(),
-            language: self.lang.as_deref().and_then(language_code),
+            language: match self.lang.as_deref().map(str::trim) {
+                None => Some(default_language(accept_language)),
+                Some(lang) if lang.is_empty() || lang.eq_ignore_ascii_case("any") => None,
+                Some(lang) => language_code(lang),
+            },
             recent: self
                 .news
                 .as_deref()
@@ -1165,8 +1242,14 @@ async fn search_page(
         _ => None,
     };
     let local = run_search_ranked(&state, &query, limit, &settings.options, rank).await;
+    // "Near me", "weather" and "what time is it" go by the town the
+    // searcher gave.
+    let town = match &visitor {
+        Some(visitor) => visitor.about.town(),
+        None => settings.browser_about.as_ref().and_then(About::town),
+    };
     let mut extras = match &local {
-        Ok(results) => extras(&state, &query, results, &settings.options).await,
+        Ok(results) => extras(&state, &query, results, &settings.options, town).await,
         Err(_) => answers::Extras::default(),
     };
     // Plugins run once the node knows what the search is about, so that
@@ -1224,14 +1307,17 @@ async fn search_page(
     } else {
         (local, NetOutcome::NotAsked)
     };
-    // "Near me" goes by the town the searcher gave.
-    let town = match &visitor {
-        Some(visitor) => visitor.about.town(),
-        None => settings.browser_about.as_ref().and_then(About::town),
-    };
     let found_places = run_places(&state, &query, town, settings.options.country.as_deref()).await;
     let response = match local {
         Ok(mut results) => {
+            route_sources(
+                &state,
+                &query,
+                extras.answer.as_ref().map(|a| a.kind),
+                settings.options.country.as_deref(),
+                &mut results,
+                limit,
+            );
             let found_places = not_a_name(found_places, &results.hits);
             if let Some(found) = &found_places {
                 let local = place_sites(&state, found).await;
@@ -1475,7 +1561,15 @@ async fn api_search(
                 places::local_first(found, &mut results.hits, local, params.limit());
             }
             let places = places.filter(|found| !found.hits.is_empty());
-            let extras = extras(&state, &query, &results, &options).await;
+            let extras = extras(&state, &query, &results, &options, None).await;
+            route_sources(
+                &state,
+                &query,
+                extras.answer.as_ref().map(|a| a.kind),
+                options.country.as_deref(),
+                &mut results,
+                params.limit(),
+            );
             let about = plugin_about(&state, &query, &results, &extras, &options).await;
             let shown_to_plugins = if state.settings.plugins.any_annotate() {
                 shown_results(&results, params.limit())
@@ -1588,8 +1682,12 @@ async fn extras(
     query: &str,
     results: &SearchResults,
     options: &SearchOptions,
+    town: Option<&str>,
 ) -> answers::Extras {
-    let answer = instant_answer(state, query).await;
+    let answer = match instant_answer(state, query, town).await {
+        Some(answer) => Some(answer),
+        None => weather::answer(state, query, town, options.country.as_deref()).await,
+    };
     let names_a_page = results.pages.iter().any(|placed| placed.hit.named);
     let mut profile = None;
     if !names_a_page {
@@ -1612,6 +1710,31 @@ async fn extras(
             .and_then(|found| answers::fact_answer(&asked, &found.pages, now_unix())),
         (answer, _) => answer,
     };
+    // What something is ("what is a manatee"): the first sentence of the
+    // article it names, or what the word means ("define anadromous").
+    let answer = match (answer, answers::definition_asked(query)) {
+        (None, Some(name)) => {
+            let backend = Arc::clone(&state.backend);
+            let word = {
+                let name = name.clone();
+                tokio::task::spawn_blocking(move || backend.definition(&name))
+                    .await
+                    .ok()
+                    .flatten()
+                    .and_then(|page| answers::word_answer(&page))
+            };
+            if word.is_some() && answers::asks_word(query) {
+                word
+            } else {
+                run_search(state, &name, PROFILE_SEARCH_LIMIT, options)
+                    .await
+                    .ok()
+                    .and_then(|found| answers::definition_answer(&found.pages))
+                    .or(word)
+            }
+        }
+        (answer, _) => answer,
+    };
     answers::Extras {
         answer,
         profile,
@@ -1619,14 +1742,46 @@ async fn extras(
     }
 }
 
+/// Lists first the sites that serve `query` best, when it asks for a tool
+/// or a quick fact ([`crate::sources`]); `answer` is the kind of the
+/// instant answer shown for it. At most `limit` sites, or as many as there
+/// were.
+fn route_sources(
+    state: &AppState,
+    query: &str,
+    answer: Option<plumb_answer::Kind>,
+    country: Option<&str>,
+    results: &mut SearchResults,
+    limit: usize,
+) {
+    let Some(route) = crate::sources::route(query, answer, country) else {
+        return;
+    };
+    let keep = results.hits.len().max(limit);
+    crate::sources::lead_with(&mut results.hits, &mut results.pages, &route, |domain| {
+        state.backend.site(domain)
+    });
+    results.hits.truncate(keep);
+}
+
 /// Results asked for when looking up whose profile a query asks for.
 const PROFILE_SEARCH_LIMIT: usize = 5;
 
 /// The instant answer to `query`, with currency rates when it needs them.
-async fn instant_answer(state: &AppState, query: &str) -> Option<plumb_answer::Answer> {
+/// "What time is it" is the time in `town`, the searcher's own, when they
+/// gave one.
+async fn instant_answer(
+    state: &AppState,
+    query: &str,
+    town: Option<&str>,
+) -> Option<plumb_answer::Answer> {
     let rates = state.rates.for_query(query).await;
     let now = i64::try_from(now_unix()).unwrap_or(i64::MAX);
-    plumb_answer::answer(query, now, rates.as_ref())
+    plumb_answer::answer(query, now, rates.as_ref()).or_else(|| {
+        let town =
+            town.filter(|_| crate::sources::asks_the_time(&plumb_core::normalize_text(query)))?;
+        plumb_answer::answer(&format!("time in {town}"), now, None)
+    })
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -2613,7 +2768,7 @@ fn settings_form(query: &str, autofocus: bool, settings: &Settings) -> String {
     .collect();
     let language = options.language.as_deref();
     let mut language_choices = format!(
-        "<option value=\"\"{}>Any language</option>",
+        "<option value=\"any\"{}>Any language</option>",
         if language.is_none() { " selected" } else { "" }
     );
     if let Some(code) = language.filter(|c| !LANGUAGE_CHOICES.iter().any(|(l, _)| l == c)) {
@@ -2875,9 +3030,7 @@ fn results_form(query: &str, settings: &Settings) -> String {
 fn search_link(path: &str, query: &str, options: &SearchOptions, net: bool) -> String {
     let mut params = url::form_urlencoded::Serializer::new(String::new());
     params.append_pair("q", query);
-    if let Some(country) = &options.country {
-        params.append_pair("country", country);
-    }
+    params.append_pair("country", options.country.as_deref().unwrap_or("any"));
     if options.only_country {
         params.append_pair("only", "1");
     }
@@ -2892,8 +3045,25 @@ fn search_link(path: &str, query: &str, options: &SearchOptions, net: bool) -> S
 }
 
 /// "Did you mean amazon?" above the results, which are for the query as
-/// typed.
-fn render_spelling(out: &mut String, spelling: &Spelling, options: &SearchOptions) {
+/// typed; or, when the results are for the spelling
+/// ([`Spelling::applied`]), "Showing results for kanye west", with a link
+/// to search for `typed` as typed.
+fn render_spelling(out: &mut String, spelling: &Spelling, typed: &str, options: &SearchOptions) {
+    if spelling.applied {
+        let as_typed = SearchOptions {
+            exact: true,
+            ..options.clone()
+        };
+        let _ = writeln!(
+            out,
+            "<p class=\"sp\">Showing results for <strong>{}</strong>. Search instead for \
+             <a href=\"{}\">{}</a></p>",
+            escape_html(&truncate_chars(&spelling.query, 150)),
+            escape_html(&search_link("/search", typed, &as_typed, false)),
+            escape_html(&truncate_chars(typed, 150))
+        );
+        return;
+    }
     let fixed_options = SearchOptions {
         exact: false,
         ..options.clone()
@@ -3174,7 +3344,7 @@ fn render_results_with(
         }
     }
     if let Some(spelling) = &results.spelling {
-        render_spelling(&mut body, spelling, &settings.options);
+        render_spelling(&mut body, spelling, query, &settings.options);
     }
     // Picks are noted for the query: shared, or kept in the searcher's
     // history.
@@ -3543,15 +3713,13 @@ fn go_link_with(query: &str, options: &SearchOptions, what: &[(&str, &str)]) -> 
     format!("/go?{}", link.finish())
 }
 
-/// Adds safe search, when not the default, and the language filter to a
-/// link's parameters.
+/// Adds safe search, when not the default, and the language filter (`any`
+/// for none) to a link's parameters.
 fn append_filters(params: &mut url::form_urlencoded::Serializer<String>, options: &SearchOptions) {
     if options.safe != SafeSearch::default() {
         params.append_pair("safe", options.safe.as_str());
     }
-    if let Some(language) = &options.language {
-        params.append_pair("lang", language);
-    }
+    params.append_pair("lang", options.language.as_deref().unwrap_or("any"));
     if options.recent != RecentNews::default() {
         params.append_pair("news", options.recent.as_str());
     }
@@ -4309,7 +4477,7 @@ mod tests {
         let (_, _, page) = send(app.clone(), "/search?q=us+bank").await;
         assert!(!page.contains("From Test News"), "not run");
         assert!(page.contains(
-            "<a href=\"/search?q=us+bank&amp;run=test-news\">Show results from Test News</a>"
+            "<a href=\"/search?q=us+bank&amp;country=any&amp;lang=en&amp;run=test-news\">Show results from Test News</a>"
         ));
         let (_, _, page) = send(app.clone(), "/search?q=us+bank&run=test-news").await;
         assert!(page.contains("From Test News"));
@@ -4648,7 +4816,7 @@ mod tests {
         // Without an icon, a site gets its first letter.
         assert!(body.contains("aria-hidden=\"true\">U</span>"));
         assert!(body.contains("value=\"us bank\""));
-        assert!(body.contains("href=\"/api/search?q=us+bank\""));
+        assert!(body.contains("href=\"/api/search?q=us+bank&amp;country=any&amp;lang=en\""));
         assert_eq!(
             *fake.calls.lock().unwrap(),
             vec![("us bank".to_string(), DEFAULT_LIMIT)]
@@ -4773,6 +4941,8 @@ mod tests {
                 website: None,
                 package: None,
                 facts: Vec::new(),
+                lead: None,
+                names: Vec::new(),
             },
             score: 1.0,
             named: true,
@@ -4870,6 +5040,8 @@ mod tests {
                 website: Some("https://music.youtube.com/".into()),
                 package: None,
                 facts: Vec::new(),
+                lead: None,
+                names: Vec::new(),
             },
             score: 1.0,
             named: true,
@@ -5255,7 +5427,7 @@ mod tests {
         let (code, _, body) = send(app(), "/search?q=us+bank&country=any").await;
         assert_eq!(code, StatusCode::OK);
         assert!(
-            body.contains("href=\"/go?q=us+bank&amp;d=usbank.com&amp;country=any\""),
+            body.contains("href=\"/go?q=us+bank&amp;d=usbank.com&amp;country=any&amp;lang=en\""),
             "{body}"
         );
         // The address shown is still the site's own.
@@ -5811,6 +5983,32 @@ mod tests {
         assert!(!body.contains("class=\"net\""));
     }
 
+    #[test]
+    fn english_is_the_language_unless_chosen() {
+        let language = |lang: Option<&str>, accept: Option<&str>| {
+            let params = SearchParams {
+                lang: lang.map(str::to_string),
+                ..SearchParams::default()
+            };
+            let mut headers = HeaderMap::new();
+            if let Some(accept) = accept {
+                headers.insert(header::ACCEPT_LANGUAGE, accept.parse().unwrap());
+            }
+            params.options(&HomeCountry::Off, &headers).language
+        };
+        assert_eq!(language(None, None).as_deref(), Some("en"));
+        assert_eq!(language(None, Some("*")).as_deref(), Some("en"));
+        assert_eq!(
+            language(None, Some("de-DE,de;q=0.9")).as_deref(),
+            Some("de")
+        );
+        // A language the gear does not offer falls back to English.
+        assert_eq!(language(None, Some("eu-ES")).as_deref(), Some("en"));
+        assert_eq!(language(Some("any"), Some("de-DE")), None);
+        assert_eq!(language(Some(""), None), None);
+        assert_eq!(language(Some("fr"), None).as_deref(), Some("fr"));
+    }
+
     #[tokio::test]
     async fn safe_search_and_language_stay_with_the_search() {
         let (_, _, body) = get(
@@ -5827,13 +6025,14 @@ mod tests {
         };
         assert_eq!(
             search_link("/search", "x", &options, false),
-            "/search?q=x&safe=off&lang=de"
+            "/search?q=x&country=any&safe=off&lang=de"
         );
         assert!(go_link("x", &options, "a.com").ends_with("&safe=off&lang=de"));
-        // The default needs no parameter.
+        // No country and no language filter say so, as the defaults
+        // are the United States and English.
         assert_eq!(
             search_link("/search", "x", &SearchOptions::default(), false),
-            "/search?q=x"
+            "/search?q=x&country=any&lang=any"
         );
     }
 
@@ -5997,6 +6196,8 @@ mod tests {
                             website: None,
                             package: None,
                             facts: Vec::new(),
+                            lead: None,
+                            names: Vec::new(),
                         },
                         score: 1.0,
                         named: query == "mrbeast",
@@ -6052,6 +6253,8 @@ mod tests {
                 website: None,
                 package: None,
                 facts: Vec::new(),
+                lead: None,
+                names: Vec::new(),
             },
             score: 1.0,
             named: true,
@@ -6114,6 +6317,7 @@ mod tests {
             spelling: Some(Spelling {
                 query: "youtube".into(),
                 site: Some("youtube.com".into()),
+                applied: false,
             }),
         };
         let page = render_results(
@@ -6139,6 +6343,38 @@ mod tests {
     }
 
     #[test]
+    fn results_for_a_spelling_say_so_and_link_the_query_as_typed() {
+        let results = SearchResults {
+            pages: Vec::new(),
+            hits: vec![scored("kanyewest.com", 0.9)],
+            site_search: None,
+            spelling: Some(Spelling {
+                query: "kanye west".into(),
+                site: None,
+                applied: true,
+            }),
+        };
+        let page = render_results(
+            "kayne west",
+            &results,
+            None,
+            &NetOutcome::NotAsked,
+            &no_settings(),
+            None,
+            10,
+            true,
+            &Icons::default(),
+        );
+        assert!(
+            page.contains("Showing results for <strong>kanye west</strong>. Search instead for"),
+            "{page}"
+        );
+        assert!(page.contains("q=kayne+west"), "{page}");
+        assert!(page.contains("exact=1"), "{page}");
+        assert!(!page.contains("Did you mean"), "{page}");
+    }
+
+    #[test]
     fn typos_are_searched_as_typed_with_a_suggestion() {
         let mut results = SearchResults {
             pages: Vec::new(),
@@ -6147,6 +6383,7 @@ mod tests {
             spelling: Some(Spelling {
                 query: "amazon".into(),
                 site: None,
+                applied: false,
             }),
         };
         let mut settings = no_settings();
@@ -6164,7 +6401,7 @@ mod tests {
         );
         assert!(
             page.contains(
-                "<p class=\"sp\">Did you mean <a href=\"/search?q=amazon&amp;country=DE\">\
+                "<p class=\"sp\">Did you mean <a href=\"/search?q=amazon&amp;country=DE&amp;lang=any\">\
              <strong>amazon</strong></a>?</p>"
             ),
             "{page}"
@@ -6300,7 +6537,7 @@ mod tests {
             &Icons::default(),
         );
         assert!(page.contains(
-            "From this site's own index. <a href=\"/search?q=q&amp;country=DE&amp;net=1\">"
+            "From this site's own index. <a href=\"/search?q=q&amp;country=DE&amp;net=1&amp;lang=any\">"
         ));
 
         settings.network = NetSetting::On;
@@ -6573,7 +6810,9 @@ mod tests {
         assert_eq!(code, StatusCode::OK);
         let profile = set_cookie(&headers, "plumb_profile").expect("a profile cookie");
         assert!(
-            body.contains("href=\"/go?q=us+bank&amp;d=usbank-login-help.com&amp;country=any\""),
+            body.contains(
+                "href=\"/go?q=us+bank&amp;d=usbank-login-help.com&amp;country=any&amp;lang=en\""
+            ),
             "{body}"
         );
         assert!(!body.contains("You opened this before"), "{body}");

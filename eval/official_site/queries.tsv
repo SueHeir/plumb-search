@@ -1,0 +1,45 @@
+# official_site test names: the sites AI agents looked up in ten test
+# projects (2026-10-08), where the answer is a subdomain, an inner page or
+# a site whose name is shared. One `name<TAB>answer[,another]` per line;
+# an answer is a host (a subdomain counts only for itself) or a registrable
+# domain (its subdomains count too).
+LifeWiki	conwaylife.com
+Golly	golly.sourceforge.io,golly.sourceforge.net
+Golly cellular automata	golly.sourceforge.io,golly.sourceforge.net
+Chess Programming Wiki	chessprogramming.org
+CIAAW	ciaaw.org
+CIAAW Commission on Isotopic Abundances and Atomic Weights	ciaaw.org
+Pillow	python-pillow.github.io,python-pillow.org,pillow.readthedocs.io
+Pillow docs	pillow.readthedocs.io
+NPS API developer	developer.nps.gov,nps.gov
+Wolfram MathWorld	mathworld.wolfram.com
+MathWorld	mathworld.wolfram.com
+Wikidata query service	query.wikidata.org
+NSSDC	nssdc.gsfc.nasa.gov
+NSSDC planetary fact sheet	nssdc.gsfc.nasa.gov
+CommonMark	commonmark.org
+CommonMark spec	spec.commonmark.org,commonmark.org
+Python docs	docs.python.org
+MDN	developer.mozilla.org
+Mozilla	mozilla.org
+BIPM	bipm.org
+International Bureau of Weights and Measures	bipm.org
+National Park Service	nps.gov
+Yosemite National Park	nps.gov
+NASA Science	science.nasa.gov
+The Telegraph	telegraph.co.uk
+NIST	nist.gov
+Peter Norvig	norvig.com
+norvig.com	norvig.com
+legislation.gov.uk	legislation.gov.uk
+Ptable	ptable.com
+PubChem	pubchem.ncbi.nlm.nih.gov,ncbi.nlm.nih.gov
+Minor Planet Center	minorplanetcenter.net
+Lichess	lichess.org
+Stockfish	stockfishchess.org
+numpy	numpy.org
+matplotlib	matplotlib.org
+FastAPI	fastapi.tiangolo.com
+Rust docs	doc.rust-lang.org,rust-lang.org
+Hacker News	news.ycombinator.com
+Google Scholar	scholar.google.com
