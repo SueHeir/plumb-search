@@ -727,8 +727,8 @@ pub struct LastError {
     pub retry_at: Option<u64>,
 }
 
-/// A running node. Dropping the handle leaves the node running until the
-/// runtime shuts down; call [`NodeHandle::shutdown`] to stop it cleanly.
+/// A running node. Dropping the handle stops its work without waiting for
+/// it; call [`NodeHandle::shutdown`] to stop it cleanly.
 #[derive(Debug)]
 pub struct NodeHandle {
     addr: SocketAddr,
@@ -1852,8 +1852,11 @@ impl Inner {
         Ok(())
     }
 
+    /// Whether the node is stopping: [`NodeHandle::shutdown`] was called,
+    /// or the handle was dropped (a test that panicked), which the async
+    /// tasks' waits already take as a stop.
     fn stopping(&self) -> bool {
-        *self.stopped.borrow()
+        *self.stopped.borrow() || self.stopped.has_changed().is_err()
     }
 
     /// Waits for, and returns, the turn to load the whole records file: a
