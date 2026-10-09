@@ -1017,7 +1017,10 @@ pub async fn download_wikidata_official_sites_paced(
 /// when there is one ([`download_wikidata_official_sites_bulk`]): one query
 /// there lists them all in seconds, while Wikidata's own query service
 /// needs a query per band of sitelink counts, each close to its 60-second
-/// limit. When the mirror fails, the bands are asked of `endpoint`.
+/// limit. When the mirror fails, the bands are asked of `endpoint`, from
+/// [`ENDPOINT_MIN_SITELINKS`] up at least: below that, bands of a single
+/// count run past its limit too (exactly 3 sitelinks did on 2026-10-09),
+/// and a node is better off with the better-known sites than with none.
 pub async fn download_wikidata_official_sites_with(
     client: &reqwest::Client,
     mirror: Option<&str>,
@@ -1031,14 +1034,31 @@ pub async fn download_wikidata_official_sites_with(
             .await
         {
             Ok(path) => return Ok(path),
-            Err(err) => warn!(
-                "could not list the official websites at {mirror} ({err:#}); \
-                 asking {endpoint} band by band"
-            ),
+            Err(err) => {
+                let min = min_sitelinks.max(ENDPOINT_MIN_SITELINKS);
+                warn!(
+                    "could not list the official websites at {mirror} ({err:#}); \
+                     asking {endpoint} band by band, from {min} sitelinks up"
+                );
+                return download_wikidata_official_sites_paced(client, endpoint, dir, min, pacing)
+                    .await;
+            }
         }
     }
     download_wikidata_official_sites_paced(client, endpoint, dir, min_sitelinks, pacing).await
 }
+
+/// The fewest sitelinks [`download_wikidata_official_sites_with`] asks
+/// Wikidata's own endpoint for once the mirror has failed.
+pub const ENDPOINT_MIN_SITELINKS: u32 = 25;
+
+/// The fewest sitelinks of the items whose official websites are fetched
+/// by default. On 2026-10-09, going from 25 down to 3 (131k to 627k sites)
+/// put the right site in the top 10 for 64.7% of described searches
+/// instead of 56.9% (tune half; 71.0% instead of 68.8% held out), with
+/// brand and ai searches about level: Expedia, Indeed, Glassdoor and
+/// Instacart are below 25.
+pub const DEFAULT_MIN_SITELINKS: u32 = 3;
 
 /// The query for every item with an official website and at least
 /// `min_sitelinks` sitelinks, with its English (or multilingual) label, or
@@ -2689,6 +2709,27 @@ mod tests {
         assert_eq!(text.lines().count(), MIN_BULK_ROWS + 6);
         assert!(text.contains("Q7\tItem 7\thttps://item7.org/\n"));
         assert_eq!(asked.bands(), [band(3, None), band(3, None)]);
+    }
+
+    #[tokio::test]
+    async fn without_the_mirror_wikidata_is_asked_from_25_up() {
+        let (mirror, _) = sparql_endpoint(|_, _| http_response("502 Bad Gateway", &[], b"")).await;
+        let (main, asked) = sparql_endpoint(|_, _| sparql_ok(&many_rows(2))).await;
+        let dir = tempfile::tempdir().unwrap();
+        download_wikidata_official_sites_with(
+            &loopback_client(),
+            Some(&mirror),
+            &main,
+            dir.path(),
+            3,
+            quick(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            asked.bands(),
+            wikidata_sitelink_bands(ENDPOINT_MIN_SITELINKS)
+        );
     }
 
     #[tokio::test]

@@ -3,9 +3,10 @@
 //!
 //! A node in the network that keeps a set but has no file of it, or too
 //! few pages of it, takes the file from a node it trusts (see
-//! `plumb_net::pages`), only as far as the pages it keeps, and takes it
-//! again once it is [`REFRESH_AFTER`] old and the other node has a newer
-//! one.
+//! `plumb_net::pages`), only as far as the pages it keeps, and takes a
+//! newer one when a trusted node has it (see [`super::newer`]). A node
+//! with no storage limit, or one with a map file already, keeps the map
+//! file the same way.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -42,11 +43,8 @@ const RETRY_WAIT: Duration = Duration::from_secs(30 * 60);
 const TICK: Duration = Duration::from_millis(250);
 /// Pages looked at per search, before [`place_pages`] picks.
 const PAGES_PER_SEARCH: usize = 10;
-/// A set file taken from another node is taken again after this long,
-/// when that node has a newer one.
-const REFRESH_AFTER: Duration = Duration::from_secs(30 * 24 * 3600);
 /// Wait after a node said it was busy.
-const BUSY_WAIT: Duration = Duration::from_secs(5);
+pub(super) const BUSY_WAIT: Duration = Duration::from_secs(5);
 /// Wait before asking again after no trusted node had the set, or a
 /// download failed.
 const FETCH_RETRY_WAIT: Duration = Duration::from_secs(15 * 60);
@@ -165,7 +163,10 @@ fn keep_files(inner: &Inner, done: &AtomicBool) {
     // By set: a set the trusted node lacks, or whose download failed, does
     // not hold up the others.
     let mut fetch_failed: HashMap<&'static str, Instant> = HashMap::new();
+    // When each set was last checked for a newer file.
+    let mut checked: HashMap<&'static str, Instant> = HashMap::new();
     let ended = || inner.stopping() || done.load(Ordering::Relaxed);
+    date_taken_files(&inner.paths.data);
     while !ended() {
         let mut settings = inner.settings();
         if inner.config.blackhole {
@@ -183,10 +184,28 @@ fn keep_files(inner: &Inner, done: &AtomicBool) {
                     continue;
                 }
                 let near = near_of(&settings, near.as_deref(), set, pages);
-                if let Err(err) = fetch_if_needed(inner, &net, set, pages, &near) {
+                if let Err(err) = fetch_if_needed(inner, &net, set, pages, &near, &mut checked) {
                     warn!("page set {}: {err:#}", set.id);
                     fetch_failed.insert(set.id, Instant::now());
                 }
+            }
+            if !ended()
+                && !fetch_failed.contains_key(MAP_SET)
+                && (settings.storage_limit_mb == 0 || crate::map::file(&inner.paths.data).is_file())
+            {
+                if let Err(err) = keep_map(inner, &net, &mut checked) {
+                    warn!("map file: {err:#}");
+                    fetch_failed.insert(MAP_SET, Instant::now());
+                }
+            }
+        }
+        // What the whole articles files hold, worked out once for each, so
+        // other nodes asking learn it with the file's time.
+        for id in super::newer::LAYERED_SETS {
+            if let Some(file) =
+                SetInfo::find(id).and_then(|set| set.servable_file(&inner.paths.data))
+            {
+                super::newer::layers(id, &file);
             }
         }
         let until = Instant::now() + LOOK_EVERY;
@@ -257,6 +276,7 @@ fn fetch_if_needed(
     set: &SetInfo,
     pages: u64,
     near: &[(f64, f64)],
+    checked: &mut HashMap<&'static str, Instant>,
 ) -> Result<()> {
     let data = &inner.paths.data;
     let notes = set.file_notes(data);
@@ -268,57 +288,75 @@ fn fetch_if_needed(
             "places near other towns wanted"
         }
         Some(n) if !n.complete && n.lines < pages => "more pages wanted",
-        Some(n)
-            if n.fetched_at > 0 && now.saturating_sub(n.fetched_at) > REFRESH_AFTER.as_secs() =>
+        Some(_)
+            if checked
+                .get(set.id)
+                .is_some_and(|at| at.elapsed() < super::newer::CHECK_EVERY) =>
         {
-            "a month old"
+            return Ok(())
         }
-        Some(_) => return Ok(()),
+        Some(_) => "a newer file",
     };
     if let Some(pause) = inner.download_pause() {
         debug!("page set {}: not downloaded now: {}", set.id, pause.reason);
         return Ok(());
     }
-    let runtime = tokio::runtime::Handle::current();
-    // Is there a node to take it from, with a file worth taking? Nodes
-    // without one are passed over for the next trusted node.
-    let mut lacking = Vec::new();
-    let first = loop {
-        match runtime.block_on(net.pages_chunk(set.id, 0, MAX_PAGES_CHUNK, None, &lacking))? {
-            None if lacking.is_empty() => {
-                debug!("page set {}: no trusted node serves page sets", set.id);
-                return Ok(());
+    // What each trusted node has, and the file worth taking.
+    let Some(offers) = super::newer::offers(inner, net, set.id)? else {
+        debug!("page set {}: no trusted node serves page sets", set.id);
+        return Ok(());
+    };
+    let chosen = match notes {
+        Some(n) if reason == "a newer file" => {
+            checked.insert(set.id, Instant::now());
+            let file = set.file(data);
+            let (modified, size) = super::newer::stamp(&file).unwrap_or((0, 0));
+            let mine = super::newer::Mine {
+                // A cut file keeps its own time; a whole one has its maker's.
+                modified: if n.complete {
+                    modified
+                } else {
+                    n.source_modified
+                },
+                size,
+                complete: n.complete,
+                layers: super::newer::layers(set.id, &file),
+            };
+            match super::newer::newest(&mine, &offers, now) {
+                Ok(offer) => offer.clone(),
+                Err(why) => {
+                    debug!("page set {}: kept: {why}", set.id);
+                    return Ok(());
+                }
             }
-            None => bail!(
-                "no trusted node has a {} file ({} asked)",
-                set.id,
-                lacking.len()
-            ),
+        }
+        // Any file is better than none, or than too few pages.
+        _ => match offers.iter().max_by_key(|o| o.modified) {
+            Some(offer) => offer.clone(),
+            None => bail!("no trusted node has a {} file", set.id),
+        },
+    };
+    let runtime = tokio::runtime::Handle::current();
+    let first = loop {
+        match runtime.block_on(net.pages_chunk(
+            set.id,
+            0,
+            MAX_PAGES_CHUNK,
+            Some(chosen.peer),
+            &[],
+        ))? {
+            None => bail!("{} went away before {} was taken", chosen.peer, set.id),
             Some(chunk) if chunk.busy => {
                 if !wait(inner, BUSY_WAIT) {
                     return Ok(());
                 }
             }
             Some(chunk) if chunk.size == 0 => {
-                debug!("page set {}: {} has no file of it", set.id, chunk.peer);
-                lacking.push(chunk.peer);
+                bail!("{} no longer has a {} file", chosen.peer, set.id)
             }
             Some(chunk) => break chunk,
         }
     };
-    if let Some(n) = notes {
-        if reason == "a month old" && first.modified <= n.source_modified {
-            // Nothing newer; look again in a month.
-            write_notes(
-                &set.file(data),
-                &SetFileNotes {
-                    fetched_at: now,
-                    ..n
-                },
-            )?;
-            return Ok(());
-        }
-    }
     info!(
         "taking {} ({}) from {}: {} MB in all",
         set.name,
@@ -355,8 +393,7 @@ fn fetch_if_needed(
     let Some((lines, complete, modified, offset)) = taken? else {
         return Ok(());
     };
-    std::fs::rename(&part, &file)
-        .with_context(|| format!("renaming {} to {}", part.display(), file.display()))?;
+    super::newer::install(&part, &file, modified)?;
     write_notes(
         &file,
         &SetFileNotes {
@@ -444,6 +481,142 @@ fn take(
     cutter.finish()?;
     drop(decoder);
     Ok(Some((lines, complete, chunk.modified, offset)))
+}
+
+/// The name the map file goes by between nodes.
+pub(super) const MAP_SET: &str = "map";
+
+/// Gives each whole set file taken from another node its maker's time, as
+/// [`super::newer::install`] does, for files taken before it did: a node
+/// hands a file on with its time, and must not pass off a taken file as a
+/// newer one.
+fn date_taken_files(data: &std::path::Path) {
+    for set in crate::pages::SETS {
+        let Some(notes) = set.file_notes(data) else {
+            continue;
+        };
+        let file = set.file(data);
+        if is_own_file(&file) || !notes.complete || notes.source_modified == 0 {
+            continue;
+        }
+        if super::newer::stamp(&file).is_some_and(|(at, _)| at != notes.source_modified) {
+            if let Err(err) = super::newer::set_time(&file, notes.source_modified) {
+                warn!("page set {}: {err:#}", set.id);
+            }
+        }
+    }
+}
+
+/// Takes the map file (see [`crate::map`]) from a trusted node when this
+/// node has none or a trusted node has a newer one, whole: it is read by
+/// tile, so it can't be cut.
+fn keep_map(
+    inner: &Inner,
+    net: &NetHandle,
+    checked: &mut HashMap<&'static str, Instant>,
+) -> Result<()> {
+    if checked
+        .get(MAP_SET)
+        .is_some_and(|at| at.elapsed() < super::newer::CHECK_EVERY)
+    {
+        return Ok(());
+    }
+    if inner.download_pause().is_some() {
+        return Ok(());
+    }
+    let Some(offers) = super::newer::offers(inner, net, MAP_SET)? else {
+        return Ok(());
+    };
+    checked.insert(MAP_SET, Instant::now());
+    let file = crate::map::file(&inner.paths.data);
+    let (modified, size) = super::newer::stamp(&file).unwrap_or((0, 0));
+    let mine = super::newer::Mine {
+        modified,
+        size,
+        complete: true,
+        layers: Vec::new(),
+    };
+    let offer = match super::newer::newest(&mine, &offers, now_unix()) {
+        Ok(offer) => offer.clone(),
+        Err(why) => {
+            debug!("map file: kept: {why}");
+            return Ok(());
+        }
+    };
+    info!(
+        "taking the map file from {}: {} MB",
+        offer.peer,
+        offer.size / 1_000_000
+    );
+    inner
+        .journal
+        .info("Downloading the map file from a node you trust");
+    std::fs::create_dir_all(crate::pages::sets_dir(&inner.paths.data))?;
+    let part = super::newer::prev_path(&file).with_extension("part");
+    let taken = take_whole(inner, net, MAP_SET, &offer, &part);
+    if !matches!(taken, Ok(true)) {
+        let _ = std::fs::remove_file(&part);
+    }
+    if !taken? {
+        return Ok(());
+    }
+    super::newer::install(&part, &file, offer.modified)?;
+    inner.journal.info(format!(
+        "Map file taken ({} MB downloaded)",
+        offer.size.div_ceil(1_000_000)
+    ));
+    Ok(())
+}
+
+/// Downloads the whole file `offer` is of into `part`, piece by piece from
+/// that node; `false` when the node stopped meanwhile.
+fn take_whole(
+    inner: &Inner,
+    net: &NetHandle,
+    set: &str,
+    offer: &super::newer::Offer,
+    part: &std::path::Path,
+) -> Result<bool> {
+    let runtime = tokio::runtime::Handle::current();
+    let mut out = std::io::BufWriter::new(
+        std::fs::File::create(part).with_context(|| format!("creating {}", part.display()))?,
+    );
+    let mut offset = 0u64;
+    while offset < offer.size {
+        if inner.stopping() || inner.owner_pause().is_some() {
+            return Ok(false);
+        }
+        let chunk = match runtime.block_on(net.pages_chunk(
+            set,
+            offset,
+            MAX_PAGES_CHUNK,
+            Some(offer.peer),
+            &[],
+        ))? {
+            None => bail!("{} went away while the {set} file was taken", offer.peer),
+            Some(chunk) if chunk.busy => {
+                if !wait(inner, BUSY_WAIT) {
+                    return Ok(false);
+                }
+                continue;
+            }
+            Some(chunk) => chunk,
+        };
+        if chunk.size != offer.size || chunk.modified != offer.modified {
+            bail!("{} got a new {set} file while it was taken", offer.peer);
+        }
+        if chunk.bytes.is_empty() {
+            bail!("{} sent nothing of its {set} file at {offset}", offer.peer);
+        }
+        out.write_all(&chunk.bytes)?;
+        offset += chunk.bytes.len() as u64;
+        if let Err(err) = inner.add_downloaded(chunk.bytes.len() as u64) {
+            warn!("{set} file: counting the download: {err:#}");
+        }
+    }
+    out.flush()?;
+    out.get_ref().sync_all()?;
+    Ok(true)
 }
 
 /// Removes the `.part` files a download left when the node stopped hard
@@ -590,7 +763,7 @@ fn write_notes(file: &std::path::Path, notes: &SetFileNotes) -> Result<()> {
 }
 
 /// Sleeps `wait`, unless the node stops first; `false` when it stops.
-fn wait(inner: &Inner, wait: Duration) -> bool {
+pub(super) fn wait(inner: &Inner, wait: Duration) -> bool {
     let until = Instant::now() + wait;
     while Instant::now() < until {
         if inner.stopping() {

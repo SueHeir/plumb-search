@@ -663,8 +663,9 @@ pub struct FetchDataArgs {
     #[arg(long)]
     pub skip_wikidata: bool,
     /// Only fetch Wikidata items with at least this many Wikipedia sitelinks
-    /// (a notability filter that keeps the query small enough to finish).
-    #[arg(long, value_name = "N", default_value_t = 25)]
+    /// (a notability filter). Wikidata's own endpoint can only list them
+    /// from 25 up, so that is where it starts when --wikidata-mirror fails.
+    #[arg(long, value_name = "N", default_value_t = plumb_ingest::download::DEFAULT_MIN_SITELINKS)]
     pub wikidata_min_sitelinks: u32,
     /// A copy of Wikidata to ask first for the official websites and their
     /// facts: QLever's lists them all in seconds, while Wikidata's own
@@ -1391,7 +1392,7 @@ mod tests {
         let Command::FetchData(args) = cli.command else {
             panic!("not fetch-data");
         };
-        assert_eq!(args.wikidata_min_sitelinks, 25);
+        assert_eq!(args.wikidata_min_sitelinks, 3);
         assert!(!args.skip_tranco && !args.skip_wikidata);
     }
 
