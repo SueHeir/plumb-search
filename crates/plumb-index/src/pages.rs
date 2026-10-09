@@ -1877,7 +1877,8 @@ impl PageSearcher {
         // above finds them; [`PageSearcher::name_match`] scores them by the
         // share of the query their title is.
         let mut by_title_inside = HashSet::new();
-        // Other pages found only so are left out.
+        // Other pages found only so are left out; one found another way
+        // below is not.
         let mut only_inside = HashSet::new();
         let mut inside_keys = HashSet::new();
         for start in 0..words.len() {
@@ -1921,6 +1922,7 @@ impl PageSearcher {
                 IndexRecordOption::Basic,
             );
             for (_, address) in searcher.search(&named, &by_popularity())? {
+                only_inside.remove(&address);
                 if !addresses.contains(&address) {
                     addresses.push(address);
                 }
@@ -1952,6 +1954,7 @@ impl PageSearcher {
                 // "React useState" and more of its words.
                 by_title_first.remove(&address);
                 film_title_first.remove(&address);
+                only_inside.remove(&address);
                 if !addresses.contains(&address) {
                     addresses.push(address);
                 }
@@ -1983,6 +1986,7 @@ impl PageSearcher {
                     needed,
                 );
                 for (_, address) in searcher.search(&most_words, &by_popularity())? {
+                    only_inside.remove(&address);
                     if !addresses.contains(&address) {
                         addresses.push(address);
                     }
@@ -2024,6 +2028,7 @@ impl PageSearcher {
                 &TopDocs::with_limit(LEAD_CANDIDATES).order_by_score(),
             )? {
                 lead_scores.insert(address, score);
+                only_inside.remove(&address);
                 if !addresses.contains(&address) {
                     addresses.push(address);
                 }
