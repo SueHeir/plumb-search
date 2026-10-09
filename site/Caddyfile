@@ -32,11 +32,12 @@ plumbsearch.org {
 		-Server
 	}
 
-	# The node's public pages: search, its JSON API, private search (the
-	# browser fetches buckets and ranks them itself), network search and the
-	# MCP server for AI assistants.
+	# The node's public pages: search, its JSON API, About you and its
+	# first-run version /welcome (kept in the visitor's own cookie), private
+	# search (the browser fetches buckets and ranks them itself), network
+	# search and the MCP server for AI assistants.
 	# Its dashboard (/app) stays private to the server.
-	@node path /search /api/search /mcp /api/status /opensearch.xml /private /private/* /api/buckets /api/buckets/* /network /api/network/search /api/oblivious/targets /api/oblivious/forward/*
+	@node path /search /api/search /mcp /api/status /opensearch.xml /about /welcome /welcome/* /private /private/* /api/buckets /api/buckets/* /network /api/network/search /api/oblivious/targets /api/oblivious/forward/*
 	handle @node {
 		reverse_proxy 127.0.0.1:8080
 	}
