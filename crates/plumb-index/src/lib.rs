@@ -6933,7 +6933,7 @@ mod tests {
                 obscure(1_000_000 + i, 10),
             ));
         }
-        for i in 0..5 {
+        for i in 0..20 {
             records.push(site(
                 &format!("forecaster{i}.com"),
                 Some("Local forecast"),
@@ -6982,6 +6982,7 @@ mod tests {
             ("Inkala sudoku", 3),
             ("Kanye West albums", 40),
             ("Kayne Anderson capital", 22),
+            ("Kimipet supplies", 10),
         ];
         let mut n = 0;
         for (title, count) in titles {
@@ -6997,6 +6998,15 @@ mod tests {
                 ));
             }
         }
+        // A popular site whose name is one letter from "perft".
+        records.push(site(
+            "perf1.com",
+            Some("Perf1"),
+            None,
+            &["Perf1"],
+            &[],
+            popular(20_000, 2_000),
+        ));
         records
     }
 
@@ -7062,6 +7072,22 @@ mod tests {
         assert_eq!(
             spelled_with(&searcher, "inkala sudoku", &RankConfig::default()),
             None
+        );
+        // Nor is it a slip of a popular site's name with a digit in it.
+        assert_eq!(
+            spelled_with(&searcher, "perft results", &RankConfig::default()),
+            None
+        );
+        // A word no site says is no likelier a slip of one only a few
+        // sites say: "kimipet" is no known word.
+        assert_eq!(
+            spelled_with(&searcher, "kiwipete perft position", &RankConfig::default()),
+            None
+        );
+        // A real typo of a known word is still fixed.
+        assert_eq!(
+            spelled_with(&searcher, "turkey travle", &RankConfig::default()).as_deref(),
+            Some("turkey travel")
         );
     }
 
