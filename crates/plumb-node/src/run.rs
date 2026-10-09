@@ -81,6 +81,8 @@ fn node_config(args: RunArgs) -> NodeConfig {
         config.alpha = args.alpha;
     }
     config.country = args.country;
+    config.only_country = args.only_country;
+    config.lang = args.lang;
     config.web_search = args.web_search.0;
     config.mcp_read_pages = args.mcp_read_pages;
     // On for the desktop profile already.

@@ -181,6 +181,11 @@ pub struct NodeConfig {
     pub alpha: Option<f32>,
     /// The home country of searches that do not name one.
     pub country: HomeCountry,
+    /// The search pages start with "Only this country" on.
+    pub only_country: bool,
+    /// The language filter of searches that name none; `None` for the
+    /// browser's.
+    pub lang: Option<String>,
     /// The web search engine the results page links to; `None` for no link.
     pub web_search: Option<Engine>,
     /// Every client of `/mcp` may use `read_page`, not only this computer's.
@@ -323,6 +328,8 @@ impl NodeConfig {
             cc_release: None,
             alpha: None,
             country: HomeCountry::Auto,
+            only_country: false,
+            lang: None,
             web_search: None,
             mcp_read_pages: false,
             page_reader: plumb_crawl::ReadConfig::default(),
@@ -913,6 +920,8 @@ pub async fn start(mut config: NodeConfig) -> Result<NodeHandle> {
     ));
     let settings = WebSettings {
         home: inner.config.country.clone(),
+        only_country: inner.config.only_country,
+        language: inner.config.lang.clone(),
         web_search: inner.config.web_search,
         read_pages_for_all: inner.config.mcp_read_pages,
         page_reader: inner.config.page_reader.clone(),

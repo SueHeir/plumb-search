@@ -117,6 +117,7 @@ Downloads are on [GitHub Releases](https://github.com/SueHeir/plumb-search/relea
 ### Nodes
 
 - Much less memory: crawl rounds keep about 150 bytes of each site instead of its whole record, and index builds, search by meaning and the network's records read the records file a record at a time. With two million sites a crawl round holds about 300 MB of site data instead of 3 GB or more, and an index build about 0.6 GB instead of about 5 GB, so a 4 GB server runs a node. `plumb index` reads a record at a time too.
+- A node can pick its search pages' starting settings: `plumb run --only-country` starts them with "Only this country" on, and `--lang en` with English whatever the browser's language. The settings gear still changes both, and the JSON API and `/mcp` still give every country's sites. plumbsearch.org starts with the United States, only its sites, and English.
 - `plumb run --network --crawl-only` is for small servers: the node crawls its share of the sites and publishes each batch, but builds no search index, answers no searches and takes in no other node's crawls, so it needs far less memory.
 - Nodes with a storage limit, such as the desktop app, stay closer to it: the places file keeps the first million places and those within 100 km of the towns on About you, and other crawlers' batches take at most a fifth of the limit, oldest dropped first.
 - The records' journal is folded into the file at every index build, and once it reaches 128 MB, so it no longer grows for days on a big node.
