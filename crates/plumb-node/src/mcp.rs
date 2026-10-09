@@ -556,7 +556,7 @@ impl Mcp {
             let package_home = self
                 .package_home(name, wants_docs, options)
                 .or_else(|| self.package_home(bare.as_deref()?, wants_docs, options));
-            if let Some((home, registry)) = &package_home {
+            if let Some((home, registry, _)) = &package_home {
                 why.push(format!(
                     "The {registry} package of this name gives {home} as its home page."
                 ));
@@ -568,7 +568,7 @@ impl Mcp {
                 "found": false,
                 "why": why,
                 "did_you_mean": did_you_mean,
-                "package_home": package_home.map(|(home, _)| home),
+                "package_home": package_home.map(|(home, _, _)| home),
             }));
         };
         let official = |hit: &Hit| hit.official || article_of(&hit.domain, &pages).is_some();
@@ -664,7 +664,18 @@ impl Mcp {
                 // a name of several words whose site shows only some of them
                 // is a guess: nssdc.ac.cn for "NSSDC planetary fact sheet".
                 let shows = shows_name(top, &words);
-                confidence = if top.named && (official(top) || well_known(top)) && lead >= 0.1 {
+                // Named by a name it shows nothing of is no sure thing
+                // (lifewire.com for "LifeWiki"), nor is one of two official,
+                // well-known sites of the name ("Elixir").
+                let rival = results.hits[1..].iter().any(|hit| {
+                    hit.named && official(hit) && well_known(hit) && shows_name(hit, &words)
+                });
+                confidence = if top.named
+                    && (official(top) || well_known(top))
+                    && lead >= 0.1
+                    && top_shows
+                    && !rival
+                {
                     "high"
                 } else if (top.named && (words.len() < 2 || shows))
                     || (official(top) && shows)
@@ -739,7 +750,7 @@ impl Mcp {
             let found = self
                 .package_home(name, wants_docs, options)
                 .or_else(|| self.package_home(bare.as_deref()?, wants_docs, options));
-            if let Some((home, registry)) = found {
+            if let Some((home, registry, docs)) = found {
                 let home_domain = registrable_domain(&home);
                 if home_domain.as_deref() == Some(domain.as_str()) {
                     why.push(format!(
@@ -748,9 +759,28 @@ impl Mcp {
                     url = home;
                     confidence = "high";
                     did_you_mean = None;
-                } else if let Some(home_domain) =
-                    home_domain.filter(|_| confidence == "low" || label_only)
+                } else if let Some(home_domain) = home_domain.clone().filter(|_| wants_docs && docs)
                 {
+                    // "Pillow docs" is the docs the package names,
+                    // pillow.readthedocs.io, not python-pillow.org.
+                    why.push(format!(
+                        "The {registry} package of this name gives it as its documentation."
+                    ));
+                    alternatives.retain(|alt| alt["domain"] != home_domain.as_str());
+                    alternatives.insert(0, brief_with(pick, &pages));
+                    alternatives.truncate(ALTERNATIVES);
+                    url = home;
+                    domain = home_domain;
+                    title = None;
+                    description = None;
+                    confidence = "medium";
+                    did_you_mean = None;
+                } else if let Some(home_domain) = home_domain
+                    .filter(|_| !docs || wants_docs)
+                    .filter(|_| confidence == "low" || label_only)
+                {
+                    // Docs alone are no home: PyPI gives pandas.readthedocs.io
+                    // for pandas, whose site is pandas.pydata.org.
                     // The best match of the words is a guess; the
                     // package's own home page is not: "FastAPI" is not
                     // xapo.com.
@@ -847,13 +877,14 @@ impl Mcp {
     }
 
     /// The home page (else the docs; the docs first when `wants_docs`) of
-    /// the most used package called `name`, and its registry's name.
+    /// the most used package called `name`, its registry's name, and whether
+    /// it is the docs.
     fn package_home(
         &self,
         name: &str,
         wants_docs: bool,
         options: &SearchOptions,
-    ) -> Option<(String, String)> {
+    ) -> Option<(String, String, bool)> {
         let found = self.package(name, None, options).ok()?;
         let card = found["packages"].as_array()?.iter().find(|card| {
             card["name"]
@@ -866,15 +897,18 @@ impl Mcp {
             ("homepage", "docs")
         };
         // A registry's own pages (docs.rs/toml) are no project's home.
-        let home = [first, then]
+        let (key, home) = [first, then]
             .iter()
-            .filter_map(|key| card[*key].as_str())
-            .find(|home| {
+            .filter_map(|key| Some((*key, card[*key].as_str()?)))
+            .find(|(_, home)| {
                 registrable_domain(home)
                     .is_none_or(|domain| !REGISTRY_HOSTS.contains(&domain.as_str()))
-            })?
-            .to_string();
-        Some((home, card["registry"].as_str()?.to_string()))
+            })?;
+        Some((
+            home.to_string(),
+            card["registry"].as_str()?.to_string(),
+            key == "docs",
+        ))
     }
 
     /// `check_lookalike`: whether `input` is a real site or imitates one.
