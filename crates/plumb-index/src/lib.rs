@@ -1734,17 +1734,20 @@ impl Searcher {
             .filter(|floor| *floor > 0.0)
             .zip(any_meaning)
         {
-            let named_inside = self.names_inside(&searcher, &query, query_text)?;
+            let (named_inside, alias_inside) = self.names_inside(&searcher, &query, query_text)?;
             let mut partial = Vec::new();
             for r in &ranked {
                 if r.named || kinds.contains(&r.addr) || nearest_ranked.contains(&r.addr) {
                     continue;
                 }
                 // A name only counts for a site known by it: hilton.com in
-                // "back bay hilton", not valley.com in "elephant valley".
+                // "back bay hilton", not valley.com in "elephant valley". An
+                // official site is known by its Wikidata name, not by its
+                // domain label (valley.com is Valley National Bank's).
                 if named_inside.contains(&r.addr)
                     && (r.link_score >= WELL_KNOWN_LINK_SCORE
-                        || self.is_official(&searcher, r.addr)?)
+                        || (alias_inside.contains(&r.addr)
+                            && self.is_official(&searcher, r.addr)?))
                 {
                     continue;
                 }
@@ -2135,20 +2138,20 @@ impl Searcher {
     /// "ecommerce wix"), unless the run goes on into more words as one
     /// phrase ("cricket" in "the cricket and the ant", "guess" in "guess
     /// the states game"). A run of one function or filler word names
-    /// nothing.
+    /// nothing. The second set has only the sites named by an alias.
     fn names_inside(
         &self,
         searcher: &tantivy::Searcher,
         query: &ParsedQuery,
         query_text: &str,
-    ) -> Result<HashSet<DocAddress>> {
-        let mut named = HashSet::new();
+    ) -> Result<(HashSet<DocAddress>, HashSet<DocAddress>)> {
         if query.asked {
-            return Ok(named);
+            return Ok((HashSet::new(), HashSet::new()));
         }
         let tokens = analysis::tokens(&self.words, query_text);
         let tokens = &tokens[..tokens.len().min(MAX_QUERY_WORDS)];
-        let mut terms = Vec::new();
+        let mut labels = Vec::new();
+        let mut aliases = Vec::new();
         for start in 0..tokens.len() {
             let mut key = String::new();
             for end in start..tokens.len() {
@@ -2163,12 +2166,14 @@ impl Searcher {
                 if goes_on {
                     continue;
                 }
-                terms.push(Term::from_field_text(self.fields.label_key, &key));
-                terms.push(Term::from_field_text(self.fields.alias_key, &key));
+                labels.push(Term::from_field_text(self.fields.label_key, &key));
+                aliases.push(Term::from_field_text(self.fields.alias_key, &key));
             }
         }
-        named.extend(matching_docs(searcher, terms)?);
-        Ok(named)
+        let by_alias = matching_docs(searcher, aliases)?;
+        let mut named = matching_docs(searcher, labels)?;
+        named.extend(by_alias.iter().copied());
+        Ok((named, by_alias))
     }
 
     /// Whether the document's title, description or Wikidata description
@@ -4224,6 +4229,54 @@ mod tests {
         // A word no site has does not leave the other word to stand alone.
         let paschen = found("paschen series");
         assert!(!paschen.contains(&"hbo.com".to_string()), "{paschen:?}");
+    }
+
+    #[test]
+    fn an_official_site_is_named_inside_by_its_wikidata_name_only() {
+        let bank = Signals {
+            official_site: true,
+            ..obscure(300_000, 40)
+        };
+        let mut valley = site(
+            "valley.com",
+            Some("Valley Bank"),
+            None,
+            &["Valley National Bank"],
+            &[],
+            bank,
+        );
+        valley.about = Some("American bank".to_string());
+        let records = vec![
+            valley,
+            site(
+                "elephantnaturepark.org",
+                Some("Elephant Nature Park"),
+                Some("An elephant sanctuary in a valley near Chiang Mai."),
+                &[],
+                &[],
+                obscure(400_000, 20),
+            ),
+        ];
+        let (_dir, searcher) = build(&records);
+        let options = SearchOptions::default();
+        let meaning = near_and_far(&[("elephantnaturepark.org", 1.0)], &[("valley.com", 0.05)]);
+        let found = |query: &str| {
+            let hits = searcher
+                .search_meaning(query, 10, &RankConfig::default(), &options, Some(&meaning))
+                .unwrap()
+                .hits;
+            domains(&hits)
+                .into_iter()
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        };
+        let elephant = found("elephant valley");
+        assert!(
+            !elephant.contains(&"valley.com".to_string()),
+            "{elephant:?}"
+        );
+        let routing = found("routing number valley national bank");
+        assert!(routing.contains(&"valley.com".to_string()), "{routing:?}");
     }
 
     #[test]
