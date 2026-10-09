@@ -10,6 +10,7 @@ shows up.
 | `brand_queries.tsv` | an organization's name ("chase") | its official site | |
 | `typo_queries.tsv` | a misspelled name ("chsae") | the brand's site | `--follow-suggestions` to measure "Did you mean" |
 | `ai_queries.tsv` | what an AI agent looks up ("rust docs", "paypal login") | the official site | |
+| `utility_queries.tsv` | a tool or a quick fact ("weather", "20 usd to eur", "define prioritize", "food near me") | a site that does the job, or the word's dictionary page | |
 | `described_queries.tsv` | a site described, not named ("cheap flights") | any of several fitting sites | |
 | `article_queries.tsv` | a person, place or idea | its Wikipedia article | `--pages wikipedia-en.tsv.gz` |
 | `fact_queries.tsv` | a fact ("capital of japan") | text the instant answer has | `--facts --pages wikipedia-en.tsv.gz` (made with fetch-facts) |

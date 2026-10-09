@@ -109,6 +109,7 @@ mod relay;
 mod searxng;
 mod setup;
 mod tune;
+mod weather;
 mod welcome;
 
 /// Results returned when a request does not say how many.
@@ -272,6 +273,13 @@ pub trait SearchBackend: Send + Sync {
         None
     }
 
+    /// The town (or else other place) `text` names, for a weather answer;
+    /// see [`plumb_index::places::PlaceSearcher::locate`]. By default none.
+    fn locate(&self, text: &str, country: Option<&str>) -> Option<plumb_core::place::Place> {
+        let _ = (text, country);
+        None
+    }
+
     /// The map the places' map is drawn on, if the node keeps one.
     fn base_map(&self) -> Option<Arc<crate::map::BaseMap>> {
         None
@@ -394,6 +402,14 @@ impl SearchBackend for IndexBackend {
 
     fn num_docs(&self) -> u64 {
         self.searcher.num_docs()
+    }
+
+    fn locate(&self, text: &str, country: Option<&str>) -> Option<plumb_core::place::Place> {
+        let places = self.places.as_ref()?;
+        places.locate(text, country).unwrap_or_else(|err| {
+            error!("locating {text:?}: {err:#}");
+            None
+        })
     }
 
     fn places(
@@ -590,6 +606,8 @@ struct AppState {
     settings: WebSettings,
     /// Currency rates for instant answers.
     rates: Arc<answers::RatesCache>,
+    /// Forecasts for weather answers.
+    weather: Arc<weather::WeatherCache>,
     /// How many tool calls each client may still make to `/mcp`.
     mcp_limiter: Arc<mcp::Limiter>,
     /// How many network searches each client may still start: a node runs
@@ -734,6 +752,7 @@ pub fn router_with(backend: Arc<dyn SearchBackend>, settings: impl Into<WebSetti
         node: None,
         settings: settings.into(),
         rates: Arc::default(),
+        weather: Arc::default(),
         mcp_limiter: Arc::default(),
         net_limiter: Arc::new(mcp::Limiter::new(NET_BURST, NET_PER_MINUTE)),
         page_reader: Arc::default(),
@@ -761,6 +780,7 @@ pub fn node_router_with(
         node: Some(status),
         settings: settings.into(),
         rates: Arc::default(),
+        weather: Arc::default(),
         mcp_limiter: Arc::default(),
         net_limiter: Arc::new(mcp::Limiter::new(NET_BURST, NET_PER_MINUTE)),
         page_reader: Arc::default(),
@@ -1217,8 +1237,14 @@ async fn search_page(
         _ => None,
     };
     let local = run_search_ranked(&state, &query, limit, &settings.options, rank).await;
+    // "Near me", "weather" and "what time is it" go by the town the
+    // searcher gave.
+    let town = match &visitor {
+        Some(visitor) => visitor.about.town(),
+        None => settings.browser_about.as_ref().and_then(About::town),
+    };
     let mut extras = match &local {
-        Ok(results) => extras(&state, &query, results, &settings.options).await,
+        Ok(results) => extras(&state, &query, results, &settings.options, town).await,
         Err(_) => answers::Extras::default(),
     };
     // Plugins run once the node knows what the search is about, so that
@@ -1276,14 +1302,17 @@ async fn search_page(
     } else {
         (local, NetOutcome::NotAsked)
     };
-    // "Near me" goes by the town the searcher gave.
-    let town = match &visitor {
-        Some(visitor) => visitor.about.town(),
-        None => settings.browser_about.as_ref().and_then(About::town),
-    };
     let found_places = run_places(&state, &query, town, settings.options.country.as_deref()).await;
     let response = match local {
         Ok(mut results) => {
+            route_sources(
+                &state,
+                &query,
+                extras.answer.as_ref().map(|a| a.kind),
+                settings.options.country.as_deref(),
+                &mut results,
+                limit,
+            );
             let found_places = not_a_name(found_places, &results.hits);
             if let Some(found) = &found_places {
                 let local = place_sites(&state, found).await;
@@ -1527,7 +1556,15 @@ async fn api_search(
                 places::local_first(found, &mut results.hits, local, params.limit());
             }
             let places = places.filter(|found| !found.hits.is_empty());
-            let extras = extras(&state, &query, &results, &options).await;
+            let extras = extras(&state, &query, &results, &options, None).await;
+            route_sources(
+                &state,
+                &query,
+                extras.answer.as_ref().map(|a| a.kind),
+                options.country.as_deref(),
+                &mut results,
+                params.limit(),
+            );
             let about = plugin_about(&state, &query, &results, &extras, &options).await;
             let shown_to_plugins = if state.settings.plugins.any_annotate() {
                 shown_results(&results, params.limit())
@@ -1640,8 +1677,12 @@ async fn extras(
     query: &str,
     results: &SearchResults,
     options: &SearchOptions,
+    town: Option<&str>,
 ) -> answers::Extras {
-    let answer = instant_answer(state, query).await;
+    let answer = match instant_answer(state, query, town).await {
+        Some(answer) => Some(answer),
+        None => weather::answer(state, query, town, options.country.as_deref()).await,
+    };
     let names_a_page = results.pages.iter().any(|placed| placed.hit.named);
     let mut profile = None;
     if !names_a_page {
@@ -1696,14 +1737,46 @@ async fn extras(
     }
 }
 
+/// Lists first the sites that serve `query` best, when it asks for a tool
+/// or a quick fact ([`crate::sources`]); `answer` is the kind of the
+/// instant answer shown for it. At most `limit` sites, or as many as there
+/// were.
+fn route_sources(
+    state: &AppState,
+    query: &str,
+    answer: Option<plumb_answer::Kind>,
+    country: Option<&str>,
+    results: &mut SearchResults,
+    limit: usize,
+) {
+    let Some(route) = crate::sources::route(query, answer, country) else {
+        return;
+    };
+    let keep = results.hits.len().max(limit);
+    crate::sources::lead_with(&mut results.hits, &mut results.pages, &route, |domain| {
+        state.backend.site(domain)
+    });
+    results.hits.truncate(keep);
+}
+
 /// Results asked for when looking up whose profile a query asks for.
 const PROFILE_SEARCH_LIMIT: usize = 5;
 
 /// The instant answer to `query`, with currency rates when it needs them.
-async fn instant_answer(state: &AppState, query: &str) -> Option<plumb_answer::Answer> {
+/// "What time is it" is the time in `town`, the searcher's own, when they
+/// gave one.
+async fn instant_answer(
+    state: &AppState,
+    query: &str,
+    town: Option<&str>,
+) -> Option<plumb_answer::Answer> {
     let rates = state.rates.for_query(query).await;
     let now = i64::try_from(now_unix()).unwrap_or(i64::MAX);
-    plumb_answer::answer(query, now, rates.as_ref())
+    plumb_answer::answer(query, now, rates.as_ref()).or_else(|| {
+        let town =
+            town.filter(|_| crate::sources::asks_the_time(&plumb_core::normalize_text(query)))?;
+        plumb_answer::answer(&format!("time in {town}"), now, None)
+    })
 }
 
 #[derive(Debug, Default, Deserialize)]

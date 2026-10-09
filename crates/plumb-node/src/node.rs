@@ -2030,6 +2030,14 @@ impl SearchBackend for Inner {
         places::search(self, query, home, country)
     }
 
+    fn locate(&self, text: &str, country: Option<&str>) -> Option<plumb_core::place::Place> {
+        places::locate(self, text, country)
+    }
+
+    fn site(&self, domain: &str) -> Option<Hit> {
+        self.current()?.backend().site(domain)
+    }
+
     fn base_map(&self) -> Option<Arc<crate::map::BaseMap>> {
         self.map.get()
     }

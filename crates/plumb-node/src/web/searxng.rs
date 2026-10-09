@@ -189,7 +189,7 @@ async fn collect(
     wanted: Wanted,
 ) -> anyhow::Result<Collected> {
     let results = run_search(state, query, limit, options).await?;
-    let extras = extras(state, query, &results, options).await;
+    let extras = extras(state, query, &results, options, None).await;
     let about = super::search_about(query, &results, &extras);
     let plugins = state
         .plugin_results(query, options, about.as_ref(), None)

@@ -1,0 +1,51 @@
+# Searches for a tool or a quick fact rather than a site, from the most
+# searched terms on Google in the US (Exploding Topics / Semrush, Jan 2026)
+# and the ways people ask for the weather, the time, a word or a place to
+# eat. The answer is any site that does the job. A node shows an instant
+# answer above many of these; these check the sites under it.
+weather	weather.com,weather.gov,accuweather.com
+weather tomorrow	weather.com,weather.gov,accuweather.com
+weather forecast today	weather.com,weather.gov,accuweather.com
+clima	weather.com,accuweather.com,meteored.com,clima.com,weather.gov
+uk weather today	metoffice.gov.uk,bbc.co.uk,bbc.com
+time	time.gov,timeanddate.com,time.is
+what time is it	time.gov,timeanddate.com,time.is
+current time	time.gov,timeanddate.com,time.is
+time in london	timeanddate.com,time.is
+time in tokyo	timeanddate.com,time.is
+20 usd to eur	xe.com,wise.com,oanda.com
+100 gbp to usd	xe.com,wise.com,oanda.com
+calculator	calculator.net,desmos.com
+scientific calculator	calculator.net,desmos.com
+bmi calculator	calculator.net,cdc.gov,nih.gov,omnicalculator.com
+mortgage calculator	calculator.net,bankrate.com,nerdwallet.com,zillow.com,omnicalculator.com
+tip calculator	calculator.net,omnicalculator.com
+translate	google.com,deepl.com,bing.com
+traductor	google.com,deepl.com,spanishdict.com
+english to spanish	spanishdict.com,google.com,deepl.com
+spanish to english	spanishdict.com,google.com,deepl.com
+english to french	google.com,deepl.com,wordreference.com
+speed test	speedtest.net,fast.com,measurementlab.net
+internet speed test	speedtest.net,fast.com,measurementlab.net
+nvidia stock	yahoo.com,nasdaq.com,marketwatch.com,cnbc.com,nvidia.com,stockanalysis.com
+tesla stock price	yahoo.com,nasdaq.com,marketwatch.com,cnbc.com,tesla.com,stockanalysis.com
+dow jones	yahoo.com,wsj.com,cnbc.com,marketwatch.com,spglobal.com,dowjones.com
+stock market today	yahoo.com,cnbc.com,marketwatch.com,wsj.com,stockanalysis.com
+define prioritize	https://www.merriam-webster.com/dictionary/prioritize,https://www.dictionary.com/browse/prioritize,https://en.wiktionary.org/wiki/prioritize
+ubiquitous meaning	https://www.merriam-webster.com/dictionary/ubiquitous,https://www.dictionary.com/browse/ubiquitous,https://en.wiktionary.org/wiki/ubiquitous
+definition of empathy	https://www.merriam-webster.com/dictionary/empathy,https://www.dictionary.com/browse/empathy,https://en.wiktionary.org/wiki/empathy
+food near me	yelp.com,doordash.com,ubereats.com,grubhub.com,tripadvisor.com
+restaurants near me	yelp.com,tripadvisor.com,opentable.com
+pizza near me	yelp.com,dominos.com,pizzahut.com,doordash.com
+coffee shop near me	yelp.com,starbucks.com
+gas station near me	gasbuddy.com
+denver weather	weather.com,weather.gov,accuweather.com
+weather radar	weather.gov,weather.com,accuweather.com,wunderground.com,windy.com
+what time is it in sydney	timeanddate.com,time.is
+50 eur to usd	xe.com,wise.com,oanda.com
+graphing calculator	desmos.com,geogebra.org
+loan calculator	calculator.net,bankrate.com,nerdwallet.com,omnicalculator.com
+apple stock	yahoo.com,nasdaq.com,marketwatch.com,cnbc.com,apple.com,stockanalysis.com
+define empathy	https://www.merriam-webster.com/dictionary/empathy,https://www.dictionary.com/browse/empathy,https://en.wiktionary.org/wiki/empathy
+what does ephemeral mean	https://www.merriam-webster.com/dictionary/ephemeral,https://www.dictionary.com/browse/ephemeral,https://en.wiktionary.org/wiki/ephemeral
+breakfast near me	yelp.com,tripadvisor.com

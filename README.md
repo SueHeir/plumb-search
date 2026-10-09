@@ -320,6 +320,7 @@ Plumb is built from open data. Nodes keep titles, short descriptions and counts,
 | [Common Crawl](https://commoncrawl.org/) | Web graph domain ranks; optionally titles and link text from WAT files | [Terms of use](https://commoncrawl.org/terms-of-use) |
 | [The Block List Project](https://github.com/blocklistproject/Lists) | The adult sites list for safe search | Public domain ([Unlicense](https://unlicense.org/)) |
 | [European Central Bank](https://www.ecb.europa.eu/stats/policy_and_exchange_rates/euro_reference_exchange_rates/html/index.en.html) | Daily euro reference rates for currency conversions | Free to reuse with the source named |
+| [Open-Meteo](https://open-meteo.com/) | Weather forecasts for weather answers | CC BY 4.0, free without a key for non-commercial use |
 | [BAAI/bge-small-en-v1.5](https://huggingface.co/BAAI/bge-small-en-v1.5) | The embedding model for search by meaning | MIT |
 
 Site titles, descriptions and icons come from the sites' own homepages. The info box credits Wikipedia under each description it takes from an article, and lists of places credit OpenStreetMap.

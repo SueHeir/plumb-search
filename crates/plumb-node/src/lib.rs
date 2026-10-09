@@ -64,6 +64,7 @@ mod records;
 mod relations;
 mod run;
 mod search;
+pub mod sources;
 mod terms;
 mod top_sites;
 

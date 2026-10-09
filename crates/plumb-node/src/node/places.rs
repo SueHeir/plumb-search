@@ -5,6 +5,7 @@
 use std::sync::{Arc, PoisonError};
 use std::time::{Duration, Instant};
 
+use plumb_core::place::Place;
 use plumb_index::places::{PlaceResults, PlaceSearcher};
 use tracing::warn;
 
@@ -108,6 +109,20 @@ pub(super) fn known_homes(inner: &Inner) -> Option<Vec<(f64, f64)>> {
     homes.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
     homes.dedup();
     Some(homes)
+}
+
+/// The town (or else other place) `text` names.
+pub(super) fn locate(inner: &Inner, text: &str, country: Option<&str>) -> Option<Place> {
+    let searcher: Arc<PlaceSearcher> = inner
+        .places
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .as_ref()
+        .map(|(_, s)| s.clone())?;
+    searcher.locate(text, country).unwrap_or_else(|err| {
+        warn!("locating {text:?}: {err:#}");
+        None
+    })
 }
 
 /// The places `query` asks for, around `home` for "near me".
