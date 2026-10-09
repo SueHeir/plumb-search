@@ -3,10 +3,10 @@
 places file, without re-reading OpenStreetMap's whole planet (~90 GB).
 
 #275 only adds tags to places the file already holds (pubs that brew,
-sports centres), so their ids and tags are enough. They come from the
-Overpass API, a tile of the world at a time:
+sports centres), so their ids and tags are enough. They come from
+QLever's OpenStreetMap planet in two queries:
 
-    add_tags.py fetch tags.tsv            # ~1-2M rows, tens of MB
+    add_tags.py fetch tags.tsv            # ~580k rows, ~14 MB
     add_tags.py patch places.tsv.gz tags.tsv places.new.tsv.gz
 
 `patch` streams the file, so it needs little memory. Tags are added as
@@ -15,83 +15,71 @@ place's kind is a craft=), then up to two sports, lower-cased.
 """
 
 import gzip
-import json
 import re
 import sys
 import time
 import urllib.parse
 import urllib.request
 
-OVERPASS = "https://overpass-api.de/api/interpreter"
-QUERY = """[out:json][timeout:600][maxsize:1073741824];
-(
-  nwr["name"]["sport"]({s},{w},{n},{e});
-  nwr["name"]["microbrewery"="yes"]({s},{w},{n},{e});
-  nwr["name"]["craft"="brewery"]({s},{w},{n},{e});
-);
-out tags;"""
-PREFIX = {"node": "n", "way": "w", "relation": "r"}
+QLEVER = "https://qlever.dev/api/osm-planet"
+PREFIX = "PREFIX osmkey: <https://www.openstreetmap.org/wiki/Key:> "
+SPORTS = PREFIX + "SELECT ?o ?s WHERE { ?o osmkey:sport ?s . ?o osmkey:name ?n }"
+BREWING = PREFIX + (
+    "SELECT DISTINCT ?o WHERE { ?o osmkey:name ?n . "
+    '{ ?o osmkey:microbrewery "yes" } UNION { ?o osmkey:craft "brewery" } }'
+)
+KINDS = {"node": "n", "way": "w", "relation": "r"}
 
 
-def overpass(box):
-    s, w, n, e = box
-    body = urllib.parse.urlencode({"data": QUERY.format(s=s, w=w, n=n, e=e)})
+def qlever(query):
+    """The rows of `query` on QLever's OpenStreetMap planet, header dropped."""
+    body = urllib.parse.urlencode({"query": query}).encode()
     request = urllib.request.Request(
-        OVERPASS, body.encode(), headers={"User-Agent": "plumb-search places tags"}
+        QLEVER,
+        body,
+        headers={
+            "Accept": "text/tab-separated-values",
+            "User-Agent": "plumb-search places tags",
+        },
     )
-    with urllib.request.urlopen(request, timeout=900) as response:
-        answer = json.load(response)
-    if "runtime error" in answer.get("remark", ""):
-        raise RuntimeError(answer["remark"])
-    return answer["elements"]
-
-
-def fetch_box(box, out, depth=0):
-    """Fetches `box`, splitting it in four when Overpass gives up on it."""
-    for attempt in range(3):
+    for attempt in range(4):
         try:
-            elements = overpass(box)
-            break
-        except Exception as err:  # timeouts, 429s, 504s, runtime errors
-            print(f"  {box}: {err}", file=sys.stderr)
-            if depth < 4 and attempt == 1:
-                s, w, n, e = box
-                mid_lat, mid_lon = (s + n) / 2, (w + e) / 2
-                for part in [
-                    (s, w, mid_lat, mid_lon),
-                    (s, mid_lon, mid_lat, e),
-                    (mid_lat, w, n, mid_lon),
-                    (mid_lat, mid_lon, n, e),
-                ]:
-                    fetch_box(part, out, depth + 1)
-                return
+            with urllib.request.urlopen(request, timeout=900) as response:
+                lines = response.read().decode("utf-8").splitlines()
+            return [line.split("\t") for line in lines[1:]]
+        except Exception as err:
+            print(f"  QLever: {err}", file=sys.stderr)
             time.sleep(30 * (attempt + 1))
-    else:
-        raise SystemExit(f"Overpass would not answer for {box}")
-    for el in elements:
-        tags = el.get("tags", {})
-        out.write(
-            "\t".join(
-                [
-                    PREFIX[el["type"]] + str(el["id"]),
-                    tags.get("craft", "").strip(),
-                    tags.get("microbrewery", "").strip(),
-                    tags.get("sport", "").strip().replace("\t", " "),
-                ]
-            )
-            + "\n"
-        )
-    out.flush()
-    print(f"  {box}: {len(elements)}", file=sys.stderr)
-    time.sleep(5)
+    raise SystemExit("QLever would not answer")
+
+
+def osm_id(uri):
+    """`<https://www.openstreetmap.org/node/123>` as `n123`."""
+    match = re.fullmatch(r"<https://www\.openstreetmap\.org/(node|way|relation)/(\d+)>", uri)
+    return KINDS[match[1]] + match[2]
+
+
+def literal(text):
+    """A TSV literal (`"climbing"`, maybe typed or tagged) as plain text."""
+    match = re.fullmatch(r'"(.*)"(\^\^.*|@.*)?', text.strip())
+    text = match[1] if match else text.strip()
+    return text.replace('\\"', '"').replace("\\t", " ").replace("\t", " ")
 
 
 def fetch(path):
-    # 30x30 degree tiles; dense ones split themselves.
+    # Whole-world tag queries answer in seconds on QLever; the public
+    # Overpass servers time out on them.
+    rows = {}
+    for uri, sport in qlever(SPORTS):
+        rows[osm_id(uri)] = ["", literal(sport)]
+    print(f"  {len(rows)} named places with a sport", file=sys.stderr)
+    brewing = qlever(BREWING)
+    for (uri,) in brewing:
+        rows.setdefault(osm_id(uri), ["", ""])[0] = "brewery"
+    print(f"  {len(brewing)} named places that brew", file=sys.stderr)
     with open(path, "w", encoding="utf-8") as out:
-        for s in range(-90, 90, 30):
-            for w in range(-180, 180, 30):
-                fetch_box((s, w, s + 30, w + 30), out)
+        for osm, (craft, sport) in rows.items():
+            out.write(f"{osm}\t{craft}\t\t{sport}\n")
 
 
 def field(text):
