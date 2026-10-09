@@ -736,6 +736,27 @@ impl Mcp {
                         confidence = "medium";
                     }
                 }
+                // A guess gives way to a site whose address is a word of
+                // the name: "cube20 God's number" is cube20.org, not
+                // rubiks.com. One that shows the whole name keeps it: "old navy"
+                // is not navy.mil.
+                let label_word = |hit: &Hit| {
+                    let label = letters(&domain_label(&hit.domain));
+                    label.len() >= 4 && words.contains(&label)
+                };
+                if confidence == "low" && !shows && !label_word(top) {
+                    if let Some(hit) = results.hits[1..].iter().find(|hit| label_word(hit)) {
+                        why = vec![format!(
+                            "Its address is {}, a word of the name.",
+                            hit.domain
+                        )];
+                        pick = hit;
+                        url = hit.url.clone();
+                        domain = hit.domain.clone();
+                        title = hit.title.clone();
+                        description = hit.description.as_deref().map(short);
+                    }
+                }
             }
         }
         let rivals: Vec<&str> = results

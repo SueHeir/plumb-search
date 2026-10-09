@@ -1542,3 +1542,17 @@ fn official_site_takes_a_well_known_site_that_shows_the_whole_name() {
     let answer = official(&mcp, "outlook email");
     assert_eq!(answer["domain"], "outlook.live.com", "{answer}");
 }
+
+#[test]
+fn official_site_takes_a_site_whose_address_is_a_word_of_the_name() {
+    let mcp = scripted(|_| {
+        let mut rubiks = titled("rubiks.com", "Rubik's", 0.8, false);
+        rubiks.official = true;
+        let mut cube20 = hit("cube20.org", 0.5, 0.1, false);
+        cube20.title = None;
+        results(vec![rubiks, cube20], Vec::new())
+    });
+    let answer = official(&mcp, "cube20 God's number");
+    assert_eq!(answer["domain"], "cube20.org", "{answer}");
+    assert_eq!(answer["confidence"], "low");
+}
