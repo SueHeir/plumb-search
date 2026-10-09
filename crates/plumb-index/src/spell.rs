@@ -404,7 +404,7 @@ impl Speller<'_> {
         let mut best: Option<(u8, u64, String)> = None;
         let mut best_likelihood = f64::NEG_INFINITY;
         for (term, distance) in near {
-            if !plausible_fix(word, &term) {
+            if !plausible_word_fix(word, &term) {
                 continue;
             }
             let term_docs = self.docs_with(&term)?;
@@ -486,7 +486,7 @@ impl Speller<'_> {
             for term in near.into_keys() {
                 if model.count(&term) < MIN_FIX_DOCS as u32
                     || !within_edits(word, &term)
-                    || !plausible_fix(word, &term)
+                    || !plausible_word_fix(word, &term)
                 {
                     continue;
                 }
@@ -509,6 +509,15 @@ impl Speller<'_> {
 fn plausible_fix(word: &str, term: &str) -> bool {
     let digits = |w: &str| w.chars().any(|c| c.is_ascii_digit());
     !(digits(term) && !digits(word)) && !crate::spell_model::plural_pair(word, term)
+}
+
+/// Whether `term` can be what the word `word` was meant as: as
+/// [`plausible_fix`], and starting with the same letter, since a slip
+/// rarely starts a word and a rare word is likelier meant: "perft" is not
+/// "erft". Names are not held to it: a well-known site's name is likely
+/// enough to outweigh it.
+pub(crate) fn plausible_word_fix(word: &str, term: &str) -> bool {
+    plausible_fix(word, term) && word.chars().next() == term.chars().next()
 }
 
 /// The terms of `field` within `edits` edits of `key`, `key` itself left
