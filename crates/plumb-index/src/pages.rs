@@ -995,6 +995,34 @@ fn site_is_titled(domain: &str, title: &str) -> bool {
     false
 }
 
+/// Whether `domain`'s first label is the initials of the page's title,
+/// three or more of them, small words aside: nba.com for "National
+/// Basketball Association".
+fn site_is_initials(domain: &str, title: &str) -> bool {
+    let label = squash(domain.split('.').next().unwrap_or(""));
+    let initials: String = base_title(title)
+        .split_whitespace()
+        .map(squash)
+        .filter(|word| !word.is_empty() && !["of", "and", "the", "for"].contains(&word.as_str()))
+        .filter_map(|word| word.chars().next())
+        .collect();
+    label.len() >= 3 && initials == label
+}
+
+/// Whether `site`'s title may be another page's: an official site whose
+/// title has not its own name, as when its homepage sent the crawler on
+/// to a section ("California Post" for nypost.com). Its article's title
+/// says which ([`PageSearcher::title_untitled`]).
+fn may_be_borrowed(site: &crate::Hit) -> bool {
+    let label = squash(site.domain.split('.').next().unwrap_or(""));
+    site.official
+        && label.len() >= 3
+        && site
+            .title
+            .as_deref()
+            .is_some_and(|title| !squash(title).contains(&label))
+}
+
 /// What [`build_page_index`] did.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PageIndexStats {
@@ -1162,16 +1190,23 @@ impl PageSearcher {
     /// of, without its qualifier: "Notion" for notion.so, "Yelp" for
     /// yelp.com, whose homepages turn crawlers away. Only an article whose
     /// official website is the site's homepage ([`Page::website`]) and
-    /// whose title the domain spells ([`site_is_titled`]) counts:
+    /// whose title the domain spells ([`site_is_titled`]) or abbreviates
+    /// ([`site_is_initials`], nba.com) counts:
     /// "Schitt's Creek", whose website is a page on cbc.ca, is not what
-    /// cbc.ca is.
+    /// cbc.ca is. An official site whose title may be borrowed
+    /// ([`may_be_borrowed`]) and names none of its articles takes the most
+    /// read one's title too: "New York Post" for nypost.com, not
+    /// "California Post".
     pub fn title_untitled(&self, sites: &mut [crate::Hit]) -> Result<()> {
         let searcher = self.reader.searcher();
-        for site in sites.iter_mut().filter(|site| {
-            site.title
+        for site in sites.iter_mut() {
+            let untitled = site
+                .title
                 .as_deref()
-                .is_none_or(|title| title.trim().is_empty())
-        }) {
+                .is_none_or(|title| title.trim().is_empty());
+            if !untitled && !may_be_borrowed(site) {
+                continue;
+            }
             let query = TermQuery::new(
                 Term::from_field_text(self.fields.site, &site.domain),
                 IndexRecordOption::Basic,
@@ -1181,6 +1216,7 @@ impl PageSearcher {
                 &TopDocs::with_limit(TITLE_CANDIDATES)
                     .order_by_fast_field::<u64>("popularity", tantivy::Order::Desc),
             )?;
+            let mut articles = Vec::new();
             for (_, address) in best {
                 let document: TantivyDocument = searcher.doc(address)?;
                 let Some(stored) = document
@@ -1190,17 +1226,32 @@ impl PageSearcher {
                     continue;
                 };
                 let page: Page = serde_json::from_str(stored)?;
-                if !page.is_article()
-                    || page.website.is_some()
-                    || !site_is_titled(&site.domain, &page.title)
-                {
-                    continue;
+                if page.is_article() && page.website.is_none() {
+                    articles.push(page.title);
                 }
-                let title = base_title(&page.title).trim();
-                if !title.is_empty() {
-                    site.title = Some(title.to_string());
-                    break;
-                }
+            }
+            let names = articles.iter().map(|title| base_title(title).trim());
+            let title = if untitled {
+                articles
+                    .iter()
+                    .find(|title| {
+                        site_is_titled(&site.domain, title) || site_is_initials(&site.domain, title)
+                    })
+                    .map(|title| base_title(title).trim())
+            } else {
+                // A title that names what any article about the site is
+                // stays ("Welcome to Steam" for steampowered.com, whose
+                // articles are Valve's and Steam's); else the most read
+                // one names it.
+                let shown = squash(site.title.as_deref().unwrap_or(""));
+                let named = names.clone().any(|name| {
+                    let name = squash(name);
+                    name.len() < 3 || shown.contains(&name)
+                });
+                names.clone().next().filter(|_| !named)
+            };
+            if let Some(title) = title.filter(|title| !title.is_empty()) {
+                site.title = Some(title.to_string());
             }
         }
         Ok(())
@@ -2982,17 +3033,55 @@ mod tests {
         show.website = Some("https://www.cbc.ca/schittscreek".into());
         let mut cbc = page("CBC Television", 3_000, &[]);
         cbc.site = Some("cbc.ca".into());
-        let (_dir, searcher) = searcher(&[notion, show, cbc]);
+        // A domain of the initials: nba.com.
+        let mut nba = page("National Basketball Association", 4_000, &[]);
+        nba.site = Some("nba.com".into());
+        let (_dir, searcher) = searcher(&[notion, show, cbc, nba]);
         let mut sites = vec![
             site("notion.so", true),
             site("other.com", false),
             site("cbc.ca", true),
+            site("nba.com", true),
         ];
         sites[1].title = Some("Other".into());
         searcher.title_untitled(&mut sites).unwrap();
         assert_eq!(sites[0].title.as_deref(), Some("Notion"));
         assert_eq!(sites[1].title.as_deref(), Some("Other"));
         assert_eq!(sites[2].title.as_deref(), Some("CBC Television"));
+        assert_eq!(
+            sites[3].title.as_deref(),
+            Some("National Basketball Association")
+        );
+    }
+
+    #[test]
+    fn official_sites_with_another_page_s_title_take_their_article_s() {
+        let mut post = page("New York Post", 5_000, &[]);
+        post.site = Some("nypost.com".into());
+        let mut valve = page("Valve Corporation", 9_000, &[]);
+        valve.site = Some("steampowered.com".into());
+        let mut steam = page("Steam (service)", 4_000, &[]);
+        steam.site = Some("steampowered.com".into());
+        let (_dir, searcher) = searcher(&[post, valve, steam]);
+        let titled = |domain: &str, title: &str, official: bool| crate::Hit {
+            title: Some(title.into()),
+            official,
+            ..site(domain, false)
+        };
+        let mut sites = vec![
+            titled(
+                "nypost.com",
+                "California Post – Breaking California News",
+                true,
+            ),
+            titled("steampowered.com", "Welcome to Steam", true),
+            // Not official: nothing says which name is its own.
+            titled("nypost.com", "California Post", false),
+        ];
+        searcher.title_untitled(&mut sites).unwrap();
+        assert_eq!(sites[0].title.as_deref(), Some("New York Post"));
+        assert_eq!(sites[1].title.as_deref(), Some("Welcome to Steam"));
+        assert_eq!(sites[2].title.as_deref(), Some("California Post"));
     }
 
     fn site(domain: &str, named: bool) -> crate::Hit {

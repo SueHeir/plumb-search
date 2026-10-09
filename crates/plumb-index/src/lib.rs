@@ -67,6 +67,7 @@
 //! `us bank` and `US BANK` are the same query and `nestle` finds `Nestlé`.
 
 mod analysis;
+mod health;
 pub mod learned;
 pub mod pages;
 pub mod places;
@@ -381,6 +382,9 @@ pub struct RankConfig {
     /// 0.25 and 0.4 on the test searches (brand 93.4% to 94.9% first on
     /// the tune half, 93.7% to 94.7% on the held-out one).
     pub link_name_bonus: f32,
+    /// Medical searches ("ibuprofen dosage", "flu symptoms") list a few
+    /// health authorities first ([`health::authorities_first`]).
+    pub health_authorities: bool,
 }
 
 impl Default for RankConfig {
@@ -411,6 +415,7 @@ impl Default for RankConfig {
             learned: true,
             link_names: true,
             link_name_bonus: 0.4,
+            health_authorities: true,
         }
     }
 }
@@ -982,7 +987,17 @@ impl Searcher {
     ) -> Result<SearchResults> {
         let ops = Operators::parse(query_text);
         if !ops.any() {
-            return self.search_words(query_text, limit, cfg, options, meaning);
+            let mut results = self.search_words(query_text, limit, cfg, options, meaning)?;
+            if cfg.health_authorities {
+                health::authorities_first(
+                    query_text,
+                    options.country.as_deref(),
+                    &mut results.hits,
+                    limit,
+                    &|domain| self.site(domain).ok().flatten(),
+                );
+            }
+            return Ok(results);
         }
         let mut results = SearchResults::default();
         if limit == 0 {

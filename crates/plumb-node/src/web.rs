@@ -164,17 +164,38 @@ async fn run_places(
 /// listed: as the index has them, or else as the place says (its name and
 /// kind), since small local sites are often not in the index. Looked up on
 /// a blocking thread.
+///
+/// Places that give no website are looked up by name: the index often has
+/// a small shop's site even when OpenStreetMap does not
+/// ([`places::site_named_for`]). They come after the places that give
+/// one.
 async fn place_sites(state: &AppState, found: &plumb_index::places::PlaceResults) -> Vec<Hit> {
     let sites = places::local_sites(found);
-    if sites.is_empty() {
+    let unsited = places::places_without_sites(found);
+    if sites.is_empty() && unsited.is_empty() {
         return Vec::new();
     }
     let backend = Arc::clone(&state.backend);
     tokio::task::spawn_blocking(move || {
-        sites
+        let mut sites: Vec<Hit> = sites
             .into_iter()
             .map(|site| backend.site(&site.domain).unwrap_or(site))
-            .collect()
+            .collect();
+        for place in unsited {
+            let Ok(hits) = backend.search(&place.name, 5) else {
+                continue;
+            };
+            if let Some(mut site) = places::site_named_for(&place, hits) {
+                if !sites.iter().any(|s| s.domain == site.domain) {
+                    site.score = 0.0;
+                    site.text_score = 0.0;
+                    site.placing_text_score = None;
+                    site.named = false;
+                    sites.push(site);
+                }
+            }
+        }
+        sites
     })
     .await
     .unwrap_or_default()

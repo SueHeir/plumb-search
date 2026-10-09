@@ -304,6 +304,58 @@ pub(super) fn local_sites(found: &PlaceResults) -> Vec<Hit> {
     sites
 }
 
+/// The places of `found` that give no website, at most
+/// [`MAX_NAME_LOOKUPS`] of them, for their sites to be looked up by name
+/// ([`site_named_for`]).
+pub(super) fn places_without_sites(found: &PlaceResults) -> Vec<Place> {
+    found
+        .hits
+        .iter()
+        .map(|hit| &hit.place)
+        .filter(|place| place.website.as_deref().and_then(http_url).is_none())
+        .take(MAX_NAME_LOOKUPS)
+        .cloned()
+        .collect()
+}
+
+/// How many places without a website are looked up by name.
+const MAX_NAME_LOOKUPS: usize = 6;
+
+/// Among `hits` found for a place's name, the place's own site: one whose
+/// domain spells the name or its first two words or more (elliottbaybook.com for
+/// "Elliott Bay Book Company"), and that is well known (a chain:
+/// starbucks.com) or says the place's town. Small places share names
+/// across towns; another town's Joe's Pizza is not this one.
+pub(super) fn site_named_for(place: &Place, hits: Vec<Hit>) -> Option<Hit> {
+    let squash = |text: &str| normalize_text(text).replace(' ', "");
+    let town = place.town.as_deref().map(normalize_text);
+    hits.into_iter().find(|hit| {
+        let label = squash(hit.domain.split('.').next().unwrap_or(""));
+        if label.len() < 5 {
+            return false;
+        }
+        // The whole name, or two words of it or more: elliott.com is not
+        // the Elliott Bay Book Company.
+        let name = normalize_text(&place.name);
+        let words: Vec<&str> = name.split(' ').collect();
+        let mut lead = String::new();
+        let spelled = words.iter().enumerate().any(|(n, word)| {
+            lead.push_str(word);
+            lead == label && (n >= 1 || words.len() == 1)
+        });
+        let local = town.as_deref().is_some_and(|town| {
+            !town.is_empty()
+                && [hit.title.as_deref(), hit.description.as_deref()]
+                    .into_iter()
+                    .flatten()
+                    .any(|text| {
+                        format!(" {} ", normalize_text(text)).contains(&format!(" {town} "))
+                    })
+        });
+        spelled && (hit.link_score >= plumb_index::WELL_KNOWN_LINK_SCORE || local)
+    })
+}
+
 /// The sites for a query that lists places around a town ("brewery in
 /// denver"): the places' own sites (`local`, from [`local_sites`])
 /// first, then the sites that say what was looked for, then the rest;
@@ -551,6 +603,57 @@ mod tests {
             country: Some("US".into()),
             ..Place::default()
         }
+    }
+
+    #[test]
+    fn a_place_without_a_website_finds_its_site_by_name() {
+        let site = |domain: &str, description: &str, link_score: f32| Hit {
+            domain: domain.into(),
+            url: format!("https://{domain}/"),
+            title: None,
+            description: Some(description.into()),
+            score: 1.0,
+            text_score: 1.0,
+            link_score,
+            placing_text_score: None,
+            country: None,
+            named: true,
+            official: false,
+            key_pages: Vec::new(),
+            demand: None,
+            missing_words: false,
+        };
+        let mut shop = place("Elliott Bay Book Company", "shop=books", 47.6, -122.3);
+        shop.town = Some("Seattle".into());
+        let found = site_named_for(
+            &shop,
+            vec![
+                site("elliott.com", "Elliott in Seattle", 0.1),
+                site(
+                    "elliottbaybook.com",
+                    "An independent bookstore in Seattle.",
+                    0.1,
+                ),
+            ],
+        );
+        assert_eq!(found.unwrap().domain, "elliottbaybook.com");
+        // Another town's shop of the same name is not this one; a chain
+        // known everywhere is.
+        let mut pizza = place("Joe's Pizza", "amenity=restaurant", 39.7, -105.0);
+        pizza.town = Some("Denver".into());
+        assert!(site_named_for(
+            &pizza,
+            vec![site("joespizza.com", "Pizza in New York", 0.1)]
+        )
+        .is_none());
+        let mut cafe = place("Starbucks", "amenity=cafe", 39.7, -105.0);
+        cafe.town = Some("Denver".into());
+        assert_eq!(
+            site_named_for(&cafe, vec![site("starbucks.com", "Coffee", 0.8)])
+                .unwrap()
+                .domain,
+            "starbucks.com"
+        );
     }
 
     fn same(href: &str) -> String {
