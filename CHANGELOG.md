@@ -10,6 +10,7 @@
 ### Fixes
 
 - `plumb run --set-updates off` no longer downloads a page set the node has no file of, as plumbsearch.org would have done with the reference and subpages sets once a trusted node had them. A list such as `films,map` still takes the sets it names when the node has none. A node with `all` (the default) takes missing sets as before.
+- A node no longer downloads a trusted node's set file or map file that holds the same pages as its own and only has a later time. A file copied between machines by hand gets a later time, so hpc had taken back copies of nine of its own sets from plumbsearch.org and rebuilt their page indexes. Nodes now note a digest of what each whole file holds and send it with the file's time. Both nodes need this version for it to apply.
 
 ## 0.2.0
 

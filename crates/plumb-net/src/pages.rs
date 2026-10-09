@@ -43,6 +43,9 @@ pub struct PagesChunk {
     pub busy: bool,
     /// What the file holds besides its pages, when the node knows.
     pub layers: Option<Vec<String>>,
+    /// A digest of what the file holds, when the node knows (see
+    /// [`Layers::content`]).
+    pub content: Option<String>,
 }
 
 /// What a node notes next to a page set file, as `<file>.layers`: the
@@ -50,7 +53,9 @@ pub struct PagesChunk {
 /// `lead`, `name`, `f-capital` and profile services), worked out once for
 /// the file's time. A node replaces its file with a newer one only when
 /// the newer one holds all the kinds its own does, so a plain articles
-/// file can't take the place of one with facts and leads added.
+/// file can't take the place of one with facts and leads added. The note
+/// also has a digest of what the file holds, so a node doesn't take a
+/// copy of its own file that only has a later time.
 pub const LAYERS_SUFFIX: &str = ".layers";
 
 /// The layers noted next to `path` (see [`LAYERS_SUFFIX`]).
@@ -61,6 +66,11 @@ pub struct Layers {
     pub size: u64,
     /// The kinds of entries, sorted.
     pub kinds: Vec<String>,
+    /// SHA-256 (hex) of what the file holds, read through gzip, so the
+    /// same pages compressed again give the same digest; `None` in notes
+    /// written before it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
 }
 
 /// `<file>.layers`.
@@ -70,11 +80,11 @@ pub fn layers_path(path: &Path) -> std::path::PathBuf {
     std::path::PathBuf::from(name)
 }
 
-/// The layers noted next to `path`, if they are for the file as it is.
-pub fn read_layers(path: &Path, modified: u64, size: u64) -> Option<Vec<String>> {
+/// The note next to `path`, if it is for the file as it is.
+pub fn read_note(path: &Path, modified: u64, size: u64) -> Option<Layers> {
     let bytes = std::fs::read(layers_path(path)).ok()?;
     let layers: Layers = serde_json::from_slice(&bytes).ok()?;
-    (layers.modified == modified && layers.size == size).then_some(layers.kinds)
+    (layers.modified == modified && layers.size == size).then_some(layers)
 }
 
 /// The answer to `request` from the set file at `path` (`None` when this
@@ -86,6 +96,7 @@ pub fn answer(path: Option<&Path>, request: &PagesRequest) -> PagesResponse {
         bytes: ByteBuf::new(),
         busy: false,
         layers: None,
+        content: None,
     };
     let Some(path) = path else {
         return empty;
@@ -104,12 +115,14 @@ pub fn answer(path: Option<&Path>, request: &PagesRequest) -> PagesResponse {
             file.seek(SeekFrom::Start(request.offset))?;
             file.take(len).read_to_end(&mut bytes)?;
         }
+        let note = read_note(path, modified, size);
         Ok(PagesResponse {
             size,
             modified,
             bytes: ByteBuf::from(bytes),
             busy: false,
-            layers: read_layers(path, modified, size),
+            layers: note.as_ref().map(|n| n.kinds.clone()),
+            content: note.and_then(|n| n.content),
         })
     };
     read().unwrap_or(empty)
@@ -138,21 +151,29 @@ mod tests {
         assert_eq!(answer(Some(&dir.path().join("none")), &ask(0, 4)).size, 0);
 
         // Layers are sent only when noted for the file as it is.
-        assert_eq!(piece.layers, None);
+        assert_eq!((&piece.layers, &piece.content), (&None, &None));
         let note = |modified| Layers {
             modified,
             size: 10,
             kinds: vec!["lead".into()],
+            content: Some("ab12".into()),
         };
         let write = |layers: &Layers| {
             std::fs::write(layers_path(&path), serde_json::to_vec(layers).unwrap()).unwrap()
         };
         write(&note(piece.modified));
-        assert_eq!(
-            answer(Some(&path), &ask(0, 4)).layers,
-            Some(vec!["lead".into()])
-        );
+        let noted = answer(Some(&path), &ask(0, 4));
+        assert_eq!(noted.layers, Some(vec!["lead".into()]));
+        assert_eq!(noted.content.as_deref(), Some("ab12"));
         write(&note(piece.modified - 1));
         assert_eq!(answer(Some(&path), &ask(0, 4)).layers, None);
+        // A note from before digests still reads.
+        std::fs::write(
+            layers_path(&path),
+            format!(r#"{{"modified":{},"size":10,"kinds":[]}}"#, piece.modified),
+        )
+        .unwrap();
+        let old = answer(Some(&path), &ask(0, 4));
+        assert_eq!((old.layers, old.content), (Some(vec![]), None));
     }
 }

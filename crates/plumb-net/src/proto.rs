@@ -257,6 +257,11 @@ pub struct PagesResponse {
     /// worked that out; `None` from nodes before it, or before they did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub layers: Option<Vec<String>>,
+    /// A digest of what the file holds (see
+    /// [`crate::pages::Layers::content`]), when the answering node has
+    /// worked it out; `None` from nodes before it, or before they did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
