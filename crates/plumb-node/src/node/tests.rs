@@ -2021,7 +2021,11 @@ async fn search_by_meaning_downloads_and_runs_embedding_gemma_when_chosen() {
     let vectors_path = dir.path().join(plumb_embed::VECTORS_FILE_NAME);
     let deadline = std::time::Instant::now() + Duration::from_secs(60);
     while plumb_embed::Vectors::load(&vectors_path).map_or(0, |v| v.len()) == 0 {
-        assert!(std::time::Instant::now() < deadline, "no vectors saved");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no vectors saved: {:?}",
+            node.inner.meaning_work()
+        );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     node.shutdown().await.unwrap();
