@@ -460,6 +460,16 @@ pub struct RunArgs {
     /// then the United States. A search can pick another with `country=` in its address.
     #[arg(long, value_name = "CODE", default_value = "auto", value_parser = HomeCountry::parse)]
     pub country: HomeCountry,
+    /// Start the search pages with "Only this country" on, leaving out
+    /// other countries' sites until the settings gear turns it off. The
+    /// JSON API and `/mcp` still need `only=1`.
+    #[arg(long)]
+    pub only_country: bool,
+    /// Language of the sites searches show when they do not pick one, a
+    /// code such as en [default: the browser's first language when the
+    /// settings gear offers it, else en].
+    #[arg(long, value_name = "CODE", value_parser = parse_language)]
+    pub lang: Option<String>,
     /// Show "Search the web with ..." above the results, a link that hands
     /// the query to this engine: duckduckgo, google, bing, brave or
     /// startpage, or `off` for none. Plumb never fetches its results.
@@ -643,7 +653,8 @@ pub struct RunArgs {
     /// quarter past this node's own at a time, so a much bigger set is not
     /// loaded unasked), `off`, or the sets to update with no limit on
     /// growth, separated by commas (`films,stackoverflow,map`; `map` is the
-    /// map file). Sets a node has no file of are taken either way.
+    /// map file). A set the node has no file of is taken only if this
+    /// allows it; the map file is taken either way.
     #[arg(long, value_name = "all|off|SETS")]
     pub set_updates: Option<crate::pages::SetUpdates>,
 }
@@ -1129,6 +1140,16 @@ pub struct ServeArgs {
     /// then the United States. A search can pick another with `country=` in its address.
     #[arg(long, value_name = "CODE", default_value = "auto", value_parser = HomeCountry::parse)]
     pub country: HomeCountry,
+    /// Start the search pages with "Only this country" on, leaving out
+    /// other countries' sites until the settings gear turns it off. The
+    /// JSON API and `/mcp` still need `only=1`.
+    #[arg(long)]
+    pub only_country: bool,
+    /// Language of the sites searches show when they do not pick one, a
+    /// code such as en [default: the browser's first language when the
+    /// settings gear offers it, else en].
+    #[arg(long, value_name = "CODE", value_parser = parse_language)]
+    pub lang: Option<String>,
     /// Show "Search the web with ..." above the results, a link that hands
     /// the query to this engine: duckduckgo, google, bing, brave or
     /// startpage, or `off` for none. Plumb never fetches its results.

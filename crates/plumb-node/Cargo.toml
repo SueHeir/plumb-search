@@ -17,14 +17,14 @@ axum = { version = "0.8.9", features = ["multipart"] }
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 clap = { version = "4.6.7", features = ["derive", "env"] }
 getrandom = "0.3.4"
-plumb-answer = { version = "0.1.0", path = "../plumb-answer" }
-plumb-core = { version = "0.1.0", path = "../plumb-core" }
-plumb-crawl = { version = "0.1.0", path = "../plumb-crawl" }
-plumb-embed = { version = "0.1.0", path = "../plumb-embed" }
-plumb-index = { version = "0.1.0", path = "../plumb-index" }
-plumb-net = { version = "0.1.0", path = "../plumb-net" }
-plumb-ingest = { version = "0.1.0", path = "../plumb-ingest" }
-plumb-plugin = { version = "0.1.0", path = "../plumb-plugin" }
+plumb-answer = { version = "0.2.0", path = "../plumb-answer" }
+plumb-core = { version = "0.2.0", path = "../plumb-core" }
+plumb-crawl = { version = "0.2.0", path = "../plumb-crawl" }
+plumb-embed = { version = "0.2.0", path = "../plumb-embed" }
+plumb-index = { version = "0.2.0", path = "../plumb-index" }
+plumb-net = { version = "0.2.0", path = "../plumb-net" }
+plumb-ingest = { version = "0.2.0", path = "../plumb-ingest" }
+plumb-plugin = { version = "0.2.0", path = "../plumb-plugin" }
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls"] }
 rcgen = "0.13.2"
 rustls = { version = "0.23.45", default-features = false, features = ["aws_lc_rs", "std", "tls12", "logging"] }
@@ -47,6 +47,6 @@ base64 = "0.22"
 rustix = { version = "1.1.5", features = ["process", "fs"] }
 
 [dev-dependencies]
-plumb-private = { version = "0.1.0", path = "../plumb-private" }
+plumb-private = { version = "0.2.0", path = "../plumb-private" }
 tempfile = "3.27.0"
 tower = { version = "0.5.3", features = ["util"] }
