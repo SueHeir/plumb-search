@@ -50,6 +50,9 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--out-dir", default="eval/llm/data")
     parser.add_argument("--sample", type=int, default=500, help="questions kept of each set (0: all)")
+    parser.add_argument("--hotpotqa", default=HOTPOTQA,
+                        help="HotpotQA dev (distractor) JSON, an address or a local file, "
+                             "for when the CMU server is down")
     parser.add_argument("--train", type=int, default=0,
                         help="also keep this many other questions of each set for training")
     args = parser.parse_args()
@@ -63,7 +66,7 @@ def main():
 
     rows = [
         {"id": f"hotpotqa-{item['_id']}", "question": item["question"], "answers": [item["answer"]]}
-        for item in json.loads(fetch(HOTPOTQA))
+        for item in json.loads(fetch(args.hotpotqa) if "://" in args.hotpotqa else open(args.hotpotqa).read())
         if item["answer"].lower() not in ("yes", "no")
     ]
     write(os.path.join(args.out_dir, "hotpotqa.jsonl"), rows, args.sample, args.train)
