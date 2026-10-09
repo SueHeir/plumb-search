@@ -297,6 +297,13 @@ fn fetch_if_needed(
         }
         Some(_) => "a newer file",
     };
+    // `--set-updates off`, or a list without this set: a set the node has
+    // no file of stays without one, since indexing it takes memory nobody
+    // asked for.
+    if notes.is_none() && inner.config.set_updates.allows(set.id).is_none() {
+        debug!("page set {}: none taken: not in --set-updates", set.id);
+        return Ok(());
+    }
     if let Some(pause) = inner.download_pause() {
         debug!("page set {}: not downloaded now: {}", set.id, pause.reason);
         return Ok(());
@@ -309,6 +316,9 @@ fn fetch_if_needed(
     let chosen = match notes {
         Some(n) if reason == "a newer file" => {
             checked.insert(set.id, Instant::now());
+            let Some(may_grow) = inner.config.set_updates.allows(set.id) else {
+                return Ok(());
+            };
             let file = set.file(data);
             let (modified, size) = super::newer::stamp(&file).unwrap_or((0, 0));
             let mine = super::newer::Mine {
@@ -321,6 +331,7 @@ fn fetch_if_needed(
                 size,
                 complete: n.complete,
                 layers: super::newer::layers(set.id, &file),
+                may_grow,
             };
             match super::newer::newest(&mine, &offers, now) {
                 Ok(offer) => offer.clone(),
@@ -521,6 +532,13 @@ fn keep_map(
     {
         return Ok(());
     }
+    let file = crate::map::file(&inner.paths.data);
+    // A node with no map file takes one whatever --set-updates says.
+    let may_grow = match inner.config.set_updates.allows(MAP_SET) {
+        Some(may_grow) => may_grow,
+        None if file.is_file() => return Ok(()),
+        None => false,
+    };
     if inner.download_pause().is_some() {
         return Ok(());
     }
@@ -528,13 +546,14 @@ fn keep_map(
         return Ok(());
     };
     checked.insert(MAP_SET, Instant::now());
-    let file = crate::map::file(&inner.paths.data);
     let (modified, size) = super::newer::stamp(&file).unwrap_or((0, 0));
     let mine = super::newer::Mine {
         modified,
         size,
-        complete: true,
+        // With no file yet, any size goes.
+        complete: size > 0,
         layers: Vec::new(),
+        may_grow,
     };
     let offer = match super::newer::newest(&mine, &offers, now_unix()) {
         Ok(offer) => offer.clone(),
@@ -884,6 +903,11 @@ pub(super) fn add_pages(
     let query = applied.as_deref().unwrap_or(query);
     match searcher.search(query, PAGES_PER_SEARCH) {
         Ok(mut found) => {
+            if let Err(err) =
+                searcher.add_other_number(query, &results.hits, &mut found, PAGES_PER_SEARCH)
+            {
+                warn!("searching pages in the other number: {err:#}");
+            }
             found.retain(|hit| options_allow(options, &hit.page));
             if let Some(index) = inner.current().filter(|_| inner.rank.add_named_site) {
                 add_named_site(&mut results.hits, &found, |domain| {

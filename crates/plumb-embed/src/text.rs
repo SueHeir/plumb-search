@@ -16,7 +16,8 @@ pub const MAX_LINK_TEXTS: usize = 5;
 pub type TextHash = [u8; 32];
 
 /// The text of `record` to embed: its names, homepage title and
-/// description, what Wikidata and Wikipedia say the organization is, the
+/// description, what Wikidata and Wikipedia say the organization is (or,
+/// for a site with none of that, a model's one-sentence summary), the
 /// [`MAX_LINK_TEXTS`] words other sites link to it with most, its homepage
 /// headings and the start of its homepage text, in that order, joined by ". " and cut at [`MAX_TEXT_WORDS`]
 /// words. Each part is put in Unicode NFC and its whitespace collapsed, and
@@ -35,6 +36,9 @@ pub fn site_text_words(record: &SiteRecord, words: usize) -> String {
         .iter()
         .take(MAX_LINK_TEXTS)
         .map(|link| &link.text);
+    let summary = record.summary.as_ref().filter(|_| {
+        record.description.is_none() && record.about.is_none() && record.intro.is_none()
+    });
     let parts = record
         .aliases
         .iter()
@@ -42,6 +46,7 @@ pub fn site_text_words(record: &SiteRecord, words: usize) -> String {
         .chain(&record.description)
         .chain(&record.about)
         .chain(&record.intro)
+        .chain(summary)
         .chain(link_texts)
         .chain(&record.headings)
         .chain(&record.body_text);

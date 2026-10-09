@@ -801,9 +801,10 @@ fn evaluate(
                 rank_of(&domains, &q.expected)
             }
             Some(pages) => {
-                let found = pages
+                let mut found = pages
                     .search(&searched, 10)
                     .with_context(|| format!("searching pages for {searched:?}"))?;
+                pages.add_other_number(&searched, &hits, &mut found, 10)?;
                 let mut lifted = hits.clone();
                 if cfg.add_named_site {
                     add_named_site(&mut lifted, &found, |domain| {
@@ -1423,7 +1424,8 @@ fn format_totals(m: &Metrics, limit: usize) -> String {
 pub(crate) fn set_of_file(name: &str) -> String {
     use plumb_index::pages::{
         BOOKS_SET, DOCS_SET, FILMS_SET, GITHUB_SET, MUSIC_SET, PACKAGES_SET, PAPERS_SET,
-        PODCASTS_SET, STACKEXCHANGE_SET, STACKOVERFLOW_SET, WIKIDATA_SET, WIKTIONARY_SET,
+        PODCASTS_SET, REFERENCE_SET, STACKEXCHANGE_SET, STACKOVERFLOW_SET, SUBPAGES_SET,
+        WIKIDATA_SET, WIKTIONARY_SET,
     };
     let stem = name.split('.').next().unwrap_or("");
     if let Some(set) = [
@@ -1437,6 +1439,8 @@ pub(crate) fn set_of_file(name: &str) -> String {
         MUSIC_SET,
         FILMS_SET,
         DOCS_SET,
+        REFERENCE_SET,
+        SUBPAGES_SET,
         WIKIDATA_SET,
         WIKTIONARY_SET,
     ]

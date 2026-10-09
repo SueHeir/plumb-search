@@ -10,8 +10,10 @@
 //! server's [`HomeCountry`] setting decides, by default from the browser's
 //! `Accept-Language`, then this computer's region settings, then the
 //! United States. They also take `lang=XX` (only sites in that language, or
-//! `any`); without it, the browser's first language when the settings gear
-//! offers it, else English.
+//! `any`); without it, the server's language when it has one, else the
+//! browser's first language when the settings gear offers it, else English.
+//! A server run with `--only-country` starts the search pages with "Only
+//! this country" on when the address names no country.
 //! - `POST /mcp` answers AI apps over the Model Context Protocol (see
 //!   [`crate::mcp`]),
 //! - `GET /opensearch.xml` describes the search engine to browsers
@@ -856,6 +858,8 @@ pub fn run(args: ServeArgs) -> Result<()> {
         Arc::new(backend),
         WebSettings {
             home: args.country.clone(),
+            only_country: args.only_country,
+            language: args.lang.clone(),
             web_search: args.web_search.0,
             read_pages_for_all: args.mcp_read_pages,
             page_reader: plumb_crawl::ReadConfig::default(),
@@ -1005,9 +1009,11 @@ impl SearchParams {
         history::prefs_from_form(&self.hist, &self.hs, &self.hr, &self.hl, &self.ht)
     }
 
-    /// The searcher's choices: the `country` parameter when it is valid,
-    /// else the server's setting for a request with these headers.
-    fn options(&self, home: &HomeCountry, headers: &HeaderMap) -> SearchOptions {
+    /// The searcher's choices: the `country` and `lang` parameters when
+    /// they are valid, else the server's settings for a request with these
+    /// headers.
+    fn options(&self, settings: &WebSettings, headers: &HeaderMap) -> SearchOptions {
+        let home = &settings.home;
         let asked = self
             .country
             .as_deref()
@@ -1030,7 +1036,12 @@ impl SearchParams {
                 .and_then(SafeSearch::parse)
                 .unwrap_or_default(),
             language: match self.lang.as_deref().map(str::trim) {
-                None => Some(default_language(accept_language)),
+                None => Some(
+                    settings
+                        .language
+                        .clone()
+                        .unwrap_or_else(|| default_language(accept_language)),
+                ),
                 Some(lang) if lang.is_empty() || lang.eq_ignore_ascii_case("any") => None,
                 Some(lang) => language_code(lang),
             },
@@ -1040,6 +1051,18 @@ impl SearchParams {
                 .and_then(RecentNews::parse)
                 .unwrap_or_default(),
         }
+    }
+
+    /// [`Self::options`] for a page with the settings gear, which starts
+    /// with the server's "Only this country" when the address names no
+    /// country. The gear's form and the pages' own links always name one,
+    /// so turning it off there sticks.
+    fn page_options(&self, settings: &WebSettings, headers: &HeaderMap) -> SearchOptions {
+        let mut options = self.options(settings, headers);
+        if settings.only_country && self.country.is_none() && self.only.is_none() {
+            options.only_country = options.country.is_some();
+        }
+        options
     }
 }
 
@@ -1073,7 +1096,7 @@ fn home_or_setup(state: &AppState, params: &SearchParams, headers: &HeaderMap) -
             };
             let settings = Settings {
                 manage: state.local_controls(headers),
-                options: params.options(&state.settings.home, headers),
+                options: params.page_options(&state.settings, headers),
                 network: state.net_setting(params),
                 scope: state.search_scope(),
                 private: state.private_search(),
@@ -1219,7 +1242,7 @@ async fn search_page(
     }
     let mut settings = Settings {
         manage: state.local_controls(&headers),
-        options: params.options(&state.settings.home, &headers),
+        options: params.page_options(&state.settings, &headers),
         network: state.net_setting(&params),
         scope: state.search_scope(),
         private: state.private_search(),
@@ -1545,7 +1568,7 @@ async fn api_search(
             (StatusCode::OK, security_headers(), Json(Vec::<Hit>::new())).into_response()
         };
     }
-    let options = params.options(&state.settings.home, &headers);
+    let options = params.options(&state.settings, &headers);
     let found = run_search(&state, &query, params.limit(), &options).await;
     match found {
         Ok(mut results) if full => {
@@ -1633,7 +1656,7 @@ async fn api_recent(
     let recent = if query.is_empty() || state.setting_up().is_some() {
         None
     } else {
-        let options = params.options(&state.settings.home, &headers);
+        let options = params.options(&state.settings, &headers);
         match run_search(&state, &query, params.limit(), &options).await {
             Ok(results) => state.recent(&query, &results),
             Err(_) => None,
@@ -1851,7 +1874,7 @@ async fn go(
     let found = if query.is_empty() || state.setting_up().is_some() {
         None
     } else {
-        let options = search.options(&state.settings.home, &headers);
+        let options = search.options(&state.settings, &headers);
         match run_search(&state, &query, MAX_LIMIT, &options).await {
             Ok(results) => match results.hits.iter().find(|hit| hit.domain == params.d) {
                 Some(hit) => Some(hit.clone()),
@@ -1927,7 +1950,7 @@ async fn go_block(
         return redirect(back);
     }
     let mut visitor = history::Visitor::of(state, headers, None);
-    let options = search.options(&state.settings.home, headers);
+    let options = search.options(&state.settings, headers);
     let links: Vec<String> = match block {
         Block::Places => {
             let browser_about = visitor.is_none().then(|| history::browser_about(headers));
@@ -1993,7 +2016,7 @@ async fn network_page(
     if query.is_empty() {
         return home_or_setup(&state, &params, &headers);
     }
-    let options = params.options(&state.settings.home, &headers);
+    let options = params.options(&state.settings, &headers);
     match network_search(&state, client, &query, params.limit(), &options).await {
         Ok(results) => {
             let domains = results.hits.iter().map(|r| r.hit.domain.clone()).collect();
@@ -2028,7 +2051,7 @@ async fn api_network_search(
         )
             .into_response();
     }
-    let options = params.options(&state.settings.home, &headers);
+    let options = params.options(&state.settings, &headers);
     match network_search(&state, client, &query, params.limit(), &options).await {
         Ok(results) => (StatusCode::OK, security_headers(), Json(results)).into_response(),
         Err(err) if err.downcast_ref::<TooManySearches>().is_some() => {
@@ -3798,6 +3821,9 @@ fn render_page(out: &mut String, hit: &PageHit, icon: Option<&str>) {
             plumb_index::pages::MUSIC_SET => "listeners on ListenBrainz",
             plumb_index::pages::FILMS_SET => "sitelinks on Wikidata",
             plumb_index::pages::DOCS_SET => "the docs site's weight over the page's depth",
+            plumb_index::pages::REFERENCE_SET | plumb_index::pages::SUBPAGES_SET => {
+                "the site's weight over the page's depth"
+            }
             plumb_index::pages::PAPERS_SET => "citations",
             plumb_index::pages::PACKAGES_SET => "use (share of the registry's most, in billionths)",
             _ => "views",
@@ -5873,6 +5899,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_server_can_start_its_pages_with_only_this_country() {
+        let fake = options_backend("https://github.com/search?q=x");
+        let app = || {
+            router_with(
+                fake.clone(),
+                WebSettings {
+                    home: HomeCountry::Fixed("US".into()),
+                    only_country: true,
+                    language: Some("en".into()),
+                    ..WebSettings::default()
+                },
+            )
+        };
+        let german = [("accept-language", "de-DE,de;q=0.9")];
+        // A new search, from a link or another site's search box: the
+        // server's choices, shown in the gear.
+        let (_, _, body) = send_with_headers(app(), "/search?q=github", &german).await;
+        assert!(body.contains("<option value=\"US\" selected>"), "{body}");
+        assert!(body.contains("name=\"only\" value=\"1\" checked"), "{body}");
+        assert!(
+            body.contains("<option value=\"en\" lang=\"en\" selected>"),
+            "{body}"
+        );
+        assert!(body.contains("country=US&amp;only=1"), "{body}");
+        let (_, _, home) = send(app(), "/").await;
+        assert!(home.contains("name=\"only\" value=\"1\" checked"), "{home}");
+        // The gear's form with the box unchecked names the country, and so
+        // turns it off; so does `only=0`.
+        send(app(), "/search?q=github&country=US&lang=en").await;
+        send(app(), "/search?q=github&only=0").await;
+        // A search for another country keeps that country's sites only
+        // when asked.
+        send(app(), "/search?q=github&country=de").await;
+        // The JSON API is not a page: AI apps get every country's sites.
+        send(app(), "/api/search?q=github").await;
+        let seen: Vec<(Option<String>, bool, Option<String>)> = fake
+            .options
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|o| (o.country.clone(), o.only_country, o.language.clone()))
+            .collect();
+        let code = |c: &str| Some(c.to_string());
+        assert_eq!(
+            seen,
+            [
+                (code("US"), true, code("en")),
+                (code("US"), false, code("en")),
+                (code("US"), false, code("en")),
+                (code("DE"), false, code("en")),
+                (code("US"), false, code("en")),
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn site_search_links_must_be_web_addresses() {
         let fake = options_backend("javascript:alert(1)");
         let (_, _, body) = send(router(fake), "/search?q=github+x").await;
@@ -5982,7 +6064,7 @@ mod tests {
 
     #[test]
     fn english_is_the_language_unless_chosen() {
-        let language = |lang: Option<&str>, accept: Option<&str>| {
+        let language_with = |server: Option<&str>, lang: Option<&str>, accept: Option<&str>| {
             let params = SearchParams {
                 lang: lang.map(str::to_string),
                 ..SearchParams::default()
@@ -5991,8 +6073,14 @@ mod tests {
             if let Some(accept) = accept {
                 headers.insert(header::ACCEPT_LANGUAGE, accept.parse().unwrap());
             }
-            params.options(&HomeCountry::Off, &headers).language
+            let settings = WebSettings {
+                home: HomeCountry::Off,
+                language: server.map(str::to_string),
+                ..WebSettings::default()
+            };
+            params.options(&settings, &headers).language
         };
+        let language = |lang: Option<&str>, accept: Option<&str>| language_with(None, lang, accept);
         assert_eq!(language(None, None).as_deref(), Some("en"));
         assert_eq!(language(None, Some("*")).as_deref(), Some("en"));
         assert_eq!(
@@ -6004,6 +6092,17 @@ mod tests {
         assert_eq!(language(Some("any"), Some("de-DE")), None);
         assert_eq!(language(Some(""), None), None);
         assert_eq!(language(Some("fr"), None).as_deref(), Some("fr"));
+        // A server's own language comes before the browser's, and a
+        // search's own before both.
+        assert_eq!(
+            language_with(Some("en"), None, Some("de-DE")).as_deref(),
+            Some("en")
+        );
+        assert_eq!(
+            language_with(Some("en"), Some("fr"), Some("de-DE")).as_deref(),
+            Some("fr")
+        );
+        assert_eq!(language_with(Some("en"), Some("any"), None), None);
     }
 
     #[tokio::test]

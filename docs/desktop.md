@@ -33,7 +33,9 @@ keeps the node running and does not apply restart settings. A banner shows
 when saved choices differ from the running node. Resource and feature forms
 never refresh automatically while you edit them.
 
-Meaning search downloads a model and builds vectors in the background.
+Search by meaning is on unless turned off here: it downloads a model (about
+130 MB) and takes site vectors from a node it trusts, or builds them in the
+background.
 Private browser search is not a setting: it is on whenever the node is in
 the Plumb network (which builds buckets anyway) and the bundled WebAssembly
 module is there. Visitors turn it on for themselves with the Private search
@@ -41,7 +43,10 @@ switch in the search page's settings gear. Desktop installers build and include 
 
 Feature choices are stored in `features.json` in the data folder and take
 precedence over startup feature defaults. Delete that file while stopped to
-return to defaults. Server transport/relay flags are preserved. For an isolated
+return to defaults. Server transport/relay flags are preserved. The file
+records the folder it was saved in: in a copy of another node's data folder,
+which carries that node's network identity, the network stays off until it is
+turned on again (or the node is started with `--network`). For an isolated
 development or test node, set `PLUMB_DESKTOP_DATA_DIR` to a separate folder
 before launching the desktop executable.
 

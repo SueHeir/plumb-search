@@ -166,7 +166,7 @@ async fn tune_page(
         seed: u32::from_le_bytes(bytes),
         step: 0,
     };
-    let options = super::SearchParams::default().options(&state.settings.home, &headers);
+    let options = super::SearchParams::default().options(&state.settings, &headers);
     super::redirect(&tuning.link(&options))
 }
 

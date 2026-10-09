@@ -449,6 +449,195 @@ fn run_docs(args: &FetchPagesArgs, dest: &std::path::Path) -> Result<()> {
     write_set(dest, &pages, "docs pages")
 }
 
+/// Reference or subpage sites whose pages are fetched at once, each one
+/// page at a time.
+const REFERENCE_SITES_AT_ONCE: usize = 32;
+
+/// Makes the reference pages set file `dest`: the pages of the reference
+/// sites (or those --reference-sites names) that their sitemaps list,
+/// fetched like the docs set's. --work keeps each site's pages so a
+/// stopped run carries on.
+fn run_reference(args: &FetchPagesArgs, dest: &std::path::Path) -> Result<()> {
+    use plumb_core::reference::{ReferenceSite, REFERENCE_SITES};
+    use plumb_ingest::reference::{reference_articles, sort_reference};
+
+    let sites: Vec<&'static ReferenceSite> = if args.reference_sites.is_empty() {
+        REFERENCE_SITES.iter().collect()
+    } else {
+        args.reference_sites
+            .iter()
+            .map(|key| {
+                plumb_core::reference::site(key).with_context(|| {
+                    format!("unknown reference site {key:?}; see plumb_core::reference")
+                })
+            })
+            .collect::<Result<_>>()?
+    };
+    let most = args.max_reference_per_site;
+    let fetched = fetch_sites(args, sites, "reference", |site| {
+        (
+            site.key(),
+            plumb_crawl::SitePagesTarget {
+                domain: site.key().to_string(),
+                roots: site.roots(),
+                sitemaps: site.sitemaps.iter().map(|r| r.to_string()).collect(),
+                index_pages: Vec::new(),
+                max_pages: site.max_pages.unwrap_or(most),
+            },
+        )
+    })?;
+    let mut pages = Vec::new();
+    for (site, docs) in &fetched {
+        let articles = reference_articles(site, docs);
+        info!(
+            "{}: {} pages of {} fetched",
+            site.key(),
+            articles.len(),
+            docs.len()
+        );
+        pages.extend(articles);
+    }
+    sort_reference(&mut pages);
+    write_set(dest, &pages, "reference pages")
+}
+
+/// Makes the subpages set file `dest`: the pages of the subpage sites (or
+/// those --subpage-sites names, or of the kinds --subpage-kinds names)
+/// that their sitemaps list and their roots link to, fetched like the
+/// reference set's. --work keeps each site's pages so a stopped run
+/// carries on.
+fn run_subpages(args: &FetchPagesArgs, dest: &std::path::Path) -> Result<()> {
+    use plumb_core::subpages::{SubpageKind, SubpageSite, SUBPAGE_SITES};
+    use plumb_ingest::reference::sort_reference;
+    use plumb_ingest::subpages::subpage_articles;
+
+    let kinds: Vec<SubpageKind> = args
+        .subpage_kinds
+        .iter()
+        .map(|name| {
+            SubpageKind::of_name(name).with_context(|| {
+                format!(
+                    "unknown subpage kind {name:?}: university, company, government, \
+                     entertainment or museum"
+                )
+            })
+        })
+        .collect::<Result<_>>()?;
+    let sites: Vec<&'static SubpageSite> = if args.subpage_sites.is_empty() {
+        SUBPAGE_SITES
+            .iter()
+            .filter(|site| kinds.is_empty() || kinds.contains(&site.kind))
+            .collect()
+    } else {
+        args.subpage_sites
+            .iter()
+            .map(|key| {
+                plumb_core::subpages::site(key).with_context(|| {
+                    format!("unknown subpage site {key:?}; see plumb_core::subpages")
+                })
+            })
+            .collect::<Result<_>>()?
+    };
+    let fetched = fetch_sites(args, sites, "subpages", |site| {
+        (
+            site.key(),
+            plumb_crawl::SitePagesTarget {
+                domain: site.key().to_string(),
+                roots: site.roots(),
+                sitemaps: site.site.sitemaps.iter().map(|r| r.to_string()).collect(),
+                index_pages: site.index_pages(),
+                max_pages: site.max_pages(),
+            },
+        )
+    })?;
+    let mut pages = Vec::new();
+    for (site, docs) in &fetched {
+        let articles = subpage_articles(site, docs);
+        info!(
+            "{}: {} pages of {} fetched",
+            site.key(),
+            articles.len(),
+            docs.len()
+        );
+        pages.extend(articles);
+    }
+    sort_reference(&mut pages);
+    write_set(dest, &pages, "subpages")
+}
+
+/// Fetches the pages of `sites`, [`REFERENCE_SITES_AT_ONCE`] sites at a
+/// time, each site's key and pages to fetch given by `target`. With
+/// --work, each site's pages are kept as `{prefix}-{key}.json` there, and
+/// a site kept by an earlier run is not fetched again.
+fn fetch_sites<S: Copy + Send + 'static>(
+    args: &FetchPagesArgs,
+    sites: Vec<S>,
+    prefix: &'static str,
+    target: impl Fn(S) -> (&'static str, plumb_crawl::SitePagesTarget),
+) -> Result<Vec<(S, Vec<plumb_ingest::docs::FetchedDoc>)>> {
+    use plumb_ingest::docs::FetchedDoc;
+
+    if let Some(work) = &args.work {
+        std::fs::create_dir_all(work).with_context(|| format!("creating {}", work.display()))?;
+    }
+    let work = args.work.clone();
+    let sites: Vec<(S, &'static str, plumb_crawl::SitePagesTarget)> = sites
+        .into_iter()
+        .map(|site| {
+            let (key, target) = target(site);
+            (site, key, target)
+        })
+        .collect();
+    block_on(async move {
+        let cfg = plumb_crawl::CrawlConfig::default();
+        let mut running = tokio::task::JoinSet::new();
+        let mut done = Vec::new();
+        let mut queue = sites.into_iter();
+        loop {
+            while running.len() < REFERENCE_SITES_AT_ONCE {
+                let Some((site, key, target)) = queue.next() else {
+                    break;
+                };
+                let cfg = cfg.clone();
+                let kept = work
+                    .as_ref()
+                    .map(|work| work.join(format!("{prefix}-{key}.json")));
+                running.spawn(async move {
+                    if let Some(docs) = kept.as_deref().and_then(read_kept_docs) {
+                        info!("{key}: {} pages kept from an earlier run", docs.len());
+                        return (site, docs);
+                    }
+                    let result = plumb_crawl::fetch_site_pages(&target, &cfg).await;
+                    let docs: Vec<FetchedDoc> = result
+                        .pages
+                        .into_iter()
+                        .map(|page| FetchedDoc {
+                            url: page.url,
+                            title: page.meta.title,
+                            description: page.meta.description,
+                            text: page.meta.body_text,
+                        })
+                        .collect();
+                    if let Some(kept) = &kept {
+                        if !docs.is_empty() {
+                            if let Err(err) = write_kept_docs(kept, &docs) {
+                                warn!("{key}: keeping its pages: {err:#}");
+                            }
+                        }
+                    }
+                    (site, docs)
+                });
+            }
+            match running.join_next().await {
+                Some(Ok(site_docs)) => done.push(site_docs),
+                Some(Err(err)) => warn!("a site's fetch failed: {err}"),
+                None => break,
+            }
+        }
+        done
+    })
+}
+
 /// The pages of a docs site kept at `path` by an earlier run.
 fn read_kept_docs(path: &std::path::Path) -> Option<Vec<plumb_ingest::docs::FetchedDoc>> {
     let bytes = std::fs::read(path).ok()?;
@@ -799,6 +988,12 @@ pub fn run_pages(args: FetchPagesArgs) -> Result<()> {
     }
     if set.id == plumb_index::pages::DOCS_SET {
         return run_docs(&args, &dest);
+    }
+    if set.id == plumb_index::pages::REFERENCE_SET {
+        return run_reference(&args, &dest);
+    }
+    if set.id == plumb_index::pages::SUBPAGES_SET {
+        return run_subpages(&args, &dest);
     }
     if set.id == plumb_index::pages::PACKAGES_SET {
         return run_packages(&args, &dest);

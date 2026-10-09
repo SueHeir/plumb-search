@@ -181,6 +181,11 @@ pub struct NodeConfig {
     pub alpha: Option<f32>,
     /// The home country of searches that do not name one.
     pub country: HomeCountry,
+    /// The search pages start with "Only this country" on.
+    pub only_country: bool,
+    /// The language filter of searches that name none; `None` for the
+    /// browser's.
+    pub lang: Option<String>,
     /// The web search engine the results page links to; `None` for no link.
     pub web_search: Option<Engine>,
     /// Every client of `/mcp` may use `read_page`, not only this computer's.
@@ -204,6 +209,9 @@ pub struct NodeConfig {
     /// trusted node answers (see `node/fill.rs`). Needs `network` with
     /// filling on and a trusted node. On by default.
     pub seed_from_network: bool,
+    /// Which page set files (and the map file) the node replaces by itself
+    /// when a trusted node has a newer one. All by default.
+    pub set_updates: crate::pages::SetUpdates,
     /// Where the seed data is downloaded from on first start.
     pub sources: SeedSources,
     /// How long to wait before trying failed work again. The wait doubles
@@ -320,6 +328,8 @@ impl NodeConfig {
             cc_release: None,
             alpha: None,
             country: HomeCountry::Auto,
+            only_country: false,
+            lang: None,
             web_search: None,
             mcp_read_pages: false,
             page_reader: plumb_crawl::ReadConfig::default(),
@@ -327,6 +337,7 @@ impl NodeConfig {
             meaning_model: crate::meaning::MeaningModel::default(),
             embed_threads: None,
             seed_from_network: true,
+            set_updates: crate::pages::SetUpdates::All,
             sources: SeedSources::default(),
             retry_wait: Duration::from_secs(10 * 60),
             max_retry_wait: Duration::from_secs(6 * 60 * 60),
@@ -351,7 +362,10 @@ impl NodeConfig {
     }
 
     /// Defaults for a desktop: 250,000 sites, 2,000 homepages crawled at
-    /// first and 1,000 more every 12 hours, on 127.0.0.1 with a free port.
+    /// first and 1,000 more every 12 hours, on 127.0.0.1 with a free port,
+    /// with search by meaning: it finds described searches ("electric car
+    /// maker") twice as often, and in the network the site vectors come from
+    /// a trusted node rather than this computer's CPU.
     pub fn desktop(data_dir: PathBuf) -> Self {
         NodeConfig {
             bind: SocketAddr::from(([127, 0, 0, 1], 0)),
@@ -362,6 +376,7 @@ impl NodeConfig {
             settings: NodeSettings::desktop(),
             manage_other_nodes: true,
             search_history: true,
+            search_by_meaning: true,
             news_feeds: 300,
             ..NodeConfig::server(data_dir)
         }
@@ -467,8 +482,9 @@ pub struct SeedSources {
     /// about the best-known official websites' organizations.
     pub wikipedia_api_url: String,
     /// Only Wikidata items with at least this many Wikipedia sitelinks are
-    /// fetched, which keeps the download small enough to finish (see
-    /// [`download::download_wikidata_official_sites`]).
+    /// fetched, a notability filter; from 25 up when only
+    /// `wikidata_sparql_url` answers (see
+    /// [`download::download_wikidata_official_sites_with`]).
     pub wikidata_min_sitelinks: u32,
     /// How the Wikidata queries are spaced out: the pause between two and
     /// the wait before trying one again.
@@ -496,7 +512,7 @@ impl Default for SeedSources {
             wikidata_sparql_url: download::WIKIDATA_SPARQL_URL.to_string(),
             wikidata_mirror_url: Some(download::QLEVER_WIKIDATA_URL.to_string()),
             wikipedia_api_url: plumb_ingest::intros::WIKIPEDIA_API_URL.to_string(),
-            wikidata_min_sitelinks: 25,
+            wikidata_min_sitelinks: download::DEFAULT_MIN_SITELINKS,
             wikidata_pacing: download::WikidataPacing::default(),
             cc_ranks_url: None,
             model_base_url: plumb_embed::MODEL_BASE_URL.to_string(),
@@ -879,9 +895,7 @@ pub fn request_reseed(data_dir: &Path) -> Result<bool> {
 /// and index builds run on its blocking threads.
 pub async fn start(mut config: NodeConfig) -> Result<NodeHandle> {
     crate::limits::raise_open_file_limit();
-    if let Some(features) = features::FeatureSettings::load(&config.data_dir)? {
-        features.apply(&mut config)?;
-    }
+    features::FeatureSettings::apply_saved(&mut config)?;
     config.limit_to_crawling();
     config.check()?;
     let rank = crate::rank_config(config.alpha);
@@ -906,6 +920,8 @@ pub async fn start(mut config: NodeConfig) -> Result<NodeHandle> {
     ));
     let settings = WebSettings {
         home: inner.config.country.clone(),
+        only_country: inner.config.only_country,
+        language: inner.config.lang.clone(),
         web_search: inner.config.web_search,
         read_pages_for_all: inner.config.mcp_read_pages,
         page_reader: inner.config.page_reader.clone(),

@@ -356,7 +356,13 @@ mod tests {
             "client_id": "abc123", "client_secret": "s3cret", "username": "u/liz"
         }))
         .unwrap();
-        assert_eq!(app.user_agent(), "plumbsearch:abc123:0.1.0 (by /u/liz)");
+        assert_eq!(
+            app.user_agent(),
+            format!(
+                "plumbsearch:abc123:{} (by /u/liz)",
+                env!("CARGO_PKG_VERSION")
+            )
+        );
         let missing = App::from_config(&serde_json::Value::Null).unwrap_err();
         assert!(missing.to_string().contains("client_id"));
     }

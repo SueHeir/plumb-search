@@ -75,6 +75,11 @@ pub const KINDS: &[(&str, &str)] = &[
     (plumb_index::pages::GITHUB_SET, "GitHub repositories"),
     (plumb_index::pages::PACKAGES_SET, "Software packages"),
     (plumb_index::pages::DOCS_SET, "Software docs"),
+    (plumb_index::pages::REFERENCE_SET, "Reference pages"),
+    (
+        plumb_index::pages::SUBPAGES_SET,
+        "Pages of universities, companies, government and museums",
+    ),
     (plumb_index::pages::WIKIDATA_SET, "Official profiles"),
 ];
 
