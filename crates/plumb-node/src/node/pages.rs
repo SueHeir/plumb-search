@@ -896,6 +896,11 @@ pub(super) fn add_pages(
     let query = applied.as_deref().unwrap_or(query);
     match searcher.search(query, PAGES_PER_SEARCH) {
         Ok(mut found) => {
+            if let Err(err) =
+                searcher.add_other_number(query, &results.hits, &mut found, PAGES_PER_SEARCH)
+            {
+                warn!("searching pages in the other number: {err:#}");
+            }
             found.retain(|hit| options_allow(options, &hit.page));
             if let Some(index) = inner.current().filter(|_| inner.rank.add_named_site) {
                 add_named_site(&mut results.hits, &found, |domain| {

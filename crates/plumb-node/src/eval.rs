@@ -563,9 +563,10 @@ fn evaluate(
                 rank_of(&domains, &q.expected)
             }
             Some(pages) => {
-                let found = pages
+                let mut found = pages
                     .search(&searched, 10)
                     .with_context(|| format!("searching pages for {searched:?}"))?;
+                pages.add_other_number(&searched, &hits, &mut found, 10)?;
                 let mut lifted = hits.clone();
                 if cfg.add_named_site {
                     add_named_site(&mut lifted, &found, |domain| {

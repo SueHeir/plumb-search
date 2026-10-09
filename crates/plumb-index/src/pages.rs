@@ -1608,6 +1608,47 @@ impl PageSearcher {
         Ok(best)
     }
 
+    /// Adds to `found`, the pages [`PageSearcher::search`] found for
+    /// `query`, the article titled in the other number of its last word
+    /// when none is named as typed and the best of `sites` only shares a
+    /// word with the query ([`only_shares_a_word`]): "tariffs" names the
+    /// article Tariff over tariffs.net. A query that sites answer well
+    /// keeps its sites: "used cars" is not the article Used car.
+    pub fn add_other_number(
+        &self,
+        query: &str,
+        sites: &[crate::Hit],
+        found: &mut Vec<PageHit>,
+        limit: usize,
+    ) -> Result<()> {
+        if found.iter().any(|hit| hit.named && hit.page.is_article())
+            || !sites.first().is_none_or(only_shares_a_word)
+        {
+            return Ok(());
+        }
+        let Some(other) = last_word_in_other_number(query) else {
+            return Ok(());
+        };
+        let mut added = false;
+        for hit in self.search(&other, limit)? {
+            if !hit.named || !hit.page.is_article() {
+                continue;
+            }
+            // Found as typed only by some of its words: named now.
+            match found.iter_mut().find(|h| h.page == hit.page) {
+                Some(listed) if listed.named => {}
+                Some(listed) => *listed = hit,
+                None => found.push(hit),
+            }
+            added = true;
+        }
+        if added {
+            found.sort_by(|a, b| b.score.total_cmp(&a.score));
+            found.truncate(limit);
+        }
+        Ok(())
+    }
+
     /// The song or album of the music set whose title is the whole of
     /// `query` when one is far better known than every other of that
     /// title: Radiohead's "Creep" for "creep", with
@@ -2558,6 +2599,48 @@ pub fn keep_page_rules(query: &str, sites: &[crate::Hit], placed: &mut Vec<Place
     *placed = rest;
 }
 
+/// `query` with its last word in the other number
+/// ([`plumb_core::other_number`]): "tariffs" -> "tariff",
+/// "no kings protest" -> "no kings protests". `None` when the word has no
+/// other number ("news") or the query is an address.
+fn last_word_in_other_number(query: &str) -> Option<String> {
+    if query.contains('.') || query.contains(':') {
+        return None;
+    }
+    let text = plumb_core::normalize_text(query);
+    let (head, last) = match text.rsplit_once(' ') {
+        Some((head, last)) => (Some(head), last),
+        None => (None, text.as_str()),
+    };
+    let other = plumb_core::other_number(last)?;
+    Some(match head {
+        Some(head) => format!("{head} {other}"),
+        None => other,
+    })
+}
+
+/// The text match ([`crate::Hit::text_score`]) below which a site the
+/// query does not name only shares a word with it (government.ru for
+/// "government shutdown", at 0.15). Sites a description finds by meaning
+/// match more ("used cars").
+const SHARES_A_WORD_MATCH: f32 = 0.25;
+
+/// The link score below which a site the query names is next to unknown
+/// (tariffs.net, at 0.015).
+const BARELY_LINKED: f32 = 0.1;
+
+/// Whether `site`, the best site found, only shares a word with the
+/// query: a site it does not name that matches it weakly
+/// ([`SHARES_A_WORD_MATCH`]), or one it names that is not official and
+/// next to nobody links to ([`BARELY_LINKED`]).
+fn only_shares_a_word(site: &crate::Hit) -> bool {
+    if site.named {
+        !site.official && site.link_score < BARELY_LINKED
+    } else {
+        site.placing_text_score.unwrap_or(site.text_score) < SHARES_A_WORD_MATCH
+    }
+}
+
 /// Whether `query` asks for podcasts or episodes.
 fn asks_for_podcasts(query: &str) -> bool {
     query.split_whitespace().any(|word| {
@@ -3037,6 +3120,41 @@ mod tests {
         );
         let hit = searcher.search("serde crate", 10).unwrap().remove(0);
         assert!(hit.named && hit.page.set_name() == "crates.io");
+    }
+
+    #[test]
+    fn plurals_name_the_article_titled_in_the_singular() {
+        let (_dir, s) = searcher(&[
+            page("Tariff", 90_000, &[]),
+            page("No Kings protests", 50_000, &[]),
+            page("Kings", 1_000, &[]),
+        ]);
+        let found = |query: &str, sites: &[crate::Hit]| {
+            let mut hits = s.search(query, 5).unwrap();
+            s.add_other_number(query, sites, &mut hits, 5).unwrap();
+            hits
+        };
+        let tariffs_net = known_site("tariffs.net", true, 0.015);
+        let hits = found("tariffs", std::slice::from_ref(&tariffs_net));
+        assert_eq!(titles(&hits)[0], "Tariff");
+        assert!(hits[0].named);
+        let hits = found("no kings protest", &[]);
+        assert_eq!(titles(&hits)[0], "No Kings protests");
+        assert!(hits[0].named);
+        // Named as typed: no other number is tried.
+        let hits = found("kings", &[]);
+        assert_eq!(titles(&hits)[0], "Kings");
+        // A site that answers the query well keeps it to the sites.
+        let mut tariff_site = known_site("tariffs.gov", false, 0.6);
+        tariff_site.text_score = 0.9;
+        assert!(found("tariffs", &[tariff_site])
+            .iter()
+            .all(|hit| !hit.named));
+        let mut official = tariffs_net;
+        official.official = true;
+        assert!(found("tariffs", &[official]).iter().all(|hit| !hit.named));
+        assert_eq!(last_word_in_other_number("news"), None);
+        assert_eq!(last_word_in_other_number("tariffs.net"), None);
     }
 
     #[test]
