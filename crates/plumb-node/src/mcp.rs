@@ -84,6 +84,10 @@ const DEFAULT_READ_CHARS: usize = 6_000;
 const MAX_READ_CHARS: usize = 30_000;
 /// Links `read_page` lists when asked for them.
 const MAX_LINKS_RETURNED: usize = 60;
+/// Most headings `read_page` lists in an outline...
+const MAX_OUTLINE_HEADINGS: usize = 60;
+/// ...and the characters of each section's opening it shows.
+const OUTLINE_OPENING_CHARS: usize = 100;
 /// Headlines `search` returns.
 const MAX_HEADLINES: usize = 5;
 /// Most packages the `package` tool lists.
@@ -1256,6 +1260,9 @@ pub struct ReadArgs {
     /// Words to jump to: the part returned starts at their first
     /// appearance from `start`.
     find: Option<String>,
+    /// The page's headings, where each starts and its opening words,
+    /// instead of its text.
+    outline: bool,
 }
 
 impl ReadArgs {
@@ -1273,6 +1280,10 @@ impl ReadArgs {
                 .map(str::trim)
                 .filter(|find| !find.is_empty())
                 .map(|find| truncate_chars(find, MAX_QUERY_CHARS)),
+            outline: args
+                .get("outline")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
         })
     }
 }
@@ -1334,6 +1345,20 @@ impl Reader {
         let (max_chars, links) = (args.max_chars, args.links);
         let chars: Vec<char> = page.text.chars().collect();
         let total = chars.len();
+        if args.outline {
+            let sections = outline(&chars);
+            // A page without headings has no outline to show: its text
+            // follows instead, so the call is not wasted.
+            if !sections.is_empty() {
+                return Ok(json!({
+                    "url": page.url,
+                    "title": page.title,
+                    "outline": sections,
+                    "length": total,
+                    "truncated": page.cut,
+                }));
+            }
+        }
         let mut start = args.start.min(total);
         let found = args
             .find
@@ -1389,6 +1414,69 @@ impl Reader {
         }
         Ok(answer)
     }
+}
+
+/// A page's sections: each Markdown heading in its text with its level,
+/// where it starts and the opening words under it, after the words before
+/// the first heading (level 0) when there are any. Without headings, none.
+/// A long outline keeps the higher levels, then the first headings.
+fn outline(chars: &[char]) -> Vec<Value> {
+    // (level, heading, where the line starts, where the text under it starts)
+    let mut headings: Vec<(usize, String, usize, usize)> = Vec::new();
+    let mut at = 0;
+    while at < chars.len() {
+        let end = chars[at..]
+            .iter()
+            .position(|&c| c == '\n')
+            .map_or(chars.len(), |n| at + n);
+        let line: String = chars[at..end].iter().collect();
+        let level = line.chars().take_while(|&c| c == '#').count();
+        if (1..=6).contains(&level) && line[level..].starts_with(' ') {
+            let heading = line[level..].trim().to_string();
+            if !heading.is_empty() {
+                headings.push((level, heading, at, end));
+            }
+        }
+        at = end + 1;
+    }
+    if headings.is_empty() {
+        return Vec::new();
+    }
+    let mut deepest = 6;
+    while headings.len() > MAX_OUTLINE_HEADINGS && deepest > 1 {
+        headings.retain(|(level, ..)| *level < deepest);
+        deepest -= 1;
+    }
+    headings.truncate(MAX_OUTLINE_HEADINGS);
+    // The words under a heading, up to the next line that is a heading.
+    let opening = |from: usize| -> String {
+        let words: String = chars[from.min(chars.len())..]
+            .iter()
+            .take(OUTLINE_OPENING_CHARS * 4)
+            .collect();
+        let words: String = words
+            .lines()
+            .map(str::trim)
+            .take_while(|line| !line.starts_with('#'))
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        truncate_chars(&words, OUTLINE_OPENING_CHARS)
+    };
+    let mut sections = Vec::new();
+    let before = opening(0);
+    if headings[0].2 > 0 && !before.is_empty() {
+        sections.push(json!({ "level": 0, "heading": "", "start": 0, "opening": before }));
+    }
+    for (level, heading, start, under) in headings {
+        sections.push(json!({
+            "level": level,
+            "heading": truncate_chars(&heading, OUTLINE_OPENING_CHARS),
+            "start": start,
+            "opening": opening(under),
+        }));
+    }
+    sections
 }
 
 /// Where `find` first appears in `chars` at or after `from`, ignoring case.
@@ -1625,7 +1713,8 @@ fn read_page_tool() -> Value {
         "description": "Fetch a web page (web_fetch) and return its text, with headings and \
              lists marked in Markdown, without menus, ads or scripts. Use it after search or \
              official_site to read what a page says. Long pages come in parts: call again with \
-             start set to next_start, or pass find to jump to the words you need. Also says \
+             start set to next_start, or pass find to jump to the words you need. On a long \
+             page, ask for its outline first and read only the section you need. Also says \
              whether the address is a look-alike of a better-known site.",
         "inputSchema": {
             "type": "object",
@@ -1635,6 +1724,7 @@ fn read_page_tool() -> Value {
                 "max_chars": { "type": "integer", "minimum": 200, "maximum": MAX_READ_CHARS, "description": "Most characters to return (default 6000)." },
                 "links": { "type": "boolean", "description": "Also list the page's links (default false)." },
                 "find": { "type": "string", "description": "Jump to the first place these words appear (from start), like Ctrl-F; says found: false when they do not." },
+                "outline": { "type": "boolean", "description": "Return the page's headings, each with where it starts and its opening words, instead of its text (default false); then read a section with start. A page without headings returns its text." },
             },
             "required": ["url"],
         },

@@ -477,6 +477,34 @@ fn read_page_is_offered_only_with_a_reader() {
     let reply = call(&with, "read_page", json!({ "url": url, "find": "four" }));
     assert_eq!(reply["result"]["structuredContent"]["found"], false);
 
+    // An outline: each heading, where it starts and its opening words.
+    let long = serve_page(
+        &runtime,
+        "<title>L</title><main><p>Lead.</p><h2>Usage</h2><p>Run it.</p><p>Twice.</p>\
+         <h3>Flags</h3><p>None.</p></main>",
+    );
+    let reply = call(&with, "read_page", json!({ "url": long, "outline": true }));
+    let answer = &reply["result"]["structuredContent"];
+    assert!(answer.get("text").is_none(), "{answer}");
+    let sections = answer["outline"].as_array().unwrap();
+    let headings: Vec<_> = sections.iter().map(|s| s["heading"].clone()).collect();
+    assert_eq!(headings, ["", "Usage", "Flags"]);
+    assert_eq!(sections[1]["level"], 2);
+    assert_eq!(sections[1]["opening"], "Run it. Twice.");
+    let start = sections[2]["start"].as_u64().unwrap();
+    let reply = call(&with, "read_page", json!({ "url": long, "start": start }));
+    assert_eq!(
+        reply["result"]["structuredContent"]["text"],
+        "### Flags\n\nNone."
+    );
+    // Without headings, the text instead.
+    let reply = call(
+        &with,
+        "read_page",
+        json!({ "url": serve_page(&runtime, "<p>Plain.</p>"), "outline": true }),
+    );
+    assert_eq!(reply["result"]["structuredContent"]["text"], "Plain.");
+
     // A bot check is not the page.
     let check = serve_page(
         &runtime,
