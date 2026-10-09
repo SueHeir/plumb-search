@@ -364,6 +364,9 @@ fn evaluate(
             ..SearchOptions::default()
         };
         let search = |query: &str| {
+            // "food near me" searches sites for "food", as a node does.
+            let query =
+                &plumb_index::places::without_near_me(query).unwrap_or_else(|| query.to_string());
             let query_meaning = meaning.as_ref().and_then(|meaning| meaning.query(query));
             let results = searcher
                 .search_meaning(
@@ -387,7 +390,18 @@ fn evaluate(
                 (results, query_meaning) = search(&searched)?;
             }
         }
-        let hits = results.hits;
+        let mut hits = results.hits;
+        // The sites that serve a tool or a quick fact come first, as a
+        // node lists them.
+        let route =
+            crate::sources::route(&searched, answer_kind(&searched), args.country.as_deref());
+        if let Some(route) = &route {
+            if pages.is_none() {
+                crate::sources::lead_with(&mut hits, &mut [], route, |domain| {
+                    searcher.site(domain).ok().flatten()
+                });
+            }
+        }
         let domains: Vec<&str> = hits.iter().map(|h| h.domain.as_str()).collect();
         // What came first: a page when one was listed first.
         let mut first = domains.first().map(|d| d.to_string());
@@ -430,6 +444,11 @@ fn evaluate(
                         &mut lifted,
                         &mut placed,
                     );
+                }
+                if let Some(route) = &route {
+                    crate::sources::lead_with(&mut lifted, &mut placed, route, |domain| {
+                        searcher.site(domain).ok().flatten()
+                    });
                 }
                 if let Some(features) = features.as_deref_mut() {
                     let closeness = |domain: &str| {
@@ -505,6 +524,16 @@ fn evaluate(
         ranks.push(rank);
     }
     Ok(ranks)
+}
+
+/// The kind of instant answer a node shows for `query`, as far as it can
+/// be told without fetching anything: a currency conversion is taken to
+/// be one when it looks like one.
+fn answer_kind(query: &str) -> Option<plumb_answer::Kind> {
+    let now = i64::try_from(plumb_core::now_unix()).unwrap_or(i64::MAX);
+    plumb_answer::answer(query, now, None)
+        .map(|answer| answer.kind)
+        .or_else(|| plumb_answer::may_need_rates(query).then_some(plumb_answer::Kind::Currency))
 }
 
 /// One ranking to try in a sweep: a name and the knobs it changes.
@@ -788,6 +817,11 @@ fn listed_with_pages(hits: &[Hit], pages: Vec<PlacedPage>) -> Vec<Vec<String>> {
     for (i, hit) in hits.iter().enumerate() {
         listed.extend(alone(i));
         let mut keys = vec![hit.domain.clone()];
+        // A site's result that links one of its pages ("define prioritize"
+        // links the word's page of merriam-webster.com) is that page too.
+        if url::Url::parse(&hit.url).is_ok_and(|url| url.path() != "/") {
+            keys.push(hit.url.clone());
+        }
         keys.extend(
             pages
                 .iter()

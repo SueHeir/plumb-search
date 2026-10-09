@@ -28,6 +28,7 @@ mod places;
 #[cfg(feature = "zones")]
 mod time;
 mod units;
+pub mod weather;
 
 pub use currency::{Rates, ECB_RATES_URL};
 pub use format::format_number;
@@ -42,6 +43,9 @@ pub enum Kind {
     Time,
     /// Where to get help now ("depression help").
     Help,
+    /// The weather somewhere, from a forecast the caller fetched
+    /// ([`weather`]).
+    Weather,
     /// A fact about something with a Wikipedia article, from Wikidata
     /// ("capital of australia"); worked out by the node, which has the
     /// facts, not here.
