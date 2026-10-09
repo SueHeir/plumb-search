@@ -546,19 +546,52 @@ pub(crate) fn fact_pages(pages: &[PlacedPage]) -> impl Iterator<Item = &PlacedPa
         })
 }
 
+/// [`fact_pages`], then the first page listed on its own when its title
+/// starts with `subject`'s words but adds more: "Yellowstone National
+/// Park" for "yellowstone", when no page named "Yellowstone" has the
+/// fact.
+pub(crate) fn fact_pages_for<'a>(
+    pages: &'a [PlacedPage],
+    subject: &str,
+) -> impl Iterator<Item = &'a PlacedPage> {
+    let subject = subject.trim().to_lowercase();
+    let leading = pages
+        .iter()
+        .filter(|placed| placed.under.is_none())
+        .min_by_key(|placed| placed.at)
+        .filter(|placed| {
+            !placed.hit.named
+                && !subject.is_empty()
+                && placed
+                    .hit
+                    .page
+                    .title
+                    .to_lowercase()
+                    .strip_prefix(&subject)
+                    .is_some_and(|rest| rest.starts_with(' ') && !rest.trim().is_empty())
+                && is_about_one_thing(&placed.hit.page)
+                && !is_disambiguation(
+                    &placed.hit.page.title,
+                    placed.hit.page.description.as_deref(),
+                )
+        });
+    fact_pages(pages).chain(leading)
+}
+
 /// The fact `asked` asks for, when the first page named by its subject
 /// (in `pages`, found for the subject's words) that has one of its kinds
 /// has it: "Canberra" for "capital of australia". Failing that, the
 /// article listed under the site the subject names: "Apple Inc." under
 /// apple.com for "ceo of apple", where the article named "Apple" is the
-/// fruit. `now` (Unix seconds) works out an age.
+/// fruit. Last, the page listed first when its title starts with the
+/// subject ([`fact_pages_for`]). `now` (Unix seconds) works out an age.
 pub(crate) fn fact_answer(
     asked: &plumb_core::facts::FactQuestion,
     pages: &[PlacedPage],
     now: u64,
 ) -> Option<plumb_answer::Answer> {
     use plumb_core::facts::FactKind;
-    fact_pages(pages).find_map(|placed| {
+    fact_pages_for(pages, &asked.subject).find_map(|placed| {
         let page = &placed.hit.page;
         let kind = asked
             .kinds
@@ -1165,6 +1198,51 @@ mod tests {
         let mut unnamed = tesla.clone();
         unnamed[0].hit.named = false;
         assert_eq!(ask("who founded tesla", &unnamed), None);
+    }
+
+    #[test]
+    fn facts_of_the_page_listed_first_that_starts_with_the_subject() {
+        use plumb_core::facts::{fact_asked, FactKind::*};
+        let ask = |q: &str, pages: &[PlacedPage]| {
+            fact_answer(&fact_asked(q).unwrap(), pages, 1_791_244_800)
+        };
+        let unnamed = |mut hit: PageHit| {
+            hit.named = false;
+            hit
+        };
+        let park = with_facts(
+            article("Yellowstone National Park", "national park", None),
+            &[(Coordinates, "44.6,-110.5")],
+        );
+        let pages = [
+            placed(unnamed(park.clone()), None, 0),
+            placed(
+                article("Yellowstone (franchise)", "media franchise", None),
+                None,
+                1,
+            ),
+            placed(
+                article("Yellowstone (TV series)", "television series", None),
+                Some("paramountnetwork.com"),
+                0,
+            ),
+        ];
+        assert_eq!(
+            ask("coordinates of yellowstone", &pages).unwrap().answer,
+            "44.6° N, 110.5° W"
+        );
+        // Not when another page is listed first, nor when the title only
+        // shares the subject's first letters.
+        let second = [
+            placed(
+                article("Yellowstone (franchise)", "media franchise", None),
+                None,
+                0,
+            ),
+            placed(unnamed(park.clone()), None, 1),
+        ];
+        assert_eq!(ask("coordinates of yellowstone", &second), None);
+        assert_eq!(ask("coordinates of yellow", &pages), None);
     }
 
     #[test]
