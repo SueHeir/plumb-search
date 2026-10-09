@@ -72,7 +72,8 @@ fn run_github(args: &FetchPagesArgs, dest: &std::path::Path) -> Result<()> {
 
 /// Makes the Stack Overflow questions set file `dest` from Stack Exchange's
 /// dump of Stack Overflow's posts (about 20 GB), downloaded into --work
-/// unless --posts names it.
+/// unless --posts names it, and of its post links (150 MB), whose
+/// duplicates give the questions their other titles.
 fn run_stackoverflow(args: &FetchPagesArgs, dest: &std::path::Path) -> Result<()> {
     use plumb_ingest::stackexchange;
     let posts = match &args.posts {
@@ -83,8 +84,20 @@ fn run_stackoverflow(args: &FetchPagesArgs, dest: &std::path::Path) -> Result<()
             "Stack Overflow's posts",
         )?,
     };
+    let links = fetch_dump(
+        args,
+        stackexchange::STACKOVERFLOW_POST_LINKS_URL,
+        "Stack Overflow's post links",
+    )
+    .inspect_err(|err| warn!("{err:#}; the questions keep no other titles"))
+    .ok();
     info!("reading questions from {}", posts.display());
-    let questions = stackexchange::read_questions_7z(&posts, args.min_score, args.max_questions)?;
+    let questions = stackexchange::read_questions_7z(
+        &posts,
+        args.min_score,
+        args.max_questions,
+        links.as_deref(),
+    )?;
     let questions: Vec<_> = questions
         .into_iter()
         .map(stackexchange::Question::into_article)
@@ -105,7 +118,8 @@ fn run_stackexchange(args: &FetchPagesArgs, dest: &std::path::Path) -> Result<()
     for site in SITES {
         let read = fetch_dump(args, &site.dump_url(), site.name).and_then(|dump| {
             info!("reading {}'s questions from {}", site.name, dump.display());
-            let read = stackexchange::read_questions_7z(&dump, args.min_score, args.max_per_site);
+            let read =
+                stackexchange::read_questions_7z(&dump, args.min_score, args.max_per_site, None);
             if args.drop_dumps {
                 if let Err(err) = std::fs::remove_file(&dump) {
                     warn!("removing {}: {err}", dump.display());
@@ -510,6 +524,21 @@ fn run_papers(args: &FetchPagesArgs, dest: &std::path::Path) -> Result<()> {
             ),
             Err(err) => warn!("asking CORE for free copies: {err:#}; writing the papers without"),
         }
+    }
+    // The short names papers go by, and the well-known arXiv papers
+    // OpenAlex lacks; with --work, Papers with Code's methods are kept
+    // there.
+    let methods_cache = args.work.as_deref().map(|w| w.join("papers-with-code"));
+    match block_on(plumb_ingest::paper_names::improve(
+        &client,
+        &mut papers,
+        methods_cache.as_deref(),
+    ))? {
+        Ok(named) => info!(
+            "named {} papers by their titles and {} by Papers with Code's methods; added {} arXiv papers OpenAlex lacks and gave {} mis-dated ones their arXiv DOI",
+            named.by_title, named.by_method, named.added, named.redated
+        ),
+        Err(err) => warn!("naming the papers: {err:#}; writing them without"),
     }
     let free = papers.iter().filter(|p| p.website.is_some()).count();
     info!("{free} of {} papers have a free copy", papers.len());

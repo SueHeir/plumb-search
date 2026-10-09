@@ -598,9 +598,9 @@ impl Page {
     }
 
     /// The words a question, paper or docs page is found by besides its
-    /// title: its title, a question's tags, and a docs page's other names
-    /// and description. `None` for pages of other sets, found by their
-    /// names only.
+    /// title: its title, a question's tags and the titles of its
+    /// duplicates, and a docs page's other names and description. `None`
+    /// for pages of other sets, found by their names only.
     pub fn topic(&self) -> Option<String> {
         if self.set == PAPERS_SET {
             return Some(self.title.clone());
@@ -613,10 +613,38 @@ impl Page {
             }
             return Some(topic);
         }
-        self.is_question().then(|| match &self.description {
-            Some(tags) => format!("{} {tags}", self.title),
-            None => self.title.clone(),
+        self.is_question().then(|| {
+            let mut topic = self.title.clone();
+            for text in self.aliases.iter().chain(&self.description) {
+                topic.push(' ');
+                topic.push_str(text);
+            }
+            topic
         })
+    }
+
+    /// The titles a question is asked by, each with its tags: its own,
+    /// then those of the questions closed as its duplicates. A paper or
+    /// docs page is asked by its title and [`Page::topic`], pages of other
+    /// sets by none.
+    fn asked_as(&self) -> Vec<(&str, String)> {
+        if !self.is_question() {
+            return self
+                .topic()
+                .map(|topic| (self.title.as_str(), topic))
+                .into_iter()
+                .collect();
+        }
+        std::iter::once(&self.title)
+            .chain(&self.aliases)
+            .map(|title| {
+                let words = match &self.description {
+                    Some(tags) => format!("{title} {tags}"),
+                    None => title.clone(),
+                };
+                (title.as_str(), words)
+            })
+            .collect()
     }
 
     /// What a Wikipedia article is matched on beyond its names: its title,
@@ -2055,7 +2083,9 @@ impl PageSearcher {
     /// And whether the query asks the question as a whole: it has all of
     /// the query's words, and the query at least [`QUESTION_TITLE_SHARE`]
     /// of its title's. A question without `topic_word`, the query's rarest
-    /// word, matches not at all.
+    /// word, matches not at all. The question's words are its title and
+    /// tags, or the title of a duplicate of it and its tags, whichever
+    /// covers the query best ([`Page::asked_as`]).
     fn question_match(
         &self,
         page: &Page,
@@ -2065,28 +2095,31 @@ impl PageSearcher {
         if stems.len() < QUESTION_QUERY_WORDS {
             return (0.0, false);
         }
-        let Some(topic) = page.topic() else {
-            return (0.0, false);
-        };
-        let words: HashSet<String> = analysis::tokens(&self.stemmed, &topic)
-            .into_iter()
-            .collect();
-        if topic_word.is_some_and(|word| !words.contains(word)) {
-            return (0.0, false);
+        let mut best = (0.0f32, false);
+        for (title, topic) in page.asked_as() {
+            let words: HashSet<String> = analysis::tokens(&self.stemmed, &topic)
+                .into_iter()
+                .collect();
+            if topic_word.is_some_and(|word| !words.contains(word)) {
+                continue;
+            }
+            let share = stems.iter().filter(|stem| words.contains(*stem)).count() as f32
+                / stems.len() as f32;
+            if share < QUESTION_SHARE {
+                continue;
+            }
+            let title: HashSet<String> =
+                analysis::tokens(&self.stemmed, title).into_iter().collect();
+            let asked = share >= 1.0
+                && !title.is_empty()
+                && title.iter().filter(|word| stems.contains(word)).count() as f32
+                    >= QUESTION_TITLE_SHARE * title.len() as f32;
+            let found = (PARTIAL_MATCH * share, asked);
+            if found.0 > best.0 || found.0 == best.0 && found.1 && !best.1 {
+                best = found;
+            }
         }
-        let share =
-            stems.iter().filter(|stem| words.contains(*stem)).count() as f32 / stems.len() as f32;
-        if share < QUESTION_SHARE {
-            return (0.0, false);
-        }
-        let title: HashSet<String> = analysis::tokens(&self.stemmed, &page.title)
-            .into_iter()
-            .collect();
-        let asked = share >= 1.0
-            && !title.is_empty()
-            && title.iter().filter(|word| stems.contains(word)).count() as f32
-                >= QUESTION_TITLE_SHARE * title.len() as f32;
-        (PARTIAL_MATCH * share, asked)
+        best
     }
 
     /// Whether the query `words` are a book's, podcast's or paper's title
@@ -3109,6 +3142,27 @@ mod tests {
         let (_dir, s) = searcher(&pages);
         let hits = s.search("how to get rid of aphids", 5).unwrap();
         assert_eq!(titles(&hits), ["How do I get rid of aphids on roses?"]);
+    }
+
+    #[test]
+    fn questions_are_found_in_their_duplicates_words() {
+        let undo = Page::from_question(Article {
+            title: "How do I undo the most recent local commits in Git?".into(),
+            description: Some("git, version-control, git-commit, undo".into()),
+            item: Some("927358".into()),
+            views: 14_000_000,
+            aliases: vec!["Revert to a previous Git commit without losing history".into()],
+            ..Article::default()
+        });
+        let (_dir, s) = searcher(&[undo]);
+        let hits = s
+            .search("revert previous commit losing history", 5)
+            .unwrap();
+        assert_eq!(
+            titles(&hits),
+            ["How do I undo the most recent local commits in Git?"]
+        );
+        assert!(hits[0].whole);
     }
 
     #[test]
