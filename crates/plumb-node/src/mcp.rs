@@ -1713,8 +1713,9 @@ fn read_page_tool() -> Value {
         "description": "Fetch a web page (web_fetch) and return its text, with headings and \
              lists marked in Markdown, without menus, ads or scripts. Use it after search or \
              official_site to read what a page says. Long pages come in parts: call again with \
-             start set to next_start, or pass find to jump to the words you need. On a long \
-             page, ask for its outline first and read only the section you need. Also says \
+             start set to next_start, or pass find to jump to the words you need. When the \
+             first part of a long page lacks what you need, ask for its outline and read only \
+             the section you need. Also says \
              whether the address is a look-alike of a better-known site.",
         "inputSchema": {
             "type": "object",
