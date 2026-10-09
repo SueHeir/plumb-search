@@ -297,6 +297,13 @@ fn fetch_if_needed(
         }
         Some(_) => "a newer file",
     };
+    // `--set-updates off`, or a list without this set: a set the node has
+    // no file of stays without one, since indexing it takes memory nobody
+    // asked for.
+    if notes.is_none() && inner.config.set_updates.allows(set.id).is_none() {
+        debug!("page set {}: none taken: not in --set-updates", set.id);
+        return Ok(());
+    }
     if let Some(pause) = inner.download_pause() {
         debug!("page set {}: not downloaded now: {}", set.id, pause.reason);
         return Ok(());

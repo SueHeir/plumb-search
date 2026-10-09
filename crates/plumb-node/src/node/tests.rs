@@ -2572,12 +2572,17 @@ async fn a_node_takes_newer_set_files_that_hold_what_its_own_do() {
         &peer_films,
         &[article("New Film", None), article("Old Film", None)],
     );
+    // Books, which this node has no file of and doesn't name in
+    // --set-updates, are never taken.
+    let peer_books = peer_dir.path().join("books.tsv.gz");
+    write(&peer_books, &[article("A Book", None)]);
     let peer_map = peer_dir.path().join("map.pmtiles");
     std::fs::write(&peer_map, b"new map, a bit longer").unwrap();
     let files = HashMap::from([
         ("wikipedia-en".to_string(), peer_articles),
         ("films".to_string(), peer_films.clone()),
         ("map".to_string(), peer_map.clone()),
+        ("books".to_string(), peer_books),
     ]);
     let table = plumb_net::BucketTable::build(
         &peer_dir.path().join("buckets"),
@@ -2601,7 +2606,7 @@ async fn a_node_takes_newer_set_files_that_hold_what_its_own_do() {
 
     let mut config = test_config(dir.path());
     config.settings.page_sets =
-        crate::pages::PageSets::parse("wikipedia-en=all,films=all").unwrap();
+        crate::pages::PageSets::parse("wikipedia-en=all,films=all,books=all").unwrap();
     // Named, so the tiny files may grow past a quarter.
     config.set_updates = "wikipedia-en,films,map".parse().unwrap();
     let mut net = plumb_net::NetConfig::new(PathBuf::new());
@@ -2640,6 +2645,8 @@ async fn a_node_takes_newer_set_files_that_hold_what_its_own_do() {
     assert_eq!(super::newer::stamp(&kept).unwrap().0, long_ago);
     assert_eq!(super::newer::layers("wikipedia-en", &kept), ["lead"]);
     assert!(!super::newer::prev_path(&kept).exists());
+    let books = crate::pages::SetInfo::find("books").unwrap();
+    assert!(!books.file(dir.path()).exists());
 
     peer.shutdown().await;
     node.shutdown().await.unwrap();

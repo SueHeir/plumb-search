@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixes
+
+- `plumb run --set-updates off` no longer downloads a page set the node has no file of, as plumbsearch.org would have done with the reference and subpages sets once a trusted node had them. A list such as `films,map` still takes the sets it names when the node has none. A node with `all` (the default) takes missing sets as before.
+
 ## 0.2.0
 
 Downloads are on [GitHub Releases](https://github.com/SueHeir/plumb-search/releases/tag/v0.2.0), and the Docker image is `ghcr.io/sueheir/plumb-search:0.2.0` (also `:0.2` and `:latest`).
