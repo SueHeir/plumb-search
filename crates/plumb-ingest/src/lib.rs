@@ -35,6 +35,7 @@ pub mod openalex;
 pub mod openlibrary;
 pub mod osm;
 pub mod packages;
+pub mod paper_names;
 pub mod podcasts;
 pub mod profiles;
 pub mod stackexchange;
