@@ -1167,16 +1167,9 @@ async fn search_page(
     };
     // Plugins run once the node knows what the search is about, so that
     // they can look it up by its identifiers.
-    let about = match local
-        .as_ref()
-        .ok()
-        .and_then(|results| search_about(&query, results, &extras))
-    {
-        Some(about) => Some(about),
-        None => match &local {
-            Ok(results) => known_song(&state, &query, results, &settings.options).await,
-            Err(_) => None,
-        },
+    let about = match &local {
+        Ok(results) => plugin_about(&state, &query, results, &extras, &settings.options).await,
+        Err(_) => None,
     };
     let shown_to_plugins = match &local {
         Ok(results) if state.settings.plugins.any_annotate() => shown_results(results, limit),
@@ -1479,10 +1472,7 @@ async fn api_search(
             }
             let places = places.filter(|found| !found.hits.is_empty());
             let extras = extras(&state, &query, &results, &options).await;
-            let about = match search_about(&query, &results, &extras) {
-                Some(about) => Some(about),
-                None => known_song(&state, &query, &results, &options).await,
-            };
+            let about = plugin_about(&state, &query, &results, &extras, &options).await;
             let shown_to_plugins = if state.settings.plugins.any_annotate() {
                 shown_results(&results, params.limit())
             } else {
@@ -2276,11 +2266,40 @@ fn search_about(
         .map(crate::plugins::about_page)
 }
 
+/// What plugins are told `query`, whose results are `results`, is about:
+/// [`search_about`], unless that is only a namesake of the query (its
+/// title says more, as "Creep (2014 film)" does) and the query is a
+/// [`known_song`]'s title.
+async fn plugin_about(
+    state: &AppState,
+    query: &str,
+    results: &SearchResults,
+    extras: &answers::Extras,
+    options: &SearchOptions,
+) -> Option<plumb_plugin::About> {
+    let about = search_about(query, results, extras);
+    if about
+        .as_ref()
+        .is_some_and(|about| same_title(&about.title, query))
+    {
+        return about;
+    }
+    known_song(state, query, results, options).await.or(about)
+}
+
+/// Whether `title` is `query`, but for case and spacing.
+fn same_title(title: &str, query: &str) -> bool {
+    let words =
+        |text: &str| -> Vec<String> { text.split_whitespace().map(str::to_lowercase).collect() };
+    words(title) == words(query)
+}
+
 /// The song or album a search of `query` alone, whose results are
 /// `results`, is surely for, as plugins are told: "creep" is Radiohead's,
-/// though no result lists it. Not when the query names a site or an
-/// article, which it is then rather for: "yellow" is the colour, and
-/// "maps" a site.
+/// though no result lists it, and "Creep (2014 film)" is only a namesake.
+/// Not when the query is the very name of a site or an article, which it
+/// is then rather for: "yellow" is the colour, and "maps" a site. A site
+/// found for a near spelling (creed.com for "creep") does not count.
 async fn known_song(
     state: &AppState,
     query: &str,
@@ -2290,11 +2309,25 @@ async fn known_song(
     if state.settings.plugins.is_empty() || plumb_core::Operators::parse(query).any() {
         return None;
     }
-    let named_else = results.hits.iter().any(|hit| hit.named)
+    let joined: String = query
+        .split_whitespace()
+        .map(str::to_lowercase)
+        .collect::<Vec<_>>()
+        .concat();
+    let names_site = |hit: &Hit| {
+        hit.named
+            && (hit.domain.split('.').next() == Some(joined.as_str())
+                || hit
+                    .title
+                    .as_deref()
+                    .is_some_and(|title| same_title(title, query)))
+    };
+    let named_else = results.hits.iter().any(names_site)
         || results.pages.iter().any(|placed| {
             let page = &placed.hit.page;
             placed.hit.named
                 && page.set != plumb_index::pages::MUSIC_SET
+                && same_title(&page.title, query)
                 && !answers::is_disambiguation(&page.title, page.description.as_deref())
         });
     if named_else {
@@ -4270,14 +4303,29 @@ mod tests {
         assert!(json.get("plugins").is_none());
     }
 
-    /// Finds `hits`, and knows "creep" is Radiohead's song.
+    /// Finds `hits` and `pages`, and knows "creep" is Radiohead's song.
     struct SongBackend {
         hits: Vec<Hit>,
+        pages: Vec<plumb_index::pages::PlacedPage>,
     }
 
     impl SearchBackend for SongBackend {
         fn search(&self, _query: &str, limit: usize) -> Result<Vec<Hit>> {
             Ok(self.hits.iter().take(limit).cloned().collect())
+        }
+
+        fn search_full(
+            &self,
+            query: &str,
+            limit: usize,
+            _options: &SearchOptions,
+        ) -> Result<SearchResults> {
+            Ok(SearchResults {
+                hits: self.search(query, limit)?,
+                pages: self.pages.clone(),
+                site_search: None,
+                spelling: None,
+            })
         }
 
         fn num_docs(&self) -> u64 {
@@ -4324,9 +4372,12 @@ mod tests {
             )
             .unwrap()])
         };
-        let app = |hit: Hit| {
+        let app_with = |hit: Hit, pages: Vec<plumb_index::pages::PlacedPage>| {
             router_with(
-                Arc::new(SongBackend { hits: vec![hit] }),
+                Arc::new(SongBackend {
+                    hits: vec![hit],
+                    pages,
+                }),
                 WebSettings {
                     home: HomeCountry::Off,
                     plugins: plugins(),
@@ -4334,12 +4385,52 @@ mod tests {
                 },
             )
         };
+        let app = |hit: Hit| app_with(hit, Vec::new());
+        let article = |title: &str, description: &str| plumb_index::pages::PlacedPage {
+            hit: PageHit {
+                page: plumb_index::pages::Page::from_article(
+                    "en",
+                    plumb_core::Article {
+                        title: title.into(),
+                        description: Some(description.into()),
+                        views: 10_000,
+                        ..Default::default()
+                    },
+                ),
+                score: 1.0,
+                named: true,
+                popularity: 0.5,
+                whole: false,
+                learned: None,
+            },
+            under: None,
+            at: 0,
+        };
         let (_, _, page) = send(app(scored("creed.com", 0.5)), "/search?q=creep").await;
         assert!(page.contains("Radiohead - Creep"), "{page}");
-        // Not when the search names a site.
+        // A site found for a near spelling, named by its own name, and an
+        // article on a namesake do not stand in its way.
+        let mut creed = hit(
+            "creed.com",
+            "https://creed.com/",
+            Some("Creed - Official Website"),
+            None,
+        );
+        (creed.named, creed.official) = (true, true);
+        let film = article("Creep (2014 film)", "2014 film by Patrick Brice");
+        let (_, _, page) = send(app_with(creed, vec![film]), "/search?q=creep").await;
+        assert!(page.contains("Radiohead - Creep"), "{page}");
+        // Not when the search is a site's name, or an article's.
         let mut named = scored("creep.example", 0.5);
         named.named = true;
         let (_, _, page) = send(app(named), "/search?q=creep").await;
+        assert!(!page.contains("Radiohead - Creep"));
+        let creep = article("Creep", "Person who makes others uneasy");
+        let (_, _, page) = send(
+            app_with(scored("creed.com", 0.5), vec![creep]),
+            "/search?q=creep",
+        )
+        .await;
         assert!(!page.contains("Radiohead - Creep"));
         let (_, _, page) = send(app(scored("creed.com", 0.5)), "/search?q=weather").await;
         assert!(!page.contains("Radiohead - Creep"));

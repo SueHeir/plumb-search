@@ -73,7 +73,7 @@ A plugin can also run for what a search is about. When the node recognises a
 search as one thing (the article its info box would show, or else a song or
 album near the top of the results that the search names, or a song whose title
 alone is the search when it has 50,000 listeners and five times those of any
-other of that title, and the search names no site or article), it tells plugins
+other of that title, and no site or article is called just that), it tells plugins
 that thing's Wikidata item and its identifiers on other services, such as
 `imdb`, `tmdb-movie`, `tmdb-tv`, `musicbrainz-artist` or `steam`; a song has
 `musicbrainz-recording`, an album `musicbrainz-album`, and both say who they
