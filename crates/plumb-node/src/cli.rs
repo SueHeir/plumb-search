@@ -686,6 +686,14 @@ pub struct FetchFactsArgs {
     /// The articles file to add them to instead.
     #[arg(long, value_name = "PATH")]
     pub articles: Option<PathBuf>,
+    /// Where to read on when Wikidata's query service stops answering a
+    /// kind's deep pages (it times out on them): by default QLever's copy
+    /// of Wikidata.
+    #[arg(long, value_name = "URL", default_value = plumb_ingest::item_facts::DEEP_SPARQL_URL)]
+    pub deep_endpoint: String,
+    /// Ask only Wikidata's query service, never --deep-endpoint.
+    #[arg(long)]
+    pub wikidata_only: bool,
 }
 
 #[derive(Debug, Args)]
@@ -1136,6 +1144,12 @@ pub struct EvalArgs {
     /// How many of each page set's most read pages to keep.
     #[arg(long, value_name = "N", default_value_t = usize::MAX, hide_default_value = true)]
     pub pages_top: usize,
+    /// Keep the index built from --pages in this folder and reuse it on
+    /// later runs with the same page set files and the same `plumb`
+    /// binary, instead of rebuilding it every run. Runs at once share one
+    /// build; only the few most recently used indexes are kept.
+    #[arg(long, value_name = "DIR", env = "PLUMB_EVAL_PAGES_CACHE")]
+    pub pages_cache: Option<PathBuf>,
     /// Measure only one half of the queries: `tune` to try ranking changes
     /// on, `held-out` to check them on afterwards. Which half a query is in
     /// depends on its words alone (see eval/README.md) [default: both].
