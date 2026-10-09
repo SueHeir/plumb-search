@@ -2205,38 +2205,13 @@ pub fn place_pages(query: &str, sites: &[crate::Hit], mut pages: Vec<PageHit>) -
 /// The places no ranking overrides, applied after [`place_pages`] and
 /// after [`crate::learned::reorder`]: a docs page found by its words never
 /// comes before the best site unless that site is the docs' own (see
-/// [`docs_kept_below`]), a topic's article leads when the best site only
-/// shares a word with it ([`topic_leads`]), and, unless the query asks for
-/// them, podcasts come after the best site and the other pages listed on
-/// their own ("better call saul" wants amc.com and the article first).
+/// [`docs_kept_below`]), and, unless the query asks for them,
+/// podcasts come after the best site and the other pages listed on their
+/// own ("better call saul" wants amc.com and the article first).
 pub fn keep_page_rules(query: &str, sites: &[crate::Hit], placed: &mut Vec<PlacedPage>) {
     for page in placed.iter_mut().filter(|p| p.under.is_none()) {
         if docs_kept_below(&page.hit, sites) {
             page.at = page.at.max(1).min(sites.len());
-        }
-    }
-    // Only where the hand-made rules put it first too: they know a site
-    // called after an organization the query names (robinhood.com).
-    let topic = placed
-        .iter()
-        .enumerate()
-        .filter(|(_, p)| p.under.is_none() && p.at > 0 && topic_leads(&p.hit, sites))
-        .max_by(|(_, a), (_, b)| a.hit.score.total_cmp(&b.hit.score))
-        .map(|(i, _)| i);
-    let led = placed.iter().any(|p| p.under.is_none() && p.at == 0);
-    if let Some(i) = topic.filter(|_| !led) {
-        let alone: Vec<PageHit> = placed
-            .iter()
-            .map(|p| PageHit {
-                learned: None,
-                ..p.hit.clone()
-            })
-            .collect();
-        let first = place_pages_by_rules(query, sites, alone)
-            .into_iter()
-            .any(|p| p.at == 0 && p.under.is_none() && p.hit.page == placed[i].hit.page);
-        if first {
-            placed[i].at = 0;
         }
     }
     if asks_for_podcasts(query) {
@@ -2278,33 +2253,25 @@ fn last_word_in_other_number(query: &str) -> Option<String> {
     })
 }
 
-/// Whether `hit` is the article on a topic the whole query names, to be
-/// listed first whatever the learned order says: an article with no
-/// website of its own (a subject, an event, an idea, not an organization),
-/// when the best site only shares a word with it. That is a site the
-/// query does not name that matches it weakly ([`WEAK_SITE_MATCH`]), as
-/// government.ru for "government shutdown", or one it names that is
-/// neither official nor known by its name ([`crate::KEEPS_ITS_NAME_LINK_SCORE`])
-/// and is linked less than the article is read, as tariffs.net for
-/// "tariffs".
-pub fn topic_leads(hit: &PageHit, sites: &[crate::Hit]) -> bool {
-    if !hit.named || !hit.page.is_article() || hit.page.site.is_some() || hit.whole {
-        return false;
-    }
-    sites.first().is_some_and(|best| {
-        only_shares_a_word(best) && (!best.named || hit.popularity > best.link_score)
-    })
-}
+/// The text match ([`crate::Hit::text_score`]) below which a site the
+/// query does not name only shares a word with it (government.ru for
+/// "government shutdown", at 0.15). Sites a description finds by meaning
+/// match more ("used cars").
+const SHARES_A_WORD_MATCH: f32 = 0.25;
+
+/// The link score below which a site the query names is next to unknown
+/// (tariffs.net, at 0.015).
+const BARELY_LINKED: f32 = 0.1;
 
 /// Whether `site`, the best site found, only shares a word with the
 /// query: a site it does not name that matches it weakly
-/// ([`WEAK_SITE_MATCH`]), or one it names that is neither official nor
-/// known by its name ([`crate::KEEPS_ITS_NAME_LINK_SCORE`]).
-pub fn only_shares_a_word(site: &crate::Hit) -> bool {
+/// ([`SHARES_A_WORD_MATCH`]), or one it names that is not official and
+/// next to nobody links to ([`BARELY_LINKED`]).
+fn only_shares_a_word(site: &crate::Hit) -> bool {
     if site.named {
-        !site.official && site.link_score < crate::KEEPS_ITS_NAME_LINK_SCORE
+        !site.official && site.link_score < BARELY_LINKED
     } else {
-        site.placing_text_score.unwrap_or(site.text_score) < WEAK_SITE_MATCH
+        site.placing_text_score.unwrap_or(site.text_score) < SHARES_A_WORD_MATCH
     }
 }
 
@@ -2822,52 +2789,6 @@ mod tests {
         assert!(found("tariffs", &[official]).iter().all(|hit| !hit.named));
         assert_eq!(last_word_in_other_number("news"), None);
         assert_eq!(last_word_in_other_number("tariffs.net"), None);
-    }
-
-    #[test]
-    fn a_topic_s_article_leads_sites_that_only_share_a_word() {
-        let weak = |domain: &str, named: bool, link_score: f32| crate::Hit {
-            text_score: 0.15,
-            ..known_site(domain, named, link_score)
-        };
-        let article = found("Government shutdown", None, true, 0.4);
-        // As the learned order may leave it: after five sites.
-        let placed_at = |at: usize| PlacedPage {
-            hit: article.clone(),
-            under: None,
-            at,
-        };
-        let sites = [
-            weak("government.ru", false, 0.6),
-            weak("usa.gov", false, 0.68),
-        ];
-        let mut placed = vec![placed_at(2)];
-        keep_page_rules("government shutdown", &sites, &mut placed);
-        assert_eq!(placed[0].at, 0);
-        // A little-known site the query names: tariffs.net.
-        let named = [known_site("tariffs.net", true, 0.015)];
-        let mut placed = vec![placed_at(1)];
-        keep_page_rules("tariffs", &named, &mut placed);
-        assert_eq!(placed[0].at, 0);
-        // A site that matches well, an official one the query names, or an
-        // article about an organization with a site of its own keep their
-        // places.
-        let mut strong = known_site("shutdown.gov", false, 0.6);
-        strong.text_score = 0.8;
-        let mut official = known_site("tariffs.net", true, 0.015);
-        official.official = true;
-        for sites in [[strong], [official]] {
-            let mut placed = vec![placed_at(1)];
-            keep_page_rules("government shutdown", &sites, &mut placed);
-            assert_eq!(placed[0].at, 1);
-        }
-        let mut placed = vec![PlacedPage {
-            hit: found("Acme", Some("acme.com"), true, 0.4),
-            under: None,
-            at: 1,
-        }];
-        keep_page_rules("acme", &sites, &mut placed);
-        assert_eq!(placed[0].at, 1);
     }
 
     #[test]
