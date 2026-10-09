@@ -21,7 +21,7 @@
 //! How pages and sites are listed together is up to the caller; see
 //! [`PageHit::named`].
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
@@ -75,6 +75,14 @@ pub const DESCRIBED_MISSING_FROM: usize = 3;
 /// How much a query word an article only says counts, against one of its
 /// title.
 pub const DESCRIBED_WORD: f32 = 0.5;
+/// Most `name` of a Wikipedia article whose lead ([`Page::lead`]), with
+/// its names and description, has every word of a query (stemmed, without
+/// the asking words) of at least [`DESCRIBED_QUERY_WORDS`]: the article
+/// whose lead matches them best gets it, others less by how much worse
+/// theirs does. "triassic jurassic cretaceous" finds Mesozoic.
+pub const LEAD_MATCH: f32 = 0.55;
+/// Most articles found by their leads looked at for one query.
+const LEAD_CANDIDATES: usize = 20;
 /// Words that only ask ("what does resin mean"), left out of a query
 /// matched against what articles say of themselves.
 const ASKING_WORDS: &[&str] = &[
@@ -775,6 +783,9 @@ struct Fields {
     /// Stemmed words of a Wikipedia article's names and what it says of
     /// itself ([`Page::about`]); empty for other pages.
     about: Field,
+    /// Stemmed words of a Wikipedia article's lead ([`Page::lead`]), with
+    /// how often each comes, so the leads most about the query rank first.
+    lead: Field,
     popularity: Field,
     /// The registrable domain of the official website of what a Wikipedia
     /// article is about ([`Page::site`]), for [`PageSearcher::site_popularity`].
@@ -816,6 +827,14 @@ fn schema() -> (Schema, Fields) {
                 .set_index_option(IndexRecordOption::Basic),
         ),
     );
+    let lead = builder.add_text_field(
+        "lead",
+        TextOptions::default().set_indexing_options(
+            TextFieldIndexing::default()
+                .set_tokenizer(STEMMED_ANALYZER)
+                .set_index_option(IndexRecordOption::WithFreqs),
+        ),
+    );
     let popularity = builder.add_u64_field("popularity", FAST | STORED);
     let site = builder.add_text_field("site", STRING);
     let page = builder.add_text_field("page", STORED);
@@ -826,6 +845,7 @@ fn schema() -> (Schema, Fields) {
             keys,
             topic,
             about,
+            lead,
             popularity,
             site,
             page,
@@ -1084,6 +1104,9 @@ pub fn build_page_index(
         }
         if let Some(about) = page.about() {
             document.add_text(fields.about, about);
+        }
+        if let Some(lead) = page.lead.as_deref().filter(|_| page.is_article()) {
+            document.add_text(fields.lead, lead);
         }
         // A docs page's title alone ("Introduction") names nothing: it is
         // named by its product's name and title ("python sorting
@@ -1570,6 +1593,47 @@ impl PageSearcher {
                 }
             }
         }
+        // Articles whose lead, names and description have every such word:
+        // "triassic jurassic cretaceous" finds Mesozoic, "manubrium
+        // sternum" Sternum. Ranked by how well the leads match, not by
+        // how often the articles are read.
+        let mut lead_scores: HashMap<tantivy::DocAddress, f32> = HashMap::new();
+        if described.len() >= DESCRIBED_QUERY_WORDS {
+            let every_word = BooleanQuery::new(
+                described
+                    .iter()
+                    .map(|stem| {
+                        let either: Vec<(Occur, Box<dyn Query>)> = [
+                            (self.fields.lead, IndexRecordOption::WithFreqs),
+                            (self.fields.about, IndexRecordOption::Basic),
+                        ]
+                        .into_iter()
+                        .map(|(field, option)| {
+                            (
+                                Occur::Should,
+                                Box::new(TermQuery::new(Term::from_field_text(field, stem), option))
+                                    as Box<dyn Query>,
+                            )
+                        })
+                        .collect();
+                        (
+                            Occur::Must,
+                            Box::new(BooleanQuery::new(either)) as Box<dyn Query>,
+                        )
+                    })
+                    .collect(),
+            );
+            for (score, address) in searcher.search(
+                &every_word,
+                &TopDocs::with_limit(LEAD_CANDIDATES).order_by_score(),
+            )? {
+                lead_scores.insert(address, score);
+                if !addresses.contains(&address) {
+                    addresses.push(address);
+                }
+            }
+        }
+        let best_lead = lead_scores.values().copied().fold(0.0f32, f32::max);
         // The query's rarest word that some question has: what it is
         // about. A question without it has only the asking words ("how to
         // get rid of aphids" found "How do I get rid of my bounty?").
@@ -1640,6 +1704,10 @@ impl PageSearcher {
             }
             if !named && !whole {
                 name = name.max(self.described_match(&page, &described));
+                if let Some(&lead) = lead_scores.get(&address).filter(|_| page.is_article()) {
+                    name = name
+                        .max(LEAD_MATCH * (0.5 + 0.5 * lead / best_lead.max(f32::MIN_POSITIVE)));
+                }
             }
             if name <= 0.0 {
                 continue;
@@ -1732,7 +1800,7 @@ impl PageSearcher {
 
     /// How well a Wikipedia article covers the query's words `stems`
     /// ([`PageSearcher::described_words`]) with one of its names and what it
-    /// says of itself ([`Page::about`]): 0 unless a name has some of them
+    /// says of itself ([`Page::about`], and its lead): 0 unless a name has some of them
     /// and the article all of them, or all but one when the name is whole
     /// in the query and the query has [`DESCRIBED_MISSING_FROM`] words.
     /// Otherwise [`PARTIAL_MATCH`] times the share of the query in the
@@ -1746,9 +1814,12 @@ impl PageSearcher {
         let Some(about) = page.about() else {
             return 0.0;
         };
-        let about: HashSet<String> = analysis::tokens(&self.stemmed, &about)
+        let mut about: HashSet<String> = analysis::tokens(&self.stemmed, &about)
             .into_iter()
             .collect();
+        if let Some(lead) = &page.lead {
+            about.extend(analysis::tokens(&self.stemmed, lead));
+        }
         let missing = stems.iter().filter(|stem| !about.contains(*stem)).count();
         let mut best = 0.0f32;
         for name in
@@ -4016,6 +4087,44 @@ mod tests {
             titles(&s.search("what is the manubrium", 5).unwrap()),
             ["Sternum"]
         );
+    }
+
+    #[test]
+    fn articles_are_found_by_their_leads() {
+        let led = |title: &str, views: u64, lead: &str| {
+            let mut page = page(title, views, &[]);
+            page.lead = Some(lead.into());
+            page
+        };
+        let (_dir, s) = searcher(&[
+            led(
+                "Mesozoic",
+                200_000,
+                "The Mesozoic Era is the era of Earth's geological history, comprising the Triassic, Jurassic and Cretaceous Periods.",
+            ),
+            led(
+                "Dinosaur",
+                900_000,
+                "Dinosaurs are a diverse group of reptiles that emerged during the Triassic period. They became dominant in the Jurassic, and most died out at the end of the Cretaceous, with birds the only survivors of a long history spanning many periods and kinds of animals on every continent.",
+            ),
+            led(
+                "Jurassic Park",
+                800_000,
+                "Jurassic Park is a 1993 American science fiction film.",
+            ),
+            led("Okinawa Prefecture", 300_000, "Okinawa Prefecture is the southernmost prefecture of Japan, with a culture of its own."),
+        ]);
+        let hits = s.search("triassic jurassic cretaceous", 5).unwrap();
+        assert_eq!(hits[0].page.title, "Mesozoic", "{:?}", titles(&hits));
+        assert!(!hits[0].named && hits[0].score >= MIN_PARTIAL_SCORE);
+        assert!(titles(&hits).contains(&"Dinosaur"));
+        assert!(!titles(&hits).contains(&"Jurassic Park"));
+        assert_eq!(
+            titles(&s.search("okinawa culture", 5).unwrap()).first(),
+            Some(&"Okinawa Prefecture")
+        );
+        // One word is a name, not a description.
+        assert!(!titles(&s.search("triassic", 5).unwrap()).contains(&"Mesozoic"));
     }
 
     #[test]
