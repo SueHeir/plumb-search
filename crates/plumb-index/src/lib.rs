@@ -1184,6 +1184,7 @@ impl Searcher {
                         .then_with(|| b.link_score.total_cmp(&a.link_score))
                         .then_with(|| a.domain.cmp(&b.domain))
                 });
+                docs_site_first(query_text, &name, &mut hits);
                 hits.truncate(limit);
                 found.hits = hits;
                 found.site_search = results.site_search.or(found.site_search);
@@ -2343,6 +2344,31 @@ pub fn without_intent_words(query: &str) -> Option<String> {
         }
     }
     (words.len() < all).then(|| words.join(" "))
+}
+
+/// Puts first the docs site of what `name` names when `query` asks for its
+/// docs ("postgres docs", "mdn web docs"): far more sites link to
+/// github.com with "docs" than to postgresql.org.
+fn docs_site_first(query: &str, name: &str, hits: &mut [Hit]) {
+    let words = normalize_text(query);
+    if !(words.ends_with(" docs") || words.ends_with(" documentation")) {
+        return;
+    }
+    let Some(site) = plumb_core::docs::named_site(name) else {
+        return;
+    };
+    // The docs' own site, or the site it is part of: mozilla.org for
+    // developer.mozilla.org.
+    let of_docs = |domain: &str| {
+        site.domain == domain
+            || site
+                .domain
+                .strip_suffix(domain)
+                .is_some_and(|sub| sub.ends_with('.'))
+    };
+    if let Some(at) = hits.iter().position(|hit| of_docs(&hit.domain)) {
+        hits[..=at].rotate_right(1);
+    }
 }
 
 /// The best link score among `docs`, 0 for none.
@@ -6108,6 +6134,48 @@ mod tests {
         ] {
             assert_eq!(without_intent_words(query).as_deref(), name, "{query:?}");
         }
+    }
+
+    #[test]
+    fn docs_searches_put_the_docs_site_first() {
+        let hit = |domain: &str| Hit {
+            domain: domain.into(),
+            url: format!("https://{domain}/"),
+            title: None,
+            description: None,
+            score: 1.0,
+            text_score: 1.0,
+            link_score: 1.0,
+            country: None,
+            named: false,
+            official: false,
+            key_pages: Vec::new(),
+            demand: None,
+            missing_words: false,
+            placing_text_score: None,
+        };
+        let order = |query: &str, name: &str| {
+            let mut hits = vec![hit("github.com"), hit("postgresql.org"), hit("mozilla.org")];
+            docs_site_first(query, name, &mut hits);
+            hits.into_iter().map(|h| h.domain).collect::<Vec<_>>()
+        };
+        assert_eq!(
+            order("postgres docs", "postgres"),
+            ["postgresql.org", "github.com", "mozilla.org"]
+        );
+        assert_eq!(
+            order("mdn web docs", "mdn"),
+            ["mozilla.org", "github.com", "postgresql.org"]
+        );
+        // Not asking for docs, or not naming a docs site: as it was.
+        assert_eq!(
+            order("postgres login", "postgres"),
+            ["github.com", "postgresql.org", "mozilla.org"]
+        );
+        assert_eq!(
+            order("acme docs", "acme"),
+            ["github.com", "postgresql.org", "mozilla.org"]
+        );
     }
 
     #[test]
