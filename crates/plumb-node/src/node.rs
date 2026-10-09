@@ -118,6 +118,7 @@ mod pages;
 mod places;
 mod round;
 pub mod schedule;
+mod shared_vectors;
 pub(crate) mod store;
 mod trim;
 mod worker;
@@ -183,11 +184,16 @@ pub struct NodeConfig {
     pub web_search: Option<Engine>,
     /// Every client of `/mcp` may use `read_page`, not only this computer's.
     pub mcp_read_pages: bool,
+    /// How `read_page` fetches pages.
+    pub page_reader: plumb_crawl::ReadConfig,
     /// Rank by meaning too, for searches that name no site: the node
     /// downloads a small embedding model into `DIR/model` (about 130 MB)
     /// and keeps a vector of each site's text in `DIR/vectors.bin`, made in
     /// the background after each index build, best-ranked sites first.
     pub search_by_meaning: bool,
+    /// The model search by meaning runs; its files go in their own
+    /// directory, and switching makes the vectors again.
+    pub meaning_model: crate::meaning::MeaningModel,
     /// Threads that embed sites for search by meaning; `None` for half the
     /// CPUs this node may use.
     pub embed_threads: Option<usize>,
@@ -264,6 +270,10 @@ pub struct NodeConfig {
     /// network learns what is popular (see [`network`]). Needs `network`.
     /// Off by default.
     pub share_popularity: bool,
+    /// Let AI apps on this computer share a finding with other nodes when
+    /// they ask to, through `/mcp`'s `report_finding` (see
+    /// [`plumb_net::leads`]). Needs `network`. Off by default.
+    pub share_findings: bool,
     /// The settings until someone changes them on the panel, which saves
     /// them in `DIR/settings.json`.
     pub settings: NodeSettings,
@@ -311,7 +321,9 @@ impl NodeConfig {
             country: HomeCountry::Auto,
             web_search: None,
             mcp_read_pages: false,
+            page_reader: plumb_crawl::ReadConfig::default(),
             search_by_meaning: false,
+            meaning_model: crate::meaning::MeaningModel::default(),
             embed_threads: None,
             seed_from_network: true,
             sources: SeedSources::default(),
@@ -320,6 +332,7 @@ impl NodeConfig {
             network: None,
             private_search: false,
             share_popularity: false,
+            share_findings: false,
             crawl_any_site: false,
             crawl_home_site: true,
             drop_dead_sites: false,
@@ -390,6 +403,9 @@ impl NodeConfig {
         if self.share_popularity && self.network.is_none() {
             bail!("sharing popularity needs the network");
         }
+        if self.share_findings && self.network.is_none() {
+            bail!("sharing findings needs the network");
+        }
         if self.crawl_any_site && self.network.is_none() {
             bail!("crawling any site needs the network");
         }
@@ -458,6 +474,10 @@ pub struct SeedSources {
     /// Where the embedding model's files are downloaded from, for search by
     /// meaning: each of [`plumb_embed::MODEL_FILES`] is appended.
     pub model_base_url: String,
+    /// Where EmbeddingGemma's files are downloaded from, for
+    /// [`crate::meaning::MeaningModel::Gemma`]: each file name with its
+    /// address.
+    pub gemma_downloads: Vec<(String, String)>,
     /// The adult blocklist safe search leaves out (see `node::adult`);
     /// `None` for none.
     pub adult_list_url: Option<String>,
@@ -473,6 +493,10 @@ impl Default for SeedSources {
             wikidata_pacing: download::WikidataPacing::default(),
             cc_ranks_url: None,
             model_base_url: plumb_embed::MODEL_BASE_URL.to_string(),
+            gemma_downloads: plumb_embed::GEMMA_DOWNLOADS
+                .iter()
+                .map(|(name, url)| (name.to_string(), url.to_string()))
+                .collect(),
             adult_list_url: Some(plumb_core::safe::ADULT_LIST_URL.to_string()),
         }
     }
@@ -616,6 +640,10 @@ pub struct Status {
     pub paused_until: Option<u64>,
     /// Bytes the data folder takes, counted at most a minute ago.
     pub disk_used: u64,
+    /// The storage limit in bytes ([`NodeSettings::storage_limit_mb`]); 0
+    /// when there is none.
+    #[serde(default)]
+    pub storage_limit: u64,
     /// Bytes downloaded today (UTC): crawls and seed data.
     pub downloaded_today: u64,
     /// Bytes downloaded since the node was set up.
@@ -699,8 +727,8 @@ pub struct LastError {
     pub retry_at: Option<u64>,
 }
 
-/// A running node. Dropping the handle leaves the node running until the
-/// runtime shuts down; call [`NodeHandle::shutdown`] to stop it cleanly.
+/// A running node. Dropping the handle stops its work without waiting for
+/// it; call [`NodeHandle::shutdown`] to stop it cleanly.
 #[derive(Debug)]
 pub struct NodeHandle {
     addr: SocketAddr,
@@ -873,6 +901,7 @@ pub async fn start(mut config: NodeConfig) -> Result<NodeHandle> {
         home: inner.config.country.clone(),
         web_search: inner.config.web_search,
         read_pages_for_all: inner.config.mcp_read_pages,
+        page_reader: inner.config.page_reader.clone(),
         plugins: load_plugins(&inner),
     };
     let app = web::node_router_with(inner.clone(), inner.clone(), settings);
@@ -1046,6 +1075,12 @@ fn open_data_dir(config: &NodeConfig, rank: RankConfig) -> Result<Opened> {
         .with_context(|| format!("creating {}", paths.indexes.display()))?;
     let lock = store::lock(&paths)?;
     store::remove_leftovers(&paths);
+    // Before anything reads the files it puts back.
+    match backup::apply_pending(&paths.data) {
+        Ok(true) => info!("finished restoring a backup"),
+        Ok(false) => {}
+        Err(err) => warn!("{err:#}"),
+    }
     let mut saved =
         store::load_state(&paths).unwrap_or_else(|| SavedState::fresh(config.initial_crawl));
 
@@ -1169,6 +1204,9 @@ struct Inner {
     /// When this node last put an index in service (Unix time; 0 for not
     /// since it started).
     last_build: std::sync::atomic::AtomicU64,
+    /// How long, in seconds, the last index build of the records file took
+    /// (0 for none since it started).
+    last_build_took: std::sync::atomic::AtomicU64,
     /// When this node last looked for sites to drop to get back under its
     /// storage limit (Unix time; 0 for not since it started).
     last_trim: std::sync::atomic::AtomicU64,
@@ -1182,6 +1220,9 @@ struct Inner {
     inbox_lock: Mutex<()>,
     /// Held while the whole records file is in memory ([`Inner::hold_records`]).
     records_held: Mutex<()>,
+    /// The page sets whose file is being downloaded or cut, so the two
+    /// never write the same file at once.
+    set_files_busy: Mutex<std::collections::HashSet<&'static str>>,
     /// Set once the index was rebuilt to add missing buckets.
     buckets_rebuilt: AtomicBool,
     /// The results opened this week, when sharing popularity.
@@ -1407,11 +1448,13 @@ impl Inner {
             kept_found: Mutex::new(std::collections::HashMap::new()),
             fill: Mutex::new(fill_state),
             last_build: std::sync::atomic::AtomicU64::new(0),
+            last_build_took: std::sync::atomic::AtomicU64::new(0),
             last_trim: std::sync::atomic::AtomicU64::new(0),
             round_sites: std::sync::atomic::AtomicU64::new(opened.sites),
             over_since: std::sync::atomic::AtomicU64::new(0),
             inbox_lock: Mutex::new(()),
             records_held: Mutex::new(()),
+            set_files_busy: Mutex::default(),
             buckets_rebuilt: AtomicBool::new(false),
             picks: Mutex::new(None),
             settings: Mutex::new(opened.settings),
@@ -1433,7 +1476,7 @@ impl Inner {
         let activity = self.activity().clone();
         let saved = self.saved();
         let index = self.current_summary();
-        let pause = self.pause();
+        let pause = self.pause_shown();
         Status {
             phase: if index.is_some() {
                 Phase::Ready
@@ -1469,7 +1512,8 @@ impl Inner {
             background_updates: self.settings().background_updates,
             paused: pause.as_ref().map(|p| p.reason.clone()),
             paused_until: pause.and_then(|p| p.until),
-            disk_used: self.disk_used(),
+            disk_used: self.disk_used_shown(),
+            storage_limit: self.settings().storage_limit_mb.saturating_mul(MB),
             downloaded_today: saved.downloaded_today(now_unix()),
             downloaded_total: saved.downloaded_total,
             homepages_visited: saved.homepages_visited,
@@ -1483,6 +1527,47 @@ impl Inner {
 
     /// Why crawls and refreshes must wait now, and until when, if they must.
     fn pause(&self) -> Option<Pause> {
+        self.pause_given(|| self.disk_used())
+    }
+
+    /// [`Inner::pause`] by the last count of the data folder, for showing:
+    /// counting a large folder again takes many seconds on a busy server,
+    /// and every search asks for the status.
+    fn pause_shown(&self) -> Option<Pause> {
+        self.pause_given(|| self.disk_used_shown())
+    }
+
+    /// [`Inner::pause`], with `disk_used` the size of the data folder.
+    fn pause_given(&self, disk_used: impl FnOnce() -> u64) -> Option<Pause> {
+        self.download_pause().or_else(|| {
+            let limit = self.settings().storage_limit_mb;
+            (limit > 0 && disk_used() >= limit.saturating_mul(MB))
+                .then(|| Pause::new("Paused: the storage limit is reached", None))
+        })
+    }
+
+    /// Why downloads of page sets, vectors and the meaning model must wait
+    /// now, if they must: as crawls, but for the storage limit, which they
+    /// keep to by what they download.
+    fn download_pause(&self) -> Option<Pause> {
+        let limit = self.settings().download_limit_mb_per_day;
+        let now = now_unix();
+        self.owner_pause().or_else(|| {
+            (limit > 0 && self.saved().downloaded_today(now) >= limit.saturating_mul(MB)).then(
+                || {
+                    Pause::new(
+                        "Paused until tomorrow: today's download limit is reached",
+                        Some(store::next_day(now)),
+                    )
+                },
+            )
+        })
+    }
+
+    /// The pauses the owner set: background updates off, paused for a
+    /// while, or outside the crawl hours. A download under way stops for
+    /// these, not for the download limit (it would start over every day).
+    fn owner_pause(&self) -> Option<Pause> {
         let settings = self.settings();
         let now = now_unix();
         if !settings.background_updates {
@@ -1501,17 +1586,6 @@ impl Inner {
                 ));
             }
         }
-        let limit = settings.download_limit_mb_per_day;
-        if limit > 0 && self.saved().downloaded_today(now) >= limit.saturating_mul(MB) {
-            return Some(Pause::new(
-                "Paused until tomorrow: today's download limit is reached",
-                Some(store::next_day(now)),
-            ));
-        }
-        let limit = settings.storage_limit_mb;
-        if limit > 0 && self.disk_used() >= limit.saturating_mul(MB) {
-            return Some(Pause::new("Paused: the storage limit is reached", None));
-        }
         None
     }
 
@@ -1525,12 +1599,13 @@ impl Inner {
         Some(match work {
             MeaningWork::Downloading => {
                 // The model's files, the one being written included.
-                let done = store::dir_size(&self.paths.data.join(embedding::MODEL_DIR)) / MB;
+                let model = self.config.meaning_model;
+                let done = store::dir_size(&self.paths.data.join(model.dir_name())) / MB;
                 BackgroundWork {
                     detail: "Downloading the search-by-meaning model".into(),
                     progress: Some(Progress {
-                        done: done.min(embedding::MODEL_MB),
-                        total: embedding::MODEL_MB,
+                        done: done.min(model.size_mb()),
+                        total: model.size_mb(),
                         unit: "MB".into(),
                     }),
                     error: None,
@@ -1576,22 +1651,39 @@ impl Inner {
 
     /// The size of the data folder, counted again when the last count is
     /// more than [`DISK_COUNT_MAX_AGE`] old or [`Inner::recount_disk`]
-    /// asked for it.
+    /// asked for it. The count is made without holding the lock, so a
+    /// status page does not wait on it.
     fn disk_used(&self) -> u64 {
-        let mut count = self.disk.lock().unwrap_or_else(PoisonError::into_inner);
-        match *count {
-            Some((at, bytes)) if at.elapsed() < DISK_COUNT_MAX_AGE => bytes,
-            _ => {
-                let bytes = store::dir_size(&self.paths.data);
-                *count = Some((std::time::Instant::now(), bytes));
-                bytes
+        if let Some((at, bytes)) = *self.disk.lock().unwrap_or_else(PoisonError::into_inner) {
+            if at.elapsed() < DISK_COUNT_MAX_AGE {
+                return bytes;
             }
+        }
+        let bytes = store::dir_size(&self.paths.data);
+        *self.disk.lock().unwrap_or_else(PoisonError::into_inner) =
+            Some((std::time::Instant::now(), bytes));
+        bytes
+    }
+
+    /// The last count of [`Inner::disk_used`], however old, for showing:
+    /// the background work counts again often enough. Counts only when
+    /// there is none yet.
+    fn disk_used_shown(&self) -> u64 {
+        let last = *self.disk.lock().unwrap_or_else(PoisonError::into_inner);
+        match last {
+            Some((_, bytes)) => bytes,
+            None => self.disk_used(),
         }
     }
 
     /// Has the next [`Inner::disk_used`] count the data folder again.
     fn recount_disk(&self) {
-        *self.disk.lock().unwrap_or_else(PoisonError::into_inner) = None;
+        let mut count = self.disk.lock().unwrap_or_else(PoisonError::into_inner);
+        // Kept for showing until then.
+        *count = count.and_then(|(_, bytes)| {
+            let stale = std::time::Instant::now().checked_sub(DISK_COUNT_MAX_AGE)?;
+            Some((stale, bytes))
+        });
     }
 
     fn settings(&self) -> NodeSettings {
@@ -1760,8 +1852,11 @@ impl Inner {
         Ok(())
     }
 
+    /// Whether the node is stopping: [`NodeHandle::shutdown`] was called,
+    /// or the handle was dropped (a test that panicked), which the async
+    /// tasks' waits already take as a stop.
     fn stopping(&self) -> bool {
-        *self.stopped.borrow()
+        *self.stopped.borrow() || self.stopped.has_changed().is_err()
     }
 
     /// Waits for, and returns, the turn to load the whole records file: a
@@ -1913,41 +2008,17 @@ impl SearchBackend for Inner {
         limit: usize,
         options: &SearchOptions,
     ) -> Result<SearchResults> {
-        let Some(index) = self.current() else {
-            bail!("the search index is not ready yet");
-        };
-        let meaning = self.meaning.get();
-        // Sites on the adult blocklist are left out after ranking, so a
-        // few more are ranked.
-        let adult = self
-            .adult_list()
-            .filter(|_| options.safe != SafeSearch::Off);
-        let wanted = match adult {
-            Some(_) => limit + adult::MARGIN,
-            None => limit,
-        };
-        let mut results = match network::handle(self).map(|net| net.popularity()) {
-            None => index
-                .backend()
-                .search_full_with(query, wanted, options, meaning.as_deref())?,
-            Some(table) => {
-                let candidates = wanted.max(network::POPULARITY_CANDIDATES);
-                let mut results = index.backend().search_full_with(
-                    query,
-                    candidates,
-                    options,
-                    meaning.as_deref(),
-                )?;
-                network::apply_popularity(&table, query, &mut results.hits);
-                results
-            }
-        };
-        if let Some(adult) = &adult {
-            results.hits.retain(|hit| !adult.contains(&hit.domain));
-        }
-        results.hits.truncate(limit);
-        pages::add_pages(self, query, options, &mut results);
-        Ok(results)
+        self.search_with_rank(query, limit, options, None)
+    }
+
+    fn search_ranked(
+        &self,
+        query: &str,
+        limit: usize,
+        options: &SearchOptions,
+        rank: &RankConfig,
+    ) -> Result<SearchResults> {
+        self.search_with_rank(query, limit, options, Some(rank))
     }
 
     fn places(
@@ -1963,8 +2034,65 @@ impl SearchBackend for Inner {
         self.map.get()
     }
 
+    fn known_song(&self, query: &str, options: &SearchOptions) -> Option<plumb_index::pages::Page> {
+        pages::known_song(self, query, options)
+    }
+
     fn num_docs(&self) -> u64 {
         self.current_summary().map_or(0, |(_, docs)| docs)
+    }
+}
+
+impl Inner {
+    /// [`SearchBackend::search_full`], with `rank` instead of the node's
+    /// own knobs when given.
+    fn search_with_rank(
+        &self,
+        query: &str,
+        limit: usize,
+        options: &SearchOptions,
+        rank: Option<&RankConfig>,
+    ) -> Result<SearchResults> {
+        let Some(index) = self.current() else {
+            bail!("the search index is not ready yet");
+        };
+        let meaning = self.meaning.get();
+        // Sites on the adult blocklist are left out after ranking, so a
+        // few more are ranked.
+        let adult = self
+            .adult_list()
+            .filter(|_| options.safe != SafeSearch::Off);
+        let wanted = match adult {
+            Some(_) => limit + adult::MARGIN,
+            None => limit,
+        };
+        let mut results = match network::handle(self).map(|net| net.popularity()) {
+            None => index.backend().search_full_with(
+                query,
+                wanted,
+                options,
+                meaning.as_deref(),
+                rank,
+            )?,
+            Some(table) => {
+                let candidates = wanted.max(network::POPULARITY_CANDIDATES);
+                let mut results = index.backend().search_full_with(
+                    query,
+                    candidates,
+                    options,
+                    meaning.as_deref(),
+                    rank,
+                )?;
+                network::apply_popularity(&table, query, &mut results.hits);
+                results
+            }
+        };
+        if let Some(adult) = &adult {
+            results.hits.retain(|hit| !adult.contains(&hit.domain));
+        }
+        results.hits.truncate(limit);
+        pages::add_pages(self, query, options, &mut results);
+        Ok(results)
     }
 }
 
@@ -2003,6 +2131,10 @@ impl StatusSource for Inner {
 
     fn shares_popularity(&self) -> bool {
         network::shares_popularity(self)
+    }
+
+    fn shares_findings(&self) -> bool {
+        self.config.share_findings && self.net.get().is_some()
     }
 
     fn record_pick(&self, query: &str, domain: &str) {
@@ -2087,6 +2219,10 @@ impl StatusSource for Inner {
     fn restore_backup(&self, restored: &backup::Backup) -> Result<()> {
         // Restoring can be undone with the backup made first.
         let before = backup::save(&self.paths.data, Some("before-restore"))?;
+        // Written now, and again at the next start, before the network
+        // reads them: until it stops, it saves its keys and credits over
+        // these.
+        restored.stage(&self.paths.data)?;
         restored.restore(&self.paths.data)?;
         if let Some(settings) = store::load_settings(&self.paths) {
             *self.settings.lock().unwrap_or_else(PoisonError::into_inner) = settings;
@@ -2096,9 +2232,12 @@ impl StatusSource for Inner {
             "Backup from {} restored; the settings before it are in {}",
             restored.version, before.name
         ));
-        // Keys and features take effect at the next start.
+        // Keys, credits and features take effect at the next start.
         if self.restart.request() {
             self.journal.info("Restarting to finish restoring");
+        } else {
+            self.journal
+                .warning("Restart the node to finish restoring its keys and credits");
         }
         Ok(())
     }

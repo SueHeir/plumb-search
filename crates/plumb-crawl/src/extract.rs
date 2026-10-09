@@ -26,6 +26,8 @@ use plumb_core::{
     MAX_HEADING_WORDS, MAX_TEXT_CHARS, SEARCH_TERMS,
 };
 use tracing::debug;
+
+use crate::structured;
 use url::Url;
 
 use crate::terms::{pick_terms, TERM_WORDS};
@@ -243,6 +245,10 @@ struct Page<'a> {
     /// Visible text outside [`CHROME_ELEMENTS`] and headings, up to
     /// [`BODY_TEXT_BYTES`].
     body: String,
+    /// The text of the `<script type="application/ld+json">` being read.
+    json_ld: Option<String>,
+    /// JSON-LD blocks read so far, at most [`structured::MAX_BLOCKS`].
+    json_ld_blocks: Vec<String>,
     /// The GET form being read, while no search address has been found.
     form: Option<SearchForm>,
     /// The link being read, when it is one to keep.
@@ -340,6 +346,8 @@ impl<'a> Page<'a> {
             headings: Vec::new(),
             heading_words: 0,
             body: String::new(),
+            json_ld: None,
+            json_ld_blocks: Vec::new(),
             form: None,
             anchor: None,
             links: Vec::new(),
@@ -401,6 +409,14 @@ impl<'a> Page<'a> {
                     self.heading_text = Some(String::new());
                 }
             }
+            "script"
+                if self.json_ld_blocks.len() < structured::MAX_BLOCKS
+                    && attr(tag, "type").is_some_and(|kind| {
+                        kind.trim().eq_ignore_ascii_case("application/ld+json")
+                    }) =>
+            {
+                self.json_ld = Some(String::new());
+            }
             "title" if self.foreign == 0 && !self.title_seen => {
                 self.title_seen = true;
                 self.title_text = Some(String::new());
@@ -435,6 +451,7 @@ impl<'a> Page<'a> {
             }
             "title" => self.close_title(),
             "form" => self.close_form(),
+            "script" => self.close_json_ld(),
             "h1" | "h2" => self.close_heading(),
             "svg" | "math" => self.foreign = self.foreign.saturating_sub(1),
             _ => {}
@@ -466,6 +483,15 @@ impl<'a> Page<'a> {
         }
         if let Some(anchor) = self.visible_anchor() {
             anchor.text.push_str(text);
+        }
+        if let Some(json) = &mut self.json_ld {
+            // One byte past the limit marks the block as too long to read.
+            let room = (structured::MAX_BLOCK_BYTES + 1).saturating_sub(json.len());
+            let mut end = room.min(text.len());
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            json.push_str(&text[..end]);
         }
         if self.body_open() {
             let room = BODY_TEXT_BYTES - self.body.len();
@@ -611,6 +637,12 @@ impl<'a> Page<'a> {
         }
     }
 
+    fn close_json_ld(&mut self) {
+        if let Some(json) = self.json_ld.take() {
+            self.json_ld_blocks.push(json);
+        }
+    }
+
     fn close_title(&mut self) {
         if let Some(text) = self.title_text.take() {
             self.title = clean_text(&text);
@@ -746,6 +778,7 @@ impl<'a> Page<'a> {
         self.close_title();
         self.close_heading();
         self.close_form();
+        self.close_json_ld();
         let words: Vec<&str> = self
             .body
             .split_whitespace()
@@ -759,6 +792,10 @@ impl<'a> Page<'a> {
             title: self.title,
             description: self.description.or(self.og_description),
             site_name: self.site_name,
+            structured_names: structured::site_names(
+                &self.json_ld_blocks,
+                self.own_domain.as_deref(),
+            ),
             search_url: self.search_url,
             language: self.language,
             icons: best_icons(self.icons),
@@ -1198,6 +1235,25 @@ mod tests {
                 ..PageMeta::default()
             }
         );
+    }
+
+    #[test]
+    fn reads_the_site_names_in_json_ld() {
+        let meta = extract(
+            "https://www.example.com/",
+            r#"<head>
+            <script type="application/ld+json">
+              {"@context": "https://schema.org", "@type": "Organization",
+               "name": "Example Bank", "alternateName": "EXB",
+               "url": "https://www.example.com/"}
+            </script>
+            <script type="Application/LD+JSON">[{"@type": "WebSite", "name": "Example"}]</script>
+            <script>var notThis = {"@type": "WebSite", "name": "Script"};</script>
+            </head><body><p>Hello</p></body>"#,
+        );
+        assert_eq!(meta.structured_names, ["Example Bank", "EXB", "Example"]);
+        // The JSON stays out of the page's text.
+        assert_eq!(meta.body_text.as_deref(), Some("Hello"));
     }
 
     #[test]

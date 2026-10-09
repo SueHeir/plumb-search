@@ -20,6 +20,7 @@ use tokio::net::{TcpListener, TcpStream};
 
 use super::store::{self, SavedState};
 use super::*;
+use crate::meaning::MeaningModel;
 
 fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -76,6 +77,7 @@ fn test_config(dir: &Path) -> NodeConfig {
         wikidata_pacing: quick_wikidata(),
         cc_ranks_url: None,
         model_base_url: format!("{nowhere}/model/"),
+        gemma_downloads: Vec::new(),
         adult_list_url: None,
     };
     config
@@ -738,6 +740,7 @@ impl SeedHost {
             wikidata_pacing: quick_wikidata(),
             cc_ranks_url: None,
             model_base_url: self.url("/model/"),
+            gemma_downloads: Vec::new(),
             adult_list_url: None,
         }
     }
@@ -1927,6 +1930,23 @@ async fn crawling_waits_for_the_next_day_once_the_download_limit_is_reached() {
     assert_eq!(status.detail, status.paused.clone().unwrap());
     assert_eq!((status.crawl_left, status.downloaded_today), (700, 3 * MB));
     assert!(status.disk_used > 0);
+    // Page set, vector and model downloads wait too.
+    assert!(node.inner.download_pause().is_some());
+    // The storage limit pauses crawls, not those downloads: they keep to it
+    // by what they take.
+    let mut settings = node.inner.settings();
+    settings.download_limit_mb_per_day = 0;
+    settings.storage_limit_mb = 1;
+    node.inner.change_settings(settings).unwrap();
+    std::fs::write(dir.path().join("filler"), vec![0u8; 2 * MB as usize]).unwrap();
+    node.inner.recount_disk();
+    assert!(node.inner.pause().is_some());
+    assert!(node.inner.download_pause().is_none());
+    // The status says so from that count, without counting again.
+    assert_eq!(
+        node.inner.status().paused.as_deref(),
+        Some("Paused: the storage limit is reached")
+    );
     node.shutdown().await.unwrap();
 }
 
@@ -1948,7 +1968,7 @@ fn downloads_are_counted_per_day() {
 async fn search_by_meaning_embeds_sites_in_the_background() {
     let dir = seeded_dir();
     // The model is in place, so nothing is downloaded.
-    plumb_embed::write_test_model(&dir.path().join(embedding::MODEL_DIR)).unwrap();
+    plumb_embed::write_test_model(&dir.path().join(MeaningModel::Small.dir_name())).unwrap();
     let mut config = test_config(dir.path());
     config.search_by_meaning = true;
     let node = start(config).await.unwrap();
@@ -1974,6 +1994,48 @@ async fn search_by_meaning_embeds_sites_in_the_background() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     node.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn search_by_meaning_downloads_and_runs_embedding_gemma_when_chosen() {
+    let made = tempfile::tempdir().unwrap();
+    plumb_embed::write_test_gemma(made.path()).unwrap();
+    let model = std::fs::read(made.path().join(plumb_embed::GEMMA_FILE)).unwrap();
+    let tokenizer = std::fs::read(made.path().join(plumb_embed::GEMMA_TOKENIZER_FILE)).unwrap();
+    let host = SeedHost::start(move |request, _| match request {
+        "GET /gemma/model.gguf" => http("200 OK", &model),
+        "GET /gemma/tokenizer.json" => http("200 OK", &tokenizer),
+        _ => http("404 Not Found", b"no such file"),
+    })
+    .await;
+    let dir = seeded_dir();
+    let mut config = test_config(dir.path());
+    config.search_by_meaning = true;
+    config.meaning_model = MeaningModel::Gemma;
+    config.sources.gemma_downloads = [plumb_embed::GEMMA_FILE, plumb_embed::GEMMA_TOKENIZER_FILE]
+        .map(|name| (name.to_string(), host.url(&format!("/gemma/{name}"))))
+        .to_vec();
+    let node = start(config).await.unwrap();
+    wait_for(node.addr(), "the first index", ready_and_idle).await;
+
+    let vectors_path = dir.path().join(plumb_embed::VECTORS_FILE_NAME);
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    while plumb_embed::Vectors::load(&vectors_path).map_or(0, |v| v.len()) == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no vectors saved: {:?}",
+            node.inner.meaning_work()
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    node.shutdown().await.unwrap();
+    let gemma_dir = dir.path().join(MeaningModel::Gemma.dir_name());
+    let (model, dim, _) = plumb_embed::Vectors::read_header(&vectors_path).unwrap();
+    assert_eq!(model, plumb_embed::gemma_id(&gemma_dir).unwrap());
+    assert_eq!(model, plumb_embed::gemma_id(made.path()).unwrap());
+    assert_eq!(dim, 96);
+    // The small model was never downloaded.
+    assert!(!dir.path().join(MeaningModel::Small.dir_name()).exists());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2433,6 +2495,149 @@ async fn a_node_takes_wikipedia_articles_from_a_trusted_node() {
     node.shutdown().await.unwrap();
 }
 
+/// A trusted node's buckets plus its adult blocklist.
+struct WithAdultList(plumb_net::BucketTable, PathBuf);
+
+impl plumb_net::BucketSource for WithAdultList {
+    fn bucket(&self, bucket: u32) -> Option<Vec<String>> {
+        self.0.bucket(bucket)
+    }
+
+    fn page_set_file(&self, set: &str) -> Option<PathBuf> {
+        (set == super::adult::SHARED_NAME).then(|| self.1.clone())
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_node_takes_the_adult_blocklist_from_a_trusted_node_before_its_source() {
+    let peer_dir = tempfile::tempdir().unwrap();
+    let peer_id = plumb_net::load_or_create_key(&peer_dir.path().join("node.key"))
+        .unwrap()
+        .public()
+        .to_peer_id();
+    let list_file = peer_dir.path().join("adult-domains.txt");
+    std::fs::write(&list_file, "adult.example\nother.example\n").unwrap();
+    let table = plumb_net::BucketTable::build(
+        &peer_dir.path().join("buckets"),
+        &[SiteRecord::new("lighthouses.org")],
+    )
+    .unwrap();
+    let mut peer_config = plumb_net::NetConfig::new(peer_dir.path().to_path_buf());
+    peer_config.search_scope = plumb_net::SearchScope::Anyone;
+    peer_config.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+    peer_config.upnp = false;
+    peer_config.local_discovery = false;
+    peer_config.round_every = None;
+    let (peer, _records) = plumb_net::start(
+        peer_config,
+        Arc::new(WithAdultList(table, list_file.clone())),
+    )
+    .await
+    .unwrap();
+    let peer_addr: plumb_net::Multiaddr = loop {
+        if let Some(addr) = peer.status().listening.first() {
+            break addr.parse().unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+
+    let dir = seeded_dir();
+    let mut config = test_config(dir.path());
+    // The source cannot be reached: the list can only come from the peer.
+    config.sources.adult_list_url = Some("http://127.0.0.1:9/porn-nl.txt".into());
+    let mut net = plumb_net::NetConfig::new(PathBuf::new());
+    net.search_scope = plumb_net::SearchScope::Anyone;
+    net.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+    net.upnp = false;
+    net.local_discovery = false;
+    net.round_every = None;
+    net.fill = false;
+    net.trusted_peers = vec![peer_id];
+    net.bootstrap = vec![peer_addr.with_p2p(peer_id).unwrap()];
+    config.network = Some(net);
+    let node = start(config).await.unwrap();
+
+    let kept = dir.path().join("safe").join("adult-domains.txt");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !kept.is_file() {
+        assert!(Instant::now() < deadline, "no list came");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(
+        std::fs::read_to_string(&kept).unwrap(),
+        "adult.example\nother.example\n"
+    );
+    // It keeps the time of the peer's copy, so it ages as that one does.
+    let modified = |path: &Path| std::fs::metadata(path).unwrap().modified().unwrap();
+    let (theirs, ours) = (modified(&list_file), modified(&kept));
+    let apart = theirs
+        .duration_since(ours)
+        .or_else(|_| ours.duration_since(theirs))
+        .unwrap();
+    assert!(apart < Duration::from_secs(2), "{apart:?}");
+
+    peer.shutdown().await;
+    node.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_set_file_being_downloaded_is_not_cut_at_the_same_time() {
+    let dir = seeded_dir();
+    let set = crate::pages::SetInfo::find("wikipedia-en").unwrap();
+    let file = set.file(dir.path());
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    let articles: Vec<plumb_core::Article> = ["Marie Curie", "Pierre Curie", "Curie (unit)"]
+        .iter()
+        .map(|title| plumb_core::Article {
+            title: title.to_string(),
+            views: 10,
+            ..Default::default()
+        })
+        .collect();
+    plumb_ingest::articles::write_articles_file(&file, &articles).unwrap();
+    let notes = crate::pages::SetFileNotes {
+        lines: 3,
+        complete: true,
+        source_modified: 1,
+        fetched_at: now_unix(),
+        near: 0,
+    };
+    std::fs::write(
+        crate::pages::notes_path(&file),
+        serde_json::to_vec(&notes).unwrap(),
+    )
+    .unwrap();
+    let node = start(test_config(dir.path())).await.unwrap();
+    let addr = node.addr();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !get(addr, "/search?q=pierre+curie")
+        .await
+        .2
+        .contains("Pierre_Curie")
+    {
+        assert!(Instant::now() < deadline, "no pages");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // A download holds the file; a lower limit meanwhile leaves it alone.
+    node.inner.set_files_busy.lock().unwrap().insert(set.id);
+    let mut settings = node.inner.settings();
+    settings.page_sets = crate::pages::PageSets::parse("wikipedia-en=2").unwrap();
+    settings.storage_limit_mb = 500;
+    node.inner.change_settings(settings).unwrap();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(set.file_notes(dir.path()).unwrap().lines, 3);
+
+    // Once the download is done, the file is cut.
+    node.inner.set_files_busy.lock().unwrap().remove(set.id);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while set.file_notes(dir.path()).unwrap().lines != 2 {
+        assert!(Instant::now() < deadline, "never cut");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    node.shutdown().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_set_file_over_the_storage_limit_is_cut_before_it_is_indexed() {
     // A file taken from a trusted node, with more pages than the node now
@@ -2877,5 +3082,369 @@ async fn a_browser_takes_a_profile_from_another_node_with_a_link_code() {
     assert!(page.contains("synced"), "{page}");
 
     peer.shutdown().await;
+    node.shutdown().await.unwrap();
+}
+
+/// A trusted node's buckets plus its vectors file, served as the set of
+/// vectors of its model.
+struct WithVectors(plumb_net::BucketTable, PathBuf, String);
+
+impl plumb_net::BucketSource for WithVectors {
+    fn bucket(&self, bucket: u32) -> Option<Vec<String>> {
+        self.0.bucket(bucket)
+    }
+
+    fn page_set_file(&self, set: &str) -> Option<PathBuf> {
+        (set == self.2).then(|| self.1.clone())
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_node_takes_site_vectors_made_from_its_own_text_from_a_trusted_node() {
+    let dir = seeded_dir();
+    let model_dir = dir.path().join(MeaningModel::Small.dir_name());
+    plumb_embed::write_test_model(&model_dir).unwrap();
+    let model = plumb_embed::model_id(&model_dir).unwrap();
+
+    // The trusted node's vectors: one for a site's very text, one for
+    // other text, one for a site this node does not know.
+    let records = fixture_records();
+    let mut with_text = records
+        .iter()
+        .filter(|r| !plumb_embed::site_text(r).is_empty());
+    let same = with_text.next().unwrap();
+    let other = with_text.next().unwrap();
+    let marker = [7i8; 32];
+    let mut theirs = plumb_embed::Vectors::new(model, 32);
+    let hash = plumb_embed::text_hash(&plumb_embed::site_text(same));
+    theirs.insert(&same.domain, hash, &marker).unwrap();
+    theirs.insert(&other.domain, [9; 32], &marker).unwrap();
+    theirs.insert("unknown-to-it.org", hash, &marker).unwrap();
+    let peer_dir = tempfile::tempdir().unwrap();
+    let file = peer_dir.path().join(plumb_embed::VECTORS_FILE_NAME);
+    theirs.save(&file).unwrap();
+    assert_eq!(
+        shared_vectors::servable(peer_dir.path(), &shared_vectors::set_name(&model)),
+        Some(file.clone())
+    );
+    assert_eq!(
+        shared_vectors::servable(peer_dir.path(), &shared_vectors::set_name(&[0; 32])),
+        None
+    );
+    assert_eq!(
+        shared_vectors::servable(peer_dir.path(), "wikipedia-en"),
+        None
+    );
+
+    let peer_id = plumb_net::load_or_create_key(&peer_dir.path().join("node.key"))
+        .unwrap()
+        .public()
+        .to_peer_id();
+    let table = plumb_net::BucketTable::build(
+        &peer_dir.path().join("buckets"),
+        &[SiteRecord::new("lighthouses.org")],
+    )
+    .unwrap();
+    let mut peer_config = plumb_net::NetConfig::new(peer_dir.path().to_path_buf());
+    peer_config.search_scope = plumb_net::SearchScope::Anyone;
+    peer_config.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+    peer_config.upnp = false;
+    peer_config.local_discovery = false;
+    peer_config.round_every = None;
+    let source = WithVectors(table, file, shared_vectors::set_name(&model));
+    let (peer, _records) = plumb_net::start(peer_config, Arc::new(source))
+        .await
+        .unwrap();
+    let peer_addr: plumb_net::Multiaddr = loop {
+        if let Some(addr) = peer.status().listening.first() {
+            break addr.parse().unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+
+    let mut config = test_config(dir.path());
+    config.search_by_meaning = true;
+    let mut net = plumb_net::NetConfig::new(PathBuf::new());
+    net.search_scope = plumb_net::SearchScope::Anyone;
+    net.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+    net.upnp = false;
+    net.local_discovery = false;
+    net.round_every = None;
+    net.fill = false;
+    net.trusted_peers = vec![peer_id];
+    net.bootstrap = vec![peer_addr.with_p2p(peer_id).unwrap()];
+    config.network = Some(net);
+    let node = start(config).await.unwrap();
+    wait_for(node.addr(), "the first index", ready_and_idle).await;
+
+    // Every site with text ends with a vector: the one sent for its text
+    // kept as sent, the others made here.
+    let vectors_path = dir.path().join(plumb_embed::VECTORS_FILE_NAME);
+    let wanted = records
+        .iter()
+        .filter(|r| !plumb_embed::site_text(r).is_empty())
+        .count();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let vectors = loop {
+        if let Ok(vectors) = plumb_embed::Vectors::load(&vectors_path) {
+            if vectors.len() == wanted && vectors.get(&same.domain).is_some() {
+                break vectors;
+            }
+        }
+        assert!(Instant::now() < deadline, "vectors not saved");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    assert_eq!(vectors.get(&same.domain), Some((&hash, &marker[..])));
+    assert_ne!(vectors.get(&other.domain).unwrap().1, &marker[..]);
+    assert!(vectors.get("unknown-to-it.org").is_none());
+
+    peer.shutdown().await;
+    node.shutdown().await.unwrap();
+}
+
+/// Calls `tool` on a node's `/mcp` as an AI app on this computer does; the
+/// tool's structured answer and its text.
+async fn mcp_call(
+    addr: SocketAddr,
+    tool: &str,
+    arguments: serde_json::Value,
+) -> (serde_json::Value, String) {
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": { "name": tool, "arguments": arguments },
+    })
+    .to_string();
+    let mut stream = TcpStream::connect(addr).await.unwrap();
+    let request = format!(
+        "POST /mcp HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\n\
+         Accept: application/json, text/event-stream\r\nContent-Length: {}\r\n\
+         Connection: close\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(request.as_bytes()).await.unwrap();
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).await.unwrap();
+    let response = String::from_utf8(response).unwrap();
+    let (head, body) = response.split_once("\r\n\r\n").unwrap();
+    assert!(head.starts_with("HTTP/1.1 200"), "{head}\n{body}");
+    let reply: serde_json::Value = serde_json::from_str(body).unwrap();
+    let result = &reply["result"];
+    assert_eq!(result["isError"], false, "{reply}");
+    let text = result["content"][0]["text"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+    (result["structuredContent"].clone(), text)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_agent_finds_a_page_another_node_s_agent_shared_and_reads_it() {
+    // The page both agents read, served here under a public name.
+    let app = axum::Router::new().route(
+        "/guide",
+        axum::routing::get(|| async {
+            axum::response::Html(
+                "<title>Lighthouse keeping</title><main><h1>Lamps</h1>\
+                 <p>Fresnel lamps burn colza oil, trimmed every four hours.</p></main>",
+            )
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let page_addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await });
+    let page = format!("http://lighthouse-keepers.org:{}/guide", page_addr.port());
+    let config_for = |dir: &Path, bootstrap: Vec<plumb_net::Multiaddr>, trusted| {
+        let mut config = test_config(dir);
+        let mut net = plumb_net::NetConfig::new(PathBuf::new());
+        net.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+        net.upnp = false;
+        net.local_discovery = false;
+        net.round_every = None;
+        net.bootstrap = bootstrap;
+        net.trusted_peers = trusted;
+        net.search_scope = plumb_net::SearchScope::Trusted;
+        config.network = Some(net);
+        config
+            .page_reader
+            .resolve
+            .push(("lighthouse-keepers.org".to_string(), page_addr));
+        config
+    };
+
+    // Node A lets its agents share findings.
+    let a_dir = seeded_dir();
+    let mut a_config = config_for(a_dir.path(), Vec::new(), Vec::new());
+    a_config.share_findings = true;
+    let a = start(a_config).await.unwrap();
+    let a_status = wait_for(a.addr(), "A's first index", ready_and_idle).await;
+    let a_net = a_status.network.unwrap();
+    let a_id: plumb_net::PeerId = a_net.peer_id.parse().unwrap();
+    let a_addr: plumb_net::Multiaddr = a_net.listening[0].parse().unwrap();
+    let a_addr = a_addr.with_p2p(a_id).unwrap();
+
+    // Node B trusts A, and its searches take only trusted nodes' leads.
+    let b_dir = seeded_dir();
+    let b = start(config_for(b_dir.path(), vec![a_addr], vec![a_id]))
+        .await
+        .unwrap();
+    wait_for(b.addr(), "B to connect to A", |s| {
+        ready_and_idle(s) && s.network.as_ref().is_some_and(|n| n.connected_peers >= 1)
+    })
+    .await;
+
+    // A's agent keeps one finding to itself, then shares another.
+    let (kept, _) = mcp_call(
+        a.addr(),
+        "report_finding",
+        serde_json::json!({
+            "query": "lighthouse foghorn schedule",
+            "url": "https://foghorn-schedules.org/harbour",
+            "why": "the harbour's own timetable",
+            "answer": "Every 30 seconds in fog",
+        }),
+    )
+    .await;
+    assert_eq!(kept["kept"], true, "{kept}");
+    assert!(kept.get("shared").is_none(), "{kept}");
+    let (shared, text) = mcp_call(
+        a.addr(),
+        "report_finding",
+        serde_json::json!({
+            "query": "lighthouse lamp oil",
+            "url": page,
+            "why": "the keepers' guide says what each lamp burns",
+            "answer": "Colza oil, as the 1890 guide on Grandpa's shelf says",
+            "task": "restoring Grandpa's lighthouse lamp",
+            "share": true,
+        }),
+    )
+    .await;
+    assert_eq!(shared["shared"]["shared"], true, "{shared}");
+    assert_eq!(shared["shared"]["node"], a_id.to_string());
+    assert!(shared["shared"]["query"].is_null(), "{shared}");
+    assert!(text.contains("Shared with other Plumb nodes"), "{text}");
+
+    // B's agent searches for the same thing in other words and finds the
+    // page, as a lead: who reported it, when, and that nobody checked it.
+    let mut found = None;
+    for _ in 0..300 {
+        let (answer, text) = mcp_call(
+            b.addr(),
+            "search",
+            serde_json::json!({ "query": "oil for a lighthouse lamp" }),
+        )
+        .await;
+        if answer.get("leads").is_some() {
+            found = Some((answer, text));
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let (answer, text) = found.expect("B's search lists A's lead");
+    let lead = &answer["leads"][0];
+    assert_eq!(lead["url"], page.as_str(), "{answer}");
+    assert_eq!(lead["verified"], false);
+    assert_eq!(lead["why"], "the keepers' guide says what each lamp burns");
+    let by = &lead["reported_by"][0];
+    assert_eq!(by["node"], a_id.to_string());
+    assert_eq!(by["relation"], "trusted");
+    assert!(by["query"].is_null(), "{answer}");
+    assert!(by["expires_at"].as_u64().unwrap() > now_unix());
+    assert!(
+        text.contains("Lead shared by 1 other Plumb node, 1 trusted"),
+        "{text}"
+    );
+    // Not its search, answer or task: only what was meant to be shared.
+    let said = answer.to_string();
+    for private in ["1890", "Grandpa", "restoring", "lamp oil\""] {
+        assert!(!said.contains(private), "{private} in {said}");
+    }
+    // A lead is not among the results, which come from crawls.
+    assert!(!answer["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|hit| hit["url"] == page.as_str()));
+
+    // B's agent reads the page itself.
+    let (read, _) = mcp_call(b.addr(), "read_page", serde_json::json!({ "url": page })).await;
+    assert!(
+        read["text"]
+            .as_str()
+            .unwrap()
+            .contains("Fresnel lamps burn colza oil"),
+        "{read}"
+    );
+
+    // The finding A's agent kept to itself never left A.
+    let (answer, _) = mcp_call(
+        b.addr(),
+        "search",
+        serde_json::json!({ "query": "lighthouse foghorn schedule" }),
+    )
+    .await;
+    assert!(answer.get("leads").is_none(), "{answer}");
+    assert!(answer.get("found_before").is_none(), "{answer}");
+    let b_leads = std::fs::read_to_string(b_dir.path().join("net/leads.jsonl")).unwrap();
+    assert_eq!(b_leads.lines().count(), 1, "{b_leads}");
+    assert!(!b_leads.contains("foghorn"), "{b_leads}");
+    let a_leads = std::fs::read_to_string(a_dir.path().join("net/leads.jsonl")).unwrap();
+    assert!(!a_leads.contains("foghorn"), "{a_leads}");
+    let a_findings = std::fs::read_to_string(a_dir.path().join("findings.jsonl")).unwrap();
+    assert!(a_findings.contains("foghorn"), "{a_findings}");
+    assert!(!b_dir.path().join("findings.jsonl").exists());
+    // A finds its own finding, not its lead.
+    let (answer, _) = mcp_call(
+        a.addr(),
+        "search",
+        serde_json::json!({ "query": "lighthouse lamp oil" }),
+    )
+    .await;
+    assert!(answer.get("found_before").is_some(), "{answer}");
+    assert!(answer.get("leads").is_none(), "{answer}");
+    let b_status = get_status(b.addr()).await;
+    assert_eq!(b_status.network.unwrap().leads_held, 1);
+
+    b.shutdown().await.unwrap();
+    a.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_node_that_does_not_share_findings_keeps_them_local() {
+    let dir = seeded_dir();
+    let mut config = test_config(dir.path());
+    let mut net = plumb_net::NetConfig::new(PathBuf::new());
+    net.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+    net.upnp = false;
+    net.local_discovery = false;
+    net.round_every = None;
+    net.trusted_peers = Vec::new();
+    config.network = Some(net);
+    let node = start(config).await.unwrap();
+    wait_for(node.addr(), "the first index", ready_and_idle).await;
+    // Asked to share, it keeps the finding and says why it did not share it.
+    let (answer, text) = mcp_call(
+        node.addr(),
+        "report_finding",
+        serde_json::json!({
+            "query": "tokio latest version",
+            "url": "https://crates.io/crates/tokio",
+            "why": "the registry's page",
+            "answer": "1.47.1",
+            "share": true,
+        }),
+    )
+    .await;
+    assert_eq!(answer["kept"], true);
+    assert_eq!(answer["shared"]["shared"], false, "{answer}");
+    assert!(
+        text.contains("Not shared: this node does not share findings"),
+        "{text}"
+    );
+    let status = get_status(node.addr()).await;
+    assert_eq!(status.network.unwrap().leads_held, 0);
+    assert!(!dir.path().join("net/leads.jsonl").exists());
     node.shutdown().await.unwrap();
 }

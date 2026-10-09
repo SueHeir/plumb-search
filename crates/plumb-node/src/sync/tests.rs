@@ -27,6 +27,7 @@ fn opened(domain: &str, times: u32, at: u64) -> Opened {
         domain: domain.into(),
         at,
         times,
+        weighted: 0,
     }
 }
 
@@ -290,4 +291,20 @@ fn the_smaller_id_asks_unless_it_went_quiet() {
     let mut failing = link("b", 0, now - 60, 0);
     failing.problem = Some("down".into());
     assert!(!due("a", &failing, now, now));
+}
+
+#[test]
+fn kinds_of_results_merge_like_the_town() {
+    use crate::about::Amount;
+    let base = About::default().with_kinds([("podcasts", Amount::Off), ("books", Amount::Less)]);
+    // Here podcasts came back; there books went to more and papers off.
+    let local = About::default().with_kinds([("books", Amount::Less)]);
+    let remote = About::default().with_kinds([
+        ("podcasts", Amount::Off),
+        ("books", Amount::More),
+        ("papers", Amount::Off),
+    ]);
+    let merged = merge_about(Some(&base), &local, &remote);
+    let got: Vec<(&str, Amount)> = merged.kinds.iter().map(|(k, a)| (k.as_str(), *a)).collect();
+    assert_eq!(got, [("books", Amount::More), ("papers", Amount::Off)]);
 }

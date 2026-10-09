@@ -74,7 +74,7 @@ The same answers come as JSON in `structuredContent` for programs.
 
 ## Setting up each app
 
-There are two ways in. Apps that speak MCP get Plumb's [tools](mcp.md): `search`, `official_site`, `check_lookalike`, `site_info`, `package`, `read_page` and `report_finding`. Apps that take a SearXNG address for web search can use a node's `/search?format=json` instead.
+There are two ways in. Apps that speak MCP get Plumb's [tools](mcp.md): `search`, `official_site`, `check_lookalike`, `site_info`, `facts`, `package`, `read_page` and `report_finding`. Apps that take a SearXNG address for web search can use a node's `/search?format=json` instead.
 
 Use a model that can call tools: Qwen3 (8B or bigger), gpt-oss, Llama 3.1 or 3.3, Mistral Small. Small models without tool training ignore the tools.
 

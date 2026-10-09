@@ -11,7 +11,7 @@ use std::time::Instant;
 use anyhow::{bail, Context, Result};
 use plumb_core::RecordSet;
 use plumb_embed::{
-    site_text, text_hash, Embedder, Vectors, MODEL_BASE_URL, MODEL_FILES, MODEL_NAME,
+    site_text_words, text_hash, Embedder, Vectors, MODEL_BASE_URL, MODEL_FILES, MODEL_NAME,
 };
 use plumb_index::Meaning;
 use tracing::{info, warn};
@@ -304,7 +304,7 @@ pub(crate) fn embed_records(
     save: &mut dyn FnMut(&Vectors) -> Result<()>,
     progress: &mut dyn FnMut(usize, usize),
 ) -> Result<Embedded> {
-    let todo = sites_to_embed(vectors, records);
+    let todo = sites_to_embed(vectors, records, embedder.text_words());
     embed_sites(embedder, vectors, todo, threads, stop, save, progress)
 }
 
@@ -315,7 +315,11 @@ pub(crate) type ToEmbed = (f32, String, plumb_embed::TextHash, String);
 /// The first half of [`embed_records`]: drops the vectors of sites not in
 /// `records` and returns the sites to embed, best first. The records are
 /// freed by the time it returns.
-pub(crate) fn sites_to_embed(vectors: &RwLock<Vectors>, records: RecordSet) -> Vec<ToEmbed> {
+pub(crate) fn sites_to_embed(
+    vectors: &RwLock<Vectors>,
+    records: RecordSet,
+    words: usize,
+) -> Vec<ToEmbed> {
     let write = || vectors.write().unwrap_or_else(PoisonError::into_inner);
     {
         let domains: HashSet<&str> = records.iter().map(|r| r.domain.as_str()).collect();
@@ -327,7 +331,7 @@ pub(crate) fn sites_to_embed(vectors: &RwLock<Vectors>, records: RecordSet) -> V
     {
         let vectors = vectors.read().unwrap_or_else(PoisonError::into_inner);
         for record in records {
-            let text = site_text(&record);
+            let text = site_text_words(&record, words);
             if text.is_empty() {
                 continue;
             }
@@ -360,6 +364,7 @@ pub(crate) fn sites_to_embed_from_file(
     vectors: &RwLock<Vectors>,
     path: &Path,
     max: usize,
+    words: usize,
 ) -> Result<(Vec<ToEmbed>, bool)> {
     let max = max.max(1);
     crate::outline::fold_journal(path)?;
@@ -373,7 +378,7 @@ pub(crate) fn sites_to_embed_from_file(
         crate::outline::for_each_record(path, |record| {
             total += 1;
             domains.insert(domain_hash(&record.domain));
-            let text = site_text(&record);
+            let text = site_text_words(&record, words);
             if text.is_empty() {
                 return;
             }
@@ -409,6 +414,30 @@ pub(crate) fn sites_to_embed_from_file(
     Ok((todo, more))
 }
 
+/// The sites of the records file at `path` whose vector is missing or
+/// made from other text than theirs now, each with the hash of its text:
+/// the vectors another node may give this one.
+pub(crate) fn wanted_texts(
+    vectors: &RwLock<Vectors>,
+    path: &Path,
+    words: usize,
+) -> Result<std::collections::HashMap<String, plumb_embed::TextHash>> {
+    crate::outline::fold_journal(path)?;
+    let mut wanted = std::collections::HashMap::new();
+    let held = vectors.read().unwrap_or_else(PoisonError::into_inner);
+    crate::outline::for_each_record(path, |record| {
+        let text = site_text_words(&record, words);
+        if text.is_empty() {
+            return;
+        }
+        let hash = text_hash(&text);
+        if held.get(&record.domain).map(|(saved, _)| saved) != Some(&hash) {
+            wanted.insert(record.domain, hash);
+        }
+    })?;
+    Ok(wanted)
+}
+
 /// A 64-bit hash of `domain`, the same in every run.
 fn domain_hash(domain: &str) -> u64 {
     use std::hash::{Hash, Hasher};
@@ -437,23 +466,26 @@ pub(crate) fn embed_sites(
         let next = AtomicUsize::new(0);
         std::thread::scope(|scope| {
             for _ in 0..threads.max(1) {
-                scope.spawn(|| loop {
-                    if stop() {
-                        break;
-                    }
-                    let i = next.fetch_add(1, Ordering::Relaxed);
-                    let Some((_, domain, hash, text)) = chunk.get(i) else {
-                        break;
-                    };
-                    match embedder.embed(text) {
-                        // The vector has the model's length.
-                        Ok(vector) => drop(write().insert(domain, *hash, &vector)),
-                        Err(err) => {
-                            warn!("could not embed the text of {domain}: {err:#}");
-                            failed.fetch_add(1, Ordering::Relaxed);
+                scope.spawn(|| {
+                    crate::lower_thread_priority();
+                    loop {
+                        if stop() {
+                            break;
                         }
+                        let i = next.fetch_add(1, Ordering::Relaxed);
+                        let Some((_, domain, hash, text)) = chunk.get(i) else {
+                            break;
+                        };
+                        match embedder.embed(text) {
+                            // The vector has the model's length.
+                            Ok(vector) => drop(write().insert(domain, *hash, &vector)),
+                            Err(err) => {
+                                warn!("could not embed the text of {domain}: {err:#}");
+                                failed.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                        done.fetch_add(1, Ordering::Relaxed);
                     }
-                    done.fetch_add(1, Ordering::Relaxed);
                 });
             }
         });
@@ -479,6 +511,55 @@ pub(crate) fn embed_sites(
         done: done.into_inner(),
         failed: failed.into_inner(),
     })
+}
+
+/// The model search by meaning runs on a node.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum MeaningModel {
+    /// bge-small-en-v1.5 (about 130 MB, English).
+    #[default]
+    Small,
+    /// EmbeddingGemma 2 at 256 values (about 310 MB, many languages).
+    Gemma,
+}
+
+impl MeaningModel {
+    /// The directory of its files in a node's data directory.
+    pub fn dir_name(self) -> &'static str {
+        match self {
+            MeaningModel::Small => "model",
+            MeaningModel::Gemma => "model-gemma",
+        }
+    }
+
+    /// About how big its files are, in MB.
+    pub fn size_mb(self) -> u64 {
+        match self {
+            MeaningModel::Small => 130,
+            MeaningModel::Gemma => 320,
+        }
+    }
+}
+
+/// Downloads EmbeddingGemma's files into `dir` from `downloads` (each file
+/// name with its address), those not there yet.
+pub(crate) async fn ensure_gemma(dir: &Path, downloads: &[(String, String)]) -> Result<()> {
+    if downloads.iter().all(|(name, _)| dir.join(name).is_file()) {
+        return Ok(());
+    }
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    let client = plumb_ingest::download::http_client()?;
+    info!("downloading the embedding model EmbeddingGemma 2");
+    for (name, url) in downloads {
+        let dest = dir.join(name);
+        if dest.is_file() {
+            continue;
+        }
+        plumb_ingest::download::download_to_file(&client, url, &dest)
+            .await
+            .with_context(|| format!("downloading {url}"))?;
+    }
+    Ok(())
 }
 
 /// `plumb embed`: downloads the model when missing, then makes a vector
@@ -624,7 +705,7 @@ mod tests {
         let embedder = Embedder::load(&model).unwrap();
         assert_eq!(
             embedder
-                .embed(&site_text(&record(
+                .embed(&plumb_embed::site_text(&record(
                     "tesla.com",
                     "Tesla electric cars and solar energy"
                 )))

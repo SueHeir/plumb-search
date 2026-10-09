@@ -34,7 +34,8 @@ use serde::Deserialize;
 use tracing::warn;
 
 use super::{escape_html, html_response, page, search_link, time_ago, AppState};
-use crate::about::{About, AboutStore, Reason, MAX_INTERESTS, MAX_SITES, MAX_TOWN_CHARS};
+use crate::about::{About, AboutStore, Amount, Reason, KINDS};
+use crate::clicks::{LabelStore, PositionStore};
 use crate::history::{new_profile, valid_profile, History, HistoryStore};
 use crate::learn::{
     describe_key, traits, Block, Choice, Learned, Rating, Taste, Trait, Verdict, JUDGED_PER_PAGE,
@@ -63,7 +64,6 @@ pub(super) fn routes(router: Router<AppState>) -> Router<AppState> {
         .route("/history/clear", post(clear))
         .route("/history/forget-clicks", post(forget_clicks))
         .route("/feedback", post(feedback))
-        .route("/about", get(about_page).post(save_about))
 }
 
 /// What a browser chose to do with its history.
@@ -76,6 +76,10 @@ pub(super) struct Prefs {
     /// Learn from clicks which boxes (places and map, headlines) to fold
     /// or unfold, and which sites are passed over (see [`crate::learn`]).
     pub learn: bool,
+    /// Keep the searches and the sites opened for them, with no profile,
+    /// as examples to train the node's ranking ([`crate::clicks::Labels`]).
+    /// Off unless chosen; counts only while learning.
+    pub train: bool,
 }
 
 impl Default for Prefs {
@@ -84,6 +88,7 @@ impl Default for Prefs {
             show: true,
             rank: true,
             learn: true,
+            train: false,
         }
     }
 }
@@ -94,13 +99,15 @@ impl Prefs {
         self.show || self.rank || self.learn
     }
 
-    /// `s1r1l1`; cookies set before learning was a choice have no `l`.
+    /// `s1r1l1t0`; cookies set before learning was a choice have no `l`,
+    /// and ones set before training was have no `t`.
     fn cookie_value(self) -> String {
         format!(
-            "s{}r{}l{}",
+            "s{}r{}l{}t{}",
             u8::from(self.show),
             u8::from(self.rank),
-            u8::from(self.learn)
+            u8::from(self.learn),
+            u8::from(self.train)
         )
     }
 
@@ -115,11 +122,29 @@ impl Prefs {
                 show,
                 rank,
                 learn: true,
+                train: false,
             }),
-            [b's', s, b'r', r, b'l', l] => bit(*s)
-                .zip(bit(*r))
-                .zip(bit(*l))
-                .map(|((show, rank), learn)| Prefs { show, rank, learn }),
+            [b's', s, b'r', r, b'l', l] => {
+                bit(*s)
+                    .zip(bit(*r))
+                    .zip(bit(*l))
+                    .map(|((show, rank), learn)| Prefs {
+                        show,
+                        rank,
+                        learn,
+                        train: false,
+                    })
+            }
+            [b's', s, b'r', r, b'l', l, b't', t] => {
+                bit(*s).zip(bit(*r)).zip(bit(*l)).zip(bit(*t)).map(
+                    |(((show, rank), learn), train)| Prefs {
+                        show,
+                        rank,
+                        learn,
+                        train,
+                    },
+                )
+            }
             _ => None,
         };
         parsed.unwrap_or_default()
@@ -213,9 +238,37 @@ impl Visitor {
             return;
         };
         let now = now_unix();
+        // A click counts for more the farther down the page it was, once
+        // the page it was on is known (see crate::clicks).
+        let weight = match self.history.learned.place(query, domain) {
+            Some((at, picked)) if learn => {
+                let positions = PositionStore::in_dir(self.store.dir());
+                let weighed = positions.update(|p| {
+                    if picked {
+                        p.bias().weight(at)
+                    } else {
+                        p.note_opened(query, domain, at, now)
+                    }
+                });
+                if self.prefs.train && !picked {
+                    let labels = LabelStore::in_dir(self.store.dir());
+                    if let Err(err) = labels.update(|l| l.note_opened(query, domain, at, now)) {
+                        warn!("could not keep an opened site for training: {err:#}");
+                    }
+                }
+                match weighed {
+                    Ok(weight) => Some(weight),
+                    Err(err) => {
+                        warn!("could not count where a result was opened: {err:#}");
+                        None
+                    }
+                }
+            }
+            _ => None,
+        };
         if let Err(err) = self.store.update(&profile, |h| {
             if keep {
-                h.add_opened(query, domain, now);
+                h.add_opened_weighted(query, domain, now, weight);
             }
             if learn {
                 h.learned.note_picked(query, domain, now);
@@ -269,6 +322,19 @@ impl Visitor {
             h.learned.note_shown(query, blocks, folded, sites, now);
         }) {
             warn!("could not note a results page in the history: {err:#}");
+        }
+        // Edit mode lists hidden results last: not the page as searched.
+        if !self.editing {
+            let positions = PositionStore::in_dir(self.store.dir());
+            if let Err(err) = positions.update(|p| p.note_shown(query, sites, now)) {
+                warn!("could not count the places of a results page: {err:#}");
+            }
+            if self.prefs.train {
+                let labels = LabelStore::in_dir(self.store.dir());
+                if let Err(err) = labels.update(|l| l.note_shown(query, sites, now)) {
+                    warn!("could not keep a results page for training: {err:#}");
+                }
+            }
         }
     }
 
@@ -619,14 +685,20 @@ impl HistoryView {
              before first</label>\
              <label><input type=\"checkbox\" name=\"hl\" value=\"1\"{}> Learn from my clicks \
              which boxes, like maps, I use</label>\
+             <label><input type=\"checkbox\" name=\"ht\" value=\"1\"{}> Use my searches to \
+             train Plumb's ranking</label>\
              <p class=\"hint\">Kept on this node for this browser only, and never sent \
-             anywhere. \
-             <a href=\"/history\">See or clear my history</a> \
-             <a href=\"/about\">About you: interests and sites</a> \
+             anywhere. Searches kept for training (while learning from clicks) are kept \
+             apart from your history, with no profile, so clearing your history does not \
+             remove them; short searches only, none with an e-mail address or a long \
+             number. \
+             <a href=\"/history\">See or clear my history</a> &middot; \
+             <a href=\"/about\">About you: interests and sites</a> &middot; \
              <a href=\"/tune\">Tune your search</a></p>",
             checked(self.prefs.show),
             checked(self.prefs.rank),
-            checked(self.prefs.learn)
+            checked(self.prefs.learn),
+            checked(self.prefs.train)
         )
     }
 
@@ -713,11 +785,13 @@ pub(super) fn prefs_from_form(
     show: &Option<String>,
     rank: &Option<String>,
     learn: &Option<String>,
+    train: &Option<String>,
 ) -> Option<Prefs> {
     super::flag(hist).then(|| Prefs {
         show: super::flag(show),
         rank: super::flag(rank),
         learn: super::flag(learn),
+        train: super::flag(train),
     })
 }
 
@@ -1035,8 +1109,9 @@ async fn forget_clicks(State(state): State<AppState>, headers: HeaderMap) -> Res
 
 fn render_history(history: &History, prefs: Prefs, now: u64) -> String {
     let options = SearchOptions::default();
-    let mut body = String::from(
-        "<div class=\"wrap hist\">\n<header><a class=\"logo\" href=\"/\">Plumb</a></header>\n<main>\n\
+    let bar = super::app_bar("", false);
+    let mut body = format!(
+        "<div class=\"wrap hist\">\n{bar}\n<main>\n\
          <h1>Your history</h1>\n\
          <p class=\"s\">Kept on this node for this browser only. Other people searching here \
          have their own.</p>\n",
@@ -1092,76 +1167,6 @@ fn render_history(history: &History, prefs: Prefs, now: u64) -> String {
          </main>\n</div>",
     );
     page("History - Plumb Search", &body)
-}
-
-/// The About page's form.
-#[derive(Debug, Default, Deserialize)]
-struct AboutForm {
-    #[serde(default)]
-    interests: String,
-    #[serde(default)]
-    pinned: String,
-    #[serde(default)]
-    hidden: String,
-    #[serde(default)]
-    town: String,
-    /// `1`: forget it all.
-    clear: Option<String>,
-}
-
-/// `GET /about`.
-async fn about_page(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    let kept = KeptAbout::of(&state, &headers);
-    no_store(html_response(
-        StatusCode::OK,
-        render_about(&kept.about, kept.in_browser(), None),
-    ))
-}
-
-/// `POST /about`: saves the form, giving the browser a profile if it has
-/// none yet.
-async fn save_about(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Form(form): Form<AboutForm>,
-) -> Response {
-    if cross_site(&headers) {
-        return refuse_cross_site();
-    }
-    let mut kept = KeptAbout::of(&state, &headers);
-    let about = if super::flag(&form.clear) {
-        About::default()
-    } else {
-        About::from_form(&form.interests, &form.pinned, &form.hidden).with_town(&form.town)
-    };
-    let (status, note) = match kept.save(about) {
-        Ok(fit) => {
-            let mut note = String::from("Saved.");
-            if !fit {
-                note.push_str(SOME_LEFT_OUT);
-            }
-            if let Some(town) = kept.about.town() {
-                let town = super::welcome::town_note(&state, town).await;
-                if !town.is_empty() {
-                    note.push(' ');
-                    note.push_str(&town);
-                }
-            }
-            (StatusCode::OK, note)
-        }
-        Err(err) => {
-            warn!("could not save an About profile: {err:#}");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "This could not be saved. The server log has the details.".to_owned(),
-            )
-        }
-    };
-    let response = no_store(html_response(
-        status,
-        render_about(&kept.about, kept.in_browser(), Some(&note)),
-    ));
-    kept.send_cookies(response)
 }
 
 /// What a saved note adds when the browser's cookie could not hold it all.
@@ -1259,7 +1264,13 @@ fn decode_about(value: &str) -> Option<About> {
             &about.pinned.join("\n"),
             &about.hidden.join("\n"),
         )
-        .with_town(&about.town),
+        .with_town(&about.town)
+        .with_kinds(
+            about
+                .kinds
+                .iter()
+                .map(|(kind, amount)| (kind.as_str(), *amount)),
+        ),
     )
 }
 
@@ -1311,69 +1322,33 @@ pub(super) fn no_store(mut response: Response) -> Response {
     response
 }
 
-fn render_about(about: &About, in_browser: bool, note: Option<&str>) -> String {
-    let lines = |items: &[String]| escape_html(&items.join("\n"));
-    let note = note
-        .map(|note| {
-            format!(
-                "<p class=\"s\"><strong>{}</strong></p>\n",
-                escape_html(note)
-            )
-        })
-        .unwrap_or_default();
-    let (kept, links) = about_kept(in_browser);
-    let body = format!(
-        "<div class=\"wrap hist about\">\n<header><a class=\"logo\" href=\"/\">Plumb</a></header>\n<main>\n\
-         <h1>About you</h1>\n\
-         <p class=\"s\">{kept}</p>\n{note}\
-         <form method=\"post\" action=\"/about\">\n\
-         <label for=\"interests\"><strong>Your interests</strong></label>\n\
-         <p class=\"m\">One per line, such as cooking or rust programming. Sites that match \
-         one move up a little and say so, so a name like \u{201c}rust\u{201d} or \
-         \u{201c}jaguar\u{201d} leans your way. Up to {MAX_INTERESTS}.</p>\n\
-         <textarea id=\"interests\" name=\"interests\" rows=\"5\">{}</textarea>\n\
-         <label for=\"pinned\"><strong>Sites always first</strong></label>\n\
-         <p class=\"m\">One per line, such as seriouseats.com. They come first whenever a \
-         search finds them. Up to {MAX_SITES}.</p>\n\
-         <textarea id=\"pinned\" name=\"pinned\" rows=\"4\">{}</textarea>\n\
-         <label for=\"hidden\"><strong>Sites never shown</strong></label>\n\
-         <p class=\"m\">One per line. They and their subdomains are left out of your \
-         results. Up to {MAX_SITES}.</p>\n\
-         <textarea id=\"hidden\" name=\"hidden\" rows=\"4\">{}</textarea>\n\
-         <label for=\"town\"><strong>Your town</strong></label>\n\
-         <p class=\"m\">Such as Denver, CO. Searches like \u{201c}coffee near me\u{201d} \
-         list places here. Plumb never works out where you are by itself.</p>\n\
-         <input id=\"town\" name=\"town\" maxlength=\"{MAX_TOWN_CHARS}\" value=\"{}\">\n\
-         <p><button type=\"submit\">Save</button></p>\n</form>\n\
-         <form method=\"post\" action=\"/about\"><input type=\"hidden\" name=\"clear\" \
-         value=\"1\"><button type=\"submit\">Forget all of this</button></form>\n\
-         {links}\n</main>\n</div>",
-        lines(&about.interests),
-        lines(&about.pinned),
-        lines(&about.hidden),
-        escape_html(&about.town),
+/// The About page's choices of how much of each kind of result to show:
+/// a row of off, less, normal and more for each.
+pub(super) fn kinds_html(about: &About) -> String {
+    let mut html = String::from(
+        "<fieldset id=\"kinds\" class=\"kinds\"><legend><strong>Kinds of results</strong></legend>\n\
+         <p class=\"m\">How much of each kind of page to list with the sites. Less moves it \
+         a few places down, more a few places up, and off leaves it out.</p>\n",
     );
-    page("About you - Plumb Search", &body)
-}
-
-/// Where the About page says the profile is kept, and the links under it.
-fn about_kept(in_browser: bool) -> (&'static str, &'static str) {
-    if in_browser {
-        (
-            "Kept in this browser only, in a cookie it sends with each search here. This \
-             server uses it for that search and keeps no copy. It is never part of a search \
-             sent to other Plumb nodes.",
-            "<p class=\"m\"><a href=\"/welcome\">Start over with the welcome page</a></p>",
-        )
-    } else {
-        (
-            "Kept on this node for this browser only, and used only here, after results are \
-             found. It is never part of a search sent to other Plumb nodes. Other people \
-             searching here have their own.",
-            "<p class=\"m\"><a href=\"/history\">Your history</a> \u{b7} <a href=\"/link\">Use \
-             this on your other computers</a></p>",
-        )
+    for (kind, name) in KINDS {
+        let current = about.kinds.get(*kind).copied().unwrap_or_default();
+        let _ = write!(
+            html,
+            "<div class=\"kind\"><span>{name}</span><span class=\"amt\">"
+        );
+        for amount in Amount::ALL {
+            let checked = if amount == current { " checked" } else { "" };
+            let _ = write!(
+                html,
+                "<label><input type=\"radio\" name=\"kind-{kind}\" value=\"{}\"{checked}> {}</label>",
+                amount.as_str(),
+                amount.name()
+            );
+        }
+        html.push_str("</span></div>\n");
     }
+    html.push_str("</fieldset>\n");
+    html
 }
 
 /// The cookies of a request, by name.
@@ -1428,16 +1403,6 @@ mod tests {
     }
 
     #[test]
-    fn the_about_page_escapes_what_was_typed() {
-        let about = About::from_form("<script>x</script>", "example.com", "");
-        let page = render_about(&about, false, Some("Saved."));
-        assert!(page.contains("&lt;script&gt;x&lt;/script&gt;"));
-        assert!(!page.contains("<script>"));
-        assert!(page.contains(">example.com</textarea>"));
-        assert!(page.contains("action=\"/about\""));
-    }
-
-    #[test]
     fn results_say_why_they_moved() {
         let view = HistoryView {
             about: About::from_form("programming", "github.com", ""),
@@ -1445,6 +1410,7 @@ mod tests {
         };
         let mut hit = Hit {
             demand: None,
+            missing_words: false,
             placing_text_score: None,
             domain: "rust-lang.org".into(),
             url: "https://rust-lang.org/".into(),
@@ -1474,8 +1440,15 @@ mod tests {
         for show in [true, false] {
             for rank in [true, false] {
                 for learn in [true, false] {
-                    let prefs = Prefs { show, rank, learn };
-                    assert_eq!(Prefs::from_cookie(&prefs.cookie_value()), prefs);
+                    for train in [true, false] {
+                        let prefs = Prefs {
+                            show,
+                            rank,
+                            learn,
+                            train,
+                        };
+                        assert_eq!(Prefs::from_cookie(&prefs.cookie_value()), prefs);
+                    }
                 }
             }
         }
@@ -1486,7 +1459,16 @@ mod tests {
             Prefs {
                 show: false,
                 rank: true,
-                learn: true
+                learn: true,
+                train: false,
+            }
+        );
+        // Set before training was a choice.
+        assert_eq!(
+            Prefs::from_cookie("s1r1l0"),
+            Prefs {
+                learn: false,
+                ..Prefs::default()
             }
         );
     }

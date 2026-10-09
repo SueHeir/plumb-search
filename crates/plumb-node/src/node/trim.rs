@@ -188,7 +188,7 @@ pub(super) fn trim(inner: &Inner) -> Result<Option<super::ServingIndex>> {
             limit / MB,
             sites / MB
         );
-        inner.journal.warning(
+        inner.journal.warning_daily(
             "Over the storage limit, but not because of the sites: page sets, places and \
              the rest take more than the limit leaves. Lower the page sets or raise the limit",
         );
@@ -204,7 +204,7 @@ pub(super) fn trim(inner: &Inner) -> Result<Option<super::ServingIndex>> {
     let per_site = sites / (set.len() as u64).max(1);
     let drops = pick_drops(&set, free, per_site, &Keep::of(inner));
     if drops.is_empty() {
-        inner.journal.warning(
+        inner.journal.warning_daily(
             "Over the storage limit, and every site left is one this node keeps: \
              lower the page sets or raise the limit",
         );

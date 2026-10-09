@@ -269,6 +269,17 @@ impl RawFacts {
         Ok(rows.len())
     }
 
+    /// Adds the facts of `other`, read for other kinds.
+    fn merge(&mut self, other: RawFacts) {
+        for (item, facts) in other.facts {
+            self.facts.entry(item).or_default().extend(facts);
+        }
+        self.counted.extend(other.counted);
+        self.disputed.extend(other.disputed);
+        self.partial.extend(other.partial);
+        self.started.extend(other.started);
+    }
+
     /// Adds the values only for some part of an item to the items that
     /// have no other of their kind.
     fn add_partial(&mut self) {
@@ -357,85 +368,129 @@ fn add_labels(labels: &mut HashMap<String, String>, json: &[u8]) -> Result<()> {
 /// Asks Wikidata's query service at `endpoint` for the facts of the items
 /// in `items` (those with an article, most read first).
 ///
-/// Each kind is read in pages of all its statements. When Wikidata stops
-/// answering a kind's pages (deep pages time out), the first
-/// [`FILL_IN_TOP`] items that still lack it are asked about by name, so
-/// the most read keep their facts.
+/// Each kind is read in pages of all its statements, [`PARALLEL_QUERIES`]
+/// kinds at once. Deep pages time out more often while other kinds are
+/// being read, so a kind Wikidata stopped answering is read on from where
+/// it stopped once the others are done, one kind at a time. When it still
+/// stops, the first [`FILL_IN_TOP`] items that lack it are asked about by
+/// name, so the most read keep their facts. Then batches of labels are
+/// asked for, [`PARALLEL_QUERIES`] at once.
 pub async fn fetch_facts(
     client: &reqwest::Client,
     endpoint: &str,
     pacing: WikidataPacing,
     items: &[String],
 ) -> Result<FactsByItem> {
+    use futures_util::stream::{self, StreamExt, TryStreamExt};
     let wanted: HashSet<String> = items.iter().cloned().collect();
     let wanted = &wanted;
-    let mut raw = RawFacts::default();
-    for &kind in KINDS {
-        let mut offset = 0;
-        // Too big to read whole: the most read items only, by name.
+    let read: Vec<(FactKind, RawFacts, Option<usize>)> = stream::iter(KINDS)
+        .map(|&kind| async move {
+            let mut raw = RawFacts::default();
+            let stopped = read_pages(client, endpoint, pacing, &mut raw, kind, 0, wanted).await?;
+            Ok::<_, anyhow::Error>((kind, raw, stopped))
+        })
+        .buffered(PARALLEL_QUERIES)
+        .try_collect()
+        .await?;
+    let mut kinds = Vec::with_capacity(read.len());
+    for (kind, mut raw, stopped) in read {
         let mut cut_short = kind.by_name_only();
-        while !kind.by_name_only() {
-            tokio::time::sleep(pacing.pause).await;
-            let json = match sparql_json(client, endpoint, &page_query(kind, offset), pacing).await
-            {
-                Ok(json) => json,
-                Err(err) => {
-                    warn!(
-                        "{} ({}): kept the {offset} statements read before Wikidata failed: {err:#}",
-                        kind.key(),
-                        kind.property()
-                    );
-                    cut_short = true;
-                    break;
-                }
-            };
-            let rows = raw.add_page(kind, wanted, &json)?;
+        if let Some(offset) = stopped {
             info!(
-                "{} ({}): {rows} statements from {offset}",
+                "{} ({}): reading on from {offset} alone",
                 kind.key(),
                 kind.property()
             );
-            if rows < FACTS_PAGE {
-                break;
-            }
-            offset += FACTS_PAGE;
+            let again =
+                read_pages(client, endpoint, pacing, &mut raw, kind, offset, wanted).await?;
+            cut_short |= again.is_some();
         }
-        let top = if cut_short {
-            FILL_IN_TOP
-        } else {
-            FILL_IN_ALWAYS
-        };
-        fill_in(
-            client,
-            endpoint,
-            pacing,
-            &mut raw,
-            kind,
-            &items[..top.min(items.len())],
-            wanted,
-        )
-        .await?;
+        kinds.push((kind, raw, cut_short));
+    }
+    let mut filled = stream::iter(kinds)
+        .map(|(kind, mut raw, cut_short)| async move {
+            // Too big or too slow to read whole: the most read items by name.
+            let top = if cut_short {
+                FILL_IN_TOP
+            } else {
+                FILL_IN_ALWAYS
+            };
+            let most_read = &items[..top.min(items.len())];
+            fill_in(client, endpoint, pacing, &mut raw, kind, most_read, wanted).await?;
+            Ok::<_, anyhow::Error>(raw)
+        })
+        .buffered(PARALLEL_QUERIES);
+    let mut raw = RawFacts::default();
+    while let Some(kind) = filled.try_next().await? {
+        raw.merge(kind);
     }
     raw.add_partial();
     let items = raw.named_items();
     info!("naming {} items the facts are about", items.len());
+    let batches = items.chunks(LABELS_BATCH).count();
+    let mut answers = stream::iter(items.chunks(LABELS_BATCH).enumerate())
+        .map(|(n, batch)| async move {
+            tokio::time::sleep(pacing.pause).await;
+            let answer = sparql_json(client, endpoint, &labels_query(batch), pacing).await;
+            (n, batch.len(), answer)
+        })
+        .buffered(PARALLEL_QUERIES);
     let mut labels = HashMap::new();
-    for (n, batch) in items.chunks(LABELS_BATCH).enumerate() {
-        tokio::time::sleep(pacing.pause).await;
-        match sparql_json(client, endpoint, &labels_query(batch), pacing).await {
+    while let Some((n, size, answer)) = answers.next().await {
+        match answer {
             Ok(json) => add_labels(&mut labels, &json)?,
             // Facts naming these items are left out.
-            Err(err) => warn!("labels of {} items left out: {err:#}", batch.len()),
+            Err(err) => warn!("labels of {size} items left out: {err:#}"),
         }
         if n % 50 == 0 {
-            info!(
-                "labels: {} of {} items",
-                (n + 1) * LABELS_BATCH,
-                items.len()
-            );
+            info!("labels: {} of {batches} batches", n + 1);
         }
     }
     Ok(raw.named(&labels))
+}
+
+/// Queries to Wikidata at once: its query service allows five per client.
+pub const PARALLEL_QUERIES: usize = 4;
+
+/// Reads the pages of `kind` from `offset` into `raw`. Returns where it
+/// stopped if Wikidata failed before the last page.
+async fn read_pages(
+    client: &reqwest::Client,
+    endpoint: &str,
+    pacing: WikidataPacing,
+    raw: &mut RawFacts,
+    kind: FactKind,
+    mut offset: usize,
+    wanted: &HashSet<String>,
+) -> Result<Option<usize>> {
+    if kind.by_name_only() {
+        return Ok(None);
+    }
+    loop {
+        tokio::time::sleep(pacing.pause).await;
+        let json = match sparql_json(client, endpoint, &page_query(kind, offset), pacing).await {
+            Ok(json) => json,
+            Err(err) => {
+                warn!(
+                    "{} ({}): Wikidata failed at statement {offset}: {err:#}",
+                    kind.key(),
+                    kind.property()
+                );
+                return Ok(Some(offset));
+            }
+        };
+        let rows = raw.add_page(kind, wanted, &json)?;
+        info!(
+            "{} ({}): {rows} statements from {offset}",
+            kind.key(),
+            kind.property()
+        );
+        if rows < FACTS_PAGE {
+            return Ok(None);
+        }
+        offset += FACTS_PAGE;
+    }
 }
 
 /// Asks for `kind` of those of `items` that lack it.

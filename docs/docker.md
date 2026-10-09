@@ -109,6 +109,49 @@ The search address the page offers is made from the address the browser
 reached Plumb at. Behind a reverse proxy, pass on the original `Host` header,
 and set `X-Forwarded-Proto: https` when the proxy serves HTTPS.
 
+## Behind a reverse proxy or tunnel
+
+A few things are kept to the computer Plumb runs on: changing settings on
+the panel, plugin buttons, and the MCP tools that fetch pages for your AI
+apps (`read_page`, findings, and sharing findings with other nodes on a
+node run with `--share-findings`, signed with its key). Plumb counts a request as local only when all
+three hold:
+
+* it connects from the machine itself (`127.0.0.1` or `::1`),
+* it was sent to a local name (`localhost`, `127.0.0.1` or `[::1]`), and
+* it has no `Forwarded`, `X-Forwarded-For` or `X-Real-IP` header.
+
+A proxy or tunnel on the same machine passes the first test for everyone it
+lets in, so it must fail one of the other two:
+
+* **Caddy and Traefik** add `X-Forwarded-For` and keep the original `Host`
+  by themselves. Nothing to do.
+* **nginx** does neither by default: `proxy_pass http://127.0.0.1:8080;`
+  sends `Host: 127.0.0.1:8080` and no forwarding header, so every visitor
+  looks like you. Add both lines (they are needed for the browser search
+  address anyway):
+
+  ```nginx
+  location / {
+      proxy_pass http://127.0.0.1:8080;
+      proxy_set_header Host $host;
+      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      proxy_set_header X-Forwarded-Proto $scheme;
+  }
+  ```
+
+  Nginx Proxy Manager sets these for you.
+* **Tunnels** (Cloudflare Tunnel, Tailscale Funnel, ngrok) need no port
+  forwarded on the router, but they still put the node on the internet, and
+  they run on the machine itself. Cloudflare Tunnel passes on the original
+  `Host` and adds `X-Forwarded-For`, so it is safe as it comes, unless set to
+  rewrite `Host` to `localhost` (its `httpHostHeader` setting). For others,
+  run the check below.
+
+To check, open `https://<your domain>/app` from another network, such as a
+phone off Wi-Fi: the settings must show as read-only. A node that only your
+own computers reach, at home or over a VPN, is fine either way.
+
 ## Where the data lives
 
 Everything is in the named volume `plumb-data`, mounted at `/data`:

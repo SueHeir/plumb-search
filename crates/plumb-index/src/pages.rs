@@ -60,6 +60,43 @@ pub const KNOWN_WORD_PAGES: u64 = 3;
 /// Most read articles about a site looked at for one about the site itself
 /// ([`PageSearcher::title_untitled`]).
 const TITLE_CANDIDATES: usize = 20;
+/// Fewest words (stemmed, without the most common ones and the asking
+/// words) of a query that finds Wikipedia articles by what they say of
+/// themselves ([`Page::about`]).
+pub const DESCRIBED_QUERY_WORDS: usize = 2;
+/// Fewest such words of a query of which an article whose title it has in
+/// full may lack one: "source of folic acid" finds Folic acid.
+pub const DESCRIBED_MISSING_FROM: usize = 3;
+/// How much a query word an article only says counts, against one of its
+/// title.
+pub const DESCRIBED_WORD: f32 = 0.5;
+/// Words that only ask ("what does resin mean"), left out of a query
+/// matched against what articles say of themselves.
+const ASKING_WORDS: &[&str] = &[
+    "about",
+    "are",
+    "define",
+    "definition",
+    "did",
+    "do",
+    "does",
+    "facts",
+    "how",
+    "info",
+    "information",
+    "is",
+    "mean",
+    "meaning",
+    "means",
+    "was",
+    "were",
+    "what",
+    "when",
+    "where",
+    "which",
+    "who",
+    "why",
+];
 /// Least share of a question title's stemmed words a query that has all of
 /// the question's own must have to ask the question as a whole.
 pub const QUESTION_TITLE_SHARE: f32 = 0.5;
@@ -354,6 +391,15 @@ impl Page {
             .filter(|host| !host.is_empty())
     }
 
+    /// Where a paper can be read free, when it is not its own address:
+    /// its copy on arXiv, the publisher's open version, a repository's.
+    pub fn free_copy(&self) -> Option<&str> {
+        if self.set != PAPERS_SET {
+            return None;
+        }
+        self.website.as_deref().filter(|url| *url != self.url)
+    }
+
     /// Whether the page is a TV show of the films set, rather than a film.
     pub fn is_show(&self) -> bool {
         self.set == FILMS_SET
@@ -375,7 +421,8 @@ impl Page {
     }
 
     /// The paper `paper`, written as an article whose item is its DOI or
-    /// else its OpenAlex id, and whose views are its citations.
+    /// else its OpenAlex id, whose views are its citations and whose
+    /// website is where it can be read free.
     pub fn from_paper(paper: Article) -> Self {
         let item = paper.item.as_deref().unwrap_or("");
         let url = if item.starts_with("10.") {
@@ -393,7 +440,7 @@ impl Page {
             aliases: paper.aliases,
             item: None,
             profiles: Vec::new(),
-            website: None,
+            website: paper.website,
             package: None,
             facts: Vec::new(),
         }
@@ -496,6 +543,22 @@ impl Page {
             Some(tags) => format!("{} {tags}", self.title),
             None => self.title.clone(),
         })
+    }
+
+    /// What a Wikipedia article is matched on beyond its names: its title,
+    /// the other titles that lead to it and its description ("1973 studio
+    /// album by Queen"), so "queen album" finds Queen (album). `None` for
+    /// pages of other sets.
+    pub fn about(&self) -> Option<String> {
+        if !self.is_article() {
+            return None;
+        }
+        let mut about = self.title.clone();
+        for text in self.aliases.iter().chain(&self.description) {
+            about.push(' ');
+            about.push_str(text);
+        }
+        Some(about)
     }
 
     /// Whether the page may be listed before every site. Books, podcasts,
@@ -668,6 +731,9 @@ struct Fields {
     keys: Field,
     /// Stemmed words of a question's title and tags; empty for other pages.
     topic: Field,
+    /// Stemmed words of a Wikipedia article's names and what it says of
+    /// itself ([`Page::about`]); empty for other pages.
+    about: Field,
     popularity: Field,
     /// The registrable domain of the official website of what a Wikipedia
     /// article is about ([`Page::site`]), for [`PageSearcher::site_popularity`].
@@ -701,6 +767,14 @@ fn schema() -> (Schema, Fields) {
                 .set_index_option(IndexRecordOption::Basic),
         ),
     );
+    let about = builder.add_text_field(
+        "about",
+        TextOptions::default().set_indexing_options(
+            TextFieldIndexing::default()
+                .set_tokenizer(STEMMED_ANALYZER)
+                .set_index_option(IndexRecordOption::Basic),
+        ),
+    );
     let popularity = builder.add_u64_field("popularity", FAST | STORED);
     let site = builder.add_text_field("site", STRING);
     let page = builder.add_text_field("page", STORED);
@@ -710,6 +784,7 @@ fn schema() -> (Schema, Fields) {
             words,
             keys,
             topic,
+            about,
             popularity,
             site,
             page,
@@ -749,6 +824,20 @@ const HINT_LEADS: &[&str] = &[
     "who are ",
     "who were ",
     "tell me about ",
+    "what is a ",
+    "what is an ",
+    "what is the ",
+    "what is ",
+    "what are ",
+    "what was ",
+    "what were ",
+    "what does ",
+    "define ",
+    "definition of ",
+    "meaning of ",
+    "info about ",
+    "information about ",
+    "facts about ",
 ];
 
 /// Words after a name that say what about it is wanted.
@@ -773,6 +862,8 @@ const HINT_TAILS: &[(&str, Hint)] = &[
     (" movie", Hint::Any),
     (" film", Hint::Any),
     (" meaning", Hint::Any),
+    (" mean", Hint::Any),
+    (" means", Hint::Any),
     (" definition", Hint::Any),
     (" explained", Hint::Any),
     (" quotes", Hint::Any),
@@ -945,6 +1036,9 @@ pub fn build_page_index(
         }
         if let Some(topic) = page.topic() {
             document.add_text(fields.topic, topic);
+        }
+        if let Some(about) = page.about() {
+            document.add_text(fields.about, about);
         }
         // A docs page's title alone ("Introduction") names nothing: it is
         // named by its product's name and title ("python sorting
@@ -1205,6 +1299,50 @@ impl PageSearcher {
         Ok(hits)
     }
 
+    /// The song or album of the music set whose title is the whole of
+    /// `query` when one is far better known than every other of that
+    /// title: Radiohead's "Creep" for "creep", with
+    /// [`KNOWN_SONG_MARGIN`] times the listeners of TLC's. `None` for a
+    /// title many share about equally ("hello", "yesterday"), or one of
+    /// fewer than [`KNOWN_SONG_LISTENERS`] listeners. Such a search does
+    /// not list the song (its title is too common a word), but it may be
+    /// for it.
+    pub fn known_song(&self, query: &str) -> Result<Option<Page>> {
+        let Some(joined) = analysis::tokens(&self.joined, query).pop() else {
+            return Ok(None);
+        };
+        let searcher = self.reader.searcher();
+        let named = TermQuery::new(
+            Term::from_field_text(self.fields.keys, &joined),
+            IndexRecordOption::Basic,
+        );
+        let top = TopDocs::with_limit(CANDIDATES)
+            .order_by_fast_field::<u64>("popularity", tantivy::Order::Desc);
+        let mut songs = Vec::new();
+        for (_, address) in searcher.search(&named, &top)? {
+            let document: TantivyDocument = searcher.doc(address)?;
+            let Some(stored) = document
+                .get_first(self.fields.page)
+                .and_then(|v| v.as_str())
+            else {
+                continue;
+            };
+            let page: Page = serde_json::from_str(stored)?;
+            if page.set == MUSIC_SET {
+                songs.push(page);
+            }
+        }
+        songs.sort_by_key(|page| std::cmp::Reverse(page.views));
+        let mut songs = songs.into_iter();
+        let Some(best) = songs.next() else {
+            return Ok(None);
+        };
+        let runner_up = songs.next().map_or(0, |page| page.views);
+        Ok((best.views >= KNOWN_SONG_LISTENERS
+            && best.views >= runner_up.saturating_mul(KNOWN_SONG_MARGIN))
+        .then_some(best))
+    }
+
     fn search_once(&self, query: &str, limit: usize) -> Result<Vec<PageHit>> {
         let words = analysis::tokens(&self.words, query);
         let Some(joined) = analysis::tokens(&self.joined, query).pop() else {
@@ -1355,6 +1493,51 @@ impl PageSearcher {
                 }
             }
         }
+        // Articles that say what the query asks for, in their names or
+        // description: "queen album" finds Queen (album), "mckinley
+        // president" William McKinley.
+        let described = self.described_words(query);
+        if described.len() >= DESCRIBED_QUERY_WORDS {
+            let mut needed = vec![described.len()];
+            if described.len() >= DESCRIBED_MISSING_FROM {
+                needed.push(described.len() - 1);
+            }
+            for needed in needed {
+                let most_words = BooleanQuery::with_minimum_required_clauses(
+                    described
+                        .iter()
+                        .map(|stem| {
+                            (
+                                Occur::Should,
+                                Box::new(TermQuery::new(
+                                    Term::from_field_text(self.fields.about, stem),
+                                    IndexRecordOption::Basic,
+                                )) as Box<dyn Query>,
+                            )
+                        })
+                        .collect(),
+                    needed,
+                );
+                for (_, address) in searcher.search(&most_words, &by_popularity())? {
+                    if !addresses.contains(&address) {
+                        addresses.push(address);
+                    }
+                }
+            }
+        }
+        // The query's rarest word that some question has: what it is
+        // about. A question without it has only the asking words ("how to
+        // get rid of aphids" found "How do I get rid of my bounty?").
+        let mut topic_word: Option<(u64, &String)> = None;
+        if stems.len() >= QUESTION_QUERY_WORDS {
+            for stem in &stems {
+                let found = searcher.doc_freq(&Term::from_field_text(self.fields.topic, stem))?;
+                if found > 0 && topic_word.is_none_or(|(least, _)| found < least) {
+                    topic_word = Some((found, stem));
+                }
+            }
+        }
+        let topic_word = topic_word.map(|(_, stem)| stem.as_str());
         let mut hits = Vec::new();
         for address in addresses {
             let document: TantivyDocument = searcher.doc(address)?;
@@ -1405,10 +1588,13 @@ impl PageSearcher {
             let mut whole = false;
             if asked_by_title {
                 (name, named, whole) = (name.max(ALIAS_MATCH), true, true);
-            } else if !named {
-                let (question, asked) = self.question_match(&page, &stems);
+            } else if !named && (page.set != DOCS_SET || docs_asked(&page, query)) {
+                let (question, asked) = self.question_match(&page, &stems, topic_word);
                 name = name.max(question);
                 whole = asked;
+            }
+            if !named && !whole {
+                name = name.max(self.described_match(&page, &described));
             }
             if name <= 0.0 {
                 continue;
@@ -1488,13 +1674,73 @@ impl PageSearcher {
         stems
     }
 
+    /// The different stemmed words of `query` without the words that only
+    /// ask ([`ASKING_WORDS`]), as articles are matched on what they say of
+    /// themselves: "resin" of "what does resin mean".
+    fn described_words(&self, query: &str) -> Vec<String> {
+        let asked: Vec<String> = analysis::tokens(&self.words, query)
+            .into_iter()
+            .filter(|word| !ASKING_WORDS.contains(&word.as_str()))
+            .collect();
+        self.question_words(&asked.join(" "))
+    }
+
+    /// How well a Wikipedia article covers the query's words `stems`
+    /// ([`PageSearcher::described_words`]) with one of its names and what it
+    /// says of itself ([`Page::about`]): 0 unless a name has some of them
+    /// and the article all of them, or all but one when the name is whole
+    /// in the query and the query has [`DESCRIBED_MISSING_FROM`] words.
+    /// Otherwise [`PARTIAL_MATCH`] times the share of the query in the
+    /// name, a word the article only says counting [`DESCRIBED_WORD`], and
+    /// halfway down by the share of the name the query lacks: "queen
+    /// album" covers Queen (album) by 0.45.
+    fn described_match(&self, page: &Page, stems: &[String]) -> f32 {
+        if stems.len() < DESCRIBED_QUERY_WORDS {
+            return 0.0;
+        }
+        let Some(about) = page.about() else {
+            return 0.0;
+        };
+        let about: HashSet<String> = analysis::tokens(&self.stemmed, &about)
+            .into_iter()
+            .collect();
+        let missing = stems.iter().filter(|stem| !about.contains(*stem)).count();
+        let mut best = 0.0f32;
+        for name in
+            std::iter::once(base_title(&page.title)).chain(page.aliases.iter().map(String::as_str))
+        {
+            let name: HashSet<String> = analysis::tokens(&self.stemmed, name).into_iter().collect();
+            let in_name = stems.iter().filter(|stem| name.contains(*stem)).count();
+            if in_name == 0 {
+                continue;
+            }
+            let whole_name = name.iter().all(|word| stems.contains(word));
+            if missing > 1 || missing == 1 && !(whole_name && stems.len() >= DESCRIBED_MISSING_FROM)
+            {
+                continue;
+            }
+            let said = stems.len() - in_name - missing;
+            let query_share = (in_name as f32 + DESCRIBED_WORD * said as f32) / stems.len() as f32;
+            let name_share =
+                name.iter().filter(|word| stems.contains(*word)).count() as f32 / name.len() as f32;
+            best = best.max(PARTIAL_MATCH * query_share * (0.5 + 0.5 * name_share));
+        }
+        best
+    }
+
     /// How well a question's words cover the query's stemmed words
     /// `stems`: [`PARTIAL_MATCH`] times the share they have, when that is
     /// at least [`QUESTION_SHARE`] of at least [`QUESTION_QUERY_WORDS`].
     /// And whether the query asks the question as a whole: it has all of
     /// the query's words, and the query at least [`QUESTION_TITLE_SHARE`]
-    /// of its title's.
-    fn question_match(&self, page: &Page, stems: &[String]) -> (f32, bool) {
+    /// of its title's. A question without `topic_word`, the query's rarest
+    /// word, matches not at all.
+    fn question_match(
+        &self,
+        page: &Page,
+        stems: &[String],
+        topic_word: Option<&str>,
+    ) -> (f32, bool) {
         if stems.len() < QUESTION_QUERY_WORDS {
             return (0.0, false);
         }
@@ -1504,6 +1750,9 @@ impl PageSearcher {
         let words: HashSet<String> = analysis::tokens(&self.stemmed, &topic)
             .into_iter()
             .collect();
+        if topic_word.is_some_and(|word| !words.contains(word)) {
+            return (0.0, false);
+        }
         let share =
             stems.iter().filter(|stem| words.contains(*stem)).count() as f32 / stems.len() as f32;
         if share < QUESTION_SHARE {
@@ -1552,6 +1801,13 @@ impl PageSearcher {
                 .map_or(by, |(name, _)| name)
                 .to_string()
         };
+        // Asked for artist first, the main artist alone: "kanye west drive
+        // slow" for "Kanye West feat. Paul Wall & GLC".
+        let main = [" feat. ", " ft. "]
+            .iter()
+            .find_map(|joiner| author.split_once(joiner))
+            .map_or(author.as_str(), |(main, _)| main);
+        let artist = analysis::tokens(&self.words, main);
         let author: HashSet<String> = analysis::tokens(&self.words, &author).into_iter().collect();
         // The title, or the title without its subtitle: "Frankenstein" for
         // "Frankenstein; or, The Modern Prometheus".
@@ -1561,6 +1817,26 @@ impl PageSearcher {
             .enumerate()
             .any(|(i, title)| {
                 let title = analysis::tokens(&self.words, title);
+                // Songs and albums are as often asked for artist first:
+                // "vampire weekend step", "nirvana nevermind album",
+                // "beatles hey jude".
+                let unthe = match artist.as_slice() {
+                    [the, rest @ ..] if the == "the" && !rest.is_empty() => rest,
+                    artist => artist,
+                };
+                if page.set == MUSIC_SET && !artist.is_empty() && !title.is_empty() {
+                    if let Some(rest) = words
+                        .strip_prefix(artist.as_slice())
+                        .or_else(|| words.strip_prefix(unthe))
+                        .and_then(|rest| rest.strip_prefix(title.as_slice()))
+                    {
+                        if rest.is_empty()
+                            || matches!(rest, [word] if kinds.contains(&word.as_str()))
+                        {
+                            return true;
+                        }
+                    }
+                }
                 let rest = match words.strip_prefix(title.as_slice()) {
                     Some([]) => {
                         return page.set == PAPERS_SET && i == 0 && title.len() >= PAPER_TITLE_WORDS
@@ -1673,6 +1949,14 @@ fn fold_films(hits: Vec<PageHit>) -> Vec<PageHit> {
     kept
 }
 
+/// Least listeners of a song or album that [`PageSearcher::known_song`]
+/// takes a search of its title alone to be for: about the 7,000 most
+/// listened.
+pub const KNOWN_SONG_LISTENERS: u64 = 50_000;
+/// How many times the listeners of every other song or album of its title
+/// such a one has.
+pub const KNOWN_SONG_MARGIN: u64 = 5;
+
 /// Most pages listed on their own among the sites.
 pub const MAX_PAGES_LISTED: usize = 2;
 /// Least score of a page the query does not name in full that is listed.
@@ -1715,12 +1999,32 @@ const LIFTED_FROM: usize = 5;
 /// (0.41).
 const LIFT_LINK_MARGIN: f32 = 0.2;
 
+/// Leaves out the sites that lack some of the query's main words
+/// ([`crate::Hit::missing_words`]) when the whole query is the name of an
+/// article or Wikidata item: "toy story" names the film, so rawstory.com
+/// and codastory.com, having one word of it, are no answer. The page's
+/// own site stays. Returns how many were left out.
+pub fn drop_namesakes_of_words(sites: &mut Vec<crate::Hit>, pages: &[PageHit]) -> usize {
+    let Some(named) = pages
+        .iter()
+        .find(|hit| hit.named && hit.page.item.is_some())
+    else {
+        return 0;
+    };
+    let own = named.page.site.as_deref();
+    let before = sites.len();
+    sites.retain(|hit| !hit.missing_words || Some(hit.domain.as_str()) == own);
+    before - sites.len()
+}
+
 /// Adds the official site of the best article the query names when the
 /// sites found leave it out, as the [`LIFTED_FROM`]th site or last, so
 /// that [`lift_named_sites`] can weigh it: "better call saul" names the
 /// article whose site is amc.com, which no word of the query matches.
-/// `site` gives the site of a domain; one with no Wikidata item
-/// ([`crate::Hit::official`]) is not added. Returns whether it added one.
+/// `site` gives the site of a domain, crawled or not: the page's site is
+/// the item's official website in Wikidata, which is enough to list it
+/// (adultswim.com for "rick and morty", never fetched on some nodes).
+/// Returns whether it added one.
 pub fn add_named_site(
     sites: &mut Vec<crate::Hit>,
     pages: &[PageHit],
@@ -1736,7 +2040,7 @@ pub fn add_named_site(
     if sites.is_empty() || sites.iter().any(|hit| hit.domain == domain) {
         return false;
     }
-    let Some(mut added) = site(domain).filter(|hit| hit.official) else {
+    let Some(mut added) = site(domain) else {
         return false;
     };
     let at = sites.len().min(LIFTED_FROM - 1);
@@ -1833,8 +2137,14 @@ pub fn lift_named_sites(sites: &mut [crate::Hit], pages: &[PageHit]) {
 ///   lists usbank.com before the article "U.S. Bancorp".
 ///
 /// A page the learned ranking listed on its own ([`PageHit::learned`])
-/// stays where it put it: before the same site, or last.
-pub fn place_pages(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) -> Vec<PlacedPage> {
+/// stays where it put it: before the same site, or last, except that a
+/// docs page found by its words never comes before the best site.
+pub fn place_pages(query: &str, sites: &[crate::Hit], mut pages: Vec<PageHit>) -> Vec<PlacedPage> {
+    if !asks_for_podcasts(query) {
+        // Podcasts it does not ask for take no other page's place
+        // ([`keep_page_rules`]).
+        pages.sort_by_key(|hit| hit.page.set == PODCASTS_SET);
+    }
     let mut placed = place_pages_by_rules(query, sites, pages);
     for page in placed.iter_mut().filter(|p| p.under.is_none()) {
         match &page.hit.learned {
@@ -1847,7 +2157,49 @@ pub fn place_pages(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) -> Ve
             None => {}
         }
     }
+    keep_page_rules(query, sites, &mut placed);
     placed
+}
+
+/// The places no ranking overrides, applied after [`place_pages`] and
+/// after [`crate::learned::reorder`]: a docs page found by its words never
+/// comes before the best site unless that site is the docs' own (see
+/// [`docs_kept_below`]), and, unless the query asks for them,
+/// podcasts come after the best site and the other pages listed on their
+/// own ("better call saul" wants amc.com and the article first).
+pub fn keep_page_rules(query: &str, sites: &[crate::Hit], placed: &mut Vec<PlacedPage>) {
+    for page in placed.iter_mut().filter(|p| p.under.is_none()) {
+        if docs_kept_below(&page.hit, sites) {
+            page.at = page.at.max(1).min(sites.len());
+        }
+    }
+    if asks_for_podcasts(query) {
+        return;
+    }
+    let others = placed
+        .iter()
+        .filter(|p| p.under.is_none() && p.hit.page.set != PODCASTS_SET)
+        .map(|p| p.at)
+        .max()
+        .unwrap_or(0);
+    let (podcasts, mut rest): (Vec<PlacedPage>, Vec<PlacedPage>) = std::mem::take(placed)
+        .into_iter()
+        .partition(|p| p.under.is_none() && p.hit.page.set == PODCASTS_SET);
+    for mut page in podcasts {
+        page.at = page.at.max(others).max(1).min(sites.len());
+        rest.push(page);
+    }
+    *placed = rest;
+}
+
+/// Whether `query` asks for podcasts or episodes.
+fn asks_for_podcasts(query: &str) -> bool {
+    query.split_whitespace().any(|word| {
+        matches!(
+            word.to_lowercase().as_str(),
+            "podcast" | "podcasts" | "episode" | "episodes"
+        )
+    })
 }
 
 fn place_pages_by_rules(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) -> Vec<PlacedPage> {
@@ -1958,7 +2310,17 @@ fn place_pages_by_rules(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) 
         if listed == most || !(hit.named || hit.score >= MIN_PARTIAL_SCORE) {
             continue;
         }
-        let at = if hit.whole {
+        // One docs page found by its words is enough: more crowd out the
+        // questions that answer the same search.
+        let docs_found = |p: &PlacedPage| p.hit.page.set == DOCS_SET && !p.hit.named;
+        if docs_found_by_words(&hit) && placed.iter().any(docs_found) {
+            continue;
+        }
+        let at = if docs_found_by_words(&hit) {
+            // A docs page found by its words comes after the best site:
+            // "docker desktop download" wants docker.com first.
+            1
+        } else if hit.whole {
             // Only the best of them leads: another edition of the book
             // comes after the best site.
             let led = placed.iter().any(|p| p.hit.whole);
@@ -1990,6 +2352,42 @@ fn place_pages_by_rules(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) 
         });
     }
     placed
+}
+
+/// Whether `hit` is a docs page the search found by most of its words
+/// rather than named.
+pub(crate) fn docs_found_by_words(hit: &PageHit) -> bool {
+    hit.page.set == DOCS_SET && !hit.named
+}
+
+/// Whether `hit` is a docs page found by its words that must come after
+/// the best of `sites`: "python package index" wants pypi.org first, and
+/// "bash parameter expansion" anything but expansion.com. Only the docs'
+/// own site may come after it, as python.org for docs.python.org's
+/// "python sorting techniques".
+pub(crate) fn docs_kept_below(hit: &PageHit, sites: &[crate::Hit]) -> bool {
+    docs_found_by_words(hit)
+        && sites
+            .first()
+            .is_some_and(|best| !docs_of(&hit.page, &best.domain))
+}
+
+/// Whether the docs page `page` is on `domain` or one of its subdomains.
+fn docs_of(page: &Page, domain: &str) -> bool {
+    plumb_core::host_of(&page.url).is_some_and(|host| {
+        host == domain
+            || host
+                .strip_suffix(domain)
+                .is_some_and(|sub| sub.ends_with('.'))
+    })
+}
+
+/// Whether `query` asks about something in the docs of the docs page
+/// `page`'s site (see [`plumb_core::docs::asks_about`]): "python sort
+/// list" does for a page of Python's docs; "note taking app" for none.
+fn docs_asked(page: &Page, query: &str) -> bool {
+    plumb_core::docs::site_of_url(&page.url)
+        .is_some_and(|site| plumb_core::docs::asks_about(site, query))
 }
 
 /// Words a search asked as a question starts with.
@@ -2175,11 +2573,12 @@ mod tests {
         // Its title alone names nothing.
         assert!(found("glossary").is_empty());
         assert!(found("sorting techniques").is_empty());
-        // Most of the query's words.
+        // Most of the query's words, with the product named.
         assert_eq!(
             found("sort a list in python"),
             [("Sorting Techniques".to_string(), false)]
         );
+        assert!(found("sort a list in place").is_empty());
         assert!(Page::from_docs(Article {
             item: Some("http://docs.python.org/3/".into()),
             ..Article::default()
@@ -2196,8 +2595,32 @@ mod tests {
                 ..Article::default()
             },
         );
-        assert_eq!(read, Some(sorting));
+        assert_eq!(read, Some(sorting.clone()));
         assert!(Page::has_reader(DOCS_SET));
+
+        // Found by its words, it comes after the best site unless that is
+        // the docs' own.
+        let placed_at = |best: &str| {
+            let sites = [site(best, false), site("other.com", false)];
+            let mut placed = vec![PlacedPage {
+                at: 0,
+                under: None,
+                hit: PageHit {
+                    page: sorting.clone(),
+                    score: 0.9,
+                    named: false,
+                    popularity: 1.0,
+                    whole: true,
+                    learned: None,
+                },
+            }];
+            keep_page_rules("sort a list in python", &sites, &mut placed);
+            placed[0].at
+        };
+        assert_eq!(placed_at("pypi.org"), 1);
+        assert_eq!(placed_at("python.org"), 0);
+        assert_eq!(placed_at("docs.python.org"), 0);
+        assert_eq!(placed_at("cpython.org"), 1);
     }
 
     #[test]
@@ -2336,6 +2759,31 @@ mod tests {
         assert!(without
             .iter()
             .all(|(t, _)| t != "Monty Python" && t != "python/cpython"));
+    }
+
+    #[test]
+    fn questions_without_the_word_asked_about_are_not_found() {
+        let question = |title: &str, tags: &str, item: &str| {
+            Page::from_question(Article {
+                title: title.into(),
+                description: Some(tags.into()),
+                item: Some(item.into()),
+                views: 100_000,
+                ..Article::default()
+            })
+        };
+        let pages = [
+            question("How do I get rid of my bounty?", "bounty, meta", "1"),
+            question(
+                "How to get rid of large gaps in text",
+                "ms-word, layout",
+                "2",
+            ),
+            question("How do I get rid of aphids on roses?", "pests, roses", "3"),
+        ];
+        let (_dir, s) = searcher(&pages);
+        let hits = s.search("how to get rid of aphids", 5).unwrap();
+        assert_eq!(titles(&hits), ["How do I get rid of aphids on roses?"]);
     }
 
     #[test]
@@ -2565,6 +3013,7 @@ mod tests {
             official: false,
             key_pages: Vec::new(),
             demand: None,
+            missing_words: false,
             placing_text_score: None,
         }
     }
@@ -2580,6 +3029,37 @@ mod tests {
             whole: false,
             learned: None,
         }
+    }
+
+    #[test]
+    fn podcasts_come_after_the_site_and_the_article_unless_asked_for() {
+        let sites = [site("comedycentral.com", false), site("amc.com", false)];
+        let podcast = |title: &str| {
+            let mut hit = found(title, None, true, 0.95);
+            hit.page.set = PODCASTS_SET.into();
+            hit.learned = Some(LearnedPlace::Before("comedycentral.com".into()));
+            hit
+        };
+        let article = found("Better Call Saul", None, true, 0.9);
+        let pages = vec![
+            podcast("Better Call Saul Insider"),
+            podcast("Better Call Saul Podcast"),
+            article,
+        ];
+        let placed = place_pages("better call saul", &sites, pages.clone());
+        let alone: Vec<(&str, usize)> = placed
+            .iter()
+            .filter(|p| p.under.is_none())
+            .map(|p| (p.hit.page.title.as_str(), p.at))
+            .collect();
+        let article_at = alone[0].1;
+        assert_eq!(alone[0].0, "Better Call Saul");
+        assert!(alone[1..].iter().all(|&(_, at)| at >= article_at.max(1)));
+        // Asked for, they stay where they were put.
+        let placed = place_pages("better call saul podcast", &sites, pages);
+        assert!(placed
+            .iter()
+            .any(|p| p.hit.page.set == PODCASTS_SET && p.at == 0));
     }
 
     #[test]
@@ -2726,6 +3206,27 @@ mod tests {
     }
 
     #[test]
+    fn sites_with_some_words_of_a_named_article_are_left_out() {
+        let mut sites = vec![
+            site("toystory.disney.com", false),
+            site("rawstory.com", false),
+            site("toys.com", false),
+        ];
+        sites[1].missing_words = true;
+        sites[2].missing_words = true;
+        let mut film = found("Toy Story", Some("toys.com"), true, 0.9);
+        film.page.item = Some("Q171048".into());
+        // Not named in full: all stay.
+        film.named = false;
+        assert_eq!(drop_namesakes_of_words(&mut sites, &[film.clone()]), 0);
+        film.named = true;
+        assert_eq!(drop_namesakes_of_words(&mut sites, &[film]), 1);
+        let order: Vec<&str> = sites.iter().map(|s| s.domain.as_str()).collect();
+        // The article's own site stays.
+        assert_eq!(order, ["toystory.disney.com", "toys.com"]);
+    }
+
+    #[test]
     fn the_site_of_the_article_named_is_added_when_missing() {
         let mut sites = vec![
             site("comedycentral.com", false),
@@ -2754,10 +3255,10 @@ mod tests {
             ]
         );
         assert!(sites[3].score < sites[2].score);
-        // Once is enough, and a site Wikidata does not know is not added.
+        // Once is enough, and a site the index does not hold is not added.
         assert!(!add_named_site(&mut sites, &[show.clone()], amc));
         show.page.site = Some("fans.example".into());
-        assert!(!add_named_site(&mut sites, &[show], amc));
+        assert!(!add_named_site(&mut sites, &[show], |_| None));
     }
 
     #[test]
@@ -3017,6 +3518,25 @@ mod tests {
         );
         assert!(jude.is_song() && !jude.may_lead());
         assert_eq!(jude.set_name(), "MusicBrainz");
+        // With guests, the main artist first finds it too.
+        let slow = song(
+            "Drive Slow",
+            "Song by Kanye West feat. Paul Wall & GLC",
+            "recording/a1b2c3d4-0000-4042-ae91-78d6a3267d69",
+            30_000,
+        );
+        let (_dir, s) = searcher(std::slice::from_ref(&slow));
+        for query in [
+            "kanye west drive slow",
+            "kanye west drive slow song",
+            "drive slow kanye west",
+        ] {
+            let hits = s.search(query, 5).unwrap();
+            assert!(
+                !hits.is_empty() && hits[0].page.url == slow.url,
+                "{query}: {hits:?}"
+            );
+        }
         let white = song(
             "The Beatles",
             "Album by The Beatles",
@@ -3035,6 +3555,9 @@ mod tests {
             "hey jude beatles",
             "hey jude by the beatles",
             "hey jude song",
+            "the beatles hey jude",
+            "beatles hey jude",
+            "beatles hey jude song",
         ] {
             let hits = s.search(query, 5).unwrap();
             assert!(
@@ -3052,6 +3575,17 @@ mod tests {
             .unwrap()
             .iter()
             .all(|hit| hit.page.set != MUSIC_SET));
+        // The artist alone, or with words that are not the title, asks
+        // for no song.
+        for query in ["the beatles", "beatles hey"] {
+            assert!(
+                s.search(query, 5)
+                    .unwrap()
+                    .iter()
+                    .all(|hit| hit.page.url != jude.url),
+                "{query}"
+            );
+        }
         let hits = s.search("the beatles album", 5).unwrap();
         assert!(hits[0].whole && hits[0].page.set == MUSIC_SET && !hits[0].page.is_song());
         // An item of neither kind is no page.
@@ -3063,6 +3597,60 @@ mod tests {
             }),
             None
         );
+    }
+
+    #[test]
+    fn a_title_alone_is_for_a_song_far_better_known_than_its_namesakes() {
+        let creep = song(
+            "Creep",
+            "Song by Radiohead",
+            "recording/a1b2c3d4-0001-4042-ae91-78d6a3267d69",
+            288_000,
+        );
+        let tlc = song(
+            "Creep",
+            "Song by TLC",
+            "recording/a1b2c3d4-0002-4042-ae91-78d6a3267d69",
+            34_000,
+        );
+        let oasis = song(
+            "Hello",
+            "Song by Oasis",
+            "recording/a1b2c3d4-0003-4042-ae91-78d6a3267d69",
+            93_000,
+        );
+        let evanescence = song(
+            "Hello",
+            "Song by Evanescence",
+            "recording/a1b2c3d4-0004-4042-ae91-78d6a3267d69",
+            83_000,
+        );
+        let quiet = song(
+            "Dead Sea",
+            "Song by The Lumineers",
+            "recording/a1b2c3d4-0005-4042-ae91-78d6a3267d69",
+            40_000,
+        );
+        let (_dir, s) = searcher(&[
+            creep.clone(),
+            tlc,
+            oasis,
+            evanescence,
+            quiet,
+            page("Creep", 50_000, &[]),
+        ]);
+        assert_eq!(s.known_song("creep").unwrap(), Some(creep.clone()));
+        assert_eq!(s.known_song("Creep").unwrap(), Some(creep));
+        // Titles shared about equally, too few listeners, or no title.
+        assert_eq!(s.known_song("hello").unwrap(), None);
+        assert_eq!(s.known_song("dead sea").unwrap(), None);
+        assert_eq!(s.known_song("radiohead").unwrap(), None);
+        // The title still lists no song.
+        assert!(s
+            .search("creep", 5)
+            .unwrap()
+            .iter()
+            .all(|hit| hit.page.set != MUSIC_SET));
     }
 
     fn film(title: &str, description: &str, item: &str, sitelinks: u64) -> Page {
@@ -3287,6 +3875,70 @@ mod tests {
         assert_eq!(
             hinted_name("Who is Dalai Lama?"),
             Some(("dalai lama".into(), Hint::Any))
+        );
+    }
+
+    #[test]
+    fn articles_are_found_by_what_they_say_of_themselves() {
+        let described = |title: &str, description: &str, views: u64, aliases: &[&str]| {
+            let mut page = page(title, views, aliases);
+            page.description = Some(description.into());
+            page
+        };
+        let (_dir, s) = searcher(&[
+            described("Queen (band)", "British rock band", 900_000, &[]),
+            described("Queen (album)", "1973 studio album by Queen", 40_000, &[]),
+            described(
+                "William McKinley",
+                "President of the United States from 1897 to 1901",
+                300_000,
+                &[],
+            ),
+            described("Folic acid", "Synthetic form of vitamin B9", 200_000, &[]),
+            described("Coworking", "Shared office arrangement", 50_000, &[]),
+            described("Resin", "Solid or highly viscous substance", 60_000, &[]),
+            described("Album", "Collection of audio recordings", 500_000, &[]),
+            described("Acid", "Chemical compound", 500_000, &[]),
+        ]);
+        let found = |query: &str| -> Vec<(String, f32)> {
+            s.search(query, 5)
+                .unwrap()
+                .into_iter()
+                .map(|hit| (hit.page.title, hit.score))
+                .collect()
+        };
+        let first = |query: &str| found(query).first().map(|(title, _)| title.clone());
+        assert_eq!(first("queen album").as_deref(), Some("Queen (album)"));
+        assert_eq!(
+            first("mckinley president").as_deref(),
+            Some("William McKinley")
+        );
+        // A word the article does not say is left over when it names the
+        // article in full.
+        assert_eq!(first("source of folic acid").as_deref(), Some("Folic acid"));
+        // Words that only ask are not looked for.
+        assert_eq!(first("what is coworking").as_deref(), Some("Coworking"));
+        assert_eq!(first("what does resin mean").as_deref(), Some("Resin"));
+        // Such a page is not named, and is listed only when it covers the
+        // query well enough.
+        let hits = s.search("mckinley president", 5).unwrap();
+        assert!(!hits[0].named);
+        // A word neither its names nor its description have keeps the
+        // article out when the query names it only in part.
+        assert!(found("queen tour")
+            .iter()
+            .all(|(title, _)| title != "Queen (album)"));
+        // One word is a name, not a description.
+        assert!(found("album")
+            .iter()
+            .all(|(title, _)| title != "Queen (album)"));
+        assert_eq!(
+            hinted_name("what does resin mean"),
+            Some(("resin".into(), Hint::Any))
+        );
+        assert_eq!(
+            hinted_name("What is a manubrium?"),
+            Some(("manubrium".into(), Hint::Any))
         );
     }
 

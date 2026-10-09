@@ -8,6 +8,7 @@
 //! one.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -16,8 +17,8 @@ use std::io::Write;
 use anyhow::{bail, Context, Result};
 use plumb_core::{now_unix, Operators};
 use plumb_index::pages::{
-    add_named_site, lift_named_sites, options_allow, place_operator_pages, place_pages,
-    OPERATOR_PAGES,
+    add_named_site, drop_namesakes_of_words, lift_named_sites, options_allow, place_operator_pages,
+    place_pages, OPERATOR_PAGES,
 };
 use plumb_index::{SearchOptions, SearchResults};
 use plumb_net::pages::MAX_PAGES_CHUNK;
@@ -57,13 +58,17 @@ pub(super) fn run(inner: Arc<Inner>) {
     // busy or slow trusted node), and the pages already here are searched
     // meanwhile. A file taken is indexed at the next look.
     let runtime = tokio::runtime::Handle::current();
+    // Ends the downloads when this ends, by a panic too: the loop started
+    // again after one starts its own.
+    let files_done = FilesDone(Arc::new(AtomicBool::new(false)));
     let files = {
         let inner = inner.clone();
+        let done = files_done.0.clone();
         std::thread::Builder::new()
             .name("page set files".into())
             .spawn(move || {
                 let _entered = runtime.enter();
-                keep_files(&inner);
+                keep_files(&inner, &done);
             })
     };
     let files = match files {
@@ -139,18 +144,29 @@ pub(super) fn run(inner: Arc<Inner>) {
             std::thread::sleep(TICK);
         }
     }
+    drop(files_done);
     if let Some(files) = files {
         let _ = files.join();
     }
 }
 
+/// Tells the downloads thread to end when dropped.
+struct FilesDone(Arc<AtomicBool>);
+
+impl Drop for FilesDone {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+}
+
 /// Takes the set files missing, or short of pages, from a trusted node,
 /// until the node stops.
-fn keep_files(inner: &Inner) {
+fn keep_files(inner: &Inner, done: &AtomicBool) {
     // By set: a set the trusted node lacks, or whose download failed, does
     // not hold up the others.
     let mut fetch_failed: HashMap<&'static str, Instant> = HashMap::new();
-    while !inner.stopping() {
+    let ended = || inner.stopping() || done.load(Ordering::Relaxed);
+    while !ended() {
         let mut settings = inner.settings();
         if inner.config.blackhole {
             settings.page_sets = settings.page_sets.all_unless_set();
@@ -160,7 +176,7 @@ fn keep_files(inner: &Inner) {
         fetch_failed.retain(|_, at| at.elapsed() < FETCH_RETRY_WAIT);
         if let Some(net) = super::network::handle(inner).cloned() {
             for &(set, pages) in &counts {
-                if inner.stopping() {
+                if ended() {
                     break;
                 }
                 if fetch_failed.contains_key(set.id) {
@@ -174,7 +190,7 @@ fn keep_files(inner: &Inner) {
             }
         }
         let until = Instant::now() + LOOK_EVERY;
-        while !inner.stopping() && Instant::now() < until {
+        while !ended() && Instant::now() < until {
             std::thread::sleep(TICK);
         }
     }
@@ -192,6 +208,41 @@ fn near_of(
         crate::places::file_near(pages, homes.unwrap_or_default()).to_vec()
     } else {
         Vec::new()
+    }
+}
+
+/// Holds a set's file for one writer: a download or a cut, never both,
+/// since each writes the file's `.part` and renames it over the file.
+struct SetFileHold<'a> {
+    inner: &'a Inner,
+    id: &'static str,
+}
+
+impl<'a> SetFileHold<'a> {
+    /// `None` while another writer holds the file.
+    fn take(inner: &'a Inner, id: &'static str) -> Option<Self> {
+        let taken = inner
+            .set_files_busy
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(id);
+        // Not `then_some`: a hold made and dropped would let the other
+        // writer's go.
+        if taken {
+            Some(SetFileHold { inner, id })
+        } else {
+            None
+        }
+    }
+}
+
+impl Drop for SetFileHold<'_> {
+    fn drop(&mut self) {
+        self.inner
+            .set_files_busy
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(self.id);
     }
 }
 
@@ -224,6 +275,10 @@ fn fetch_if_needed(
         }
         Some(_) => return Ok(()),
     };
+    if let Some(pause) = inner.download_pause() {
+        debug!("page set {}: not downloaded now: {}", set.id, pause.reason);
+        return Ok(());
+    }
     let runtime = tokio::runtime::Handle::current();
     // Is there a node to take it from, with a file worth taking? Nodes
     // without one are passed over for the next trusted node.
@@ -280,6 +335,13 @@ fn fetch_if_needed(
             thousands(pages)
         }
     ));
+    let Some(_hold) = SetFileHold::take(inner, set.id) else {
+        debug!(
+            "page set {}: its file is being cut; downloading later",
+            set.id
+        );
+        return Ok(());
+    };
     let file = set.file(data);
     std::fs::create_dir_all(file.parent().context("a set file has a folder")?)?;
     let mut part = file.as_os_str().to_owned();
@@ -345,10 +407,13 @@ fn take(
             .flush()
             .with_context(|| format!("unpacking {} from {}", set.id, chunk.peer))?;
         offset += chunk.bytes.len() as u64;
+        if let Err(err) = inner.add_downloaded(chunk.bytes.len() as u64) {
+            warn!("page set {}: counting the download: {err:#}", set.id);
+        }
         if decoder.get_ref().full() || offset >= chunk.size || chunk.bytes.is_empty() {
             break;
         }
-        if inner.stopping() {
+        if inner.stopping() || inner.owner_pause().is_some() {
             return Ok(None);
         }
         let (size, modified) = (chunk.size, chunk.modified);
@@ -436,6 +501,11 @@ fn cut_if_longer(
         }
         return Ok(());
     }
+    // A download of the set will replace the file anyway; the index goes
+    // on with it as it is until then.
+    let Some(_hold) = SetFileHold::take(inner, set.id) else {
+        return Ok(());
+    };
     let mut part = file.as_os_str().to_owned();
     part.push(".part");
     let part = std::path::PathBuf::from(part);
@@ -447,6 +517,11 @@ fn cut_if_longer(
     }
     let mut buf = vec![0u8; 1 << 16];
     while !cutter.full() {
+        if inner.stopping() {
+            drop(cutter);
+            let _ = std::fs::remove_file(&part);
+            return Ok(());
+        }
         let n = std::io::Read::read(&mut reader, &mut buf)
             .with_context(|| format!("reading {}", file.display()))?;
         if n == 0 {
@@ -533,6 +608,28 @@ impl Inner {
     }
 }
 
+/// The song or album a search of `query` alone is surely for; see
+/// [`PageSearcher::known_song`].
+pub(super) fn known_song(
+    inner: &Inner,
+    query: &str,
+    options: &SearchOptions,
+) -> Option<plumb_index::pages::Page> {
+    let searcher = inner
+        .pages
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .as_ref()
+        .map(|(_, s)| s.clone())?;
+    match searcher.known_song(query) {
+        Ok(song) => song.filter(|page| options_allow(options, page)),
+        Err(err) => {
+            warn!("looking for a song: {err:#}");
+            None
+        }
+    }
+}
+
 /// Adds the pages found for `query` to `results`.
 pub(super) fn add_pages(
     inner: &Inner,
@@ -570,6 +667,9 @@ pub(super) fn add_pages(
                 add_named_site(&mut results.hits, &found, |domain| {
                     index.backend().site(domain)
                 });
+            }
+            if inner.rank.drop_namesakes {
+                drop_namesakes_of_words(&mut results.hits, &found);
             }
             lift_named_sites(&mut results.hits, &found);
             if let Err(err) = searcher.note_demand(&mut results.hits) {

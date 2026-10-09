@@ -88,8 +88,11 @@ const KEY_PAGES_CATCH_UP_PER_ROUND: usize = 200;
 /// crawler's) that a round crawls whether or not they are this node's to
 /// crawl today, at most this many, best-known first. A popular site outside
 /// the node's daily share can otherwise wait weeks for a first read, and
-/// until then search knows nothing of what it is.
-const FIRST_FETCH_CATCH_UP_PER_ROUND: usize = 50;
+/// until then search knows nothing of what it is. They come out of the
+/// round's budget, not on top of it. About 180,000 such sites were waiting
+/// in October 2026; an hpc test crawl of 60,000 of them fixed three test
+/// searches (weather.com, stability.ai) and broke one.
+const FIRST_FETCH_CATCH_UP_PER_ROUND: usize = 500;
 
 /// Link score a site needs for [`first_fetch_catch_up`]: about the top
 /// 60,000 of the Tranco list, or any official site.
@@ -207,7 +210,7 @@ async fn step(inner: &Arc<Inner>) -> Result<Next> {
         return Ok(Next::Continue);
     }
     // Enough records from other nodes rebuild the index, but no sooner
-    // than NETWORK_REBUILD_GAP after the last build.
+    // than NETWORK_REBUILD_GAP (or a few times the last build) after it.
     let network_rebuild_at = (inner.saved().network_pending >= REBUILD_AFTER_RECORDS
         && !inner.config.crawl_only)
         .then(|| network_rebuild_at(inner));
@@ -290,14 +293,33 @@ async fn step(inner: &Arc<Inner>) -> Result<Next> {
 }
 
 /// When records from other nodes may next rebuild the index: once
-/// [`NETWORK_REBUILD_GAP`] has passed since the last build (right away when
-/// none was built since the node started).
+/// [`NETWORK_REBUILD_GAP`], or [`BUILD_GAP_PER_BUILD`] times as long as the
+/// last build took when that is longer, has passed since the last build
+/// (right away when none was built since the node started).
 fn network_rebuild_at(inner: &Inner) -> u64 {
     match inner.last_build.load(Ordering::SeqCst) {
         0 => 0,
-        last => last.saturating_add(NETWORK_REBUILD_GAP.as_secs()),
+        last => last.saturating_add(network_rebuild_gap(
+            inner.last_build_took.load(Ordering::SeqCst),
+        )),
     }
 }
+
+/// Seconds between index builds that records from other nodes ask for,
+/// after a build that took `took` seconds: a build of millions of sites on
+/// a small server takes most of half an hour, and one every half hour
+/// would leave it building more often than not, with searches waiting on
+/// the memory and disk the builds take.
+fn network_rebuild_gap(took: u64) -> u64 {
+    NETWORK_REBUILD_GAP
+        .as_secs()
+        .max(took.saturating_mul(BUILD_GAP_PER_BUILD))
+}
+
+/// How many times as long as a build takes the node waits before another
+/// that records from other nodes ask for: building at most a quarter of
+/// the time.
+const BUILD_GAP_PER_BUILD: u64 = 3;
 
 fn idle_detail(config: &NodeConfig) -> &'static str {
     if config.crawl_only {
@@ -394,6 +416,13 @@ fn build_from_file_unless_crawling_only(inner: &Inner) -> Result<Option<ServingI
 /// A failure of Wikidata only sets the time of the next try: it is shown in
 /// the status, but does not hold up other work.
 async fn complete_seed(inner: &Arc<Inner>) -> Result<()> {
+    let from_network = tokio::select! {
+        done = complete_seed_from_network(inner) => done?,
+        () = inner.stopped() => return Err(Stopped.into()),
+    };
+    if from_network {
+        return Ok(());
+    }
     let quick = inner.saved().quick_start;
     if quick {
         info!("downloading the rest of the seed data: Wikidata's official websites and more");
@@ -488,6 +517,36 @@ async fn complete_seed(inner: &Arc<Inner>) -> Result<()> {
     }
     sweep(inner).await;
     Ok(())
+}
+
+/// The rest of the seed data from the network rather than Wikidata: a
+/// node that set up from the Tranco list because no trusted node answered
+/// in time asks again before it goes to Wikidata and Wikipedia, and takes
+/// the best sites of a trusted node's list, which carry the official
+/// sites, facts and intros, as filling does. `false` when no trusted node
+/// answers now either.
+async fn complete_seed_from_network(inner: &Arc<Inner>) -> Result<bool> {
+    let Some((records, downloaded)) = super::fill::seed_from_network(inner).await? else {
+        return Ok(false);
+    };
+    let n = records.len() as u64;
+    blocking(inner, move |inner| {
+        super::network::append_inbox(inner, &records)?;
+        inner.update_saved(|saved| {
+            saved.wikidata_missing = false;
+            saved.quick_start = false;
+            saved.sites_version = SITES_VERSION;
+        })
+    })
+    .await?;
+    inner.add_downloaded(downloaded)?;
+    inner.inbox_records.fetch_add(n, Ordering::SeqCst);
+    inner.wake.notify_one();
+    info!("took {n} sites from a trusted node instead of asking Wikidata");
+    inner.journal.info(format!(
+        "Took the rest of the seed data from a trusted node in the network ({n} sites) instead of Wikidata"
+    ));
+    Ok(true)
 }
 
 /// Brings records made before the lists of sites on subdomains, or before
@@ -905,11 +964,15 @@ fn missing_buckets(inner: &Inner) -> bool {
 /// Builds a new index of the records file and puts it in service; see
 /// [`put_in_service`] for `ends_round`.
 async fn rebuild(inner: &Arc<Inner>, ends_round: bool) -> Result<()> {
+    let started = Instant::now();
     let built = blocking(inner, |inner| {
         let _records = inner.hold_records();
         build_from_file(inner)
     })
     .await?;
+    inner
+        .last_build_took
+        .store(started.elapsed().as_secs(), Ordering::SeqCst);
     put_in_service(inner, Some(built), ends_round).await
 }
 
@@ -1620,7 +1683,16 @@ pub(super) fn build_from_file(inner: &Inner) -> Result<ServingIndex> {
             inner.check_stop()
         },
     )
-    .with_context(|| format!("building the index in {}", dir.display()))?;
+    .with_context(|| format!("building the index in {}", dir.display()));
+    let built = match built {
+        Ok(built) => built,
+        Err(err) => {
+            // Each try has a new id: the half-written buckets would
+            // otherwise pile up, against the storage limit, until restart.
+            let _ = std::fs::remove_dir_all(&buckets_dir);
+            return Err(err);
+        }
+    };
     if inner.config.news_feeds > 0 {
         inner.news.watch(built.feeds);
     }
@@ -1713,9 +1785,19 @@ where
     F: FnOnce(&Inner) -> Result<T> + Send + 'static,
 {
     let inner = Arc::clone(inner);
-    let done = tokio::task::spawn_blocking(move || work(&inner))
-        .await
-        .context("background work crashed");
+    // On a thread of its own, at a lower priority than searches: a thread
+    // of the blocking pool keeps its priority, and searches run there too.
+    let runtime = Handle::current();
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    std::thread::Builder::new()
+        .name("plumb-background".to_string())
+        .spawn(move || {
+            let _runtime = runtime.enter();
+            crate::lower_thread_priority();
+            let _ = sender.send(work(&inner));
+        })
+        .context("cannot start the background work")?;
+    let done = receiver.await.context("background work crashed");
     // Not on an async thread: handing back a few hundred megabytes takes
     // tens of milliseconds.
     let _ = tokio::task::spawn_blocking(crate::release_freed_memory).await;
@@ -1752,8 +1834,11 @@ async fn wait(inner: &Arc<Inner>, deadline: Deadline) {
             return;
         }
         // Records from other nodes are folded in as they pile up; whether
-        // they rebuild the index is up to step().
-        if inner.inbox_records.load(Ordering::SeqCst) >= REBUILD_AFTER_RECORDS {
+        // they rebuild the index is up to step(). Not while backing off
+        // after an error: folding them in may be what failed.
+        if !matches!(deadline, Deadline::After(_))
+            && inner.inbox_records.load(Ordering::SeqCst) >= REBUILD_AFTER_RECORDS
+        {
             return;
         }
         let nap = match deadline {
@@ -1817,6 +1902,15 @@ impl Backoff {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn slow_builds_wait_longer_for_the_next() {
+        let gap = NETWORK_REBUILD_GAP.as_secs();
+        assert_eq!(network_rebuild_gap(0), gap, "none built yet");
+        assert_eq!(network_rebuild_gap(120), gap, "a quick build");
+        // 2.5 million sites on a busy 4-core server: 25 minutes.
+        assert_eq!(network_rebuild_gap(1_500), 4_500);
+    }
 
     /// What a round keeps of `record`.
     fn round(record: SiteRecord) -> RoundSite {

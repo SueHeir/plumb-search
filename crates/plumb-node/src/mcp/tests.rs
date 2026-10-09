@@ -29,6 +29,7 @@ impl SearchBackend for Broken {
 fn hit(domain: &str, score: f32, link_score: f32, named: bool) -> Hit {
     Hit {
         demand: None,
+        missing_words: false,
         placing_text_score: None,
         domain: domain.to_string(),
         url: format!("https://www.{domain}/"),
@@ -99,7 +100,7 @@ fn notifications_get_no_answer_and_unknown_methods_an_error() {
 }
 
 #[test]
-fn lists_five_read_only_tools_with_schemas() {
+fn lists_six_read_only_tools_with_schemas() {
     let reply = server(Vec::new())
         .handle(&json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }))
         .unwrap();
@@ -112,7 +113,8 @@ fn lists_five_read_only_tools_with_schemas() {
             "check_lookalike",
             "search",
             "package",
-            "site_info"
+            "site_info",
+            "facts"
         ]
     );
     for tool in tools {
@@ -310,6 +312,62 @@ fn stdio_answers_line_by_line_and_skips_notifications() {
 }
 
 #[test]
+fn responses_get_no_answer_and_junk_with_an_id_an_error() {
+    let mcp = server(vec![hit("python.org", 2.0, 0.8, true)]);
+    assert_eq!(
+        mcp.handle(&json!({ "jsonrpc": "2.0", "id": 1, "result": {} })),
+        None
+    );
+    assert_eq!(
+        mcp.handle(&json!({ "jsonrpc": "2.0", "id": 1, "error": { "code": 1, "message": "x" } })),
+        None
+    );
+    let junk = mcp.handle(&json!({ "jsonrpc": "2.0", "id": 1 })).unwrap();
+    assert_eq!(junk["error"]["code"], INVALID_REQUEST);
+}
+
+#[test]
+fn long_urls_are_kept_whole_and_numbers_read_as_models_send_them() {
+    let long = format!("https://example.com/a?{}", "x".repeat(300));
+    let args = json!({ "url": format!("  {long} "), "start": 5.0, "max_chars": "1000" });
+    let args = args.as_object().unwrap();
+    assert_eq!(url_arg(args, "url").unwrap(), long);
+    let read = ReadArgs::of(args).unwrap();
+    assert_eq!(read.url, long);
+    assert_eq!(read.start, 5);
+    assert_eq!(read.max_chars, 1000);
+    let too_long = json!({ "url": "x".repeat(MAX_URL_CHARS + 1) });
+    assert!(url_arg(too_long.as_object().unwrap(), "url").is_err());
+    assert!(as_whole(&json!(2.5)).is_none());
+    assert!(as_whole(&json!(-1)).is_none());
+}
+
+#[test]
+fn find_jumps_to_the_first_match_ignoring_case() {
+    let chars: Vec<char> = "Café au lait, CAFÉ noir".chars().collect();
+    assert_eq!(find_from(&chars, "café", 0), Some(0));
+    assert_eq!(find_from(&chars, "café", 1), Some(14));
+    assert_eq!(find_from(&chars, " Noir ", 0), Some(19));
+    assert_eq!(find_from(&chars, "tea", 0), None);
+    assert_eq!(find_from(&chars, "café", 100), None);
+}
+
+#[test]
+fn search_queries_for_plugins_are_cut_like_searches() {
+    let message = |query: &str| {
+        json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": { "name": "search", "arguments": { "query": query } } })
+    };
+    assert_eq!(
+        Mcp::search_query(&message("  rust   lang ")).as_deref(),
+        Some("rust lang")
+    );
+    assert_eq!(Mcp::search_query(&message("   ")), None);
+    let long = Mcp::search_query(&message(&"a".repeat(1000))).unwrap();
+    assert_eq!(long.chars().count(), MAX_QUERY_CHARS);
+}
+
+#[test]
 fn node_addresses_become_their_mcp_endpoint() {
     for (node, endpoint) in [
         ("https://plumbsearch.org", "https://plumbsearch.org/mcp"),
@@ -392,6 +450,15 @@ fn read_page_is_offered_only_with_a_reader() {
     );
     let with = server(Vec::new()).with_reader(Some(reader));
     assert!(list(&with).contains(&"read_page".to_string()));
+    // search sends agents on to read_page only where they have it.
+    let search_says = |read_pages| {
+        tools(read_pages, false, false)[2]["description"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    assert!(!search_says(false).contains("read_page"));
+    assert!(search_says(true).contains("then read a page with read_page."));
     let reply = call(&with, "read_page", json!({ "url": url }));
     assert_eq!(reply["result"]["isError"], false, "{reply}");
     let answer = &reply["result"]["structuredContent"];
@@ -418,6 +485,34 @@ fn read_page_is_offered_only_with_a_reader() {
     assert_eq!(answer["found"], true);
     let reply = call(&with, "read_page", json!({ "url": url, "find": "four" }));
     assert_eq!(reply["result"]["structuredContent"]["found"], false);
+
+    // An outline: each heading, where it starts and its opening words.
+    let long = serve_page(
+        &runtime,
+        "<title>L</title><main><p>Lead.</p><h2>Usage</h2><p>Run it.</p><p>Twice.</p>\
+         <h3>Flags</h3><p>None.</p></main>",
+    );
+    let reply = call(&with, "read_page", json!({ "url": long, "outline": true }));
+    let answer = &reply["result"]["structuredContent"];
+    assert!(answer.get("text").is_none(), "{answer}");
+    let sections = answer["outline"].as_array().unwrap();
+    let headings: Vec<_> = sections.iter().map(|s| s["heading"].clone()).collect();
+    assert_eq!(headings, ["", "Usage", "Flags"]);
+    assert_eq!(sections[1]["level"], 2);
+    assert_eq!(sections[1]["opening"], "Run it. Twice.");
+    let start = sections[2]["start"].as_u64().unwrap();
+    let reply = call(&with, "read_page", json!({ "url": long, "start": start }));
+    assert_eq!(
+        reply["result"]["structuredContent"]["text"],
+        "### Flags\n\nNone."
+    );
+    // Without headings, the text instead.
+    let reply = call(
+        &with,
+        "read_page",
+        json!({ "url": serve_page(&runtime, "<p>Plain.</p>"), "outline": true }),
+    );
+    assert_eq!(reply["result"]["structuredContent"]["text"], "Plain.");
 
     // A bot check is not the page.
     let check = serve_page(
@@ -456,9 +551,16 @@ fn plumb_mcp_node_reads_pages_itself() {
 
     // The node's list gains read_page.
     let mut listed =
-        json!({ "jsonrpc": "2.0", "id": 1, "result": { "tools": [{ "name": "search" }] } });
+        json!({ "jsonrpc": "2.0", "id": 1, "result": { "tools": tools(false, false, false) } });
     offer_read_page(&json!({ "method": "tools/list" }), &mut listed);
-    assert_eq!(listed["result"]["tools"][1]["name"], "read_page");
+    assert_eq!(listed["result"]["tools"][6]["name"], "read_page");
+    let search = listed["result"]["tools"][2]["description"]
+        .as_str()
+        .unwrap();
+    assert!(
+        search.contains("then read a page with read_page."),
+        "{search}"
+    );
 }
 
 /// Finds the crate serde for queries that ask for a package, and no site.
@@ -744,4 +846,178 @@ fn official_site_prefers_a_packages_home_page_to_a_guess() {
     assert_eq!(answer["domain"], "serde.rs");
     assert_eq!(answer["confidence"], "medium");
     assert_eq!(answer["alternatives"][0]["domain"], "xapo.com");
+}
+
+/// Finds Wikipedia's article on Australia, with its facts, for any query
+/// naming it.
+struct Australia;
+
+impl SearchBackend for Australia {
+    fn search(&self, _query: &str, _limit: usize) -> Result<Vec<Hit>> {
+        Ok(Vec::new())
+    }
+
+    fn search_full(
+        &self,
+        query: &str,
+        _limit: usize,
+        _options: &SearchOptions,
+    ) -> Result<SearchResults> {
+        use plumb_core::facts::{Fact, FactKind};
+        let mut pages = Vec::new();
+        if query.to_lowercase().contains("australia") {
+            let page = plumb_index::pages::Page::from_article(
+                "en",
+                plumb_core::article::Article {
+                    title: "Australia".into(),
+                    description: Some("country in Oceania".into()),
+                    item: Some("Q408".into()),
+                    facts: vec![
+                        Fact {
+                            kind: FactKind::Capital,
+                            value: "Canberra".into(),
+                        },
+                        Fact {
+                            kind: FactKind::Population,
+                            value: "27204809;2024".into(),
+                        },
+                    ],
+                    ..Default::default()
+                },
+            );
+            pages.push(plumb_index::pages::PlacedPage {
+                hit: plumb_index::pages::PageHit {
+                    page,
+                    score: 0.9,
+                    named: true,
+                    popularity: 1.0,
+                    whole: true,
+                    learned: None,
+                },
+                under: None,
+                at: 0,
+            });
+        }
+        Ok(SearchResults {
+            hits: Vec::new(),
+            pages,
+            site_search: None,
+            spelling: None,
+        })
+    }
+
+    fn num_docs(&self) -> u64 {
+        0
+    }
+}
+
+#[test]
+fn facts_come_with_the_wikidata_item_and_property_they_are_from() {
+    let mcp = Mcp::new(Arc::new(Australia), None);
+    let answer = call(&mcp, "facts", json!({ "subject": "Australia" }));
+    let result = &answer["result"];
+    assert_eq!(result["isError"], false, "{answer}");
+    let data = &result["structuredContent"];
+    assert_eq!(data["item"], "Q408");
+    assert_eq!(data["facts"][0]["question"], "Capital of Australia");
+    assert_eq!(data["facts"][0]["value"], "Canberra");
+    assert_eq!(
+        data["facts"][0]["source"],
+        "https://www.wikidata.org/wiki/Q408#P36"
+    );
+    let text = result["content"][0]["text"].as_str().unwrap();
+    assert_eq!(
+        text,
+        "Australia, country in Oceania https://en.wikipedia.org/wiki/Australia\n\
+         Capital of Australia: Canberra [Wikidata Q408 P36]\n\
+         Population of Australia: 27,204,809 (Counted in 2024) [Wikidata Q408 P1082]\n\
+         Source: https://www.wikidata.org/wiki/Q408"
+    );
+
+    // One kind, by its key or as people ask it.
+    for about in ["capital", "capital city"] {
+        let answer = call(
+            &mcp,
+            "facts",
+            json!({ "subject": "australia", "about": about }),
+        );
+        let facts = answer["result"]["structuredContent"]["facts"]
+            .as_array()
+            .unwrap();
+        assert_eq!(facts.len(), 1, "{about}: {answer}");
+        assert_eq!(facts[0]["kind"], "capital");
+    }
+    // A kind it has no fact of, a kind it never keeps, a subject it lacks.
+    let answer = call(
+        &mcp,
+        "facts",
+        json!({ "subject": "australia", "about": "ceo" }),
+    );
+    assert_eq!(answer["result"]["structuredContent"]["found"], false);
+    let answer = call(
+        &mcp,
+        "facts",
+        json!({ "subject": "australia", "about": "favourite colour" }),
+    );
+    assert_eq!(answer["result"]["isError"], true);
+    let text = answer["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("capital, population"), "{text}");
+    let answer = call(&mcp, "facts", json!({ "subject": "Atlantis" }));
+    assert_eq!(
+        answer["result"]["content"][0]["text"],
+        "Plumb has no facts about Atlantis."
+    );
+}
+
+#[test]
+fn relate_is_answered_here_and_offered_with_the_tools() {
+    let dir = tempfile::tempdir().unwrap();
+    crate::relations::tests::write_store(dir.path());
+    let store = crate::relations::RelationStore::load(dir.path(), None).unwrap();
+    let call = |args: Value| {
+        relate_here(
+            &store,
+            &json!({ "jsonrpc": "2.0", "id": 7, "method": "tools/call",
+                     "params": { "name": "relate", "arguments": args } }),
+        )
+        .unwrap()
+    };
+    let answer = call(json!({ "subject": "Fiji", "relation": "Capital", "limit": 1 }));
+    let text = answer["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(
+        text.starts_with("capital of Fiji, likeliest first:\nSuva ("),
+        "{text}"
+    );
+    assert!(text.ends_with("a learned guess) [Wikidata K5]"), "{text}");
+    let answer = call(json!({ "subject": "France", "relation": "capital", "object": "Paris" }));
+    let text = answer["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(
+        text.starts_with("capital of France: Paris has probability"),
+        "{text}"
+    );
+    assert!(text.ends_with("(stated in Wikidata)."), "{text}");
+    let answer = call(json!({ "subject": "France", "relation": "spouse" }));
+    assert_eq!(answer["result"]["isError"], true);
+    // Other tools are not answered here.
+    assert!(relate_here(
+        &store,
+        &json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                 "params": { "name": "search", "arguments": { "query": "x" } } }),
+    )
+    .is_none());
+
+    let mut listed = json!({ "jsonrpc": "2.0", "id": 2, "result": { "tools": [] } });
+    offer_relate(
+        &store,
+        &json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }),
+        &mut listed,
+    );
+    assert_eq!(listed["result"]["tools"][0]["name"], "relate");
+    let description = listed["result"]["tools"][0]["description"]
+        .as_str()
+        .unwrap();
+    assert!(
+        description.ends_with("Relations: capital."),
+        "{description}"
+    );
 }

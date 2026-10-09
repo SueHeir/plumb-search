@@ -71,6 +71,8 @@ struct ActForm {
     /// The search the button was on, to go back to.
     #[serde(default)]
     q: String,
+    /// The plugin that search ran, to run again.
+    run: Option<String>,
 }
 
 async fn act_form(
@@ -80,12 +82,14 @@ async fn act_form(
     uri: Uri,
     Form(form): Form<ActForm>,
 ) -> Response {
-    let back = format!(
-        "/search?{}",
-        url::form_urlencoded::Serializer::new(String::new())
-            .append_pair("q", &form.q)
-            .finish()
-    );
+    let back = {
+        let mut back = url::form_urlencoded::Serializer::new(String::new());
+        back.append_pair("q", &form.q);
+        if let Some(run) = form.run.as_deref().filter(|run| !run.is_empty()) {
+            back.append_pair("run", run);
+        }
+        format!("/search?{}", back.finish())
+    };
     let plugins = &state.settings.plugins;
     let refused = match refusal_of(peer(&extensions), &headers, &uri) {
         Some(_) => Some("Buttons work only on the computer Plumb runs on, from its own pages."),
@@ -119,7 +123,10 @@ async fn act_form(
         escape_html(&name),
         escape_html(&said)
     );
-    html_response(status, page_with_head(&name, &head, &body))
+    html_response(
+        status,
+        page_with_head(&format!("{name} - Plumb Search"), &head, &body),
+    )
 }
 
 #[derive(Debug, Deserialize)]

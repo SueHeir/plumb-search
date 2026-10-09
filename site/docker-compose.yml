@@ -47,10 +47,11 @@ services:
       - 0.0.0.0:8080
       - --private-search
       - --search-by-meaning
-      # One embedding thread per CPU allowed below: the node is mostly idle
-      # otherwise, and the relay needs little.
+      # One embedding thread: with 2.5 million sites the node rebuilds its
+      # index often and shares the box with the relay, and three threads
+      # left searches waiting behind the embed.
       - --embed-threads
-      - "3"
+      - "1"
       - --network
       - --p2p-port
       - "4002"

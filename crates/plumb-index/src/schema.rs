@@ -22,10 +22,21 @@
 //! | `language`    | the homepage's language code, untokenized            | stored, fast, language filter |
 //! | `adult`       | [`plumb_core::AdultLevel`] as 0, 1 or 2              | fast, safe search           |
 //! | `key_pages`   | the site's key pages, as JSON                        | stored, sitelinks           |
+//! | `fingerprint` | [`plumb_core::simhash`] of the homepage's text       | stored, near-copies         |
+//! | `link_name_key` | name-like link texts, once per linking site        | names other sites give it   |
 //!
 //! An official website's aliases (its Wikidata names) also go into
 //! `label_key`, so they name the site as strongly as its domain does, and
 //! every alias starting with "The" is also keyed without it.
+//!
+//! `link_name_key` holds the link texts that read like a name, that
+//! [`MIN_LINK_NAME_SITES`] or more sites use and that are at least
+//! [`MIN_LINK_NAME_SHARE`] of the site's links, each as many times as sites
+//! use it (up to [`MAX_LINK_NAME_REPEATS`]), and without a leading "The"
+//! too. Its term frequencies say how
+//! many sites call this site by that text, so a search can weigh how often
+//! a text names this site against every other site it names, as CrossWikis
+//! does with Wikipedia's links ([`Searcher`](crate::Searcher)).
 
 use anyhow::{Context, Result};
 use plumb_core::key_pages::{key_pages_or_known, valid_key_pages};
@@ -61,6 +72,22 @@ pub(crate) const SEARCH_URL: &str = "search_url";
 pub(crate) const LANGUAGE: &str = "language";
 pub(crate) const ADULT: &str = "adult";
 pub(crate) const KEY_PAGES: &str = "key_pages";
+pub(crate) const FINGERPRINT: &str = "fingerprint";
+pub(crate) const LINK_NAME_KEY: &str = "link_name_key";
+
+/// Fewest distinct sites linking with a text for it to name the site:
+/// independent sources have to agree, as on any other name.
+pub(crate) const MIN_LINK_NAME_SITES: u32 = 3;
+/// Most times one link text goes into `link_name_key`. Enough to tell a
+/// site most links name apart from one a few do.
+pub(crate) const MAX_LINK_NAME_REPEATS: u32 = 64;
+/// Least share of the links to a site that use a text for it to be one of
+/// the site's names: what a few of a bank's many links say of it ("online
+/// banking") describes it rather than names it.
+const MIN_LINK_NAME_SHARE: f64 = 0.05;
+/// Longest link text taken as a name, in characters, and most words.
+const MAX_LINK_NAME_CHARS: usize = 60;
+const MAX_LINK_NAME_WORDS: usize = 6;
 
 /// How many link texts (most frequent first) also get a joined form.
 const JOINED_LINK_TEXTS: usize = 8;
@@ -129,6 +156,10 @@ pub(crate) struct Fields {
     pub(crate) language: Field,
     pub(crate) adult: Field,
     pub(crate) key_pages: Field,
+    /// Missing from indexes built before it was added.
+    pub(crate) fingerprint: Option<Field>,
+    /// Missing from indexes built before it was added.
+    pub(crate) link_name_key: Option<Field>,
 }
 
 impl Fields {
@@ -160,12 +191,30 @@ impl Fields {
             language: field(LANGUAGE)?,
             adult: field(ADULT)?,
             key_pages: field(KEY_PAGES)?,
+            fingerprint: schema.get_field(FINGERPRINT).ok(),
+            link_name_key: schema.get_field(LINK_NAME_KEY).ok(),
         })
     }
 }
 
 /// The schema of a Plumb index.
 pub(crate) fn schema() -> Schema {
+    schema_with(true, true)
+}
+
+/// Whether an index with `schema` can be searched: it has this version's
+/// schema, the one before [`LINK_NAME_KEY`] (until its next build, link
+/// texts name nothing), or the one before [`FINGERPRINT`] too (near-copies
+/// are not told apart either).
+pub(crate) fn readable(schema: &Schema) -> bool {
+    *schema == schema_with(true, true)
+        || *schema == schema_with(true, false)
+        || *schema == schema_with(false, false)
+}
+
+/// The schema, with or without the [`FINGERPRINT`] and [`LINK_NAME_KEY`]
+/// fields.
+fn schema_with(fingerprint: bool, link_names: bool) -> Schema {
     let mut builder = Schema::builder();
     builder.add_text_field(DOMAIN, STRING | STORED | FAST);
     builder.add_text_field(URL, STORED);
@@ -189,6 +238,12 @@ pub(crate) fn schema() -> Schema {
     builder.add_text_field(LANGUAGE, STRING | STORED | FAST);
     builder.add_u64_field(ADULT, FAST);
     builder.add_text_field(KEY_PAGES, STORED);
+    if fingerprint {
+        builder.add_u64_field(FINGERPRINT, STORED);
+    }
+    if link_names {
+        builder.add_text_field(LINK_NAME_KEY, keys(IndexRecordOption::WithFreqs));
+    }
     builder.build()
 }
 
@@ -323,13 +378,29 @@ pub(crate) fn document(
         }
     }
 
-    for (i, link_text) in top_link_texts(&record.link_texts).into_iter().enumerate() {
+    let link_texts = top_link_texts(&record.link_texts);
+    let links: u64 = link_texts.iter().map(|lt| u64::from(lt.count)).sum();
+    for (i, link_text) in link_texts.into_iter().enumerate() {
         let text = truncate_chars(&link_text.text, MAX_TEXT_CHARS);
         for _ in 0..anchor_repeats(link_text.count) {
             doc.add_text(f.anchors, &text);
         }
         if i < JOINED_LINK_TEXTS {
             doc.add_text(f.joined, &text);
+        }
+        if let Some(field) = f.link_name_key {
+            let share = f64::from(link_text.count) / links as f64;
+            if link_text.count >= MIN_LINK_NAME_SITES
+                && share >= MIN_LINK_NAME_SHARE
+                && reads_like_a_name(&text)
+            {
+                let short = without_leading_article(&text);
+                for key in std::iter::once(text.as_str()).chain(short.as_deref()) {
+                    for _ in 0..link_text.count.min(MAX_LINK_NAME_REPEATS) {
+                        doc.add_text(field, key);
+                    }
+                }
+            }
         }
     }
 
@@ -350,6 +421,14 @@ pub(crate) fn document(
         doc.add_text(f.language, language);
     }
     doc.add_u64(f.adult, record_adult_level(record) as u64);
+    let fingerprint = f.fingerprint.zip(
+        non_empty(&record.body_text)
+            .filter(|_| !borrowed)
+            .and_then(plumb_core::simhash::fingerprint),
+    );
+    if let Some((field, print)) = fingerprint {
+        doc.add_u64(field, print);
+    }
     let key_pages = valid_key_pages(
         key_pages_or_known(&record.key_pages, &record.domain),
         &record.domain,
@@ -405,6 +484,18 @@ fn top_link_texts(link_texts: &[LinkText]) -> Vec<&LinkText> {
     top.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.text.cmp(&b.text)));
     top.truncate(MAX_LINK_TEXTS);
     top
+}
+
+/// Whether a link text reads like a name: a few words with a letter, not
+/// an address or a sentence.
+fn reads_like_a_name(text: &str) -> bool {
+    let words = normalize_text(text);
+    let count = words.split_whitespace().count();
+    (1..=MAX_LINK_NAME_WORDS).contains(&count)
+        && words.chars().count() <= MAX_LINK_NAME_CHARS
+        && words.chars().any(char::is_alphabetic)
+        && !text.contains("://")
+        && !text.contains(['|', '<', '>', '{', '}', '@'])
 }
 
 /// How many times a link text used `count` times goes into `anchors`.
@@ -504,5 +595,30 @@ mod tests {
         let schema = schema();
         assert_eq!(schema.get_field_name(fields.joined), JOINED);
         assert!(Fields::new(&Schema::builder().build()).is_err());
+        assert!(fields.fingerprint.is_some());
+        assert!(fields.link_name_key.is_some());
+        // Indexes built before link names, and before fingerprints, can
+        // still be searched.
+        let before_link_names = schema_with(true, false);
+        let older = schema_with(false, false);
+        assert!(readable(&older) && readable(&before_link_names) && readable(&schema));
+        assert!(!readable(&schema_with(false, true)));
+        assert!(!readable(&Schema::builder().build()));
+        assert!(Fields::new(&older).unwrap().fingerprint.is_none());
+        assert!(Fields::new(&before_link_names)
+            .unwrap()
+            .link_name_key
+            .is_none());
+    }
+
+    #[test]
+    fn names_are_short_and_plain() {
+        assert!(reads_like_a_name("The Guardian"));
+        assert!(reads_like_a_name("BBC"));
+        assert!(!reads_like_a_name("https://www.theguardian.com/"));
+        assert!(!reads_like_a_name(
+            "read the full story on the guardian website today"
+        ));
+        assert!(!reads_like_a_name("..."));
     }
 }

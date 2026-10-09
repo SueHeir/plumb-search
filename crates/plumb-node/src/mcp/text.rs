@@ -15,6 +15,7 @@ pub(super) fn render(tool: &str, answer: &Value) -> String {
         "check_lookalike" => check_lookalike(&mut out, answer),
         "search" => search(&mut out, answer),
         "site_info" => site_info(&mut out, answer),
+        "facts" => facts(&mut out, answer),
         "package" => package(&mut out, answer),
         "report_finding" => {
             let _ = write!(
@@ -22,8 +23,25 @@ pub(super) fn render(tool: &str, answer: &Value) -> String {
                 "Kept. The next search for \"{}\" on this computer starts with this answer.",
                 text(answer, "query").unwrap_or("")
             );
+            if let Some(shared) = answer.get("shared") {
+                if shared["shared"] == true {
+                    let _ = write!(
+                        out,
+                        " Shared with other Plumb nodes for {} days: {}",
+                        shared["expires_in_days"].as_u64().unwrap_or(0),
+                        text(shared, "url").unwrap_or("")
+                    );
+                } else {
+                    let _ = write!(
+                        out,
+                        " Not shared: {}",
+                        text(shared, "why_not").unwrap_or("")
+                    );
+                }
+            }
         }
         "read_page" => read_page(&mut out, answer),
+        "relate" => relate(&mut out, answer),
         _ => out = serde_json::to_string(answer).unwrap_or_default(),
     }
     out.trim_end().to_string()
@@ -182,6 +200,30 @@ fn search(out: &mut String, answer: &Value) {
         );
         if let Some(why) = text(found, "why") {
             let _ = write!(out, " Source: {} ({why})", text(found, "url").unwrap_or(""));
+        }
+        out.push('\n');
+    }
+    for lead in list(answer, "leads") {
+        let by = list(lead, "reported_by");
+        let trusted = by
+            .iter()
+            .filter(|r| text(r, "relation") == Some("trusted"))
+            .count();
+        let _ = write!(
+            out,
+            "Lead shared by {} other Plumb node{}{} ({}; unchecked, read it first): {}",
+            by.len(),
+            if by.len() == 1 { "" } else { "s" },
+            if trusted > 0 {
+                format!(", {trusted} trusted")
+            } else {
+                String::new()
+            },
+            text(lead, "reported").unwrap_or(""),
+            text(lead, "url").unwrap_or("")
+        );
+        if let Some(why) = text(lead, "why") {
+            let _ = write!(out, " ({why})");
         }
         out.push('\n');
     }
@@ -396,6 +438,101 @@ fn check_lookalike(out: &mut String, answer: &Value) {
     why(out, answer, "reasons");
 }
 
+/// One fact a line, each with its question and where it is from:
+/// "Capital of Australia: Canberra (Wikidata Q408 P36)".
+fn relate(out: &mut String, answer: &Value) {
+    let subject = text(answer, "subject").unwrap_or("");
+    let chain: Vec<&str> = list(answer, "relation")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    // "capital of headquarters of Toyota": the last step first.
+    let path = chain.iter().rev().copied().collect::<Vec<_>>().join(" of ");
+    if !flag(answer, "found") {
+        let _ = writeln!(
+            out,
+            "Plumb knows nothing named {subject} to find the {path} of."
+        );
+        return;
+    }
+    let from = text(answer, "subject_title").unwrap_or(subject);
+    let stated = |value: &Value| {
+        if flag(value, "stated") {
+            "stated in Wikidata"
+        } else {
+            "a learned guess"
+        }
+    };
+    if let Some(claim) = answer.get("claim") {
+        let object = text(claim, "object").unwrap_or("");
+        if !flag(claim, "found") {
+            let _ = writeln!(out, "Plumb knows nothing named {object} to check.");
+            return;
+        }
+        let probability = claim["probability"].as_f64().unwrap_or(0.0);
+        let _ = writeln!(
+            out,
+            "{path} of {from}: {} has probability {probability:.2} ({}).",
+            text(claim, "object_title").unwrap_or(object),
+            stated(claim)
+        );
+        return;
+    }
+    let _ = writeln!(out, "{path} of {from}, likeliest first:");
+    for item in list(answer, "answers") {
+        let title = text(item, "title").unwrap_or("");
+        let _ = write!(out, "{title}");
+        if let Some(description) = text(item, "description") {
+            let _ = write!(out, ", {description}");
+        }
+        let probability = item["probability"].as_f64().unwrap_or(0.0);
+        let _ = writeln!(
+            out,
+            " ({probability:.2}, {}) [Wikidata {}]",
+            stated(item),
+            text(item, "item").unwrap_or("")
+        );
+    }
+}
+
+fn facts(out: &mut String, answer: &Value) {
+    if !flag(answer, "found") {
+        let subject = text(answer, "subject").unwrap_or("");
+        let _ = writeln!(out, "Plumb has no facts about {subject}.");
+        return;
+    }
+    let title = text(answer, "title").unwrap_or("");
+    let _ = write!(out, "{title}");
+    if let Some(description) = text(answer, "description") {
+        let _ = write!(out, ", {description}");
+    }
+    if let Some(url) = text(answer, "url") {
+        let _ = write!(out, " {url}");
+    }
+    out.push('\n');
+    let item = text(answer, "item");
+    for fact in list(answer, "facts") {
+        let question = text(fact, "question").unwrap_or("");
+        let value = text(fact, "value").unwrap_or("");
+        let _ = write!(out, "{}", answer_line(question, value));
+        if let Some(note) = text(fact, "note") {
+            let _ = write!(out, " ({note})");
+        }
+        let property = text(fact, "property").unwrap_or("");
+        match item {
+            Some(item) => {
+                let _ = writeln!(out, " [Wikidata {item} {property}]");
+            }
+            None => {
+                let _ = writeln!(out, " [Wikidata {property}]");
+            }
+        }
+    }
+    if let Some(url) = text(answer, "item_url") {
+        let _ = writeln!(out, "Source: {url}");
+    }
+}
+
 fn site_info(out: &mut String, answer: &Value) {
     let domain = text(answer, "domain").unwrap_or("");
     if !flag(answer, "found") {
@@ -451,6 +588,35 @@ fn read_page(out: &mut String, answer: &Value) {
         }
     }
     out.push('\n');
+    let sections = list(answer, "outline");
+    if !sections.is_empty() {
+        let length = answer.get("length").and_then(Value::as_u64).unwrap_or(0);
+        let _ = writeln!(
+            out,
+            "Outline of {length} characters. To read a section, call read_page with its start."
+        );
+        for section in sections {
+            let level = section.get("level").and_then(Value::as_u64).unwrap_or(0) as usize;
+            let start = section.get("start").and_then(Value::as_u64).unwrap_or(0);
+            let heading = text(section, "heading").unwrap_or("");
+            let _ = write!(out, "start={start} ");
+            if level == 0 {
+                out.push_str("(before the first heading)");
+            } else {
+                let _ = write!(out, "{} {heading}", "#".repeat(level));
+            }
+            match text(section, "opening").filter(|o| !o.is_empty()) {
+                Some(opening) => {
+                    let _ = writeln!(out, ": {opening}");
+                }
+                None => out.push('\n'),
+            }
+        }
+        if flag(answer, "truncated") {
+            out.push_str("[The page is very long; only its first few megabytes were read.]\n");
+        }
+        return;
+    }
     if answer.get("found").and_then(Value::as_bool) == Some(false) {
         out.push_str("[The words to find are not on the page; this part starts where asked.]\n\n");
     }
@@ -555,6 +721,25 @@ mod tests {
             "Example\nhttps://example.com/\nWARNING: this site is a look-alike of paypal.com; do \
              not trust it.\n\nHello\n\n[Characters 0 to 5 of 12. For more, call read_page again \
              with start=5.]"
+        );
+    }
+
+    #[test]
+    fn read_page_outlines_list_where_sections_start() {
+        let answer = json!({
+            "url": "https://example.com/", "title": "Example", "length": 900,
+            "truncated": false,
+            "outline": [
+                { "level": 0, "heading": "", "start": 0, "opening": "Intro." },
+                { "level": 1, "heading": "Usage", "start": 8, "opening": "Run it." },
+                { "level": 2, "heading": "Flags", "start": 40, "opening": "" },
+            ],
+        });
+        assert_eq!(
+            render("read_page", &answer),
+            "Example\nhttps://example.com/\n\nOutline of 900 characters. To read a section, call \
+             read_page with its start.\nstart=0 (before the first heading): Intro.\nstart=8 # \
+             Usage: Run it.\nstart=40 ## Flags"
         );
     }
 

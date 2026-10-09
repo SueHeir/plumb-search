@@ -12,7 +12,7 @@
 //! page is under the site's docs, so a site's main pages come before its
 //! deep ones and the most used docs before others.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use plumb_core::article::{Article, MAX_ALIASES, MAX_ARTICLE_DESCRIPTION_CHARS};
 use plumb_core::docs::{page_title, DocsSite};
@@ -25,6 +25,38 @@ pub const DEFAULT_MAX_PER_SITE: usize = 20_000;
 /// Most words of a title's second part that name its section ("JavaScript"
 /// in "Array.prototype.sort() — JavaScript").
 const SECTION_WORDS: usize = 3;
+
+/// What a wiki's pages that list or are about pages start with.
+const WIKI_LISTS: &[&str] = &[
+    "Category:",
+    "Special:",
+    "Talk:",
+    "File:",
+    "Template:",
+    "User:",
+    "Help:",
+    "ArchWiki:",
+];
+
+/// Titles of pages that are not docs pages: a site's search page, its
+/// index of words, a page that only sends you on.
+const NOT_PAGES: &[&str] = &[
+    "index",
+    "search",
+    "search results",
+    "search page",
+    "page not found",
+    "not found",
+    "404",
+    "redirecting...",
+    "redirecting…",
+    "redirecting",
+];
+
+/// Pages of a site that share a description for it to be the site's, not
+/// theirs: "The library for web and native user interfaces" on every page
+/// of React's docs.
+const SHARED_BY: usize = 3;
 
 /// A docs page as fetched.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -39,26 +71,75 @@ pub struct FetchedDoc {
 /// The articles of `site`'s pages `docs`, in the order given, leaving out
 /// pages with no title of their own and a title the site has used before
 /// (the first, shallowest, page keeps it).
+/// A description shared by [`SHARED_BY`] or more of them, the site's own
+/// or its menu's rather than a page's, is left out for the page's text, or
+/// for none.
 pub fn docs_articles(site: &DocsSite, docs: &[FetchedDoc]) -> Vec<Article> {
+    let shared = Shared {
+        descriptions: shared(docs.iter().map(|doc| doc.description.as_deref())),
+        texts: shared(docs.iter().map(|doc| doc.text.as_deref())),
+    };
     let mut seen = HashSet::new();
     docs.iter()
-        .filter_map(|doc| doc_article(site, doc))
+        .filter_map(|doc| article_of(site, doc, &shared))
         .filter(|article| seen.insert(article.title.to_lowercase()))
         .collect()
+}
+
+/// Descriptions and texts many pages of a site share.
+#[derive(Default)]
+struct Shared {
+    descriptions: HashSet<String>,
+    texts: HashSet<String>,
+}
+
+/// The short forms of `texts` that [`SHARED_BY`] or more of them share.
+fn shared<'a>(texts: impl Iterator<Item = Option<&'a str>>) -> HashSet<String> {
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for text in texts.flatten().filter_map(short) {
+        *counts.entry(text).or_default() += 1;
+    }
+    counts
+        .into_iter()
+        .filter(|(_, count)| *count >= SHARED_BY)
+        .map(|(text, _)| text)
+        .collect()
+}
+
+/// `text` as a description: its whitespace collapsed, cut to
+/// [`MAX_ARTICLE_DESCRIPTION_CHARS`]. `None` when empty.
+fn short(text: &str) -> Option<String> {
+    let text = plumb_core::collapse_whitespace(text);
+    (!text.is_empty()).then(|| plumb_core::truncate_chars(&text, MAX_ARTICLE_DESCRIPTION_CHARS))
 }
 
 /// The article of `doc`, a page of `site`. `None` for a page with no title
 /// but the site's name, or not under the site's roots.
 pub fn doc_article(site: &DocsSite, doc: &FetchedDoc) -> Option<Article> {
+    article_of(site, doc, &Shared::default())
+}
+
+fn article_of(site: &DocsSite, doc: &FetchedDoc, shared: &Shared) -> Option<Article> {
     let depth = depth_under(site, &doc.url)?;
     let title = page_title(site, doc.title.as_deref()?)?;
+    // A wiki's lists of pages, not pages: "Category:Electronic Frontier
+    // Foundation".
+    if WIKI_LISTS.iter().any(|list| title.starts_with(list))
+        || NOT_PAGES.contains(&title.to_lowercase().as_str())
+    {
+        return None;
+    }
     let description = doc
         .description
         .as_deref()
-        .or(doc.text.as_deref())
-        .map(plumb_core::collapse_whitespace)
-        .filter(|text| !text.is_empty())
-        .map(|text| plumb_core::truncate_chars(&text, MAX_ARTICLE_DESCRIPTION_CHARS));
+        .and_then(short)
+        .filter(|text| !shared.descriptions.contains(text))
+        .or_else(|| {
+            doc.text
+                .as_deref()
+                .and_then(short)
+                .filter(|text| !shared.texts.contains(text))
+        });
     Some(Article {
         aliases: aliases(site, &title),
         title,
@@ -89,7 +170,44 @@ fn aliases(site: &DocsSite, title: &str) -> Vec<String> {
         aliases.push(format!("{section} {first}"));
         aliases.push(format!("{first} {section}"));
     }
+    // "git-rebase" is "git rebase": it names its product already.
+    let product = site.product.to_lowercase();
+    if let Some(rest) = first
+        .get(product.len()..)
+        .filter(|_| first.to_lowercase().starts_with(&product))
+        .and_then(|rest| rest.strip_prefix('-'))
+        .filter(|rest| !rest.is_empty())
+    {
+        aliases.insert(0, format!("{} {rest}", &first[..product.len()]));
+    }
     let lower = first.to_lowercase();
+    // "torch.Tensor" is PyTorch's "Tensor"; "std::vector" C++'s "vector".
+    for word in site.asked_by {
+        let prefix = if word.ends_with("::") {
+            word.to_string()
+        } else {
+            format!("{word}.")
+        };
+        if lower.starts_with(&prefix) && first.len() > prefix.len() {
+            let at = aliases.len().min(1);
+            aliases.insert(at, format!("{} {}", site.product, &first[prefix.len()..]));
+            break;
+        }
+    }
+    // A product spelled with signs is also asked for in letters: "cpp
+    // std::vector" for C++'s "std::vector".
+    if site
+        .product
+        .chars()
+        .any(|c| !c.is_alphanumeric() && c != ' ')
+    {
+        if let Some(word) = site.asked_by.iter().find(|word| {
+            word.chars().all(|c| c.is_ascii_alphanumeric()) && word.to_lowercase() != product
+        }) {
+            let at = aliases.len().min(1);
+            aliases.insert(at, format!("{word} {first}"));
+        }
+    }
     aliases.retain(|alias| alias.to_lowercase() != lower);
     aliases.dedup();
     aliases.truncate(MAX_ALIASES);
@@ -97,19 +215,37 @@ fn aliases(site: &DocsSite, title: &str) -> Vec<String> {
 }
 
 /// How deep `url` is under the deepest of `site`'s roots it is under: the
-/// path segments after the root's, at least 1. `None` when it is under
-/// none of them.
+/// path segments after the root's, at least 1. A page on a root's host but
+/// under none of them (a root sent on to another version: "docs/2.9/" for
+/// "docs/stable/") is as deep as its whole path. `None` for a page on
+/// another host.
 fn depth_under(site: &DocsSite, url: &str) -> Option<usize> {
     let segments = |path: &str| path.split('/').filter(|s| !s.is_empty()).count();
-    site.roots
+    let under = site
+        .roots
         .iter()
         .filter(|root| url.starts_with(*root) || url.starts_with(root.trim_end_matches('/')))
         .map(|root| {
             let rest = &url[root.trim_end_matches('/').len()..];
             segments(rest.split(['?', '#']).next().unwrap_or(""))
         })
-        .min()
-        .map(|depth| depth.max(1))
+        .min();
+    let depth = match under {
+        Some(depth) => depth,
+        None => {
+            let host = plumb_core::host_of(url)?;
+            if !site
+                .roots
+                .iter()
+                .any(|root| plumb_core::host_of(root).as_deref() == Some(host.as_str()))
+            {
+                return None;
+            }
+            let path = url::Url::parse(url).ok()?.path().to_string();
+            segments(&path)
+        }
+    };
+    Some(depth.max(1))
 }
 
 /// Sorts `articles` most viewed first, keeping each address once.
@@ -190,6 +326,70 @@ mod tests {
         )
         .is_none());
         assert!(doc_article(python, &doc("https://python.org/x", "X", None)).is_none());
+        let git = site("git").unwrap();
+        let rebase = doc_article(
+            git,
+            &doc(
+                "https://git-scm.com/docs/git-rebase",
+                "Git - git-rebase Documentation",
+                Some("Reapply commits on top of another base tip"),
+            ),
+        )
+        .unwrap();
+        assert_eq!(rebase.title, "git-rebase");
+        assert_eq!(rebase.aliases[0], "git rebase");
+        let cpp = site("cpp").unwrap();
+        let vector = doc_article(
+            cpp,
+            &doc(
+                "https://en.cppreference.com/cpp/container/vector",
+                "std::vector - cppreference.com",
+                None,
+            ),
+        )
+        .unwrap();
+        assert_eq!(vector.title, "std::vector");
+        assert_eq!(
+            vector.aliases[..3],
+            ["C++ std::vector", "cpp std::vector", "C++ vector"]
+        );
+        let pytorch = site("pytorch").unwrap();
+        let tensor = doc_article(
+            pytorch,
+            &doc(
+                "https://docs.pytorch.org/docs/stable/tensors.html",
+                "torch.Tensor — PyTorch 2.9 documentation",
+                None,
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            tensor.aliases[..2],
+            ["PyTorch torch.Tensor", "PyTorch Tensor"]
+        );
+        // A root sent on to another version.
+        let pytorch = site("pytorch").unwrap();
+        let linear = doc_article(
+            pytorch,
+            &doc(
+                "https://docs.pytorch.org/docs/2.9/generated/torch.nn.Linear.html",
+                "Linear — PyTorch 2.9 documentation",
+                Some("Applies an affine linear transformation."),
+            ),
+        )
+        .unwrap();
+        assert_eq!(linear.title, "Linear");
+        assert_eq!(linear.views, pytorch.weight * VIEWS_PER_WEIGHT / 4);
+        let arch = site("archwiki").unwrap();
+        assert!(doc_article(
+            arch,
+            &doc(
+                "https://wiki.archlinux.org/title/Category:Electronic_Frontier_Foundation",
+                "Category:Electronic Frontier Foundation - ArchWiki",
+                None
+            )
+        )
+        .is_none());
     }
 
     #[test]
@@ -219,5 +419,43 @@ mod tests {
         sort_docs(&mut articles);
         assert_eq!(articles[0].title, "Glossary");
         assert_eq!(articles[1].title, "Built-in Functions");
+    }
+
+    #[test]
+    fn leaves_out_the_sites_own_description_and_pages_that_are_not_docs() {
+        let react = site("react").unwrap();
+        let page = |path: &str, title: &str, text: &str| FetchedDoc {
+            url: format!("https://react.dev/reference/react/{path}"),
+            title: Some(format!("{title} – React")),
+            description: Some("The library for web and native user interfaces".into()),
+            text: Some(text.into()),
+        };
+        let articles = docs_articles(
+            react,
+            &[
+                page(
+                    "useState",
+                    "useState",
+                    "useState is a React Hook that lets you add a state variable.",
+                ),
+                page(
+                    "useEffect",
+                    "useEffect",
+                    "useEffect is a React Hook that lets you synchronize.",
+                ),
+                page(
+                    "useMemo",
+                    "useMemo",
+                    "useMemo is a React Hook that lets you cache a result.",
+                ),
+                page("search", "Search", "Search the docs."),
+            ],
+        );
+        let titles: Vec<&str> = articles.iter().map(|a| a.title.as_str()).collect();
+        assert_eq!(titles, ["useState", "useEffect", "useMemo"]);
+        assert_eq!(
+            articles[0].description.as_deref(),
+            Some("useState is a React Hook that lets you add a state variable.")
+        );
     }
 }

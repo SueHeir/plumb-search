@@ -41,8 +41,13 @@ plumbsearch.org {
 		reverse_proxy 127.0.0.1:8080
 	}
 
+	# Routes kept only on this server, outside git, such as one to another
+	# node of the owner's. A glob, so with no such file there is nothing to
+	# import.
+	import /site/local/*.caddy
+
 	handle {
-		header Content-Security-Policy "default-src 'none'; style-src 'self'; img-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
+		header Content-Security-Policy "default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'self'; img-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
 		root * /site/public
 		# /privacy serves privacy.html, and so on.
 		try_files {path} {path}.html
