@@ -974,9 +974,6 @@ pub struct SpellingArgs {
     /// likely the slip is and how common each word is. May be repeated.
     #[arg(long, value_name = "TYPED:MEANT")]
     pub pair: Vec<String>,
-    /// A half-typed query to complete. May be repeated.
-    #[arg(long, value_name = "TEXT")]
-    pub complete: Vec<String>,
 }
 
 #[derive(Debug, Args)]

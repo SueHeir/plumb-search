@@ -18,11 +18,9 @@
 //! - **A word-pair model** over the sites' names, titles, link texts and
 //!   descriptions: in how many sites each word and each pair of
 //!   neighbouring words is found. Scored with Stupid Backoff, it says how
-//!   likely a word is after another ("capital one" over "capitol one") and
-//!   what a half-typed query goes on with ([`Model::complete`]).
+//!   likely a word is after another ("capital one" over "capitol one").
 //!
-//! Adult sites' words are left out of the word-pair model, and completions
-//! with adult words are never offered.
+//! Adult sites' words are left out of the word-pair model.
 //!
 //! A missing or unreadable file only means typos are corrected as before,
 //! by edit distance and popularity, and nothing is completed.
@@ -66,13 +64,6 @@ const BUILD_PAIRS_CAP: usize = 4_000_000;
 const BUILD_WORDS_CAP: usize = 1_500_000;
 /// Words and word pairs found in fewer sites are left out of the file.
 const MIN_SAVED_COUNT: u32 = 3;
-/// Most words a completion looks through for a prefix.
-const MAX_PREFIX_WORDS: usize = 50_000;
-/// A completed word goes on with the word that follows it in this share of
-/// the sites that have it, or more: "bank of a" -> "bank of america".
-const FOLLOWS_SHARE: f64 = 0.4;
-/// Completions name words found in at least this many sites.
-const MIN_COMPLETION_COUNT: u32 = 3;
 
 /// Words in one string, so a million of them take little more memory than
 /// their letters.
@@ -226,96 +217,6 @@ impl Model {
                 f64::from(p).ln()
             })
             .sum()
-    }
-
-    /// The most likely ways the query `text` goes on, best first, at most
-    /// `limit`: its last word completed ("amaz" -> "amazon"), or, after a
-    /// space, the word that most often comes next ("bank of " -> "bank of
-    /// america"). Each is the whole query, in normalized words.
-    pub fn complete(&self, analyzer: &TextAnalyzer, text: &str, limit: usize) -> Vec<String> {
-        if limit == 0 {
-            return Vec::new();
-        }
-        let mut tokens = crate::analysis::tokens(analyzer, text);
-        let goes_on = text.ends_with(char::is_whitespace) || tokens.is_empty();
-        let prefix = if goes_on {
-            String::new()
-        } else {
-            tokens.pop().unwrap_or_default()
-        };
-        let before = tokens.last().map(String::as_str);
-        // (score, word)
-        let mut found: Vec<(f64, u32)> = Vec::new();
-        if prefix.is_empty() {
-            let Some(before) = before.and_then(|b| self.id(b)) else {
-                return Vec::new();
-            };
-            let start = self.pairs.partition_point(|&(a, _)| a < before);
-            for i in start..self.pairs.len() {
-                let (a, b) = self.pairs[i];
-                if a != before {
-                    break;
-                }
-                found.push((f64::from(self.pair_counts[i]), b));
-            }
-        } else {
-            let start = self.words.first_not_below(&prefix);
-            for (i, word) in self
-                .words
-                .iter()
-                .skip(start)
-                .enumerate()
-                .take(MAX_PREFIX_WORDS)
-            {
-                if !word.starts_with(prefix.as_str()) {
-                    break;
-                }
-                let id = (start + i) as u32;
-                if self.counts[id as usize] < MIN_COMPLETION_COUNT {
-                    continue;
-                }
-                found.push((self.ln_score(before, word), id));
-            }
-        }
-        found.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-        let mut out: Vec<String> = Vec::new();
-        for (_, id) in found {
-            let word = self.words.get(id as usize);
-            if self.counts[id as usize] < MIN_COMPLETION_COUNT || word == prefix {
-                continue;
-            }
-            let mut words: Vec<&str> = tokens.iter().map(String::as_str).collect();
-            words.push(word);
-            if let Some(next) = self.follower(id) {
-                words.push(next);
-            }
-            let line = words.join(" ");
-            // Link texts of other sites can still be adult.
-            if plumb_core::safe::text_level(&line) != plumb_core::AdultLevel::None {
-                continue;
-            }
-            if !out.contains(&line) {
-                out.push(line);
-            }
-            if out.len() >= limit {
-                break;
-            }
-        }
-        out
-    }
-
-    /// The word that follows the word `id` in at least [`FOLLOWS_SHARE`] of
-    /// the sites that have it.
-    fn follower(&self, id: u32) -> Option<&str> {
-        let count = f64::from(self.counts[id as usize]);
-        let start = self.pairs.partition_point(|&(a, _)| a < id);
-        self.pairs[start..]
-            .iter()
-            .zip(&self.pair_counts[start..])
-            .take_while(|((a, _), _)| *a == id)
-            .filter(|(_, &n)| f64::from(n) >= FOLLOWS_SHARE * count && n >= MIN_COMPLETION_COUNT)
-            .max_by_key(|(_, &n)| n)
-            .map(|((_, b), _)| self.words.get(*b as usize))
     }
 
     /// The learned rules, most likely first, as (meant, typed, probability).
@@ -1030,21 +931,6 @@ mod tests {
             m.ln_score_all(&["capital", "one"]) > m.ln_score_all(&["capitol", "one"]),
             "capital one is the likelier name"
         );
-    }
-
-    #[test]
-    fn queries_are_completed() {
-        let m = model();
-        let analyzer = crate::analysis::words_analyzer();
-        assert_eq!(m.complete(&analyzer, "ban", 3), ["bank of"]);
-        assert_eq!(m.complete(&analyzer, "bank of ", 3), ["bank of america"]);
-        assert_eq!(m.complete(&analyzer, "bank of a", 3), ["bank of america"]);
-        assert_eq!(
-            m.complete(&analyzer, "capit", 3),
-            ["capital one", "capitol"]
-        );
-        assert!(m.complete(&analyzer, "zzz", 3).is_empty());
-        assert!(m.complete(&analyzer, "", 3).is_empty());
     }
 
     #[test]

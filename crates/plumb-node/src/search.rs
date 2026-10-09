@@ -93,9 +93,6 @@ pub fn run_spelling(args: &SpellingArgs) -> Result<()> {
             }
         );
     }
-    for text in &args.complete {
-        println!("complete {text:?}: {:?}", searcher.complete(text, 8));
-    }
     Ok(())
 }
 

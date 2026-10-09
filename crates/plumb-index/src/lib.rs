@@ -947,17 +947,6 @@ impl Searcher {
             .sum()
     }
 
-    /// Up to `limit` ways the half-typed query `text` likely goes on, most
-    /// likely first, from the words the sites are called by
-    /// ([`spell_model::Model::complete`]). None for an index without a
-    /// spelling model.
-    pub fn complete(&self, text: &str, limit: usize) -> Vec<String> {
-        self.spelling
-            .as_ref()
-            .map(|model| model.complete(&self.words, text, limit))
-            .unwrap_or_default()
-    }
-
     /// Number of documents (sites) in the index.
     pub fn num_docs(&self) -> u64 {
         self.reader.searcher().num_docs()
@@ -6687,31 +6676,6 @@ mod tests {
         assert!(learned > unseen, "{learned} > {unseen}");
         assert!(model.ln_channel("hocky", "hockey") > model.ln_channel("hockqy", "hockey"));
         assert!(model.ln_score(Some("grand"), "canyon") > model.ln_score(Some("grand"), "canon"));
-    }
-
-    #[test]
-    fn half_typed_queries_are_completed() {
-        let (_dir, searcher) = build(&spelling_corpus());
-        let completed = searcher.complete("amt", 5);
-        assert_eq!(
-            completed.first().map(String::as_str),
-            Some("amtrak station")
-        );
-        assert!(
-            completed.iter().any(|c| c == "amtrack fan"),
-            "{completed:?}"
-        );
-        // The word that follows "grand" comes first, then common words.
-        let completed = searcher.complete("grand c", 5);
-        assert_eq!(
-            completed.first().map(String::as_str),
-            Some("grand canyon tours")
-        );
-        assert!(searcher
-            .complete("grand ", 5)
-            .contains(&"grand canyon tours".to_string()));
-        assert!(searcher.complete("", 5).is_empty());
-        assert!(searcher.complete("zzzz", 5).is_empty());
     }
 
     #[test]
