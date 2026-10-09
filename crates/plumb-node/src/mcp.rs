@@ -718,6 +718,47 @@ impl Mcp {
                         confidence = "medium";
                     }
                 }
+                // A guess that shows only some of the name gives way to an
+                // official, well-known site that shows all of it: "Outlook
+                // email" is outlook.live.com, not office.com.
+                if confidence == "low" && !shows && words.iter().all(|word| word.len() >= 3) {
+                    if let Some(hit) = results.hits[1..]
+                        .iter()
+                        .find(|hit| official(hit) && well_known(hit) && shows_name(hit, &words))
+                    {
+                        why = vec![format!(
+                            "It shows every word of the name; {} does not.",
+                            top.domain
+                        )];
+                        pick = hit;
+                        url = hit.url.clone();
+                        domain = hit.domain.clone();
+                        title = hit.title.clone();
+                        description = hit.description.as_deref().map(short);
+                        confidence = "medium";
+                    }
+                }
+                // A guess gives way to a site whose address is a word of
+                // the name: "cube20 God's number" is cube20.org, not
+                // rubiks.com. One that shows the whole name keeps it: "old navy"
+                // is not navy.mil.
+                let label_word = |hit: &Hit| {
+                    let label = letters(&domain_label(&hit.domain));
+                    label.len() >= 4 && words.contains(&label)
+                };
+                if confidence == "low" && !shows && !label_word(top) {
+                    if let Some(hit) = results.hits[1..].iter().find(|hit| label_word(hit)) {
+                        why = vec![format!(
+                            "Its address is {}, a word of the name.",
+                            hit.domain
+                        )];
+                        pick = hit;
+                        url = hit.url.clone();
+                        domain = hit.domain.clone();
+                        title = hit.title.clone();
+                        description = hit.description.as_deref().map(short);
+                    }
+                }
             }
         }
         let rivals: Vec<&str> = results
@@ -761,10 +802,14 @@ impl Mcp {
                     url = home;
                     confidence = "high";
                     did_you_mean = None;
-                } else if let Some(home_domain) = home_domain.clone().filter(|_| wants_docs && docs)
+                } else if let Some(home_domain) = home_domain
+                    .clone()
+                    .filter(|_| wants_docs && docs && !well_known(pick))
                 {
                     // "Pillow docs" is the docs the package names,
-                    // pillow.readthedocs.io, not python-pillow.org.
+                    // pillow.readthedocs.io, not python-pillow.org; a
+                    // well-known site keeps its own: "Anthropic API docs" is
+                    // not anthropic.readthedocs.io.
                     why.push(format!(
                         "The {registry} package of this name gives it as its documentation."
                     ));

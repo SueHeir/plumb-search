@@ -1545,3 +1545,55 @@ fn official_site_is_unsure_of_a_name_its_site_does_not_show() {
     });
     assert_eq!(official(&mcp, "elixir")["confidence"], "high");
 }
+
+#[test]
+fn official_site_keeps_a_well_known_sites_own_docs() {
+    // PyPI's anthropic.readthedocs.io is no docs of anthropic.com's.
+    let mcp = scripted(|query| {
+        if query.ends_with("package") {
+            return results(
+                Vec::new(),
+                vec![package_page(
+                    "pypi",
+                    "anthropic",
+                    None,
+                    Some("https://anthropic.readthedocs.io/"),
+                )],
+            );
+        }
+        let mut anthropic = titled("anthropic.com", "Home \\ Anthropic", 0.8, false);
+        anthropic.official = true;
+        results(vec![anthropic], Vec::new())
+    });
+    let answer = official(&mcp, "anthropic api docs");
+    assert_eq!(answer["domain"], "anthropic.com", "{answer}");
+}
+
+#[test]
+fn official_site_takes_a_well_known_site_that_shows_the_whole_name() {
+    let mcp = scripted(|_| {
+        let mut office = titled("office.com", "Office.com", 0.9, false);
+        office.official = true;
+        let mut outlook = titled("outlook.live.com", "Outlook", 0.8, false);
+        outlook.official = true;
+        outlook.score = 0.9;
+        outlook.description = Some("Microsoft free web-based email service".into());
+        results(vec![office, outlook], Vec::new())
+    });
+    let answer = official(&mcp, "outlook email");
+    assert_eq!(answer["domain"], "outlook.live.com", "{answer}");
+}
+
+#[test]
+fn official_site_takes_a_site_whose_address_is_a_word_of_the_name() {
+    let mcp = scripted(|_| {
+        let mut rubiks = titled("rubiks.com", "Rubik's", 0.8, false);
+        rubiks.official = true;
+        let mut cube20 = hit("cube20.org", 0.5, 0.1, false);
+        cube20.title = None;
+        results(vec![rubiks, cube20], Vec::new())
+    });
+    let answer = official(&mcp, "cube20 God's number");
+    assert_eq!(answer["domain"], "cube20.org", "{answer}");
+    assert_eq!(answer["confidence"], "low");
+}

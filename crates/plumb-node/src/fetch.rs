@@ -414,6 +414,7 @@ fn run_docs(args: &FetchPagesArgs, dest: &std::path::Path) -> Result<()> {
                             title: page.meta.title,
                             description: page.meta.description,
                             text: page.meta.body_text,
+                            sections: page.meta.sections,
                         })
                         .collect();
                     if let Some(kept) = &kept {
@@ -616,6 +617,7 @@ fn fetch_sites<S: Copy + Send + 'static>(
                             title: page.meta.title,
                             description: page.meta.description,
                             text: page.meta.body_text,
+                            sections: page.meta.sections,
                         })
                         .collect();
                     if let Some(kept) = &kept {
