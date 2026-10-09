@@ -84,6 +84,9 @@ pub const DESCRIBED_WORD: f32 = 0.5;
 /// whose lead matches them best gets it, others less by how much worse
 /// theirs does. "triassic jurassic cretaceous" finds Mesozoic.
 pub const LEAD_MATCH: f32 = 0.55;
+/// Most pages looked at for each part of a query that may be a title
+/// ([`PageSearcher::search`]: "titanic sinking" finds Titanic).
+const TITLE_INSIDE_CANDIDATES: usize = 20;
 /// Most articles found by their leads looked at for one query.
 const LEAD_CANDIDATES: usize = 20;
 /// Words that only ask ("what does resin mean"), left out of a query
@@ -1555,8 +1558,15 @@ impl PageSearcher {
             Hint::Any => {}
         }
         for hit in found {
-            if !hits.iter().any(|h| h.page == hit.page) {
-                hits.push(hit);
+            // Found both ways, a page keeps its better score and whatever
+            // either way says of it.
+            match hits.iter_mut().find(|h| h.page == hit.page) {
+                Some(kept) => {
+                    kept.named |= hit.named;
+                    kept.whole |= hit.whole;
+                    kept.score = kept.score.max(hit.score);
+                }
+                None => hits.push(hit),
             }
         }
         hits.sort_by(|a, b| b.score.total_cmp(&a.score));
@@ -1751,6 +1761,44 @@ impl PageSearcher {
                 }
             }
         }
+        // Articles whose title is some of the query and the rest says more
+        // about it: "titanic sinking", "radium discovery marie curie",
+        // "catholic homily". They lack the query's other words, so nothing
+        // above finds them; [`PageSearcher::name_match`] scores them by the
+        // share of the query their title is.
+        let mut by_title_inside = HashSet::new();
+        // Other pages found only so are left out.
+        let mut only_inside = HashSet::new();
+        let mut inside_keys = HashSet::new();
+        for start in 0..words.len() {
+            for end in start + 1..=words.len() {
+                let span = &words[start..end];
+                if span.len() == words.len()
+                    || span.iter().all(|word| {
+                        crate::is_function_word(word) || ASKING_WORDS.contains(&word.as_str())
+                    })
+                {
+                    continue;
+                }
+                let Some(key) = analysis::tokens(&self.joined, &span.join(" ")).pop() else {
+                    continue;
+                };
+                let named = TermQuery::new(
+                    Term::from_field_text(self.fields.keys, &key),
+                    IndexRecordOption::Basic,
+                );
+                inside_keys.insert(key);
+                let most_read = TopDocs::with_limit(TITLE_INSIDE_CANDIDATES)
+                    .order_by_fast_field::<u64>("popularity", tantivy::Order::Desc);
+                for (_, address) in searcher.search(&named, &most_read)? {
+                    if !addresses.contains(&address) {
+                        addresses.push(address);
+                        only_inside.insert(address);
+                    }
+                    by_title_inside.insert(address);
+                }
+            }
+        }
         // Packages, only ever found when the query asks for one: "serde
         // crate", "latest version of requests python".
         let package_query = plumb_core::packages::package_query(query);
@@ -1921,9 +1969,24 @@ impl PageSearcher {
             if page.set == MUSIC_SET && !asked_by_title {
                 continue;
             }
-            if by_title_first.contains(&address) && !asked_by_title
-                || film_title_first.contains(&address) && !asked_as_film
+            // Its title in full, or another name: "queen tour" is not
+            // about Queen (album).
+            let article_inside = page.is_article()
+                && by_title_inside.contains(&address)
+                && std::iter::once(&page.title)
+                    .chain(&page.aliases)
+                    .any(|name| {
+                        analysis::tokens(&self.joined, name)
+                            .pop()
+                            .is_some_and(|key| inside_keys.contains(&key))
+                    });
+            if !article_inside
+                && (by_title_first.contains(&address) && !asked_by_title
+                    || film_title_first.contains(&address) && !asked_as_film)
             {
+                continue;
+            }
+            if only_inside.contains(&address) && !article_inside && !asked_by_title {
                 continue;
             }
             let (mut name, mut named) = self.name_match(&page, query, &joined, &query_words);
@@ -4330,6 +4393,40 @@ mod tests {
             hinted_name("Who is Dalai Lama?"),
             Some(("dalai lama".into(), Hint::Any))
         );
+    }
+
+    #[test]
+    fn articles_whose_title_is_part_of_the_query_are_found() {
+        let (_dir, s) = searcher(&[
+            page("Titanic", 400_000, &["RMS Titanic"]),
+            page("Marie Curie", 300_000, &[]),
+            page("Homily", 20_000, &[]),
+            page("Sinking", 5_000, &[]),
+            Page::from_question(Article {
+                title: "Homily".into(),
+                item: Some("1".into()),
+                views: 900_000,
+                ..Article::default()
+            }),
+        ]);
+        let first = |query: &str| {
+            s.search(query, 5)
+                .unwrap()
+                .first()
+                .map(|hit| (hit.page.title.clone(), hit.named))
+        };
+        assert_eq!(first("titanic sinking"), Some(("Titanic".into(), false)));
+        assert_eq!(
+            first("radium discovery marie curie"),
+            Some(("Marie Curie".into(), false))
+        );
+        assert_eq!(first("rms titanic wreck"), Some(("Titanic".into(), false)));
+        // Only articles are found so: a question titled "Homily" is not.
+        let hits = s.search("catholic homily", 5).unwrap();
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert!(hits[0].page.is_article());
+        // Words that only ask name no article.
+        assert_eq!(first("what does it mean"), None);
     }
 
     #[test]
