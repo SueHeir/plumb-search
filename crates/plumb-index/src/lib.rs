@@ -102,6 +102,7 @@ use tantivy::{
     Term, TERMINATED,
 };
 
+pub use crate::replace::remove_build_leftovers;
 use crate::replace::Staging;
 use crate::schema::Fields;
 
