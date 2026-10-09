@@ -113,7 +113,8 @@ and set `X-Forwarded-Proto: https` when the proxy serves HTTPS.
 
 A few things are kept to the computer Plumb runs on: changing settings on
 the panel, plugin buttons, and the MCP tools that fetch pages for your AI
-apps (`read_page`, findings). Plumb counts a request as local only when all
+apps (`read_page`, findings, and sharing findings with other nodes on a
+node run with `--share-findings`, signed with its key). Plumb counts a request as local only when all
 three hold:
 
 * it connects from the machine itself (`127.0.0.1` or `::1`),

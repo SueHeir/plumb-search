@@ -11,11 +11,11 @@
 </head>
 <body>
 <header class="top">
-  <a class="brand" href="/"><img src="/favicon.svg" alt="" width="28" height="28">Plumb Search</a>
-  <nav>
-    <a href="#hack">Hack it</a>
+  <a class="brand" href="/"><img src="/favicon.svg" alt="" width="28" height="28">Plumb</a>
+  <nav aria-label="Site navigation">
+    <a href="#features">Explore</a>
     <a href="#ai">AI apps</a>
-    <a href="#get">Download</a>
+    <a href="#get" class="nav-download">Get Plumb</a>
     <a href="https://github.com/SueHeir/plumb-search">GitHub</a>
   </nav>
 </header>
@@ -23,16 +23,27 @@
 <main>
   <section class="hero">
     <h1>Plumb Search</h1>
-    <p class="lede">Plumb is a free, open-source, fully hackable search engine for finding websites, and free web search for AI apps and local models. Use it here, or run it on your own computer so your searches stay with you.</p>
+    <p class="lede">A free, open-source search engine for sites, articles, places and more. Search here, or run it on your own computer so your searches stay with you.</p>
     <form class="try" action="/search" method="get" role="search">
-      <label for="q" class="visually-hidden">Search for a website</label>
-      <input id="q" name="q" type="search" placeholder="Try “irs” or “bank of america”" autocomplete="off" required>
+      <label for="q" class="visually-hidden">Search sites, articles, places and more</label>
+      <input id="q" name="q" type="search" placeholder="Search sites, articles, places and more" autocomplete="off" required>
       <button type="submit">Search</button>
     </form>
     <p class="note">This box searches the Plumb node on this server.<span id="storage" hidden> It answers from <strong id="storage-used"></strong> of search data<span id="storage-limit"></span>.</span></p>
     <div class="actions">
-      <a class="button primary" href="#get">Get Plumb</a>
-      <a class="button" href="https://github.com/SueHeir/plumb-search">View the code</a>
+      <a class="button primary" href="#get">Get the desktop app</a>
+      <a class="button" href="#ai">Use with AI apps</a>
+    </div>
+    <p class="principles">Open source<span aria-hidden="true">·</span>No ads<span aria-hidden="true">·</span>Your own index</p>
+  </section>
+
+  <section id="features" class="discover">
+    <div class="section-heading"><h2>What it finds</h2></div>
+    <div class="discovery-grid">
+      <article><h3>Websites</h3><p>Site names, sitelinks and a learned ranking model that tries to put the official site first.</p><a href="/search?q=rust+programming">Try Rust programming →</a></article>
+      <article><h3>Reference</h3><p>Wikipedia, books, papers, music, films and podcasts alongside web results.</p><a href="/search?q=marie+curie">Try Marie Curie →</a></article>
+      <article><h3>Code and docs</h3><p>Software packages, documentation, GitHub projects and Stack Exchange questions.</p><a href="/search?q=sort+a+list+in+python">Try a Python question →</a></article>
+      <article><h3>Everyday answers</h3><p>Places and maps, recent headlines, calculations, conversions and sourced facts.</p><a href="/search?q=coffee+in+denver">Try coffee in Denver →</a></article>
     </div>
   </section>
 

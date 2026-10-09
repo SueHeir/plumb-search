@@ -41,6 +41,7 @@ const MUSIC_KEYWORDS: &[&str] = &["ytm", "youtube music"];
 const MUSIC_IDS: &[&str] = &[
     "musicbrainz-artist",
     "musicbrainz-album",
+    "musicbrainz-recording",
     "spotify",
     "spotify-album",
     "spotify-track",
@@ -182,7 +183,8 @@ struct Details {
 }
 
 fn search(query: &Query) -> Result<Vec<Item>, Error> {
-    let terms = query.terms.trim();
+    let terms = terms(query);
+    let terms = terms.trim();
     let music = match &query.keyword {
         Some(keyword) => MUSIC_KEYWORDS.contains(&keyword.to_lowercase().as_str()),
         None => about_music(query),
@@ -227,6 +229,21 @@ fn search(query: &Query) -> Result<Vec<Item>, Error> {
         HashMap::new()
     });
     Ok(items(found, &details, music))
+}
+
+/// What to search YouTube for: for a song or album the node recognised
+/// without a keyword, its artist and title ("Radiohead Creep"), which
+/// finds it whatever words it was asked for with; otherwise the search.
+fn terms(query: &Query) -> String {
+    let song = query
+        .about
+        .as_ref()
+        .filter(|_| query.keyword.is_none())
+        .filter(|about| {
+            about.id("musicbrainz-recording").is_some() || about.id("musicbrainz-album").is_some()
+        })
+        .and_then(|about| Some(format!("{} {}", about.by.as_deref()?, about.title)));
+    song.unwrap_or_else(|| query.terms.clone())
 }
 
 /// Whether a search without a keyword is about music: about an artist,
@@ -606,6 +623,36 @@ mod tests {
             .insert("musicbrainz-artist".into(), "a74b1b7f".into());
         query.about = Some(about);
         assert!(about_music(&query));
+    }
+
+    #[test]
+    fn a_song_is_searched_for_by_its_artist_and_title() {
+        let mut about = plumb_plugin::About {
+            title: "Gold Digger".into(),
+            by: Some("Kanye West feat. Jamie Foxx".into()),
+            ..plumb_plugin::About::default()
+        };
+        about
+            .ids
+            .insert("musicbrainz-recording".into(), "0b9fc0a5".into());
+        let mut query = Query {
+            terms: "gold digger".into(),
+            about: Some(about),
+            ..Query::default()
+        };
+        assert_eq!(terms(&query), "Kanye West feat. Jamie Foxx Gold Digger");
+        assert!(about_music(&query));
+        // A keyword searches for what was typed.
+        query.keyword = Some("yt".into());
+        query.terms = "gold digger live".into();
+        assert_eq!(terms(&query), "gold digger live");
+        // An artist alone is not a song.
+        query.keyword = None;
+        query.about = Some(plumb_plugin::About {
+            title: "Radiohead".into(),
+            ..plumb_plugin::About::default()
+        });
+        assert_eq!(terms(&query), "gold digger live");
     }
 
     #[test]

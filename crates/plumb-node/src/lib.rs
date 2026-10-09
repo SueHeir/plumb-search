@@ -28,9 +28,11 @@ use tracing_subscriber::EnvFilter;
 
 pub mod about;
 pub mod cli;
+pub mod clicks;
 pub mod country;
 pub mod eval;
 pub mod eval_labels;
+pub mod experiments;
 pub mod findings;
 pub mod history;
 pub mod learn;
@@ -118,6 +120,8 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::RemoteControl(args) => run::remote_control(args),
         Command::Storage(args) => storage::run(args),
         Command::DeadSites(args) => dead::run(&args),
+        Command::Experiments(args) => experiments::run(&args),
+        Command::ClickLabels(args) => clicks::run(&args),
         Command::LinkRank(args) => link_rank::run(&args),
         Command::Relations(args) => relations::run(&args),
         Command::TopSites(args) => top_sites::run(&args),
@@ -271,6 +275,34 @@ pub(crate) fn release_freed_memory() {
         }
     }
 }
+
+/// Has the calling thread, and the threads it starts from now on, yield
+/// the CPU to the node's other threads: index builds and embedding run this
+/// way, so searches answer at once on a busy server. On Linux the priority
+/// (nice value) belongs to the thread; elsewhere this does nothing.
+pub(crate) fn lower_thread_priority() {
+    #[cfg(target_os = "linux")]
+    {
+        extern "C" {
+            fn setpriority(
+                which: std::os::raw::c_int,
+                who: std::os::raw::c_uint,
+                prio: std::os::raw::c_int,
+            ) -> std::os::raw::c_int;
+        }
+        const PRIO_PROCESS: std::os::raw::c_int = 0;
+        // SAFETY: setpriority only changes the scheduling priority; with
+        // `who` 0 Linux applies it to the calling thread alone.
+        unsafe {
+            setpriority(PRIO_PROCESS, 0, BACKGROUND_NICE);
+        }
+    }
+}
+
+/// The nice value of [`lower_thread_priority`]'s threads (0 is normal, 19
+/// the lowest).
+#[cfg(target_os = "linux")]
+const BACKGROUND_NICE: std::os::raw::c_int = 10;
 
 /// `dir/records.jsonl` -> `dir/.records.jsonl.<pid>-<n>.tmp`: `n` counts
 /// up, so two threads writing the same file never share a temporary one.

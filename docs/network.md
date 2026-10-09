@@ -265,6 +265,28 @@ The query text stays on the asking node. Relaying separates the asker's address 
 
 Tested on one machine (`cargo test -p plumb-net popularity`, `cargo test -p plumb-node popularity`): reports below the threshold stay unreadable, other picks and other weeks do not help, copies count once, forged shares and junk do not break counting, low-threshold shares are refused; across three nodes a report handed in under a throwaway identity, sealed through a relay, reaches the others, a pick becomes readable at the tenth report, and a node that joins later catches up and counts the same; a whole `plumb run` node notes a pick through `/go`, sends its report to another node, and after nine more reports of the same pick ranks that site higher by the bonus.
 
+## Shared findings
+
+`plumb_net::leads`, `plumb-node`'s `findings` and `mcp`. An AI app on a node run with `--share-findings` can share a page it found useful with the rest of the network (`report_finding` with `share: true`, see [MCP](mcp.md#sharing-a-finding-with-other-nodes)), and an agent searching another node for the same thing is shown that page as a **lead** (Liz, 2026-10-08).
+
+**What a lead is.** The page's address, why it helped (at most 300 characters), the search's words as 16-bit keys (SHA-256 of `plumb-lead-word-v1` and the word, so many words share each key), when it was reported and when it expires (at most 30 days later), and the reporting node's public key and signature over all of it. The search as typed only when the agent shares it too (`share_query`); never the answer the agent worked out or what it was doing. Words that say what is wanted rather than what about ("latest", "install", "docs") are kept apart from the rest, so "latest version of python" does not match a lead for "requests latest version python". A lead names a public page: an http or https address, no user name or password, no private address or local name.
+
+**How it travels.** The reporting node keeps the lead and publishes it on the gossip topic `plumb/leads/1` (again once a node takes the topic, if none does yet). Every node checks a lead before keeping or passing it on: the signature, the times, sizes and canonical form; a node passes on only leads it took, so copies and floods stop at the first node. A node meeting another asks it on `/plumb/leads/1` for the 2,000 newest leads it holds, then the next node, two at a time, and every 30 minutes asks again, so a node that was away catches up.
+
+**What a node keeps.** `DIR/net/leads.jsonl`: at most 20,000 leads, 500 from any one node (its oldest go), and at most 50 a day from any one node, its own included. When full, the node holding the most leads gives up its oldest, so a node that floods the network crowds out only itself. A newer report of the same page for the same search from the same node replaces the older one; expired leads are dropped every hour. `GET /api/status` shows `network.leads_held` and `network.leads_shared`.
+
+**Who is listed.** Every node keeps the leads it hears of, but a search lists only those from nodes in its search scope (see "Who a search asks" above): its trusted nodes, also the nodes they trust (the default), or anyone. Each reporter is labeled `trusted`, `friend_of_friend` or `other`, closer ones first.
+
+**Leads are not crawls.** Search results come from crawls that other crawlers check (see "Agreement between crawlers"); a lead is one node's say-so that a page helped. So leads are listed apart from the results, with `verified: false`, never ranked among them, and never taken into a node's records. An agent reads the page itself before relying on it.
+
+**Limits now.**
+
+* The word keys hide a search from a casual look, not from someone who tries the likely words: a lead for "tokio latest version" can be found by computing the keys of those words. Share findings for searches you would not mind being seen.
+* A lead is signed by the node, so it shows which node shared it, and the node's id is public. Leads are not sent through a relay or under a throwaway identity.
+* Nothing stops one person from running many keys and sharing 50 misleading leads a day from each. Leads from nodes you trust come first, `--search-from trusted` lists only those, and every lead is marked unchecked, but crawl tokens (see "Crawl credits") would be the real limit.
+
+Tested on one machine (`cargo test -p plumb-net leads`, `cargo test -p plumb-net --test network shared_leads`, `cargo test -p plumb-node an_agent_finds_a_page`): leads are signed, matched by their keys and refused when changed, expired or naming a private page; the store keeps to its limits and survives a restart; across six nodes a lead reaches a node that joins later and is listed only under the scopes that take its node; across two whole nodes, an agent shares a page on one, an agent searching the other in other words finds it with who reported it and when, and reads it, while a finding the first agent kept to itself never leaves its node.
+
 ## Crawl credits
 
 `plumb_net::credits`, on for every network node. Crawling for the network earns credits, and a node turns them into anonymous one-time tokens it can spend at the node that issued them. By design, credits cannot be given away or sold, early adopters get a head start, and people who only search on a website never see any of it.

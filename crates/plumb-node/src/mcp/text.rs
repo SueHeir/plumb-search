@@ -23,6 +23,22 @@ pub(super) fn render(tool: &str, answer: &Value) -> String {
                 "Kept. The next search for \"{}\" on this computer starts with this answer.",
                 text(answer, "query").unwrap_or("")
             );
+            if let Some(shared) = answer.get("shared") {
+                if shared["shared"] == true {
+                    let _ = write!(
+                        out,
+                        " Shared with other Plumb nodes for {} days: {}",
+                        shared["expires_in_days"].as_u64().unwrap_or(0),
+                        text(shared, "url").unwrap_or("")
+                    );
+                } else {
+                    let _ = write!(
+                        out,
+                        " Not shared: {}",
+                        text(shared, "why_not").unwrap_or("")
+                    );
+                }
+            }
         }
         "read_page" => read_page(&mut out, answer),
         "relate" => relate(&mut out, answer),
@@ -184,6 +200,30 @@ fn search(out: &mut String, answer: &Value) {
         );
         if let Some(why) = text(found, "why") {
             let _ = write!(out, " Source: {} ({why})", text(found, "url").unwrap_or(""));
+        }
+        out.push('\n');
+    }
+    for lead in list(answer, "leads") {
+        let by = list(lead, "reported_by");
+        let trusted = by
+            .iter()
+            .filter(|r| text(r, "relation") == Some("trusted"))
+            .count();
+        let _ = write!(
+            out,
+            "Lead shared by {} other Plumb node{}{} ({}; unchecked, read it first): {}",
+            by.len(),
+            if by.len() == 1 { "" } else { "s" },
+            if trusted > 0 {
+                format!(", {trusted} trusted")
+            } else {
+                String::new()
+            },
+            text(lead, "reported").unwrap_or(""),
+            text(lead, "url").unwrap_or("")
+        );
+        if let Some(why) = text(lead, "why") {
+            let _ = write!(out, " ({why})");
         }
         out.push('\n');
     }

@@ -70,9 +70,14 @@ is a search for the site. A plugin with `"always": true` runs for every
 search; use it only for a source that allows that many requests.
 
 A plugin can also run for what a search is about. When the node recognises a
-search as one thing (the article its info box would show), it tells plugins
+search as one thing (the article its info box would show, or else a song or
+album near the top of the results that the search names, or a song whose title
+alone is the search when it has 50,000 listeners and five times those of any
+other of that title, and no site or article is called just that), it tells plugins
 that thing's Wikidata item and its identifiers on other services, such as
-`imdb`, `tmdb-movie`, `tmdb-tv`, `musicbrainz-artist` or `steam`. A plugin
+`imdb`, `tmdb-movie`, `tmdb-tv`, `musicbrainz-artist` or `steam`; a song has
+`musicbrainz-recording`, an album `musicbrainz-album`, and both say who they
+are `by`. A plugin
 whose `ids` lists one of those runs for such searches without a keyword, and
 can look the thing up by its identifier rather than by its name: with
 `"ids": ["tmdb-movie"]`, `paddington 2` runs it with `about.ids["tmdb-movie"]`
@@ -91,7 +96,9 @@ do one of three things:
   node's, as above.
 - **Offer it** (`"suggest": "button"`): the results page shows a "Show results
   from YouTube" link where its results would be, and runs it only when that is
-  followed. This suits a source with a small daily quota.
+  followed. This suits a source with a small daily quota. A search about
+  something with an identifier its `run_ids` lists still runs it: the YouTube
+  plugin runs for a song or album, and offers itself for an artist.
 - **Leave it** (`"suggest": "keywords"`): only its keywords run it.
 
 `plugin.json`'s `suggest` is the plugin's own choice. The node's owner can
@@ -331,6 +338,7 @@ and copy `target/wasm32-unknown-unknown/release/my_plugin.wasm` to
 | `always` | `true` to run it for every search. |
 | `ids` | Run it, without a keyword, for searches about something with an identifier on one of these services (see [When a plugin runs](#when-a-plugin-runs)). |
 | `hints` | Words or phrases that, anywhere in a search, make it fit the plugin, as `ids` do. |
+| `run_ids` | Of its `ids`, those that run it even when it is offered as a link (`suggest` `button`). |
 | `suggest` | What a search that fits it does without a keyword: `automatic` (run it, the default), `button` (offer a link that runs it) or `keywords` (nothing). The node's owner can change it ([Run it, or offer it](#run-it-or-offer-it)). |
 | `pages` | Sites whose pages it can say something about, for [page lookups](#pages-and-browser-extensions). |
 | `cache_seconds` | How long its results for a search are reused: 0 to 86400, 600 without it. |
@@ -349,7 +357,7 @@ What `search` gets ([`Query`](../crates/plumb-plugin/src/lib.rs)):
 | `safe` | Safe search: `off`, `moderate` or `strict`. Pass it on to sources that filter. |
 | `language` | The language asked for, such as `en`, if any. |
 | `config` | The node owner's `config.json`, or `null`. |
-| `about` | What the node took the search to be about, if anything: its `title`, `description`, `wikidata` item and `ids` on other services (`about.id("imdb")`). |
+| `about` | What the node took the search to be about, if anything: its `title`, `description`, `wikidata` item, `ids` on other services (`about.id("imdb")`) and, for a song or album, its artist as `by`. |
 | `page` | For a page lookup, the page's address; `terms` is then empty. |
 
 Each `Item` has a `title` and a `url` (`http`, `https` or `magnet`), and

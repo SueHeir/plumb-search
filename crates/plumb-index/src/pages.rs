@@ -1270,6 +1270,50 @@ impl PageSearcher {
         Ok(hits)
     }
 
+    /// The song or album of the music set whose title is the whole of
+    /// `query` when one is far better known than every other of that
+    /// title: Radiohead's "Creep" for "creep", with
+    /// [`KNOWN_SONG_MARGIN`] times the listeners of TLC's. `None` for a
+    /// title many share about equally ("hello", "yesterday"), or one of
+    /// fewer than [`KNOWN_SONG_LISTENERS`] listeners. Such a search does
+    /// not list the song (its title is too common a word), but it may be
+    /// for it.
+    pub fn known_song(&self, query: &str) -> Result<Option<Page>> {
+        let Some(joined) = analysis::tokens(&self.joined, query).pop() else {
+            return Ok(None);
+        };
+        let searcher = self.reader.searcher();
+        let named = TermQuery::new(
+            Term::from_field_text(self.fields.keys, &joined),
+            IndexRecordOption::Basic,
+        );
+        let top = TopDocs::with_limit(CANDIDATES)
+            .order_by_fast_field::<u64>("popularity", tantivy::Order::Desc);
+        let mut songs = Vec::new();
+        for (_, address) in searcher.search(&named, &top)? {
+            let document: TantivyDocument = searcher.doc(address)?;
+            let Some(stored) = document
+                .get_first(self.fields.page)
+                .and_then(|v| v.as_str())
+            else {
+                continue;
+            };
+            let page: Page = serde_json::from_str(stored)?;
+            if page.set == MUSIC_SET {
+                songs.push(page);
+            }
+        }
+        songs.sort_by_key(|page| std::cmp::Reverse(page.views));
+        let mut songs = songs.into_iter();
+        let Some(best) = songs.next() else {
+            return Ok(None);
+        };
+        let runner_up = songs.next().map_or(0, |page| page.views);
+        Ok((best.views >= KNOWN_SONG_LISTENERS
+            && best.views >= runner_up.saturating_mul(KNOWN_SONG_MARGIN))
+        .then_some(best))
+    }
+
     fn search_once(&self, query: &str, limit: usize) -> Result<Vec<PageHit>> {
         let words = analysis::tokens(&self.words, query);
         let Some(joined) = analysis::tokens(&self.joined, query).pop() else {
@@ -1639,8 +1683,14 @@ impl PageSearcher {
                 .map_or(by, |(name, _)| name)
                 .to_string()
         };
-        let artist = analysis::tokens(&self.words, &author);
-        let author: HashSet<String> = artist.iter().cloned().collect();
+        // Asked for artist first, the main artist alone: "kanye west drive
+        // slow" for "Kanye West feat. Paul Wall & GLC".
+        let main = [" feat. ", " ft. "]
+            .iter()
+            .find_map(|joiner| author.split_once(joiner))
+            .map_or(author.as_str(), |(main, _)| main);
+        let artist = analysis::tokens(&self.words, main);
+        let author: HashSet<String> = analysis::tokens(&self.words, &author).into_iter().collect();
         // The title, or the title without its subtitle: "Frankenstein" for
         // "Frankenstein; or, The Modern Prometheus".
         let short = page.title.split([':', ';']).next().unwrap_or("");
@@ -1780,6 +1830,14 @@ fn fold_films(hits: Vec<PageHit>) -> Vec<PageHit> {
     }
     kept
 }
+
+/// Least listeners of a song or album that [`PageSearcher::known_song`]
+/// takes a search of its title alone to be for: about the 7,000 most
+/// listened.
+pub const KNOWN_SONG_LISTENERS: u64 = 50_000;
+/// How many times the listeners of every other song or album of its title
+/// such a one has.
+pub const KNOWN_SONG_MARGIN: u64 = 5;
 
 /// Most pages listed on their own among the sites.
 pub const MAX_PAGES_LISTED: usize = 2;
@@ -3379,6 +3437,25 @@ mod tests {
         );
         assert!(jude.is_song() && !jude.may_lead());
         assert_eq!(jude.set_name(), "MusicBrainz");
+        // With guests, the main artist first finds it too.
+        let slow = song(
+            "Drive Slow",
+            "Song by Kanye West feat. Paul Wall & GLC",
+            "recording/a1b2c3d4-0000-4042-ae91-78d6a3267d69",
+            30_000,
+        );
+        let (_dir, s) = searcher(std::slice::from_ref(&slow));
+        for query in [
+            "kanye west drive slow",
+            "kanye west drive slow song",
+            "drive slow kanye west",
+        ] {
+            let hits = s.search(query, 5).unwrap();
+            assert!(
+                !hits.is_empty() && hits[0].page.url == slow.url,
+                "{query}: {hits:?}"
+            );
+        }
         let white = song(
             "The Beatles",
             "Album by The Beatles",
@@ -3439,6 +3516,60 @@ mod tests {
             }),
             None
         );
+    }
+
+    #[test]
+    fn a_title_alone_is_for_a_song_far_better_known_than_its_namesakes() {
+        let creep = song(
+            "Creep",
+            "Song by Radiohead",
+            "recording/a1b2c3d4-0001-4042-ae91-78d6a3267d69",
+            288_000,
+        );
+        let tlc = song(
+            "Creep",
+            "Song by TLC",
+            "recording/a1b2c3d4-0002-4042-ae91-78d6a3267d69",
+            34_000,
+        );
+        let oasis = song(
+            "Hello",
+            "Song by Oasis",
+            "recording/a1b2c3d4-0003-4042-ae91-78d6a3267d69",
+            93_000,
+        );
+        let evanescence = song(
+            "Hello",
+            "Song by Evanescence",
+            "recording/a1b2c3d4-0004-4042-ae91-78d6a3267d69",
+            83_000,
+        );
+        let quiet = song(
+            "Dead Sea",
+            "Song by The Lumineers",
+            "recording/a1b2c3d4-0005-4042-ae91-78d6a3267d69",
+            40_000,
+        );
+        let (_dir, s) = searcher(&[
+            creep.clone(),
+            tlc,
+            oasis,
+            evanescence,
+            quiet,
+            page("Creep", 50_000, &[]),
+        ]);
+        assert_eq!(s.known_song("creep").unwrap(), Some(creep.clone()));
+        assert_eq!(s.known_song("Creep").unwrap(), Some(creep));
+        // Titles shared about equally, too few listeners, or no title.
+        assert_eq!(s.known_song("hello").unwrap(), None);
+        assert_eq!(s.known_song("dead sea").unwrap(), None);
+        assert_eq!(s.known_song("radiohead").unwrap(), None);
+        // The title still lists no song.
+        assert!(s
+            .search("creep", 5)
+            .unwrap()
+            .iter()
+            .all(|hit| hit.page.set != MUSIC_SET));
     }
 
     fn film(title: &str, description: &str, item: &str, sitelinks: u64) -> Page {

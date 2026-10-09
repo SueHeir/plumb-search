@@ -16,7 +16,12 @@
 //!
 //! `report_finding`, and the findings listed with search results, are
 //! offered only to apps on the node's own computer, always: they hold
-//! what its agents searched for (see [`crate::findings`]).
+//! what its agents searched for (see [`crate::findings`]). So are the
+//! leads other nodes shared, listed with search results, and sharing a
+//! finding with `report_finding`'s `share`, on a node that allows it: a
+//! lead goes out signed with the node's key. Behind a reverse proxy on the
+//! same computer that does not say who it forwards for, every request looks
+//! local (see `docs/docker.md`), so such a node should not share findings.
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
@@ -110,10 +115,10 @@ impl Limiter {
 pub(crate) struct SharedReader(OnceLock<Option<Reader>>);
 
 impl SharedReader {
-    fn get(&self) -> Option<Reader> {
+    fn get(&self, config: &plumb_crawl::ReadConfig) -> Option<Reader> {
         self.0
             .get_or_init(|| {
-                Reader::standard(tokio::runtime::Handle::current())
+                Reader::with_config(config.clone(), tokio::runtime::Handle::current())
                     .map_err(|err| error!("{err:#}"))
                     .ok()
             })
@@ -293,7 +298,7 @@ async fn mcp(State(state): State<AppState>, request: Request) -> Response {
         None => (None, Vec::new()),
     };
     let reader = if reads_pages {
-        state.page_reader.get()
+        state.page_reader.get(&state.settings.page_reader)
     } else {
         None
     };
@@ -302,6 +307,7 @@ async fn mcp(State(state): State<AppState>, request: Request) -> Response {
         .with_rates(rates)
         .with_node(state.node.clone())
         .with_findings(if here { state.findings() } else { None })
+        .with_leads(here)
         .with_plugin_results(plugins);
     let id = message.get("id").cloned().unwrap_or(Value::Null);
     let reply = tokio::task::spawn_blocking(move || server.handle(&message)).await;

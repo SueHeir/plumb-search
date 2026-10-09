@@ -225,6 +225,19 @@ pub trait SearchBackend: Send + Sync {
             spelling: None,
         })
     }
+    /// [`SearchBackend::search_full`] ranked with `rank` instead of the
+    /// backend's own knobs, for experiments ([`crate::experiments`]). By
+    /// default `rank` is ignored.
+    fn search_ranked(
+        &self,
+        query: &str,
+        limit: usize,
+        options: &SearchOptions,
+        rank: &RankConfig,
+    ) -> Result<SearchResults> {
+        let _ = rank;
+        self.search_full(query, limit, options)
+    }
     /// Number of sites that can be found.
     fn num_docs(&self) -> u64;
     /// The places `query` asks for, when it asks for places somewhere
@@ -256,6 +269,14 @@ pub trait SearchBackend: Send + Sync {
     fn complete(&self, query: &str, limit: usize) -> Vec<String> {
         let _ = (query, limit);
         Vec::new()
+    }
+
+    /// The song or album a search of `query` alone is surely for, when
+    /// the node keeps the music set; see
+    /// [`plumb_index::pages::PageSearcher::known_song`]. By default none.
+    fn known_song(&self, query: &str, options: &SearchOptions) -> Option<plumb_index::pages::Page> {
+        let _ = (query, options);
+        None
     }
 }
 
@@ -314,19 +335,21 @@ impl IndexBackend {
         &self.searcher
     }
 
-    /// [`SearchBackend::search_full`], ranking by `meaning` too when given.
+    /// [`SearchBackend::search_full`], ranking by `meaning` too when given,
+    /// and with `rank` instead of the backend's own knobs when given.
     pub fn search_full_with(
         &self,
         query: &str,
         limit: usize,
         options: &SearchOptions,
         meaning: Option<&MeaningIndex>,
+        rank: Option<&RankConfig>,
     ) -> Result<SearchResults> {
         let query_meaning = meaning.and_then(|meaning| meaning.query(query));
         self.searcher.search_meaning(
             query,
             limit,
-            &self.rank,
+            rank.unwrap_or(&self.rank),
             options,
             query_meaning
                 .as_ref()
@@ -351,7 +374,18 @@ impl SearchBackend for IndexBackend {
         options: &SearchOptions,
     ) -> Result<SearchResults> {
         let meaning = self.meaning.get();
-        self.search_full_with(query, limit, options, meaning.as_deref())
+        self.search_full_with(query, limit, options, meaning.as_deref(), None)
+    }
+
+    fn search_ranked(
+        &self,
+        query: &str,
+        limit: usize,
+        options: &SearchOptions,
+        rank: &RankConfig,
+    ) -> Result<SearchResults> {
+        let meaning = self.meaning.get();
+        self.search_full_with(query, limit, options, meaning.as_deref(), Some(rank))
     }
 
     fn num_docs(&self) -> u64 {
@@ -420,6 +454,11 @@ pub trait StatusSource: Send + Sync {
     /// Whether the node notes which result is opened for a search and
     /// reports it anonymously; its result links then go through `/go`.
     fn shares_popularity(&self) -> bool {
+        false
+    }
+    /// Whether AI apps on this computer may share their findings with other
+    /// nodes (see [`crate::findings`]).
+    fn shares_findings(&self) -> bool {
         false
     }
     /// Notes that `domain` was opened from the results for `query`.
@@ -557,6 +596,9 @@ struct AppState {
     /// What agents found, for `/mcp`'s `report_finding`; opened from the
     /// node's data directory when first needed.
     findings: Arc<std::sync::OnceLock<Option<Arc<crate::findings::Findings>>>>,
+    /// The ranking experiments set up in the node's data directory;
+    /// opened when first needed.
+    experiments: Arc<std::sync::OnceLock<Option<Arc<crate::experiments::Lab>>>>,
 }
 
 impl AppState {
@@ -576,6 +618,23 @@ impl AppState {
                     Ok(findings) => Some(Arc::new(findings)),
                     Err(err) => {
                         error!("opening findings: {err:#}");
+                        None
+                    }
+                }
+            })
+            .clone()
+    }
+
+    /// The node's ranking experiments; `None` for `plumb serve`, and for
+    /// a node that sets up none.
+    fn experiments(&self) -> Option<Arc<crate::experiments::Lab>> {
+        self.experiments
+            .get_or_init(|| {
+                let dir = self.node.as_ref()?.data_dir()?;
+                match crate::experiments::Lab::in_dir(&dir) {
+                    Ok(lab) => lab.map(Arc::new),
+                    Err(err) => {
+                        error!("no experiments run: {err:#}");
                         None
                     }
                 }
@@ -673,6 +732,7 @@ pub fn router_with(backend: Arc<dyn SearchBackend>, settings: impl Into<WebSetti
         net_limiter: Arc::new(mcp::Limiter::new(NET_BURST, NET_PER_MINUTE)),
         page_reader: Arc::default(),
         findings: Arc::default(),
+        experiments: Arc::default(),
     })
 }
 
@@ -698,6 +758,7 @@ pub fn node_router_with(
         net_limiter: Arc::new(mcp::Limiter::new(NET_BURST, NET_PER_MINUTE)),
         page_reader: Arc::default(),
         findings: Arc::default(),
+        experiments: Arc::default(),
     })
 }
 
@@ -765,6 +826,7 @@ pub fn run(args: ServeArgs) -> Result<()> {
             home: args.country.clone(),
             web_search: args.web_search.0,
             read_pages_for_all: args.mcp_read_pages,
+            page_reader: plumb_crawl::ReadConfig::default(),
             plugins: args
                 .plugins
                 .as_deref()
@@ -841,6 +903,8 @@ struct SearchParams {
     hr: Option<String>,
     /// `1`: learn from clicks which boxes to fold (see [`crate::learn`]).
     hl: Option<String>,
+    /// `1`: keep searches as examples to train the ranking.
+    ht: Option<String>,
     /// `1`: edit mode, with buttons to move results and fold boxes.
     edit: Option<String>,
     /// `<seed>.<step>`: tuning, a round of random searches in edit mode
@@ -889,7 +953,7 @@ impl SearchParams {
 
     /// The history choices the settings gear's form sent, if it sent them.
     fn history_prefs(&self) -> Option<history::Prefs> {
-        history::prefs_from_form(&self.hist, &self.hs, &self.hr, &self.hl)
+        history::prefs_from_form(&self.hist, &self.hs, &self.hr, &self.hl, &self.ht)
     }
 
     /// The searcher's choices: the `country` parameter when it is valid,
@@ -940,7 +1004,9 @@ fn home_or_setup(state: &AppState, params: &SearchParams, headers: &HeaderMap) -
     let status = state.node.as_ref().map(|node| node.status());
     let now = now_unix();
     match &status {
-        Some(status) if status.phase != Phase::Ready => setup_response(status, now),
+        Some(status) if status.phase != Phase::Ready => {
+            setup_response(status, now, state.local_controls(headers))
+        }
         _ => {
             let visitor = history::Visitor::of(state, headers, params.history_prefs());
             let browser_about = (visitor.is_none() && state.node.is_some())
@@ -953,12 +1019,14 @@ fn home_or_setup(state: &AppState, params: &SearchParams, headers: &HeaderMap) -
                 (None, None) => false,
             };
             let settings = Settings {
+                manage: state.local_controls(headers),
                 options: params.options(&state.settings.home, headers),
                 network: state.net_setting(params),
                 scope: state.search_scope(),
                 private: state.private_search(),
                 history: visitor.as_ref().map(history::Visitor::view),
                 browser_about,
+                experiment: None,
                 welcome: state.node.is_some() && !told && !history::welcomed(headers),
             };
             let response = html_response(
@@ -973,12 +1041,12 @@ fn home_or_setup(state: &AppState, params: &SearchParams, headers: &HeaderMap) -
     }
 }
 
-fn setup_response(status: &Status, now: u64) -> Response {
+fn setup_response(status: &Status, now: u64, controls: bool) -> Response {
     (
         StatusCode::OK,
         security_headers(),
         [(header::CACHE_CONTROL, "no-store")],
-        Html(render_setup(status, now)),
+        Html(render_setup_with(status, now, controls)),
     )
         .into_response()
 }
@@ -994,6 +1062,8 @@ enum NetSetting {
 
 /// What the settings gear holds.
 struct Settings {
+    /// Offer node controls on the node's own local address.
+    manage: bool,
     options: SearchOptions,
     network: NetSetting,
     /// Which nodes the network part of a search asks.
@@ -1007,6 +1077,9 @@ struct Settings {
     browser_about: Option<About>,
     /// The home page invites the searcher to the welcome page.
     welcome: bool,
+    /// The page's token, when the search is in ranking experiments: its
+    /// result links say it and their place (see [`crate::experiments`]).
+    experiment: Option<u64>,
 }
 
 impl Settings {
@@ -1020,6 +1093,16 @@ impl Settings {
 }
 
 impl AppState {
+    fn local_controls(&self, headers: &HeaderMap) -> bool {
+        self.node.is_some()
+            && request_origin(headers, &Uri::from_static("/"))
+                .as_deref()
+                .is_some_and(panel::local_origin)
+            && !control::FORWARDED_HEADERS
+                .iter()
+                .any(|name| headers.contains_key(*name))
+    }
+
     /// Which nodes this node's network searches ask, set by its owner.
     fn search_scope(&self) -> plumb_net::SearchScope {
         self.network()
@@ -1066,7 +1149,7 @@ async fn search_page(
     }
     if let Some(status) = state.setting_up() {
         // Reloading keeps the query, so the results show up once the index is ready.
-        return setup_response(&status, now_unix());
+        return setup_response(&status, now_unix(), state.local_controls(&headers));
     }
     let query = params.query();
     if query.is_empty() {
@@ -1082,6 +1165,7 @@ async fn search_page(
         visitor.editing = editing;
     }
     let mut settings = Settings {
+        manage: state.local_controls(&headers),
         options: params.options(&state.settings.home, &headers),
         network: state.net_setting(&params),
         scope: state.search_scope(),
@@ -1090,19 +1174,31 @@ async fn search_page(
         browser_about: (visitor.is_none() && state.node.is_some())
             .then(|| history::browser_about(&headers)),
         welcome: false,
+        experiment: None,
     };
     let limit = params.limit();
-    let local = run_search(&state, &query, limit, &settings.options).await;
+    // The ranking experiments this search is in, if any; tuning and edit
+    // mode are not searches as made.
+    let lab = state.experiments().filter(|_| tuning.is_none() && !editing);
+    let arms = lab
+        .as_ref()
+        .map(|lab| lab.assign(&query, visitor.as_ref().and_then(|v| v.profile())))
+        .unwrap_or_default();
+    let rank = match (&lab, &state.node) {
+        (Some(lab), Some(node)) if !arms.is_empty() => Some(lab.rank(node.rank(), &arms)),
+        _ => None,
+    };
+    let local = run_search_ranked(&state, &query, limit, &settings.options, rank).await;
     let mut extras = match &local {
         Ok(results) => extras(&state, &query, results, &settings.options).await,
         Err(_) => answers::Extras::default(),
     };
     // Plugins run once the node knows what the search is about, so that
     // they can look it up by its identifiers.
-    let about = local
-        .as_ref()
-        .ok()
-        .and_then(|results| search_about(&query, results, &extras));
+    let about = match &local {
+        Ok(results) => plugin_about(&state, &query, results, &extras, &settings.options).await,
+        Err(_) => None,
+    };
     let shown_to_plugins = match &local {
         Ok(results) if state.settings.plugins.any_annotate() => shown_results(results, limit),
         _ => Vec::new(),
@@ -1258,6 +1354,7 @@ async fn search_page(
                         .learned
                         .box_verdict(Block::News, &query, context);
             }
+            settings.experiment = lab.as_ref().and_then(|lab| lab.note_search(&arms));
             let mut page = render_results_with(
                 &query,
                 &results,
@@ -1403,7 +1500,7 @@ async fn api_search(
             }
             let places = places.filter(|found| !found.hits.is_empty());
             let extras = extras(&state, &query, &results, &options).await;
-            let about = search_about(&query, &results, &extras);
+            let about = plugin_about(&state, &query, &results, &extras, &options).await;
             let shown_to_plugins = if state.settings.plugins.any_annotate() {
                 shown_results(&results, params.limit())
             } else {
@@ -1565,6 +1662,10 @@ struct GoParams {
     d: String,
     /// A box of the page (`places`, `news`) whose link `u` was opened.
     b: Option<String>,
+    /// The page's token, for a search in ranking experiments, and the
+    /// place of the result on it.
+    x: Option<String>,
+    p: Option<String>,
     u: Option<String>,
     country: Option<String>,
     only: Option<String>,
@@ -1595,6 +1696,7 @@ async fn go(
         hs: None,
         hr: None,
         hl: None,
+        ht: None,
         edit: None,
         tune: None,
         safe: params.safe,
@@ -1638,6 +1740,11 @@ async fn go(
     };
     if let Some(mut visitor) = history::Visitor::of(&state, &headers, None) {
         visitor.note_opened(&query, &hit.domain);
+    }
+    let token = params.x.as_deref().and_then(|x| x.parse::<u64>().ok());
+    let place = params.p.as_deref().and_then(|p| p.parse::<usize>().ok());
+    if let (Some(lab), Some(token), Some(place)) = (state.experiments(), token, place) {
+        lab.note_click(token, place);
     }
     if state.shares_popularity() {
         if let Some(node) = state.node.clone() {
@@ -2080,6 +2187,7 @@ fn request_origin(headers: &HeaderMap, uri: &Uri) -> Option<String> {
 
 /// The OpenSearch 1.1 description of the search engine at `origin`.
 fn render_opensearch(origin: &str) -> String {
+    let icon = &*ICON_PNG_BASE64;
     format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
          <OpenSearchDescription xmlns=\"http://a9.com/-/spec/opensearch/1.1/\">\n\
@@ -2087,7 +2195,7 @@ fn render_opensearch(origin: &str) -> String {
          <Description>Plumb Search</Description>\n\
          <InputEncoding>UTF-8</InputEncoding>\n\
          <Image width=\"32\" height=\"32\" type=\"image/png\">\
-         data:image/png;base64,{ICON_PNG_BASE64}</Image>\n\
+         data:image/png;base64,{icon}</Image>\n\
          <Url type=\"text/html\" method=\"get\" template=\"{0}/search?q={{searchTerms}}\"/>\n\
          <Url type=\"{SUGGESTIONS_TYPE}\" method=\"get\" template=\"{0}/complete?q={{searchTerms}}\"/>\n\
          </OpenSearchDescription>\n",
@@ -2095,23 +2203,12 @@ fn render_opensearch(origin: &str) -> String {
     )
 }
 
-/// The desktop app's icon (`crates/plumb-desktop/icons/32x32.png`, cut to
-/// 255 colors), for the OpenSearch description.
-const ICON_PNG_BASE64: &str = "\
-iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAMAAABEpIrGAAABjFBMVEX///8sWZ4oVpw3Y6Tk6fIqV5suX6osWqEpVpk4\
-ZKbo7vcoVJUmU5g2YKDj6fEmUZIoVZg1XpwjTIrj6O/m8f9YZXjYyLDYyK8oUY4mUJAZSZMqToa1dBeybgskTYsYRoxJ\
-Z429sYTaq03YpkjapUW4oWhHYoZoe4z/3YL/5IT846T90Gj5zGT9yVbzvEtkb3ccSIz536H31YP0xFn0wVLvvFDyuUTw\
-tT5HXn0iSochSYUXRIj/4nv325L63pz50nrttUT4tzixklA5WYP913bxt0HusTvrrjjhpzg2UnseRH0WQYNWa4LmqTXp\
-qzVPX3EgRoH2y2nipDPkoizanTAdRYEdQnu/qG7/0F/poymphEMhRXsSPoFOYnjeoDHhnSlLWm0cQnoOOoCWiWX/xkmG\
-c0/BjjUcQHYQO31YYmhRWWMXOm4OOXqehU/3tjbnoCeSd0cYOm0aPXIVO3QnRXDUnTjenSzJkDANN3hfYFzhnCdbXFkZ\
-PHAZPHENN3aogTynfzsxR2kxSGkXOW3LNf1CAAAAAXRSTlMAQObYZgAAAeZJREFUOMutk+tf0lAYxyWVTY9yxEshKnir\
-CJFQpiTWkDSnTuYEd0pnmHmZilaAmhleyn/c7dwge+vv1fN8f9+dz3lxVlf3SHG5nuDUNzTUk8nlqqkb3QKJ2NTc3CTS\
-xd1Y7QEQcVpaPZ7WFjIDwA03FMX/BVGEbtK3CYALXo/HywUgtGGh3T6NBno7OryQr2I7EQBHUOjsFKob4AINgF1Pn3X5\
-IN+pALsp8Pf09vX19vip0g2ZEMDxBfsHBoeGh5+/8PsIYQLrX4ZehUMjkdHoaz9BgX+EWH8oNBYej0sTk4k3sVphKpB0\
-lumBt+/CckqSojPp90GHJANTTLATmx2fk2U5IkU/zCsLizGHUWHJmZPq8lxKHktJ0cmEktFWghguUUEnwmoK9/NaNrcy\
-bSO9KthRZ1cjcdwrmezaouEwJujIsHf146c4vkAmu76hmrphIJ0KBrJjbn4epX1+64tqOswgwjbCMb/u7M4kFC2bX9/b\
-NAnbrhVsZTCtaJl8bt9khAmWs1jmwWFasy+4dXRgEkKFArJojk++5de+/zhmOypgoYhKJFb59Cx3/vO0bFGAiuRRMqFk\
-XfzKXf6+YH0J0VddQVcMXd/cXrP5ClXYj1Hh35T//C3z83jv3KNw9yCF4mP91vcYNadv9VISrAAAAABJRU5ErkJggg==";
+/// The desktop icon, embedded in OpenSearch and page chrome without a request.
+static ICON_PNG_BASE64: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD
+        .encode(include_bytes!("../../plumb-desktop/icons/32x32.png"))
+});
 
 /// Runs a search on the blocking thread pool, since searching is CPU and
 /// disk work. A panicking backend becomes an error, not a dropped connection.
@@ -2123,6 +2220,18 @@ async fn run_search(
     limit: usize,
     options: &SearchOptions,
 ) -> Result<SearchResults> {
+    run_search_ranked(state, query, limit, options, None).await
+}
+
+/// [`run_search`] with `rank` instead of the backend's own knobs, when
+/// given.
+async fn run_search_ranked(
+    state: &AppState,
+    query: &str,
+    limit: usize,
+    options: &SearchOptions,
+    rank: Option<RankConfig>,
+) -> Result<SearchResults> {
     if limit == 0 {
         return Ok(SearchResults::default());
     }
@@ -2133,8 +2242,9 @@ async fn run_search(
     let local = near_me.is_some();
     let owned_query = near_me.unwrap_or_else(|| query.to_string());
     let owned_options = options.clone();
-    let mut results = tokio::task::spawn_blocking(move || {
-        backend.search_full(&owned_query, limit, &owned_options)
+    let mut results = tokio::task::spawn_blocking(move || match rank {
+        Some(rank) => backend.search_ranked(&owned_query, limit, &owned_options, &rank),
+        None => backend.search_full(&owned_query, limit, &owned_options),
     })
     .await
     .context("the search task failed")??;
@@ -2195,7 +2305,8 @@ fn shown_results(results: &SearchResults, limit: usize) -> Vec<plumb_plugin::Sho
 }
 
 /// What the node takes `query`, whose results are `results`, to be
-/// about, for its plugins: the article an info box would show.
+/// about, for its plugins: the article an info box would show, or else a
+/// song or album among the top results that the query names.
 fn search_about(
     query: &str,
     results: &SearchResults,
@@ -2212,7 +2323,105 @@ fn search_about(
         &results.hits,
         results.pages.iter().map(|p| p.hit.clone()).collect(),
     );
-    answers::page_about(&results.hits, &placed).map(crate::plugins::about_page)
+    answers::page_about(&results.hits, &placed)
+        .or_else(|| music_about(&placed))
+        .map(crate::plugins::about_page)
+}
+
+/// What plugins are told `query`, whose results are `results`, is about:
+/// [`search_about`], unless that is only a namesake of the query (its
+/// title says more, as "Creep (2014 film)" does) and the query is a
+/// [`known_song`]'s title.
+async fn plugin_about(
+    state: &AppState,
+    query: &str,
+    results: &SearchResults,
+    extras: &answers::Extras,
+    options: &SearchOptions,
+) -> Option<plumb_plugin::About> {
+    let about = search_about(query, results, extras);
+    if about
+        .as_ref()
+        .is_some_and(|about| same_title(&about.title, query))
+    {
+        return about;
+    }
+    known_song(state, query, results, options).await.or(about)
+}
+
+/// Whether `title` is `query`, but for case and spacing.
+fn same_title(title: &str, query: &str) -> bool {
+    let words =
+        |text: &str| -> Vec<String> { text.split_whitespace().map(str::to_lowercase).collect() };
+    words(title) == words(query)
+}
+
+/// The song or album a search of `query` alone, whose results are
+/// `results`, is surely for, as plugins are told: "creep" is Radiohead's,
+/// though no result lists it, and "Creep (2014 film)" is only a namesake.
+/// Not when the query is the very name of a site or an article, which it
+/// is then rather for: "yellow" is the colour, and "maps" a site. A site
+/// found for a near spelling (creed.com for "creep") does not count.
+async fn known_song(
+    state: &AppState,
+    query: &str,
+    results: &SearchResults,
+    options: &SearchOptions,
+) -> Option<plumb_plugin::About> {
+    if state.settings.plugins.is_empty() || plumb_core::Operators::parse(query).any() {
+        return None;
+    }
+    let joined: String = query
+        .split_whitespace()
+        .map(str::to_lowercase)
+        .collect::<Vec<_>>()
+        .concat();
+    let names_site = |hit: &Hit| {
+        hit.named
+            && (hit.domain.split('.').next() == Some(joined.as_str())
+                || hit
+                    .title
+                    .as_deref()
+                    .is_some_and(|title| same_title(title, query)))
+    };
+    let named_else = results.hits.iter().any(names_site)
+        || results.pages.iter().any(|placed| {
+            let page = &placed.hit.page;
+            placed.hit.named
+                && page.set != plumb_index::pages::MUSIC_SET
+                && same_title(&page.title, query)
+                && !answers::is_disambiguation(&page.title, page.description.as_deref())
+        });
+    if named_else {
+        return None;
+    }
+    let backend = Arc::clone(&state.backend);
+    let (query, options) = (query.to_string(), options.clone());
+    tokio::task::spawn_blocking(move || backend.known_song(&query, &options))
+        .await
+        .ok()
+        .flatten()
+        .map(|page| crate::plugins::about_page(&page))
+}
+
+/// How near the top a song or album must be listed for a search to be
+/// taken to be for it: among the first three results.
+const MUSIC_ABOUT_AT: usize = 2;
+
+/// The song or album of the music set that the query names, by its title
+/// ("creep") or with its artist ("radiohead creep"), listed among the top
+/// results on its own: what a search for a song is about.
+fn music_about(placed: &[plumb_index::pages::PlacedPage]) -> Option<&plumb_index::pages::Page> {
+    placed
+        .iter()
+        .filter(|placed| {
+            placed.hit.page.set == plumb_index::pages::MUSIC_SET
+                && (placed.hit.named || placed.hit.whole)
+                && placed.under.is_none()
+                && placed.at <= MUSIC_ABOUT_AT
+        })
+        .min_by_key(|placed| placed.at)
+        .map(|placed| &placed.hit.page)
 }
 
 fn security_headers() -> [(HeaderName, &'static str); 3] {
@@ -2307,204 +2516,36 @@ fn time_until(at: u64, now: u64) -> String {
     }
 }
 
-const STYLE: &str = "\
-:root{color-scheme:light dark;--bg:#fff;--fg:#202124;--muted:#5f6368;--link:#1a0dab;\
---url:#0d652d;--line:#dadce0;--accent:#1a73e8;--err:#b3261e;--net:#f2effb;--chip:#fff;\
---seen:#681da8}\
-@media (prefers-color-scheme:dark){:root{--bg:#1f1f1f;--fg:#e8eaed;--muted:#9aa0a6;\
---link:#8ab4f8;--url:#81c995;--line:#3c4043;--accent:#8ab4f8;--err:#f2b8b5;--net:#29263a;\
---chip:#f1f3f4;--seen:#c58af9}}\
-*{box-sizing:border-box}\
-body{margin:0;background:var(--bg);color:var(--fg);\
-font:16px/1.5 system-ui,-apple-system,\"Segoe UI\",Roboto,sans-serif}\
-.wrap{max-width:44rem;margin:0 auto;padding:1rem}\
-.home{padding-top:18vh;text-align:center}\
-.home form{margin:1.5rem auto 0;max-width:36rem}\
-h1{margin:0;font-size:2.5rem;letter-spacing:-.02em}\
-header{display:flex;flex-wrap:wrap;align-items:center;gap:.75rem;\
-padding-bottom:.75rem;border-bottom:1px solid var(--line)}\
-.logo{font-weight:700;font-size:1.25rem;color:var(--fg);text-decoration:none}\
-form{display:flex;gap:.5rem;flex:1;min-width:14rem}\
-form.inline{display:inline-flex;flex:none;min-width:0;vertical-align:middle}\
-input{flex:1;min-width:0;font:inherit;padding:.55rem .8rem;border:1px solid var(--line);\
-border-radius:.5rem;background:var(--bg);color:var(--fg)}\
-button{font:inherit;padding:.55rem 1rem;border:0;border-radius:.5rem;\
-background:var(--accent);color:var(--bg);cursor:pointer}\
-ol{list-style:none;margin:0;padding:0}\
-main>ol{margin-top:.5rem}\
-li{padding:.85rem 0;margin:.25rem 0}\
-.r{display:block;color:inherit;text-decoration:none}\
-.site{display:flex;align-items:center;gap:.7rem;min-width:0;margin-bottom:.35rem}\
-.ic{flex:none;display:grid;place-items:center;width:1.85rem;height:1.85rem;border-radius:50%;\
-background:var(--chip);border:1px solid var(--line);overflow:hidden}\
-.ic img{display:block;width:18px;height:18px}\
-.ic.l0,.ic.l1,.ic.l2,.ic.l3,.ic.l4,.ic.l5,.ic.l6,.ic.l7{border:0;color:#fff;\
-font-size:.85rem;font-weight:600;line-height:1}\
-.l0{background:#1a73e8}.l1{background:#d93025}.l2{background:#188038}.l3{background:#e37400}\
-.l4{background:#9334e6}.l5{background:#007b83}.l6{background:#c5221f}.l7{background:#5f6368}\
-.sn{display:flex;flex-direction:column;min-width:0;line-height:1.3}\
-.dn{font-size:.875rem;color:var(--fg);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}\
-.u{font-size:.75rem;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}\
-.t{display:block;font-size:1.25rem;line-height:1.3;color:var(--link);overflow-wrap:anywhere}\
-a.r:hover .t,a.r:focus-visible .t{text-decoration:underline}\
-a.r:visited .t{color:var(--seen)}\
-.d{margin:.3rem 0 0;line-height:1.55;overflow-wrap:anywhere}\
-.pk code{font-size:.85em;padding:0 .3em;border-radius:4px;background:rgba(127,127,127,.15)}\
-.pk a{color:var(--link)}\
-.sub{margin:.35rem 0 0;font-size:.9rem;line-height:1.5;overflow-wrap:anywhere}\
-.sub a{color:var(--link)}\
-.kp{display:flex;flex-wrap:wrap;gap:.3rem 1.25rem;margin:.45rem 0 0;font-size:.9rem}\
-.kp li{padding:0;margin:0}\
-.kp a{color:var(--link)}\
-.tag,.m,.s{color:var(--muted)}\
-.m,.s{font-size:.8rem}\
-.m{margin-top:.25rem}\
-.s{margin-top:1.5rem}\
-.ft{margin:2.5rem 0 0;font-size:.8rem;color:var(--muted)}.ft a{color:inherit}\
-.none{margin:1.5rem 0}\
-header form{flex-wrap:wrap}\
-form[role=search]{position:relative}\
-.gear{flex:none}\
-.gear>summary{list-style:none;cursor:pointer;padding:.55rem .7rem;border:1px solid var(--line);\
-border-radius:.5rem;color:var(--muted);user-select:none}\
-.gear>summary::-webkit-details-marker{display:none}\
-.gear[open]>summary,.gear>summary:hover{color:var(--fg);border-color:var(--accent)}\
-.panel{position:absolute;right:0;top:calc(100% + .4rem);z-index:2;width:min(20rem,calc(100vw - 2rem));\
-display:grid;gap:.6rem;padding:.8rem .9rem;text-align:left;font-size:.875rem;\
-background:var(--bg);border:1px solid var(--line);border-radius:.6rem;\
-box-shadow:0 6px 20px rgba(0,0,0,.18)}\
-.panel label{display:flex;gap:.45rem;align-items:center}\
-.panel input{flex:none;margin:0}\
-.panel .hint{margin:-.35rem 0 0 1.45rem;color:var(--muted);font-size:.8rem}\
-.panel label.off{color:var(--muted)}\
-.panel button{justify-self:end;padding:.35rem .9rem}\
-.pv{margin:0;padding-top:.5rem;border-top:1px solid var(--line)}\
-.src a,.err a{color:var(--link)}\
-.pv{display:grid;gap:.6rem}\
-.panel .pv .hint{margin-left:2.65rem}\
-.panel a.tg{display:flex;gap:.6rem;align-items:center;color:var(--fg);text-decoration:none}\
-.knob{flex:none;position:relative;width:2rem;height:1.1rem;border-radius:1rem;\
-background:var(--line);transition:background .15s}\
-.knob::after{content:\"\";position:absolute;top:.15rem;left:.15rem;width:.8rem;height:.8rem;\
-border-radius:50%;background:var(--bg);transition:left .15s}\
-.tg[aria-checked=true] .knob{background:var(--accent)}\
-.tg[aria-checked=true] .knob::after{left:1.05rem}\
-.tg:hover .knob,.tg:focus-visible .knob{outline:2px solid var(--accent);outline-offset:1px}\
-.src{margin:.75rem 0 0;font-size:.8rem;color:var(--muted)}\
-.src a{color:var(--link)}\
-.sw{display:inline-block;width:.8em;height:.8em;margin:0 .2em -.1em 0;border-radius:.2em;\
-background:var(--net);border:1px solid var(--muted)}\
-li.net{background:var(--net);margin:.25rem -.75rem;padding:.85rem .75rem;border-radius:.75rem}\
-select{font:inherit;padding:.15rem .3rem;border:1px solid var(--line);border-radius:.35rem;\
-background:var(--bg);color:var(--fg)}\
-.ss{margin:1rem 0 .25rem;padding:.6rem .8rem;border:1px solid var(--line);border-radius:.5rem}\
-.ss a{color:var(--link)}\
-.sp{margin:1rem 0 .25rem}.sp a{color:var(--link)}.sp .sps{margin-left:.5rem;font-size:.9em}\
-li.news{padding:.6rem .9rem;border:1px solid var(--line);border-radius:.6rem}\
-.news summary{cursor:pointer}\
-.news .nh{font-size:.875rem;font-weight:600}\
-.news details[open] summary{margin-bottom:.2rem}\
-.news ol li{padding:.3rem 0;margin:0}\
-.news a{color:var(--link);text-decoration:none;overflow-wrap:anywhere}\
-.news a:hover,.news a:focus-visible{text-decoration:underline}\
-.news .m{margin:0}\
-.plugin .nh{margin:0 0 .2rem}\
-.plugin .d{margin:.1rem 0;font-size:.875rem}\
-.plugin li::after{content:'';display:block;clear:both}\
-.plugin .pim{float:left;width:3rem;max-height:4.5rem;object-fit:cover;margin:.15rem .6rem 0 0;\
-border-radius:.25rem}\
-.plugin .pb{font-size:.75rem;padding:0 .4rem;border:1px solid var(--line);border-radius:1rem;\
-color:var(--muted);white-space:nowrap}\
-.plugin .pa{display:flex;flex-wrap:wrap;gap:.4rem;margin:.3rem 0 .1rem}\
-.plugin .pa form{margin:0}\
-.pn{display:flex;flex-wrap:wrap;align-items:center;gap:.4rem;margin:.3rem 0 .1rem}\
-.pn form{margin:0}\
-.pn .pb{font-size:.75rem;padding:.05rem .5rem;border:1px solid var(--line);border-radius:1rem;\
-color:var(--muted)}\
-.pn button{font:inherit;font-size:.8rem;padding:.2rem .7rem;border-radius:.4rem;\
-border:1px solid var(--accent);background:none;color:var(--accent);cursor:pointer}\
-.plugin .pa button{font:inherit;font-size:.8rem;padding:.2rem .7rem;border-radius:.4rem;\
-border:1px solid var(--accent);background:none;color:var(--accent);cursor:pointer}\
-.web{margin:.25rem 0;font-size:.9rem}.web a{color:var(--muted)}\
-.setup{max-width:36rem}\
-.step{margin:2rem 0 .5rem;font-size:1.1rem}\
-progress{width:100%;height:.75rem;accent-color:var(--accent)}\
-.err{margin-top:1.5rem;padding:.25rem 1rem;border:1px solid var(--err);border-radius:.5rem;\
-text-align:left}\
-.err strong{color:var(--err)}\
-.msg{white-space:pre-wrap;overflow-wrap:anywhere;font:.85rem/1.4 ui-monospace,monospace}\
-.op{color:var(--url);font-weight:600}\
-.fb{display:inline-flex;gap:.2rem;margin:0;vertical-align:middle}\
-.fb button{font:inherit;font-size:.8rem;line-height:1.2;padding:.25rem .6rem;border:1px solid var(--line);\
-border-radius:999px;background:var(--bg);color:var(--fg);cursor:pointer}\
-.fb button:hover{background:var(--net)}\
-.tbar{margin:1rem 0 .5rem;padding:.85rem 1rem;border-radius:.75rem;background:var(--net);\
-border:1px solid var(--line)}\
-.tbar .th{display:flex;justify-content:space-between;gap:1rem;align-items:baseline}\
-.tbar .th span{color:var(--muted);font-size:.9rem}\
-.tbar p{margin:.35rem 0 .6rem;font-size:.95rem;line-height:1.5}\
-.tgo{display:flex;flex-wrap:wrap;gap:.6rem 1.25rem;align-items:center}\
-.tgo a{color:var(--link)}\
-.tgo .tnext{padding:.45rem 1rem;border-radius:.5rem;background:var(--accent);color:var(--bg);\
-text-decoration:none;font-weight:600}\
-.fb button[aria-pressed=true]{background:var(--accent);color:var(--bg);border-color:var(--accent)}\
-.fbx{display:flex;flex-wrap:wrap;margin:.3rem 0 .6rem}\
-.ed{font-size:.85rem}\
-.panel a{color:var(--link)}\
-.recent{margin:1rem auto 0;max-width:36rem;display:flex;flex-wrap:wrap;gap:.4rem;\
-justify-content:center;align-items:center;font-size:.875rem}\
-.recent ul{display:contents;list-style:none}\
-.recent li{margin:0;padding:0}\
-.recent li a{display:inline-block;padding:.2rem .7rem;border:1px solid var(--line);\
-border-radius:1rem;color:var(--fg);text-decoration:none}\
-.recent li a:hover{border-color:var(--accent)}\
-.recent .all{color:var(--muted)}\
-.hist h1{font-size:1.6rem;margin-top:1.25rem}.hist h2{font-size:1.05rem;margin:1.75rem 0 .5rem}\
-.hist ul{padding-left:1.1rem}.hist li{padding:.2rem 0;margin:0}.hist li a{color:var(--link)}\
-.hist form{margin-top:1.5rem}\
-.about label{display:block;margin-top:1.25rem}.about .m{margin:.2rem 0 .4rem}\
-.about form.block{display:block}\
-.about form{display:block}\
-.welcome fieldset{border:0;padding:0;margin:1.25rem 0 0;min-width:0}.welcome legend{padding:0}\
-.welcome .topics{display:grid;grid-template-columns:repeat(auto-fill,minmax(9rem,1fr));gap:.4rem}\
-.welcome .topics label{display:flex;align-items:center;gap:.45rem;margin:0;padding:.4rem .6rem;\
-border:1px solid var(--line);border-radius:.5rem;cursor:pointer;overflow-wrap:anywhere}\
-.welcome .topics label:has(input:checked){border-color:var(--accent)}\
-.welcome .topics input{flex:none;width:auto;margin:0;padding:0;accent-color:var(--accent)}\
-.welcome .acts{display:flex;flex-wrap:wrap;align-items:center;gap:1rem;margin-top:1.5rem}\
-.welcome .quiet{background:none;color:var(--muted);padding:.55rem 0;text-decoration:underline}\
-.about .kinds{border:0;padding:0;margin:1.25rem 0 0}.about .kinds legend{padding:0}\
-.about .kind{display:flex;flex-wrap:wrap;align-items:center;gap:.2rem .9rem;padding:.35rem 0;\
-border-bottom:1px solid var(--line)}.about .kind>span:first-child{flex:1 1 12rem}\
-.about .kind .amt{display:flex;flex-wrap:wrap;gap:.2rem .9rem}\
-.about .kind label{display:inline-flex;align-items:center;gap:.25rem;margin:0}\
-.about .kind input{flex:none;width:auto;margin:0;padding:0;accent-color:var(--accent)}\
-.invite{margin:.75rem 0}.invite form{display:inline;margin:0}\
-.invite button{background:none;border:0;padding:0;color:var(--muted);font:inherit;\
-text-decoration:underline;cursor:pointer}\
-.about textarea,.about #town,.about #paste,.about #code{width:100%;box-sizing:border-box;font:inherit;padding:.4rem;\
-background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:6px}\
-.ia{margin:1rem 0 .5rem;padding:.85rem 1rem;border:1px solid var(--line);border-radius:.75rem}\
-.ia p{margin:0}.iaq{color:var(--muted);font-size:.9rem;overflow-wrap:anywhere}\
-.iaa{font-size:1.75rem;line-height:1.3;overflow-wrap:anywhere}.ia .m{margin-top:.2rem}\
-.wide{max-width:74rem}.wide header form{max-width:42rem}\
-.wide>main,main.wide>:not(header){max-width:44rem}\
-.cols{display:flex;flex-direction:column}.cols>main{min-width:0}\
-.ib{order:-1;margin:1rem 0 .25rem;padding:1rem 1.1rem;border:1px solid var(--line);\
-border-radius:.75rem;overflow-wrap:anywhere}\
-.ib h2{margin:0;font-size:1.35rem;line-height:1.3}\
-.ibd{margin:.2rem 0 0;color:var(--muted)}\
-.ib dl{display:grid;grid-template-columns:auto 1fr;gap:.25rem .9rem;margin:.8rem 0 0;font-size:.9rem}\
-.ib dt{color:var(--muted)}.ib dd{margin:0;min-width:0}\
-.ib a{color:var(--link)}.ibl{margin:.8rem 0 0;font-size:.9rem}\
-.pf{margin:1rem 0 .5rem;padding:.85rem 1rem;border:1px solid var(--accent);border-radius:.75rem}\
-.pf .m{margin:.3rem 0 0}\
-.ibp{display:flex;flex-wrap:wrap;gap:.4rem;margin:.8rem 0 0;padding:0;list-style:none;font-size:.85rem}\
-.ibp li{margin:0;padding:0}.ibp a{display:inline-block;padding:.15rem .65rem;\
-border:1px solid var(--line);border-radius:1rem;text-decoration:none}\
-.ibp a:hover{border-color:var(--accent)}.pfirst .ib{order:0}\
-@media (min-width:64rem){.cols{display:grid;grid-template-columns:minmax(0,44rem) minmax(0,22rem);\
-gap:0 3rem;align-items:start}.ib{order:0;margin-top:1.25rem}}";
+const STYLE: &str = include_str!("web/style.css");
+
+/// Shared chrome; public search pages do not advertise local node controls.
+fn app_bar(active: &str, controls: bool) -> String {
+    app_bar_for(active, controls, "/app")
+}
+
+fn app_bar_for(active: &str, controls: bool, panel: &str) -> String {
+    let panel = escape_html(panel);
+    let icon = &*ICON_PNG_BASE64;
+    let current = |page: &str| {
+        if page == active {
+            " aria-current=\"page\""
+        } else {
+            ""
+        }
+    };
+    let controls = if controls {
+        // One link: the panel's Overview section carries the node's status.
+        format!("<a href=\"{panel}\"{}>Settings</a>", current("settings"))
+    } else {
+        String::new()
+    };
+    format!(
+        "<header class=\"app-bar\"><a class=\"app-brand\" href=\"/\" aria-label=\"Plumb Search home\">\
+         <img src=\"data:image/png;base64,{icon}\" width=\"28\" height=\"28\" alt=\"\">Plumb</a>\
+         <nav aria-label=\"App navigation\"><a href=\"/\"{}>Search</a>{controls}</nav></header>",
+        current("search")
+    )
+}
 
 /// The foot of the home and results pages: the code, and where the data
 /// comes from and under which licences. A node does not serve the
@@ -2524,8 +2565,8 @@ fn page_with_head(title: &str, head: &str, body: &str) -> String {
     format!(
         "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
-         <meta name=\"referrer\" content=\"no-referrer\">\n{OPENSEARCH_LINK}{head}\
-         <title>{}</title>\n<style>{STYLE}</style>\n</head>\n<body>\n{body}\n</body>\n</html>\n",
+         <meta name=\"referrer\" content=\"no-referrer\">\n{OPENSEARCH_LINK}\
+         <title>{}</title>\n<style>{STYLE}</style>\n{head}</head>\n<body>\n{body}\n</body>\n</html>\n",
         escape_html(title)
     )
 }
@@ -2750,10 +2791,16 @@ fn render_home(docs: u64, status: Option<&Status>, now: u64, settings: &Settings
         ""
     };
     let body = format!(
-        "<main class=\"wrap home\">\n<h1>Plumb Search</h1>\n\
-         {}{welcome}{recent}\n<p class=\"s\">{} sites indexed{note}</p>{wikidata}\n\
-         <p class=\"s\">Not looking for a site? Add !g, !ddg or !b to search Google, \
-         DuckDuckGo or Bing.</p>\n{FOOTER}\n</main>",
+        "<div class=\"wrap search-home\">{}<main class=\"home\">\n\
+         <h1>Plumb Search</h1>\n\
+         <p class=\"home-intro\">Find sites, articles, places and more.</p>\
+         {}{welcome}{recent}\n<p class=\"index-status\"><span class=\"status-dot\" aria-hidden=\"true\"></span>{} sites indexed{note}</p>{wikidata}\n\
+         <details class=\"search-help\"><summary>Search tips</summary>\
+         <p>Try a site name, a topic, a calculation, or a place. Use \
+         <code>site:</code> to search one domain and quotes for exact words.</p>\
+         <p>Add !g, !ddg or !b to search Google, DuckDuckGo or Bing.</p></details>\
+         {FOOTER}\n</main></div>",
+        app_bar("search", settings.manage),
         settings_form("", true, settings),
         group_thousands(docs)
     );
@@ -2804,9 +2851,15 @@ fn wikidata_note(status: &Status, now: u64) -> Option<String> {
 
 /// The page shown while a node sets up: the step, its progress and the last
 /// error. It reloads itself, since the page allows no script.
+#[cfg(test)]
 fn render_setup(status: &Status, now: u64) -> String {
-    let mut body = String::from(
-        "<main class=\"wrap home setup\">\n<h1>Plumb Search</h1>\n\
+    render_setup_with(status, now, false)
+}
+
+fn render_setup_with(status: &Status, now: u64, controls: bool) -> String {
+    let bar = app_bar("search", controls);
+    let mut body = format!(
+        "<div class=\"wrap\">{bar}<main class=\"home setup\">\n<h1>Plumb Search</h1>\n\
          <p class=\"tag\">Setting up your search engine</p>\n",
     );
     let _ = writeln!(
@@ -2852,7 +2905,7 @@ fn render_setup(status: &Status, now: u64) -> String {
         body,
         "<p class=\"s\">On its first start, Plumb downloads a public list of popular websites \
          and builds a first search index from it, which takes a minute or two. It adds more \
-         lists while you search. This page reloads every {SETUP_RELOAD_SECONDS} seconds.</p>\n</main>"
+         lists while you search. This page reloads every {SETUP_RELOAD_SECONDS} seconds.</p>\n</main></div>"
     );
     let head = format!("<meta http-equiv=\"refresh\" content=\"{SETUP_RELOAD_SECONDS}\">\n");
     page_with_head("Setting up - Plumb Search", &head, &body)
@@ -2860,7 +2913,8 @@ fn render_setup(status: &Status, now: u64) -> String {
 
 fn results_header(query: &str) -> String {
     format!(
-        "<header><a class=\"logo\" href=\"/\">Plumb</a>{}</header>",
+        "{}<header class=\"results-header\">{}</header>",
+        app_bar("search", false),
         search_form(query, false)
     )
 }
@@ -2869,7 +2923,8 @@ fn results_header(query: &str) -> String {
 /// settings gear.
 fn results_form(query: &str, settings: &Settings) -> String {
     format!(
-        "<header><a class=\"logo\" href=\"/\">Plumb</a>{}</header>",
+        "{}<header class=\"results-header\">{}</header>",
+        app_bar("search", settings.manage),
         settings_form(query, false, settings)
     )
 }
@@ -3199,6 +3254,7 @@ fn render_results_with(
     // Picks are noted for the query: shared, or kept in the searcher's
     // history.
     let notes_picks = share_picks
+        || settings.experiment.is_some()
         || settings
             .history
             .as_ref()
@@ -3313,8 +3369,19 @@ fn render_results_with(
             }
             // `/go` only follows this node's own results, so sites from other
             // nodes link straight to themselves.
-            let go = (notes_picks && item.network.is_none())
-                .then(|| go_link(query, &settings.options, &item.hit.domain));
+            let go = (notes_picks && item.network.is_none()).then(|| match settings.experiment {
+                // The page and the result's place, for the experiments.
+                Some(token) => go_link_with(
+                    query,
+                    &settings.options,
+                    &[
+                        ("d", &item.hit.domain),
+                        ("x", &token.to_string()),
+                        ("p", &position.to_string()),
+                    ],
+                ),
+                None => go_link(query, &settings.options, &item.hit.domain),
+            });
             let icon = icons.get(&item.hit.domain);
             let notes = match (&settings.history, &settings.browser_about) {
                 (Some(history), _) => history.notes(&item.hit),
@@ -3618,7 +3685,7 @@ fn render_page(out: &mut String, hit: &PageHit, icon: Option<&str>) {
     }
     let _ = writeln!(
         out,
-        "<div class=\"m\"><span title=\"{} {}\">score {:.3}</span></div></li>",
+        "<div class=\"m rank-meta\"><span title=\"{} {}\">score {:.3}</span></div></li>",
         hit.page.views,
         match hit.page.set.as_str() {
             plumb_index::pages::GITHUB_SET => "stars",
@@ -4080,13 +4147,14 @@ fn render_hit(
         };
         meta.push(format!("from the Plumb network ({crawl}, in {answers})"));
     }
-    meta.push(format!(
-        "<span title=\"text {:.3}, link {:.3}\">score {:.3}</span>",
+    let score = format!(
+        "<span class=\"rank-meta\">{}<span title=\"text {:.3}, link {:.3}\">score {:.3}</span></span>",
+        if meta.is_empty() { "" } else { " &middot; " },
         hit.text_score, hit.link_score, hit.score
-    ));
+    );
     let _ = writeln!(
         out,
-        "<div class=\"m\">{}</div></li>",
+        "<div class=\"m\">{}{score}</div></li>",
         meta.join(" &middot; ")
     );
 }
@@ -4312,6 +4380,139 @@ mod tests {
         let json: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(json["plugin_offers"][0]["plugin"], "test-news");
         assert!(json.get("plugins").is_none());
+    }
+
+    /// Finds `hits` and `pages`, and knows "creep" is Radiohead's song.
+    struct SongBackend {
+        hits: Vec<Hit>,
+        pages: Vec<plumb_index::pages::PlacedPage>,
+    }
+
+    impl SearchBackend for SongBackend {
+        fn search(&self, _query: &str, limit: usize) -> Result<Vec<Hit>> {
+            Ok(self.hits.iter().take(limit).cloned().collect())
+        }
+
+        fn search_full(
+            &self,
+            query: &str,
+            limit: usize,
+            _options: &SearchOptions,
+        ) -> Result<SearchResults> {
+            Ok(SearchResults {
+                hits: self.search(query, limit)?,
+                pages: self.pages.clone(),
+                site_search: None,
+                spelling: None,
+            })
+        }
+
+        fn num_docs(&self) -> u64 {
+            1
+        }
+
+        fn known_song(
+            &self,
+            query: &str,
+            _options: &SearchOptions,
+        ) -> Option<plumb_index::pages::Page> {
+            (query == "creep").then(|| {
+                plumb_index::pages::Page::from_music(plumb_core::Article {
+                    title: "Creep".into(),
+                    description: Some("Song by Radiohead, 1992".into()),
+                    item: Some("recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69".into()),
+                    views: 288_000,
+                    ..Default::default()
+                })
+                .unwrap()
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_songs_title_alone_runs_a_plugin_for_songs() {
+        let manifest = crate::plugins::Manifest {
+            name: "Songs".into(),
+            hosts: vec!["a.example".into()],
+            ids: vec!["musicbrainz-recording".into()],
+            run_ids: vec!["musicbrainz-recording".into()],
+            suggest: crate::plugins::Suggest::Button,
+            ..crate::plugins::Manifest::default()
+        };
+        let plugins = || {
+            crate::plugins::Plugins::new(vec![crate::plugins::Plugin::from_parts(
+                "songs".into(),
+                manifest.clone(),
+                serde_json::Value::Null,
+                crate::plugins::answering(
+                    r#"{"results":[{"title":"Radiohead - Creep","url":"https://a.example/creep"}]}"#,
+                )
+                .as_bytes(),
+            )
+            .unwrap()])
+        };
+        let app_with = |hit: Hit, pages: Vec<plumb_index::pages::PlacedPage>| {
+            router_with(
+                Arc::new(SongBackend {
+                    hits: vec![hit],
+                    pages,
+                }),
+                WebSettings {
+                    home: HomeCountry::Off,
+                    plugins: plugins(),
+                    ..WebSettings::default()
+                },
+            )
+        };
+        let app = |hit: Hit| app_with(hit, Vec::new());
+        let article = |title: &str, description: &str| plumb_index::pages::PlacedPage {
+            hit: PageHit {
+                page: plumb_index::pages::Page::from_article(
+                    "en",
+                    plumb_core::Article {
+                        title: title.into(),
+                        description: Some(description.into()),
+                        views: 10_000,
+                        ..Default::default()
+                    },
+                ),
+                score: 1.0,
+                named: true,
+                popularity: 0.5,
+                whole: false,
+                learned: None,
+            },
+            under: None,
+            at: 0,
+        };
+        let (_, _, page) = send(app(scored("creed.com", 0.5)), "/search?q=creep").await;
+        assert!(page.contains("Radiohead - Creep"), "{page}");
+        // A site found for a near spelling, named by its own name, and an
+        // article on a namesake do not stand in its way.
+        let mut creed = hit(
+            "creed.com",
+            "https://creed.com/",
+            Some("Creed - Official Website"),
+            None,
+        );
+        (creed.named, creed.official) = (true, true);
+        let film = article("Creep (2014 film)", "2014 film by Patrick Brice");
+        let (_, _, page) = send(app_with(creed, vec![film]), "/search?q=creep").await;
+        assert!(page.contains("Radiohead - Creep"), "{page}");
+        // Not when the search is a site's name, or an article's.
+        let mut named = scored("creep.example", 0.5);
+        named.named = true;
+        let (_, _, page) = send(app(named), "/search?q=creep").await;
+        assert!(!page.contains("Radiohead - Creep"));
+        let creep = article("Creep", "Person who makes others uneasy");
+        let (_, _, page) = send(
+            app_with(scored("creed.com", 0.5), vec![creep]),
+            "/search?q=creep",
+        )
+        .await;
+        assert!(!page.contains("Radiohead - Creep"));
+        let (_, _, page) = send(app(scored("creed.com", 0.5)), "/search?q=weather").await;
+        assert!(!page.contains("Radiohead - Creep"));
     }
 
     #[tokio::test]
@@ -4741,7 +4942,8 @@ mod tests {
         let (status, _, body) = get(backend(vec![evil]), "/search?q=%3Cb%3Eevil%3C%2Fb%3E").await;
         assert_eq!(status, StatusCode::OK);
         assert!(!body.contains("<script>"), "{body}");
-        assert!(!body.contains("<img"), "{body}");
+        assert!(!body.contains("<img src=x"), "{body}");
+        assert_eq!(body.matches("<img ").count(), 1, "only the bundled logo");
         assert!(!body.contains("<b>evil"), "{body}");
         assert!(!body.contains("javascript:"), "{body}");
         assert!(body.contains("&lt;script&gt;alert(&#39;title&#39;)&lt;/script&gt; Evil &amp; Co"));
@@ -4820,6 +5022,40 @@ mod tests {
 
     /// A node that reports a set status.
     struct FakeNode(Status);
+
+    #[tokio::test]
+    async fn search_navigation_only_shows_controls_for_a_direct_local_node() {
+        let app = || {
+            node_router(
+                backend(bank_hits()),
+                node(node_status(Phase::Ready, Step::Idle)),
+            )
+        };
+        for path in ["/", "/search?q=us+bank"] {
+            let (_, _, local) = send_with_headers(app(), path, &[("host", "127.0.0.1:7586")]).await;
+            assert!(local.contains("href=\"/app\">Settings</a>"));
+            assert!(!local.contains(">Status</a>"));
+            for headers in [
+                vec![("host", "plumbsearch.org")],
+                vec![
+                    ("host", "127.0.0.1:7586"),
+                    ("x-forwarded-for", "203.0.113.2"),
+                ],
+                vec![("host", "127.0.0.1:7586"), ("forwarded", "for=203.0.113.2")],
+            ] {
+                let (_, _, public) = send_with_headers(app(), path, &headers).await;
+                assert!(!public.contains("href=\"/app\""));
+                assert!(!public.contains("href=\"/app?section=search\""));
+            }
+        }
+        let (_, _, standalone) = send_with_headers(
+            router(backend(bank_hits())),
+            "/",
+            &[("host", "127.0.0.1:7586")],
+        )
+        .await;
+        assert!(!standalone.contains("href=\"/app\""));
+    }
 
     impl StatusSource for FakeNode {
         fn status(&self) -> Status {
@@ -5515,7 +5751,9 @@ mod tests {
         );
         assert!(body.contains("<option value=\"DE\" selected>Germany</option>"));
         assert!(body.contains("name=\"only\" value=\"1\" checked"));
-        assert!(body.contains("<div class=\"m\">United States &middot; <span title=\"text"));
+        assert!(body.contains(
+            "<div class=\"m\">United States<span class=\"rank-meta\"> &middot; <span title=\"text"
+        ));
         assert!(body.contains("country=DE&amp;only=1"), "{body}");
 
         // No country asked for: the server's setting, then the browser's.
@@ -5589,9 +5827,11 @@ mod tests {
 
     fn no_settings() -> Settings {
         Settings {
+            manage: false,
             history: None,
             browser_about: None,
             welcome: false,
+            experiment: None,
             options: SearchOptions::default(),
             network: NetSetting::Unavailable,
             scope: plumb_net::SearchScope::default(),
@@ -6073,6 +6313,45 @@ mod tests {
     }
 
     #[test]
+    fn a_search_naming_a_song_near_the_top_is_about_it() {
+        let song = |title: &str, named: bool, under: Option<&str>, at: usize| {
+            plumb_index::pages::PlacedPage {
+                hit: PageHit {
+                    page: plumb_index::pages::Page::from_music(plumb_core::Article {
+                        title: title.into(),
+                        description: Some("Song by Radiohead, 1992".into()),
+                        item: Some("recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69".into()),
+                        ..Default::default()
+                    })
+                    .unwrap(),
+                    score: 0.5,
+                    named,
+                    popularity: 0.1,
+                    whole: false,
+                    learned: None,
+                },
+                under: under.map(str::to_string),
+                at,
+            }
+        };
+        let about = music_about(&[song("Creep", true, None, 1)]).map(crate::plugins::about_page);
+        let about = about.expect("about the song");
+        assert_eq!(about.title, "Creep");
+        assert_eq!(about.by.as_deref(), Some("Radiohead"));
+        assert!(about.id("musicbrainz-recording").is_some());
+        // Not one the query does not name, one far down, or one under a site.
+        assert!(music_about(&[song("Creep", false, None, 0)]).is_none());
+        assert!(music_about(&[song("Creep", true, None, MUSIC_ABOUT_AT + 1)]).is_none());
+        assert!(music_about(&[song("Creep", true, Some("radiohead.com"), 0)]).is_none());
+        // The higher of two.
+        let pages = [
+            song("Creep (Live)", true, None, 2),
+            song("Creep", true, None, 0),
+        ];
+        assert_eq!(music_about(&pages).unwrap().title, "Creep");
+    }
+
+    #[test]
     fn site_queries_list_every_page_on_the_site() {
         let pages = ["Albert Einstein", "Einstein family", "Einstein (crater)"]
             .into_iter()
@@ -6456,7 +6735,7 @@ mod tests {
         let (_, headers, body) =
             send_with_headers(app(), "/search?q=us+bank&country=any&hist=1", &me).await;
         let prefs = set_cookie(&headers, "plumb_history").unwrap();
-        assert_eq!(prefs, "plumb_history=s0r0l0");
+        assert_eq!(prefs, "plumb_history=s0r0l0t0");
         assert!(first(&body), "{body}");
         assert!(!body.contains("You opened this before"), "{body}");
         let both = format!("{profile}; {prefs}");
@@ -6993,6 +7272,176 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn clicks_count_by_how_far_down_the_page_they_were() {
+        let dir = tempfile::tempdir().unwrap();
+        let node = Arc::new(HistoryNode(dir.path().join("history")));
+        let fake = backend(bank_hits());
+        let app = || node_router(fake.clone(), node.clone());
+        let (_, headers, _) = send(app(), "/search?q=us+bank&country=any").await;
+        let profile = set_cookie(&headers, "plumb_profile").expect("a profile");
+        let me = [("cookie", profile.as_str())];
+        // The second result, opened.
+        let (code, _, _) = send_with_headers(
+            app(),
+            "/go?q=us+bank&d=usbank-login-help.com&country=any",
+            &me,
+        )
+        .await;
+        assert_eq!(code, StatusCode::SEE_OTHER);
+        let id = profile.trim_start_matches("plumb_profile=");
+        let history = crate::history::HistoryStore::new(&node.0).load(id);
+        // Counted twice over: half the people look at the second place.
+        assert_eq!(history.opened[0].weighted, 200, "{:?}", history.opened);
+        let counts = std::fs::read_to_string(node.0.join("positions.json")).unwrap();
+        assert!(!counts.contains("bank"), "{counts}");
+        // Opened again from the same page, it is not counted again.
+        send_with_headers(
+            app(),
+            "/go?q=us+bank&d=usbank-login-help.com&country=any",
+            &me,
+        )
+        .await;
+        let positions = crate::clicks::PositionStore::in_dir(&node.0).load();
+        assert_eq!(positions.bias(), crate::clicks::PositionBias::prior());
+        assert_eq!(
+            std::fs::read_to_string(node.0.join("positions.json")).unwrap(),
+            counts
+        );
+    }
+
+    #[tokio::test]
+    async fn searches_are_kept_for_training_only_when_the_browser_chose_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let node = Arc::new(HistoryNode(dir.path().join("history")));
+        let fake = backend(bank_hits());
+        let app = || node_router(fake.clone(), node.clone());
+        let labels = node.0.join("click-labels.json");
+        for (prefs, kept) in [("s1r1l1", false), ("s1r1l1t1", true)] {
+            let (_, headers, _) = send(app(), "/search?q=us+bank&country=any").await;
+            let profile = set_cookie(&headers, "plumb_profile").expect("a profile");
+            let cookies = format!("{profile}; plumb_history={prefs}");
+            let me = [("cookie", cookies.as_str())];
+            send_with_headers(app(), "/search?q=us+bank&country=any", &me).await;
+            send_with_headers(
+                app(),
+                "/go?q=us+bank&d=usbank-login-help.com&country=any",
+                &me,
+            )
+            .await;
+            assert_eq!(labels.exists(), kept, "{prefs}");
+        }
+        let text = std::fs::read_to_string(&labels).unwrap();
+        assert!(!text.contains("plumb_profile"), "{text}");
+        let out = dir.path().join("labels.jsonl");
+        let queries = dir.path().join("labels.tsv");
+        crate::clicks::run(&crate::cli::ClickLabelsArgs {
+            data: dir.path().to_path_buf(),
+            out: out.clone(),
+            queries: Some(queries.clone()),
+            min_opened: 1,
+        })
+        .unwrap();
+        let first: crate::clicks::Label = serde_json::from_str(
+            std::fs::read_to_string(&out)
+                .unwrap()
+                .lines()
+                .next()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(first.query, "us bank");
+        assert_eq!(first.domain, "usbank-login-help.com");
+        assert_eq!((first.shown, first.opened), (1, 1));
+        let tsv = std::fs::read_to_string(&queries).unwrap();
+        assert!(tsv.ends_with("us bank\tusbank-login-help.com\n"), "{tsv}");
+        let parsed = crate::eval::parse_queries(&tsv).unwrap();
+        assert_eq!(parsed[0].expected, ["usbank-login-help.com"]);
+    }
+
+    /// A ready node with a data folder, where experiments are set up.
+    struct LabNode(std::path::PathBuf);
+
+    impl StatusSource for LabNode {
+        fn status(&self) -> Status {
+            node_status(Phase::Ready, Step::Idle)
+        }
+        fn data_dir(&self) -> Option<std::path::PathBuf> {
+            Some(self.0.clone())
+        }
+    }
+
+    /// Bank hits, noting the `alpha` of each search ranked for an
+    /// experiment.
+    #[derive(Default)]
+    struct RankedBackend {
+        alphas: Mutex<Vec<f32>>,
+    }
+
+    impl SearchBackend for RankedBackend {
+        fn search(&self, _query: &str, limit: usize) -> Result<Vec<Hit>> {
+            Ok(bank_hits().into_iter().take(limit).collect())
+        }
+        fn search_ranked(
+            &self,
+            query: &str,
+            limit: usize,
+            _options: &SearchOptions,
+            rank: &RankConfig,
+        ) -> Result<SearchResults> {
+            self.alphas.lock().unwrap().push(rank.alpha);
+            Ok(SearchResults {
+                hits: self.search(query, limit)?,
+                ..SearchResults::default()
+            })
+        }
+        fn num_docs(&self) -> u64 {
+            2
+        }
+    }
+
+    #[tokio::test]
+    async fn searches_in_an_experiment_are_ranked_its_way_and_their_clicks_counted() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(crate::experiments::CONFIG_FILE),
+            r#"{"layers": [{"name": "ranking", "experiments": [
+                {"name": "more-popularity", "percent": 100, "rank": {"alpha": 0.9}}
+            ]}]}"#,
+        )
+        .unwrap();
+        let fake = Arc::new(RankedBackend::default());
+        // One app, as a node serves: the pages shown are kept in memory.
+        let app = node_router(fake.clone(), Arc::new(LabNode(dir.path().to_path_buf())));
+        let (code, _, body) = send(app.clone(), "/search?q=us+bank&country=any").await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(*fake.alphas.lock().unwrap(), [0.9]);
+        let start = body
+            .find("/go?q=us+bank&amp;d=usbank-login-help.com&amp;x=")
+            .expect("results link through /go");
+        let link = &body[start..start + body[start..].find('"').unwrap()];
+        assert!(link.contains("&amp;p=1&amp;"), "{link}");
+        let link = link.replace("&amp;", "&");
+        let (code, headers, _) = send(app.clone(), &link).await;
+        assert_eq!(code, StatusCode::SEE_OTHER);
+        assert_eq!(headers[header::LOCATION], "https://usbank-login-help.com/");
+        // A page never shown counts nothing.
+        let forged = link.replace("&x=", "&x=1");
+        send(app.clone(), &forged).await;
+        let results: std::collections::BTreeMap<String, crate::experiments::Counts> =
+            serde_json::from_str(
+                &std::fs::read_to_string(dir.path().join(crate::experiments::RESULTS_FILE))
+                    .unwrap(),
+            )
+            .unwrap();
+        let counts = results.values().next().unwrap();
+        assert_eq!((counts.searches, counts.clicked, counts.clicks), (1, 1, 1));
+        assert_eq!(counts.at[1], 1);
+        // The JSON API is not in experiments.
+        send(app.clone(), "/api/search?q=us+bank").await;
+        assert_eq!(fake.alphas.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
     async fn the_about_page_moves_and_hides_results_for_this_browser_only() {
         let dir = tempfile::tempdir().unwrap();
         let node = Arc::new(HistoryNode(dir.path().join("history")));
@@ -7228,6 +7677,6 @@ mod tests {
             body.contains("<img src=\"data:image/png;base64,iVBORw==\""),
             "{body}"
         );
-        assert_eq!(body.matches("<img ").count(), 1);
+        assert_eq!(body.matches("<img ").count(), 2, "logo and the site's icon");
     }
 }

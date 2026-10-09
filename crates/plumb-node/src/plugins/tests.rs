@@ -560,6 +560,118 @@ fn about_carries_a_pages_identifiers() {
     assert_eq!(about.id("tmdb-movie"), Some("346648"));
 }
 
+#[test]
+fn about_a_song_or_album_carries_its_musicbrainz_id_and_artist() {
+    let page: plumb_index::pages::Page = serde_json::from_str(
+        r#"{"set":"music","url":"https://musicbrainz.org/recording/0b9fc0a5-8a37-4b41-8a9c-2b6d4a2c2a7e",
+            "title":"Gold Digger","description":"Song by Kanye West feat. Jamie Foxx, 2005","views":1,
+            "profiles":[{"service":"genius-song","id":"Kanye-west-gold-digger-lyrics"}]}"#,
+    )
+    .unwrap();
+    let about = about_page(&page);
+    assert_eq!(
+        about.id("musicbrainz-recording"),
+        Some("0b9fc0a5-8a37-4b41-8a9c-2b6d4a2c2a7e")
+    );
+    assert_eq!(
+        about.id("genius-song"),
+        Some("Kanye-west-gold-digger-lyrics")
+    );
+    assert_eq!(about.by.as_deref(), Some("Kanye West feat. Jamie Foxx"));
+    assert_eq!(about.wikidata, None);
+    let page: plumb_index::pages::Page = serde_json::from_str(
+        r#"{"set":"music","url":"https://musicbrainz.org/release-group/1b022e01-4da6-387b-8658-8678046e4cef",
+            "title":"Nevermind","description":"Album by Nirvana · Grunge","views":1}"#,
+    )
+    .unwrap();
+    let about = about_page(&page);
+    assert!(about.id("musicbrainz-album").is_some());
+    assert_eq!(about.by.as_deref(), Some("Nirvana"));
+    assert_eq!(
+        music_artist("Song by Crosby, Stills, Nash & Young, 1970").as_deref(),
+        Some("Crosby, Stills, Nash & Young")
+    );
+    assert_eq!(music_artist("2017 film"), None);
+}
+
+#[test]
+fn a_song_runs_a_plugin_that_only_offers_its_other_fits() {
+    let m = Manifest {
+        ids: vec!["musicbrainz-artist".into(), "musicbrainz-recording".into()],
+        run_ids: vec!["musicbrainz-recording".into(), "spotify-track".into()],
+        hints: vec!["lyrics".into()],
+        ..manifest(&["ytm"], &["a.example"])
+    };
+    let song = About {
+        title: "Creep".into(),
+        ids: [("musicbrainz-recording".to_string(), "a1".to_string())].into(),
+        ..About::default()
+    };
+    let run = Some(Pick::Run(None, "creep".into()));
+    assert_eq!(m.picks("creep", Some(&song), Suggest::Button), run);
+    assert_eq!(m.picks("creep", Some(&song), Suggest::Automatic), run);
+    // The owner can still keep it to its keywords.
+    assert_eq!(m.picks("creep", Some(&song), Suggest::Keywords), None);
+    // An artist, or a hint, is still only offered.
+    let artist = About {
+        title: "Radiohead".into(),
+        ids: [("musicbrainz-artist".to_string(), "a74b1b7f".to_string())].into(),
+        ..About::default()
+    };
+    assert_eq!(
+        m.picks("radiohead", Some(&artist), Suggest::Button),
+        Some(Pick::Offer)
+    );
+    assert_eq!(
+        m.picks("creep lyrics", None, Suggest::Button),
+        Some(Pick::Offer)
+    );
+    // A run id that is not one of its ids does not make it fit.
+    let track = About {
+        title: "Creep".into(),
+        ids: [("spotify-track".to_string(), "t1".to_string())].into(),
+        ..About::default()
+    };
+    assert_eq!(m.picks("creep", Some(&track), Suggest::Button), None);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_songs_results_are_kept_for_the_song_whatever_words_found_it() {
+    let m = Manifest {
+        ids: vec!["musicbrainz-recording".into(), "musicbrainz-artist".into()],
+        run_ids: vec!["musicbrainz-recording".into()],
+        suggest: Suggest::Button,
+        ..manifest(&["ytm"], &["a.example"])
+    };
+    let plugins = Plugins::new(vec![plugin(
+        m,
+        &answering(r#"{"results":[{"title":"Creep","url":"https://a.example/creep"}]}"#),
+    )]);
+    let song = About {
+        title: "Creep".into(),
+        ids: [("musicbrainz-recording".to_string(), "a1".to_string())].into(),
+        by: Some("Radiohead".into()),
+        ..About::default()
+    };
+    for query in ["creep", "radiohead creep", "creep song"] {
+        let found = plugins
+            .search(query, SafeSearch::Moderate, None, Some(&song))
+            .await;
+        assert_eq!(found[0].results[0].title, "Creep", "{query}");
+    }
+    assert_eq!(plugins.inner.cache.lock().unwrap().len(), 1);
+    // An artist is only offered, so nothing runs.
+    let artist = About {
+        title: "Radiohead".into(),
+        ids: [("musicbrainz-artist".to_string(), "a74b1b7f".to_string())].into(),
+        ..About::default()
+    };
+    assert!(plugins
+        .search("radiohead", SafeSearch::Moderate, None, Some(&artist))
+        .await
+        .is_empty());
+}
+
 fn shown(id: u32, url: &str, about: Option<About>) -> ShownResult {
     ShownResult {
         id,

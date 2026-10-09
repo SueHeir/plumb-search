@@ -466,23 +466,26 @@ pub(crate) fn embed_sites(
         let next = AtomicUsize::new(0);
         std::thread::scope(|scope| {
             for _ in 0..threads.max(1) {
-                scope.spawn(|| loop {
-                    if stop() {
-                        break;
-                    }
-                    let i = next.fetch_add(1, Ordering::Relaxed);
-                    let Some((_, domain, hash, text)) = chunk.get(i) else {
-                        break;
-                    };
-                    match embedder.embed(text) {
-                        // The vector has the model's length.
-                        Ok(vector) => drop(write().insert(domain, *hash, &vector)),
-                        Err(err) => {
-                            warn!("could not embed the text of {domain}: {err:#}");
-                            failed.fetch_add(1, Ordering::Relaxed);
+                scope.spawn(|| {
+                    crate::lower_thread_priority();
+                    loop {
+                        if stop() {
+                            break;
                         }
+                        let i = next.fetch_add(1, Ordering::Relaxed);
+                        let Some((_, domain, hash, text)) = chunk.get(i) else {
+                            break;
+                        };
+                        match embedder.embed(text) {
+                            // The vector has the model's length.
+                            Ok(vector) => drop(write().insert(domain, *hash, &vector)),
+                            Err(err) => {
+                                warn!("could not embed the text of {domain}: {err:#}");
+                                failed.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                        done.fetch_add(1, Ordering::Relaxed);
                     }
-                    done.fetch_add(1, Ordering::Relaxed);
                 });
             }
         });

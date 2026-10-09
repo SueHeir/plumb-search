@@ -7,6 +7,7 @@
     "youtube-video",
     "musicbrainz-artist",
     "musicbrainz-album",
+    "musicbrainz-recording",
     "spotify",
     "spotify-album",
     "spotify-track",
@@ -17,6 +18,15 @@
     "genius-song",
     "genius-artist"
   ],
+  "run_ids": [
+    "musicbrainz-recording",
+    "musicbrainz-album",
+    "spotify-track",
+    "spotify-album",
+    "apple-music-album",
+    "genius-song"
+  ],
   "hints": ["song", "songs", "lyrics", "album", "remix", "acoustic", "playlist", "cover", "music video", "official video", "trailer"],
-  "suggest": "button"
+  "suggest": "button",
+  "seconds": 3
 }
