@@ -3608,6 +3608,16 @@ fn render_page(out: &mut String, hit: &PageHit, icon: Option<&str>) {
     if let Some(package) = &hit.page.package {
         render_package(out, package);
     }
+    if let Some(href) = hit.page.free_copy().and_then(http_url) {
+        let host = display_url(&href);
+        let host = host.split('/').next().unwrap_or(&host);
+        let _ = write!(
+            out,
+            "<p class=\"d pk\"><a href=\"{}\" rel=\"noreferrer\">Free to read</a> on {}</p>",
+            escape_html(&href),
+            escape_html(host)
+        );
+    }
     let _ = writeln!(
         out,
         "<div class=\"m rank-meta\"><span title=\"{} {}\">score {:.3}</span></div></li>",
@@ -4707,6 +4717,39 @@ mod tests {
         .await
         .2;
         assert!(!body.contains("class=\"kp\""));
+    }
+
+    #[test]
+    fn papers_link_their_free_copy() {
+        use plumb_core::article::Article;
+        use plumb_index::pages::Page;
+        let hit = |website: Option<&str>| PageHit {
+            page: Page::from_paper(Article {
+                title: "Superconductivity at 39 K in magnesium diboride".into(),
+                description: Some("Paper by Jun Nagamatsu et al., 2001, Nature".into()),
+                item: Some("10.1038/35065039".into()),
+                website: website.map(str::to_string),
+                views: 9000,
+                ..Article::default()
+            }),
+            score: 1.0,
+            named: true,
+            popularity: 0.5,
+            whole: false,
+            learned: None,
+        };
+        let mut out = String::new();
+        render_page(
+            &mut out,
+            &hit(Some("https://arxiv.org/abs/cond-mat/0101295")),
+            None,
+        );
+        assert!(out.contains(
+            "<a href=\"https://arxiv.org/abs/cond-mat/0101295\" rel=\"noreferrer\">Free to read</a> on arxiv.org"
+        ));
+        let mut out = String::new();
+        render_page(&mut out, &hit(None), None);
+        assert!(!out.contains("Free to read"));
     }
 
     #[test]

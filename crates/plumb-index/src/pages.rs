@@ -391,6 +391,15 @@ impl Page {
             .filter(|host| !host.is_empty())
     }
 
+    /// Where a paper can be read free, when it is not its own address:
+    /// its copy on arXiv, the publisher's open version, a repository's.
+    pub fn free_copy(&self) -> Option<&str> {
+        if self.set != PAPERS_SET {
+            return None;
+        }
+        self.website.as_deref().filter(|url| *url != self.url)
+    }
+
     /// Whether the page is a TV show of the films set, rather than a film.
     pub fn is_show(&self) -> bool {
         self.set == FILMS_SET
@@ -412,7 +421,8 @@ impl Page {
     }
 
     /// The paper `paper`, written as an article whose item is its DOI or
-    /// else its OpenAlex id, and whose views are its citations.
+    /// else its OpenAlex id, whose views are its citations and whose
+    /// website is where it can be read free.
     pub fn from_paper(paper: Article) -> Self {
         let item = paper.item.as_deref().unwrap_or("");
         let url = if item.starts_with("10.") {
@@ -430,7 +440,7 @@ impl Page {
             aliases: paper.aliases,
             item: None,
             profiles: Vec::new(),
-            website: None,
+            website: paper.website,
             package: None,
             facts: Vec::new(),
         }
