@@ -450,6 +450,8 @@ impl Page {
             website: None,
             package: None,
             facts: Vec::new(),
+            lead: None,
+            names: Vec::new(),
         })
     }
 
