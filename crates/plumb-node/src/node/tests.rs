@@ -2599,6 +2599,8 @@ async fn a_node_takes_newer_set_files_that_hold_what_its_own_do() {
     let mut config = test_config(dir.path());
     config.settings.page_sets =
         crate::pages::PageSets::parse("wikipedia-en=all,films=all").unwrap();
+    // Named, so the tiny files may grow past a quarter.
+    config.set_updates = "wikipedia-en,films,map".parse().unwrap();
     let mut net = plumb_net::NetConfig::new(PathBuf::new());
     net.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
     net.upnp = false;
