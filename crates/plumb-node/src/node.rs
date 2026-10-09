@@ -2036,12 +2036,24 @@ impl SearchBackend for Inner {
         places::search(self, query, home, country)
     }
 
+    fn locate(&self, text: &str, country: Option<&str>) -> Option<plumb_core::place::Place> {
+        places::locate(self, text, country)
+    }
+
+    fn site(&self, domain: &str) -> Option<Hit> {
+        self.current()?.backend().site(domain)
+    }
+
     fn base_map(&self) -> Option<Arc<crate::map::BaseMap>> {
         self.map.get()
     }
 
     fn known_song(&self, query: &str, options: &SearchOptions) -> Option<plumb_index::pages::Page> {
         pages::known_song(self, query, options)
+    }
+
+    fn definition(&self, name: &str) -> Option<plumb_index::pages::Page> {
+        pages::definition(self, name)
     }
 
     fn num_docs(&self) -> u64 {
@@ -2072,27 +2084,42 @@ impl Inner {
             Some(_) => limit + adult::MARGIN,
             None => limit,
         };
-        let mut results = match network::handle(self).map(|net| net.popularity()) {
-            None => index.backend().search_full_with(
-                query,
-                wanted,
-                options,
-                meaning.as_deref(),
-                rank,
-            )?,
-            Some(table) => {
-                let candidates = wanted.max(network::POPULARITY_CANDIDATES);
-                let mut results = index.backend().search_full_with(
+        let run = |options: &SearchOptions| -> Result<SearchResults> {
+            Ok(match network::handle(self).map(|net| net.popularity()) {
+                None => index.backend().search_full_with(
                     query,
-                    candidates,
+                    wanted,
                     options,
                     meaning.as_deref(),
                     rank,
-                )?;
-                network::apply_popularity(&table, query, &mut results.hits);
-                results
-            }
+                )?,
+                Some(table) => {
+                    let candidates = wanted.max(network::POPULARITY_CANDIDATES);
+                    let mut results = index.backend().search_full_with(
+                        query,
+                        candidates,
+                        options,
+                        meaning.as_deref(),
+                        rank,
+                    )?;
+                    network::apply_popularity(&table, query, &mut results.hits);
+                    results
+                }
+            })
         };
+        let mut results = run(options)?;
+        // Results shown for a spelling are for what was typed after all
+        // when the pages know the words typed.
+        if results
+            .spelling
+            .as_ref()
+            .is_some_and(|spelling| spelling.applied && pages::knows_typed(self, query, spelling))
+        {
+            results = run(&SearchOptions {
+                exact: true,
+                ..options.clone()
+            })?;
+        }
         if let Some(adult) = &adult {
             results.hits.retain(|hit| !adult.contains(&hit.domain));
         }

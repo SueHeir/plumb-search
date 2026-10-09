@@ -14,6 +14,12 @@
 //! tower", "github". It shows the article's short description, the
 //! official site with the country this node knows it for, and links to
 //! Wikipedia and Wikidata. Nothing in it is loaded from elsewhere.
+//!
+//! When the article's lead is held (`plumb fetch-leads`), the box shows
+//! its first sentences too, and a query that asks what something is
+//! ("what is a manatee", "define photosynthesis", "who was ada lovelace")
+//! is answered above the results with the first sentence of the article
+//! the query names ([`definition_answer`]).
 
 use std::fmt::Write as _;
 use std::time::{Duration, Instant};
@@ -117,6 +123,9 @@ pub(crate) struct InfoBox {
     pub title: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// The first sentences of the Wikipedia article.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lead: Option<String>,
     /// The Wikipedia article, if it is about one (an item of the
     /// `wikidata` set has none).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -291,6 +300,10 @@ pub(crate) fn info_from_page(page: &Page, sites: &[Hit]) -> Option<InfoBox> {
     Some(InfoBox {
         title: page.title.clone(),
         description: page.description.clone().filter(|d| !d.trim().is_empty()),
+        lead: article
+            .as_ref()
+            .and(page.lead.clone())
+            .filter(|lead| !lead.trim().is_empty()),
         article,
         wikidata: page
             .item
@@ -438,6 +451,9 @@ pub(crate) fn render_info_box(out: &mut String, info: &InfoBox) {
     if let Some(description) = &info.description {
         let _ = write!(out, "<p class=\"ibd\">{}</p>", escape_html(description));
     }
+    if let Some(lead) = &info.lead {
+        let _ = write!(out, "<p class=\"ibx\">{}</p>", escape_html(lead));
+    }
     let mut facts = String::new();
     if let Some(site) = &info.site {
         if let Some(href) = homepage_url(site) {
@@ -478,8 +494,8 @@ pub(crate) fn render_info_box(out: &mut String, info: &InfoBox) {
     }
     // A description from a Wikipedia article is under its licence, which
     // asks for credit; Wikidata's are CC0.
-    let licence =
-        (info.article.is_some() && info.description.is_some()).then_some(WIKIPEDIA_LICENCE);
+    let licence = (info.article.is_some() && (info.description.is_some() || info.lead.is_some()))
+        .then_some(WIKIPEDIA_LICENCE);
     let links: Vec<String> = [
         (info.article.as_deref(), "Wikipedia"),
         (licence, "CC BY-SA"),
@@ -578,6 +594,115 @@ pub(crate) fn fact_answer(
                 None => "From Wikidata".to_string(),
             }),
         })
+    })
+}
+
+/// Words before a name that ask what it is: "what is a" of "what is a
+/// manatee".
+const DEFINITION_LEADS: &[&str] = &[
+    "what is a ",
+    "what is an ",
+    "what is the ",
+    "what is ",
+    "what are ",
+    "what was ",
+    "what were ",
+    "who is ",
+    "who was ",
+    "who were ",
+    "define ",
+    "definition of ",
+    "meaning of ",
+    "tell me about ",
+];
+
+/// Words after a name that ask what it is: " definition" of
+/// "photosynthesis definition".
+const DEFINITION_TAILS: &[&str] = &[" definition", " meaning", " defined", " explained"];
+
+/// The name `query` asks what it is: "manatee" of "what is a manatee?",
+/// "photosynthesis" of "define photosynthesis". `None` for a query that
+/// asks nothing so, or more than that ("what is the capital of france"
+/// asks a fact, "what is my ip" about the searcher).
+pub(crate) fn definition_asked(query: &str) -> Option<String> {
+    let q = plumb_core::collapse_whitespace(query.trim().trim_end_matches(['?', '.', '!']))
+        .to_lowercase();
+    let name = DEFINITION_LEADS
+        .iter()
+        .find_map(|lead| q.strip_prefix(lead))
+        .or_else(|| {
+            DEFINITION_TAILS
+                .iter()
+                .find_map(|tail| q.strip_suffix(tail))
+        })?
+        .trim();
+    let words: Vec<&str> = name.split_whitespace().collect();
+    // A name, not a question of its own.
+    if words.is_empty()
+        || words.len() > 6
+        || words.iter().any(|word| {
+            matches!(
+                *word,
+                "my" | "your"
+                    | "i"
+                    | "you"
+                    | "we"
+                    | "of"
+                    | "in"
+                    | "for"
+                    | "to"
+                    | "best"
+                    | "difference"
+            )
+        })
+    {
+        return None;
+    }
+    Some(name.to_string())
+}
+
+/// The first sentence of the article that `pages` (found for the name a
+/// query asks about, [`definition_asked`]) name, when its lead is held:
+/// "The West Indian manatee is the largest surviving member of the order
+/// Sirenia." Only a page the name names in full, about one thing and not
+/// a disambiguation page, answers.
+pub(crate) fn definition_answer(pages: &[PlacedPage]) -> Option<plumb_answer::Answer> {
+    let placed = fact_pages(pages).find(|placed| placed.hit.named)?;
+    let page = &placed.hit.page;
+    if !page.is_article() {
+        return None;
+    }
+    let lead = page.lead.as_deref()?;
+    let sentence = plumb_core::article::first_sentence(lead).trim();
+    if sentence.is_empty() {
+        return None;
+    }
+    Some(plumb_answer::Answer {
+        kind: plumb_answer::Kind::Definition,
+        question: page.title.clone(),
+        answer: sentence.to_string(),
+        note: Some("From Wikipedia, CC BY-SA".to_string()),
+    })
+}
+
+/// Whether `query` asks what a word means rather than what a thing is:
+/// "define anadromous", "prioritize meaning". Such a query is answered
+/// from Wiktionary first, others from Wikipedia first.
+pub(crate) fn asks_word(query: &str) -> bool {
+    let q = query.to_lowercase();
+    q.split_whitespace()
+        .any(|word| matches!(word, "define" | "definition" | "meaning" | "means" | "mean"))
+}
+
+/// What the Wiktionary word `page` means, as an answer: "(adjective) Of
+/// fish, migrating up rivers from the sea to breed in fresh water."
+pub(crate) fn word_answer(page: &Page) -> Option<plumb_answer::Answer> {
+    let meaning = page.description.as_deref()?.trim();
+    (!meaning.is_empty()).then(|| plumb_answer::Answer {
+        kind: plumb_answer::Kind::Definition,
+        question: page.title.clone(),
+        answer: meaning.to_string(),
+        note: Some("From Wiktionary, CC BY-SA".to_string()),
     })
 }
 
@@ -746,6 +871,8 @@ mod tests {
                 website: None,
                 package: None,
                 facts: Vec::new(),
+                lead: None,
+                names: Vec::new(),
             },
             score: 1.0,
             named: true,
@@ -791,6 +918,75 @@ mod tests {
             })
             .collect();
         hit
+    }
+
+    #[test]
+    fn definitions_answer_what_something_is() {
+        assert_eq!(
+            definition_asked("What is a manatee?").as_deref(),
+            Some("manatee")
+        );
+        assert_eq!(
+            definition_asked("define photosynthesis").as_deref(),
+            Some("photosynthesis")
+        );
+        assert_eq!(
+            definition_asked("entropy definition").as_deref(),
+            Some("entropy")
+        );
+        assert_eq!(
+            definition_asked("who was ada lovelace").as_deref(),
+            Some("ada lovelace")
+        );
+        assert_eq!(definition_asked("what is my ip"), None);
+        assert_eq!(definition_asked("what is the capital of france"), None);
+        assert_eq!(definition_asked("manatee"), None);
+        let mut manatee = article("West Indian manatee", "species of mammal", None);
+        manatee.page.lead = Some(
+            "The West Indian manatee is the largest surviving member of the order Sirenia. It lives in shallow waters."
+                .into(),
+        );
+        let answer = definition_answer(&[placed(manatee.clone(), None, 1)]).unwrap();
+        assert_eq!(answer.question, "West Indian manatee");
+        assert_eq!(
+            answer.answer,
+            "The West Indian manatee is the largest surviving member of the order Sirenia."
+        );
+        // Only an article the name names in full answers.
+        let mut partly = manatee.clone();
+        partly.named = false;
+        assert_eq!(definition_answer(&[placed(partly, None, 3)]), None);
+        // Nor one without a lead.
+        assert_eq!(
+            definition_answer(&[placed(article("Manatee", "genus", None), None, 1)]),
+            None
+        );
+        // The info box shows the lead, under Wikipedia's licence.
+        let info = info_from_page(&manatee.page, &[]).unwrap();
+        let mut html = String::new();
+        render_info_box(&mut html, &info);
+        assert!(html.contains("<p class=\"ibx\">The West Indian manatee is"));
+        assert!(html.contains("CC BY-SA"));
+    }
+
+    #[test]
+    fn words_answer_what_they_mean() {
+        assert!(asks_word("define anadromous"));
+        assert!(asks_word("prioritize meaning"));
+        assert!(!asks_word("what is a manatee"));
+        let word = Page::from_word(plumb_core::Article {
+            title: "anadromous".into(),
+            description: Some(
+                "(adjective) Of fish, migrating up rivers from the sea to breed in fresh water."
+                    .into(),
+            ),
+            views: 3,
+            ..Default::default()
+        });
+        let answer = word_answer(&word).unwrap();
+        assert_eq!(answer.question, "anadromous");
+        assert!(answer.answer.starts_with("(adjective) Of fish"));
+        assert_eq!(answer.note.as_deref(), Some("From Wiktionary, CC BY-SA"));
     }
 
     #[test]

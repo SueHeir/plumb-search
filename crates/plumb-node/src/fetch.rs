@@ -7,7 +7,9 @@ use plumb_ingest::{articles, download, facts, intros, kind_sites};
 use tracing::{error, info, warn};
 
 use crate::block_on;
-use crate::cli::{FetchDataArgs, FetchFactsArgs, FetchPagesArgs, FetchProfilesArgs};
+use crate::cli::{
+    FetchDataArgs, FetchFactsArgs, FetchLeadsArgs, FetchPagesArgs, FetchProfilesArgs,
+};
 
 /// Where release names for `--cc-release` are listed. We know of no
 /// machine-readable index of releases, so we point people here instead.
@@ -70,7 +72,8 @@ fn run_github(args: &FetchPagesArgs, dest: &std::path::Path) -> Result<()> {
 
 /// Makes the Stack Overflow questions set file `dest` from Stack Exchange's
 /// dump of Stack Overflow's posts (about 20 GB), downloaded into --work
-/// unless --posts names it.
+/// unless --posts names it, and of its post links (150 MB), whose
+/// duplicates give the questions their other titles.
 fn run_stackoverflow(args: &FetchPagesArgs, dest: &std::path::Path) -> Result<()> {
     use plumb_ingest::stackexchange;
     let posts = match &args.posts {
@@ -81,8 +84,20 @@ fn run_stackoverflow(args: &FetchPagesArgs, dest: &std::path::Path) -> Result<()
             "Stack Overflow's posts",
         )?,
     };
+    let links = fetch_dump(
+        args,
+        stackexchange::STACKOVERFLOW_POST_LINKS_URL,
+        "Stack Overflow's post links",
+    )
+    .inspect_err(|err| warn!("{err:#}; the questions keep no other titles"))
+    .ok();
     info!("reading questions from {}", posts.display());
-    let questions = stackexchange::read_questions_7z(&posts, args.min_score, args.max_questions)?;
+    let questions = stackexchange::read_questions_7z(
+        &posts,
+        args.min_score,
+        args.max_questions,
+        links.as_deref(),
+    )?;
     let questions: Vec<_> = questions
         .into_iter()
         .map(stackexchange::Question::into_article)
@@ -103,7 +118,8 @@ fn run_stackexchange(args: &FetchPagesArgs, dest: &std::path::Path) -> Result<()
     for site in SITES {
         let read = fetch_dump(args, &site.dump_url(), site.name).and_then(|dump| {
             info!("reading {}'s questions from {}", site.name, dump.display());
-            let read = stackexchange::read_questions_7z(&dump, args.min_score, args.max_per_site);
+            let read =
+                stackexchange::read_questions_7z(&dump, args.min_score, args.max_per_site, None);
             if args.drop_dumps {
                 if let Err(err) = std::fs::remove_file(&dump) {
                     warn!("removing {}: {err}", dump.display());
@@ -509,6 +525,21 @@ fn run_papers(args: &FetchPagesArgs, dest: &std::path::Path) -> Result<()> {
             Err(err) => warn!("asking CORE for free copies: {err:#}; writing the papers without"),
         }
     }
+    // The short names papers go by, and the well-known arXiv papers
+    // OpenAlex lacks; with --work, Papers with Code's methods are kept
+    // there.
+    let methods_cache = args.work.as_deref().map(|w| w.join("papers-with-code"));
+    match block_on(plumb_ingest::paper_names::improve(
+        &client,
+        &mut papers,
+        methods_cache.as_deref(),
+    ))? {
+        Ok(named) => info!(
+            "named {} papers by their titles and {} by Papers with Code's methods; added {} arXiv papers OpenAlex lacks and gave {} mis-dated ones their arXiv DOI",
+            named.by_title, named.by_method, named.added, named.redated
+        ),
+        Err(err) => warn!("naming the papers: {err:#}; writing them without"),
+    }
     let free = papers.iter().filter(|p| p.website.is_some()).count();
     info!("{free} of {} papers have a free copy", papers.len());
     write_set(dest, &papers, "papers")
@@ -584,6 +615,71 @@ pub fn run_profiles(args: FetchProfilesArgs) -> Result<()> {
         added.articles,
         added.profiles,
         added.websites
+    );
+    Ok(())
+}
+
+/// `plumb fetch-leads`: adds leads and other names from Wikipedia's search
+/// dump to an articles file.
+pub fn run_leads(args: FetchLeadsArgs) -> Result<()> {
+    let path = match (&args.articles, &args.data) {
+        (Some(path), _) => path.clone(),
+        (None, Some(data)) => crate::pages::SetInfo::find("wikipedia-en")
+            .context("no English Wikipedia set")?
+            .file(data),
+        (None, None) => bail!("pass --data DIR or --articles PATH"),
+    };
+    if !path.is_file() {
+        bail!(
+            "{} is not there; make it with plumb fetch-pages first",
+            path.display()
+        );
+    }
+    let read = if args.dumps.is_empty() {
+        let client = download::http_client()?;
+        let (date, urls) = block_on(plumb_ingest::leads::latest_dump_files(
+            &client,
+            plumb_ingest::leads::CIRRUS_URL,
+            "en",
+        ))??;
+        info!(
+            "reading the {date} dump of English Wikipedia: {} files",
+            urls.len()
+        );
+        block_on(plumb_ingest::leads::fetch_dump(
+            &client,
+            &urls,
+            &args.work,
+            args.keep_dumps,
+        ))??
+    } else {
+        std::fs::create_dir_all(&args.work)
+            .with_context(|| format!("creating {}", args.work.display()))?;
+        let mut read = Vec::new();
+        for dump in &args.dumps {
+            let name = dump.file_name().context("a dump file has no name")?;
+            let out_path = args
+                .work
+                .join(format!("{}.leads.tsv.gz", name.to_string_lossy()));
+            let mut out = flate2::write::GzEncoder::new(
+                std::io::BufWriter::new(std::fs::File::create(&out_path)?),
+                flate2::Compression::fast(),
+            );
+            let articles = plumb_ingest::leads::read_dump_file(dump, &mut out)?;
+            out.finish()?;
+            info!("read {articles} articles of {}", dump.display());
+            read.push(out_path);
+        }
+        read
+    };
+    let added = plumb_ingest::leads::add_leads_to_file(&path, &read, args.top)?;
+    info!(
+        "{}: {} of {} articles have a lead, {} other names ({} in all)",
+        path.display(),
+        added.with_lead,
+        added.articles,
+        added.with_names,
+        added.names
     );
     Ok(())
 }
@@ -706,6 +802,15 @@ pub fn run_pages(args: FetchPagesArgs) -> Result<()> {
     }
     if set.id == plumb_index::pages::PACKAGES_SET {
         return run_packages(&args, &dest);
+    }
+    if set.id == plumb_index::pages::WIKTIONARY_SET {
+        let dump = fetch_dump(
+            &args,
+            plumb_ingest::wiktionary::DUMP_URL,
+            "kaikki.org's English Wiktionary",
+        )?;
+        let words = plumb_ingest::wiktionary::read_words(&dump)?;
+        return write_set(&dest, &words, "words");
     }
     if set.id == plumb_index::places::PLACES_SET {
         return run_places(&args, &dest);

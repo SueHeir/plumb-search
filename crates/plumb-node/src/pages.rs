@@ -118,6 +118,12 @@ pub const SETS: &[SetInfo] = &[
         pages: 100_000,
         bytes_per_page: 200,
     },
+    SetInfo {
+        id: plumb_index::pages::WIKTIONARY_SET,
+        name: "Word definitions (Wiktionary), for \"define\" searches",
+        pages: 1_000_000,
+        bytes_per_page: 150,
+    },
     // Searched apart from the pages, by where they are (see
     // `crate::places`).
     SetInfo {

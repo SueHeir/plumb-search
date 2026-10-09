@@ -817,8 +817,15 @@ pub(crate) fn answer(query: &str) -> Option<Answer> {
 /// `typed` gives back as typed.
 fn conversion<'a>(from: &str, to: &str, typed: impl Fn(&str) -> &'a str) -> Option<Answer> {
     let (value, from_name) = amount(from)?;
-    let from_unit = find_typed(from_name, typed(from_name))?;
-    let to_unit = find_typed(to, typed(to))?;
+    let mut from_unit = find_typed(from_name, typed(from_name))?;
+    let mut to_unit = find_typed(to, typed(to))?;
+    // "how many ounces in a cup": an ounce of something poured is a
+    // fluid ounce.
+    if from_unit.dimension == Volume && to_unit.one == "ounce" {
+        to_unit = find("fl oz")?;
+    } else if to_unit.dimension == Volume && from_unit.one == "ounce" {
+        from_unit = find("fl oz")?;
+    }
     if from_unit.dimension != to_unit.dimension || std::ptr::eq(from_unit, to_unit) {
         return None;
     }
@@ -870,6 +877,15 @@ mod tests {
             convert("how many feet in a mile").unwrap(),
             "1 mile = 5,280 feet"
         );
+        assert_eq!(
+            convert("how many ounces in a cup").unwrap(),
+            "1 US cup = 8 US fluid ounces"
+        );
+        assert_eq!(
+            convert("16 oz to cups").unwrap(),
+            "16 US fluid ounces = 2 US cups"
+        );
+        assert_eq!(convert("1 lb to oz").unwrap(), "1 pound = 16 ounces");
         assert_eq!(
             convert("how many cm are in 5 inches?").unwrap(),
             "5 inches = 12.7 centimetres"
