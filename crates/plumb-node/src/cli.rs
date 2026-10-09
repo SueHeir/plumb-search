@@ -93,6 +93,11 @@ pub enum Command {
     /// to each other (a PageRank of our own crawls), without changing
     /// anything. A look at the link graph; nothing uses the ranks yet.
     LinkRank(LinkRankArgs),
+    /// How often each site's pages state Wikidata's facts right, from
+    /// Common Crawl's page text (Knowledge-Based Trust), and optionally a
+    /// copy of a records file with each site's counts, which its link
+    /// score counts in.
+    FactTrust(crate::fact_trust::FactTrustArgs),
     /// Learn each kind of Wikidata fact (capital, founder, CEO...) as a
     /// map between the vectors of Wikipedia articles, and measure how well
     /// the maps find facts they were not shown (an experiment).
@@ -653,6 +658,15 @@ pub struct FetchDataArgs {
     /// (a notability filter that keeps the query small enough to finish).
     #[arg(long, value_name = "N", default_value_t = 25)]
     pub wikidata_min_sitelinks: u32,
+    /// A copy of Wikidata to ask first for the official websites and their
+    /// facts: QLever's lists them all in seconds, while Wikidata's own
+    /// endpoint needs many queries, each close to its 60-second limit. When
+    /// it fails, Wikidata's own endpoint is asked.
+    #[arg(long, value_name = "URL", default_value = plumb_ingest::download::QLEVER_WIKIDATA_URL)]
+    pub wikidata_mirror: String,
+    /// Ask only Wikidata's own endpoint, not --wikidata-mirror.
+    #[arg(long)]
+    pub no_wikidata_mirror: bool,
     /// Keep each file an earlier run saved in --dir within this many days
     /// instead of fetching it again, so a rerun only fetches what is missing,
     /// stale or failed. A file copied in from another run's folder counts
@@ -681,6 +695,14 @@ pub struct FetchFactsArgs {
     /// The articles file to add them to instead.
     #[arg(long, value_name = "PATH")]
     pub articles: Option<PathBuf>,
+    /// Where to read on when Wikidata's query service stops answering a
+    /// kind's deep pages (it times out on them): by default QLever's copy
+    /// of Wikidata.
+    #[arg(long, value_name = "URL", default_value = plumb_ingest::item_facts::DEEP_SPARQL_URL)]
+    pub deep_endpoint: String,
+    /// Ask only Wikidata's query service, never --deep-endpoint.
+    #[arg(long)]
+    pub wikidata_only: bool,
 }
 
 #[derive(Debug, Args)]
@@ -774,6 +796,10 @@ pub struct FetchPagesArgs {
     /// Papers: most papers kept, the most cited.
     #[arg(long, value_name = "N", default_value_t = 2_000_000)]
     pub max_papers: usize,
+    /// Papers: most requests to CORE for free copies (fifty papers each),
+    /// when CORE_API_KEY is set.
+    #[arg(long, value_name = "N", default_value_t = plumb_ingest::core_ac::DEFAULT_MAX_REQUESTS)]
+    pub max_core_requests: usize,
     /// Podcasts: fewest Podcast Index popularity points (0 to 9) of a
     /// podcast kept.
     #[arg(long, value_name = "N", default_value_t = plumb_ingest::podcasts::DEFAULT_MIN_SCORE)]
@@ -1127,6 +1153,12 @@ pub struct EvalArgs {
     /// How many of each page set's most read pages to keep.
     #[arg(long, value_name = "N", default_value_t = usize::MAX, hide_default_value = true)]
     pub pages_top: usize,
+    /// Keep the index built from --pages in this folder and reuse it on
+    /// later runs with the same page set files and the same `plumb`
+    /// binary, instead of rebuilding it every run. Runs at once share one
+    /// build; only the few most recently used indexes are kept.
+    #[arg(long, value_name = "DIR", env = "PLUMB_EVAL_PAGES_CACHE")]
+    pub pages_cache: Option<PathBuf>,
     /// Measure only one half of the queries: `tune` to try ranking changes
     /// on, `held-out` to check them on afterwards. Which half a query is in
     /// depends on its words alone (see eval/README.md) [default: both].

@@ -88,8 +88,11 @@ const KEY_PAGES_CATCH_UP_PER_ROUND: usize = 200;
 /// crawler's) that a round crawls whether or not they are this node's to
 /// crawl today, at most this many, best-known first. A popular site outside
 /// the node's daily share can otherwise wait weeks for a first read, and
-/// until then search knows nothing of what it is.
-const FIRST_FETCH_CATCH_UP_PER_ROUND: usize = 50;
+/// until then search knows nothing of what it is. They come out of the
+/// round's budget, not on top of it. About 180,000 such sites were waiting
+/// in October 2026; an hpc test crawl of 60,000 of them fixed three test
+/// searches (weather.com, stability.ai) and broke one.
+const FIRST_FETCH_CATCH_UP_PER_ROUND: usize = 500;
 
 /// Link score a site needs for [`first_fetch_catch_up`]: about the top
 /// 60,000 of the Tranco list, or any official site.
@@ -716,8 +719,9 @@ async fn download_seed(inner: &Inner) -> Result<SeedFiles> {
     inner.set_step(Step::Downloading, "Asking Wikidata for official websites");
     inner.set_progress(1, total, "files");
     if !wikidata.as_ref().is_ok_and(|path| is_recent(path)) {
-        let downloaded = download::download_wikidata_official_sites_paced(
+        let downloaded = download::download_wikidata_official_sites_with(
             &client,
+            sources.wikidata_mirror_url.as_deref(),
             &sources.wikidata_sparql_url,
             seed,
             sources.wikidata_min_sitelinks,
@@ -755,8 +759,9 @@ async fn download_seed(inner: &Inner) -> Result<SeedFiles> {
             Step::Downloading,
             "Asking Wikidata for the countries and kinds of those sites",
         );
-        let downloaded = facts::download_site_facts(
+        let downloaded = facts::download_site_facts_with(
             &client,
+            sources.wikidata_mirror_url.as_deref(),
             &sources.wikidata_sparql_url,
             seed,
             &[sites.clone(), kind_sites.clone()],

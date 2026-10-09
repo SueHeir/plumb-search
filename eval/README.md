@@ -29,7 +29,8 @@ shows up.
 One `query<TAB>answer[,another_ok_answer]` per line; blank lines and lines
 starting with `#` are skipped. An answer is a registrable domain
 (`chase.com`), a page's address, or an address ending in `*` that takes
-any page it starts. A fact answer is lowercase text the answer must
+any page it starts. A comma inside an address (`Tesla,_Inc.`) is
+written `%2C`. A fact answer is lowercase text the answer must
 contain, commas left out. The test `repository_query_files_are_valid`
 checks every file here: it parses, no query is asked twice, and every
 answer is written the way results are keyed.

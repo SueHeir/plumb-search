@@ -457,6 +457,11 @@ pub struct SeedSources {
     pub tranco_url: String,
     /// A SPARQL endpoint that answers Wikidata queries.
     pub wikidata_sparql_url: String,
+    /// A copy of Wikidata asked first for the official websites and their
+    /// facts, which lists them far faster than Wikidata's own endpoint
+    /// ([`download::QLEVER_WIKIDATA_URL`]); `None` to ask only
+    /// `wikidata_sparql_url`.
+    pub wikidata_mirror_url: Option<String>,
     /// English Wikipedia's API, for the first sentences of the articles
     /// about the best-known official websites' organizations.
     pub wikipedia_api_url: String,
@@ -488,6 +493,7 @@ impl Default for SeedSources {
         SeedSources {
             tranco_url: download::TRANCO_LATEST_URL.to_string(),
             wikidata_sparql_url: download::WIKIDATA_SPARQL_URL.to_string(),
+            wikidata_mirror_url: Some(download::QLEVER_WIKIDATA_URL.to_string()),
             wikipedia_api_url: plumb_ingest::intros::WIKIPEDIA_API_URL.to_string(),
             wikidata_min_sitelinks: 25,
             wikidata_pacing: download::WikidataPacing::default(),
@@ -727,8 +733,8 @@ pub struct LastError {
     pub retry_at: Option<u64>,
 }
 
-/// A running node. Dropping the handle leaves the node running until the
-/// runtime shuts down; call [`NodeHandle::shutdown`] to stop it cleanly.
+/// A running node. Dropping the handle stops its work without waiting for
+/// it; call [`NodeHandle::shutdown`] to stop it cleanly.
 #[derive(Debug)]
 pub struct NodeHandle {
     addr: SocketAddr,
@@ -1852,8 +1858,11 @@ impl Inner {
         Ok(())
     }
 
+    /// Whether the node is stopping: [`NodeHandle::shutdown`] was called,
+    /// or the handle was dropped (a test that panicked), which the async
+    /// tasks' waits already take as a stop.
     fn stopping(&self) -> bool {
-        *self.stopped.borrow()
+        *self.stopped.borrow() || self.stopped.has_changed().is_err()
     }
 
     /// Waits for, and returns, the turn to load the whole records file: a

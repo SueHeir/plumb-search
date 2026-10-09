@@ -16,7 +16,12 @@ up in Plumb, and how much context does that cost?
        --mode plumb --plumb "target/release/plumb mcp --node http://127.0.0.1:8080" \
        --out out/qwen-simpleqa-plumb.jsonl
    python3 eval/llm/bench.py ... --mode budget --budget 300 --out out/qwen-simpleqa-budget.jsonl
+   python3 eval/llm/bench.py ... --mode outline --out out/qwen-simpleqa-outline.jsonl
    ```
+
+   `outline` is `plumb` with `read_page`'s outline option, which the other
+   modes leave out, so comparing it with `plumb` shows what reading a
+   page's outline first saves.
 
 Each run prints how many answers were right, the prompt tokens a question
 took, right answers per 1,000 tokens, tool calls and time. Results files are

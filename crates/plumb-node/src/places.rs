@@ -116,7 +116,8 @@ pub fn auto_places(storage_limit_mb: u64) -> u64 {
 }
 
 /// Names the index of `wanted`: changes when the file (size or time), the
-/// count or the towns changes.
+/// count or the towns changes, and when what a place is found by
+/// ([`plumb_core::place::Place::kind_words`]) changes (the `v`).
 pub fn key(wanted: &WantedPlaces) -> String {
     let meta = std::fs::metadata(&wanted.file).ok();
     let modified = meta
@@ -125,7 +126,7 @@ pub fn key(wanted: &WantedPlaces) -> String {
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map_or(0, |d| d.as_secs());
     let len = meta.map_or(0, |m| m.len());
-    let mut text = format!("v1|{len}:{modified}:{}", wanted.count);
+    let mut text = format!("v2|{len}:{modified}:{}", wanted.count);
     for (lat, lon) in &wanted.near {
         text.push_str(&format!("|{lat:.2},{lon:.2}"));
     }

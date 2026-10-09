@@ -72,6 +72,7 @@ fn test_config(dir: &Path) -> NodeConfig {
     config.sources = SeedSources {
         tranco_url: format!("{nowhere}/tranco.csv"),
         wikidata_sparql_url: format!("{nowhere}/sparql"),
+        wikidata_mirror_url: None,
         wikipedia_api_url: format!("{nowhere}/w/api.php"),
         wikidata_min_sitelinks: 25,
         wikidata_pacing: quick_wikidata(),
@@ -735,6 +736,7 @@ impl SeedHost {
         SeedSources {
             tranco_url: self.url("/tranco.csv"),
             wikidata_sparql_url: self.url("/sparql"),
+            wikidata_mirror_url: None,
             wikipedia_api_url: self.url("/w/api.php"),
             wikidata_min_sitelinks: 25,
             wikidata_pacing: quick_wikidata(),
@@ -2021,7 +2023,11 @@ async fn search_by_meaning_downloads_and_runs_embedding_gemma_when_chosen() {
     let vectors_path = dir.path().join(plumb_embed::VECTORS_FILE_NAME);
     let deadline = std::time::Instant::now() + Duration::from_secs(60);
     while plumb_embed::Vectors::load(&vectors_path).map_or(0, |v| v.len()) == 0 {
-        assert!(std::time::Instant::now() < deadline, "no vectors saved");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no vectors saved: {:?}",
+            node.inner.meaning_work()
+        );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     node.shutdown().await.unwrap();

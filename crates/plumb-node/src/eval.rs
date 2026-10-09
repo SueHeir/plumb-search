@@ -61,7 +61,9 @@ pub fn parse_queries(text: &str) -> Result<Vec<EvalQuery>> {
             .split(',')
             .map(str::trim)
             .filter(|d| !d.is_empty())
-            .map(normalize_domain)
+            // A comma inside an address (`Tesla,_Inc.`) is written `%2C`,
+            // since a bare one separates answers.
+            .map(|d| normalize_domain(&d.replace("%2C", ",").replace("%2c", ",")))
             .collect();
         if expected.is_empty() {
             bail!("line {line}: no expected domain for {query:?}");
@@ -222,8 +224,9 @@ struct Setup {
     searcher: Searcher,
     meaning: Option<MeaningIndex>,
     pages: Option<PageSearcher>,
-    /// Holds the page index while it is searched.
-    _pages_dir: tempfile::TempDir,
+    /// Holds the page index while it is searched, when it is not kept in
+    /// `--pages-cache`.
+    _pages_dir: Option<tempfile::TempDir>,
 }
 
 pub fn run(args: EvalArgs) -> Result<()> {
@@ -302,21 +305,14 @@ fn open_setup(args: &EvalArgs) -> Result<Setup> {
     let searcher = Searcher::open(&args.index)
         .with_context(|| format!("opening the index in {}", args.index.display()))?;
     let meaning = MeaningIndex::from_args(&args.meaning)?;
-    let pages_dir = tempfile::tempdir().context("making a folder for the page index")?;
-    let pages = if args.pages.is_empty() {
-        None
+    let (pages, pages_dir) = if args.pages.is_empty() {
+        (None, None)
+    } else if let Some(cache) = &args.pages_cache {
+        (Some(pages_cache::open(cache, args)?), None)
     } else {
-        let mut all: Vec<Page> = Vec::new();
-        for file in &args.pages {
-            let reader = plumb_ingest::open_maybe_gz(file)?;
-            let name = file.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            let articles = plumb_core::article::read_articles(reader, args.pages_top)?;
-            info!("indexing {} pages of {}", articles.len(), file.display());
-            let set = set_of_file(name);
-            all.extend(articles.into_iter().filter_map(|a| Page::from_set(&set, a)));
-        }
-        plumb_index::pages::build_page_index(pages_dir.path(), all)?;
-        Some(PageSearcher::open(pages_dir.path())?)
+        let dir = tempfile::tempdir().context("making a folder for the page index")?;
+        build_pages(args, dir.path())?;
+        (Some(PageSearcher::open(dir.path())?), Some(dir))
     };
     Ok(Setup {
         searcher,
@@ -324,6 +320,131 @@ fn open_setup(args: &EvalArgs) -> Result<Setup> {
         pages,
         _pages_dir: pages_dir,
     })
+}
+
+/// Builds the page index of `--pages` in `dir`.
+fn build_pages(args: &EvalArgs, dir: &Path) -> Result<()> {
+    let mut all: Vec<Page> = Vec::new();
+    for file in &args.pages {
+        let reader = plumb_ingest::open_maybe_gz(file)?;
+        let name = file.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        let articles = plumb_core::article::read_articles(reader, args.pages_top)?;
+        info!("indexing {} pages of {}", articles.len(), file.display());
+        let set = set_of_file(name);
+        all.extend(articles.into_iter().filter_map(|a| Page::from_set(&set, a)));
+    }
+    plumb_index::pages::build_page_index(dir, all)?;
+    Ok(())
+}
+
+/// `--pages-cache`: page indexes kept between runs, one folder each, named
+/// by a hash of what the index is built from ([`pages_cache::key`]).
+mod pages_cache {
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    use anyhow::{Context, Result};
+    use plumb_index::pages::PageSearcher;
+    use sha2::{Digest, Sha256};
+    use tracing::info;
+
+    use crate::cli::EvalArgs;
+
+    /// How many indexes are kept: those of the last few `plumb` builds
+    /// measured, such as the two sides of an A/B test.
+    pub(super) const KEEP: usize = 4;
+
+    /// Opens the page index of `args` kept in `cache`, building it first
+    /// when it is not there. A lock on the folder makes runs started
+    /// together wait for one build rather than each make its own.
+    pub(super) fn open(cache: &Path, args: &EvalArgs) -> Result<PageSearcher> {
+        fs::create_dir_all(cache).with_context(|| format!("creating {}", cache.display()))?;
+        let key = key(args)?;
+        let dir = cache.join(&key);
+        let _lock = lock(cache)?;
+        if dir.exists() {
+            info!("reusing the page index in {}", dir.display());
+        } else {
+            info!("building the page index in {}", dir.display());
+            super::build_pages(args, &dir)?;
+        }
+        let searcher = PageSearcher::open(&dir)?;
+        let used = cache.join(format!("{key}.used"));
+        fs::write(&used, b"").with_context(|| format!("writing {}", used.display()))?;
+        prune(cache, KEEP)?;
+        Ok(searcher)
+    }
+
+    /// What the page index depends on, hashed: the `plumb` binary (so a
+    /// newly built one builds a new index) and each page set file in
+    /// order, both by path, size and time of last change, and
+    /// `--pages-top`.
+    pub(super) fn key(args: &EvalArgs) -> Result<String> {
+        let exe = std::env::current_exe().context("finding the plumb binary")?;
+        let mut hash = Sha256::new();
+        for file in std::iter::once(&exe).chain(&args.pages) {
+            let path =
+                fs::canonicalize(file).with_context(|| format!("finding {}", file.display()))?;
+            let meta =
+                fs::metadata(&path).with_context(|| format!("reading {}", path.display()))?;
+            let changed = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |d| d.as_nanos());
+            hash.update(format!("{}\0{}\0{changed}\0", path.display(), meta.len()));
+        }
+        hash.update(format!("top {}", args.pages_top));
+        Ok(format!("{:x}", hash.finalize()))
+    }
+
+    /// Deletes all but the `keep` most recently used indexes in `cache`.
+    /// A run still searching one it opened keeps reading it: its files
+    /// stay until it closes them.
+    fn prune(cache: &Path, keep: usize) -> Result<()> {
+        let mut kept: Vec<(std::time::SystemTime, String)> = Vec::new();
+        for entry in fs::read_dir(cache).with_context(|| format!("reading {}", cache.display()))? {
+            let name = entry?.file_name().to_string_lossy().into_owned();
+            let Some(key) = name.strip_suffix(".used") else {
+                continue;
+            };
+            let used = cache.join(&name);
+            let when = fs::metadata(&used).and_then(|m| m.modified());
+            kept.push((when.unwrap_or(std::time::UNIX_EPOCH), key.to_string()));
+        }
+        kept.sort_by(|a, b| b.cmp(a));
+        for (_, key) in kept.into_iter().skip(keep) {
+            let dir = cache.join(&key);
+            info!("deleting the page index in {}", dir.display());
+            if dir.exists() {
+                fs::remove_dir_all(&dir).with_context(|| format!("deleting {}", dir.display()))?;
+            }
+            let _ = fs::remove_file(cache.join(format!("{key}.used")));
+        }
+        Ok(())
+    }
+
+    /// Holds the lock on `cache` until dropped.
+    #[cfg(unix)]
+    fn lock(cache: &Path) -> Result<fs::File> {
+        let path: PathBuf = cache.join("lock");
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)
+            .with_context(|| format!("opening {}", path.display()))?;
+        rustix::fs::flock(&file, rustix::fs::FlockOperation::LockExclusive)
+            .with_context(|| format!("locking {}", path.display()))?;
+        Ok(file)
+    }
+
+    /// Without the lock, runs started together each build the index; the
+    /// last one built is kept.
+    #[cfg(not(unix))]
+    fn lock(_cache: &Path) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// The rank each query's expected answer was found at, within
@@ -406,9 +527,10 @@ fn evaluate(
                 rank_of(&domains, &q.expected)
             }
             Some(pages) => {
-                let found = pages
+                let mut found = pages
                     .search(&searched, 10)
                     .with_context(|| format!("searching pages for {searched:?}"))?;
+                pages.add_other_number(&searched, &hits, &mut found, 10)?;
                 let mut lifted = hits.clone();
                 if cfg.add_named_site {
                     add_named_site(&mut lifted, &found, |domain| {
@@ -1150,6 +1272,14 @@ mod tests {
         assert_eq!(
             queries[0].expected,
             ["https://en.wikipedia.org/wiki/Marie_Curie"]
+        );
+        let queries = parse_queries(
+            "owner of tesla\thttps://en.wikipedia.org/wiki/Tesla%2C_Inc.,tesla.com\n",
+        )
+        .unwrap();
+        assert_eq!(
+            queries[0].expected,
+            ["https://en.wikipedia.org/wiki/Tesla,_Inc.", "tesla.com"]
         );
     }
     use super::*;

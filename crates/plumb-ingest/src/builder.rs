@@ -493,6 +493,7 @@ mod tests {
                 linking_domains: 2,
                 official_site: true,
                 sitelinks: 0,
+                ..Signals::default()
             }
         );
         assert_eq!(usbank.crawled_at, None);
