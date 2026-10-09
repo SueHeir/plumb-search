@@ -1212,6 +1212,19 @@ pub fn joined(text: &str) -> String {
     normalize_text(text).replace(' ', "")
 }
 
+/// Small words that join the words of a longer query ("pizza in denver",
+/// "bank of america") and name nothing there. Normalized, as
+/// [`normalize_text`] gives them.
+pub const FUNCTION_WORDS: &[&str] = &[
+    "a", "an", "and", "at", "by", "for", "from", "in", "into", "near", "of", "on", "or", "the",
+    "to", "with",
+];
+
+/// Whether `word`, normalized, is one of [`FUNCTION_WORDS`].
+pub fn is_function_word(word: &str) -> bool {
+    FUNCTION_WORDS.contains(&word)
+}
+
 /// The primary language of a language tag, lowercase: `en-US` -> `en`,
 /// `zh-Hant-TW` -> `zh`, `DE` -> `de`. `None` for tags that name no
 /// language (`x-default`, `und`, `zxx`, `mul`) or are not tags at all.

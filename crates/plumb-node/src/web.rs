@@ -3127,8 +3127,14 @@ struct Shown<'a> {
 /// This node's hits and the network's, best score first, at most `limit`.
 /// A site both found is shown once, as this node's: only sites this node
 /// did not find count as from the network. Both lists are ranked with this
-/// node's ranking and the same choices, and scores are normalized per
-/// search, so they compare.
+/// node's ranking and the same choices, so their scores compare, with one
+/// exception: text scores are normalized within each list's own
+/// candidates, and the network's are the few sites of a few buckets. When
+/// none of those has all the query's main words, the best partial match
+/// scores as if it had them: "Social Security in Spain", found by "in"
+/// alone, came first for "weather in denver". So a site only the network
+/// found that lacks some of the main words ([`Hit::missing_words`]) comes
+/// after this node's hits, and shows only when this node has too few.
 ///
 /// When the network holds a signed crawl of a site both found, that crawl
 /// fills the title and description this node's copy lacks, and the site
@@ -3156,25 +3162,27 @@ fn merge_results<'a>(local: &'a [Hit], network: &'a NetOutcome, limit: usize) ->
         .collect();
     if let NetOutcome::Answered(results) = network {
         let seen: HashSet<&str> = local.iter().map(|hit| hit.domain.as_str()).collect();
-        shown.extend(
-            results
-                .hits
-                .iter()
-                .filter(|result| !seen.contains(result.hit.domain.as_str()))
-                .map(|result| Shown {
-                    hit: Cow::Borrowed(&result.hit),
-                    network: Some(result),
-                }),
-        );
+        let (partial, whole): (Vec<&NetworkResult>, Vec<&NetworkResult>) = results
+            .hits
+            .iter()
+            .filter(|result| !seen.contains(result.hit.domain.as_str()))
+            .partition(|result| result.hit.missing_words);
+        let from_network = |result: &'a NetworkResult| Shown {
+            hit: Cow::Borrowed(&result.hit),
+            network: Some(result),
+        };
+        shown.extend(whole.into_iter().map(from_network));
         // Stable, so ties keep this node's hits first.
         shown.sort_by(|a, b| b.hit.score.total_cmp(&a.hit.score));
+        shown.extend(partial.into_iter().map(from_network));
     }
     shown.truncate(limit);
     shown
 }
 
 /// This node's `hit` with what the network's signed crawl of the site adds:
-/// the title and description it lacks, and the network's score when better.
+/// the title and description it lacks, and the network's score when better
+/// and the crawl has all the query's main words (see [`merge_results`]).
 fn fill_from_network(hit: &Hit, result: &NetworkResult) -> Hit {
     let mut hit = hit.clone();
     let blank = |text: &Option<String>| text.as_deref().is_none_or(|t| t.trim().is_empty());
@@ -3189,7 +3197,9 @@ fn fill_from_network(hit: &Hit, result: &NetworkResult) -> Hit {
             hit.key_pages.clone_from(&shared.key_pages);
         }
     }
-    hit.score = hit.score.max(result.hit.score);
+    if !result.hit.missing_words {
+        hit.score = hit.score.max(result.hit.score);
+    }
     hit
 }
 
@@ -6195,6 +6205,59 @@ mod tests {
         let b = shown.iter().find(|s| s.hit.domain == "b.com").unwrap();
         assert_eq!(b.hit.description.as_deref(), Some("Our own words"));
         assert_eq!(b.hit.title.as_deref(), Some("B Shoes"));
+    }
+
+    #[test]
+    fn network_only_sites_lacking_main_words_come_after_this_nodes() {
+        // "weather in denver": the network's only bucket at hand was that
+        // of "in", whose best match scored as if it had every word.
+        let partial = |domain: &str, score: f32| {
+            let mut hit = scored(domain, score);
+            hit.missing_words = true;
+            hit
+        };
+        let local = vec![scored("denverpost.com", 0.65), partial("krain88.com", 0.55)];
+        let network = answered(vec![
+            partial("seg-social.es", 0.66),
+            scored("denverweather.example", 0.6),
+            partial("heybakeries.com", 0.62),
+        ]);
+        let order = |shown: &[Shown]| -> Vec<String> {
+            shown.iter().map(|s| s.hit.domain.clone()).collect()
+        };
+        assert_eq!(
+            order(&merge_results(&local, &network, 10)),
+            [
+                "denverpost.com",
+                "denverweather.example",
+                "krain88.com",
+                "seg-social.es",
+                "heybakeries.com"
+            ]
+        );
+        assert_eq!(
+            order(&merge_results(&local, &network, 3)),
+            ["denverpost.com", "denverweather.example", "krain88.com"]
+        );
+        // With nothing of this node's own, they still show.
+        assert_eq!(
+            order(&merge_results(&[], &network, 10)),
+            ["denverweather.example", "seg-social.es", "heybakeries.com"]
+        );
+
+        // Nor does a partial match's score lift this node's copy.
+        let mut signed = SiteRecord::new("krain88.com");
+        signed.title = Some("Weather".into());
+        let mut crawl = from_network(partial("krain88.com", 0.9));
+        crawl.shared = Some(signed);
+        let network = NetOutcome::Answered(NetworkResults {
+            hits: vec![crawl],
+            ..NetworkResults::default()
+        });
+        let shown = merge_results(&local, &network, 10);
+        assert_eq!(order(&shown), ["denverpost.com", "krain88.com"]);
+        assert_eq!(shown[1].hit.title.as_deref(), Some("Weather"));
+        assert!((shown[1].hit.score - 0.55).abs() < f32::EPSILON);
     }
 
     #[test]

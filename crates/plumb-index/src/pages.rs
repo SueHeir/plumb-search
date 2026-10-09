@@ -87,6 +87,9 @@ pub const DESCRIBED_WORD: f32 = 0.5;
 /// whose lead matches them best gets it, others less by how much worse
 /// theirs does. "triassic jurassic cretaceous" finds Mesozoic.
 pub const LEAD_MATCH: f32 = 0.55;
+/// Most pages looked at for each part of a query that may be a title
+/// ([`PageSearcher::search`]: "titanic sinking" finds Titanic).
+const TITLE_INSIDE_CANDIDATES: usize = 20;
 /// Most articles found by their leads looked at for one query.
 const LEAD_CANDIDATES: usize = 20;
 /// Words that only ask ("what does resin mean"), left out of a query
@@ -1559,6 +1562,9 @@ impl PageSearcher {
             for (term, distance) in
                 crate::spell::near_terms(&searcher, self.fields.words, word, edits)?
             {
+                if !crate::spell::plausible_word_fix(word, &term) {
+                    continue;
+                }
                 let term_docs = docs(&term)?;
                 if term_docs < needed {
                     continue;
@@ -1621,8 +1627,15 @@ impl PageSearcher {
             Hint::Any => {}
         }
         for hit in found {
-            if !hits.iter().any(|h| h.page == hit.page) {
-                hits.push(hit);
+            // Found both ways, a page keeps its better score and whatever
+            // either way says of it.
+            match hits.iter_mut().find(|h| h.page == hit.page) {
+                Some(kept) => {
+                    kept.named |= hit.named;
+                    kept.whole |= hit.whole;
+                    kept.score = kept.score.max(hit.score);
+                }
+                None => hits.push(hit),
             }
         }
         hits.sort_by(|a, b| b.score.total_cmp(&a.score));
@@ -1858,6 +1871,45 @@ impl PageSearcher {
                 }
             }
         }
+        // Articles whose title is some of the query and the rest says more
+        // about it: "titanic sinking", "radium discovery marie curie",
+        // "catholic homily". They lack the query's other words, so nothing
+        // above finds them; [`PageSearcher::name_match`] scores them by the
+        // share of the query their title is.
+        let mut by_title_inside = HashSet::new();
+        // Other pages found only so are left out; one found another way
+        // below is not.
+        let mut only_inside = HashSet::new();
+        let mut inside_keys = HashSet::new();
+        for start in 0..words.len() {
+            for end in start + 1..=words.len() {
+                let span = &words[start..end];
+                if span.len() == words.len()
+                    || span.iter().all(|word| {
+                        crate::is_function_word(word) || ASKING_WORDS.contains(&word.as_str())
+                    })
+                {
+                    continue;
+                }
+                let Some(key) = analysis::tokens(&self.joined, &span.join(" ")).pop() else {
+                    continue;
+                };
+                let named = TermQuery::new(
+                    Term::from_field_text(self.fields.keys, &key),
+                    IndexRecordOption::Basic,
+                );
+                inside_keys.insert(key);
+                let most_read = TopDocs::with_limit(TITLE_INSIDE_CANDIDATES)
+                    .order_by_fast_field::<u64>("popularity", tantivy::Order::Desc);
+                for (_, address) in searcher.search(&named, &most_read)? {
+                    if !addresses.contains(&address) {
+                        addresses.push(address);
+                        only_inside.insert(address);
+                    }
+                    by_title_inside.insert(address);
+                }
+            }
+        }
         // Packages, only ever found when the query asks for one: "serde
         // crate", "latest version of requests python".
         let package_query = plumb_core::packages::package_query(query);
@@ -1870,6 +1922,7 @@ impl PageSearcher {
                 IndexRecordOption::Basic,
             );
             for (_, address) in searcher.search(&named, &by_popularity())? {
+                only_inside.remove(&address);
                 if !addresses.contains(&address) {
                     addresses.push(address);
                 }
@@ -1901,6 +1954,7 @@ impl PageSearcher {
                 // "React useState" and more of its words.
                 by_title_first.remove(&address);
                 film_title_first.remove(&address);
+                only_inside.remove(&address);
                 if !addresses.contains(&address) {
                     addresses.push(address);
                 }
@@ -1932,6 +1986,7 @@ impl PageSearcher {
                     needed,
                 );
                 for (_, address) in searcher.search(&most_words, &by_popularity())? {
+                    only_inside.remove(&address);
                     if !addresses.contains(&address) {
                         addresses.push(address);
                     }
@@ -1973,6 +2028,7 @@ impl PageSearcher {
                 &TopDocs::with_limit(LEAD_CANDIDATES).order_by_score(),
             )? {
                 lead_scores.insert(address, score);
+                only_inside.remove(&address);
                 if !addresses.contains(&address) {
                     addresses.push(address);
                 }
@@ -1981,12 +2037,17 @@ impl PageSearcher {
         let best_lead = lead_scores.values().copied().fold(0.0f32, f32::max);
         // The query's rarest word that some question has: what it is
         // about. A question without it has only the asking words ("how to
-        // get rid of aphids" found "How do I get rid of my bounty?").
+        // get rid of aphids" found "How do I get rid of my bounty?"). A
+        // word the pages know that no question has is rarer still: no
+        // question asks about it, so none is found. A word nothing knows
+        // is likely a typo, and is passed over.
         let mut topic_word: Option<(u64, &String)> = None;
         if stems.len() >= QUESTION_QUERY_WORDS.min(REFERENCE_QUERY_WORDS) {
             for stem in &stems {
                 let found = searcher.doc_freq(&Term::from_field_text(self.fields.topic, stem))?;
-                if found > 0 && topic_word.is_none_or(|(least, _)| found < least) {
+                if (found > 0 || self.knows_stem(query, stem)?)
+                    && topic_word.is_none_or(|(least, _)| found < least)
+                {
                     topic_word = Some((found, stem));
                 }
             }
@@ -2033,9 +2094,24 @@ impl PageSearcher {
             if page.set == MUSIC_SET && !asked_by_title {
                 continue;
             }
-            if by_title_first.contains(&address) && !asked_by_title
-                || film_title_first.contains(&address) && !asked_as_film
+            // Its title in full, or another name: "queen tour" is not
+            // about Queen (album).
+            let article_inside = page.is_article()
+                && by_title_inside.contains(&address)
+                && std::iter::once(&page.title)
+                    .chain(&page.aliases)
+                    .any(|name| {
+                        analysis::tokens(&self.joined, name)
+                            .pop()
+                            .is_some_and(|key| inside_keys.contains(&key))
+                    });
+            if !article_inside
+                && (by_title_first.contains(&address) && !asked_by_title
+                    || film_title_first.contains(&address) && !asked_as_film)
             {
+                continue;
+            }
+            if only_inside.contains(&address) && !article_inside && !asked_by_title {
                 continue;
             }
             let (mut name, mut named) = self.name_match(&page, query, &joined, &query_words);
@@ -2130,6 +2206,21 @@ impl PageSearcher {
         let mut seen = HashSet::new();
         stems.retain(|stem| seen.insert(stem.clone()));
         stems
+    }
+
+    /// Whether a word of `query` whose stem is `stem` is one the pages
+    /// know ([`PageSearcher::knows_word`]), as typed or as its stem:
+    /// "aphids" is known by the names that say "aphid".
+    fn knows_stem(&self, query: &str, stem: &str) -> Result<bool> {
+        for word in analysis::tokens(&self.words, query) {
+            let stems = analysis::tokens(&self.stemmed, &word);
+            if stems.first().map(String::as_str) == Some(stem)
+                && (self.knows_word(&word)? || self.knows_word(stem)?)
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// The different stemmed words of `query` without the words that only
@@ -3572,6 +3663,52 @@ mod tests {
     }
 
     #[test]
+    fn no_question_is_found_for_a_known_word_none_asks_about() {
+        let question = |title: &str, tags: &str, item: &str| {
+            Page::from_question(Article {
+                title: title.into(),
+                description: Some(tags.into()),
+                item: Some(item.into()),
+                views: 100_000,
+                ..Article::default()
+            })
+        };
+        let pages = [
+            question("How do I get rid of my bounty?", "bounty, meta", "1"),
+            question(
+                "How to get rid of large gaps in text",
+                "ms-word, layout",
+                "2",
+            ),
+            question(
+                "How do I undo the most recent local commits in Git?",
+                "git, git-commit",
+                "3",
+            ),
+            page("Aphid", 50_000, &[]),
+            page("Green peach aphid", 2_000, &[]),
+            page("Black bean aphid", 1_000, &[]),
+        ];
+        let (_dir, s) = searcher(&pages);
+        let questions = |query: &str| -> Vec<String> {
+            s.search(query, 5)
+                .unwrap()
+                .into_iter()
+                .filter(|hit| hit.page.is_question())
+                .map(|hit| hit.page.title)
+                .collect()
+        };
+        // No question has "aphids", which pages name: none is about them.
+        assert!(questions("how to get rid of aphids").is_empty());
+        // "comit" no page knows, so it may be a typo: the question with
+        // the other words is still found.
+        assert_eq!(
+            questions("how to undo git comit"),
+            ["How do I undo the most recent local commits in Git?"]
+        );
+    }
+
+    #[test]
     fn questions_are_found_in_their_duplicates_words() {
         let undo = Page::from_question(Article {
             title: "How do I undo the most recent local commits in Git?".into(),
@@ -3743,6 +3880,9 @@ mod tests {
         for i in 0..5 {
             pages.push(page(&format!("Perfi album {i}"), 10, &[]));
         }
+        for i in 0..25 {
+            pages.push(page(&format!("Erft river {i}"), 10, &[]));
+        }
         let (_dir, searcher) = searcher(&pages);
         let nothing_known = |_: &str| false;
         let suggest = |query: &str| {
@@ -3762,6 +3902,7 @@ mod tests {
         assert_eq!(suggest("anub"), None);
         assert_eq!(suggest("budafest2"), None);
         // A rare word is no slip of another rare one: few pages say "perfi".
+        // Nor of a common one with another first letter: "erft".
         assert_eq!(suggest("perft"), None);
         // A word the sites know is spelled right.
         let sites_know = |word: &str| word == "budafest";
@@ -4762,6 +4903,40 @@ mod tests {
             hinted_name("Who is Dalai Lama?"),
             Some(("dalai lama".into(), Hint::Any))
         );
+    }
+
+    #[test]
+    fn articles_whose_title_is_part_of_the_query_are_found() {
+        let (_dir, s) = searcher(&[
+            page("Titanic", 400_000, &["RMS Titanic"]),
+            page("Marie Curie", 300_000, &[]),
+            page("Homily", 20_000, &[]),
+            page("Sinking", 5_000, &[]),
+            Page::from_question(Article {
+                title: "Homily".into(),
+                item: Some("1".into()),
+                views: 900_000,
+                ..Article::default()
+            }),
+        ]);
+        let first = |query: &str| {
+            s.search(query, 5)
+                .unwrap()
+                .first()
+                .map(|hit| (hit.page.title.clone(), hit.named))
+        };
+        assert_eq!(first("titanic sinking"), Some(("Titanic".into(), false)));
+        assert_eq!(
+            first("radium discovery marie curie"),
+            Some(("Marie Curie".into(), false))
+        );
+        assert_eq!(first("rms titanic wreck"), Some(("Titanic".into(), false)));
+        // Only articles are found so: a question titled "Homily" is not.
+        let hits = s.search("catholic homily", 5).unwrap();
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert!(hits[0].page.is_article());
+        // Words that only ask name no article.
+        assert_eq!(first("what does it mean"), None);
     }
 
     #[test]

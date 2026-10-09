@@ -12,6 +12,7 @@
 //! are top-1 and top-3 rates and the mean reciprocal rank within the
 //! results fetched ([`Metrics::from_ranks`]).
 
+use std::collections::HashSet;
 use std::fmt::Write as _;
 
 use anyhow::{bail, Context, Result};
@@ -224,6 +225,8 @@ struct Setup {
     searcher: Searcher,
     meaning: Option<MeaningIndex>,
     pages: Option<PageSearcher>,
+    /// With --recall, the address of every page in the page sets.
+    page_urls: HashSet<String>,
     /// Holds the page index while it is searched, when it is not kept in
     /// `--pages-cache`.
     _pages_dir: Option<tempfile::TempDir>,
@@ -248,6 +251,17 @@ pub fn run(args: EvalArgs) -> Result<()> {
         None => Vec::new(),
     };
     let setup = open_setup(&args)?;
+    if args.recall {
+        for suite in &suites {
+            if suites.len() > 1 {
+                println!("== {}", suite.name);
+            }
+            let ranks = evaluate(&args, &setup, &suite.queries, &cfg, false, None)?;
+            let stages = recall(&args, &setup, &suite.queries, &cfg, &ranks)?;
+            print!("{}", format_recall(&stages, args.limit));
+        }
+        return Ok(());
+    }
     if variants.is_empty() {
         let mut low = None;
         let mut features_out = String::new();
@@ -314,12 +328,236 @@ fn open_setup(args: &EvalArgs) -> Result<Setup> {
         build_pages(args, dir.path())?;
         (Some(PageSearcher::open(dir.path())?), Some(dir))
     };
+    let page_urls = if args.recall {
+        page_urls(args)?
+    } else {
+        HashSet::new()
+    };
     Ok(Setup {
         searcher,
         meaning,
         pages,
+        page_urls,
         _pages_dir: pages_dir,
     })
+}
+
+/// How far down the sites matching a query's words `--recall` looks.
+const RECALL_WORDS_DEPTH: usize = 10_000;
+/// How far down the pages found for a query `--recall` looks.
+const RECALL_PAGES_DEPTH: usize = 1_000;
+/// The depths `--recall` counts answers within.
+const RECALL_DEPTHS: [usize; 4] = [50, 100, 1_000, 10_000];
+
+/// Where a query's answer stands before ranking (`plumb eval --recall`).
+/// Positions are 1-based, of the best expected answer.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct Stage {
+    /// Where the query's answer was listed, within the limit.
+    rank: Option<usize>,
+    /// Some expected site is in the index.
+    site_indexed: bool,
+    /// Some expected page is in a page set.
+    page_indexed: bool,
+    /// Among the sites by how well their words match the query.
+    by_words: Option<usize>,
+    /// An expected site has some of the query's words, however far down.
+    matches_words: bool,
+    /// Among the sites nearest the query in meaning.
+    by_meaning: Option<usize>,
+    /// The ranking looked at an expected site.
+    ranked: bool,
+    /// Among the pages found for the query.
+    page: Option<usize>,
+}
+
+impl Stage {
+    /// The answer is among the first `depth` sites by words or meaning,
+    /// or pages found.
+    fn within(&self, depth: usize) -> bool {
+        [self.by_words, self.by_meaning, self.page]
+            .into_iter()
+            .flatten()
+            .any(|at| at <= depth)
+    }
+
+    /// Where a query not answered in the first `limit` lost its answer,
+    /// the stage it got furthest to.
+    fn loss(&self, limit: usize) -> Option<&'static str> {
+        if self.rank.is_some() {
+            return None;
+        }
+        Some(if self.ranked {
+            "site ranked, placed too low"
+        } else if self.page.is_some_and(|at| at <= limit) {
+            "page found, not listed"
+        } else if self.page.is_some() {
+            "page found, too far down"
+        } else if self.page_indexed && !self.site_indexed {
+            "page in a set, never found"
+        } else if self.by_words.is_some() || self.by_meaning.is_some() {
+            "site matches, never ranked"
+        } else if self.matches_words {
+            "site matches, past the first 10,000"
+        } else if self.site_indexed {
+            "site indexed, matches no word"
+        } else if self.page_indexed {
+            "page in a set, never found"
+        } else {
+            "answer in no index"
+        })
+    }
+}
+
+/// Where each of `queries`' answers stands before ranking; `ranks` are
+/// where [`evaluate`] listed them.
+fn recall(
+    args: &EvalArgs,
+    setup: &Setup,
+    queries: &[EvalQuery],
+    cfg: &plumb_index::RankConfig,
+    ranks: &[Option<usize>],
+) -> Result<Vec<Stage>> {
+    let options = SearchOptions {
+        country: args.country.clone(),
+        exact: args.exact,
+        ..SearchOptions::default()
+    };
+    let mut stages = Vec::with_capacity(queries.len());
+    for (q, &rank) in queries.iter().zip(ranks) {
+        let (sites, pages): (Vec<String>, Vec<String>) =
+            q.expected.iter().cloned().partition(|e| !e.contains("://"));
+        let mut searched = q.query.clone();
+        if args.follow_suggestions {
+            let found = setup.searcher.search_full(
+                &q.query,
+                1,
+                cfg,
+                &SearchOptions {
+                    exact: false,
+                    ..options.clone()
+                },
+            )?;
+            if let Some(spelling) = found.spelling {
+                searched = spelling.query;
+            }
+        }
+        let query_meaning = setup
+            .meaning
+            .as_ref()
+            .and_then(|meaning| meaning.query(&searched));
+        let meaning = query_meaning.as_ref().map(|m| m as &dyn Meaning);
+        let mut stage = Stage {
+            rank,
+            site_indexed: sites.iter().any(|d| setup.searcher.has_domain(d)),
+            page_indexed: pages.iter().any(|e| match e.strip_suffix('*') {
+                Some(start) => setup.page_urls.iter().any(|url| url.starts_with(start)),
+                None => setup.page_urls.contains(e),
+            }),
+            ..Stage::default()
+        };
+        if !sites.is_empty() {
+            let pool = setup
+                .searcher
+                .candidate_pool(&searched, cfg, &options, meaning)?;
+            stage.ranked = sites.iter().any(|d| pool.has(d));
+            if let Some(found) =
+                setup
+                    .searcher
+                    .words_order(&searched, RECALL_WORDS_DEPTH, cfg, &sites)?
+            {
+                stage.by_words = rank_of(&found.order, &sites);
+                stage.matches_words = !found.matched.is_empty();
+            }
+            if let Some(meaning) = meaning {
+                stage.by_meaning = rank_of(&meaning.nearest(), &sites);
+            }
+        }
+        if let (Some(found), false) = (&setup.pages, pages.is_empty()) {
+            let hits = found
+                .search(&searched, RECALL_PAGES_DEPTH)
+                .with_context(|| format!("searching pages for {searched:?}"))?;
+            let urls: Vec<&str> = hits.iter().map(|hit| hit.page.url.as_str()).collect();
+            stage.page = rank_of(&urls, &pages);
+        }
+        if let Some(loss) = stage.loss(args.limit) {
+            let at = |at: Option<usize>| at.map_or("-".to_string(), |at| at.to_string());
+            println!(
+                "{loss}\t{:?}\twords {}\tmeaning {}\tpage {}\t{}",
+                q.query,
+                at(stage.by_words),
+                at(stage.by_meaning),
+                at(stage.page),
+                q.expected.join(","),
+            );
+        }
+        stages.push(stage);
+    }
+    Ok(stages)
+}
+
+/// The `--recall` table of one file: how many answers are within each
+/// depth, and where the ones not listed in the first `limit` were lost.
+fn format_recall(stages: &[Stage], limit: usize) -> String {
+    let n = stages.len();
+    let pct = |count: usize| format!("{count:>4} {:>5.1}%", ratio(count, n) * 100.0);
+    let mut out = String::new();
+    let count = |f: &dyn Fn(&Stage) -> bool| stages.iter().filter(|s| f(s)).count();
+    let _ = writeln!(out, "recall of {n} queries");
+    let _ = writeln!(
+        out,
+        "  listed in the first {limit:<6} {}",
+        pct(count(&|s| s.rank.is_some()))
+    );
+    let _ = writeln!(
+        out,
+        "  site ranked at all        {}",
+        pct(count(&|s| s.ranked))
+    );
+    for depth in RECALL_DEPTHS {
+        let _ = writeln!(
+            out,
+            "  within the first {depth:<8} {}  (words {}, meaning {}, pages {})",
+            pct(count(&|s| s.within(depth))),
+            count(&|s| s.by_words.is_some_and(|at| at <= depth)),
+            count(&|s| s.by_meaning.is_some_and(|at| at <= depth)),
+            count(&|s| s.page.is_some_and(|at| at <= depth)),
+        );
+    }
+    let _ = writeln!(
+        out,
+        "  in the index or a page set {}",
+        pct(count(&|s| s.site_indexed || s.page_indexed))
+    );
+    let mut losses: Vec<(&str, usize)> = Vec::new();
+    for loss in stages.iter().filter_map(|s| s.loss(limit)) {
+        match losses.iter_mut().find(|(l, _)| *l == loss) {
+            Some((_, count)) => *count += 1,
+            None => losses.push((loss, 1)),
+        }
+    }
+    losses.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+    let _ = writeln!(out, "  not listed, by where the answer was lost:");
+    for (loss, count) in losses {
+        let _ = writeln!(out, "    {loss:<38} {}", pct(count));
+    }
+    out
+}
+
+/// The address of every page in the sets of `--pages`.
+fn page_urls(args: &EvalArgs) -> Result<HashSet<String>> {
+    let mut urls = HashSet::new();
+    for file in &args.pages {
+        let reader = plumb_ingest::open_maybe_gz(file)?;
+        let name = file.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        let set = set_of_file(name);
+        for article in plumb_core::article::read_articles(reader, args.pages_top)? {
+            if let Some(page) = Page::from_set(&set, article) {
+                urls.insert(page.url);
+            }
+        }
+    }
+    Ok(urls)
 }
 
 /// Builds the page index of `--pages` in `dir`.
@@ -1348,6 +1586,44 @@ mod tests {
 
     fn close(a: f64, b: f64) -> bool {
         (a - b).abs() < 1e-9
+    }
+
+    #[test]
+    fn recall_says_where_an_answer_was_lost() {
+        let found = Stage {
+            rank: Some(2),
+            ranked: true,
+            ..Stage::default()
+        };
+        assert_eq!(found.loss(10), None);
+        let deep = Stage {
+            site_indexed: true,
+            by_words: Some(400),
+            matches_words: true,
+            ..Stage::default()
+        };
+        assert_eq!(deep.loss(10), Some("site matches, never ranked"));
+        assert!(deep.within(1_000) && !deep.within(100));
+        let wordless = Stage {
+            site_indexed: true,
+            ..Stage::default()
+        };
+        assert_eq!(wordless.loss(10), Some("site indexed, matches no word"));
+        assert_eq!(Stage::default().loss(10), Some("answer in no index"));
+        let page = Stage {
+            page_indexed: true,
+            page: Some(30),
+            ..Stage::default()
+        };
+        assert_eq!(page.loss(10), Some("page found, too far down"));
+
+        let table = format_recall(&[found, deep, wordless, page], 10);
+        assert!(table.contains("recall of 4 queries"), "{table}");
+        assert!(
+            table.contains("listed in the first 10        1  25.0%"),
+            "{table}"
+        );
+        assert!(table.contains("site matches, never ranked"), "{table}");
     }
 
     #[test]

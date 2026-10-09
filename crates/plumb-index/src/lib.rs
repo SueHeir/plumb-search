@@ -127,19 +127,12 @@ const HEADINGS_BOOST: f32 = 0.5;
 /// joined name or a label word.
 const WHOLE_QUERY_BOOST: f32 = 6.0;
 
-/// Small words that join the words of a longer query ("pizza in denver",
-/// "bank of america") and name no site there: between two other words they
-/// never match a domain label or joined name on their own, so in.gov is not
-/// found by them, and one alone never counts as a leading name ("in n out
-/// burger" does not name in.gov). A one-word query is still a name.
-const FUNCTION_WORDS: &[&str] = &[
-    "a", "an", "and", "at", "by", "for", "from", "in", "into", "near", "of", "on", "or", "the",
-    "to", "with",
-];
-
-fn is_function_word(word: &str) -> bool {
-    FUNCTION_WORDS.contains(&word)
-}
+// Function words ("pizza in denver", "bank of america") name no site in a
+// longer query: between two other words they never match a domain label or
+// joined name on their own, so in.gov is not found by them, and one alone
+// never counts as a leading name ("in n out burger" does not name in.gov). A
+// one-word query is still a name.
+use plumb_core::is_function_word;
 
 /// Words that ask or say what is wanted rather than name anything: in a
 /// query of two words or more, one of them never matches a domain label,
@@ -545,8 +538,8 @@ pub struct Hit {
     pub demand: Option<f32>,
     /// The query, of two words or more, does not name the site and the
     /// site lacks some of its main words (all but [`FILLER_WORDS`] and
-    /// [`FUNCTION_WORDS`]): better.com for "better call saul". Such a site
-    /// is filler once a page is named by the whole query
+    /// [`plumb_core::FUNCTION_WORDS`]): better.com for "better call saul".
+    /// Such a site is filler once a page is named by the whole query
     /// ([`pages::drop_namesakes_of_words`]).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub missing_words: bool,
@@ -583,6 +576,47 @@ pub struct SiteSearch {
     pub terms: String,
     /// The site's search address for them.
     pub url: String,
+}
+
+/// Where the sites a query ranks come from ([`Searcher::candidate_pool`]).
+/// A site can come from more than one place.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CandidatePool {
+    /// The first [`RankConfig::candidates`] sites by BM25, best first.
+    pub words: Vec<String>,
+    /// The most linked sites with any of the query's words.
+    pub popular: Vec<String>,
+    /// The sites the query names, by its first words or all of them.
+    pub named: Vec<String>,
+    /// The sites of the kind the query names ("banks").
+    pub kind: Vec<String>,
+    /// The sites near the query in meaning that are ranked.
+    pub meaning: Vec<String>,
+}
+
+impl CandidatePool {
+    /// Whether the site `domain` is ranked at all.
+    pub fn has(&self, domain: &str) -> bool {
+        [
+            &self.words,
+            &self.popular,
+            &self.named,
+            &self.kind,
+            &self.meaning,
+        ]
+        .iter()
+        .any(|list| list.iter().any(|d| d == domain))
+    }
+}
+
+/// The sites by how well their words match a query
+/// ([`Searcher::words_order`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WordsOrder {
+    /// The first sites, best first.
+    pub order: Vec<String>,
+    /// Those of the domains asked about that have any of the query's words.
+    pub matched: HashSet<String>,
 }
 
 /// What [`Searcher::search_full`] finds.
@@ -1319,6 +1353,67 @@ impl Searcher {
         })
     }
 
+    /// The sites [`Searcher::search_meaning`] ranks for `query_text` as
+    /// typed, before ranking, by where each came from: what `plumb eval
+    /// --recall` measures. A site the ranking never looks at cannot be
+    /// found, however it is scored.
+    pub fn candidate_pool(
+        &self,
+        query_text: &str,
+        cfg: &RankConfig,
+        options: &SearchOptions,
+        meaning: Option<&dyn Meaning>,
+    ) -> Result<CandidatePool> {
+        let mut pool = CandidatePool::default();
+        self.rank_traced(query_text, 1, cfg, options, meaning, Some(&mut pool))?;
+        Ok(pool)
+    }
+
+    /// The first `depth` sites by how well their words match `query_text`
+    /// (BM25 alone, as [`RankConfig::candidates`] are picked), and which of
+    /// `domains` have any of the query's words. `None` for a query with no
+    /// words.
+    pub fn words_order(
+        &self,
+        query_text: &str,
+        depth: usize,
+        cfg: &RankConfig,
+        domains: &[String],
+    ) -> Result<Option<WordsOrder>> {
+        let Some(mut query) = ParsedQuery::new(query_text, &self.words, &self.joined) else {
+            return Ok(None);
+        };
+        query.terms_boost = cfg.terms_boost;
+        query.filler_words = cfg.filler_words;
+        query.asked =
+            cfg.questions_name_nothing && query.len >= 3 && pages::asked_as_question(query_text);
+        let searcher = self.reader.searcher();
+        let num_docs = usize::try_from(searcher.num_docs()).unwrap_or(usize::MAX);
+        if num_docs == 0 {
+            return Ok(Some(WordsOrder::default()));
+        }
+        let text_query = query.text_query(&searcher, &self.fields)?;
+        let found = searcher.search(
+            &text_query,
+            &TopDocs::with_limit(depth.max(1).min(num_docs)).order_by_score(),
+        )?;
+        let order = found
+            .into_iter()
+            .filter_map(|(_, addr)| domain_of(&searcher, addr))
+            .collect();
+        let mut docs = Vec::new();
+        for domain in domains {
+            let term = Term::from_field_text(self.fields.domain, domain);
+            docs.extend(matching_docs(&searcher, vec![term])?);
+        }
+        let matched = bm25_of(&searcher, &text_query, docs)?
+            .into_iter()
+            .filter(|&(bm25, _)| bm25 > 0.0)
+            .filter_map(|(_, addr)| domain_of(&searcher, addr))
+            .collect();
+        Ok(Some(WordsOrder { order, matched }))
+    }
+
     /// The ranked results of `query_text` as typed, and how the query names
     /// sites.
     fn rank(
@@ -1328,6 +1423,20 @@ impl Searcher {
         cfg: &RankConfig,
         options: &SearchOptions,
         meaning: Option<&dyn Meaning>,
+    ) -> Result<(SearchResults, Named)> {
+        self.rank_traced(query_text, limit, cfg, options, meaning, None)
+    }
+
+    /// [`Searcher::rank`], noting in `pool` where the sites it ranks came
+    /// from.
+    fn rank_traced(
+        &self,
+        query_text: &str,
+        limit: usize,
+        cfg: &RankConfig,
+        options: &SearchOptions,
+        meaning: Option<&dyn Meaning>,
+        pool: Option<&mut CandidatePool>,
     ) -> Result<(SearchResults, Named)> {
         if limit == 0 {
             return Ok(Default::default());
@@ -1448,6 +1557,18 @@ impl Searcher {
             .collect();
         unranked.sort_unstable();
         unranked.dedup();
+        if let Some(pool) = pool {
+            let domains = |docs: &mut dyn Iterator<Item = DocAddress>| -> Vec<String> {
+                docs.filter_map(|addr| domain_of(&searcher, addr)).collect()
+            };
+            *pool = CandidatePool {
+                words: domains(&mut candidates.iter().map(|&(_, addr)| addr)),
+                popular: domains(&mut popular.iter().copied()),
+                named: domains(&mut names.keys().copied()),
+                kind: domains(&mut kinds.iter().copied()),
+                meaning: domains(&mut nearest.iter().copied()),
+            };
+        }
         candidates.extend(bm25_of(&searcher, &text_query, unranked)?);
         let full_names: HashSet<DocAddress> = names
             .iter()
@@ -1734,17 +1855,20 @@ impl Searcher {
             .filter(|floor| *floor > 0.0)
             .zip(any_meaning)
         {
-            let named_inside = self.names_inside(&searcher, &query, query_text)?;
+            let (named_inside, alias_inside) = self.names_inside(&searcher, &query, query_text)?;
             let mut partial = Vec::new();
             for r in &ranked {
                 if r.named || kinds.contains(&r.addr) || nearest_ranked.contains(&r.addr) {
                     continue;
                 }
                 // A name only counts for a site known by it: hilton.com in
-                // "back bay hilton", not valley.com in "elephant valley".
+                // "back bay hilton", not valley.com in "elephant valley". An
+                // official site is known by its Wikidata name, not by its
+                // domain label (valley.com is Valley National Bank's).
                 if named_inside.contains(&r.addr)
                     && (r.link_score >= WELL_KNOWN_LINK_SCORE
-                        || self.is_official(&searcher, r.addr)?)
+                        || (alias_inside.contains(&r.addr)
+                            && self.is_official(&searcher, r.addr)?))
                 {
                     continue;
                 }
@@ -2135,20 +2259,20 @@ impl Searcher {
     /// "ecommerce wix"), unless the run goes on into more words as one
     /// phrase ("cricket" in "the cricket and the ant", "guess" in "guess
     /// the states game"). A run of one function or filler word names
-    /// nothing.
+    /// nothing. The second set has only the sites named by an alias.
     fn names_inside(
         &self,
         searcher: &tantivy::Searcher,
         query: &ParsedQuery,
         query_text: &str,
-    ) -> Result<HashSet<DocAddress>> {
-        let mut named = HashSet::new();
+    ) -> Result<(HashSet<DocAddress>, HashSet<DocAddress>)> {
         if query.asked {
-            return Ok(named);
+            return Ok((HashSet::new(), HashSet::new()));
         }
         let tokens = analysis::tokens(&self.words, query_text);
         let tokens = &tokens[..tokens.len().min(MAX_QUERY_WORDS)];
-        let mut terms = Vec::new();
+        let mut labels = Vec::new();
+        let mut aliases = Vec::new();
         for start in 0..tokens.len() {
             let mut key = String::new();
             for end in start..tokens.len() {
@@ -2163,12 +2287,14 @@ impl Searcher {
                 if goes_on {
                     continue;
                 }
-                terms.push(Term::from_field_text(self.fields.label_key, &key));
-                terms.push(Term::from_field_text(self.fields.alias_key, &key));
+                labels.push(Term::from_field_text(self.fields.label_key, &key));
+                aliases.push(Term::from_field_text(self.fields.alias_key, &key));
             }
         }
-        named.extend(matching_docs(searcher, terms)?);
-        Ok(named)
+        let by_alias = matching_docs(searcher, aliases)?;
+        let mut named = matching_docs(searcher, labels)?;
+        named.extend(by_alias.iter().copied());
+        Ok((named, by_alias))
     }
 
     /// Whether the document's title, description or Wikidata description
@@ -2426,6 +2552,19 @@ fn link_scores(searcher: &tantivy::Searcher, docs: &HashSet<DocAddress>) -> Vec<
     scores
 }
 
+/// The domain of the site at `addr`.
+fn domain_of(searcher: &tantivy::Searcher, addr: DocAddress) -> Option<String> {
+    let column = searcher
+        .segment_reader(addr.segment_ord)
+        .fast_fields()
+        .str(schema::DOMAIN)
+        .ok()??;
+    let ord = column.term_ords(addr.doc_id).next()?;
+    let mut domain = String::new();
+    column.ord_to_str(ord, &mut domain).ok()?;
+    Some(domain)
+}
+
 /// A candidate with its blended score.
 struct Ranked {
     addr: DocAddress,
@@ -2600,12 +2739,13 @@ fn without_copies(hits: Vec<Hit>, typed: Option<&str>, home: Option<&str>) -> Ve
         // namesake whose title does not name the brand (hm.com of hm.edu)
         // nor when it is well known: no title is then a gap in the crawl
         // (abc.net.au next to abc.com, weather.com next to weather.gov).
-        // Endings used as generic ones (.io, .me, .co) are not countries'.
+        // Endings used as generic ones (.io, .me, .co) are not countries',
+        // but the same ending under a country's own (.com.co, Colombia's;
+        // .com.ai) still is.
         let country = |suffix: &str| {
-            suffix
-                .rsplit('.')
-                .next()
-                .is_some_and(|tld| tld.len() == 2 && !GENERIC_COUNTRY_ENDINGS.contains(&tld))
+            suffix.rsplit('.').next().is_some_and(|tld| {
+                tld.len() == 2 && (suffix.contains('.') || !GENERIC_COUNTRY_ENDINGS.contains(&tld))
+            })
         };
         let same_brand = |other: &Hit| {
             brand_label(&other.domain).is_some_and(|(l, s)| {
@@ -3022,8 +3162,8 @@ impl ParsedQuery {
     }
 
     /// Which of `docs` lack one of the query's main words: those other
-    /// than [`FILLER_WORDS`] and [`FUNCTION_WORDS`]. None for a query of
-    /// one main word or fewer.
+    /// than [`FILLER_WORDS`] and [`plumb_core::FUNCTION_WORDS`]. None for a
+    /// query of one main word or fewer.
     fn missing_main_words(
         &self,
         searcher: &tantivy::Searcher,
@@ -4227,6 +4367,54 @@ mod tests {
     }
 
     #[test]
+    fn an_official_site_is_named_inside_by_its_wikidata_name_only() {
+        let bank = Signals {
+            official_site: true,
+            ..obscure(300_000, 40)
+        };
+        let mut valley = site(
+            "valley.com",
+            Some("Valley Bank"),
+            None,
+            &["Valley National Bank"],
+            &[],
+            bank,
+        );
+        valley.about = Some("American bank".to_string());
+        let records = vec![
+            valley,
+            site(
+                "elephantnaturepark.org",
+                Some("Elephant Nature Park"),
+                Some("An elephant sanctuary in a valley near Chiang Mai."),
+                &[],
+                &[],
+                obscure(400_000, 20),
+            ),
+        ];
+        let (_dir, searcher) = build(&records);
+        let options = SearchOptions::default();
+        let meaning = near_and_far(&[("elephantnaturepark.org", 1.0)], &[("valley.com", 0.05)]);
+        let found = |query: &str| {
+            let hits = searcher
+                .search_meaning(query, 10, &RankConfig::default(), &options, Some(&meaning))
+                .unwrap()
+                .hits;
+            domains(&hits)
+                .into_iter()
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        };
+        let elephant = found("elephant valley");
+        assert!(
+            !elephant.contains(&"valley.com".to_string()),
+            "{elephant:?}"
+        );
+        let routing = found("routing number valley national bank");
+        assert!(routing.contains(&"valley.com".to_string()), "{routing:?}");
+    }
+
+    #[test]
     fn a_misspelled_name_keeps_the_site_meaning_finds_for_it() {
         let records = vec![
             site(
@@ -4267,6 +4455,49 @@ mod tests {
             "{:?}",
             domains(&found.hits)
         );
+    }
+
+    #[test]
+    fn the_candidate_pool_says_where_each_site_came_from() {
+        let records = vec![
+            site(
+                "tesla.com",
+                None,
+                None,
+                &["Tesla"],
+                &[],
+                popular(500, 20_000),
+            ),
+            site("electric.com", None, None, &[], &[], ranked(40_000, 200)),
+            site("carmaker.net", None, None, &[], &[], ranked(90_000, 50)),
+        ];
+        let (_dir, searcher) = build(&records);
+        let cfg = RankConfig::default();
+        let options = SearchOptions::default();
+        let meaning = FixedMeaning(vec![("tesla.com", 0.9)]);
+        let pool = searcher
+            .candidate_pool("electric car maker", &cfg, &options, Some(&meaning))
+            .unwrap();
+        assert_eq!(pool.words, ["electric.com"], "{pool:?}");
+        assert_eq!(pool.meaning, ["tesla.com"], "{pool:?}");
+        assert!(pool.has("tesla.com") && !pool.has("carmaker.net"));
+        let pool = searcher
+            .candidate_pool("tesla", &cfg, &options, Some(&meaning))
+            .unwrap();
+        assert_eq!(pool.named, ["tesla.com"], "{pool:?}");
+        assert!(pool.meaning.is_empty(), "a name is not searched by meaning");
+
+        let found = searcher
+            .words_order(
+                "electric car",
+                10,
+                &cfg,
+                &["electric.com".into(), "tesla.com".into()],
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.order, ["electric.com"]);
+        assert!(found.matched.contains("electric.com") && !found.matched.contains("tesla.com"));
     }
 
     #[test]
@@ -5755,6 +5986,39 @@ mod tests {
         let (_dir, searcher) = build(&records);
         let hits = searcher.search("cbc", 10).unwrap();
         assert!(domains(&hits).contains(&"cbc.ca"), "{:?}", domains(&hits));
+        // .co alone is a generic ending, but .com.co is Colombia's: Pizza
+        // Hut Colombia is the brand again next to pizzahut.com.
+        let records = [
+            site(
+                "pizzahut.com",
+                Some("Pizza Hut"),
+                None,
+                &[],
+                &[],
+                popular(200, 600),
+            ),
+            site(
+                "pizzahut.com.co",
+                Some("Pizza Hut Colombia"),
+                None,
+                &[],
+                &[],
+                popular(9_000, 20),
+            ),
+            site(
+                "pizzahut.co",
+                Some("Pizza Hut Deals"),
+                None,
+                &[],
+                &[],
+                popular(9_500, 20),
+            ),
+        ];
+        let (_dir, searcher) = build(&records);
+        let hits = searcher.search("pizza hut", 10).unwrap();
+        let order = domains(&hits);
+        assert!(order.contains(&"pizzahut.com"), "{order:?}");
+        assert!(!order.contains(&"pizzahut.com.co"), "{order:?}");
         assert_eq!(brand_label("google.co.uk"), Some(("google", "co.uk")));
         assert_eq!(brand_label("news.ycombinator.com"), None);
     }
@@ -7197,7 +7461,8 @@ mod tests {
             ("Jockey silks", 25),
             ("Jocky silks", 2),
             ("Perf1 benchmark", 80),
-            ("Perft results", 3),
+            ("Perft results", 1),
+            ("Erft cycling", 25),
             ("Ikala karaoke", 80),
             ("Inkala sudoku", 3),
             ("Kanye West albums", 40),
@@ -7278,7 +7543,9 @@ mod tests {
     #[test]
     fn rare_terms_that_are_meant_stay() {
         let (_dir, searcher) = build(&spelling_corpus());
-        // A word without digits is no slip of one with them.
+        // A word without digits is no slip of one with them, and a word
+        // one site says is no slip of a common word with another first
+        // letter ("erft").
         assert_eq!(
             spelled_with(&searcher, "perft", &RankConfig::default()),
             None

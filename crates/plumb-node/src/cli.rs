@@ -340,8 +340,8 @@ pub struct MeaningArgs {
     #[arg(long, value_name = "DIR", requires = "vectors")]
     pub model: Option<PathBuf>,
     /// Whether searches are embedded after the model's instruction for
-    /// search queries ([`QueryInstruction`]); for trying it out.
-    #[arg(long, value_enum, default_value_t = QueryInstruction::Off, hide = true)]
+    /// search queries ([`QueryInstruction`]); for trying the others out.
+    #[arg(long, value_enum, default_value_t = QueryInstruction::Split, hide = true)]
     pub query_instruction: QueryInstruction,
 }
 
@@ -351,7 +351,6 @@ pub struct MeaningArgs {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
 pub enum QueryInstruction {
     /// As it is, for the nearest sites and their closeness.
-    #[default]
     Off,
     /// After the instruction, for both.
     On,
@@ -360,7 +359,12 @@ pub enum QueryInstruction {
     /// Both ways, closeness being the lower of the two.
     Min,
     /// After the instruction for ranking sites; as it is for deciding
-    /// whether a page goes before them.
+    /// whether a page goes before them. What nodes do: searches that
+    /// describe a site find it more often this way (described 25% to 31%
+    /// first by the hand-made order; with the learned ranking retrained
+    /// on it, 47% to 50% on the held-out half, all searches 76.1% to
+    /// 76.6%).
+    #[default]
     Split,
 }
 
@@ -1246,6 +1250,14 @@ pub struct EvalArgs {
     /// scored: final score, text match, link score and closeness in meaning.
     #[arg(long)]
     pub explain: bool,
+    /// Measure where each query's answer is lost before ranking instead:
+    /// whether it is in the index or a page set at all, how far down the
+    /// sites matching the query's words (first 50, 100, 1,000, 10,000) or
+    /// nearest in meaning it is, or the pages found, and whether the
+    /// ranking looked at it. Prints one line per query not answered in the
+    /// first --limit and a table per file.
+    #[arg(long, conflicts_with_all = ["sweep", "facts", "features_out"])]
+    pub recall: bool,
     /// Print the first N results of every query, hit or miss: each site's
     /// domain (with the pages shown under it) or page's address.
     #[arg(long, value_name = "N", default_value_t = 0)]
