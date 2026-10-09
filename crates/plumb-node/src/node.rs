@@ -2073,6 +2073,16 @@ impl SearchBackend for Inner {
         pages::definition(self, name)
     }
 
+    fn pages_of(
+        &self,
+        query: &str,
+        limit: usize,
+        options: &SearchOptions,
+        keep: &dyn Fn(&plumb_index::pages::Page) -> bool,
+    ) -> Vec<plumb_index::pages::PageHit> {
+        pages::pages_of(self, query, limit, options, keep)
+    }
+
     fn num_docs(&self) -> u64 {
         self.current_summary().map_or(0, |(_, docs)| docs)
     }

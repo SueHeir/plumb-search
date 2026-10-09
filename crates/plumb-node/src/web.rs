@@ -301,6 +301,21 @@ pub trait SearchBackend: Send + Sync {
         let _ = name;
         None
     }
+
+    /// The best `limit` pages for `query` that `keep` keeps, best first,
+    /// when the node keeps page sets: for a search that asks for one kind
+    /// of page (`kind` of MCP's `search`). Search operators and `options`
+    /// narrow them as they narrow the pages of a search. By default none.
+    fn pages_of(
+        &self,
+        query: &str,
+        limit: usize,
+        options: &SearchOptions,
+        keep: &dyn Fn(&plumb_index::pages::Page) -> bool,
+    ) -> Vec<plumb_index::pages::PageHit> {
+        let _ = (query, limit, options, keep);
+        Vec::new()
+    }
 }
 
 /// A [`Searcher`] with fixed ranking settings.
