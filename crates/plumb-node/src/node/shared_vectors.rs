@@ -30,6 +30,8 @@ const SET_PREFIX: &str = "vectors-";
 pub(super) const PART_FILE: &str = "vectors-taken.bin.part";
 /// Wait after a node said it was busy.
 const BUSY_WAIT: Duration = Duration::from_secs(5);
+/// Vectors taken that are put in at once.
+const PUT_IN_AT_ONCE: usize = 10_000;
 
 /// The set name of the vectors made by `model`.
 pub(super) fn set_name(model: &ModelId) -> String {
@@ -193,31 +195,33 @@ fn keep(
             meaning.embedder().text_words(),
         )?
     };
-    // Read first, then put in: search by meaning waits on the lock, not
-    // on reading the whole file.
+    // Read a batch, then put it in: search by meaning waits on the lock,
+    // not on reading the file, and only a batch is held twice.
     let mut taken = Vec::new();
-    Vectors::for_each_in(part, |domain, hash, vector| {
-        if wanted.get(domain) == Some(hash) {
-            taken.push((domain.to_string(), *hash, vector.to_vec()));
-        }
-        Ok(())
-    })?;
-    let kept = taken.len();
-    {
+    let mut kept = 0;
+    let mut put_in = |taken: &mut Vec<(String, plumb_embed::TextHash, Vec<i8>)>| {
         let mut vectors = meaning
             .vectors()
             .write()
             .unwrap_or_else(PoisonError::into_inner);
-        for (domain, hash, vector) in taken {
+        for (domain, hash, vector) in taken.drain(..) {
             vectors.insert(&domain, hash, &vector)?;
+            kept += 1;
         }
-    }
+        anyhow::Ok(())
+    };
+    Vectors::for_each_in(part, |domain, hash, vector| {
+        if wanted.get(domain) == Some(hash) {
+            taken.push((domain.to_string(), *hash, vector.to_vec()));
+            if taken.len() >= PUT_IN_AT_ONCE {
+                put_in(&mut taken)?;
+            }
+        }
+        Ok(())
+    })?;
+    put_in(&mut taken)?;
     if kept > 0 {
-        meaning
-            .vectors()
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .save(vectors_path)?;
+        Vectors::save_shared(meaning.vectors(), vectors_path)?;
     }
     info!(
         "search by meaning: kept {kept} site vectors from {from} ({} wanted)",

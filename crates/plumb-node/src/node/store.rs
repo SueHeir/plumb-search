@@ -126,8 +126,10 @@ pub(super) fn lock(paths: &Paths) -> Result<Option<DirLock>> {
 }
 
 /// Removes what interrupted work left behind, best effort: hidden staging
-/// directories in `indexes/`, temporary records, state and vectors files,
-/// and partial downloads of the seed data and the model. Only call it while holding the [`DirLock`].
+/// directories in `indexes/`, those of the page and place indexes in
+/// `pages/`, temporary records, state and vectors files, and partial
+/// downloads of the seed data and the model. Only call it while holding the
+/// [`DirLock`], before anything starts building.
 pub(super) fn remove_leftovers(paths: &Paths) {
     let temp_prefixes = [
         format!(".{RECORDS_FILE}."),
@@ -155,6 +157,17 @@ pub(super) fn remove_leftovers(paths: &Paths) {
         if name.starts_with('.') {
             remove_leftover(&paths.indexes.join(name));
         }
+    }
+    // A page or place index whose build was cut short, by a crash or a
+    // restart, is named for sets that may have changed since, so no later
+    // build would come across it.
+    match plumb_index::remove_build_leftovers(&paths.data.join(crate::pages::PAGES_DIR)) {
+        Ok(removed) => {
+            for path in removed {
+                info!("removed {}, left over from an earlier run", path.display());
+            }
+        }
+        Err(err) => warn!("{err:#}"),
     }
 }
 
@@ -446,6 +459,20 @@ mod tests {
         fs::create_dir_all(paths.indexes.join(".000003.new-99-0")).unwrap();
         fs::write(paths.indexes.join(".000003.new-99-0/meta.json"), "{}").unwrap();
         fs::create_dir_all(paths.indexes.join("000002")).unwrap();
+        // Page and place indexes cut short, named for sets that changed
+        // since; the current ones and the set files stay.
+        let pages = dir.path().join(crate::pages::PAGES_DIR);
+        for name in [
+            ".index-5de8bfa68fa8dc17.new-7-2",
+            ".index-01f2421460ce3a31.new-6-4",
+            ".places-1d0bc8d3eb4d17ec.new-7-0",
+            "index-50c6c41fb10e4efa",
+            "places-1d0bc8d3eb4d17ec",
+            "sets",
+        ] {
+            fs::create_dir_all(pages.join(name)).unwrap();
+            fs::write(pages.join(name).join("meta.json"), "{}").unwrap();
+        }
         fs::create_dir_all(&paths.seed).unwrap();
         fs::create_dir_all(dir.path().join("model")).unwrap();
         for file in [
@@ -464,6 +491,10 @@ mod tests {
         }
         remove_leftovers(&paths);
         assert_eq!(names(&paths.indexes), ["000002"]);
+        assert_eq!(
+            names(&pages),
+            ["index-50c6c41fb10e4efa", "places-1d0bc8d3eb4d17ec", "sets"]
+        );
         assert_eq!(names(&paths.seed), ["tranco-top-1m.csv.zip"]);
         assert_eq!(names(&dir.path().join("model")), ["config.json"]);
         assert_eq!(
@@ -472,6 +503,7 @@ mod tests {
                 ".hidden-by-the-user",
                 "indexes",
                 "model",
+                "pages",
                 "records.jsonl",
                 "seed",
                 "state.json"
