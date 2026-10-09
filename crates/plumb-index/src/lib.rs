@@ -375,9 +375,11 @@ pub struct RankConfig {
     pub link_names: bool,
     /// Added instead of the alias bonus when a link text names the site
     /// ([`RankConfig::link_names`]), and `k / n` of it for one equal to the
-    /// first `k` words. As much as the label bonus: when most of the sites
-    /// linking with "steam" link to steampowered.com, that names it as
-    /// surely as steam.tv's domain names steam.tv.
+    /// first `k` words. More than the label bonus: when most of the sites
+    /// linking with "steam" link to steampowered.com, that names it more
+    /// surely than steam.tv's domain names steam.tv. 0.4 did best of 0.1,
+    /// 0.25 and 0.4 on the test searches (brand 93.4% to 94.9% first on
+    /// the tune half, 93.7% to 94.7% on the held-out one).
     pub link_name_bonus: f32,
 }
 
@@ -408,7 +410,7 @@ impl Default for RankConfig {
             drop_namesakes: false,
             learned: true,
             link_names: true,
-            link_name_bonus: 0.25,
+            link_name_bonus: 0.4,
         }
     }
 }
