@@ -101,6 +101,9 @@ impl Place {
         let mut words = vec![kind_label(&self.kind)];
         words.extend(kind_info(&self.kind).map(|k| k.2.to_string()));
         for tag in &self.tags {
+            if tag == BREWERY_TAG && !brews_where_served(&self.kind) {
+                continue;
+            }
             words.extend(kind_info(tag).map(|k| format!("{} {}", k.1, k.2)));
             if let Some(cuisine) = tag.strip_prefix("cuisine=") {
                 words.push(cuisine.replace('_', " "));
@@ -474,7 +477,11 @@ const KINDS: &[KindInfo] = &[
     ("historic=palace", "Palace", ""),
     ("aeroway=aerodrome", "Airport", "airfield"),
     ("railway=station", "Train station", "railway station train"),
-    ("craft=brewery", "Brewery", "beer"),
+    (
+        "craft=brewery",
+        "Brewery",
+        "beer brewpub brewpubs taproom microbrewery",
+    ),
     ("craft=winery", "Winery", "wine"),
     ("craft=distillery", "Distillery", "spirits"),
     ("craft=plumber", "Plumber", "plumbing"),
@@ -531,6 +538,25 @@ const KINDS: &[KindInfo] = &[
     ("cuisine=american", "American", ""),
     ("cuisine=tex-mex", "Tex-Mex", "mexican"),
 ];
+
+/// The tag of a place that brews its own beer: a brewpub or taproom.
+pub const BREWERY_TAG: &str = "craft=brewery";
+
+/// Whether a place of `kind` with `craft=brewery` or `microbrewery=yes` is
+/// a brewpub: somewhere that serves drinks or food. Elsewhere the tag is a
+/// mapping slip (a vet clinic in Denver carries it).
+pub fn brews_where_served(kind: &str) -> bool {
+    matches!(
+        kind,
+        "amenity=pub"
+            | "amenity=bar"
+            | "amenity=biergarten"
+            | "amenity=restaurant"
+            | "amenity=cafe"
+            | "amenity=fast_food"
+            | "amenity=nightclub"
+    )
+}
 
 /// What `kind` is called and the other words for it, when it is listed.
 fn kind_info(kind: &str) -> Option<&'static KindInfo> {
@@ -668,6 +694,14 @@ mod tests {
         };
         assert_eq!(pizza.label(), "Pizza restaurant");
         assert!(cafe().kind_words().contains("coffee"));
+        // A brewpub is found as one; a vet clinic tagged as a brewery is not.
+        let mut pub_ = cafe();
+        pub_.kind = "amenity=pub".into();
+        pub_.tags = vec![BREWERY_TAG.into()];
+        assert!(pub_.kind_words().contains("brewpub"));
+        let mut vet = pub_.clone();
+        vet.kind = "amenity=veterinary".into();
+        assert!(!vet.kind_words().contains("brew"));
         for word in [
             "pizza", "coffee", "hotels", "cafe", "gas", "museums", "sushi",
         ] {

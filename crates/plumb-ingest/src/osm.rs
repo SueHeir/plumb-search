@@ -23,8 +23,8 @@ use anyhow::{Context, Result};
 use osmpbf::{Element, ElementReader, RelMemberType};
 use plumb_core::normalize_country;
 use plumb_core::place::{
-    distance_km, normalize_region, place_rank, Place, MAX_PLACE_ALIASES, MAX_PLACE_NAME_CHARS,
-    MAX_WEBSITE_CHARS,
+    brews_where_served, distance_km, normalize_region, place_rank, Place, BREWERY_TAG,
+    MAX_PLACE_ALIASES, MAX_PLACE_NAME_CHARS, MAX_WEBSITE_CHARS,
 };
 use tracing::info;
 
@@ -194,10 +194,10 @@ fn place_of(tags: &[(&str, &str)], osm: String, node: bool) -> Option<Place> {
     place_tags.truncate(4);
     // A pub that brews its own ("brewery in denver"), and what a sports
     // centre is for ("climbing gym").
-    if !kind.starts_with("craft=")
+    if brews_where_served(&kind)
         && (get("craft") == Some("brewery") || get("microbrewery") == Some("yes"))
     {
-        place_tags.push("craft=brewery".to_string());
+        place_tags.push(BREWERY_TAG.to_string());
     }
     if let Some(sports) = get("sport") {
         for sport in sports
