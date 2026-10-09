@@ -113,6 +113,7 @@ pub mod features;
 mod fill;
 pub mod journal;
 mod network;
+mod newer;
 mod news;
 mod pages;
 mod places;
