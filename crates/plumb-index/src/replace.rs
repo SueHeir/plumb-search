@@ -16,14 +16,24 @@
 //! The swap is two renames, so a crash between them leaves both copies on
 //! disk under their hidden names and nothing at the target. The next build
 //! puts the old copy back first, and deletes what other crashed builds left
-//! behind ([`tidy`]). Renaming also means the target cannot be a mount
-//! point; mount its parent instead.
+//! behind ([`tidy`]). That only reaches the leftovers of the directory being
+//! built, so a program that is the only one to build in a directory also
+//! calls [`remove_build_leftovers`] when it starts, for the leftovers of
+//! directories it no longer builds. Renaming also means the target cannot be
+//! a mount point; mount its parent instead.
+//!
+//! The hidden names carry the id of the process that made them, but an id
+//! alone does not say whose a directory is: a node in a container has the
+//! same id every time it starts. So a process keeps a list of the names it
+//! uses ([`Claim`]), and only those count as its own.
 
+use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
@@ -54,6 +64,9 @@ pub(crate) struct Staging {
     /// Where it goes once complete.
     target: PathBuf,
     installed: bool,
+    /// Keeps tidying from taking it for a leftover. Dropped after the
+    /// directory is deleted or installed.
+    _claim: Claim,
 }
 
 impl Staging {
@@ -72,12 +85,14 @@ impl Staging {
         fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
         loop {
             let path = sibling(&target, "new")?;
+            let claim = Claim::new(&path);
             match fs::create_dir(&path) {
                 Ok(()) => {
                     return Ok(Staging {
                         path,
                         target,
                         installed: false,
+                        _claim: claim,
                     })
                 }
                 Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
@@ -119,6 +134,7 @@ fn swap(new: &Path, dir: &Path) -> Result<()> {
     let old = match fs::symlink_metadata(dir) {
         Ok(_) => {
             let old = unused_sibling(dir, "old")?;
+            let claim = Claim::new(&old);
             if let Err(err) = fs::rename(dir, &old) {
                 let busy = err.kind() == io::ErrorKind::ResourceBusy;
                 let err =
@@ -134,7 +150,7 @@ fn swap(new: &Path, dir: &Path) -> Result<()> {
                 }
                 return Err(err);
             }
-            Some(old)
+            Some((old, claim))
         }
         Err(err) if err.kind() == io::ErrorKind::NotFound => None,
         Err(err) => return Err(err).with_context(|| format!("reading {}", dir.display())),
@@ -142,7 +158,7 @@ fn swap(new: &Path, dir: &Path) -> Result<()> {
     if let Err(err) = fs::rename(new, dir) {
         let err =
             anyhow::Error::new(err).context(format!("moving the new index into {}", dir.display()));
-        if let Some(old) = old {
+        if let Some((old, _claim)) = old {
             if let Err(restore) = fs::rename(&old, dir) {
                 return Err(err.context(format!(
                     "could not move the old index back from {} ({restore})",
@@ -155,7 +171,7 @@ fn swap(new: &Path, dir: &Path) -> Result<()> {
     // The renames are entries of the parent: sync it before deleting the
     // old index, so a crash cannot bring the old name back without it.
     sync_dir(parent_of(dir));
-    if let Some(old) = old {
+    if let Some((old, _claim)) = old {
         fs::remove_dir_all(&old).with_context(|| {
             format!(
                 "the new index is in {}, but the old one could not be deleted from {}",
@@ -175,64 +191,180 @@ const LEFTOVER_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 /// when a crash between [`swap`]'s renames left nothing at `dir`, then
 /// deletes staging and old directories that no running build still uses.
 fn tidy(dir: &Path) -> Result<()> {
-    let mut leftovers = Vec::new();
-    match fs::read_dir(parent_of(dir)) {
-        Ok(entries) => {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if let Some(tag) = leftover(dir, &entry.file_name()) {
-                    leftovers.push((tag, path));
-                }
-            }
-        }
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(err) => return Err(err).with_context(|| format!("reading {}", dir.display())),
-    }
-    if matches!(fs::symlink_metadata(dir), Err(err) if err.kind() == io::ErrorKind::NotFound) {
-        let old = leftovers
-            .iter()
-            .filter(|(tag, path)| tag == "old" && holds_index(path))
-            .max_by_key(|(_, path)| fs::metadata(path).and_then(|m| m.modified()).ok());
-        if let Some((_, old)) = old {
-            fs::rename(old, dir)
-                .with_context(|| format!("moving the old index back from {}", old.display()))?;
-            sync_dir(parent_of(dir));
-        }
-    }
-    for (_, path) in leftovers {
-        if fs::symlink_metadata(&path).is_ok() {
-            // Best effort, like dropping a [`Staging`].
-            let _ = fs::remove_dir_all(&path);
-        }
-    }
+    let name = dir_name(dir)?;
+    clean_up(parent_of(dir), |target, pid, path| {
+        target == name && !may_be_in_use(pid, path)
+    })?;
     Ok(())
 }
 
-/// The tag (`new` or `old`) of `name` when it is a [`sibling`] of `dir`
-/// that no running process uses: one made by another process that has
-/// exited, or, where that cannot be told, one untouched for
-/// [`LEFTOVER_AGE`].
-fn leftover(dir: &Path, name: &OsStr) -> Option<String> {
+/// Cleans up after every build in `parent` that did not finish, whatever
+/// directory it was building and whichever process made it: puts old
+/// indexes back where a crash between [`swap`]'s renames left nothing, then
+/// deletes the other staging and old directories. Returns the directories
+/// deleted.
+///
+/// Only the builds of this process are left alone, so call it only where
+/// no other process can be building in `parent`, such as a node's own data
+/// directory while it holds the directory's lock. Unlike the cleanup each
+/// build does, it does not need to tell whether another process still runs,
+/// which a process id alone cannot (see the module docs).
+pub fn remove_build_leftovers(parent: &Path) -> Result<Vec<PathBuf>> {
+    clean_up(parent, |_, _, path| !Claim::held(path))
+}
+
+/// The staging and old directories in `parent` that `abandoned` picks, given
+/// the name of the directory each was for, the id of the process that made
+/// it and its path: puts the newest old copy that holds an index back where
+/// its directory is missing, and deletes the others. Returns the
+/// directories deleted; ones that cannot be deleted are left, as a leftover
+/// only wastes space.
+fn clean_up(parent: &Path, abandoned: impl Fn(&OsStr, u32, &Path) -> bool) -> Result<Vec<PathBuf>> {
+    let mut leftovers: BTreeMap<OsString, Vec<(Tag, PathBuf)>> = BTreeMap::new();
+    match fs::read_dir(parent) {
+        Ok(entries) => {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let Some((target, tag, pid)) = parse_sibling(&name) else {
+                    continue;
+                };
+                // Never followed: only directories are made with these names.
+                if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                    continue;
+                }
+                let path = entry.path();
+                if abandoned(target, pid, &path) {
+                    let found = (tag, path);
+                    leftovers.entry(target.to_owned()).or_default().push(found);
+                }
+            }
+        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(err).with_context(|| format!("reading {}", parent.display())),
+    }
+    let mut removed = Vec::new();
+    for (target, paths) in leftovers {
+        let dir = parent.join(&target);
+        if matches!(fs::symlink_metadata(&dir), Err(err) if err.kind() == io::ErrorKind::NotFound) {
+            let old = paths
+                .iter()
+                .filter(|(tag, path)| *tag == Tag::Old && holds_index(path))
+                .max_by_key(|(_, path)| fs::metadata(path).and_then(|m| m.modified()).ok());
+            if let Some((_, old)) = old {
+                fs::rename(old, &dir)
+                    .with_context(|| format!("moving the old index back from {}", old.display()))?;
+                sync_dir(parent);
+            }
+        }
+        for (_, path) in paths {
+            // Best effort, like dropping a [`Staging`].
+            if fs::symlink_metadata(&path).is_ok() && fs::remove_dir_all(&path).is_ok() {
+                removed.push(path);
+            }
+        }
+    }
+    Ok(removed)
+}
+
+/// Which of the two kinds of hidden directory a [`sibling`] is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Tag {
+    /// A new index being built ([`Staging`]).
+    New,
+    /// The index it replaces, moved aside during [`swap`].
+    Old,
+}
+
+/// The parts of a [`sibling`]'s name: `.index.new-12-0` -> the name of the
+/// directory it is for (`index`), its tag and the id of the process that
+/// made it (12). `None` for any other name.
+fn parse_sibling(name: &OsStr) -> Option<(&OsStr, Tag, u32)> {
     let name = name.to_str()?;
-    let rest = name
-        .strip_prefix('.')?
-        .strip_prefix(dir_name(dir).ok()?.to_str()?)?
-        .strip_prefix('.')?;
+    let (target, rest) = name.strip_prefix('.')?.rsplit_once('.')?;
     let (tag, ids) = rest.split_once('-')?;
     let (pid, n) = ids.split_once('-')?;
-    let pid: u32 = pid.parse().ok()?;
-    if !matches!(tag, "new" | "old") || n.parse::<u64>().is_err() || pid == std::process::id() {
+    let tag = match tag {
+        "new" => Tag::New,
+        "old" => Tag::Old,
+        _ => return None,
+    };
+    if target.is_empty() || n.parse::<u64>().is_err() {
         return None;
     }
-    let gone = if cfg!(target_os = "linux") {
-        !Path::new("/proc").join(pid.to_string()).exists()
-    } else {
-        let path = parent_of(dir).join(name);
-        fs::metadata(path)
-            .and_then(|meta| meta.modified())
-            .is_ok_and(|time| time.elapsed().is_ok_and(|age| age > LEFTOVER_AGE))
-    };
-    gone.then(|| tag.to_string())
+    Some((OsStr::new(target), tag, pid.parse().ok()?))
+}
+
+/// Whether a running build may still use the [`sibling`] at `path`, made
+/// by process `pid`: one this process holds a [`Claim`] on, or one made by
+/// another process that still runs or, where that cannot be told, that
+/// changed within [`LEFTOVER_AGE`].
+///
+/// A name with this process's id that it holds no claim on was made by an
+/// earlier process with the same id, as a node in a container gets the same
+/// id every time it starts.
+fn may_be_in_use(pid: u32, path: &Path) -> bool {
+    if pid == std::process::id() {
+        return Claim::held(path);
+    }
+    if cfg!(target_os = "linux") {
+        return is_running(pid);
+    }
+    fs::metadata(path)
+        .and_then(|meta| meta.modified())
+        .map_or(true, |time| {
+            time.elapsed().map_or(true, |age| age <= LEFTOVER_AGE)
+        })
+}
+
+/// Whether a process with id `pid` runs, on Linux. `/proc` also has an
+/// entry for every thread, under the thread's own id, so a thread whose id
+/// matches does not count. When the entry cannot be read for another
+/// reason than its absence, the process may run.
+fn is_running(pid: u32) -> bool {
+    match fs::read_to_string(format!("/proc/{pid}/status")) {
+        Ok(status) => status
+            .lines()
+            .find_map(|line| line.strip_prefix("Tgid:"))
+            .and_then(|tgid| tgid.trim().parse::<u32>().ok())
+            .is_none_or(|tgid| tgid == pid),
+        Err(err) => err.kind() != io::ErrorKind::NotFound,
+    }
+}
+
+/// The names of the [`sibling`]s this process uses now.
+static CLAIMED: Mutex<Vec<OsString>> = Mutex::new(Vec::new());
+
+/// A [`sibling`] this process uses, which tidying leaves alone until the
+/// claim is dropped. Taken before the directory is made or renamed to that
+/// name, and dropped after it is gone. A name is enough to tell, as
+/// [`sibling`] never gives one twice within a process.
+struct Claim(OsString);
+
+impl Claim {
+    fn new(path: &Path) -> Claim {
+        let name = path.file_name().unwrap_or_default().to_owned();
+        Claim::names().push(name.clone());
+        Claim(name)
+    }
+
+    /// Whether this process holds a claim on the name of `path`.
+    fn held(path: &Path) -> bool {
+        path.file_name()
+            .is_some_and(|name| Claim::names().iter().any(|held| held == name))
+    }
+
+    fn names() -> std::sync::MutexGuard<'static, Vec<OsString>> {
+        CLAIMED.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+impl Drop for Claim {
+    fn drop(&mut self) {
+        let mut names = Claim::names();
+        if let Some(at) = names.iter().position(|name| *name == self.0) {
+            names.swap_remove(at);
+        }
+    }
 }
 
 /// Whether `dir` holds a complete index: marked, or a bare Tantivy index.
@@ -531,32 +663,173 @@ mod tests {
         pid
     }
 
+    /// The name of `path`, as text.
+    fn name_of(path: &Path) -> String {
+        path.file_name().unwrap().to_str().unwrap().to_string()
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn leftovers_of_crashed_builds_are_cleaned_up() {
         let root = TempDir::new().unwrap();
         let dir = root.path().join("index");
         fake_index(&dir, "current");
+        // A build under way in this process is kept.
+        let running = Staging::new(&dir).unwrap();
         let dead = dead_pid();
         // A build killed mid-way, and one killed while deleting the old copy.
         fake_index(&root.path().join(format!(".index.new-{dead}-0")), "half");
         fake_index(&root.path().join(format!(".index.old-{dead}-1")), "older");
-        // A running build's, and things that only look alike, are kept.
-        let running = format!(".index.new-{}-0", std::process::id());
-        fs::create_dir(root.path().join(&running)).unwrap();
-        for name in [".index.new-x-0", ".other.new-1-0", "index.new-1-0"] {
+        // One made by an earlier process with this process's id, as a node
+        // in a container has every time it starts.
+        let me = std::process::id();
+        fake_index(
+            &root.path().join(format!(".index.new-{me}-{}", u64::MAX)),
+            "half",
+        );
+        // One of a process that still runs (1 always does), and things that
+        // only look alike, are kept.
+        let kept = [
+            ".index.new-1-0".to_string(),
+            ".index.new-x-0".to_string(),
+            ".other.new-1-0".to_string(),
+            "index.new-1-0".to_string(),
+        ];
+        for name in &kept {
             fs::create_dir(root.path().join(name)).unwrap();
         }
+        let file = format!(".index.new-{dead}-2");
+        fs::write(root.path().join(&file), "not a directory").unwrap();
         let staging = Staging::new(&dir).unwrap();
-        let mut left = entries(root.path());
-        left.retain(|name| !name.starts_with(&running) || *name == running);
-        let staged = staging.path().file_name().unwrap().to_str().unwrap();
-        let mut expected = vec![".index.new-x-0", ".other.new-1-0", "index", "index.new-1-0"];
-        expected.push(staged);
-        expected.push(&running);
+        let mut expected = kept.to_vec();
+        expected.extend([
+            file,
+            "index".to_string(),
+            name_of(running.path()),
+            name_of(staging.path()),
+        ]);
         expected.sort();
-        assert_eq!(left, expected);
+        assert_eq!(entries(root.path()), expected);
         assert_eq!(entries(&dir), [MARKER, "current"]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_thread_is_not_a_running_process() {
+        // `/proc` has an entry under every thread's id too.
+        let (send, receive) = std::sync::mpsc::channel();
+        let (stop, stopped) = std::sync::mpsc::channel::<()>();
+        let thread = std::thread::spawn(move || {
+            let link = fs::read_link("/proc/thread-self").unwrap();
+            send.send(name_of(&link).parse::<u32>().unwrap()).unwrap();
+            let _ = stopped.recv();
+        });
+        let thread_id = receive.recv().unwrap();
+        assert_ne!(thread_id, std::process::id());
+        assert!(Path::new("/proc").join(thread_id.to_string()).exists());
+        assert!(!is_running(thread_id));
+        assert!(is_running(std::process::id()));
+        assert!(!is_running(dead_pid()));
+        stop.send(()).unwrap();
+        thread.join().unwrap();
+    }
+
+    #[test]
+    fn leftovers_of_every_build_can_be_removed() {
+        let root = TempDir::new().unwrap();
+        let parent = root.path();
+        // Builds of indexes no longer wanted, whatever process made them.
+        let me = std::process::id();
+        let own_id = format!(".index-a.new-{me}-{}", u64::MAX);
+        fake_index(&parent.join(&own_id), "half");
+        fake_index(&parent.join(".index-b.new-1-0"), "half");
+        // A crash between the renames: the old copy goes back.
+        fake_index(&parent.join(".places-c.old-1-3"), "old");
+        fake_index(&parent.join(".places-c.new-1-4"), "new");
+        // A build under way in this process, and things that only look
+        // alike, are kept.
+        fake_index(&parent.join("index-d"), "current");
+        let running = Staging::new(&parent.join("index-d")).unwrap();
+        fs::create_dir(parent.join("sets")).unwrap();
+        fs::create_dir(parent.join(".index-e.new-x-0")).unwrap();
+        fs::write(parent.join(".index-f.new-1-0"), "not a directory").unwrap();
+
+        let mut removed = remove_build_leftovers(parent).unwrap();
+        removed.sort();
+        assert_eq!(
+            removed,
+            [
+                parent.join(own_id),
+                parent.join(".index-b.new-1-0"),
+                parent.join(".places-c.new-1-4"),
+            ]
+        );
+        let mut expected = vec![
+            ".index-e.new-x-0".to_string(),
+            ".index-f.new-1-0".to_string(),
+            "index-d".to_string(),
+            "places-c".to_string(),
+            "sets".to_string(),
+            name_of(running.path()),
+        ];
+        expected.sort();
+        assert_eq!(entries(parent), expected);
+        assert_eq!(entries(&parent.join("places-c")), [MARKER, "old"]);
+        assert_eq!(entries(&parent.join("index-d")), [MARKER, "current"]);
+
+        let path = running.path().to_path_buf();
+        assert!(Claim::held(&path));
+        drop(running);
+        assert!(!Claim::held(&path));
+        assert!(remove_build_leftovers(&parent.join("missing"))
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn claims_end_with_the_build() {
+        let root = TempDir::new().unwrap();
+        let dir = root.path().join("index");
+        fake_index(&dir, "old");
+        let staging = Staging::new(&dir).unwrap();
+        let path = staging.path().to_path_buf();
+        assert!(Claim::held(&path));
+        staging.install().unwrap();
+        assert!(!Claim::held(&path));
+        assert_eq!(entries(root.path()), ["index"]);
+    }
+
+    #[test]
+    fn sibling_names_parse() {
+        let parse = |name: &str| {
+            parse_sibling(OsStr::new(name))
+                .map(|(target, tag, pid)| (target.to_str().unwrap().to_string(), tag, pid))
+        };
+        assert_eq!(
+            parse(".index-5de8.new-7-2"),
+            Some(("index-5de8".to_string(), Tag::New, 7))
+        );
+        assert_eq!(
+            parse(".places.tsv.gz.index-1.old-12-0"),
+            Some(("places.tsv.gz.index-1".to_string(), Tag::Old, 12))
+        );
+        for name in [
+            "index.new-7-2",
+            "..new-7-2",
+            ".index.new-7",
+            ".index.new-7-x",
+            ".index.tmp-7-2",
+            ".000086-buckets.staging",
+            ".records.jsonl.99.tmp",
+        ] {
+            assert_eq!(parse(name), None, "{name}");
+        }
+        // A name made by [`sibling`] parses back.
+        let made = sibling(Path::new("/data/pages/index-ab"), "new").unwrap();
+        assert_eq!(
+            parse(&name_of(&made)),
+            Some(("index-ab".to_string(), Tag::New, std::process::id()))
+        );
     }
 
     #[cfg(target_os = "linux")]
