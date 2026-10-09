@@ -3641,6 +3641,31 @@ mod tests {
     }
 
     #[test]
+    fn summaries_stand_in_for_a_missing_description() {
+        let mut recipes = site("allrecipes.com", None, None, &[], &[], ranked(3_000, 500));
+        recipes.summary = Some("Allrecipes is a site where home cooks share recipes.".into());
+        let mut described = site(
+            "food.com",
+            None,
+            Some("Our own words"),
+            &[],
+            &[],
+            ranked(5_000, 400),
+        );
+        described.summary = Some("Food.com shares recipes from home cooks.".into());
+        let (_dir, searcher) = build(&[recipes, described]);
+        let hits = searcher.search("home cooks recipes", 10).unwrap();
+        let found = |domain: &str| hits.iter().find(|hit| hit.domain == domain);
+        assert_eq!(
+            found("allrecipes.com").and_then(|hit| hit.description.as_deref()),
+            Some("Allrecipes is a site where home cooks share recipes."),
+            "{hits:?}"
+        );
+        // A site's own description wins: its summary is not searched.
+        assert!(found("food.com").is_none(), "{hits:?}");
+    }
+
+    #[test]
     fn sites_that_redirect_name_the_site_they_redirect_to() {
         let mut lookalike = site(
             "pncbank.com",

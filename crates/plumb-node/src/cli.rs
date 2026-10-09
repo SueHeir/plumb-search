@@ -71,6 +71,9 @@ pub enum Command {
     /// Pick each site's search terms from its homepage text, made by
     /// `plumb fetch-text`, into the records (an experiment).
     Terms(crate::terms::TermsArgs),
+    /// One sentence about each well-known site with no text, written by a
+    /// language model: `pick` the sites, then `apply` the sentences.
+    Summaries(crate::summaries::SummariesArgs),
     /// Let the Plumb Search app on another computer change this node's
     /// settings: `on` makes a new token (shown once), `off` stops it.
     RemoteControl(RemoteControlArgs),

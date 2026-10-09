@@ -147,6 +147,13 @@ pub struct SiteRecord {
     /// developer platform that ...").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intro: Option<String>,
+    /// One sentence saying what the site is, written by a language model
+    /// for a well-known site that has no words of its own here (no
+    /// description, homepage text, terms or Wikidata/Wikipedia text; see
+    /// `plumb summaries`). Searched like the description, and only while
+    /// the site has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
     /// The site's own search address, with `{searchTerms}` where the words
     /// go (see [`search_link`]), read from a search form on its homepage.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -563,6 +570,7 @@ impl SiteRecord {
         self.country = self.country.take().or(other.country);
         self.about = self.about.take().or(other.about);
         self.intro = self.intro.take().or(other.intro);
+        self.summary = self.summary.take().or(other.summary);
         for kind in &other.kinds {
             self.add_kind(kind);
         }
