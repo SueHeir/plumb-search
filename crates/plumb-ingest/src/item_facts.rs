@@ -95,23 +95,35 @@ fn page_query(kind: FactKind, offset: usize) -> String {
                 ""
             },
             if kind.latest_only() {
-                " OPTIONAL { ?s pq:P580 ?t . }"
+                // `?dated`: whether any of the item's statements, ended
+                // ones too, says when it started.
+                format!(
+                    " OPTIONAL {{ ?s pq:P580 ?t . }} \
+                     BIND(EXISTS {{ ?item p:{p}/pq:P580 [] }} AS ?dated)"
+                )
             } else {
-                ""
+                String::new()
             }
         ),
         // A count has no unit to normalize.
         ValueType::Quantity if kind == FactKind::Population => {
             format!("psv:{p}/wikibase:quantityAmount ?v . OPTIONAL {{ ?s pq:P585 ?t . }}")
         }
-        // Metres and square metres, whatever unit the statement is in.
+        ValueType::Quantity if kind.unitless() => {
+            format!("psv:{p}/wikibase:quantityAmount ?v .")
+        }
+        // Metres, square metres and seconds, whatever unit the statement
+        // is in.
         ValueType::Quantity => format!("psn:{p}/wikibase:quantityAmount ?v ."),
+        // A WKT point, `Point(149.1269 -35.2931)`, with the globe first
+        // when it is not Earth.
+        ValueType::Coordinates => format!("ps:{p} ?v ."),
         ValueType::Time => {
             format!("psv:{p} ?tv . ?tv wikibase:timeValue ?v ; wikibase:timePrecision ?p .")
         }
     };
     format!(
-        "SELECT ?item ?v ?p ?t ?part WHERE {{ ?item p:{p} ?s . ?s a wikibase:BestRank ; {value} }} \
+        "SELECT ?item ?v ?p ?t ?part ?dated WHERE {{ ?item p:{p} ?s . ?s a wikibase:BestRank ; {value} }} \
          LIMIT {FACTS_PAGE} OFFSET {offset}"
     )
 }
@@ -174,8 +186,17 @@ impl RawFacts {
                         continue;
                     }
                     if kind.latest_only() {
-                        // No start counts as the earliest.
+                        // No start counts as the earliest. Where the item
+                        // dates its CEOs, one with no dates at all is left
+                        // out: Intel's interim co-CEO, recorded with no
+                        // start or end, outlived the CEOs who ended.
                         let start = row.get("t").map_or("", |t| t.value.as_str());
+                        let dated = row
+                            .get("dated")
+                            .is_some_and(|d| d.value == "true" || d.value == "1");
+                        if start.is_empty() && dated {
+                            continue;
+                        }
                         let key = (item.to_string(), kind);
                         let kept = self.started.get(&key).map_or("", String::as_str);
                         let has = self
@@ -256,6 +277,12 @@ impl RawFacts {
                     }
                     date.write()
                 }
+                ValueType::Coordinates => {
+                    let Some(place) = earth_point(&v.value) else {
+                        continue;
+                    };
+                    place
+                }
             };
             let facts = self.facts.entry(item.to_string()).or_default();
             if facts.iter().filter(|fact| fact.kind == kind).count() < kind.most_values()
@@ -287,6 +314,49 @@ impl RawFacts {
             let facts = self.facts.entry(item).or_default();
             if !facts.iter().any(|fact| fact.kind == kind) {
                 facts.extend(values.into_iter().map(|value| Fact { kind, value }));
+            }
+        }
+    }
+
+    /// The (item, company) pairs where the item's founder or owner is an
+    /// item, which may be the company it is named after.
+    fn founded_by_items(&self) -> Vec<(String, String)> {
+        let mut pairs: Vec<(String, String)> = self
+            .facts
+            .iter()
+            .flat_map(|(item, facts)| {
+                facts
+                    .iter()
+                    .filter(|fact| matches!(fact.kind, FactKind::Founder | FactKind::Owner))
+                    .filter(|fact| fact.value != *item)
+                    .map(move |fact| (item.clone(), fact.value.clone()))
+            })
+            .collect();
+        pairs.sort_unstable();
+        pairs.dedup();
+        pairs
+    }
+
+    /// Gives each item of `namesakes` (item, company) its company's
+    /// [`NAMESAKE_KINDS`] from `companies` in place of the company itself:
+    /// Netflix, the service, was founded by Netflix, Inc., which was
+    /// founded by Reed Hastings and Marc Randolph.
+    fn take_from_namesakes(&mut self, namesakes: &[(String, String)], companies: &RawFacts) {
+        for (item, company) in namesakes {
+            let Some(facts) = self.facts.get_mut(item) else {
+                continue;
+            };
+            facts.retain(|fact| {
+                !(matches!(fact.kind, FactKind::Founder | FactKind::Owner)
+                    && fact.value == *company)
+            });
+            let Some(theirs) = companies.facts.get(company) else {
+                continue;
+            };
+            for &kind in NAMESAKE_KINDS {
+                if !facts.iter().any(|fact| fact.kind == kind) {
+                    facts.extend(theirs.iter().filter(|fact| fact.kind == kind).cloned());
+                }
             }
         }
     }
@@ -327,6 +397,172 @@ impl RawFacts {
         }
         out
     }
+}
+
+/// A place on Earth as kept (`-35.2931,149.1269`) of a WKT point
+/// (`Point(149.1269 -35.2931)`, longitude first); `None` for a point on
+/// another globe (`<http://www.wikidata.org/entity/Q111> Point(...)`).
+fn earth_point(wkt: &str) -> Option<String> {
+    let inside = wkt.trim().strip_prefix("Point(")?.strip_suffix(')')?;
+    let mut numbers = inside.split_whitespace().map(str::parse::<f64>);
+    let lon = numbers.next()?.ok()?;
+    let lat = numbers.next()?.ok()?;
+    if numbers.next().is_some() {
+        return None;
+    }
+    let degrees = |x: f64| {
+        let text = format!("{x:.6}");
+        let text = text.trim_end_matches('0').trim_end_matches('.');
+        if text == "-0" {
+            "0".to_string()
+        } else {
+            text.to_string()
+        }
+    };
+    let value = format!("{},{}", degrees(lat), degrees(lon));
+    plumb_core::facts::coordinates(&value).map(|_| value)
+}
+
+/// Kinds an item takes from the company it is named after
+/// ([`RawFacts::take_from_namesakes`]).
+const NAMESAKE_KINDS: &[FactKind] = &[
+    FactKind::Founder,
+    FactKind::Ceo,
+    FactKind::Headquarters,
+    FactKind::Founded,
+];
+
+/// `name` as a company is named, without its legal form: "netflix" of
+/// "Netflix, Inc.".
+fn company_name(name: &str) -> String {
+    let mut name = name.trim().to_lowercase();
+    loop {
+        let before = name.len();
+        for form in [
+            "inc.",
+            "inc",
+            "llc",
+            "l.l.c.",
+            "corporation",
+            "corp.",
+            "corp",
+            "company",
+            "co.",
+            "ltd.",
+            "ltd",
+            "limited",
+            "plc",
+            "ag",
+            "gmbh",
+            "s.a.",
+            "sa",
+            "group",
+            "holdings",
+        ] {
+            if let Some(rest) = name.strip_suffix(form) {
+                if rest.ends_with([' ', ',']) {
+                    name = rest.trim_end_matches([' ', ',']).to_string();
+                }
+            }
+        }
+        if name.len() == before {
+            return name;
+        }
+    }
+}
+
+/// The pairs of `pairs` (item, company) where the company is the item's
+/// namesake by `labels`: "Netflix" and "Netflix, Inc.".
+fn namesakes(
+    pairs: &[(String, String)],
+    labels: &HashMap<String, String>,
+) -> Vec<(String, String)> {
+    pairs
+        .iter()
+        .filter(|(item, company)| {
+            let (Some(item), Some(company)) = (labels.get(item), labels.get(company)) else {
+                return false;
+            };
+            let name = company_name(item);
+            !name.is_empty() && company_name(company) == name
+        })
+        .cloned()
+        .collect()
+}
+
+/// Asks for the labels of `items`, [`PARALLEL_QUERIES`] batches at once;
+/// a batch Wikidata fails to answer is left out.
+async fn fetch_labels(
+    client: &reqwest::Client,
+    endpoint: &str,
+    pacing: WikidataPacing,
+    items: &[String],
+) -> Result<HashMap<String, String>> {
+    use futures_util::stream::{self, StreamExt};
+    let batches = items.chunks(LABELS_BATCH).count();
+    let mut answers = stream::iter(items.chunks(LABELS_BATCH).enumerate())
+        .map(|(n, batch)| async move {
+            tokio::time::sleep(pacing.pause).await;
+            let answer = sparql_json(client, endpoint, &labels_query(batch), pacing).await;
+            (n, batch.len(), answer)
+        })
+        .buffered(PARALLEL_QUERIES);
+    let mut labels = HashMap::new();
+    while let Some((n, size, answer)) = answers.next().await {
+        match answer {
+            Ok(json) => add_labels(&mut labels, &json)?,
+            // Facts naming these items are left out.
+            Err(err) => warn!("labels of {size} items left out: {err:#}"),
+        }
+        if n % 50 == 0 {
+            info!("labels: {} of {batches} batches", n + 1);
+        }
+    }
+    Ok(labels)
+}
+
+/// Gives the items in `raw` of `pairs` ([`RawFacts::founded_by_items`])
+/// whose founder or owner is the company they are named after, by
+/// `labels`, that company's founders, CEO, headquarters and founding date
+/// ([`RawFacts::take_from_namesakes`]).
+async fn follow_namesakes(
+    client: &reqwest::Client,
+    endpoint: &str,
+    pacing: WikidataPacing,
+    raw: &mut RawFacts,
+    pairs: &[(String, String)],
+    labels: &HashMap<String, String>,
+) -> Result<()> {
+    let namesakes = namesakes(pairs, labels);
+    let companies: Vec<String> = namesakes
+        .iter()
+        .map(|(_, company)| company.clone())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    info!(
+        "{} items named after the company that founded or owns them",
+        namesakes.len()
+    );
+    let wanted: HashSet<String> = companies.iter().cloned().collect();
+    let mut theirs = RawFacts::default();
+    for &kind in NAMESAKE_KINDS {
+        for batch in companies.chunks(LABELS_BATCH) {
+            tokio::time::sleep(pacing.pause).await;
+            match sparql_json(client, endpoint, &items_query(kind, batch), pacing).await {
+                Ok(json) => {
+                    theirs.add_page(kind, &wanted, &json)?;
+                }
+                Err(err) => warn!(
+                    "{} of {} companies left out: {err:#}",
+                    kind.key(),
+                    batch.len()
+                ),
+            }
+        }
+    }
+    raw.take_from_namesakes(&namesakes, &theirs);
+    Ok(())
 }
 
 /// `amount` without needless digits: `8848.86`, `27204809`.
@@ -426,27 +662,22 @@ pub async fn fetch_facts(
         raw.merge(kind);
     }
     raw.add_partial();
-    let items = raw.named_items();
+    // The items founded or owned by an item are named too, to tell which
+    // are named after it.
+    let pairs = raw.founded_by_items();
+    let mut items = raw.named_items();
+    items.extend(pairs.iter().map(|(item, _)| item.clone()));
+    items.sort_unstable();
+    items.dedup();
     info!("naming {} items the facts are about", items.len());
-    let batches = items.chunks(LABELS_BATCH).count();
-    let mut answers = stream::iter(items.chunks(LABELS_BATCH).enumerate())
-        .map(|(n, batch)| async move {
-            tokio::time::sleep(pacing.pause).await;
-            let answer = sparql_json(client, endpoint, &labels_query(batch), pacing).await;
-            (n, batch.len(), answer)
-        })
-        .buffered(PARALLEL_QUERIES);
-    let mut labels = HashMap::new();
-    while let Some((n, size, answer)) = answers.next().await {
-        match answer {
-            Ok(json) => add_labels(&mut labels, &json)?,
-            // Facts naming these items are left out.
-            Err(err) => warn!("labels of {size} items left out: {err:#}"),
-        }
-        if n % 50 == 0 {
-            info!("labels: {} of {batches} batches", n + 1);
-        }
-    }
+    let mut labels = fetch_labels(client, endpoint, pacing, &items).await?;
+    follow_namesakes(client, endpoint, pacing, &mut raw, &pairs, &labels).await?;
+    let unnamed: Vec<String> = raw
+        .named_items()
+        .into_iter()
+        .filter(|item| !labels.contains_key(item))
+        .collect();
+    labels.extend(fetch_labels(client, endpoint, pacing, &unnamed).await?);
     Ok(raw.named(&labels))
 }
 
@@ -644,14 +875,25 @@ mod tests {
         let q = page_query(FactKind::Currency, 0);
         assert!(q.contains("OPTIONAL { ?s pq:P518 ?part . }"), "{q}");
         assert!(!q.contains("P580"), "{q}");
-        assert!(page_query(FactKind::Ceo, 0).contains("OPTIONAL { ?s pq:P580 ?t . }"));
+        let q = page_query(FactKind::Ceo, 0);
+        assert!(q.contains("OPTIONAL { ?s pq:P580 ?t . }"), "{q}");
+        assert!(
+            q.contains("BIND(EXISTS { ?item p:P169/pq:P580 [] } AS ?dated)"),
+            "{q}"
+        );
         assert!(q.contains("FILTER NOT EXISTS { ?s pq:P582 [] }"), "{q}");
         assert!(!page_query(FactKind::Founder, 0).contains("FILTER"));
+        let q = page_query(FactKind::AtomicNumber, 0);
+        assert!(q.contains("psv:P1086/wikibase:quantityAmount ?v"), "{q}");
+        assert!(!q.contains("P585"), "{q}");
+        let q = page_query(FactKind::OrbitalPeriod, 0);
+        assert!(q.contains("psn:P2146/wikibase:quantityAmount ?v"), "{q}");
+        assert!(page_query(FactKind::Coordinates, 0).contains("ps:P625 ?v ."));
         let items = ["Q30".to_string(), "Q668".to_string()];
         let q = items_query(FactKind::Population, &items);
         assert!(
             q.starts_with(
-                "SELECT ?item ?v ?p ?t ?part WHERE { VALUES ?item { wd:Q30 wd:Q668 } ?item p:P1082 ?s ."
+                "SELECT ?item ?v ?p ?t ?part ?dated WHERE { VALUES ?item { wd:Q30 wd:Q668 } ?item p:P1082 ?s ."
             ),
             "{q}"
         );
@@ -808,7 +1050,11 @@ mod tests {
                     ("v", &format!("{E}Q2")),
                     ("t", "2025-03-18T00:00:00Z"),
                 ],
-                &[("item", &intel), ("v", &format!("{E}Q3"))],
+                &[
+                    ("item", &intel),
+                    ("v", &format!("{E}Q3")),
+                    ("dated", "true"),
+                ],
             ]),
         )
         .unwrap();
@@ -819,6 +1065,34 @@ mod tests {
                 value: "Q2".into()
             }]
         );
+        // Intel as Wikidata has it now: the CEOs who ended are filtered
+        // out by the query, and the undated interim one is not kept.
+        let mut undated = RawFacts::default();
+        undated
+            .add_page(
+                FactKind::Ceo,
+                &wanted_intel,
+                &answer(&[&[
+                    ("item", &intel),
+                    ("v", &format!("{E}Q131981722")),
+                    ("dated", "true"),
+                ]]),
+            )
+            .unwrap();
+        assert!(!undated.facts.contains_key("Q248"));
+        // Where no CEO is dated, an undated one is the CEO.
+        undated
+            .add_page(
+                FactKind::Ceo,
+                &wanted_intel,
+                &answer(&[&[
+                    ("item", &intel),
+                    ("v", &format!("{E}Q3")),
+                    ("dated", "false"),
+                ]]),
+            )
+            .unwrap();
+        assert_eq!(undated.facts["Q248"].len(), 1);
         assert_eq!(raw.named_items(), ["Q3114", "Q317521"]);
         let mut labels = HashMap::new();
         add_labels(
@@ -867,6 +1141,97 @@ mod tests {
         assert_eq!(added.with_facts, 1);
         let back = read_articles(open_maybe_gz(&path).unwrap(), 10).unwrap();
         assert_eq!(back[0].facts, facts["Q408"]);
+    }
+
+    #[test]
+    fn points_on_earth_are_kept() {
+        assert_eq!(
+            earth_point("Point(149.126944 -35.293056)").unwrap(),
+            "-35.293056,149.126944"
+        );
+        assert_eq!(
+            earth_point("Point(2.2945 48.8584)").unwrap(),
+            "48.8584,2.2945"
+        );
+        assert_eq!(
+            earth_point("<http://www.wikidata.org/entity/Q111> Point(137.4 -4.6)"),
+            None
+        );
+        assert_eq!(earth_point("Point(200 10)"), None);
+        let wanted: HashSet<String> = ["Q90"].map(String::from).into();
+        let mut raw = RawFacts::default();
+        let paris = format!("{E}Q90");
+        raw.add_page(
+            FactKind::Coordinates,
+            &wanted,
+            &answer(&[&[("item", &paris), ("v", "Point(2.351388888 48.856944444)")]]),
+        )
+        .unwrap();
+        assert_eq!(
+            raw.facts["Q90"],
+            [Fact {
+                kind: FactKind::Coordinates,
+                value: "48.856944,2.351389".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn items_take_facts_from_their_namesake_company() {
+        assert_eq!(company_name("Netflix, Inc."), "netflix");
+        assert_eq!(company_name("Samsung Group"), "samsung");
+        assert_eq!(company_name("Inc."), "inc.");
+        let fact = |kind, value: &str| Fact {
+            kind,
+            value: value.into(),
+        };
+        let mut raw = RawFacts::default();
+        // Netflix, the service, founded by Netflix, Inc.; YouTube Kids by
+        // YouTube, another thing.
+        raw.facts.insert(
+            "Q907311".into(),
+            vec![
+                fact(FactKind::Founder, "Q116452644"),
+                fact(FactKind::Headquarters, "Q747509"),
+            ],
+        );
+        raw.facts
+            .insert("Q19599566".into(), vec![fact(FactKind::Founder, "Q866")]);
+        let pairs = raw.founded_by_items();
+        assert_eq!(pairs.len(), 2);
+        let labels: HashMap<String, String> = [
+            ("Q907311", "Netflix"),
+            ("Q116452644", "Netflix, Inc."),
+            ("Q19599566", "YouTube Kids"),
+            ("Q866", "YouTube"),
+        ]
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .into();
+        let found = namesakes(&pairs, &labels);
+        assert_eq!(found, [("Q907311".to_string(), "Q116452644".to_string())]);
+        let mut companies = RawFacts::default();
+        companies.facts.insert(
+            "Q116452644".into(),
+            vec![
+                fact(FactKind::Founder, "Q18341330"),
+                fact(FactKind::Founder, "Q7306657"),
+                fact(FactKind::Ceo, "Q19661212"),
+                fact(FactKind::Headquarters, "Q1"),
+                fact(FactKind::Founded, "1997-08-29"),
+            ],
+        );
+        raw.take_from_namesakes(&found, &companies);
+        assert_eq!(
+            raw.facts["Q907311"],
+            [
+                fact(FactKind::Headquarters, "Q747509"),
+                fact(FactKind::Founder, "Q18341330"),
+                fact(FactKind::Founder, "Q7306657"),
+                fact(FactKind::Ceo, "Q19661212"),
+                fact(FactKind::Founded, "1997-08-29"),
+            ]
+        );
+        assert_eq!(raw.facts["Q19599566"], [fact(FactKind::Founder, "Q866")]);
     }
 
     #[test]

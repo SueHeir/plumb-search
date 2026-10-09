@@ -592,6 +592,21 @@ pub(crate) fn fact_text(
     Some(match kind.value_type() {
         ValueType::Item => (join_names(values), None),
         ValueType::Time => (Date::parse(first)?.display(), None),
+        ValueType::Coordinates => {
+            let (lat, lon) = plumb_core::facts::coordinates(first)?;
+            let (ns, ew) = (
+                if lat < 0.0 { 'S' } else { 'N' },
+                if lon < 0.0 { 'W' } else { 'E' },
+            );
+            (
+                format!(
+                    "{}° {ns}, {}° {ew}",
+                    group_digits(lat.abs(), 4),
+                    group_digits(lon.abs(), 4)
+                ),
+                None,
+            )
+        }
         ValueType::Quantity => {
             let (number, year) = first.split_once(';').unwrap_or((first, ""));
             let amount: f64 = number.parse().ok()?;
@@ -600,6 +615,35 @@ pub(crate) fn fact_text(
                     group_digits(amount.round(), 0),
                     (!year.is_empty()).then(|| format!("Counted in {year}")),
                 ),
+                plumb_core::facts::FactKind::AtomicNumber => (group_digits(amount, 0), None),
+                plumb_core::facts::FactKind::OrbitalPeriod => {
+                    let days = amount / 86_400.0;
+                    let years = days / 365.25;
+                    let text = if days < 1.0 {
+                        format!("{} hours", group_digits(amount / 3600.0, 2))
+                    } else if years < 2.0 {
+                        format!("{} days", group_digits(days, 2))
+                    } else {
+                        format!(
+                            "{} years ({} days)",
+                            group_digits(years, 2),
+                            group_digits(days, 0)
+                        )
+                    };
+                    (text, None)
+                }
+                plumb_core::facts::FactKind::Radius if amount >= 1000.0 => {
+                    let km = amount / 1000.0;
+                    let digits = if km >= 100.0 { 0 } else { 2 };
+                    (
+                        format!(
+                            "{} km ({} mi)",
+                            group_digits(km, digits),
+                            group_digits(km / 1.609_344, digits)
+                        ),
+                        None,
+                    )
+                }
                 plumb_core::facts::FactKind::Area => {
                     let km2 = amount / 1e6;
                     let digits = if km2 >= 100.0 { 0 } else { 2 };
@@ -885,6 +929,25 @@ mod tests {
         let mut unnamed = tesla.clone();
         unnamed[0].hit.named = false;
         assert_eq!(ask("who founded tesla", &unnamed), None);
+    }
+
+    #[test]
+    fn new_kinds_read_as_people_write_them() {
+        use plumb_core::facts::FactKind;
+        let text = |kind, value| fact_text(kind, &[value]).unwrap().0;
+        assert_eq!(
+            text(FactKind::Coordinates, "-35.293056,149.126944"),
+            "35.2931° S, 149.1269° E"
+        );
+        assert_eq!(text(FactKind::AtomicNumber, "79"), "79");
+        // Earth's 365.256363 days, Jupiter's 4,332.59, the Moon's 27.32.
+        assert_eq!(text(FactKind::OrbitalPeriod, "31558149.763"), "365.26 days");
+        assert_eq!(
+            text(FactKind::OrbitalPeriod, "374335776"),
+            "11.86 years (4,333 days)"
+        );
+        assert_eq!(text(FactKind::Radius, "6371000"), "6,371 km (3,959 mi)");
+        assert_eq!(text(FactKind::Radius, "250"), "250 m (820 ft)");
     }
 
     #[test]
