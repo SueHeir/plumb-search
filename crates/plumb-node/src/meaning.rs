@@ -60,7 +60,7 @@ impl MeaningIndex {
         MeaningIndex {
             embedder,
             vectors: RwLock::new(vectors),
-            instruction: QueryInstruction::Off,
+            instruction: QueryInstruction::default(),
         }
     }
 
@@ -116,7 +116,12 @@ impl MeaningIndex {
             }
         };
         let vectors = self.read();
-        match self.instruction {
+        let instruction = if self.embedder.takes_query_instruction() {
+            self.instruction
+        } else {
+            QueryInstruction::Off
+        };
+        match instruction {
             QueryInstruction::Off => Some(vec![plain()?]),
             QueryInstruction::On => Some(vec![instructed()?]),
             QueryInstruction::Mix | QueryInstruction::Min => {
@@ -125,7 +130,7 @@ impl MeaningIndex {
             // Ranked by the instructed vector; placed by the plain one.
             QueryInstruction::Split => Some(vec![instructed()?, embed(query)?]),
         }
-        .map(|query| QueryMeaning::new(vectors, query, self.instruction))
+        .map(|query| QueryMeaning::new(vectors, query, instruction))
     }
 }
 
