@@ -368,11 +368,13 @@ fn add_labels(labels: &mut HashMap<String, String>, json: &[u8]) -> Result<()> {
 /// Asks Wikidata's query service at `endpoint` for the facts of the items
 /// in `items` (those with an article, most read first).
 ///
-/// Each kind is read in pages of all its statements. When Wikidata stops
-/// answering a kind's pages (deep pages time out), the first
-/// [`FILL_IN_TOP`] items that still lack it are asked about by name, so
-/// the most read keep their facts. [`PARALLEL_QUERIES`] kinds, and then
-/// batches of labels, are asked for at once.
+/// Each kind is read in pages of all its statements, [`PARALLEL_QUERIES`]
+/// kinds at once. Deep pages time out more often while other kinds are
+/// being read, so a kind Wikidata stopped answering is read on from where
+/// it stopped once the others are done, one kind at a time. When it still
+/// stops, the first [`FILL_IN_TOP`] items that lack it are asked about by
+/// name, so the most read keep their facts. Then batches of labels are
+/// asked for, [`PARALLEL_QUERIES`] at once.
 pub async fn fetch_facts(
     client: &reqwest::Client,
     endpoint: &str,
@@ -382,11 +384,45 @@ pub async fn fetch_facts(
     use futures_util::stream::{self, StreamExt, TryStreamExt};
     let wanted: HashSet<String> = items.iter().cloned().collect();
     let wanted = &wanted;
-    let mut raw = RawFacts::default();
-    let mut kinds = stream::iter(KINDS)
-        .map(|&kind| fetch_kind(client, endpoint, pacing, kind, items, wanted))
+    let read: Vec<(FactKind, RawFacts, Option<usize>)> = stream::iter(KINDS)
+        .map(|&kind| async move {
+            let mut raw = RawFacts::default();
+            let stopped = read_pages(client, endpoint, pacing, &mut raw, kind, 0, wanted).await?;
+            Ok::<_, anyhow::Error>((kind, raw, stopped))
+        })
+        .buffered(PARALLEL_QUERIES)
+        .try_collect()
+        .await?;
+    let mut kinds = Vec::with_capacity(read.len());
+    for (kind, mut raw, stopped) in read {
+        let mut cut_short = kind.by_name_only();
+        if let Some(offset) = stopped {
+            info!(
+                "{} ({}): reading on from {offset} alone",
+                kind.key(),
+                kind.property()
+            );
+            let again =
+                read_pages(client, endpoint, pacing, &mut raw, kind, offset, wanted).await?;
+            cut_short |= again.is_some();
+        }
+        kinds.push((kind, raw, cut_short));
+    }
+    let mut filled = stream::iter(kinds)
+        .map(|(kind, mut raw, cut_short)| async move {
+            // Too big or too slow to read whole: the most read items by name.
+            let top = if cut_short {
+                FILL_IN_TOP
+            } else {
+                FILL_IN_ALWAYS
+            };
+            let most_read = &items[..top.min(items.len())];
+            fill_in(client, endpoint, pacing, &mut raw, kind, most_read, wanted).await?;
+            Ok::<_, anyhow::Error>(raw)
+        })
         .buffered(PARALLEL_QUERIES);
-    while let Some(kind) = kinds.try_next().await? {
+    let mut raw = RawFacts::default();
+    while let Some(kind) = filled.try_next().await? {
         raw.merge(kind);
     }
     raw.add_partial();
@@ -417,31 +453,31 @@ pub async fn fetch_facts(
 /// Queries to Wikidata at once: its query service allows five per client.
 pub const PARALLEL_QUERIES: usize = 4;
 
-/// The facts of one kind: its pages, then the most read items that lack it.
-async fn fetch_kind(
+/// Reads the pages of `kind` from `offset` into `raw`. Returns where it
+/// stopped if Wikidata failed before the last page.
+async fn read_pages(
     client: &reqwest::Client,
     endpoint: &str,
     pacing: WikidataPacing,
+    raw: &mut RawFacts,
     kind: FactKind,
-    items: &[String],
+    mut offset: usize,
     wanted: &HashSet<String>,
-) -> Result<RawFacts> {
-    let mut raw = RawFacts::default();
-    let mut offset = 0;
-    // Too big to read whole: the most read items only, by name.
-    let mut cut_short = kind.by_name_only();
-    while !kind.by_name_only() {
+) -> Result<Option<usize>> {
+    if kind.by_name_only() {
+        return Ok(None);
+    }
+    loop {
         tokio::time::sleep(pacing.pause).await;
         let json = match sparql_json(client, endpoint, &page_query(kind, offset), pacing).await {
             Ok(json) => json,
             Err(err) => {
                 warn!(
-                    "{} ({}): kept the {offset} statements read before Wikidata failed: {err:#}",
+                    "{} ({}): Wikidata failed at statement {offset}: {err:#}",
                     kind.key(),
                     kind.property()
                 );
-                cut_short = true;
-                break;
+                return Ok(Some(offset));
             }
         };
         let rows = raw.add_page(kind, wanted, &json)?;
@@ -451,26 +487,10 @@ async fn fetch_kind(
             kind.property()
         );
         if rows < FACTS_PAGE {
-            break;
+            return Ok(None);
         }
         offset += FACTS_PAGE;
     }
-    let top = if cut_short {
-        FILL_IN_TOP
-    } else {
-        FILL_IN_ALWAYS
-    };
-    fill_in(
-        client,
-        endpoint,
-        pacing,
-        &mut raw,
-        kind,
-        &items[..top.min(items.len())],
-        wanted,
-    )
-    .await?;
-    Ok(raw)
 }
 
 /// Asks for `kind` of those of `items` that lack it.
