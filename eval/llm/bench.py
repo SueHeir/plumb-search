@@ -25,6 +25,7 @@ Standard library only. Questions are JSON lines: {"id", "question",
 
 import argparse
 import json
+import os
 import re
 import shlex
 import string
@@ -106,14 +107,17 @@ class Mcp:
         ]
 
 
-def chat(server, model, messages, tools):
-    body = {"model": model, "messages": messages, "temperature": 0, "max_tokens": 512}
+def chat(args, messages, tools):
+    body = {"model": args.model, "messages": messages, "temperature": 0, "max_tokens": args.max_tokens}
     if tools:
         body["tools"] = tools
+    headers = {"Content-Type": "application/json"}
+    if args.api_key_env:
+        headers["Authorization"] = "Bearer " + os.environ[args.api_key_env]
     request = urllib.request.Request(
-        server.rstrip("/") + "/v1/chat/completions",
+        args.server.rstrip("/") + "/v1/chat/completions",
         data=json.dumps(body).encode(),
-        headers={"Content-Type": "application/json"},
+        headers=headers,
     )
     with urllib.request.urlopen(request, timeout=600) as response:
         return json.load(response)
@@ -146,7 +150,7 @@ def ask(question, args, mcp):
     started = time.time()
     text = ""
     for _ in range(MAX_ROUNDS):
-        reply = chat(args.server, args.model, messages, tools)
+        reply = chat(args, messages, tools)
         usage = reply.get("usage", {})
         prompt_tokens += usage.get("prompt_tokens", 0)
         completion_tokens += usage.get("completion_tokens", 0)
@@ -155,7 +159,12 @@ def ask(question, args, mcp):
         calls = message.get("tool_calls") or []
         if not calls:
             break
-        messages.append({"role": "assistant", "content": text, "tool_calls": calls})
+        turn = {"role": "assistant", "content": text, "tool_calls": calls}
+        if message.get("reasoning_content"):
+            # thinking models such as deepseek-reasoner want their reasoning
+            # back within one question's tool calls
+            turn["reasoning_content"] = message["reasoning_content"]
+        messages.append(turn)
         for call in calls:
             tool_calls += 1
             try:
@@ -168,6 +177,10 @@ def ask(question, args, mcp):
             tool_tokens += len(result) // 4
             messages.append({"role": "tool", "tool_call_id": call.get("id", ""), "content": result})
     answer = final_answer(text)
+    final = {"role": "assistant", "content": text}
+    if message.get("reasoning_content"):
+        final["reasoning_content"] = message["reasoning_content"]
+    messages.append(final)
     return {
         "id": question["id"],
         "question": question["question"],
@@ -180,6 +193,8 @@ def ask(question, args, mcp):
         "tool_calls": tool_calls,
         "tool_tokens": tool_tokens,
         "seconds": round(time.time() - started, 2),
+        "messages": messages,
+        "tools": tools,
     }
 
 
@@ -210,6 +225,13 @@ def main():
     parser.add_argument("--budget", type=int, default=300, help="tokens per tool result in budget mode")
     parser.add_argument("--limit", type=int, default=0, help="ask only the first N questions")
     parser.add_argument("--out", required=True, help="results file (JSON lines), appended to")
+    parser.add_argument("--api-key-env", default="",
+                        help="environment variable holding an API key, for a hosted model")
+    parser.add_argument("--max-tokens", type=int, default=512,
+                        help="tokens a reply may use; raise it for models that think first")
+    parser.add_argument("--transcripts", default="",
+                        help="also write each question's whole conversation and tools here "
+                             "(JSON lines), for training a model on them")
     args = parser.parse_args()
 
     with open(args.questions) as f:
@@ -225,6 +247,7 @@ def main():
     except FileNotFoundError:
         pass
     mcp = Mcp(args.plumb) if args.mode != "none" else None
+    transcripts = open(args.transcripts, "a") if args.transcripts else None
     with open(args.out, "a") as out:
         for n, question in enumerate(questions, 1):
             if question["id"] in done:
@@ -234,9 +257,14 @@ def main():
             except Exception as err:
                 print(f"{question['id']}: {err}", file=sys.stderr)
                 continue
+            conversation = {"messages": result.pop("messages"), "tools": result.pop("tools")}
             done[result["id"]] = result
             out.write(json.dumps(result) + "\n")
             out.flush()
+            if transcripts:
+                transcripts.write(json.dumps({**{k: result[k] for k in ("id", "right", "said", "answers")},
+                                              **conversation}) + "\n")
+                transcripts.flush()
             if n % 25 == 0:
                 print(f"{n}/{len(questions)}: {summary(list(done.values()))}", file=sys.stderr)
     asked = [done[q["id"]] for q in questions if q["id"] in done]
