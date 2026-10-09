@@ -110,7 +110,7 @@ It is good at what agents look up most: the official site ("chase login"), a pac
 
 ## Status
 
-Plumb is young and moving fast. The latest release is [0.2.0](https://github.com/SueHeir/plumb-search/releases/latest); [CHANGELOG.md](CHANGELOG.md) lists what each release has. The peer-to-peer network works but is young. Private information retrieval (PIR), which would let a node fetch results without learning which ones it asked for, is research in progress: the first pieces are in `crates/plumb-net/src/pir`, but no search uses them and there is no setting for it.
+Plumb is young and moving fast. The latest release is [0.2.1](https://github.com/SueHeir/plumb-search/releases/latest); [CHANGELOG.md](CHANGELOG.md) lists what each release has. The peer-to-peer network works but is young. Private information retrieval (PIR), which would let a node fetch results without learning which ones it asked for, is research in progress: the first pieces are in `crates/plumb-net/src/pir`, but no search uses them and there is no setting for it.
 
 ## Contributing
 

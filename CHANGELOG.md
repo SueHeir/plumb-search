@@ -1,16 +1,40 @@
 # Changelog
 
-## Unreleased
+## 0.2.1
+
+Downloads are on [GitHub Releases](https://github.com/SueHeir/plumb-search/releases/tag/v0.2.1), and the Docker image is `ghcr.io/sueheir/plumb-search:0.2.1` (also `:0.2` and `:latest`).
+
+### Upgrading from 0.2.0
+
+- Docker: `docker compose pull`, then `docker compose up -d`. Desktop: install the new version over the old one. Nothing else needs doing: the index, page sets, site vectors and settings of 0.2.0 are used as they are, nothing is rebuilt for the upgrade, and 0.2.0 and 0.2.1 nodes work together in the network.
+- On its first start the node removes page and place index builds an earlier run left half-done (about 4.8 GB on plumbsearch.org).
+- plumbsearch.org now serves the `reference` and `subpages` page sets, so a node that trusts it, 0.2.0 included, downloads both by itself and searches them once they are indexed: all of both, or the 100,000 most read of each under a storage limit of 1 GB.
 
 ### Search
 
-- Spelling corrects a word only to one that starts with the same letter, since slips rarely start a word: "perft" is no longer "erft" (the Erft river).
+- Inner pages of well-known sites, from the `reference` and `subpages` sets: a search for one page, like "irs form 1040" or "nist special publication 811", can find that page and not only the site's homepage. A page found by most of its words is now kept even when the search for articles inside the query found it too.
+- Docs pages are found by the headings of their sections: "python list comprehension" reaches Python's "Data Structures" page, and "go goroutines" reaches Effective Go. A heading alone still names nothing; the search has to name the docs' product. The headings come with a docs set made by this version (`plumb fetch-pages --set docs`); nodes taking plumbsearch.org's get them.
+- Articles whose title is only part of a search are found: "titanic sinking", "radium discovery marie curie" and "catholic homily" now reach their Wikipedia articles.
+- Search by meaning reads a search after the model's instruction for search queries, and the learned ranking is retrained for it: on the half of the test searches never tuned on, the described site comes first for 49.5% of described searches instead of 47.3%, and the expected result for 76.6% of all searches instead of 76.1%. Only the default English model takes the instruction; EmbeddingGemma and embedding servers keep their own.
+- Rare words and names are no longer rewritten by spelling: "perft" stays "perft", "Kiwipete" is not "kimipet" and "Inkala" is not "ikala". A word is now only corrected to a word that many sites or pages use and that starts with the same letter, and only when a slip is likelier than the word as typed.
+- Question pages need the word a search is about: "how to get rid of aphids" no longer lists a Skyrim question about getting rid of a bounty.
 - With "Use the Plumb network" on, "weather in denver" no longer puts Spain's social security site first. Network searches no longer ask for the bucket of a small joining word ("in", "of", "the") in a longer query, and a site only the network found that lacks some of the query's words comes after the node's own results: its score was measured against the few sites the network sent, where the best partial match looks like a full one.
+- A brand's sites under a country's second-level ending such as `.com.co` count as that country's, like its other country sites: pizzahut.com.co and kayak.com.co are no longer listed next to the brand's own site as if they were sites of their own.
+- A small site that is a company's official one is named by the company's name, not by its address alone: "elephant valley" no longer lists Valley National Bank's valley.com.
+- Site names: a site whose only Wikidata link is an inner page of it now gets its name ("Perplexity AI" for perplexity.ai), and an article no longer stands for a site on another host that it links an inner page of (the film Rocky's bit.ly link). They need the records ingested again with `--wikidata`, and the article fix needs the articles set made again.
 
-### Fixes
+### For AI apps
+
+- `official_site` keeps a project's own site when its package gives only docs (pandas is pandas.pydata.org, not pandas.readthedocs.io), gives the docs when asked for them ("Pillow docs" is pillow.readthedocs.io), and keeps a well-known site's own docs ("Anthropic API docs" is anthropic.com).
+- `official_site` is less often sure of a wrong answer: a site named by a name it shows nothing of, or one of two official sites of a name ("Elixir"), is no longer high confidence. A low-confidence guess gives way to a site that shows the whole name ("outlook email" is outlook.live.com, not office.com) or whose address is a word of it ("cube20 God's number" is cube20.org).
+
+### Running a node
 
 - Search by meaning reads the vectors file in place, mapped into memory, instead of holding a copy: a node with 2.8 million sites' vectors holds about 50 MB for them instead of 1.6 GB, and the system can drop the file's pages when memory runs short instead of swapping. Searches by meaning also take about a third less time on CPUs with AVX2, with the same results.
+- Page and place index builds cut short by a crash or a restart no longer stay on disk: the node removes them when it starts. In a container, where the node has the same process id on every start, it no longer takes an earlier run's leftovers for its own.
 - `plumb run --set-updates off` no longer downloads a page set the node has no file of, as plumbsearch.org would have done with the reference and subpages sets once a trusted node had them. A list such as `films,map` still takes the sets it names when the node has none. A node with `all` (the default) takes missing sets as before.
+- `plumb fetch-facts` reads a kind again from its start when it moves to QLever's endpoint, which lists statements in another order: facts made before lost about a third of areas, elevations and heights.
+- `plumb eval --recall` shows where each test search's answer is lost before ranking: not in the index or a page set at all, too far down the sites matching its words or nearest in meaning, or never looked at by the ranking.
 
 ## 0.2.0
 
