@@ -72,6 +72,7 @@ fn test_config(dir: &Path) -> NodeConfig {
     config.sources = SeedSources {
         tranco_url: format!("{nowhere}/tranco.csv"),
         wikidata_sparql_url: format!("{nowhere}/sparql"),
+        wikidata_mirror_url: None,
         wikipedia_api_url: format!("{nowhere}/w/api.php"),
         wikidata_min_sitelinks: 25,
         wikidata_pacing: quick_wikidata(),
@@ -735,6 +736,7 @@ impl SeedHost {
         SeedSources {
             tranco_url: self.url("/tranco.csv"),
             wikidata_sparql_url: self.url("/sparql"),
+            wikidata_mirror_url: None,
             wikipedia_api_url: self.url("/w/api.php"),
             wikidata_min_sitelinks: 25,
             wikidata_pacing: quick_wikidata(),

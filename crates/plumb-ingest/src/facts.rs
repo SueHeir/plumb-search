@@ -16,14 +16,15 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result};
 use plumb_core::normalize_country;
 use serde::Deserialize;
+use tokio::io::AsyncWriteExt;
 use tracing::{info, warn};
 
-use crate::download::{part_path, WikidataPacing};
+use crate::download::{WikidataPacing, WIKIDATA_PREFIXES};
 use crate::wikidata::bare_item_id;
 use crate::{load_wikidata_official_sites, open_maybe_gz, Line, LineReader, OfficialSite};
 
@@ -80,7 +81,7 @@ const MIN_BATCH: usize = 125;
 pub fn facts_query(items: &[String]) -> String {
     let values: String = items.iter().map(|item| format!(" wd:{item}")).collect();
     format!(
-        "SELECT DISTINCT ?item ?country ?kind ?alias ?about ?sitelinks WHERE {{ VALUES ?item {{{values} }} \
+        "{WIKIDATA_PREFIXES}SELECT DISTINCT ?item ?country ?kind ?alias ?about ?sitelinks WHERE {{ VALUES ?item {{{values} }} \
          {{ ?item wdt:P17 ?c . ?c wdt:P297 ?country . }} UNION \
          {{ ?item wdt:P31|wdt:P452 ?k . ?k rdfs:label ?kind . FILTER(LANG(?kind) = \"en\") }} UNION \
          {{ ?item skos:altLabel ?alias . FILTER(LANG(?alias) = \"en\") }} UNION \
@@ -108,15 +109,55 @@ fn is_item_id(item: &str) -> bool {
 }
 
 /// Asks the SPARQL `endpoint` for the facts of the items of the official
-/// websites files `sites_files` ([`official_items`]; files that do not
-/// exist are skipped), [`FACTS_BATCH`] at a
-/// time with `pacing.pause` between queries, and writes
-/// `dir/`[`FACTS_FILE_NAME`]. A batch that fails after a few tries (HTTP
-/// 429 or 5xx, a cut-off answer, a lost connection) is asked for again in
-/// halves, down to [`MIN_BATCH`] items. Fails if any batch still fails,
-/// leaving any earlier file in place.
+/// websites files `sites_files`, as [`download_site_facts_with`] does
+/// without a mirror.
 pub async fn download_site_facts(
     client: &reqwest::Client,
+    endpoint: &str,
+    dir: &Path,
+    sites_files: &[PathBuf],
+    pacing: WikidataPacing,
+) -> Result<PathBuf> {
+    download_site_facts_with(client, None, endpoint, dir, sites_files, pacing).await
+}
+
+/// Items per query to a mirror such as QLever's: 20,000 took 13 seconds
+/// there on 2026-10-09, no longer than 2,000.
+pub const MIRROR_FACTS_BATCH: usize = 20_000;
+
+/// Batches in a row that may fail at the mirror before the rest go
+/// straight to the main endpoint.
+const MIRROR_FAILURES: u32 = 2;
+
+/// The file next to the facts file where each batch's facts are added as
+/// they come in, so a download that stops part way can go on from there.
+pub const FACTS_PARTIAL_NAME: &str = "wikidata-site-facts.tsv.partial";
+
+/// Facts saved by an earlier download longer ago than this are asked for
+/// again.
+const PARTIAL_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+
+/// Asks for the facts of the items of the official websites files
+/// `sites_files` ([`official_items`]; files that do not exist are skipped)
+/// and writes `dir/`[`FACTS_FILE_NAME`].
+///
+/// With a `mirror`, such as [`crate::download::QLEVER_WIKIDATA_URL`], the
+/// items go to it [`MIRROR_FACTS_BATCH`] at a time; a batch it fails goes to
+/// `endpoint` instead, and after two failed batches in a row everything
+/// left does. At `endpoint` they go [`FACTS_BATCH`] at a time, with
+/// `pacing.pause` between queries; a batch that fails after a few tries
+/// (HTTP 429 or 5xx, a cut-off answer, a lost connection) is asked for again
+/// in halves, down to [`MIN_BATCH`] items.
+///
+/// Each batch's facts are added to `dir/`[`FACTS_PARTIAL_NAME`] as they come
+/// in, and a later download (within a week) skips the items found there:
+/// every item has a sitelinks count, so every item asked about has a row.
+/// The file becomes the facts file once all are in. Fails if a batch still
+/// fails at `endpoint`, leaving any earlier facts file in place and the
+/// facts so far for the next try.
+pub async fn download_site_facts_with(
+    client: &reqwest::Client,
+    mirror: Option<&str>,
     endpoint: &str,
     dir: &Path,
     sites_files: &[PathBuf],
@@ -137,25 +178,72 @@ pub async fn download_site_facts(
     })
     .await
     .context("reading the official websites")??;
-    let batches = items.len().div_ceil(FACTS_BATCH);
+    tokio::fs::create_dir_all(dir)
+        .await
+        .with_context(|| format!("creating {}", dir.display()))?;
+    let partial = dir.join(FACTS_PARTIAL_NAME);
+    let done = saved_items(&partial)?;
+    let items: Vec<String> = items
+        .into_iter()
+        .filter(|item| !done.contains(item))
+        .collect();
+    if done.is_empty() {
+        tokio::fs::write(&partial, FACTS_HEADER)
+            .await
+            .with_context(|| format!("writing {}", partial.display()))?;
+    }
     info!(
-        "asking Wikidata for the countries and kinds of {} items, in {batches} queries",
-        items.len()
+        "asking Wikidata for the countries and kinds of {} items{}",
+        items.len(),
+        match done.len() {
+            0 => String::new(),
+            n => format!(" ({n} more were saved by an earlier try)"),
+        }
     );
     let started = Instant::now();
-    let mut tsv = String::from(FACTS_HEADER);
-    // The batches still to ask for, the next one last.
-    let mut todo: Vec<&[String]> = items.chunks(FACTS_BATCH).rev().collect();
+    let asked = items.len();
     let mut queries = 0u32;
+    let mut left: Vec<String> = Vec::new();
+    match mirror {
+        Some(mirror) => {
+            let mut failures = 0u32;
+            for batch in items.chunks(MIRROR_FACTS_BATCH) {
+                if failures >= MIRROR_FAILURES {
+                    left.extend_from_slice(batch);
+                    continue;
+                }
+                if queries > 0 {
+                    tokio::time::sleep(pacing.pause).await;
+                }
+                queries += 1;
+                match sparql_json(client, mirror, &facts_query(batch), pacing).await {
+                    Ok(json) => {
+                        append_facts(&partial, &json).await?;
+                        failures = 0;
+                    }
+                    Err(err) => {
+                        failures += 1;
+                        warn!(
+                            "facts for {} items failed at {mirror} ({err:#}); asking {endpoint}",
+                            batch.len()
+                        );
+                        left.extend_from_slice(batch);
+                    }
+                }
+            }
+        }
+        None => left = items,
+    }
+
+    // The batches still to ask for, the next one last.
+    let mut todo: Vec<&[String]> = left.chunks(FACTS_BATCH).rev().collect();
     while let Some(batch) = todo.pop() {
         if queries > 0 {
             tokio::time::sleep(pacing.pause).await;
         }
         queries += 1;
         match sparql_json(client, endpoint, &facts_query(batch), pacing).await {
-            Ok(json) => {
-                push_facts(&mut tsv, &json)?;
-            }
+            Ok(json) => append_facts(&partial, &json).await?,
             Err(err) if batch.len() > MIN_BATCH => {
                 warn!(
                     "Wikidata facts for {} items failed ({err:#}); asking for them in halves",
@@ -166,29 +254,71 @@ pub async fn download_site_facts(
                 todo.push(lower);
             }
             Err(err) => {
-                return Err(err.context(format!("asking Wikidata about {} items", batch.len())))
+                return Err(err.context(format!(
+                    "asking Wikidata about {} items (the facts so far are kept in {} \
+                     for the next try)",
+                    batch.len(),
+                    partial.display()
+                )))
             }
         }
     }
 
-    tokio::fs::create_dir_all(dir)
-        .await
-        .with_context(|| format!("creating {}", dir.display()))?;
     let dest = dir.join(FACTS_FILE_NAME);
-    let part = part_path(&dest);
-    tokio::fs::write(&part, tsv.as_bytes())
+    tokio::fs::rename(&partial, &dest)
         .await
-        .with_context(|| format!("writing {}", part.display()))?;
-    tokio::fs::rename(&part, &dest)
-        .await
-        .with_context(|| format!("renaming {} to {}", part.display(), dest.display()))?;
+        .with_context(|| format!("renaming {} to {}", partial.display(), dest.display()))?;
     info!(
-        "wrote {} Wikidata facts to {} after {queries} queries in {:.0} s",
-        tsv.lines().count().saturating_sub(1),
+        "wrote the Wikidata facts of {} items to {} after {queries} queries in {:.0} s",
+        done.len() + asked,
         dest.display(),
         started.elapsed().as_secs_f64()
     );
     Ok(dest)
+}
+
+/// The items with facts in the `partial` file an earlier download left, when
+/// it is less than a week old; none otherwise.
+fn saved_items(partial: &Path) -> Result<HashSet<String>> {
+    let recent = std::fs::metadata(partial)
+        .and_then(|meta| meta.modified())
+        .is_ok_and(|modified| {
+            SystemTime::now()
+                .duration_since(modified)
+                .map_or(true, |age| age < PARTIAL_MAX_AGE)
+        });
+    if !recent {
+        return Ok(HashSet::new());
+    }
+    let text = std::fs::read_to_string(partial)
+        .with_context(|| format!("reading {}", partial.display()))?;
+    if !text.starts_with(FACTS_HEADER) {
+        return Ok(HashSet::new());
+    }
+    Ok(text
+        .lines()
+        .skip(1)
+        .filter_map(|line| line.split('\t').next())
+        .filter(|item| !item.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
+/// Adds the facts of a [`facts_query`] answer to the `partial` file.
+async fn append_facts(partial: &Path, json: &[u8]) -> Result<()> {
+    let mut rows = String::new();
+    push_facts(&mut rows, json)?;
+    let mut file = tokio::fs::OpenOptions::new()
+        .append(true)
+        .open(partial)
+        .await
+        .with_context(|| format!("opening {}", partial.display()))?;
+    file.write_all(rows.as_bytes())
+        .await
+        .with_context(|| format!("writing {}", partial.display()))?;
+    file.flush()
+        .await
+        .with_context(|| format!("writing {}", partial.display()))
 }
 
 /// Runs `query`, trying again after HTTP 429 or 5xx, a cut-off answer and
@@ -524,6 +654,167 @@ mod tests {
         assert!(query.contains("skos:altLabel"));
         assert!(query.contains("schema:description"));
         assert!(query.contains("wikibase:sitelinks"));
+    }
+
+    type Queries = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
+
+    /// A stand-in SPARQL endpoint on a loopback port: answers each query
+    /// with `respond(query, n)`, `n` counting the queries before it, and
+    /// keeps the queries.
+    async fn endpoint<F>(respond: F) -> (String, Queries)
+    where
+        F: Fn(&str, usize) -> Vec<u8> + Send + 'static,
+    {
+        use tokio::io::AsyncReadExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/sparql", listener.local_addr().unwrap());
+        let queries = Queries::default();
+        let log = queries.clone();
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut request = Vec::new();
+                let mut buf = [0u8; 4096];
+                let body_start = loop {
+                    if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                        break end + 4;
+                    }
+                    match socket.read(&mut buf).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => request.extend_from_slice(&buf[..n]),
+                    }
+                };
+                let head = String::from_utf8_lossy(&request[..body_start]).to_ascii_lowercase();
+                let length: usize = head
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length:"))
+                    .and_then(|n| n.trim().parse().ok())
+                    .unwrap_or(0);
+                while request.len() < body_start + length {
+                    match socket.read(&mut buf).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => request.extend_from_slice(&buf[..n]),
+                    }
+                }
+                let query = url::form_urlencoded::parse(&request[body_start..])
+                    .find(|(name, _)| name == "query")
+                    .map(|(_, query)| query.into_owned())
+                    .unwrap_or_default();
+                let n = {
+                    let mut log = log.lock().unwrap();
+                    log.push(query.clone());
+                    log.len() - 1
+                };
+                let _ = socket.write_all(&respond(&query, n)).await;
+                let _ = socket.shutdown().await;
+            }
+        });
+        (url, queries)
+    }
+
+    /// The items a [`facts_query`] names.
+    fn items_of(query: &str) -> Vec<String> {
+        let values = query.split_once("VALUES ?item {").unwrap().1;
+        let values = values.split_once('}').unwrap().0;
+        values
+            .split_whitespace()
+            .map(|item| item.trim_start_matches("wd:").to_string())
+            .collect()
+    }
+
+    fn http(status: &str, body: &str) -> Vec<u8> {
+        format!(
+            "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .into_bytes()
+    }
+
+    /// An answer giving each item of `query` 7 sitelinks.
+    fn sitelinks_answer(query: &str) -> Vec<u8> {
+        let bindings: Vec<serde_json::Value> = items_of(query)
+            .iter()
+            .map(|item| {
+                serde_json::json!({
+                    "item": {"type": "uri", "value": format!("http://www.wikidata.org/entity/{item}")},
+                    "sitelinks": {"type": "literal", "value": "7"},
+                })
+            })
+            .collect();
+        let body = serde_json::json!({"results": {"bindings": bindings}}).to_string();
+        http("200 OK", &body)
+    }
+
+    fn quick() -> WikidataPacing {
+        WikidataPacing {
+            pause: Duration::ZERO,
+            retry_wait: Duration::from_millis(1),
+        }
+    }
+
+    fn sites_file(dir: &Path, items: std::ops::Range<usize>) -> PathBuf {
+        let path = dir.join("sites.tsv");
+        let rows: String = items
+            .map(|i| format!("Q{i}\tItem {i}\thttps://item{i}.org/\n"))
+            .collect();
+        std::fs::write(&path, format!("item\tlabel\twebsite\n{rows}")).unwrap();
+        path
+    }
+
+    #[tokio::test]
+    async fn a_failing_mirror_hands_its_batches_to_the_endpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let count = MIRROR_FACTS_BATCH * 2 + 10;
+        let sites = sites_file(dir.path(), 1..count + 1);
+        let (mirror, asked_mirror) = endpoint(|_, _| http("502 Bad Gateway", "down")).await;
+        let (main, asked_main) = endpoint(|query, _| sitelinks_answer(query)).await;
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let path =
+            download_site_facts_with(&client, Some(&mirror), &main, dir.path(), &[sites], quick())
+                .await
+                .unwrap();
+        let facts = load_site_facts(&path).unwrap();
+        assert_eq!(facts.len(), count);
+        // Two batches failed at the mirror (3 tries each); the third was
+        // never tried there.
+        assert_eq!(asked_mirror.lock().unwrap().len(), 2 * BATCH_TRIES as usize);
+        let main_items: usize = asked_main
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|q| items_of(q).len())
+            .sum();
+        assert_eq!(main_items, count);
+        assert!(!dir.path().join(FACTS_PARTIAL_NAME).exists());
+    }
+
+    #[tokio::test]
+    async fn a_later_download_goes_on_from_the_saved_facts() {
+        let dir = tempfile::tempdir().unwrap();
+        let sites = sites_file(dir.path(), 1..4);
+        std::fs::write(
+            dir.path().join(FACTS_PARTIAL_NAME),
+            format!("{FACTS_HEADER}Q1\t\t\t\t\t30\nQ2\tUS\t\t\t\t\n"),
+        )
+        .unwrap();
+        let (mirror, asked) = endpoint(|query, _| sitelinks_answer(query)).await;
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let path = download_site_facts_with(
+            &client,
+            Some(&mirror),
+            "http://127.0.0.1:9/never",
+            dir.path(),
+            &[sites],
+            quick(),
+        )
+        .await
+        .unwrap();
+        let asked = asked.lock().unwrap();
+        assert_eq!(asked.len(), 1);
+        assert_eq!(items_of(&asked[0]), ["Q3"]);
+        let facts = load_site_facts(&path).unwrap();
+        assert_eq!(facts.len(), 3);
+        assert_eq!(facts["Q1"].sitelinks, 30);
+        assert_eq!(facts["Q3"].sitelinks, 7);
     }
 
     #[test]

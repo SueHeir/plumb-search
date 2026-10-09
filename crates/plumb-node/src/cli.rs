@@ -658,6 +658,15 @@ pub struct FetchDataArgs {
     /// (a notability filter that keeps the query small enough to finish).
     #[arg(long, value_name = "N", default_value_t = 25)]
     pub wikidata_min_sitelinks: u32,
+    /// A copy of Wikidata to ask first for the official websites and their
+    /// facts: QLever's lists them all in seconds, while Wikidata's own
+    /// endpoint needs many queries, each close to its 60-second limit. When
+    /// it fails, Wikidata's own endpoint is asked.
+    #[arg(long, value_name = "URL", default_value = plumb_ingest::download::QLEVER_WIKIDATA_URL)]
+    pub wikidata_mirror: String,
+    /// Ask only Wikidata's own endpoint, not --wikidata-mirror.
+    #[arg(long)]
+    pub no_wikidata_mirror: bool,
     /// Keep each file an earlier run saved in --dir within this many days
     /// instead of fetching it again, so a rerun only fetches what is missing,
     /// stale or failed. A file copied in from another run's folder counts

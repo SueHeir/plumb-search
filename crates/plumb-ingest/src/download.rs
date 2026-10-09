@@ -36,6 +36,23 @@ pub const TRANCO_LATEST_URL: &str = "https://tranco-list.eu/top-1m.csv.zip";
 /// Wikidata's public SPARQL endpoint.
 pub const WIKIDATA_SPARQL_URL: &str = "https://query.wikidata.org/sparql";
 
+/// QLever's copy of Wikidata (<https://qlever.dev>), a SPARQL endpoint
+/// that lists every item with an official website in seconds and has no
+/// 60-second limit. It is rebuilt from Wikidata's dumps, so it can be a
+/// few days behind. The official websites and their facts are asked of it
+/// first, and of [`WIKIDATA_SPARQL_URL`] when it fails.
+pub const QLEVER_WIKIDATA_URL: &str = "https://qlever.dev/api/wikidata";
+
+/// The prefixes Wikidata's query service declares by itself, declared for
+/// endpoints such as [`QLEVER_WIKIDATA_URL`] that need them.
+pub const WIKIDATA_PREFIXES: &str = "PREFIX wd: <http://www.wikidata.org/entity/> \
+     PREFIX wdt: <http://www.wikidata.org/prop/direct/> \
+     PREFIX wikibase: <http://wikiba.se/ontology#> \
+     PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#> \
+     PREFIX skos: <http://www.w3.org/2004/02/skos/core#> \
+     PREFIX schema: <http://schema.org/> \
+     PREFIX xsd: <http://www.w3.org/2001/XMLSchema#> ";
+
 /// File name [`download_tranco`] saves to.
 pub const TRANCO_FILE_NAME: &str = "tranco-top-1m.csv.zip";
 
@@ -996,6 +1013,138 @@ pub async fn download_wikidata_official_sites_paced(
     Ok(dest)
 }
 
+/// [`download_wikidata_official_sites_paced`], asking the `mirror` first
+/// when there is one ([`download_wikidata_official_sites_bulk`]): one query
+/// there lists them all in seconds, while Wikidata's own query service
+/// needs a query per band of sitelink counts, each close to its 60-second
+/// limit. When the mirror fails, the bands are asked of `endpoint`.
+pub async fn download_wikidata_official_sites_with(
+    client: &reqwest::Client,
+    mirror: Option<&str>,
+    endpoint: &str,
+    dir: &Path,
+    min_sitelinks: u32,
+    pacing: WikidataPacing,
+) -> Result<PathBuf> {
+    if let Some(mirror) = mirror {
+        match download_wikidata_official_sites_bulk(client, mirror, dir, min_sitelinks, pacing)
+            .await
+        {
+            Ok(path) => return Ok(path),
+            Err(err) => warn!(
+                "could not list the official websites at {mirror} ({err:#}); \
+                 asking {endpoint} band by band"
+            ),
+        }
+    }
+    download_wikidata_official_sites_paced(client, endpoint, dir, min_sitelinks, pacing).await
+}
+
+/// The query for every item with an official website and at least
+/// `min_sitelinks` sitelinks, with its English (or multilingual) label, or
+/// its id when it has neither, as Wikidata's label service gives. It needs
+/// no label service, so endpoints other than Wikidata's own can answer it.
+/// The sitelink count is read as a number first, since QLever compares its
+/// counts with a plain number as never equal.
+pub fn bulk_official_sites_query(min_sitelinks: u32) -> String {
+    format!(
+        "{WIKIDATA_PREFIXES}SELECT ?item ?itemLabel ?website WHERE {{ \
+         ?item wdt:P856 ?website ; wikibase:sitelinks ?s . \
+         FILTER(xsd:integer(?s) >= {min_sitelinks}) \
+         OPTIONAL {{ ?item rdfs:label ?en . FILTER(LANG(?en) = \"en\") }} \
+         OPTIONAL {{ ?item rdfs:label ?mul . FILTER(LANG(?mul) = \"mul\") }} \
+         BIND(COALESCE(?en, ?mul, STRAFTER(STR(?item), \"/entity/\")) AS ?itemLabel) }}"
+    )
+}
+
+/// Fewer rows than this from [`download_wikidata_official_sites_bulk`]
+/// means the endpoint did not understand the query as meant: there were
+/// 131,386 items from 25 sitelinks up in October 2026, and an empty answer
+/// would leave a node without official websites.
+const MIN_BULK_ROWS: usize = 1_000;
+
+/// Asks `endpoint`, such as [`QLEVER_WIKIDATA_URL`], for every official
+/// website of items with at least `min_sitelinks` sitelinks in one query
+/// ([`bulk_official_sites_query`]), and writes the same TSV as
+/// [`download_wikidata_official_sites_paced`]. An answer that breaks off,
+/// HTTP 429 or 5xx and failed connections are tried again after the waits
+/// of `pacing` (or the `Retry-After`), up to 6 tries; an answer with fewer
+/// than 1,000 rows is an error, so a mirror that reads the query
+/// differently is not taken for the truth.
+pub async fn download_wikidata_official_sites_bulk(
+    client: &reqwest::Client,
+    endpoint: &str,
+    dir: &Path,
+    min_sitelinks: u32,
+    pacing: WikidataPacing,
+) -> Result<PathBuf> {
+    info!(
+        "asking {endpoint} for official websites of items with at least {min_sitelinks} \
+         sitelinks, in one query"
+    );
+    let form = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("query", &bulk_official_sites_query(min_sitelinks))
+        .finish();
+    let started = Instant::now();
+    let mut tries = 0;
+    let rows = loop {
+        tries += 1;
+        let (why, after, rate_limited) = match try_query(client, endpoint, &form).await {
+            Ok(rows) => break rows,
+            Err(Failed::Fatal(err)) => return Err(err),
+            Err(Failed::Again {
+                why,
+                after,
+                rate_limited,
+                ..
+            }) => (why, after, rate_limited),
+        };
+        if tries >= WIKIDATA_TRIES {
+            bail!("{why} (tried {tries} times)");
+        }
+        let wait = match after {
+            Some(after) if after > MAX_RETRY_AFTER => bail!(
+                "{why}; the answer asks to wait {} seconds before the next query",
+                after.as_secs()
+            ),
+            Some(after) => after,
+            None if rate_limited => pacing.wait_after(tries).max(pacing.rate_limit_wait()),
+            None => pacing.wait_after(tries),
+        };
+        warn!(
+            "{endpoint}: {why}; trying again in {:.1} s",
+            wait.as_secs_f64()
+        );
+        tokio::time::sleep(wait).await;
+    };
+    if rows.len() < MIN_BULK_ROWS {
+        bail!(
+            "only {} official websites came back, fewer than the {MIN_BULK_ROWS} expected",
+            rows.len()
+        );
+    }
+    let mut tsv = OfficialSitesTsv::new();
+    tsv.add(rows);
+    tokio::fs::create_dir_all(dir)
+        .await
+        .with_context(|| format!("creating {}", dir.display()))?;
+    let dest = dir.join(WIKIDATA_FILE_NAME);
+    let part = part_path(&dest);
+    tokio::fs::write(&part, tsv.text.as_bytes())
+        .await
+        .with_context(|| format!("writing {}", part.display()))?;
+    tokio::fs::rename(&part, &dest)
+        .await
+        .with_context(|| format!("renaming {} to {}", part.display(), dest.display()))?;
+    info!(
+        "wrote {} official websites to {} after {tries} queries in {:.0} s",
+        tsv.rows(),
+        dest.display(),
+        started.elapsed().as_secs_f64()
+    );
+    Ok(dest)
+}
+
 /// What a failed download says about trying again, given the bands saved.
 fn try_later(done: &[SitelinkBand]) -> String {
     match done.len() {
@@ -1170,6 +1319,16 @@ impl SitelinkBand {
     /// The SPARQL query for the items in the band, as
     /// [`wikidata_sparql_query`] is for those from a minimum up.
     pub fn sparql_query(&self) -> String {
+        if self.max == Some(self.min) {
+            // One count: naming it lets Wikidata start from its index of
+            // sitelink counts instead of every item with a website (on
+            // 2026-10-09 the filter for exactly 20 ran past the limit,
+            // while this answered in 50 seconds).
+            return format!(
+                "SELECT ?item ?itemLabel ?website WHERE {{ ?item wikibase:sitelinks {} . ?item wdt:P856 ?website . SERVICE wikibase:label {{ bd:serviceParam wikibase:language \"en,mul\". }} }}",
+                self.min
+            );
+        }
         let filter = match self.max {
             Some(max) => format!("?s >= {} && ?s < {}", self.min, u64::from(max) + 1),
             None => format!("?s >= {}", self.min),
@@ -2470,6 +2629,90 @@ mod tests {
     }
 
     #[test]
+    fn one_count_bands_start_from_the_count() {
+        assert_eq!(
+            band(20, Some(20)).sparql_query(),
+            "SELECT ?item ?itemLabel ?website WHERE { ?item wikibase:sitelinks 20 . ?item wdt:P856 ?website . SERVICE wikibase:label { bd:serviceParam wikibase:language \"en,mul\". } }"
+        );
+    }
+
+    #[test]
+    fn the_bulk_query_needs_no_label_service() {
+        let query = bulk_official_sites_query(3);
+        assert!(query.starts_with(WIKIDATA_PREFIXES), "{query}");
+        assert!(query.contains("FILTER(xsd:integer(?s) >= 3)"), "{query}");
+        assert!(query.contains("COALESCE(?en, ?mul, STRAFTER(STR(?item), \"/entity/\"))"));
+        assert!(!query.contains("SERVICE"));
+    }
+
+    /// `n` made-up official websites.
+    fn many_rows(n: usize) -> Vec<(String, String, String)> {
+        (0..n)
+            .map(|i| {
+                (
+                    format!("Q{i}"),
+                    format!("Item {i}"),
+                    format!("https://item{i}.org/"),
+                )
+            })
+            .collect()
+    }
+
+    fn sparql_ok(rows: &[(String, String, String)]) -> Vec<u8> {
+        let answer = sparql_answer(
+            rows.iter()
+                .map(|(item, label, website)| (item.as_str(), label.as_str(), website.as_str())),
+        );
+        http_response("200 OK", &[], answer.as_bytes())
+    }
+
+    #[tokio::test]
+    async fn the_mirror_lists_every_site_in_one_query() {
+        let rows = many_rows(MIN_BULK_ROWS + 5);
+        let (url, asked) = sparql_endpoint(move |_, n| match n {
+            0 => http_response("429 Too Many Requests", &[], b"slow down"),
+            _ => sparql_ok(&rows),
+        })
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let path = download_wikidata_official_sites_with(
+            &loopback_client(),
+            Some(&url),
+            "http://127.0.0.1:9/never",
+            dir.path(),
+            3,
+            quick(),
+        )
+        .await
+        .unwrap();
+        let text = std::fs::read_to_string(path).unwrap();
+        assert_eq!(text.lines().count(), MIN_BULK_ROWS + 6);
+        assert!(text.contains("Q7\tItem 7\thttps://item7.org/\n"));
+        assert_eq!(asked.bands(), [band(3, None), band(3, None)]);
+    }
+
+    #[tokio::test]
+    async fn a_mirror_with_too_few_rows_falls_back_to_the_bands() {
+        let (mirror, _) = sparql_endpoint(|_, _| sparql_ok(&many_rows(3))).await;
+        let (main, asked) = sparql_endpoint(|_, _| sparql_ok(&many_rows(2))).await;
+        let dir = tempfile::tempdir().unwrap();
+        // From 130 up there is one band, so one query.
+        let path = download_wikidata_official_sites_with(
+            &loopback_client(),
+            Some(&mirror),
+            &main,
+            dir.path(),
+            130,
+            quick(),
+        )
+        .await
+        .unwrap();
+        let text = std::fs::read_to_string(path).unwrap();
+        assert_eq!(text.lines().count(), 3);
+        assert_eq!(asked.bands(), [band(130, None)]);
+    }
+
+    #[test]
     fn band_queries_and_names() {
         assert_eq!(
             band(25, Some(29)).sparql_query(),
@@ -2698,6 +2941,13 @@ mod tests {
 
     /// The band a query from [`SitelinkBand::sparql_query`] asks for.
     fn band_of_query(query: &str) -> Option<SitelinkBand> {
+        if let Some(rest) = query.split_once("?item wikibase:sitelinks ") {
+            let n = rest.1.split_once(' ')?.0.parse().ok()?;
+            return Some(band(n, Some(n)));
+        }
+        if let Some(rest) = query.split_once("FILTER(xsd:integer(?s) >= ") {
+            return Some(band(rest.1.split_once(')')?.0.parse().ok()?, None));
+        }
         let filter = query.split_once("FILTER(")?.1.split_once(')')?.0;
         let (mut min, mut max) = (None, None);
         for part in filter.split("&&").map(str::trim) {
