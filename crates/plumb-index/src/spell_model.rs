@@ -43,13 +43,19 @@ const MAGIC: &[u8; 8] = b"PLUMBSP1";
 /// A word is taken as a misspelling of a word one edit away found in this
 /// many times as many sites. The paper's "conservative" ratio.
 pub(crate) const MINED_RATIO: u64 = 10;
+/// Least number of mined pairs a rule needs to be kept.
+const MIN_RULE_PAIRS: u32 = 3;
+/// Added to how often a rule's letters are meant, in sites, so a rule of
+/// rare letters is not taken as likely from a few pairs.
+const RULE_SMOOTHING: u64 = 10_000;
 /// Only words this long or longer are paired up: shorter ones are one
 /// edit from too many others.
 const MIN_MINED_CHARS: usize = 4;
 /// Longest word paired up or kept.
 const MAX_WORD_CHARS: usize = 24;
-/// An unseen edit of a word's first letter is this much less likely than
-/// another unseen edit.
+/// An edit of a word's first letter is this much less likely than the
+/// rules say: typos rarely start a word ("fedx" is fedex, not edx), and
+/// the pairs mined include names that differ in their first letter.
 const FIRST_LETTER_SHARE: f32 = 0.1;
 /// Stupid Backoff's discount for a word seen without the word before it.
 const BACKOFF: f64 = 0.4;
@@ -205,23 +211,18 @@ impl Model {
         edit_rules(meant, typed)
             .iter()
             .map(|forms| {
-                // Typos rarely start a word: an unseen edit of the first
-                // letter costs more.
+                // Typos rarely start a word.
                 let first = forms
                     .iter()
                     .any(|(r, t)| r.starts_with('^') || t.starts_with('^'));
-                let unseen = if first {
-                    self.unseen * FIRST_LETTER_SHARE
-                } else {
-                    self.unseen
-                };
                 let p = forms
                     .iter()
                     .filter_map(|rule| {
                         self.rules
                             .get(&(rule.0.as_str().into(), rule.1.as_str().into()))
                     })
-                    .fold(unseen, |best, &p| best.max(p));
+                    .fold(self.unseen, |best, &p| best.max(p));
+                let p = if first { p * FIRST_LETTER_SHARE } else { p };
                 f64::from(p).ln()
             })
             .sum()
@@ -464,8 +465,6 @@ pub(crate) struct ModelBuilder {
     words: Vec<Box<str>>,
     counts: Vec<u32>,
     pairs: HashMap<(u32, u32), u32>,
-    /// Counts at or below this were dropped at least once (lossy counting).
-    floor: u32,
 }
 
 impl ModelBuilder {
@@ -477,7 +476,6 @@ impl ModelBuilder {
             words: Vec::new(),
             counts: Vec::new(),
             pairs: HashMap::new(),
-            floor: 0,
         }
     }
 
@@ -521,8 +519,19 @@ impl ModelBuilder {
             *self.pairs.entry(pair).or_insert(0) += 1;
         }
         if self.pairs.len() > BUILD_PAIRS_CAP || self.words.len() > BUILD_WORDS_CAP {
-            self.floor += 1;
-            self.prune(self.floor + 1);
+            // Drop what was seen once so far, and more only while that is
+            // not enough to halve what is held: a pair seen in many sites
+            // reaches two long before the next pruning.
+            let mut least = 2;
+            loop {
+                self.prune(least);
+                if self.pairs.len() <= BUILD_PAIRS_CAP / 2
+                    && self.words.len() <= BUILD_WORDS_CAP / 2
+                {
+                    break;
+                }
+                least += 1;
+            }
         }
     }
 
@@ -568,7 +577,7 @@ impl ModelBuilder {
         searcher: &tantivy::Searcher,
         fields: &[Field],
     ) -> Result<Model> {
-        self.prune(MIN_SAVED_COUNT.max(self.floor + 1));
+        self.prune(MIN_SAVED_COUNT);
         let (rules, unseen) = mine_rules(searcher, fields)?;
         let mut order: Vec<u32> = (0..self.words.len() as u32).collect();
         order.sort_by(|&a, &b| self.words[a as usize].cmp(&self.words[b as usize]));
@@ -810,7 +819,7 @@ fn deletion_hashes(chars: &[char]) -> Vec<u64> {
 
 /// Whether two words differ by a plural or possessive `s` at the end:
 /// "bank" and "banks" are both meant.
-fn plural_pair(a: &str, b: &str) -> bool {
+pub(crate) fn plural_pair(a: &str, b: &str) -> bool {
     a.strip_suffix('s') == Some(b) || b.strip_suffix('s') == Some(a)
 }
 
@@ -854,7 +863,8 @@ pub(crate) fn mine_rules(searcher: &tantivy::Searcher, fields: &[Field]) -> Resu
     by_deletion.sort_unstable();
     by_deletion.dedup();
 
-    let mut weights: HashMap<(String, String), u64> = HashMap::new();
+    // Per rule: sites with the misspellings, and how many misspellings.
+    let mut weights: HashMap<(String, String), (u64, u32)> = HashMap::new();
     let mut typos: u64 = 0;
     for_each_term(searcher, fields, |term, docs| {
         if !minable(term) {
@@ -893,20 +903,24 @@ pub(crate) fn mine_rules(searcher: &tantivy::Searcher, fields: &[Field]) -> Resu
         typos += docs;
         for forms in edit_rules(&meant_word, term) {
             for rule in forms {
-                *weights.entry(rule).or_insert(0) += docs;
+                let weight = weights.entry(rule).or_insert((0, 0));
+                weight.0 += docs;
+                weight.1 += 1;
             }
         }
     })?;
     let mut rules = HashMap::with_capacity(weights.len());
-    for ((r, t), weight) in weights {
+    for ((r, t), (weight, pairs)) in weights {
+        // A rule only a pair or two show may be chance: names that differ
+        // by a letter ("schwaab" and "schwab"), not a slip.
+        if pairs < MIN_RULE_PAIRS {
+            continue;
+        }
         let Some(&of) = substrings.get(&r) else {
             continue;
         };
-        if of == 0 {
-            continue;
-        }
-        // A rule seen once may be chance; it still beats an unseen edit.
-        let p = (weight as f64 / of as f64).min(1.0) as f32;
+        // Rare letters are smoothed towards no rule at all.
+        let p = (weight as f64 / (of + RULE_SMOOTHING) as f64).min(1.0) as f32;
         rules.insert((r.into_boxed_str(), t.into_boxed_str()), p);
     }
     // An unseen edit: well below the average error rate per letter.

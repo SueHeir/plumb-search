@@ -57,6 +57,9 @@ pub const QUESTION_SHARE: f32 = 0.75;
 /// spelled right: "pkce", "nalgebra", "stain" and "biles" are, however few
 /// sites say them.
 pub const KNOWN_WORD_PAGES: u64 = 3;
+/// A word the pages hardly know is corrected to a near word found in this
+/// many times as many pages names ([`PageSearcher::suggest_spelling`]).
+pub const PAGE_FIX_RATIO: u64 = 20;
 /// Most read articles about a site looked at for one about the site itself
 /// ([`PageSearcher::title_untitled`]).
 const TITLE_CANDIDATES: usize = 20;
@@ -1160,6 +1163,68 @@ impl PageSearcher {
         Ok(Some(crate::Spelling {
             query: fixed.join(" "),
             ..spelling
+        }))
+    }
+
+    /// A suggested spelling of `query` from the words of the pages' names,
+    /// for queries about things rather than sites ("anubas", "budafest"),
+    /// whose words the sites index hardly has. Each word the pages do not
+    /// know ([`PageSearcher::knows_word`]) and `site_known` does not either
+    /// is replaced by the near word found in the most pages, at least
+    /// [`PAGE_FIX_RATIO`] times as many as have the word typed, or with the
+    /// spelling model, the likeliest by the noisy channel
+    /// ([`crate::spell_model`]). `None` when no word changes.
+    pub fn suggest_spelling(
+        &self,
+        query: &str,
+        model: Option<&crate::spell_model::Model>,
+        site_known: &dyn Fn(&str) -> bool,
+    ) -> Result<Option<crate::Spelling>> {
+        let searcher = self.reader.searcher();
+        let docs = |word: &str| -> Result<u64> {
+            Ok(searcher.doc_freq(&Term::from_field_text(self.fields.words, word))?)
+        };
+        let typed = analysis::tokens(&self.words, query);
+        let mut fixed = typed.clone();
+        for word in &mut fixed {
+            let chars = word.chars().count();
+            let edits = crate::spell::max_edits(chars);
+            if edits == 0
+                || !word.chars().all(char::is_alphabetic)
+                || self.knows_word(word)?
+                || site_known(word)
+            {
+                continue;
+            }
+            let typed_docs = docs(word)?;
+            let needed = KNOWN_WORD_PAGES.max(PAGE_FIX_RATIO.saturating_mul(typed_docs));
+            let mut best: Option<(f64, String)> = None;
+            for (term, distance) in
+                crate::spell::near_terms(&searcher, self.fields.words, word, edits)?
+            {
+                let term_docs = docs(&term)?;
+                if term_docs < needed {
+                    continue;
+                }
+                // Without a model, an edit costs as much as a thousand
+                // times the pages.
+                let cost = match model {
+                    Some(model) => model.ln_channel(word, &term),
+                    None => -7.0 * f64::from(distance),
+                };
+                let likelihood = cost + (term_docs as f64).ln();
+                if best.as_ref().is_none_or(|(b, _)| likelihood > *b) {
+                    best = Some((likelihood, term));
+                }
+            }
+            if let Some((_, term)) = best {
+                *word = term;
+            }
+        }
+        Ok((fixed != typed).then(|| crate::Spelling {
+            query: fixed.join(" "),
+            site: None,
+            applied: false,
         }))
     }
 
@@ -2686,6 +2751,42 @@ mod tests {
     }
 
     #[test]
+    fn words_of_things_are_corrected_from_page_names() {
+        let mut pages = Vec::new();
+        for i in 0..25 {
+            pages.push(page(&format!("Anubis statue {i}"), 10, &[]));
+            pages.push(page(&format!("Budapest hotels {i}"), 10, &[]));
+        }
+        pages.push(page("Anubas (beetle)", 1, &[]));
+        let (_dir, searcher) = searcher(&pages);
+        let nothing_known = |_: &str| false;
+        let suggest = |query: &str| {
+            searcher
+                .suggest_spelling(query, None, &nothing_known)
+                .unwrap()
+                .map(|s| s.query)
+        };
+        // Even a word one page has is taken for a slip of a far commoner one.
+        assert_eq!(suggest("anubas").as_deref(), Some("anubis"));
+        assert_eq!(
+            suggest("budafest hotels").as_deref(),
+            Some("budapest hotels")
+        );
+        // Known words, short words and words with digits stay.
+        assert_eq!(suggest("budapest"), None);
+        assert_eq!(suggest("anub"), None);
+        assert_eq!(suggest("budafest2"), None);
+        // A word the sites know is spelled right.
+        let sites_know = |word: &str| word == "budafest";
+        assert_eq!(
+            searcher
+                .suggest_spelling("budafest", None, &sites_know)
+                .unwrap(),
+            None
+        );
+    }
+
+    #[test]
     fn spellings_keep_the_words_pages_know() {
         let mut pages = Vec::new();
         for i in 0..3 {
@@ -2696,6 +2797,7 @@ mod tests {
         let spelling = |query: &str, site: Option<&str>| crate::Spelling {
             query: query.into(),
             site: site.map(str::to_string),
+            applied: false,
         };
         // Every changed word is known: no suggestion.
         assert_eq!(

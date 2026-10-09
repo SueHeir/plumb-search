@@ -394,6 +394,9 @@ impl Speller<'_> {
         let mut best: Option<(u8, u64, String)> = None;
         let mut best_likelihood = f64::NEG_INFINITY;
         for (term, distance) in near {
+            if !plausible_fix(word, &term) {
+                continue;
+            }
             let term_docs = self.docs_with(&term)?;
             if term_docs < needed {
                 continue;
@@ -417,6 +420,17 @@ impl Speller<'_> {
         }
         match best {
             Some((_, _, term)) if known && !self.real_word_slip(word, &term)? => Ok(None),
+            // A word several sites use is taken for a slip only when the
+            // edit is likelier than the word itself (the paper's simple
+            // classifier): "perft" and "inkala" are rare, but meant.
+            Some((_, term_docs, term))
+                if docs >= MIN_FIX_DOCS
+                    && self.channel(word, &term).is_some_and(|channel| {
+                        channel + (term_docs as f64 / docs as f64).ln() < 0.0
+                    }) =>
+            {
+                Ok(None)
+            }
             best => Ok(best.map(|(_, _, term)| term)),
         }
     }
@@ -460,7 +474,10 @@ impl Speller<'_> {
                 }
             }
             for term in near.into_keys() {
-                if model.count(&term) < MIN_FIX_DOCS as u32 || !within_edits(word, &term) {
+                if model.count(&term) < MIN_FIX_DOCS as u32
+                    || !within_edits(word, &term)
+                    || !plausible_fix(word, &term)
+                {
                     continue;
                 }
                 let mut other = words.clone();
@@ -476,9 +493,17 @@ impl Speller<'_> {
     }
 }
 
+/// Whether `term` can be what `word` was meant as at all: a word typed
+/// without digits is not a slip of one with them ("perft" is not
+/// "perf1"), and a plural is not a slip of the word ("buffers").
+fn plausible_fix(word: &str, term: &str) -> bool {
+    let digits = |w: &str| w.chars().any(|c| c.is_ascii_digit());
+    !(digits(term) && !digits(word)) && !crate::spell_model::plural_pair(word, term)
+}
+
 /// The terms of `field` within `edits` edits of `key`, `key` itself left
 /// out, each with its edit distance.
-fn near_terms(
+pub(crate) fn near_terms(
     searcher: &tantivy::Searcher,
     field: Field,
     key: &str,

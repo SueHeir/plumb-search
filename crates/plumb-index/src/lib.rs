@@ -52,10 +52,12 @@
 //!   A well-known site ([`WELL_KNOWN_LINK_SCORE`]) named by the whole
 //!   query keeps it to itself: "read the docs".
 //!
-//! A query that names no site in full is checked for typos. It is always
-//! searched as typed; a correction is only suggested: "amazom" asks "Did
-//! you mean amazon?". See [`Searcher::search_meaning`] and the [`spell`]
-//! module.
+//! A query that names no site in full is checked for typos. It is
+//! searched as typed and a correction is only suggested: "amazom" asks "Did
+//! you mean amazon?". Only when no site has all the words typed and the
+//! correction finds one that does are its results shown instead ("kayne
+//! west albums"; [`Spelling::applied`]). See [`Searcher::search_meaning`]
+//! and the [`spell`] module.
 //!
 //! All text, at index and at query time, goes through
 //! [`plumb_core::normalize_text`] and is then ASCII-folded, so `U.S. Bank`,
@@ -184,6 +186,9 @@ const MAX_QUERY_WORDS: usize = 16;
 /// [`OPERATOR_CANDIDATES`], before they narrow the hits.
 const OPERATOR_WIDENING: usize = 5;
 const OPERATOR_CANDIDATES: usize = 200;
+/// A word found in this many sites or more is spelled right as far as the
+/// sites can tell ([`Searcher::word_sites`]).
+pub const KNOWN_WORD_SITES: u64 = spell::KNOWN_WORD_DOCS;
 /// The least link score of a well-known site (roughly the top 30,000).
 pub const WELL_KNOWN_LINK_SCORE: f32 = 0.5;
 /// How much more link score a well-known site whose name is a typo away
@@ -550,6 +555,11 @@ pub struct Spelling {
     /// in a site's name ("youtbue": youtube.com), offered with it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub site: Option<String>,
+    /// The results are for this spelling, not the query as typed: nothing
+    /// found had all the typed words, and the spelling finds a site that
+    /// does ("kayne west stronger"). Shown as "Showing results for ...".
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub applied: bool,
 }
 
 /// Builds a fresh index of `records` in `dir`, replacing any index already
@@ -1188,6 +1198,20 @@ impl Searcher {
         if fixed.hits.is_empty() {
             return Ok(results);
         }
+        // Nothing has all the words typed, and the spelling finds what
+        // does: show its results instead ("kayne west stronger").
+        let typed_found_nothing = results.hits.iter().all(|hit| hit.missing_words);
+        if typed_found_nothing && fixed.hits.first().is_some_and(|hit| !hit.missing_words) {
+            let (fixed, _) = self.rank(&fix.query, limit, cfg, options, meaning)?;
+            return Ok(SearchResults {
+                spelling: Some(Spelling {
+                    query: fix.query,
+                    site: None,
+                    applied: true,
+                }),
+                ..fixed
+            });
+        }
         let site = fixed
             .hits
             .first()
@@ -1229,6 +1253,7 @@ impl Searcher {
             spelling: Some(Spelling {
                 query: fix.query,
                 site,
+                applied: false,
             }),
             ..results
         })
@@ -6432,6 +6457,19 @@ mod tests {
             ("Grand hotel", 25),
             ("Hockey club", 30),
             ("Hocky club", 2),
+            // Two more of each slip, so the error model learns them.
+            ("Kodak camera", 25),
+            ("Kodack camera", 2),
+            ("Batik prints", 25),
+            ("Batick prints", 2),
+            ("Turkey travel", 25),
+            ("Turky travel", 2),
+            ("Jockey silks", 25),
+            ("Jocky silks", 2),
+            ("Perf1 benchmark", 80),
+            ("Perft results", 3),
+            ("Ikala karaoke", 80),
+            ("Inkala sudoku", 3),
             ("Kanye West albums", 40),
             ("Kayne Anderson capital", 22),
         ];
@@ -6523,6 +6561,26 @@ mod tests {
     }
 
     #[test]
+    fn rare_terms_that_are_meant_stay() {
+        let (_dir, searcher) = build(&spelling_corpus());
+        // A word without digits is no slip of one with them.
+        assert_eq!(
+            spelled_with(&searcher, "perft", &RankConfig::default()),
+            None
+        );
+        // Three sites say "inkala": far fewer than say "ikala", but too many
+        // for a slip as unlikely as a dropped letter.
+        assert_eq!(
+            spelled_with(&searcher, "inkala", &RankConfig::default()),
+            None
+        );
+        assert_eq!(
+            spelled_with(&searcher, "inkala sudoku", &RankConfig::default()),
+            None
+        );
+    }
+
+    #[test]
     fn words_around_a_word_can_show_it_is_a_slip() {
         let (_dir, searcher) = build(&spelling_corpus());
         assert_eq!(
@@ -6547,6 +6605,24 @@ mod tests {
             spelled_with(&searcher, "kayne west stronger", &trusting).as_deref(),
             Some("kanye west stronger")
         );
+        // Nothing has the words as typed, and the spelling finds sites
+        // with all of them: its results are shown.
+        let results = searcher
+            .search_full(
+                "kayne west albums",
+                10,
+                &trusting,
+                &SearchOptions::default(),
+            )
+            .unwrap();
+        let spelling = results.spelling.expect("a spelling");
+        assert_eq!(spelling.query, "kanye west albums");
+        assert!(spelling.applied);
+        assert!(results.hits[0]
+            .title
+            .as_deref()
+            .unwrap_or("")
+            .starts_with("Kanye West albums"));
         // Alone, "canon" is a word like any other.
         assert_eq!(spelled_with(&searcher, "canon", &trusting), None);
         assert_eq!(spelled_with(&searcher, "canon camera", &trusting), None);
