@@ -337,7 +337,7 @@ pub(super) async fn search(state: AppState, headers: HeaderMap, params: SearchPa
     if pageno > MAX_PAGENO.min((MAX_LIMIT / per_page).max(1)) {
         return reply(StatusCode::OK, body);
     }
-    let mut options = params.options(&state.settings.home, &headers);
+    let mut options = params.options(&state.settings, &headers);
     if params.safe.is_none() {
         if let Some(level) = params.safesearch.as_deref().and_then(safesearch) {
             options.safe = level;
@@ -450,7 +450,7 @@ pub(super) async fn external(
         .unwrap_or(super::DEFAULT_LIMIT)
         .clamp(1, MAX_LIMIT);
     let params = SearchParams::default();
-    let options = params.options(&state.settings.home, &headers);
+    let options = params.options(&state.settings, &headers);
     match collect(&state, &query, count, &options, Wanted::Everything).await {
         Ok(collected) => {
             let results: Vec<Value> = collected
