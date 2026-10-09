@@ -647,8 +647,8 @@ impl Page {
     }
 
     /// The words a question, paper, docs or reference page is found by
-    /// besides its title: its title, a question's tags and the titles of its
-    /// duplicates, and a docs or reference page's other names and
+    /// besides its title: its title, a question's tags and the titles of
+    /// its duplicates, and a docs, reference or subpages page's other names and
     /// description. `None` for pages of other sets, found by their names
     /// only.
     pub fn topic(&self) -> Option<String> {

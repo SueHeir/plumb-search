@@ -775,8 +775,8 @@ pub struct FetchPagesArgs {
     /// government agencies, entertainment sites and museums, from their
     /// sitemaps and the pages their homepages link to; --work as for docs),
     /// places (named shops, restaurants, parks and towns from
-    /// OpenStreetMap) or wiktionary (English words and what they mean, from
-    /// kaikki.org's reading of Wiktionary, about 3.3 GB, for "define"
+    /// OpenStreetMap) or wiktionary (English words and what they mean,
+    /// from kaikki.org's reading of Wiktionary, about 3.3 GB, for "define"
     /// searches).
     #[arg(long, value_name = "SET", default_value = "wikipedia-en")]
     pub set: String,
