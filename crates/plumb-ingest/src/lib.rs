@@ -39,6 +39,7 @@ pub mod profiles;
 pub mod stackexchange;
 pub mod tranco;
 pub mod wat;
+pub mod wet;
 pub mod wikidata;
 
 pub use builder::Builder;
