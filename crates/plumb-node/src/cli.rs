@@ -686,6 +686,14 @@ pub struct FetchFactsArgs {
     /// The articles file to add them to instead.
     #[arg(long, value_name = "PATH")]
     pub articles: Option<PathBuf>,
+    /// Where to read on when Wikidata's query service stops answering a
+    /// kind's deep pages (it times out on them): by default QLever's copy
+    /// of Wikidata.
+    #[arg(long, value_name = "URL", default_value = plumb_ingest::item_facts::DEEP_SPARQL_URL)]
+    pub deep_endpoint: String,
+    /// Ask only Wikidata's query service, never --deep-endpoint.
+    #[arg(long)]
+    pub wikidata_only: bool,
 }
 
 #[derive(Debug, Args)]

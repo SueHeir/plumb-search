@@ -606,9 +606,11 @@ pub fn run_facts(args: FetchFactsArgs) -> Result<()> {
     let wanted = plumb_ingest::profiles::items_in_order(&path)?;
     info!("{} articles have a Wikidata item", wanted.len());
     let client = download::http_client()?;
+    let deep = (!args.wikidata_only).then_some(args.deep_endpoint.as_str());
     let facts = block_on(plumb_ingest::item_facts::fetch_facts(
         &client,
         download::WIKIDATA_SPARQL_URL,
+        deep,
         download::WikidataPacing::default(),
         &wanted,
     ))??;
