@@ -138,6 +138,71 @@ fn ingest_index_search_and_eval_the_fixtures() {
 }
 
 #[test]
+fn eval_scores_the_same_with_the_page_index_kept() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (index, _) = build_fixture_index(tmp.path());
+    let pages = tmp.path().join("wikipedia-en.tsv");
+    std::fs::write(
+        &pages,
+        "views\ttitle\tdescription\titem\tsite\taliases\n\
+         9000\tU.S. Bancorp\tAmerican bank holding company\tQ1\tusbank.com\tUS Bank\n\
+         8000\tMarie Curie\tPolish-French physicist and chemist\tQ7186\t\t\n\
+         7000\tChase Bank\tAmerican bank\tQ2\tchase.com\t\n",
+    )
+    .unwrap();
+    let queries = tmp.path().join("queries.tsv");
+    std::fs::write(
+        &queries,
+        "us bank\tusbank.com\n\
+         marie curie\thttps://en.wikipedia.org/wiki/Marie_Curie\n\
+         chase\tchase.com\n",
+    )
+    .unwrap();
+    let cache = tmp.path().join("cache");
+    let eval = |cached: bool| {
+        let mut items: Vec<&dyn AsRef<OsStr>> = vec![
+            &"eval",
+            &"--index",
+            &index,
+            &"--queries",
+            &queries,
+            &"--pages",
+            &pages,
+            &"--show",
+            &"3",
+        ];
+        if cached {
+            items.extend([&"--pages-cache" as &dyn AsRef<OsStr>, &cache]);
+        }
+        plumb_ok(&args(&items))
+    };
+    let fresh = eval(false);
+    assert!(fresh.contains("top-1"), "{fresh}");
+    // The first cached run builds the index, the second reuses it.
+    assert_eq!(eval(true), fresh);
+    assert_eq!(eval(true), fresh);
+    let kept: Vec<_> = std::fs::read_dir(&cache)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .filter(|name| name.len() == 64)
+        .collect();
+    assert_eq!(kept.len(), 1, "{kept:?}");
+
+    // A changed page set file builds another index.
+    std::fs::write(
+        &pages,
+        std::fs::read_to_string(&pages).unwrap() + "100\tChase\tA pursuit\tQ3\t\t\n",
+    )
+    .unwrap();
+    eval(true);
+    let kept = std::fs::read_dir(&cache)
+        .unwrap()
+        .filter(|e| e.as_ref().unwrap().file_name().len() == 64)
+        .count();
+    assert_eq!(kept, 2);
+}
+
+#[test]
 fn eval_fails_below_min_top1_and_reports_misses() {
     let tmp = tempfile::tempdir().unwrap();
     let (index, _) = build_fixture_index(tmp.path());

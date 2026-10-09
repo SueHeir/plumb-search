@@ -207,3 +207,5 @@ plumb eval --index data/indexes/000123 --queries eval/repo_queries.tsv \
 ```
 
 `--pages` also works with the brand and described query files, to check that articles do not push official sites down.
+
+Each run builds an index of the pages first, which with every set takes minutes and several GB. `--pages-cache DIR` (or `PLUMB_EVAL_PAGES_CACHE=DIR`) keeps that index in `DIR` and reuses it while the page set files and the `plumb` binary are unchanged, so only the first run of a build pays for it; runs started together wait for one build, and the four most recently used indexes are kept. Scores are the same as without it.
