@@ -24,8 +24,10 @@
 //!   public node it would make an open proxy. Nothing read is kept.
 //!
 //! Each tool's answer comes twice: as short plain text, one line per
-//! result, for the model to read (small local models have little room),
-//! and as JSON in `structuredContent` for programs.
+//! result (small local models have little room), and as JSON in
+//! `structuredContent` for programs. Some AI apps give the model the JSON
+//! when there is any, so `plumb mcp --text-answers` and `/mcp?answers=text`
+//! leave it out ([`text_only`]).
 //!
 //! Two transports carry it:
 //!
@@ -1684,6 +1686,16 @@ fn tool_result(name: &str, answer: Result<Value>) -> Value {
     }
 }
 
+/// Leaves the JSON (`structuredContent`) out of a `tools/call` answer, so
+/// an AI app that would give the model the JSON gives it the short text.
+/// No tool declares an output schema, so the JSON is optional. Any other
+/// answer is left as it is.
+pub fn text_only(reply: &mut Value) {
+    if let Some(result) = reply.get_mut("result").and_then(Value::as_object_mut) {
+        result.remove("structuredContent");
+    }
+}
+
 impl Reader {
     /// Fetches the page and cuts out the part asked for.
     fn read(&self, args: &ReadArgs) -> Result<Value> {
@@ -2626,7 +2638,7 @@ pub fn run(args: McpArgs) -> Result<()> {
             let backend: Arc<dyn SearchBackend> =
                 Arc::new(IndexBackend::new(searcher, rank_config(None)));
             let rates = answers::RatesCache::default();
-            serve_lines(stdin, stdout, |message| {
+            serve_lines(stdin, stdout, args.text_answers, |message| {
                 if let Some(answer) = relations.and_then(|store| relate_here(store, message)) {
                     return Ok(Some(answer));
                 }
@@ -2649,7 +2661,7 @@ pub fn run(args: McpArgs) -> Result<()> {
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
                 .context("making the HTTP client")?;
-            serve_lines(stdin, stdout, |message| {
+            serve_lines(stdin, stdout, args.text_answers, |message| {
                 if let Some(answer) = relations.and_then(|store| relate_here(store, message)) {
                     return Ok(Some(answer));
                 }
@@ -2903,10 +2915,12 @@ async fn forward(
 }
 
 /// Reads one JSON-RPC message per line from `input` and writes each answer
-/// as one line to `output`.
+/// as one line to `output`, without the JSON copy of tool answers if
+/// `text_answers` ([`text_only`]).
 fn serve_lines(
     input: impl BufRead,
     mut output: impl Write,
+    text_answers: bool,
     mut answer: impl FnMut(&Value) -> Result<Option<Value>>,
 ) -> Result<()> {
     for line in input.lines() {
@@ -2918,7 +2932,10 @@ fn serve_lines(
             Ok(message) => answer(&message)?,
             Err(_) => Some(parse_error()),
         };
-        if let Some(reply) = reply {
+        if let Some(mut reply) = reply {
+            if text_answers {
+                text_only(&mut reply);
+            }
             serde_json::to_writer(&mut output, &reply).context("writing stdout")?;
             output.write_all(b"\n").context("writing stdout")?;
             output.flush().context("writing stdout")?;

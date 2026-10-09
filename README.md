@@ -94,7 +94,7 @@ It is good at what agents look up most: the official site ("chase login"), a pac
   claude mcp add --transport http plumb https://plumbsearch.org/mcp
   ```
 
-  [docs/mcp.md](docs/mcp.md) covers Claude Desktop and other apps.
+  With the desktop app, give `http://127.0.0.1:7586/mcp` instead to have `read_page` too. [docs/mcp.md](docs/mcp.md) covers `plumb mcp`, Claude Desktop and other apps.
 - **Local models**: LM Studio, Open WebUI, Jan, LibreChat, AnythingLLM, and anything that takes a SearXNG address (`/search?format=json`). Setup for each is in [docs/local-llms.md](docs/local-llms.md).
 - **JSON API**: `/api/search?q=...` on any node.
 

@@ -353,12 +353,22 @@ async fn web_app_escapes_text_from_the_web() {
 /// Sends `messages` to `plumb mcp --index <index>`, one per line, and
 /// returns its answers.
 fn mcp_over_stdio(index: &Path, messages: &[serde_json::Value]) -> Vec<serde_json::Value> {
+    mcp_over_stdio_with(index, &[], messages)
+}
+
+/// [`mcp_over_stdio`], with more options for `plumb mcp`.
+fn mcp_over_stdio_with(
+    index: &Path,
+    options: &[&str],
+    messages: &[serde_json::Value],
+) -> Vec<serde_json::Value> {
     use std::io::Write;
     use std::process::Stdio;
     let mut child = Command::new(env!("CARGO_BIN_EXE_plumb"))
         .arg("mcp")
         .arg("--index")
         .arg(index)
+        .args(options)
         .env("RUST_LOG", "warn")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -463,6 +473,18 @@ fn mcp_command_finds_official_sites_and_lookalikes_in_the_fixtures() {
         assert_eq!(answer["lookalike"], false, "{url}: {answer}");
         assert_ne!(answer["verdict"], "unknown", "{url}: {answer}");
     }
+
+    // With --text-answers, the same answers as text alone.
+    let call = tool_call(1, "official_site", json!({ "name": "PayPal" }));
+    let text = mcp_over_stdio_with(&index, &["--text-answers"], &[call]);
+    assert!(
+        text[0]["result"].get("structuredContent").is_none(),
+        "{text:?}"
+    );
+    assert!(text[0]["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("paypal.com"));
 }
 
 #[tokio::test]
@@ -470,10 +492,10 @@ async fn web_app_serves_mcp() {
     let tmp = tempfile::tempdir().unwrap();
     let (index, _) = build_fixture_index(tmp.path());
     let app = app_for(&index);
-    let post = |body: String, origin: Option<&str>| {
+    let post_to = |uri: &'static str, body: String, origin: Option<&str>| {
         let mut request = Request::builder()
             .method("POST")
-            .uri("/mcp")
+            .uri(uri)
             .header(header::HOST, "plumb.test")
             .header(header::CONTENT_TYPE, "application/json")
             .header(header::ACCEPT, "application/json, text/event-stream");
@@ -491,6 +513,7 @@ async fn web_app_serves_mcp() {
             (status, String::from_utf8(body.to_vec()).unwrap())
         }
     };
+    let post = |body: String, origin: Option<&str>| post_to("/mcp", body, origin);
 
     let call = tool_call(1, "official_site", serde_json::json!({ "name": "us bank" }));
     let (status, body) = post(call.to_string(), None).await;
@@ -501,6 +524,17 @@ async fn web_app_serves_mcp() {
         answer["result"]["structuredContent"]["domain"],
         "usbank.com"
     );
+
+    // Text alone, for apps that would give the model the JSON.
+    let (status, body) = post_to("/mcp?answers=text", call.to_string(), None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let text: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(text["result"].get("structuredContent").is_none(), "{body}");
+    assert_eq!(text["result"]["content"], answer["result"]["content"]);
+    assert!(text["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("usbank.com"));
 
     let note = r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#;
     let (status, body) = post(note.to_string(), None).await;
