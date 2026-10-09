@@ -73,6 +73,11 @@ services:
       # a row, leave the index; they come back if they answer again (Liz
       # OK'd it 2026-10-06).
       - --drop-dead-sites
+      # Page set and map files change here only by hand for now: this
+      # machine has under 8 GB, and a much bigger set (hpc's 6.8 million
+      # Wikipedia pages) would not fit next to the node (2026-10-09).
+      - --set-updates
+      - "off"
       # Crawls from trusted nodes run by the project count as soon as they're
       # signed, without waiting for a second crawler; the first is plumb-relay
       # on this machine.

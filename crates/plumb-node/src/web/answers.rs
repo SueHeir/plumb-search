@@ -516,11 +516,22 @@ pub(crate) fn render_info_box(out: &mut String, info: &InfoBox) {
 }
 
 /// The pages of `pages` (found for a subject's words) whose facts are the
-/// subject's, in the order to try them: the pages it names, then those
-/// listed under the site it names, each about one thing and none a
-/// disambiguation page.
+/// subject's, in the order to try them: the pages it names, those with a
+/// plain title first (Wikipedia's main sense of a name: "Australia", the
+/// country, before "Australia (continent)"), then those listed under the
+/// site it names, each about one thing and none a disambiguation page.
 pub(crate) fn fact_pages(pages: &[PlacedPage]) -> impl Iterator<Item = &PlacedPage> {
-    let named = pages.iter().filter(|placed| placed.hit.named);
+    let qualified = |placed: &&PlacedPage| placed.hit.page.title.trim_end().ends_with(')');
+    let named = pages
+        .iter()
+        .filter(|placed| placed.hit.named)
+        .filter(move |placed| !qualified(placed))
+        .chain(
+            pages
+                .iter()
+                .filter(|placed| placed.hit.named)
+                .filter(move |placed| qualified(placed)),
+        );
     let of_sites = pages
         .iter()
         .filter(|placed| !placed.hit.named && placed.under.is_some());
@@ -1030,6 +1041,35 @@ mod tests {
         );
         // A kind it has no fact of: no answer.
         assert_eq!(ask("australia currency", &pages), None);
+
+        // The continent, found first, gives way to the country, the
+        // plain title.
+        let both = [
+            placed(
+                with_facts(
+                    article("Australia (continent)", "continent", None),
+                    &[(Area, "8600000000000")],
+                ),
+                None,
+                0,
+            ),
+            placed(
+                with_facts(
+                    article("Australia", "country in Oceania", None),
+                    &[(Area, "7688287000000")],
+                ),
+                None,
+                1,
+            ),
+        ];
+        let first: Vec<&str> = fact_pages(&both)
+            .map(|placed| placed.hit.page.title.as_str())
+            .collect();
+        assert_eq!(first, ["Australia", "Australia (continent)"]);
+        assert_eq!(
+            ask("how big is australia", &both).unwrap().answer,
+            "7,688,287 km² (2,968,463 sq mi)"
+        );
 
         // The article named "Apple" is the fruit; Apple Inc. is listed
         // under apple.com.

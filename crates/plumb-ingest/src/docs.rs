@@ -40,7 +40,7 @@ const WIKI_LISTS: &[&str] = &[
 
 /// Titles of pages that are not docs pages: a site's search page, its
 /// index of words, a page that only sends you on.
-const NOT_PAGES: &[&str] = &[
+pub const NOT_PAGES: &[&str] = &[
     "index",
     "search",
     "search results",

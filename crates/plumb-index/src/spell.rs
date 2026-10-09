@@ -11,9 +11,10 @@
 //!   [`MIN_FIX_LINK_SCORE`] can be the correction: look-alike sites have no
 //!   popularity to show, so a typo never leads to them.
 //! - **Words.** Any other word that hardly appears in the index (in fewer
-//!   than [`KNOWN_WORD_DOCS`] sites) is replaced by the nearest word that
-//!   appears in many more ([`FIX_DOCS_RATIO`] times as many, and at least
-//!   [`MIN_FIX_DOCS`]).
+//!   than [`KNOWN_WORD_DOCS`] sites) is replaced by the nearest known word
+//!   that appears in many more ([`FIX_DOCS_RATIO`] times as many). A rare
+//!   word is only taken for a slip of a common one: "kiwipete" is not
+//!   "kimipet", which a few sites say.
 //!
 //! With the spelling model the index learned from its own words
 //! ([`crate::spell_model`]), candidates are ranked by the noisy channel
@@ -50,7 +51,9 @@ pub(crate) const MIN_FIX_LINK_SCORE: f32 = 0.3;
 /// A word found in this many sites or more is a known word and is never
 /// corrected.
 pub(crate) const KNOWN_WORD_DOCS: u64 = 20;
-/// A word is only corrected to a word found in at least this many sites...
+/// A word found in this many sites or more is taken for a slip only when
+/// the slip is likelier than the word; a word of the word-pair model found
+/// in fewer is not what a word is corrected to by the words around it.
 pub(crate) const MIN_FIX_DOCS: u64 = 3;
 /// ...and in this many times as many sites as the word typed.
 pub(crate) const FIX_DOCS_RATIO: u64 = 20;
@@ -333,6 +336,11 @@ impl Speller<'_> {
                     if word == fixed {
                         continue;
                     }
+                    // "perft" is not a slip of perf1.com's name.
+                    if !plausible_fix(word, fixed) {
+                        plausible = false;
+                        break;
+                    }
                     // A word that is the name of a site as popular as the
                     // correction's stays: "lyft app" is not "syft app".
                     if !within_edits(word, fixed)
@@ -390,7 +398,9 @@ impl Speller<'_> {
                 near.insert(term, distance);
             }
         }
-        let needed = MIN_FIX_DOCS.max(FIX_DOCS_RATIO.saturating_mul(docs));
+        // Only to a known word: a slip of a rare word is no likelier than
+        // a rare word typed as meant.
+        let needed = KNOWN_WORD_DOCS.max(FIX_DOCS_RATIO.saturating_mul(docs));
         let mut best: Option<(u8, u64, String)> = None;
         let mut best_likelihood = f64::NEG_INFINITY;
         for (term, distance) in near {

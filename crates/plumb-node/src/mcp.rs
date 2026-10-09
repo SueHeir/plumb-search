@@ -573,6 +573,13 @@ impl Mcp {
         };
         let official = |hit: &Hit| hit.official || article_of(&hit.domain, &pages).is_some();
         let well_known = |hit: &Hit| hit.link_score >= WELL_KNOWN_LINK_SCORE;
+        // A site named by the name that shows nothing of it is not the
+        // site of the article the name names: "USNO" is not mo.gov, whatever
+        // names it, when the article on the United States Naval Observatory
+        // gives navy.mil.
+        let top_shows = shows_name(top, &words) || title_has(top, bare_or_name);
+        let about_site =
+            about_site.or_else(|| (!top_shows).then(|| named_article_site(&pages)).flatten());
         let mut why = Vec::new();
         let mut pick = top;
         let mut url = top.url.clone();
@@ -601,8 +608,10 @@ impl Mcp {
                 confidence = "high";
             }
             // The article's own site, unless the first site is a well-known
-            // or official site of exactly this name.
-            Some((page, site)) if !(top.named && (official(top) || well_known(top))) => {
+            // or official site of exactly this name that shows it.
+            Some((page, site))
+                if !(top.named && (official(top) || well_known(top)) && top_shows) =>
+            {
                 why.push(format!(
                     "Wikidata gives it as the official website of {}, the article this name \
                      names.",
@@ -651,11 +660,13 @@ impl Mcp {
                     (top.score - next.score) / top.score.max(f32::EPSILON)
                 });
                 // Official or well known says whose site it is, not that it is
-                // this name's: chess.com is not the Chess Programming Wiki.
+                // this name's: chess.com is not the Chess Programming Wiki. And
+                // a name of several words whose site shows only some of them
+                // is a guess: nssdc.ac.cn for "NSSDC planetary fact sheet".
                 let shows = shows_name(top, &words);
                 confidence = if top.named && (official(top) || well_known(top)) && lead >= 0.1 {
                     "high"
-                } else if top.named
+                } else if (top.named && (words.len() < 2 || shows))
                     || (official(top) && shows)
                     || (well_known(top) && lead >= 0.2 && shows)
                 {
@@ -715,6 +726,13 @@ impl Mcp {
             .filter(|hit| hit.named || official(hit) || mentions_name(hit, &words))
             .map(|hit| brief_with(hit, &pages))
             .collect();
+        // Named only by its address, which a package of the name outweighs:
+        // skyfield.cloud is not the Skyfield library's.
+        let label_only = std::ptr::eq(pick, top)
+            && top.named
+            && !official(top)
+            && !well_known(top)
+            && confidence == "medium";
         if confidence != "high" {
             // A software package of the name says where its home is:
             // FastAPI's PyPI card names fastapi.tiangolo.com.
@@ -730,7 +748,9 @@ impl Mcp {
                     url = home;
                     confidence = "high";
                     did_you_mean = None;
-                } else if let (Some(home_domain), "low") = (home_domain, confidence) {
+                } else if let Some(home_domain) =
+                    home_domain.filter(|_| confidence == "low" || label_only)
+                {
                     // The best match of the words is a guess; the
                     // package's own home page is not: "FastAPI" is not
                     // xapo.com.
@@ -773,6 +793,18 @@ impl Mcp {
                 description = hit.description.as_deref().map(short);
                 confidence = "medium";
                 did_you_mean = None;
+            }
+        }
+        // "Python docs" is docs.python.org, a site of its own.
+        if wants_docs && url.contains(&format!("{domain}/")) {
+            if let Some((site, _)) = plumb_core::subdomain_sites().find(|(site, parent)| {
+                *parent == domain && (site.starts_with("docs.") || site.starts_with("doc."))
+            }) {
+                why.push(format!("Its documentation is {site}, a site of its own."));
+                domain = site.to_string();
+                url = format!("https://{site}/");
+                title = None;
+                description = None;
             }
         }
         if confidence == "low" {
@@ -833,9 +865,14 @@ impl Mcp {
         } else {
             ("homepage", "docs")
         };
-        let home = card[first]
-            .as_str()
-            .or_else(|| card[then].as_str())?
+        // A registry's own pages (docs.rs/toml) are no project's home.
+        let home = [first, then]
+            .iter()
+            .filter_map(|key| card[*key].as_str())
+            .find(|home| {
+                registrable_domain(home)
+                    .is_none_or(|domain| !REGISTRY_HOSTS.contains(&domain.as_str()))
+            })?
             .to_string();
         Some((home, card["registry"].as_str()?.to_string()))
     }
@@ -2259,6 +2296,35 @@ fn article_website(page: &Page, site: &str) -> (String, String) {
         site.to_string()
     };
     (domain, website.to_string())
+}
+
+/// Hosts of package registries and the docs they build, which a package's
+/// card may give as its home or docs but which are no project's own site.
+const REGISTRY_HOSTS: &[&str] = &[
+    "docs.rs",
+    "crates.io",
+    "npmjs.com",
+    "npmjs.org",
+    "pypi.org",
+    "pkg.go.dev",
+    "go.dev",
+    "rubygems.org",
+    "rubydoc.info",
+    "nuget.org",
+    "packagist.org",
+    "hex.pm",
+    "hexdocs.pm",
+];
+
+/// The site Wikidata gives the best article among `pages` the name names,
+/// with the article.
+fn named_article_site(pages: &[PlacedPage]) -> Option<(&Page, &str)> {
+    pages
+        .iter()
+        .filter(|placed| placed.hit.named && is_article(&placed.hit.page))
+        .filter(|placed| !placed.hit.page.title.ends_with("(disambiguation)"))
+        .max_by(|a, b| a.hit.score.total_cmp(&b.hit.score))
+        .and_then(|placed| Some((&placed.hit.page, placed.hit.page.site.as_deref()?)))
 }
 
 /// Words after a name that say what is wanted from its site, besides the
