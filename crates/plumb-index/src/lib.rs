@@ -1286,7 +1286,7 @@ impl Searcher {
         // nearest: among hundreds of thousands of sites, small ones whose
         // text repeats the query's words crowd out the big site it
         // describes, which may say little about itself.
-        let nearest = match meaning {
+        let (nearest, nearest_ranked) = match meaning {
             Some(meaning) => {
                 let domains = meaning.nearest();
                 let terms = |domains: &[String]| -> Vec<Term> {
@@ -1296,14 +1296,15 @@ impl Searcher {
                         .collect()
                 };
                 let split = domains.len().min(NEAREST_RANKED);
-                let mut docs = matching_docs(&searcher, terms(&domains[..split]))?;
+                let ranked = matching_docs(&searcher, terms(&domains[..split]))?;
+                let mut docs = ranked.clone();
                 let next = matching_docs(&searcher, terms(&domains[split..]))?;
                 let mut next = link_scores(&searcher, &next);
                 next.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
                 docs.extend(next.into_iter().take(NEAREST_POPULAR).map(|(_, addr)| addr));
-                docs
+                (docs, ranked)
             }
-            None => HashSet::new(),
+            None => (HashSet::new(), HashSet::new()),
         };
         let known: HashSet<DocAddress> = candidates.iter().map(|&(_, addr)| addr).collect();
         let mut unranked: Vec<DocAddress> = names
@@ -1599,25 +1600,20 @@ impl Searcher {
             .partial_closeness
             .filter(|floor| *floor > 0.0 && meaning.is_some())
         {
-            let tokens = analysis::tokens(&self.words, query_text);
-            let by_name = |name: &NameMatch| {
-                name.typed
-                    || (name.words() > 0
-                        && !tokens
-                            .get(name.words())
-                            .is_some_and(|next| is_function_word(next)))
-            };
+            let named_inside = self.names_inside(&searcher, &query, query_text)?;
             let partial: Vec<DocAddress> = ranked
                 .iter()
                 .filter(|r| {
                     !r.named
                         && !kinds.contains(&r.addr)
-                        && !names.get(&r.addr).is_some_and(by_name)
+                        && !named_inside.contains(&r.addr)
+                        && !nearest_ranked.contains(&r.addr)
                         && r.closeness.is_none_or(|closeness| closeness < floor)
                 })
                 .map(|r| r.addr)
                 .collect();
-            let missing = query.missing_main_words(&searcher, &self.fields, &partial)?;
+            let all: Vec<DocAddress> = ranked.iter().map(|r| r.addr).collect();
+            let missing = query.missing_found_words(&searcher, &self.fields, &all, &partial)?;
             ranked.retain(|r| !missing.contains(&r.addr));
         }
 
@@ -1987,6 +1983,47 @@ impl Searcher {
             }
         }
         Ok(names)
+    }
+
+    /// The sites whose domain label or an alias is a run of the query's
+    /// words anywhere in it ("hilton" in "back bay hilton", "wix" in
+    /// "ecommerce wix"), unless the run goes on into more words as one
+    /// phrase ("cricket" in "the cricket and the ant", "guess" in "guess
+    /// the states game"). A run of one function or filler word names
+    /// nothing.
+    fn names_inside(
+        &self,
+        searcher: &tantivy::Searcher,
+        query: &ParsedQuery,
+        query_text: &str,
+    ) -> Result<HashSet<DocAddress>> {
+        let mut named = HashSet::new();
+        if query.asked {
+            return Ok(named);
+        }
+        let tokens = analysis::tokens(&self.words, query_text);
+        let tokens = &tokens[..tokens.len().min(MAX_QUERY_WORDS)];
+        let mut terms = Vec::new();
+        for start in 0..tokens.len() {
+            let mut key = String::new();
+            for end in start..tokens.len() {
+                key.push_str(&tokens[end]);
+                let one = end == start;
+                if one && (is_function_word(&key) || FILLER_WORDS.contains(&key.as_str())) {
+                    continue;
+                }
+                let goes_on = tokens
+                    .get(end + 1)
+                    .is_some_and(|next| is_function_word(next));
+                if goes_on {
+                    continue;
+                }
+                terms.push(Term::from_field_text(self.fields.label_key, &key));
+                terms.push(Term::from_field_text(self.fields.alias_key, &key));
+            }
+        }
+        named.extend(matching_docs(searcher, terms)?);
+        Ok(named)
     }
 
     /// Whether the document's title, description or Wikidata description
@@ -2841,6 +2878,62 @@ impl ParsedQuery {
             clauses.add(Term::from_field_text(f.joined, joined), 1.0);
             clauses.add(Term::from_field_text(f.label, joined), 1.0);
             for (bm25, addr) in bm25_of(searcher, &clauses.into_query(), docs.to_vec())? {
+                if bm25 > 0.0 {
+                    missing.remove(&addr);
+                }
+            }
+        }
+        Ok(missing)
+    }
+
+    /// Which of `docs` lack one of the query's main words that some of
+    /// `found` have: a word no site found has (a misspelling, "aries
+    /// horroscope") is not held against any of them. None when fewer than
+    /// two main words are found.
+    fn missing_found_words(
+        &self,
+        searcher: &tantivy::Searcher,
+        f: &Fields,
+        found: &[DocAddress],
+        docs: &[DocAddress],
+    ) -> Result<HashSet<DocAddress>> {
+        let mut missing = HashSet::new();
+        if docs.is_empty() {
+            return Ok(missing);
+        }
+        let docs: HashSet<DocAddress> = docs.iter().copied().collect();
+        let mut lacking: Vec<HashSet<DocAddress>> = Vec::new();
+        for i in 0..self.words.len() {
+            let word = self.words[i].as_str();
+            if is_function_word(word) || FILLER_WORDS.contains(&word) {
+                continue;
+            }
+            let mut clauses = Clauses::default();
+            self.word_clauses(i, searcher, f, &mut clauses)?;
+            let query = clauses.into_query();
+            let has = bm25_of(searcher, &query, found.to_vec())?;
+            if has.iter().all(|&(bm25, _)| bm25 <= 0.0) {
+                continue;
+            }
+            lacking.push(
+                has.into_iter()
+                    .filter(|&(bm25, addr)| bm25 <= 0.0 && docs.contains(&addr))
+                    .map(|(_, addr)| addr)
+                    .collect(),
+            );
+        }
+        if lacking.len() < 2 {
+            return Ok(missing);
+        }
+        for lacks in lacking {
+            missing.extend(lacks);
+        }
+        if let Some(joined) = &self.joined {
+            let mut clauses = Clauses::default();
+            clauses.add(Term::from_field_text(f.joined, joined), 1.0);
+            clauses.add(Term::from_field_text(f.label, joined), 1.0);
+            let docs: Vec<DocAddress> = docs.into_iter().collect();
+            for (bm25, addr) in bm25_of(searcher, &clauses.into_query(), docs)? {
                 if bm25 > 0.0 {
                     missing.remove(&addr);
                 }
@@ -3752,6 +3845,16 @@ mod tests {
         }
     }
 
+    /// A [`FixedMeaning`] with `near` the nearest sites and `far` beyond
+    /// the [`NEAREST_RANKED`] nearest, as a big site far in meaning is.
+    fn near_and_far(near: &[(&'static str, f32)], far: &[(&'static str, f32)]) -> FixedMeaning {
+        let mut all = near.to_vec();
+        let pads = ["pad.example"; NEAREST_RANKED];
+        all.extend(pads.iter().map(|&pad| (pad, 0.6)));
+        all.extend_from_slice(far);
+        FixedMeaning(all)
+    }
+
     #[test]
     fn big_sites_far_in_meaning_do_not_fill_a_weak_search() {
         let records = vec![
@@ -3783,11 +3886,10 @@ mod tests {
         let (_dir, searcher) = build(&records);
         let options = SearchOptions::default();
         // Among the thousand nearest, as every big site is for some query.
-        let meaning = FixedMeaning(vec![
-            ("drainhelp.net", 1.0),
-            ("plumbers.org", 0.3),
-            ("stripe.com", 0.08),
-        ]);
+        let meaning = near_and_far(
+            &[("drainhelp.net", 1.0)],
+            &[("plumbers.org", 0.3), ("stripe.com", 0.08)],
+        );
         let score = |cfg: &RankConfig, domain: &str| {
             searcher
                 .search_meaning("how to unclog a drain", 10, cfg, &options, Some(&meaning))
@@ -3890,11 +3992,10 @@ mod tests {
 
         // "secret" alone makes no answer of a lingerie shop; a site near in
         // meaning that lacks a word is still one.
-        let mana = FixedMeaning(vec![
-            ("manaworld.org", 1.0),
-            ("rpgguides.net", 0.8),
-            ("victoriassecret.com", 0.1),
-        ]);
+        let mana = near_and_far(
+            &[("manaworld.org", 1.0), ("rpgguides.net", 0.8)],
+            &[("victoriassecret.com", 0.1)],
+        );
         let query = "secret of mana walkthrough";
         assert!(found(query, &mana, &off).contains(&"victoriassecret.com".to_string()));
         assert_eq!(
@@ -3903,14 +4004,16 @@ mod tests {
         );
 
         // A name the words go on from as one phrase names nothing.
-        let fable = FixedMeaning(vec![("fables.org", 1.0), ("cricket.com.au", 0.2)]);
+        let fable = near_and_far(&[("fables.org", 1.0)], &[("cricket.com.au", 0.2)]);
         let query = "the cricket and the ant";
         assert!(found(query, &fable, &off).contains(&"cricket.com.au".to_string()));
         assert_eq!(found(query, &fable, &now), ["fables.org"]);
 
         // A name followed by what is wanted of it keeps the site.
-        let scores = FixedMeaning(vec![("cricket.com.au", 0.2)]);
+        let scores = near_and_far(&[], &[("cricket.com.au", 0.2)]);
         assert_eq!(found("cricket scores", &scores, &now)[0], "cricket.com.au");
+        // So does a name further in ("back bay hilton").
+        assert!(found("grasshopper cricket", &scores, &now).contains(&"cricket.com.au".to_string()));
     }
 
     #[test]
