@@ -831,6 +831,9 @@ impl Mcp {
             if placed.hit.page.package.is_some() {
                 page["package"] = package_card(&placed.hit.page);
             }
+            if let Some(free) = placed.hit.page.free_copy() {
+                page["free_copy"] = json!(free);
+            }
             page
         }));
         let mut sites: Vec<Value> = results.hits.iter().map(brief).collect();
