@@ -1531,9 +1531,10 @@ impl PageSearcher {
     /// is replaced by the near word found in the most pages, at least
     /// [`PAGE_FIX_RATIO`] times as many as have the word typed and at least
     /// [`MIN_PAGE_FIX_PAGES`], or with the spelling model, the likeliest by
-    /// the noisy channel ([`crate::spell_model`]). A word some pages have
-    /// is kept unless the slip is likelier than the word ("inkala" is not
-    /// "ikala"). `None` when no word changes.
+    /// the noisy channel ([`crate::spell_model`]). With the model, a word
+    /// is kept unless the slip is likelier than the word, a word no page
+    /// has counting as if one did ("perft" is not "perf"). `None` when no
+    /// word changes.
     pub fn suggest_spelling(
         &self,
         query: &str,
@@ -1576,7 +1577,9 @@ impl PageSearcher {
                     None => -7.0 * f64::from(distance),
                 };
                 let likelihood = cost + (term_docs as f64).ln();
-                if model.is_some() && typed_docs > 0 && likelihood < (typed_docs as f64).ln() {
+                // As likely as the word typed, a word no page has counting
+                // as if one did: "perft" is not "perf".
+                if model.is_some() && likelihood < (typed_docs.max(1) as f64).ln() {
                     continue;
                 }
                 if best.as_ref().is_none_or(|(b, _)| likelihood > *b) {

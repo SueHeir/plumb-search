@@ -4,7 +4,7 @@
 
 ### Search
 
-- Spelling corrects a word only to one that starts with the same letter, since slips rarely start a word: "perft" is no longer "erft" (the Erft river).
+- Rare words and names are no longer rewritten by spelling: "perft" stays "perft" rather than becoming perf1.com's name, "Kiwipete" is not "kimipet" and "Inkala" is not "ikala". A word is now only corrected to a word that many sites or pages use and that starts with the same letter ("perft" is not "erft"), and only when the slip is likelier than the word typed as meant, counting a word no site or page has as if one did ("perft" is not "perf"), and never to one with a digit in it, whether a word or a site's name.
 - With "Use the Plumb network" on, "weather in denver" no longer puts Spain's social security site first. Network searches no longer ask for the bucket of a small joining word ("in", "of", "the") in a longer query, and a site only the network found that lacks some of the query's words comes after the node's own results: its score was measured against the few sites the network sent, where the best partial match looks like a full one.
 
 ### Fixes
