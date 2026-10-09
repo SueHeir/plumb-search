@@ -76,6 +76,11 @@ const CHROME_ELEMENTS: &[&str] = &[
     "aside", "button", "dialog", "footer", "form", "header", "nav", "select",
 ];
 
+/// Most section headings ([`PageMeta::sections`]) kept per page.
+pub const MAX_SECTIONS: usize = 64;
+/// Most words kept of each section heading.
+pub const MAX_SECTION_WORDS: usize = 8;
+
 /// Elements whose text never shows on the page.
 pub(crate) const HIDDEN_ELEMENTS: &[&str] = &["script", "style", "noscript", "template", "iframe"];
 
@@ -242,6 +247,10 @@ struct Page<'a> {
     headings: Vec<String>,
     /// Words in `headings`.
     heading_words: usize,
+    /// The text of the `<h2>` or `<h3>` being read, when it is visible and
+    /// outside [`CHROME_ELEMENTS`].
+    section_text: Option<String>,
+    sections: Vec<String>,
     /// Visible text outside [`CHROME_ELEMENTS`] and headings, up to
     /// [`BODY_TEXT_BYTES`].
     body: String,
@@ -345,6 +354,8 @@ impl<'a> Page<'a> {
             heading_text: None,
             headings: Vec::new(),
             heading_words: 0,
+            section_text: None,
+            sections: Vec::new(),
             body: String::new(),
             json_ld: None,
             json_ld_blocks: Vec::new(),
@@ -401,12 +412,22 @@ impl<'a> Page<'a> {
                 self.input(tag);
             }
             "svg" | "math" if !tag.self_closing => self.foreign += 1,
-            "h1" | "h2" => {
-                self.close_heading();
-                let shown = attr(tag, "hidden").is_none()
+            "h1" | "h2" | "h3" => {
+                let shown = self.hidden == 0
+                    && self.foreign == 0
+                    && attr(tag, "hidden").is_none()
                     && !attr(tag, "aria-hidden").is_some_and(|v| v.eq_ignore_ascii_case("true"));
-                if self.hidden == 0 && self.foreign == 0 && shown {
-                    self.heading_text = Some(String::new());
+                if name != "h3" {
+                    self.close_heading();
+                    if shown {
+                        self.heading_text = Some(String::new());
+                    }
+                }
+                if name != "h1" {
+                    self.close_section();
+                    if shown && self.chrome == 0 {
+                        self.section_text = Some(String::new());
+                    }
                 }
             }
             "script"
@@ -452,7 +473,12 @@ impl<'a> Page<'a> {
             "title" => self.close_title(),
             "form" => self.close_form(),
             "script" => self.close_json_ld(),
-            "h1" | "h2" => self.close_heading(),
+            "h1" => self.close_heading(),
+            "h2" => {
+                self.close_heading();
+                self.close_section();
+            }
+            "h3" => self.close_section(),
             "svg" | "math" => self.foreign = self.foreign.saturating_sub(1),
             _ => {}
         }
@@ -478,6 +504,11 @@ impl<'a> Page<'a> {
             if let Some(heading) = &mut self.heading_text {
                 if heading.len() < MAX_TEXT_CHARS * 4 {
                     heading.push_str(text);
+                }
+            }
+            if let Some(section) = &mut self.section_text {
+                if section.len() < MAX_TEXT_CHARS {
+                    section.push_str(text);
                 }
             }
         }
@@ -509,6 +540,9 @@ impl<'a> Page<'a> {
         }
         if let Some(heading) = &mut self.heading_text {
             heading.push(' ');
+        }
+        if let Some(section) = &mut self.section_text {
+            section.push(' ');
         }
         if self.body_open() {
             self.body.push(' ');
@@ -547,6 +581,24 @@ impl<'a> Page<'a> {
         }
         self.heading_words += words.len();
         self.headings.push(heading);
+    }
+
+    /// Keeps the section heading just read, cut to [`MAX_SECTION_WORDS`]
+    /// words, unless it repeats one or the sections are full.
+    fn close_section(&mut self) {
+        let Some(text) = self.section_text.take() else {
+            return;
+        };
+        if self.sections.len() >= MAX_SECTIONS {
+            return;
+        }
+        let words: Vec<&str> = text.split_whitespace().take(MAX_SECTION_WORDS).collect();
+        let Some(section) = clean_text(&words.join(" ")) else {
+            return;
+        };
+        if !self.sections.contains(&section) {
+            self.sections.push(section);
+        }
     }
 
     /// The open link, unless a hidden element has opened inside it.
@@ -777,6 +829,7 @@ impl<'a> Page<'a> {
         self.close_anchor();
         self.close_title();
         self.close_heading();
+        self.close_section();
         self.close_form();
         self.close_json_ld();
         let words: Vec<&str> = self
@@ -809,6 +862,7 @@ impl<'a> Page<'a> {
                 None => Vec::new(),
             },
             headings: self.headings,
+            sections: self.sections,
             feed: self.feed,
             links: self.links,
         }
@@ -1113,6 +1167,30 @@ mod tests {
             "<html><head><title>T</title></head><body><nav>Menu</nav></body></html>",
         );
         assert_eq!(menu_only.body_text, None);
+    }
+
+    #[test]
+    fn reads_section_headings() {
+        let meta = extract(
+            "https://docs.python.org/3/tutorial/datastructures.html",
+            r#"<header><h3>Navigation</h3></header>
+                <h1>5. Data Structures</h1>
+                <h2>5.1. More on <em>Lists</em></h2><p>Lists have methods.</p>
+                <h3>5.1.3. List Comprehensions</h3><p>A concise way.</p>
+                <h3 hidden>Not shown</h3>
+                <h4>Too deep</h4>
+                <h3>5.1.3. List Comprehensions</h3>"#,
+        );
+        assert_eq!(
+            meta.sections,
+            ["5.1. More on Lists", "5.1.3. List Comprehensions"]
+        );
+        assert_eq!(meta.headings, ["5. Data Structures", "5.1. More on Lists"]);
+        let many: String = (0..100).map(|i| format!("<h3>Part {i}</h3>")).collect();
+        assert_eq!(
+            extract("https://example.com/", &many).sections.len(),
+            MAX_SECTIONS
+        );
     }
 
     #[test]

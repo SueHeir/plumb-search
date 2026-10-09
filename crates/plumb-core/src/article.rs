@@ -38,6 +38,9 @@
 //! other names: the titles that lead to it that are not among its aliases,
 //! such as those that lead to one of its sections (`name=Manubrium`). Both
 //! come from Wikipedia's search dump (`plumb fetch-leads`).
+//!
+//! A docs page's line carries the headings of its sections the same way
+//! (`section=List Comprehensions`), from `plumb fetch-pages --set docs`.
 
 use std::io::{BufRead, Write};
 
@@ -63,6 +66,12 @@ pub const MAX_LEAD_CHARS: usize = 300;
 
 /// Most other names ([`Article::names`]) kept per article.
 pub const MAX_OTHER_NAMES: usize = 10;
+
+/// Most sections ([`Article::sections`]) kept per page.
+pub const MAX_SECTIONS: usize = 64;
+
+/// Most characters of a page's sections, all together.
+pub const MAX_SECTIONS_CHARS: usize = 1_000;
 
 /// The articles file of Wikipedia in `lang` (`en`): `wikipedia-en.tsv.gz`.
 pub fn articles_file_name(lang: &str) -> String {
@@ -117,6 +126,12 @@ pub struct Article {
     /// its sections ("Manubrium" to Sternum), on its line of profiles.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub names: Vec<String>,
+    /// The headings of a docs page's sections, at most [`MAX_SECTIONS`]
+    /// and [`MAX_SECTIONS_CHARS`] characters in all
+    /// ("List Comprehensions" in Python's "Data Structures"), on its line
+    /// of profiles.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sections: Vec<String>,
 }
 
 /// The key of an official website on a line of profiles.
@@ -125,6 +140,8 @@ pub const WEBSITE_KEY: &str = "website";
 pub const LEAD_KEY: &str = "lead";
 /// The key of one of an article's other names on a line of profiles.
 pub const NAME_KEY: &str = "name";
+/// The key of one of a docs page's sections on a line of profiles.
+pub const SECTION_KEY: &str = "section";
 
 /// What starts a line of profiles in an articles file.
 pub const PROFILES_LINE: &str = "profiles\t";
@@ -144,6 +161,7 @@ pub struct ProfilesLine<'a> {
     pub facts: Vec<Fact>,
     pub lead: Option<String>,
     pub names: Vec<String>,
+    pub sections: Vec<String>,
 }
 
 /// The item, profiles, official website and facts of a line of profiles,
@@ -172,6 +190,7 @@ pub fn parse_profiles_line(line: &str) -> Option<ProfilesLine<'_>> {
         facts: parse_facts(profiles),
         lead: values(LEAD_KEY).next(),
         names: values(NAME_KEY).take(MAX_OTHER_NAMES).collect(),
+        sections: values(SECTION_KEY).take(MAX_SECTIONS).collect(),
     })
 }
 
@@ -251,10 +270,12 @@ pub fn write_article(out: &mut impl Write, article: &Article) -> std::io::Result
     }
     let lead = article.lead.as_deref().map(field);
     let names = article.names.iter().map(|name| field(name));
+    let sections = article.sections.iter().map(|section| field(section));
     for (key, value) in lead
         .into_iter()
         .map(|lead| (LEAD_KEY, lead))
         .chain(names.map(|name| (NAME_KEY, name)))
+        .chain(sections.map(|section| (SECTION_KEY, section)))
         .filter(|(_, value)| !value.is_empty())
     {
         if !profiles.is_empty() {
@@ -327,6 +348,7 @@ impl<I: Iterator<Item = String>> Iterator for ArticleLines<I> {
                         article.facts = found.facts;
                         article.lead = found.lead;
                         article.names = found.names;
+                        article.sections = found.sections;
                     }
                 }
                 continue;
@@ -397,6 +419,7 @@ pub fn parse_article(line: &str) -> Result<Article> {
         facts: Vec::new(),
         lead: None,
         names: Vec::new(),
+        sections: Vec::new(),
     })
 }
 
@@ -540,6 +563,7 @@ mod tests {
             facts: Vec::new(),
             lead: None,
             names: Vec::new(),
+            sections: Vec::new(),
         };
         let mut out = Vec::new();
         out.extend_from_slice(ARTICLES_HEADER.as_bytes());
@@ -676,6 +700,26 @@ mod tests {
         // Readers made before leads see no profile or fact in it.
         assert!(parse_profiles("lead=A b.|name=C").is_empty());
         assert!(parse_facts("lead=A b.|name=C").is_empty());
+    }
+
+    #[test]
+    fn a_docs_pages_sections_ride_on_the_line_of_profiles() {
+        let page = Article {
+            title: "Data Structures".into(),
+            item: Some("https://docs.python.org/3/tutorial/datastructures.html".into()),
+            views: 1_000,
+            sections: vec!["More on Lists".into(), "List Comprehensions".into()],
+            ..Article::default()
+        };
+        let mut out = Vec::new();
+        out.extend_from_slice(ARTICLES_HEADER.as_bytes());
+        write_article(&mut out, &page).unwrap();
+        let text = String::from_utf8(out.clone()).unwrap();
+        assert!(text.contains("\tsection=More on Lists|section=List Comprehensions\n"));
+        let back = read_articles(&out[..], 10).unwrap();
+        assert_eq!(back[0].sections, page.sections);
+        assert!(back[0].names.is_empty());
+        assert!(parse_profiles("section=More on Lists").is_empty());
     }
 
     #[test]

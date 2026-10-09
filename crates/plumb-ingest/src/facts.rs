@@ -91,14 +91,17 @@ pub fn facts_query(items: &[String]) -> String {
 }
 
 /// The distinct items of an official websites file whose claim is a front
-/// page ([`OfficialSite::is_root_homepage`]), the only claims facts are
-/// used for, in file order.
+/// page ([`OfficialSite::is_root_homepage`]) or a named inner page
+/// ([`OfficialSite::is_named_inner_page`]), the only claims facts are used
+/// for, in file order.
 pub fn official_items(sites_file: &Path) -> Result<Vec<String>> {
     let sites = load_wikidata_official_sites(sites_file)?;
     let mut seen = HashSet::new();
     Ok(sites
         .into_iter()
-        .filter(|site| site.is_root_homepage() && is_item_id(&site.item))
+        .filter(|site| {
+            (site.is_root_homepage() || site.is_named_inner_page()) && is_item_id(&site.item)
+        })
         .filter_map(|site| seen.insert(site.item.clone()).then_some(site.item))
         .collect())
 }

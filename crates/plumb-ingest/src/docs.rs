@@ -14,7 +14,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use plumb_core::article::{Article, MAX_ALIASES, MAX_ARTICLE_DESCRIPTION_CHARS};
+use plumb_core::article::{
+    Article, MAX_ALIASES, MAX_ARTICLE_DESCRIPTION_CHARS, MAX_SECTIONS, MAX_SECTIONS_CHARS,
+};
 use plumb_core::docs::{page_title, DocsSite};
 use serde::{Deserialize, Serialize};
 
@@ -66,6 +68,10 @@ pub struct FetchedDoc {
     pub description: Option<String>,
     /// The start of the page's text.
     pub text: Option<String>,
+    /// The headings of the page's sections
+    /// ([`plumb_crawl::PageMeta::sections`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sections: Vec<String>,
 }
 
 /// The articles of `site`'s pages `docs`, in the order given, leaving out
@@ -78,6 +84,7 @@ pub fn docs_articles(site: &DocsSite, docs: &[FetchedDoc]) -> Vec<Article> {
     let shared = Shared {
         descriptions: shared(docs.iter().map(|doc| doc.description.as_deref())),
         texts: shared(docs.iter().map(|doc| doc.text.as_deref())),
+        sections: shared_sections(docs),
     };
     let mut seen = HashSet::new();
     docs.iter()
@@ -91,6 +98,65 @@ pub fn docs_articles(site: &DocsSite, docs: &[FetchedDoc]) -> Vec<Article> {
 struct Shared {
     descriptions: HashSet<String>,
     texts: HashSet<String>,
+    /// Section headings, lowercased, on most of the site's pages: its
+    /// menus' ("Navigation", "This page"), not a page's.
+    sections: HashSet<String>,
+}
+
+/// The section headings, lowercased, on more than half of `docs` and at
+/// least [`SHARED_BY`] of them.
+fn shared_sections(docs: &[FetchedDoc]) -> HashSet<String> {
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for doc in docs {
+        let names: HashSet<String> = doc
+            .sections
+            .iter()
+            .filter_map(|section| section_name(section))
+            .map(|name| name.to_lowercase())
+            .collect();
+        for name in names {
+            *counts.entry(name).or_default() += 1;
+        }
+    }
+    counts
+        .into_iter()
+        .filter(|(_, count)| *count >= SHARED_BY && *count * 2 > docs.len())
+        .map(|(name, _)| name)
+        .collect()
+}
+
+/// The page's section heading `heading` without its number and anchor
+/// mark: "5.1.3. List Comprehensions¶" is "List Comprehensions". `None`
+/// when nothing is left.
+fn section_name(heading: &str) -> Option<String> {
+    let heading = heading.trim_end_matches(['¶', '#', '§', ' ']);
+    let words: Vec<&str> = heading
+        .split_whitespace()
+        .skip_while(|word| word.chars().all(|c| c.is_ascii_digit() || c == '.'))
+        .collect();
+    (!words.is_empty()).then(|| words.join(" "))
+}
+
+/// The section headings of `doc` worth searching it by, at most
+/// [`MAX_SECTIONS`] and [`MAX_SECTIONS_CHARS`] characters: each once,
+/// without the page's own title and the site's shared ones.
+fn sections_of(title: &str, doc: &FetchedDoc, shared: &Shared) -> Vec<String> {
+    let mut seen = HashSet::from([title.to_lowercase()]);
+    // "5. Data Structures" repeats a numbered title.
+    seen.extend(section_name(title).map(|name| name.to_lowercase()));
+    doc.sections
+        .iter()
+        .filter_map(|section| section_name(section))
+        .filter(|name| {
+            let key = name.to_lowercase();
+            !shared.sections.contains(&key) && seen.insert(key)
+        })
+        .take(MAX_SECTIONS)
+        .scan(0, |chars, name| {
+            *chars += name.chars().count();
+            (*chars <= MAX_SECTIONS_CHARS).then_some(name)
+        })
+        .collect()
 }
 
 /// The short forms of `texts` that [`SHARED_BY`] or more of them share.
@@ -142,6 +208,7 @@ fn article_of(site: &DocsSite, doc: &FetchedDoc, shared: &Shared) -> Option<Arti
         });
     Some(Article {
         aliases: aliases(site, &title),
+        sections: sections_of(&title, doc, shared),
         title,
         description,
         item: Some(doc.url.clone()),
@@ -266,6 +333,7 @@ mod tests {
             title: Some(title.into()),
             description: description.map(Into::into),
             text: Some("Python lists have a built-in list.sort() method.".into()),
+            sections: Vec::new(),
         }
     }
 
@@ -429,6 +497,7 @@ mod tests {
             title: Some(format!("{title} – React")),
             description: Some("The library for web and native user interfaces".into()),
             text: Some(text.into()),
+            sections: Vec::new(),
         };
         let articles = docs_articles(
             react,
@@ -456,6 +525,61 @@ mod tests {
         assert_eq!(
             articles[0].description.as_deref(),
             Some("useState is a React Hook that lets you add a state variable.")
+        );
+    }
+
+    #[test]
+    fn sections_lose_their_numbers_and_the_sites_shared_ones() {
+        assert_eq!(
+            section_name("5.1.3. List Comprehensions¶").as_deref(),
+            Some("List Comprehensions")
+        );
+        assert_eq!(
+            section_name("2.4.3 f-strings #").as_deref(),
+            Some("f-strings")
+        );
+        assert_eq!(section_name("1.2."), None);
+        let site = plumb_core::docs::site("python").unwrap();
+        let page = |path: &str, title: &str, sections: &[&str]| FetchedDoc {
+            url: format!("https://docs.python.org/3/{path}"),
+            title: Some(format!("{title} — Python 3.13 documentation")),
+            description: None,
+            text: Some(format!("About {title}")),
+            sections: sections.iter().map(|s| s.to_string()).collect(),
+        };
+        let docs = [
+            page(
+                "tutorial/datastructures.html",
+                "5. Data Structures",
+                &[
+                    "Navigation",
+                    "5. Data Structures",
+                    "5.1.3. List Comprehensions¶",
+                    "List comprehensions",
+                ],
+            ),
+            page(
+                "tutorial/inputoutput.html",
+                "7. Input and Output",
+                &["Navigation", "7.1.1. Formatted String Literals"],
+            ),
+            page(
+                "tutorial/errors.html",
+                "8. Errors and Exceptions",
+                &["Navigation"],
+            ),
+        ];
+        let sections: Vec<Vec<String>> = docs_articles(site, &docs)
+            .into_iter()
+            .map(|article| article.sections)
+            .collect();
+        assert_eq!(
+            sections,
+            [
+                vec!["List Comprehensions".to_string()],
+                vec!["Formatted String Literals".to_string()],
+                vec![],
+            ]
         );
     }
 }

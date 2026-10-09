@@ -1,7 +1,7 @@
 //! Folds every seed source into one set of [`SiteRecord`]s.
 
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use std::collections::{hash_map::Entry, HashMap, HashSet};
 
 use plumb_core::{
     canonical_domain, kind_key, linker_count, parent_domain, subdomain_sites, RecordSet,
@@ -148,19 +148,26 @@ impl Builder {
     /// `ox.ac.uk` the University of Oxford's site, while a college at
     /// `https://www.balliol.ox.ac.uk/` or a band at
     /// `https://linktr.ee/acmerockets` neither grants nor takes away anything
-    /// for the parent domain. A front page claimed by more than five
+    /// for the parent domain. One exception: an inner page of a domain no
+    /// item claims the front page of counts when the item's names name the
+    /// domain ([`OfficialSite::is_named_inner_page`]), so Perplexity AI at
+    /// `https://www.perplexity.ai/hub/` makes perplexity.ai its site, while
+    /// the film Rocky at a bit.ly link does not. A front page claimed by more than five
     /// different items is a shared host rather than anyone's official site,
     /// so it is skipped entirely.
     ///
     /// A label that is just the item id (what Wikidata's label service
     /// returns for items without an English label) is not added as an alias.
     pub fn add_official_sites(&mut self, sites: &[OfficialSite]) {
-        // Front page claims by domain, in input order.
+        // Front page claims by domain, in input order, and named inner page
+        // claims, which count for a domain without front page claims.
         let mut claims: HashMap<String, Vec<&OfficialSite>> = HashMap::new();
+        let mut named_inner: HashMap<String, Vec<&OfficialSite>> = HashMap::new();
         let mut inner = 0u64;
         let mut invalid = 0u64;
         for site in sites {
-            if !site.is_root_homepage() {
+            let front_page = site.is_root_homepage();
+            if !front_page && !site.is_named_inner_page() {
                 inner += 1;
                 continue;
             }
@@ -168,7 +175,20 @@ impl Builder {
                 invalid += 1;
                 continue;
             };
-            claims.entry(domain).or_default().push(site);
+            if front_page {
+                claims.entry(domain).or_default().push(site);
+            } else {
+                named_inner.entry(domain).or_default().push(site);
+            }
+        }
+        let mut by_inner_page = 0usize;
+        for (domain, sites) in named_inner {
+            if let Entry::Vacant(entry) = claims.entry(domain) {
+                entry.insert(sites);
+                by_inner_page += 1;
+            } else {
+                inner += sites.len() as u64;
+            }
         }
         let (mut official, mut shared) = (0usize, 0usize);
         for (domain, claims) in &claims {
@@ -245,7 +265,7 @@ impl Builder {
         }
         warn_invalid("Wikidata official sites", invalid);
         info!(
-            "marked {official} official sites; skipped {shared} front pages claimed by more than {MAX_ITEMS_PER_HOMEPAGE} Wikidata items, and {inner} claims on a subdomain or an inner page"
+            "marked {official} official sites ({by_inner_page} by an inner page naming the site); skipped {shared} front pages claimed by more than {MAX_ITEMS_PER_HOMEPAGE} Wikidata items, and {inner} claims on a subdomain or an inner page"
         );
     }
 
@@ -699,6 +719,29 @@ mod tests {
         assert_eq!(
             records[0].aliases,
             ["The New York Times", "NYT Company", "NYT", "New York Times"]
+        );
+    }
+
+    #[test]
+    fn an_inner_page_naming_its_site_counts_when_no_front_page_does() {
+        let got = official(&[
+            ("Q1", "Perplexity AI", "https://www.perplexity.ai/hub/"),
+            ("Q2", "Rocky", "https://bit.ly/RockyHeavyweightCollection"),
+            ("Q3", "Sergey Karjakin", "https://t.me/karjakin"),
+            // A hotel of the chain is not the chain.
+            ("Q7", "Hilton Athens", "https://www.hilton.ru/athens"),
+            // A front page claim wins over an inner page naming the site.
+            ("Q4", "Honda", "https://www.honda.com/"),
+            ("Q5", "Honda Super Cub", "https://www.honda.com/supercub"),
+            // A subdomain is still a part of the site, not the site.
+            ("Q6", "City of Milwaukee", "https://city.milwaukee.gov/"),
+        ]);
+        assert_eq!(
+            got,
+            [
+                official_with("honda.com", &["Honda"]),
+                official_with("perplexity.ai", &["Perplexity AI"]),
+            ]
         );
     }
 
