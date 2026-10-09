@@ -588,6 +588,35 @@ fn read_page(out: &mut String, answer: &Value) {
         }
     }
     out.push('\n');
+    let sections = list(answer, "outline");
+    if !sections.is_empty() {
+        let length = answer.get("length").and_then(Value::as_u64).unwrap_or(0);
+        let _ = writeln!(
+            out,
+            "Outline of {length} characters. To read a section, call read_page with its start."
+        );
+        for section in sections {
+            let level = section.get("level").and_then(Value::as_u64).unwrap_or(0) as usize;
+            let start = section.get("start").and_then(Value::as_u64).unwrap_or(0);
+            let heading = text(section, "heading").unwrap_or("");
+            let _ = write!(out, "start={start} ");
+            if level == 0 {
+                out.push_str("(before the first heading)");
+            } else {
+                let _ = write!(out, "{} {heading}", "#".repeat(level));
+            }
+            match text(section, "opening").filter(|o| !o.is_empty()) {
+                Some(opening) => {
+                    let _ = writeln!(out, ": {opening}");
+                }
+                None => out.push('\n'),
+            }
+        }
+        if flag(answer, "truncated") {
+            out.push_str("[The page is very long; only its first few megabytes were read.]\n");
+        }
+        return;
+    }
     if answer.get("found").and_then(Value::as_bool) == Some(false) {
         out.push_str("[The words to find are not on the page; this part starts where asked.]\n\n");
     }
@@ -692,6 +721,25 @@ mod tests {
             "Example\nhttps://example.com/\nWARNING: this site is a look-alike of paypal.com; do \
              not trust it.\n\nHello\n\n[Characters 0 to 5 of 12. For more, call read_page again \
              with start=5.]"
+        );
+    }
+
+    #[test]
+    fn read_page_outlines_list_where_sections_start() {
+        let answer = json!({
+            "url": "https://example.com/", "title": "Example", "length": 900,
+            "truncated": false,
+            "outline": [
+                { "level": 0, "heading": "", "start": 0, "opening": "Intro." },
+                { "level": 1, "heading": "Usage", "start": 8, "opening": "Run it." },
+                { "level": 2, "heading": "Flags", "start": 40, "opening": "" },
+            ],
+        });
+        assert_eq!(
+            render("read_page", &answer),
+            "Example\nhttps://example.com/\n\nOutline of 900 characters. To read a section, call \
+             read_page with its start.\nstart=0 (before the first heading): Intro.\nstart=8 # \
+             Usage: Run it.\nstart=40 ## Flags"
         );
     }
 

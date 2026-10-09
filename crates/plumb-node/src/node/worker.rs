@@ -88,8 +88,11 @@ const KEY_PAGES_CATCH_UP_PER_ROUND: usize = 200;
 /// crawler's) that a round crawls whether or not they are this node's to
 /// crawl today, at most this many, best-known first. A popular site outside
 /// the node's daily share can otherwise wait weeks for a first read, and
-/// until then search knows nothing of what it is.
-const FIRST_FETCH_CATCH_UP_PER_ROUND: usize = 50;
+/// until then search knows nothing of what it is. They come out of the
+/// round's budget, not on top of it. About 180,000 such sites were waiting
+/// in October 2026; an hpc test crawl of 60,000 of them fixed three test
+/// searches (weather.com, stability.ai) and broke one.
+const FIRST_FETCH_CATCH_UP_PER_ROUND: usize = 500;
 
 /// Link score a site needs for [`first_fetch_catch_up`]: about the top
 /// 60,000 of the Tranco list, or any official site.

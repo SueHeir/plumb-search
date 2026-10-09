@@ -772,13 +772,18 @@ pub(crate) fn check_answer(
 /// value, so one node alone cannot make a site look more popular.
 fn merge_site(existing: &mut FoundSite, other: FoundSite) {
     existing.answers += 1;
-    let worse = |a: Signals, b: &Signals| Signals {
-        harmonic_rank: worse_rank(a.harmonic_rank, b.harmonic_rank),
-        pagerank_rank: worse_rank(a.pagerank_rank, b.pagerank_rank),
-        tranco_rank: worse_rank(a.tranco_rank, b.tranco_rank),
-        linking_domains: a.linking_domains.min(b.linking_domains),
-        official_site: a.official_site && b.official_site,
-        sitelinks: a.sitelinks.min(b.sitelinks),
+    let worse = |a: Signals, b: &Signals| {
+        let (fact_checks, fact_agrees) = a.worse_facts(b);
+        Signals {
+            harmonic_rank: worse_rank(a.harmonic_rank, b.harmonic_rank),
+            pagerank_rank: worse_rank(a.pagerank_rank, b.pagerank_rank),
+            tranco_rank: worse_rank(a.tranco_rank, b.tranco_rank),
+            linking_domains: a.linking_domains.min(b.linking_domains),
+            official_site: a.official_site && b.official_site,
+            sitelinks: a.sitelinks.min(b.sitelinks),
+            fact_checks,
+            fact_agrees,
+        }
     };
     let signals = worse(existing.record.signals.clone(), &other.record.signals);
     let other_proof = existing
