@@ -649,7 +649,8 @@ pub struct RunArgs {
     /// quarter past this node's own at a time, so a much bigger set is not
     /// loaded unasked), `off`, or the sets to update with no limit on
     /// growth, separated by commas (`films,stackoverflow,map`; `map` is the
-    /// map file). Sets a node has no file of are taken either way.
+    /// map file). A set the node has no file of is taken only if this
+    /// allows it; the map file is taken either way.
     #[arg(long, value_name = "all|off|SETS")]
     pub set_updates: Option<crate::pages::SetUpdates>,
 }
