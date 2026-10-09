@@ -471,8 +471,9 @@ pub struct SeedSources {
     /// about the best-known official websites' organizations.
     pub wikipedia_api_url: String,
     /// Only Wikidata items with at least this many Wikipedia sitelinks are
-    /// fetched, which keeps the download small enough to finish (see
-    /// [`download::download_wikidata_official_sites`]).
+    /// fetched, a notability filter; from 25 up when only
+    /// `wikidata_sparql_url` answers (see
+    /// [`download::download_wikidata_official_sites_with`]).
     pub wikidata_min_sitelinks: u32,
     /// How the Wikidata queries are spaced out: the pause between two and
     /// the wait before trying one again.
@@ -500,7 +501,7 @@ impl Default for SeedSources {
             wikidata_sparql_url: download::WIKIDATA_SPARQL_URL.to_string(),
             wikidata_mirror_url: Some(download::QLEVER_WIKIDATA_URL.to_string()),
             wikipedia_api_url: plumb_ingest::intros::WIKIPEDIA_API_URL.to_string(),
-            wikidata_min_sitelinks: 25,
+            wikidata_min_sitelinks: download::DEFAULT_MIN_SITELINKS,
             wikidata_pacing: download::WikidataPacing::default(),
             cc_ranks_url: None,
             model_base_url: plumb_embed::MODEL_BASE_URL.to_string(),

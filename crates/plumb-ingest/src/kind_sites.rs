@@ -2,8 +2,9 @@
 //! (banks, credit unions, airlines, universities, government agencies),
 //! however few Wikipedia articles they have.
 //!
-//! The official websites download keeps items with at least 25 sitelinks,
-//! which leaves out most credit unions, local banks and government agencies
+//! The official websites download keeps items with a few sitelinks or more
+//! (25 when only Wikidata's own endpoint answers), which leaves out many
+//! credit unions, local banks and government agencies
 //! (Navy Federal Credit Union, the Social Security Administration's site).
 //! Asking for every item of a few kinds is small and fast instead: one
 //! query per kind, found by its English label, so no item ids are written
