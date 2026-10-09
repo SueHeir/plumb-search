@@ -46,6 +46,9 @@ pub enum Kind {
     /// ("capital of australia"); worked out by the node, which has the
     /// facts, not here.
     Fact,
+    /// What something is, from the first sentence of its Wikipedia
+    /// article ("what is a manatee"); worked out by the node too.
+    Definition,
 }
 
 /// An answer to the query, as shown: the question as understood, the

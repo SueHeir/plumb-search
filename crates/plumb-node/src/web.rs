@@ -1612,6 +1612,15 @@ async fn extras(
             .and_then(|found| answers::fact_answer(&asked, &found.pages, now_unix())),
         (answer, _) => answer,
     };
+    // What something is ("what is a manatee"): the first sentence of the
+    // article it names.
+    let answer = match (answer, answers::definition_asked(query)) {
+        (None, Some(name)) => run_search(state, &name, PROFILE_SEARCH_LIMIT, options)
+            .await
+            .ok()
+            .and_then(|found| answers::definition_answer(&found.pages)),
+        (answer, _) => answer,
+    };
     answers::Extras {
         answer,
         profile,
