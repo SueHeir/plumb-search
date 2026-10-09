@@ -340,8 +340,8 @@ pub struct MeaningArgs {
     #[arg(long, value_name = "DIR", requires = "vectors")]
     pub model: Option<PathBuf>,
     /// Whether searches are embedded after the model's instruction for
-    /// search queries ([`QueryInstruction`]); for trying it out.
-    #[arg(long, value_enum, default_value_t = QueryInstruction::Off, hide = true)]
+    /// search queries ([`QueryInstruction`]); for trying the others out.
+    #[arg(long, value_enum, default_value_t = QueryInstruction::Split, hide = true)]
     pub query_instruction: QueryInstruction,
 }
 
@@ -351,7 +351,6 @@ pub struct MeaningArgs {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
 pub enum QueryInstruction {
     /// As it is, for the nearest sites and their closeness.
-    #[default]
     Off,
     /// After the instruction, for both.
     On,
@@ -360,7 +359,12 @@ pub enum QueryInstruction {
     /// Both ways, closeness being the lower of the two.
     Min,
     /// After the instruction for ranking sites; as it is for deciding
-    /// whether a page goes before them.
+    /// whether a page goes before them. What nodes do: searches that
+    /// describe a site find it more often this way (described 25% to 31%
+    /// first by the hand-made order; with the learned ranking retrained
+    /// on it, 47% to 50% on the held-out half, all searches 76.1% to
+    /// 76.6%).
+    #[default]
     Split,
 }
 

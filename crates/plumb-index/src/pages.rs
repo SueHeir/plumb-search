@@ -1562,6 +1562,9 @@ impl PageSearcher {
             for (term, distance) in
                 crate::spell::near_terms(&searcher, self.fields.words, word, edits)?
             {
+                if !crate::spell::plausible_word_fix(word, &term) {
+                    continue;
+                }
                 let term_docs = docs(&term)?;
                 if term_docs < needed {
                     continue;
@@ -1991,12 +1994,17 @@ impl PageSearcher {
         let best_lead = lead_scores.values().copied().fold(0.0f32, f32::max);
         // The query's rarest word that some question has: what it is
         // about. A question without it has only the asking words ("how to
-        // get rid of aphids" found "How do I get rid of my bounty?").
+        // get rid of aphids" found "How do I get rid of my bounty?"). A
+        // word the pages know that no question has is rarer still: no
+        // question asks about it, so none is found. A word nothing knows
+        // is likely a typo, and is passed over.
         let mut topic_word: Option<(u64, &String)> = None;
         if stems.len() >= QUESTION_QUERY_WORDS.min(REFERENCE_QUERY_WORDS) {
             for stem in &stems {
                 let found = searcher.doc_freq(&Term::from_field_text(self.fields.topic, stem))?;
-                if found > 0 && topic_word.is_none_or(|(least, _)| found < least) {
+                if (found > 0 || self.knows_stem(query, stem)?)
+                    && topic_word.is_none_or(|(least, _)| found < least)
+                {
                     topic_word = Some((found, stem));
                 }
             }
@@ -2194,6 +2202,21 @@ impl PageSearcher {
         let mut seen = HashSet::new();
         stems.retain(|stem| seen.insert(stem.clone()));
         stems
+    }
+
+    /// Whether a word of `query` whose stem is `stem` is one the pages
+    /// know ([`PageSearcher::knows_word`]), as typed or as its stem:
+    /// "aphids" is known by the names that say "aphid".
+    fn knows_stem(&self, query: &str, stem: &str) -> Result<bool> {
+        for word in analysis::tokens(&self.words, query) {
+            let stems = analysis::tokens(&self.stemmed, &word);
+            if stems.first().map(String::as_str) == Some(stem)
+                && (self.knows_word(&word)? || self.knows_word(stem)?)
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// The different stemmed words of `query` without the words that only
@@ -3636,6 +3659,52 @@ mod tests {
     }
 
     #[test]
+    fn no_question_is_found_for_a_known_word_none_asks_about() {
+        let question = |title: &str, tags: &str, item: &str| {
+            Page::from_question(Article {
+                title: title.into(),
+                description: Some(tags.into()),
+                item: Some(item.into()),
+                views: 100_000,
+                ..Article::default()
+            })
+        };
+        let pages = [
+            question("How do I get rid of my bounty?", "bounty, meta", "1"),
+            question(
+                "How to get rid of large gaps in text",
+                "ms-word, layout",
+                "2",
+            ),
+            question(
+                "How do I undo the most recent local commits in Git?",
+                "git, git-commit",
+                "3",
+            ),
+            page("Aphid", 50_000, &[]),
+            page("Green peach aphid", 2_000, &[]),
+            page("Black bean aphid", 1_000, &[]),
+        ];
+        let (_dir, s) = searcher(&pages);
+        let questions = |query: &str| -> Vec<String> {
+            s.search(query, 5)
+                .unwrap()
+                .into_iter()
+                .filter(|hit| hit.page.is_question())
+                .map(|hit| hit.page.title)
+                .collect()
+        };
+        // No question has "aphids", which pages name: none is about them.
+        assert!(questions("how to get rid of aphids").is_empty());
+        // "comit" no page knows, so it may be a typo: the question with
+        // the other words is still found.
+        assert_eq!(
+            questions("how to undo git comit"),
+            ["How do I undo the most recent local commits in Git?"]
+        );
+    }
+
+    #[test]
     fn questions_are_found_in_their_duplicates_words() {
         let undo = Page::from_question(Article {
             title: "How do I undo the most recent local commits in Git?".into(),
@@ -3807,6 +3876,9 @@ mod tests {
         for i in 0..5 {
             pages.push(page(&format!("Perfi album {i}"), 10, &[]));
         }
+        for i in 0..25 {
+            pages.push(page(&format!("Erft river {i}"), 10, &[]));
+        }
         let (_dir, searcher) = searcher(&pages);
         let nothing_known = |_: &str| false;
         let suggest = |query: &str| {
@@ -3826,6 +3898,7 @@ mod tests {
         assert_eq!(suggest("anub"), None);
         assert_eq!(suggest("budafest2"), None);
         // A rare word is no slip of another rare one: few pages say "perfi".
+        // Nor of a common one with another first letter: "erft".
         assert_eq!(suggest("perft"), None);
         // A word the sites know is spelled right.
         let sites_know = |word: &str| word == "budafest";

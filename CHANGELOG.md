@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Search
+
+- Spelling corrects a word only to one that starts with the same letter, since slips rarely start a word: "perft" is no longer "erft" (the Erft river).
+- With "Use the Plumb network" on, "weather in denver" no longer puts Spain's social security site first. Network searches no longer ask for the bucket of a small joining word ("in", "of", "the") in a longer query, and a site only the network found that lacks some of the query's words comes after the node's own results: its score was measured against the few sites the network sent, where the best partial match looks like a full one.
+
 ### Fixes
 
 - `plumb run --set-updates off` no longer downloads a page set the node has no file of, as plumbsearch.org would have done with the reference and subpages sets once a trusted node had them. A list such as `films,map` still takes the sets it names when the node has none. A node with `all` (the default) takes missing sets as before.

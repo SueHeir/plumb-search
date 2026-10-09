@@ -1420,3 +1420,87 @@ fn official_site_sends_docs_to_a_docs_site_of_its_own() {
     assert_eq!(answer["url"], "https://docs.python.org/");
     assert_eq!(official(&mcp, "Python")["domain"], "python.org");
 }
+
+#[test]
+fn official_site_takes_no_package_docs_for_a_home() {
+    // PyPI gives pandas only docs, pandas.readthedocs.io, which is no home.
+    let mcp = scripted(|query| {
+        if query.ends_with("package") {
+            return results(
+                Vec::new(),
+                vec![package_page(
+                    "pypi",
+                    "pandas",
+                    None,
+                    Some("https://pandas.readthedocs.io/"),
+                )],
+            );
+        }
+        results(vec![titled("pydata.org", "PyData", 0.1, true)], Vec::new())
+    });
+    let answer = official(&mcp, "pandas");
+    assert_eq!(answer["domain"], "pydata.org", "{answer}");
+    assert_eq!(answer["package_home"], "https://pandas.readthedocs.io/");
+
+    // Asked for the docs, the package's docs are the answer.
+    let mcp = scripted(|query| {
+        if query.ends_with("package") {
+            return results(
+                Vec::new(),
+                vec![package_page(
+                    "pypi",
+                    "pillow",
+                    None,
+                    Some("https://pillow.readthedocs.io/"),
+                )],
+            );
+        }
+        let mut pillow = titled("python-pillow.org", "Python Pillow", 0.3, false);
+        pillow.official = true;
+        results(vec![pillow], Vec::new())
+    });
+    let answer = official(&mcp, "Pillow docs");
+    assert_eq!(answer["domain"], "pillow.readthedocs.io", "{answer}");
+    assert_eq!(answer["alternatives"][0]["domain"], "python-pillow.org");
+}
+
+#[test]
+fn official_site_is_unsure_of_a_name_its_site_does_not_show() {
+    // lifewire.com goes by "LifeWiki" somewhere, but shows nothing of it.
+    let mcp = scripted(|_| {
+        let mut lifewire = titled("lifewire.com", "Lifewire: Tech News", 0.8, true);
+        lifewire.official = true;
+        results(vec![lifewire], Vec::new())
+    });
+    assert_ne!(official(&mcp, "LifeWiki")["confidence"], "high");
+
+    // Two official, well-known sites of the name.
+    let mcp = scripted(|_| {
+        let mut europe = titled("elixir-europe.org", "Welcome to ELIXIR", 0.6, true);
+        europe.official = true;
+        let mut lang = titled(
+            "elixir-lang.org",
+            "The Elixir programming language",
+            0.6,
+            true,
+        );
+        lang.official = true;
+        lang.score = 0.5;
+        results(vec![europe, lang], Vec::new())
+    });
+    let answer = official(&mcp, "elixir");
+    assert_eq!(answer["confidence"], "medium", "{answer}");
+
+    // One alone is sure.
+    let mcp = scripted(|_| {
+        let mut lang = titled(
+            "elixir-lang.org",
+            "The Elixir programming language",
+            0.6,
+            true,
+        );
+        lang.official = true;
+        results(vec![lang], Vec::new())
+    });
+    assert_eq!(official(&mcp, "elixir")["confidence"], "high");
+}
