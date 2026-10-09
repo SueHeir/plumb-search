@@ -41,6 +41,11 @@
 //!   holds every report and counts them itself into the table
 //!   [`NetHandle::popularity`] returns (see [`crate::popularity`]). On
 //!   meeting a node, it asks for the reports of this week and last week.
+//! * Leads: [`NetHandle::share_lead`] signs a page an agent found useful
+//!   and passes it on over the gossip topic; every node keeps the leads it
+//!   hears of, and [`NetHandle::leads`] finds those for a search from nodes
+//!   in the search scope (see [`crate::leads`]). On meeting a node, it asks
+//!   for the newest leads it holds.
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::num::NonZeroU32;
@@ -80,6 +85,10 @@ use crate::credits::{
 use crate::fill::{FillPage, FILL_REQUESTS_PER_MINUTE, MAX_FILLING};
 use crate::hash::Hash;
 use crate::joining::{explain_dial_error, peer_of, JoinProblem, PeerView, Route};
+use crate::leads::{
+    FoundLead, Inserted, Lead, LeadDraft, LeadKeys, LeadStore, Relation, LEADS_FILE,
+    MAX_LISTED_LEADS,
+};
 use crate::oblivious::{
     seal_response, Gateway, ObliviousRequest, ObliviousResponse, Opened, SignedKeys, MAX_MESSAGE,
     OBLIVIOUS_PROTOCOL, RELAY_KEY_CACHE, REPORT_REQUEST_SIZE,
@@ -106,6 +115,12 @@ pub const CATCH_UP_EPOCHS: u64 = 3;
 pub const RELIST_MINUTES: u64 = 30;
 /// A node dials more nodes it knows of while it has fewer connections.
 pub const TARGET_PEERS: usize = 8;
+/// After first becoming reachable through a relay, a node asks around for
+/// nodes once more this much later: nodes that joined at the same moment
+/// (all of them, after the bootstrap node restarts) are not known to the
+/// relay yet when each first asks, and would otherwise meet only at the
+/// next periodic ask, minutes later.
+const ASK_AGAIN_AFTER: Duration = Duration::from_secs(5);
 /// Minutes between tries at the bootstrap nodes while a node has other
 /// connections but none to them, as after a bootstrap node restarts: they
 /// are the relays that let nodes behind NAT be reached.
@@ -162,6 +177,12 @@ const MAX_REPORT_RESPONSE: u64 = 64 * 1024 * 1024;
 /// Report lists asked of other nodes at once: one node's two weeks. Nodes
 /// met meanwhile are asked when they next identify themselves.
 const MAX_REPORT_LISTS: usize = 2;
+
+/// Largest answer taken on `/plumb/leads/1`: [`MAX_LISTED_LEADS`] leads of
+/// at most a few KB each.
+const MAX_LEAD_RESPONSE: u64 = 16 * 1024 * 1024;
+/// Lead lists asked of other nodes at once.
+const MAX_LEAD_LISTS: usize = 2;
 
 /// Batch and report requests of other nodes answered at once: one can mean
 /// reading a 16 MB batch. More are answered with nothing for now.
@@ -335,6 +356,12 @@ pub struct NetStatus {
     /// Sealed requests (bucket requests and popularity reports) passed on
     /// for others, as their relay.
     pub requests_relayed: u64,
+    /// Leads held, this node's own included (see [`crate::leads`]).
+    #[serde(default)]
+    pub leads_held: usize,
+    /// Leads this node shared since it started.
+    #[serde(default)]
+    pub leads_shared: u64,
     /// The connected nodes, at most [`MAX_PEER_VIEWS`] of them.
     #[serde(default)]
     pub peers: Vec<PeerView>,
@@ -462,6 +489,12 @@ enum Command {
         peer: PeerId,
         request: ProfileRequest,
         reply: ProfileReply,
+    },
+    ShareLead(LeadDraft, oneshot::Sender<Result<Lead>>),
+    Leads {
+        keys: LeadKeys,
+        limit: usize,
+        reply: oneshot::Sender<Vec<FoundLead>>,
     },
     Dial(Multiaddr),
     Reconnect,
@@ -838,6 +871,39 @@ impl NetHandle {
             .held(issuer)
     }
 
+    /// Signs `draft` as a lead of this node's, keeps it and passes it on to
+    /// the network: the nodes connected now hear of it over gossip, the
+    /// others when they next meet a node that holds it. Refused when it is
+    /// not fit to share or this node shared [`crate::leads::MAX_LEADS_PER_DAY`]
+    /// leads in the last day.
+    pub async fn share_lead(&self, draft: LeadDraft) -> Result<Lead> {
+        let (reply, answer) = oneshot::channel();
+        self.send(Command::ShareLead(draft, reply))?;
+        answer.await.context("the network task stopped")?
+    }
+
+    /// [`NetHandle::share_lead`], for a blocking thread.
+    pub fn share_lead_blocking(&self, draft: LeadDraft) -> Result<Lead> {
+        let (reply, answer) = oneshot::channel();
+        self.send(Command::ShareLead(draft, reply))?;
+        answer.blocking_recv().context("the network task stopped")?
+    }
+
+    /// Pages other nodes reported for a search with `keys`, at most `limit`:
+    /// only from nodes this node's search scope asks, never its own.
+    pub async fn leads(&self, keys: LeadKeys, limit: usize) -> Result<Vec<FoundLead>> {
+        let (reply, answer) = oneshot::channel();
+        self.send(Command::Leads { keys, limit, reply })?;
+        answer.await.context("the network task stopped")
+    }
+
+    /// [`NetHandle::leads`], for a blocking thread.
+    pub fn leads_blocking(&self, keys: LeadKeys, limit: usize) -> Result<Vec<FoundLead>> {
+        let (reply, answer) = oneshot::channel();
+        self.send(Command::Leads { keys, limit, reply })?;
+        answer.blocking_recv().context("the network task stopped")
+    }
+
     /// Dials `addr`, for tests and for adding a node by hand.
     pub fn dial(&self, addr: Multiaddr) -> Result<()> {
         self.send(Command::Dial(addr))
@@ -944,6 +1010,7 @@ struct Behaviour {
     pages: request_response::cbor::Behaviour<PagesRequest, PagesResponse>,
     trust: request_response::cbor::Behaviour<TrustRequest, TrustResponse>,
     profile: request_response::cbor::Behaviour<ProfileRequest, ProfileResponse>,
+    leads: request_response::cbor::Behaviour<LeadRequest, LeadResponse>,
 }
 
 /// Starts the network side of a node. Returns its handle and the records
@@ -955,16 +1022,17 @@ pub async fn start(
     source: Arc<dyn BucketSource>,
 ) -> Result<(NetHandle, mpsc::UnboundedReceiver<Vec<SiteRecord>>)> {
     let key = load_or_create_key(&config.dir.join("node.key"))?;
-    let (reports, table) = {
+    let (reports, table, leads) = {
         let dir = config.dir.clone();
         tokio::task::spawn_blocking(move || {
             let now = now_unix();
             let reports = ReportStore::open(&dir.join("reports"), now)?;
             let table = reports.table(now);
-            anyhow::Ok((reports, table))
+            let leads = LeadStore::open(&dir.join(LEADS_FILE), now)?;
+            anyhow::Ok((reports, table, leads))
         })
         .await
-        .context("opening the report store")??
+        .context("opening the report and lead stores")??
     };
     let peer_id = key.public().to_peer_id();
     // The network's own first nodes start from the same default list as
@@ -1032,12 +1100,19 @@ pub async fn start(
         .gossipsub
         .subscribe(&report_topic)
         .context("subscribing to the report topic")?;
+    let lead_topic = gossipsub::IdentTopic::new(LEAD_TOPIC);
+    swarm
+        .behaviour_mut()
+        .gossipsub
+        .subscribe(&lead_topic)
+        .context("subscribing to the lead topic")?;
 
     let status = Arc::new(Mutex::new(NetStatus {
         peer_id: peer_id.to_string(),
         nat: "unknown".into(),
         batches_held: store.len(),
         reports_held: reports.len(),
+        leads_held: leads.len(),
         popular_picks: table.picks.len(),
         agreement: agreement.status(),
         crawlers: crawler_views(&store, peer_id, &config.trusted_peers, now_unix()),
@@ -1073,6 +1148,13 @@ pub async fn start(
         report_peers: HashMap::new(),
         report_listing: HashSet::new(),
         report_lists: HashSet::new(),
+        lead_topic,
+        leads,
+        lead_peers: HashSet::new(),
+        lead_listing: HashSet::new(),
+        lead_lists: HashSet::new(),
+        leads_shared: 0,
+        unannounced_leads: Vec::new(),
         source,
         status: status.clone(),
         records: records_tx,
@@ -1092,6 +1174,7 @@ pub async fn start(
         bucket_peers: HashMap::new(),
         batch_peers: HashSet::new(),
         relays: HashMap::new(),
+        ask_again_at: None,
         remote_addrs: HashMap::new(),
         circuits: HashMap::new(),
         reserved: HashSet::new(),
@@ -1508,6 +1591,13 @@ fn build_swarm(key: &Keypair, config: &NetConfig) -> Result<Swarm<Behaviour>> {
                         .set_request_size_maximum(MAX_PROFILE_MESSAGE)
                         .set_response_size_maximum(MAX_PROFILE_MESSAGE),
                     [(StreamProtocol::new(PROFILE_PROTOCOL), ProtocolSupport::Full)],
+                    request_config.clone(),
+                ),
+                leads: request_response::Behaviour::with_codec(
+                    request_response::cbor::codec::Codec::default()
+                        .set_request_size_maximum(64)
+                        .set_response_size_maximum(MAX_LEAD_RESPONSE),
+                    [(StreamProtocol::new(LEAD_PROTOCOL), ProtocolSupport::Full)],
                     request_config,
                 ),
             })
@@ -1582,6 +1672,19 @@ struct Task {
     report_listing: HashSet<PeerId>,
     /// Those requests not answered yet (see [`MAX_REPORT_LISTS`]).
     report_lists: HashSet<OutboundRequestId>,
+    lead_topic: gossipsub::IdentTopic,
+    /// Leads held, this node's own and other nodes' (see [`crate::leads`]).
+    leads: LeadStore,
+    /// Connected nodes that hand out leads.
+    lead_peers: HashSet<PeerId>,
+    /// Connected nodes asked for their leads.
+    lead_listing: HashSet<PeerId>,
+    /// Those requests not answered yet (see [`MAX_LEAD_LISTS`]).
+    lead_lists: HashSet<OutboundRequestId>,
+    /// Leads this node shared since it started.
+    leads_shared: u64,
+    /// This node's leads not passed on yet: no node took the topic.
+    unannounced_leads: Vec<Lead>,
     source: Arc<dyn BucketSource>,
     status: Arc<Mutex<NetStatus>>,
     records: mpsc::UnboundedSender<Vec<SiteRecord>>,
@@ -1614,6 +1717,8 @@ struct Task {
     batch_peers: HashSet<PeerId>,
     /// Relays we asked for a reservation, and whether it was granted.
     relays: HashMap<PeerId, bool>,
+    /// When to ask around for nodes again (see [`ASK_AGAIN_AFTER`]).
+    ask_again_at: Option<tokio::time::Instant>,
     /// The address of each connected node, as we reached it or it reached us.
     remote_addrs: HashMap<PeerId, Multiaddr>,
     /// Connected nodes reached through a relay, and that relay.
@@ -1690,6 +1795,7 @@ impl Task {
         maintenance.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut ticks: u64 = 0;
         loop {
+            let ask_again_at = self.ask_again_at;
             tokio::select! {
                 event = self.swarm.select_next_some() => self.on_event(event),
                 command = commands.recv() => match command {
@@ -1700,6 +1806,15 @@ impl Task {
                 _ = maintenance.tick() => {
                     self.maintain(ticks);
                     ticks += 1;
+                }
+                () = async {
+                    match ask_again_at {
+                        Some(at) => tokio::time::sleep_until(at).await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    self.ask_again_at = None;
+                    let _ = self.swarm.behaviour_mut().kad.bootstrap();
                 }
             }
             self.update_status();
@@ -1794,6 +1909,21 @@ impl Task {
                 let _ = reply.send(peers);
             }
             Command::Recount(reply) => self.count_reports(Some(reply)),
+            Command::ShareLead(draft, reply) => {
+                let _ = reply.send(self.share_lead(draft));
+            }
+            Command::Leads { keys, limit, reply } => {
+                let me = *self.swarm.local_peer_id();
+                let found = self.leads.matching(
+                    &keys,
+                    &me,
+                    self.config.search_scope,
+                    |peer| self.relation(peer),
+                    now_unix(),
+                    limit,
+                );
+                let _ = reply.send(found);
+            }
             Command::Oblivious(request, reply) => {
                 self.on_oblivious_request(request, Reply::Local(reply), None);
             }
@@ -2109,6 +2239,11 @@ impl Task {
                 self.announce(header);
             }
         }
+        if !self.unannounced_leads.is_empty() && connected > 0 {
+            for lead in std::mem::take(&mut self.unannounced_leads) {
+                self.announce_lead(lead);
+            }
+        }
         if ticks.is_multiple_of(60) {
             let now = now_unix();
             let mut store = self.lock_store();
@@ -2121,6 +2256,9 @@ impl Task {
             let agreement = self.agreement.status();
             self.with_status(|s| s.agreement = agreement);
             self.lock_reports().prune(now);
+            if let Err(err) = self.leads.prune(now) {
+                warn!("cannot drop expired leads: {err:#}");
+            }
             // A new week makes last week's count stale.
             self.recount = true;
         }
@@ -2133,6 +2271,10 @@ impl Task {
                     .batches
                     .send_request(&peer, BatchRequest::List { since_epoch: since });
             }
+            // Leads whose gossip was missed, as when a node shares one
+            // before the gossip mesh has formed.
+            self.lead_listing.clear();
+            self.list_more_leads();
         }
         if self.recount && ticks.is_multiple_of(RECOUNT_MINUTES) {
             self.recount = false;
@@ -2220,6 +2362,8 @@ impl Task {
                     self.report_peers.remove(&peer_id);
                     // Asked again on coming back, for what it took meanwhile.
                     self.report_listing.remove(&peer_id);
+                    self.lead_peers.remove(&peer_id);
+                    self.lead_listing.remove(&peer_id);
                     self.oblivious_peers.remove(&peer_id);
                     self.batch_peers.remove(&peer_id);
                     self.fill_peers.remove(&peer_id);
@@ -2288,6 +2432,8 @@ impl Task {
             }) => {
                 let verdict = if message.topic == self.report_topic.hash() {
                     self.on_gossip_report(&message.data)
+                } else if message.topic == self.lead_topic.hash() {
+                    self.on_gossip_lead(&message.data)
                 } else {
                     self.on_header(propagation_source, &message.data)
                 };
@@ -2303,6 +2449,9 @@ impl Task {
                         self.announce(header);
                     }
                 }
+                for lead in std::mem::take(&mut self.unannounced_leads) {
+                    self.announce_lead(lead);
+                }
             }
             BehaviourEvent::Buckets(event) => self.on_bucket_event(event),
             BehaviourEvent::Batches(event) => self.on_batch_event(event),
@@ -2313,6 +2462,7 @@ impl Task {
             BehaviourEvent::Pages(event) => self.on_pages_event(event),
             BehaviourEvent::Trust(event) => self.on_trust_event(event),
             BehaviourEvent::Profile(event) => self.on_profile_event(event),
+            BehaviourEvent::Leads(event) => self.on_lead_event(event),
             BehaviourEvent::RelayClient(relay::client::Event::ReservationReqAccepted {
                 relay_peer_id,
                 renewal,
@@ -2323,6 +2473,7 @@ impl Task {
                     // Now that others can reach us, ask around for nodes,
                     // which also puts us in their routing tables.
                     let _ = self.swarm.behaviour_mut().kad.bootstrap();
+                    self.ask_again_at = Some(tokio::time::Instant::now() + ASK_AGAIN_AFTER);
                 }
                 self.relays.insert(relay_peer_id, true);
             }
@@ -2452,6 +2603,10 @@ impl Task {
                     self.report_lists.insert(id);
                 }
             }
+        }
+        if supports(LEAD_PROTOCOL) {
+            self.lead_peers.insert(peer);
+            self.list_more_leads();
         }
         if supports(OBLIVIOUS_PROTOCOL) {
             self.oblivious_peers.insert(peer);
@@ -3278,6 +3433,167 @@ impl Task {
             || self.ledger.account(peer).answered >= MIN_ANSWERS_FOR_TOKENS
     }
 
+    /// How this node stands to `peer`, for the leads it reported.
+    fn relation(&self, peer: &PeerId) -> Relation {
+        let me = self.swarm.local_peer_id();
+        if self.config.trusted_peers.contains(peer) {
+            Relation::Trusted
+        } else if self.friends.allows(
+            SearchScope::FriendsOfFriends,
+            me,
+            &self.config.trusted_peers,
+            peer,
+        ) {
+            Relation::FriendOfFriend
+        } else {
+            Relation::Other
+        }
+    }
+
+    /// Signs and keeps a lead of this node's, and passes it on.
+    fn share_lead(&mut self, draft: LeadDraft) -> Result<Lead> {
+        let now = now_unix();
+        let lead = Lead::sign(&self.key, draft, now)?;
+        let me = *self.swarm.local_peer_id();
+        if self.leads.insert(lead.clone(), me, now)? == Inserted::TooMany {
+            anyhow::bail!(
+                "this node shared {} leads in the last day; share more tomorrow",
+                crate::leads::MAX_LEADS_PER_DAY
+            );
+        }
+        self.leads_shared += 1;
+        info!("shared a lead: {}", lead.url);
+        self.announce_lead(lead.clone());
+        Ok(lead)
+    }
+
+    /// Passes a lead of this node's on over gossip, or again once a node
+    /// that takes leads is there; others ask for it when they next list
+    /// this node's leads.
+    fn announce_lead(&mut self, lead: Lead) {
+        if lead.expired(now_unix()) {
+            return;
+        }
+        let data = serde_json::to_vec(&lead).expect("leads encode");
+        let topic = self.lead_topic.clone();
+        match self.swarm.behaviour_mut().gossipsub.publish(topic, data) {
+            Ok(_) => {}
+            Err(gossipsub::PublishError::NoPeersSubscribedToTopic) => {
+                debug!("no node to pass a lead on to yet; trying again later");
+                self.unannounced_leads.push(lead);
+            }
+            Err(err) => debug!("cannot pass a lead on: {err}"),
+        }
+    }
+
+    /// Keeps another node's lead if it checks out. `None` for one that does
+    /// not, else what the store did with it.
+    fn take_lead(&mut self, lead: Lead) -> Option<Inserted> {
+        let now = now_unix();
+        let reporter = match lead.check(now) {
+            Ok(reporter) => reporter,
+            Err(err) => {
+                debug!("refused a lead: {err:#}");
+                return None;
+            }
+        };
+        match self.leads.insert(lead, reporter, now) {
+            Ok(inserted) => Some(inserted),
+            Err(err) => {
+                warn!("cannot keep a lead: {err:#}");
+                Some(Inserted::Known)
+            }
+        }
+    }
+
+    /// A lead passed on over gossip: passed on further only when taken, so
+    /// copies, and leads past a node's daily limit, stop here.
+    fn on_gossip_lead(&mut self, data: &[u8]) -> gossipsub::MessageAcceptance {
+        let Ok(lead) = serde_json::from_slice::<Lead>(data) else {
+            return gossipsub::MessageAcceptance::Reject;
+        };
+        if lead.expired(now_unix()) {
+            // It may have expired on the way.
+            return gossipsub::MessageAcceptance::Ignore;
+        }
+        match self.take_lead(lead) {
+            Some(Inserted::Taken) => gossipsub::MessageAcceptance::Accept,
+            Some(Inserted::Known | Inserted::TooMany) => gossipsub::MessageAcceptance::Ignore,
+            None => gossipsub::MessageAcceptance::Reject,
+        }
+    }
+
+    /// Asks connected nodes not asked yet for the newest leads they hold,
+    /// [`MAX_LEAD_LISTS`] at a time; the rest are asked as answers come.
+    fn list_more_leads(&mut self) {
+        while self.lead_lists.len() < MAX_LEAD_LISTS {
+            let Some(peer) = self
+                .lead_peers
+                .iter()
+                .find(|peer| !self.lead_listing.contains(*peer))
+                .copied()
+            else {
+                return;
+            };
+            self.lead_listing.insert(peer);
+            let id = self
+                .swarm
+                .behaviour_mut()
+                .leads
+                .send_request(&peer, LeadRequest {});
+            self.lead_lists.insert(id);
+        }
+    }
+
+    /// Any node may ask for the leads held: they were shared to be found.
+    fn on_lead_event(&mut self, event: request_response::Event<LeadRequest, LeadResponse>) {
+        match event {
+            request_response::Event::Message {
+                message: request_response::Message::Request { channel, .. },
+                ..
+            } => {
+                let leads = self.leads.list(MAX_LISTED_LEADS);
+                let _ = self
+                    .swarm
+                    .behaviour_mut()
+                    .leads
+                    .send_response(channel, LeadResponse { leads });
+            }
+            request_response::Event::Message {
+                peer,
+                message:
+                    request_response::Message::Response {
+                        request_id,
+                        response,
+                    },
+                ..
+            } => {
+                self.lead_lists.remove(&request_id);
+                let mut new = 0;
+                for lead in response.leads.into_iter().take(MAX_LISTED_LEADS) {
+                    if self.take_lead(lead) == Some(Inserted::Taken) {
+                        new += 1;
+                    }
+                }
+                if new > 0 {
+                    info!("caught up on {new} leads from {peer}");
+                }
+                self.list_more_leads();
+            }
+            request_response::Event::OutboundFailure {
+                peer,
+                request_id,
+                error,
+                ..
+            } => {
+                self.lead_lists.remove(&request_id);
+                debug!("asking {peer} for leads failed: {error}");
+                self.list_more_leads();
+            }
+            _ => {}
+        }
+    }
+
     /// Whether this node's searches may ask `peer`, under
     /// [`NetConfig::search_scope`].
     fn may_search(&self, peer: &PeerId) -> bool {
@@ -3750,6 +4066,7 @@ impl Task {
             .friends
             .of(self.swarm.local_peer_id(), &self.config.trusted_peers)
             .len();
+        let (leads_held, leads_shared) = (self.leads.len(), self.leads_shared);
         // Bootstrap nodes and relays first, then the nearest.
         peers.sort_by_key(|p| (!p.bootstrap, !p.relay, p.route != Route::Nearby));
         peers.truncate(MAX_PEER_VIEWS);
@@ -3789,6 +4106,8 @@ impl Task {
             s.nearby_peers = nearby_peers;
             s.search_peers = search_peers;
             s.friends_of_friends = friends_of_friends;
+            s.leads_held = leads_held;
+            s.leads_shared = leads_shared;
             s.problem = problem;
             s.alone_since = alone_since;
             let tokens_held = tokens_held.unwrap_or(s.credits.tokens_held);

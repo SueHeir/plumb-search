@@ -27,6 +27,7 @@ fn opened(domain: &str, times: u32, at: u64) -> Opened {
         domain: domain.into(),
         at,
         times,
+        weighted: 0,
     }
 }
 

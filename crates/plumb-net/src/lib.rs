@@ -20,6 +20,8 @@
 //! * [`hash`]: hashes and the Merkle tree that proves one record of a batch.
 //! * [`popularity`] and [`reports`]: sharing which site people pick for a
 //!   search, readable only once many reports of the same pick are sent.
+//! * [`leads`]: pages agents found useful and chose to share, for agents
+//!   searching other nodes.
 //! * [`store`]: the batches a node keeps.
 //! * [`throwaway`]: one-request identities for searches and reports.
 //! * [`proto`]: the messages and protocol names.
@@ -35,6 +37,7 @@ pub mod credits;
 pub mod fill;
 pub mod hash;
 pub mod joining;
+pub mod leads;
 pub mod node;
 pub mod oblivious;
 pub mod pages;

@@ -14,7 +14,9 @@ use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
 use clap::Args;
-use plumb_index::learned::{train, Model, RowSignals, TrainOptions, TrainingQuery, LEARNED_ROWS};
+use plumb_index::learned::{
+    train, Learner, Model, Objective, RowSignals, TrainOptions, TrainingQuery, LEARNED_ROWS,
+};
 use serde::Deserialize;
 use tracing::info;
 
@@ -38,9 +40,83 @@ pub struct TrainRankArgs {
     /// nodes use, or a model file.
     #[arg(long, value_name = "MODEL", conflicts_with = "out")]
     pub judge: Option<String>,
+    /// The kind of model: `trees` or `net`.
+    #[arg(long, value_name = "KIND", default_value = "trees")]
+    pub learner: LearnerArg,
+    /// What training makes better: `lambda-rank`, `lambda-loss`
+    /// (NDCG-Loss2++) or `softmax`.
+    #[arg(long, value_name = "LOSS", default_value = "lambda-rank")]
+    pub objective: ObjectiveArg,
     /// Trees to grow.
     #[arg(long, value_name = "N", default_value_t = TrainOptions::default().trees)]
     pub trees: usize,
+    /// Leaves of each tree.
+    #[arg(long, value_name = "N", default_value_t = TrainOptions::default().leaves)]
+    pub leaves: usize,
+    /// Fewest rows in a tree's leaf.
+    #[arg(long, value_name = "N", default_value_t = TrainOptions::default().min_rows_in_leaf)]
+    pub min_rows: usize,
+    /// How much of each tree's values is kept.
+    #[arg(long, value_name = "RATE", default_value_t = TrainOptions::default().learning_rate)]
+    pub learning_rate: f64,
+    /// A net's hidden layers; 0 is a linear model.
+    #[arg(long, value_name = "N", default_value_t = TrainOptions::default().layers)]
+    pub layers: usize,
+    /// Units in each of a net's hidden layers.
+    #[arg(long, value_name = "N", default_value_t = TrainOptions::default().width)]
+    pub width: usize,
+    /// Passes over the searches a net trains for.
+    #[arg(long, value_name = "N", default_value_t = TrainOptions::default().epochs)]
+    pub epochs: usize,
+    /// Noise added to a net's scaled inputs while it trains.
+    #[arg(long, value_name = "SD", default_value_t = TrainOptions::default().noise)]
+    pub noise: f64,
+    /// Seed of a net's starting weights and noise.
+    #[arg(long, value_name = "N", default_value_t = TrainOptions::default().seed)]
+    pub seed: u64,
+    /// Also train on all but one of this many parts of the training half
+    /// and judge on the part left out, in turn, to choose options without
+    /// looking at the other half.
+    #[arg(long, value_name = "K")]
+    pub folds: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum LearnerArg {
+    Trees,
+    Net,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum ObjectiveArg {
+    LambdaRank,
+    LambdaLoss,
+    Softmax,
+}
+
+impl TrainRankArgs {
+    fn options(&self) -> TrainOptions {
+        TrainOptions {
+            learner: match self.learner {
+                LearnerArg::Trees => Learner::Trees,
+                LearnerArg::Net => Learner::Net,
+            },
+            objective: match self.objective {
+                ObjectiveArg::LambdaRank => Objective::LambdaRank,
+                ObjectiveArg::LambdaLoss => Objective::LambdaLoss,
+                ObjectiveArg::Softmax => Objective::Softmax,
+            },
+            trees: self.trees,
+            leaves: self.leaves,
+            min_rows_in_leaf: self.min_rows,
+            learning_rate: self.learning_rate,
+            layers: self.layers,
+            width: self.width,
+            epochs: self.epochs,
+            noise: self.noise,
+            seed: self.seed,
+        }
+    }
 }
 
 /// One test search as `--features-out` writes it.
@@ -79,20 +155,16 @@ pub fn run(args: TrainRankArgs) -> Result<()> {
             &std::fs::read_to_string(path).with_context(|| format!("reading {path}"))?,
         )?,
         None => {
-            let trained: Vec<TrainingQuery> = searches
+            let half: Vec<&Written> = searches
                 .iter()
                 .filter(|s| s.half == half_name(args.half))
-                .map(|s| TrainingQuery {
-                    searched: s.searched.clone(),
-                    rows: s.rows.clone(),
-                })
                 .collect();
-            info!("training on {} searches", trained.len());
-            let options = TrainOptions {
-                trees: args.trees,
-                ..TrainOptions::default()
-            };
-            let model = train(&trained, options);
+            let options = args.options();
+            if let Some(folds) = args.folds {
+                print!("{}", cross_validate(&half, folds, options)?);
+            }
+            info!("training on {} searches", half.len());
+            let model = train(&training(&half), options);
             if let Some(out) = &args.out {
                 std::fs::write(out, serde_json::to_string(&model)? + "\n")
                     .with_context(|| format!("writing {}", out.display()))?;
@@ -102,6 +174,57 @@ pub fn run(args: TrainRankArgs) -> Result<()> {
     };
     print!("{}", report(&model, &searches));
     Ok(())
+}
+
+fn training(searches: &[&Written]) -> Vec<TrainingQuery> {
+    searches
+        .iter()
+        .map(|s| TrainingQuery {
+            searched: s.searched.clone(),
+            rows: s.rows.clone(),
+        })
+        .collect()
+}
+
+/// Top-1, top-3 and MRR of `half` judged a part at a time by a model
+/// trained on the other `folds - 1` parts, the parts taken by turns.
+fn cross_validate(half: &[&Written], folds: usize, options: TrainOptions) -> Result<String> {
+    if folds < 2 {
+        bail!("--folds needs at least 2 parts");
+    }
+    let (mut base, mut learned) = (Vec::new(), Vec::new());
+    for fold in 0..folds {
+        let in_fold = |i: &usize| i % folds == fold;
+        let judged = half.iter().enumerate().filter(|(i, _)| in_fold(i));
+        let trained: Vec<&Written> = half
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !in_fold(i))
+            .map(|(_, s)| *s)
+            .collect();
+        let model = train(&training(&trained), options);
+        for (_, s) in judged {
+            let (b, l) = ranks(&model, s);
+            base.push(b);
+            learned.push(l);
+        }
+    }
+    let (b, l) = (
+        Metrics::from_ranks(&base, LEARNED_ROWS),
+        Metrics::from_ranks(&learned, LEARNED_ROWS),
+    );
+    Ok(format!(
+        "{:<9} {:<20} {:>5} {:>6.1}->{:>5.1}% {:>6.1}->{:>5.1}% {:>7.3}->{:.3}\n",
+        format!("cv{folds}"),
+        "ALL",
+        base.len(),
+        b.top1_rate() * 100.0,
+        l.top1_rate() * 100.0,
+        b.top3_rate() * 100.0,
+        l.top3_rate() * 100.0,
+        b.mrr,
+        l.mrr,
+    ))
 }
 
 /// The rank of the first labelled row within the first [`LEARNED_ROWS`],

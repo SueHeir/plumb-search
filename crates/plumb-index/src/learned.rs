@@ -18,6 +18,9 @@ use serde::{Deserialize, Serialize};
 use crate::pages::{LearnedPlace, PageHit, PlacedPage};
 use crate::Hit;
 
+mod net;
+pub use net::Net;
+
 /// How many of the first listed rows the model puts in order.
 pub const LEARNED_ROWS: usize = 10;
 
@@ -253,13 +256,17 @@ impl Node {
     }
 }
 
-/// A learned ranking: trees whose values add up to a row's score.
+/// A learned ranking: trees whose values add up to a row's score, or a
+/// small neural network ([`Net`]) that gives it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Model {
     /// [`FEATURES`] when the model was trained, to refuse a model made
     /// for other features.
     pub features: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     trees: Vec<Node>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    net: Option<Net>,
 }
 
 impl Model {
@@ -284,7 +291,8 @@ impl Model {
 
     /// The score of a row with features `x`; higher comes first.
     pub fn score(&self, x: &[f64]) -> f64 {
-        self.trees.iter().map(|tree| tree.value(x)).sum()
+        let trees: f64 = self.trees.iter().map(|tree| tree.value(x)).sum();
+        trees + self.net.as_ref().map_or(0.0, |net| net.score(x))
     }
 
     /// The order the model lists `rows` of `query` in: indexes into
@@ -418,22 +426,66 @@ pub struct TrainingQuery {
     pub rows: Vec<RowSignals>,
 }
 
-/// How [`train`] grows its trees.
+/// The kind of model [`train`] makes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Learner {
+    /// Gradient-boosted trees (LambdaMART with [`Objective::LambdaRank`]).
+    Trees,
+    /// A small neural network ([`Net`]).
+    Net,
+}
+
+/// What [`train`] makes the scores of each search better at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Objective {
+    /// Pairs of rows weighted by how much swapping them changes NDCG, as
+    /// LightGBM's `lambdarank` does.
+    LambdaRank,
+    /// LambdaLoss's NDCG-Loss2++ (Wang et al. 2018): pairs weighted by a
+    /// bound on NDCG that, unlike LambdaRank's, is a loss the training
+    /// really goes down on.
+    LambdaLoss,
+    /// Softmax cross entropy over each search's rows: the share of the
+    /// search's score the labelled rows get.
+    Softmax,
+}
+
+/// How [`train`] makes its model.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TrainOptions {
+    pub learner: Learner,
+    pub objective: Objective,
     pub trees: usize,
     pub leaves: usize,
     pub min_rows_in_leaf: usize,
     pub learning_rate: f64,
+    /// Hidden layers of a [`Learner::Net`]; 0 is a linear model.
+    pub layers: usize,
+    /// Units in each hidden layer.
+    pub width: usize,
+    /// Passes over the searches a net is trained for.
+    pub epochs: usize,
+    /// Standard deviation of the noise added to a net's inputs while it
+    /// trains, after they are scaled.
+    pub noise: f64,
+    /// Seed of a net's starting weights and noise.
+    pub seed: u64,
 }
 
 impl Default for TrainOptions {
     fn default() -> Self {
         TrainOptions {
+            learner: Learner::Trees,
+            objective: Objective::LambdaRank,
             trees: 200,
             leaves: 7,
             min_rows_in_leaf: 20,
             learning_rate: 0.05,
+            layers: 2,
+            width: 32,
+            epochs: 60,
+            noise: 0.1,
+            seed: 1,
         }
     }
 }
@@ -443,12 +495,12 @@ fn discount(place: usize) -> f64 {
     1.0 / ((place + 2) as f64).log2()
 }
 
-/// Trains a model on `queries` with LambdaMART: each tree fits how much
-/// each row should move up or down to put the labelled rows first, as
-/// LightGBM's `lambdarank` does. Deterministic: the same queries give the
-/// same model.
-pub fn train(queries: &[TrainingQuery], options: TrainOptions) -> Model {
-    // Rows of every query, its first LEARNED_ROWS, end to end.
+/// The training rows of `queries`: every query's first
+/// [`LEARNED_ROWS`] rows end to end, their labels, and where each query's
+/// rows start and end. Queries with no labelled row there are left out.
+type Rows = (Vec<[f64; FEATURES.len()]>, Vec<f64>, Vec<(usize, usize)>);
+
+fn training_rows(queries: &[TrainingQuery]) -> Rows {
     let mut x: Vec<[f64; FEATURES.len()]> = Vec::new();
     let mut labels: Vec<f64> = Vec::new();
     let mut groups: Vec<(usize, usize)> = Vec::new();
@@ -462,6 +514,22 @@ pub fn train(queries: &[TrainingQuery], options: TrainOptions) -> Model {
         labels.extend(rows.iter().map(|r| f64::from(r.label.min(1))));
         groups.push((start, x.len()));
     }
+    (x, labels, groups)
+}
+
+/// Trains a model on `queries`. Trees are grown as in LambdaMART: each
+/// tree fits how much each row should move up or down to put the
+/// labelled rows first, by `options.objective`. Deterministic: the same
+/// queries and options give the same model.
+pub fn train(queries: &[TrainingQuery], options: TrainOptions) -> Model {
+    let (x, labels, groups) = training_rows(queries);
+    if options.learner == Learner::Net {
+        return Model {
+            features: FEATURES.iter().map(|f| f.to_string()).collect(),
+            trees: Vec::new(),
+            net: Some(Net::train(&x, &labels, &groups, options)),
+        };
+    }
     let n = x.len();
     // Every feature's row order, sorted by value, for finding splits.
     let sorted: Vec<Vec<usize>> = (0..FEATURES.len())
@@ -474,7 +542,7 @@ pub fn train(queries: &[TrainingQuery], options: TrainOptions) -> Model {
     let mut scores = vec![0.0; n];
     let mut trees = Vec::with_capacity(options.trees);
     for _ in 0..options.trees {
-        let (grad, hess) = lambdas(&scores, &labels, &groups);
+        let (grad, hess) = gradients(options.objective, &scores, &labels, &groups);
         let tree = grow(&x, &sorted, &grad, &hess, options);
         for (i, row) in x.iter().enumerate() {
             scores[i] += tree.value(row);
@@ -484,7 +552,96 @@ pub fn train(queries: &[TrainingQuery], options: TrainOptions) -> Model {
     Model {
         features: FEATURES.iter().map(|f| f.to_string()).collect(),
         trees,
+        net: None,
     }
+}
+
+/// How the loss of `objective` changes with every row's score: first and
+/// second derivatives.
+fn gradients(
+    objective: Objective,
+    scores: &[f64],
+    labels: &[f64],
+    groups: &[(usize, usize)],
+) -> (Vec<f64>, Vec<f64>) {
+    match objective {
+        Objective::LambdaRank => lambdas(scores, labels, groups),
+        Objective::LambdaLoss => lambda_loss(scores, labels, groups),
+        Objective::Softmax => softmax(scores, labels, groups),
+    }
+}
+
+/// Weight of the NDCG-Loss2++ pairs' second term (the paper's μ).
+const LAMBDA_LOSS_MU: f64 = 5.0;
+
+/// LambdaLoss's NDCG-Loss2++ (Wang et al. 2018, eq. 13 and 16): for every
+/// pair of a labelled and an unlabelled row of a query, a logistic loss
+/// on their score difference weighted by how far apart their places are
+/// in discount (ρ) plus μ times how much one place apart costs at that
+/// distance (δ), over the best DCG.
+fn lambda_loss(scores: &[f64], labels: &[f64], groups: &[(usize, usize)]) -> (Vec<f64>, Vec<f64>) {
+    let mut grad = vec![0.0; scores.len()];
+    let mut hess = vec![0.0; scores.len()];
+    for &(start, end) in groups {
+        let place = places(scores, start, end);
+        let relevant = labels[start..end].iter().filter(|&&l| l > 0.0).count();
+        let best: f64 = (0..relevant).map(discount).sum();
+        if best <= 0.0 {
+            continue;
+        }
+        for hi in start..end {
+            for lo in start..end {
+                if labels[hi] <= labels[lo] {
+                    continue;
+                }
+                let (p_hi, p_lo) = (place[hi - start], place[lo - start]);
+                let rho = (discount(p_hi) - discount(p_lo)).abs();
+                // |i - j| places apart, 1-based: 1/D(|i-j|) - 1/D(|i-j|+1).
+                let apart = p_hi.abs_diff(p_lo);
+                let delta = discount(apart - 1) - discount(apart);
+                let weight = (labels[hi] - labels[lo]) * (rho + LAMBDA_LOSS_MU * delta) / best;
+                let p = 1.0 / (1.0 + (scores[hi] - scores[lo]).exp());
+                grad[hi] -= weight * p;
+                grad[lo] += weight * p;
+                let h = weight * p * (1.0 - p);
+                hess[hi] += h;
+                hess[lo] += h;
+            }
+        }
+    }
+    (grad, hess)
+}
+
+/// Softmax cross entropy of every query: its rows' scores as a softmax
+/// against its labels, shared out.
+fn softmax(scores: &[f64], labels: &[f64], groups: &[(usize, usize)]) -> (Vec<f64>, Vec<f64>) {
+    let mut grad = vec![0.0; scores.len()];
+    let mut hess = vec![0.0; scores.len()];
+    for &(start, end) in groups {
+        let total: f64 = labels[start..end].iter().sum();
+        if total <= 0.0 {
+            continue;
+        }
+        let top = scores[start..end].iter().copied().fold(f64::MIN, f64::max);
+        let sum: f64 = scores[start..end].iter().map(|s| (s - top).exp()).sum();
+        for i in start..end {
+            let p = (scores[i] - top).exp() / sum;
+            grad[i] = p - labels[i] / total;
+            hess[i] = p * (1.0 - p);
+        }
+    }
+    (grad, hess)
+}
+
+/// The 0-based place of each row of `start..end` when listed by score.
+fn places(scores: &[f64], start: usize, end: usize) -> Vec<usize> {
+    let mut by_score: Vec<usize> = (start..end).collect();
+    by_score.sort_by(|&a, &b| scores[b].total_cmp(&scores[a]).then(a.cmp(&b)));
+    let mut place = vec![0; end - start];
+    for (p, &i) in by_score.iter().enumerate() {
+        place[i - start] = p;
+    }
+    place
 }
 
 /// LambdaRank gradients and second derivatives of every row: for each
@@ -495,12 +652,7 @@ fn lambdas(scores: &[f64], labels: &[f64], groups: &[(usize, usize)]) -> (Vec<f6
     let mut grad = vec![0.0; scores.len()];
     let mut hess = vec![0.0; scores.len()];
     for &(start, end) in groups {
-        let mut by_score: Vec<usize> = (start..end).collect();
-        by_score.sort_by(|&a, &b| scores[b].total_cmp(&scores[a]).then(a.cmp(&b)));
-        let mut place = vec![0; end - start];
-        for (p, &i) in by_score.iter().enumerate() {
-            place[i - start] = p;
-        }
+        let place = places(scores, start, end);
         let relevant = labels[start..end].iter().filter(|&&l| l > 0.0).count();
         let best: f64 = (0..relevant).map(discount).sum();
         if best <= 0.0 {
@@ -784,6 +936,37 @@ mod tests {
         for q in training() {
             for x in features(&q.searched, &q.rows) {
                 assert!((read.score(&x) - model.score(&x)).abs() < 1e-9);
+            }
+        }
+    }
+
+    #[test]
+    fn every_objective_and_learner_learns() {
+        for (learner, objective) in [
+            (Learner::Trees, Objective::LambdaLoss),
+            (Learner::Trees, Objective::Softmax),
+            (Learner::Net, Objective::Softmax),
+            (Learner::Net, Objective::LambdaLoss),
+        ] {
+            let options = TrainOptions {
+                learner,
+                objective,
+                ..TrainOptions::default()
+            };
+            let model = train(&training(), options);
+            for (i, q) in training().iter().enumerate() {
+                let order = model.order(&q.searched, &q.rows);
+                assert_eq!(
+                    q.rows[order[0]].label, 1,
+                    "{learner:?} {objective:?} query {i}: {order:?}"
+                );
+            }
+            assert_eq!(model, train(&training(), options));
+            let read = Model::from_json(&serde_json::to_string(&model).unwrap()).unwrap();
+            for q in training() {
+                for x in features(&q.searched, &q.rows) {
+                    assert!((read.score(&x) - model.score(&x)).abs() < 1e-9);
+                }
             }
         }
     }

@@ -100,7 +100,7 @@ pub struct Query {
 }
 
 /// The one thing a search is about, as the node recognised it from
-/// Wikipedia and Wikidata.
+/// Wikipedia and Wikidata, or a song or album from MusicBrainz.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct About {
     /// Its name: the Wikipedia article's title ("Paddington 2").
@@ -116,6 +116,11 @@ pub struct About {
     /// `tmdb-tv`, `musicbrainz-artist`, `steam`, `github` and so on.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub ids: std::collections::BTreeMap<String, String>,
+    /// Who it is by, for a song or album the node knows from MusicBrainz
+    /// ("Radiohead" for the song "Creep"); `musicbrainz-recording` or
+    /// `musicbrainz-album` in `ids` says which.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by: Option<String>,
 }
 
 impl About {

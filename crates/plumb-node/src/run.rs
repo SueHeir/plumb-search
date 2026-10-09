@@ -142,6 +142,7 @@ fn node_config(args: RunArgs) -> NodeConfig {
         }
         config.network = Some(net);
         config.share_popularity = args.share_popularity;
+        config.share_findings = args.share_findings;
         config.publish_records = args.publish_records;
         config.crawl_any_site = args.crawl_any_site;
         config.crawl_with = args.crawl_with;
@@ -361,6 +362,8 @@ mod tests {
         assert!(net.relay_server && net.upnp);
         assert!(!node.share_popularity);
         assert!(config(&["--data", "d", "--network", "--share-popularity"]).share_popularity);
+        assert!(!node.share_findings);
+        assert!(config(&["--data", "d", "--network", "--share-findings"]).share_findings);
         let parse = |args: &[&str]| Cli::try_parse_from(["plumb", "run"].iter().chain(args));
         assert!(
             parse(&["--data", "d", "--relay"]).is_err(),
