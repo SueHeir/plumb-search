@@ -623,7 +623,8 @@ fn add_labels(labels: &mut HashMap<String, String>, json: &[u8]) -> Result<()> {
 /// kinds at once. Deep pages time out, so a kind Wikidata stopped
 /// answering is read on from where it stopped once the others are done,
 /// one kind at a time, from `deep_endpoint` if given (Wikidata's query
-/// service times out on them even alone). When it still stops, the first
+/// service times out on them even alone), which reads the kind from its
+/// start, as it lists the statements in another order. When it still stops, the first
 /// [`FILL_IN_TOP`] items that lack it are asked about by name, so the
 /// most read keep their facts. Then batches of labels are asked for,
 /// [`PARALLEL_QUERIES`] at once.
@@ -649,10 +650,17 @@ pub async fn fetch_facts(
     let mut kinds = Vec::with_capacity(read.len());
     for (kind, mut raw, stopped) in read {
         let mut cut_short = kind.by_name_only();
-        if let Some(offset) = stopped {
+        if let Some(stopped_at) = stopped {
             let from = deep_endpoint.unwrap_or(endpoint);
+            // Pages are read by offset without an order, and another
+            // endpoint lists the statements in another order: reading on
+            // from where Wikidata stopped would skip those the deep
+            // endpoint lists first (facts7 lost a third of the areas,
+            // elevations and heights so). It reads them all again instead;
+            // statements already read are kept once.
+            let offset = if from == endpoint { stopped_at } else { 0 };
             info!(
-                "{} ({}): reading on from {offset} alone, from {from}",
+                "{} ({}): stopped at {stopped_at}, reading on from {offset} alone, from {from}",
                 kind.key(),
                 kind.property()
             );
@@ -1258,6 +1266,70 @@ mod tests {
             ]
         );
         assert_eq!(raw.facts["Q19599566"], [fact(FactKind::Founder, "Q866")]);
+    }
+
+    #[test]
+    fn statements_read_twice_are_kept_once() {
+        // A kind the deep endpoint reads again from its start.
+        let wanted: HashSet<String> = ["Q408", "Q513", "Q937", "Q248"].map(String::from).into();
+        let au = format!("{E}Q408");
+        let everest = format!("{E}Q513");
+        let einstein = format!("{E}Q937");
+        let intel = format!("{E}Q248");
+        let pages: Vec<(FactKind, Vec<u8>)> = vec![
+            (
+                FactKind::Population,
+                answer(&[&[
+                    ("item", &au),
+                    ("v", "+27204809"),
+                    ("t", "2024-01-01T00:00:00Z"),
+                ]]),
+            ),
+            (
+                FactKind::Elevation,
+                answer(&[&[("item", &everest), ("v", "8848.86")]]),
+            ),
+            (
+                FactKind::Born,
+                answer(&[&[
+                    ("item", &einstein),
+                    ("v", "1879-03-14T00:00:00Z"),
+                    ("p", "11"),
+                ]]),
+            ),
+            (
+                FactKind::Founder,
+                answer(&[
+                    &[("item", &intel), ("v", &format!("{E}Q241735"))],
+                    &[("item", &intel), ("v", &format!("{E}Q243969"))],
+                ]),
+            ),
+            (
+                FactKind::Ceo,
+                answer(&[&[
+                    ("item", &intel),
+                    ("v", &format!("{E}Q2")),
+                    ("t", "2025-03-18T00:00:00Z"),
+                    ("dated", "true"),
+                ]]),
+            ),
+            (
+                FactKind::Coordinates,
+                answer(&[&[("item", &everest), ("v", "Point(86.925 27.988)")]]),
+            ),
+        ];
+        let read = |times: usize| {
+            let mut raw = RawFacts::default();
+            for _ in 0..times {
+                for (kind, page) in &pages {
+                    raw.add_page(*kind, &wanted, page).unwrap();
+                }
+            }
+            let mut facts: Vec<_> = raw.facts.into_iter().collect();
+            facts.sort_by(|a, b| a.0.cmp(&b.0));
+            facts
+        };
+        assert_eq!(read(2), read(1));
     }
 
     #[test]
