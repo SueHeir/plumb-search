@@ -719,8 +719,9 @@ async fn download_seed(inner: &Inner) -> Result<SeedFiles> {
     inner.set_step(Step::Downloading, "Asking Wikidata for official websites");
     inner.set_progress(1, total, "files");
     if !wikidata.as_ref().is_ok_and(|path| is_recent(path)) {
-        let downloaded = download::download_wikidata_official_sites_paced(
+        let downloaded = download::download_wikidata_official_sites_with(
             &client,
+            sources.wikidata_mirror_url.as_deref(),
             &sources.wikidata_sparql_url,
             seed,
             sources.wikidata_min_sitelinks,
@@ -758,8 +759,9 @@ async fn download_seed(inner: &Inner) -> Result<SeedFiles> {
             Step::Downloading,
             "Asking Wikidata for the countries and kinds of those sites",
         );
-        let downloaded = facts::download_site_facts(
+        let downloaded = facts::download_site_facts_with(
             &client,
+            sources.wikidata_mirror_url.as_deref(),
             &sources.wikidata_sparql_url,
             seed,
             &[sites.clone(), kind_sites.clone()],

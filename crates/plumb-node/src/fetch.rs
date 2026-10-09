@@ -885,6 +885,7 @@ pub fn run(args: FetchDataArgs) -> Result<()> {
     let client = download::http_client()?;
     let kept = |name: &str| recent_file(&args.dir.join(name), args.keep_days);
 
+    let wikidata_mirror = (!args.no_wikidata_mirror).then_some(args.wikidata_mirror.as_str());
     let outcomes = block_on(async {
         let tranco = if args.skip_tranco {
             Outcome::Skipped("--skip-tranco".to_string())
@@ -914,10 +915,13 @@ pub fn run(args: FetchDataArgs) -> Result<()> {
                 args.wikidata_min_sitelinks
             );
             outcome(
-                download::download_wikidata_official_sites(
+                download::download_wikidata_official_sites_with(
                     &client,
+                    wikidata_mirror,
+                    download::WIKIDATA_SPARQL_URL,
                     &args.dir,
                     args.wikidata_min_sitelinks,
+                    download::WikidataPacing::default(),
                 )
                 .await,
             )
@@ -948,8 +952,9 @@ pub fn run(args: FetchDataArgs) -> Result<()> {
             Outcome::Skipped("needs the official websites, which are missing".to_string())
         } else {
             outcome(
-                facts::download_site_facts(
+                facts::download_site_facts_with(
                     &client,
+                    wikidata_mirror,
                     download::WIKIDATA_SPARQL_URL,
                     &args.dir,
                     &sites_files,
@@ -1123,6 +1128,8 @@ mod tests {
             skip_tranco: false,
             skip_wikidata: false,
             wikidata_min_sitelinks: 25,
+            wikidata_mirror: plumb_ingest::download::QLEVER_WIKIDATA_URL.to_string(),
+            no_wikidata_mirror: false,
             keep_days: 0,
         }
     }

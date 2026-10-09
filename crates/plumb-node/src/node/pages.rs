@@ -512,7 +512,10 @@ fn cut_if_longer(
     let before = std::fs::metadata(&file).map_or(0, |m| m.len());
     let mut reader = plumb_ingest::open_maybe_gz(&file)?;
     let mut cutter = SetFileCutter::create(&part, pages)?;
-    if near_key != 0 {
+    // The places past the first: near the towns, and the specialties
+    // (brewpubs, climbing gyms) anywhere. Read from disk, so the whole
+    // file is cheap to go through.
+    if set.id == plumb_index::places::PLACES_SET {
         cutter = cutter.keep_past(crate::places::near_lines(near.to_vec()));
     }
     let mut buf = vec![0u8; 1 << 16];
