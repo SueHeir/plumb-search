@@ -1559,6 +1559,9 @@ impl PageSearcher {
             for (term, distance) in
                 crate::spell::near_terms(&searcher, self.fields.words, word, edits)?
             {
+                if !crate::spell::plausible_word_fix(word, &term) {
+                    continue;
+                }
                 let term_docs = docs(&term)?;
                 if term_docs < needed {
                     continue;
@@ -3743,6 +3746,9 @@ mod tests {
         for i in 0..5 {
             pages.push(page(&format!("Perfi album {i}"), 10, &[]));
         }
+        for i in 0..25 {
+            pages.push(page(&format!("Erft river {i}"), 10, &[]));
+        }
         let (_dir, searcher) = searcher(&pages);
         let nothing_known = |_: &str| false;
         let suggest = |query: &str| {
@@ -3762,6 +3768,7 @@ mod tests {
         assert_eq!(suggest("anub"), None);
         assert_eq!(suggest("budafest2"), None);
         // A rare word is no slip of another rare one: few pages say "perfi".
+        // Nor of a common one with another first letter: "erft".
         assert_eq!(suggest("perft"), None);
         // A word the sites know is spelled right.
         let sites_know = |word: &str| word == "budafest";

@@ -7197,7 +7197,8 @@ mod tests {
             ("Jockey silks", 25),
             ("Jocky silks", 2),
             ("Perf1 benchmark", 80),
-            ("Perft results", 3),
+            ("Perft results", 1),
+            ("Erft cycling", 25),
             ("Ikala karaoke", 80),
             ("Inkala sudoku", 3),
             ("Kanye West albums", 40),
@@ -7278,7 +7279,9 @@ mod tests {
     #[test]
     fn rare_terms_that_are_meant_stay() {
         let (_dir, searcher) = build(&spelling_corpus());
-        // A word without digits is no slip of one with them.
+        // A word without digits is no slip of one with them, and a word
+        // one site says is no slip of a common word with another first
+        // letter ("erft").
         assert_eq!(
             spelled_with(&searcher, "perft", &RankConfig::default()),
             None
