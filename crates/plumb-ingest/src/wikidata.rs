@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
-use plumb_core::{host_of, is_homepage_path, registrable_domain};
+use plumb_core::{host_of, is_homepage_path, normalize_text, registrable_domain};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 use url::Url;
@@ -117,6 +117,62 @@ impl OfficialSite {
         let canonical_host = self.host == self.domain
             || self.host.strip_prefix("www.") == Some(self.domain.as_str());
         canonical_host && is_homepage_path(&self.path)
+    }
+
+    /// True when the claim is on the domain's own host (the domain or
+    /// `www.` plus it) but not its front page: `https://www.perplexity.ai/hub/`
+    /// or `https://bit.ly/RockyHeavyweightCollection`.
+    pub fn is_root_inner_page(&self) -> bool {
+        let canonical_host = self.host == self.domain
+            || self.host.strip_prefix("www.") == Some(self.domain.as_str());
+        canonical_host && !is_homepage_path(&self.path)
+    }
+
+    /// True for a claim on an inner page of the domain's own host
+    /// ([`OfficialSite::is_root_inner_page`]) by an item named mostly by the
+    /// domain's name: Perplexity AI at `https://www.perplexity.ai/hub/`,
+    /// not the hotel Hilton Athens at `https://www.hilton.ru/athens`. Such a
+    /// claim makes the domain the item's site when no item claims its
+    /// front page.
+    pub fn is_named_inner_page(&self) -> bool {
+        self.is_root_inner_page() && self.domain_name_share() * 3.0 >= 2.0
+    }
+
+    /// True when the item's label or one of its other names contains the
+    /// domain's name, its part before the suffix (`perplexity` of
+    /// perplexity.ai in "Perplexity AI"), ignoring case, spaces and
+    /// punctuation. A domain name shorter than three characters (`t` of
+    /// t.me) never matches. So a link shortener or a profile host is not
+    /// taken for the item's site: `bit.ly/RockyHeavyweightCollection` is no
+    /// site of the film Rocky.
+    pub fn names_its_domain(&self) -> bool {
+        self.domain_name_share() > 0.0
+    }
+
+    /// How much of the item's label or other name the domain's name makes
+    /// up, at most, for the names that contain it ([`OfficialSite::names_its_domain`]):
+    /// 10 of the 12 letters of "Perplexity AI" for perplexity.ai; 0 when
+    /// none does.
+    fn domain_name_share(&self) -> f32 {
+        let name: String = self
+            .domain
+            .split('.')
+            .next()
+            .unwrap_or_default()
+            .chars()
+            .filter(char::is_ascii_alphanumeric)
+            .map(|c| c.to_ascii_lowercase())
+            .collect();
+        let len = name.chars().count();
+        if len < 3 {
+            return 0.0;
+        }
+        std::iter::once(&self.label)
+            .chain(&self.names)
+            .map(|text| normalize_text(text).replace(' ', ""))
+            .filter(|text| text.contains(&name))
+            .map(|text| len as f32 / text.chars().count() as f32)
+            .fold(0.0, f32::max)
     }
 }
 
@@ -292,6 +348,39 @@ mod tests {
 
     fn site(item: &str, label: &str, url: &str) -> OfficialSite {
         OfficialSite::new(item, label, url).unwrap()
+    }
+
+    #[test]
+    fn inner_pages_count_for_an_item_naming_their_site() {
+        let mut sites = HashMap::new();
+        for (item, label, url) in [
+            ("Q1", "Rocky", "https://bit.ly/RockyHeavyweightCollection"),
+            ("Q2", "YouTube Music", "https://music.youtube.com/"),
+            ("Q3", "Sergey Karjakin", "https://t.me/karjakin"),
+            ("Q3", "Sergey Karjakin", "https://www.karjakin.ru/"),
+            ("Q4", "Perplexity AI", "https://www.perplexity.ai/hub/"),
+        ] {
+            let claim = site(item, label, url);
+            if claim.is_root_homepage() || claim.names_its_domain() {
+                ItemSite::add(&mut sites, &claim);
+            }
+        }
+        assert!(!sites.contains_key("Q1"));
+        assert_eq!(sites["Q2"].domain, "youtube.com");
+        assert_eq!(sites["Q2"].website(), Some("https://music.youtube.com/"));
+        assert_eq!(sites["Q3"].domain, "karjakin.ru");
+        assert!(sites["Q3"].front_page());
+        assert_eq!(sites["Q4"].domain, "perplexity.ai");
+
+        let mut named = site(
+            "Q5",
+            "Massachusetts Institute of Technology",
+            "https://web.mit.edu/",
+        );
+        assert!(!named.names_its_domain());
+        named.names = vec!["MIT".into()];
+        assert!(named.names_its_domain());
+        assert!(!named.is_named_inner_page(), "a subdomain is no inner page");
     }
 
     #[test]
