@@ -299,7 +299,7 @@ fn stdio_answers_line_by_line_and_skips_notifications() {
         "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}\n",
     );
     let mut output = Vec::new();
-    serve_lines(input.as_bytes(), &mut output, |m| Ok(mcp.handle(m))).unwrap();
+    serve_lines(input.as_bytes(), &mut output, false, |m| Ok(mcp.handle(m))).unwrap();
     let lines: Vec<Value> = String::from_utf8(output)
         .unwrap()
         .lines()
@@ -309,6 +309,47 @@ fn stdio_answers_line_by_line_and_skips_notifications() {
     assert_eq!(lines[0]["id"], 1);
     assert_eq!(lines[1]["error"]["code"], PARSE_ERROR);
     assert_eq!(lines[2]["id"], 2);
+}
+
+#[test]
+fn text_answers_leave_out_the_json_and_nothing_else() {
+    let mcp = server(vec![hit("python.org", 2.0, 0.8, true)]);
+    let input = concat!(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",",
+        "\"params\":{\"name\":\"site_info\",\"arguments\":{\"domain\":\"python.org\"}}}\n",
+        "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}\n",
+    );
+    let answers = |text_answers| {
+        let mut output = Vec::new();
+        serve_lines(input.as_bytes(), &mut output, text_answers, |m| {
+            Ok(mcp.handle(m))
+        })
+        .unwrap();
+        String::from_utf8(output)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect::<Vec<Value>>()
+    };
+    let (full, text) = (answers(false), answers(true));
+    assert_eq!(
+        full[0]["result"]["structuredContent"]["domain"],
+        "python.org"
+    );
+    assert!(
+        text[0]["result"].get("structuredContent").is_none(),
+        "{}",
+        text[0]
+    );
+    // The model reads the same text either way.
+    assert_eq!(text[0]["result"]["content"], full[0]["result"]["content"]);
+    assert!(text[0]["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("python.org"));
+    assert_eq!(text[0]["result"]["isError"], false);
+    // The tools are listed as before.
+    assert_eq!(text[1], full[1]);
 }
 
 #[test]
