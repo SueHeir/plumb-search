@@ -44,4 +44,4 @@ php array_map	https://www.php.net/manual/*
 linux chmod command	https://man7.org/linux/man-pages/*
 bash parameter expansion	https://www.gnu.org/software/bash/*
 nginx reverse proxy	https://nginx.org/en/docs/*
-cpp std::vector	https://en.cppreference.com/w/*
+cpp std::vector	https://en.cppreference.com/cpp/*,https://en.cppreference.com/w/*

@@ -306,7 +306,25 @@ pub const DOCS_SITES: &[DocsSite] = &[
         domain: "docs.github.com",
         roots: &["https://docs.github.com/en/"],
         sitemaps: &[],
-        index_pages: &[],
+        // No sitemap: each product's landing page lists its articles.
+        index_pages: &[
+            "https://docs.github.com/en",
+            "https://docs.github.com/en/get-started",
+            "https://docs.github.com/en/actions",
+            "https://docs.github.com/en/repositories",
+            "https://docs.github.com/en/pull-requests",
+            "https://docs.github.com/en/issues",
+            "https://docs.github.com/en/authentication",
+            "https://docs.github.com/en/pages",
+            "https://docs.github.com/en/packages",
+            "https://docs.github.com/en/codespaces",
+            "https://docs.github.com/en/copilot",
+            "https://docs.github.com/en/rest",
+            "https://docs.github.com/en/code-security",
+            "https://docs.github.com/en/organizations",
+            "https://docs.github.com/en/account-and-profile",
+            "https://docs.github.com/en/github-cli",
+        ],
         names: &["GitHub Docs"],
         weight: 7,
     },
@@ -326,11 +344,16 @@ pub const DOCS_SITES: &[DocsSite] = &[
         product: "C++",
         asked_by: &["c++", "cpp", "std::"],
         domain: "cppreference.com",
-        roots: &["https://en.cppreference.com/w/"],
+        roots: &[
+            "https://en.cppreference.com/cpp/",
+            "https://en.cppreference.com/c/",
+            "https://en.cppreference.com/w/",
+        ],
         sitemaps: &[],
         index_pages: &[
-            "https://en.cppreference.com/w/cpp/symbol_index",
-            "https://en.cppreference.com/w/c",
+            "https://en.cppreference.com/cpp/symbol_index",
+            "https://en.cppreference.com/cpp",
+            "https://en.cppreference.com/c",
         ],
         names: &["cppreference.com"],
         weight: 6,
@@ -345,7 +368,14 @@ pub const DOCS_SITES: &[DocsSite] = &[
             "https://learn.microsoft.com/en-us/powershell/",
         ],
         sitemaps: &[],
-        index_pages: &[],
+        index_pages: &[
+            "https://learn.microsoft.com/en-us/dotnet/",
+            "https://learn.microsoft.com/en-us/dotnet/csharp/",
+            "https://learn.microsoft.com/en-us/dotnet/fundamentals/",
+            "https://learn.microsoft.com/en-us/dotnet/core/introduction",
+            "https://learn.microsoft.com/en-us/aspnet/core/",
+            "https://learn.microsoft.com/en-us/powershell/scripting/overview",
+        ],
         names: &["Microsoft Learn"],
         weight: 6,
     },
@@ -508,11 +538,12 @@ const SITE_WORDS: &[&str] = &["documentation", "docs", "manual", "reference manu
 const SEPARATORS: &[&str] = &[" — ", " – ", " | ", " - ", " · ", " :: ", " » "];
 
 /// The page's own title out of `title`, the `<title>` of a page of `site`:
-/// the parts before those that name the site, joined by " — ".
+/// the parts between those that name the site, joined by " — ".
 /// "Sorting Techniques — Python 3.14 documentation" is "Sorting
 /// Techniques"; "Array.prototype.sort() - JavaScript | MDN" is
-/// "Array.prototype.sort() — JavaScript". `None` when nothing is left but
-/// the site's name.
+/// "Array.prototype.sort() — JavaScript"; "TypeScript: Documentation -
+/// Generics" is "Generics"; Rust's "Vec in std::vec" is "Vec — std::vec".
+/// `None` when nothing is left but the site's name.
 pub fn page_title(site: &DocsSite, title: &str) -> Option<String> {
     let title = crate::collapse_whitespace(title);
     let mut parts: Vec<&str> = vec![title.as_str()];
@@ -523,6 +554,31 @@ pub fn page_title(site: &DocsSite, title: &str) -> Option<String> {
             .map(str::trim)
             .filter(|part| !part.is_empty())
             .collect();
+    }
+    // "Vec in std::vec": the item, then the module it is in.
+    parts = parts
+        .into_iter()
+        .flat_map(|part| match part.split_once(" in ") {
+            Some((item, path))
+                if path.contains("::") && !item.contains(' ') && !path.contains(' ') =>
+            {
+                vec![item, path]
+            }
+            _ => vec![part],
+        })
+        .collect();
+    // A leading part that is only the site's name: "TypeScript:
+    // Documentation".
+    let only_site = |part: &str| {
+        let lower = part.trim_end_matches(':').to_lowercase();
+        lower == site.product.to_lowercase()
+            || site.names.iter().any(|name| lower == name.to_lowercase())
+            || SITE_WORDS
+                .iter()
+                .any(|word| lower.ends_with(&format!(" {word}")))
+    };
+    while parts.len() > 1 && only_site(parts[0]) {
+        parts.remove(0);
     }
     let names_site = |part: &str| {
         let lower = part.to_lowercase();
@@ -537,12 +593,46 @@ pub fn page_title(site: &DocsSite, title: &str) -> Option<String> {
                 .any(|word| lower == *word || lower.ends_with(&format!(" {word}")))
     };
     while parts.len() > 1 && parts.last().is_some_and(|part| names_site(part)) {
+        // "git-rebase Documentation" is the page's own name.
+        let last = parts.last().copied().unwrap_or_default();
+        if let Some(own) = own_docs(site, last) {
+            let at = parts.len() - 1;
+            parts[at] = own;
+            break;
+        }
         parts.pop();
     }
     if parts.len() == 1 && names_site(parts[0]) {
-        return None;
+        return own_docs(site, parts[0]).map(str::to_string);
     }
     Some(parts.join(" — "))
+}
+
+/// The page's own name in `part`, a part of a title of `site` ending in
+/// a word for docs: "git-rebase" in "git-rebase Documentation". `None`
+/// when what comes before that word names the site, perhaps with a
+/// version ("Python 3.14 documentation", "3.14.0 Documentation").
+fn own_docs<'a>(site: &DocsSite, part: &'a str) -> Option<&'a str> {
+    let lower = part.to_lowercase();
+    let word = SITE_WORDS
+        .iter()
+        .find(|word| lower.ends_with(&format!(" {word}")))?;
+    let own = part[..part.len() - word.len() - 1].trim();
+    let rest: Vec<String> = own
+        .split_whitespace()
+        .filter(|w| !w.chars().any(|c| c.is_ascii_digit()))
+        .map(str::to_lowercase)
+        .collect();
+    let rest = rest.join(" ");
+    let names_site = rest.is_empty()
+        || rest == "the"
+        || [site.product].iter().chain(site.names).any(|name| {
+            let name = name.to_lowercase();
+            rest == name
+                || rest.starts_with(&format!("{name} "))
+                || rest.starts_with(&format!("the {name}"))
+        });
+    (!names_site).then_some(own)
 }
 
 /// Words that ask for docs in general, not for something in them: "python
@@ -572,12 +662,24 @@ const DOCS_WORDS: &[&str] = &[
 ];
 
 /// The docs site a page at `url` is on: the one with a root it is under.
+/// Else the one with a root on its host, as a page its root sent on to
+/// another version ("docs.pytorch.org/docs/2.9/" for "…/docs/stable/").
 pub fn site_of_url(url: &str) -> Option<&'static DocsSite> {
-    DOCS_SITES.iter().find(|site| {
-        site.roots
-            .iter()
-            .any(|root| url.starts_with(root.trim_end_matches('/')))
-    })
+    DOCS_SITES
+        .iter()
+        .find(|site| {
+            site.roots
+                .iter()
+                .any(|root| url.starts_with(root.trim_end_matches('/')))
+        })
+        .or_else(|| {
+            let host = crate::host_of(url)?;
+            DOCS_SITES.iter().find(|site| {
+                site.roots
+                    .iter()
+                    .any(|root| crate::host_of(root).as_deref() == Some(host.as_str()))
+            })
+        })
 }
 
 /// Whether `query` asks about something in `site`'s docs: it names what
@@ -709,7 +811,31 @@ mod tests {
         let rust = site("rust").unwrap();
         assert_eq!(
             page_title(rust, "Vec in std::vec - Rust").as_deref(),
-            Some("Vec in std::vec")
+            Some("Vec — std::vec")
+        );
+        assert_eq!(
+            page_title(
+                rust,
+                "Using Trait Objects in Rust - The Rust Programming Language"
+            )
+            .as_deref(),
+            Some("Using Trait Objects in Rust")
+        );
+        let git = site("git").unwrap();
+        assert_eq!(
+            page_title(git, "Git - git-rebase Documentation").as_deref(),
+            Some("git-rebase")
+        );
+        assert_eq!(
+            site_of_url("https://docs.pytorch.org/docs/2.9/generated/torch.nn.Linear.html")
+                .map(|site| site.key),
+            Some("pytorch")
+        );
+        assert_eq!(site_of_url("https://example.com/docs/"), None);
+        let typescript = site("typescript").unwrap();
+        assert_eq!(
+            page_title(typescript, "TypeScript: Documentation - Generics").as_deref(),
+            Some("Generics")
         );
         assert_eq!(
             page_title(rust, "Built-in   Functions").as_deref(),

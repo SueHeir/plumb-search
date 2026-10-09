@@ -19,7 +19,8 @@ use plumb_core::registrable_domain;
 use std::path::Path;
 
 use plumb_index::pages::{
-    add_named_site, lift_named_sites, place_pages, Page, PageSearcher, PlacedPage,
+    add_named_site, drop_namesakes_of_words, lift_named_sites, place_pages, Page, PageSearcher,
+    PlacedPage,
 };
 use plumb_index::{Hit, Meaning, SearchOptions, Searcher};
 use tracing::info;
@@ -414,6 +415,9 @@ fn evaluate(
                     add_named_site(&mut lifted, &found, |domain| {
                         searcher.site(domain).ok().flatten()
                     });
+                }
+                if cfg.drop_namesakes {
+                    drop_namesakes_of_words(&mut lifted, &found);
                 }
                 lift_named_sites(&mut lifted, &found);
                 pages.note_demand(&mut lifted)?;
@@ -1092,6 +1096,7 @@ mod tests {
     fn pages_are_listed_as_a_node_lists_them() {
         let site = |domain: &str, named: bool| Hit {
             demand: None,
+            missing_words: false,
             placing_text_score: None,
             domain: domain.into(),
             url: format!("https://{domain}/"),

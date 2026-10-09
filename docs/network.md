@@ -194,12 +194,30 @@ Tranco, Common Crawl, Wikidata or Wikipedia. The best 50,000 make the first
 index; filling then takes the rest, a round a minute, until the node holds
 `--sites` of them (or as many as its storage and memory allow), and goes on
 filling as usual from there. When no trusted node answers within two
-minutes, or it sends fewer than 1,000 sites, the node downloads the seed
-data as before; so does `--seed-from-outside`, `--no-fill`, or a node that
-trusts no one. Nodes from before this ignore `all` and send crawled sites
+minutes, or it sends fewer than 1,000 sites, the node downloads only the
+Tranco list to start searching, and asks the trusted nodes again before it
+goes on to Wikidata and Wikipedia: if one answers then, its best 50,000
+sites are folded in instead and nothing is asked of Wikidata. Only when no
+trusted node answers again does the node download the rest of the seed
+data; so does `--seed-from-outside`, `--no-fill`, or a node that trusts no
+one. Nodes from before this ignore `all` and send crawled sites
 only, which still sets a node up, without the uncrawled ones. The ranks and
 facts are as fresh as the trusted node's seed: refreshing them means
 reseeding that node.
+
+**Outside data comes from the network first.** Nodes do not each ask
+Wikipedia, Wikidata or other sources for data the network already holds:
+setup takes the sites above from a trusted node, page set files come from
+trusted nodes ([pages.md](pages.md#nodes-in-the-network)), and so does the
+weekly adult blocklist safe search uses: a node whose copy is a week old
+asks its trusted nodes for theirs over `/plumb/pages/1` (as
+`adult-domains`) and takes one younger than a week, keeping that copy's
+date so it ages as the original does. It waits up to ten minutes after
+starting for a trusted node to connect, and downloads the list from its
+source only when none has a fresh copy, so in practice only the nodes that
+build from source (plumbsearch.org) fetch it, once a week. Answers that
+need live data (currency rates, cached six hours) and a page an AI asks
+to read are still fetched by the node that needs them.
 
 ## Network search
 
@@ -207,7 +225,7 @@ The query text stays on the asking node. Relaying separates the asker's address 
 
 * `GET /network?q=` on a node's web page (linked from every results page as "Ask other Plumb nodes too"), and `GET /api/network/search?q=` as JSON.
 * **Buckets, not queries.** Every node that answers searches keeps a bucket table next to each index it builds (`indexes/<n>/buckets/`). Each site is filed under its keys: its words and joined names from the domain label, title, aliases and top link texts. A key goes to one of 16,384 buckets by hash, and each key keeps its best 32 sites by link score.
-* **Asking.** The asker turns the query into keys the same way and first checks its retained bucket cache. With background rounds enabled, missing or overdue buckets enter an in-memory queue for the next scheduled round. Each round contains exactly 4 buckets, padded with background buckets and shuffled, asked over `/plumb/bucket/1` from up to 2 connected nodes. Answering nodes see bucket numbers. Public hashes allow likely queries to be tested against observed bucket sets; padding does not eliminate that inference.
+* **Asking.** The asker turns the query into keys the same way and first checks its retained bucket cache. With background rounds enabled, missing or overdue buckets enter an in-memory queue for the next scheduled round. Each round contains exactly 4 buckets, padded with background buckets and shuffled, asked over `/plumb/bucket/1` from up to 2 connected nodes. A bucket still short of 2 answers after a quarter of the wait, or once every request is in (a node failed or answered badly), is asked of one more node, and the search ends as soon as every bucket has 2 answers rather than waiting out a slow node (the approach of Google's "The Tail at Scale"). That extra node sees the bucket too; `hedged` in the JSON answer counts these requests. Answering nodes see bucket numbers. Public hashes allow likely queries to be tested against observed bucket sets; padding does not eliminate that inference.
 * **A throwaway identity for every request.** Each bucket fetch uses a fresh node key and its own short-lived connection, dialed straight to the node or through its relay. This avoids reusing the asker's permanent key; addresses and timing can still link requests, particularly with direct retrieval or colluding operators.
 * **Through a relay, sealed** (Oblivious HTTP, RFC 9458). On its own, a throwaway identity still shows the node asked the IP address the request comes from. So each bucket request goes through another node, picked at random for every request, over `/plumb/oblivious/1`:
   1. The asker asks the relay for the target node's key. The relay fetches it from the target over its own connection and hands the same key to everyone who asks for 10 minutes, so the target cannot give each asker a key of its own and recognize them by it. The key is signed with the target's node key, so the relay cannot swap in its own.
@@ -246,6 +264,28 @@ The query text stays on the asking node. Relaying separates the asker's address 
 * **Bots.** Nothing yet stops one machine from sending many reports of one pick under many throwaway identities, and so pushing a site up for a query. The per-node cap only binds honest nodes. Limits now: the bonus is small and bounded, a pick only counts for sites the asking node's own search returns, and stuffed reports cost the attacker 10 identities per pick per week. The real fix is anonymous crawl tokens (Privacy Pass style): a report must spend a token earned by verified crawling. Tokens exist now (see "Crawl credits"), but a report reaches every node, so it needs a token any node can check, which these are not yet.
 
 Tested on one machine (`cargo test -p plumb-net popularity`, `cargo test -p plumb-node popularity`): reports below the threshold stay unreadable, other picks and other weeks do not help, copies count once, forged shares and junk do not break counting, low-threshold shares are refused; across three nodes a report handed in under a throwaway identity, sealed through a relay, reaches the others, a pick becomes readable at the tenth report, and a node that joins later catches up and counts the same; a whole `plumb run` node notes a pick through `/go`, sends its report to another node, and after nine more reports of the same pick ranks that site higher by the bonus.
+
+## Shared findings
+
+`plumb_net::leads`, `plumb-node`'s `findings` and `mcp`. An AI app on a node run with `--share-findings` can share a page it found useful with the rest of the network (`report_finding` with `share: true`, see [MCP](mcp.md#sharing-a-finding-with-other-nodes)), and an agent searching another node for the same thing is shown that page as a **lead** (Liz, 2026-10-08).
+
+**What a lead is.** The page's address, why it helped (at most 300 characters), the search's words as 16-bit keys (SHA-256 of `plumb-lead-word-v1` and the word, so many words share each key), when it was reported and when it expires (at most 30 days later), and the reporting node's public key and signature over all of it. The search as typed only when the agent shares it too (`share_query`); never the answer the agent worked out or what it was doing. Words that say what is wanted rather than what about ("latest", "install", "docs") are kept apart from the rest, so "latest version of python" does not match a lead for "requests latest version python". A lead names a public page: an http or https address, no user name or password, no private address or local name.
+
+**How it travels.** The reporting node keeps the lead and publishes it on the gossip topic `plumb/leads/1` (again once a node takes the topic, if none does yet). Every node checks a lead before keeping or passing it on: the signature, the times, sizes and canonical form; a node passes on only leads it took, so copies and floods stop at the first node. A node meeting another asks it on `/plumb/leads/1` for the 2,000 newest leads it holds, then the next node, two at a time, and every 30 minutes asks again, so a node that was away catches up.
+
+**What a node keeps.** `DIR/net/leads.jsonl`: at most 20,000 leads, 500 from any one node (its oldest go), and at most 50 a day from any one node, its own included. When full, the node holding the most leads gives up its oldest, so a node that floods the network crowds out only itself. A newer report of the same page for the same search from the same node replaces the older one; expired leads are dropped every hour. `GET /api/status` shows `network.leads_held` and `network.leads_shared`.
+
+**Who is listed.** Every node keeps the leads it hears of, but a search lists only those from nodes in its search scope (see "Who a search asks" above): its trusted nodes, also the nodes they trust (the default), or anyone. Each reporter is labeled `trusted`, `friend_of_friend` or `other`, closer ones first.
+
+**Leads are not crawls.** Search results come from crawls that other crawlers check (see "Agreement between crawlers"); a lead is one node's say-so that a page helped. So leads are listed apart from the results, with `verified: false`, never ranked among them, and never taken into a node's records. An agent reads the page itself before relying on it.
+
+**Limits now.**
+
+* The word keys hide a search from a casual look, not from someone who tries the likely words: a lead for "tokio latest version" can be found by computing the keys of those words. Share findings for searches you would not mind being seen.
+* A lead is signed by the node, so it shows which node shared it, and the node's id is public. Leads are not sent through a relay or under a throwaway identity.
+* Nothing stops one person from running many keys and sharing 50 misleading leads a day from each. Leads from nodes you trust come first, `--search-from trusted` lists only those, and every lead is marked unchecked, but crawl tokens (see "Crawl credits") would be the real limit.
+
+Tested on one machine (`cargo test -p plumb-net leads`, `cargo test -p plumb-net --test network shared_leads`, `cargo test -p plumb-node an_agent_finds_a_page`): leads are signed, matched by their keys and refused when changed, expired or naming a private page; the store keeps to its limits and survives a restart; across six nodes a lead reaches a node that joins later and is listed only under the scopes that take its node; across two whole nodes, an agent shares a page on one, an agent searching the other in other words finds it with who reported it and when, and reads it, while a finding the first agent kept to itself never leaves its node.
 
 ## Crawl credits
 

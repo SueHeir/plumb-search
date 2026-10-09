@@ -9,7 +9,7 @@
 //!   work ([`absorb_inbox`]). Rebuilding the index for every batch would
 //!   keep a node busy, so the index is rebuilt once
 //!   [`REBUILD_AFTER_RECORDS`] records have come in, at most once every
-//!   [`NETWORK_REBUILD_GAP`], or at the next refresh.
+//!   [`NETWORK_REBUILD_GAP`] (longer after a slow build), or at the next refresh.
 //! * Other nodes search by bucket (see `plumb_net::bucket`), never sending
 //!   their query. Each index build also writes the index's buckets into
 //!   `indexes/NNNNNN/buckets/` ([`build_buckets`]), and bucket requests are
@@ -153,6 +153,12 @@ impl BucketSource for ServedIndex {
     }
 
     fn page_set_file(&self, set: &str) -> Option<PathBuf> {
+        if let Some(file) = super::shared_vectors::servable(&self.0.paths.data, set) {
+            return Some(file);
+        }
+        if set == super::adult::SHARED_NAME {
+            return super::adult::shared_file(&self.0.paths.data);
+        }
         crate::pages::SetInfo::find(set)?.servable_file(&self.0.paths.data)
     }
 
@@ -788,6 +794,7 @@ mod tests {
     fn hit(domain: &str, score: f32) -> Hit {
         Hit {
             demand: None,
+            missing_words: false,
             placing_text_score: None,
             domain: domain.to_string(),
             url: format!("https://{domain}/"),

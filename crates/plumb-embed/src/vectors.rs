@@ -182,37 +182,37 @@ impl Vectors {
     }
 
     fn read(input: &mut impl Read) -> Result<Self> {
-        let mut magic = [0; 8];
-        input.read_exact(&mut magic)?;
-        if &magic != MAGIC {
-            bail!("not a vectors file");
-        }
-        let version = read_u32(input)?;
-        if version != VERSION {
-            bail!("vectors file version {version}, expected {VERSION}");
-        }
-        let mut model = [0; 32];
-        input.read_exact(&mut model)?;
-        let dim = read_u32(input)? as usize;
-        let count = read_u32(input)? as usize;
+        let (model, dim, count) = read_header(input)?;
         let mut vectors = Vectors::new(model, dim);
-        let mut vector = vec![0; dim];
-        for _ in 0..count {
-            let mut len = [0; 1];
-            input.read_exact(&mut len)?;
-            let mut domain = vec![0; usize::from(len[0])];
-            input.read_exact(&mut domain)?;
-            let domain = String::from_utf8(domain).context("a domain is not UTF-8")?;
-            let mut hash = [0; 32];
-            input.read_exact(&mut hash)?;
-            let mut bytes = vec![0u8; dim];
-            input.read_exact(&mut bytes)?;
-            for (value, byte) in vector.iter_mut().zip(&bytes) {
-                *value = *byte as i8;
-            }
-            vectors.insert(&domain, hash, &vector)?;
-        }
+        read_rows(input, dim, count, |domain, hash, vector| {
+            vectors.insert(domain, *hash, vector)
+        })?;
         Ok(vectors)
+    }
+
+    /// The model, length and number of the vectors saved in `path`, read
+    /// from its start only.
+    pub fn read_header(path: &Path) -> Result<(ModelId, usize, usize)> {
+        let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
+        read_header(&mut BufReader::new(file))
+            .with_context(|| format!("reading vectors from {}", path.display()))
+    }
+
+    /// Calls `each` with the domain, text hash and vector of every site in
+    /// the vectors file at `path`, one at a time, without holding them
+    /// all; gives the file's model and vector length.
+    pub fn for_each_in(
+        path: &Path,
+        mut each: impl FnMut(&str, &TextHash, &[i8]) -> Result<()>,
+    ) -> Result<(ModelId, usize)> {
+        let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
+        let mut input = BufReader::new(file);
+        let mut read = || -> Result<(ModelId, usize)> {
+            let (model, dim, count) = read_header(&mut input)?;
+            read_rows(&mut input, dim, count, &mut each)?;
+            Ok((model, dim))
+        };
+        read().with_context(|| format!("reading vectors from {}", path.display()))
     }
 
     /// Saves the vectors to `path`, replacing it only once all are written.
@@ -246,6 +246,51 @@ impl Vectors {
         }
         Ok(())
     }
+}
+
+/// The model, vector length and number of vectors at the start of a
+/// vectors file.
+fn read_header(input: &mut impl Read) -> Result<(ModelId, usize, usize)> {
+    let mut magic = [0; 8];
+    input.read_exact(&mut magic)?;
+    if &magic != MAGIC {
+        bail!("not a vectors file");
+    }
+    let version = read_u32(input)?;
+    if version != VERSION {
+        bail!("vectors file version {version}, expected {VERSION}");
+    }
+    let mut model = [0; 32];
+    input.read_exact(&mut model)?;
+    let dim = read_u32(input)? as usize;
+    let count = read_u32(input)? as usize;
+    Ok((model, dim, count))
+}
+
+/// Reads the `count` rows of `dim` values after a vectors file's header.
+fn read_rows(
+    input: &mut impl Read,
+    dim: usize,
+    count: usize,
+    mut each: impl FnMut(&str, &TextHash, &[i8]) -> Result<()>,
+) -> Result<()> {
+    let mut vector = vec![0; dim];
+    let mut bytes = vec![0u8; dim];
+    for _ in 0..count {
+        let mut len = [0; 1];
+        input.read_exact(&mut len)?;
+        let mut domain = vec![0; usize::from(len[0])];
+        input.read_exact(&mut domain)?;
+        let domain = String::from_utf8(domain).context("a domain is not UTF-8")?;
+        let mut hash = [0; 32];
+        input.read_exact(&mut hash)?;
+        input.read_exact(&mut bytes)?;
+        for (value, byte) in vector.iter_mut().zip(&bytes) {
+            *value = *byte as i8;
+        }
+        each(&domain, &hash, &vector)?;
+    }
+    Ok(())
 }
 
 fn read_u32(input: &mut impl Read) -> Result<u32> {
@@ -295,7 +340,19 @@ mod tests {
         assert_eq!(kept.len(), 2);
         assert_eq!(kept.nearest(&query, 1)[0].0, "northeast.com");
 
+        let (model, dim, count) = Vectors::read_header(&path).unwrap();
+        assert_eq!((model, dim, count), ([1; 32], 3, 3));
+        let mut seen = Vec::new();
+        Vectors::for_each_in(&path, |domain, hash, vector| {
+            seen.push((domain.to_string(), *hash, vector.to_vec()));
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(seen.len(), 3);
+        assert!(seen.contains(&("north.com".to_string(), [5; 32], vec![0, 0, 127])));
+
         std::fs::write(&path, b"nonsense").unwrap();
         assert!(Vectors::load(&path).is_err());
+        assert!(Vectors::read_header(&path).is_err());
     }
 }

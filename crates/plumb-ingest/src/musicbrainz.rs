@@ -8,9 +8,10 @@
 //! derived dumps (tags, ratings, annotations) is. No lyrics are kept, only
 //! where to read them: the Genius page MusicBrainz links a song's work to.
 //!
-//! A song is all the recordings of one title by one artist credit, its
-//! remasters and live versions too. How popular it is, is how many people
-//! listened to its recordings, as ListenBrainz (MusicBrainz's sister
+//! A song is all the recordings of one title by one artist, with guests
+//! ("feat. Jamie Foxx") or without, its remasters and live versions too.
+//! How popular it is, is how many people listened to its recordings, as
+//! ListenBrainz (MusicBrainz's sister
 //! project, whose data is CC0 too) counts them; an album's, how many
 //! listened to it. ListenBrainz is asked about the songs on at least
 //! [`MusicOptions::min_song_releases`] release groups (an album, a single,
@@ -389,13 +390,37 @@ fn is_mbid(gid: &str) -> bool {
         })
 }
 
-/// What a song is grouped by: its artist credit and its title's words.
-fn song_key(credit: u32, title: &str) -> u64 {
+/// What a song is grouped by: its main artist's name (see
+/// [`main_artist`]) and its title's words, so "Gold Digger" by "Kanye
+/// West" and by "Kanye West feat. Jamie Foxx" are one song.
+fn song_key(artist: u64, title: &str) -> u64 {
     let mut hasher = DefaultHasher::new();
-    credit.hash(&mut hasher);
+    artist.hash(&mut hasher);
     plumb_core::normalize_text(title).hash(&mut hasher);
     // 0 marks a recording left out.
     hasher.finish() | 1
+}
+
+/// The main artist of a credit (see [`main_artist`]) as a number, kept
+/// for each of MusicBrainz's millions of credits.
+fn artist_key(credit: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    plumb_core::normalize_text(main_artist(credit)).hash(&mut hasher);
+    hasher.finish()
+}
+
+/// An artist credit without its guests: "Kanye West" for "Kanye West
+/// feat. Jamie Foxx", "ft. Jamie Foxx" or "featuring Jamie Foxx". Credits
+/// joined otherwise are the artist's own name ("Simon & Garfunkel").
+fn main_artist(credit: &str) -> &str {
+    // ASCII lowercasing keeps every byte where it was.
+    let lower = credit.to_ascii_lowercase();
+    [" feat. ", " feat ", " ft. ", " featuring "]
+        .iter()
+        .filter_map(|joint| lower.find(joint))
+        .min()
+        .filter(|&end| end > 0)
+        .map_or(credit, |end| &credit[..end])
 }
 
 /// Whether a title is a placeholder rather than a name: `[untitled]`,
@@ -492,10 +517,17 @@ impl MusicDump {
             .collect();
 
         let mut no_artist = HashSet::new();
+        // Each credit's main artist, by credit.
+        let mut credit_artist: Vec<u64> = Vec::new();
         for_each_row(dir, "artist_credit", |row| {
             if let (Some(id), Some(name)) = (row.first().and_then(|f| num(f)), row.get(1)) {
-                if text(name).is_none_or(|name| is_no_artist(&name)) {
-                    no_artist.insert(id);
+                match text(name) {
+                    Some(name) if !is_no_artist(&name) => {
+                        put(&mut credit_artist, id, artist_key(&name));
+                    }
+                    _ => {
+                        no_artist.insert(id);
+                    }
                 }
             }
         })?;
@@ -603,7 +635,8 @@ impl MusicDump {
             if row.get(8) == Some(&"t") || is_placeholder(&title) || no_artist.contains(&credit) {
                 return;
             }
-            put(&mut recording_song, id, song_key(credit, &title));
+            let artist = at(&credit_artist, credit);
+            put(&mut recording_song, id, song_key(artist, &title));
         })?;
         info!("read {recordings} recordings");
 
@@ -1342,6 +1375,29 @@ mod tests {
 
     fn mbid(text: &str) -> Mbid {
         parse_mbid(text).unwrap()
+    }
+
+    #[test]
+    fn a_song_with_guests_is_one_song_with_its_artists_own() {
+        for credit in [
+            "Kanye West feat. Jamie Foxx",
+            "Kanye West ft. Jamie Foxx",
+            "Kanye West featuring Jamie Foxx",
+            "Kanye West",
+        ] {
+            assert_eq!(main_artist(credit), "Kanye West", "{credit}");
+            assert_eq!(
+                song_key(artist_key(credit), "Gold Digger"),
+                song_key(artist_key("Kanye West"), "Gold  Digger")
+            );
+        }
+        for credit in ["Simon & Garfunkel", "Earth, Wind & Fire", "Feather"] {
+            assert_eq!(main_artist(credit), credit);
+        }
+        assert_ne!(
+            song_key(artist_key("Kanye West"), "Gold Digger"),
+            song_key(artist_key("EPMD"), "Gold Digger")
+        );
     }
 
     #[test]

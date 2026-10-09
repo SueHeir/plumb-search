@@ -1,13 +1,12 @@
 //! Plumb Search for the desktop: a Plumb Search node that runs inside the
-//! app, and one window with its panel.
+//! app, and one window for searching and managing its nodes.
 //!
 //! The window opens on a bundled "Starting..." page while the node starts on
-//! Tauri's async runtime, then shows the node's panel (`/app`): what works
-//! now ("Limited search is ready"), storage and downloads against their
-//! limits, crawling, the Plumb network, setup progress, the settings and how
-//! to search from the browser. The app is no browser: searching happens
-//! in the default browser, and so does every link out of the panel,
-//! including the node's search page.
+//! Tauri's async runtime, then shows the search home page (`/`). Search,
+//! private search, history, profiles and the node's panel (`/app`) stay in
+//! the window. Result links and other destinations open in the default
+//! browser. Only explicitly allowed routes on this node's origin can load
+//! in the window; its pages cannot call into Tauri.
 //!
 //! Closing the window keeps the node running, so that searches from the
 //! browser keep working: the app stays in the menu bar (macOS) or the
@@ -55,7 +54,7 @@ const MAIN_WINDOW: &str = "main";
 /// The argument the app is started with at login, when it opens no window.
 const AT_LOGIN: &str = "--at-login";
 
-/// The node's panel, which the window shows; its forms post under it.
+/// The node's control panel; its forms post under it.
 const PANEL_PATH: &str = "app";
 
 /// The port the node listens on, so that its address stays the same from
@@ -365,13 +364,14 @@ fn report_other_port(app: &AppHandle, port: u16) {
 
 fn show_node_page(app: &AppHandle, node: &NodeHandle) -> Result<()> {
     let url: Url = node.url().parse().context("reading the node's address")?;
-    // Let the window go to the node's panel before sending it there.
+    // Let the window show this node's search and settings pages.
     app.state::<Node>().set_url(url.clone());
     let window = app
         .get_webview_window(MAIN_WINDOW)
         .context("the window is closed")?;
-    let panel = url.join(PANEL_PATH).context("finding the node's panel")?;
-    window.navigate(panel).context("opening the node's panel")
+    window
+        .navigate(url)
+        .context("opening the node's search page")
 }
 
 /// Shows an error dialog, and quits when it is closed.
@@ -727,11 +727,33 @@ enum Destination {
 fn destination(url: &Url, node: Option<&Url>, dev_server: Option<&Url>) -> Destination {
     let same_origin = |page: &Url| page.origin() == url.origin();
     if node.is_some_and(same_origin) {
-        // Only the panel: the search pages and the JSON API belong in the
-        // browser, and the window has no back button.
+        // Search and profile workflows stay in the app. Result destinations
+        // and diagnostic/download pages still open in the default browser.
         let panel = format!("/{PANEL_PATH}");
         let path = url.path();
-        if path == panel || path.starts_with(&format!("{panel}/")) {
+        if path == panel
+            || path.starts_with(&format!("{panel}/"))
+            || matches!(
+                path,
+                "/" | "/search"
+                    | "/network"
+                    | "/private"
+                    | "/go"
+                    | "/history"
+                    | "/history/clear"
+                    | "/history/forget-clicks"
+                    | "/feedback"
+                    | "/tune"
+                    | "/about"
+                    | "/welcome"
+                    | "/welcome/skip"
+                    | "/link"
+                    | "/link/new"
+                    | "/link/join"
+                    | "/link/stop"
+                    | "/plugins/act"
+            )
+        {
             Destination::Window
         } else {
             Destination::Browser
@@ -795,11 +817,34 @@ mod tests {
     }
 
     #[test]
-    fn the_nodes_search_pages_and_json_api_open_in_the_browser() {
+    fn search_and_profile_workflows_stay_in_the_window() {
+        let node = url(NODE);
+        for path in [
+            "/",
+            "/search?q=us+bank",
+            "/private",
+            "/history",
+            "/about",
+            "/welcome",
+            "/welcome/skip",
+            "/link",
+            "/link/join",
+            "/tune",
+            "/feedback",
+            "/go?domain=usbank.com",
+        ] {
+            assert_eq!(
+                destination(&node.join(path).unwrap(), Some(&node), None),
+                Destination::Window,
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn other_node_pages_and_json_api_open_in_the_browser() {
         let node = url(NODE);
         for page in [
-            "http://127.0.0.1:41234/",
-            "http://127.0.0.1:41234/search?q=us+bank",
             "http://127.0.0.1:41234/apps",
             "http://127.0.0.1:41234/api/search?q=us+bank",
             "http://127.0.0.1:41234/api/status",

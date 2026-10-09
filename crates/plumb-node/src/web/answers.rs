@@ -182,7 +182,7 @@ pub(crate) struct Extras {
 
 /// Whether a Wikipedia article lists the pages a name could mean rather
 /// than being about one thing.
-fn is_disambiguation(title: &str, description: Option<&str>) -> bool {
+pub(super) fn is_disambiguation(title: &str, description: Option<&str>) -> bool {
     title.ends_with("(disambiguation)")
         || description.is_some_and(|d| {
             let d = d.to_lowercase();
@@ -223,20 +223,45 @@ pub(crate) fn page_about<'a>(sites: &[Hit], pages: &'a [PlacedPage]) -> Option<&
         && top.is_some_and(|hit| {
             hit.named && (hit.official || hit.link_score >= plumb_index::WELL_KNOWN_LINK_SCORE)
         });
-    let placed = pages.iter().find(|placed| {
+    let about_one_thing = |placed: &&PlacedPage| {
         let page = &placed.hit.page;
-        let under_top = placed.under.is_some() && placed.under.as_deref() == top_site;
-        (placed.hit.named || (site_wins && under_top))
-            && is_about_one_thing(page)
+        is_about_one_thing(page)
             // A film or show only when asked for as one: "dune 2021".
             && (page.set != FILMS_SET || placed.hit.whole)
             && !is_disambiguation(&page.title, page.description.as_deref())
-            && match &placed.under {
-                _ if site_wins => under_top,
-                Some(_) => under_top,
-                None => placed.at <= 1,
-            }
-    })?;
+    };
+    let under_top =
+        |placed: &PlacedPage| placed.under.is_some() && placed.under.as_deref() == top_site;
+    let placed = if site_wins {
+        pages
+            .iter()
+            .filter(about_one_thing)
+            .find(|placed| under_top(placed))?
+    } else {
+        // The best named article, wherever it is listed: a namesake never
+        // stands in for it ("tim cook" is not the historian, "better call
+        // saul" not the episode). It gets the box only when listed near
+        // the top, alone or under the first site.
+        let best = pages
+            .iter()
+            .filter(|placed| placed.hit.named)
+            .filter(about_one_thing)
+            .reduce(|best, placed| {
+                if placed.hit.score > best.hit.score {
+                    placed
+                } else {
+                    best
+                }
+            })?;
+        let listed_high = match &best.under {
+            Some(_) => under_top(best),
+            None => best.at <= 1,
+        };
+        if !listed_high {
+            return None;
+        }
+        best
+    };
     Some(&placed.hit.page)
 }
 
@@ -474,18 +499,11 @@ pub(crate) fn render_info_box(out: &mut String, info: &InfoBox) {
     out.push_str("</aside>\n");
 }
 
-/// The fact `asked` asks for, when the first page named by its subject
-/// (in `pages`, found for the subject's words) that has one of its kinds
-/// has it: "Canberra" for "capital of australia". Failing that, the
-/// article listed under the site the subject names: "Apple Inc." under
-/// apple.com for "ceo of apple", where the article named "Apple" is the
-/// fruit. `now` (Unix seconds) works out an age.
-pub(crate) fn fact_answer(
-    asked: &plumb_core::facts::FactQuestion,
-    pages: &[PlacedPage],
-    now: u64,
-) -> Option<plumb_answer::Answer> {
-    use plumb_core::facts::FactKind;
+/// The pages of `pages` (found for a subject's words) whose facts are the
+/// subject's, in the order to try them: the pages it names, then those
+/// listed under the site it names, each about one thing and none a
+/// disambiguation page.
+pub(crate) fn fact_pages(pages: &[PlacedPage]) -> impl Iterator<Item = &PlacedPage> {
     let named = pages.iter().filter(|placed| placed.hit.named);
     let of_sites = pages
         .iter()
@@ -499,59 +517,73 @@ pub(crate) fn fact_answer(
                 placed.hit.page.description.as_deref(),
             )
         })
-        .find_map(|placed| {
-            let page = &placed.hit.page;
-            let kind = asked
-                .kinds
+}
+
+/// The fact `asked` asks for, when the first page named by its subject
+/// (in `pages`, found for the subject's words) that has one of its kinds
+/// has it: "Canberra" for "capital of australia". Failing that, the
+/// article listed under the site the subject names: "Apple Inc." under
+/// apple.com for "ceo of apple", where the article named "Apple" is the
+/// fruit. `now` (Unix seconds) works out an age.
+pub(crate) fn fact_answer(
+    asked: &plumb_core::facts::FactQuestion,
+    pages: &[PlacedPage],
+    now: u64,
+) -> Option<plumb_answer::Answer> {
+    use plumb_core::facts::FactKind;
+    fact_pages(pages).find_map(|placed| {
+        let page = &placed.hit.page;
+        let kind = asked
+            .kinds
+            .iter()
+            .copied()
+            .find(|kind| page.facts.iter().any(|fact| fact.kind == *kind))?;
+        let values: Vec<&str> = page
+            .facts
+            .iter()
+            .filter(|fact| fact.kind == kind)
+            .map(|fact| fact.value.as_str())
+            .collect();
+        let date_of = |kind: FactKind| {
+            page.facts
                 .iter()
-                .copied()
-                .find(|kind| page.facts.iter().any(|fact| fact.kind == *kind))?;
-            let values: Vec<&str> = page
-                .facts
-                .iter()
-                .filter(|fact| fact.kind == kind)
-                .map(|fact| fact.value.as_str())
-                .collect();
-            let date_of = |kind: FactKind| {
-                page.facts
-                    .iter()
-                    .find(|fact| fact.kind == kind)
-                    .and_then(|fact| plumb_core::facts::Date::parse(&fact.value))
-            };
-            let (question, answer, note) = if asked.age && kind == FactKind::Born {
-                let born = date_of(FactKind::Born)?;
-                match date_of(FactKind::Died) {
-                    Some(died) => (
-                        format!("Age of {}", page.title),
-                        format!("Died at {}", born.years_until(&died)?),
-                        Some(format!("{} to {}", born.display(), died.display())),
-                    ),
-                    None => (
-                        format!("Age of {}", page.title),
-                        format!("{} years old", born.years_until(&date_from_unix(now))?),
-                        Some(format!("Born {}", born.display())),
-                    ),
-                }
-            } else {
-                let (answer, note) = fact_text(kind, &values)?;
-                (kind.question(&page.title), answer, note)
-            };
-            let from = "from Wikidata";
-            Some(plumb_answer::Answer {
-                kind: plumb_answer::Kind::Fact,
-                question,
-                answer,
-                note: Some(match note {
-                    Some(note) => format!("{note}, {from}"),
-                    None => "From Wikidata".to_string(),
-                }),
-            })
+                .find(|fact| fact.kind == kind)
+                .and_then(|fact| plumb_core::facts::Date::parse(&fact.value))
+        };
+        let (question, answer, note) = if asked.age && kind == FactKind::Born {
+            let born = date_of(FactKind::Born)?;
+            match date_of(FactKind::Died) {
+                Some(died) => (
+                    format!("Age of {}", page.title),
+                    format!("Died at {}", born.years_until(&died)?),
+                    Some(format!("{} to {}", born.display(), died.display())),
+                ),
+                None => (
+                    format!("Age of {}", page.title),
+                    format!("{} years old", born.years_until(&date_from_unix(now))?),
+                    Some(format!("Born {}", born.display())),
+                ),
+            }
+        } else {
+            let (answer, note) = fact_text(kind, &values)?;
+            (kind.question(&page.title), answer, note)
+        };
+        let from = "from Wikidata";
+        Some(plumb_answer::Answer {
+            kind: plumb_answer::Kind::Fact,
+            question,
+            answer,
+            note: Some(match note {
+                Some(note) => format!("{note}, {from}"),
+                None => "From Wikidata".to_string(),
+            }),
         })
+    })
 }
 
 /// A fact's values as shown, and a note: "27,204,809" and "counted in
 /// 2024".
-fn fact_text(
+pub(crate) fn fact_text(
     kind: plumb_core::facts::FactKind,
     values: &[&str],
 ) -> Option<(String, Option<String>)> {
@@ -682,6 +714,7 @@ mod tests {
     fn site(domain: &str, country: Option<&str>) -> Hit {
         Hit {
             demand: None,
+            missing_words: false,
             placing_text_score: None,
             domain: domain.to_string(),
             url: format!("https://{domain}/"),
@@ -924,6 +957,26 @@ mod tests {
         // An article listed above every site is still what was searched.
         let curie = placed(article("Zoom", "Physicist", None), None, 0);
         assert_eq!(info_box(&[zoom], &[curie]).unwrap().title, "Zoom");
+    }
+
+    #[test]
+    fn namesakes_never_stand_in_for_the_best_named_article() {
+        let sites = [site("amc.com", None), site("apple.com", Some("US"))];
+        let mut episode = article("Better Call Saul (Breaking Bad)", "Episode", None);
+        episode.score = 0.8;
+        let series = article("Better Call Saul", "Television series", Some("amc.com"));
+        let pages = [placed(episode, None, 0), placed(series, Some("amc.com"), 0)];
+        assert_eq!(info_box(&sites, &pages).unwrap().title, "Better Call Saul");
+        // The best article is about a site further down: no box, rather
+        // than the historian.
+        let mut historian = article("Tim Cook (historian)", "Canadian historian", None);
+        historian.score = 0.8;
+        let ceo = article("Tim Cook", "Chief executive of Apple", Some("apple.com"));
+        let pages = [
+            placed(historian, None, 0),
+            placed(ceo, Some("apple.com"), 0),
+        ];
+        assert_eq!(info_box(&sites, &pages), None);
     }
 
     #[test]

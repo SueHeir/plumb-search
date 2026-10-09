@@ -88,6 +88,23 @@ impl Journal {
         self.add(LogLevel::Warning, message.into());
     }
 
+    /// A warning that may come up every hour while nothing changes: kept
+    /// once a day, so it does not push everything else out of the log.
+    pub fn warning_daily(&self, message: impl Into<String>) {
+        let message = message.into();
+        let since = now_unix().saturating_sub(24 * 60 * 60);
+        let said = self
+            .inner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entries
+            .iter()
+            .any(|e| e.at >= since && e.message == message);
+        if !said {
+            self.warning(message);
+        }
+    }
+
     pub fn error(&self, message: impl Into<String>) {
         self.add(LogLevel::Error, message.into());
     }
@@ -157,6 +174,20 @@ impl Journal {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn daily_warnings_are_kept_once_a_day() {
+        let journal = Journal::in_memory();
+        journal.warning_daily("Over the limit");
+        journal.info("Crawled 10 sites");
+        journal.warning_daily("Over the limit");
+        journal.warning_daily("Something else");
+        let messages: Vec<String> = journal.entries().into_iter().map(|e| e.message).collect();
+        assert_eq!(
+            messages,
+            ["Something else", "Crawled 10 sites", "Over the limit"]
+        );
+    }
 
     #[test]
     fn the_log_survives_a_restart_and_keeps_the_newest() {

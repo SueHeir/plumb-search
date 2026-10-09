@@ -28,9 +28,9 @@ pub const CRAWL_VERSION: u32 = 1;
 
 /// Turns crawl results into records to merge into a
 /// [`plumb_core::RecordSet`]: one record per fetched homepage (url, title,
-/// description, `site_name` as an alias, `crawled_at`, the first
-/// [`plumb_core::MAX_LINKS_TO`] other sites it links to), plus one record per
-/// linked domain carrying the texts of links to its front page and
+/// description, `site_name` and the JSON-LD names as aliases, `crawled_at`,
+/// the first [`plumb_core::MAX_LINKS_TO`] other sites it links to), plus one
+/// record per linked domain carrying the texts of links to its front page and
 /// `signals.linking_domains` = the number of distinct crawled domains
 /// linking to it. Domains seen only as link targets are new discoveries.
 ///
@@ -68,6 +68,9 @@ pub fn to_records(results: &[CrawlResult]) -> Vec<SiteRecord> {
                 record.description = page.meta.description.clone();
                 if let Some(site_name) = &page.meta.site_name {
                     record.add_alias(site_name);
+                }
+                for name in &page.meta.structured_names {
+                    record.add_alias(name);
                 }
                 record.search_url = page.meta.search_url.clone();
                 record.language = page.meta.language.clone();
@@ -178,6 +181,7 @@ mod tests {
                     title: Some(format!("{domain} home")),
                     description: Some("About us".into()),
                     site_name: Some(format!("{domain} site")),
+                    structured_names: vec![format!("{domain} Corporation")],
                     search_url: None,
                     language: Some("en".into()),
                     icons: Vec::new(),
@@ -225,7 +229,10 @@ mod tests {
         assert_eq!(record.url.as_deref(), Some("https://www.usbank.com/"));
         assert_eq!(record.title.as_deref(), Some("usbank.com home"));
         assert_eq!(record.description.as_deref(), Some("About us"));
-        assert_eq!(record.aliases, ["usbank.com site"]);
+        assert_eq!(
+            record.aliases,
+            ["usbank.com site", "usbank.com Corporation"]
+        );
         assert_eq!(record.crawled_at, Some(1_700_000_000));
         assert!(record.link_texts.is_empty());
         assert_eq!(record.signals.linking_domains, 0);
