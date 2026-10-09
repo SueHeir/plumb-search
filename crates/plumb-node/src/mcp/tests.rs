@@ -1313,3 +1313,110 @@ fn names_lose_what_is_wanted_of_their_sites() {
     assert_eq!(asked_page("nps.gov"), None);
     assert_eq!(asked_page("https://nps.gov/"), None);
 }
+
+/// A package card of `name` from `registry`, found for "<name> package".
+fn package_page(
+    registry: &str,
+    name: &str,
+    homepage: Option<&str>,
+    docs: Option<&str>,
+) -> PlacedPage {
+    let page = Page::from_package(plumb_core::article::Article {
+        title: name.into(),
+        item: Some(format!("{registry}:{name}")),
+        views: 1_000,
+        package: Some(plumb_core::packages::PackageInfo {
+            registry: registry.into(),
+            name: name.into(),
+            homepage: homepage.map(str::to_string),
+            docs: docs.map(str::to_string),
+            ..Default::default()
+        }),
+        ..Default::default()
+    })
+    .unwrap();
+    let mut placed = article("x", None, None);
+    placed.hit.page = page;
+    placed
+}
+
+#[test]
+fn official_site_takes_the_named_article_over_a_site_that_shows_nothing_of_the_name() {
+    // mo.gov goes by "USNO" somewhere, but shows nothing of it.
+    let mcp = scripted(|_| {
+        let mut mo = titled("mo.gov", "Home | MO.gov", 0.8, true);
+        mo.official = true;
+        let mut navy = titled("navy.mil", "United States Navy", 0.8, false);
+        navy.official = true;
+        results(
+            vec![mo, navy],
+            vec![article(
+                "United States Naval Observatory",
+                Some("navy.mil"),
+                Some("https://www.usno.navy.mil/"),
+            )],
+        )
+    });
+    let answer = official(&mcp, "USNO");
+    assert_eq!(answer["domain"], "usno.navy.mil", "{answer}");
+}
+
+#[test]
+fn official_site_trusts_a_package_over_a_site_named_only_by_its_address() {
+    let mcp = scripted(|query| {
+        if query.ends_with("package") {
+            return results(
+                Vec::new(),
+                vec![package_page(
+                    "pypi",
+                    "skyfield",
+                    Some("https://rhodesmill.org/skyfield/"),
+                    None,
+                )],
+            );
+        }
+        results(
+            vec![titled("skyfield.cloud", "Cloud", 0.1, true)],
+            Vec::new(),
+        )
+    });
+    let answer = official(&mcp, "Skyfield");
+    assert_eq!(
+        answer["url"], "https://rhodesmill.org/skyfield/",
+        "{answer}"
+    );
+
+    // A registry's own pages are no project's home: TOML is not docs.rs.
+    let mcp = scripted(|query| {
+        if query.ends_with("package") {
+            return results(
+                Vec::new(),
+                vec![package_page(
+                    "crates",
+                    "toml",
+                    None,
+                    Some("https://docs.rs/toml"),
+                )],
+            );
+        }
+        results(
+            vec![titled("toml.example", "Tom's", 0.1, false)],
+            Vec::new(),
+        )
+    });
+    let answer = official(&mcp, "TOML");
+    assert_ne!(answer["domain"], "docs.rs", "{answer}");
+}
+
+#[test]
+fn official_site_sends_docs_to_a_docs_site_of_its_own() {
+    let mcp = scripted(|_| {
+        let mut python = titled("python.org", "Welcome to Python.org", 0.9, true);
+        python.official = true;
+        results(vec![python], Vec::new())
+    });
+    let answer = official(&mcp, "Python docs");
+    assert_eq!(answer["domain"], "docs.python.org", "{answer}");
+    assert_eq!(answer["url"], "https://docs.python.org/");
+    assert_eq!(official(&mcp, "Python")["domain"], "python.org");
+}
