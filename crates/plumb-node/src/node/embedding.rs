@@ -198,7 +198,7 @@ fn work(inner: &Arc<Inner>) -> Result<()> {
             todo,
             threads,
             &|| inner.stopping(),
-            &mut |vectors| vectors.save(&vectors_path),
+            &mut |vectors| plumb_embed::Vectors::save_shared(vectors, &vectors_path),
             &mut |done, total| {
                 inner.set_meaning_work((done < total).then_some(MeaningWork::Embedding {
                     done: done as u64,

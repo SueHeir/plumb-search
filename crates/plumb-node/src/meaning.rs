@@ -306,7 +306,7 @@ pub(crate) fn embed_records(
     records: RecordSet,
     threads: usize,
     stop: &(dyn Fn() -> bool + Sync),
-    save: &mut dyn FnMut(&Vectors) -> Result<()>,
+    save: &mut dyn FnMut(&RwLock<Vectors>) -> Result<()>,
     progress: &mut dyn FnMut(usize, usize),
 ) -> Result<Embedded> {
     let todo = sites_to_embed(vectors, records, embedder.text_words());
@@ -458,7 +458,7 @@ pub(crate) fn embed_sites(
     todo: Vec<ToEmbed>,
     threads: usize,
     stop: &(dyn Fn() -> bool + Sync),
-    save: &mut dyn FnMut(&Vectors) -> Result<()>,
+    save: &mut dyn FnMut(&RwLock<Vectors>) -> Result<()>,
     progress: &mut dyn FnMut(usize, usize),
 ) -> Result<Embedded> {
     let write = || vectors.write().unwrap_or_else(PoisonError::into_inner);
@@ -496,7 +496,7 @@ pub(crate) fn embed_sites(
         });
         let last = n + 1 == chunks || stop();
         if last || (n + 1) % (SAVE_EVERY / REPORT_EVERY) == 0 {
-            save(&vectors.read().unwrap_or_else(PoisonError::into_inner))?;
+            save(vectors)?;
         }
         let done = done.load(Ordering::Relaxed);
         progress(done, todo.len());
@@ -510,7 +510,7 @@ pub(crate) fn embed_sites(
         }
     }
     if todo.is_empty() {
-        save(&vectors.read().unwrap_or_else(PoisonError::into_inner))?;
+        save(vectors)?;
     }
     Ok(Embedded {
         done: done.into_inner(),
@@ -585,7 +585,7 @@ pub fn run_embed(args: EmbedArgs) -> Result<()> {
         records,
         threads,
         &|| false,
-        &mut |vectors| vectors.save(&args.vectors),
+        &mut |vectors| Vectors::save_shared(vectors, &args.vectors),
         &mut |_, _| {},
     )?;
     println!(

@@ -9,6 +9,7 @@
 
 ### Fixes
 
+- Search by meaning reads the vectors file in place, mapped into memory, instead of holding a copy: a node with 2.8 million sites' vectors holds about 50 MB for them instead of 1.6 GB, and the system can drop the file's pages when memory runs short instead of swapping. Searches by meaning also take about a third less time on CPUs with AVX2, with the same results.
 - `plumb run --set-updates off` no longer downloads a page set the node has no file of, as plumbsearch.org would have done with the reference and subpages sets once a trusted node had them. A list such as `films,map` still takes the sets it names when the node has none. A node with `all` (the default) takes missing sets as before.
 
 ## 0.2.0
