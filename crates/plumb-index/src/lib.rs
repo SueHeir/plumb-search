@@ -26,6 +26,11 @@
 //!   typed hostname) also gets a full text match, so popularity decides
 //!   among the sites a query names: aa.com, officially "American Airlines",
 //!   beats americanairlines.com.
+//! - A text most of the sites linking with it link to one site with names
+//!   that site like an alias, and in full like its label when it is the
+//!   whole query ([`RankConfig::link_names`]): "the guardian" names
+//!   theguardian.com because most links saying "the guardian" go there,
+//!   whatever its own pages call it.
 //! - A query that is a kind of thing ("banks", "airlines") gives every site
 //!   of that kind ([`SiteRecord::kinds`]) a full text match and
 //!   [`RankConfig::kind_bonus`], so they are listed by popularity.
@@ -83,11 +88,13 @@ use plumb_core::{
 use serde::{Deserialize, Serialize};
 use tantivy::collector::{DocSetCollector, TopDocs};
 use tantivy::merge_policy::NoMergePolicy;
+use tantivy::postings::Postings;
 use tantivy::query::{BooleanQuery, BoostQuery, EnableScoring, Occur, Query, Scorer, TermQuery};
 use tantivy::schema::{Field, IndexRecordOption, Value};
 use tantivy::tokenizer::TextAnalyzer;
 use tantivy::{
-    DocAddress, DocSet, Index, IndexReader, IndexWriter, Order, ReloadPolicy, TantivyDocument, Term,
+    DocAddress, DocSet, Index, IndexReader, IndexWriter, Order, ReloadPolicy, TantivyDocument,
+    Term, TERMINATED,
 };
 
 use crate::replace::Staging;
@@ -228,6 +235,15 @@ const INTENT_WORDS: &[&str] = &[
     "careers",
     "investor relations",
 ];
+/// The share of the sites linking with a text that must link to one site
+/// for the text to name it ([`RankConfig::link_names`]): the probability of
+/// the site given the text, as CrossWikis estimates it from Wikipedia's
+/// links. Over half, so a text names one site at most, and generic ones
+/// ("click here", "official website") name none.
+pub const LINK_NAME_SHARE: f32 = 0.5;
+/// A link text more sites than this are linked with names none of them,
+/// and is not read further.
+const MAX_LINK_NAME_DOCS: u32 = 1_000;
 /// Memory budget of the index writer, shared by its threads. Enough for a
 /// million records without flushing tiny segments.
 const WRITER_HEAP_BYTES: usize = 200_000_000;
@@ -352,6 +368,19 @@ pub struct RankConfig {
     /// Put the first results in the order the learned ranking gives
     /// ([`learned::reorder`]), once pages are placed among the sites.
     pub learned: bool,
+    /// A site most links with a text point to is named by that text, as by
+    /// an alias: "the guardian" names theguardian.com when most of the
+    /// sites linking with those words link there ([`LINK_NAME_SHARE`]).
+    /// Needs an index built with link names.
+    pub link_names: bool,
+    /// Added instead of the alias bonus when a link text names the site
+    /// ([`RankConfig::link_names`]), and `k / n` of it for one equal to the
+    /// first `k` words. More than the label bonus: when most of the sites
+    /// linking with "steam" link to steampowered.com, that names it more
+    /// surely than steam.tv's domain names steam.tv. 0.4 did best of 0.1,
+    /// 0.25 and 0.4 on the test searches (brand 93.4% to 94.9% first on
+    /// the tune half, 93.7% to 94.7% on the held-out one).
+    pub link_name_bonus: f32,
 }
 
 impl Default for RankConfig {
@@ -380,6 +409,8 @@ impl Default for RankConfig {
             add_named_site: true,
             drop_namesakes: false,
             learned: true,
+            link_names: true,
+            link_name_bonus: 0.4,
         }
     }
 }
@@ -1204,7 +1235,7 @@ impl Searcher {
         // A site the query names is ranked even if BM25 put others first:
         // it is what the look-alikes are measured against. So is every site
         // of the kind the query names.
-        let names = self.name_matches(&searcher, &query)?;
+        let mut names = self.name_matches(&searcher, &query, cfg)?;
         let mut kinds = match &query.kind {
             Some(key) => matching_docs(
                 &searcher,
@@ -1227,6 +1258,14 @@ impl Searcher {
                     kinds.insert(addr);
                 }
             }
+        }
+        // A query that is a kind of thing ("banks") asks for every site of
+        // that kind: a site linked to with the word is not named by it.
+        if !kinds.is_empty() {
+            for name in names.values_mut() {
+                name.linked = 0;
+            }
+            names.retain(|_, name| name.words() > 0 || name.typed);
         }
         // Meaning helps with queries that describe a site, not with names.
         let named_in_full = !kinds.is_empty() || names.values().any(|n| n.words() >= query.len);
@@ -1439,12 +1478,13 @@ impl Searcher {
             let is_kind = kinds.contains(&addr);
             let name = names.get(&addr).copied().unwrap_or_default();
             let mut placing_text_score = None;
-            let text_score = if is_kind || name.label >= query.len {
+            let text_score = if is_kind || name.label >= query.len || name.linked >= query.len {
                 // Being what the query names, or being named by all of it,
                 // is a full match, however little of the site's own text
                 // says so: among sites the query names in full, popularity
                 // decides, so aa.com wins "american airlines" over
-                // americanairlines.com.
+                // americanairlines.com. What most links to a site call it
+                // names it as well as its label does.
                 1.0
             } else {
                 let words = if max_bm25 > 0.0 {
@@ -1478,7 +1518,10 @@ impl Searcher {
                 partial_label_bonus
             };
             let mut name_bonus = (label_bonus * name.label as f32 / query_words)
-                .max(cfg.exact_alias_bonus * name.alias as f32 / query_words);
+                .max(cfg.exact_alias_bonus * name.alias as f32 / query_words)
+                .max(
+                    link_name_bonus(cfg, name.linked, query.len) * name.linked as f32 / query_words,
+                );
             if is_kind {
                 name_bonus = name_bonus.max(cfg.kind_bonus);
             }
@@ -1851,11 +1894,13 @@ impl Searcher {
     /// The sites whose domain label or an alias equals the query's first
     /// words, with how many words each covers, plus the site of a typed
     /// hostname (covering the whole query). An official site's Wikidata
-    /// names count as labels (see [`schema`]).
+    /// names count as labels (see [`schema`]), and a text most links to a
+    /// site use counts as an alias ([`RankConfig::link_names`]).
     fn name_matches(
         &self,
         searcher: &tantivy::Searcher,
         query: &ParsedQuery,
+        cfg: &RankConfig,
     ) -> Result<HashMap<DocAddress, NameMatch>> {
         let mut names: HashMap<DocAddress, NameMatch> = HashMap::new();
         for (key, words) in &query.leading {
@@ -1872,6 +1917,13 @@ impl Searcher {
             for addr in matching_docs(searcher, vec![alias])? {
                 let name = names.entry(addr).or_default();
                 name.alias = name.alias.max(words);
+            }
+            if let Some(field) = self.fields.link_name_key.filter(|_| cfg.link_names) {
+                let term = Term::from_field_text(field, key);
+                if let Some(addr) = named_by_links(searcher, &term)? {
+                    let name = names.entry(addr).or_default();
+                    name.linked = name.linked.max(words);
+                }
             }
         }
         if let Some(domain) = &query.domain {
@@ -2372,6 +2424,9 @@ struct NameMatch {
     label: usize,
     /// Words covered by an alias.
     alias: usize,
+    /// Words covered by a text most links to the site use
+    /// ([`RankConfig::link_names`]).
+    linked: usize,
     /// The query is this site's hostname or URL.
     typed: bool,
 }
@@ -2379,7 +2434,7 @@ struct NameMatch {
 impl NameMatch {
     /// Words covered by the site's best name.
     fn words(&self) -> usize {
-        self.label.max(self.alias)
+        self.label.max(self.alias).max(self.linked)
     }
 }
 
@@ -2426,6 +2481,51 @@ fn bm25_of(
         scored.push((bm25, addr));
     }
     Ok(scored)
+}
+
+/// The bonus of a site a link text covering `linked` of the query's `len`
+/// words names: [`RankConfig::link_name_bonus`] for the whole query, at
+/// most the label bonus for its first words, so a longer name still wins
+/// ("chase center tickets": chasecenter.com before chase.com).
+fn link_name_bonus(cfg: &RankConfig, linked: usize, len: usize) -> f32 {
+    if linked >= len {
+        cfg.link_name_bonus
+    } else {
+        cfg.link_name_bonus.min(cfg.exact_label_bonus)
+    }
+}
+
+/// The document most of the sites linking with the text of `term` link
+/// to, in a `link_name_key` field: one that holds more than
+/// [`LINK_NAME_SHARE`] of the term's occurrences, each standing for a
+/// linking site ([`schema`]).
+fn named_by_links(searcher: &tantivy::Searcher, term: &Term) -> Result<Option<DocAddress>> {
+    if searcher.doc_freq(term)? > u64::from(MAX_LINK_NAME_DOCS) {
+        return Ok(None);
+    }
+    let mut total = 0u64;
+    let mut best: Option<(u32, DocAddress)> = None;
+    for (segment_ord, reader) in searcher.segment_readers().iter().enumerate() {
+        let inverted = reader.inverted_index(term.field())?;
+        let Some(mut postings) = inverted.read_postings(term, IndexRecordOption::WithFreqs)? else {
+            continue;
+        };
+        let alive = reader.alive_bitset();
+        while postings.doc() != TERMINATED {
+            let doc = postings.doc();
+            if alive.is_none_or(|alive| alive.is_alive(doc)) {
+                let sites = postings.term_freq();
+                total += u64::from(sites);
+                if best.is_none_or(|(most, _)| sites > most) {
+                    best = Some((sites, DocAddress::new(segment_ord as u32, doc)));
+                }
+            }
+            postings.advance();
+        }
+    }
+    Ok(best
+        .filter(|&(sites, _)| f64::from(sites) > f64::from(LINK_NAME_SHARE) * total as f64)
+        .map(|(_, addr)| addr))
 }
 
 /// The documents containing any of `terms`.
@@ -3906,6 +4006,103 @@ mod tests {
         assert_eq!(top(&searcher, "us bank"), "usbank.com");
     }
 
+    #[test]
+    fn link_texts_most_links_agree_on_name_the_site() {
+        let records = vec![
+            // Most sites linking with "the guardian" link here, though the
+            // site's own pages never say it.
+            site(
+                "gdn.example",
+                Some("Latest news, sport and opinion"),
+                None,
+                &[],
+                &[("the guardian", 40), ("click here", 5)],
+                obscure(5_000, 900),
+            ),
+            site(
+                "guardian-insurance.example",
+                Some("Guardian Insurance"),
+                None,
+                &[],
+                &[("the guardian", 4), ("click here", 6)],
+                obscure(4_000, 1_000),
+            ),
+            // Two sites use the text: not independent agreement yet.
+            site(
+                "rare.example",
+                Some("Welcome"),
+                None,
+                &[],
+                &[("rare words", 2)],
+                obscure(9_000, 10),
+            ),
+            site(
+                "news.example",
+                Some("Click here for news"),
+                None,
+                &[],
+                &[("click here", 5)],
+                obscure(6_000, 50),
+            ),
+        ];
+        let (_dir, searcher) = build(&records);
+        let named = |query: &str, cfg: &RankConfig| -> Vec<String> {
+            searcher
+                .search_with(query, 10, cfg)
+                .unwrap()
+                .into_iter()
+                .filter(|hit| hit.named)
+                .map(|hit| hit.domain)
+                .collect()
+        };
+        let on = keep_all();
+        let off = RankConfig {
+            link_names: false,
+            ..keep_all()
+        };
+        assert_eq!(named("the guardian", &on), ["gdn.example"]);
+        assert_eq!(named("guardian", &on), ["gdn.example"]);
+        assert_eq!(top(&searcher, "the guardian"), "gdn.example");
+        assert!(named("the guardian", &off).is_empty());
+        // A text spread over many sites names none of them.
+        assert!(named("click here", &on).is_empty());
+        assert!(named("rare words", &on).is_empty());
+    }
+
+    #[test]
+    fn link_names_beat_a_domain_that_is_the_name() {
+        let records = vec![
+            site(
+                "steampowered.com",
+                Some("Welcome to Steam"),
+                None,
+                &[],
+                &[("steam", 300), ("steam store", 40)],
+                ranked(2_000, 30_000),
+            ),
+            site(
+                "steam.tv",
+                Some("Steam TV"),
+                None,
+                &[],
+                &[("steam tv", 4)],
+                ranked(20_000, 2_000),
+            ),
+        ];
+        let (_dir, searcher) = build(&records);
+        let off = RankConfig {
+            link_names: false,
+            ..RankConfig::default()
+        };
+        let first = |cfg: &RankConfig| {
+            searcher.search_with("steam", 10, cfg).unwrap()[0]
+                .domain
+                .clone()
+        };
+        assert_eq!(first(&off), "steam.tv");
+        assert_eq!(first(&RankConfig::default()), "steampowered.com");
+    }
+
     fn bank_corpus() -> Vec<SiteRecord> {
         let bank = |domain: &str, alias: &str, country: &str, rank: u32| {
             with_facts(
@@ -5116,7 +5313,8 @@ mod tests {
             alpha * prior + (1.0 - alpha) * hit.text_score
         });
 
-        // "us bank" is usbank.com's whole name: the label bonus, full trust.
+        // "us bank" is usbank.com's whole name, as its label and in most
+        // links to it: the larger bonus of the two, full trust.
         let hits = searcher.search("us bank", 10).unwrap();
         let usbank = &hits[0];
         assert_eq!(usbank.domain, "usbank.com");
@@ -5129,8 +5327,15 @@ mod tests {
                 0.0
             }
         };
+        let whole_name_bonus = |hit: &Hit| {
+            label_bonus(hit, 1.0).max(if hit.domain == "usbank.com" {
+                cfg.link_name_bonus
+            } else {
+                0.0
+            })
+        };
         check(&hits, &|hit| {
-            cfg.alpha * hit.link_score + (1.0 - cfg.alpha) * hit.text_score + label_bonus(hit, 1.0)
+            cfg.alpha * hit.link_score + (1.0 - cfg.alpha) * hit.text_score + whole_name_bonus(hit)
         });
 
         // "us bank online" goes on past the name: usbank.com gets 2/3 of the
@@ -5497,6 +5702,7 @@ mod tests {
             alpha: 0.0,
             exact_label_bonus: 0.0,
             exact_alias_bonus: 0.0,
+            link_name_bonus: 0.0,
             described_alpha: Some(1.0),
             ..RankConfig::default()
         };

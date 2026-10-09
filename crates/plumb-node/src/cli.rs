@@ -93,6 +93,11 @@ pub enum Command {
     /// to each other (a PageRank of our own crawls), without changing
     /// anything. A look at the link graph; nothing uses the ranks yet.
     LinkRank(LinkRankArgs),
+    /// How often each site's pages state Wikidata's facts right, from
+    /// Common Crawl's page text (Knowledge-Based Trust), and optionally a
+    /// copy of a records file with each site's counts, which its link
+    /// score counts in.
+    FactTrust(crate::fact_trust::FactTrustArgs),
     /// Learn each kind of Wikidata fact (capital, founder, CEO...) as a
     /// map between the vectors of Wikipedia articles, and measure how well
     /// the maps find facts they were not shown (an experiment).
@@ -777,6 +782,10 @@ pub struct FetchPagesArgs {
     /// Papers: most papers kept, the most cited.
     #[arg(long, value_name = "N", default_value_t = 2_000_000)]
     pub max_papers: usize,
+    /// Papers: most requests to CORE for free copies (fifty papers each),
+    /// when CORE_API_KEY is set.
+    #[arg(long, value_name = "N", default_value_t = plumb_ingest::core_ac::DEFAULT_MAX_REQUESTS)]
+    pub max_core_requests: usize,
     /// Podcasts: fewest Podcast Index popularity points (0 to 9) of a
     /// podcast kept.
     #[arg(long, value_name = "N", default_value_t = plumb_ingest::podcasts::DEFAULT_MIN_SCORE)]

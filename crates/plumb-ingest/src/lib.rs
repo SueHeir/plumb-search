@@ -21,6 +21,7 @@ use flate2::read::MultiGzDecoder;
 pub mod articles;
 pub mod builder;
 pub mod ccranks;
+pub mod core_ac;
 pub mod docs;
 pub mod download;
 pub mod facts;
@@ -40,6 +41,7 @@ pub mod reference;
 pub mod stackexchange;
 pub mod tranco;
 pub mod wat;
+pub mod wet;
 pub mod wikidata;
 
 pub use builder::Builder;

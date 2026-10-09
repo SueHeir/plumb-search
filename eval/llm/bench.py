@@ -8,6 +8,8 @@ questions file, in one of three ways:
   none     the model answers from what it knows
   plumb    the model may call Plumb's MCP tools (`plumb mcp`) a few times
   budget   as plumb, but each tool result is cut to --budget tokens
+  outline  as plumb, with read_page's outline option, which plumb and budget
+           leave out so the two can be compared
 
 Each answer is graded by whether it contains one of the question's answers
 (normalized: case, punctuation, articles), and every call's token counts are
@@ -90,20 +92,34 @@ class Mcp:
             part.get("text", "") for part in result.get("content", []) if part.get("type") == "text"
         )
 
-    def openai_tools(self):
+    def openai_tools(self, outline):
         return [
             {
                 "type": "function",
                 "function": {
                     "name": tool["name"],
-                    "description": tool.get("description", ""),
-                    "parameters": tool.get("inputSchema", {"type": "object"}),
+                    "description": tool.get("description", "") if outline else without_outline(
+                        tool.get("description", "")),
+                    "parameters": tool.get("inputSchema", {"type": "object"}) if outline else {
+                        **tool.get("inputSchema", {"type": "object"}),
+                        "properties": {
+                            name: schema
+                            for name, schema in tool.get("inputSchema", {}).get("properties", {}).items()
+                            if name != "outline"
+                        },
+                    },
                 },
             }
             for tool in self.tools
             if not tool.get("annotations", {}).get("destructiveHint")
             and tool["name"] != "report_finding"
         ]
+
+
+def without_outline(description):
+    """A tool's description without its sentences about outlines."""
+    sentences = re.split(r"(?<=\.) ", description)
+    return " ".join(s for s in sentences if "outline" not in s)
 
 
 def chat(server, model, messages, tools):
@@ -137,7 +153,7 @@ def is_right(answer, answers):
 
 
 def ask(question, args, mcp):
-    tools = mcp.openai_tools() if mcp else None
+    tools = mcp.openai_tools(args.mode == "outline") if mcp else None
     messages = [
         {"role": "system", "content": SYSTEM.format(tools=TOOLS_NOTE if tools else "")},
         {"role": "user", "content": question["question"]},
@@ -205,7 +221,7 @@ def main():
     parser.add_argument("--server", required=True, help="OpenAI-compatible server address")
     parser.add_argument("--model", default="local", help="model name sent to the server")
     parser.add_argument("--questions", required=True, help="questions file (JSON lines)")
-    parser.add_argument("--mode", choices=["none", "plumb", "budget"], default="none")
+    parser.add_argument("--mode", choices=["none", "plumb", "budget", "outline"], default="none")
     parser.add_argument("--plumb", default="plumb mcp", help="command that runs plumb mcp")
     parser.add_argument("--budget", type=int, default=300, help="tokens per tool result in budget mode")
     parser.add_argument("--limit", type=int, default=0, help="ask only the first N questions")

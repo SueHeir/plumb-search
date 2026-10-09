@@ -549,7 +549,8 @@ fn write_kept_docs(path: &std::path::Path, docs: &[plumb_ingest::docs::FetchedDo
     Ok(())
 }
 
-/// Makes the papers set file `dest` from OpenAlex's API.
+/// Makes the papers set file `dest` from OpenAlex's API, with free copies
+/// from OpenAlex (Unpaywall's data and arXiv) and CORE.
 fn run_papers(args: &FetchPagesArgs, dest: &std::path::Path) -> Result<()> {
     let key = std::env::var("OPENALEX_API_KEY")
         .ok()
@@ -580,7 +581,39 @@ fn run_papers(args: &FetchPagesArgs, dest: &std::path::Path) -> Result<()> {
             }
         );
     }
-    write_set(dest, &fetched.papers, "papers")
+    let mut papers = fetched.papers;
+    // CORE's repositories give free copies of papers OpenAlex knows none
+    // of; with --work, what CORE answered is kept there for later runs.
+    let core_key = std::env::var("CORE_API_KEY")
+        .ok()
+        .filter(|k| !k.trim().is_empty());
+    let core_cache = args.work.as_deref().map(|w| w.join("core"));
+    if core_key.is_some() || core_cache.is_some() {
+        // CORE only adds to the papers, so a CORE that fails loses none.
+        match block_on(plumb_ingest::core_ac::fill_free_copies(
+            &client,
+            core_key.as_deref(),
+            &mut papers,
+            args.max_core_requests,
+            core_cache.as_deref(),
+        ))? {
+            Ok(filled) => info!(
+                "CORE gave {} papers a free copy ({} requests); {} not asked about yet{}",
+                filled.found,
+                filled.requests,
+                filled.left,
+                if core_key.is_some() {
+                    ""
+                } else {
+                    " (set CORE_API_KEY to ask)"
+                }
+            ),
+            Err(err) => warn!("asking CORE for free copies: {err:#}; writing the papers without"),
+        }
+    }
+    let free = papers.iter().filter(|p| p.website.is_some()).count();
+    info!("{free} of {} papers have a free copy", papers.len());
+    write_set(dest, &papers, "papers")
 }
 
 /// Makes the packages set file `dest` from ecosyste.ms's lists of the

@@ -15,6 +15,7 @@ pub mod article;
 mod bot_check;
 mod country;
 pub mod docs;
+pub mod fact_check;
 pub mod facts;
 pub mod films;
 pub mod key_pages;
@@ -316,6 +317,33 @@ pub struct Signals {
     /// it: how widely known the organization is.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub sitelinks: u32,
+    /// Facts the site's pages state about Wikipedia's articles that were
+    /// checked against Wikidata ([`fact_check`]), each counted once.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub fact_checks: u32,
+    /// How many of those were Wikidata's. See [`fact_accuracy`].
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub fact_agrees: u32,
+}
+
+impl Signals {
+    /// Of two counts of a site's checked facts, the one with less
+    /// evidence for its accuracy: so one node alone cannot make a site
+    /// look right.
+    pub fn worse_facts(&self, other: &Signals) -> (u32, u32) {
+        let mine = (self.fact_checks, self.fact_agrees);
+        let theirs = (other.fact_checks, other.fact_agrees);
+        match (fact_accuracy(self), fact_accuracy(other)) {
+            (Some(a), Some(b)) => {
+                if a <= b {
+                    mine
+                } else {
+                    theirs
+                }
+            }
+            _ => (0, 0),
+        }
+    }
 }
 
 fn is_zero(n: &u32) -> bool {
@@ -563,6 +591,10 @@ impl SiteRecord {
         s.linking_domains = s.linking_domains.max(o.linking_domains);
         s.official_site |= o.official_site;
         s.sitelinks = s.sitelinks.max(o.sitelinks);
+        if o.fact_checks > s.fact_checks {
+            s.fact_checks = o.fact_checks;
+            s.fact_agrees = o.fact_agrees.min(o.fact_checks);
+        }
     }
 
     /// `crawl_attempted_at` keeps the later time, with the `crawl_failures`
@@ -799,7 +831,9 @@ fn known_share(sitelinks: u32) -> f64 {
 /// of them counts for 75%. The number of linking domains, also on a log
 /// scale, counts for the other 25%. An official website listed in Wikidata
 /// gets a 0.15 bonus, plus up to 0.05 more the more widely known its
-/// organization is ([`Signals::sitelinks`]). The result is capped at 1.0.
+/// organization is ([`Signals::sitelinks`]). A site whose stated facts were
+/// checked gains up to [`FACT_WEIGHT`] for getting them right, or loses as
+/// much for getting them wrong ([`fact_trust`]). The result is in `0..=1`.
 pub fn link_score(signals: &Signals) -> f32 {
     const RANK_SCALE: f64 = 1e8;
     const LINKS_SCALE: f64 = 1e5;
@@ -823,7 +857,49 @@ pub fn link_score(signals: &Signals) -> f32 {
     if signals.official_site {
         score += 0.15 + 0.05 * known_share(signals.sitelinks);
     }
-    score.min(1.0) as f32
+    score += FACT_WEIGHT * fact_trust(signals);
+    score.clamp(0.0, 1.0) as f32
+}
+
+/// Fewest checked facts for a site's accuracy to count (the paper's 5).
+pub const MIN_FACT_CHECKS: u32 = 5;
+
+/// Share of checked facts a site states right before its own count is
+/// known: about what sites get on average (97 to 99% in Common Crawl's
+/// pages, where many of the rest are dates Wikidata and others dispute).
+pub const FACT_PRIOR: f64 = 0.97;
+
+/// An accuracy this low counts as fully wrong for [`fact_trust`]: half
+/// the facts checked.
+const FACT_WRONG: f64 = 0.5;
+
+/// How many checks the prior weighs, so a few facts move a site little.
+pub const FACT_PRIOR_CHECKS: f64 = 10.0;
+
+/// Most a site's accuracy adds to (or takes off) its [`link_score`].
+pub const FACT_WEIGHT: f64 = 0.1;
+
+/// The share of a site's checked facts that it states right, pulled
+/// toward [`FACT_PRIOR`] by [`FACT_PRIOR_CHECKS`] (Knowledge-Based Trust);
+/// `None` with fewer than [`MIN_FACT_CHECKS`].
+pub fn fact_accuracy(signals: &Signals) -> Option<f64> {
+    if signals.fact_checks < MIN_FACT_CHECKS {
+        return None;
+    }
+    let checks = f64::from(signals.fact_checks);
+    let agrees = f64::from(signals.fact_agrees.min(signals.fact_checks));
+    Some((agrees + FACT_PRIOR * FACT_PRIOR_CHECKS) / (checks + FACT_PRIOR_CHECKS))
+}
+
+/// How far a site's [`fact_accuracy`] is from the prior, from -1 (half
+/// its facts wrong or worse, with many of them) to 1 (every fact right,
+/// with many of them); 0 when too few were checked.
+pub fn fact_trust(signals: &Signals) -> f64 {
+    match fact_accuracy(signals) {
+        None => 0.0,
+        Some(accuracy) if accuracy >= FACT_PRIOR => (accuracy - FACT_PRIOR) / (1.0 - FACT_PRIOR),
+        Some(accuracy) => ((accuracy - FACT_PRIOR) / (FACT_PRIOR - FACT_WRONG)).max(-1.0),
+    }
 }
 
 /// The lowercase host of an http(s) URL or a bare hostname (optionally with
@@ -1946,6 +2022,51 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(link_score(&official), 1.0);
+    }
+
+    #[test]
+    fn facts_stated_right_raise_a_site_and_wrong_ones_lower_it() {
+        let site = |checks, agrees| Signals {
+            harmonic_rank: Some(100_000),
+            fact_checks: checks,
+            fact_agrees: agrees,
+            ..Default::default()
+        };
+        let plain = link_score(&site(0, 0));
+        // Too few to count.
+        assert_eq!(link_score(&site(4, 0)), plain);
+        assert_eq!(fact_accuracy(&site(4, 4)), None);
+        let right = link_score(&site(50, 50));
+        let some = link_score(&site(5, 5));
+        let wrong = link_score(&site(40, 10));
+        assert!(right > some && some > plain && plain > wrong);
+        assert!(right - plain <= FACT_WEIGHT as f32 + 1e-6);
+        assert!(plain - wrong <= FACT_WEIGHT as f32 + 1e-6);
+        // A fact or two wrong among many costs little.
+        assert!(plain - link_score(&site(100, 98)) < 0.01);
+        assert!((-1.0..=1.0).contains(&fact_trust(&site(1_000_000, 0))));
+        assert!((fact_trust(&site(1_000_000, 1_000_000)) - 1.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn checked_facts_merge_to_the_bigger_count_and_the_network_keeps_the_worse() {
+        let mut a = SiteRecord::new("a.com");
+        a.signals.fact_checks = 10;
+        a.signals.fact_agrees = 10;
+        let mut b = SiteRecord::new("a.com");
+        b.signals.fact_checks = 20;
+        b.signals.fact_agrees = 12;
+        a.merge(b.clone());
+        assert_eq!((a.signals.fact_checks, a.signals.fact_agrees), (20, 12));
+        let good = Signals {
+            fact_checks: 30,
+            fact_agrees: 30,
+            ..Default::default()
+        };
+        assert_eq!(good.worse_facts(&b.signals), (20, 12));
+        assert_eq!(b.signals.worse_facts(&good), (20, 12));
+        // One answer with no count leaves none.
+        assert_eq!(good.worse_facts(&Signals::default()), (0, 0));
     }
 
     #[test]
