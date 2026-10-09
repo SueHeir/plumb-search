@@ -3630,7 +3630,9 @@ fn render_page(out: &mut String, hit: &PageHit, icon: Option<&str>) {
             plumb_index::pages::MUSIC_SET => "listeners on ListenBrainz",
             plumb_index::pages::FILMS_SET => "sitelinks on Wikidata",
             plumb_index::pages::DOCS_SET => "the docs site's weight over the page's depth",
-            plumb_index::pages::REFERENCE_SET => "the site's weight over the page's depth",
+            plumb_index::pages::REFERENCE_SET | plumb_index::pages::SUBPAGES_SET => {
+                "the site's weight over the page's depth"
+            }
             plumb_index::pages::PAPERS_SET => "citations",
             plumb_index::pages::PACKAGES_SET => "use (share of the registry's most, in billionths)",
             _ => "views",

@@ -106,6 +106,12 @@ pub const SETS: &[SetInfo] = &[
         bytes_per_page: 300,
     },
     SetInfo {
+        id: plumb_index::pages::SUBPAGES_SET,
+        name: "Pages of universities, companies, government, entertainment and museums",
+        pages: 300_000,
+        bytes_per_page: 300,
+    },
+    SetInfo {
         id: plumb_index::pages::PAPERS_SET,
         name: "Papers (OpenAlex, arXiv, CORE)",
         pages: 2_000_000,

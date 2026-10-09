@@ -382,13 +382,19 @@ impl Page {
     /// The page of the reference set written as `page` in its articles
     /// file, whose item is its address.
     pub fn from_reference(page: Article) -> Option<Self> {
+        Page::from_site_page(REFERENCE_SET, page)
+    }
+
+    /// The page of the set `set` (reference or subpages) written as `page`
+    /// in its articles file, whose item is its address.
+    fn from_site_page(set: &str, page: Article) -> Option<Self> {
         let url = page.item.filter(|item| {
             item.starts_with("https://")
                 && item.len() > "https://".len()
                 && !item.contains(char::is_whitespace)
         })?;
         Some(Page {
-            set: REFERENCE_SET.to_string(),
+            set: set.to_string(),
             url,
             title: page.title,
             description: page.description,
@@ -403,10 +409,16 @@ impl Page {
         })
     }
 
-    /// The host of a docs or reference page's address, without `www.`:
-    /// `docs.python.org`, `healthline.com`.
+    /// Whether the page is an inner page of a site of the reference or
+    /// subpages set, found by the same rules.
+    pub fn is_site_page(&self) -> bool {
+        self.set == REFERENCE_SET || self.set == SUBPAGES_SET
+    }
+
+    /// The host of a docs, reference or subpages page's address, without
+    /// `www.`: `docs.python.org`, `healthline.com`.
     fn docs_host(&self) -> Option<&str> {
-        if self.set != DOCS_SET && self.set != REFERENCE_SET {
+        if self.set != DOCS_SET && !self.is_site_page() {
             return None;
         }
         let host = self
@@ -529,6 +541,7 @@ impl Page {
             || set == FILMS_SET
             || set == DOCS_SET
             || set == REFERENCE_SET
+            || set == SUBPAGES_SET
             || Page::from_set(set, Article::default()).is_some()
     }
 
@@ -549,6 +562,7 @@ impl Page {
             FILMS_SET => Page::from_film(article)?,
             DOCS_SET => Page::from_docs(article)?,
             REFERENCE_SET => Page::from_reference(article)?,
+            SUBPAGES_SET => Page::from_site_page(SUBPAGES_SET, article)?,
             _ => Page::from_article(set.strip_prefix("wikipedia-")?, article),
         })
     }
@@ -561,7 +575,7 @@ impl Page {
         if self.set == PAPERS_SET {
             return Some(self.title.clone());
         }
-        if self.set == DOCS_SET || self.set == REFERENCE_SET {
+        if self.set == DOCS_SET || self.is_site_page() {
             let mut topic = self.title.clone();
             for text in self.aliases.iter().chain(&self.description) {
                 topic.push(' ');
@@ -702,6 +716,10 @@ pub const DOCS_SET: &str = "docs";
 /// dictionaries, recipes, how-tos, government (see
 /// `plumb_core::reference`).
 pub const REFERENCE_SET: &str = "reference";
+/// The set of inner pages of other well-known sites: universities and
+/// labs, big companies, government agencies, entertainment and museums
+/// (see `plumb_core::subpages`). Found like reference pages.
+pub const SUBPAGES_SET: &str = "subpages";
 /// Fewest words (stemmed, without the most common ones) of a query that
 /// finds reference pages by their words: "define prioritize".
 pub const REFERENCE_QUERY_WORDS: usize = 2;
@@ -1332,7 +1350,7 @@ impl PageSearcher {
             }
         }
         hits.sort_by(|a, b| b.score.total_cmp(&a.score));
-        hits.truncate(limit);
+        truncate_keeping_inner_pages(&mut hits, limit);
         Ok(hits)
     }
 
@@ -1525,6 +1543,11 @@ impl PageSearcher {
                 needed,
             );
             for (_, address) in searcher.search(&most_words, &by_popularity())? {
+                // Found by most of the query's words, not only by a title
+                // that starts it: "react usestate hook" is the docs page
+                // "React useState" and more of its words.
+                by_title_first.remove(&address);
+                film_title_first.remove(&address);
                 if !addresses.contains(&address) {
                     addresses.push(address);
                 }
@@ -1653,7 +1676,7 @@ impl PageSearcher {
         }
         let mut hits = fold_films(hits);
         hits.sort_by(|a, b| b.score.total_cmp(&a.score));
-        hits.truncate(limit);
+        truncate_keeping_inner_pages(&mut hits, limit);
         Ok(hits)
     }
 
@@ -1778,7 +1801,7 @@ impl PageSearcher {
         stems: &[String],
         topic_word: Option<&str>,
     ) -> (f32, bool) {
-        let fewest = if page.set == REFERENCE_SET {
+        let fewest = if page.is_site_page() {
             REFERENCE_QUERY_WORDS
         } else {
             QUESTION_QUERY_WORDS
@@ -1937,7 +1960,7 @@ impl PageSearcher {
         // A reference page is named only by its whole title: part of it
         // ("Stool") says too little, and it is found by its words
         // otherwise ([`Self::question_match`]).
-        if page.set == REFERENCE_SET {
+        if page.is_site_page() {
             return if key(&page.title) == joined {
                 (ALIAS_MATCH, true)
             } else {
@@ -2359,13 +2382,18 @@ fn place_pages_by_rules(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) 
         if hit.page.set == WIKIDATA_SET {
             continue;
         }
-        if listed == most || !(hit.named || hit.score >= MIN_PARTIAL_SCORE) {
-            continue;
-        }
         // One docs page found by its words is enough: more crowd out the
         // questions that answer the same search.
         let docs_found = |p: &PlacedPage| p.hit.page.set == DOCS_SET && !p.hit.named;
         if docs_found_by_words(&hit) && placed.iter().any(docs_found) {
+            continue;
+        }
+        // The first docs page found by its words is listed even when
+        // questions took the places for pages: "react usestate hook" wants
+        // React's page as well as the questions on it.
+        if listed >= most && !docs_found_by_words(&hit)
+            || !(hit.named || hit.score >= MIN_PARTIAL_SCORE)
+        {
             continue;
         }
         let at = if docs_found_by_words(&hit) {
@@ -2390,7 +2418,7 @@ fn place_pages_by_rules(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) 
             let led = placed.iter().any(|p| {
                 p.at == 0
                     && p.under.is_none()
-                    && (p.hit.page.is_question() || p.hit.page.set == REFERENCE_SET)
+                    && (p.hit.page.is_question() || p.hit.page.is_site_page())
             });
             let weak_site = sites.first().is_some_and(|site| {
                 !site.named && site.placing_text_score.unwrap_or(site.text_score) < WEAK_SITE_MATCH
@@ -2398,7 +2426,7 @@ fn place_pages_by_rules(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) 
             let leads = !site_named
                 && !led
                 && (hit.page.is_question() && asked_as_question(query)
-                    || hit.page.set == REFERENCE_SET && (asked_as_question(query) || weak_site));
+                    || hit.page.is_site_page() && (asked_as_question(query) || weak_site));
             usize::from(!leads)
         } else if !hit.named || namesake {
             PARTIAL_AFTER
@@ -2415,6 +2443,31 @@ fn place_pages_by_rules(query: &str, sites: &[crate::Hit], pages: Vec<PageHit>) 
         });
     }
     placed
+}
+
+/// Cuts `hits`, best first, to `limit`, keeping the best docs page and the
+/// best subpage among them: the many Stack Overflow questions with the
+/// words of "javascript array sort" are more read than MDN's page on it,
+/// and would crowd it out.
+fn truncate_keeping_inner_pages(hits: &mut Vec<PageHit>, limit: usize) {
+    for set in [DOCS_SET, SUBPAGES_SET] {
+        if hits.len() <= limit || limit == 0 || hits[..limit].iter().any(|h| h.page.set == set) {
+            continue;
+        }
+        let Some(best) = hits.iter().position(|h| h.page.set == set) else {
+            continue;
+        };
+        // In place of the last hit that is not one kept already.
+        let Some(last) = (0..limit)
+            .rev()
+            .find(|&i| hits[i].page.set != DOCS_SET && hits[i].page.set != SUBPAGES_SET)
+        else {
+            continue;
+        };
+        let hit = hits.remove(best);
+        hits.insert(last, hit);
+    }
+    hits.truncate(limit);
 }
 
 /// Whether `hit` is a docs page the search found by most of its words
@@ -2763,6 +2816,109 @@ mod tests {
         assert_eq!(placed_at("python.org"), 0);
         assert_eq!(placed_at("docs.python.org"), 0);
         assert_eq!(placed_at("cpython.org"), 1);
+    }
+
+    #[test]
+    fn docs_pages_named_then_more_words_and_crowded_by_questions_are_listed() {
+        let use_state = docs_page(
+            "https://react.dev/reference/react/useState",
+            "useState",
+            &["React useState", "useState React"],
+            "useState is a React Hook that lets you add a state variable to your component.",
+        );
+        let question = |title: &str, item: &str, views| {
+            Page::from_question(Article {
+                title: title.into(),
+                description: Some("reactjs, react-hooks".into()),
+                item: Some(item.into()),
+                views,
+                ..Article::default()
+            })
+        };
+        let mut pages = vec![use_state.clone()];
+        for i in 0..12 {
+            pages.push(question(
+                &format!("React useState hook question {i}"),
+                &format!("{i}"),
+                1_000_000 + i,
+            ));
+        }
+        let (_dir, searcher) = searcher(&pages);
+        // Named by its product and title, then a word of its description:
+        // not a book's title and its author.
+        let hits = searcher.search("react usestate hook", 10).unwrap();
+        assert_eq!(hits.len(), 10);
+        // The questions outnumber it, and are more read, but it stays.
+        let docs: Vec<&PageHit> = hits.iter().filter(|h| h.page.set == DOCS_SET).collect();
+        assert_eq!(docs.len(), 1);
+        assert_eq!(docs[0].page.title, "useState");
+        assert!(!docs[0].named);
+        // Listed after the best site, besides the questions that took
+        // the places for pages.
+        let sites = [site("react.dev", true), site("other.com", false)];
+        let placed = place_pages("react usestate hook", &sites, hits);
+        let alone: Vec<&str> = placed
+            .iter()
+            .filter(|p| p.under.is_none())
+            .map(|p| p.hit.page.title.as_str())
+            .collect();
+        assert!(alone.contains(&"useState"), "{alone:?}");
+        assert_eq!(
+            placed
+                .iter()
+                .find(|p| p.hit.page.set == DOCS_SET)
+                .map(|p| p.at),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn subpages_are_found_like_reference_pages() {
+        let page = |url: &str, title: &str, description: &str| {
+            Page::from_set(
+                SUBPAGES_SET,
+                Article {
+                    title: title.into(),
+                    description: Some(description.into()),
+                    item: Some(url.into()),
+                    views: 2_000,
+                    ..Article::default()
+                },
+            )
+            .unwrap()
+        };
+        let perft = page(
+            "https://chessprogramming.org/Perft_Results",
+            "Perft Results",
+            "Perft results of the initial position and Kiwipete.",
+        );
+        let sp811 = page(
+            "https://www.nist.gov/pml/special-publication-811",
+            "Special Publication 811",
+            "NIST Guide to the SI, with conversion factors.",
+        );
+        assert!(Page::has_reader(SUBPAGES_SET));
+        assert!(perft.is_site_page());
+        assert_eq!(perft.set_domain(), "chessprogramming.org");
+        assert_eq!(sp811.set_name(), "nist.gov");
+        assert!(Page::from_set(SUBPAGES_SET, Article::default()).is_none());
+        let (_dir, searcher) = searcher(&[perft.clone(), sp811.clone()]);
+        let found = |query: &str| -> Vec<(String, bool)> {
+            searcher
+                .search(query, 10)
+                .unwrap()
+                .into_iter()
+                .map(|hit| (hit.page.title, hit.named))
+                .collect()
+        };
+        // Named by its whole title, or found by most words.
+        assert_eq!(found("perft results"), [(perft.title.clone(), true)]);
+        assert_eq!(
+            found("nist special publication 811"),
+            [(sp811.title.clone(), false)]
+        );
+        // Part of a title names nothing.
+        assert!(found("perft").is_empty());
     }
 
     #[test]

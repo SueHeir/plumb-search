@@ -33,6 +33,7 @@ pub mod safe;
 pub mod simhash;
 mod site_search;
 pub mod stack_exchange;
+pub mod subpages;
 pub mod subsites;
 
 pub use article::{article_url, Article};

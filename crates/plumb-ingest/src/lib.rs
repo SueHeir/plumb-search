@@ -39,6 +39,7 @@ pub mod podcasts;
 pub mod profiles;
 pub mod reference;
 pub mod stackexchange;
+pub mod subpages;
 pub mod tranco;
 pub mod wat;
 pub mod wet;
