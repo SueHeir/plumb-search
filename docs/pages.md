@@ -59,6 +59,16 @@ plumb fetch-facts --data /path/to/node-data
 
 It asks for twenty-one properties, only their best-ranked statements, a page of 50,000 at a time: capital, population (the latest count), elevation, height, area, birth and death dates, founding date, founders, CEO, headquarters, currency, author, director, composer, creator, owner, birthplace, spouse, head of state and head of government. Authors and creators (millions of papers and paintings) are asked for only for the most read articles, by name, as is any property whose pages Wikidata stops answering. A capital, CEO, spouse or leader that ended is left out, and one that applies only to a part (South Africa's three capitals) counts only when there is no other. Quantities are kept in metres and square metres whatever unit Wikidata has them in, dates only as precise as Wikidata knows them, and items (Canberra, a founder) by their English labels. They ride on the article's `profiles` line as `f-capital=Canberra` entries, which readers made before facts leave out, so `fetch-profiles` and `fetch-facts` keep each other's entries and can run in either order. The answer is shown above the results, with "From Wikidata", only when the search's subject names an article that has the fact; the node never guesses one.
 
+### Leads and other names
+
+To find an article by what its first sentences say ("triassic jurassic cretaceous" finds Mesozoic) and by the other titles that lead to it ("manubrium" leads to a section of Sternum), add each article's lead and other names from Wikimedia's weekly dump of its search index:
+
+```sh
+plumb fetch-leads --data /path/to/node-data --work /path/to/scratch
+```
+
+It downloads the dump's files (about 66 of 600 MB for English, three at a time), reads each into a small file in `--work` and deletes it, so a stopped run carries on from the files already read. The 2,000,000 most read articles (`--top`) get their lead, as many whole sentences of the paragraph before the first heading as fit in 300 characters, and up to ten other names: the titles that lead to the article but are not among its five most read aliases, the shortest first, including those that lead to one of its sections, which `fetch-pages` leaves out. They ride on the `profiles` line as `lead=` and `name=` entries, which readers made before leave out; `fetch-profiles` and `fetch-facts` keep them. A query that is one of an article's other names lists the article, though not as named, after the first sites.
+
 ## Nodes in the network
 
 A node with no set file, or fewer pages than it is set to keep, takes the file from a node it trusts (plumbsearch.org by default) over `/plumb/pages/1`, 1 MiB at a time, and stops once it has the pages it keeps: a node keeping 100,000 articles downloads about 10 MB, not the whole file. It asks again for a newer file after 30 days. A node passes on only whole files, made with `fetch-pages` or taken whole, so a cut file never spreads. Nodes answer at most four such requests at once and 120 a minute from each node.

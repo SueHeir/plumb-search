@@ -7,7 +7,9 @@ use plumb_ingest::{articles, download, facts, intros, kind_sites};
 use tracing::{error, info, warn};
 
 use crate::block_on;
-use crate::cli::{FetchDataArgs, FetchFactsArgs, FetchPagesArgs, FetchProfilesArgs};
+use crate::cli::{
+    FetchDataArgs, FetchFactsArgs, FetchLeadsArgs, FetchPagesArgs, FetchProfilesArgs,
+};
 
 /// Where release names for `--cc-release` are listed. We know of no
 /// machine-readable index of releases, so we point people here instead.
@@ -584,6 +586,71 @@ pub fn run_profiles(args: FetchProfilesArgs) -> Result<()> {
         added.articles,
         added.profiles,
         added.websites
+    );
+    Ok(())
+}
+
+/// `plumb fetch-leads`: adds leads and other names from Wikipedia's search
+/// dump to an articles file.
+pub fn run_leads(args: FetchLeadsArgs) -> Result<()> {
+    let path = match (&args.articles, &args.data) {
+        (Some(path), _) => path.clone(),
+        (None, Some(data)) => crate::pages::SetInfo::find("wikipedia-en")
+            .context("no English Wikipedia set")?
+            .file(data),
+        (None, None) => bail!("pass --data DIR or --articles PATH"),
+    };
+    if !path.is_file() {
+        bail!(
+            "{} is not there; make it with plumb fetch-pages first",
+            path.display()
+        );
+    }
+    let read = if args.dumps.is_empty() {
+        let client = download::http_client()?;
+        let (date, urls) = block_on(plumb_ingest::leads::latest_dump_files(
+            &client,
+            plumb_ingest::leads::CIRRUS_URL,
+            "en",
+        ))??;
+        info!(
+            "reading the {date} dump of English Wikipedia: {} files",
+            urls.len()
+        );
+        block_on(plumb_ingest::leads::fetch_dump(
+            &client,
+            &urls,
+            &args.work,
+            args.keep_dumps,
+        ))??
+    } else {
+        std::fs::create_dir_all(&args.work)
+            .with_context(|| format!("creating {}", args.work.display()))?;
+        let mut read = Vec::new();
+        for dump in &args.dumps {
+            let name = dump.file_name().context("a dump file has no name")?;
+            let out_path = args
+                .work
+                .join(format!("{}.leads.tsv.gz", name.to_string_lossy()));
+            let mut out = flate2::write::GzEncoder::new(
+                std::io::BufWriter::new(std::fs::File::create(&out_path)?),
+                flate2::Compression::fast(),
+            );
+            let articles = plumb_ingest::leads::read_dump_file(dump, &mut out)?;
+            out.finish()?;
+            info!("read {articles} articles of {}", dump.display());
+            read.push(out_path);
+        }
+        read
+    };
+    let added = plumb_ingest::leads::add_leads_to_file(&path, &read, args.top)?;
+    info!(
+        "{}: {} of {} articles have a lead, {} other names ({} in all)",
+        path.display(),
+        added.with_lead,
+        added.articles,
+        added.with_names,
+        added.names
     );
     Ok(())
 }

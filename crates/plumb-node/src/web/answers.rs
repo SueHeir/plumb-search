@@ -702,6 +702,8 @@ mod tests {
                 website: None,
                 package: None,
                 facts: Vec::new(),
+                lead: None,
+                names: Vec::new(),
             },
             score: 1.0,
             named: true,

@@ -45,6 +45,11 @@ pub enum Command {
     /// a company's CEO) to a Wikipedia articles file made by fetch-pages,
     /// for searches that ask one ("capital of australia").
     FetchFacts(FetchFactsArgs),
+    /// Add each article's lead (its first sentences) and other names (the
+    /// titles that lead to it, to one of its sections too: "Manubrium" to
+    /// Sternum) to a Wikipedia articles file made by fetch-pages, from
+    /// Wikimedia's weekly dump of its search index.
+    FetchLeads(FetchLeadsArgs),
     /// Fold seed data and earlier records into one records file.
     Ingest(IngestArgs),
     /// Fetch the homepages of the best-scored records and merge what they say.
@@ -675,6 +680,31 @@ pub struct FetchProfilesArgs {
     /// The articles file to add them to instead.
     #[arg(long, value_name = "PATH")]
     pub articles: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub struct FetchLeadsArgs {
+    /// A node's data directory whose English Wikipedia set gets the leads;
+    /// the node picks the new file up within seconds.
+    #[arg(long, value_name = "DIR", required_unless_present = "articles")]
+    pub data: Option<PathBuf>,
+    /// The articles file to add them to instead.
+    #[arg(long, value_name = "PATH")]
+    pub articles: Option<PathBuf>,
+    /// Directory for the dump's files (about 66 of 600 MB for English, a
+    /// few at a time, each deleted once read) and what was read of them,
+    /// so a stopped run carries on.
+    #[arg(long, value_name = "DIR")]
+    pub work: PathBuf,
+    /// How many of the most read articles get a lead.
+    #[arg(long, value_name = "N", default_value_t = 2_000_000)]
+    pub top: usize,
+    /// Keep the dump's files once read.
+    #[arg(long)]
+    pub keep_dumps: bool,
+    /// Read these files of the dump instead of downloading it.
+    #[arg(long, value_name = "PATH", num_args = 1..)]
+    pub dumps: Vec<PathBuf>,
 }
 
 #[derive(Debug, Args)]

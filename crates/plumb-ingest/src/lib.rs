@@ -30,6 +30,7 @@ pub mod github;
 pub mod intros;
 pub mod item_facts;
 pub mod kind_sites;
+pub mod leads;
 pub mod musicbrainz;
 pub mod openalex;
 pub mod openlibrary;

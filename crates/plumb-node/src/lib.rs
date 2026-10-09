@@ -106,6 +106,7 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::FetchMap(args) => map::fetch::run(args),
         Command::FetchProfiles(args) => fetch::run_profiles(args),
         Command::FetchFacts(args) => fetch::run_facts(args),
+        Command::FetchLeads(args) => fetch::run_leads(args),
         Command::Ingest(args) => ingest::run(args),
         Command::Crawl(args) => crawl::run(args),
         Command::Index(args) => search::run_index(args),

@@ -44,6 +44,11 @@ use crate::replace::Staging;
 pub const ALIAS_MATCH: f32 = 0.9;
 /// Most `name` of a page whose title has some of the query's words.
 pub const PARTIAL_MATCH: f32 = 0.6;
+/// How well a Wikipedia article matches a query that is one of its other
+/// names ([`Page::names`]): a less read redirect, or one to a section of
+/// it ("manubrium" for Sternum). Not its name, so never above a page the
+/// query names, but enough to be listed.
+pub const OTHER_NAME_MATCH: f32 = 0.6;
 /// How much popularity counts, against how well the query names the page.
 pub const POPULARITY_SHARE: f32 = 0.5;
 /// Pages whose words match that are looked at, most matching first.
@@ -136,6 +141,13 @@ pub struct Page {
     /// country's capital, a person's birth date.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub facts: Vec<plumb_core::facts::Fact>,
+    /// A Wikipedia article's first sentences ([`plumb_core::article::lead_of`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lead: Option<String>,
+    /// A Wikipedia article's other names than its aliases: less read
+    /// redirects, and ones to one of its sections ("Manubrium" to Sternum).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub names: Vec<String>,
 }
 
 impl Page {
@@ -154,6 +166,8 @@ impl Page {
             website: article.website,
             package: None,
             facts: article.facts,
+            lead: article.lead,
+            names: article.names,
         }
     }
 
@@ -173,6 +187,8 @@ impl Page {
             website: None,
             package: None,
             facts: Vec::new(),
+            lead: None,
+            names: Vec::new(),
         }
     }
 
@@ -195,6 +211,8 @@ impl Page {
             website: None,
             package: None,
             facts: Vec::new(),
+            lead: None,
+            names: Vec::new(),
         }
     }
 
@@ -218,6 +236,8 @@ impl Page {
             website: None,
             package: None,
             facts: Vec::new(),
+            lead: None,
+            names: Vec::new(),
         })
     }
 
@@ -260,6 +280,8 @@ impl Page {
             website: None,
             package: None,
             facts: Vec::new(),
+            lead: None,
+            names: Vec::new(),
         }
     }
 
@@ -283,6 +305,8 @@ impl Page {
             website: None,
             package: None,
             facts: Vec::new(),
+            lead: None,
+            names: Vec::new(),
         }
     }
 
@@ -309,6 +333,8 @@ impl Page {
             website: None,
             package: None,
             facts: Vec::new(),
+            lead: None,
+            names: Vec::new(),
         })
     }
 
@@ -351,6 +377,8 @@ impl Page {
             website: None,
             package: None,
             facts: Vec::new(),
+            lead: None,
+            names: Vec::new(),
         })
     }
 
@@ -376,6 +404,8 @@ impl Page {
             website: None,
             package: None,
             facts: Vec::new(),
+            lead: None,
+            names: Vec::new(),
         })
     }
 
@@ -443,6 +473,8 @@ impl Page {
             website: paper.website,
             package: None,
             facts: Vec::new(),
+            lead: None,
+            names: Vec::new(),
         }
     }
 
@@ -465,6 +497,8 @@ impl Page {
             website: None,
             package: None,
             facts: item.facts,
+            lead: None,
+            names: Vec::new(),
         }
     }
 
@@ -489,6 +523,8 @@ impl Page {
             website: None,
             package: Some(info),
             facts: Vec::new(),
+            lead: None,
+            names: Vec::new(),
         })
     }
 
@@ -554,7 +590,12 @@ impl Page {
             return None;
         }
         let mut about = self.title.clone();
-        for text in self.aliases.iter().chain(&self.description) {
+        for text in self
+            .aliases
+            .iter()
+            .chain(&self.names)
+            .chain(&self.description)
+        {
             about.push(' ');
             about.push_str(text);
         }
@@ -1033,6 +1074,10 @@ pub fn build_page_index(
         document.add_text(fields.words, &page.title);
         for alias in &page.aliases {
             document.add_text(fields.words, alias);
+        }
+        for name in &page.names {
+            document.add_text(fields.words, name);
+            document.add_text(fields.keys, name);
         }
         if let Some(topic) = page.topic() {
             document.add_text(fields.topic, topic);
@@ -1901,7 +1946,11 @@ impl PageSearcher {
         {
             return (ALIAS_MATCH, true);
         }
-        let mut best = 0.0f32;
+        let mut best = if page.names.iter().any(|name| key(name) == joined) {
+            OTHER_NAME_MATCH
+        } else {
+            0.0f32
+        };
         for name in
             std::iter::once(base_title(&page.title)).chain(page.aliases.iter().map(String::as_str))
         {
@@ -3939,6 +3988,33 @@ mod tests {
         assert_eq!(
             hinted_name("What is a manubrium?"),
             Some(("manubrium".into(), Hint::Any))
+        );
+    }
+
+    #[test]
+    fn articles_are_found_by_their_other_names() {
+        let mut sternum = page("Sternum", 300_000, &["Breastbone"]);
+        sternum.names = vec!["Manubrium".into(), "Manubrium sterni".into()];
+        let (_dir, s) = searcher(&[
+            sternum,
+            page("Manubrium (band)", 100, &[]),
+            page("Clavicle", 400_000, &[]),
+        ]);
+        let hits = s.search("manubrium", 5).unwrap();
+        // The page the query names comes first; the article it names a
+        // part of is listed, but not as named.
+        assert_eq!(titles(&hits), ["Manubrium (band)", "Sternum"]);
+        assert!(!hits[1].named);
+        assert!(hits[1].score >= MIN_PARTIAL_SCORE);
+        let (_dir, s) = searcher(&[{
+            let mut sternum = page("Sternum", 300_000, &[]);
+            sternum.names = vec!["Manubrium".into()];
+            sternum
+        }]);
+        assert_eq!(titles(&s.search("manubrium", 5).unwrap()), ["Sternum"]);
+        assert_eq!(
+            titles(&s.search("what is the manubrium", 5).unwrap()),
+            ["Sternum"]
         );
     }
 
