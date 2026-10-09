@@ -81,6 +81,20 @@ impl Place {
         town_size(&self.kind).is_some()
     }
 
+    /// Whether it is found by what it is for, past its kind: a brewpub, or a
+    /// gym or sports centre by its sport ("climbing gym"). Nodes that keep
+    /// only the most notable places keep these too, since few are notable.
+    pub fn is_specialty(&self) -> bool {
+        self.tags.iter().any(|tag| {
+            (tag == BREWERY_TAG && brews_where_served(&self.kind))
+                || (tag.starts_with("sport=")
+                    && matches!(
+                        self.kind.as_str(),
+                        "leisure=sports_centre" | "leisure=fitness_centre"
+                    ))
+        })
+    }
+
     /// What people see: "Pizza restaurant", "Café", "Bicycle shop".
     pub fn label(&self) -> String {
         let cuisine = self
@@ -702,6 +716,11 @@ mod tests {
         let mut vet = pub_.clone();
         vet.kind = "amenity=veterinary".into();
         assert!(!vet.kind_words().contains("brew"));
+        assert!(pub_.is_specialty() && !vet.is_specialty() && !cafe().is_specialty());
+        let mut gym = cafe();
+        gym.kind = "leisure=sports_centre".into();
+        gym.tags = vec!["sport=climbing".into()];
+        assert!(gym.is_specialty());
         for word in [
             "pizza", "coffee", "hotels", "cafe", "gas", "museums", "sushi",
         ] {
