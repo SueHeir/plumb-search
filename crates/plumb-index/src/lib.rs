@@ -126,19 +126,12 @@ const HEADINGS_BOOST: f32 = 0.5;
 /// joined name or a label word.
 const WHOLE_QUERY_BOOST: f32 = 6.0;
 
-/// Small words that join the words of a longer query ("pizza in denver",
-/// "bank of america") and name no site there: between two other words they
-/// never match a domain label or joined name on their own, so in.gov is not
-/// found by them, and one alone never counts as a leading name ("in n out
-/// burger" does not name in.gov). A one-word query is still a name.
-const FUNCTION_WORDS: &[&str] = &[
-    "a", "an", "and", "at", "by", "for", "from", "in", "into", "near", "of", "on", "or", "the",
-    "to", "with",
-];
-
-fn is_function_word(word: &str) -> bool {
-    FUNCTION_WORDS.contains(&word)
-}
+// Function words ("pizza in denver", "bank of america") name no site in a
+// longer query: between two other words they never match a domain label or
+// joined name on their own, so in.gov is not found by them, and one alone
+// never counts as a leading name ("in n out burger" does not name in.gov). A
+// one-word query is still a name.
+use plumb_core::is_function_word;
 
 /// Words that ask or say what is wanted rather than name anything: in a
 /// query of two words or more, one of them never matches a domain label,
@@ -537,8 +530,8 @@ pub struct Hit {
     pub demand: Option<f32>,
     /// The query, of two words or more, does not name the site and the
     /// site lacks some of its main words (all but [`FILLER_WORDS`] and
-    /// [`FUNCTION_WORDS`]): better.com for "better call saul". Such a site
-    /// is filler once a page is named by the whole query
+    /// [`plumb_core::FUNCTION_WORDS`]): better.com for "better call saul".
+    /// Such a site is filler once a page is named by the whole query
     /// ([`pages::drop_namesakes_of_words`]).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub missing_words: bool,
@@ -2957,8 +2950,8 @@ impl ParsedQuery {
     }
 
     /// Which of `docs` lack one of the query's main words: those other
-    /// than [`FILLER_WORDS`] and [`FUNCTION_WORDS`]. None for a query of
-    /// one main word or fewer.
+    /// than [`FILLER_WORDS`] and [`plumb_core::FUNCTION_WORDS`]. None for a
+    /// query of one main word or fewer.
     fn missing_main_words(
         &self,
         searcher: &tantivy::Searcher,
