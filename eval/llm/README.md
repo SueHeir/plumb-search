@@ -32,3 +32,6 @@ normalizing case, punctuation and articles. That is stricter than SimpleQA's
 own grader (a model) for answers in other words, and looser for answers that
 name several things; read a sample of the results before trusting a small
 difference.
+
+DISTILL.md trains a small model on a big one's conversations with Plumb,
+using `--transcripts`, `--api-key-env` and `--max-tokens` here and `to_sft.py`.
