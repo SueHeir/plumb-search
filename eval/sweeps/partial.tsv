@@ -1,9 +1,10 @@
 # Sites lacking some of a longer query's main words, by how close in
 # meaning they must be to stay listed (RankConfig::partial_closeness;
 # base is the default, 0.5).
-#   plumb eval --index DIR --vectors FILE --model DIR --pages wikipedia-en.tsv.gz \
-#     --queries eval/everyday_queries.tsv --queries eval/brand_queries.tsv ... \
-#     --sweep eval/sweeps/partial.tsv
+# Measured with --vectors and --model (it needs meaning) on the suites
+# here and on the ORCAS everyday searches, which are not in the repo:
+#   plumb eval --index DIR --vectors FILE --model DIR --pages ... \
+#     --queries eval/brand_queries.tsv ... --sweep eval/sweeps/partial.tsv
 off	{"partial_closeness": null}
 partial-0.3	{"partial_closeness": 0.3}
 partial-0.7	{"partial_closeness": 0.7}
