@@ -10,8 +10,8 @@ QLever's OpenStreetMap planet in two queries:
     add_tags.py patch places.tsv.gz tags.tsv places.new.tsv.gz
 
 `patch` streams the file, so it needs little memory. Tags are added as
-plumb_ingest::osm::place_of adds them: craft=brewery first (unless the
-place's kind is a craft=), then up to two sports, lower-cased.
+plumb_ingest::osm::place_of adds them: craft=brewery first (only on places
+that serve drinks or food), then up to two sports, lower-cased.
 """
 
 import gzip
@@ -82,6 +82,18 @@ def fetch(path):
             out.write(f"{osm}\t{craft}\t\t{sport}\n")
 
 
+# plumb_core::place::brews_where_served: elsewhere the tag is a mapping slip.
+SERVED = {
+    "amenity=pub",
+    "amenity=bar",
+    "amenity=biergarten",
+    "amenity=restaurant",
+    "amenity=cafe",
+    "amenity=fast_food",
+    "amenity=nightclub",
+}
+
+
 def field(text):
     return " ".join(re.sub(r"[\t\n\r|;]", " ", text).split())
 
@@ -109,7 +121,7 @@ def patch(places_in, tags_path, places_out):
                 for t in cols[3].split(";")
                 if t and t != "craft=brewery" and not t.startswith("sport=")
             ]
-            if brews and not cols[2].startswith("craft="):
+            if brews and cols[2] in SERVED:
                 kept.append("craft=brewery")
                 brewing += 1
             sports = [s.strip() for s in sport.split(";") if s.strip()][:2]
