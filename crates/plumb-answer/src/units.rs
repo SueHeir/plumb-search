@@ -253,6 +253,13 @@ static UNITS: &[Unit] = &[
         US_GALLON / 8.0,
     ),
     unit(
+        &["imperial quart", "uk quart"],
+        "imperial quart",
+        "imperial quarts",
+        Volume,
+        IMPERIAL_GALLON / 4.0,
+    ),
+    unit(
         &["imperial pint", "uk pint"],
         "imperial pint",
         "imperial pints",
@@ -267,11 +274,24 @@ static UNITS: &[Unit] = &[
         US_GALLON / 16.0,
     ),
     unit(
-        &["fl oz", "floz", "fluid ounce", "us fluid ounce"],
+        &["fl oz", "floz", "fluid ounce", "us fluid ounce", "us fl oz"],
         "US fluid ounce",
         "US fluid ounces",
         Volume,
         US_GALLON / 128.0,
+    ),
+    unit(
+        &[
+            "imperial fluid ounce",
+            "uk fluid ounce",
+            "imperial fl oz",
+            "imp fl oz",
+            "uk fl oz",
+        ],
+        "imperial fluid ounce",
+        "imperial fluid ounces",
+        Volume,
+        IMPERIAL_GALLON / 160.0,
     ),
     unit(
         &["tbsp", "tablespoon"],
@@ -712,9 +732,21 @@ pub(crate) fn amount(text: &str) -> Option<(f64, &str)> {
     Some((value, rest))
 }
 
-/// The number written for an answer: up to 6 significant digits.
+/// The number written for an answer: in full when it ends within 12
+/// significant digits (a US gallon is exactly 3.785411784 litres), else
+/// rounded to 6.
 fn shown(value: f64) -> Option<String> {
-    format_number(value, 6)
+    let full = format_number(value, 15)?;
+    let digits = full
+        .chars()
+        .filter(char::is_ascii_digit)
+        .skip_while(|&c| c == '0')
+        .count();
+    if !full.contains('×') && digits <= 12 {
+        format_number(value, 12)
+    } else {
+        format_number(value, 6)
+    }
 }
 
 fn named(value: f64, unit: &Unit) -> Option<String> {
@@ -848,11 +880,11 @@ mod tests {
         );
         assert_eq!(
             convert("5 lbs to kg").unwrap(),
-            "5 pounds = 2.26796 kilograms"
+            "5 pounds = 2.26796185 kilograms"
         );
         assert_eq!(
             convert("1 gallon to liters").unwrap(),
-            "1 US gallon = 3.78541 litres"
+            "1 US gallon = 3.785411784 litres"
         );
         assert_eq!(
             convert("1.5kg to grams").unwrap(),
@@ -860,15 +892,15 @@ mod tests {
         );
         assert_eq!(
             convert("60 mph to km/h").unwrap(),
-            "60 miles per hour = 96.5606 kilometres per hour"
+            "60 miles per hour = 96.56064 kilometres per hour"
         );
         assert_eq!(
             convert("1 gib in mb").unwrap(),
-            "1 gibibyte = 1,073.74 megabytes"
+            "1 gibibyte = 1,073.741824 megabytes"
         );
         assert_eq!(
             convert("convert 3 cups to ml").unwrap(),
-            "3 US cups = 709.765 millilitres"
+            "3 US cups = 709.7647095 millilitres"
         );
         assert_eq!(
             convert("km to miles").unwrap(),
@@ -908,14 +940,38 @@ mod tests {
     }
 
     #[test]
+    fn exact_factors_in_full() {
+        assert_eq!(
+            convert("1 imperial pint to ml").unwrap(),
+            "1 imperial pint = 568.26125 millilitres"
+        );
+        assert_eq!(
+            convert("1 fl oz to ml").unwrap(),
+            "1 US fluid ounce = 29.5735295625 millilitres"
+        );
+        assert_eq!(
+            convert("1 imperial fl oz in ml").unwrap(),
+            "1 imperial fluid ounce = 28.4130625 millilitres"
+        );
+        assert_eq!(
+            convert("convert 1 US fluid ounce to imperial fluid ounces").unwrap(),
+            "1 US fluid ounce = 1.04084 imperial fluid ounces"
+        );
+        assert_eq!(
+            convert("how many uk fl oz in an imperial quart").unwrap(),
+            "1 imperial quart = 40 imperial fluid ounces"
+        );
+    }
+
+    #[test]
     fn gr_is_a_grain() {
         assert_eq!(
             convert("100 gr to g").unwrap(),
-            "100 grains = 6.47989 grams"
+            "100 grains = 6.479891 grams"
         );
         assert_eq!(
             convert("1 grain in mg").unwrap(),
-            "1 grain = 64.7989 milligrams"
+            "1 grain = 64.79891 milligrams"
         );
     }
 
