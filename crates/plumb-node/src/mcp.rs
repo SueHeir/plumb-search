@@ -998,6 +998,24 @@ impl Mcp {
                 .and_then(|found| answers::fact_answer(&asked, &found.pages, now)),
             (answer, _) => answer,
         };
+        // What something is ("what is a manatee").
+        let answer = match (answer, answers::definition_asked(query)) {
+            (None, Some(name)) => {
+                let word = self
+                    .backend
+                    .definition(&name)
+                    .and_then(|page| answers::word_answer(&page));
+                if word.is_some() && answers::asks_word(query) {
+                    word
+                } else {
+                    self.lookup(&name, PROFILE_SEARCH_LIMIT, options)
+                        .ok()
+                        .and_then(|found| answers::definition_answer(&found.pages))
+                        .or(word)
+                }
+            }
+            (answer, _) => answer,
+        };
         let names_a_page = placed.iter().any(|placed| placed.hit.named);
         let profile = if names_a_page {
             None

@@ -284,6 +284,13 @@ pub trait SearchBackend: Send + Sync {
         let _ = (query, options);
         None
     }
+
+    /// The Wiktionary word `name` is, when the node keeps the set; see
+    /// [`plumb_index::pages::PageSearcher::definition`]. By default none.
+    fn definition(&self, name: &str) -> Option<plumb_index::pages::Page> {
+        let _ = name;
+        None
+    }
 }
 
 /// A [`Searcher`] with fixed ranking settings.
@@ -1655,6 +1662,31 @@ async fn extras(
             .await
             .ok()
             .and_then(|found| answers::fact_answer(&asked, &found.pages, now_unix())),
+        (answer, _) => answer,
+    };
+    // What something is ("what is a manatee"): the first sentence of the
+    // article it names, or what the word means ("define anadromous").
+    let answer = match (answer, answers::definition_asked(query)) {
+        (None, Some(name)) => {
+            let backend = Arc::clone(&state.backend);
+            let word = {
+                let name = name.clone();
+                tokio::task::spawn_blocking(move || backend.definition(&name))
+                    .await
+                    .ok()
+                    .flatten()
+                    .and_then(|page| answers::word_answer(&page))
+            };
+            if word.is_some() && answers::asks_word(query) {
+                word
+            } else {
+                run_search(state, &name, PROFILE_SEARCH_LIMIT, options)
+                    .await
+                    .ok()
+                    .and_then(|found| answers::definition_answer(&found.pages))
+                    .or(word)
+            }
+        }
         (answer, _) => answer,
     };
     answers::Extras {
@@ -4811,6 +4843,8 @@ mod tests {
                 website: None,
                 package: None,
                 facts: Vec::new(),
+                lead: None,
+                names: Vec::new(),
             },
             score: 1.0,
             named: true,
@@ -4908,6 +4942,8 @@ mod tests {
                 website: Some("https://music.youtube.com/".into()),
                 package: None,
                 facts: Vec::new(),
+                lead: None,
+                names: Vec::new(),
             },
             score: 1.0,
             named: true,
@@ -6062,6 +6098,8 @@ mod tests {
                             website: None,
                             package: None,
                             facts: Vec::new(),
+                            lead: None,
+                            names: Vec::new(),
                         },
                         score: 1.0,
                         named: query == "mrbeast",
@@ -6117,6 +6155,8 @@ mod tests {
                 website: None,
                 package: None,
                 facts: Vec::new(),
+                lead: None,
+                names: Vec::new(),
             },
             score: 1.0,
             named: true,

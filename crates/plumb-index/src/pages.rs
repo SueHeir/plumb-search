@@ -21,7 +21,7 @@
 //! How pages and sites are listed together is up to the caller; see
 //! [`PageHit::named`].
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
@@ -44,6 +44,11 @@ use crate::replace::Staging;
 pub const ALIAS_MATCH: f32 = 0.9;
 /// Most `name` of a page whose title has some of the query's words.
 pub const PARTIAL_MATCH: f32 = 0.6;
+/// How well a Wikipedia article matches a query that is one of its other
+/// names ([`Page::names`]): a less read redirect, or one to a section of
+/// it ("manubrium" for Sternum). Not its name, so never above a page the
+/// query names, but enough to be listed.
+pub const OTHER_NAME_MATCH: f32 = 0.6;
 /// How much popularity counts, against how well the query names the page.
 pub const POPULARITY_SHARE: f32 = 0.5;
 /// Pages whose words match that are looked at, most matching first.
@@ -70,6 +75,14 @@ pub const DESCRIBED_MISSING_FROM: usize = 3;
 /// How much a query word an article only says counts, against one of its
 /// title.
 pub const DESCRIBED_WORD: f32 = 0.5;
+/// Most `name` of a Wikipedia article whose lead ([`Page::lead`]), with
+/// its names and description, has every word of a query (stemmed, without
+/// the asking words) of at least [`DESCRIBED_QUERY_WORDS`]: the article
+/// whose lead matches them best gets it, others less by how much worse
+/// theirs does. "triassic jurassic cretaceous" finds Mesozoic.
+pub const LEAD_MATCH: f32 = 0.55;
+/// Most articles found by their leads looked at for one query.
+const LEAD_CANDIDATES: usize = 20;
 /// Words that only ask ("what does resin mean"), left out of a query
 /// matched against what articles say of themselves.
 const ASKING_WORDS: &[&str] = &[
@@ -136,6 +149,13 @@ pub struct Page {
     /// country's capital, a person's birth date.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub facts: Vec<plumb_core::facts::Fact>,
+    /// A Wikipedia article's first sentences ([`plumb_core::article::lead_of`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lead: Option<String>,
+    /// A Wikipedia article's other names than its aliases: less read
+    /// redirects, and ones to one of its sections ("Manubrium" to Sternum).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub names: Vec<String>,
 }
 
 impl Page {
@@ -154,6 +174,8 @@ impl Page {
             website: article.website,
             package: None,
             facts: article.facts,
+            lead: article.lead,
+            names: article.names,
         }
     }
 
@@ -173,6 +195,8 @@ impl Page {
             website: None,
             package: None,
             facts: Vec::new(),
+            lead: None,
+            names: Vec::new(),
         }
     }
 
@@ -195,6 +219,8 @@ impl Page {
             website: None,
             package: None,
             facts: Vec::new(),
+            lead: None,
+            names: Vec::new(),
         }
     }
 
@@ -218,6 +244,8 @@ impl Page {
             website: None,
             package: None,
             facts: Vec::new(),
+            lead: None,
+            names: Vec::new(),
         })
     }
 
@@ -260,6 +288,8 @@ impl Page {
             website: None,
             package: None,
             facts: Vec::new(),
+            lead: None,
+            names: Vec::new(),
         }
     }
 
@@ -283,6 +313,8 @@ impl Page {
             website: None,
             package: None,
             facts: Vec::new(),
+            lead: None,
+            names: Vec::new(),
         }
     }
 
@@ -309,6 +341,8 @@ impl Page {
             website: None,
             package: None,
             facts: Vec::new(),
+            lead: None,
+            names: Vec::new(),
         })
     }
 
@@ -351,6 +385,8 @@ impl Page {
             website: None,
             package: None,
             facts: Vec::new(),
+            lead: None,
+            names: Vec::new(),
         })
     }
 
@@ -376,6 +412,8 @@ impl Page {
             website: None,
             package: None,
             facts: Vec::new(),
+            lead: None,
+            names: Vec::new(),
         })
     }
 
@@ -443,6 +481,8 @@ impl Page {
             website: paper.website,
             package: None,
             facts: Vec::new(),
+            lead: None,
+            names: Vec::new(),
         }
     }
 
@@ -465,6 +505,34 @@ impl Page {
             website: None,
             package: None,
             facts: item.facts,
+            lead: None,
+            names: Vec::new(),
+        }
+    }
+
+    /// The English word `word` of Wiktionary, written as an article whose
+    /// title is the word and whose description says what it means.
+    pub fn from_word(word: Article) -> Self {
+        let url = plumb_core::article::article_url("en", &word.title).replacen(
+            "en.wikipedia.org",
+            "en.wiktionary.org",
+            1,
+        );
+        Page {
+            set: WIKTIONARY_SET.to_string(),
+            url,
+            title: word.title,
+            description: word.description,
+            site: None,
+            views: word.views,
+            aliases: Vec::new(),
+            item: None,
+            profiles: Vec::new(),
+            website: None,
+            package: None,
+            facts: Vec::new(),
+            lead: None,
+            names: Vec::new(),
         }
     }
 
@@ -489,6 +557,8 @@ impl Page {
             website: None,
             package: Some(info),
             facts: Vec::new(),
+            lead: None,
+            names: Vec::new(),
         })
     }
 
@@ -514,6 +584,7 @@ impl Page {
             PODCASTS_SET => Page::from_podcast(article),
             PAPERS_SET => Page::from_paper(article),
             WIKIDATA_SET => Page::from_item(article),
+            WIKTIONARY_SET => Page::from_word(article),
             PACKAGES_SET => Page::from_package(article)?,
             STACKEXCHANGE_SET => Page::from_exchange(article)?,
             MUSIC_SET => Page::from_music(article)?,
@@ -554,7 +625,12 @@ impl Page {
             return None;
         }
         let mut about = self.title.clone();
-        for text in self.aliases.iter().chain(&self.description) {
+        for text in self
+            .aliases
+            .iter()
+            .chain(&self.names)
+            .chain(&self.description)
+        {
             about.push(' ');
             about.push_str(text);
         }
@@ -592,6 +668,8 @@ impl Page {
             "OpenAlex"
         } else if self.set == WIKIDATA_SET || self.set == FILMS_SET {
             "Wikidata"
+        } else if self.set == WIKTIONARY_SET {
+            "Wiktionary"
         } else if let Some(registry) = self.registry() {
             registry.name
         } else if let Some(host) = self.docs_host() {
@@ -681,6 +759,11 @@ pub const PAPERS_SET: &str = "papers";
 /// Wikipedia article (Linus Tech Tips the channel), each only ever listed
 /// under its own website.
 pub const WIKIDATA_SET: &str = "wikidata";
+/// The set of English words and what they mean, from Wiktionary
+/// ([`plumb_core::article`] files made by `plumb fetch-pages --set
+/// wiktionary`). Never listed among the results: a word is only looked up
+/// ([`PageSearcher::definition`]) for a search that asks what it means.
+pub const WIKTIONARY_SET: &str = "wiktionary";
 /// How much a book's or paper's score counts against an article's of the
 /// same name: "dune" lists the article on the novel before the book.
 pub const SHELF_WEIGHT: f32 = 0.8;
@@ -734,6 +817,12 @@ struct Fields {
     /// Stemmed words of a Wikipedia article's names and what it says of
     /// itself ([`Page::about`]); empty for other pages.
     about: Field,
+    /// Stemmed words of a Wikipedia article's lead ([`Page::lead`]), with
+    /// how often each comes, so the leads most about the query rank first.
+    lead: Field,
+    /// A Wiktionary word as one token ([`WIKTIONARY_SET`]); such pages have
+    /// no other words, so other searches never find them.
+    word: Field,
     popularity: Field,
     /// The registrable domain of the official website of what a Wikipedia
     /// article is about ([`Page::site`]), for [`PageSearcher::site_popularity`].
@@ -775,6 +864,22 @@ fn schema() -> (Schema, Fields) {
                 .set_index_option(IndexRecordOption::Basic),
         ),
     );
+    let lead = builder.add_text_field(
+        "lead",
+        TextOptions::default().set_indexing_options(
+            TextFieldIndexing::default()
+                .set_tokenizer(STEMMED_ANALYZER)
+                .set_index_option(IndexRecordOption::WithFreqs),
+        ),
+    );
+    let word = builder.add_text_field(
+        "word",
+        TextOptions::default().set_indexing_options(
+            TextFieldIndexing::default()
+                .set_tokenizer(JOINED_ANALYZER)
+                .set_index_option(IndexRecordOption::Basic),
+        ),
+    );
     let popularity = builder.add_u64_field("popularity", FAST | STORED);
     let site = builder.add_text_field("site", STRING);
     let page = builder.add_text_field("page", STORED);
@@ -785,6 +890,8 @@ fn schema() -> (Schema, Fields) {
             keys,
             topic,
             about,
+            lead,
+            word,
             popularity,
             site,
             page,
@@ -1058,15 +1165,33 @@ pub fn build_page_index(
             ((page.views as f32).ln_1p() / (*most as f32).ln_1p()).min(1.0)
         };
         let mut document = TantivyDocument::default();
+        document.add_u64(
+            fields.popularity,
+            (popularity * POPULARITY_SCALE).round() as u64,
+        );
+        if page.set == WIKTIONARY_SET {
+            document.add_text(fields.word, &page.title);
+            document.add_text(fields.page, serde_json::to_string(&page)?);
+            writer.add_document(document)?;
+            stats.pages += 1;
+            continue;
+        }
         document.add_text(fields.words, &page.title);
         for alias in &page.aliases {
             document.add_text(fields.words, alias);
+        }
+        for name in &page.names {
+            document.add_text(fields.words, name);
+            document.add_text(fields.keys, name);
         }
         if let Some(topic) = page.topic() {
             document.add_text(fields.topic, topic);
         }
         if let Some(about) = page.about() {
             document.add_text(fields.about, about);
+        }
+        if let Some(lead) = page.lead.as_deref().filter(|_| page.is_article()) {
+            document.add_text(fields.lead, lead);
         }
         // A docs page's title alone ("Introduction") names nothing: it is
         // named by its product's name and title ("python sorting
@@ -1084,10 +1209,6 @@ pub fn build_page_index(
                 document.add_text(fields.keys, alias);
             }
         }
-        document.add_u64(
-            fields.popularity,
-            (popularity * POPULARITY_SCALE).round() as u64,
-        );
         if let Some(site) = page.site.as_deref().filter(|_| page.is_article()) {
             document.add_text(fields.site, site);
         }
@@ -1350,6 +1471,42 @@ impl PageSearcher {
         Ok(hits)
     }
 
+    /// The Wiktionary word `name` is ([`WIKTIONARY_SET`]), written as it
+    /// is or with other capitals ("anadromous", "AWOL"): the best-known
+    /// such word, the one written alike first.
+    pub fn definition(&self, name: &str) -> Result<Option<Page>> {
+        let Some(joined) = analysis::tokens(&self.joined, name).pop() else {
+            return Ok(None);
+        };
+        let searcher = self.reader.searcher();
+        let named = TermQuery::new(
+            Term::from_field_text(self.fields.word, &joined),
+            IndexRecordOption::Basic,
+        );
+        let top = TopDocs::with_limit(TITLE_CANDIDATES)
+            .order_by_fast_field::<u64>("popularity", tantivy::Order::Desc);
+        let wanted = plumb_core::collapse_whitespace(name);
+        let mut best: Option<Page> = None;
+        for (_, address) in searcher.search(&named, &top)? {
+            let document: TantivyDocument = searcher.doc(address)?;
+            let Some(stored) = document
+                .get_first(self.fields.page)
+                .and_then(|v| v.as_str())
+            else {
+                continue;
+            };
+            let page: Page = serde_json::from_str(stored)?;
+            if page.set != WIKTIONARY_SET || !page.title.eq_ignore_ascii_case(&wanted) {
+                continue;
+            }
+            if page.title == wanted {
+                return Ok(Some(page));
+            }
+            best.get_or_insert(page);
+        }
+        Ok(best)
+    }
+
     /// The song or album of the music set whose title is the whole of
     /// `query` when one is far better known than every other of that
     /// title: Radiohead's "Creep" for "creep", with
@@ -1576,6 +1733,47 @@ impl PageSearcher {
                 }
             }
         }
+        // Articles whose lead, names and description have every such word:
+        // "triassic jurassic cretaceous" finds Mesozoic, "manubrium
+        // sternum" Sternum. Ranked by how well the leads match, not by
+        // how often the articles are read.
+        let mut lead_scores: HashMap<tantivy::DocAddress, f32> = HashMap::new();
+        if described.len() >= DESCRIBED_QUERY_WORDS {
+            let every_word = BooleanQuery::new(
+                described
+                    .iter()
+                    .map(|stem| {
+                        let either: Vec<(Occur, Box<dyn Query>)> = [
+                            (self.fields.lead, IndexRecordOption::WithFreqs),
+                            (self.fields.about, IndexRecordOption::Basic),
+                        ]
+                        .into_iter()
+                        .map(|(field, option)| {
+                            (
+                                Occur::Should,
+                                Box::new(TermQuery::new(Term::from_field_text(field, stem), option))
+                                    as Box<dyn Query>,
+                            )
+                        })
+                        .collect();
+                        (
+                            Occur::Must,
+                            Box::new(BooleanQuery::new(either)) as Box<dyn Query>,
+                        )
+                    })
+                    .collect(),
+            );
+            for (score, address) in searcher.search(
+                &every_word,
+                &TopDocs::with_limit(LEAD_CANDIDATES).order_by_score(),
+            )? {
+                lead_scores.insert(address, score);
+                if !addresses.contains(&address) {
+                    addresses.push(address);
+                }
+            }
+        }
+        let best_lead = lead_scores.values().copied().fold(0.0f32, f32::max);
         // The query's rarest word that some question has: what it is
         // about. A question without it has only the asking words ("how to
         // get rid of aphids" found "How do I get rid of my bounty?").
@@ -1646,6 +1844,10 @@ impl PageSearcher {
             }
             if !named && !whole {
                 name = name.max(self.described_match(&page, &described));
+                if let Some(&lead) = lead_scores.get(&address).filter(|_| page.is_article()) {
+                    name = name
+                        .max(LEAD_MATCH * (0.5 + 0.5 * lead / best_lead.max(f32::MIN_POSITIVE)));
+                }
             }
             if name <= 0.0 {
                 continue;
@@ -1738,7 +1940,7 @@ impl PageSearcher {
 
     /// How well a Wikipedia article covers the query's words `stems`
     /// ([`PageSearcher::described_words`]) with one of its names and what it
-    /// says of itself ([`Page::about`]): 0 unless a name has some of them
+    /// says of itself ([`Page::about`], and its lead): 0 unless a name has some of them
     /// and the article all of them, or all but one when the name is whole
     /// in the query and the query has [`DESCRIBED_MISSING_FROM`] words.
     /// Otherwise [`PARTIAL_MATCH`] times the share of the query in the
@@ -1752,9 +1954,12 @@ impl PageSearcher {
         let Some(about) = page.about() else {
             return 0.0;
         };
-        let about: HashSet<String> = analysis::tokens(&self.stemmed, &about)
+        let mut about: HashSet<String> = analysis::tokens(&self.stemmed, &about)
             .into_iter()
             .collect();
+        if let Some(lead) = &page.lead {
+            about.extend(analysis::tokens(&self.stemmed, lead));
+        }
         let missing = stems.iter().filter(|stem| !about.contains(*stem)).count();
         let mut best = 0.0f32;
         for name in
@@ -1952,7 +2157,11 @@ impl PageSearcher {
         {
             return (ALIAS_MATCH, true);
         }
-        let mut best = 0.0f32;
+        let mut best = if page.names.iter().any(|name| key(name) == joined) {
+            OTHER_NAME_MATCH
+        } else {
+            0.0f32
+        };
         for name in
             std::iter::once(base_title(&page.title)).chain(page.aliases.iter().map(String::as_str))
         {
@@ -4029,6 +4238,99 @@ mod tests {
             hinted_name("What is a manubrium?"),
             Some(("manubrium".into(), Hint::Any))
         );
+    }
+
+    #[test]
+    fn articles_are_found_by_their_other_names() {
+        let mut sternum = page("Sternum", 300_000, &["Breastbone"]);
+        sternum.names = vec!["Manubrium".into(), "Manubrium sterni".into()];
+        let (_dir, s) = searcher(&[
+            sternum,
+            page("Manubrium (band)", 100, &[]),
+            page("Clavicle", 400_000, &[]),
+        ]);
+        let hits = s.search("manubrium", 5).unwrap();
+        // The page the query names comes first; the article it names a
+        // part of is listed, but not as named.
+        assert_eq!(titles(&hits), ["Manubrium (band)", "Sternum"]);
+        assert!(!hits[1].named);
+        assert!(hits[1].score >= MIN_PARTIAL_SCORE);
+        let (_dir, s) = searcher(&[{
+            let mut sternum = page("Sternum", 300_000, &[]);
+            sternum.names = vec!["Manubrium".into()];
+            sternum
+        }]);
+        assert_eq!(titles(&s.search("manubrium", 5).unwrap()), ["Sternum"]);
+        assert_eq!(
+            titles(&s.search("what is the manubrium", 5).unwrap()),
+            ["Sternum"]
+        );
+    }
+
+    #[test]
+    fn articles_are_found_by_their_leads() {
+        let led = |title: &str, views: u64, lead: &str| {
+            let mut page = page(title, views, &[]);
+            page.lead = Some(lead.into());
+            page
+        };
+        let (_dir, s) = searcher(&[
+            led(
+                "Mesozoic",
+                200_000,
+                "The Mesozoic Era is the era of Earth's geological history, comprising the Triassic, Jurassic and Cretaceous Periods.",
+            ),
+            led(
+                "Dinosaur",
+                900_000,
+                "Dinosaurs are a diverse group of reptiles that emerged during the Triassic period. They became dominant in the Jurassic, and most died out at the end of the Cretaceous, with birds the only survivors of a long history spanning many periods and kinds of animals on every continent.",
+            ),
+            led(
+                "Jurassic Park",
+                800_000,
+                "Jurassic Park is a 1993 American science fiction film.",
+            ),
+            led("Okinawa Prefecture", 300_000, "Okinawa Prefecture is the southernmost prefecture of Japan, with a culture of its own."),
+        ]);
+        let hits = s.search("triassic jurassic cretaceous", 5).unwrap();
+        assert_eq!(hits[0].page.title, "Mesozoic", "{:?}", titles(&hits));
+        assert!(!hits[0].named && hits[0].score >= MIN_PARTIAL_SCORE);
+        assert!(titles(&hits).contains(&"Dinosaur"));
+        assert!(!titles(&hits).contains(&"Jurassic Park"));
+        assert_eq!(
+            titles(&s.search("okinawa culture", 5).unwrap()).first(),
+            Some(&"Okinawa Prefecture")
+        );
+        // One word is a name, not a description.
+        assert!(!titles(&s.search("triassic", 5).unwrap()).contains(&"Mesozoic"));
+    }
+
+    #[test]
+    fn words_are_only_looked_up() {
+        let word = |title: &str, description: &str, views: u64| {
+            Page::from_word(Article {
+                title: title.into(),
+                description: Some(description.into()),
+                views,
+                ..Article::default()
+            })
+        };
+        let (_dir, s) = searcher(&[
+            page("Free (album)", 1_000, &[]),
+            word("free", "(adjective) Unconstrained.", 900),
+            word("Free", "(noun) A surname.", 5),
+            word("AWOL", "(adjective) Absent without leave.", 50),
+        ]);
+        // Never a result.
+        assert_eq!(titles(&s.search("free", 5).unwrap()), ["Free (album)"]);
+        let free = s.definition("free").unwrap().unwrap();
+        assert_eq!(
+            free.description.as_deref(),
+            Some("(adjective) Unconstrained.")
+        );
+        assert_eq!(free.url, "https://en.wiktionary.org/wiki/free");
+        assert_eq!(s.definition("awol").unwrap().unwrap().title, "AWOL");
+        assert_eq!(s.definition("freedom").unwrap(), None);
     }
 
     #[test]

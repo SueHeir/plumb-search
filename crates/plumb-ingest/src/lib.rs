@@ -30,6 +30,7 @@ pub mod github;
 pub mod intros;
 pub mod item_facts;
 pub mod kind_sites;
+pub mod leads;
 pub mod musicbrainz;
 pub mod openalex;
 pub mod openlibrary;
@@ -42,6 +43,7 @@ pub mod tranco;
 pub mod wat;
 pub mod wet;
 pub mod wikidata;
+pub mod wiktionary;
 
 pub use builder::Builder;
 pub use ccranks::{load_cc_domain_ranks, CcRank, DEFAULT_CC_RANKS_LIMIT};
