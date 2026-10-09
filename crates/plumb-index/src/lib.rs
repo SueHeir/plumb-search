@@ -2739,12 +2739,13 @@ fn without_copies(hits: Vec<Hit>, typed: Option<&str>, home: Option<&str>) -> Ve
         // namesake whose title does not name the brand (hm.com of hm.edu)
         // nor when it is well known: no title is then a gap in the crawl
         // (abc.net.au next to abc.com, weather.com next to weather.gov).
-        // Endings used as generic ones (.io, .me, .co) are not countries'.
+        // Endings used as generic ones (.io, .me, .co) are not countries',
+        // but the same ending under a country's own (.com.co, Colombia's;
+        // .com.ai) still is.
         let country = |suffix: &str| {
-            suffix
-                .rsplit('.')
-                .next()
-                .is_some_and(|tld| tld.len() == 2 && !GENERIC_COUNTRY_ENDINGS.contains(&tld))
+            suffix.rsplit('.').next().is_some_and(|tld| {
+                tld.len() == 2 && (suffix.contains('.') || !GENERIC_COUNTRY_ENDINGS.contains(&tld))
+            })
         };
         let same_brand = |other: &Hit| {
             brand_label(&other.domain).is_some_and(|(l, s)| {
@@ -5985,6 +5986,39 @@ mod tests {
         let (_dir, searcher) = build(&records);
         let hits = searcher.search("cbc", 10).unwrap();
         assert!(domains(&hits).contains(&"cbc.ca"), "{:?}", domains(&hits));
+        // .co alone is a generic ending, but .com.co is Colombia's: Pizza
+        // Hut Colombia is the brand again next to pizzahut.com.
+        let records = [
+            site(
+                "pizzahut.com",
+                Some("Pizza Hut"),
+                None,
+                &[],
+                &[],
+                popular(200, 600),
+            ),
+            site(
+                "pizzahut.com.co",
+                Some("Pizza Hut Colombia"),
+                None,
+                &[],
+                &[],
+                popular(9_000, 20),
+            ),
+            site(
+                "pizzahut.co",
+                Some("Pizza Hut Deals"),
+                None,
+                &[],
+                &[],
+                popular(9_500, 20),
+            ),
+        ];
+        let (_dir, searcher) = build(&records);
+        let hits = searcher.search("pizza hut", 10).unwrap();
+        let order = domains(&hits);
+        assert!(order.contains(&"pizzahut.com"), "{order:?}");
+        assert!(!order.contains(&"pizzahut.com.co"), "{order:?}");
         assert_eq!(brand_label("google.co.uk"), Some(("google", "co.uk")));
         assert_eq!(brand_label("news.ycombinator.com"), None);
     }
