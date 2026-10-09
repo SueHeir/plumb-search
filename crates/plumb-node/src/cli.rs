@@ -1112,6 +1112,14 @@ pub struct EvalArgs {
     /// scored: final score, text match, link score and closeness in meaning.
     #[arg(long)]
     pub explain: bool,
+    /// Measure where each query's answer is lost before ranking instead:
+    /// whether it is in the index or a page set at all, how far down the
+    /// sites matching the query's words (first 50, 100, 1,000, 10,000) or
+    /// nearest in meaning it is, or the pages found, and whether the
+    /// ranking looked at it. Prints one line per query not answered in the
+    /// first --limit and a table per file.
+    #[arg(long, conflicts_with_all = ["sweep", "facts", "features_out"])]
+    pub recall: bool,
     /// Print the first N results of every query, hit or miss: each site's
     /// domain (with the pages shown under it) or page's address.
     #[arg(long, value_name = "N", default_value_t = 0)]

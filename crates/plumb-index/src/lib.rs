@@ -537,6 +537,47 @@ pub struct SiteSearch {
     pub url: String,
 }
 
+/// Where the sites a query ranks come from ([`Searcher::candidate_pool`]).
+/// A site can come from more than one place.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CandidatePool {
+    /// The first [`RankConfig::candidates`] sites by BM25, best first.
+    pub words: Vec<String>,
+    /// The most linked sites with any of the query's words.
+    pub popular: Vec<String>,
+    /// The sites the query names, by its first words or all of them.
+    pub named: Vec<String>,
+    /// The sites of the kind the query names ("banks").
+    pub kind: Vec<String>,
+    /// The sites near the query in meaning that are ranked.
+    pub meaning: Vec<String>,
+}
+
+impl CandidatePool {
+    /// Whether the site `domain` is ranked at all.
+    pub fn has(&self, domain: &str) -> bool {
+        [
+            &self.words,
+            &self.popular,
+            &self.named,
+            &self.kind,
+            &self.meaning,
+        ]
+        .iter()
+        .any(|list| list.iter().any(|d| d == domain))
+    }
+}
+
+/// The sites by how well their words match a query
+/// ([`Searcher::words_order`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WordsOrder {
+    /// The first sites, best first.
+    pub order: Vec<String>,
+    /// Those of the domains asked about that have any of the query's words.
+    pub matched: HashSet<String>,
+}
+
 /// What [`Searcher::search_full`] finds.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct SearchResults {
@@ -1191,6 +1232,67 @@ impl Searcher {
         })
     }
 
+    /// The sites [`Searcher::search_meaning`] ranks for `query_text` as
+    /// typed, before ranking, by where each came from: what `plumb eval
+    /// --recall` measures. A site the ranking never looks at cannot be
+    /// found, however it is scored.
+    pub fn candidate_pool(
+        &self,
+        query_text: &str,
+        cfg: &RankConfig,
+        options: &SearchOptions,
+        meaning: Option<&dyn Meaning>,
+    ) -> Result<CandidatePool> {
+        let mut pool = CandidatePool::default();
+        self.rank_traced(query_text, 1, cfg, options, meaning, Some(&mut pool))?;
+        Ok(pool)
+    }
+
+    /// The first `depth` sites by how well their words match `query_text`
+    /// (BM25 alone, as [`RankConfig::candidates`] are picked), and which of
+    /// `domains` have any of the query's words. `None` for a query with no
+    /// words.
+    pub fn words_order(
+        &self,
+        query_text: &str,
+        depth: usize,
+        cfg: &RankConfig,
+        domains: &[String],
+    ) -> Result<Option<WordsOrder>> {
+        let Some(mut query) = ParsedQuery::new(query_text, &self.words, &self.joined) else {
+            return Ok(None);
+        };
+        query.terms_boost = cfg.terms_boost;
+        query.filler_words = cfg.filler_words;
+        query.asked =
+            cfg.questions_name_nothing && query.len >= 3 && pages::asked_as_question(query_text);
+        let searcher = self.reader.searcher();
+        let num_docs = usize::try_from(searcher.num_docs()).unwrap_or(usize::MAX);
+        if num_docs == 0 {
+            return Ok(Some(WordsOrder::default()));
+        }
+        let text_query = query.text_query(&searcher, &self.fields)?;
+        let found = searcher.search(
+            &text_query,
+            &TopDocs::with_limit(depth.max(1).min(num_docs)).order_by_score(),
+        )?;
+        let order = found
+            .into_iter()
+            .filter_map(|(_, addr)| domain_of(&searcher, addr))
+            .collect();
+        let mut docs = Vec::new();
+        for domain in domains {
+            let term = Term::from_field_text(self.fields.domain, domain);
+            docs.extend(matching_docs(&searcher, vec![term])?);
+        }
+        let matched = bm25_of(&searcher, &text_query, docs)?
+            .into_iter()
+            .filter(|&(bm25, _)| bm25 > 0.0)
+            .filter_map(|(_, addr)| domain_of(&searcher, addr))
+            .collect();
+        Ok(Some(WordsOrder { order, matched }))
+    }
+
     /// The ranked results of `query_text` as typed, and how the query names
     /// sites.
     fn rank(
@@ -1200,6 +1302,20 @@ impl Searcher {
         cfg: &RankConfig,
         options: &SearchOptions,
         meaning: Option<&dyn Meaning>,
+    ) -> Result<(SearchResults, Named)> {
+        self.rank_traced(query_text, limit, cfg, options, meaning, None)
+    }
+
+    /// [`Searcher::rank`], noting in `pool` where the sites it ranks came
+    /// from.
+    fn rank_traced(
+        &self,
+        query_text: &str,
+        limit: usize,
+        cfg: &RankConfig,
+        options: &SearchOptions,
+        meaning: Option<&dyn Meaning>,
+        pool: Option<&mut CandidatePool>,
     ) -> Result<(SearchResults, Named)> {
         if limit == 0 {
             return Ok(Default::default());
@@ -1304,6 +1420,18 @@ impl Searcher {
             .collect();
         unranked.sort_unstable();
         unranked.dedup();
+        if let Some(pool) = pool {
+            let domains = |docs: &mut dyn Iterator<Item = DocAddress>| -> Vec<String> {
+                docs.filter_map(|addr| domain_of(&searcher, addr)).collect()
+            };
+            *pool = CandidatePool {
+                words: domains(&mut candidates.iter().map(|&(_, addr)| addr)),
+                popular: domains(&mut popular.iter().copied()),
+                named: domains(&mut names.keys().copied()),
+                kind: domains(&mut kinds.iter().copied()),
+                meaning: domains(&mut nearest.iter().copied()),
+            };
+        }
         candidates.extend(bm25_of(&searcher, &text_query, unranked)?);
         let full_names: HashSet<DocAddress> = names
             .iter()
@@ -2165,6 +2293,19 @@ fn link_scores(searcher: &tantivy::Searcher, docs: &HashSet<DocAddress>) -> Vec<
         }
     }
     scores
+}
+
+/// The domain of the site at `addr`.
+fn domain_of(searcher: &tantivy::Searcher, addr: DocAddress) -> Option<String> {
+    let column = searcher
+        .segment_reader(addr.segment_ord)
+        .fast_fields()
+        .str(schema::DOMAIN)
+        .ok()??;
+    let ord = column.term_ords(addr.doc_id).next()?;
+    let mut domain = String::new();
+    column.ord_to_str(ord, &mut domain).ok()?;
+    Some(domain)
 }
 
 /// A candidate with its blended score.
@@ -3795,6 +3936,49 @@ mod tests {
             "{:?}",
             domains(&found.hits)
         );
+    }
+
+    #[test]
+    fn the_candidate_pool_says_where_each_site_came_from() {
+        let records = vec![
+            site(
+                "tesla.com",
+                None,
+                None,
+                &["Tesla"],
+                &[],
+                popular(500, 20_000),
+            ),
+            site("electric.com", None, None, &[], &[], ranked(40_000, 200)),
+            site("carmaker.net", None, None, &[], &[], ranked(90_000, 50)),
+        ];
+        let (_dir, searcher) = build(&records);
+        let cfg = RankConfig::default();
+        let options = SearchOptions::default();
+        let meaning = FixedMeaning(vec![("tesla.com", 0.9)]);
+        let pool = searcher
+            .candidate_pool("electric car maker", &cfg, &options, Some(&meaning))
+            .unwrap();
+        assert_eq!(pool.words, ["electric.com"], "{pool:?}");
+        assert_eq!(pool.meaning, ["tesla.com"], "{pool:?}");
+        assert!(pool.has("tesla.com") && !pool.has("carmaker.net"));
+        let pool = searcher
+            .candidate_pool("tesla", &cfg, &options, Some(&meaning))
+            .unwrap();
+        assert_eq!(pool.named, ["tesla.com"], "{pool:?}");
+        assert!(pool.meaning.is_empty(), "a name is not searched by meaning");
+
+        let found = searcher
+            .words_order(
+                "electric car",
+                10,
+                &cfg,
+                &["electric.com".into(), "tesla.com".into()],
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.order, ["electric.com"]);
+        assert!(found.matched.contains("electric.com") && !found.matched.contains("tesla.com"));
     }
 
     #[test]
