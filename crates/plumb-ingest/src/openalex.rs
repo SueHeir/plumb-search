@@ -6,7 +6,12 @@
 //! the work's title, the description "Paper by AUTHOR et al., YEAR, VENUE",
 //! the item its DOI (`10.48550/arXiv.1706.03762`) or else its OpenAlex id
 //! (`W2741809807`), from which the address is made, and the views its
-//! citations. No abstract or text is kept.
+//! citations. No abstract or text is kept. A work that can be read free
+//! keeps where (its `website`, see [`free_copy`]): its arXiv copy, or the
+//! best free copy Unpaywall's data in OpenAlex knows of (the publisher's
+//! open version, a university repository, PubMed Central). A work cited more often a year
+//! than any real paper (OpenAlex credits a 2020 plasma camera paper with
+//! 800,000 citations) is left out as a data error.
 //!
 //! OpenAlex pages through results with a cursor, 200 works a request. Set
 //! `OPENALEX_API_KEY` if OpenAlex asks for a key.
@@ -17,14 +22,18 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use plumb_core::article::{Article, MAX_ARTICLE_DESCRIPTION_CHARS};
+use plumb_core::papers::{valid_date, PaperCountKind, PaperMetadata, MAX_PAPER_AUTHORS};
 use serde::Deserialize;
 use tracing::{info, warn};
 
 const WORKS_URL: &str = "https://api.openalex.org/works";
-/// Works a request, OpenAlex's most.
-pub const PER_PAGE: usize = 200;
+/// Supported maximum; the legacy 200-row behavior is deprecated.
+pub const PER_PAGE: usize = 100;
 /// Fewest citations of a paper kept, unless asked otherwise.
 pub const DEFAULT_MIN_CITATIONS: u64 = 200;
+/// Most citations a year a paper is believed to have: the most cited
+/// papers of recent years get about 25,000.
+const MAX_CITATIONS_A_YEAR: u64 = 40_000;
 /// Pause between requests, well under OpenAlex's ten a second.
 const PAUSE: Duration = Duration::from_millis(200);
 
@@ -53,11 +62,41 @@ pub struct Work {
     #[serde(default)]
     pub publication_year: Option<i32>,
     #[serde(default)]
+    pub publication_date: Option<String>,
+    #[serde(default)]
     pub cited_by_count: u64,
     #[serde(default)]
     pub authorships: Vec<Authorship>,
     #[serde(default)]
     pub primary_location: Option<Location>,
+    #[serde(default)]
+    pub open_access: Option<OpenAccess>,
+    #[serde(default)]
+    pub best_oa_location: Option<Location>,
+    #[serde(default)]
+    pub locations: Vec<Location>,
+    #[serde(default)]
+    pub primary_topic: Option<PrimaryTopic>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PrimaryTopic {
+    #[serde(default)]
+    pub domain: Option<TopicDomain>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TopicDomain {
+    pub id: String,
+}
+
+/// Whether a work is free to read and where, from Unpaywall's data.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct OpenAccess {
+    #[serde(default)]
+    pub is_oa: bool,
+    #[serde(default)]
+    pub oa_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -66,10 +105,97 @@ pub struct Authorship {
     pub author: Option<Named>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct Location {
     #[serde(default)]
     pub source: Option<Named>,
+    #[serde(default)]
+    pub is_oa: bool,
+    #[serde(default)]
+    pub landing_page_url: Option<String>,
+    #[serde(default)]
+    pub pdf_url: Option<String>,
+    /// `publishedVersion`, `acceptedVersion` or `submittedVersion`.
+    #[serde(default)]
+    pub version: Option<String>,
+}
+
+/// `url` as an `https://` address that fits an articles file, or `None`.
+/// arXiv's and most repositories' `http://` addresses also answer on
+/// `https://`.
+fn web_address(url: &str) -> Option<String> {
+    let url = url.trim();
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))?;
+    let host = rest.split(['/', '?', '#']).next()?;
+    if host.is_empty() || !host.contains('.') || url.contains(['\t', '\n', '\r', '|', ' ']) {
+        return None;
+    }
+    Some(
+        if url.starts_with("http://") && host.ends_with("arxiv.org") {
+            format!("https://{rest}")
+        } else {
+            url.to_string()
+        },
+    )
+}
+
+/// The arXiv id of a location on arXiv (`1706.03762`, `hep-th/9711200`),
+/// from its address, without a version.
+fn arxiv_id(location: &Location) -> Option<String> {
+    [&location.landing_page_url, &location.pdf_url]
+        .into_iter()
+        .flatten()
+        .find_map(|url| {
+            let rest = url
+                .trim_start_matches("https://")
+                .trim_start_matches("http://")
+                .trim_start_matches("www.")
+                .strip_prefix("arxiv.org/")?;
+            let id = rest
+                .strip_prefix("abs/")
+                .or_else(|| rest.strip_prefix("pdf/"))?
+                .trim_end_matches(".pdf");
+            let id = match id.rfind('v') {
+                Some(i) if i + 1 < id.len() && id[i + 1..].bytes().all(|b| b.is_ascii_digit()) => {
+                    &id[..i]
+                }
+                _ => id,
+            };
+            (!id.is_empty()
+                && id
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'/' | b'-')))
+            .then(|| id.to_string())
+        })
+}
+
+/// Where `work` can be read free, if anywhere: the publisher's own free
+/// PDF, else its arXiv page (full text, and never moves), else the best
+/// free copy Unpaywall's data knows of (a PDF before a page), else
+/// OpenAlex's free address for it.
+pub fn free_copy(work: &Work) -> Option<String> {
+    let best = work.best_oa_location.as_ref().filter(|l| l.is_oa);
+    if let Some(pdf) = best
+        .filter(|l| l.version.as_deref() == Some("publishedVersion"))
+        .and_then(|l| l.pdf_url.as_deref())
+        .and_then(web_address)
+    {
+        return Some(pdf);
+    }
+    if let Some(id) = work.locations.iter().find_map(arxiv_id) {
+        return Some(format!("https://arxiv.org/abs/{id}"));
+    }
+    best.into_iter()
+        .flat_map(|l| [&l.pdf_url, &l.landing_page_url])
+        .chain([&work
+            .open_access
+            .as_ref()
+            .filter(|oa| oa.is_oa)
+            .and_then(|oa| oa.oa_url.clone())])
+        .flatten()
+        .find_map(|url| web_address(url))
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -95,23 +221,52 @@ fn strip_tags(text: &str) -> String {
 
 impl Work {
     /// The work as an articles file line (see the module docs), `None`
-    /// without a title.
+    /// without a usable title or primary identity. Rejected provider
+    /// identities are reported; blank DOI values are missing metadata.
     pub fn to_article(&self) -> Option<Article> {
         let title = plumb_core::collapse_whitespace(&strip_tags(
             self.display_name.as_deref().unwrap_or(""),
         ));
-        if title.is_empty() {
+        if title.is_empty() || title.chars().count() > 2000 {
             return None;
         }
-        let item = match self.doi.as_deref() {
-            Some(doi) => doi
-                .trim_start_matches("https://doi.org/")
-                .trim_start_matches("http://doi.org/")
-                .to_string(),
-            None => self
-                .id
-                .trim_start_matches("https://openalex.org/")
-                .to_string(),
+        let doi = self
+            .doi
+            .as_deref()
+            .map(|value| {
+                value
+                    .trim()
+                    .trim_start_matches("https://doi.org/")
+                    .trim_start_matches("http://doi.org/")
+                    .trim()
+                    .to_ascii_lowercase()
+            })
+            .filter(|value| !value.is_empty());
+        if doi.as_deref().is_some_and(|id| {
+            id.contains(char::is_whitespace)
+                || !id
+                    .strip_prefix("10.")
+                    .and_then(|rest| rest.split_once('/'))
+                    .is_some_and(|(prefix, suffix)| {
+                        !prefix.is_empty()
+                            && prefix.bytes().all(|b| b.is_ascii_digit())
+                            && !suffix.is_empty()
+                    })
+        }) {
+            warn!("OpenAlex work has a malformed DOI; record rejected before caching");
+            return None;
+        }
+        let provider_id = self.id.trim().trim_start_matches("https://openalex.org/");
+        let openalex_id = provider_id
+            .strip_prefix('W')
+            .filter(|number| !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()))
+            .map(|_| provider_id.to_string());
+        if openalex_id.is_none() {
+            warn!("OpenAlex work has no valid OpenAlex identifier");
+        }
+        let Some(item) = doi.clone().or_else(|| openalex_id.clone()) else {
+            warn!("OpenAlex work has no usable primary identity; record rejected before caching");
+            return None;
         };
         let authors: Vec<&str> = self
             .authorships
@@ -137,6 +292,13 @@ impl Work {
             description.push_str(", ");
             description.push_str(venue);
         }
+        // A paper whose own address (an arXiv DOI) is already free keeps
+        // no other.
+        let website = if item.to_ascii_lowercase().starts_with(ARXIV_DOI) {
+            None
+        } else {
+            free_copy(self)
+        };
         Some(Article {
             title,
             description: Some(plumb_core::truncate_chars(
@@ -148,10 +310,86 @@ impl Work {
             views: self.cited_by_count,
             aliases: Vec::new(),
             profiles: Vec::new(),
-            website: None,
+            website,
             package: None,
+            facts: Vec::new(),
+            lead: None,
+            names: Vec::new(),
+            sections: Vec::new(),
+            search: None,
+            language: None,
+            paper: Some(PaperMetadata {
+                doi: doi.clone(),
+                openalex_id,
+                arxiv_id: doi
+                    .as_ref()
+                    .and_then(|doi| {
+                        doi.to_ascii_lowercase()
+                            .split_once(ARXIV_DOI)
+                            .map(|(_, id)| id.to_string())
+                    })
+                    .or_else(|| self.locations.iter().find_map(arxiv_id)),
+                authors: authors
+                    .iter()
+                    .take(MAX_PAPER_AUTHORS)
+                    .map(|a| a.to_string())
+                    .collect(),
+                publication_date: self
+                    .publication_date
+                    .as_ref()
+                    .filter(|date| valid_date(date))
+                    .cloned(),
+                publication_year: self.publication_year,
+                raw_publication_date: self.publication_date.clone(),
+                venue: self
+                    .primary_location
+                    .as_ref()
+                    .and_then(|l| l.source.as_ref()?.display_name.clone()),
+                source: "openalex".into(),
+                count: self.cited_by_count,
+                count_kind: PaperCountKind::Citations,
+                alternate_urls: free_copy(self).into_iter().collect(),
+                ..PaperMetadata::default()
+            }),
         })
     }
+}
+
+/// The DOI prefix arXiv gives its papers, which lead to the paper on arXiv.
+pub const ARXIV_DOI: &str = "10.48550/arxiv.";
+
+/// The year of a paper written by [`Work::to_article`], from its
+/// description ("Paper by A et al., 2017, Venue").
+fn year_of(paper: &Article) -> Option<u64> {
+    if let Some(year) = paper.paper.as_ref().and_then(|m| m.publication_year) {
+        return u64::try_from(year).ok();
+    }
+    paper
+        .description
+        .as_deref()?
+        .split(", ")
+        .skip(1)
+        .find(|part| part.len() == 4 && part.bytes().all(|b| b.is_ascii_digit()))?
+        .parse()
+        .ok()
+}
+
+/// Whether a paper's citations could be real in `this_year`: no more than
+/// [`MAX_CITATIONS_A_YEAR`] for each year since it came out.
+fn plausible(paper: &Article, this_year: u64) -> bool {
+    let Some(year) = year_of(paper) else {
+        return true;
+    };
+    let years = this_year.saturating_sub(year).max(1);
+    paper.views <= years.saturating_mul(MAX_CITATIONS_A_YEAR)
+}
+
+/// The year now.
+fn this_year() -> u64 {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    1970 + secs / 31_556_952
 }
 
 /// What [`fetch_papers`] got.
@@ -254,9 +492,12 @@ pub async fn fetch_papers(
         "cited_by_count:>{},is_paratext:false",
         min_citations.saturating_sub(1)
     );
+    // What the progress folder is kept for: papers fetched before free
+    // copies were kept are fetched again.
+    let key = format!("{filter};paper-metadata-v1;per-page={PER_PAGE}");
     let progress = progress.map(Progress::new).transpose()?;
     let (mut articles, mut cursor) = match &progress {
-        Some(progress) => progress.resume(&filter)?,
+        Some(progress) => progress.resume(&key)?,
         None => (Vec::new(), Some("*".to_string())),
     };
     let mut failures = 0u32;
@@ -272,7 +513,8 @@ pub async fn fetch_papers(
             ("cursor", at),
             (
                 "select",
-                "id,doi,display_name,publication_year,cited_by_count,authorships,primary_location"
+                "id,doi,display_name,publication_year,publication_date,cited_by_count,authorships,primary_location,\
+                 open_access,best_oa_location,locations"
                     .to_string(),
             ),
         ];
@@ -338,7 +580,7 @@ pub async fn fetch_papers(
         cursor = page.meta.next_cursor.filter(|_| count > 0);
         if let Some(progress) = &progress {
             progress.append(&new)?;
-            progress.save(&filter, cursor.as_deref())?;
+            progress.save(&key, cursor.as_deref())?;
         }
         articles.extend(new);
         if articles.len() % 20_000 < count {
@@ -350,6 +592,15 @@ pub async fn fetch_papers(
         }
         tokio::time::sleep(PAUSE).await;
     }
+    let now = this_year();
+    let before = articles.len();
+    articles.retain(|paper| plausible(paper, now));
+    if articles.len() < before {
+        info!(
+            "left out {} papers cited implausibly often for their age",
+            before - articles.len()
+        );
+    }
     articles.truncate(limit);
     Ok(Fetched {
         papers: articles,
@@ -358,7 +609,7 @@ pub async fn fetch_papers(
 }
 
 /// The wait a `Retry-After` header asks for, in seconds.
-fn retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+pub(crate) fn retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
     let seconds: u64 = headers
         .get("retry-after")?
         .to_str()
@@ -377,7 +628,9 @@ mod tests {
       {"id": "https://openalex.org/W2963403868", "doi": "https://doi.org/10.48550/arxiv.1706.03762",
        "display_name": "Attention Is All You Need", "publication_year": 2017, "cited_by_count": 90000,
        "authorships": [{"author": {"display_name": "Ashish Vaswani"}}, {"author": {"display_name": "Noam Shazeer"}}],
-       "primary_location": {"source": {"display_name": "arXiv (Cornell University)"}}},
+       "primary_location": {"source": {"display_name": "arXiv (Cornell University)"}},
+       "open_access": {"is_oa": true, "oa_url": "https://arxiv.org/pdf/1706.03762"},
+       "locations": [{"is_oa": true, "landing_page_url": "https://arxiv.org/abs/1706.03762"}]},
       {"id": "https://openalex.org/W1", "doi": null, "display_name": "Growth of <i>E. coli</i>",
        "publication_year": null, "cited_by_count": 300, "authorships": [], "primary_location": null},
       {"id": "https://openalex.org/W2", "display_name": null, "cited_by_count": 5}
@@ -401,6 +654,126 @@ mod tests {
         assert_eq!(articles[1].title, "Growth of E. coli");
         assert_eq!(articles[1].item.as_deref(), Some("W1"));
         assert_eq!(articles[1].description.as_deref(), Some("Paper"));
+    }
+
+    #[test]
+    fn provider_identities_keep_blank_dois_out_of_primary_and_metadata_fields() {
+        for doi in [None, Some(""), Some("  "), Some("https://doi.org/")] {
+            let work: Work = serde_json::from_value(serde_json::json!({
+                "id": "https://openalex.org/W987654", "doi": doi,
+                "display_name": "Unseen synthetic publication"
+            }))
+            .unwrap();
+            let article = work.to_article().unwrap();
+            assert_eq!(article.item.as_deref(), Some("W987654"));
+            let metadata = article.paper.as_ref().unwrap();
+            assert_eq!(metadata.doi, None);
+            assert_eq!(metadata.openalex_id.as_deref(), Some("W987654"));
+            crate::paper_validation::validate_consistency(&[article]).unwrap();
+        }
+        for doi in ["not-a-doi", "10./missing", "10.1234/", "10.1234/has space"] {
+            let work: Work = serde_json::from_value(serde_json::json!({
+                "id": "W987654", "doi": doi, "display_name": "Synthetic publication"
+            }))
+            .unwrap();
+            assert!(work.to_article().is_none(), "{doi}");
+        }
+        let work: Work = serde_json::from_value(serde_json::json!({
+            "id": "invalid-provider-id", "doi": "", "display_name": "Synthetic publication"
+        }))
+        .unwrap();
+        assert!(work.to_article().is_none());
+    }
+
+    #[test]
+    fn papers_keep_where_they_can_be_read_free() {
+        let work = |json: &str| -> Work { serde_json::from_str(json).unwrap() };
+        // The publisher's own free PDF comes first.
+        let gold = work(
+            r#"{"id": "W1", "doi": "https://doi.org/10.1/a", "display_name": "A",
+                "best_oa_location": {"is_oa": true, "version": "publishedVersion",
+                  "pdf_url": "https://journal.example/a.pdf",
+                  "landing_page_url": "https://journal.example/a"},
+                "locations": [{"is_oa": true, "landing_page_url": "http://arxiv.org/abs/2101.00001v2"}]}"#,
+        );
+        assert_eq!(
+            gold.to_article().unwrap().website.as_deref(),
+            Some("https://journal.example/a.pdf")
+        );
+        // Then arXiv, over an accepted version elsewhere.
+        let preprint = work(
+            r#"{"id": "W2", "doi": "https://doi.org/10.1/b", "display_name": "B",
+                "open_access": {"is_oa": true, "oa_url": "https://repo.example.edu/b"},
+                "best_oa_location": {"is_oa": true, "version": "acceptedVersion",
+                  "landing_page_url": "https://repo.example.edu/b"},
+                "locations": [{"is_oa": false, "landing_page_url": "https://doi.org/10.1/b"},
+                  {"is_oa": true, "landing_page_url": "http://arxiv.org/abs/hep-th/9711200v3",
+                   "pdf_url": "http://arxiv.org/pdf/hep-th/9711200v3"}]}"#,
+        );
+        assert_eq!(
+            free_copy(&preprint).as_deref(),
+            Some("https://arxiv.org/abs/hep-th/9711200")
+        );
+        // Then the best copy Unpaywall's data knows of, a PDF first.
+        let repository = work(
+            r#"{"id": "W3", "doi": "https://doi.org/10.1/c", "display_name": "C",
+                "open_access": {"is_oa": true, "oa_url": "https://repo.example.edu/c"},
+                "best_oa_location": {"is_oa": true, "version": "acceptedVersion",
+                  "pdf_url": "https://repo.example.edu/c.pdf",
+                  "landing_page_url": "https://repo.example.edu/c"}}"#,
+        );
+        assert_eq!(
+            free_copy(&repository).as_deref(),
+            Some("https://repo.example.edu/c.pdf")
+        );
+        let bare = work(
+            r#"{"id": "W4", "display_name": "D",
+                "open_access": {"is_oa": true, "oa_url": "https://europepmc.org/articles/pmc1"}}"#,
+        );
+        assert_eq!(
+            free_copy(&bare).as_deref(),
+            Some("https://europepmc.org/articles/pmc1")
+        );
+        // Closed papers, and ones on arXiv by their DOI, keep none.
+        let closed = work(
+            r#"{"id": "W5", "display_name": "E", "open_access": {"is_oa": false, "oa_url": null}}"#,
+        );
+        assert_eq!(free_copy(&closed), None);
+        let page: WorksPage = serde_json::from_str(PAGE).unwrap();
+        let attention = page.results[0].to_article().unwrap();
+        assert_eq!(attention.website, None);
+        // A free copy survives the articles file.
+        let mut line = Vec::new();
+        let paper = preprint.to_article().unwrap();
+        plumb_core::article::write_article(&mut line, &paper).unwrap();
+        let read = plumb_core::article::read_articles(&line[..], 10).unwrap();
+        assert_eq!(read, vec![paper]);
+    }
+
+    #[test]
+    fn papers_cited_more_than_any_real_paper_are_left_out() {
+        let paper = |description: &str, views: u64| Article {
+            title: "A paper".to_string(),
+            description: Some(description.to_string()),
+            views,
+            ..Article::default()
+        };
+        let camera = paper(
+            "Paper by M. Shoji et al., 2020, Plasma and Fusion Research",
+            801_217,
+        );
+        assert_eq!(year_of(&camera), Some(2020));
+        assert!(!plausible(&camera, 2026));
+        let attention = paper("Paper by Ashish Vaswani et al., 2017, arXiv", 180_000);
+        assert!(plausible(&attention, 2026));
+        let lowry = paper(
+            "Paper by Oliver H. Lowry et al., 1951, J. Biol. Chem.",
+            318_762,
+        );
+        assert!(plausible(&lowry, 2026));
+        // Without a year nothing can be said.
+        assert!(plausible(&paper("Paper", 5_000_000), 2026));
+        assert!(this_year() >= 2026);
     }
 
     #[test]

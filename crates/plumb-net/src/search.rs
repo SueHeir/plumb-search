@@ -56,6 +56,10 @@ pub const MAX_BUCKET_RECORDS: usize = 20_000;
 /// Relays a bucket request is tried through before giving up on it.
 pub const RELAY_TRIES: usize = 2;
 
+/// A search sends a bucket to one more node when it is still short of
+/// answers after this share of the time it waits (a quarter).
+const HEDGE_AFTER_SHARE: u32 = 4;
+
 /// The result of a network search: candidate sites to rank locally.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct NetSearch {
@@ -89,6 +93,10 @@ pub struct NetSearch {
     /// Retained buckets used past their freshness deadline; refresh is queued.
     #[serde(default)]
     pub stale: usize,
+    /// Extra requests sent for buckets still short of answers late in the
+    /// search, each to one more node.
+    #[serde(default)]
+    pub hedged: usize,
     /// The sites that match the query, unranked.
     pub found: Vec<FoundSite>,
     /// Size of the records fetched, for [`crate::rounds::RoundStatus`].
@@ -118,11 +126,16 @@ pub struct FoundSite {
     /// Signed crawls from at least [`QUORUM`] different crawlers agree.
     #[serde(default)]
     pub confirmed: bool,
+    /// The crawl in `shared` was signed by a node this node trusts (set by
+    /// [`crate::NetHandle::search`]).
+    #[serde(default)]
+    pub trusted: bool,
     /// What this node may keep of the site in its own records: the signed
     /// crawl as a batch from its crawler would be kept (homepage facts of
     /// an assigned site, plus headings and text when this node trusts the
     /// crawler, see [`crate::NetHandle::search`]). `None` when no signed
-    /// crawl counts here.
+    /// crawl counts here. One crawler alone can be anyone with a fresh key,
+    /// so a node keeps it only when [`FoundSite::keeps`] says so.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shared: Option<SiteRecord>,
     /// The first proof the answer held that checked out as signed, for
@@ -132,6 +145,17 @@ pub struct FoundSite {
 }
 
 impl FoundSite {
+    /// What of the site this node may keep in its own records: `shared`,
+    /// but only when its crawler is trusted here or crawlers this node
+    /// counts confirmed it, as a published batch's crawls are only folded
+    /// in once confirmed (see [`crate::agree`]). Otherwise one throwaway
+    /// key assigned the site could rewrite its title for good.
+    pub fn keeps(&self) -> Option<&SiteRecord> {
+        self.shared
+            .as_ref()
+            .filter(|_| self.trusted || self.confirmed)
+    }
+
     fn add_crawler(&mut self, crawler: String) {
         if !self.crawlers.contains(&crawler) {
             self.crawlers.push(crawler);
@@ -254,6 +278,11 @@ async fn round(
 ) -> NetSearch {
     out.buckets = buckets.len();
     let peers = if buckets.is_empty() { &[][..] } else { peers };
+    // Once requests can go through relays, only nodes that take them
+    // sealed are asked: asking one that does not would show it this
+    // node's IP address with the bucket.
+    let sealed = sealed_targets(peers);
+    let peers = sealed.as_deref().unwrap_or(peers);
     // Spread the buckets over the nodes so that no node gets two buckets
     // of one search while others get none.
     let mut order: Vec<usize> = (0..peers.len()).collect();
@@ -274,63 +303,57 @@ async fn round(
             }
         }
     }
-    out.asked = requests.len();
     // Relays, in a random order; each request starts at its own place in
     // it, so the requests of one search go through different relays.
     let mut relays: Vec<&BucketPeer> = peers.iter().filter(|p| p.oblivious).collect();
     shuffle(&mut relays);
-    let routed: Vec<_> = requests
-        .into_iter()
-        .enumerate()
-        .map(|(i, (bucket, target))| {
-            let through: Vec<BucketPeer> = if target.oblivious {
-                (0..relays.len())
-                    .map(|k| relays[(i + k) % relays.len()])
-                    .filter(|r| r.peer != target.peer)
-                    .take(RELAY_TRIES)
-                    .cloned()
-                    .collect()
-            } else {
-                Vec::new()
-            };
-            (bucket, target, through)
-        })
-        .collect();
-    out.direct = routed
-        .iter()
-        .filter(|(_, _, through)| through.is_empty())
-        .count();
-    let answers = futures::future::join_all(routed.into_iter().map(
-        |(bucket, target, through)| async move {
-            let answerer = target.peer;
-            let deadline = tokio::time::Instant::now() + wait;
-            let answer = async {
-                let (response, relayed) =
-                    ask_bucket(&target, &through, BucketRequest::new(bucket), deadline, now)
-                        .await?;
-                if !response.busy {
-                    return Ok((response, relayed, false));
-                }
-                let token = wallet.and_then(|w| {
-                    w.lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .take(&target.peer)
-                });
-                let Some(token) = token else {
-                    return Ok((response, relayed, false));
-                };
-                let paid = BucketRequest {
-                    bucket,
-                    token: Some(token),
-                };
-                let (response, relayed) =
-                    ask_bucket(&target, &through, paid, deadline, now).await?;
-                Ok::<_, anyhow::Error>((response, relayed, true))
-            };
-            (bucket, answerer, answer.await)
-        },
-    ))
+    let mut sent = 0;
+    let deadline = tokio::time::Instant::now() + wait;
+    let mut send = |bucket: u32, target: &BucketPeer| {
+        let through: Vec<BucketPeer> = if target.oblivious {
+            (0..relays.len())
+                .map(|k| relays[(sent + k) % relays.len()])
+                .filter(|r| r.peer != target.peer)
+                .take(RELAY_TRIES)
+                .cloned()
+                .collect()
+        } else {
+            Vec::new()
+        };
+        sent += 1;
+        out.asked += 1;
+        if through.is_empty() {
+            out.direct += 1;
+        }
+        ask_one(bucket, target.clone(), through, deadline, now, wallet)
+    };
+    let mut asked_of: HashMap<u32, Vec<PeerId>> = HashMap::new();
+    let mut first = Vec::new();
+    for (bucket, target) in &requests {
+        asked_of.entry(*bucket).or_default().push(target.peer);
+        first.push((*bucket, send(*bucket, target)));
+    }
+    // A bucket still short of answers late in the search gets one more
+    // node, so one slow or gone node does not hold up the whole search.
+    let hedge = move |bucket: u32| {
+        let asked = asked_of.entry(bucket).or_default();
+        let target = (0..order.len())
+            .map(|k| &peers[order[(next + k) % order.len()]])
+            .find(|peer| !asked.contains(&peer.peer))?;
+        next += 1;
+        asked.push(target.peer);
+        Some(send(bucket, target))
+    };
+    let want = NODES_PER_BUCKET.min(peers.len());
+    let (answers, hedged) = gather(
+        first,
+        want,
+        wait / HEDGE_AFTER_SHARE,
+        hedge,
+        |answer| matches!(&answer.1, Ok((response, _, _)) if response.records.is_some()),
+    )
     .await;
+    out.hedged = hedged;
 
     let mut merged: HashMap<String, FoundSite> = HashMap::new();
     let mut add = |checked: Vec<FoundSite>| {
@@ -347,7 +370,7 @@ async fn round(
         }
     };
     let mut fetched: HashMap<u32, Vec<Vec<crate::proto::BucketRecord>>> = HashMap::new();
-    for (bucket, answerer, answer) in answers {
+    for (bucket, (answerer, answer)) in answers {
         let (response, relayed, paid) = match answer {
             Ok(response) => response,
             Err(err) => {
@@ -375,7 +398,9 @@ async fn round(
             out.rejected += 1;
             continue;
         };
-        out.answered_by.push(answerer);
+        if earns(&checked) {
+            out.answered_by.push(answerer);
+        }
         if let Some(records) = keep {
             fetched.entry(bucket).or_default().push(records);
         }
@@ -396,6 +421,120 @@ async fn round(
     found.sort_by(|a, b| a.record.domain.cmp(&b.record.domain));
     out.found = found;
     out
+}
+
+/// Asks `target` for `bucket` by [`ask_bucket`], again with one of its
+/// tokens from `wallet` when it says it is busy. Returns who answered, and
+/// the answer, whether it came through a relay and whether a token paid
+/// for it.
+async fn ask_one(
+    bucket: u32,
+    target: BucketPeer,
+    through: Vec<BucketPeer>,
+    deadline: tokio::time::Instant,
+    now: u64,
+    wallet: Option<&Mutex<Wallet>>,
+) -> (PeerId, Result<(BucketResponse, bool, bool)>) {
+    let answer = async {
+        let (response, relayed) =
+            ask_bucket(&target, &through, BucketRequest::new(bucket), deadline, now).await?;
+        if !response.busy {
+            return Ok((response, relayed, false));
+        }
+        let token = wallet.and_then(|w| {
+            w.lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take(&target.peer)
+        });
+        let Some(token) = token else {
+            return Ok((response, relayed, false));
+        };
+        let paid = BucketRequest {
+            bucket,
+            token: Some(token),
+        };
+        let (response, relayed) = ask_bucket(&target, &through, paid, deadline, now).await?;
+        Ok::<_, anyhow::Error>((response, relayed, true))
+    };
+    (target.peer, answer.await)
+}
+
+/// The answer of one request, with its bucket.
+async fn tagged<F: std::future::Future>(bucket: u32, request: F) -> (u32, F::Output) {
+    (bucket, request.await)
+}
+
+/// Waits for the answers to `first`, the requests of a search by bucket,
+/// as in "The Tail at Scale": once a share of the time is gone
+/// (`hedge_after`), or sooner when every request is in, each bucket with
+/// fewer than `want` `good` answers so far gets one more request from
+/// `hedge` (when it has a node left to ask). Returns once every bucket has `want` good answers or nothing is
+/// left to wait for, leaving requests still out unanswered, with the
+/// answers in the order they came and the number of extra requests sent.
+/// Each request ends at the search's deadline on its own.
+async fn gather<T, F>(
+    first: Vec<(u32, F)>,
+    want: usize,
+    hedge_after: Duration,
+    mut hedge: impl FnMut(u32) -> Option<F>,
+    good: impl Fn(&T) -> bool,
+) -> (Vec<(u32, T)>, usize)
+where
+    F: std::future::Future<Output = T>,
+{
+    let mut buckets: Vec<u32> = first.iter().map(|(bucket, _)| *bucket).collect();
+    buckets.dedup();
+    let mut pending = futures::stream::FuturesUnordered::new();
+    for (bucket, request) in first {
+        pending.push(tagged(bucket, request));
+    }
+    let mut good_for: HashMap<u32, usize> = HashMap::new();
+    let mut answers = Vec::new();
+    let mut hedged = 0;
+    let hedge_at = tokio::time::sleep(hedge_after);
+    tokio::pin!(hedge_at);
+    let mut hedging = true;
+    while !buckets
+        .iter()
+        .all(|bucket| good_for.get(bucket).copied().unwrap_or(0) >= want)
+    {
+        let hedge_now = tokio::select! {
+            answer = pending.next() => match answer {
+                Some((bucket, answer)) => {
+                    if good(&answer) {
+                        *good_for.entry(bucket).or_default() += 1;
+                    }
+                    answers.push((bucket, answer));
+                    false
+                }
+                // Everything is in and a bucket is still short (a node
+                // failed or answered badly): ask more nodes now, once.
+                None if hedging => true,
+                None => break,
+            },
+            () = &mut hedge_at, if hedging => true,
+        };
+        if hedge_now {
+            hedging = false;
+            for &bucket in &buckets {
+                if good_for.get(&bucket).copied().unwrap_or(0) >= want {
+                    continue;
+                }
+                if let Some(request) = hedge(bucket) {
+                    hedged += 1;
+                    pending.push(tagged(bucket, request));
+                }
+            }
+        }
+    }
+    (answers, hedged)
+}
+
+/// Whether an answer earns its node credits here (see
+/// [`crate::credits`]): only one holding a signed crawl that checked out,
+/// so a node cannot earn by answering every request with nothing.
+fn earns(checked: &[FoundSite]) -> bool {
+    checked.iter().any(|site| site.verified)
 }
 
 /// Search retained buckets locally, including stale and valid empty answers.
@@ -479,6 +618,14 @@ pub(crate) fn bucket_ready(cache: &BucketCache, bucket: u32, now: u64) -> bool {
     })
 }
 
+/// The nodes that take sealed requests, when at least two do, so each of
+/// them has another to relay to it; `None` when requests cannot all be
+/// relayed and any node may be asked.
+fn sealed_targets(peers: &[BucketPeer]) -> Option<Vec<BucketPeer>> {
+    let sealed: Vec<BucketPeer> = peers.iter().filter(|p| p.oblivious).cloned().collect();
+    (sealed.len() >= 2).then_some(sealed)
+}
+
 /// Asks `target` for a bucket: through one of `through` (relays, tried in
 /// turn) when there are any, else straight. Returns the answer and whether
 /// it came through a relay.
@@ -544,6 +691,7 @@ pub(crate) fn check_answer(
             answers: 1,
             crawlers: Vec::new(),
             confirmed: false,
+            trusted: false,
             shared: None,
             proof: None,
         };
@@ -624,13 +772,18 @@ pub(crate) fn check_answer(
 /// value, so one node alone cannot make a site look more popular.
 fn merge_site(existing: &mut FoundSite, other: FoundSite) {
     existing.answers += 1;
-    let worse = |a: Signals, b: &Signals| Signals {
-        harmonic_rank: worse_rank(a.harmonic_rank, b.harmonic_rank),
-        pagerank_rank: worse_rank(a.pagerank_rank, b.pagerank_rank),
-        tranco_rank: worse_rank(a.tranco_rank, b.tranco_rank),
-        linking_domains: a.linking_domains.min(b.linking_domains),
-        official_site: a.official_site && b.official_site,
-        sitelinks: a.sitelinks.min(b.sitelinks),
+    let worse = |a: Signals, b: &Signals| {
+        let (fact_checks, fact_agrees) = a.worse_facts(b);
+        Signals {
+            harmonic_rank: worse_rank(a.harmonic_rank, b.harmonic_rank),
+            pagerank_rank: worse_rank(a.pagerank_rank, b.pagerank_rank),
+            tranco_rank: worse_rank(a.tranco_rank, b.tranco_rank),
+            linking_domains: a.linking_domains.min(b.linking_domains),
+            official_site: a.official_site && b.official_site,
+            sitelinks: a.sitelinks.min(b.sitelinks),
+            fact_checks,
+            fact_agrees,
+        }
     };
     let signals = worse(existing.record.signals.clone(), &other.record.signals);
     let other_proof = existing
@@ -896,6 +1049,75 @@ mod tests {
     use libp2p::identity::Keypair;
 
     use super::*;
+
+    /// A request answering `good` after `ms` milliseconds.
+    async fn answer_after(ms: u64, good: bool) -> bool {
+        tokio::time::sleep(Duration::from_millis(ms)).await;
+        good
+    }
+
+    #[tokio::test]
+    async fn a_slow_bucket_gets_one_more_node_and_the_search_does_not_wait_for_it() {
+        let start = std::time::Instant::now();
+        let first = vec![
+            (1, answer_after(5, true)),
+            (1, answer_after(5, true)),
+            (2, answer_after(5, true)),
+            // Gone: it would hold the search up for its whole time.
+            (2, answer_after(2_000, true)),
+        ];
+        let mut extra = 0;
+        let (answers, hedged) = gather(
+            first,
+            2,
+            Duration::from_millis(50),
+            |bucket| {
+                assert_eq!(bucket, 2, "only the bucket short of answers");
+                extra += 1;
+                Some(answer_after(5, true))
+            },
+            |good| *good,
+        )
+        .await;
+        assert!(start.elapsed() < Duration::from_millis(1_000));
+        assert_eq!((hedged, extra), (1, 1));
+        assert_eq!(answers.iter().filter(|(bucket, _)| *bucket == 2).count(), 2);
+    }
+
+    #[tokio::test]
+    async fn bad_answers_do_not_count_and_answered_searches_return_at_once() {
+        let start = std::time::Instant::now();
+        let (answers, hedged) = gather(
+            vec![(7, answer_after(1, false)), (7, answer_after(1, true))],
+            2,
+            Duration::from_millis(20),
+            |_| Some(answer_after(1, true)),
+            |good| *good,
+        )
+        .await;
+        assert_eq!((answers.len(), hedged), (3, 1));
+        // Everything answered well before any hedge: no extra request.
+        let (answers, hedged) = gather(
+            vec![(7, answer_after(1, true)), (7, answer_after(1, true))],
+            2,
+            Duration::from_millis(500),
+            |_| -> Option<_> { unreachable!("no bucket is short") },
+            |good| *good,
+        )
+        .await;
+        assert_eq!((answers.len(), hedged), (2, 0));
+        assert!(start.elapsed() < Duration::from_millis(400));
+        // With no node left to ask, it waits for what is out, then stops.
+        let (answers, hedged) = gather(
+            vec![(3, answer_after(30, false))],
+            2,
+            Duration::from_millis(1),
+            |_| None,
+            |good| *good,
+        )
+        .await;
+        assert_eq!((answers.len(), hedged), (1, 0));
+    }
     use crate::assign::{epoch_of, is_assigned, EPOCH_SECS, MAX_SHARE_PPM};
     use crate::batch::Batch;
     use crate::proto::BucketRecord;
@@ -906,6 +1128,22 @@ mod tests {
             proof: None,
             also: Vec::new(),
         }
+    }
+
+    #[test]
+    fn with_relays_only_nodes_taking_sealed_requests_are_asked() {
+        let peer = |oblivious| BucketPeer {
+            peer: PeerId::random(),
+            addrs: Vec::new(),
+            oblivious,
+        };
+        let (a, b, plain) = (peer(true), peer(true), peer(false));
+        // Two relays: the plain node would see the asker's address.
+        let all = [a.clone(), plain.clone(), b.clone()];
+        assert_eq!(sealed_targets(&all), Some(vec![a.clone(), b]));
+        // One relay cannot relay to itself: any node may be asked.
+        assert_eq!(sealed_targets(&[a, plain.clone()]), None);
+        assert_eq!(sealed_targets(&[plain]), None);
     }
 
     #[test]
@@ -966,6 +1204,16 @@ mod tests {
     }
 
     #[test]
+    fn only_an_answer_with_a_signed_crawl_earns_credits() {
+        assert!(!earns(&check_answer(Vec::new(), 0).unwrap()));
+        let unsigned = check_answer(vec![item(&SiteRecord::new("a.com"))], 0).unwrap();
+        assert!(!earns(&unsigned));
+        let mut signed = unsigned;
+        signed[0].verified = true;
+        assert!(earns(&signed));
+    }
+
+    #[test]
     fn two_answers_keep_the_less_favorable_popularity() {
         let mut boosted = SiteRecord::new("phish.com");
         boosted.signals.tranco_rank = Some(1);
@@ -979,6 +1227,7 @@ mod tests {
             answers: 1,
             crawlers: Vec::new(),
             confirmed: false,
+            trusted: false,
             shared: None,
             proof: None,
         };

@@ -81,6 +81,20 @@ impl Place {
         town_size(&self.kind).is_some()
     }
 
+    /// Whether it is found by what it is for, past its kind: a brewpub, or a
+    /// gym or sports centre by its sport ("climbing gym"). Nodes that keep
+    /// only the most notable places keep these too, since few are notable.
+    pub fn is_specialty(&self) -> bool {
+        self.tags.iter().any(|tag| {
+            (tag == BREWERY_TAG && brews_where_served(&self.kind))
+                || (tag.starts_with("sport=")
+                    && matches!(
+                        self.kind.as_str(),
+                        "leisure=sports_centre" | "leisure=fitness_centre"
+                    ))
+        })
+    }
+
     /// What people see: "Pizza restaurant", "Café", "Bicycle shop".
     pub fn label(&self) -> String {
         let cuisine = self
@@ -101,9 +115,15 @@ impl Place {
         let mut words = vec![kind_label(&self.kind)];
         words.extend(kind_info(&self.kind).map(|k| k.2.to_string()));
         for tag in &self.tags {
+            if tag == BREWERY_TAG && !brews_where_served(&self.kind) {
+                continue;
+            }
             words.extend(kind_info(tag).map(|k| format!("{} {}", k.1, k.2)));
             if let Some(cuisine) = tag.strip_prefix("cuisine=") {
                 words.push(cuisine.replace('_', " "));
+            }
+            if let Some(sport) = tag.strip_prefix("sport=") {
+                words.push(sport.replace('_', " "));
             }
         }
         words.join(" ")
@@ -471,9 +491,25 @@ const KINDS: &[KindInfo] = &[
     ("historic=palace", "Palace", ""),
     ("aeroway=aerodrome", "Airport", "airfield"),
     ("railway=station", "Train station", "railway station train"),
-    ("craft=brewery", "Brewery", "beer"),
+    (
+        "craft=brewery",
+        "Brewery",
+        "beer brewpub brewpubs taproom microbrewery",
+    ),
     ("craft=winery", "Winery", "wine"),
     ("craft=distillery", "Distillery", "spirits"),
+    ("craft=plumber", "Plumber", "plumbing"),
+    ("craft=electrician", "Electrician", "electrical"),
+    ("craft=carpenter", "Carpenter", "handyman woodworking"),
+    ("craft=handyman", "Handyman", ""),
+    ("craft=roofer", "Roofer", "roofing"),
+    ("craft=painter", "Painter", "painting"),
+    ("craft=hvac", "HVAC", "heating furnace"),
+    ("craft=locksmith", "Locksmith", ""),
+    ("shop=locksmith", "Locksmith", ""),
+    ("craft=gardener", "Landscaper", "landscaping gardener lawn"),
+    ("craft=tailor", "Tailor", "alterations"),
+    ("craft=shoemaker", "Shoe repair", "cobbler"),
     ("office=government", "Government office", ""),
     ("office=company", "Company office", ""),
     ("healthcare=hospital", "Hospital", ""),
@@ -517,6 +553,25 @@ const KINDS: &[KindInfo] = &[
     ("cuisine=tex-mex", "Tex-Mex", "mexican"),
 ];
 
+/// The tag of a place that brews its own beer: a brewpub or taproom.
+pub const BREWERY_TAG: &str = "craft=brewery";
+
+/// Whether a place of `kind` with `craft=brewery` or `microbrewery=yes` is
+/// a brewpub: somewhere that serves drinks or food. Elsewhere the tag is a
+/// mapping slip (a vet clinic in Denver carries it).
+pub fn brews_where_served(kind: &str) -> bool {
+    matches!(
+        kind,
+        "amenity=pub"
+            | "amenity=bar"
+            | "amenity=biergarten"
+            | "amenity=restaurant"
+            | "amenity=cafe"
+            | "amenity=fast_food"
+            | "amenity=nightclub"
+    )
+}
+
 /// What `kind` is called and the other words for it, when it is listed.
 fn kind_info(kind: &str) -> Option<&'static KindInfo> {
     KINDS.iter().find(|k| k.0 == kind)
@@ -545,6 +600,14 @@ pub fn kind_label(kind: &str) -> String {
 /// Whether `word` (normalized, lowercase) names a kind of place or is one
 /// of the words people search kinds by: "pizza", "coffee", "hotels".
 pub fn is_kind_word(word: &str) -> bool {
+    // Little words of labels ("Place of worship"): "capital of washington"
+    // asks for no place.
+    if matches!(
+        word,
+        "of" | "to" | "and" | "the" | "for" | "a" | "an" | "in" | "on" | "at"
+    ) {
+        return false;
+    }
     let one = word
         .strip_suffix("es")
         .filter(|w| w.ends_with(['s', 'x', 'h']))
@@ -645,6 +708,19 @@ mod tests {
         };
         assert_eq!(pizza.label(), "Pizza restaurant");
         assert!(cafe().kind_words().contains("coffee"));
+        // A brewpub is found as one; a vet clinic tagged as a brewery is not.
+        let mut pub_ = cafe();
+        pub_.kind = "amenity=pub".into();
+        pub_.tags = vec![BREWERY_TAG.into()];
+        assert!(pub_.kind_words().contains("brewpub"));
+        let mut vet = pub_.clone();
+        vet.kind = "amenity=veterinary".into();
+        assert!(!vet.kind_words().contains("brew"));
+        assert!(pub_.is_specialty() && !vet.is_specialty() && !cafe().is_specialty());
+        let mut gym = cafe();
+        gym.kind = "leisure=sports_centre".into();
+        gym.tags = vec!["sport=climbing".into()];
+        assert!(gym.is_specialty());
         for word in [
             "pizza", "coffee", "hotels", "cafe", "gas", "museums", "sushi",
         ] {

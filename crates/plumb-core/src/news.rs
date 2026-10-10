@@ -22,6 +22,38 @@ pub const MAX_HEADLINE_CHARS: usize = 200;
 /// Longest headline link, in bytes.
 pub const MAX_HEADLINE_URL_BYTES: usize = 500;
 
+/// Bounded publisher identities. The BBC's own terms page links both article domains:
+/// https://www.bbc.com/usingthebbc/terms/
+/// Its feed directory and current RSS endpoint identify feeds.bbci.co.uk:
+/// https://support.bbc.co.uk/platform/feeds/NewsFeeds.htm
+/// https://feeds.bbci.co.uk/news/rss.xml
+pub const NEWS_PUBLISHERS: &[(&str, &[&str], &[&str])] = &[
+    ("bbc.com", &["bbc.com", "bbc.co.uk"], &["bbc", "bbc news"]),
+    ("cnn.com", &["cnn.com"], &["cnn", "cnn news"]),
+    ("reuters.com", &["reuters.com"], &["reuters"]),
+];
+
+/// Whether an article belongs to a publisher, allowing only reviewed alternate domains.
+pub fn publisher_allows(domain: &str, url: &str) -> bool {
+    let Some(article_domain) = registrable_domain(url) else {
+        return false;
+    };
+    article_domain == domain
+        || NEWS_PUBLISHERS.iter().any(|(_, domains, _)| {
+            domains.contains(&domain) && domains.contains(&article_domain.as_str())
+        })
+}
+
+/// The BBC uses a separate feed domain; other publishers retain discovered-feed behavior.
+pub fn publisher_feed_allows(domain: &str, url: &str) -> bool {
+    if matches!(domain, "bbc.com" | "bbc.co.uk") {
+        registrable_domain(url)
+            .is_some_and(|host| matches!(host.as_str(), "bbc.com" | "bbc.co.uk" | "bbci.co.uk"))
+    } else {
+        true
+    }
+}
+
 /// How a results page shows its "Recent" block of headlines.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -84,7 +116,7 @@ impl Headline {
         let lower = url.to_ascii_lowercase();
         if url.len() > MAX_HEADLINE_URL_BYTES
             || !(lower.starts_with("https://") || lower.starts_with("http://"))
-            || registrable_domain(url).as_deref() != Some(domain)
+            || !publisher_allows(domain, url)
         {
             return None;
         }
@@ -130,6 +162,33 @@ mod tests {
     use super::*;
 
     const NOW: u64 = 1_800_000_000;
+
+    #[test]
+    fn bbc_feed_articles_keep_reviewed_identity_boundaries() {
+        assert!(
+            Headline::checked("bbc.co.uk", "News", "https://www.bbc.com/news/1", NOW, NOW)
+                .is_some()
+        );
+        assert!(
+            Headline::checked("bbc.com", "News", "https://www.bbc.co.uk/news/1", NOW, NOW)
+                .is_some()
+        );
+        for url in [
+            "https://bbc.com.attacker.test/1",
+            "https://notbbc.com/1",
+            "https://other.com/1",
+        ] {
+            assert!(Headline::checked("bbc.co.uk", "News", url, NOW, NOW).is_none());
+        }
+        assert!(publisher_feed_allows(
+            "bbc.com",
+            "https://feeds.bbci.co.uk/news/rss.xml"
+        ));
+        assert!(!publisher_feed_allows(
+            "bbc.com",
+            "https://feeds.bbci.co.uk.attacker.test/feed"
+        ));
+    }
 
     #[test]
     fn keeps_only_recent_headlines_on_the_site() {

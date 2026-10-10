@@ -1,0 +1,37 @@
+{
+  "kind": "Listing",
+  "data": {
+    "after": "t3_1abcdh",
+    "dist": 6,
+    "children": [
+      {"kind": "t3", "data": {
+        "title": "How do you structure async code in a large project?",
+        "permalink": "/r/rust/comments/1abcde/how_do_you_structure_async_code/",
+        "subreddit_name_prefixed": "r/rust", "score": 412, "num_comments": 87,
+        "created_utc": 1759000000.0, "over_18": false, "is_self": true,
+        "selftext": "We have a tokio service that grew to 40k lines & I keep going\n\nback and forth on channels vs shared state.",
+        "domain": "self.rust", "url": "https://www.reddit.com/r/rust/comments/1abcde/how_do_you_structure_async_code/",
+        "author": "someone"}},
+      {"kind": "t3", "data": {
+        "title": "Why async Rust",
+        "permalink": "/r/programming/comments/1abcdf/why_async_rust/",
+        "subreddit_name_prefixed": "r/programming", "score": 1530, "num_comments": 301,
+        "created_utc": 1758000000.5, "over_18": false, "is_self": false,
+        "selftext": "", "domain": "without.boats", "url": "https://without.boats/blog/why-async-rust/"}},
+      {"kind": "t1", "data": {"body": "a comment, not a thread", "permalink": "/r/rust/comments/1abcde/x/c1"}},
+      {"kind": "t3", "data": {
+        "title": "", "permalink": "/r/rust/comments/1abcdg/untitled/", "over_18": false}},
+      {"kind": "t3", "data": {
+        "title": "Async traits are stable now",
+        "permalink": "/r/rust/comments/1abcdh/async_traits_are_stable_now/",
+        "subreddit_name_prefixed": "r/rust", "score": 980, "num_comments": 120,
+        "created_utc": 1757000000, "over_18": false, "is_self": false,
+        "domain": "blog.rust-lang.org"}},
+      {"kind": "t3", "data": {
+        "title": "An adult thread",
+        "permalink": "/r/somewhere/comments/1abcdi/an_adult_thread/",
+        "subreddit_name_prefixed": "r/somewhere", "score": 5, "num_comments": 1,
+        "created_utc": 1756000000, "over_18": true, "is_self": true, "selftext": "..."}}
+    ]
+  }
+}

@@ -1,9 +1,12 @@
 //! Folds every seed source into one set of [`SiteRecord`]s.
 
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use std::collections::{hash_map::Entry, HashMap, HashSet};
 
-use plumb_core::{canonical_domain, kind_key, linker_count, RecordSet, SiteRecord, MAX_LINK_TEXTS};
+use plumb_core::{
+    canonical_domain, kind_key, linker_count, parent_domain, subdomain_sites, RecordSet,
+    SiteRecord, MAX_LINK_TEXTS, SUBDOMAIN_SITE_NAMES,
+};
 use tracing::{info, warn};
 
 use crate::{CcRank, OfficialSite, TrancoEntry, WatExtract};
@@ -145,19 +148,26 @@ impl Builder {
     /// `ox.ac.uk` the University of Oxford's site, while a college at
     /// `https://www.balliol.ox.ac.uk/` or a band at
     /// `https://linktr.ee/acmerockets` neither grants nor takes away anything
-    /// for the parent domain. A front page claimed by more than five
+    /// for the parent domain. One exception: an inner page of a domain no
+    /// item claims the front page of counts when the item's names name the
+    /// domain ([`OfficialSite::is_named_inner_page`]), so Perplexity AI at
+    /// `https://www.perplexity.ai/hub/` makes perplexity.ai its site, while
+    /// the film Rocky at a bit.ly link does not. A front page claimed by more than five
     /// different items is a shared host rather than anyone's official site,
     /// so it is skipped entirely.
     ///
     /// A label that is just the item id (what Wikidata's label service
     /// returns for items without an English label) is not added as an alias.
     pub fn add_official_sites(&mut self, sites: &[OfficialSite]) {
-        // Front page claims by domain, in input order.
+        // Front page claims by domain, in input order, and named inner page
+        // claims, which count for a domain without front page claims.
         let mut claims: HashMap<String, Vec<&OfficialSite>> = HashMap::new();
+        let mut named_inner: HashMap<String, Vec<&OfficialSite>> = HashMap::new();
         let mut inner = 0u64;
         let mut invalid = 0u64;
         for site in sites {
-            if !site.is_root_homepage() {
+            let front_page = site.is_root_homepage();
+            if !front_page && !site.is_named_inner_page() {
                 inner += 1;
                 continue;
             }
@@ -165,7 +175,20 @@ impl Builder {
                 invalid += 1;
                 continue;
             };
-            claims.entry(domain).or_default().push(site);
+            if front_page {
+                claims.entry(domain).or_default().push(site);
+            } else {
+                named_inner.entry(domain).or_default().push(site);
+            }
+        }
+        let mut by_inner_page = 0usize;
+        for (domain, sites) in named_inner {
+            if let Entry::Vacant(entry) = claims.entry(domain) {
+                entry.insert(sites);
+                by_inner_page += 1;
+            } else {
+                inner += sites.len() as u64;
+            }
         }
         let (mut official, mut shared) = (0usize, 0usize);
         for (domain, claims) in &claims {
@@ -242,7 +265,7 @@ impl Builder {
         }
         warn_invalid("Wikidata official sites", invalid);
         info!(
-            "marked {official} official sites; skipped {shared} front pages claimed by more than {MAX_ITEMS_PER_HOMEPAGE} Wikidata items, and {inner} claims on a subdomain or an inner page"
+            "marked {official} official sites ({by_inner_page} by an inner page naming the site); skipped {shared} front pages claimed by more than {MAX_ITEMS_PER_HOMEPAGE} Wikidata items, and {inner} claims on a subdomain or an inner page"
         );
     }
 
@@ -257,6 +280,7 @@ impl Builder {
     /// With a cut, each record is scored once, only the kept ones are
     /// sorted, and they are moved out of the set rather than copied.
     pub fn finish(mut self, top_n: Option<usize>) -> Vec<SiteRecord> {
+        self.rank_subdomain_sites();
         let total = self.records.len();
         let n = match top_n {
             Some(n) if n < total => n,
@@ -282,6 +306,35 @@ impl Builder {
         kept.iter()
             .map(|domain| std::mem::take(self.records.entry(domain)))
             .collect()
+    }
+}
+
+impl Builder {
+    /// Gives each subdomain that is a site of its own
+    /// ([`plumb_core::subdomain_sites`]) and has a record, such as
+    /// news.ycombinator.com from Wikidata, the ranks of its domain that it
+    /// lacks: the rank lists only rank registrable domains. Subdomain sites
+    /// with no record are not made, so they take no room under a cap, but
+    /// for the few the seed data may not name ([`SUBDOMAIN_SITE_NAMES`]).
+    fn rank_subdomain_sites(&mut self) {
+        for (site, name) in SUBDOMAIN_SITE_NAMES {
+            let parent = parent_domain(site).and_then(|domain| self.records.get(domain));
+            if parent.is_some() && self.records.get(site).is_none() {
+                let record = self.records.entry(site);
+                record.signals.official_site = true;
+                record.add_alias(name);
+            }
+        }
+        for (site, domain) in subdomain_sites() {
+            let (Some(_), Some(parent)) = (self.records.get(site), self.records.get(domain)) else {
+                continue;
+            };
+            let parent = parent.signals.clone();
+            let signals = &mut self.records.entry(site).signals;
+            signals.tranco_rank = signals.tranco_rank.or(parent.tranco_rank);
+            signals.harmonic_rank = signals.harmonic_rank.or(parent.harmonic_rank);
+            signals.pagerank_rank = signals.pagerank_rank.or(parent.pagerank_rank);
+        }
     }
 }
 
@@ -460,6 +513,7 @@ mod tests {
                 linking_domains: 2,
                 official_site: true,
                 sitelinks: 0,
+                ..Signals::default()
             }
         );
         assert_eq!(usbank.crawled_at, None);
@@ -529,6 +583,58 @@ mod tests {
                 ..Default::default()
             }
         );
+    }
+
+    #[test]
+    fn subdomain_sites_get_their_domains_ranks_and_their_own_names() {
+        let mut builder = Builder::new();
+        builder.add_tranco(&[
+            TrancoEntry {
+                rank: 900,
+                domain: "ycombinator.com".into(),
+            },
+            TrancoEntry {
+                rank: 1,
+                domain: "google.com".into(),
+            },
+        ]);
+        builder.add_cc_ranks(&[CcRank {
+            domain: "ycombinator.com".into(),
+            harmonic_rank: 300,
+            pagerank_rank: Some(200),
+            n_hosts: None,
+        }]);
+        builder.add_official_sites(&[
+            site("Q1", "Y Combinator", "www.ycombinator.com"),
+            site("Q2", "Hacker News", "news.ycombinator.com"),
+        ]);
+        let records = builder.finish(None);
+        let get = |domain: &str| records.iter().find(|r| r.domain == domain).unwrap();
+        let (yc, news) = (get("ycombinator.com"), get("news.ycombinator.com"));
+        assert_eq!(news.signals.tranco_rank, Some(900));
+        assert_eq!(news.signals.harmonic_rank, Some(300));
+        assert_eq!(news.signals.pagerank_rank, Some(200));
+        assert_eq!(news.aliases, ["Hacker News"]);
+        assert_eq!(yc.aliases, ["Y Combinator"]);
+        // Google's products with no record of their own are not made.
+        assert_eq!(records.len(), 3);
+    }
+
+    #[test]
+    fn hacker_news_gets_a_record_without_wikidata() {
+        let mut builder = Builder::new();
+        builder.add_tranco(&[TrancoEntry {
+            rank: 900,
+            domain: "ycombinator.com".into(),
+        }]);
+        let records = builder.finish(None);
+        let news = records
+            .iter()
+            .find(|r| r.domain == "news.ycombinator.com")
+            .unwrap();
+        assert_eq!(news.aliases, ["Hacker News"]);
+        assert_eq!(news.signals.tranco_rank, Some(900));
+        assert_eq!(records.len(), 2);
     }
 
     #[test]
@@ -613,6 +719,29 @@ mod tests {
         assert_eq!(
             records[0].aliases,
             ["The New York Times", "NYT Company", "NYT", "New York Times"]
+        );
+    }
+
+    #[test]
+    fn an_inner_page_naming_its_site_counts_when_no_front_page_does() {
+        let got = official(&[
+            ("Q1", "Perplexity AI", "https://www.perplexity.ai/hub/"),
+            ("Q2", "Rocky", "https://bit.ly/RockyHeavyweightCollection"),
+            ("Q3", "Sergey Karjakin", "https://t.me/karjakin"),
+            // A hotel of the chain is not the chain.
+            ("Q7", "Hilton Athens", "https://www.hilton.ru/athens"),
+            // A front page claim wins over an inner page naming the site.
+            ("Q4", "Honda", "https://www.honda.com/"),
+            ("Q5", "Honda Super Cub", "https://www.honda.com/supercub"),
+            // A subdomain is still a part of the site, not the site.
+            ("Q6", "City of Milwaukee", "https://city.milwaukee.gov/"),
+        ]);
+        assert_eq!(
+            got,
+            [
+                official_with("honda.com", &["Honda"]),
+                official_with("perplexity.ai", &["Perplexity AI"]),
+            ]
         );
     }
 

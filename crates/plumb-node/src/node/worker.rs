@@ -33,22 +33,27 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{bail, Context, Result};
-use plumb_core::{now_unix, RecordSet, SiteRecord};
+use plumb_core::{
+    now_unix, parent_domain, RecordSet, SiteRecord, SITES_VERSION, SUBDOMAIN_SITE_NAMES,
+};
 use plumb_crawl::{CrawlConfig, CrawlOutcome, CrawlResult, CrawlTarget, HomepageCrawler};
 use plumb_index::build_index;
 use plumb_ingest::{
     attach_facts, attach_intros, download, facts, intros, kind_sites, load_cc_domain_ranks,
-    load_intros, load_site_facts, load_tranco, load_wikidata_official_sites, Builder,
+    load_intros, load_misread_official_sites, load_site_facts, load_tranco,
+    load_wikidata_official_sites, Builder,
 };
 use tokio::runtime::Handle;
 use tracing::{info, warn};
 
 use super::network::{self, NETWORK_REBUILD_GAP, REBUILD_AFTER_RECORDS};
+use super::round::{RoundSite, RoundSites};
 use super::store::{self, SavedState};
+use super::trim::Keep;
 use super::{Inner, NodeConfig, ServingIndex, Step, Stopped};
 use crate::crawl::{
-    crawl_rolling, due_at, select_targets, select_targets_with, target_for, Fetcher, Rolling,
-    RunEnd, CRAWL_BATCH_SIZE, SECONDS_PER_DAY,
+    crawl_rolling, due_at, select_targets, select_targets_with, target_for, CrawlSet, CrawlSite,
+    Fetcher, Rolling, RunEnd, CRAWL_BATCH_SIZE, SECONDS_PER_DAY,
 };
 use crate::icons::IconStore;
 use crate::records::{load_records, replace_records, sorted_by_link_score, Change, RecordStore};
@@ -78,6 +83,20 @@ const KEY_PAGES_KEPT_SINCE: u64 = 1_791_190_000;
 /// they are this node's to crawl today: a site outside its share would
 /// otherwise keep no sitelinks here until another node's regular recrawl.
 const KEY_PAGES_CATCH_UP_PER_ROUND: usize = 200;
+
+/// Well-known sites no crawl has fetched yet (this node's or a trusted
+/// crawler's) that a round crawls whether or not they are this node's to
+/// crawl today, at most this many, best-known first. A popular site outside
+/// the node's daily share can otherwise wait weeks for a first read, and
+/// until then search knows nothing of what it is. They come out of the
+/// round's budget, not on top of it. About 180,000 such sites were waiting
+/// in October 2026; an hpc test crawl of 60,000 of them fixed three test
+/// searches (weather.com, stability.ai) and broke one.
+const FIRST_FETCH_CATCH_UP_PER_ROUND: usize = 500;
+
+/// Link score a site needs for [`first_fetch_catch_up`]: about the top
+/// 60,000 of the Tranco list, or any official site.
+const FIRST_FETCH_MIN_SCORE: f32 = 0.3;
 
 /// Sites without an icon here that a crawl round fetches just the icon of,
 /// most linked first: crawls that came from the network before nodes shared
@@ -164,6 +183,7 @@ async fn step(inner: &Arc<Inner>) -> Result<Next> {
     // built without them, before filling takes sites for the new ones.
     // Only under a storage limit: a node with none never loses sites.
     if inner.fill_state().prune
+        && !inner.config.crawl_only
         && inner.settings().storage_limit_mb > 0
         && inner.saved().crawl_left == 0
     {
@@ -178,21 +198,22 @@ async fn step(inner: &Arc<Inner>) -> Result<Next> {
             build(inner, &sorted_by_link_score(&set))
         })
         .await?;
-        put_in_service(inner, built, false).await?;
+        put_in_service(inner, Some(built), false).await?;
         return Ok(Next::Continue);
     }
     // Over the storage limit: the least useful sites go, before the limit
     // pauses crawling (see super::trim).
     if super::trim::due(inner) {
         if let Some(built) = blocking(inner, super::trim::trim).await? {
-            put_in_service(inner, built, false).await?;
+            put_in_service(inner, Some(built), false).await?;
         }
         return Ok(Next::Continue);
     }
     // Enough records from other nodes rebuild the index, but no sooner
-    // than NETWORK_REBUILD_GAP after the last build.
-    let network_rebuild_at =
-        (inner.saved().network_pending >= REBUILD_AFTER_RECORDS).then(|| network_rebuild_at(inner));
+    // than NETWORK_REBUILD_GAP (or a few times the last build) after it.
+    let network_rebuild_at = (inner.saved().network_pending >= REBUILD_AFTER_RECORDS
+        && !inner.config.crawl_only)
+        .then(|| network_rebuild_at(inner));
     if network_rebuild_at.is_some_and(|at| at <= now_unix()) && !inner.saved().index_stale {
         if inner.saved().crawl_left > 0 {
             // The round under way builds them in when it ends.
@@ -205,8 +226,14 @@ async fn step(inner: &Arc<Inner>) -> Result<Next> {
         }
     }
     let saved = inner.saved();
-    if inner.current().is_none() || (saved.index_stale && saved.crawl_left == 0) {
+    if !inner.config.crawl_only
+        && (inner.current().is_none() || (saved.index_stale && saved.crawl_left == 0))
+    {
         rebuild(inner, true).await?;
+        return Ok(Next::Continue);
+    }
+    if saved.sites_version < SITES_VERSION && !saved.quick_start {
+        refold_seed(inner).await?;
         return Ok(Next::Continue);
     }
     if missing_buckets(inner) {
@@ -217,7 +244,11 @@ async fn step(inner: &Arc<Inner>) -> Result<Next> {
         rebuild(inner, false).await?;
         return Ok(Next::Continue);
     }
-    let wikidata_due = saved.wikidata_missing.then(|| inner.wikidata_retry_at());
+    // Crawling only, the sites set up with (from a trusted node, or the
+    // Tranco list) and those filling brings are crawled without the rest of
+    // the seed data, whose fold holds every record.
+    let wikidata_due =
+        (saved.wikidata_missing && !inner.config.crawl_only).then(|| inner.wikidata_retry_at());
     // Crawls and refreshes wait while background updates are off, paused
     // or outside the crawl hours, or a limit is reached; a day's download
     // limit ends with the day, a pause when it says.
@@ -262,17 +293,38 @@ async fn step(inner: &Arc<Inner>) -> Result<Next> {
 }
 
 /// When records from other nodes may next rebuild the index: once
-/// [`NETWORK_REBUILD_GAP`] has passed since the last build (right away when
-/// none was built since the node started).
+/// [`NETWORK_REBUILD_GAP`], or [`BUILD_GAP_PER_BUILD`] times as long as the
+/// last build took when that is longer, has passed since the last build
+/// (right away when none was built since the node started).
 fn network_rebuild_at(inner: &Inner) -> u64 {
     match inner.last_build.load(Ordering::SeqCst) {
         0 => 0,
-        last => last.saturating_add(NETWORK_REBUILD_GAP.as_secs()),
+        last => last.saturating_add(network_rebuild_gap(
+            inner.last_build_took.load(Ordering::SeqCst),
+        )),
     }
 }
 
+/// Seconds between index builds that records from other nodes ask for,
+/// after a build that took `took` seconds: a build of millions of sites on
+/// a small server takes most of half an hour, and one every half hour
+/// would leave it building more often than not, with searches waiting on
+/// the memory and disk the builds take.
+fn network_rebuild_gap(took: u64) -> u64 {
+    NETWORK_REBUILD_GAP
+        .as_secs()
+        .max(took.saturating_mul(BUILD_GAP_PER_BUILD))
+}
+
+/// How many times as long as a build takes the node waits before another
+/// that records from other nodes ask for: building at most a quarter of
+/// the time.
+const BUILD_GAP_PER_BUILD: u64 = 3;
+
 fn idle_detail(config: &NodeConfig) -> &'static str {
-    if config.refresh_every.is_some() {
+    if config.crawl_only {
+        "Crawling only; up to date until the next crawl round"
+    } else if config.refresh_every.is_some() {
         "Up to date until the next refresh"
     } else {
         "Up to date; refreshing is off"
@@ -299,7 +351,7 @@ async fn set_up(inner: &Arc<Inner>) -> Result<()> {
             inner.update_saved(|saved| *saved = fresh)?;
             save_seed_records(inner, &records)?;
             inner.check_stop()?;
-            build(inner, &records)
+            build_unless_crawling_only(inner, &records)
         })
         .await?;
         return put_in_service(inner, built, true).await;
@@ -324,10 +376,35 @@ async fn set_up(inner: &Arc<Inner>) -> Result<()> {
         inner.update_saved(|saved| *saved = fresh)?;
         save_seed_records(inner, &records)?;
         inner.check_stop()?;
-        build(inner, &records)
+        build_unless_crawling_only(inner, &records)
     })
     .await?;
     put_in_service(inner, built, true).await
+}
+
+/// [`build`], or crawling only ([`NodeConfig::crawl_only`]), no index:
+/// `None`, noting how many sites the records hold.
+fn build_unless_crawling_only<R: Borrow<SiteRecord>>(
+    inner: &Inner,
+    records: &[R],
+) -> Result<Option<ServingIndex>> {
+    if inner.config.crawl_only {
+        inner
+            .round_sites
+            .store(records.len() as u64, Ordering::SeqCst);
+        return Ok(None);
+    }
+    build(inner, records).map(Some)
+}
+
+/// [`build_from_file`], or crawling only ([`NodeConfig::crawl_only`]),
+/// no index: `None`. The records are saved already, and the next round
+/// folds their journal in as it reads them.
+fn build_from_file_unless_crawling_only(inner: &Inner) -> Result<Option<ServingIndex>> {
+    if inner.config.crawl_only {
+        return Ok(None);
+    }
+    build_from_file(inner).map(Some)
 }
 
 /// Downloads the rest of the seed data, which setup went on without, and
@@ -339,6 +416,13 @@ async fn set_up(inner: &Arc<Inner>) -> Result<()> {
 /// A failure of Wikidata only sets the time of the next try: it is shown in
 /// the status, but does not hold up other work.
 async fn complete_seed(inner: &Arc<Inner>) -> Result<()> {
+    let from_network = tokio::select! {
+        done = complete_seed_from_network(inner) => done?,
+        () = inner.stopped() => return Err(Stopped.into()),
+    };
+    if from_network {
+        return Ok(());
+    }
     let quick = inner.saved().quick_start;
     if quick {
         info!("downloading the rest of the seed data: Wikidata's official websites and more");
@@ -391,8 +475,13 @@ async fn complete_seed(inner: &Arc<Inner>) -> Result<()> {
                 record.crawl_attempted_at.is_some() || !record.link_texts.is_empty()
             });
         }
+        take_back_misread(&files, &mut set);
+        set.split_subdomain_sites(&seed);
         set.extend(seed);
-        if let Some(change) = home_site_change(inner, &set) {
+        let titled = set
+            .get(plumb_core::HOME_SITE)
+            .is_some_and(|home| home.title.is_some());
+        if let Some(change) = home_site_change(inner, titled) {
             change.apply(&mut set);
         }
         inner.check_stop()?;
@@ -409,6 +498,7 @@ async fn complete_seed(inner: &Arc<Inner>) -> Result<()> {
             saved.wikidata_missing = wikidata_missing;
             saved.quick_start = false;
             saved.index_stale = true;
+            saved.sites_version = SITES_VERSION;
         })?;
         info!(
             "folded the seed data into the records: {} sites (there were {before})",
@@ -427,6 +517,157 @@ async fn complete_seed(inner: &Arc<Inner>) -> Result<()> {
     }
     sweep(inner).await;
     Ok(())
+}
+
+/// The rest of the seed data from the network rather than Wikidata: a
+/// node that set up from the Tranco list because no trusted node answered
+/// in time asks again before it goes to Wikidata and Wikipedia, and takes
+/// the best sites of a trusted node's list, which carry the official
+/// sites, facts and intros, as filling does. `false` when no trusted node
+/// answers now either.
+async fn complete_seed_from_network(inner: &Arc<Inner>) -> Result<bool> {
+    let Some((records, downloaded)) = super::fill::seed_from_network(inner).await? else {
+        return Ok(false);
+    };
+    let n = records.len() as u64;
+    blocking(inner, move |inner| {
+        super::network::append_inbox(inner, &records)?;
+        inner.update_saved(|saved| {
+            saved.wikidata_missing = false;
+            saved.quick_start = false;
+            saved.sites_version = SITES_VERSION;
+        })
+    })
+    .await?;
+    inner.add_downloaded(downloaded)?;
+    inner.inbox_records.fetch_add(n, Ordering::SeqCst);
+    inner.wake.notify_one();
+    info!("took {n} sites from a trusted node instead of asking Wikidata");
+    inner.journal.info(format!(
+        "Took the rest of the seed data from a trusted node in the network ({n} sites) instead of Wikidata"
+    ));
+    Ok(true)
+}
+
+/// Brings records made before the lists of sites on subdomains, or before
+/// email addresses were refused as websites ([`SITES_VERSION`]), up to
+/// date from the seed files already on disk, without downloading anything:
+/// sites such as scholar.google.com, which were part of their parent
+/// domain, get records of their own with their official names, and claims
+/// misread from email addresses are taken back. Only the few records that
+/// change are read from the seed files; the changes go into the records'
+/// journal ([`subdomain_changes`]) and the index is rebuilt as after a
+/// crawl, so this needs no more memory than a rebuild. A node stopped part
+/// way does it again on its next start: the changes come out the same.
+async fn refold_seed(inner: &Arc<Inner>) -> Result<()> {
+    info!("the lists of sites on subdomains changed: updating the records from the seed data");
+    blocking(inner, |inner| {
+        let changes = subdomain_changes(&inner.paths.seed)?;
+        let n = changes.len();
+        inner.check_stop()?;
+        {
+            let _records = inner.hold_records();
+            RecordStore::open(&inner.paths.records).save(&changes)?;
+        }
+        inner.update_saved(|saved| {
+            saved.sites_version = SITES_VERSION;
+            saved.index_stale |= n > 0;
+        })?;
+        info!("updated the records from the seed data: {n} changes");
+        Ok(())
+    })
+    .await
+}
+
+/// The changes [`refold_seed`] makes, from the Wikidata files in `seed`:
+/// for each claim misread from an email address
+/// ([`plumb_ingest::OfficialSite::misread`]), taking it back and merging
+/// the domain's own claims again; for each subdomain site with a claim or
+/// a built-in name ([`SUBDOMAIN_SITE_NAMES`]), its record, made where its
+/// parent domain has one ([`Change::SubdomainSite`]).
+fn subdomain_changes(seed: &Path) -> Result<Vec<Change>> {
+    let files = [
+        seed.join(download::WIKIDATA_FILE_NAME),
+        seed.join(kind_sites::KIND_SITES_FILE_NAME),
+    ];
+    let files: Vec<&PathBuf> = files.iter().filter(|path| path.is_file()).collect();
+    let mut misread = Vec::new();
+    for path in &files {
+        misread.extend(
+            load_misread_official_sites(path)?
+                .into_iter()
+                .filter(|site| site.is_root_homepage()),
+        );
+    }
+    let misread_domains: HashSet<&str> = misread.iter().map(|site| site.domain.as_str()).collect();
+    let mut sites = Vec::new();
+    for path in &files {
+        sites.extend(
+            load_wikidata_official_sites(path)?
+                .into_iter()
+                .filter(|site| {
+                    parent_domain(&site.domain).is_some()
+                        || misread_domains.contains(site.domain.as_str())
+                }),
+        );
+    }
+    let facts = seed.join(facts::FACTS_FILE_NAME);
+    if facts.is_file() && !(sites.is_empty() && misread.is_empty()) {
+        let facts = load_site_facts(&facts)?;
+        attach_facts(&mut sites, &facts);
+        attach_facts(&mut misread, &facts);
+    }
+    let intros = seed.join(intros::INTROS_FILE_NAME);
+    if intros.is_file() && !sites.is_empty() {
+        attach_intros(&mut sites, &load_intros(&intros)?);
+    }
+    let mut changes: Vec<Change> = misread
+        .iter()
+        .map(|site| Change::TakeBack {
+            domain: site.domain.clone(),
+            names: std::iter::once(site.label.trim().to_string())
+                .chain(site.names.iter().cloned())
+                .collect(),
+        })
+        .collect();
+    let mut builder = Builder::new();
+    builder.add_official_sites(&sites);
+    for record in builder.finish(None) {
+        changes.push(if parent_domain(&record.domain).is_some() {
+            Change::SubdomainSite { record }
+        } else {
+            Change::Merge { record }
+        });
+    }
+    for (site, name) in SUBDOMAIN_SITE_NAMES {
+        let mut record = SiteRecord::new(*site);
+        record.signals.official_site = true;
+        record.add_alias(name);
+        changes.push(Change::SubdomainSite { record });
+    }
+    Ok(changes)
+}
+
+/// Takes back what Wikidata claims that earlier versions misread gave the
+/// records ([`plumb_ingest::OfficialSite::misread`]), for a full fold of
+/// the seed: the domain's own seed record adds its facts back after.
+fn take_back_misread(files: &SeedFiles, set: &mut RecordSet) {
+    let Ok(wikidata) = &files.wikidata else {
+        return;
+    };
+    for path in [wikidata, &files.kind_sites] {
+        if !path.is_file() {
+            continue;
+        }
+        match load_misread_official_sites(path) {
+            Ok(sites) => {
+                for site in sites.iter().filter(|site| site.is_root_homepage()) {
+                    set.take_back_official_site(&site.domain, &[site.label.trim()]);
+                }
+            }
+            Err(err) => warn!("could not read {} again: {err:#}", path.display()),
+        }
+    }
 }
 
 /// The files a setup ingests.
@@ -478,8 +719,9 @@ async fn download_seed(inner: &Inner) -> Result<SeedFiles> {
     inner.set_step(Step::Downloading, "Asking Wikidata for official websites");
     inner.set_progress(1, total, "files");
     if !wikidata.as_ref().is_ok_and(|path| is_recent(path)) {
-        let downloaded = download::download_wikidata_official_sites_paced(
+        let downloaded = download::download_wikidata_official_sites_with(
             &client,
+            sources.wikidata_mirror_url.as_deref(),
             &sources.wikidata_sparql_url,
             seed,
             sources.wikidata_min_sitelinks,
@@ -517,8 +759,9 @@ async fn download_seed(inner: &Inner) -> Result<SeedFiles> {
             Step::Downloading,
             "Asking Wikidata for the countries and kinds of those sites",
         );
-        let downloaded = facts::download_site_facts(
+        let downloaded = facts::download_site_facts_with(
             &client,
+            sources.wikidata_mirror_url.as_deref(),
             &sources.wikidata_sparql_url,
             seed,
             &[sites.clone(), kind_sites.clone()],
@@ -723,17 +966,16 @@ fn missing_buckets(inner: &Inner) -> bool {
 /// Builds a new index of the records file and puts it in service; see
 /// [`put_in_service`] for `ends_round`.
 async fn rebuild(inner: &Arc<Inner>, ends_round: bool) -> Result<()> {
+    let started = Instant::now();
     let built = blocking(inner, |inner| {
         let _records = inner.hold_records();
-        inner.set_step(Step::Indexing, "Reading the site records");
-        let set = load_records(&inner.paths.records)?;
-        inner.check_stop()?;
-        // In order by reference: copying a million records into a list
-        // would hold them twice.
-        build(inner, &sorted_by_link_score(&set))
+        build_from_file(inner)
     })
     .await?;
-    put_in_service(inner, built, ends_round).await
+    inner
+        .last_build_took
+        .store(started.elapsed().as_secs(), Ordering::SeqCst);
+    put_in_service(inner, Some(built), ends_round).await
 }
 
 /// Starts a refresh: [`NodeConfig::crawl_per_refresh`] homepages to crawl.
@@ -802,7 +1044,10 @@ impl Fetcher for NodeFetcher<'_> {
         }
         // Time to index what was crawled so far; the homepages in flight
         // are tried again when the crawl goes on.
-        if self.batches > 0 && self.started.elapsed() >= self.inner.config.index_during_crawl_every
+        // Crawling only, there is no index to put the crawl in.
+        if self.batches > 0
+            && !self.inner.config.crawl_only
+            && self.started.elapsed() >= self.inner.config.index_during_crawl_every
         {
             self.checkpoint = true;
             return None;
@@ -836,46 +1081,62 @@ impl Fetcher for NodeFetcher<'_> {
 /// in service.
 async fn crawl(inner: &Arc<Inner>) -> Result<()> {
     let handle = Handle::current();
-    let built = blocking(inner, move |inner| crawl_and_build(inner, &handle)).await?;
-    match built {
-        Some(built) => put_in_service(inner, built, true).await,
-        None => Ok(()),
+    match blocking(inner, move |inner| crawl_and_build(inner, &handle)).await? {
+        Done::Built(built) => put_in_service(inner, built, true).await,
+        Done::Nothing => Ok(()),
     }
 }
 
-/// The change that gives `set` the network's own site
-/// ([`plumb_core::home_site_record`]) while it has no title for it: never
-/// crawled, or only through a bot check. `None` unless
-/// [`super::NodeConfig::crawl_home_site`].
-fn home_site_change(inner: &Inner, set: &RecordSet) -> Option<Change> {
+/// The change that gives the records the network's own site
+/// ([`plumb_core::home_site_record`]) while they have no title for it
+/// (`titled` false): never crawled, or only through a bot check. `None`
+/// unless [`super::NodeConfig::crawl_home_site`].
+fn home_site_change(inner: &Inner, titled: bool) -> Option<Change> {
     if !inner.config.crawl_home_site {
         return None;
     }
-    set.get(plumb_core::HOME_SITE)
-        .is_none_or(|home| home.title.is_none())
-        .then(|| Change::Merge {
-            record: plumb_core::home_site_record(),
-        })
+    (!titled).then(|| Change::Merge {
+        record: plumb_core::home_site_record(),
+    })
+}
+
+/// What [`crawl_and_build`] did. Made once a round, so its size does not
+/// matter.
+#[allow(clippy::large_enum_variant)]
+enum Done {
+    /// Crawled, and built an index of the records (none when crawling
+    /// only), for [`put_in_service`].
+    Built(Option<ServingIndex>),
+    /// Nothing to crawl and nothing new to index.
+    Nothing,
 }
 
 /// Crawls the homepages left in the round, saving each batch as it goes
-/// (see [`crate::crawl`]), then builds an index. `None` when there turned
-/// out to be nothing to crawl and nothing new to index.
-fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Option<ServingIndex>> {
+/// (see [`crate::crawl`]), then builds an index.
+fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Done> {
     let left = inner.saved().crawl_left;
     let _records = inner.hold_records();
     inner.set_step(Step::Crawling, "Reading the site records");
-    let mut set = load_records(&inner.paths.records)?;
+    let topics = inner.focus_topics();
+    let mut set = RoundSites::load(&inner.paths.records, topics.clone(), Keep::of(inner))?;
+    set.hold_new_sites(!inner.config.take_new_sites);
+    inner
+        .round_sites
+        .store(set.iter().len() as u64, Ordering::SeqCst);
     let mut store = RecordStore::open(&inner.paths.records);
     inner.check_stop()?;
-    if let Some(change) = home_site_change(inner, &set) {
+    let titled = set
+        .get(plumb_core::HOME_SITE)
+        .is_some_and(RoundSite::titled);
+    if let Some(change) = home_site_change(inner, titled) {
         store.save(std::slice::from_ref(&change))?;
-        change.apply(&mut set);
+        set.apply(change);
     }
 
     let window = RECRAWL_AFTER_DAYS * SECONDS_PER_DAY;
     let net = network::handle(inner).cloned();
     let now = now_unix();
+    drop_dead_sites(inner, &mut set, &mut store, now)?;
     // In the network, only the sites assigned to this node today, or,
     // crawling any site, this node's slice among its trusted crawlers.
     let group = match &net {
@@ -890,8 +1151,8 @@ fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Option<ServingIndex
     }
     let candidates = set.iter().filter(|record| match (&net, &group) {
         (None, _) => true,
-        (Some(net), Some(group)) => net.owns_slice(group, &record.domain),
-        (Some(net), None) => net.is_assigned(&record.domain, now),
+        (Some(net), Some(group)) => net.owns_slice(group, record.domain()),
+        (Some(net), None) => net.is_assigned(record.domain(), now),
     });
     // Sites whose crawlers disagree are fetched whether assigned or not:
     // this node's own crawl settles the dispute (see plumb_net::agree).
@@ -903,8 +1164,8 @@ fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Option<ServingIndex
             .filter_map(|domain| set.get(domain))
             .filter(|record| {
                 record
-                    .crawled_at
-                    .max(record.crawl_attempted_at)
+                    .crawled_at()
+                    .max(record.crawl_attempted_at())
                     .is_none_or(|last| last + RECHECK_AGAIN_AFTER_SECS <= now)
             })
             .map(target_for)
@@ -919,28 +1180,37 @@ fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Option<ServingIndex
         .filter(|_| inner.config.crawl_home_site);
     if let Some(home) = home {
         if due_at(home, window).is_none_or(|due| due <= now)
-            && !rechecks.iter().any(|target| target.domain == home.domain)
+            && !rechecks.iter().any(|target| target.domain == home.domain())
         {
             rechecks.push(target_for(home));
         }
     }
-    for record in key_page_catch_up(&set) {
-        if !rechecks.iter().any(|target| target.domain == record.domain) {
+    for record in key_page_catch_up(&set)
+        .into_iter()
+        .chain(first_fetch_catch_up(&set, now, window))
+    {
+        if !rechecks
+            .iter()
+            .any(|target| target.domain == record.domain())
+        {
             rechecks.push(target_for(record));
         }
     }
-    let candidates: Vec<&SiteRecord> = candidates
-        .filter(|record| !rechecks.iter().any(|target| target.domain == record.domain))
+    let candidates: Vec<&RoundSite> = candidates
+        .filter(|record| {
+            !rechecks
+                .iter()
+                .any(|target| target.domain == record.domain())
+        })
         .collect();
     let budget = left.saturating_sub(rechecks.len());
     // Sites about the node's focus topics come first, up to half the
     // round, and are due again twice as soon.
-    let topics = inner.focus_topics();
     let focused = if topics.is_empty() {
         Vec::new()
     } else {
         select_targets(
-            candidates.iter().copied().filter(|r| topics.matches(r)),
+            candidates.iter().copied().filter(|r| r.focused()),
             budget / FOCUS_SHARE_OF_ROUND,
             now,
             window / FOCUS_RECRAWL_FASTER,
@@ -954,18 +1224,21 @@ fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Option<ServingIndex
     }
     let focused_domains: HashSet<&str> = focused.iter().map(|t| t.domain.as_str()).collect();
     // Sites crawled before nodes kept icons or key pages are due again for
-    // them.
+    // them, and so are sites read by an older crawler (see
+    // plumb_crawl::CRAWL_VERSION).
     let icons = IconStore::new(&inner.paths.icons);
     let noted = icons.noted();
     let rest = select_targets_with(
         candidates
             .iter()
             .copied()
-            .filter(|r| !focused_domains.contains(r.domain.as_str())),
+            .filter(|r| !focused_domains.contains(r.domain())),
         budget - focused.len(),
         now,
         window,
-        |record| due_for_icon(record, &noted) || due_for_key_pages(record),
+        |record| {
+            due_for_icon(record, &noted) || due_for_key_pages(record) || due_for_rereading(record)
+        },
     );
     drop(noted);
     drop(focused_domains);
@@ -1036,7 +1309,8 @@ fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Option<ServingIndex
                     totals.attempted,
                     inner.saved().crawl_left
                 );
-                return build(inner, &sorted_by_link_score(&set)).map(Some);
+                drop((set, store));
+                return build_from_file_unless_crawling_only(inner).map(Done::Built);
             }
             RunEnd::Stopped => {
                 // Paused by the settings or a limit: index what was crawled
@@ -1051,9 +1325,10 @@ fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Option<ServingIndex
                     group_thousands(totals.attempted as u64)
                 ));
                 if totals.attempted == 0 {
-                    return Ok(None);
+                    return Ok(Done::Nothing);
                 }
-                return build(inner, &sorted_by_link_score(&set)).map(Some);
+                drop((set, store));
+                return build_from_file_unless_crawling_only(inner).map(Done::Built);
             }
             RunEnd::Offline(offline) => {
                 let proxy = if inner.config.use_system_proxy {
@@ -1093,10 +1368,13 @@ fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Option<ServingIndex
         let now = now_unix();
         inner.update_saved(|saved| saved.last_refresh = Some(now))?;
         inner.refresh_requested.store(false, Ordering::SeqCst);
-        return Ok(None);
+        return Ok(Done::Nothing);
     }
     inner.check_stop()?;
-    build(inner, &sorted_by_link_score(&set)).map(Some)
+    // The records are read again a record at a time, rather than built
+    // from the set held, so the build never holds every record.
+    drop((set, store));
+    build_from_file_unless_crawling_only(inner).map(Done::Built)
 }
 
 /// Whether the last try at `record`'s homepage fetched it.
@@ -1104,50 +1382,132 @@ fn crawl_and_build(inner: &Inner, handle: &Handle) -> Result<Option<ServingIndex
 /// its icon. A newer crawl without an icon here came from the network
 /// without one; fetching it again would undo the point of sharing crawls,
 /// so its icon is fetched on its own ([`catch_up_icons`]).
-fn due_for_icon(record: &SiteRecord, noted: &HashSet<String>) -> bool {
+fn due_for_icon(record: &RoundSite, noted: &HashSet<String>) -> bool {
     last_crawl_answered(record)
-        && record.crawled_at.is_some_and(|at| at < ICONS_KEPT_SINCE)
-        && !noted.contains(&record.domain)
+        && record.crawled_at().is_some_and(|at| at < ICONS_KEPT_SINCE)
+        && !noted.contains(record.domain())
 }
 
 /// Whether a site last crawled before nodes kept key pages, and without
 /// any, is due again for them.
-fn due_for_key_pages(record: &SiteRecord) -> bool {
+fn due_for_key_pages(record: &RoundSite) -> bool {
     last_crawl_answered(record)
-        && record.key_pages.is_empty()
+        && !record.has_key_pages()
         && record
-            .crawled_at
+            .crawled_at()
             .is_some_and(|at| at < KEY_PAGES_KEPT_SINCE)
 }
 
 /// The best-linked sites, up to [`KEY_PAGES_CATCH_UP_PER_ROUND`], due for
 /// key pages ([`due_for_key_pages`]), assigned to this node or not.
-fn key_page_catch_up(set: &RecordSet) -> Vec<&SiteRecord> {
-    sorted_by_link_score(set)
+fn key_page_catch_up(set: &RoundSites) -> Vec<&RoundSite> {
+    set.sorted_by_link_score()
         .into_iter()
         .filter(|record| due_for_key_pages(record))
         .take(KEY_PAGES_CATCH_UP_PER_ROUND)
         .collect()
 }
 
-fn last_crawl_answered(record: &SiteRecord) -> bool {
+/// The best-known sites, up to [`FIRST_FETCH_CATCH_UP_PER_ROUND`], that no
+/// crawl has fetched yet and are due a try ([`due_at`]: never tried, or
+/// waited out the pause after their last failed try), assigned to this node
+/// or not.
+fn first_fetch_catch_up(set: &RoundSites, now: u64, window: u64) -> Vec<&RoundSite> {
+    let mut due: Vec<&RoundSite> = set
+        .iter()
+        .filter(|record| {
+            record.crawled_at().is_none()
+                && record.gone_at().is_none()
+                && record.link_score() >= FIRST_FETCH_MIN_SCORE
+                && due_at(*record, window).is_none_or(|due| due <= now)
+        })
+        .collect();
+    due.sort_by(|a, b| {
+        b.link_score()
+            .total_cmp(&a.link_score())
+            .then_with(|| a.domain().cmp(b.domain()))
+    });
+    due.truncate(FIRST_FETCH_CATCH_UP_PER_ROUND);
+    due
+}
+
+/// Whether a site was last read by an older crawler than this one
+/// ([`plumb_crawl::CRAWL_VERSION`]), so it is due again to be read anew.
+// Never, while the version is still the first one.
+#[allow(clippy::absurd_extreme_comparisons)]
+fn due_for_rereading(record: &RoundSite) -> bool {
+    last_crawl_answered(record) && record.crawl_version() < plumb_crawl::CRAWL_VERSION
+}
+
+/// Counts the sites that look dead ([`crate::dead`]) and, with
+/// [`NodeConfig::drop_dead_sites`], takes them out: each is cut down to its
+/// crawl marks and ranks, saved to the records' journal, and the index is
+/// built again without them.
+fn drop_dead_sites(
+    inner: &Inner,
+    set: &mut RoundSites,
+    store: &mut RecordStore,
+    now: u64,
+) -> Result<()> {
+    if !set
+        .iter()
+        .any(|record| crate::dead::looks_dead(record, now))
+    {
+        return Ok(());
+    }
+    let dead: Vec<String> = crate::dead::find_dead(|| set.iter(), now, RoundSite::kept)
+        .into_iter()
+        .map(|record| record.domain().to_owned())
+        .collect();
+    if dead.is_empty() {
+        return Ok(());
+    }
+    if !inner.config.drop_dead_sites {
+        info!(
+            "{} sites look dead (no answer for weeks; the best known: {}); kept, since \
+             --drop-dead-sites is off",
+            dead.len(),
+            dead.iter().take(5).cloned().collect::<Vec<_>>().join(", ")
+        );
+        return Ok(());
+    }
+    let changes: Vec<Change> = dead
+        .into_iter()
+        .map(|domain| Change::Gone { domain, at: now })
+        .collect();
+    store.save(&changes)?;
+    let count = changes.len();
+    for change in changes {
+        set.apply(change);
+    }
+    inner.update_saved(|saved| saved.index_stale = true)?;
+    info!("took {count} dead sites out of the index");
+    inner.journal.info(format!(
+        "Took {} sites out of the index that no crawl has reached for weeks; any that \
+         answer again come back",
+        group_thousands(count as u64)
+    ));
+    Ok(())
+}
+
+fn last_crawl_answered(record: &impl CrawlSite) -> bool {
     record
-        .crawled_at
-        .is_some_and(|at| at >= record.crawl_attempted_at.unwrap_or(0))
+        .crawled_at()
+        .is_some_and(|at| at >= record.crawl_attempted_at().unwrap_or(0))
 }
 
 /// The best-linked sites, up to [`ICON_CATCH_UP_PER_ROUND`], whose last
 /// crawl answered but which have no icon noted here: their icons are
 /// fetched on their own ([`catch_up_icons`]).
-fn icon_catch_up_targets(set: &RecordSet, noted: &HashSet<String>) -> Vec<CrawlTarget> {
-    sorted_by_link_score(set)
+fn icon_catch_up_targets(set: &RoundSites, noted: &HashSet<String>) -> Vec<CrawlTarget> {
+    set.sorted_by_link_score()
         .into_iter()
-        .filter(|record| last_crawl_answered(record) && !noted.contains(&record.domain))
+        .filter(|record| last_crawl_answered(*record) && !noted.contains(record.domain()))
         .take(ICON_CATCH_UP_PER_ROUND)
         .map(|record| CrawlTarget {
-            url: record.url.clone().unwrap_or_default(),
+            url: record.url().unwrap_or_default().to_owned(),
             known_url: None,
-            domain: record.domain.clone(),
+            domain: record.domain().to_owned(),
         })
         .collect()
 }
@@ -1158,7 +1518,7 @@ fn icon_catch_up_targets(set: &RecordSet, noted: &HashSet<String>) -> Vec<CrawlT
 fn catch_up_icons(
     inner: &Inner,
     handle: &Handle,
-    set: &RecordSet,
+    set: &RoundSites,
     icons: &IconStore,
 ) -> Result<()> {
     if inner.pause_reason().is_some() {
@@ -1218,6 +1578,14 @@ fn save_icons(icons: &IconStore, results: &[CrawlResult]) {
 
 /// Builds an index of `records` in a new numbered directory and opens it.
 pub(super) fn build<R: Borrow<SiteRecord>>(inner: &Inner, records: &[R]) -> Result<ServingIndex> {
+    // Sites judged dead stay in the records, out of the index and the
+    // buckets other nodes take.
+    let records: Vec<&SiteRecord> = records
+        .iter()
+        .map(Borrow::borrow)
+        .filter(|record| record.gone_at.is_none())
+        .collect();
+    let records = records.as_slice();
     let id = store::next_index_id(&inner.paths);
     let dir = inner.paths.index(id);
     inner.set_step(
@@ -1260,6 +1628,104 @@ pub(super) fn build<R: Borrow<SiteRecord>>(inner: &Inner, records: &[R]) -> Resu
     Ok(index)
 }
 
+/// Builds an index of the records file in a new numbered directory and
+/// opens it, reading the file a record at a time ([`crate::outline`]): the
+/// journal is folded into the file first, and no more than an outline of
+/// each site is held at once, where loading the file would hold every
+/// record. The same index as [`build`] of the whole set. A file that only a
+/// whole set can merge (a site on two lines) is loaded and rewritten once.
+/// Call it holding the records ([`Inner::hold_records`]).
+pub(super) fn build_from_file(inner: &Inner) -> Result<ServingIndex> {
+    inner.set_step(Step::Indexing, "Reading the site records");
+    let Some(outlines) = crate::outline::outline(&inner.paths.records)? else {
+        info!(
+            "{} holds a site more than once: reading it whole to merge them",
+            inner.paths.records.display()
+        );
+        let set = load_records(&inner.paths.records)?;
+        RecordStore::open(&inner.paths.records).compact(&set)?;
+        inner.check_stop()?;
+        return build(inner, &sorted_by_link_score(&set));
+    };
+    inner.check_stop()?;
+    let id = store::next_index_id(&inner.paths);
+    let dir = inner.paths.index(id);
+    // Hidden next to the index until both are done (leftovers of hidden
+    // names are removed at start).
+    let buckets_dir = inner
+        .paths
+        .indexes
+        .join(format!(".{}-buckets", store::index_name(id)));
+    let started = Instant::now();
+    let built = crate::outline::build_index(
+        &inner.paths.records,
+        outlines,
+        &dir,
+        network::wants_buckets(inner).then_some(buckets_dir.as_path()),
+        inner.config.news_feeds,
+        &mut |step| {
+            match step {
+                crate::outline::Step::Started { docs, sites } => {
+                    inner.set_step(
+                        Step::Indexing,
+                        format!(
+                            "Building the search index of {} sites",
+                            group_thousands(docs as u64)
+                        ),
+                    );
+                    inner.set_progress(0, sites, "sites");
+                }
+                crate::outline::Step::Read { done, sites } => {
+                    inner.set_progress(done, sites, "sites");
+                }
+                crate::outline::Step::Writing => {
+                    inner.set_step(Step::Indexing, "Writing the search index");
+                }
+            }
+            inner.check_stop()
+        },
+    )
+    .with_context(|| format!("building the index in {}", dir.display()));
+    let built = match built {
+        Ok(built) => built,
+        Err(err) => {
+            // Each try has a new id: the half-written buckets would
+            // otherwise pile up, against the storage limit, until restart.
+            let _ = std::fs::remove_dir_all(&buckets_dir);
+            return Err(err);
+        }
+    };
+    if inner.config.news_feeds > 0 {
+        inner.news.watch(built.feeds);
+    }
+    if built.buckets {
+        let into = dir.join(network::BUCKETS_DIR);
+        if let Err(err) = std::fs::rename(&buckets_dir, &into) {
+            warn!("cannot move the buckets to {}: {err}", into.display());
+            let _ = std::fs::remove_dir_all(&buckets_dir);
+        }
+    }
+    let index = match ServingIndex::open(id, &dir, inner.rank) {
+        Ok(index) => index,
+        Err(err) => {
+            let _ = store::remove_index(&dir);
+            return Err(err.context(format!("opening the new index in {}", dir.display())));
+        }
+    };
+    inner.journal.info(format!(
+        "Search index rebuilt: {} sites in {}",
+        group_thousands(built.docs as u64),
+        duration_words(started.elapsed().as_secs().max(1))
+    ));
+    info!(
+        "built the index in {} ({} sites, read a record at a time) in {:.1} s",
+        dir.display(),
+        built.docs,
+        started.elapsed().as_secs_f64()
+    );
+    Ok(index)
+}
+
 /// Has the node watch the feeds of its best-ranked sites, the first of
 /// `records` (see [`NodeConfig::news_feeds`](super::NodeConfig)): sites
 /// that answered their last crawl and redirect nowhere.
@@ -1271,15 +1737,9 @@ fn watch_feeds<R: Borrow<SiteRecord>>(inner: &Inner, records: &[R]) {
     let sites = records
         .iter()
         .map(Borrow::borrow)
-        .filter(|r| r.redirect.is_none() && r.crawl_failures == 0)
+        .filter(|r| crate::outline::wants_feed(r))
         .take(wanted)
-        .map(|r| {
-            let homepage = r
-                .url
-                .clone()
-                .unwrap_or_else(|| format!("https://{}/", r.domain));
-            (r.domain.clone(), homepage)
-        })
+        .map(crate::outline::feed_of)
         .collect();
     inner.news.watch(sites);
 }
@@ -1287,12 +1747,22 @@ fn watch_feeds<R: Borrow<SiteRecord>>(inner: &Inner, records: &[R]) {
 /// Swaps in a freshly built index and notes that the records file holds no
 /// changes it lacks. A build that `ends_round`, with no homepages left to
 /// crawl, ends the round: the next refresh is due a refresh interval later.
-async fn put_in_service(inner: &Arc<Inner>, built: ServingIndex, ends_round: bool) -> Result<()> {
-    inner.install(built);
+/// `None` when crawling only ([`NodeConfig::crawl_only`]): no index, and
+/// the records stay marked newer than the last one, for when the node
+/// searches again.
+async fn put_in_service(
+    inner: &Arc<Inner>,
+    built: Option<ServingIndex>,
+    ends_round: bool,
+) -> Result<()> {
+    let indexed = built.is_some();
+    if let Some(built) = built {
+        inner.install(built);
+    }
     let now = now_unix();
     inner.last_build.store(now, Ordering::SeqCst);
     inner.update_saved(|saved| {
-        saved.index_stale = false;
+        saved.index_stale = !indexed;
         saved.network_pending = 0;
         if ends_round && saved.crawl_left == 0 {
             saved.last_refresh = Some(now);
@@ -1317,9 +1787,19 @@ where
     F: FnOnce(&Inner) -> Result<T> + Send + 'static,
 {
     let inner = Arc::clone(inner);
-    let done = tokio::task::spawn_blocking(move || work(&inner))
-        .await
-        .context("background work crashed");
+    // On a thread of its own, at a lower priority than searches: a thread
+    // of the blocking pool keeps its priority, and searches run there too.
+    let runtime = Handle::current();
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    std::thread::Builder::new()
+        .name("plumb-background".to_string())
+        .spawn(move || {
+            let _runtime = runtime.enter();
+            crate::lower_thread_priority();
+            let _ = sender.send(work(&inner));
+        })
+        .context("cannot start the background work")?;
+    let done = receiver.await.context("background work crashed");
     // Not on an async thread: handing back a few hundred megabytes takes
     // tens of milliseconds.
     let _ = tokio::task::spawn_blocking(crate::release_freed_memory).await;
@@ -1356,8 +1836,11 @@ async fn wait(inner: &Arc<Inner>, deadline: Deadline) {
             return;
         }
         // Records from other nodes are folded in as they pile up; whether
-        // they rebuild the index is up to step().
-        if inner.inbox_records.load(Ordering::SeqCst) >= REBUILD_AFTER_RECORDS {
+        // they rebuild the index is up to step(). Not while backing off
+        // after an error: folding them in may be what failed.
+        if !matches!(deadline, Deadline::After(_))
+            && inner.inbox_records.load(Ordering::SeqCst) >= REBUILD_AFTER_RECORDS
+        {
             return;
         }
         let nap = match deadline {
@@ -1423,6 +1906,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn slow_builds_wait_longer_for_the_next() {
+        let gap = NETWORK_REBUILD_GAP.as_secs();
+        assert_eq!(network_rebuild_gap(0), gap, "none built yet");
+        assert_eq!(network_rebuild_gap(120), gap, "a quick build");
+        // 2.5 million sites on a busy 4-core server: 25 minutes.
+        assert_eq!(network_rebuild_gap(1_500), 4_500);
+    }
+
+    /// What a round keeps of `record`.
+    fn round(record: SiteRecord) -> RoundSite {
+        RoundSite::of(&record, &crate::about::Topics::default(), &Keep::default())
+    }
+
+    #[test]
     fn only_sites_whose_last_crawl_answered_wait_for_an_icon() {
         let mut record = SiteRecord::new("a.com");
         assert!(!last_crawl_answered(&record), "never crawled");
@@ -1474,14 +1971,14 @@ mod tests {
         };
         let noted: HashSet<String> = ["noted.com".to_string()].into();
         let old = ICONS_KEPT_SINCE - 1;
-        assert!(due_for_icon(&crawled("old.com", old), &noted));
-        assert!(!due_for_icon(&crawled("noted.com", old), &noted));
+        assert!(due_for_icon(&round(crawled("old.com", old)), &noted));
+        assert!(!due_for_icon(&round(crawled("noted.com", old)), &noted));
         // Crawled since, by another node: waits for its regular recrawl.
         assert!(!due_for_icon(
-            &crawled("network.com", ICONS_KEPT_SINCE + 60),
+            &round(crawled("network.com", ICONS_KEPT_SINCE + 60)),
             &noted
         ));
-        assert!(!due_for_icon(&SiteRecord::new("never.com"), &noted));
+        assert!(!due_for_icon(&round(SiteRecord::new("never.com")), &noted));
     }
 
     #[test]
@@ -1495,7 +1992,7 @@ mod tests {
                     url: "https://www.facebook.com/".into(),
                 }];
             }
-            record
+            round(record)
         };
         let old = KEY_PAGES_KEPT_SINCE - 1;
         assert!(due_for_key_pages(&crawled(old, false)));
@@ -1504,7 +2001,25 @@ mod tests {
             KEY_PAGES_KEPT_SINCE + 60,
             false
         )));
-        assert!(!due_for_key_pages(&SiteRecord::new("never.com")));
+        assert!(!due_for_key_pages(&round(SiteRecord::new("never.com"))));
+    }
+
+    #[test]
+    fn sites_are_read_anew_only_once_the_crawl_version_goes_up() {
+        let mut record = SiteRecord::new("a.com");
+        record.crawled_at = Some(10);
+        record.crawl_version = plumb_crawl::CRAWL_VERSION;
+        assert!(!due_for_rereading(&round(record.clone())));
+        if let Some(older) = plumb_crawl::CRAWL_VERSION.checked_sub(1) {
+            record.crawl_version = older;
+            assert!(due_for_rereading(&round(record.clone())));
+            record.crawl_attempted_at = Some(20);
+            record.crawl_failures = 1;
+            assert!(
+                !due_for_rereading(&round(record)),
+                "not reached on its last try"
+            );
+        }
     }
 
     #[test]
@@ -1516,18 +2031,60 @@ mod tests {
             record
         };
         let old = KEY_PAGES_KEPT_SINCE - 1;
-        let set: RecordSet = [
+        let set = RoundSites::of([
             site("paypal.com", 20, old),
             site("facebook.com", 1, old),
             site("recent.com", 2, KEY_PAGES_KEPT_SINCE + 60),
-        ]
-        .into_iter()
-        .collect();
-        let domains: Vec<&str> = key_page_catch_up(&set)
-            .iter()
-            .map(|r| r.domain.as_str())
-            .collect();
+        ]);
+        let domains: Vec<&str> = key_page_catch_up(&set).iter().map(|r| r.domain()).collect();
         assert_eq!(domains, ["facebook.com", "paypal.com"]);
+    }
+
+    #[test]
+    fn well_known_sites_never_fetched_are_caught_up_once_due() {
+        const NOW: u64 = 100 * SECONDS_PER_DAY;
+        const WINDOW: u64 = 30 * SECONDS_PER_DAY;
+        let site = |domain: &str, rank: u32| {
+            let mut record = SiteRecord::new(domain);
+            record.signals.tranco_rank = Some(rank);
+            record
+        };
+        let mut crawled = site("crawled.com", 1);
+        crawled.crawled_at = Some(NOW - SECONDS_PER_DAY);
+        let mut failed_lately = site("failed-lately.com", 2);
+        failed_lately.crawl_attempted_at = Some(NOW - 60);
+        failed_lately.crawl_failures = 1;
+        let mut failed_long_ago = site("failed-long-ago.com", 3);
+        failed_long_ago.crawl_attempted_at = Some(NOW - WINDOW);
+        failed_long_ago.crawl_failures = 1;
+        let mut gone = site("gone.com", 4);
+        gone.gone_at = Some(NOW - SECONDS_PER_DAY);
+        let mut official = SiteRecord::new("official.com");
+        official.signals.official_site = true;
+        official.signals.tranco_rank = Some(500_000);
+        let set = RoundSites::of([
+            site("obscure.com", 5_000_000),
+            site("instacart.com", 2_339),
+            crawled,
+            failed_lately,
+            failed_long_ago,
+            gone,
+            official,
+            site("google.com", 1),
+        ]);
+        let domains: Vec<&str> = first_fetch_catch_up(&set, NOW, WINDOW)
+            .iter()
+            .map(|r| r.domain())
+            .collect();
+        assert_eq!(
+            domains,
+            [
+                "google.com",
+                "failed-long-ago.com",
+                "instacart.com",
+                "official.com"
+            ]
+        );
     }
 
     #[test]
@@ -1541,15 +2098,13 @@ mod tests {
             }
             record
         };
-        let set: RecordSet = [
+        let set = RoundSites::of([
             site("third.com", 30, true),
             site("first.com", 1, true),
             site("noted.com", 2, true),
             site("never.com", 3, false),
             site("second.com", 20, true),
-        ]
-        .into_iter()
-        .collect();
+        ]);
         let noted: HashSet<String> = ["noted.com".to_string()].into();
         let targets = icon_catch_up_targets(&set, &noted);
         let domains: Vec<&str> = targets.iter().map(|t| t.domain.as_str()).collect();

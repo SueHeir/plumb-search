@@ -21,7 +21,9 @@
 //!
 //! Dropping a site only takes it out of this node's index. The batches this
 //! node signed and published stay in `net/batches/` for as long as they
-//! always did, so the network loses none of its crawls.
+//! always did, so the network loses none of its crawls. Other crawlers'
+//! batches there are held to a share of the limit by themselves, oldest out
+//! first (see super::network::start).
 
 use std::collections::HashSet;
 use std::sync::atomic::Ordering;
@@ -124,6 +126,7 @@ fn share(limit: u64, percent: u64) -> u64 {
 }
 
 /// What the node keeps whatever the room.
+#[derive(Debug, Default)]
 pub(super) struct Keep {
     pub topics: Topics,
     /// Sites an About page always puts first, or a searcher opened.
@@ -131,7 +134,7 @@ pub(super) struct Keep {
 }
 
 impl Keep {
-    fn of(inner: &Inner) -> Keep {
+    pub(super) fn of(inner: &Inner) -> Keep {
         let history = inner.paths.data.join("history");
         let mut domains: HashSet<String> = crate::about::all_pinned(&history)
             .into_iter()
@@ -144,7 +147,7 @@ impl Keep {
         }
     }
 
-    fn keeps(&self, record: &SiteRecord) -> bool {
+    pub(super) fn keeps(&self, record: &SiteRecord) -> bool {
         record.signals.official_site
             || self.domains.contains(&record.domain)
             || self.topics.matches(record)
@@ -185,7 +188,7 @@ pub(super) fn trim(inner: &Inner) -> Result<Option<super::ServingIndex>> {
             limit / MB,
             sites / MB
         );
-        inner.journal.warning(
+        inner.journal.warning_daily(
             "Over the storage limit, but not because of the sites: page sets, places and \
              the rest take more than the limit leaves. Lower the page sets or raise the limit",
         );
@@ -201,7 +204,7 @@ pub(super) fn trim(inner: &Inner) -> Result<Option<super::ServingIndex>> {
     let per_site = sites / (set.len() as u64).max(1);
     let drops = pick_drops(&set, free, per_site, &Keep::of(inner));
     if drops.is_empty() {
-        inner.journal.warning(
+        inner.journal.warning_daily(
             "Over the storage limit, and every site left is one this node keeps: \
              lower the page sets or raise the limit",
         );

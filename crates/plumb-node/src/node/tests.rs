@@ -20,6 +20,7 @@ use tokio::net::{TcpListener, TcpStream};
 
 use super::store::{self, SavedState};
 use super::*;
+use crate::meaning::MeaningModel;
 
 fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -67,15 +68,19 @@ fn test_config(dir: &Path) -> NodeConfig {
     config.news_feeds = 0;
     // As if "Set up my node" was answered, so filling goes ahead.
     config.settings.setup_chosen = true;
+    // No model is downloaded unless a test asks for one.
+    config.search_by_meaning = false;
     let nowhere = closed_port();
     config.sources = SeedSources {
         tranco_url: format!("{nowhere}/tranco.csv"),
         wikidata_sparql_url: format!("{nowhere}/sparql"),
+        wikidata_mirror_url: None,
         wikipedia_api_url: format!("{nowhere}/w/api.php"),
         wikidata_min_sitelinks: 25,
         wikidata_pacing: quick_wikidata(),
         cc_ranks_url: None,
         model_base_url: format!("{nowhere}/model/"),
+        gemma_downloads: Vec::new(),
         adult_list_url: None,
     };
     config
@@ -265,6 +270,7 @@ fn profiles() {
     );
     assert_eq!(desktop.refresh_every, Some(Duration::from_secs(12 * 3600)));
     assert!(!desktop.use_system_proxy);
+    assert!(desktop.search_by_meaning && !server.search_by_meaning);
     desktop.check().unwrap();
 }
 
@@ -400,8 +406,10 @@ async fn indexes_what_an_interrupted_crawl_saved() {
     let hits = search(node.addr(), "plumbline+example+widgets").await;
     assert_eq!(hits[0].domain, "plumbline-example.com");
     node.shutdown().await.unwrap();
-    // Every read replays it; the next crawl folds it in once it is big.
-    assert!(dir.path().join("records.jsonl.journal").exists());
+    // Building the index folded it into the records file.
+    assert!(!dir.path().join("records.jsonl.journal").exists());
+    let set = crate::records::load_records(&records).unwrap();
+    assert!(set.get("plumbline-example.com").is_some());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -597,6 +605,66 @@ async fn picks_up_a_round_left_unfinished() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_node_that_only_crawls_builds_no_index_until_it_searches_again() {
+    let dir = recently_crawled_dir();
+    let paths = store::Paths::new(dir.path());
+    store::save_state(
+        &paths,
+        // Records newer than any index, as after a crawl.
+        &SavedState {
+            crawl_left: 700,
+            index_stale: true,
+            ..SavedState::default()
+        },
+    )
+    .unwrap();
+    let mut config = test_config(dir.path());
+    config.crawl_only = true;
+    config.search_by_meaning = true;
+    config.refresh_every = Some(Duration::from_secs(3600));
+    let node = start(config).await.unwrap();
+    assert!(!node.inner.config.search_by_meaning, "turned off");
+    let status = wait_for(node.addr(), "the end of the round", |s| {
+        s.step == Step::Idle && s.last_refresh.is_some()
+    })
+    .await;
+    assert_eq!(status.phase, Phase::SettingUp, "nothing to search");
+    assert_eq!(status.index, None);
+    assert_eq!(status.last_error, None);
+    assert_eq!(
+        node.inner.held_sites(),
+        fixture_records().len() as u64,
+        "counted for filling"
+    );
+    node.shutdown().await.unwrap();
+    assert!(names(&paths.indexes).is_empty(), "no index built");
+    let saved = store::load_state(&paths).unwrap();
+    assert_eq!(saved.crawl_left, 0);
+    assert!(saved.index_stale, "still newer than any index");
+
+    // Without the flag again, the node builds its index.
+    let node = start(test_config(dir.path())).await.unwrap();
+    let status = wait_for(node.addr(), "the index", ready_and_idle).await;
+    assert_eq!(status.sites, fixture_records().len() as u64);
+    assert_eq!(search(node.addr(), "chase").await[0].domain, "chase.com");
+    node.shutdown().await.unwrap();
+}
+
+#[test]
+fn crawling_only_turns_off_what_only_searching_needs() {
+    let mut config = NodeConfig::server(PathBuf::from("d"));
+    config.crawl_only = true;
+    config.search_by_meaning = true;
+    config.private_search = true;
+    config.network = Some(plumb_net::NetConfig::new(PathBuf::from("d/net")));
+    config.limit_to_crawling();
+    assert!(!config.search_by_meaning && !config.private_search);
+    assert_eq!(config.news_feeds, 0);
+    let net = config.network.unwrap();
+    assert!(!net.answer_searches && !net.follow_crawls);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn refreshes_when_due() {
     let dir = recently_crawled_dir();
     let paths = store::Paths::new(dir.path());
@@ -671,11 +739,13 @@ impl SeedHost {
         SeedSources {
             tranco_url: self.url("/tranco.csv"),
             wikidata_sparql_url: self.url("/sparql"),
+            wikidata_mirror_url: None,
             wikipedia_api_url: self.url("/w/api.php"),
             wikidata_min_sitelinks: 25,
             wikidata_pacing: quick_wikidata(),
             cc_ranks_url: None,
             model_base_url: self.url("/model/"),
+            gemma_downloads: Vec::new(),
             adult_list_url: None,
         }
     }
@@ -932,7 +1002,7 @@ async fn stops_promptly_in_the_middle_of_a_download() {
     assert_eq!(code, 200);
     assert!(body.contains("Downloading the Tranco list"), "{body}");
     assert!(
-        body.contains("<progress value=\"0\" max=\"1\"></progress>"),
+        body.contains("<progress aria-label=\"Setup progress\" value=\"0\" max=\"1\"></progress>"),
         "{body}"
     );
     assert!(body.contains("0 of 1 files"), "{body}");
@@ -1093,6 +1163,91 @@ async fn sets_up_without_wikidata_and_adds_it_later() {
     assert!(usbank.signals.official_site);
     assert!(usbank.aliases.iter().any(|alias| alias == "U.S. Bancorp"));
 
+    // Records made before the lists of sites on subdomains are folded
+    // again too, from the seed files however old: Google Scholar, folded
+    // into google.com then, gets a record of its own, and a college whose
+    // website was misread from its email address is taken off google.com.
+    let wikidata = dir.path().join("seed").join(download::WIKIDATA_FILE_NAME);
+    let mut tsv = std::fs::read_to_string(&wikidata).unwrap();
+    tsv.push_str(
+        "http://www.wikidata.org/entity/Q90000099\tGoogle Scholar\thttps://scholar.google.com/\n",
+    );
+    tsv.push_str(
+        "http://www.wikidata.org/entity/Q90000098\tCOE, Moro\thttps://mailto:coe@google.com\n",
+    );
+    std::fs::write(&wikidata, tsv).unwrap();
+    let mut records: Vec<SiteRecord> = read_jsonl(&dir.path().join("records.jsonl")).unwrap();
+    let google = records
+        .iter_mut()
+        .find(|r| r.domain == "google.com")
+        .unwrap();
+    google.aliases.push("Google Scholar".into());
+    google.aliases.insert(0, "COE, Moro".into());
+    google.kinds.push("college".into());
+    write_jsonl(&dir.path().join("records.jsonl"), &records).unwrap();
+    let mut saved = store::load_state(&paths).unwrap();
+    saved.sites_version = 0;
+    store::save_state(&paths, &saved).unwrap();
+    let index_before = names(&dir.path().join("indexes"));
+    let mut config = test_config(dir.path());
+    config.sources = offline.sources();
+    config.sites = 50;
+    let node = start(config).await.unwrap();
+    wait_for(
+        node.addr(),
+        "the seed folded for the subdomain sites",
+        |s| {
+            ready_and_idle(s)
+                && s.index
+                    .as_ref()
+                    .is_some_and(|index| !index_before.contains(index))
+        },
+    )
+    .await;
+    node.shutdown().await.unwrap();
+    assert_eq!(offline.requests.lock().unwrap().len(), 0);
+    assert_eq!(
+        store::load_state(&paths).unwrap().sites_version,
+        plumb_core::SITES_VERSION
+    );
+    // The changes went into the journal, which the index build folded into
+    // the records a record at a time.
+    assert!(!crate::records::journal_path(&dir.path().join("records.jsonl")).exists());
+    let check = || {
+        let set = crate::records::load_records(&dir.path().join("records.jsonl")).unwrap();
+        let scholar = set.get("scholar.google.com").unwrap();
+        assert_eq!(scholar.aliases, ["Google Scholar"]);
+        assert_eq!(scholar.signals.tranco_rank, Some(1));
+        let google = set.get("google.com").unwrap();
+        assert_eq!(google.aliases, ["Google"]);
+        assert!(!google.kinds.iter().any(|kind| kind == "college"));
+        assert!(google.signals.official_site);
+        // Hacker News needs a record for ycombinator.com, which this has not.
+        assert!(set.get("news.ycombinator.com").is_none());
+        set.len()
+    };
+    let sites = check();
+
+    // A node stopped before it noted the version makes the same changes
+    // again on its next start, which leaves the records as they were.
+    let mut saved = store::load_state(&paths).unwrap();
+    saved.sites_version = 0;
+    store::save_state(&paths, &saved).unwrap();
+    let index_before = names(&dir.path().join("indexes"));
+    let mut config = test_config(dir.path());
+    config.sources = offline.sources();
+    config.sites = 50;
+    let node = start(config).await.unwrap();
+    wait_for(node.addr(), "the records updated again", |s| {
+        ready_and_idle(s)
+            && s.index
+                .as_ref()
+                .is_some_and(|index| !index_before.contains(index))
+    })
+    .await;
+    node.shutdown().await.unwrap();
+    assert_eq!(check(), sites);
+
     // Nothing to fold in a directory with no node yet.
     assert!(!request_reseed(tempfile::tempdir().unwrap().path()).unwrap());
 }
@@ -1108,6 +1263,8 @@ async fn a_node_in_the_network_takes_in_other_nodes_crawls_and_searches_them() {
     net.local_discovery = false;
     net.round_every = None;
     config.network = Some(net);
+    // Other nodes' crawls add sites only with new sites taken.
+    config.take_new_sites = true;
     let node = start(config).await.unwrap();
     let addr = node.addr();
     let status = wait_for(addr, "the first index", ready_and_idle).await;
@@ -1382,14 +1539,20 @@ async fn a_network_search_fills_in_text_this_node_lacks() {
     assert!(first.contains("reddit.com"), "{first}");
     assert!(first.contains("Communities for every"), "{first}");
 
-    // And the node keeps it: its next index has the text.
-    let inbox = std::fs::read_to_string(dir.path().join("net/inbox.jsonl")).unwrap();
-    assert_eq!(inbox.lines().count(), 1, "{inbox}");
-    assert!(inbox.contains("Communities for every"), "{inbox}");
-    // Searching again keeps nothing more.
-    get(addr, "/search?q=reddit&net=1").await;
-    let again = std::fs::read_to_string(dir.path().join("net/inbox.jsonl")).unwrap();
-    assert_eq!(again, inbox);
+    // But one crawler alone, neither trusted nor confirmed, is not kept:
+    // anyone can make a key assigned the site.
+    let inbox = || std::fs::read_to_string(dir.path().join("net/inbox.jsonl")).unwrap_or_default();
+    assert!(!inbox().contains("Communities for every"), "{}", inbox());
+
+    // A crawl the search may keep (trusted or confirmed, see
+    // plumb_net::FoundSite::keeps) goes to the inbox once, and the node's
+    // next index has the text.
+    network::keep_found(&node.inner, vec![crawled.clone()]);
+    let kept = inbox();
+    assert_eq!(kept.lines().count(), 1, "{kept}");
+    assert!(kept.contains("Communities for every"), "{kept}");
+    network::keep_found(&node.inner, vec![crawled.clone()]);
+    assert_eq!(inbox(), kept, "kept once");
     node.refresh_now();
     wait_for(addr, "a new index", |s| {
         ready_and_idle(s) && s.index.as_deref() != Some("000001")
@@ -1429,13 +1592,15 @@ async fn a_node_sharing_popularity_reports_picks_and_ranks_with_the_networks() {
         .with_p2p(net_status.peer_id.parse().unwrap())
         .unwrap();
 
-    let before = search(addr, "us+bank").await;
+    // "bank" rather than "us bank": a search naming usbank.com leaves
+    // out the sites far below it, so it has no runner-up to pick.
+    let before = search(addr, "bank").await;
     assert!(before.len() >= 2, "{before:?}");
     let runner_up = before[1].clone();
 
     // A result opened from the page is noted.
-    let (_, _, body) = get(addr, "/search?q=us+bank").await;
-    let go = format!("/go?q=us+bank&amp;d={}", runner_up.domain);
+    let (_, _, body) = get(addr, "/search?q=bank").await;
+    let go = format!("/go?q=bank&amp;d={}", runner_up.domain);
     assert!(body.contains(&go), "{body}");
     let (code, head, _) = get(addr, &go.replace("&amp;", "&")).await;
     assert_eq!(code, 303);
@@ -1487,7 +1652,7 @@ async fn a_node_sharing_popularity_reports_picks_and_ranks_with_the_networks() {
     // Once enough others report the same pick, the node ranks with it.
     let epoch = report_epoch(now_unix());
     for _ in 1..REPORT_THRESHOLD {
-        let report = plumb_net::Report::new(epoch, "us bank", &runner_up.domain).unwrap();
+        let report = plumb_net::Report::new(epoch, "bank", &runner_up.domain).unwrap();
         peer.send_report(&report, Duration::from_secs(10))
             .await
             .unwrap();
@@ -1502,7 +1667,7 @@ async fn a_node_sharing_popularity_reports_picks_and_ranks_with_the_networks() {
         table = net.recount().await.unwrap();
     }
     assert_eq!(table.picks.len(), 1, "{table:?}");
-    let after = search(addr, "us+bank").await;
+    let after = search(addr, "bank").await;
     let boosted = after.iter().find(|h| h.domain == runner_up.domain).unwrap();
     assert!(
         (boosted.score - (runner_up.score + MAX_POPULARITY_BONUS)).abs() < 1e-4,
@@ -1522,7 +1687,7 @@ async fn private_search_serves_buckets_a_browser_can_search() {
     wait_for(addr, "the first index", ready_and_idle).await;
     assert_eq!(get(addr, "/api/buckets").await.0, 503);
     assert_eq!(get(addr, "/private").await.0, 503);
-    assert!(!get(addr, "/").await.2.contains("href=\"/private\""));
+    assert!(!get(addr, "/").await.2.contains("href=\"/private?"));
     node.shutdown().await.unwrap();
 
     // Turned on, the index built before it is rebuilt with its buckets.
@@ -1572,7 +1737,7 @@ async fn private_search_serves_buckets_a_browser_can_search() {
             head.contains("script-src 'self' 'wasm-unsafe-eval'"),
             "{head}"
         );
-        assert!(get(addr, "/").await.2.contains("href=\"/private\""));
+        assert!(get(addr, "/").await.2.contains("href=\"/private?"));
     } else {
         assert_eq!(code, 503, "{body}");
     }
@@ -1770,6 +1935,23 @@ async fn crawling_waits_for_the_next_day_once_the_download_limit_is_reached() {
     assert_eq!(status.detail, status.paused.clone().unwrap());
     assert_eq!((status.crawl_left, status.downloaded_today), (700, 3 * MB));
     assert!(status.disk_used > 0);
+    // Page set, vector and model downloads wait too.
+    assert!(node.inner.download_pause().is_some());
+    // The storage limit pauses crawls, not those downloads: they keep to it
+    // by what they take.
+    let mut settings = node.inner.settings();
+    settings.download_limit_mb_per_day = 0;
+    settings.storage_limit_mb = 1;
+    node.inner.change_settings(settings).unwrap();
+    std::fs::write(dir.path().join("filler"), vec![0u8; 2 * MB as usize]).unwrap();
+    node.inner.recount_disk();
+    assert!(node.inner.pause().is_some());
+    assert!(node.inner.download_pause().is_none());
+    // The status says so from that count, without counting again.
+    assert_eq!(
+        node.inner.status().paused.as_deref(),
+        Some("Paused: the storage limit is reached")
+    );
     node.shutdown().await.unwrap();
 }
 
@@ -1791,7 +1973,7 @@ fn downloads_are_counted_per_day() {
 async fn search_by_meaning_embeds_sites_in_the_background() {
     let dir = seeded_dir();
     // The model is in place, so nothing is downloaded.
-    plumb_embed::write_test_model(&dir.path().join(embedding::MODEL_DIR)).unwrap();
+    plumb_embed::write_test_model(&dir.path().join(MeaningModel::Small.dir_name())).unwrap();
     let mut config = test_config(dir.path());
     config.search_by_meaning = true;
     let node = start(config).await.unwrap();
@@ -1817,6 +1999,48 @@ async fn search_by_meaning_embeds_sites_in_the_background() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     node.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn search_by_meaning_downloads_and_runs_embedding_gemma_when_chosen() {
+    let made = tempfile::tempdir().unwrap();
+    plumb_embed::write_test_gemma(made.path()).unwrap();
+    let model = std::fs::read(made.path().join(plumb_embed::GEMMA_FILE)).unwrap();
+    let tokenizer = std::fs::read(made.path().join(plumb_embed::GEMMA_TOKENIZER_FILE)).unwrap();
+    let host = SeedHost::start(move |request, _| match request {
+        "GET /gemma/model.gguf" => http("200 OK", &model),
+        "GET /gemma/tokenizer.json" => http("200 OK", &tokenizer),
+        _ => http("404 Not Found", b"no such file"),
+    })
+    .await;
+    let dir = seeded_dir();
+    let mut config = test_config(dir.path());
+    config.search_by_meaning = true;
+    config.meaning_model = MeaningModel::Gemma;
+    config.sources.gemma_downloads = [plumb_embed::GEMMA_FILE, plumb_embed::GEMMA_TOKENIZER_FILE]
+        .map(|name| (name.to_string(), host.url(&format!("/gemma/{name}"))))
+        .to_vec();
+    let node = start(config).await.unwrap();
+    wait_for(node.addr(), "the first index", ready_and_idle).await;
+
+    let vectors_path = dir.path().join(plumb_embed::VECTORS_FILE_NAME);
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    while plumb_embed::Vectors::load(&vectors_path).map_or(0, |v| v.len()) == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no vectors saved: {:?}",
+            node.inner.meaning_work()
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    node.shutdown().await.unwrap();
+    let gemma_dir = dir.path().join(MeaningModel::Gemma.dir_name());
+    let (model, dim, _) = plumb_embed::Vectors::read_header(&vectors_path).unwrap();
+    assert_eq!(model, plumb_embed::gemma_id(&gemma_dir).unwrap());
+    assert_eq!(model, plumb_embed::gemma_id(made.path()).unwrap());
+    assert_eq!(dim, 96);
+    // The small model was never downloaded.
+    assert!(!dir.path().join(MeaningModel::Small.dir_name()).exists());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2276,6 +2500,478 @@ async fn a_node_takes_wikipedia_articles_from_a_trusted_node() {
     node.shutdown().await.unwrap();
 }
 
+/// A trusted node's buckets plus files of several sets.
+struct WithFiles(plumb_net::BucketTable, HashMap<String, PathBuf>);
+
+impl plumb_net::BucketSource for WithFiles {
+    fn bucket(&self, bucket: u32) -> Option<Vec<String>> {
+        self.0.bucket(bucket)
+    }
+
+    fn page_set_file(&self, set: &str) -> Option<PathBuf> {
+        self.1.get(set).cloned()
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_node_takes_newer_set_files_that_hold_what_its_own_do() {
+    let article = |title: &str, lead: Option<&str>| plumb_core::Article {
+        title: title.to_string(),
+        views: 100,
+        item: Some("Q1".into()),
+        lead: lead.map(str::to_string),
+        ..Default::default()
+    };
+    let write = |path: &Path, articles: &[plumb_core::Article]| {
+        plumb_ingest::articles::write_articles_file(path, articles).unwrap();
+    };
+    let long_ago = now_unix() - 100_000;
+
+    // This node made its own files a while ago: articles with leads, films
+    // and a map.
+    let dir = seeded_dir();
+    let sets = crate::pages::sets_dir(dir.path());
+    std::fs::create_dir_all(&sets).unwrap();
+    let wikipedia = crate::pages::SetInfo::find("wikipedia-en").unwrap();
+    let films = crate::pages::SetInfo::find("films").unwrap();
+    let led = [article("Marie Curie", Some("Marie Curie was a physicist."))];
+    write(&wikipedia.file(dir.path()), &led);
+    write(&films.file(dir.path()), &[article("Old Film", None)]);
+    let map = crate::map::file(dir.path());
+    std::fs::write(&map, b"old map").unwrap();
+    for file in [
+        wikipedia.file(dir.path()),
+        films.file(dir.path()),
+        map.clone(),
+    ] {
+        super::newer::set_time(&file, long_ago).unwrap();
+    }
+
+    // The trusted node has newer ones of all three, but its articles have
+    // no leads.
+    let peer_dir = tempfile::tempdir().unwrap();
+    let peer_id = plumb_net::load_or_create_key(&peer_dir.path().join("node.key"))
+        .unwrap()
+        .public()
+        .to_peer_id();
+    let peer_articles = peer_dir.path().join("wikipedia-en.tsv.gz");
+    write(&peer_articles, &[article("Marie Curie", None)]);
+    let (modified, size) = super::newer::stamp(&peer_articles).unwrap();
+    let note = plumb_net::pages::Layers {
+        version: plumb_net::pages::LAYERS_VERSION,
+        modified,
+        size,
+        kinds: vec![],
+    };
+    std::fs::write(
+        plumb_net::pages::layers_path(&peer_articles),
+        serde_json::to_vec(&note).unwrap(),
+    )
+    .unwrap();
+    let peer_films = peer_dir.path().join("films.tsv.gz");
+    write(
+        &peer_films,
+        &[article("New Film", None), article("Old Film", None)],
+    );
+    // Books, which this node has no file of and doesn't name in
+    // --set-updates, are never taken.
+    let peer_books = peer_dir.path().join("books.tsv.gz");
+    write(&peer_books, &[article("A Book", None)]);
+    let peer_map = peer_dir.path().join("map.pmtiles");
+    std::fs::write(&peer_map, b"new map, a bit longer").unwrap();
+    let files = HashMap::from([
+        ("wikipedia-en".to_string(), peer_articles),
+        ("films".to_string(), peer_films.clone()),
+        ("map".to_string(), peer_map.clone()),
+        ("books".to_string(), peer_books),
+    ]);
+    let table = plumb_net::BucketTable::build(
+        &peer_dir.path().join("buckets"),
+        &[SiteRecord::new("lighthouses.org")],
+    )
+    .unwrap();
+    let mut peer_config = plumb_net::NetConfig::new(peer_dir.path().to_path_buf());
+    peer_config.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+    peer_config.upnp = false;
+    peer_config.local_discovery = false;
+    peer_config.round_every = None;
+    let (peer, _records) = plumb_net::start(peer_config, Arc::new(WithFiles(table, files)))
+        .await
+        .unwrap();
+    let peer_addr: plumb_net::Multiaddr = loop {
+        if let Some(addr) = peer.status().listening.first() {
+            break addr.parse().unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+
+    let mut config = test_config(dir.path());
+    config.settings.page_sets =
+        crate::pages::PageSets::parse("wikipedia-en=all,films=all,books=all").unwrap();
+    // Named, so the tiny files may grow past a quarter.
+    config.set_updates = "wikipedia-en,films,map".parse().unwrap();
+    let mut net = plumb_net::NetConfig::new(PathBuf::new());
+    net.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+    net.upnp = false;
+    net.local_discovery = false;
+    net.round_every = None;
+    net.fill = false;
+    net.trusted_peers = vec![peer_id];
+    net.bootstrap = vec![peer_addr.with_p2p(peer_id).unwrap()];
+    config.network = Some(net);
+    let node = start(config).await.unwrap();
+    wait_for(node.addr(), "the first index", ready_and_idle).await;
+
+    // The newer films and map files are taken, the old ones kept as .prev,
+    // and the new ones dated as their maker dated them.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let films_file = films.file(dir.path());
+    while std::fs::read(&map).unwrap() != b"new map, a bit longer"
+        || std::fs::read(&films_file).unwrap() != std::fs::read(&peer_films).unwrap()
+    {
+        assert!(Instant::now() < deadline, "the newer files never came");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(
+        std::fs::read(super::newer::prev_path(&map)).unwrap(),
+        b"old map"
+    );
+    assert!(super::newer::prev_path(&films_file).is_file());
+    assert_eq!(
+        super::newer::stamp(&films_file).unwrap().0,
+        super::newer::stamp(&peer_films).unwrap().0
+    );
+    // The articles without leads are not taken, however new.
+    let kept = wikipedia.file(dir.path());
+    assert_eq!(super::newer::stamp(&kept).unwrap().0, long_ago);
+    assert_eq!(super::newer::layers("wikipedia-en", &kept), ["lead"]);
+    assert!(!super::newer::prev_path(&kept).exists());
+    let books = crate::pages::SetInfo::find("books").unwrap();
+    assert!(!books.file(dir.path()).exists());
+
+    peer.shutdown().await;
+    node.shutdown().await.unwrap();
+}
+
+/// A trusted node's buckets plus its adult blocklist.
+struct WithAdultList(plumb_net::BucketTable, PathBuf);
+
+impl plumb_net::BucketSource for WithAdultList {
+    fn bucket(&self, bucket: u32) -> Option<Vec<String>> {
+        self.0.bucket(bucket)
+    }
+
+    fn page_set_file(&self, set: &str) -> Option<PathBuf> {
+        (set == super::adult::SHARED_NAME).then(|| self.1.clone())
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_node_takes_the_adult_blocklist_from_a_trusted_node_before_its_source() {
+    let peer_dir = tempfile::tempdir().unwrap();
+    let peer_id = plumb_net::load_or_create_key(&peer_dir.path().join("node.key"))
+        .unwrap()
+        .public()
+        .to_peer_id();
+    let list_file = peer_dir.path().join("adult-domains.txt");
+    std::fs::write(&list_file, "adult.example\nother.example\n").unwrap();
+    let table = plumb_net::BucketTable::build(
+        &peer_dir.path().join("buckets"),
+        &[SiteRecord::new("lighthouses.org")],
+    )
+    .unwrap();
+    let mut peer_config = plumb_net::NetConfig::new(peer_dir.path().to_path_buf());
+    peer_config.search_scope = plumb_net::SearchScope::Anyone;
+    peer_config.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+    peer_config.upnp = false;
+    peer_config.local_discovery = false;
+    peer_config.round_every = None;
+    let (peer, _records) = plumb_net::start(
+        peer_config,
+        Arc::new(WithAdultList(table, list_file.clone())),
+    )
+    .await
+    .unwrap();
+    let peer_addr: plumb_net::Multiaddr = loop {
+        if let Some(addr) = peer.status().listening.first() {
+            break addr.parse().unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+
+    let dir = seeded_dir();
+    let mut config = test_config(dir.path());
+    // The source cannot be reached: the list can only come from the peer.
+    config.sources.adult_list_url = Some("http://127.0.0.1:9/porn-nl.txt".into());
+    let mut net = plumb_net::NetConfig::new(PathBuf::new());
+    net.search_scope = plumb_net::SearchScope::Anyone;
+    net.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+    net.upnp = false;
+    net.local_discovery = false;
+    net.round_every = None;
+    net.fill = false;
+    net.trusted_peers = vec![peer_id];
+    net.bootstrap = vec![peer_addr.with_p2p(peer_id).unwrap()];
+    config.network = Some(net);
+    let node = start(config).await.unwrap();
+
+    let kept = dir.path().join("safe").join("adult-domains.txt");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !kept.is_file() {
+        assert!(Instant::now() < deadline, "no list came");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(
+        std::fs::read_to_string(&kept).unwrap(),
+        "adult.example\nother.example\n"
+    );
+    // It keeps the time of the peer's copy, so it ages as that one does.
+    let modified = |path: &Path| std::fs::metadata(path).unwrap().modified().unwrap();
+    let (theirs, ours) = (modified(&list_file), modified(&kept));
+    let apart = theirs
+        .duration_since(ours)
+        .or_else(|_| ours.duration_since(theirs))
+        .unwrap();
+    assert!(apart < Duration::from_secs(2), "{apart:?}");
+
+    peer.shutdown().await;
+    node.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_set_file_being_downloaded_is_not_cut_at_the_same_time() {
+    let dir = seeded_dir();
+    let set = crate::pages::SetInfo::find("wikipedia-en").unwrap();
+    let file = set.file(dir.path());
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    let articles: Vec<plumb_core::Article> = ["Marie Curie", "Pierre Curie", "Curie (unit)"]
+        .iter()
+        .map(|title| plumb_core::Article {
+            title: title.to_string(),
+            views: 10,
+            ..Default::default()
+        })
+        .collect();
+    plumb_ingest::articles::write_articles_file(&file, &articles).unwrap();
+    let notes = crate::pages::SetFileNotes {
+        lines: 3,
+        complete: true,
+        source_modified: 1,
+        fetched_at: now_unix(),
+        near: 0,
+    };
+    std::fs::write(
+        crate::pages::notes_path(&file),
+        serde_json::to_vec(&notes).unwrap(),
+    )
+    .unwrap();
+    let node = start(test_config(dir.path())).await.unwrap();
+    let addr = node.addr();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !get(addr, "/search?q=pierre+curie")
+        .await
+        .2
+        .contains("Pierre_Curie")
+    {
+        assert!(Instant::now() < deadline, "no pages");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // A download holds the file; a lower limit meanwhile leaves it alone.
+    node.inner.set_files_busy.lock().unwrap().insert(set.id);
+    let mut settings = node.inner.settings();
+    settings.page_sets = crate::pages::PageSets::parse("wikipedia-en=2").unwrap();
+    settings.storage_limit_mb = 500;
+    node.inner.change_settings(settings).unwrap();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(set.file_notes(dir.path()).unwrap().lines, 3);
+
+    // Once the download is done, the file is cut.
+    node.inner.set_files_busy.lock().unwrap().remove(set.id);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while set.file_notes(dir.path()).unwrap().lines != 2 {
+        assert!(Instant::now() < deadline, "never cut");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    node.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_set_file_over_the_storage_limit_is_cut_before_it_is_indexed() {
+    // A file taken from a trusted node, with more pages than the node now
+    // keeps.
+    let dir = seeded_dir();
+    let set = crate::pages::SetInfo::find("wikipedia-en").unwrap();
+    let file = set.file(dir.path());
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    let articles: Vec<plumb_core::Article> = [
+        ("Marie Curie", 900u64),
+        ("Pierre Curie", 500),
+        ("Curie (unit)", 10),
+    ]
+    .iter()
+    .map(|(title, views)| plumb_core::Article {
+        title: title.to_string(),
+        views: *views,
+        ..Default::default()
+    })
+    .collect();
+    plumb_ingest::articles::write_articles_file(&file, &articles).unwrap();
+    let notes = crate::pages::SetFileNotes {
+        lines: 3,
+        complete: true,
+        source_modified: 1,
+        fetched_at: now_unix(),
+        near: 0,
+    };
+    std::fs::write(
+        crate::pages::notes_path(&file),
+        serde_json::to_vec(&notes).unwrap(),
+    )
+    .unwrap();
+    let mut config = test_config(dir.path());
+    config.settings.page_sets = crate::pages::PageSets::parse("wikipedia-en=2").unwrap();
+    config.settings.storage_limit_mb = 500;
+    let node = start(config).await.unwrap();
+    let addr = node.addr();
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let (_, _, body) = get(addr, "/search?q=pierre+curie").await;
+        if body.contains("Pierre_Curie") {
+            break;
+        }
+        assert!(Instant::now() < deadline, "no pages: {body}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(set.file_notes(dir.path()).unwrap().lines, 2);
+    // One index, of the pages kept: none of the whole file first.
+    let built: Vec<String> = node
+        .inner
+        .journal
+        .entries()
+        .into_iter()
+        .map(|entry| entry.message)
+        .filter(|message| message.starts_with("Page sets ready"))
+        .collect();
+    assert_eq!(
+        built,
+        ["Page sets ready: 2 pages searched next to the sites"],
+        "{built:?}"
+    );
+
+    node.shutdown().await.unwrap();
+}
+
+/// A trusted node that says when it is asked for a page set file, then
+/// answers only once let go (or the asker gives up).
+struct SlowPages {
+    table: plumb_net::BucketTable,
+    asked: Mutex<std::sync::mpsc::Sender<()>>,
+    gate: Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+impl plumb_net::BucketSource for SlowPages {
+    fn bucket(&self, bucket: u32) -> Option<Vec<String>> {
+        self.table.bucket(bucket)
+    }
+
+    fn page_set_file(&self, _set: &str) -> Option<PathBuf> {
+        let _ = self.asked.lock().unwrap().send(());
+        let _ = self
+            .gate
+            .lock()
+            .unwrap()
+            .recv_timeout(Duration::from_secs(60));
+        None
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_node_searches_the_pages_it_has_while_a_download_waits() {
+    let peer_dir = tempfile::tempdir().unwrap();
+    let peer_id = plumb_net::load_or_create_key(&peer_dir.path().join("node.key"))
+        .unwrap()
+        .public()
+        .to_peer_id();
+    let table = plumb_net::BucketTable::build(
+        &peer_dir.path().join("buckets"),
+        &[SiteRecord::new("lighthouses.org")],
+    )
+    .unwrap();
+    let (asked_tx, asked) = std::sync::mpsc::channel();
+    let (let_go, gate) = std::sync::mpsc::channel();
+    let mut peer_config = plumb_net::NetConfig::new(peer_dir.path().to_path_buf());
+    peer_config.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+    peer_config.upnp = false;
+    peer_config.local_discovery = false;
+    peer_config.round_every = None;
+    let source = SlowPages {
+        table,
+        asked: Mutex::new(asked_tx),
+        gate: Mutex::new(gate),
+    };
+    let (peer, _records) = plumb_net::start(peer_config, Arc::new(source))
+        .await
+        .unwrap();
+    let peer_addr: plumb_net::Multiaddr = loop {
+        if let Some(addr) = peer.status().listening.first() {
+            break addr.parse().unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+
+    // The node keeps a set it has no file of, so it asks the trusted node,
+    // which takes its time.
+    let dir = seeded_dir();
+    let mut config = test_config(dir.path());
+    config.settings.page_sets = crate::pages::PageSets::parse("wikipedia-en=2").unwrap();
+    let mut net = plumb_net::NetConfig::new(PathBuf::new());
+    net.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+    net.upnp = false;
+    net.local_discovery = false;
+    net.round_every = None;
+    net.fill = false;
+    net.trusted_peers = vec![peer_id];
+    net.bootstrap = vec![peer_addr.with_p2p(peer_id).unwrap()];
+    config.network = Some(net);
+    let node = start(config).await.unwrap();
+    let addr = node.addr();
+    wait_for(addr, "the first index", ready_and_idle).await;
+    tokio::task::spawn_blocking(move || asked.recv_timeout(Duration::from_secs(30)))
+        .await
+        .unwrap()
+        .expect("the node asks the trusted node for the set");
+
+    // Meanwhile a file of the set turns up here (from fetch-pages, say):
+    // it is searched without waiting on the download.
+    let set = crate::pages::SetInfo::find("wikipedia-en").unwrap();
+    let file = set.file(dir.path());
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    let articles = [plumb_core::Article {
+        title: "Pierre Curie".into(),
+        views: 500,
+        ..Default::default()
+    }];
+    plumb_ingest::articles::write_articles_file(&file, &articles).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let (_, _, body) = get(addr, "/search?q=pierre+curie").await;
+        if body.contains("Pierre_Curie") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the pages wait on the download: {body}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    let _ = let_go.send(());
+    peer.shutdown().await;
+    node.shutdown().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_new_node_sets_up_from_a_trusted_node_without_the_seed_downloads() {
     // A trusted node holds five sites, two never crawled, with what the
@@ -2417,5 +3113,580 @@ async fn a_new_node_that_trusts_no_one_still_sets_up_from_the_seed_downloads() {
     .await;
     let error = status.last_error.unwrap().message;
     assert!(error.contains("Tranco"), "{error}");
+    node.shutdown().await.unwrap();
+}
+
+/// An HTTP/1.1 request with a cookie and, for a POST, a form: the status
+/// code, the head (lowercased) and the body.
+async fn send(
+    addr: SocketAddr,
+    method: &str,
+    path: &str,
+    cookie: &str,
+    form: &str,
+) -> (u16, String, String) {
+    let mut stream = TcpStream::connect(addr).await.unwrap();
+    let request = format!(
+        "{method} {path} HTTP/1.1\r\nHost: {addr}\r\nCookie: {cookie}\r\n\
+         Content-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\n\
+         Connection: close\r\n\r\n{form}",
+        form.len()
+    );
+    stream.write_all(request.as_bytes()).await.unwrap();
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).await.unwrap();
+    let response = String::from_utf8(response).unwrap();
+    let (head, body) = response.split_once("\r\n\r\n").unwrap();
+    let code = head.split(' ').nth(1).unwrap().parse().unwrap();
+    (code, head.to_ascii_lowercase(), body.to_string())
+}
+
+/// The profile cookie a response sets, if it sets one.
+fn profile_cookie(head: &str) -> Option<String> {
+    let start = head.find("plumb_profile=")? + "plumb_profile=".len();
+    Some(head[start..start + 32].to_string())
+}
+
+/// A searcher's other node, keeping its profiles in a folder.
+struct ProfileFolder(PathBuf);
+
+impl plumb_net::BucketSource for ProfileFolder {
+    fn bucket(&self, _bucket: u32) -> Option<Vec<String>> {
+        None
+    }
+
+    fn profile(
+        &self,
+        peer: plumb_net::PeerId,
+        request: plumb_net::proto::ProfileRequest,
+    ) -> plumb_net::proto::ProfileResponse {
+        crate::sync::answer(&self.0, peer, request)
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_browser_takes_a_profile_from_another_node_with_a_link_code() {
+    // The other node's browser searched github.
+    let peer_dir = tempfile::tempdir().unwrap();
+    let peer_id = plumb_net::load_or_create_key(&peer_dir.path().join("node.key"))
+        .unwrap()
+        .public()
+        .to_peer_id();
+    let profiles = peer_dir.path().join("history");
+    let theirs = crate::history::HistoryStore::new(&profiles);
+    let p = crate::history::new_profile().unwrap();
+    theirs.update(&p, |h| h.add_search("github", 1)).unwrap();
+    let mut peer_config = plumb_net::NetConfig::new(peer_dir.path().to_path_buf());
+    peer_config.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+    peer_config.upnp = false;
+    peer_config.local_discovery = false;
+    peer_config.round_every = None;
+    let (peer, _records) = plumb_net::start(peer_config, Arc::new(ProfileFolder(profiles)))
+        .await
+        .unwrap();
+    let peer_addr: plumb_net::Multiaddr = loop {
+        if let Some(addr) = peer.status().listening.first() {
+            break addr.parse().unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+
+    let dir = seeded_dir();
+    let mut config = test_config(dir.path());
+    config.search_history = true;
+    let mut net = plumb_net::NetConfig::new(PathBuf::new());
+    net.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+    net.upnp = false;
+    net.local_discovery = false;
+    net.round_every = None;
+    net.fill = false;
+    net.bootstrap = vec![peer_addr.with_p2p(peer_id).unwrap()];
+    config.network = Some(net);
+    let node = start(config).await.unwrap();
+    let addr = node.addr();
+    wait_for(addr, "the first index", ready_and_idle).await;
+
+    // This node's browser searched chase, then pastes the other's code.
+    let (_, head, _) = send(addr, "GET", "/search?q=chase", "", "").await;
+    let q = profile_cookie(&head).expect("a profile for the search");
+    let code = crate::sync::format_code(&crate::sync::make_code(&p).unwrap(), Some(&peer_id));
+    let form = format!("code={}", code.replace('@', "%40"));
+    let (status, head, body) = send(
+        addr,
+        "POST",
+        "/link/join",
+        &format!("plumb_profile={q}"),
+        &form,
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("Done."), "{body}");
+    assert_eq!(profile_cookie(&head).as_deref(), Some(p.as_str()));
+
+    // Both searches are on both nodes now.
+    let (_, _, history) = send(addr, "GET", "/history", &format!("plumb_profile={p}"), "").await;
+    assert!(
+        history.contains("github") && history.contains("chase"),
+        "{history}"
+    );
+    let searches: Vec<String> = theirs
+        .load(&p)
+        .searches
+        .into_iter()
+        .map(|s| s.query)
+        .collect();
+    assert_eq!(searches, ["chase", "github"]);
+    let (_, _, page) = send(addr, "GET", "/link", &format!("plumb_profile={p}"), "").await;
+    assert!(page.contains("synced"), "{page}");
+
+    peer.shutdown().await;
+    node.shutdown().await.unwrap();
+}
+
+/// A trusted node's buckets plus its vectors file, served as the set of
+/// vectors of its model.
+struct WithVectors(plumb_net::BucketTable, PathBuf, String);
+
+impl plumb_net::BucketSource for WithVectors {
+    fn bucket(&self, bucket: u32) -> Option<Vec<String>> {
+        self.0.bucket(bucket)
+    }
+
+    fn page_set_file(&self, set: &str) -> Option<PathBuf> {
+        (set == self.2).then(|| self.1.clone())
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_node_takes_site_vectors_made_from_its_own_text_from_a_trusted_node() {
+    let dir = seeded_dir();
+    let model_dir = dir.path().join(MeaningModel::Small.dir_name());
+    plumb_embed::write_test_model(&model_dir).unwrap();
+    let model = plumb_embed::model_id(&model_dir).unwrap();
+
+    // The trusted node's vectors: one for a site's very text, one for
+    // other text, one for a site this node does not know.
+    let records = fixture_records();
+    let mut with_text = records
+        .iter()
+        .filter(|r| !plumb_embed::site_text(r).is_empty());
+    let same = with_text.next().unwrap();
+    let other = with_text.next().unwrap();
+    let marker = [7i8; 32];
+    let mut theirs = plumb_embed::Vectors::new(model, 32);
+    let hash = plumb_embed::text_hash(&plumb_embed::site_text(same));
+    theirs.insert(&same.domain, hash, &marker).unwrap();
+    theirs.insert(&other.domain, [9; 32], &marker).unwrap();
+    theirs.insert("unknown-to-it.org", hash, &marker).unwrap();
+    let peer_dir = tempfile::tempdir().unwrap();
+    let file = peer_dir.path().join(plumb_embed::VECTORS_FILE_NAME);
+    theirs.save(&file).unwrap();
+    assert_eq!(
+        shared_vectors::servable(peer_dir.path(), &shared_vectors::set_name(&model)),
+        Some(file.clone())
+    );
+    assert_eq!(
+        shared_vectors::servable(peer_dir.path(), &shared_vectors::set_name(&[0; 32])),
+        None
+    );
+    assert_eq!(
+        shared_vectors::servable(peer_dir.path(), "wikipedia-en"),
+        None
+    );
+
+    let peer_id = plumb_net::load_or_create_key(&peer_dir.path().join("node.key"))
+        .unwrap()
+        .public()
+        .to_peer_id();
+    let table = plumb_net::BucketTable::build(
+        &peer_dir.path().join("buckets"),
+        &[SiteRecord::new("lighthouses.org")],
+    )
+    .unwrap();
+    let mut peer_config = plumb_net::NetConfig::new(peer_dir.path().to_path_buf());
+    peer_config.search_scope = plumb_net::SearchScope::Anyone;
+    peer_config.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+    peer_config.upnp = false;
+    peer_config.local_discovery = false;
+    peer_config.round_every = None;
+    let source = WithVectors(table, file, shared_vectors::set_name(&model));
+    let (peer, _records) = plumb_net::start(peer_config, Arc::new(source))
+        .await
+        .unwrap();
+    let peer_addr: plumb_net::Multiaddr = loop {
+        if let Some(addr) = peer.status().listening.first() {
+            break addr.parse().unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+
+    let mut config = test_config(dir.path());
+    config.search_by_meaning = true;
+    let mut net = plumb_net::NetConfig::new(PathBuf::new());
+    net.search_scope = plumb_net::SearchScope::Anyone;
+    net.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+    net.upnp = false;
+    net.local_discovery = false;
+    net.round_every = None;
+    net.fill = false;
+    net.trusted_peers = vec![peer_id];
+    net.bootstrap = vec![peer_addr.with_p2p(peer_id).unwrap()];
+    config.network = Some(net);
+    let node = start(config).await.unwrap();
+    wait_for(node.addr(), "the first index", ready_and_idle).await;
+
+    // Every site with text ends with a vector: the one sent for its text
+    // kept as sent, the others made here.
+    let vectors_path = dir.path().join(plumb_embed::VECTORS_FILE_NAME);
+    let wanted = records
+        .iter()
+        .filter(|r| !plumb_embed::site_text(r).is_empty())
+        .count();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let vectors = loop {
+        if let Ok(vectors) = plumb_embed::Vectors::load(&vectors_path) {
+            if vectors.len() == wanted && vectors.get(&same.domain).is_some() {
+                break vectors;
+            }
+        }
+        assert!(Instant::now() < deadline, "vectors not saved");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    assert_eq!(vectors.get(&same.domain), Some((&hash, &marker[..])));
+    assert_ne!(vectors.get(&other.domain).unwrap().1, &marker[..]);
+    assert!(vectors.get("unknown-to-it.org").is_none());
+
+    peer.shutdown().await;
+    node.shutdown().await.unwrap();
+}
+
+/// Calls `tool` on a node's `/mcp` as an AI app on this computer does; the
+/// tool's structured answer and its text.
+async fn mcp_call(
+    addr: SocketAddr,
+    tool: &str,
+    arguments: serde_json::Value,
+) -> (serde_json::Value, String) {
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": { "name": tool, "arguments": arguments },
+    })
+    .to_string();
+    let mut stream = TcpStream::connect(addr).await.unwrap();
+    let request = format!(
+        "POST /mcp HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\n\
+         Accept: application/json, text/event-stream\r\nContent-Length: {}\r\n\
+         Connection: close\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(request.as_bytes()).await.unwrap();
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).await.unwrap();
+    let response = String::from_utf8(response).unwrap();
+    let (head, body) = response.split_once("\r\n\r\n").unwrap();
+    assert!(head.starts_with("HTTP/1.1 200"), "{head}\n{body}");
+    let reply: serde_json::Value = serde_json::from_str(body).unwrap();
+    let result = &reply["result"];
+    assert_eq!(result["isError"], false, "{reply}");
+    let text = result["content"][0]["text"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+    (result["structuredContent"].clone(), text)
+}
+
+/// Writes `articles` as the node's whole file of the page set `set`.
+fn write_set_file(dir: &Path, set: &str, articles: &[plumb_core::Article]) {
+    let set = crate::pages::SetInfo::find(set).unwrap();
+    let file = set.file(dir);
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    plumb_ingest::articles::write_articles_file(&file, articles).unwrap();
+    let notes = crate::pages::SetFileNotes {
+        lines: articles.len() as u64,
+        complete: true,
+        source_modified: 1,
+        fetched_at: now_unix(),
+        near: 0,
+    };
+    std::fs::write(
+        crate::pages::notes_path(&file),
+        serde_json::to_vec(&notes).unwrap(),
+    )
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_agent_asks_for_one_kind_of_page() {
+    let dir = seeded_dir();
+    write_set_file(
+        dir.path(),
+        "wikipedia-en",
+        &[plumb_core::Article {
+            title: "Lighthouse".into(),
+            views: 900,
+            ..Default::default()
+        }],
+    );
+    write_set_file(
+        dir.path(),
+        "stackoverflow",
+        &[plumb_core::Article {
+            title: "How do I clean a lighthouse lens?".into(),
+            item: Some("42".into()),
+            views: 10,
+            ..Default::default()
+        }],
+    );
+    let mut config = test_config(dir.path());
+    config.settings.page_sets =
+        crate::pages::PageSets::parse("wikipedia-en=all,stackoverflow=all").unwrap();
+    let node = start(config).await.unwrap();
+    let addr = node.addr();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !get(addr, "/search?q=lighthouse")
+        .await
+        .2
+        .contains("wiki/Lighthouse")
+    {
+        assert!(Instant::now() < deadline, "no pages");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    let (answer, text) = mcp_call(
+        addr,
+        "search",
+        serde_json::json!({ "query": "lighthouse", "kind": "question" }),
+    )
+    .await;
+    assert_eq!(answer["results"], serde_json::json!([]), "{answer}");
+    let pages = answer["pages"].as_array().unwrap();
+    assert_eq!(pages.len(), 1, "{answer}");
+    assert_eq!(pages[0]["url"], "https://stackoverflow.com/questions/42");
+    assert!(
+        text.contains("[Stack Overflow] How do I clean a lighthouse lens?"),
+        "{text}"
+    );
+    let (answer, _) = mcp_call(
+        addr,
+        "search",
+        serde_json::json!({ "query": "lighthouse", "kind": "article" }),
+    )
+    .await;
+    let pages = answer["pages"].as_array().unwrap();
+    assert_eq!(pages.len(), 1, "{answer}");
+    assert_eq!(pages[0]["title"], "Lighthouse");
+
+    node.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_agent_finds_a_page_another_node_s_agent_shared_and_reads_it() {
+    // The page both agents read, served here under a public name.
+    let app = axum::Router::new().route(
+        "/guide",
+        axum::routing::get(|| async {
+            axum::response::Html(
+                "<title>Lighthouse keeping</title><main><h1>Lamps</h1>\
+                 <p>Fresnel lamps burn colza oil, trimmed every four hours.</p></main>",
+            )
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let page_addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await });
+    let page = format!("http://lighthouse-keepers.org:{}/guide", page_addr.port());
+    let config_for = |dir: &Path, bootstrap: Vec<plumb_net::Multiaddr>, trusted| {
+        let mut config = test_config(dir);
+        let mut net = plumb_net::NetConfig::new(PathBuf::new());
+        net.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+        net.upnp = false;
+        net.local_discovery = false;
+        net.round_every = None;
+        net.bootstrap = bootstrap;
+        net.trusted_peers = trusted;
+        net.search_scope = plumb_net::SearchScope::Trusted;
+        config.network = Some(net);
+        config
+            .page_reader
+            .resolve
+            .push(("lighthouse-keepers.org".to_string(), page_addr));
+        config
+    };
+
+    // Node A lets its agents share findings.
+    let a_dir = seeded_dir();
+    let mut a_config = config_for(a_dir.path(), Vec::new(), Vec::new());
+    a_config.share_findings = true;
+    let a = start(a_config).await.unwrap();
+    let a_status = wait_for(a.addr(), "A's first index", ready_and_idle).await;
+    let a_net = a_status.network.unwrap();
+    let a_id: plumb_net::PeerId = a_net.peer_id.parse().unwrap();
+    let a_addr: plumb_net::Multiaddr = a_net.listening[0].parse().unwrap();
+    let a_addr = a_addr.with_p2p(a_id).unwrap();
+
+    // Node B trusts A, and its searches take only trusted nodes' leads.
+    let b_dir = seeded_dir();
+    let b = start(config_for(b_dir.path(), vec![a_addr], vec![a_id]))
+        .await
+        .unwrap();
+    wait_for(b.addr(), "B to connect to A", |s| {
+        ready_and_idle(s) && s.network.as_ref().is_some_and(|n| n.connected_peers >= 1)
+    })
+    .await;
+
+    // A's agent keeps one finding to itself, then shares another.
+    let (kept, _) = mcp_call(
+        a.addr(),
+        "report_finding",
+        serde_json::json!({
+            "query": "lighthouse foghorn schedule",
+            "url": "https://foghorn-schedules.org/harbour",
+            "why": "the harbour's own timetable",
+            "answer": "Every 30 seconds in fog",
+        }),
+    )
+    .await;
+    assert_eq!(kept["kept"], true, "{kept}");
+    assert!(kept.get("shared").is_none(), "{kept}");
+    let (shared, text) = mcp_call(
+        a.addr(),
+        "report_finding",
+        serde_json::json!({
+            "query": "lighthouse lamp oil",
+            "url": page,
+            "why": "the keepers' guide says what each lamp burns",
+            "answer": "Colza oil, as the 1890 guide on Grandpa's shelf says",
+            "task": "restoring Grandpa's lighthouse lamp",
+            "share": true,
+        }),
+    )
+    .await;
+    assert_eq!(shared["shared"]["shared"], true, "{shared}");
+    assert_eq!(shared["shared"]["node"], a_id.to_string());
+    assert!(shared["shared"]["query"].is_null(), "{shared}");
+    assert!(text.contains("Shared with other Plumb nodes"), "{text}");
+
+    // B's agent searches for the same thing in other words and finds the
+    // page, as a lead: who reported it, when, and that nobody checked it.
+    let mut found = None;
+    for _ in 0..300 {
+        let (answer, text) = mcp_call(
+            b.addr(),
+            "search",
+            serde_json::json!({ "query": "oil for a lighthouse lamp" }),
+        )
+        .await;
+        if answer.get("leads").is_some() {
+            found = Some((answer, text));
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let (answer, text) = found.expect("B's search lists A's lead");
+    let lead = &answer["leads"][0];
+    assert_eq!(lead["url"], page.as_str(), "{answer}");
+    assert_eq!(lead["verified"], false);
+    assert_eq!(lead["why"], "the keepers' guide says what each lamp burns");
+    let by = &lead["reported_by"][0];
+    assert_eq!(by["node"], a_id.to_string());
+    assert_eq!(by["relation"], "trusted");
+    assert!(by["query"].is_null(), "{answer}");
+    assert!(by["expires_at"].as_u64().unwrap() > now_unix());
+    assert!(
+        text.contains("Lead shared by 1 other Plumb node, 1 trusted"),
+        "{text}"
+    );
+    // Not its search, answer or task: only what was meant to be shared.
+    let said = answer.to_string();
+    for private in ["1890", "Grandpa", "restoring", "lamp oil\""] {
+        assert!(!said.contains(private), "{private} in {said}");
+    }
+    // A lead is not among the results, which come from crawls.
+    assert!(!answer["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|hit| hit["url"] == page.as_str()));
+
+    // B's agent reads the page itself.
+    let (read, _) = mcp_call(b.addr(), "read_page", serde_json::json!({ "url": page })).await;
+    assert!(
+        read["text"]
+            .as_str()
+            .unwrap()
+            .contains("Fresnel lamps burn colza oil"),
+        "{read}"
+    );
+
+    // The finding A's agent kept to itself never left A.
+    let (answer, _) = mcp_call(
+        b.addr(),
+        "search",
+        serde_json::json!({ "query": "lighthouse foghorn schedule" }),
+    )
+    .await;
+    assert!(answer.get("leads").is_none(), "{answer}");
+    assert!(answer.get("found_before").is_none(), "{answer}");
+    let b_leads = std::fs::read_to_string(b_dir.path().join("net/leads.jsonl")).unwrap();
+    assert_eq!(b_leads.lines().count(), 1, "{b_leads}");
+    assert!(!b_leads.contains("foghorn"), "{b_leads}");
+    let a_leads = std::fs::read_to_string(a_dir.path().join("net/leads.jsonl")).unwrap();
+    assert!(!a_leads.contains("foghorn"), "{a_leads}");
+    let a_findings = std::fs::read_to_string(a_dir.path().join("findings.jsonl")).unwrap();
+    assert!(a_findings.contains("foghorn"), "{a_findings}");
+    assert!(!b_dir.path().join("findings.jsonl").exists());
+    // A finds its own finding, not its lead.
+    let (answer, _) = mcp_call(
+        a.addr(),
+        "search",
+        serde_json::json!({ "query": "lighthouse lamp oil" }),
+    )
+    .await;
+    assert!(answer.get("found_before").is_some(), "{answer}");
+    assert!(answer.get("leads").is_none(), "{answer}");
+    let b_status = get_status(b.addr()).await;
+    assert_eq!(b_status.network.unwrap().leads_held, 1);
+
+    b.shutdown().await.unwrap();
+    a.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_node_that_does_not_share_findings_keeps_them_local() {
+    let dir = seeded_dir();
+    let mut config = test_config(dir.path());
+    let mut net = plumb_net::NetConfig::new(PathBuf::new());
+    net.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+    net.upnp = false;
+    net.local_discovery = false;
+    net.round_every = None;
+    net.trusted_peers = Vec::new();
+    config.network = Some(net);
+    let node = start(config).await.unwrap();
+    wait_for(node.addr(), "the first index", ready_and_idle).await;
+    // Asked to share, it keeps the finding and says why it did not share it.
+    let (answer, text) = mcp_call(
+        node.addr(),
+        "report_finding",
+        serde_json::json!({
+            "query": "tokio latest version",
+            "url": "https://crates.io/crates/tokio",
+            "why": "the registry's page",
+            "answer": "1.47.1",
+            "share": true,
+        }),
+    )
+    .await;
+    assert_eq!(answer["kept"], true);
+    assert_eq!(answer["shared"]["shared"], false, "{answer}");
+    assert!(
+        text.contains("Not shared: this node does not share findings"),
+        "{text}"
+    );
+    let status = get_status(node.addr()).await;
+    assert_eq!(status.network.unwrap().leads_held, 0);
+    assert!(!dir.path().join("net/leads.jsonl").exists());
     node.shutdown().await.unwrap();
 }

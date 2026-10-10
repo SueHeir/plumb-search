@@ -1,0 +1,18 @@
+[package]
+name = "plumb-plugin-youtube-music"
+description = "A Plumb Search plugin: songs and videos from YouTube and YouTube Music, through the YouTube Data API."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+# `cdylib` is the plugin; `rlib` lets its tests run on the computer that
+# builds it.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+plumb-plugin = { version = "0.2.1", path = "../../crates/plumb-plugin" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"

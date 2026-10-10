@@ -31,9 +31,9 @@ use url::{Host, Url};
 
 use super::control::{ControlError, ControlView};
 use super::panel::{
-    apply_features_form, forbidden, panel_error, panel_page, paused, refusal, render_panel,
-    settings_from_form, FeaturesForm, PanelQuery, PanelView, PauseForm, RetryForm, SettingsForm,
-    LAYOUT_STYLE, PANEL_STYLE,
+    apply_features_form, features_error, forbidden, panel_error, panel_page, paused, refusal,
+    render_panel, settings_error, settings_from_form, FeaturesForm, PanelQuery, PanelView,
+    PauseForm, RetryForm, SettingsForm, LAYOUT_STYLE, PANEL_STYLE,
 };
 use super::{escape_html, page_with_head, AppState, StatusSource};
 use crate::node::control::{hex_encode, TOKEN_PREFIX};
@@ -424,6 +424,7 @@ async fn new_page(State(state): State<AppState>, request: Request) -> Response {
 }
 
 fn render_connect(node: &dyn StatusSource, form: &AddForm, error: Option<&str>) -> String {
+    let bar = super::app_bar("settings", true);
     let error = error
         .map(|error| {
             format!(
@@ -433,7 +434,7 @@ fn render_connect(node: &dyn StatusSource, form: &AddForm, error: Option<&str>) 
         })
         .unwrap_or_default();
     let body = format!(
-        "<main class=\"wrap node-panel\">{}<div class=\"node-heading\"><div>\
+        "<div class=\"wrap node-panel\">{bar}<main class=\"node-standalone\">{}<div class=\"node-heading\"><div>\
          <p class=\"eyebrow\">ANOTHER NODE</p><h1>Connect to a node</h1></div></div>\
          <p class=\"intro\">Control a Plumb Search node on another computer from here, such \
          as a Docker container or a homelab server: its settings, crawling and \
@@ -462,7 +463,7 @@ fn render_connect(node: &dyn StatusSource, form: &AddForm, error: Option<&str>) 
          from an authority.</p>\
          <label for=\"name\">Name <span class=\"state\">· optional</span></label>\
          <input id=\"name\" name=\"name\" placeholder=\"Homelab\" value=\"{}\">\
-         <button type=\"submit\">Connect</button></form></main>",
+         <button type=\"submit\">Connect</button></form></main></div>",
         switcher(node, Some("new")),
         escape_html(&form.address),
         escape_html(&form.fingerprint),
@@ -658,6 +659,7 @@ async fn show(
                 remote_control: None,
                 activity: &view.activity,
                 backups: None,
+                plugins: None,
             }))
             .into_response()
         }
@@ -671,15 +673,16 @@ async fn show(
 
 fn render_unreachable(remote: &RemoteNode, switcher: &str, error: &str) -> String {
     let base = format!("/app/nodes/{}", remote.id);
+    let bar = super::app_bar_for("settings", true, &base);
     let body = format!(
-        "<main class=\"wrap node-panel\">{switcher}<div class=\"node-heading\"><div>\
+        "<div class=\"wrap node-panel\">{bar}<main class=\"node-standalone\">{switcher}<div class=\"node-heading\"><div>\
          <p class=\"eyebrow\">{}</p><h1>Plumb Search</h1></div></div>\
          <div class=\"err\" role=\"alert\"><p>{}</p></div>\
          <p>Address: <code>{}</code></p>\
          <div class=\"btns\"><a class=\"btn\" href=\"{base}\">Try again</a>\
          <a class=\"btn alt\" href=\"/app/nodes/new\">Connect with a new token</a></div>\
          <form method=\"post\" action=\"{base}/remove\">\
-         <button type=\"submit\" class=\"alt\">Forget this node</button></form></main>",
+         <button type=\"submit\" class=\"alt\">Forget this node</button></form></main></div>",
         escape_html(&remote.name.to_uppercase()),
         escape_html(error),
         escape_html(&remote.url),
@@ -721,14 +724,17 @@ async fn change_settings(
         Ok(view) => view.settings,
         Err(error) => return after_change(&remote, Err(error), ""),
     };
-    let settings = match settings_from_form(&form, &current) {
+    let settings = match settings_from_form(&form, &current, &format!("/app/nodes/{}", remote.id)) {
         Ok(settings) => settings,
         Err(response) => return response,
     };
     let body = serde_json::to_vec(&settings).expect("settings as JSON");
     let result = call(&remote, "/api/control/settings", Some(body)).await;
     let back = format!("/app/nodes/{}?section=resources&saved=settings", remote.id);
-    after_change(&remote, result, &back)
+    match result {
+        Ok(_) => Redirect::to(&back).into_response(),
+        Err(ClientError(error)) => settings_error(StatusCode::BAD_GATEWAY, &form, &format!("/app/nodes/{}", remote.id), &format!("Could not confirm the change on {}. Review its saved settings before retrying. {error}", remote.name)),
+    }
 }
 
 async fn change_features(
@@ -753,16 +759,27 @@ async fn change_features(
     // The form holds one section's features; the rest stay as saved there.
     let mut features = match fetch_view(&remote).await {
         Ok(view) => view.saved_features,
-        Err(error) => return after_change(&remote, Err(error), ""),
+        Err(ClientError(error)) => {
+            return features_error(
+                StatusCode::BAD_GATEWAY,
+                &form,
+                &format!("/app/nodes/{}", remote.id),
+                &format!("Could not read the saved features. No changes were sent. {error}"),
+            )
+        }
     };
-    let section = match apply_features_form(&form, &mut features) {
-        Ok(section) => section,
-        Err(response) => return response,
-    };
+    let section =
+        match apply_features_form(&form, &mut features, &format!("/app/nodes/{}", remote.id)) {
+            Ok(section) => section,
+            Err(response) => return response,
+        };
     let body = serde_json::to_vec(&features).expect("features as JSON");
     let result = call(&remote, "/api/control/features", Some(body)).await;
     let back = format!("/app/nodes/{}?section={section}&saved=features", remote.id);
-    after_change(&remote, result, &back)
+    match result {
+        Ok(_) => Redirect::to(&back).into_response(),
+        Err(ClientError(error)) => features_error(StatusCode::BAD_GATEWAY, &form, &format!("/app/nodes/{}", remote.id), &format!("Could not confirm the change on {}. Review its saved settings before retrying. {error}", remote.name)),
+    }
 }
 
 async fn refresh(
@@ -1031,12 +1048,14 @@ mod end_to_end {
                 background_updates: true,
                 paused: None,
                 disk_used: 0,
+                storage_limit: 0,
                 downloaded_today: 0,
                 downloaded_total: 0,
                 homepages_visited: 0,
                 meaning_sites: None,
                 meaning_work: None,
                 can_restart: false,
+                page_coverage: None,
                 paused_until: None,
                 network: self
                     .peer
@@ -1380,6 +1399,38 @@ mod end_to_end {
         );
         assert!(!page.contains(&token), "the window never sees the token");
         assert!(!page.contains("section=remote"), "{page}");
+
+        // A rejected edit stays attached to the remote node, keeps the draft,
+        // and never forwards invalid settings or exposes its control token.
+        let invalid = form(&[
+            ("download_limit_mb_per_day", "250"),
+            ("storage_limit_mb", "oops"),
+        ]);
+        let (status, _, page) =
+            panel_request(app.clone(), "POST", &format!("{panel}/settings"), &invalid).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(page.contains("value=\"oops\""));
+        assert!(page.contains("value=\"250\""));
+        assert!(page.contains(&format!("action=\"{panel}/settings\"")));
+        assert!(page.contains(&format!("href=\"{panel}?section=resources\"")));
+        assert!(!page.contains(&token));
+        assert_eq!(*server.settings.lock().unwrap(), NodeSettings::default());
+        let invalid_features = form(&[
+            ("section", "network"),
+            ("network", "1"),
+            ("bootstrap", "bad-address"),
+        ]);
+        let (status, _, page) = panel_request(
+            app.clone(),
+            "POST",
+            &format!("{panel}/features"),
+            &invalid_features,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(page.contains(">bad-address</textarea>"));
+        assert!(page.contains(&format!("action=\"{panel}/features\"")));
+        assert_eq!(*server.features.lock().unwrap(), FeatureSettings::default());
 
         let settings = form(&[
             ("download_limit_mb_per_day", "42"),

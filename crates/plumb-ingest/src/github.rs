@@ -100,6 +100,13 @@ impl Repo {
             profiles: Vec::new(),
             website: None,
             package: None,
+            facts: Vec::new(),
+            lead: None,
+            names: Vec::new(),
+            sections: Vec::new(),
+            search: None,
+            language: None,
+            paper: None,
         }
     }
 }

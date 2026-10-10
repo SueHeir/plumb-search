@@ -113,10 +113,13 @@ pub mod features;
 mod fill;
 pub mod journal;
 mod network;
+pub(crate) mod newer;
 mod news;
 mod pages;
 mod places;
+mod round;
 pub mod schedule;
+mod shared_vectors;
 pub(crate) mod store;
 mod trim;
 mod worker;
@@ -178,15 +181,28 @@ pub struct NodeConfig {
     pub alpha: Option<f32>,
     /// The home country of searches that do not name one.
     pub country: HomeCountry,
+    /// The search pages start with "Only this country" on.
+    pub only_country: bool,
+    /// The language filter of searches that name none; `None` for the
+    /// browser's.
+    pub lang: Option<String>,
     /// The web search engine the results page links to; `None` for no link.
     pub web_search: Option<Engine>,
     /// Every client of `/mcp` may use `read_page`, not only this computer's.
     pub mcp_read_pages: bool,
+    /// Every client of `/mcp` may keep and see findings, not only this
+    /// computer's.
+    pub mcp_findings: bool,
+    /// How `read_page` fetches pages.
+    pub page_reader: plumb_crawl::ReadConfig,
     /// Rank by meaning too, for searches that name no site: the node
     /// downloads a small embedding model into `DIR/model` (about 130 MB)
     /// and keeps a vector of each site's text in `DIR/vectors.bin`, made in
     /// the background after each index build, best-ranked sites first.
     pub search_by_meaning: bool,
+    /// The model search by meaning runs; its files go in their own
+    /// directory, and switching makes the vectors again.
+    pub meaning_model: crate::meaning::MeaningModel,
     /// Threads that embed sites for search by meaning; `None` for half the
     /// CPUs this node may use.
     pub embed_threads: Option<usize>,
@@ -196,6 +212,9 @@ pub struct NodeConfig {
     /// trusted node answers (see `node/fill.rs`). Needs `network` with
     /// filling on and a trusted node. On by default.
     pub seed_from_network: bool,
+    /// Which page set files (and the map file) the node replaces by itself
+    /// when a trusted node has a newer one. All by default.
+    pub set_updates: crate::pages::SetUpdates,
     /// Where the seed data is downloaded from on first start.
     pub sources: SeedSources,
     /// How long to wait before trying failed work again. The wait doubles
@@ -222,6 +241,26 @@ pub struct NodeConfig {
     /// and crawl it every round it is due, assigned or not, so searching
     /// its name finds it. On by default.
     pub crawl_home_site: bool,
+    /// Take sites that look dead ([`crate::dead`]) out of the index each
+    /// crawl round. Off by default: the node only counts them in its log.
+    pub drop_dead_sites: bool,
+    /// Add sites the records do not hold yet: the domains a crawl finds
+    /// linked or redirected to, and the new sites in other nodes' shared
+    /// crawls. Off by default (Liz, 2026-10-06: "hold off crawling new
+    /// sites, until we get search way better"): crawls refresh the sites
+    /// held, and filling free space from trusted nodes, the seed and
+    /// searches still add sites the network already knows.
+    pub take_new_sites: bool,
+    /// Only crawl (Liz, 2026-10-06: "a memory safe setting for 'just
+    /// crawl'"), for a small server that supports the network and that
+    /// nobody searches: crawl rounds and the batches they publish go on,
+    /// while no search index is built or opened, no page sets, places,
+    /// feeds or adult blocklist are kept, search by meaning and private
+    /// search are off, and no other node's crawls are folded in. The
+    /// records are read for a round as [`round::RoundSites`], a few hundred
+    /// bytes a site, so millions of sites fit in a few hundred megabytes.
+    /// The index stays marked stale, so turning this off builds one.
+    pub crawl_only: bool,
     /// The nodes that share the sites with this one under `crawl_any_site`;
     /// they should crawl with it on and name this node in turn.
     pub crawl_with: Vec<plumb_net::PeerId>,
@@ -243,6 +282,10 @@ pub struct NodeConfig {
     /// network learns what is popular (see [`network`]). Needs `network`.
     /// Off by default.
     pub share_popularity: bool,
+    /// Let AI apps on this computer share a finding with other nodes when
+    /// they ask to, through `/mcp`'s `report_finding` (see
+    /// [`plumb_net::leads`]). Needs `network`. Off by default.
+    pub share_findings: bool,
     /// The settings until someone changes them on the panel, which saves
     /// them in `DIR/settings.json`.
     pub settings: NodeSettings,
@@ -288,19 +331,29 @@ impl NodeConfig {
             cc_release: None,
             alpha: None,
             country: HomeCountry::Auto,
+            only_country: false,
+            lang: None,
             web_search: None,
             mcp_read_pages: false,
+            mcp_findings: false,
+            page_reader: plumb_crawl::ReadConfig::default(),
             search_by_meaning: false,
+            meaning_model: crate::meaning::MeaningModel::default(),
             embed_threads: None,
             seed_from_network: true,
+            set_updates: crate::pages::SetUpdates::All,
             sources: SeedSources::default(),
             retry_wait: Duration::from_secs(10 * 60),
             max_retry_wait: Duration::from_secs(6 * 60 * 60),
             network: None,
             private_search: false,
             share_popularity: false,
+            share_findings: false,
             crawl_any_site: false,
             crawl_home_site: true,
+            drop_dead_sites: false,
+            take_new_sites: false,
+            crawl_only: false,
             crawl_with: Vec::new(),
             blackhole: false,
             publish_records: None,
@@ -313,7 +366,10 @@ impl NodeConfig {
     }
 
     /// Defaults for a desktop: 250,000 sites, 2,000 homepages crawled at
-    /// first and 1,000 more every 12 hours, on 127.0.0.1 with a free port.
+    /// first and 1,000 more every 12 hours, on 127.0.0.1 with a free port,
+    /// with search by meaning: it finds described searches ("electric car
+    /// maker") twice as often, and in the network the site vectors come from
+    /// a trusted node rather than this computer's CPU.
     pub fn desktop(data_dir: PathBuf) -> Self {
         NodeConfig {
             bind: SocketAddr::from(([127, 0, 0, 1], 0)),
@@ -324,6 +380,7 @@ impl NodeConfig {
             settings: NodeSettings::desktop(),
             manage_other_nodes: true,
             search_history: true,
+            search_by_meaning: true,
             news_feeds: 300,
             ..NodeConfig::server(data_dir)
         }
@@ -339,6 +396,23 @@ impl NodeConfig {
     }
 
     /// Catches settings that cannot work before anything is started.
+    /// Under [`NodeConfig::crawl_only`], turns off what only searching
+    /// needs, whatever the flags or the panel's features asked for.
+    fn limit_to_crawling(&mut self) {
+        if !self.crawl_only {
+            return;
+        }
+        self.search_by_meaning = false;
+        self.private_search = false;
+        self.news_feeds = 0;
+        if let Some(net) = &mut self.network {
+            // Nothing is searched here, and other nodes' crawls are not
+            // taken in, so neither is followed in memory.
+            net.answer_searches = false;
+            net.follow_crawls = false;
+        }
+    }
+
     fn check(&self) -> Result<()> {
         if self.sites == 0 {
             bail!("sites must be at least 1");
@@ -348,6 +422,9 @@ impl NodeConfig {
         }
         if self.share_popularity && self.network.is_none() {
             bail!("sharing popularity needs the network");
+        }
+        if self.share_findings && self.network.is_none() {
+            bail!("sharing findings needs the network");
         }
         if self.crawl_any_site && self.network.is_none() {
             bail!("crawling any site needs the network");
@@ -400,12 +477,18 @@ pub struct SeedSources {
     pub tranco_url: String,
     /// A SPARQL endpoint that answers Wikidata queries.
     pub wikidata_sparql_url: String,
+    /// A copy of Wikidata asked first for the official websites and their
+    /// facts, which lists them far faster than Wikidata's own endpoint
+    /// ([`download::QLEVER_WIKIDATA_URL`]); `None` to ask only
+    /// `wikidata_sparql_url`.
+    pub wikidata_mirror_url: Option<String>,
     /// English Wikipedia's API, for the first sentences of the articles
     /// about the best-known official websites' organizations.
     pub wikipedia_api_url: String,
     /// Only Wikidata items with at least this many Wikipedia sitelinks are
-    /// fetched, which keeps the download small enough to finish (see
-    /// [`download::download_wikidata_official_sites`]).
+    /// fetched, a notability filter; from 25 up when only
+    /// `wikidata_sparql_url` answers (see
+    /// [`download::download_wikidata_official_sites_with`]).
     pub wikidata_min_sitelinks: u32,
     /// How the Wikidata queries are spaced out: the pause between two and
     /// the wait before trying one again.
@@ -417,6 +500,10 @@ pub struct SeedSources {
     /// Where the embedding model's files are downloaded from, for search by
     /// meaning: each of [`plumb_embed::MODEL_FILES`] is appended.
     pub model_base_url: String,
+    /// Where EmbeddingGemma's files are downloaded from, for
+    /// [`crate::meaning::MeaningModel::Gemma`]: each file name with its
+    /// address.
+    pub gemma_downloads: Vec<(String, String)>,
     /// The adult blocklist safe search leaves out (see `node::adult`);
     /// `None` for none.
     pub adult_list_url: Option<String>,
@@ -427,11 +514,16 @@ impl Default for SeedSources {
         SeedSources {
             tranco_url: download::TRANCO_LATEST_URL.to_string(),
             wikidata_sparql_url: download::WIKIDATA_SPARQL_URL.to_string(),
+            wikidata_mirror_url: Some(download::QLEVER_WIKIDATA_URL.to_string()),
             wikipedia_api_url: plumb_ingest::intros::WIKIPEDIA_API_URL.to_string(),
-            wikidata_min_sitelinks: 25,
+            wikidata_min_sitelinks: download::DEFAULT_MIN_SITELINKS,
             wikidata_pacing: download::WikidataPacing::default(),
             cc_ranks_url: None,
             model_base_url: plumb_embed::MODEL_BASE_URL.to_string(),
+            gemma_downloads: plumb_embed::GEMMA_DOWNLOADS
+                .iter()
+                .map(|(name, url)| (name.to_string(), url.to_string()))
+                .collect(),
             adult_list_url: Some(plumb_core::safe::ADULT_LIST_URL.to_string()),
         }
     }
@@ -575,6 +667,10 @@ pub struct Status {
     pub paused_until: Option<u64>,
     /// Bytes the data folder takes, counted at most a minute ago.
     pub disk_used: u64,
+    /// The storage limit in bytes ([`NodeSettings::storage_limit_mb`]); 0
+    /// when there is none.
+    #[serde(default)]
+    pub storage_limit: u64,
     /// Bytes downloaded today (UTC): crawls and seed data.
     pub downloaded_today: u64,
     /// Bytes downloaded since the node was set up.
@@ -593,6 +689,27 @@ pub struct Status {
     /// feature changes (the desktop app's node can).
     #[serde(default)]
     pub can_restart: bool,
+    /// Indexed page count/generation plus bounded source-file quality notes.
+    /// File generation may be newer than the index while a rebuild is pending.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_coverage: Option<PageCoverage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PageCoverage {
+    pub indexed_pages: u64,
+    pub index_generation: Option<String>,
+    pub sets: Vec<SetCoverage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetCoverage {
+    pub set: String,
+    pub enabled: bool,
+    pub stored_records: Option<u64>,
+    /// Receiving the whole file is independent of its enrichment quality.
+    pub transfer_complete: Option<bool>,
+    pub file_quality: Option<plumb_net::pages::SetQuality>,
 }
 
 /// Work going on beside the main step, for the panel.
@@ -658,8 +775,8 @@ pub struct LastError {
     pub retry_at: Option<u64>,
 }
 
-/// A running node. Dropping the handle leaves the node running until the
-/// runtime shuts down; call [`NodeHandle::shutdown`] to stop it cleanly.
+/// A running node. Dropping the handle stops its work without waiting for
+/// it; call [`NodeHandle::shutdown`] to stop it cleanly.
 #[derive(Debug)]
 pub struct NodeHandle {
     addr: SocketAddr,
@@ -803,9 +920,8 @@ pub fn request_reseed(data_dir: &Path) -> Result<bool> {
 /// and index builds run on its blocking threads.
 pub async fn start(mut config: NodeConfig) -> Result<NodeHandle> {
     crate::limits::raise_open_file_limit();
-    if let Some(features) = features::FeatureSettings::load(&config.data_dir)? {
-        features.apply(&mut config)?;
-    }
+    features::FeatureSettings::apply_saved(&mut config)?;
+    config.limit_to_crawling();
     config.check()?;
     let rank = crate::rank_config(config.alpha);
     let opened = {
@@ -829,8 +945,12 @@ pub async fn start(mut config: NodeConfig) -> Result<NodeHandle> {
     ));
     let settings = WebSettings {
         home: inner.config.country.clone(),
+        only_country: inner.config.only_country,
+        language: inner.config.lang.clone(),
         web_search: inner.config.web_search,
         read_pages_for_all: inner.config.mcp_read_pages,
+        findings_for_all: inner.config.mcp_findings,
+        page_reader: inner.config.page_reader.clone(),
         plugins: load_plugins(&inner),
     };
     let app = web::node_router_with(inner.clone(), inner.clone(), settings);
@@ -885,20 +1005,33 @@ pub async fn start(mut config: NodeConfig) -> Result<NodeHandle> {
         warn!("{err:#}");
     }
     let worker = tokio::spawn(worker::run(inner.clone()));
+    tokio::spawn(release_memory_now_and_then(inner.clone()));
     let embedding = inner.config.search_by_meaning.then(|| {
         supervise(&inner, "search by meaning", |inner| {
             tokio::task::spawn_blocking(move || embedding::run(inner))
         })
     });
-    let pages = supervise(&inner, "page sets", |inner| {
-        tokio::task::spawn_blocking(move || pages::run(inner))
-    });
-    let news = supervise(&inner, "checking feeds", |inner| {
-        tokio::spawn(news::run(inner))
-    });
-    let adult = supervise(&inner, "the adult blocklist", |inner| {
-        tokio::spawn(adult::run(inner))
-    });
+    let (pages, news, adult) = if inner.config.crawl_only {
+        // Only searching needs these.
+        info!("crawling only: no search index, page sets, places, feeds or adult blocklist");
+        (
+            tokio::spawn(async {}),
+            tokio::spawn(async {}),
+            tokio::spawn(async {}),
+        )
+    } else {
+        (
+            supervise(&inner, "page sets", |inner| {
+                tokio::task::spawn_blocking(move || pages::run(inner))
+            }),
+            supervise(&inner, "checking feeds", |inner| {
+                tokio::spawn(news::run(inner))
+            }),
+            supervise(&inner, "the adult blocklist", |inner| {
+                tokio::spawn(adult::run(inner))
+            }),
+        )
+    };
     info!(
         "serving http://{addr}/ with data in {}",
         inner.paths.data.display()
@@ -914,6 +1047,25 @@ pub async fn start(mut config: NodeConfig) -> Result<NodeHandle> {
         news,
         adult,
     })
+}
+
+/// How often a running node hands the memory its threads freed back to the
+/// system, besides after each background job: a crawl round runs for most
+/// of an hour, and searches, the network and embedding free memory
+/// meanwhile, which would otherwise sit in the allocator until swapped out.
+const RELEASE_MEMORY_EVERY: Duration = Duration::from_secs(5 * 60);
+
+/// Hands freed memory back every [`RELEASE_MEMORY_EVERY`] until the node stops.
+async fn release_memory_now_and_then(inner: Arc<Inner>) {
+    loop {
+        tokio::select! {
+            () = tokio::time::sleep(RELEASE_MEMORY_EVERY) => {}
+            () = inner.stopped() => return,
+        }
+        // Not on an async thread: right after a big job it takes up to a
+        // fifth of a second.
+        let _ = tokio::task::spawn_blocking(crate::release_freed_memory).await;
+    }
 }
 
 /// First wait before a background task that panicked is started again.
@@ -963,6 +1115,9 @@ struct Opened {
     index: Option<ServingIndex>,
     /// Index directories that could not be deleted yet.
     leftover: Vec<Retired>,
+    /// Sites in the records file, counted only when crawling only
+    /// ([`Inner::round_sites`]).
+    sites: u64,
 }
 
 /// Creates and locks the data directory, clears leftovers, reads the saved
@@ -989,13 +1144,26 @@ fn open_data_dir(config: &NodeConfig, rank: RankConfig) -> Result<Opened> {
         .with_context(|| format!("creating {}", paths.indexes.display()))?;
     let lock = store::lock(&paths)?;
     store::remove_leftovers(&paths);
+    // Before anything reads the files it puts back.
+    match backup::apply_pending(&paths.data) {
+        Ok(true) => info!("finished restoring a backup"),
+        Ok(false) => {}
+        Err(err) => warn!("{err:#}"),
+    }
     let mut saved =
         store::load_state(&paths).unwrap_or_else(|| SavedState::fresh(config.initial_crawl));
 
     let mut index = None;
     let mut leftover = Vec::new();
     let mut broken = false;
-    for id in store::index_ids(&paths) {
+    // Crawling only, no index is opened, and those on disk stay for when
+    // the node searches again.
+    let ids = if config.crawl_only {
+        Vec::new()
+    } else {
+        store::index_ids(&paths)
+    };
+    for id in ids {
         let dir = paths.index(id);
         if index.is_none() {
             match ServingIndex::open(id, &dir, rank) {
@@ -1024,6 +1192,11 @@ fn open_data_dir(config: &NodeConfig, rank: RankConfig) -> Result<Opened> {
         }
     }
     let settings = store::load_settings(&paths).unwrap_or_else(|| config.settings.clone());
+    let sites = if config.crawl_only {
+        count_lines(&paths.records)
+    } else {
+        0
+    };
     Ok(Opened {
         paths,
         lock,
@@ -1031,7 +1204,30 @@ fn open_data_dir(config: &NodeConfig, rank: RankConfig) -> Result<Opened> {
         settings,
         index,
         leftover,
+        sites,
     })
+}
+
+/// Lines in the file at `path`, read a block at a time: about the sites in
+/// a records file. 0 when there is no file.
+fn count_lines(path: &Path) -> u64 {
+    use std::io::Read;
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return 0;
+    };
+    let mut block = vec![0u8; 1 << 20];
+    let mut lines = 0u64;
+    loop {
+        match file.read(&mut block) {
+            Ok(0) => return lines,
+            Ok(n) => lines += block[..n].iter().filter(|&&b| b == b'\n').count() as u64,
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(err) => {
+                warn!("cannot count the sites in {}: {err}", path.display());
+                return lines;
+            }
+        }
+    }
 }
 
 /// Raised inside the background work when the node is shutting down.
@@ -1077,9 +1273,15 @@ struct Inner {
     /// When this node last put an index in service (Unix time; 0 for not
     /// since it started).
     last_build: std::sync::atomic::AtomicU64,
+    /// How long, in seconds, the last index build of the records file took
+    /// (0 for none since it started).
+    last_build_took: std::sync::atomic::AtomicU64,
     /// When this node last looked for sites to drop to get back under its
     /// storage limit (Unix time; 0 for not since it started).
     last_trim: std::sync::atomic::AtomicU64,
+    /// Crawling only, with no index to count them: the sites the records
+    /// held when last read, which filling counts as the index's.
+    round_sites: std::sync::atomic::AtomicU64,
     /// Since when the data folder has been over the storage limit (Unix
     /// time; 0 for not over).
     over_since: std::sync::atomic::AtomicU64,
@@ -1087,6 +1289,9 @@ struct Inner {
     inbox_lock: Mutex<()>,
     /// Held while the whole records file is in memory ([`Inner::hold_records`]).
     records_held: Mutex<()>,
+    /// The page sets whose file is being downloaded or cut, so the two
+    /// never write the same file at once.
+    set_files_busy: Mutex<std::collections::HashSet<&'static str>>,
     /// Set once the index was rebuilt to add missing buckets.
     buckets_rebuilt: AtomicBool,
     /// The results opened this week, when sharing popularity.
@@ -1109,6 +1314,8 @@ struct Inner {
     pages: RwLock<Option<(String, Arc<plumb_index::pages::PageSearcher>)>>,
     /// The place index and its key; `None` while no places are kept.
     places: RwLock<Option<(String, Arc<plumb_index::places::PlaceSearcher>)>>,
+    /// The map the places' map is drawn on (`DIR/pages/sets/map.pmtiles`).
+    map: crate::map::MapFile,
     /// Recent headlines and the feeds watched for them.
     news: crate::news::NewsStore,
     /// The adult blocklist, once loaded.
@@ -1281,6 +1488,7 @@ impl Inner {
     ) -> Self {
         let backoff = worker::Backoff::new(config.retry_wait, config.max_retry_wait);
         let journal = journal::Journal::open(&opened.paths.data);
+        let map_data = opened.paths.data.clone();
         let fill_state = fill::FillState::load(&opened.paths.net);
         let news = crate::news::NewsStore::open(&opened.paths.news);
         Inner {
@@ -1309,10 +1517,13 @@ impl Inner {
             kept_found: Mutex::new(std::collections::HashMap::new()),
             fill: Mutex::new(fill_state),
             last_build: std::sync::atomic::AtomicU64::new(0),
+            last_build_took: std::sync::atomic::AtomicU64::new(0),
             last_trim: std::sync::atomic::AtomicU64::new(0),
+            round_sites: std::sync::atomic::AtomicU64::new(opened.sites),
             over_since: std::sync::atomic::AtomicU64::new(0),
             inbox_lock: Mutex::new(()),
             records_held: Mutex::new(()),
+            set_files_busy: Mutex::default(),
             buckets_rebuilt: AtomicBool::new(false),
             picks: Mutex::new(None),
             settings: Mutex::new(opened.settings),
@@ -1324,6 +1535,7 @@ impl Inner {
             meaning_retry: AtomicBool::new(false),
             pages: RwLock::new(None),
             places: RwLock::new(None),
+            map: crate::map::MapFile::new(crate::map::file(&map_data)),
             news,
             adult: RwLock::new(None),
         }
@@ -1333,7 +1545,7 @@ impl Inner {
         let activity = self.activity().clone();
         let saved = self.saved();
         let index = self.current_summary();
-        let pause = self.pause();
+        let pause = self.pause_shown();
         Status {
             phase: if index.is_some() {
                 Phase::Ready
@@ -1366,10 +1578,12 @@ impl Inner {
             meaning_sites: self.meaning.get().map(|meaning| meaning.len() as u64),
             meaning_work: self.meaning_work(),
             can_restart: self.restart.can_restart(),
+            page_coverage: Some(pages::coverage(self)),
             background_updates: self.settings().background_updates,
             paused: pause.as_ref().map(|p| p.reason.clone()),
             paused_until: pause.and_then(|p| p.until),
-            disk_used: self.disk_used(),
+            disk_used: self.disk_used_shown(),
+            storage_limit: self.settings().storage_limit_mb.saturating_mul(MB),
             downloaded_today: saved.downloaded_today(now_unix()),
             downloaded_total: saved.downloaded_total,
             homepages_visited: saved.homepages_visited,
@@ -1383,6 +1597,47 @@ impl Inner {
 
     /// Why crawls and refreshes must wait now, and until when, if they must.
     fn pause(&self) -> Option<Pause> {
+        self.pause_given(|| self.disk_used())
+    }
+
+    /// [`Inner::pause`] by the last count of the data folder, for showing:
+    /// counting a large folder again takes many seconds on a busy server,
+    /// and every search asks for the status.
+    fn pause_shown(&self) -> Option<Pause> {
+        self.pause_given(|| self.disk_used_shown())
+    }
+
+    /// [`Inner::pause`], with `disk_used` the size of the data folder.
+    fn pause_given(&self, disk_used: impl FnOnce() -> u64) -> Option<Pause> {
+        self.download_pause().or_else(|| {
+            let limit = self.settings().storage_limit_mb;
+            (limit > 0 && disk_used() >= limit.saturating_mul(MB))
+                .then(|| Pause::new("Paused: the storage limit is reached", None))
+        })
+    }
+
+    /// Why downloads of page sets, vectors and the meaning model must wait
+    /// now, if they must: as crawls, but for the storage limit, which they
+    /// keep to by what they download.
+    fn download_pause(&self) -> Option<Pause> {
+        let limit = self.settings().download_limit_mb_per_day;
+        let now = now_unix();
+        self.owner_pause().or_else(|| {
+            (limit > 0 && self.saved().downloaded_today(now) >= limit.saturating_mul(MB)).then(
+                || {
+                    Pause::new(
+                        "Paused until tomorrow: today's download limit is reached",
+                        Some(store::next_day(now)),
+                    )
+                },
+            )
+        })
+    }
+
+    /// The pauses the owner set: background updates off, paused for a
+    /// while, or outside the crawl hours. A download under way stops for
+    /// these, not for the download limit (it would start over every day).
+    fn owner_pause(&self) -> Option<Pause> {
         let settings = self.settings();
         let now = now_unix();
         if !settings.background_updates {
@@ -1401,17 +1656,6 @@ impl Inner {
                 ));
             }
         }
-        let limit = settings.download_limit_mb_per_day;
-        if limit > 0 && self.saved().downloaded_today(now) >= limit.saturating_mul(MB) {
-            return Some(Pause::new(
-                "Paused until tomorrow: today's download limit is reached",
-                Some(store::next_day(now)),
-            ));
-        }
-        let limit = settings.storage_limit_mb;
-        if limit > 0 && self.disk_used() >= limit.saturating_mul(MB) {
-            return Some(Pause::new("Paused: the storage limit is reached", None));
-        }
         None
     }
 
@@ -1425,12 +1669,13 @@ impl Inner {
         Some(match work {
             MeaningWork::Downloading => {
                 // The model's files, the one being written included.
-                let done = store::dir_size(&self.paths.data.join(embedding::MODEL_DIR)) / MB;
+                let model = self.config.meaning_model;
+                let done = store::dir_size(&self.paths.data.join(model.dir_name())) / MB;
                 BackgroundWork {
                     detail: "Downloading the search-by-meaning model".into(),
                     progress: Some(Progress {
-                        done: done.min(embedding::MODEL_MB),
-                        total: embedding::MODEL_MB,
+                        done: done.min(model.size_mb()),
+                        total: model.size_mb(),
                         unit: "MB".into(),
                     }),
                     error: None,
@@ -1476,22 +1721,39 @@ impl Inner {
 
     /// The size of the data folder, counted again when the last count is
     /// more than [`DISK_COUNT_MAX_AGE`] old or [`Inner::recount_disk`]
-    /// asked for it.
+    /// asked for it. The count is made without holding the lock, so a
+    /// status page does not wait on it.
     fn disk_used(&self) -> u64 {
-        let mut count = self.disk.lock().unwrap_or_else(PoisonError::into_inner);
-        match *count {
-            Some((at, bytes)) if at.elapsed() < DISK_COUNT_MAX_AGE => bytes,
-            _ => {
-                let bytes = store::dir_size(&self.paths.data);
-                *count = Some((std::time::Instant::now(), bytes));
-                bytes
+        if let Some((at, bytes)) = *self.disk.lock().unwrap_or_else(PoisonError::into_inner) {
+            if at.elapsed() < DISK_COUNT_MAX_AGE {
+                return bytes;
             }
+        }
+        let bytes = store::dir_size(&self.paths.data);
+        *self.disk.lock().unwrap_or_else(PoisonError::into_inner) =
+            Some((std::time::Instant::now(), bytes));
+        bytes
+    }
+
+    /// The last count of [`Inner::disk_used`], however old, for showing:
+    /// the background work counts again often enough. Counts only when
+    /// there is none yet.
+    fn disk_used_shown(&self) -> u64 {
+        let last = *self.disk.lock().unwrap_or_else(PoisonError::into_inner);
+        match last {
+            Some((_, bytes)) => bytes,
+            None => self.disk_used(),
         }
     }
 
     /// Has the next [`Inner::disk_used`] count the data folder again.
     fn recount_disk(&self) {
-        *self.disk.lock().unwrap_or_else(PoisonError::into_inner) = None;
+        let mut count = self.disk.lock().unwrap_or_else(PoisonError::into_inner);
+        // Kept for showing until then.
+        *count = count.and_then(|(_, bytes)| {
+            let stale = std::time::Instant::now().checked_sub(DISK_COUNT_MAX_AGE)?;
+            Some((stale, bytes))
+        });
     }
 
     fn settings(&self) -> NodeSettings {
@@ -1660,8 +1922,11 @@ impl Inner {
         Ok(())
     }
 
+    /// Whether the node is stopping: [`NodeHandle::shutdown`] was called,
+    /// or the handle was dropped (a test that panicked), which the async
+    /// tasks' waits already take as a stop.
     fn stopping(&self) -> bool {
-        *self.stopped.borrow()
+        *self.stopped.borrow() || self.stopped.has_changed().is_err()
     }
 
     /// Waits for, and returns, the turn to load the whole records file: a
@@ -1706,6 +1971,16 @@ impl Inner {
 
     /// The id and the size of the index searched now, read without holding
     /// the index open.
+    /// The sites this node holds, as filling counts them: those of the
+    /// index searched, or crawling only, those the records held when last
+    /// read ([`Inner::round_sites`]).
+    fn held_sites(&self) -> u64 {
+        if self.config.crawl_only {
+            return self.round_sites.load(Ordering::SeqCst);
+        }
+        self.current_summary().map_or(0, |(_, docs)| docs)
+    }
+
     fn current_summary(&self) -> Option<(u64, u64)> {
         self.index
             .read()
@@ -1803,6 +2078,111 @@ impl SearchBackend for Inner {
         limit: usize,
         options: &SearchOptions,
     ) -> Result<SearchResults> {
+        self.search_with_rank(query, limit, options, None)
+    }
+
+    fn search_ranked(
+        &self,
+        query: &str,
+        limit: usize,
+        options: &SearchOptions,
+        rank: &RankConfig,
+    ) -> Result<SearchResults> {
+        self.search_with_rank(query, limit, options, Some(rank))
+    }
+
+    fn places(
+        &self,
+        query: &str,
+        home: Option<&str>,
+        country: Option<&str>,
+    ) -> Option<plumb_index::places::PlaceResults> {
+        places::search(self, query, home, country)
+    }
+
+    fn locate(&self, text: &str, country: Option<&str>) -> Option<plumb_core::place::Place> {
+        places::locate(self, text, country)
+    }
+
+    fn site(&self, domain: &str) -> Option<Hit> {
+        self.current()?.backend().site(domain)
+    }
+
+    fn base_map(&self) -> Option<Arc<crate::map::BaseMap>> {
+        self.map.get()
+    }
+
+    fn known_song(&self, query: &str, options: &SearchOptions) -> Option<plumb_index::pages::Page> {
+        pages::known_song(self, query, options)
+    }
+
+    fn definition(&self, name: &str) -> Option<plumb_index::pages::Page> {
+        pages::definition(self, name)
+    }
+
+    fn entities(
+        &self,
+        query: &str,
+        limit: usize,
+        options: &SearchOptions,
+    ) -> Result<Vec<plumb_index::pages::PageHit>> {
+        pages::entities(self, query, limit, options)
+    }
+
+    fn pages_of(
+        &self,
+        query: &str,
+        limit: usize,
+        options: &SearchOptions,
+        docs: bool,
+        keep: &dyn Fn(&plumb_index::pages::Page) -> bool,
+    ) -> Vec<plumb_index::pages::PageHit> {
+        pages::pages_of(self, query, limit, options, docs, keep)
+    }
+
+    fn papers(
+        &self,
+        query: &plumb_core::paper_query::PaperQuery,
+        limit: usize,
+        options: &SearchOptions,
+    ) -> Result<Vec<plumb_index::pages::PageHit>> {
+        pages::papers(self, query, limit, options)
+    }
+
+    fn paper_coverage(&self) -> Option<plumb_index::pages::PaperCoverage> {
+        pages::paper_coverage(self)
+    }
+
+    fn num_docs(&self) -> u64 {
+        self.current_summary().map_or(0, |(_, docs)| docs)
+    }
+}
+
+impl Inner {
+    /// [`SearchBackend::search_full`], with `rank` instead of the node's
+    /// own knobs when given.
+    fn search_with_rank(
+        &self,
+        query: &str,
+        limit: usize,
+        options: &SearchOptions,
+        rank: Option<&RankConfig>,
+    ) -> Result<SearchResults> {
+        let paper = plumb_core::paper_query::PaperQuery::parse(query)?;
+        if paper.constrained {
+            let found = pages::papers(self, &paper, limit, options)?;
+            return Ok(SearchResults {
+                pages: found
+                    .into_iter()
+                    .map(|hit| plumb_index::pages::PlacedPage {
+                        hit,
+                        under: None,
+                        at: 0,
+                    })
+                    .collect(),
+                ..Default::default()
+            });
+        }
         let Some(index) = self.current() else {
             bail!("the search index is not ready yet");
         };
@@ -1816,41 +2196,48 @@ impl SearchBackend for Inner {
             Some(_) => limit + adult::MARGIN,
             None => limit,
         };
-        let mut results = match network::handle(self).map(|net| net.popularity()) {
-            None => index
-                .backend()
-                .search_full_with(query, wanted, options, meaning.as_deref())?,
-            Some(table) => {
-                let candidates = wanted.max(network::POPULARITY_CANDIDATES);
-                let mut results = index.backend().search_full_with(
+        let run = |options: &SearchOptions| -> Result<SearchResults> {
+            Ok(match network::handle(self).map(|net| net.popularity()) {
+                None => index.backend().search_full_with(
                     query,
-                    candidates,
+                    wanted,
                     options,
                     meaning.as_deref(),
-                )?;
-                network::apply_popularity(&table, query, &mut results.hits);
-                results
-            }
+                    rank,
+                )?,
+                Some(table) => {
+                    let candidates = wanted.max(network::POPULARITY_CANDIDATES);
+                    let mut results = index.backend().search_full_with(
+                        query,
+                        candidates,
+                        options,
+                        meaning.as_deref(),
+                        rank,
+                    )?;
+                    network::apply_popularity(&table, query, &mut results.hits);
+                    results
+                }
+            })
         };
+        let mut results = run(options)?;
+        // Results shown for a spelling are for what was typed after all
+        // when the pages know the words typed.
+        if results
+            .spelling
+            .as_ref()
+            .is_some_and(|spelling| spelling.applied && pages::knows_typed(self, query, spelling))
+        {
+            results = run(&SearchOptions {
+                exact: true,
+                ..options.clone()
+            })?;
+        }
         if let Some(adult) = &adult {
             results.hits.retain(|hit| !adult.contains(&hit.domain));
         }
         results.hits.truncate(limit);
         pages::add_pages(self, query, options, &mut results);
         Ok(results)
-    }
-
-    fn places(
-        &self,
-        query: &str,
-        home: Option<&str>,
-        country: Option<&str>,
-    ) -> Option<plumb_index::places::PlaceResults> {
-        places::search(self, query, home, country)
-    }
-
-    fn num_docs(&self) -> u64 {
-        self.current_summary().map_or(0, |(_, docs)| docs)
     }
 }
 
@@ -1889,6 +2276,10 @@ impl StatusSource for Inner {
 
     fn shares_popularity(&self) -> bool {
         network::shares_popularity(self)
+    }
+
+    fn shares_findings(&self) -> bool {
+        self.config.share_findings && self.net.get().is_some()
     }
 
     fn record_pick(&self, query: &str, domain: &str) {
@@ -1973,6 +2364,10 @@ impl StatusSource for Inner {
     fn restore_backup(&self, restored: &backup::Backup) -> Result<()> {
         // Restoring can be undone with the backup made first.
         let before = backup::save(&self.paths.data, Some("before-restore"))?;
+        // Written now, and again at the next start, before the network
+        // reads them: until it stops, it saves its keys and credits over
+        // these.
+        restored.stage(&self.paths.data)?;
         restored.restore(&self.paths.data)?;
         if let Some(settings) = store::load_settings(&self.paths) {
             *self.settings.lock().unwrap_or_else(PoisonError::into_inner) = settings;
@@ -1982,9 +2377,12 @@ impl StatusSource for Inner {
             "Backup from {} restored; the settings before it are in {}",
             restored.version, before.name
         ));
-        // Keys and features take effect at the next start.
+        // Keys, credits and features take effect at the next start.
         if self.restart.request() {
             self.journal.info("Restarting to finish restoring");
+        } else {
+            self.journal
+                .warning("Restart the node to finish restoring its keys and credits");
         }
         Ok(())
     }

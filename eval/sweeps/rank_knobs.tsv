@@ -1,0 +1,27 @@
+# Ranking knobs one at a time, each a step either side of its default.
+#   plumb eval --index DIR --pages wikipedia-en.tsv.gz \
+#     --queries eval/brand_queries.tsv --queries eval/ai_queries.tsv ... \
+#     --sweep eval/sweeps/rank_knobs.tsv --ranks-out ranks.tsv
+alpha-0.25	{"alpha": 0.25}
+alpha-0.45	{"alpha": 0.45}
+described_alpha-0.4	{"described_alpha": 0.4}
+described_alpha-0.6	{"described_alpha": 0.6}
+label-0.15	{"exact_label_bonus": 0.15}
+label-0.35	{"exact_label_bonus": 0.35}
+alias-0.05	{"exact_alias_bonus": 0.05}
+alias-0.2	{"exact_alias_bonus": 0.2}
+kind-0.15	{"kind_bonus": 0.15}
+kind-0.35	{"kind_bonus": 0.35}
+untrusted-0.3	{"untrusted_share": 0.3}
+untrusted-0.7	{"untrusted_share": 0.7}
+meaning-0.5	{"meaning_weight": 0.5}
+meaning-0.85	{"meaning_weight": 0.85}
+relevance-0.02	{"described_relevance": 0.02}
+relevance-0.08	{"described_relevance": 0.08}
+meaning_only-0.25	{"meaning_only_relevance": 0.25}
+meaning_only-0.5	{"meaning_only_relevance": 0.5}
+named_share-0.3	{"named_share": 0.3}
+named_share-0.5	{"named_share": 0.5}
+terms-0.5	{"terms_boost": 0.5}
+terms-2	{"terms_boost": 2.0}
+candidates-400	{"candidates": 400}

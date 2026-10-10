@@ -6,20 +6,30 @@
 //! answer can also be a page's address (`https://en.wikipedia.org/wiki/
 //! Marie_Curie`): with `--pages`, pages are listed among the sites as a
 //! node lists them (see [`plumb_index::pages::place_pages`]), and a page
-//! shown under a site's result counts at that site's rank. The metrics
+//! shown under a site's result counts at that site's rank. An address
+//! ending in `*` takes any page whose address starts with the rest
+//! (`https://diy.stackexchange.com/questions/*`). The metrics
 //! are top-1 and top-3 rates and the mean reciprocal rank within the
 //! results fetched ([`Metrics::from_ranks`]).
 
+use std::collections::HashSet;
 use std::fmt::Write as _;
 
 use anyhow::{bail, Context, Result};
 use plumb_core::registrable_domain;
-use plumb_index::pages::{lift_named_sites, place_pages, Page, PageSearcher, PlacedPage};
+use std::path::Path;
+
+use plumb_index::pages::{
+    add_named_site, drop_namesakes_of_words, lift_named_sites, place_pages, Page, PageSearcher,
+    PlacedPage,
+};
 use plumb_index::{Hit, Meaning, SearchOptions, Searcher};
 use tracing::info;
 
-use crate::cli::EvalArgs;
+use crate::cli::{EvalArgs, Half};
 use crate::meaning::MeaningIndex;
+
+pub mod contracts;
 
 /// One query of a queries file.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,7 +64,9 @@ pub fn parse_queries(text: &str) -> Result<Vec<EvalQuery>> {
             .split(',')
             .map(str::trim)
             .filter(|d| !d.is_empty())
-            .map(normalize_domain)
+            // A comma inside an address (`Tesla,_Inc.`) is written `%2C`,
+            // since a bare one separates answers.
+            .map(|d| normalize_domain(&d.replace("%2C", ",").replace("%2c", ",")))
             .collect();
         if expected.is_empty() {
             bail!("line {line}: no expected domain for {query:?}");
@@ -68,6 +80,32 @@ pub fn parse_queries(text: &str) -> Result<Vec<EvalQuery>> {
     Ok(queries)
 }
 
+/// The half of a queries file `query` is in. A query's half depends on its
+/// words alone (lowercased, spaces collapsed), not on its line or file, so
+/// adding queries never moves one from half to half, and a query asked in
+/// two files is in the same half of both.
+pub fn half_of(query: &str) -> Half {
+    // FNV-1a and a final mix (MurmurHash3's), which never change between
+    // Rust versions as std's hasher may.
+    let words = query.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut hash = words
+        .to_lowercase()
+        .bytes()
+        .fold(0xcbf2_9ce4_8422_2325u64, |h, b| {
+            (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3)
+        });
+    hash ^= hash >> 33;
+    hash = hash.wrapping_mul(0xff51_afd7_ed55_8ccd);
+    hash ^= hash >> 33;
+    hash = hash.wrapping_mul(0xc4ce_b9fe_1a85_ec53);
+    hash ^= hash >> 33;
+    if hash & 1 == 0 {
+        Half::Tune
+    } else {
+        Half::HeldOut
+    }
+}
+
 fn normalize_domain(domain: &str) -> String {
     // A page's address stays one; a homepage's counts as its site.
     if let Ok(url) = url::Url::parse(domain) {
@@ -78,11 +116,21 @@ fn normalize_domain(domain: &str) -> String {
     registrable_domain(domain).unwrap_or_else(|| domain.trim_end_matches('.').to_ascii_lowercase())
 }
 
+/// Whether a result keyed `key` (a domain or a page's address) is the
+/// expected answer `expected`, which takes any address it starts when it
+/// ends in `*`.
+pub fn is_expected(expected: &str, key: &str) -> bool {
+    match expected.strip_suffix('*') {
+        Some(start) => key.starts_with(start),
+        None => expected == key,
+    }
+}
+
 /// 1-based position of the first result whose domain is one of `expected`.
 pub fn rank_of<S: AsRef<str>>(results: &[S], expected: &[String]) -> Option<usize> {
     results
         .iter()
-        .position(|domain| expected.iter().any(|e| e == domain.as_ref()))
+        .position(|domain| expected.iter().any(|e| is_expected(e, domain.as_ref())))
         .map(|i| i + 1)
 }
 
@@ -147,65 +195,549 @@ fn ratio(part: usize, whole: usize) -> f64 {
     }
 }
 
-pub fn run(args: EvalArgs) -> Result<()> {
-    let text = std::fs::read_to_string(&args.queries)
-        .with_context(|| format!("reading {}", args.queries.display()))?;
-    let queries =
-        parse_queries(&text).with_context(|| format!("parsing {}", args.queries.display()))?;
+/// One file of queries, read.
+struct Suite {
+    /// The file's name without its folder and extension (`brand_queries`).
+    name: String,
+    queries: Vec<EvalQuery>,
+}
+
+/// The queries of the file at `path`, only those of `half` when given.
+fn read_suite(path: &Path, half: Option<Half>) -> Result<Suite> {
+    let text =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let queries = parse_queries(&text).with_context(|| format!("parsing {}", path.display()))?;
+    let queries: Vec<EvalQuery> = queries
+        .into_iter()
+        .filter(|q| half.is_none_or(|half| half_of(&q.query) == half))
+        .collect();
     if queries.is_empty() {
-        bail!("{} has no queries", args.queries.display());
+        bail!("{} has no queries", path.display());
     }
-    let searcher = Searcher::open(&args.index)
-        .with_context(|| format!("opening the index in {}", args.index.display()))?;
+    let name = path
+        .file_stem()
+        .and_then(|n| n.to_str())
+        .unwrap_or("queries")
+        .to_string();
+    Ok(Suite { name, queries })
+}
+
+/// What every query is searched with.
+struct Setup {
+    searcher: Searcher,
+    meaning: Option<MeaningIndex>,
+    pages: Option<PageSearcher>,
+    /// With --recall, the address of every page in the page sets.
+    page_urls: HashSet<String>,
+    /// Holds the page index while it is searched, when it is not kept in
+    /// `--pages-cache`.
+    _pages_dir: Option<tempfile::TempDir>,
+}
+
+pub fn run(args: EvalArgs) -> Result<()> {
+    if args.report.is_some() {
+        return contracts::run(&args);
+    }
+    let suites = args
+        .queries
+        .iter()
+        .map(|path| read_suite(path, args.half))
+        .collect::<Result<Vec<_>>>()?;
     let mut cfg = args.rank.unwrap_or_default();
     if let Some(alpha) = args.alpha {
         cfg.alpha = alpha;
     }
-    let meaning = MeaningIndex::from_args(&args.meaning)?;
-    let pages_dir = tempfile::tempdir().context("making a folder for the page index")?;
-    let pages = if args.pages.is_empty() {
-        None
-    } else {
-        let mut all: Vec<Page> = Vec::new();
-        for file in &args.pages {
-            let reader = plumb_ingest::open_maybe_gz(file)?;
-            let name = file.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            let articles = plumb_core::article::read_articles(reader, args.pages_top)?;
-            info!("indexing {} pages of {}", articles.len(), file.display());
-            let set = set_of_file(name);
-            all.extend(articles.into_iter().filter_map(|a| Page::from_set(&set, a)));
+    let variants = match &args.sweep {
+        Some(path) => {
+            let text = std::fs::read_to_string(path)
+                .with_context(|| format!("reading {}", path.display()))?;
+            parse_sweep(&text, &cfg).with_context(|| format!("parsing {}", path.display()))?
         }
-        plumb_index::pages::build_page_index(pages_dir.path(), all)?;
-        Some(PageSearcher::open(pages_dir.path())?)
+        None => Vec::new(),
     };
-    info!(
-        "evaluating {} queries against {} sites ({cfg:?})",
-        queries.len(),
-        searcher.num_docs(),
+    let setup = open_setup(&args)?;
+    if args.recall {
+        for suite in &suites {
+            if suites.len() > 1 {
+                println!("== {}", suite.name);
+            }
+            let ranks = evaluate(&args, &setup, &suite.queries, &cfg, false, None)?;
+            let stages = recall(&args, &setup, &suite.queries, &cfg, &ranks)?;
+            print!("{}", format_recall(&stages, args.limit));
+        }
+        return Ok(());
+    }
+    if variants.is_empty() {
+        let mut low = None;
+        let mut features_out = String::new();
+        let rerankers = args
+            .rerank_model
+            .iter()
+            .map(|dir| {
+                plumb_embed::Reranker::load(dir)
+                    .with_context(|| format!("loading the reranker in {}", dir.display()))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        for suite in &suites {
+            let mut features = args.features_out.as_ref().map(|_| Vec::new());
+            if suites.len() > 1 {
+                println!("== {}", suite.name);
+            }
+            info!(
+                "evaluating {} queries against {} sites ({cfg:?})",
+                suite.queries.len(),
+                setup.searcher.num_docs(),
+            );
+            let ranks = evaluate(&args, &setup, &suite.queries, &cfg, true, features.as_mut())?;
+            for mut query in features.into_iter().flatten() {
+                if let serde_json::Value::Object(fields) = &mut query {
+                    fields.insert("suite".into(), suite.name.clone().into());
+                }
+                rerank_rows(&rerankers, &mut query)?;
+                let _ = writeln!(features_out, "{query}");
+            }
+            let metrics = Metrics::from_ranks(&ranks, args.limit);
+            print!("{}", format_totals(&metrics, args.limit));
+            if let Some(min) = args.min_top1 {
+                if metrics.top1_rate() < min {
+                    low = Some((suite.name.clone(), metrics.top1_rate()));
+                }
+            }
+        }
+        if let Some(path) = &args.features_out {
+            std::fs::write(path, features_out)
+                .with_context(|| format!("writing {}", path.display()))?;
+        }
+        if let (Some((name, rate)), Some(min)) = (low, args.min_top1) {
+            bail!(
+                "{name}: top-1 is {:.1}%, below --min-top1 {:.1}%",
+                rate * 100.0,
+                min * 100.0
+            );
+        }
+        return Ok(());
+    }
+    sweep(&args, &setup, &suites, &variants)
+}
+
+fn open_setup(args: &EvalArgs) -> Result<Setup> {
+    let searcher = Searcher::open(&args.index)
+        .with_context(|| format!("opening the index in {}", args.index.display()))?;
+    let meaning = MeaningIndex::from_args(&args.meaning)?;
+    let (pages, pages_dir) = if args.pages.is_empty() {
+        (None, None)
+    } else if let Some(cache) = &args.pages_cache {
+        (Some(pages_cache::open(cache, args)?), None)
+    } else {
+        let dir = tempfile::tempdir().context("making a folder for the page index")?;
+        build_pages(args, dir.path())?;
+        (Some(PageSearcher::open(dir.path())?), Some(dir))
+    };
+    let page_urls = if args.recall || args.report.is_some() {
+        page_urls(args)?
+    } else {
+        HashSet::new()
+    };
+    Ok(Setup {
+        searcher,
+        meaning,
+        pages,
+        page_urls,
+        _pages_dir: pages_dir,
+    })
+}
+
+/// How far down the sites matching a query's words `--recall` looks.
+const RECALL_WORDS_DEPTH: usize = 10_000;
+/// How far down the pages found for a query `--recall` looks.
+const RECALL_PAGES_DEPTH: usize = 1_000;
+/// The depths `--recall` counts answers within.
+const RECALL_DEPTHS: [usize; 5] = [10, 50, 100, 1_000, 10_000];
+
+/// Where a query's answer stands before ranking (`plumb eval --recall`).
+/// Positions are 1-based, of the best expected answer.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct Stage {
+    /// Where the query's answer was listed, within the limit.
+    rank: Option<usize>,
+    /// Some expected site is in the index.
+    site_indexed: bool,
+    /// Some expected page is in a page set.
+    page_indexed: bool,
+    /// Among the sites by how well their words match the query.
+    by_words: Option<usize>,
+    /// An expected site has some of the query's words, however far down.
+    matches_words: bool,
+    /// Among the sites nearest the query in meaning.
+    by_meaning: Option<usize>,
+    /// The ranking looked at an expected site.
+    ranked: bool,
+    /// Among the pages found for the query.
+    page: Option<usize>,
+}
+
+impl Stage {
+    /// The answer is among the first `depth` sites by words or meaning,
+    /// or pages found.
+    fn within(&self, depth: usize) -> bool {
+        [self.by_words, self.by_meaning, self.page]
+            .into_iter()
+            .flatten()
+            .any(|at| at <= depth)
+    }
+
+    /// Where a query not answered in the first `limit` lost its answer,
+    /// the stage it got furthest to.
+    fn loss(&self, limit: usize) -> Option<&'static str> {
+        if self.rank.is_some() {
+            return None;
+        }
+        Some(if self.ranked {
+            "site ranked, placed too low"
+        } else if self.page.is_some_and(|at| at <= limit) {
+            "page found, not listed"
+        } else if self.page.is_some() {
+            "page found, too far down"
+        } else if self.page_indexed && !self.site_indexed {
+            "page in a set, never found"
+        } else if self.by_words.is_some() || self.by_meaning.is_some() {
+            "site matches, never ranked"
+        } else if self.matches_words {
+            "site matches, past the first 10,000"
+        } else if self.site_indexed {
+            "site indexed, matches no word"
+        } else if self.page_indexed {
+            "page in a set, never found"
+        } else {
+            "answer in no index"
+        })
+    }
+}
+
+/// Where each of `queries`' answers stands before ranking; `ranks` are
+/// where [`evaluate`] listed them.
+fn recall(
+    args: &EvalArgs,
+    setup: &Setup,
+    queries: &[EvalQuery],
+    cfg: &plumb_index::RankConfig,
+    ranks: &[Option<usize>],
+) -> Result<Vec<Stage>> {
+    let options = SearchOptions {
+        country: args.country.clone(),
+        exact: args.exact,
+        ..SearchOptions::default()
+    };
+    let mut stages = Vec::with_capacity(queries.len());
+    for (q, &rank) in queries.iter().zip(ranks) {
+        let (sites, pages): (Vec<String>, Vec<String>) =
+            q.expected.iter().cloned().partition(|e| !e.contains("://"));
+        let mut searched = q.query.clone();
+        if args.follow_suggestions {
+            let found = setup.searcher.search_full(
+                &q.query,
+                1,
+                cfg,
+                &SearchOptions {
+                    exact: false,
+                    ..options.clone()
+                },
+            )?;
+            if let Some(spelling) = found.spelling {
+                searched = spelling.query;
+            }
+        }
+        let query_meaning = setup
+            .meaning
+            .as_ref()
+            .and_then(|meaning| meaning.query(&searched));
+        let meaning = query_meaning.as_ref().map(|m| m as &dyn Meaning);
+        let mut stage = Stage {
+            rank,
+            site_indexed: sites.iter().any(|d| setup.searcher.has_domain(d)),
+            page_indexed: pages.iter().any(|e| match e.strip_suffix('*') {
+                Some(start) => setup.page_urls.iter().any(|url| url.starts_with(start)),
+                None => setup.page_urls.contains(e),
+            }),
+            ..Stage::default()
+        };
+        if !sites.is_empty() {
+            let pool = setup
+                .searcher
+                .candidate_pool(&searched, cfg, &options, meaning)?;
+            stage.ranked = sites.iter().any(|d| pool.has(d));
+            if let Some(found) =
+                setup
+                    .searcher
+                    .words_order(&searched, RECALL_WORDS_DEPTH, cfg, &sites)?
+            {
+                stage.by_words = rank_of(&found.order, &sites);
+                stage.matches_words = !found.matched.is_empty();
+            }
+            if let Some(meaning) = meaning {
+                stage.by_meaning = rank_of(&meaning.nearest(), &sites);
+            }
+        }
+        if let (Some(found), false) = (&setup.pages, pages.is_empty()) {
+            let hits = found
+                .search(&searched, RECALL_PAGES_DEPTH)
+                .with_context(|| format!("searching pages for {searched:?}"))?;
+            let urls: Vec<&str> = hits.iter().map(|hit| hit.page.url.as_str()).collect();
+            stage.page = rank_of(&urls, &pages);
+        }
+        if let Some(loss) = stage.loss(args.limit) {
+            let at = |at: Option<usize>| at.map_or("-".to_string(), |at| at.to_string());
+            println!(
+                "{loss}\t{:?}\twords {}\tmeaning {}\tpage {}\t{}",
+                q.query,
+                at(stage.by_words),
+                at(stage.by_meaning),
+                at(stage.page),
+                q.expected.join(","),
+            );
+        }
+        stages.push(stage);
+    }
+    Ok(stages)
+}
+
+/// The `--recall` table of one file: how many answers are within each
+/// depth, and where the ones not listed in the first `limit` were lost.
+fn format_recall(stages: &[Stage], limit: usize) -> String {
+    let n = stages.len();
+    let pct = |count: usize| format!("{count:>4} {:>5.1}%", ratio(count, n) * 100.0);
+    let mut out = String::new();
+    let count = |f: &dyn Fn(&Stage) -> bool| stages.iter().filter(|s| f(s)).count();
+    let _ = writeln!(out, "recall of {n} queries");
+    let _ = writeln!(
+        out,
+        "  listed in the first {limit:<6} {}",
+        pct(count(&|s| s.rank.is_some()))
     );
+    let _ = writeln!(
+        out,
+        "  site ranked at all        {}",
+        pct(count(&|s| s.ranked))
+    );
+    for depth in RECALL_DEPTHS {
+        let _ = writeln!(
+            out,
+            "  within the first {depth:<8} {}  (words {}, meaning {}, pages {})",
+            pct(count(&|s| s.within(depth))),
+            count(&|s| s.by_words.is_some_and(|at| at <= depth)),
+            count(&|s| s.by_meaning.is_some_and(|at| at <= depth)),
+            count(&|s| s.page.is_some_and(|at| at <= depth)),
+        );
+    }
+    let _ = writeln!(
+        out,
+        "  in the index or a page set {}",
+        pct(count(&|s| s.site_indexed || s.page_indexed))
+    );
+    let mut losses: Vec<(&str, usize)> = Vec::new();
+    for loss in stages.iter().filter_map(|s| s.loss(limit)) {
+        match losses.iter_mut().find(|(l, _)| *l == loss) {
+            Some((_, count)) => *count += 1,
+            None => losses.push((loss, 1)),
+        }
+    }
+    losses.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+    let _ = writeln!(out, "  not listed, by where the answer was lost:");
+    for (loss, count) in losses {
+        let _ = writeln!(out, "    {loss:<38} {}", pct(count));
+    }
+    out
+}
+
+/// The address of every page in the sets of `--pages`.
+fn page_urls(args: &EvalArgs) -> Result<HashSet<String>> {
+    let mut urls = HashSet::new();
+    for file in &args.pages {
+        let reader = plumb_ingest::open_maybe_gz(file)?;
+        let name = file.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        let set = set_of_file(name);
+        for article in plumb_core::article::read_articles(reader, args.pages_top)? {
+            if let Some(page) = Page::from_set(&set, article) {
+                urls.insert(page.url);
+            }
+        }
+    }
+    Ok(urls)
+}
+
+/// Builds the page index of `--pages` in `dir`.
+fn build_pages(args: &EvalArgs, dir: &Path) -> Result<()> {
+    let mut all: Vec<Page> = Vec::new();
+    for file in &args.pages {
+        let reader = plumb_ingest::open_maybe_gz(file)?;
+        let name = file.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        let articles = plumb_core::article::read_articles(reader, args.pages_top)?;
+        info!("indexing {} pages of {}", articles.len(), file.display());
+        let set = set_of_file(name);
+        all.extend(articles.into_iter().filter_map(|a| Page::from_set(&set, a)));
+    }
+    plumb_index::pages::build_page_index(dir, all)?;
+    Ok(())
+}
+
+/// `--pages-cache`: page indexes kept between runs, one folder each, named
+/// by a hash of what the index is built from ([`pages_cache::key`]).
+mod pages_cache {
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    use anyhow::{Context, Result};
+    use plumb_index::pages::PageSearcher;
+    use sha2::{Digest, Sha256};
+    use tracing::info;
+
+    use crate::cli::EvalArgs;
+
+    /// How many indexes are kept: those of the last few `plumb` builds
+    /// measured, such as the two sides of an A/B test.
+    pub(super) const KEEP: usize = 4;
+
+    /// Opens the page index of `args` kept in `cache`, building it first
+    /// when it is not there. A lock on the folder makes runs started
+    /// together wait for one build rather than each make its own.
+    pub(super) fn open(cache: &Path, args: &EvalArgs) -> Result<PageSearcher> {
+        fs::create_dir_all(cache).with_context(|| format!("creating {}", cache.display()))?;
+        let key = key(args)?;
+        let dir = cache.join(&key);
+        let _lock = lock(cache)?;
+        if dir.exists() {
+            info!("reusing the page index in {}", dir.display());
+        } else {
+            info!("building the page index in {}", dir.display());
+            super::build_pages(args, &dir)?;
+        }
+        let searcher = PageSearcher::open(&dir)?;
+        let used = cache.join(format!("{key}.used"));
+        fs::write(&used, b"").with_context(|| format!("writing {}", used.display()))?;
+        prune(cache, KEEP)?;
+        Ok(searcher)
+    }
+
+    /// What the page index depends on, hashed: the `plumb` binary (so a
+    /// newly built one builds a new index) and each page set file in
+    /// order, both by path, size and time of last change, and
+    /// `--pages-top`.
+    pub(super) fn key(args: &EvalArgs) -> Result<String> {
+        let exe = std::env::current_exe().context("finding the plumb binary")?;
+        let mut hash = Sha256::new();
+        for file in std::iter::once(&exe).chain(&args.pages) {
+            let path =
+                fs::canonicalize(file).with_context(|| format!("finding {}", file.display()))?;
+            let meta =
+                fs::metadata(&path).with_context(|| format!("reading {}", path.display()))?;
+            let changed = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |d| d.as_nanos());
+            hash.update(format!("{}\0{}\0{changed}\0", path.display(), meta.len()));
+        }
+        hash.update(format!("top {}", args.pages_top));
+        Ok(format!("{:x}", hash.finalize()))
+    }
+
+    /// Deletes all but the `keep` most recently used indexes in `cache`.
+    /// A run still searching one it opened keeps reading it: its files
+    /// stay until it closes them.
+    fn prune(cache: &Path, keep: usize) -> Result<()> {
+        let mut kept: Vec<(std::time::SystemTime, String)> = Vec::new();
+        for entry in fs::read_dir(cache).with_context(|| format!("reading {}", cache.display()))? {
+            let name = entry?.file_name().to_string_lossy().into_owned();
+            let Some(key) = name.strip_suffix(".used") else {
+                continue;
+            };
+            let used = cache.join(&name);
+            let when = fs::metadata(&used).and_then(|m| m.modified());
+            kept.push((when.unwrap_or(std::time::UNIX_EPOCH), key.to_string()));
+        }
+        kept.sort_by(|a, b| b.cmp(a));
+        for (_, key) in kept.into_iter().skip(keep) {
+            let dir = cache.join(&key);
+            info!("deleting the page index in {}", dir.display());
+            if dir.exists() {
+                fs::remove_dir_all(&dir).with_context(|| format!("deleting {}", dir.display()))?;
+            }
+            let _ = fs::remove_file(cache.join(format!("{key}.used")));
+        }
+        Ok(())
+    }
+
+    /// Holds the lock on `cache` until dropped.
+    #[cfg(unix)]
+    fn lock(cache: &Path) -> Result<fs::File> {
+        let path: PathBuf = cache.join("lock");
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)
+            .with_context(|| format!("opening {}", path.display()))?;
+        rustix::fs::flock(&file, rustix::fs::FlockOperation::LockExclusive)
+            .with_context(|| format!("locking {}", path.display()))?;
+        Ok(file)
+    }
+
+    /// Without the lock, runs started together each build the index; the
+    /// last one built is kept.
+    #[cfg(not(unix))]
+    fn lock(_cache: &Path) -> Result<()> {
+        Ok(())
+    }
+}
+
+/// The rank each query's expected answer was found at, within
+/// `args.limit`. With `verbose`, misses are printed (and `--show`,
+/// `--explain` say more).
+fn evaluate(
+    args: &EvalArgs,
+    setup: &Setup,
+    queries: &[EvalQuery],
+    cfg: &plumb_index::RankConfig,
+    verbose: bool,
+    mut features: Option<&mut Vec<serde_json::Value>>,
+) -> Result<Vec<Option<usize>>> {
+    let Setup {
+        searcher,
+        meaning,
+        pages,
+        ..
+    } = setup;
     // With --explain, sites ranked below the limit are fetched too, to show
     // how far behind the expected one is.
-    let fetched = if args.explain {
+    let fetched = if args.explain && verbose {
         args.limit.max(EXPLAIN_DEPTH)
     } else {
         args.limit
     };
 
     let mut ranks = Vec::with_capacity(queries.len());
-    for q in &queries {
+    for q in queries {
+        if args.facts {
+            ranks.push(fact_rank(args, q, searcher, cfg, pages.as_ref(), verbose)?);
+            continue;
+        }
         let options = SearchOptions {
             country: args.country.clone(),
             only_country: false,
             exact: args.exact,
+            language: args.lang.clone(),
             ..SearchOptions::default()
         };
         let search = |query: &str| {
+            // "food near me" searches sites for "food", as a node does.
+            let query =
+                &plumb_index::places::without_near_me(query).unwrap_or_else(|| query.to_string());
             let query_meaning = meaning.as_ref().and_then(|meaning| meaning.query(query));
             let results = searcher
                 .search_meaning(
                     query,
                     fetched,
-                    &cfg,
+                    cfg,
                     &options,
                     query_meaning
                         .as_ref()
@@ -215,6 +747,27 @@ pub fn run(args: EvalArgs) -> Result<()> {
             results.map(|results| (results, query_meaning))
         };
         let (mut results, mut query_meaning) = search(&q.query)?;
+        // As a node with pages does: words of things, not sites, are
+        // corrected from the pages' names ("anubas").
+        if results.spelling.is_none() && !args.exact {
+            if let Some(pages) = pages.as_ref() {
+                let site_known =
+                    |word: &str| searcher.word_sites(word) >= plumb_index::KNOWN_WORD_SITES;
+                let spelled_right = pages
+                    .search(&q.query, 10)?
+                    .iter()
+                    .any(|hit| hit.page.package.is_some() || hit.named || hit.whole);
+                if !spelled_right {
+                    results.spelling =
+                        pages.suggest_spelling(&q.query, searcher.spelling_model(), &site_known)?;
+                }
+            }
+        }
+        if verbose && args.show_suggestions {
+            if let Some(spelling) = &results.spelling {
+                println!("suggests: {:?} -> {:?}", q.query, spelling.query);
+            }
+        }
         // What one click on "Did you mean" finds.
         let mut searched = q.query.clone();
         if args.follow_suggestions {
@@ -223,32 +776,110 @@ pub fn run(args: EvalArgs) -> Result<()> {
                 (results, query_meaning) = search(&searched)?;
             }
         }
-        let hits = results.hits;
+        let mut hits = results.hits;
+        // The sites that serve a tool or a quick fact come first, as a
+        // node lists them.
+        let route =
+            crate::sources::route(&searched, answer_kind(&searched), args.country.as_deref());
+        if let Some(route) = &route {
+            if pages.is_none() {
+                crate::sources::lead_with(&mut hits, &mut [], route, |domain| {
+                    searcher.site(domain).ok().flatten()
+                });
+            }
+        }
         let domains: Vec<&str> = hits.iter().map(|h| h.domain.as_str()).collect();
         // What came first: a page when one was listed first.
         let mut first = domains.first().map(|d| d.to_string());
         // With pages, what each listed position holds (pages count as rows).
         let mut listed = None;
         let deep_rank = match &pages {
-            None => rank_of(&domains, &q.expected),
+            None => {
+                if let Some(features) = features.as_deref_mut() {
+                    let closeness = |domain: &str| {
+                        query_meaning
+                            .as_ref()
+                            .and_then(|meaning| meaning.closeness(domain))
+                    };
+                    features.push(feature_rows(q, &searched, &hits, &[], &closeness));
+                }
+                rank_of(&domains, &q.expected)
+            }
             Some(pages) => {
-                let found = pages
+                let mut found = pages
                     .search(&searched, 10)
                     .with_context(|| format!("searching pages for {searched:?}"))?;
+                pages.add_other_number(&searched, &hits, &mut found, 10)?;
                 let mut lifted = hits.clone();
+                if cfg.add_named_site {
+                    add_named_site(&mut lifted, &found, |domain| {
+                        searcher.site(domain).ok().flatten()
+                    });
+                }
+                if cfg.drop_namesakes {
+                    drop_namesakes_of_words(&mut lifted, &found);
+                }
                 lift_named_sites(&mut lifted, &found);
-                let rows = listed_with_pages(&lifted, place_pages(&searched, &lifted, found));
+                pages.note_demand(&mut lifted)?;
+                let mut placed = place_pages(&searched, &lifted, found);
+                // --features-out writes the hand-made order the learned
+                // ranking is trained to improve.
+                if cfg.learned && features.is_none() {
+                    plumb_index::learned::reorder(
+                        plumb_index::learned::Model::builtin(),
+                        &searched,
+                        &mut lifted,
+                        &mut placed,
+                    );
+                }
+                if let Some(route) = &route {
+                    crate::sources::lead_with(&mut lifted, &mut placed, route, |domain| {
+                        searcher.site(domain).ok().flatten()
+                    });
+                }
+                if let Some(features) = features.as_deref_mut() {
+                    let closeness = |domain: &str| {
+                        query_meaning
+                            .as_ref()
+                            .and_then(|meaning| meaning.closeness(domain))
+                    };
+                    features.push(feature_rows(q, &searched, &lifted, &placed, &closeness));
+                }
+                let profile = if !args.profiles || placed.iter().any(|p| p.hit.named) {
+                    None
+                } else {
+                    profile_shown(args, &searched, searcher, cfg, pages)?
+                };
+                let mut rows = listed_with_pages(&lifted, placed);
+                // The profile asked for ("bohemian rhapsody lyrics") is
+                // shown above the results.
+                if let Some(url) = profile {
+                    rows.insert(0, vec![url]);
+                }
                 first = rows.first().and_then(|keys| keys.first()).cloned();
                 let rank = rows
                     .iter()
-                    .position(|keys| keys.iter().any(|k| q.expected.contains(k)))
+                    .position(|keys| {
+                        keys.iter()
+                            .any(|k| q.expected.iter().any(|e| is_expected(e, k)))
+                    })
                     .map(|i| i + 1);
                 listed = Some(rows);
                 rank
             }
         };
         let rank = deep_rank.filter(|&rank| rank <= args.limit);
-        if rank != Some(1) {
+        if verbose && args.show > 0 {
+            println!("{:?}", q.query);
+            let shown: Vec<String> = match &listed {
+                None => domains.iter().map(|d| d.to_string()).collect(),
+                Some(rows) => rows.iter().map(|keys| keys.join(" + ")).collect(),
+            };
+            for (i, row) in shown.iter().take(args.show).enumerate() {
+                println!("  {}. {row}", i + 1);
+            }
+        }
+        if verbose && rank != Some(1) {
             println!("{}", format_miss(q, rank, first.as_deref(), args.limit));
             if args.explain {
                 let closeness = |domain: &str| {
@@ -279,19 +910,286 @@ pub fn run(args: EvalArgs) -> Result<()> {
         }
         ranks.push(rank);
     }
+    Ok(ranks)
+}
 
-    let metrics = Metrics::from_ranks(&ranks, args.limit);
-    print!("{}", format_totals(&metrics, args.limit));
-    if let Some(min) = args.min_top1 {
-        if metrics.top1_rate() < min {
-            bail!(
-                "top-1 is {:.1}%, below --min-top1 {:.1}%",
-                metrics.top1_rate() * 100.0,
-                min * 100.0
-            );
+/// The kind of instant answer a node shows for `query`, as far as it can
+/// be told without fetching anything: a currency conversion is taken to
+/// be one when it looks like one.
+fn answer_kind(query: &str) -> Option<plumb_answer::Kind> {
+    let now = i64::try_from(plumb_core::now_unix()).unwrap_or(i64::MAX);
+    plumb_answer::answer(query, now, None)
+        .map(|answer| answer.kind)
+        .or_else(|| plumb_answer::may_need_rates(query).then_some(plumb_answer::Kind::Currency))
+}
+
+/// One ranking to try in a sweep: a name and the knobs it changes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Variant {
+    pub name: String,
+    pub cfg: plumb_index::RankConfig,
+}
+
+/// Parses a sweep file: one `name<TAB>{"knob": value, ...}` per line, each
+/// knob changed from `base` (the ranking `--rank` and `--alpha` give);
+/// blank lines and lines starting with `#` are skipped. The first variant
+/// is always `base` itself, which the others are compared with.
+pub fn parse_sweep(text: &str, base: &plumb_index::RankConfig) -> Result<Vec<Variant>> {
+    let base_json = serde_json::to_value(base)?;
+    let mut variants = vec![Variant {
+        name: "base".to_string(),
+        cfg: *base,
+    }];
+    for (i, raw) in text.lines().enumerate() {
+        let line = i + 1;
+        let trimmed = raw.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
         }
+        let Some((name, knobs)) = trimmed.split_once('\t') else {
+            bail!("line {line}: expected `name<TAB>{{json}}`, found no tab");
+        };
+        let name = name.trim();
+        if variants.iter().any(|v| v.name == name) {
+            bail!("line {line}: a variant is already called {name:?}");
+        }
+        let knobs: serde_json::Value = serde_json::from_str(knobs.trim())
+            .with_context(|| format!("line {line}: reading the knobs of {name:?}"))?;
+        let serde_json::Value::Object(knobs) = knobs else {
+            bail!("line {line}: the knobs of {name:?} are not a JSON object");
+        };
+        let mut merged = base_json.clone();
+        for (knob, value) in knobs {
+            let serde_json::Value::Object(fields) = &mut merged else {
+                unreachable!("RankConfig serializes as an object");
+            };
+            if !fields.contains_key(&knob) {
+                bail!("line {line}: {name:?} changes {knob:?}, which is no ranking knob");
+            }
+            fields.insert(knob, value);
+        }
+        let cfg = serde_json::from_value(merged)
+            .with_context(|| format!("line {line}: reading the knobs of {name:?}"))?;
+        variants.push(Variant {
+            name: name.to_string(),
+            cfg,
+        });
+    }
+    Ok(variants)
+}
+
+/// `--sweep`: every suite under every variant, in one table, each
+/// compared query by query with `base`.
+fn sweep(args: &EvalArgs, setup: &Setup, suites: &[Suite], variants: &[Variant]) -> Result<()> {
+    // ranks[variant][suite][query]
+    let mut ranks: Vec<Vec<Vec<Option<usize>>>> = Vec::with_capacity(variants.len());
+    for variant in variants {
+        info!("sweep: {} ({:?})", variant.name, variant.cfg);
+        let mut of_suites = Vec::with_capacity(suites.len());
+        for suite in suites {
+            of_suites.push(evaluate(
+                args,
+                setup,
+                &suite.queries,
+                &variant.cfg,
+                false,
+                None,
+            )?);
+        }
+        ranks.push(of_suites);
+    }
+    print!("{}", format_sweep(args.limit, suites, variants, &ranks));
+    if let Some(path) = &args.ranks_out {
+        let mut out = String::from("variant\tsuite\tline\tquery\trank\n");
+        for (v, variant) in variants.iter().enumerate() {
+            for (s, suite) in suites.iter().enumerate() {
+                for (q, query) in suite.queries.iter().enumerate() {
+                    let rank = ranks[v][s][q].unwrap_or(0);
+                    let _ = writeln!(
+                        out,
+                        "{}\t{}\t{}\t{}\t{rank}",
+                        variant.name, suite.name, query.line, query.query
+                    );
+                }
+            }
+        }
+        std::fs::write(path, out).with_context(|| format!("writing {}", path.display()))?;
     }
     Ok(())
+}
+
+/// A rank as a number to compare: lower is better, not found is worst.
+fn place(rank: Option<usize>) -> usize {
+    rank.unwrap_or(usize::MAX)
+}
+
+fn format_sweep(
+    limit: usize,
+    suites: &[Suite],
+    variants: &[Variant],
+    ranks: &[Vec<Vec<Option<usize>>>],
+) -> String {
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "{:<24} {:<22} {:>7} {:>7} {:>7} {:>6} {:>6}",
+        "variant", "suite", "top-1", "top-3", "MRR", "better", "worse"
+    );
+    for (v, variant) in variants.iter().enumerate() {
+        let mut all = Vec::new();
+        let (mut better, mut worse) = (0, 0);
+        for (s, suite) in suites.iter().enumerate() {
+            let these = &ranks[v][s];
+            let base = &ranks[0][s];
+            let b = these
+                .iter()
+                .zip(base)
+                .filter(|(r, b)| place(**r) < place(**b))
+                .count();
+            let w = these
+                .iter()
+                .zip(base)
+                .filter(|(r, b)| place(**r) > place(**b))
+                .count();
+            better += b;
+            worse += w;
+            all.extend_from_slice(these);
+            let m = Metrics::from_ranks(these, limit);
+            let _ = writeln!(
+                out,
+                "{:<24} {:<22} {:>6.1}% {:>6.1}% {:>7.3} {:>6} {:>6}",
+                variant.name,
+                suite.name,
+                m.top1_rate() * 100.0,
+                m.top3_rate() * 100.0,
+                m.mrr,
+                b,
+                w
+            );
+        }
+        let m = Metrics::from_ranks(&all, limit);
+        let _ = writeln!(
+            out,
+            "{:<24} {:<22} {:>6.1}% {:>6.1}% {:>7.3} {:>6} {:>6}",
+            variant.name,
+            "ALL",
+            m.top1_rate() * 100.0,
+            m.top3_rate() * 100.0,
+            m.mrr,
+            better,
+            worse
+        );
+    }
+    // What each variant changed, query by query.
+    let shown = |rank: Option<usize>| rank.map_or_else(|| "-".to_string(), |r| r.to_string());
+    for (v, variant) in variants.iter().enumerate().skip(1) {
+        let mut changed = Vec::new();
+        for (s, suite) in suites.iter().enumerate() {
+            for (q, query) in suite.queries.iter().enumerate() {
+                let (was, now) = (ranks[0][s][q], ranks[v][s][q]);
+                if was != now {
+                    changed.push(format!(
+                        "  {} {:?}: {} -> {}",
+                        suite.name,
+                        query.query,
+                        shown(was),
+                        shown(now)
+                    ));
+                }
+            }
+        }
+        if !changed.is_empty() {
+            let _ = writeln!(out, "\n{} changed:", variant.name);
+            for line in changed {
+                let _ = writeln!(out, "{line}");
+            }
+        }
+    }
+    out
+}
+
+/// The address of the profile a node shows above the results for `query`
+/// ("bohemian rhapsody lyrics", "mrbeast youtube"), found as a node finds
+/// it, by searching for the words before the service.
+fn profile_shown(
+    args: &EvalArgs,
+    query: &str,
+    searcher: &Searcher,
+    cfg: &plumb_index::RankConfig,
+    pages: &PageSearcher,
+) -> Result<Option<String>> {
+    let options = SearchOptions {
+        country: args.country.clone(),
+        language: args.lang.clone(),
+        ..SearchOptions::default()
+    };
+    for name in crate::web::answers::profile_lookups(query) {
+        let mut sites = searcher.search_meaning(&name, 5, cfg, &options, None)?;
+        pages.note_demand(&mut sites.hits)?;
+        let found = pages.search(&name, 10)?;
+        let placed = place_pages(&name, &sites.hits, found);
+        if let Some(profile) = crate::web::answers::profile_answer(query, &placed) {
+            return Ok(Some(profile.url));
+        }
+    }
+    Ok(None)
+}
+
+/// With `--facts`: `Some(1)` when the instant answer to `q` (worked out
+/// as a node does, by searching for the fact's subject) has one of the
+/// expected texts, commas left out ("8848" in "8,848.86 m"); `None`
+/// otherwise.
+fn fact_rank(
+    args: &EvalArgs,
+    q: &EvalQuery,
+    searcher: &Searcher,
+    cfg: &plumb_index::RankConfig,
+    pages: Option<&PageSearcher>,
+    verbose: bool,
+) -> Result<Option<usize>> {
+    let asked = plumb_core::facts::fact_asked(&q.query);
+    let answer = match (&asked, pages) {
+        (Some(asked), Some(pages)) => {
+            let options = SearchOptions {
+                country: args.country.clone(),
+                exact: true,
+                language: args.lang.clone(),
+                ..SearchOptions::default()
+            };
+            let mut sites = searcher.search_meaning(&asked.subject, 5, cfg, &options, None)?;
+            pages.note_demand(&mut sites.hits)?;
+            let found = pages.search(&asked.subject, 10)?;
+            let placed = place_pages(&asked.subject, &sites.hits, found);
+            crate::web::answers::fact_answer(asked, &placed, plumb_core::now_unix())
+        }
+        _ => None,
+    };
+    let text = answer.as_ref().map(|a| {
+        format!(
+            "{}: {} ({})",
+            a.question,
+            a.answer,
+            a.note.as_deref().unwrap_or("")
+        )
+    });
+    let hit = answer.as_ref().is_some_and(|a| {
+        let shown = a.answer.to_lowercase().replace(',', "");
+        q.expected.iter().any(|e| shown.contains(e.as_str()))
+    });
+    if verbose && (args.show > 0 || !hit) {
+        let what = match (&asked, &text) {
+            (None, _) => "not read as a fact question".to_string(),
+            (Some(_), None) => "no answer".to_string(),
+            (Some(_), Some(text)) => text.clone(),
+        };
+        let mark = if hit { "ok" } else { "miss" };
+        println!(
+            "{mark}: {:?} expected {}; {what}",
+            q.query,
+            q.expected.join(" or ")
+        );
+    }
+    Ok(hit.then_some(1))
 }
 
 /// What each position of a results page holds, as a node lists sites and
@@ -308,6 +1206,11 @@ fn listed_with_pages(hits: &[Hit], pages: Vec<PlacedPage>) -> Vec<Vec<String>> {
     for (i, hit) in hits.iter().enumerate() {
         listed.extend(alone(i));
         let mut keys = vec![hit.domain.clone()];
+        // A site's result that links one of its pages ("define prioritize"
+        // links the word's page of merriam-webster.com) is that page too.
+        if url::Url::parse(&hit.url).is_ok_and(|url| url.path() != "/") {
+            keys.push(hit.url.clone());
+        }
         keys.extend(
             pages
                 .iter()
@@ -323,6 +1226,149 @@ fn listed_with_pages(hits: &[Hit], pages: Vec<PlacedPage>) -> Vec<Vec<String>> {
             .map(|p| vec![p.hit.page.url.clone()]),
     );
     listed
+}
+
+/// Most listed rows of a query `--features-out` writes.
+const FEATURE_ROWS: usize = 30;
+
+/// One query's listed rows with everything that ranked them, for
+/// `--features-out`: what a learned ranking is trained and judged on.
+/// Rows are listed as [`listed_with_pages`] lists them; `label` is 1 for
+/// a row holding an expected answer.
+fn feature_rows(
+    q: &EvalQuery,
+    searched: &str,
+    hits: &[Hit],
+    placed: &[PlacedPage],
+    closeness: &dyn Fn(&str) -> Option<f32>,
+) -> serde_json::Value {
+    use serde_json::json;
+    let expected = |key: &str| q.expected.iter().any(|e| is_expected(e, key));
+    let page = |p: &PlacedPage| {
+        json!({
+            "key": p.hit.page.url,
+            "set": p.hit.page.set,
+            "title": p.hit.page.title,
+            "description": p.hit.page.description,
+            "score": p.hit.score,
+            "named": p.hit.named,
+            "popularity": p.hit.popularity,
+            "whole": p.hit.whole,
+            "label": u8::from(expected(&p.hit.page.url)),
+        })
+    };
+    let alone = |at: usize| {
+        placed
+            .iter()
+            .filter(move |p| p.under.is_none() && p.at == at)
+            .map(|p| {
+                let mut row = page(p);
+                row["kind"] = "page".into();
+                row
+            })
+    };
+    let mut rows = Vec::new();
+    for (i, hit) in hits.iter().enumerate() {
+        rows.extend(alone(i));
+        let under: Vec<serde_json::Value> = placed
+            .iter()
+            .filter(|p| p.under.as_deref() == Some(hit.domain.as_str()))
+            .map(page)
+            .collect();
+        let label = expected(&hit.domain) || under.iter().any(|p| p["label"] == 1);
+        rows.push(json!({
+            "kind": "site",
+            "key": hit.domain,
+            "site_rank": i + 1,
+            "title": hit.title,
+            "description": hit.description,
+            "score": hit.score,
+            "text_score": hit.text_score,
+            "placing_text_score": hit.placing_text_score,
+            "link_score": hit.link_score,
+            "closeness": closeness(&hit.domain),
+            "country": hit.country,
+            "named": hit.named,
+            "official": hit.official,
+            "demand": hit.demand,
+            "under": under,
+            "label": u8::from(label),
+        }));
+    }
+    rows.extend(
+        placed
+            .iter()
+            .filter(|p| p.under.is_none() && p.at >= hits.len())
+            .map(|p| {
+                let mut row = page(p);
+                row["kind"] = "page".into();
+                row
+            }),
+    );
+    rows.truncate(FEATURE_ROWS);
+    json!({
+        "line": q.line,
+        "query": q.query,
+        "searched": searched,
+        "half": match half_of(&q.query) {
+            Half::Tune => "tune",
+            Half::HeldOut => "held-out",
+        },
+        "expected": q.expected,
+        "rows": rows,
+    })
+}
+
+/// Most rows of a query each `--rerank-model` scores.
+const RERANKED_ROWS: usize = 20;
+
+/// What a reranker reads of a listed row: a site's name, title and
+/// description, or a page's title and description.
+fn row_text(row: &serde_json::Value) -> String {
+    let field = |name: &str| row[name].as_str().unwrap_or("").trim().to_string();
+    let mut text = field("title");
+    if row["kind"] == "site" {
+        let key = field("key");
+        text = if text.is_empty() {
+            key
+        } else {
+            format!("{text} ({key})")
+        };
+    }
+    let description = field("description");
+    if !description.is_empty() {
+        text = format!("{text}. {description}");
+    }
+    text
+}
+
+/// Scores the first [`RERANKED_ROWS`] rows of a query written by
+/// [`feature_rows`] with each reranker: `ce` holds one score per model,
+/// and the query's `ce_ms` how long each model took over all its rows.
+fn rerank_rows(rerankers: &[plumb_embed::Reranker], query: &mut serde_json::Value) -> Result<()> {
+    if rerankers.is_empty() {
+        return Ok(());
+    }
+    let searched = query["searched"].as_str().unwrap_or("").to_string();
+    let mut millis = Vec::with_capacity(rerankers.len());
+    let Some(rows) = query["rows"].as_array_mut() else {
+        return Ok(());
+    };
+    for row in rows.iter_mut() {
+        row["ce"] = serde_json::json!([]);
+    }
+    for reranker in rerankers {
+        let start = std::time::Instant::now();
+        for row in rows.iter_mut().take(RERANKED_ROWS) {
+            let score = reranker.score(&searched, &row_text(row))?;
+            if let Some(scores) = row["ce"].as_array_mut() {
+                scores.push(score.into());
+            }
+        }
+        millis.push(start.elapsed().as_secs_f64() * 1000.0);
+    }
+    query["ce_ms"] = millis.into();
+    Ok(())
 }
 
 /// How deep `--explain` looks for the expected site.
@@ -380,12 +1426,31 @@ fn format_totals(m: &Metrics, limit: usize) -> String {
 /// github.tsv.gz and github-new.tsv.gz are repositories,
 /// wikipedia-en-old.tsv.gz English Wikipedia; any other is English
 /// Wikipedia.
-fn set_of_file(name: &str) -> String {
-    use plumb_index::pages::{BOOKS_SET, GITHUB_SET, PAPERS_SET, STACKOVERFLOW_SET};
+pub(crate) fn set_of_file(name: &str) -> String {
+    use plumb_index::pages::{
+        BOOKS_SET, DOCS_SET, FILMS_SET, GITHUB_SET, MUSIC_SET, PACKAGES_SET, PAPERS_SET,
+        PODCASTS_SET, REFERENCE_SET, STACKEXCHANGE_SET, STACKOVERFLOW_SET, SUBPAGES_SET,
+        WIKIDATA_SET, WIKTIONARY_SET,
+    };
     let stem = name.split('.').next().unwrap_or("");
-    if let Some(set) = [GITHUB_SET, STACKOVERFLOW_SET, BOOKS_SET, PAPERS_SET]
-        .into_iter()
-        .find(|set| stem.starts_with(set))
+    if let Some(set) = [
+        GITHUB_SET,
+        STACKOVERFLOW_SET,
+        STACKEXCHANGE_SET,
+        BOOKS_SET,
+        PAPERS_SET,
+        PACKAGES_SET,
+        PODCASTS_SET,
+        MUSIC_SET,
+        FILMS_SET,
+        DOCS_SET,
+        REFERENCE_SET,
+        SUBPAGES_SET,
+        WIKIDATA_SET,
+        WIKTIONARY_SET,
+    ]
+    .into_iter()
+    .find(|set| stem.starts_with(set))
     {
         return set.to_string();
     }
@@ -399,22 +1464,65 @@ fn set_of_file(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::set_of_file;
+    use super::{half_of, is_expected, parse_queries, parse_sweep, rank_of, set_of_file};
+    use crate::cli::Half;
+
+    #[test]
+    fn a_sweep_changes_knobs_of_the_base_ranking() {
+        let base = plumb_index::RankConfig {
+            alpha: 0.3,
+            ..Default::default()
+        };
+        let text = "# knobs\nlabel\t{\"exact_label_bonus\": 0.1}\nnone\t{\"named_share\": null}\n";
+        let variants = parse_sweep(text, &base).unwrap();
+        let names: Vec<&str> = variants.iter().map(|v| v.name.as_str()).collect();
+        assert_eq!(names, ["base", "label", "none"]);
+        assert_eq!(variants[0].cfg, base);
+        assert_eq!(variants[1].cfg.exact_label_bonus, 0.1);
+        assert_eq!(variants[1].cfg.alpha, 0.3);
+        assert_eq!(variants[2].cfg.named_share, None);
+        assert!(parse_sweep("x\t{\"no_such_knob\": 1}", &base).is_err());
+        assert!(parse_sweep("x {}", &base).is_err());
+        assert!(parse_sweep("x\t{}\nx\t{}", &base).is_err());
+    }
 
     #[test]
     fn sets_come_from_file_names() {
         assert_eq!(set_of_file("github.tsv.gz"), "github");
         assert_eq!(set_of_file("github-new.tsv.gz"), "github");
         assert_eq!(set_of_file("stackoverflow.tsv.gz"), "stackoverflow");
+        assert_eq!(set_of_file("stackexchange.tsv.gz"), "stackexchange");
         assert_eq!(set_of_file("books.tsv"), "books");
+        assert_eq!(set_of_file("packages.tsv.gz"), "packages");
+        assert_eq!(set_of_file("podcasts.tsv.gz"), "podcasts");
         assert_eq!(set_of_file("wikipedia-de.tsv.gz"), "wikipedia-de");
         assert_eq!(set_of_file("wikipedia-en-before157.tsv.gz"), "wikipedia-en");
         assert_eq!(set_of_file("articles.tsv.gz"), "wikipedia-en");
     }
 
     #[test]
+    fn an_address_ending_in_a_star_takes_the_pages_it_starts() {
+        let queries =
+            parse_queries("unclog a drain\thttps://diy.stackexchange.com/questions/*\n").unwrap();
+        let expected = &queries[0].expected;
+        assert_eq!(expected, &["https://diy.stackexchange.com/questions/*"]);
+        let rows = [
+            "drain.com",
+            "https://superuser.com/questions/1",
+            "https://diy.stackexchange.com/questions/2142",
+        ];
+        assert_eq!(rank_of(&rows, expected), Some(3));
+        assert!(is_expected("usbank.com", "usbank.com"));
+        assert!(!is_expected("usbank.com", "usbank.com.evil"));
+    }
+
+    #[test]
     fn pages_are_listed_as_a_node_lists_them() {
         let site = |domain: &str, named: bool| Hit {
+            demand: None,
+            missing_words: false,
+            query_evidence: None,
+            placing_text_score: None,
             domain: domain.into(),
             url: format!("https://{domain}/"),
             title: None,
@@ -442,6 +1550,7 @@ mod tests {
             named: true,
             popularity: 0.9,
             whole: false,
+            learned: None,
         };
         let hits = [site("curie.org", false), site("python.org", false)];
         let placed = place_pages(
@@ -470,11 +1579,57 @@ mod tests {
             queries[0].expected,
             ["https://en.wikipedia.org/wiki/Marie_Curie"]
         );
+        let queries = parse_queries(
+            "owner of tesla\thttps://en.wikipedia.org/wiki/Tesla%2C_Inc.,tesla.com\n",
+        )
+        .unwrap();
+        assert_eq!(
+            queries[0].expected,
+            ["https://en.wikipedia.org/wiki/Tesla,_Inc.", "tesla.com"]
+        );
     }
     use super::*;
 
     fn close(a: f64, b: f64) -> bool {
         (a - b).abs() < 1e-9
+    }
+
+    #[test]
+    fn recall_says_where_an_answer_was_lost() {
+        let found = Stage {
+            rank: Some(2),
+            ranked: true,
+            ..Stage::default()
+        };
+        assert_eq!(found.loss(10), None);
+        let deep = Stage {
+            site_indexed: true,
+            by_words: Some(400),
+            matches_words: true,
+            ..Stage::default()
+        };
+        assert_eq!(deep.loss(10), Some("site matches, never ranked"));
+        assert!(deep.within(1_000) && !deep.within(100));
+        let wordless = Stage {
+            site_indexed: true,
+            ..Stage::default()
+        };
+        assert_eq!(wordless.loss(10), Some("site indexed, matches no word"));
+        assert_eq!(Stage::default().loss(10), Some("answer in no index"));
+        let page = Stage {
+            page_indexed: true,
+            page: Some(30),
+            ..Stage::default()
+        };
+        assert_eq!(page.loss(10), Some("page found, too far down"));
+
+        let table = format_recall(&[found, deep, wordless, page], 10);
+        assert!(table.contains("recall of 4 queries"), "{table}");
+        assert!(
+            table.contains("listed in the first 10        1  25.0%"),
+            "{table}"
+        );
+        assert!(table.contains("site matches, never ranked"), "{table}");
     }
 
     #[test]
@@ -568,33 +1723,83 @@ mod tests {
         assert!(close(all_missed.mrr, 0.0) && close(all_missed.top3_rate(), 0.0));
     }
 
-    /// The query lists in the repository parse, and every expected domain is
-    /// written as the registrable domain that hits are keyed by.
+    #[test]
+    fn halves_depend_on_the_words_alone() {
+        // Fixed for good: tuning runs on other machines rely on them.
+        assert_eq!(half_of("chase"), Half::Tune);
+        assert_eq!(half_of("paypal"), Half::HeldOut);
+        assert_eq!(half_of("marie curie"), Half::Tune);
+        assert_eq!(half_of("  Marie   CURIE "), half_of("marie curie"));
+        let halves: Vec<Half> = (0..1000).map(|i| half_of(&format!("query {i}"))).collect();
+        let tune = halves.iter().filter(|h| **h == Half::Tune).count();
+        assert!(
+            (400..=600).contains(&tune),
+            "{tune} of 1000 in the tune half"
+        );
+    }
+
+    /// Every queries file in eval/ parses, has no query twice, and writes
+    /// each expected answer as hits are keyed: a registrable domain, or a
+    /// page's https address. Both halves of each file have queries.
     #[test]
     fn repository_query_files_are_valid() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        for file in [
-            "fixtures/brand_queries.tsv",
-            "eval/brand_queries.tsv",
-            "eval/ai_queries.tsv",
-        ] {
-            let text = std::fs::read_to_string(root.join(file)).unwrap();
-            let queries = parse_queries(&text).unwrap();
+        let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(root.join("eval"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|e| e == "tsv"))
+            .collect();
+        files.sort();
+        assert!(files.len() >= 11, "{files:?}");
+        files.push(root.join("fixtures/brand_queries.tsv"));
+        for path in files {
+            let file = path.display();
+            let text = std::fs::read_to_string(&path).unwrap();
+            let queries = parse_queries(&text).unwrap_or_else(|err| panic!("{file}: {err:#}"));
             assert!(
                 queries.len() >= 40,
                 "{file}: only {} queries",
                 queries.len()
             );
+            let mut seen = std::collections::HashSet::new();
+            for q in &queries {
+                let words = q.query.split_whitespace().collect::<Vec<_>>().join(" ");
+                assert!(
+                    seen.insert(words.to_lowercase()),
+                    "{file}: {:?} twice",
+                    q.query
+                );
+            }
+            let held_out = queries
+                .iter()
+                .filter(|q| half_of(&q.query) == Half::HeldOut)
+                .count();
+            assert!(
+                held_out * 4 >= queries.len() && held_out * 4 <= queries.len() * 3,
+                "{file}: {held_out} of {} held out",
+                queries.len()
+            );
+            let facts = path.ends_with("fact_queries.tsv");
             for line in text.lines().filter(|l| !l.trim_start().starts_with('#')) {
-                let Some((_, domains)) = line.split_once('\t') else {
+                let Some((_, answers)) = line.split_once('\t') else {
                     continue;
                 };
-                for domain in domains.split(',') {
-                    assert_eq!(
-                        registrable_domain(domain).as_deref(),
-                        Some(domain),
-                        "{file}: {line:?}"
-                    );
+                for answer in answers.split(',') {
+                    if facts {
+                        assert_eq!(answer, answer.trim().to_lowercase(), "{file}: {line:?}");
+                    } else if answer.contains('/') {
+                        let url = url::Url::parse(answer.trim_end_matches('*'));
+                        assert!(
+                            url.is_ok_and(|u| u.scheme() == "https" && u.path() != "/"),
+                            "{file}: {line:?}"
+                        );
+                    } else {
+                        assert_eq!(
+                            registrable_domain(answer).as_deref(),
+                            Some(answer),
+                            "{file}: {line:?}"
+                        );
+                    }
                 }
             }
         }

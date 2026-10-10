@@ -89,11 +89,12 @@ async fn private_page(
 ) -> Response {
     // A query in the address (`/private?q=`) is not read: private searches
     // come from the fragment.
+    let country_mode = params.country_mode();
     let options = SearchParams {
         q: String::new(),
         ..params
     }
-    .options(&state.settings.home, &headers);
+    .options(&state.settings, &headers);
     let available = state.private_search();
     let status = if available {
         StatusCode::OK
@@ -108,7 +109,7 @@ async fn private_page(
             (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
             (header::CACHE_CONTROL, "no-cache"),
         ],
-        axum::response::Html(render_private(available, &options)),
+        axum::response::Html(render_private_with_mode(available, &options, &country_mode)),
     )
         .into_response()
 }
@@ -116,7 +117,20 @@ async fn private_page(
 /// The private search page. `available` says whether its script can run
 /// here; `options` hold the home country the ranking favors, safe search
 /// and the language filter, which the page's script reads.
+#[cfg(test)]
 fn render_private(available: bool, options: &SearchOptions) -> String {
+    render_private_with_mode(
+        available,
+        options,
+        options.country.as_deref().unwrap_or("auto"),
+    )
+}
+
+fn render_private_with_mode(
+    available: bool,
+    options: &SearchOptions,
+    country_mode: &str,
+) -> String {
     let head = if available {
         format!(
             "<script type=\"module\" src=\"/private/{}/boot.js\"></script>\n",
@@ -132,29 +146,49 @@ fn render_private(available: bool, options: &SearchOptions) -> String {
         "<p class=\"err\">This site does not offer private search right now. \
          <a href=\"/\">Search normally</a> instead.</p>"
     };
+    let disabled = if available { "" } else { " disabled" };
+    let mut choices = String::new();
+    for (code, name) in [("auto", "Automatic"), ("any", "Any country")]
+        .into_iter()
+        .chain(super::COUNTRY_CHOICES.iter().copied())
+    {
+        let selected = if code == country_mode {
+            " selected"
+        } else {
+            ""
+        };
+        choices.push_str(&format!(
+            "<option value=\"{code}\"{selected}>{name}</option>"
+        ));
+    }
+    let only = if options.only_country { " checked" } else { "" };
+    let controls = format!("<label>Country <select id=\"pq-country\">{choices}</select></label><label><input id=\"pq-only\" type=\"checkbox\"{only}> Only this country</label>");
     let body = format!(
-        "<main class=\"wrap\" id=\"pq\" data-country=\"{}\" data-safe=\"{}\" \
-         data-language=\"{}\">\n\
-         <header><a class=\"logo\" href=\"/\">Plumb</a>\
+        "<div class=\"wrap wide\" id=\"pq\" data-country=\"{}\" data-safe=\"{}\" \
+         data-language=\"{}\" data-country-mode=\"{mode}\" data-only=\"{initial_only}\">\n\
+         {bar}<header class=\"results-header\">\
          <form id=\"pq-form\" action=\"/private\" method=\"get\" role=\"search\">\
-         <input type=\"search\" id=\"pq-q\" placeholder=\"A site's name, e.g. us bank\" \
+         <fieldset style=\"display:contents;border:0;margin:0;padding:0\"{disabled}><input type=\"search\" id=\"pq-q\" placeholder=\"Search sites, articles, questions and more\" \
          aria-label=\"Search privately\" autocomplete=\"off\" autofocus>\
-         {gear}<button type=\"submit\" id=\"pq-go\" disabled>Search</button></form></header>\n\
-         <p class=\"src\"><strong>Private search.</strong> Your browser looks up the results \
+         {gear}<button type=\"submit\" id=\"pq-go\" disabled>Search</button></fieldset></form></header>\n\
+         <main><h1 class=\"visually-hidden\">Private search</h1><p class=\"src\"><strong>Private search.</strong> Your browser looks up the results \
          itself: it fetches a few groups of sites from this server, padded with random ones, \
          and picks the matches. Query text stays in your browser. The requested groups \
          can still reveal likely searches to answering nodes. \
-         <a href=\"/\">Normal search</a></p>\n{note}\n\
+         <a id=\"pq-normal\" href=\"/\">Normal search</a></p>\n{note}\n\
          <div id=\"pq-answer\"></div>\n\
          <p class=\"s\" id=\"pq-status\" role=\"status\"></p>\n<ol id=\"pq-results\"></ol>\n\
-         </main>",
+         </main></div>",
         escape_html(options.country.as_deref().unwrap_or("")),
         options.safe.as_str(),
         escape_html(options.language.as_deref().unwrap_or("")),
+        mode = escape_html(country_mode),
+        initial_only = if options.only_country { "1" } else { "0" },
+        bar = super::app_bar("search", false),
         gear = if available {
             format!(
                 "<details class=\"gear\"><summary title=\"Settings\" aria-label=\"Settings\">\
-                 &#9881;&#xFE0E;</summary><div class=\"panel\">{}</div></details>",
+                 &#9881;&#xFE0E;</summary><div class=\"panel\">{controls}{}</div></details>",
                 super::private_toggle(true)
             )
         } else {

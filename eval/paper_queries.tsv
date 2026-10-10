@@ -10,3 +10,131 @@ random forests breiman	https://doi.org/10.1023/a:1010933404324
 deep learning lecun bengio hinton nature	https://doi.org/10.1038/nature14539
 u-net convolutional networks for biomedical image segmentation	https://doi.org/10.1007/978-3-319-24574-4_28
 basic local alignment search tool	https://doi.org/10.1016/s0022-2836(05)80360-2
+
+# Added 2026-10-06 to make the suite bigger.
+# Machine learning and AI
+bert pre-training of deep bidirectional transformers	https://doi.org/10.48550/arxiv.1810.04805,https://doi.org/10.18653/v1/n19-1423
+bert paper	https://doi.org/10.48550/arxiv.1810.04805,https://doi.org/10.18653/v1/n19-1423
+generative adversarial nets goodfellow	https://doi.org/10.48550/arxiv.1406.2661,https://doi.org/10.1145/3422622
+batch normalization ioffe szegedy	https://doi.org/10.48550/arxiv.1502.03167
+very deep convolutional networks for large-scale image recognition	https://doi.org/10.48550/arxiv.1409.1556
+vgg paper	https://doi.org/10.48550/arxiv.1409.1556
+efficient estimation of word representations in vector space	https://doi.org/10.48550/arxiv.1301.3781
+word2vec paper	https://doi.org/10.48550/arxiv.1301.3781
+long short-term memory hochreiter	https://doi.org/10.1162/neco.1997.9.8.1735
+learning representations by back-propagating errors	https://doi.org/10.1038/323533a0
+gradient-based learning applied to document recognition	https://doi.org/10.1109/5.726791
+support-vector networks cortes vapnik	https://doi.org/10.1007/bf00994018
+human-level control through deep reinforcement learning	https://doi.org/10.1038/nature14236
+mastering the game of go with deep neural networks and tree search	https://doi.org/10.1038/nature16961
+alphago paper	https://doi.org/10.1038/nature16961
+highly accurate protein structure prediction with alphafold	https://doi.org/10.1038/s41586-021-03819-2
+alphafold paper	https://doi.org/10.1038/s41586-021-03819-2
+faster r-cnn	https://doi.org/10.1109/tpami.2016.2577031,https://doi.org/10.48550/arxiv.1506.01497
+you only look once unified real-time object detection	https://doi.org/10.1109/cvpr.2016.91
+yolo paper	https://doi.org/10.1109/cvpr.2016.91
+going deeper with convolutions	https://doi.org/10.1109/cvpr.2015.7298594
+densely connected convolutional networks	https://doi.org/10.1109/cvpr.2017.243
+mask r-cnn	https://doi.org/10.1109/iccv.2017.322
+fully convolutional networks for semantic segmentation	https://doi.org/10.1109/cvpr.2015.7298965
+imagenet a large-scale hierarchical image database	https://doi.org/10.1109/cvpr.2009.5206848
+distinctive image features from scale-invariant keypoints	https://doi.org/10.1023/b:visi.0000029664.99615.94
+sift lowe	https://doi.org/10.1023/b:visi.0000029664.99615.94
+a computational approach to edge detection canny	https://doi.org/10.1109/tpami.1986.4767851
+xgboost a scalable tree boosting system	https://doi.org/10.1145/2939672.2939785
+glove global vectors for word representation	https://doi.org/10.3115/v1/d14-1162
+auto-encoding variational bayes	https://doi.org/10.48550/arxiv.1312.6114
+denoising diffusion probabilistic models	https://doi.org/10.48550/arxiv.2006.11239
+high-resolution image synthesis with latent diffusion models	https://doi.org/10.1109/cvpr52688.2022.01042
+learning transferable visual models from natural language supervision	https://doi.org/10.48550/arxiv.2103.00020
+clip paper openai	https://doi.org/10.48550/arxiv.2103.00020
+language models are few-shot learners	https://doi.org/10.48550/arxiv.2005.14165
+gpt-3 paper	https://doi.org/10.48550/arxiv.2005.14165
+an image is worth 16x16 words	https://doi.org/10.48550/arxiv.2010.11929
+training language models to follow instructions with human feedback	https://doi.org/10.48550/arxiv.2203.02155
+llama open and efficient foundation language models	https://doi.org/10.48550/arxiv.2302.13971
+neural machine translation by jointly learning to align and translate	https://doi.org/10.48550/arxiv.1409.0473
+sequence to sequence learning with neural networks	https://doi.org/10.48550/arxiv.1409.3215
+semi-supervised classification with graph convolutional networks	https://doi.org/10.48550/arxiv.1609.02907
+
+# Computing and the web
+the anatomy of a large-scale hypertextual web search engine	https://doi.org/10.1016/s0169-7552(98)00110-x
+pagerank paper brin page	https://doi.org/10.1016/s0169-7552(98)00110-x
+authoritative sources in a hyperlinked environment	https://doi.org/10.1145/324133.324140
+mapreduce simplified data processing on large clusters	https://doi.org/10.1145/1327452.1327492
+a relational model of data for large shared data banks	https://doi.org/10.1145/362384.362685
+new directions in cryptography	https://doi.org/10.1109/tit.1976.1055638
+a method for obtaining digital signatures and public-key cryptosystems	https://doi.org/10.1145/359340.359342
+time clocks and the ordering of events in a distributed system	https://doi.org/10.1145/359545.359563
+a note on two problems in connexion with graphs	https://doi.org/10.1007/bf01386390
+computing machinery and intelligence	https://doi.org/10.1093/mind/lix.236.433
+on computable numbers turing	https://doi.org/10.1112/plms/s2-42.1.230
+a mathematical theory of communication	https://doi.org/10.1002/j.1538-7305.1948.tb01338.x
+the probabilistic relevance framework bm25 and beyond	https://doi.org/10.1561/1500000019
+term-weighting approaches in automatic text retrieval	https://doi.org/10.1016/0306-4573(88)90021-0
+array programming with numpy	https://doi.org/10.1038/s41586-020-2649-2
+scipy 1.0 fundamental algorithms for scientific computing in python	https://doi.org/10.1038/s41592-019-0686-2
+matplotlib a 2d graphics environment	https://doi.org/10.1109/mcse.2007.55
+
+# Physics and chemistry
+on the electrodynamics of moving bodies	https://doi.org/10.1002/andp.19053221004
+broken symmetries and the masses of gauge bosons	https://doi.org/10.1103/physrevlett.13.508
+observation of gravitational waves from a binary black hole merger	https://doi.org/10.1103/physrevlett.116.061102
+observational evidence from supernovae for an accelerating universe	https://doi.org/10.1086/300499
+electric field effect in atomically thin carbon films	https://doi.org/10.1126/science.1102896
+self-consistent equations including exchange and correlation effects	https://doi.org/10.1103/physrev.140.a1133
+inhomogeneous electron gas	https://doi.org/10.1103/physrev.136.b864
+generalized gradient approximation made simple	https://doi.org/10.1103/physrevlett.77.3865
+pbe functional paper	https://doi.org/10.1103/physrevlett.77.3865
+density-functional thermochemistry iii the role of exact exchange	https://doi.org/10.1063/1.464913
+projector augmented-wave method	https://doi.org/10.1103/physrevb.50.17953
+efficient iterative schemes for ab initio total-energy calculations	https://doi.org/10.1103/physrevb.54.11169
+a short history of shelx	https://doi.org/10.1107/s0108767307043930
+
+# Biology and medicine
+molecular structure of nucleic acids watson crick	https://doi.org/10.1038/171737a0
+protein measurement with the folin phenol reagent	https://doi.org/10.1016/s0021-9258(19)52451-6
+cleavage of structural proteins during the assembly of the head of bacteriophage t4	https://doi.org/10.1038/227680a0
+bradford protein assay	https://doi.org/10.1016/0003-2697(76)90527-3
+analysis of relative gene expression data using real-time quantitative pcr	https://doi.org/10.1006/meth.2001.1262
+dna sequencing with chain-terminating inhibitors	https://doi.org/10.1073/pnas.74.12.5463
+a programmable dual-rna-guided dna endonuclease in adaptive bacterial immunity	https://doi.org/10.1126/science.1225829
+induction of pluripotent stem cells from mouse embryonic and adult fibroblast cultures	https://doi.org/10.1016/j.cell.2006.07.024
+hallmarks of cancer the next generation	https://doi.org/10.1016/j.cell.2011.02.013
+the hallmarks of cancer hanahan weinberg 2000	https://doi.org/10.1016/s0092-8674(00)81683-9
+initial sequencing and analysis of the human genome	https://doi.org/10.1038/35057062
+gapped blast and psi-blast	https://doi.org/10.1093/nar/25.17.3389
+clustal w improving the sensitivity of progressive multiple sequence alignment	https://doi.org/10.1093/nar/22.22.4673
+muscle multiple sequence alignment	https://doi.org/10.1093/nar/gkh340
+deseq2 paper	https://doi.org/10.1186/s13059-014-0550-8
+fast gapped-read alignment with bowtie 2	https://doi.org/10.1038/nmeth.1923
+fast and accurate short read alignment with burrows-wheeler transform	https://doi.org/10.1093/bioinformatics/btp324
+the sequence alignment/map format and samtools	https://doi.org/10.1093/bioinformatics/btp352
+fiji an open-source platform for biological-image analysis	https://doi.org/10.1038/nmeth.2019
+nih image to imagej 25 years of image analysis	https://doi.org/10.1038/nmeth.2089
+the prisma statement	https://doi.org/10.1371/journal.pmed.1000097,https://doi.org/10.1136/bmj.n71
+why most published research findings are false	https://doi.org/10.1371/journal.pmed.0020124
+
+# Statistics and social science
+nonparametric estimation from incomplete observations	https://doi.org/10.1080/01621459.1958.10501452
+kaplan meier paper	https://doi.org/10.1080/01621459.1958.10501452
+regression models and life-tables cox	https://doi.org/10.1111/j.2517-6161.1972.tb00899.x
+controlling the false discovery rate	https://doi.org/10.1111/j.2517-6161.1995.tb02031.x
+maximum likelihood from incomplete data via the em algorithm	https://doi.org/10.1111/j.2517-6161.1977.tb01600.x
+regression shrinkage and selection via the lasso	https://doi.org/10.1111/j.2517-6161.1996.tb02080.x
+an index to quantify an individual's scientific research output	https://doi.org/10.1073/pnas.0507655102
+using thematic analysis in psychology	https://doi.org/10.1191/1478088706qp063oa
+the moderator-mediator variable distinction	https://doi.org/10.1037/0022-3514.51.6.1173
+a power primer cohen	https://doi.org/10.1037/0033-2909.112.1.155
+perceived usefulness perceived ease of use and user acceptance of information technology	https://doi.org/10.2307/249008
+evaluating structural equation models with unobservable variables and measurement error	https://doi.org/10.1177/002224378101800104
+the strength of weak ties	https://doi.org/10.1086/225469
+collective dynamics of small-world networks	https://doi.org/10.1038/30918
+emergence of scaling in random networks	https://doi.org/10.1126/science.286.5439.509
+the tragedy of the commons	https://doi.org/10.1126/science.162.3859.1243
+prospect theory an analysis of decision under risk	https://doi.org/10.2307/1914185
+the market for lemons	https://doi.org/10.2307/1879431
+the nature of the firm coase	https://doi.org/10.1111/j.1468-0335.1937.tb00002.x
+the pricing of options and corporate liabilities	https://doi.org/10.1086/260062
+common risk factors in the returns on stocks and bonds	https://doi.org/10.1016/0304-405x(93)90023-5
+theory of the firm managerial behavior agency costs and ownership structure	https://doi.org/10.1016/0304-405x(76)90026-x

@@ -14,6 +14,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub mod article;
 mod bot_check;
 mod country;
+pub mod docs;
+pub mod fact_check;
+pub mod facts;
+pub mod films;
 pub mod key_pages;
 pub mod keys;
 mod kinds;
@@ -22,13 +26,20 @@ pub mod news;
 pub mod oblivious;
 mod operators;
 pub mod packages;
+pub mod paper_query;
+pub mod papers;
 pub mod place;
 pub mod profiles;
+pub mod reference;
 pub mod safe;
+pub mod simhash;
 mod site_search;
+pub mod stack_exchange;
+pub mod subpages;
+pub mod subsites;
 
 pub use article::{article_url, Article};
-pub use bot_check::{echoes_the_request, is_bot_check_page};
+pub use bot_check::{echoes_the_request, is_bot_check_page, is_sign_in_portal};
 pub use country::{country_of_name, normalize_country, site_country, tld_country, COUNTRY_CHOICES};
 pub use key_pages::{KeyPage, PageIntent, MAX_KEY_PAGES};
 pub use kinds::{is_generic_kind, kind_key, other_number, MAX_KINDS};
@@ -36,6 +47,7 @@ pub use news::{Headline, RecentNews};
 pub use operators::Operators;
 pub use safe::{adult_level, record_adult_level, AdultLevel, SafeSearch};
 pub use site_search::{search_link, search_template_for, SEARCH_TERMS};
+pub use subsites::{parent_domain, subdomain_sites, SITES_VERSION, SUBDOMAIN_SITE_NAMES};
 
 use anyhow::{Context, Result};
 use serde::de::DeserializeOwned;
@@ -69,6 +81,8 @@ pub const MAX_LINKS_TO: usize = 50;
 pub const MAX_ALIASES: usize = 16;
 /// Most homepage headings kept per site.
 pub const MAX_HEADINGS: usize = 8;
+/// Most entries in [`SiteRecord::terms`].
+pub const MAX_TERMS: usize = 100;
 /// Most words kept from a homepage's headings, all together.
 pub const MAX_HEADING_WORDS: usize = 60;
 /// Longest title, description, alias or link text kept, in characters.
@@ -97,6 +111,12 @@ pub struct SiteRecord {
     /// its words; it goes into the site's embedding.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body_text: Option<String>,
+    /// Search terms picked from the whole homepage's text (YAKE), best
+    /// first, at most [`MAX_TERMS`]; a word stands more than once to weigh
+    /// more. Searched like headings: below names. Not searched by its
+    /// words; kept like `body_text`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub terms: Vec<String>,
     /// Normalized text of links from other sites, most frequent first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub link_texts: Vec<LinkText>,
@@ -131,6 +151,13 @@ pub struct SiteRecord {
     /// developer platform that ...").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intro: Option<String>,
+    /// One sentence saying what the site is, written by a language model
+    /// for a well-known site that has no words of its own here (no
+    /// description, homepage text, terms or Wikidata/Wikipedia text; see
+    /// `plumb summaries`). Searched like the description, and only while
+    /// the site has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
     /// The site's own search address, with `{searchTerms}` where the words
     /// go (see [`search_link`]), read from a search form on its homepage.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -157,6 +184,21 @@ pub struct SiteRecord {
     /// each failure.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub crawl_failures: u32,
+    /// What the crawl at `crawled_at` read from the homepage, as the
+    /// crawler's `CRAWL_VERSION` then (`plumb_crawl::CRAWL_VERSION`). When
+    /// crawlers learn to read more, or better, from a homepage (a better
+    /// list of its words, say), the version goes up and nodes crawl the
+    /// sites read by an older one again, best-known first.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub crawl_version: u32,
+    /// Unix seconds when this node judged the site dead (its homepage could
+    /// not be reached for weeks; see `plumb run --drop-dead-sites`) and cut
+    /// its record down to the crawl marks and ranks: a gone site is left
+    /// out of the index, and a crawl that reaches it again brings it back.
+    /// A node's own judgment: [`SiteRecord::merge`] never takes it from
+    /// another record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gone_at: Option<u64>,
     /// Where the homepage sent the crawler instead, when it redirects to
     /// another site (`pncbank.com` -> `pnc.com`), as of the last crawl. Such
     /// a site is the other one under another name.
@@ -285,6 +327,33 @@ pub struct Signals {
     /// it: how widely known the organization is.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub sitelinks: u32,
+    /// Facts the site's pages state about Wikipedia's articles that were
+    /// checked against Wikidata ([`fact_check`]), each counted once.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub fact_checks: u32,
+    /// How many of those were Wikidata's. See [`fact_accuracy`].
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub fact_agrees: u32,
+}
+
+impl Signals {
+    /// Of two counts of a site's checked facts, the one with less
+    /// evidence for its accuracy: so one node alone cannot make a site
+    /// look right.
+    pub fn worse_facts(&self, other: &Signals) -> (u32, u32) {
+        let mine = (self.fact_checks, self.fact_agrees);
+        let theirs = (other.fact_checks, other.fact_agrees);
+        match (fact_accuracy(self), fact_accuracy(other)) {
+            (Some(a), Some(b)) => {
+                if a <= b {
+                    mine
+                } else {
+                    theirs
+                }
+            }
+            _ => (0, 0),
+        }
+    }
 }
 
 fn is_zero(n: &u32) -> bool {
@@ -371,6 +440,8 @@ impl SiteRecord {
     /// `crawl_attempted_at` keeps the later time, with the `crawl_failures`
     /// counted at that attempt (the larger count when both tried at the same
     /// time). A redirect stays only when no successful crawl came after it.
+    /// A gone record ([`SiteRecord::gone_at`]) takes only ranks and crawl
+    /// marks, until a crawl made after it went reaches the site.
     /// [`SiteRecord::merge`] for a crawl another node shared. Shared crawls
     /// carry only some of what a crawl finds (no search box, and page text
     /// only from trusted crawlers), so a field the shared crawl leaves empty
@@ -382,6 +453,13 @@ impl SiteRecord {
             .is_empty()
             .then(|| std::mem::take(&mut self.headings));
         let body_text = other.body_text.is_none().then(|| self.body_text.take());
+        let terms = other
+            .terms
+            .is_empty()
+            .then(|| std::mem::take(&mut self.terms));
+        // Without the page's text, the shared crawl did not read what a
+        // newer crawler reads either.
+        let crawl_version = other.body_text.is_none().then_some(self.crawl_version);
         let key_pages = other
             .key_pages
             .is_empty()
@@ -402,6 +480,14 @@ impl SiteRecord {
         if let Some(mine) = body_text {
             self.body_text = self.body_text.take().or(mine);
         }
+        if let Some(mine) = terms {
+            if self.terms.is_empty() {
+                self.terms = mine;
+            }
+        }
+        if let Some(mine) = crawl_version {
+            self.crawl_version = self.crawl_version.max(mine);
+        }
         if let Some(mine) = key_pages {
             if self.key_pages.is_empty() {
                 self.key_pages = mine;
@@ -416,6 +502,17 @@ impl SiteRecord {
 
     pub fn merge(&mut self, other: SiteRecord) {
         debug_assert_eq!(self.domain, other.domain);
+        if let Some(gone) = self.gone_at {
+            if other.crawled_at.is_none_or(|at| at <= gone) {
+                // Nothing reached it since it went: only its crawl marks
+                // and ranks change, so it stays small and stays out.
+                self.merge_signals(&other.signals);
+                self.merge_attempts(other.crawl_attempted_at, other.crawl_failures);
+                return;
+            }
+            // Reached again: it is back, and the fresh crawl fills it in.
+            self.gone_at = None;
+        }
         let other_is_fresher = other.crawled_at.is_some() && other.crawled_at >= self.crawled_at;
         if other_is_fresher {
             if other.url.is_some() {
@@ -435,8 +532,10 @@ impl SiteRecord {
             self.search_url = other.search_url;
             self.headings = other.headings;
             self.body_text = other.body_text;
+            self.terms = other.terms;
             self.key_pages = other.key_pages;
             self.links_to = other.links_to;
+            self.crawl_version = other.crawl_version;
             self.crawled_at = other.crawled_at;
         } else {
             self.url = self.url.take().or(other.url);
@@ -449,12 +548,16 @@ impl SiteRecord {
                     self.headings = other.headings;
                 }
                 self.body_text = self.body_text.take().or(other.body_text);
+                if self.terms.is_empty() {
+                    self.terms = other.terms;
+                }
                 if self.key_pages.is_empty() {
                     self.key_pages = other.key_pages;
                 }
                 if self.links_to.is_empty() {
                     self.links_to = other.links_to;
                 }
+                self.crawl_version = other.crawl_version;
             }
         }
         // The latest crawl decides: a redirect seen after the last
@@ -471,6 +574,7 @@ impl SiteRecord {
         self.country = self.country.take().or(other.country);
         self.about = self.about.take().or(other.about);
         self.intro = self.intro.take().or(other.intro);
+        self.summary = self.summary.take().or(other.summary);
         for kind in &other.kinds {
             self.add_kind(kind);
         }
@@ -484,22 +588,52 @@ impl SiteRecord {
         for alias in &other.aliases {
             self.add_alias(alias);
         }
+        self.merge_signals(&other.signals);
+        self.merge_attempts(other.crawl_attempted_at, other.crawl_failures);
+    }
+
+    /// Ranks keep the best (lowest) value, counts the larger one, and
+    /// `official_site` is OR-ed.
+    fn merge_signals(&mut self, o: &Signals) {
         let s = &mut self.signals;
-        let o = other.signals;
         s.harmonic_rank = min_some(s.harmonic_rank, o.harmonic_rank);
         s.pagerank_rank = min_some(s.pagerank_rank, o.pagerank_rank);
         s.tranco_rank = min_some(s.tranco_rank, o.tranco_rank);
         s.linking_domains = s.linking_domains.max(o.linking_domains);
         s.official_site |= o.official_site;
         s.sitelinks = s.sitelinks.max(o.sitelinks);
-        match other.crawl_attempted_at.cmp(&self.crawl_attempted_at) {
-            std::cmp::Ordering::Greater => self.crawl_failures = other.crawl_failures,
+        if o.fact_checks > s.fact_checks {
+            s.fact_checks = o.fact_checks;
+            s.fact_agrees = o.fact_agrees.min(o.fact_checks);
+        }
+    }
+
+    /// `crawl_attempted_at` keeps the later time, with the `crawl_failures`
+    /// counted at that attempt (the larger count when both tried at the
+    /// same time).
+    fn merge_attempts(&mut self, attempted_at: Option<u64>, failures: u32) {
+        match attempted_at.cmp(&self.crawl_attempted_at) {
+            std::cmp::Ordering::Greater => self.crawl_failures = failures,
             std::cmp::Ordering::Equal => {
-                self.crawl_failures = self.crawl_failures.max(other.crawl_failures);
+                self.crawl_failures = self.crawl_failures.max(failures);
             }
             std::cmp::Ordering::Less => {}
         }
-        self.crawl_attempted_at = self.crawl_attempted_at.max(other.crawl_attempted_at);
+        self.crawl_attempted_at = self.crawl_attempted_at.max(attempted_at);
+    }
+
+    /// Cuts the record down to a gone site's (see [`SiteRecord::gone_at`]):
+    /// its domain, ranks and crawl marks, gone since `at`.
+    pub fn make_gone(&mut self, at: u64) {
+        *self = SiteRecord {
+            domain: std::mem::take(&mut self.domain),
+            signals: std::mem::take(&mut self.signals),
+            crawled_at: self.crawled_at,
+            crawl_attempted_at: self.crawl_attempted_at,
+            crawl_failures: self.crawl_failures,
+            gone_at: Some(at),
+            ..SiteRecord::default()
+        };
     }
 
     /// Popularity prior for this site, see [`link_score`].
@@ -554,6 +688,49 @@ impl RecordSet {
         self.map
             .entry(domain.to_string())
             .or_insert_with(|| Box::new(SiteRecord::new(domain)))
+    }
+
+    /// Takes off parent domains what they got from `seed` records of their
+    /// subdomain sites ([`parent_domain`]) when those were folded into them:
+    /// names, Wikidata's description and the Wikipedia intro. For seed data
+    /// read again after the subdomain lists grew ([`SITES_VERSION`]), before
+    /// it is upserted; the parent's own seed record adds its own back.
+    pub fn split_subdomain_sites(&mut self, seed: &[SiteRecord]) {
+        for site in seed {
+            let Some(parent) = parent_domain(&site.domain) else {
+                continue;
+            };
+            let Some(record) = self.map.get_mut(parent) else {
+                continue;
+            };
+            record.aliases.retain(|alias| !site.aliases.contains(alias));
+            if record.about.is_some() && record.about == site.about {
+                record.about = None;
+            }
+            if record.intro.is_some() && record.intro == site.intro {
+                record.intro = None;
+            }
+        }
+    }
+
+    /// Takes back what a misread Wikidata claim (an email address read as a
+    /// website) gave the record of `domain`: the item's `names`, and the
+    /// facts official websites bring (whether it is one, its sitelinks,
+    /// country, kinds, description and intro), which the domain's own seed
+    /// record adds back when it is upserted after.
+    pub fn take_back_official_site(&mut self, domain: &str, names: &[&str]) {
+        let Some(record) = self.map.get_mut(domain) else {
+            return;
+        };
+        record
+            .aliases
+            .retain(|alias| !names.contains(&alias.as_str()));
+        record.signals.official_site = false;
+        record.signals.sitelinks = 0;
+        record.country = None;
+        record.kinds.clear();
+        record.about = None;
+        record.intro = None;
     }
 
     /// Inserts a record, merging it into an existing one for the same domain.
@@ -665,7 +842,9 @@ fn known_share(sitelinks: u32) -> f64 {
 /// of them counts for 75%. The number of linking domains, also on a log
 /// scale, counts for the other 25%. An official website listed in Wikidata
 /// gets a 0.15 bonus, plus up to 0.05 more the more widely known its
-/// organization is ([`Signals::sitelinks`]). The result is capped at 1.0.
+/// organization is ([`Signals::sitelinks`]). A site whose stated facts were
+/// checked gains up to [`FACT_WEIGHT`] for getting them right, or loses as
+/// much for getting them wrong ([`fact_trust`]). The result is in `0..=1`.
 pub fn link_score(signals: &Signals) -> f32 {
     const RANK_SCALE: f64 = 1e8;
     const LINKS_SCALE: f64 = 1e5;
@@ -689,7 +868,49 @@ pub fn link_score(signals: &Signals) -> f32 {
     if signals.official_site {
         score += 0.15 + 0.05 * known_share(signals.sitelinks);
     }
-    score.min(1.0) as f32
+    score += FACT_WEIGHT * fact_trust(signals);
+    score.clamp(0.0, 1.0) as f32
+}
+
+/// Fewest checked facts for a site's accuracy to count (the paper's 5).
+pub const MIN_FACT_CHECKS: u32 = 5;
+
+/// Share of checked facts a site states right before its own count is
+/// known: about what sites get on average (97 to 99% in Common Crawl's
+/// pages, where many of the rest are dates Wikidata and others dispute).
+pub const FACT_PRIOR: f64 = 0.97;
+
+/// An accuracy this low counts as fully wrong for [`fact_trust`]: half
+/// the facts checked.
+const FACT_WRONG: f64 = 0.5;
+
+/// How many checks the prior weighs, so a few facts move a site little.
+pub const FACT_PRIOR_CHECKS: f64 = 10.0;
+
+/// Most a site's accuracy adds to (or takes off) its [`link_score`].
+pub const FACT_WEIGHT: f64 = 0.1;
+
+/// The share of a site's checked facts that it states right, pulled
+/// toward [`FACT_PRIOR`] by [`FACT_PRIOR_CHECKS`] (Knowledge-Based Trust);
+/// `None` with fewer than [`MIN_FACT_CHECKS`].
+pub fn fact_accuracy(signals: &Signals) -> Option<f64> {
+    if signals.fact_checks < MIN_FACT_CHECKS {
+        return None;
+    }
+    let checks = f64::from(signals.fact_checks);
+    let agrees = f64::from(signals.fact_agrees.min(signals.fact_checks));
+    Some((agrees + FACT_PRIOR * FACT_PRIOR_CHECKS) / (checks + FACT_PRIOR_CHECKS))
+}
+
+/// How far a site's [`fact_accuracy`] is from the prior, from -1 (half
+/// its facts wrong or worse, with many of them) to 1 (every fact right,
+/// with many of them); 0 when too few were checked.
+pub fn fact_trust(signals: &Signals) -> f64 {
+    match fact_accuracy(signals) {
+        None => 0.0,
+        Some(accuracy) if accuracy >= FACT_PRIOR => (accuracy - FACT_PRIOR) / (1.0 - FACT_PRIOR),
+        Some(accuracy) => ((accuracy - FACT_PRIOR) / (FACT_PRIOR - FACT_WRONG)).max(-1.0),
+    }
 }
 
 /// The lowercase host of an http(s) URL or a bare hostname (optionally with
@@ -705,6 +926,11 @@ pub fn host_of(input: &str) -> Option<String> {
     let parsed = if input.contains("://") {
         let parsed = url::Url::parse(input).ok()?;
         if !matches!(parsed.scheme(), "http" | "https") {
+            return None;
+        }
+        // User info names no site: `https://mailto:someone@gmail.com` is
+        // an email address put where a website goes, not gmail.com's.
+        if !parsed.username().is_empty() || parsed.password().is_some() {
             return None;
         }
         parsed
@@ -757,14 +983,17 @@ pub fn is_valid_host(host: &str) -> bool {
     labels >= 2 && !last.bytes().all(|b| b.is_ascii_digit())
 }
 
-/// The registrable domain ("eTLD+1") of a URL or hostname, using the Public
-/// Suffix List: `https://www.usbank.com/x` -> `usbank.com`,
-/// `news.bbc.co.uk` -> `bbc.co.uk`. Returns `None` for IP addresses, bare
-/// public suffixes like `co.uk`, single-label hosts like `localhost`, and
-/// everything [`host_of`] rejects.
+/// The site of a URL or hostname: its registrable domain ("eTLD+1"), using
+/// the Public Suffix List, `https://www.usbank.com/x` -> `usbank.com`,
+/// `news.bbc.co.uk` -> `bbc.co.uk`; or, for the few subdomains that are
+/// sites of their own ([`subsites`]), that subdomain:
+/// `https://news.ycombinator.com/item` -> `news.ycombinator.com`. Returns
+/// `None` for IP addresses, bare public suffixes like `co.uk`, single-label
+/// hosts like `localhost`, and everything [`host_of`] rejects.
 pub fn registrable_domain(input: &str) -> Option<String> {
     let host = host_of(input)?;
-    psl::domain_str(&host).map(str::to_string)
+    let domain = psl::domain_str(&host)?;
+    Some(subsites::site_of(&host, domain))
 }
 
 /// `links` made fit for [`SiteRecord::links_to`] of `domain`: each made a
@@ -985,11 +1214,32 @@ pub fn joined(text: &str) -> String {
     normalize_text(text).replace(' ', "")
 }
 
+/// Small words that join the words of a longer query ("pizza in denver",
+/// "bank of america") and name nothing there. Normalized, as
+/// [`normalize_text`] gives them.
+pub const FUNCTION_WORDS: &[&str] = &[
+    "a", "an", "and", "at", "by", "for", "from", "in", "into", "near", "of", "on", "or", "the",
+    "to", "with",
+];
+
+/// Whether `word`, normalized, is one of [`FUNCTION_WORDS`].
+pub fn is_function_word(word: &str) -> bool {
+    FUNCTION_WORDS.contains(&word)
+}
+
 /// The primary language of a language tag, lowercase: `en-US` -> `en`,
 /// `zh-Hant-TW` -> `zh`, `DE` -> `de`. `None` for tags that name no
 /// language (`x-default`, `und`, `zxx`, `mul`) or are not tags at all.
 pub fn language_code(tag: &str) -> Option<String> {
-    let primary = tag.trim().split(['-', '_']).next()?.to_ascii_lowercase();
+    let tag = tag.trim();
+    if tag.len() > 63
+        || tag.split(['-', '_']).any(|part| {
+            part.is_empty() || part.len() > 8 || !part.bytes().all(|b| b.is_ascii_alphanumeric())
+        })
+    {
+        return None;
+    }
+    let primary = tag.split(['-', '_']).next()?.to_ascii_lowercase();
     let letters = primary.bytes().all(|b| b.is_ascii_lowercase());
     let named = !matches!(primary.as_str(), "und" | "zxx" | "mul" | "mis");
     (letters && (2..=3).contains(&primary.len()) && named).then_some(primary)
@@ -1457,6 +1707,96 @@ mod tests {
     }
 
     #[test]
+    fn a_gone_site_stays_small_until_a_later_crawl_reaches_it() {
+        let mut gone = SiteRecord::new("dead.com");
+        gone.title = Some("Dead".into());
+        gone.body_text = Some("words".into());
+        gone.add_alias("Dead Inc");
+        gone.signals.tranco_rank = Some(50);
+        gone.crawled_at = Some(100);
+        gone.crawl_attempted_at = Some(900);
+        gone.crawl_failures = 6;
+        gone.make_gone(1_000);
+        assert_eq!(gone.title, None);
+        assert!(gone.aliases.is_empty() && gone.body_text.is_none());
+        assert_eq!(gone.signals.tranco_rank, Some(50));
+        assert_eq!(
+            (
+                gone.crawled_at,
+                gone.crawl_attempted_at,
+                gone.crawl_failures
+            ),
+            (Some(100), Some(900), 6)
+        );
+
+        // A seed or an older crawl only brings ranks and marks.
+        let mut old = SiteRecord::new("dead.com");
+        old.title = Some("Dead".into());
+        old.signals.tranco_rank = Some(40);
+        old.crawled_at = Some(500);
+        let mut tried = SiteRecord::new("dead.com");
+        tried.crawl_attempted_at = Some(1_100);
+        tried.crawl_failures = 7;
+        let mut merged = gone.clone();
+        merged.merge(old);
+        merged.merge_shared(tried);
+        assert_eq!(merged.gone_at, Some(1_000));
+        assert_eq!(merged.title, None);
+        assert_eq!(merged.signals.tranco_rank, Some(40));
+        assert_eq!(
+            (
+                merged.crawled_at,
+                merged.crawl_attempted_at,
+                merged.crawl_failures
+            ),
+            (Some(100), Some(1_100), 7)
+        );
+
+        // A crawl that reaches it after it went brings it back.
+        let mut back = SiteRecord::new("dead.com");
+        back.title = Some("Alive".into());
+        back.crawled_at = Some(1_200);
+        back.crawl_attempted_at = Some(1_200);
+        merged.merge(back);
+        assert_eq!(merged.gone_at, None);
+        assert_eq!(merged.title.as_deref(), Some("Alive"));
+        assert_eq!(merged.crawl_failures, 0);
+
+        // Gone is this node's own judgment: another record's never spreads.
+        let mut alive = SiteRecord::new("dead.com");
+        alive.title = Some("Here".into());
+        alive.merge(gone);
+        assert_eq!(alive.gone_at, None);
+        assert_eq!(alive.title.as_deref(), Some("Here"));
+    }
+
+    #[test]
+    fn the_crawl_version_follows_the_page_text() {
+        let crawl = |at: u64, version: u32, text: bool| {
+            let mut r = SiteRecord::new("a.com");
+            r.crawled_at = Some(at);
+            r.crawl_version = version;
+            r.body_text = text.then(|| "words".to_owned());
+            r
+        };
+        let mut a = crawl(10, 2, true);
+        a.merge(crawl(20, 1, true));
+        assert_eq!(a.crawl_version, 1, "a fresher crawl by an older crawler");
+        let mut a = crawl(10, 2, true);
+        a.merge(crawl(5, 1, true));
+        assert_eq!(a.crawl_version, 2, "an older crawl changes nothing");
+        // A shared crawl without the page's text read none of it.
+        let mut a = crawl(10, 2, true);
+        a.merge_shared(crawl(20, 0, false));
+        assert_eq!(a.crawl_version, 2);
+        let mut a = crawl(10, 1, true);
+        a.merge_shared(crawl(20, 2, true));
+        assert_eq!(a.crawl_version, 2);
+        let json = serde_json::to_string(&SiteRecord::new("a.com")).unwrap();
+        assert!(!json.contains("crawl_version") && !json.contains("gone_at"));
+    }
+
+    #[test]
     fn merge_keeps_the_failure_count_of_the_later_attempt() {
         let tried = |attempted_at: Option<u64>, failures: u32| {
             let mut r = SiteRecord::new("flaky.com");
@@ -1577,6 +1917,8 @@ mod tests {
         for bad in [
             "mailto:a@b.com",
             "a@b.com",
+            "https://mailto:someone@gmail.com",
+            "https://user:pass@example.com/",
             "ftp://example.com/",
             "javascript:alert(1)",
             "a..b.com",
@@ -1715,6 +2057,51 @@ mod tests {
     }
 
     #[test]
+    fn facts_stated_right_raise_a_site_and_wrong_ones_lower_it() {
+        let site = |checks, agrees| Signals {
+            harmonic_rank: Some(100_000),
+            fact_checks: checks,
+            fact_agrees: agrees,
+            ..Default::default()
+        };
+        let plain = link_score(&site(0, 0));
+        // Too few to count.
+        assert_eq!(link_score(&site(4, 0)), plain);
+        assert_eq!(fact_accuracy(&site(4, 4)), None);
+        let right = link_score(&site(50, 50));
+        let some = link_score(&site(5, 5));
+        let wrong = link_score(&site(40, 10));
+        assert!(right > some && some > plain && plain > wrong);
+        assert!(right - plain <= FACT_WEIGHT as f32 + 1e-6);
+        assert!(plain - wrong <= FACT_WEIGHT as f32 + 1e-6);
+        // A fact or two wrong among many costs little.
+        assert!(plain - link_score(&site(100, 98)) < 0.01);
+        assert!((-1.0..=1.0).contains(&fact_trust(&site(1_000_000, 0))));
+        assert!((fact_trust(&site(1_000_000, 1_000_000)) - 1.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn checked_facts_merge_to_the_bigger_count_and_the_network_keeps_the_worse() {
+        let mut a = SiteRecord::new("a.com");
+        a.signals.fact_checks = 10;
+        a.signals.fact_agrees = 10;
+        let mut b = SiteRecord::new("a.com");
+        b.signals.fact_checks = 20;
+        b.signals.fact_agrees = 12;
+        a.merge(b.clone());
+        assert_eq!((a.signals.fact_checks, a.signals.fact_agrees), (20, 12));
+        let good = Signals {
+            fact_checks: 30,
+            fact_agrees: 30,
+            ..Default::default()
+        };
+        assert_eq!(good.worse_facts(&b.signals), (20, 12));
+        assert_eq!(b.signals.worse_facts(&good), (20, 12));
+        // One answer with no count leaves none.
+        assert_eq!(good.worse_facts(&Signals::default()), (0, 0));
+    }
+
+    #[test]
     fn record_set_upserts_and_sorts() {
         let mut set = RecordSet::new();
         let mut a = SiteRecord::new("a.com");
@@ -1730,6 +2117,29 @@ mod tests {
         let domains: Vec<&str> = sorted.iter().map(|r| r.domain.as_str()).collect();
         assert_eq!(domains, ["b.com", "a.com", "c.com"]);
         assert_eq!(sorted[1].aliases, vec!["Alpha".to_string()]);
+    }
+
+    #[test]
+    fn subdomain_sites_take_their_names_off_their_parent() {
+        let mut set = RecordSet::new();
+        let mut old = SiteRecord::new("ycombinator.com");
+        old.aliases = vec!["Y Combinator".into(), "Hacker News".into()];
+        old.about = Some("social news website".into());
+        set.upsert(old);
+        let mut news = SiteRecord::new("news.ycombinator.com");
+        news.aliases = vec!["Hacker News".into()];
+        news.about = Some("social news website".into());
+        let mut yc = SiteRecord::new("ycombinator.com");
+        yc.aliases = vec!["Y Combinator".into()];
+        yc.about = Some("startup accelerator".into());
+        let seed = vec![news, yc];
+        set.split_subdomain_sites(&seed);
+        set.extend(seed);
+        let yc = set.get("ycombinator.com").unwrap();
+        assert_eq!(yc.aliases, ["Y Combinator"]);
+        assert_eq!(yc.about.as_deref(), Some("startup accelerator"));
+        let news = set.get("news.ycombinator.com").unwrap();
+        assert_eq!(news.aliases, ["Hacker News"]);
     }
 
     #[test]

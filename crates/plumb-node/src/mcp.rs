@@ -16,14 +16,18 @@
 //!   (sums, conversions, the time somewhere), the info box, an official
 //!   profile and recent headlines;
 //! - `site_info(domain)`: what Plumb knows about one site;
+//! - `facts(subject, about)`: what Wikidata says about the thing a name
+//!   names, each fact with the item and property it is from;
 //! - `read_page(url)`: a page as plain text, fetched by this node when an
 //!   AI app picks it from the results. Only offered to AI apps on the
 //!   node's own computer, or to every client with `--mcp-read-pages`: on a
 //!   public node it would make an open proxy. Nothing read is kept.
 //!
 //! Each tool's answer comes twice: as short plain text, one line per
-//! result, for the model to read (small local models have little room),
-//! and as JSON in `structuredContent` for programs.
+//! result (small local models have little room), and as JSON in
+//! `structuredContent` for programs. Some AI apps give the model the JSON
+//! when there is any, so `plumb mcp --text-answers` and `/mcp?answers=text`
+//! leave it out ([`text_only`]).
 //!
 //! Two transports carry it:
 //!
@@ -41,7 +45,10 @@ use anyhow::{bail, Context, Result};
 use plumb_answer::Rates;
 use plumb_core::{domain_label, host_of, registrable_domain, search_template_for, truncate_chars};
 use plumb_crawl::{PageReader, ReadConfig};
-use plumb_index::pages::{place_operator_pages, place_pages};
+use plumb_index::pages::{
+    docs_query_topic, docs_symbol_matches, place_operator_pages, place_pages, Page, PlacedPage,
+    WIKIDATA_SET,
+};
 use plumb_index::{
     without_intent_words, Hit, SearchOptions, SearchResults, Searcher, WELL_KNOWN_LINK_SCORE,
 };
@@ -53,6 +60,7 @@ use crate::rank_config;
 use crate::web::answers;
 use crate::web::{IndexBackend, SearchBackend, StatusSource, MAX_QUERY_CHARS};
 
+mod identity;
 mod text;
 
 pub(crate) use text::answer_line;
@@ -76,12 +84,18 @@ const ALTERNATIVES: usize = 3;
 const MAX_LOOKALIKE_SEARCHES: usize = 6;
 /// Longest description returned, in characters.
 const MAX_DESCRIPTION_CHARS: usize = 300;
+/// Characters of a page's opening `site_info` returns when it reads one.
+const MAX_OPENING_CHARS: usize = 300;
 /// Characters of a page `read_page` returns when the caller does not say...
 const DEFAULT_READ_CHARS: usize = 6_000;
 /// ...and the most it returns at once.
 const MAX_READ_CHARS: usize = 30_000;
 /// Links `read_page` lists when asked for them.
 const MAX_LINKS_RETURNED: usize = 60;
+/// Most headings `read_page` lists in an outline...
+const MAX_OUTLINE_HEADINGS: usize = 60;
+/// ...and the characters of each section's opening it shows.
+const OUTLINE_OPENING_CHARS: usize = 100;
 /// Headlines `search` returns.
 const MAX_HEADLINES: usize = 5;
 /// Most packages the `package` tool lists.
@@ -95,17 +109,60 @@ const MAX_GUESS_WORDS: usize = 4;
 /// of its registry, so "express delivery" is not about a package.
 const GUESSED_PACKAGE: f32 = 0.75;
 
+/// Most subjects `facts` answers in one call, `subject` and
+/// `more_subjects` together.
+const MAX_FACT_SUBJECTS: usize = 10;
+
+/// The kinds of result `search` can be asked for alone (`kind`), each with
+/// what it is: `site` for sites without pages, the others for the pages of
+/// one kind ([`kind_keeps`]).
+const KINDS: &[(&str, &str)] = &[
+    ("site", "sites, without pages"),
+    ("article", "Wikipedia articles"),
+    (
+        "question",
+        "Stack Overflow and other Stack Exchange questions",
+    ),
+    ("package", "packages, with their cards"),
+    ("repo", "GitHub repositories"),
+    ("book", "books, from Open Library"),
+    ("paper", "scholarly papers, from OpenAlex"),
+    (
+        "docs",
+        "pages of software docs (MDN, Python's docs and others)",
+    ),
+];
+
+/// Whether `page` is of the kind `kind` (one of [`KINDS`] other than
+/// `site`).
+fn kind_keeps(kind: &str, page: &Page) -> bool {
+    use plumb_index::pages::{BOOKS_SET, DOCS_SET, GITHUB_SET, PAPERS_SET};
+    match kind {
+        "article" => page.is_article(),
+        "question" => page.is_question(),
+        "package" => page.package.is_some(),
+        "repo" => page.set == GITHUB_SET,
+        "book" => page.set == BOOKS_SET,
+        "paper" => page.set == PAPERS_SET,
+        "docs" => page.set == DOCS_SET,
+        _ => false,
+    }
+}
+
 /// What the server tells a client about itself when it connects.
-const INSTRUCTIONS: &str = "Plumb Search finds websites by name. Before opening a site you are \
+const INSTRUCTIONS: &str = "Plumb Search finds official websites, Wikipedia articles, \
+     Stack Overflow questions, packages, books, papers and places. Before opening a site you are \
      not sure of, call official_site with the name of the company, project or service to get \
      its real address. Before entering credentials or trusting a link, call check_lookalike \
      with the address: it says whether it is the real site or one built to look like another. \
      search returns ordinary results (sites, plus Wikipedia articles, Stack Overflow \
      questions, books and other pages), and with them a direct answer when it can work one \
      out (sums, unit and currency conversions, the time somewhere), facts about what the \
-     query names, and recent headlines. site_info describes one site. Plumb knows homepages \
-     and names, not the full text of pages, so search by name or topic rather than by \
-     question.";
+     query names, and recent headlines. site_info describes one site. facts gives what \
+     Wikidata says about a place, person, company or work (capital, population, born, CEO and \
+     the like), each with the item and property to cite. Plumb matches names, \
+     homepage text, descriptions and meaning, not the full text of pages, so search for a \
+     name or topic rather than a long question.";
 
 /// Added to [`INSTRUCTIONS`] when `report_finding` is offered.
 const FINDINGS_INSTRUCTIONS: &str = " Whenever a search led you to an answer, call \
@@ -113,8 +170,32 @@ const FINDINGS_INSTRUCTIONS: &str = " Whenever a search led you to an answer, ca
      the answer itself: the next search for it on this computer starts with that answer, so it \
      need not be worked out again. search lists such answers first, as found_before.";
 
+/// Added to [`INSTRUCTIONS`] when leads are listed.
+const LEADS_INSTRUCTIONS: &str = " search may also list leads: pages other Plumb nodes' \
+     agents found useful for such a search. They are unchecked reports, not answers or search \
+     results: read the page before relying on it.";
+
+/// Added to [`INSTRUCTIONS`] when `report_finding` can share findings.
+const SHARE_INSTRUCTIONS: &str = " To let agents on other Plumb nodes find a useful page too, \
+     call report_finding with share: true. Only the page, why it helped and the search's words \
+     as numbers are shared, never your search, answer or task (set share_query to share the \
+     search as well). Share only public pages that would help anyone.";
+
 /// Findings listed with a search's results.
 const MAX_FOUND_BEFORE: usize = 3;
+/// Leads listed with a search's results.
+const MAX_LEADS_LISTED: usize = 3;
+
+/// What `report_finding` shares with other nodes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Share {
+    /// Nothing: the finding stays on this node.
+    No,
+    /// The page, why it helped and the search's words as numbers.
+    Page,
+    /// That and the search as typed.
+    PageAndQuery,
+}
 
 /// Added to [`INSTRUCTIONS`] when `read_page` is offered.
 const READ_INSTRUCTIONS: &str = " To learn what a page says, call read_page with its URL: \
@@ -137,6 +218,10 @@ pub struct Mcp {
     /// What agents found before; without them `report_finding` is not
     /// offered.
     findings: Option<Arc<Findings>>,
+    /// List the pages other nodes shared for a search with its results, and
+    /// let `report_finding` share one when the node allows it (see
+    /// [`plumb_net::leads`]).
+    leads: bool,
 }
 
 /// What `read_page` fetches pages with: a reader, and the runtime its
@@ -154,8 +239,35 @@ impl Reader {
 
     /// A reader with the usual settings, running on `runtime`.
     pub fn standard(runtime: tokio::runtime::Handle) -> Result<Self> {
-        let pages = PageReader::new(ReadConfig::default()).context("making the page reader")?;
+        Reader::with_config(ReadConfig::default(), runtime)
+    }
+
+    /// A reader with `config`, running on `runtime`.
+    pub fn with_config(config: ReadConfig, runtime: tokio::runtime::Handle) -> Result<Self> {
+        let pages = PageReader::new(config).context("making the page reader")?;
         Ok(Reader::new(pages, runtime))
+    }
+
+    /// What a page says of itself, for `site_info`: where it ends up, its
+    /// title and its opening words.
+    fn front(&self, address: &str) -> Result<Value> {
+        let page = self
+            .runtime
+            .block_on(self.pages.read(address))
+            .map_err(anyhow::Error::from)?;
+        let opening: String = page
+            .text
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .chars()
+            .take(MAX_OPENING_CHARS)
+            .collect();
+        let host = host_of(&page.url).unwrap_or_default();
+        if plumb_core::is_bot_check_page(&host, page.title.as_deref(), None, &[], Some(&opening)) {
+            bail!("it showed a bot check instead of the page");
+        }
+        Ok(json!({ "url": page.url, "title": page.title, "opening": opening }))
     }
 }
 
@@ -175,7 +287,34 @@ impl Mcp {
             node: None,
             plugins: Vec::new(),
             findings: None,
+            leads: false,
         }
+    }
+
+    /// Lists the pages other nodes shared for a search with its results,
+    /// when the node is in the network, and offers sharing findings when
+    /// it allows that too.
+    pub fn with_leads(mut self, leads: bool) -> Self {
+        self.leads = leads;
+        self
+    }
+
+    /// The network, for leads.
+    fn net(&self) -> Option<Arc<plumb_net::NetHandle>> {
+        if !self.leads {
+            return None;
+        }
+        self.node.as_ref()?.network()
+    }
+
+    /// Whether `report_finding` may share a finding with other nodes.
+    fn shares(&self) -> bool {
+        self.findings.is_some()
+            && self.net().is_some()
+            && self
+                .node
+                .as_ref()
+                .is_some_and(|node| node.shares_findings())
     }
 
     /// Offers `report_finding`, keeping findings in `findings`, and lists
@@ -212,14 +351,17 @@ impl Mcp {
 
     /// The query of a `search` call, for a caller that fetches currency
     /// rates before handling it.
-    pub fn search_query(message: &Value) -> Option<&str> {
+    /// Cleaned and cut as `search` itself does; `None` for an empty one.
+    pub fn search_query(message: &Value) -> Option<String> {
         let params = message.get("params")?;
         if message.get("method")?.as_str()? != "tools/call"
             || params.get("name")?.as_str()? != "search"
         {
             return None;
         }
-        params.get("arguments")?.get("query")?.as_str()
+        let query = params.get("arguments")?.get("query")?.as_str()?;
+        let query = truncate_chars(&plumb_core::collapse_whitespace(query), MAX_QUERY_CHARS);
+        (!query.is_empty()).then_some(query)
     }
 
     /// Answers one JSON-RPC message; `None` for a notification or a
@@ -234,7 +376,11 @@ impl Mcp {
         };
         let id = object.get("id").cloned();
         let Some(method) = object.get("method").and_then(Value::as_str) else {
-            // A response to something we never send, or junk.
+            // A response (to a request we never send) gets no answer;
+            // junk with an id gets an error.
+            if object.contains_key("result") || object.contains_key("error") {
+                return None;
+            }
             return id.map(|id| error(id, INVALID_REQUEST, "expected a method"));
         };
         // A notification (no id) gets no answer, whatever it says.
@@ -245,10 +391,12 @@ impl Mcp {
                 &params,
                 self.reader.is_some(),
                 self.findings.is_some(),
+                self.net().is_some(),
+                self.shares(),
             )),
             "ping" => Ok(json!({})),
             "tools/list" => Ok(json!({
-                "tools": tools(self.reader.is_some(), self.findings.is_some())
+                "tools": tools(self.reader.is_some(), self.findings.is_some(), self.shares())
             })),
             "tools/call" => self.call(&params),
             "resources/list" => Ok(json!({ "resources": [] })),
@@ -266,6 +414,12 @@ impl Mcp {
     /// server rate-limits only those.
     pub fn is_tool_call(message: &Value) -> bool {
         message.get("method").and_then(Value::as_str) == Some("tools/call")
+    }
+
+    /// Whether `message` calls `read_page`.
+    pub fn is_read_call(message: &Value) -> bool {
+        Mcp::is_tool_call(message)
+            && message.pointer("/params/name").and_then(Value::as_str) == Some("read_page")
     }
 
     /// `tools/call`: a tool's answer, as text for the model and as
@@ -289,7 +443,7 @@ impl Mcp {
                 self.official_site(&name, &options)
             }
             "check_lookalike" => {
-                let url = text_arg(args, "url")?;
+                let url = url_arg(args, "url")?;
                 let options = self.options(args)?;
                 self.check_lookalike(&url, &options)
             }
@@ -298,8 +452,7 @@ impl Mcp {
                 let limit = match args.get("limit") {
                     None | Some(Value::Null) => None,
                     Some(limit) => Some(
-                        limit
-                            .as_u64()
+                        as_whole(limit)
                             .filter(|&n| n > 0)
                             .ok_or((
                                 INVALID_PARAMS,
@@ -308,13 +461,63 @@ impl Mcp {
                             .min(MAX_SEARCH_LIMIT as u64) as usize,
                     ),
                 };
-                let options = self.options(args)?;
-                self.search(&query, limit, &options)
+                let options = SearchOptions {
+                    language: search_language(args)?,
+                    ..self.options(args)?
+                };
+                let query = match site_arg(args)? {
+                    Some(site) => format!("{query} site:{site}"),
+                    None => query,
+                };
+                let kind = kind_arg(args)?;
+                let paper = plumb_core::paper_query::PaperQuery::with_options(
+                    &query,
+                    paper_text_arg(args, "after")?,
+                    paper_text_arg(args, "before")?,
+                    paper_text_arg(args, "order")?,
+                )
+                .map_err(|error| (INVALID_PARAMS, error.to_string()))?;
+                if paper.constrained && kind.is_some_and(|k| k != "paper") {
+                    return Err((
+                        INVALID_PARAMS,
+                        "publication bounds and order require kind=paper".to_string(),
+                    ));
+                }
+                if paper.constrained || kind == Some("paper") {
+                    self.search_pages(&paper.text(), "paper", limit, &options)
+                } else {
+                    match kind {
+                        None => self.search(&query, limit, &options),
+                        Some("site") => self.search_sites(&query, limit, &options),
+                        Some(kind) => self.search_pages(&query, kind, limit, &options),
+                    }
+                }
             }
             "site_info" => {
                 let domain = text_arg(args, "domain")?;
                 let options = self.options(args)?;
                 self.site_info(&domain, &options)
+            }
+            "facts" => {
+                let subject = text_arg(args, "subject")?;
+                let about = args
+                    .get("about")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|a| !a.is_empty());
+                let more = more_subjects_arg(args)?;
+                let options = self.options(args)?;
+                self.facts(&subject, about, &options)
+                    .and_then(|mut answer| {
+                        if !more.is_empty() {
+                            let more = more
+                                .iter()
+                                .map(|subject| self.facts(subject, about, &options))
+                                .collect::<Result<Vec<Value>>>()?;
+                            answer["more"] = json!(more);
+                        }
+                        Ok(answer)
+                    })
             }
             "package" => {
                 let name = text_arg(args, "name")?;
@@ -344,7 +547,7 @@ impl Mcp {
             }
             "report_finding" if self.findings.is_some() => {
                 let query = text_arg(args, "query")?;
-                let url = text_arg(args, "url")?;
+                let url = url_arg(args, "url")?;
                 let why = text_arg(args, "why")?;
                 let answer = args
                     .get("answer")
@@ -354,8 +557,13 @@ impl Mcp {
                     .ok_or((INVALID_PARAMS, "answer is required".to_string()))?
                     .to_string();
                 let task = args.get("task").and_then(Value::as_str);
+                let share = match (bool_arg(args, "share")?, bool_arg(args, "share_query")?) {
+                    (false, _) => Share::No,
+                    (true, false) => Share::Page,
+                    (true, true) => Share::PageAndQuery,
+                };
                 let options = self.options(args)?;
-                self.report_finding(&query, &url, &why, &answer, task, &options)
+                self.report_finding(&query, &url, &why, &answer, task, share, &options)
             }
             "read_page" if self.reader.is_some() => {
                 let read = ReadArgs::of(args)?;
@@ -390,92 +598,464 @@ impl Mcp {
 
     /// `official_site`: the site the name names, best first.
     pub fn official_site(&self, name: &str, options: &SearchOptions) -> Result<Value> {
-        let results = self.lookup(name, 1 + ALTERNATIVES, options)?;
+        let intent = identity::Intent::of(name);
+        let country_conflict = intent.country.filter(|country| {
+            options.country.as_deref().is_some_and(|preference| preference != *country)
+        }).map(|country| json!({
+            "query": country,
+            "preference": options.country,
+            "resolution": "The jurisdiction named in the query takes precedence over the country preference.",
+        }));
+        let options = &SearchOptions {
+            country: intent
+                .country
+                .map(str::to_string)
+                .or_else(|| options.country.clone()),
+            ..options.clone()
+        };
+        let mut results = self.lookup(name, 1 + ALTERNATIVES, options)?;
+        // Keep ranking within the requested entity. A popular spelling
+        // suggestion or a task-word domain cannot validate another entity.
+        if let Some(at) = results
+            .hits
+            .iter()
+            .position(|hit| hit.official && intent.supports_site(hit))
+            .or_else(|| {
+                results
+                    .hits
+                    .iter()
+                    .position(|hit| intent.supports_site(hit))
+            })
+            .or_else(|| results.hits.iter().position(|hit| intent.matches_site(hit)))
+        {
+            results.hits[..=at].rotate_right(1);
+        }
         let did_you_mean = results.spelling.as_ref().map(|s| s.query.as_str());
+        // "Pillow docs" is Pillow, wanting its docs.
+        let bare = bare_name(name);
+        let bare_or_name = intent.entity.as_str();
+        let wants_docs = asks_for_docs(name);
+        let words = intent.words.clone();
+        let pages = place_pages(
+            name,
+            &results.hits,
+            results.pages.iter().map(|p| p.hit.clone()).collect(),
+        );
+        // The Wikipedia article the name names, and the site Wikidata gives
+        // as its item's: LifeWiki is conwaylife.com, not life-wiki.com.
+        let about = answers::page_about(&results.hits, &pages)
+            .filter(|page| is_article(page) && intent.matches_article(page));
+        let about_site = about.and_then(|page| Some((page, page.site.as_deref()?)));
         let Some(top) = results.hits.first() else {
+            if let Some((page, site)) = about_site {
+                let (domain, url) = article_website(page, site);
+                return Ok(json!({
+                    "name": name,
+                    "found": true,
+                    "status": "resolved",
+                    "domain": domain,
+                    "url": url,
+                    "package_home": Value::Null,
+                    "title": Value::Null,
+                    "description": page.description.as_deref().map(short),
+                    "confidence": "medium",
+                    "why": [format!(
+                        "Wikidata gives it as the official website of {}, the article this name \
+                         names.",
+                        page.title
+                    )],
+                    "alternatives": [],
+                    "did_you_mean": Value::Null,
+                    "country_conflict": country_conflict,
+                }));
+            }
             let mut why = vec!["Plumb knows no site by this name.".to_string()];
-            let package_home = self.package_home(name, options);
-            if let Some((home, registry)) = &package_home {
-                why.push(format!(
-                    "The {registry} package of this name gives {home} as its home page."
-                ));
+            let package_home = self
+                .package_home(name, wants_docs, options)
+                .or_else(|| self.package_home(bare.as_deref()?, wants_docs, options));
+            if let Some((home, registry, docs, _)) = &package_home {
+                let resource = if *docs { "documentation" } else { "home page" };
+                why = vec![format!(
+                    "The {registry} package of this name gives {home} as its {resource}."
+                )];
             } else if let Some(fixed) = did_you_mean {
                 why.push(format!("Did you mean {fixed:?}? Look that up instead."));
             }
+            let destination = package_home
+                .as_ref()
+                // A cached docs URL alone does not establish affiliation
+                // with the requested owner or technical resource.
+                .filter(|(_, _, docs, _)| !docs)
+                .and_then(|(home, _, _, _)| Some((home, registrable_domain(home)?)));
+            if package_home.as_ref().is_some_and(|(_, _, docs, _)| *docs) {
+                why.push("The cached package documentation has no matching indexed owner or destination evidence; treat it as an unverified hint.".to_string());
+            }
             return Ok(json!({
                 "name": name,
-                "found": false,
+                "found": destination.is_some(),
+                "status": if destination.is_some() { "resolved" } else { "unresolved" },
+                "domain": destination.as_ref().map(|(_, domain)| domain),
+                "url": destination.as_ref().map(|(home, _)| home),
+                "confidence": if destination.is_some() { "medium" } else { "low" },
                 "why": why,
                 "did_you_mean": did_you_mean,
-                "package_home": package_home.map(|(home, _)| home),
+                "package_home": package_home.map(|(home, _, _, _)| home),
+                "country_conflict": country_conflict,
             }));
         };
-        let mut why = Vec::new();
-        if top.official {
-            why.push("Wikidata lists it as an official website.".to_string());
-        }
-        if top.named {
-            why.push("The name is the site's own name or address.".to_string());
-        }
-        let well_known = top.link_score >= WELL_KNOWN_LINK_SCORE;
-        if well_known {
-            why.push("It is a well-known site, linked from many others.".to_string());
-        }
-        let rivals: Vec<&Hit> = results.hits[1..]
+        let entity_pages: Vec<_> = pages
             .iter()
-            .filter(|hit| hit.named || hit.official)
+            .filter(|placed| intent.matches_article(&placed.hit.page))
+            .cloned()
             .collect();
-        if !rivals.is_empty() {
-            let names: Vec<&str> = rivals.iter().map(|hit| hit.domain.as_str()).collect();
-            why.push(format!(
-                "Other sites also go by this name: {}.",
-                names.join(", ")
-            ));
-        }
-        // How far ahead of the next site it is, as a share of its score.
-        let lead = results.hits.get(1).map_or(1.0, |next| {
-            (top.score - next.score) / top.score.max(f32::EPSILON)
-        });
-        let mut confidence = if top.named && (top.official || well_known) && lead >= 0.1 {
-            "high"
-        } else if top.named || top.official || (well_known && lead >= 0.2) {
-            "medium"
-        } else {
-            "low"
+        let official = |hit: &Hit| {
+            (hit.official && intent.supports_site(hit))
+                || article_of(&hit.domain, &entity_pages).is_some()
         };
+        let well_known = |hit: &Hit| hit.link_score >= WELL_KNOWN_LINK_SCORE;
+        // A site named by the name that shows nothing of it is not the
+        // site of the article the name names: "USNO" is not mo.gov, whatever
+        // names it, when the article on the United States Naval Observatory
+        // gives navy.mil.
+        let top_shows = intent.matches_site(top);
+        let about_site = about_site.or_else(|| named_article_site(&entity_pages));
+        let mut why = Vec::new();
+        let mut pick = top;
         let mut url = top.url.clone();
         let mut domain = top.domain.clone();
         let mut title = top.title.clone();
         let mut description = top.description.as_deref().map(short);
-        let mut alternatives: Vec<Value> = results.hits[1..].iter().map(brief).collect();
         let mut did_you_mean = did_you_mean;
         let mut package_home = None;
-        if confidence != "high" {
+        let mut package_ambiguity = None;
+        let mut verified_destination = false;
+        let mut confidence;
+        match about_site {
+            Some((page, site)) if site == top.domain => {
+                why.push(format!(
+                    "Wikidata gives it as the official website of {}.",
+                    page.title
+                ));
+                // MathWorld is mathworld.wolfram.com, not wolfram.com.
+                let (site_domain, site_url) = article_website(page, site);
+                if site_domain != top.domain {
+                    domain = site_domain;
+                    url = site_url;
+                    title = None;
+                    description = page.description.as_deref().map(short);
+                } else if page.website.is_some() {
+                    url = site_url;
+                }
+                confidence = "high";
+                verified_destination = true;
+            }
+            // The article's own site, unless the first site has owner
+            // evidence for exactly this entity. Popularity alone cannot
+            // outweigh the article's explicit owner reference.
+            Some((page, site)) if !(top.named && official(top) && intent.supports_site(top)) => {
+                why.push(format!(
+                    "Wikidata gives it as the official website of {}, the article this name \
+                     names.",
+                    page.title
+                ));
+                let (site_domain, site_url) = article_website(page, site);
+                match results.hits.iter().find(|hit| hit.domain == site) {
+                    Some(hit) => {
+                        pick = hit;
+                        title = hit.title.clone();
+                        description = hit.description.as_deref().map(short);
+                        url = if site_domain == hit.domain && page.website.is_none() {
+                            hit.url.clone()
+                        } else {
+                            site_url
+                        };
+                    }
+                    None => {
+                        title = None;
+                        description = page.description.as_deref().map(short);
+                        url = site_url;
+                    }
+                }
+                domain = site_domain;
+                did_you_mean = None;
+                confidence = "high";
+                verified_destination = true;
+            }
+            _ => {
+                if official(top) {
+                    why.push(match article_of(&top.domain, &entity_pages) {
+                        Some(page) => format!(
+                            "Wikidata gives it as the official website of {}.",
+                            page.title
+                        ),
+                        None => "Wikidata lists it as an official website.".to_string(),
+                    });
+                }
+                if top.named && top_shows {
+                    why.push("The name is the site's own name or address.".to_string());
+                }
+                if well_known(top) && top_shows {
+                    why.push("It is a well-known site, linked from many others.".to_string());
+                }
+                // How far ahead of the next site it is, as a share of its score.
+                let lead = results.hits.get(1).map_or(1.0, |next| {
+                    (top.score - next.score) / top.score.max(f32::EPSILON)
+                });
+                // Official or well known says whose site it is, not that it is
+                // this name's: chess.com is not the Chess Programming Wiki. And
+                // a name of several words whose site shows only some of them
+                // is a guess: nssdc.ac.cn for "NSSDC planetary fact sheet".
+                let shows = shows_name(top, &words);
+                // Named by a name it shows nothing of is no sure thing
+                // (lifewire.com for "LifeWiki"), nor is one of two official,
+                // well-known sites of the name ("Elixir").
+                let rival = results.hits[1..].iter().any(|hit| {
+                    // A metadata-supported owner remains a namesake even
+                    // when it is less popular or retrieval missed its alias.
+                    official(hit) && intent.supports_site(hit)
+                });
+                confidence = if top.named
+                    && (official(top) || well_known(top))
+                    && lead >= 0.1
+                    && top_shows
+                    && !rival
+                {
+                    "high"
+                } else if top_shows
+                    && ((top.named && (words.len() < 2 || shows))
+                        || title_has(top, bare_or_name)
+                        || (official(top) && shows)
+                        || (well_known(top) && lead >= 0.2 && shows))
+                {
+                    "medium"
+                } else {
+                    "low"
+                };
+                // An article named by the name that gives no website, and a
+                // site of another name: Golly is not gollo.com.
+                if let Some(page) = about {
+                    if confidence != "high" && !official(top) && !title_has(top, bare_or_name) {
+                        why.push(format!(
+                            "Wikipedia's article {} gives no official website, and nothing ties \
+                             this site to it.",
+                            page.title
+                        ));
+                        confidence = "low";
+                    }
+                }
+                // Another site's title is the name: "Main Page - Chess
+                // Programming Wiki" for "Chess Programming Wiki".
+                if !top.named && !title_has(top, bare_or_name) {
+                    if let Some(hit) = results.hits[1..]
+                        .iter()
+                        .find(|hit| intent.matches_site(hit) && title_has(hit, bare_or_name))
+                    {
+                        why = vec![format!(
+                            "Its title has the name; {}'s does not.",
+                            top.domain
+                        )];
+                        pick = hit;
+                        url = hit.url.clone();
+                        domain = hit.domain.clone();
+                        title = hit.title.clone();
+                        description = hit.description.as_deref().map(short);
+                        confidence = "medium";
+                    }
+                }
+                // A guess that shows only some of the name gives way to an
+                // official, well-known site that shows all of it: "Outlook
+                // email" is outlook.live.com, not office.com.
+                if confidence == "low" && !shows && words.iter().all(|word| word.len() >= 3) {
+                    if let Some(hit) = results.hits[1..].iter().find(|hit| {
+                        official(hit)
+                            && well_known(hit)
+                            && intent.matches_site(hit)
+                            && shows_name(hit, &words)
+                    }) {
+                        why = vec![format!(
+                            "It shows every word of the name; {} does not.",
+                            top.domain
+                        )];
+                        pick = hit;
+                        url = hit.url.clone();
+                        domain = hit.domain.clone();
+                        title = hit.title.clone();
+                        description = hit.description.as_deref().map(short);
+                        confidence = "medium";
+                    }
+                }
+                // A guess gives way to a site whose address is a word of
+                // the name: "cube20 God's number" is cube20.org, not
+                // rubiks.com. One that shows the whole name keeps it: "old navy"
+                // is not navy.mil.
+                let label_word = |hit: &Hit| {
+                    let label = letters(&domain_label(&hit.domain));
+                    label.len() >= 4
+                        && words.first() == Some(&label)
+                        && intent.matches_country(&hit.domain, hit.country.as_deref())
+                        && (intent.country.is_none() || intent.matches_site(hit))
+                };
+                if confidence == "low" && !shows && !label_word(top) {
+                    if let Some(hit) = results.hits[1..].iter().find(|hit| label_word(hit)) {
+                        why = vec![format!(
+                            "Its address is {}, a word of the name.",
+                            hit.domain
+                        )];
+                        pick = hit;
+                        url = hit.url.clone();
+                        domain = hit.domain.clone();
+                        title = hit.title.clone();
+                        description = hit.description.as_deref().map(short);
+                        // A distinctive label is still only a suggestion
+                        // without evidence for the complete requested entity.
+                    }
+                }
+            }
+        }
+        let rivals: Vec<&str> = results
+            .hits
+            .iter()
+            .filter(|hit| hit.domain != pick.domain && (hit.named || hit.official))
+            .map(|hit| hit.domain.as_str())
+            .collect();
+        if !rivals.is_empty() && confidence != "high" {
+            why.push(format!("Other search candidates: {}.", rivals.join(", ")));
+        }
+        let mut alternatives: Vec<Value> = results
+            .hits
+            .iter()
+            .filter(|hit| hit.domain != domain)
+            .filter(|hit| hit.named || official(hit) || mentions_name(hit, &words))
+            .map(|hit| brief_with(hit, &pages))
+            .collect();
+        if confidence != "high" || wants_docs || (!verified_destination && !official(pick)) {
             // A software package of the name says where its home is:
             // FastAPI's PyPI card names fastapi.tiangolo.com.
-            if let Some((home, registry)) = self.package_home(name, options) {
-                if registrable_domain(&home).as_deref() == Some(top.domain.as_str()) {
+            let found = self
+                .package_home(name, wants_docs, options)
+                .or_else(|| self.package_home(bare.as_deref()?, wants_docs, options));
+            if let Some((home, registry, docs, owner)) = found {
+                let home_domain = registrable_domain(&home);
+                // Package metadata can connect a project's indexed homepage
+                // to its docs, but a same-name cached docs link cannot supply
+                // missing evidence for the requested owner or qualifiers.
+                let docs_supported = !docs
+                    || (verified_destination && owner.as_deref() == Some(domain.as_str()))
+                    || results.hits.iter().any(|hit| {
+                        intent.supports_site(hit)
+                            && (owner.as_deref() == Some(hit.domain.as_str())
+                                || (official(hit)
+                                    && home_domain.as_deref() == Some(hit.domain.as_str())))
+                    });
+                // Rejecting an inferred owner label does not establish that
+                // a same-name package is the requested entity. Keep a full
+                // matching official candidate as unresolved evidence, even
+                // when its title does not spell or expand the query's name.
+                let conflict = results.hits.iter().find(|hit| {
+                    !verified_destination
+                        && hit.official
+                        && intent.matches_site(hit)
+                        && !intent.supports_site(hit)
+                        && registrable_domain(&hit.url) == registrable_domain(&hit.domain)
+                        && home_domain.as_deref() != Some(hit.domain.as_str())
+                });
+                if let Some(conflict) = conflict {
+                    alternatives.retain(|alt| {
+                        alt["domain"] != conflict.domain
+                            && alt["domain"].as_str() != home_domain.as_deref()
+                    });
+                    alternatives.insert(
+                        0,
+                        json!({
+                            "domain": home_domain,
+                            "url": home,
+                            "title": format!("{registry} package {bare_or_name}"),
+                            "official": false,
+                            "well_known": false,
+                        }),
+                    );
+                    alternatives.insert(0, brief_with(conflict, &pages));
+                    alternatives.truncate(ALTERNATIVES);
+                    package_ambiguity = Some(format!(
+                        "Both {} and the {registry} package's {home} are candidates; \
+                         the package name does not resolve which entity was requested.",
+                        conflict.url
+                    ));
+                    package_home = Some(home);
+                } else if !docs_supported {
+                    alternatives.retain(|alt| alt["url"] != home);
+                    // Preserve indexed owner rivals ahead of an unverified
+                    // metadata hint when the alternatives list is capped.
+                    alternatives.push(json!({
+                        "domain": home_domain,
+                        "url": home,
+                        "title": format!("{registry} package {bare_or_name} documentation"),
+                        "official": false,
+                        "well_known": false,
+                    }));
+                    alternatives.truncate(ALTERNATIVES);
+                    why.push(format!(
+                        "Cached {registry} metadata lists {home} as documentation, but indexed \
+                         evidence does not bind that host to the complete requested identity."
+                    ));
+                    package_home = Some(home);
+                } else if home_domain.as_deref() == Some(domain.as_str()) {
                     why.push(format!(
                         "The {registry} package of this name gives it as its home page."
                     ));
                     url = home;
                     confidence = "high";
+                    verified_destination = true;
                     did_you_mean = None;
-                } else if let (Some(home_domain), "low") = (registrable_domain(&home), confidence) {
-                    // The best match of the words is a guess; the
-                    // package's own home page is not: "FastAPI" is not
-                    // xapo.com.
-                    why.push(format!(
-                        "No site is called exactly this, but the {registry} package of this \
-                         name gives it as its home page."
-                    ));
-                    alternatives.insert(0, brief(top));
+                } else if let Some(home_domain) = home_domain.clone().filter(|_| {
+                    wants_docs
+                        && docs
+                        && (!well_known(pick)
+                            || !intent.matches_site(pick)
+                            || owner.as_deref() == Some(pick.domain.as_str()))
+                }) {
+                    // "Pillow docs" is the docs the package names,
+                    // pillow.readthedocs.io, not python-pillow.org; a
+                    // A matching well-known site keeps its own unless the
+                    // package's homepage also ties its docs to that site:
+                    // "Anthropic API docs" is not an SDK's unrelated docs.
+                    why = vec![format!(
+                        "The {registry} package of this name gives it as its documentation."
+                    )];
+                    alternatives.retain(|alt| alt["domain"] != home_domain.as_str());
+                    alternatives.insert(0, brief_with(pick, &pages));
                     alternatives.truncate(ALTERNATIVES);
                     url = home;
                     domain = home_domain;
                     title = None;
                     description = None;
                     confidence = "medium";
+                    verified_destination = true;
+                    did_you_mean = None;
+                } else if let Some(home_domain) =
+                    home_domain.filter(|_| !docs || wants_docs).filter(|_| {
+                        !verified_destination
+                            && (!intent.supports_site(pick)
+                                || (!official(pick) && !well_known(pick)))
+                    })
+                {
+                    // Docs alone are no home: PyPI gives pandas.readthedocs.io
+                    // for pandas, whose site is pandas.pydata.org.
+                    // The best match of the words is a guess; the
+                    // package's own home page is not: "FastAPI" is not
+                    // xapo.com.
+                    why = vec![format!(
+                        "No site is called exactly this, but the {registry} package of this \
+                         name gives it as its home page."
+                    )];
+                    alternatives.insert(0, brief_with(pick, &pages));
+                    alternatives.truncate(ALTERNATIVES);
+                    url = home;
+                    domain = home_domain;
+                    title = None;
+                    description = None;
+                    confidence = "medium";
+                    verified_destination = true;
                     did_you_mean = None;
                 } else {
                     why.push(format!(
@@ -486,39 +1066,181 @@ impl Mcp {
             }
         }
         if confidence == "low" {
-            why.push(
-                "No site is called exactly this; it is the best match of the words.".to_string(),
+            // A name that spells out its abbreviation: "CIAAW Commission on
+            // Isotopic Abundances and Atomic Weights" is ciaaw.org.
+            if let Some(hit) = self.abbreviation_site(name, options) {
+                // An acronym lookup may recover an owner already described
+                // by Wikidata, but cannot discard the rest of the query.
+                if !hit.official || !intent.supports_site(&hit) {
+                    if !alternatives.iter().any(|alt| alt["domain"] == hit.domain) {
+                        alternatives.insert(0, brief_with(&hit, &pages));
+                        alternatives.truncate(ALTERNATIVES);
+                    }
+                } else {
+                    why = vec![format!(
+                        "Its address is {}, an abbreviation in the name.",
+                        hit.domain
+                    )];
+                    alternatives.retain(|alt| alt["domain"] != hit.domain);
+                    if pick.domain != hit.domain {
+                        alternatives.insert(0, brief_with(pick, &pages));
+                        alternatives.truncate(ALTERNATIVES);
+                    }
+                    url = hit.url.clone();
+                    domain = hit.domain.clone();
+                    title = hit.title.clone();
+                    description = hit.description.as_deref().map(short);
+                    confidence = "medium";
+                    verified_destination = true;
+                    did_you_mean = None;
+                }
+            }
+        }
+        // "Python docs" is docs.python.org, a site of its own.
+        let owner_domains: std::collections::BTreeSet<_> = results
+            .hits
+            .iter()
+            .filter(|hit| official(hit) && intent.supports_site(hit))
+            .filter_map(|hit| registrable_domain(&hit.url))
+            .collect();
+        // An explicit address identifies the destination. An unqualified
+        // shared name does not identify one of several documented owners,
+        // even if popularity or a same-name package favors one candidate.
+        let owner_ambiguity =
+            registrable_domain(&intent.entity).is_none() && owner_domains.len() > 1;
+        let ambiguous = owner_ambiguity || package_ambiguity.is_some();
+        let bound = (verified_destination || intent.supports_site(pick)) && !ambiguous;
+        if ambiguous {
+            alternatives.retain(|alt| alt["url"] != url);
+            alternatives.insert(
+                0,
+                json!({
+                    "domain": domain,
+                    "url": url,
+                    "title": title,
+                    "official": official(pick),
+                    "well_known": well_known(pick),
+                }),
             );
+            alternatives.truncate(ALTERNATIVES);
+        }
+        if bound && !verified_destination && !official(pick) {
+            // Popularity and agreeing title/domain words are useful
+            // suggestions, but do not verify ownership independently.
+            confidence = "low";
+            why.push("The site's title or descriptive text agrees with its domain name; its ownership is not independently verified.".to_string());
+        }
+        if bound && wants_docs && url.contains(&format!("{domain}/")) {
+            if let Some((site, _)) = plumb_core::subdomain_sites().find(|(site, parent)| {
+                *parent == domain && (site.starts_with("docs.") || site.starts_with("doc."))
+            }) {
+                why.push(format!("Its documentation is {site}, a site of its own."));
+                domain = site.to_string();
+                url = format!("https://{site}/");
+                title = None;
+                description = None;
+            }
+        }
+        if !bound {
+            alternatives.retain(|alt| alt["domain"] != pick.domain);
+            alternatives.insert(0, brief_with(pick, &pages));
+            alternatives.truncate(ALTERNATIVES);
+            why = vec![format!(
+                "No owner evidence establishes the suggested site as the destination for {:?}; \
+                 search names, titles, partial domain matches and spelling corrections alone \
+                 do not establish its official destination.",
+                intent.entity
+            )];
+            if let Some(page) = about {
+                why.push(format!(
+                    "Wikipedia's article {} gives no matching official destination.",
+                    page.title
+                ));
+            }
+            confidence = "low";
+        } else if confidence == "low" {
+            why.push("Treat this as an unverified candidate for the requested name.".to_string());
+        }
+        if owner_ambiguity {
+            why.push(format!(
+                "Several documented owners match the requested name: {}. Specify the entity or its purpose before choosing an official destination.",
+                owner_domains.into_iter().collect::<Vec<_>>().join(", ")
+            ));
+        }
+        if let Some(ambiguity) = package_ambiguity {
+            why.push(ambiguity);
         }
         Ok(json!({
             "name": name,
-            "found": true,
-            "domain": domain,
-            "url": url,
+            "found": bound,
+            "status": if ambiguous { "ambiguous" } else if bound { "resolved" } else { "unresolved" },
+            "domain": bound.then_some(domain),
+            "url": bound.then_some(url),
             "package_home": package_home,
-            "title": title,
-            "description": description,
+            "title": bound.then_some(title).flatten(),
+            "description": bound.then_some(description).flatten(),
             "confidence": confidence,
             "why": why,
             "alternatives": alternatives,
             "did_you_mean": did_you_mean,
+            "country_conflict": country_conflict,
         }))
     }
 
-    /// The home page (else the docs) of the most used package called
-    /// `name`, and its registry's name.
-    fn package_home(&self, name: &str, options: &SearchOptions) -> Option<(String, String)> {
+    /// The site whose address is an abbreviation in `name` of two words or
+    /// more ("NPS API developer" -> nps.gov), when a search for it finds the
+    /// site named by it.
+    fn abbreviation_site(&self, name: &str, options: &SearchOptions) -> Option<Hit> {
+        let words: Vec<&str> = name.split_whitespace().collect();
+        if words.len() < 2 {
+            return None;
+        }
+        let abbreviation = words.iter().find(|word| {
+            (2..=8).contains(&word.len())
+                && word.bytes().all(|b| b.is_ascii_uppercase())
+                && !WANTED_WORDS.contains(&word.to_ascii_lowercase().as_str())
+        })?;
+        let found = self.lookup(abbreviation, 1, options).ok()?;
+        let top = found.hits.into_iter().next()?;
+        (top.named && letters(&domain_label(&top.domain)) == abbreviation.to_ascii_lowercase())
+            .then_some(top)
+    }
+
+    /// The home page (else the docs; the docs first when `wants_docs`) of
+    /// the most used package called `name`, its registry's name, and whether
+    /// it is the docs, and the package's homepage domain. The latter binds
+    /// a docs link to a matching well-known project homepage.
+    fn package_home(
+        &self,
+        name: &str,
+        wants_docs: bool,
+        options: &SearchOptions,
+    ) -> Option<(String, String, bool, Option<String>)> {
         let found = self.package(name, None, options).ok()?;
         let card = found["packages"].as_array()?.iter().find(|card| {
             card["name"]
                 .as_str()
                 .is_some_and(|n| n.eq_ignore_ascii_case(name.trim()))
         })?;
-        let home = card["homepage"]
-            .as_str()
-            .or_else(|| card["docs"].as_str())?
-            .to_string();
-        Some((home, card["registry"].as_str()?.to_string()))
+        let (first, then) = if wants_docs {
+            ("docs", "homepage")
+        } else {
+            ("homepage", "docs")
+        };
+        // A registry's own pages (docs.rs/toml) are no project's home.
+        let (key, home) = [first, then]
+            .iter()
+            .filter_map(|key| Some((*key, card[*key].as_str()?)))
+            .find(|(_, home)| {
+                registrable_domain(home)
+                    .is_none_or(|domain| !REGISTRY_HOSTS.contains(&domain.as_str()))
+            })?;
+        Some((
+            home.to_string(),
+            card["registry"].as_str()?.to_string(),
+            key == "docs",
+            card["homepage"].as_str().and_then(registrable_domain),
+        ))
     }
 
     /// `check_lookalike`: whether `input` is a real site or imitates one.
@@ -594,16 +1316,28 @@ impl Mcp {
                 "known_site"
             }
             (_, Some(other)) => {
-                reasons.push(format!(
-                    "Its address borrows the name of {}, a far better-known site.",
-                    other.domain
-                ));
-                if site.is_none() {
-                    reasons.push("Plumb does not list it as a site of its own.".to_string());
+                // An exact brand label on another suffix or hosting tenant
+                // can also be a legitimate regional/product/service host.
+                // Service words do not prove affiliation or impersonation.
+                if domain_label(&domain) == domain_label(&other.domain) {
+                    reasons.push(format!(
+                        "Its name resembles {}, but Plumb has no owner reference establishing \
+                         affiliation or evidence confirming impersonation.",
+                        other.domain
+                    ));
+                    "suspected"
                 } else {
-                    reasons.push("Few other sites link to it.".to_string());
+                    reasons.push(format!(
+                        "Its address borrows the name of {}, a far better-known site.",
+                        other.domain
+                    ));
+                    if site.is_none() {
+                        reasons.push("Plumb does not list it as a site of its own.".to_string());
+                    } else {
+                        reasons.push("Few other sites link to it.".to_string());
+                    }
+                    "lookalike"
                 }
-                "lookalike"
             }
             (Some(_), None) => {
                 reasons.push(
@@ -627,8 +1361,9 @@ impl Mcp {
             "domain": domain,
             "verdict": verdict,
             "lookalike": verdict == "lookalike",
+            "suspected": verdict == "suspected",
             "reasons": reasons,
-            "imitates": (verdict == "lookalike").then(|| imitated.as_ref().map(brief)).flatten(),
+            "imitates": matches!(verdict, "lookalike" | "suspected").then(|| imitated.as_ref().map(brief)).flatten(),
             "site": site.as_ref().map(brief),
         }))
     }
@@ -644,24 +1379,131 @@ impl Mcp {
         limit: Option<usize>,
         options: &SearchOptions,
     ) -> Result<Value> {
-        let mut results = self.lookup(query, limit.unwrap_or(DEFAULT_SEARCH_LIMIT), options)?;
-        let guessed = if results.pages.iter().any(|p| p.hit.page.package.is_some()) {
+        self.search_with(query, limit, options, false)
+    }
+
+    /// `search` with `kind` `site`: the sites alone, without the pages
+    /// placed among them.
+    pub fn search_sites(
+        &self,
+        query: &str,
+        limit: Option<usize>,
+        options: &SearchOptions,
+    ) -> Result<Value> {
+        let mut answer = self.search_with(query, limit, options, true)?;
+        answer["kind"] = json!("site");
+        Ok(answer)
+    }
+
+    /// `search` with another `kind`: the best pages of that kind alone
+    /// ([`kind_keeps`]), from more pages than a search places among sites,
+    /// and for a `site:` search the link into the site's own search.
+    pub fn search_pages(
+        &self,
+        query: &str,
+        kind: &str,
+        limit: Option<usize>,
+        options: &SearchOptions,
+    ) -> Result<Value> {
+        let limit = limit.unwrap_or(DEFAULT_SEARCH_LIMIT);
+        let found = if kind == "paper" {
+            self.backend.papers(
+                &plumb_core::paper_query::PaperQuery::parse(query)?,
+                limit,
+                options,
+            )?
+        } else {
+            self.backend
+                .pages_of(query, limit, options, kind == "docs", &|page| {
+                    kind_keeps(kind, page)
+                })
+        };
+        // Pages Plumb lacks may still be on the site.
+        let site_search = if plumb_core::Operators::parse(query).sites.is_empty() {
             None
         } else {
-            self.guess_package(query, options)
+            self.lookup(query, 1, options)?.site_search
+        };
+        let pages: Vec<Value> = found
+            .iter()
+            .enumerate()
+            .map(|(i, hit)| page_entry(&hit.page, query, None, i + 1))
+            .collect();
+        Ok(json!({
+            "query": query,
+            "kind": kind,
+            "results": [],
+            "pages": pages,
+            "site_search": site_search,
+            "spelling": Value::Null,
+            "paper_coverage": if kind == "paper" { self.backend.paper_coverage() } else { None },
+            "coverage_message": if kind == "paper" && found.is_empty() && plumb_core::paper_query::PaperQuery::parse(query)?.constrained { Some("No matching papers in the indexed corpus with the requested publication precision; research may exist outside indexed coverage.") } else { None },
+        }))
+    }
+
+    /// [`Mcp::search`], without any pages if `sites_only`.
+    fn search_with(
+        &self,
+        query: &str,
+        limit: Option<usize>,
+        options: &SearchOptions,
+        sites_only: bool,
+    ) -> Result<Value> {
+        let mut results = self.lookup(query, limit.unwrap_or(DEFAULT_SEARCH_LIMIT), options)?;
+        if sites_only {
+            results.pages.clear();
+        }
+        let guessed = match plumb_core::packages::install_command(query) {
+            _ if sites_only => None,
+            // "cargo add serde" asks for serde's card, whatever else is found.
+            Some((registry, name)) => self.installed_package(registry, &name, options),
+            None if results.pages.iter().any(|p| p.hit.page.package.is_some()) => None,
+            None => self.guess_package(query, options),
         };
         if guessed.is_some() {
             // "fastapi docs" is not "fastai docs".
             results.spelling = None;
         }
-        // Placed as the results page places them, which the info box needs.
-        let found_pages = results.pages.iter().map(|p| p.hit.clone()).collect();
-        let operators = plumb_core::Operators::parse(query);
-        let placed = if operators.any() {
-            place_operator_pages(&operators, &results.hits, found_pages)
+        let places = if sites_only
+            || plumb_core::Operators::parse(query).any()
+            || plumb_index::places::parse_place_query(query).is_none()
+        {
+            None
         } else {
-            place_pages(query, &results.hits, found_pages)
+            crate::assembly::places(
+                query,
+                self.backend.places(query, None, options.country.as_deref()),
+                &results.hits,
+                options,
+                |domain| {
+                    self.node
+                        .as_ref()
+                        .is_some_and(|node| node.blocks_adult(domain))
+                },
+            )
         };
+        if let Some(places) = &places {
+            let local = crate::assembly::linked_sites(
+                &places.found,
+                |domain| self.backend.site(domain),
+                |name| self.backend.search(name, 5).unwrap_or_default(),
+            )
+            .into_iter()
+            .filter(|site| {
+                options.safe == plumb_core::SafeSearch::Off
+                    || !self
+                        .node
+                        .as_ref()
+                        .is_some_and(|node| node.blocks_adult(&site.domain))
+            })
+            .collect();
+            crate::assembly::local_first(
+                &places.found,
+                &mut results.hits,
+                local,
+                limit.unwrap_or(DEFAULT_SEARCH_LIMIT),
+            );
+        }
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs());
@@ -670,26 +1512,166 @@ impl Mcp {
             i64::try_from(now).unwrap_or(i64::MAX),
             self.rates.as_ref(),
         );
-        let names_a_page = placed.iter().any(|placed| placed.hit.named);
-        let profile = match plumb_core::profiles::services_asked(query) {
-            Some((_, name)) if !names_a_page => self
-                .lookup(&name, PROFILE_SEARCH_LIMIT, options)
-                .ok()
-                .and_then(|found| answers::profile_answer(query, &found.pages)),
-            _ => None,
+        crate::assembly::route_sources(
+            query,
+            answer.as_ref().map(|a| a.kind),
+            options.country.as_deref(),
+            &mut results,
+            limit.unwrap_or(DEFAULT_SEARCH_LIMIT),
+            |domain| self.backend.site(domain),
+        );
+        // Placed as the results page places them, which the info box needs.
+        let found_pages = results.pages.iter().map(|p| p.hit.clone()).collect();
+        let operators = plumb_core::Operators::parse(query);
+        let mut placed = if operators.any() {
+            place_operator_pages(&operators, &results.hits, found_pages)
+        } else {
+            place_pages(query, &results.hits, found_pages)
         };
+        let promote_package = crate::assembly::promote_package(query);
+        if !promote_package {
+            let mut supplementary = Vec::new();
+            placed.retain(|page| {
+                if page.hit.page.package.is_some() {
+                    supplementary.push(page.clone());
+                    false
+                } else {
+                    true
+                }
+            });
+            let after = results
+                .hits
+                .len()
+                .max(placed.iter().map(|p| p.at + 1).max().unwrap_or(0));
+            for mut page in supplementary {
+                page.at = after;
+                page.under = None;
+                placed.push(page);
+            }
+        }
+        if let Some(page) = &guessed {
+            placed.retain(|p| p.hit.page.url != page.url);
+            let card = PlacedPage {
+                hit: plumb_index::pages::PageHit {
+                    page: page.clone(),
+                    score: 0.0,
+                    named: false,
+                    popularity: 0.0,
+                    whole: false,
+                    learned: None,
+                },
+                under: None,
+                at: if promote_package {
+                    0
+                } else {
+                    results
+                        .hits
+                        .len()
+                        .max(placed.iter().map(|p| p.at + 1).max().unwrap_or(0))
+                },
+            };
+            if promote_package {
+                placed.insert(0, card);
+            } else {
+                placed.push(card);
+            }
+        }
+        // A fact the query asks about something ("capital of australia").
+        let answer = match (answer, plumb_core::facts::fact_asked(query)) {
+            (None, Some(asked)) => self
+                .backend
+                .entities(&asked.subject, 20, options)
+                .ok()
+                .and_then(|found| {
+                    match answers::resolve_entity(&asked.subject, &found, Some(&asked.kinds)) {
+                        answers::EntityResolution::Resolved(page) => {
+                            answers::fact_answer_from_page(&asked, page, now)
+                        }
+                        _ => None,
+                    }
+                }),
+            (answer, _) => answer,
+        };
+        // What something is ("what is a manatee").
+        let answer = match (answer, answers::definition_asked(query)) {
+            (None, Some(name)) => {
+                let word = self
+                    .backend
+                    .definition(&name)
+                    .and_then(|page| answers::word_answer(&page));
+                if word.is_some() && answers::asks_word(query) {
+                    word
+                } else {
+                    self.lookup(&name, PROFILE_SEARCH_LIMIT, options)
+                        .ok()
+                        .and_then(|found| answers::definition_answer(&found.pages))
+                        .or(word)
+                }
+            }
+            (answer, _) => answer,
+        };
+        // A task with no answer-bearing rows must not turn its related package into the answer.
+        let mut related_packages = Vec::new();
+        if !promote_package
+            && query.split_whitespace().count() > 1
+            && answer.is_none()
+            && results.hits.is_empty()
+            && placed.iter().all(|p| p.hit.page.package.is_some())
+        {
+            related_packages = placed
+                .iter()
+                .take(limit.unwrap_or(DEFAULT_SEARCH_LIMIT).min(MAX_PACKAGES))
+                .map(|p| package_card(&p.hit.page))
+                .collect();
+            placed.clear();
+        }
+        let names_a_page = placed.iter().any(|placed| placed.hit.named);
+        let profile = answers::profile_lookups(query).iter().find_map(|name| {
+            let entities = self.backend.entities(name, 20, options).ok()?;
+            match answers::resolve_entity(name, &entities, None) {
+                answers::EntityResolution::Resolved(page) => {
+                    let profile = answers::profile_answer_from_page(query, page);
+                    if profile.is_some() || !name.ends_with(" song") {
+                        return profile;
+                    }
+                    // An article on a song may have no Genius link while
+                    // its explicitly requested MusicBrainz song has one.
+                }
+                answers::EntityResolution::Ambiguous(_) => return None,
+                answers::EntityResolution::Unresolved => {}
+            }
+            self.lookup(name, PROFILE_SEARCH_LIMIT, options)
+                .ok()
+                .and_then(|found| {
+                    let songs: Vec<_> = found
+                        .pages
+                        .into_iter()
+                        .filter(|placed| placed.hit.page.set == plumb_index::pages::MUSIC_SET)
+                        .collect();
+                    answers::profile_answer(query, &songs)
+                })
+        });
         let info = match &profile {
             Some(profile) => answers::info_from_page(&profile.page, &results.hits),
             None if operators.any() => None,
             None => answers::info_box(&results.hits, &placed),
         };
-        let recent = self.node.as_ref().and_then(|node| {
-            let top = results
-                .hits
-                .first()
-                .map(|hit| (hit.domain.as_str(), hit.named));
-            node.recent(query, top)
-        });
+        let recent = (!sites_only)
+            .then_some(self.node.as_ref())
+            .flatten()
+            .and_then(|node| {
+                let top = results
+                    .hits
+                    .first()
+                    .map(|hit| (hit.domain.as_str(), hit.named));
+                crate::assembly::recent(
+                    query,
+                    node.recent(query, top),
+                    options,
+                    limit.unwrap_or(DEFAULT_SEARCH_LIMIT),
+                    |domain| node.blocks_adult(domain),
+                )
+            });
         let headlines: Vec<Value> = recent
             .iter()
             .flat_map(|recent| recent.headlines.iter().take(MAX_HEADLINES))
@@ -699,38 +1681,12 @@ impl Mcp {
                     "url": headline.url,
                     "site": headline.domain,
                     "published": crate::web::time_ago(headline.at, now),
+                    "published_at": headline.at,
+                    "published_date": crate::news::published_date(headline.at),
+                    "source": "publisher_feed",
                 })
             })
             .collect();
-        let mut pages: Vec<Value> = guessed
-            .iter()
-            .map(|page| {
-                json!({
-                    "title": page.title,
-                    "url": page.url,
-                    "description": page.description.as_deref().map(short),
-                    "set": page.set,
-                    "about_site": Value::Null,
-                    "position": 1,
-                    "package": package_card(page),
-                })
-            })
-            .collect();
-        pages.extend(placed.iter().map(|placed| {
-            let mut page = json!({
-                "title": placed.hit.page.title,
-                "url": placed.hit.page.url,
-                "description": placed.hit.page.description.as_deref().map(short),
-                "set": placed.hit.page.set,
-                "about_site": placed.under,
-                "position": placed.at + 1,
-            });
-            if placed.hit.page.package.is_some() {
-                page["package"] = package_card(&placed.hit.page);
-            }
-            page
-        }));
-        let mut sites: Vec<Value> = results.hits.iter().map(brief).collect();
         let found_before: Vec<Value> = self
             .findings
             .iter()
@@ -743,12 +1699,19 @@ impl Mcp {
                     "answer": finding.answer,
                     "task": finding.task,
                     "reported": crate::web::time_ago(finding.at, now),
+                    "reported_at": finding.at,
+                    "source": "user_reported_finding",
                 })
             })
             .collect();
+        let known: Vec<&str> = found_before
+            .iter()
+            .filter_map(|found| found["url"].as_str())
+            .collect();
+        let leads = self.leads_for(query, &known, now, options);
         let direct = !found_before.is_empty()
             || answer.is_some()
-            || pages.iter().any(|page| page.get("package").is_some())
+            || (promote_package && placed.iter().any(|page| page.hit.page.package.is_some()))
             || names_a_page
             || results.hits.iter().any(|hit| hit.named);
         let cap = match limit {
@@ -756,7 +1719,52 @@ impl Mcp {
             None if direct => DIRECT_SEARCH_LIMIT,
             None => DEFAULT_SEARCH_LIMIT,
         };
-        cap_results(&mut sites, &mut pages, cap);
+        let assembled = crate::assembly::Assembled {
+            rows: crate::assembly::ordered_rows(&results.hits, &placed, cap),
+            places,
+            recent: recent.clone(),
+            answer: answer.as_ref(),
+            profile: profile.as_ref(),
+        };
+        let mut sites = Vec::new();
+        let mut pages = Vec::new();
+        for row in &assembled.rows {
+            match row {
+                crate::assembly::Row::Site {
+                    site,
+                    pages: supporting,
+                } => {
+                    sites.push(brief_with(site, &results.pages));
+                    pages.extend(supporting.iter().map(|page| {
+                        page_entry(&page.hit.page, query, page.under.as_deref(), page.at + 1)
+                    }));
+                }
+                crate::assembly::Row::Page { page } => pages.push(page_entry(
+                    &page.hit.page,
+                    query,
+                    page.under.as_deref(),
+                    page.at + 1,
+                )),
+            }
+        }
+        let ordered_results: Vec<_> = assembled
+            .rows
+            .iter()
+            .map(|row| match row {
+                crate::assembly::Row::Site { site, .. } => json!({"kind": "site", "url": site.url}),
+                crate::assembly::Row::Page { page } => {
+                    let url = pages
+                        .iter()
+                        .find(|entry| {
+                            entry["page_url"].as_str().or_else(|| entry["url"].as_str())
+                                == Some(page.hit.page.url.as_str())
+                        })
+                        .and_then(|entry| entry["url"].as_str())
+                        .unwrap_or(&page.hit.page.url);
+                    json!({"kind": "page", "url": url})
+                }
+            })
+            .collect();
         let mut answer_json = json!({
             "query": query,
             "results": sites,
@@ -765,6 +1773,21 @@ impl Mcp {
             "spelling": results.spelling,
         });
         let fields = answer_json.as_object_mut().expect("an object");
+        fields.insert("ordered_results".into(), json!(ordered_results));
+        if !related_packages.is_empty() {
+            fields.insert("related_packages".into(), json!(related_packages));
+        }
+        if let Some(places) = &assembled.places {
+            fields.insert("places".into(), json!(places));
+        }
+        if let Some(recent) = &recent {
+            fields.insert(
+                "news_status".into(),
+                json!({ "site": recent.site,
+                "status": recent.status, "sources": recent.sources }),
+            );
+        }
+        drop(assembled);
         if let Some(answer) = answer {
             fields.insert("answer".into(), json!(answer));
         }
@@ -776,7 +1799,9 @@ impl Mcp {
         }
         // Headlines with a package's name are rarely about the package:
         // "react latest" is not footballers' kids reacting to a new kit.
-        if !headlines.is_empty() && !pages.iter().any(|page| page.get("package").is_some()) {
+        if !headlines.is_empty()
+            && (!promote_package || !pages.iter().any(|page| page.get("package").is_some()))
+        {
             fields.insert("recent".into(), json!(headlines));
         }
         let from_plugins: Vec<Value> = self
@@ -805,6 +1830,9 @@ impl Mcp {
         if !found_before.is_empty() {
             fields.insert("found_before".into(), json!(found_before));
         }
+        if !leads.is_empty() {
+            fields.insert("leads".into(), json!(leads));
+        }
         Ok(answer_json)
     }
 
@@ -831,8 +1859,41 @@ impl Mcp {
             .pages
             .into_iter()
             .map(|placed| placed.hit)
-            .find(|hit| hit.page.package.is_some() && hit.popularity >= GUESSED_PACKAGE)
+            .find(|hit| {
+                hit.popularity >= GUESSED_PACKAGE
+                    && hit.page.package.as_ref().is_some_and(|p| {
+                        p.name.eq_ignore_ascii_case(name)
+                            || p.registry()
+                                .and_then(|r| r.short_name(&p.name))
+                                .is_some_and(|short| short.eq_ignore_ascii_case(name))
+                    })
+            })
             .map(|hit| hit.page)
+    }
+
+    /// The package an install command names, from its registry.
+    fn installed_package(
+        &self,
+        registry: &plumb_core::packages::Registry,
+        name: &str,
+        options: &SearchOptions,
+    ) -> Option<plumb_index::pages::Page> {
+        let mut query = format!("{name} package");
+        if let Some(word) = registry.words.first().or(registry.languages.first()) {
+            query.push(' ');
+            query.push_str(word);
+        }
+        let found = self.lookup(&query, 1, options).ok()?;
+        found
+            .pages
+            .into_iter()
+            .map(|placed| placed.hit.page)
+            .find(|page| {
+                page.package.as_ref().is_some_and(|package| {
+                    package.registry().is_some_and(|r| r.key == registry.key)
+                        && package.name.eq_ignore_ascii_case(name)
+                })
+            })
     }
 
     /// `package`: the cards of the packages called `name`, of `registry`
@@ -867,7 +1928,9 @@ impl Mcp {
     }
 
     /// `report_finding`: keeps what an agent found, unless its page is a
-    /// look-alike of another site.
+    /// look-alike of another site, and shares it as a lead when asked to and
+    /// the node allows it.
+    #[allow(clippy::too_many_arguments)]
     pub fn report_finding(
         &self,
         query: &str,
@@ -875,6 +1938,7 @@ impl Mcp {
         why: &str,
         answer: &str,
         task: Option<&str>,
+        share: Share,
         options: &SearchOptions,
     ) -> Result<Value> {
         let Some(findings) = &self.findings else {
@@ -889,41 +1953,309 @@ impl Mcp {
             );
         }
         findings.add(finding.clone())?;
-        Ok(json!({
+        let mut kept = json!({
             "kept": true,
             "query": finding.query,
             "url": finding.url,
             "findings": findings.len(),
-        }))
+        });
+        if share != Share::No {
+            kept["shared"] = self.share_finding(&finding, share);
+        }
+        Ok(kept)
     }
 
-    /// `site_info`: one site's entry.
+    /// Shares `finding` with other nodes as a lead: what the answer says,
+    /// or why it was not shared.
+    fn share_finding(&self, finding: &Finding, share: Share) -> Value {
+        let net = match self.net() {
+            Some(net) if self.shares() => net,
+            _ => {
+                return json!({
+                    "shared": false,
+                    "why_not": "this node does not share findings; it was kept on this node only \
+                         (a node run with --share-findings in the Plumb network can share them)",
+                })
+            }
+        };
+        let draft = plumb_net::leads::LeadDraft {
+            keys: crate::findings::lead_keys(&finding.query),
+            query: (share == Share::PageAndQuery).then(|| finding.query.clone()),
+            url: finding.url.clone(),
+            note: finding.why.clone(),
+        };
+        match net.share_lead_blocking(draft) {
+            Ok(lead) => json!({
+                "shared": true,
+                "url": lead.url,
+                "note": lead.note,
+                "query": lead.query,
+                "node": net.peer_id().to_string(),
+                "expires_in_days": lead.expires.saturating_sub(lead.at) / 86_400,
+            }),
+            Err(err) => json!({ "shared": false, "why_not": format!("{err:#}") }),
+        }
+    }
+
+    /// The pages other nodes shared for `query`, besides `known` ones,
+    /// each checked for look-alikes; at most [`MAX_LEADS_LISTED`].
+    fn leads_for(
+        &self,
+        query: &str,
+        known: &[&str],
+        now: u64,
+        options: &SearchOptions,
+    ) -> Vec<Value> {
+        let Some(net) = self.net() else {
+            return Vec::new();
+        };
+        let keys = crate::findings::lead_keys(query);
+        if keys.topic.is_empty() {
+            return Vec::new();
+        }
+        let found = match net.leads_blocking(keys, MAX_LEADS_LISTED + known.len()) {
+            Ok(found) => found,
+            Err(err) => {
+                tracing::debug!("cannot list leads: {err:#}");
+                return Vec::new();
+            }
+        };
+        found
+            .into_iter()
+            .filter(|lead| !known.contains(&lead.url.as_str()))
+            // A page made to look like another site is no lead.
+            .filter(|lead| {
+                self.check_lookalike(&lead.url, options)
+                    .map_or(true, |check| check["verdict"] != "lookalike")
+            })
+            .take(MAX_LEADS_LISTED)
+            .map(|lead| {
+                let newest = lead.reporters.first();
+                let reporters: Vec<Value> = lead
+                    .reporters
+                    .iter()
+                    .map(|by| {
+                        json!({
+                            "node": by.peer_id,
+                            "relation": by.relation,
+                            "why": by.note,
+                            "query": by.query,
+                            "reported": crate::web::time_ago(by.at, now),
+                            "reported_at": by.at,
+                            "expires_at": by.expires,
+                        })
+                    })
+                    .collect();
+                json!({
+                    "url": lead.url,
+                    "why": newest.map(|by| by.note.as_str()),
+                    "reported": newest.map(|by| crate::web::time_ago(by.at, now)),
+                    "verified": false,
+                    "reported_by": reporters,
+                })
+            })
+            .collect()
+    }
+
+    /// `site_info`: one site's entry. A subdomain that is not a site of its
+    /// own (spec.commonmark.org) or a page of the site (nps.gov/yose/) is
+    /// said to be part of the site, and read now when the node reads pages,
+    /// as is the front page of a site the index has no title or description
+    /// of.
     pub fn site_info(&self, input: &str, options: &SearchOptions) -> Result<Value> {
         let Some(domain) = registrable_domain(input) else {
             bail!("{input:?} is not a web address or domain name");
         };
+        let host = host_of(input).unwrap_or_else(|| domain.clone());
+        let bare_host = host
+            .strip_prefix("www.")
+            .or_else(|| host.strip_prefix("m."))
+            .unwrap_or(&host);
+        let folded = bare_host != domain;
+        let asked_page = asked_page(input);
         let results = self.lookup(&domain, 3, options)?;
-        let Some(hit) = results.hits.iter().find(|hit| hit.domain == domain) else {
-            return Ok(json!({ "domain": domain, "found": false }));
+        let hit = results.hits.iter().find(|hit| hit.domain == domain);
+        let mut answer = match hit {
+            None => json!({ "domain": domain, "found": false }),
+            Some(hit) => {
+                let pages: Vec<Value> = results
+                    .pages
+                    .iter()
+                    .filter(|placed| placed.under.as_deref() == Some(domain.as_str()))
+                    .map(|placed| {
+                        json!({ "title": placed.hit.page.title, "url": placed.hit.page.url })
+                    })
+                    .collect();
+                // The index says official when it has Wikidata's description of
+                // the site; an article giving it as its item's website says so
+                // too (nps.gov, the National Park Service's).
+                let official_for = article_of(&domain, &results.pages);
+                json!({
+                    "domain": domain,
+                    "found": true,
+                    "url": hit.url,
+                    "title": hit.title,
+                    "description": hit.description.as_deref().map(short),
+                    "official": hit.official || official_for.is_some(),
+                    "official_for": official_for.map(|page| page.title.clone()),
+                    "well_known": hit.link_score >= WELL_KNOWN_LINK_SCORE,
+                    "popularity": round(hit.link_score),
+                    "country": hit.country,
+                    "searchable": search_template_for(&domain).is_some(),
+                    "pages": pages,
+                })
+            }
         };
-        let pages: Vec<Value> = results
-            .pages
-            .iter()
-            .filter(|placed| placed.under.as_deref() == Some(domain.as_str()))
-            .map(|placed| json!({ "title": placed.hit.page.title, "url": placed.hit.page.url }))
+        let fields = answer.as_object_mut().expect("an object");
+        if folded {
+            fields.insert("host".into(), json!(bare_host));
+            fields.insert("part_of".into(), json!(domain));
+        }
+        let untold = hit.is_none_or(|hit| hit.title.is_none() && hit.description.is_none());
+        let to_read = match (&asked_page, folded) {
+            (Some(page), _) => Some(page.clone()),
+            (None, true) => Some(format!("https://{host}/")),
+            (None, false) if untold => Some(format!("https://{domain}/")),
+            (None, false) => None,
+        };
+        if let (Some(reader), Some(address)) = (&self.reader, to_read) {
+            match reader.front(&address) {
+                Ok(read) => {
+                    fields.insert("read_now".into(), read);
+                }
+                Err(err) => {
+                    fields.insert(
+                        "read_error".into(),
+                        json!(format!("{address} could not be read: {err:#}")),
+                    );
+                }
+            }
+        }
+        Ok(answer)
+    }
+
+    /// `facts`: what Wikidata says about the thing `subject` names, each
+    /// fact with the item and property it comes from, so a model can cite
+    /// it. With `about` ("ceo", "population"), only the facts of that kind.
+    pub fn facts(
+        &self,
+        subject: &str,
+        about: Option<&str>,
+        options: &SearchOptions,
+    ) -> Result<Value> {
+        use plumb_core::facts::{fact_asked, FactKind, KINDS};
+        // The kinds asked for, and whether only the first of them a page
+        // has is wanted.
+        let (kinds, first_only): (Option<Vec<FactKind>>, bool) = match about {
+            None => (None, false),
+            Some(about) => {
+                let key = about.to_lowercase().replace([' ', '_'], "-");
+                let asked = |question: String| fact_asked(&question).map(|q| q.kinds);
+                let kinds = match FactKind::from_key(&key) {
+                    // Then the kinds the question asks for after it:
+                    // "height of mount everest" is its elevation, as a
+                    // mountain has no height.
+                    Some(kind) => Some((
+                        asked(format!("{about} of {subject}"))
+                            .filter(|kinds| kinds.first() == Some(&kind))
+                            .unwrap_or_else(|| vec![kind]),
+                        true,
+                    )),
+                    None => asked(format!("{about} of {subject}"))
+                        .or_else(|| asked(format!("{subject} {about}")))
+                        .map(|kinds| (kinds, false)),
+                };
+                let Some((kinds, first_only)) = kinds else {
+                    return Ok(json!({
+                        "subject": subject, "found": false, "status": "unsupported_property",
+                        "about": about, "supported": KINDS.iter().map(|k| k.key()).collect::<Vec<_>>(),
+                    }));
+                };
+                (Some(kinds), first_only)
+            }
+        };
+        let found = self.backend.entities(subject, 20, options)?;
+        let page = match answers::resolve_entity(subject, &found, kinds.as_deref()) {
+            answers::EntityResolution::Resolved(page) => page,
+            answers::EntityResolution::Unresolved => {
+                return Ok(json!({
+                    "subject": subject, "found": false, "status": "unresolved_entity",
+                }))
+            }
+            answers::EntityResolution::Ambiguous(candidates) => {
+                return Ok(json!({
+                    "subject": subject, "found": false, "status": "ambiguous_entity",
+                    "candidates": candidates.iter().take(5).map(|page| json!({
+                        "item": page.item, "title": page.title,
+                        "description": page.description.as_deref().map(short), "url": page.url,
+                    })).collect::<Vec<_>>(),
+                }))
+            }
+        };
+        let kinds = kinds.map(|kinds| {
+            match kinds
+                .iter()
+                .find(|kind| page.facts.iter().any(|fact| fact.kind == **kind))
+            {
+                Some(&first) if first_only => vec![first],
+                _ => kinds,
+            }
+        });
+        let wanted = |kind: &FactKind| kinds.as_ref().is_none_or(|kinds| kinds.contains(kind));
+        let item_url = page
+            .item
+            .as_deref()
+            .map(|item| format!("https://www.wikidata.org/wiki/{item}"));
+        let mut facts = Vec::new();
+        for kind in KINDS.iter().copied().filter(wanted) {
+            let values: Vec<&str> = page
+                .facts
+                .iter()
+                .filter(|fact| fact.kind == kind)
+                .map(|fact| fact.value.as_str())
+                .collect();
+            let Some((value, note)) = answers::fact_text(kind, &values) else {
+                continue;
+            };
+            facts.push(json!({
+                "kind": kind.key(),
+                "question": kind.question(&page.title),
+                "value": value,
+                "note": note,
+                "property": kind.property(),
+                "source": item_url.as_ref().map(|url| format!("{url}#{}", kind.property())),
+                "raw_values": values,
+                "unit": kind.unit(),
+                "valid_from": Value::Null,
+                "valid_to": Value::Null,
+                "observation_year": page.facts.iter().find(|fact| fact.kind == kind).and_then(|fact| fact.observation_year()),
+                "retrieved_at": Value::Null,
+                "statement": Value::Null,
+                "freshness": "unknown",
+
+            }));
+        }
+        let missing: Vec<_> = kinds
+            .as_ref()
+            .into_iter()
+            .flatten()
+            .filter(|kind| !page.facts.iter().any(|fact| fact.kind == **kind))
+            .map(|kind| kind.key())
             .collect();
         Ok(json!({
-            "domain": domain,
-            "found": true,
-            "url": hit.url,
-            "title": hit.title,
-            "description": hit.description.as_deref().map(short),
-            "official": hit.official,
-            "well_known": hit.link_score >= WELL_KNOWN_LINK_SCORE,
-            "popularity": round(hit.link_score),
-            "country": hit.country,
-            "searchable": search_template_for(&domain).is_some(),
-            "pages": pages,
+            "subject": subject,
+            "found": !facts.is_empty(),
+            "status": if facts.is_empty() { "missing_enrichment" } else { "ok" },
+            "coverage": if facts.is_empty() || !missing.is_empty() { "partial" } else { "available" },
+            "missing_properties": missing,
+            "freshness": "unknown",
+            "title": page.title,
+            "description": page.description.as_deref().map(short),
+            "url": page.url,
+            "item": page.item,
+            "item_url": item_url,
+            "from": "Wikidata",
+            "facts": facts,
         }))
     }
 
@@ -953,12 +2285,15 @@ pub struct ReadArgs {
     /// Words to jump to: the part returned starts at their first
     /// appearance from `start`.
     find: Option<String>,
+    /// The page's headings, where each starts and its opening words,
+    /// instead of its text.
+    outline: bool,
 }
 
 impl ReadArgs {
     fn of(args: &Map<String, Value>) -> Result<Self, (i64, String)> {
         Ok(ReadArgs {
-            url: text_arg(args, "url")?,
+            url: url_arg(args, "url")?,
             start: whole_number(args, "start")?.unwrap_or(0),
             max_chars: whole_number(args, "max_chars")?
                 .unwrap_or(DEFAULT_READ_CHARS)
@@ -970,6 +2305,10 @@ impl ReadArgs {
                 .map(str::trim)
                 .filter(|find| !find.is_empty())
                 .map(|find| truncate_chars(find, MAX_QUERY_CHARS)),
+            outline: args
+                .get("outline")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
         })
     }
 }
@@ -997,6 +2336,16 @@ fn tool_result(name: &str, answer: Result<Value>) -> Value {
             "content": [{ "type": "text", "text": format!("Plumb could not answer: {err:#}") }],
             "isError": true,
         }),
+    }
+}
+
+/// Leaves the JSON (`structuredContent`) out of a `tools/call` answer, so
+/// an AI app that would give the model the JSON gives it the short text.
+/// No tool declares an output schema, so the JSON is optional. Any other
+/// answer is left as it is.
+pub fn text_only(reply: &mut Value) {
+    if let Some(result) = reply.get_mut("result").and_then(Value::as_object_mut) {
+        result.remove("structuredContent");
     }
 }
 
@@ -1031,6 +2380,20 @@ impl Reader {
         let (max_chars, links) = (args.max_chars, args.links);
         let chars: Vec<char> = page.text.chars().collect();
         let total = chars.len();
+        if args.outline {
+            let sections = outline(&chars);
+            // A page without headings has no outline to show: its text
+            // follows instead, so the call is not wasted.
+            if !sections.is_empty() {
+                return Ok(json!({
+                    "url": page.url,
+                    "title": page.title,
+                    "outline": sections,
+                    "length": total,
+                    "truncated": page.cut,
+                }));
+            }
+        }
         let mut start = args.start.min(total);
         let found = args
             .find
@@ -1088,22 +2451,85 @@ impl Reader {
     }
 }
 
+/// A page's sections: each Markdown heading in its text with its level,
+/// where it starts and the opening words under it, after the words before
+/// the first heading (level 0) when there are any. Without headings, none.
+/// A long outline keeps the higher levels, then the first headings.
+fn outline(chars: &[char]) -> Vec<Value> {
+    // (level, heading, where the line starts, where the text under it starts)
+    let mut headings: Vec<(usize, String, usize, usize)> = Vec::new();
+    let mut at = 0;
+    while at < chars.len() {
+        let end = chars[at..]
+            .iter()
+            .position(|&c| c == '\n')
+            .map_or(chars.len(), |n| at + n);
+        let line: String = chars[at..end].iter().collect();
+        let level = line.chars().take_while(|&c| c == '#').count();
+        if (1..=6).contains(&level) && line[level..].starts_with(' ') {
+            let heading = line[level..].trim().to_string();
+            if !heading.is_empty() {
+                headings.push((level, heading, at, end));
+            }
+        }
+        at = end + 1;
+    }
+    if headings.is_empty() {
+        return Vec::new();
+    }
+    let mut deepest = 6;
+    while headings.len() > MAX_OUTLINE_HEADINGS && deepest > 1 {
+        headings.retain(|(level, ..)| *level < deepest);
+        deepest -= 1;
+    }
+    headings.truncate(MAX_OUTLINE_HEADINGS);
+    // The words under a heading, up to the next line that is a heading.
+    let opening = |from: usize| -> String {
+        let words: String = chars[from.min(chars.len())..]
+            .iter()
+            .take(OUTLINE_OPENING_CHARS * 4)
+            .collect();
+        let words: String = words
+            .lines()
+            .map(str::trim)
+            .take_while(|line| !line.starts_with('#'))
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        truncate_chars(&words, OUTLINE_OPENING_CHARS)
+    };
+    let mut sections = Vec::new();
+    let before = opening(0);
+    if headings[0].2 > 0 && !before.is_empty() {
+        sections.push(json!({ "level": 0, "heading": "", "start": 0, "opening": before }));
+    }
+    for (level, heading, start, under) in headings {
+        sections.push(json!({
+            "level": level,
+            "heading": truncate_chars(&heading, OUTLINE_OPENING_CHARS),
+            "start": start,
+            "opening": opening(under),
+        }));
+    }
+    sections
+}
+
 /// Where `find` first appears in `chars` at or after `from`, ignoring case.
 fn find_from(chars: &[char], find: &str, from: usize) -> Option<usize> {
     let fold = |c: char| c.to_lowercase().next().unwrap_or(c);
-    let find: Vec<char> = find.trim().chars().map(fold).collect();
-    if find.is_empty() || find.len() > chars.len() {
+    let find: String = find.trim().chars().map(fold).collect();
+    if find.is_empty() || from >= chars.len() {
         return None;
     }
-    (from..=chars.len() - find.len()).find(|&at| {
-        chars[at..at + find.len()]
-            .iter()
-            .zip(&find)
-            .all(|(&c, &f)| fold(c) == f)
-    })
+    // One char folds to one char, so positions carry over; `str::find`
+    // stays linear where comparing at every position could take seconds
+    // on a big page.
+    let rest: String = chars[from..].iter().map(|&c| fold(c)).collect();
+    let byte = rest.find(&find)?;
+    Some(from + rest[..byte].chars().count())
 }
 
-fn error(id: Value, code: i64, message: &str) -> Value {
+pub(crate) fn error(id: Value, code: i64, message: &str) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
 }
 
@@ -1112,12 +2538,13 @@ pub fn parse_error() -> Value {
     error(Value::Null, PARSE_ERROR, "the message is not JSON")
 }
 
-fn initialize(params: &Value, read_pages: bool, findings: bool) -> Value {
+fn initialize(params: &Value, read_pages: bool, findings: bool, leads: bool, share: bool) -> Value {
     let asked = params.get("protocolVersion").and_then(Value::as_str);
     let version = asked
         .and_then(|asked| PROTOCOL_VERSIONS.iter().find(|v| **v == asked))
         .unwrap_or(&PROTOCOL_VERSIONS[0]);
     json!({
+        "_meta": { "plumb.build": crate::build_info::current() },
         "protocolVersion": version,
         "capabilities": { "tools": { "listChanged": false } },
         "serverInfo": {
@@ -1126,16 +2553,33 @@ fn initialize(params: &Value, read_pages: bool, findings: bool) -> Value {
             "version": env!("CARGO_PKG_VERSION"),
         },
         "instructions": format!(
-            "{INSTRUCTIONS}{}{}",
+            "{INSTRUCTIONS}{}{}{}{}",
             if read_pages { READ_INSTRUCTIONS } else { "" },
             if findings { FINDINGS_INSTRUCTIONS } else { "" },
+            if leads { LEADS_INSTRUCTIONS } else { "" },
+            if share { SHARE_INSTRUCTIONS } else { "" },
         ),
     })
 }
 
+/// The language filter of a `search` call: its `language` (a code such as
+/// `en`, or `any` for none), else English. Sites that do not say their
+/// language stay either way.
+fn search_language(args: &Map<String, Value>) -> Result<Option<String>, (i64, String)> {
+    match args.get("language").and_then(Value::as_str).map(str::trim) {
+        None | Some("") => Ok(Some("en".to_string())),
+        Some(code) if code.eq_ignore_ascii_case("any") => Ok(None),
+        Some(code) => plumb_core::language_code(code).map(Some).ok_or((
+            INVALID_PARAMS,
+            format!("language must be a code such as en or de, or \"any\"; got {code:?}"),
+        )),
+    }
+}
+
 /// The tools' descriptions, as `tools/list` returns them; `read_pages`
-/// adds `read_page`, `findings` `report_finding`.
-pub fn tools(read_pages: bool, findings: bool) -> Value {
+/// adds `read_page`, `findings` `report_finding`, and `share` its choice to
+/// share a finding with other nodes.
+pub fn tools(read_pages: bool, findings: bool, share: bool) -> Value {
     let country = json!({
         "type": "string",
         "description": "Optional home country, a two-letter code such as US or DE: its sites \
@@ -1149,7 +2593,9 @@ pub fn tools(read_pages: bool, findings: bool) -> Value {
             "description": "The official website for a company, organization, product, project \
                  or service, by name (\"PayPal\", \"rust docs\", \"IRS\"). Returns the domain and \
                  URL, a confidence (high, medium, low), the reasons, and other candidates. Use \
-                 it instead of guessing a URL.",
+                 it instead of guessing a URL. Unresolved identity returns found:false with \
+                 suggestions; task words and spelling corrections do not establish ownership. \
+                 A jurisdiction named in the query takes precedence over the country preference.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1165,7 +2611,9 @@ pub fn tools(read_pages: bool, findings: bool) -> Value {
             "title": "Check for a look-alike site",
             "description": "Whether a URL or domain is a real site or one made to look like \
                  another (paypal-login.us, twiter.com). Returns a verdict (official, known_site, \
-                 little_known, lookalike or unknown), the reasons, and the real site it imitates. \
+                 little_known, lookalike, suspected or unknown), the reasons from indexed \
+                 evidence, and the real site it resembles. Suspected means affiliation \
+                 is unverified and impersonation is not established. \
                  Use it before entering credentials or trusting a link.",
             "inputSchema": {
                 "type": "object",
@@ -1180,19 +2628,38 @@ pub fn tools(read_pages: bool, findings: bool) -> Value {
         {
             "name": "search",
             "title": "Search",
-            "description": "Search the web (web_search) with Plumb Search: sites by name, best \
-                 first, plus Wikipedia articles, Stack Overflow questions, books and other pages \
+            "description": "Search the web (web_search) with Plumb Search: sites by name or topic, \
+                 best first, plus Wikipedia articles, Stack Overflow questions, books and other pages \
                  placed among them, package cards (version, install command, docs) when the query \
                  says npm, crate, pip, python or another registry or language, a direct answer for sums, unit and currency conversions and \
-                 the time somewhere, facts about what the query names, and recent headlines. \
-                 Plumb indexes homepages and names, not the full text of the web, so search for \
-                 names and topics, then read a page with read_page.",
+                 the time somewhere, facts about what the query names, recent headlines, and local places \
+                 when the query includes a town (restaurants in Denver). Near me requires an actual location; \
+                 country alone is not a location. Package cards supplement troubleshooting results. \
+                 Plumb indexes homepages and page sets, not the full text of the web, so search \
+                 for names and topics, then open the page you need.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "query": { "type": "string", "description": "What to search for." },
                     "limit": { "type": "integer", "minimum": 1, "maximum": MAX_SEARCH_LIMIT, "description": "How many results to return (default 5, or 3 when the search has a direct answer such as a package card or an answer found before)." },
                     "country": country,
+                    "language": { "type": "string", "description": "Optional language of the sites, a code such as en or de (default en); \"any\" for every language." },
+                    "site": { "type": "string", "description": "Optional: only results on this site, a domain such as docs.python.org or github.com (like site: in the query): the pages Plumb has there, and a link into the site's own search for the rest." },
+                    "kind": {
+                        "type": "string",
+                        "enum": KINDS.iter().map(|(key, _)| *key).collect::<Vec<_>>(),
+                        "description": format!(
+                            "Optional: only one kind of result, best first: {}.",
+                            KINDS
+                                .iter()
+                                .map(|(key, what)| format!("{key} ({what})"))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ),
+                    },
+                    "after": { "type": "string", "description": "Paper publication on or after YYYY or YYYY-MM-DD; unknown dates are excluded. Requires kind=paper when a kind is supplied." },
+                    "before": { "type": "string", "description": "Paper publication on or before YYYY or YYYY-MM-DD; day precision requires an actual publication day." },
+                    "order": { "type": "string", "enum": ["relevance", "newest"], "description": "Paper ordering; newest orders within relevance tiers." },
                 },
                 "required": ["query"],
             },
@@ -1235,25 +2702,51 @@ pub fn tools(read_pages: bool, findings: bool) -> Value {
             },
             "annotations": read_only,
         },
+        {
+            "name": "facts",
+            "title": "Facts",
+            "description": "Facts about a country, place, person, company, book or film from \
+                 Wikidata, by name (\"Australia\", \"Marie Curie\", \"Nvidia\"): capital, \
+                 population, height, area, born, died, founded, founder, CEO, headquarters, \
+                 currency, author, director, owner, spouse, head of state and the like. Each fact \
+                 comes with the Wikidata item and property it is from, to cite. Use it instead of \
+                 answering such facts from memory.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "subject": { "type": "string", "description": "What the facts are about, by name." },
+                    "about": { "type": "string", "description": "Optional: only one kind of fact (\"ceo\", \"population\", \"capital\")." },
+                    "more_subjects": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "maxItems": MAX_FACT_SUBJECTS - 1,
+                        "description": "Optional: more names to answer in the same call, each like subject (\"Canada\", \"Japan\"), to compare several things without a call for each.",
+                    },
+                    "country": country,
+                },
+                "required": ["subject"],
+            },
+            "annotations": read_only,
+        },
     ]);
     if read_pages {
-        tools
-            .as_array_mut()
-            .expect("an array")
-            .push(read_page_tool());
+        let tools = tools.as_array_mut().expect("an array");
+        tools.push(read_page_tool());
+        point_search_at_read_page(tools);
     }
     if findings {
         tools
             .as_array_mut()
             .expect("an array")
-            .push(report_finding_tool());
+            .push(report_finding_tool(share));
     }
     tools
 }
 
-/// `report_finding`'s description.
-fn report_finding_tool() -> Value {
-    json!({
+/// `report_finding`'s description, with `share` and `share_query` when the
+/// node shares findings.
+fn report_finding_tool(share: bool) -> Value {
+    let mut tool = json!({
         "name": "report_finding",
         "title": "Report what a search found",
         "description": "Whenever a search led you to an answer, report it: what you searched \
@@ -1272,7 +2765,37 @@ fn report_finding_tool() -> Value {
             "required": ["query", "url", "why", "answer"],
         },
         "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false },
-    })
+    });
+    if share {
+        tool["description"] = json!(
+            "Whenever a search led you to an answer, report it: what you searched for, the page \
+             that answered it, why that page helped, and the answer itself. The next search for \
+             the same thing on this computer lists it first (found_before), so no agent has to \
+             work it out again. Kept on this node only, unless you set share: then agents \
+             searching other Plumb nodes for the same thing see the page and why it helped (not \
+             your search, answer or task), signed by this node."
+        );
+        let properties = &mut tool["inputSchema"]["properties"];
+        properties["share"] = json!({ "type": "boolean", "description": "Also share the page and why it helped with other Plumb nodes, for agents searching for the same thing (default false). Only for public pages that would help anyone; never share anything private." });
+        properties["share_query"] = json!({ "type": "boolean", "description": "With share: also share your search as you typed it (default false: only its words as numbers, for matching)." });
+        tool["annotations"]["openWorldHint"] = json!(true);
+    }
+    tool
+}
+
+/// How `search`'s description ends without `read_page`...
+const SEARCH_THEN_OPEN: &str = "then open the page you need.";
+/// ...and with it.
+const SEARCH_THEN_READ: &str = "then read a page with read_page.";
+
+/// Has `search`'s description, among `tools`, send agents on to
+/// `read_page`, once that is offered too.
+fn point_search_at_read_page(tools: &mut [Value]) {
+    for tool in tools.iter_mut().filter(|tool| tool["name"] == "search") {
+        if let Some(text) = tool["description"].as_str() {
+            tool["description"] = json!(text.replace(SEARCH_THEN_OPEN, SEARCH_THEN_READ));
+        }
+    }
 }
 
 /// `read_page`'s description.
@@ -1283,7 +2806,9 @@ fn read_page_tool() -> Value {
         "description": "Fetch a web page (web_fetch) and return its text, with headings and \
              lists marked in Markdown, without menus, ads or scripts. Use it after search or \
              official_site to read what a page says. Long pages come in parts: call again with \
-             start set to next_start, or pass find to jump to the words you need. Also says \
+             start set to next_start, or pass find to jump to the words you need. When the \
+             first part of a long page lacks what you need, ask for its outline and read only \
+             the section you need. Also says \
              whether the address is a look-alike of a better-known site.",
         "inputSchema": {
             "type": "object",
@@ -1293,6 +2818,7 @@ fn read_page_tool() -> Value {
                 "max_chars": { "type": "integer", "minimum": 200, "maximum": MAX_READ_CHARS, "description": "Most characters to return (default 6000)." },
                 "links": { "type": "boolean", "description": "Also list the page's links (default false)." },
                 "find": { "type": "string", "description": "Jump to the first place these words appear (from start), like Ctrl-F; says found: false when they do not." },
+                "outline": { "type": "boolean", "description": "Return the page's headings, each with where it starts and its opening words, instead of its text (default false); then read a section with start. A page without headings returns its text." },
             },
             "required": ["url"],
         },
@@ -1313,15 +2839,306 @@ fn text_arg(args: &Map<String, Value>, name: &str) -> Result<String, (i64, Strin
     Ok(text)
 }
 
+/// An optional true-or-false argument, false when left out.
+fn bool_arg(args: &Map<String, Value>, name: &str) -> Result<bool, (i64, String)> {
+    match args.get(name) {
+        None | Some(Value::Null) => Ok(false),
+        Some(Value::Bool(on)) => Ok(*on),
+        Some(_) => Err((INVALID_PARAMS, format!("{name} must be true or false"))),
+    }
+}
+
+/// Longest URL a tool takes; longer than any real page's address.
+const MAX_URL_CHARS: usize = 4096;
+
+/// A required URL argument: trimmed but otherwise as given, since
+/// cutting or collapsing it would fetch some other page.
+fn url_arg(args: &Map<String, Value>, name: &str) -> Result<String, (i64, String)> {
+    let url = args
+        .get(name)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    if url.is_empty() {
+        return Err((INVALID_PARAMS, format!("{name} is required")));
+    }
+    if url.chars().count() > MAX_URL_CHARS {
+        return Err((
+            INVALID_PARAMS,
+            format!("{name} is longer than {MAX_URL_CHARS} characters"),
+        ));
+    }
+    Ok(url.to_string())
+}
+
+/// A whole number, also as a model may send it: `5.0` or `"5"`.
+fn as_whole(value: &Value) -> Option<u64> {
+    value
+        .as_u64()
+        .or_else(|| {
+            value
+                .as_f64()
+                .filter(|n| *n >= 0.0 && n.fract() == 0.0 && *n < 1e15)
+                .map(|n| n as u64)
+        })
+        .or_else(|| value.as_str().and_then(|s| s.trim().parse().ok()))
+}
+
 /// An optional whole-number argument.
 fn whole_number(args: &Map<String, Value>, name: &str) -> Result<Option<usize>, (i64, String)> {
     match args.get(name) {
         None | Some(Value::Null) => Ok(None),
-        Some(value) => value
-            .as_u64()
+        Some(value) => as_whole(value)
             .map(|n| Some(usize::try_from(n).unwrap_or(usize::MAX)))
             .ok_or((INVALID_PARAMS, format!("{name} must be a whole number"))),
     }
+}
+
+/// A page among `search`'s results: listed under the site `under`, or
+/// alone at `position` (from 1) among the sites.
+fn page_entry(page: &Page, query: &str, under: Option<&str>, position: usize) -> Value {
+    let mut entry = json!({
+        "title": page.title,
+        "url": page.url,
+        "description": page.description.as_deref().map(short),
+        "set": page.set,
+        "about_site": under,
+        "position": position,
+    });
+    if page.package.is_some() {
+        entry["package"] = package_card(page);
+    }
+    if let Some(free) = page.free_copy() {
+        entry["free_copy"] = json!(free);
+    }
+    if page.set == plumb_index::pages::PAPERS_SET {
+        entry["paper"] = json!(page.paper);
+        entry["count"] = page.paper.as_ref().map_or_else(
+            || json!({ "value": page.views, "kind": "unknown" }),
+            |paper| json!({ "value": paper.count, "kind": paper.count_kind }),
+        );
+    }
+    if let Some(language) = &page.content_language {
+        entry["language"] = json!(language);
+    }
+    add_source_excerpt(&mut entry, page, query);
+    entry
+}
+
+/// One bounded, query-matched source passage and at most one exact API
+/// symbol. Metadata is source evidence, not a generated answer.
+fn add_source_excerpt(entry: &mut Value, page: &Page, query: &str) {
+    let Some(search) = page
+        .search
+        .as_ref()
+        .and_then(plumb_core::article::SearchContent::bounded)
+    else {
+        return;
+    };
+    let ops = plumb_core::Operators::parse(query);
+    let topic = docs_query_topic(page, query);
+    if topic.is_empty() {
+        return;
+    }
+    let symbol = search
+        .symbols
+        .iter()
+        .filter(|symbol| docs_symbol_matches(&topic, &symbol.identifier))
+        .min_by_key(|symbol| symbol.anchor.is_none());
+    // Do not turn an unmatched qualified identifier into a loose prose
+    // match for a different receiver or namespace.
+    if symbol.is_none() && topic.contains(['.', ':', '_']) && docs_symbol_matches(&topic, &topic) {
+        return;
+    }
+    let terms: HashSet<_> = plumb_core::normalize_text(&topic)
+        .split_whitespace()
+        .filter(|word| !plumb_core::is_function_word(word))
+        .map(str::to_string)
+        .collect();
+    let passage = search
+        .passages
+        .iter()
+        .enumerate()
+        .filter_map(|(i, passage)| {
+            if !ops.allows_text([passage.heading.as_str(), passage.text.as_str()]) {
+                return None;
+            }
+            let source = format!("{} {}", passage.heading, passage.text);
+            let exact = symbol.map_or(0, |symbol| {
+                if symbol.anchor.is_some() && symbol.anchor == passage.anchor {
+                    2
+                } else if source
+                    .split(|c: char| !c.is_ascii_alphanumeric() && !"_.:".contains(c))
+                    .any(|word| {
+                        docs_symbol_matches(word.trim_matches(['.', ':']), &symbol.identifier)
+                    })
+                {
+                    1
+                } else {
+                    0
+                }
+            });
+            let normalized = plumb_core::normalize_text(&source);
+            let words: HashSet<_> = normalized.split_whitespace().collect();
+            let matched = terms
+                .iter()
+                .filter(|term| {
+                    words.contains(term.as_str())
+                        || plumb_core::other_number(term)
+                            .is_some_and(|other| words.contains(other.as_str()))
+                })
+                .count();
+            let needed = if terms.len() <= 3 {
+                terms.len()
+            } else {
+                (terms.len() * 3).div_ceil(4)
+            };
+            // With an exact symbol, require its own section or literal. The
+            // same query words in another method's prose are weaker evidence.
+            ((symbol.is_some() && exact > 0)
+                || (symbol.is_none() && !terms.is_empty() && matched >= needed))
+                .then_some(((exact, matched, std::cmp::Reverse(i)), passage))
+        })
+        .max_by_key(|(score, _)| *score)
+        .map(|(_, passage)| passage);
+    let fragment = symbol
+        .and_then(|symbol| symbol.anchor.as_deref())
+        .or_else(|| passage.and_then(|passage| passage.anchor.as_deref()));
+    if let Some(url) = fragment.and_then(|anchor| source_fragment_url(&page.url, anchor)) {
+        entry["page_url"] = json!(page.url);
+        entry["url"] = json!(url);
+    }
+    if let Some(symbol) = symbol {
+        let url = symbol
+            .anchor
+            .as_deref()
+            .and_then(|anchor| source_fragment_url(&page.url, anchor))
+            .unwrap_or_else(|| page.url.clone());
+        entry["matched_symbol"] = json!({"identifier": symbol.identifier, "url": url});
+    }
+    if let Some(passage) = passage {
+        let url = passage
+            .anchor
+            .as_deref()
+            .and_then(|anchor| source_fragment_url(&page.url, anchor))
+            .unwrap_or_else(|| page.url.clone());
+        entry["source_excerpt"] = json!({
+            "heading": passage.heading,
+            "text": passage.text,
+            "url": url,
+        });
+    }
+}
+
+/// A fragment always stays on the original HTTP(S) source. URL parsing
+/// encodes fragment punctuation; whitespace/control IDs are discarded.
+fn source_fragment_url(source: &str, anchor: &str) -> Option<String> {
+    let anchor = plumb_core::article::search_anchor(anchor)?;
+    let mut url = url::Url::parse(source).ok()?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        return None;
+    }
+    url.set_fragment(Some(&anchor));
+    Some(url.into())
+}
+
+fn paper_text_arg<'a>(
+    args: &'a Map<String, Value>,
+    key: &str,
+) -> Result<Option<&'a str>, (i64, String)> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(text)) => Ok(Some(text)),
+        _ => Err((INVALID_PARAMS, format!("{key} must be a string"))),
+    }
+}
+
+/// `search`'s optional `site`: one domain, or a URL on it, whose results
+/// alone are wanted.
+fn site_arg(args: &Map<String, Value>) -> Result<Option<String>, (i64, String)> {
+    let Some(site) = args
+        .get("site")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|site| !site.is_empty())
+    else {
+        return Ok(None);
+    };
+    let ops = plumb_core::Operators::parse(&format!("site:{site}"));
+    match ops.sites.as_slice() {
+        // "github" alone would be a top-level domain: a model means the site.
+        [host] if host.contains('.') && !site.contains(char::is_whitespace) => {
+            Ok(Some(host.clone()))
+        }
+        _ => Err((
+            INVALID_PARAMS,
+            format!("site must be one domain, such as docs.python.org; got {site:?}"),
+        )),
+    }
+}
+
+/// `search`'s optional `kind`: one of [`KINDS`].
+fn kind_arg(args: &Map<String, Value>) -> Result<Option<&'static str>, (i64, String)> {
+    let Some(kind) = args
+        .get("kind")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|kind| !kind.is_empty() && !kind.eq_ignore_ascii_case("any"))
+    else {
+        return Ok(None);
+    };
+    let kind = kind.to_lowercase();
+    // "articles", "questions": as a model may write them.
+    let key = kind
+        .strip_suffix('s')
+        .filter(|k| *k != "doc")
+        .unwrap_or(&kind);
+    KINDS
+        .iter()
+        .map(|(key, _)| *key)
+        .find(|known| *known == key || *known == kind)
+        .map(Some)
+        .ok_or((
+            INVALID_PARAMS,
+            format!(
+                "kind must be one of {}; got {kind:?}",
+                KINDS
+                    .iter()
+                    .map(|(key, _)| *key)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        ))
+}
+
+/// `facts`' optional `more_subjects`: names, each cut as `subject` is.
+fn more_subjects_arg(args: &Map<String, Value>) -> Result<Vec<String>, (i64, String)> {
+    let names = match args.get("more_subjects") {
+        None | Some(Value::Null) => return Ok(Vec::new()),
+        Some(Value::Array(names)) => names,
+        Some(_) => {
+            return Err((
+                INVALID_PARAMS,
+                "more_subjects must be a list of names".to_string(),
+            ))
+        }
+    };
+    let names: Vec<String> = names
+        .iter()
+        .filter_map(Value::as_str)
+        .map(|name| truncate_chars(&plumb_core::collapse_whitespace(name), MAX_QUERY_CHARS))
+        .filter(|name| !name.is_empty())
+        .collect();
+    if names.len() >= MAX_FACT_SUBJECTS {
+        return Err((
+            INVALID_PARAMS,
+            format!(
+                "at most {} more_subjects in one call",
+                MAX_FACT_SUBJECTS - 1
+            ),
+        ));
+    }
+    Ok(names)
 }
 
 /// A package's card in a tool's answer.
@@ -1348,6 +3165,7 @@ fn package_card(page: &plumb_index::pages::Page) -> Value {
 /// them: the `sites` in order, each after the `pages` placed before it
 /// (`position`), and the pages placed after the last site at the end.
 /// Pages listed under a site (`about_site`) go with it.
+#[cfg(test)]
 fn cap_results(sites: &mut Vec<Value>, pages: &mut Vec<Value>, cap: usize) {
     let alone = |page: &Value| page.get("about_site").is_none_or(Value::is_null);
     let position = |page: &Value| {
@@ -1398,6 +3216,175 @@ fn brief(hit: &Hit) -> Value {
         "well_known": hit.link_score >= WELL_KNOWN_LINK_SCORE,
         "country": hit.country,
     })
+}
+
+/// [`brief`], official too when Wikidata gives the site as the official
+/// website of an article among `pages`.
+fn brief_with(hit: &Hit, pages: &[PlacedPage]) -> Value {
+    let mut site = brief(hit);
+    if !hit.official && article_of(&hit.domain, pages).is_some() {
+        site["official"] = json!(true);
+    }
+    site
+}
+
+/// The page `input` asks about when it is a web address with a path,
+/// query or fragment past the front page: `https://www.nps.gov/yose/`.
+fn asked_page(input: &str) -> Option<String> {
+    let input = input.trim();
+    let address = if input.contains("://") {
+        input.to_string()
+    } else {
+        format!("https://{input}")
+    };
+    let url = url::Url::parse(&address).ok()?;
+    let front = matches!(url.path(), "" | "/") && url.query().is_none();
+    (!front).then(|| url.to_string())
+}
+
+/// Whether `page` is about one thing Wikidata describes: a Wikipedia
+/// article or a Wikidata item.
+fn is_article(page: &Page) -> bool {
+    page.set.starts_with("wikipedia-") || page.set == WIKIDATA_SET
+}
+
+/// The article among `pages` whose item Wikidata gives `domain` as the
+/// official website of.
+fn article_of<'a>(domain: &str, pages: &'a [PlacedPage]) -> Option<&'a Page> {
+    pages
+        .iter()
+        .map(|placed| &placed.hit.page)
+        .find(|page| is_article(page) && page.site.as_deref() == Some(domain))
+}
+
+/// The site and address of the official website of `page`'s item, whose
+/// registrable domain is `site`: its subdomain when the website is on one
+/// (`mathworld.wolfram.com`), else `site`.
+fn article_website(page: &Page, site: &str) -> (String, String) {
+    let Some(website) = page.website.as_deref() else {
+        return (site.to_string(), format!("https://{site}/"));
+    };
+    let host = host_of(website).unwrap_or_else(|| site.to_string());
+    let host = host.strip_prefix("www.").unwrap_or(&host);
+    let domain = if host.ends_with(&format!(".{site}")) {
+        host.to_string()
+    } else {
+        site.to_string()
+    };
+    (domain, website.to_string())
+}
+
+/// Hosts of package registries and the docs they build, which a package's
+/// card may give as its home or docs but which are no project's own site.
+const REGISTRY_HOSTS: &[&str] = &[
+    "docs.rs",
+    "crates.io",
+    "npmjs.com",
+    "npmjs.org",
+    "pypi.org",
+    "pkg.go.dev",
+    "go.dev",
+    "rubygems.org",
+    "rubydoc.info",
+    "nuget.org",
+    "packagist.org",
+    "hex.pm",
+    "hexdocs.pm",
+];
+
+/// The site Wikidata gives the best article among `pages` the name names,
+/// with the article.
+fn named_article_site(pages: &[PlacedPage]) -> Option<(&Page, &str)> {
+    pages
+        .iter()
+        .filter(|placed| placed.hit.named && is_article(&placed.hit.page))
+        .filter(|placed| !placed.hit.page.title.ends_with("(disambiguation)"))
+        .max_by(|a, b| a.hit.score.total_cmp(&b.hit.score))
+        .and_then(|placed| Some((&placed.hit.page, placed.hit.page.site.as_deref()?)))
+}
+
+/// Documentation navigation is separate from identity. Technical resource
+/// words such as API, developer and specification still constrain the owner.
+const WANTED_WORDS: &[&str] = &["docs", "documentation"];
+
+/// The name in `asked` without what is wanted from its site after it:
+/// "Pillow docs" -> "pillow", `None` when nothing is wanted.
+fn bare_name(asked: &str) -> Option<String> {
+    let whole = asked
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase();
+    let mut name = whole.clone();
+    loop {
+        let words: Vec<&str> = name.split_whitespace().collect();
+        if words.len() < 2 {
+            break;
+        }
+        if WANTED_WORDS.contains(&words[words.len() - 1]) {
+            name = words[..words.len() - 1].join(" ");
+        } else if let Some(shorter) = without_intent_words(&name) {
+            name = shorter;
+        } else {
+            break;
+        }
+    }
+    (name != whole && !name.is_empty()).then_some(name)
+}
+
+/// Whether `asked` wants a site's documentation: "Pillow docs".
+fn asks_for_docs(asked: &str) -> bool {
+    asked
+        .split_whitespace()
+        .any(|word| matches!(word.to_lowercase().as_str(), "docs" | "documentation"))
+}
+
+/// Letters and digits only, lowercase.
+fn letters(text: &str) -> String {
+    text.chars()
+        .filter(char::is_ascii_alphanumeric)
+        .map(|c| c.to_ascii_lowercase())
+        .collect()
+}
+
+/// What a site shows of itself: its address, title and description, as
+/// [`letters`].
+fn site_letters(hit: &Hit) -> String {
+    letters(&format!(
+        "{} {} {}",
+        hit.domain,
+        hit.title.as_deref().unwrap_or(""),
+        hit.description.as_deref().unwrap_or("")
+    ))
+}
+
+/// Whether `hit` shows every one of the name's `words`.
+fn shows_name(hit: &Hit, words: &[String]) -> bool {
+    let shown = site_letters(hit);
+    !words.is_empty() && words.iter().all(|word| shown.contains(word.as_str()))
+}
+
+/// Whether `hit` shows one of the name's `words` at least: an alternative
+/// with none of them is noise (sleepnumber.com for "Pillow").
+fn mentions_name(hit: &Hit, words: &[String]) -> bool {
+    let shown = site_letters(hit);
+    words.iter().any(|word| {
+        word.len() >= 3 && !FILLER_WORDS.contains(&word.as_str()) && shown.contains(word.as_str())
+    })
+}
+
+/// Least letters of a name a title must have whole for [`title_has`]:
+/// shorter names are in too many titles.
+const MIN_TITLE_NAME_LETTERS: usize = 6;
+
+/// Whether `hit`'s title has the whole of `name` in it.
+fn title_has(hit: &Hit, name: &str) -> bool {
+    let name = letters(name);
+    name.len() >= MIN_TITLE_NAME_LETTERS
+        && hit
+            .title
+            .as_deref()
+            .is_some_and(|title| letters(title).contains(&name))
 }
 
 fn short(text: &str) -> String {
@@ -1459,6 +3446,9 @@ fn name_queries(host: &str, domain: &str) -> Vec<String> {
     let label = domain_label(domain);
     let label_words = label.replace(['-', '_'], " ");
     let mut queries = vec![without_intent_words(&label_words).unwrap_or(label_words)];
+    if label.contains("xn--") {
+        queries.insert(0, squash(&label));
+    }
     let subdomains = host.strip_suffix(domain).unwrap_or("");
     let mut words: Vec<String> = subdomains
         .split(['.', '-', '_'])
@@ -1480,16 +3470,33 @@ fn name_queries(host: &str, domain: &str) -> Vec<String> {
 /// pass for letters read as them: `paypa1` -> `paypal`, `rnicrosoft` ->
 /// `microsoft`.
 fn squash(text: &str) -> String {
-    let plain: String = text
+    let (unicode, _) = idna::domain_to_unicode(text);
+    let plain: String = unicode
         .chars()
-        .filter(char::is_ascii_alphanumeric)
-        .map(|c| match c.to_ascii_lowercase() {
+        .flat_map(char::to_lowercase)
+        .map(|c| match c {
             '0' => 'o',
             '1' => 'l',
             '3' => 'e',
             '5' => 's',
+            // Common Cyrillic/Greek homographs; retain the literal ASCII
+            // hostname for ownership checks, using this only for resemblance.
+            'а' | 'α' => 'a',
+            'е' | 'ε' => 'e',
+            'о' | 'ο' => 'o',
+            'р' | 'ρ' => 'p',
+            'с' => 'c',
+            'у' | 'ү' => 'y',
+            'х' | 'χ' => 'x',
+            'і' | 'ι' => 'i',
+            'ј' => 'j',
+            'ѕ' => 's',
+            'к' | 'κ' => 'k',
+            'м' => 'm',
+            'т' | 'τ' => 't',
             c => c,
         })
+        .filter(char::is_ascii_alphanumeric)
         .collect();
     plain.replace("rn", "m").replace("vv", "w")
 }
@@ -1542,6 +3549,13 @@ pub fn run(args: McpArgs) -> Result<()> {
     let runtime = crate::runtime()?;
     // Pages are fetched from this computer, whichever node answers the rest.
     let reader = Reader::standard(runtime.handle().clone())?;
+    let relations = args
+        .relations
+        .as_deref()
+        .map(|dir| crate::relations::RelationStore::load(dir, args.relations_model.as_deref()))
+        .transpose()
+        .context("loading the relation maps")?;
+    let relations = relations.as_ref();
     match &args.index {
         Some(index) => {
             let searcher = Searcher::open(index)
@@ -1549,13 +3563,20 @@ pub fn run(args: McpArgs) -> Result<()> {
             let backend: Arc<dyn SearchBackend> =
                 Arc::new(IndexBackend::new(searcher, rank_config(None)));
             let rates = answers::RatesCache::default();
-            serve_lines(stdin, stdout, |message| {
+            serve_lines(stdin, stdout, args.text_answers, |message| {
+                if let Some(answer) = relations.and_then(|store| relate_here(store, message)) {
+                    return Ok(Some(answer));
+                }
                 let rates = Mcp::search_query(message)
-                    .and_then(|query| runtime.block_on(rates.for_query(query)));
+                    .and_then(|query| runtime.block_on(rates.for_query(&query)));
                 let mcp = Mcp::new(Arc::clone(&backend), args.country.clone())
                     .with_reader(Some(reader.clone()))
                     .with_rates(rates);
-                Ok(mcp.handle(message))
+                let mut answer = mcp.handle(message);
+                if let (Some(store), Some(answer)) = (relations, &mut answer) {
+                    offer_relate(store, message, answer);
+                }
+                Ok(answer)
             })
         }
         None => {
@@ -1565,7 +3586,10 @@ pub fn run(args: McpArgs) -> Result<()> {
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
                 .context("making the HTTP client")?;
-            serve_lines(stdin, stdout, |message| {
+            serve_lines(stdin, stdout, args.text_answers, |message| {
+                if let Some(answer) = relations.and_then(|store| relate_here(store, message)) {
+                    return Ok(Some(answer));
+                }
                 if let Some(answer) = read_here(&reader, message, |check| {
                     runtime.block_on(forward(&client, &endpoint, check))
                 }) {
@@ -1574,11 +3598,113 @@ pub fn run(args: McpArgs) -> Result<()> {
                 let mut answer = runtime.block_on(forward(&client, &endpoint, message))?;
                 if let Some(answer) = &mut answer {
                     offer_read_page(message, answer);
+                    if let Some(store) = relations {
+                        offer_relate(store, message, answer);
+                    }
                 }
                 Ok(answer)
             })
         }
     }
+}
+
+/// For `plumb mcp --relations`: answers a `relate` call here, from the
+/// relation maps on this computer. `None` for any other message.
+fn relate_here(store: &crate::relations::RelationStore, message: &Value) -> Option<Value> {
+    let params = message.get("params")?;
+    if message.get("method")?.as_str()? != "tools/call" || params.get("name")?.as_str()? != "relate"
+    {
+        return None;
+    }
+    let id = message.get("id")?.clone();
+    let empty = Map::new();
+    let args = params
+        .get("arguments")
+        .and_then(Value::as_object)
+        .unwrap_or(&empty);
+    let subject = match text_arg(args, "subject") {
+        Ok(subject) => subject,
+        Err((code, why)) => return Some(error(id, code, &why)),
+    };
+    let chain: Vec<String> = match args.get("relation") {
+        Some(Value::String(text)) => text
+            .split(['>', ',', '/'])
+            .map(|key| key.trim().to_lowercase().replace([' ', '-'], "_"))
+            .filter(|key| !key.is_empty())
+            .collect(),
+        Some(Value::Array(keys)) => keys
+            .iter()
+            .filter_map(Value::as_str)
+            .map(|key| key.trim().to_lowercase().replace([' ', '-'], "_"))
+            .collect(),
+        _ => Vec::new(),
+    };
+    let object = args
+        .get("object")
+        .and_then(Value::as_str)
+        .map(|text| truncate_chars(&plumb_core::collapse_whitespace(text), MAX_QUERY_CHARS))
+        .filter(|text| !text.is_empty());
+    let limit = args
+        .get("limit")
+        .and_then(Value::as_u64)
+        .map_or(5, |n| usize::try_from(n).unwrap_or(usize::MAX));
+    let answer = store.relate(&subject, &chain, object.as_deref(), limit);
+    Some(json!({ "jsonrpc": "2.0", "id": id, "result": tool_result("relate", answer) }))
+}
+
+/// Adds `relate` to a `tools/list` or `initialize` answer.
+fn offer_relate(store: &crate::relations::RelationStore, message: &Value, answer: &mut Value) {
+    let method = message.get("method").and_then(Value::as_str);
+    let Some(result) = answer.get_mut("result").and_then(Value::as_object_mut) else {
+        return;
+    };
+    match method {
+        Some("tools/list") => {
+            if let Some(tools) = result.get_mut("tools").and_then(Value::as_array_mut) {
+                if !tools.iter().any(|tool| tool["name"] == "relate") {
+                    tools.push(relate_tool(&store.kinds()));
+                }
+            }
+        }
+        Some("initialize") => {
+            if let Some(Value::String(instructions)) = result.get_mut("instructions") {
+                if !instructions.contains("relate") {
+                    instructions.push_str(RELATE_INSTRUCTIONS);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+const RELATE_INSTRUCTIONS: &str = " To follow a relation through steps in one call (the capital \
+     of the country a company is headquartered in) or to check whether a claim is likely, \
+     call relate; its answers are learned guesses unless marked as stated in Wikidata.";
+
+fn relate_tool(kinds: &[&str]) -> Value {
+    json!({
+        "name": "relate",
+        "title": "Follow or check a relation",
+        "description": format!(
+            "Follow a relation from a thing to what it is related to, by maps learned from \
+             Wikidata facts, in one call even through several steps (relation \
+             \"headquarters > capital\"). Answers are the likeliest, each with a probability \
+             and whether Wikidata states it; it can guess for things Wikidata has no fact about. \
+             With object, says how likely the claim is instead. Relations: {}.",
+            kinds.join(", ")
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "subject": { "type": "string", "description": "The thing to start from, by name (\"Toyota\")." },
+                "relation": { "type": "string", "description": format!("One relation, or several to follow in turn separated by >: one of {}.", kinds.join(", ")) },
+                "object": { "type": "string", "description": "A claimed answer to check instead (\"Kiichiro Toyoda\")." },
+                "limit": { "type": "integer", "minimum": 1, "maximum": crate::relations::MAX_RELATE_ANSWERS, "description": "Most answers (default 5)." },
+            },
+            "required": ["subject", "relation"],
+        },
+        "annotations": { "readOnlyHint": true, "idempotentHint": true, "openWorldHint": false },
+    })
 }
 
 /// For `plumb mcp --node`: answers a `read_page` call here, asking the node
@@ -1644,6 +3770,7 @@ fn offer_read_page(message: &Value, answer: &mut Value) {
                 if !tools.iter().any(|tool| tool["name"] == "read_page") {
                     tools.push(read_page_tool());
                 }
+                point_search_at_read_page(tools);
             }
         }
         Some("initialize") => {
@@ -1695,17 +3822,30 @@ async fn forward(
     }
     let body = response.text().await.unwrap_or_default();
     match serde_json::from_str::<Value>(&body) {
-        Ok(answer) => Ok(Some(answer)),
+        // A JSON-RPC answer to this message; anything else (a plain
+        // `{"error": ...}` from a refusal) would leave the client waiting.
+        Ok(answer) if answer.get("jsonrpc").is_some() && answer.get("id") == id.as_ref() => {
+            Ok(Some(answer))
+        }
+        Ok(answer) => {
+            let why = answer.get("error").and_then(Value::as_str).map_or_else(
+                || format!("{endpoint} answered {status}"),
+                |why| format!("{endpoint}: {why}"),
+            );
+            failed(why)
+        }
         Err(_) if status.is_success() => failed(format!("{endpoint} did not answer with JSON")),
         Err(_) => failed(format!("{endpoint} answered {status}")),
     }
 }
 
 /// Reads one JSON-RPC message per line from `input` and writes each answer
-/// as one line to `output`.
+/// as one line to `output`, without the JSON copy of tool answers if
+/// `text_answers` ([`text_only`]).
 fn serve_lines(
     input: impl BufRead,
     mut output: impl Write,
+    text_answers: bool,
     mut answer: impl FnMut(&Value) -> Result<Option<Value>>,
 ) -> Result<()> {
     for line in input.lines() {
@@ -1717,7 +3857,10 @@ fn serve_lines(
             Ok(message) => answer(&message)?,
             Err(_) => Some(parse_error()),
         };
-        if let Some(reply) = reply {
+        if let Some(mut reply) = reply {
+            if text_answers {
+                text_only(&mut reply);
+            }
             serde_json::to_writer(&mut output, &reply).context("writing stdout")?;
             output.write_all(b"\n").context("writing stdout")?;
             output.flush().context("writing stdout")?;

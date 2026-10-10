@@ -30,16 +30,26 @@
 //! * `/plumb/trust/1`: which nodes a node trusts, asked by the nodes that
 //!   trust it, so a search can ask friends of friends (see
 //!   [`crate::scope`]).
+//! * `/plumb/profile/1`: one searcher's profile (search history, About
+//!   you, what their clicks taught), shared between the nodes they linked
+//!   it on. Answered only for a profile linked with the asking node, so a
+//!   node never learns anything of a profile it was not given. The
+//!   connection is end to end encrypted, relayed or not.
+//! * `/plumb/leads/1`: the newest [`Lead`]s a node holds, for a node it
+//!   meets, so one that was away catches up (see [`crate::leads`]).
+//! * Gossip topic `plumb/leads/1`: every lead a node shares, as JSON,
+//!   passed on by every node that takes it.
 //! * `/plumb/kad/1.0.0`: Kademlia, to find more nodes.
 //!
 //! Requests and responses are CBOR.
 
 use serde::{Deserialize, Serialize};
-use serde_bytes::ByteBuf;
+pub use serde_bytes::ByteBuf;
 
 use crate::batch::{Batch, RecordProof, SignedHeader};
 use crate::credits::{Issued, Token};
 use crate::hash::Hash;
+use crate::leads::Lead;
 use crate::popularity::Report;
 
 pub const BUCKET_PROTOCOL: &str = "/plumb/bucket/1";
@@ -47,12 +57,15 @@ pub const BATCH_PROTOCOL: &str = "/plumb/batch/1";
 pub const FILL_PROTOCOL: &str = "/plumb/fill/1";
 pub const PAGES_PROTOCOL: &str = "/plumb/pages/1";
 pub const TRUST_PROTOCOL: &str = "/plumb/trust/1";
+pub const PROFILE_PROTOCOL: &str = "/plumb/profile/1";
 pub const REPORT_PROTOCOL: &str = "/plumb/report/1";
 pub const CREDIT_PROTOCOL: &str = "/plumb/credits/1";
+pub const LEAD_PROTOCOL: &str = "/plumb/leads/1";
 pub const KAD_PROTOCOL: &str = "/plumb/kad/1.0.0";
 pub const IDENTIFY_PROTOCOL: &str = "/plumb/id/1.0.0";
 pub const BATCH_TOPIC: &str = "plumb/batches/1";
 pub const REPORT_TOPIC: &str = "plumb/reports/1";
+pub const LEAD_TOPIC: &str = "plumb/leads/1";
 
 /// Most batch headers returned for one [`BatchRequest::List`].
 pub const MAX_LISTED_BATCHES: usize = 10_000;
@@ -73,6 +86,16 @@ pub enum ReportResponse {
     /// or not valid).
     Taken(bool),
     Reports(Vec<Report>),
+}
+
+/// Asks for the newest leads a node holds, at most
+/// [`crate::leads::MAX_LISTED_LEADS`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LeadRequest {}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LeadResponse {
+    pub leads: Vec<Lead>,
 }
 
 /// Asks for one bucket (see [`crate::bucket`]).
@@ -177,6 +200,38 @@ pub struct TrustResponse {
     pub trusted: Vec<String>,
 }
 
+/// Most bytes of a profile request or response.
+pub const MAX_PROFILE_MESSAGE: u64 = 8 * 1024 * 1024;
+
+/// About one searcher's profile, between two nodes they use.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProfileRequest {
+    /// Links the asker to the profile a link code was made for; `token` is
+    /// the code's secret part, good once and only for a few minutes.
+    Join { token: String },
+    /// The asker's copy of `profile`, to merge with the answerer's. `round`
+    /// names the copy both nodes agreed on last time, if any.
+    Sync {
+        profile: String,
+        round: Option<u64>,
+        state: ByteBuf,
+    },
+    /// The asker no longer shares `profile` with the answerer.
+    Leave { profile: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProfileResponse {
+    /// The profile linked, and the answerer's copy of it.
+    Joined { profile: String, state: ByteBuf },
+    /// The merged copy, which both nodes now keep as round `round`.
+    Synced { round: u64, state: ByteBuf },
+    /// Done (for [`ProfileRequest::Leave`]).
+    Left,
+    /// Not answered, and why.
+    Refused(String),
+}
+
 /// Asks for `len` bytes from `offset` of the answering node's file of the
 /// page set `set` (see [`crate::pages`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -197,6 +252,13 @@ pub struct PagesResponse {
     /// Turned away for now: it is serving others, or was asked too often.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub busy: bool,
+    /// What the file holds besides its pages (see
+    /// [`crate::pages::LAYERS_SUFFIX`]), when the answering node has
+    /// worked that out; `None` from nodes before it, or before they did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layers: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quality: Option<crate::pages::SetQuality>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

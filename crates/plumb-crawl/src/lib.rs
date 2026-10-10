@@ -21,6 +21,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+mod boilerplate;
 mod crawl;
 mod dns;
 mod extract;
@@ -28,6 +29,9 @@ mod feed;
 mod icon;
 mod read;
 mod records;
+mod site_pages;
+mod structured;
+mod terms;
 #[cfg(test)]
 mod test_alloc;
 
@@ -35,11 +39,19 @@ pub use crawl::{
     check_feeds, crawl_homepages, fetch_site_icons, log_summary, FeedCheck, FeedOutcome,
     FeedTarget, HomepageCrawler,
 };
-pub use extract::{extract_page_meta, MAX_BODY_WORDS, MAX_ICONS, MAX_OUT_LINKS};
+pub use extract::{
+    extract_inner_page_meta, extract_page_meta, InnerPageExtraction, DOCS_EXTRACTOR_VERSION,
+    MAX_BODY_WORDS, MAX_ICONS, MAX_OUT_LINKS, MAX_PAGE_TEXT_WORDS, MAX_SECTIONS, MAX_SECTION_WORDS,
+};
 pub use feed::{parse_date, read_feed};
 pub use icon::{normalize_icon, ICON_SIZE};
 pub use read::{page_text, PageReader, ReadConfig, ReadError, ReadPage, MAX_READ_LINKS};
-pub use records::to_records;
+pub use records::{to_records, CRAWL_VERSION};
+pub use site_pages::{
+    fetch_site_pages, fetch_site_pages_with_extraction, SitePage, SitePageOutcome, SitePagesResult,
+    SitePagesTarget, MAX_SITEMAPS,
+};
+pub use terms::{pick_terms, words_of, TERM_WORDS};
 
 /// Sent with every request so site owners can see who is crawling and why.
 pub const USER_AGENT: &str = concat!(
@@ -180,12 +192,17 @@ pub struct PageMeta {
     pub description: Option<String>,
     /// `og:site_name`.
     pub site_name: Option<String>,
+    /// The names the page gives its own site in schema.org JSON-LD
+    /// (`WebSite` and `Organization` items), at most a few.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub structured_names: Vec<String>,
     /// The site's search address, with `{searchTerms}` where the words go,
     /// from the first GET form on the page with a search box that submits
     /// to the same site.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub search_url: Option<String>,
-    /// The page's language from `<html lang>`, as
+    /// The page's declared language from `<html lang>`, then HTML
+    /// Content-Language metadata, then `og:locale`, as
     /// [`plumb_core::language_code`] gives it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
@@ -203,11 +220,30 @@ pub struct PageMeta {
     /// words in all.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub headings: Vec<String>,
+    /// Visible `<h2>` and `<h3>` texts outside a page's header, footer,
+    /// menus and forms, in page order, each once, at most
+    /// [`MAX_SECTIONS`] of [`MAX_SECTION_WORDS`] words:
+    /// the sections a docs page is about ("List Comprehensions" in
+    /// Python's "Data Structures"). Left out of the JSON form.
+    #[serde(skip)]
+    pub sections: Vec<String>,
+    /// Bounded rich inner-page content. Absent on homepage/legacy records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search: Option<plumb_core::article::SearchContent>,
     /// The page's visible text in reading order, without scripts, menus,
     /// headers, footers, forms and headings, cut to [`MAX_BODY_WORDS`]
     /// words.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body_text: Option<String>,
+    /// The same visible text cut to [`MAX_PAGE_TEXT_WORDS`] words instead,
+    /// for picking search terms from the whole page. Left out of the JSON
+    /// form.
+    #[serde(skip)]
+    pub page_text: String,
+    /// Search terms [`pick_terms`] picked from the title, description,
+    /// headings and page text, for [`plumb_core::SiteRecord::terms`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub terms: Vec<String>,
     /// The site's feed: the first `<link rel="alternate">` to an RSS or
     /// Atom document, as an absolute http(s) URL. See [`check_feeds`].
     #[serde(default, skip_serializing_if = "Option::is_none")]

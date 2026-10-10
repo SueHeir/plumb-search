@@ -10,7 +10,7 @@ Or give an app that takes a SearXNG address `https://plumbsearch.org` (it asks `
 
 ## What it is good at, and what it isn't
 
-Plumb indexes sites by name and homepage, plus page sets: Wikipedia articles, Stack Overflow's most viewed questions, popular GitHub repositories, the most used packages of eight registries, books and papers. It does not crawl the full text of the web. So it finds the official site, the package, the docs, the well-known question and the encyclopedia fact well, and the long tail (a blog post, a forum thread, a page deep inside a site) worse than Google does.
+Plumb indexes sites by name, homepage text, Wikidata description and meaning, plus page sets: Wikipedia articles, Stack Overflow's most viewed questions, popular GitHub repositories, the most used packages of eight registries, books and papers. It does not crawl the full text of the web. So it finds the official site, the package, the docs, the well-known question and the encyclopedia fact well, and the long tail (a blog post, a forum thread, a page deep inside a site) worse than Google does.
 
 Searches it answers well:
 
@@ -74,7 +74,7 @@ The same answers come as JSON in `structuredContent` for programs.
 
 ## Setting up each app
 
-There are two ways in. Apps that speak MCP get Plumb's [tools](mcp.md): `search`, `official_site`, `check_lookalike`, `site_info`, `package`, `read_page` and `report_finding`. Apps that take a SearXNG address for web search can use a node's `/search?format=json` instead.
+There are two ways in. Apps that speak MCP get Plumb's [tools](mcp.md): `search`, `official_site`, `check_lookalike`, `site_info`, `facts`, `package`, `read_page` and `report_finding`. Apps that take a SearXNG address for web search can use a node's `/search?format=json` instead.
 
 Use a model that can call tools: Qwen3 (8B or bigger), gpt-oss, Llama 3.1 or 3.3, Mistral Small. Small models without tool training ignore the tools.
 

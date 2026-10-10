@@ -7,8 +7,13 @@
 //! (KillBot is also what phishing kits use to hide from scanners). Such a
 //! page says nothing about the site, so its title, description and links
 //! must not become the site's facts or travel to other nodes.
+//!
+//! The same goes for other pages that stand in for a homepage: an error or
+//! maintenance page ("FedEx | System Down"), an identity check ("Verifica
+//! tu identidad", "Client Challenge") or a parked domain's "this domain is
+//! for sale".
 
-use crate::{normalize_text, SiteRecord};
+use crate::{canonical_domain, normalize_text, registrable_domain, SiteRecord};
 
 /// Whole titles, after [`normalize_text`], that only a bot check has.
 const CHECK_TITLES: &[&str] = &[
@@ -19,6 +24,8 @@ const CHECK_TITLES: &[&str] = &[
     "attention required",
     "bot check",
     "bot verification",
+    "client challenge",
+    "error",
     "browser check",
     "captcha",
     "captcha verification",
@@ -45,7 +52,62 @@ const CHECK_TITLES: &[&str] = &[
     "verifying",
     "verifying you are human",
     "you have been blocked",
+    "not found",
+    "page not found",
 ];
+
+/// Title parts, after [`normalize_text`], of a page standing in for the
+/// homepage, wherever they are in a title split at its separators: "FedEx |
+/// System Down", "Walmart: Verifica tu identidad".
+const STAND_IN_TITLE_PARTS: &[&str] = &[
+    "404 not found",
+    "500 internal server error",
+    "502 bad gateway",
+    "503 service unavailable",
+    "access denied",
+    "bad gateway",
+    "client challenge",
+    "down for maintenance",
+    "internal server error",
+    "page not found",
+    "service unavailable",
+    "site maintenance",
+    "site unavailable",
+    "system down",
+    "temporarily unavailable",
+    "under maintenance",
+    "verifica tu identidad",
+    "verify your identity",
+    "website unavailable",
+];
+
+/// Whole titles, after [`normalize_text`], of a placeholder where a
+/// homepage should be: a web server's default page, a site not built yet,
+/// a suspended hosting account.
+const PLACEHOLDER_TITLES: &[&str] = &[
+    "welcome to nginx",
+    "welcome to nginx on debian",
+    "welcome to centos",
+    "apache2 ubuntu default page it works",
+    "apache2 debian default page it works",
+    "test page for the apache http server",
+    "iis windows server",
+    "it works",
+    "coming soon",
+    "website coming soon",
+    "site coming soon",
+    "under construction",
+    "website under construction",
+    "site under construction",
+    "account suspended",
+    "this account has been suspended",
+    "suspended domain",
+    "default web site page",
+    "web server s default page",
+];
+
+/// What a page title is split at into parts for [`STAND_IN_TITLE_PARTS`].
+const TITLE_SEPARATORS: [char; 10] = ['|', '·', '•', ':', '–', '—', '»', '«', '/', '\\'];
 
 /// Title beginnings, after [`normalize_text`], that only a bot check has
 /// ("Just a moment...", "Checking your browser before accessing example.com",
@@ -85,6 +147,10 @@ const CHECK_PHRASES: &[&str] = &[
     "please complete the security check",
     "press hold to confirm you are a human",
     "this website is using a security service to protect itself",
+    // Parked domains.
+    "domain is for sale",
+    "this domain may be for sale",
+    "buy this domain",
 ];
 
 /// Vendors whose own homepages talk about their checks.
@@ -98,6 +164,13 @@ const CHECK_VENDORS: &[&str] = &[
     "plumbsearch",
     "sucuri",
     "vercel",
+    // Domain marketplaces, whose homepages sell domains.
+    "afternic",
+    "dan.com",
+    "godaddy",
+    "hugedomains",
+    "namecheap",
+    "sedo",
 ];
 
 /// Whether a page with this title, description, headings and text is a
@@ -130,15 +203,31 @@ pub fn is_bot_check_page(
     if CHECK_VENDORS.iter().any(|vendor| domain.contains(vendor)) {
         return false;
     }
+    // A server's directory listing: "Index of /".
+    if title.is_some_and(|title| title.trim_start().to_lowercase().starts_with("index of /")) {
+        return true;
+    }
     if let Some(title) = title.map(normalize_text) {
         let starts = |start: &&str| {
             title
                 .strip_prefix(start)
                 .is_some_and(|rest| rest.is_empty() || rest.starts_with(' '))
         };
-        if CHECK_TITLES.contains(&title.as_str()) || CHECK_TITLE_STARTS.iter().any(starts) {
+        if CHECK_TITLES.contains(&title.as_str())
+            || PLACEHOLDER_TITLES.contains(&title.as_str())
+            || CHECK_TITLE_STARTS.iter().any(starts)
+        {
             return true;
         }
+    }
+    let stand_in = |part: &str| STAND_IN_TITLE_PARTS.contains(&normalize_text(part).as_str());
+    if title.is_some_and(|title| {
+        title
+            .split(TITLE_SEPARATORS)
+            .flat_map(|part| part.split(" - "))
+            .any(stand_in)
+    }) {
+        return true;
     }
     all().any(|text| {
         let text = format!(" {} ", normalize_text(text));
@@ -146,6 +235,64 @@ pub fn is_bot_check_page(
             .iter()
             .any(|phrase| text.contains(&format!(" {phrase} ")))
     })
+}
+
+/// Whole titles, after [`normalize_text`], of sign-in pages that
+/// companies run for themselves with someone else's product: Outlook on
+/// the web, webmail, VPN and remote-desktop gateways. Such a homepage is
+/// the company's door, not a page about the product.
+const PORTAL_TITLES: &[&str] = &[
+    "outlook",
+    "outlook web app",
+    "outlook web access",
+    "outlook sign in",
+    "sign in to outlook",
+    "microsoft exchange",
+    "exchange admin center",
+    "owa",
+    "roundcube webmail",
+    "roundcube webmail login",
+    "squirrelmail",
+    "horde",
+    "horde login",
+    "zimbra web client sign in",
+    "zimbra",
+    "webmail",
+    "webmail login",
+    "citrix gateway",
+    "netscaler gateway",
+    "netscaler aaa",
+    "citrix storefront",
+    "pulse connect secure",
+    "ivanti connect secure",
+    "globalprotect portal",
+    "sslvpn portal",
+    "fortinet ssl vpn",
+    "remote desktop web access",
+    "rd web access",
+    "vmware horizon",
+    "cpanel login",
+    "whm login",
+    "plesk login",
+    "sign in",
+    "log in",
+    "login",
+    "user login",
+    "member login",
+];
+
+/// Whether a homepage titled `title` is a sign-in page for a product the
+/// site at `domain` only uses ([`PORTAL_TITLES`]): "Outlook Web App" on
+/// bpl.net. The product's own site (outlook.com, citrix.com) is not.
+pub fn is_sign_in_portal(domain: &str, title: &str) -> bool {
+    let title = normalize_text(title);
+    if !PORTAL_TITLES.contains(&title.as_str()) {
+        return false;
+    }
+    let label = domain.split('.').next().unwrap_or("");
+    let product = title.split(' ').next().unwrap_or("");
+    let generic = ["sign", "log", "login", "user", "member", "webmail"];
+    generic.contains(&product) || !label.contains(product)
 }
 
 /// Whether `text` shows what the crawler sent rather than what the site
@@ -171,7 +318,26 @@ fn shows_the_user_agent(text: &str) -> bool {
 impl SiteRecord {
     /// Whether the record's page fields came from a bot check
     /// ([`is_bot_check_page`]) rather than the site's homepage.
+    ///
+    /// So is a homepage read on another site's host: prevention.nih.gov's
+    /// "NIH Office of Disease Prevention" kept for nih.gov, or
+    /// play.google.com's page for google.com, from crawls before those
+    /// subdomains were sites of their own ([`crate::subsites`]); crawlers
+    /// now stop at such a redirect. And so is a hosting company's page for
+    /// a suspended account (cPanel's `/cgi-sys/suspendedpage.cgi`, titled
+    /// "Contact Support").
     pub fn is_bot_check(&self) -> bool {
+        if let Some(url) = self.url.as_deref() {
+            let read_elsewhere = registrable_domain(url).is_some_and(|site| {
+                canonical_domain(&self.domain).is_some_and(|domain| site != domain)
+            });
+            let suspended = url
+                .to_ascii_lowercase()
+                .contains("/cgi-sys/suspendedpage.cgi");
+            if read_elsewhere || suspended {
+                return true;
+            }
+        }
         is_bot_check_page(
             &self.domain,
             self.title.as_deref(),
@@ -194,6 +360,7 @@ impl SiteRecord {
         self.description = None;
         self.headings.clear();
         self.body_text = None;
+        self.terms.clear();
         self.search_url = None;
         self.key_pages.clear();
         self.links_to.clear();
@@ -235,6 +402,43 @@ mod tests {
             "Verification",
         ] {
             assert!(check("example.com", title), "{title}");
+        }
+    }
+
+    #[test]
+    fn error_identity_and_parked_pages_are_not_homepages() {
+        for (domain, title) in [
+            ("fedex.com", "FedEx | System Down"),
+            ("walmart.com.mx", "Walmart - Verifica tu identidad"),
+            ("statesman.com", "Client Challenge"),
+            ("example.com", "Example: Under Maintenance"),
+            ("example.com", "503 Service Unavailable"),
+            ("example.com", "Error"),
+        ] {
+            assert!(check(domain, title), "{title}");
+        }
+        assert!(is_bot_check_page(
+            "icloud.sm",
+            Some("icloud.sm"),
+            Some("This domain is for sale!"),
+            &[],
+            None,
+        ));
+        // A marketplace's own homepage, and ordinary titles, are not.
+        assert!(!is_bot_check_page(
+            "sedo.com",
+            Some("Sedo: Buy and sell domains"),
+            Some("Buy this domain or sell yours"),
+            &[],
+            None,
+        ));
+        for title in [
+            "FedEx | Shipping, Tracking & Delivery",
+            "Downdetector",
+            "Errors in Medicine Journal",
+            "Not Found Records",
+        ] {
+            assert!(!check("example.com", title), "{title}");
         }
     }
 
@@ -345,5 +549,64 @@ mod tests {
         let mut kept = good.clone();
         assert!(!kept.drop_bot_check());
         assert_eq!(kept, good);
+    }
+
+    #[test]
+    fn placeholders_are_not_homepages() {
+        for title in [
+            "Welcome to nginx!",
+            "Coming Soon",
+            "Under Construction",
+            "Account Suspended",
+            "Index of /",
+            "Apache2 Ubuntu Default Page: It works",
+        ] {
+            assert!(check("example.com", title), "{title}");
+        }
+        for title in [
+            "Gladiator II | Coming Soon to Theaters",
+            "Nginx: Advanced Load Balancer",
+            "Index Ventures",
+        ] {
+            assert!(!check("example.com", title), "{title}");
+        }
+    }
+
+    #[test]
+    fn pages_of_another_site_or_a_suspended_account_are_dropped() {
+        let record = |domain: &str, url: &str| {
+            let mut record = SiteRecord::new(domain);
+            record.url = Some(url.into());
+            record.title = Some("Some Title".into());
+            record.crawled_at = Some(100);
+            record
+        };
+        let mut nih = record("nih.gov", "https://prevention.nih.gov/");
+        assert!(nih.drop_bot_check());
+        assert_eq!(nih.title, None);
+        assert!(record("google.com", "https://play.google.com/store/games").is_bot_check());
+        assert!(record(
+            "example.com",
+            "https://example.com/cgi-sys/suspendedpage.cgi"
+        )
+        .is_bot_check());
+        for (domain, url) in [
+            ("nih.gov", "https://www.nih.gov/"),
+            ("usbank.com", "https://www.usbank.com/index.html"),
+            ("prevention.nih.gov", "https://prevention.nih.gov/"),
+            ("squareup.com", "https://squareup.com/us/en"),
+        ] {
+            assert!(!record(domain, url).is_bot_check(), "{url}");
+        }
+    }
+
+    #[test]
+    fn sign_in_portals_of_other_products_are_told_apart() {
+        assert!(is_sign_in_portal("bpl.net", "Outlook Web App"));
+        assert!(is_sign_in_portal("se-coop.com", "Outlook"));
+        assert!(is_sign_in_portal("example.org", "Login"));
+        assert!(!is_sign_in_portal("outlook.com", "Outlook"));
+        assert!(!is_sign_in_portal("citrix.com", "Citrix Gateway"));
+        assert!(!is_sign_in_portal("bpl.net", "Brooklyn Public Library"));
     }
 }

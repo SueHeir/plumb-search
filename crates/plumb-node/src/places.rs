@@ -55,15 +55,44 @@ pub fn wanted(
     })
 }
 
-/// How many of the places file's places to keep, under `sets` and a
-/// storage limit of `storage_limit_mb`: with towns to keep places `near`,
-/// the whole file, so the places around them can be picked out of it.
-pub fn file_pages(sets: &PageSets, storage_limit_mb: u64, near: &[(f64, f64)]) -> u64 {
-    match set_info().kept(sets, storage_limit_mb) {
-        0 => 0,
-        _ if !near.is_empty() => u64::MAX,
-        count => count,
+/// The towns whose places a node with `count` places kept everywhere
+/// also keeps past them: none when it keeps them all.
+pub fn file_near(count: u64, near: &[(f64, f64)]) -> &[(f64, f64)] {
+    if count == 0 || count == u64::MAX {
+        &[]
+    } else {
+        near
     }
+}
+
+/// Names the towns `near` for a places file's notes
+/// ([`crate::pages::SetFileNotes::near`]): 0 for none.
+pub fn near_key(near: &[(f64, f64)]) -> u64 {
+    if near.is_empty() {
+        return 0;
+    }
+    let text: String = near
+        .iter()
+        .map(|(lat, lon)| format!("{lat:.2},{lon:.2}|"))
+        .collect();
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(text.as_bytes());
+    u64::from_le_bytes(digest[..8].try_into().expect("8 bytes")).max(1)
+}
+
+/// Keeps the lines of a places file that are places within [`NEAR_KM`]
+/// of a point of `near`, or specialty places ([`Place::is_specialty`]), for
+/// a file cut past its first places.
+pub fn near_lines(near: Vec<(f64, f64)>) -> crate::pages::LineFilter {
+    Box::new(move |line: &[u8]| {
+        if near.is_empty() && !may_be_specialty(line) {
+            return false;
+        }
+        std::str::from_utf8(line)
+            .ok()
+            .and_then(|line| parse_place(line.trim_end_matches(['\n', '\r'])).ok())
+            .is_some_and(|place| is_near(&place, &near) || place.is_specialty())
+    })
 }
 
 /// Places on Automatic are kept everywhere up to this many: every city
@@ -91,7 +120,8 @@ pub fn auto_places(storage_limit_mb: u64) -> u64 {
 }
 
 /// Names the index of `wanted`: changes when the file (size or time), the
-/// count or the towns changes.
+/// count or the towns changes, and when what a place is found by
+/// ([`plumb_core::place::Place::kind_words`]) changes (the `v`).
 pub fn key(wanted: &WantedPlaces) -> String {
     let meta = std::fs::metadata(&wanted.file).ok();
     let modified = meta
@@ -100,7 +130,7 @@ pub fn key(wanted: &WantedPlaces) -> String {
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map_or(0, |d| d.as_secs());
     let len = meta.map_or(0, |m| m.len());
-    let mut text = format!("v1|{len}:{modified}:{}", wanted.count);
+    let mut text = format!("v3|{len}:{modified}:{}", wanted.count);
     for (lat, lon) in &wanted.near {
         text.push_str(&format!("|{lat:.2},{lon:.2}"));
     }
@@ -121,7 +151,9 @@ pub fn read_places(path: &Path, limit: u64) -> Result<impl Iterator<Item = Place
 }
 
 /// Reads the first `limit` places of the places file `path`, most notable
-/// first, then the ones within [`NEAR_KM`] of a point of `near`.
+/// first, then the ones within [`NEAR_KM`] of a point of `near` and the
+/// specialty places ([`Place::is_specialty`]: brewpubs, climbing gyms)
+/// anywhere.
 pub fn read_places_near(
     path: &Path,
     limit: u64,
@@ -141,6 +173,13 @@ pub fn read_places_near(
             }
         })
         .filter(|(n, line)| !(line.is_empty() || *n == 0 && line.starts_with("rank\t")))
+        .enumerate()
+        // Past `limit`, only lines that may be near or a specialty are
+        // parsed: most of the file is skipped by its text.
+        .filter(move |(kept, (_, line))| {
+            (*kept as u64) < limit || !near_empty || may_be_specialty(line.as_bytes())
+        })
+        .map(|(_, line)| line)
         .filter_map(move |(n, line)| match parse_place(&line) {
             Ok(place) => Some(place),
             Err(err) => {
@@ -152,9 +191,16 @@ pub fn read_places_near(
             }
         })
         .enumerate()
-        .take_while(move |(n, _)| (*n as u64) < limit || !near_empty)
-        .filter(move |(n, place)| (*n as u64) < limit || is_near(place, &near))
+        .filter(move |(n, place)| {
+            (*n as u64) < limit || is_near(place, &near) || place.is_specialty()
+        })
         .map(|(_, place)| place))
+}
+
+/// Whether a places file line may be a specialty place, by its text alone.
+fn may_be_specialty(line: &[u8]) -> bool {
+    let has = |needle: &[u8]| line.windows(needle.len()).any(|w| w == needle);
+    has(b"craft=brewery") || has(b"sport=")
 }
 
 /// Whether `place` is within [`NEAR_KM`] of a point of `near`.
@@ -329,19 +375,35 @@ mod tests {
                 place("Denver", "place=city", 39.7392, -104.9903, "n1"),
                 place("Paris cafe", "amenity=cafe", 48.85, 2.35, "n2"),
                 place("Denver cafe", "amenity=cafe", 39.76, -104.99, "n3"),
+                Place {
+                    tags: vec!["sport=climbing".into()],
+                    ..place("Paris climbing", "leisure=sports_centre", 48.86, 2.35, "n4")
+                },
             ],
         );
         let sets = PageSets::parse("places=1").unwrap();
         let denver = [(39.74, -104.99)];
-        // With a town, the whole file is wanted, to pick places out of it.
-        assert_eq!(file_pages(&sets, 2_000, &denver), u64::MAX);
-        assert_eq!(file_pages(&sets, 2_000, &[]), 1);
+        // With a town, the file keeps the places near it past the first.
+        assert_eq!(file_near(1, &denver), &denver[..]);
+        assert!(file_near(u64::MAX, &denver).is_empty());
+        assert_ne!(near_key(&denver), 0);
+        assert_eq!(near_key(&[]), 0);
+        let keep = near_lines(denver.to_vec());
+        let file = set_info().file(data);
+        let lines: Vec<String> =
+            std::io::BufRead::lines(plumb_ingest::open_maybe_gz(&file).unwrap())
+                .map(Result::unwrap)
+                .skip(1)
+                .collect();
+        let kept: Vec<bool> = lines.iter().map(|l| keep(l.as_bytes())).collect();
+        assert_eq!(kept, [true, false, true, true]);
         let near = wanted(data, &sets, 2_000, &denver).unwrap();
         let names: Vec<String> = read_places_near(&near.file, near.count, near.near.clone())
             .unwrap()
             .map(|p| p.name)
             .collect();
-        assert_eq!(names, ["Denver", "Denver cafe"]);
+        // Climbing gyms are kept anywhere.
+        assert_eq!(names, ["Denver", "Denver cafe", "Paris climbing"]);
         let far = wanted(data, &sets, 2_000, &[]).unwrap();
         assert_ne!(key(&near), key(&far));
         // Keeping everything needs no towns.

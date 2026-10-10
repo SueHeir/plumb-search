@@ -52,6 +52,18 @@ pub const SETS: &[SetInfo] = &[
         bytes_per_page: 100,
     },
     SetInfo {
+        id: "wikipedia-es",
+        name: "Spanish Wikipedia articles",
+        pages: 2_000_000,
+        bytes_per_page: 100,
+    },
+    SetInfo {
+        id: "wikipedia-de",
+        name: "German Wikipedia articles",
+        pages: 3_000_000,
+        bytes_per_page: 100,
+    },
+    SetInfo {
         id: plumb_index::pages::GITHUB_SET,
         name: "GitHub repositories",
         pages: 300_000,
@@ -62,6 +74,12 @@ pub const SETS: &[SetInfo] = &[
         name: "Stack Overflow questions",
         pages: 2_000_000,
         bytes_per_page: 120,
+    },
+    SetInfo {
+        id: plumb_index::pages::STACKEXCHANGE_SET,
+        name: "Other Stack Exchange questions (Super User, Ask Ubuntu, Home Improvement and more)",
+        pages: 800_000,
+        bytes_per_page: 130,
     },
     SetInfo {
         id: plumb_index::pages::BOOKS_SET,
@@ -76,10 +94,47 @@ pub const SETS: &[SetInfo] = &[
         bytes_per_page: 140,
     },
     SetInfo {
+        id: plumb_index::pages::MUSIC_SET,
+        name: "Songs and albums (MusicBrainz)",
+        pages: 180_000,
+        bytes_per_page: 200,
+    },
+    SetInfo {
+        id: plumb_index::pages::FILMS_SET,
+        name: "Films and TV shows (Wikidata)",
+        pages: 150_000,
+        bytes_per_page: 220,
+    },
+    SetInfo {
+        id: plumb_index::pages::DOCS_SET,
+        name: "Software docs (MDN, Python, Rust and more)",
+        pages: 400_000,
+        bytes_per_page: 250,
+    },
+    SetInfo {
+        id: plumb_index::pages::REFERENCE_SET,
+        name: "Reference pages (health, dictionaries, recipes, how-tos and more)",
+        pages: 700_000,
+        bytes_per_page: 300,
+    },
+    SetInfo {
+        id: plumb_index::pages::REFERENCE2_SET,
+        name: "Staged reference pages (stricter title relevance)",
+        pages: 700_000,
+        bytes_per_page: 300,
+    },
+    SetInfo {
+        id: plumb_index::pages::SUBPAGES_SET,
+        name: "Pages of universities, companies, government, entertainment and museums",
+        pages: 300_000,
+        bytes_per_page: 300,
+    },
+    SetInfo {
         id: plumb_index::pages::PAPERS_SET,
-        name: "Papers (OpenAlex)",
+        name: "Papers (OpenAlex, arXiv, CORE)",
         pages: 2_000_000,
-        bytes_per_page: 160,
+        // About half have a free copy's address.
+        bytes_per_page: 200,
     },
     SetInfo {
         id: plumb_index::pages::PACKAGES_SET,
@@ -92,6 +147,12 @@ pub const SETS: &[SetInfo] = &[
         name: "Official profiles without an article (Wikidata)",
         pages: 100_000,
         bytes_per_page: 200,
+    },
+    SetInfo {
+        id: plumb_index::pages::WIKTIONARY_SET,
+        name: "Word definitions (Wiktionary), for \"define\" searches",
+        pages: 1_000_000,
+        bytes_per_page: 150,
     },
     // Searched apart from the pages, by where they are (see
     // `crate::places`).
@@ -109,6 +170,9 @@ impl SetInfo {
     /// (see [`crate::places::auto_places`]).
     pub fn kept(&self, sets: &PageSets, storage_limit_mb: u64) -> u64 {
         match sets.size(self.id) {
+            // Initial language editions are opt-in by count or All;
+            // adding support does not trigger an unbounded download.
+            PageSetSize::Auto if matches!(self.id, "wikipedia-es" | "wikipedia-de") => 0,
             PageSetSize::Auto if self.id == plumb_index::places::PLACES_SET => {
                 crate::places::auto_places(storage_limit_mb)
             }
@@ -118,6 +182,18 @@ impl SetInfo {
 
     pub fn find(id: &str) -> Option<&'static SetInfo> {
         SETS.iter().find(|set| set.id == id)
+    }
+
+    /// The set a person names, by its id or by a name it had before
+    /// ("subpages" for [`plumb_index::pages::SUBPAGES_SET`]). Only for what
+    /// people type: a set is never served or asked for by an old name.
+    pub fn named(name: &str) -> Option<&'static SetInfo> {
+        let id = if name == plumb_index::pages::OLD_SUBPAGES_SET {
+            plumb_index::pages::SUBPAGES_SET
+        } else {
+            name
+        };
+        SetInfo::find(id)
     }
 
     /// The set's file in `data_dir`.
@@ -130,7 +206,7 @@ impl SetInfo {
     }
 
     /// Reads up to `limit` pages of the set's file `path`, most read first.
-    fn read(&self, path: &Path, limit: u64) -> Result<impl Iterator<Item = Page>> {
+    pub(crate) fn read(&self, path: &Path, limit: u64) -> Result<impl Iterator<Item = Page>> {
         // Every set's file is an articles file (see `Page::from_set`).
         let id = self.id;
         if !Page::has_reader(id) {
@@ -180,6 +256,7 @@ impl SetInfo {
                     complete: true,
                     source_modified: 0,
                     fetched_at: 0,
+                    near: 0,
                 }),
         )
     }
@@ -187,6 +264,9 @@ impl SetInfo {
     /// The set's file in `data_dir` when it is whole, so it can be handed
     /// to other nodes.
     pub fn servable_file(&self, data_dir: &Path) -> Option<PathBuf> {
+        if self.id == plumb_index::pages::REFERENCE2_SET && !reference_stage_ready(data_dir) {
+            return None;
+        }
         self.file_notes(data_dir)
             .filter(|notes| notes.complete)
             .map(|_| self.file(data_dir))
@@ -205,6 +285,11 @@ pub struct SetFileNotes {
     pub source_modified: u64,
     /// When it was taken (Unix seconds).
     pub fetched_at: u64,
+    /// Past its first pages, the file holds only the places near the
+    /// towns with this key ([`crate::places::near_key`]); 0 when it holds
+    /// no more than its first pages.
+    #[serde(default)]
+    pub near: u64,
 }
 
 /// `<file>.json`, the notes of a set file.
@@ -236,7 +321,18 @@ pub struct SetFileCutter {
     /// Whether lines past the limit were dropped.
     cut: bool,
     out: Option<flate2::write::GzEncoder<std::io::BufWriter<std::fs::File>>>,
+    /// Past the limit, the lines to keep still ([`SetFileCutter::keep_past`]).
+    keep_past: Option<LineFilter>,
+    /// The line past the limit being read, whole lines being needed to
+    /// choose.
+    pending: Vec<u8>,
+    /// A metadata line at the cutoff still belongs to the last kept page.
+    boundary_profiles: bool,
+    kept_parent: bool,
 }
+
+/// Whether to keep a line of a set file past its first pages.
+pub type LineFilter = Box<dyn Fn(&[u8]) -> bool + Send>;
 
 impl SetFileCutter {
     pub fn create(path: &Path, limit: u64) -> Result<Self> {
@@ -252,7 +348,41 @@ impl SetFileCutter {
                 std::io::BufWriter::new(file),
                 flate2::Compression::default(),
             )),
+            keep_past: None,
+            pending: Vec::new(),
+            boundary_profiles: false,
+            kept_parent: false,
         })
+    }
+
+    /// Past the limit, goes on through the whole file keeping the lines
+    /// `keep` says to (the places near the node's towns), rather than
+    /// stopping.
+    pub fn keep_past(mut self, keep: LineFilter) -> Self {
+        self.keep_past = Some(keep);
+        self
+    }
+
+    /// Writes `line`, read past the limit, if it is kept.
+    fn finish_line(&mut self, line: &[u8]) -> std::io::Result<()> {
+        if is_profiles_line(line) {
+            if self.kept_parent {
+                if let Some(out) = self.out.as_mut() {
+                    std::io::Write::write_all(out, line)?;
+                }
+            }
+            return Ok(());
+        }
+        let keep = self.keep_past.as_ref().is_some_and(|keep| keep(line));
+        self.kept_parent = keep;
+        match self.out.as_mut() {
+            Some(out) if keep && !is_profiles_line(line) => {
+                std::io::Write::write_all(out, line)?;
+                self.lines += 1;
+            }
+            _ => self.cut = true,
+        }
+        Ok(())
     }
 
     /// Pages written so far.
@@ -260,9 +390,11 @@ impl SetFileCutter {
         self.lines
     }
 
-    /// Whether it has all the pages it wants.
+    /// Whether it has read past the last kept page's metadata: never with
+    /// [`SetFileCutter::keep_past`], which reads to the end. Reaching the
+    /// article count alone must not drop that article's profiles/search.
     pub fn full(&self) -> bool {
-        self.lines >= self.limit
+        self.keep_past.is_none() && self.cut
     }
 
     /// Whether pages past the limit were dropped, so the file is not
@@ -273,6 +405,10 @@ impl SetFileCutter {
 
     /// Finishes the gzip file.
     pub fn finish(&mut self) -> Result<()> {
+        if !self.pending.is_empty() {
+            let line = std::mem::take(&mut self.pending);
+            self.finish_line(&line)?;
+        }
         if let Some(out) = self.out.take() {
             out.finish()?
                 .into_inner()
@@ -287,9 +423,53 @@ impl std::io::Write for SetFileCutter {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         let mut rest = buf;
         while !rest.is_empty() && !self.full() {
-            let Some(out) = self.out.as_mut() else { break };
             let end = rest.iter().position(|&b| b == b'\n').map(|i| i + 1);
             let piece = &rest[..end.unwrap_or(rest.len())];
+            if self.header_done && self.lines >= self.limit {
+                if self.keep_past.is_none() {
+                    // Buffer only enough prefix to decide whether this is
+                    // metadata of the parent at the cutoff. Once decided,
+                    // stream the rest without retaining a whole line.
+                    let mut remaining = piece;
+                    if !self.boundary_profiles {
+                        let wanted = PROFILES_LINE.len().saturating_sub(self.pending.len());
+                        let take = wanted.min(remaining.len());
+                        self.pending.extend_from_slice(&remaining[..take]);
+                        remaining = &remaining[take..];
+                        if !self.kept_parent || !PROFILES_LINE.as_bytes().starts_with(&self.pending)
+                        {
+                            self.cut = true;
+                            self.pending.clear();
+                            break;
+                        }
+                        if self.pending.len() < PROFILES_LINE.len() {
+                            return Ok(buf.len());
+                        }
+                        if let Some(out) = self.out.as_mut() {
+                            out.write_all(&self.pending)?;
+                        }
+                        self.pending.clear();
+                        self.boundary_profiles = true;
+                    }
+                    if let Some(out) = self.out.as_mut() {
+                        out.write_all(remaining)?;
+                    }
+                    if end.is_some() {
+                        self.boundary_profiles = false;
+                    }
+                    rest = &rest[piece.len()..];
+                    continue;
+                }
+                // Past the limit with keep_past: whole lines, then choose.
+                self.pending.extend_from_slice(piece);
+                if end.is_some() {
+                    let line = std::mem::take(&mut self.pending);
+                    self.finish_line(&line)?;
+                }
+                rest = &rest[piece.len()..];
+                continue;
+            }
+            let Some(out) = self.out.as_mut() else { break };
             out.write_all(piece)?;
             // A line of profiles is not a page (see `plumb_core::article`).
             // Lines can come in pieces, so their starts are kept.
@@ -301,6 +481,7 @@ impl std::io::Write for SetFileCutter {
                     self.header_done = true;
                 } else if !is_profiles_line(&self.line_start) {
                     self.lines += 1;
+                    self.kept_parent = true;
                 }
                 self.line_start.clear();
             }
@@ -435,11 +616,21 @@ pub struct PageSets(pub BTreeMap<String, PageSetSize>);
 
 impl PageSets {
     pub fn size(&self, set: &str) -> PageSetSize {
-        self.0.get(set).copied().unwrap_or_default()
+        // Migration is opt-in. An upgrade keeps the legacy file/settings
+        // while the new generation is evaluated; it never implicitly
+        // downloads a differently gated dataset.
+        if set == plumb_index::pages::REFERENCE2_SET {
+            return self.0.get(set).copied().unwrap_or(PageSetSize::Off);
+        }
+        let old = (set == plumb_index::pages::SUBPAGES_SET)
+            .then(|| self.0.get(plumb_index::pages::OLD_SUBPAGES_SET))
+            .flatten();
+        // A size chosen for the set under its old name still holds.
+        self.0.get(set).or(old).copied().unwrap_or_default()
     }
 
     pub fn set(&mut self, set: &str, size: PageSetSize) {
-        if size == PageSetSize::Auto {
+        if size == PageSetSize::Auto && set != plumb_index::pages::REFERENCE2_SET {
             self.0.remove(set);
         } else {
             self.0.insert(set.to_string(), size);
@@ -466,15 +657,69 @@ impl PageSets {
             let (set, size) = part
                 .split_once('=')
                 .with_context(|| format!("expected SET=SIZE, got {part:?}"))?;
-            if SetInfo::find(set.trim()).is_none() {
+            let Some(info) = SetInfo::named(set.trim()) else {
                 bail!(
                     "unknown page set {set:?}; there are: {}",
                     SETS.iter().map(|s| s.id).collect::<Vec<_>>().join(", ")
                 );
-            }
-            sets.set(set.trim(), size.parse()?);
+            };
+            sets.set(info.id, size.parse()?);
         }
         Ok(sets)
+    }
+}
+
+/// Which set files a node replaces by itself when a trusted node has a
+/// newer one (see `node/newer.rs`); `plumb run --set-updates`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum SetUpdates {
+    /// Every set and the map file, each growing at most
+    /// `MAX_GROWTH_PERCENT` past this node's own file at a time.
+    #[default]
+    All,
+    /// None: set files change only by hand (or `fetch-pages`). Files a node
+    /// has none of, or too few pages of, are still taken.
+    Off,
+    /// Only these sets (`map` for the map file), with no limit on growth:
+    /// naming a set says this machine can hold whatever it grows to.
+    Only(Vec<String>),
+}
+
+impl SetUpdates {
+    /// Whether `set` is updated, and whether with no limit on growth.
+    pub fn allows(&self, set: &str) -> Option<bool> {
+        match self {
+            SetUpdates::All => Some(false),
+            SetUpdates::Off => None,
+            SetUpdates::Only(sets) => sets.iter().any(|s| s == set).then_some(true),
+        }
+    }
+}
+
+impl FromStr for SetUpdates {
+    type Err = anyhow::Error;
+
+    /// `all`, `off`, or sets separated by commas: `films,map`.
+    fn from_str(text: &str) -> Result<Self> {
+        Ok(match text.trim().to_ascii_lowercase().as_str() {
+            "all" | "" => SetUpdates::All,
+            "off" | "none" => SetUpdates::Off,
+            list => {
+                let mut sets = Vec::new();
+                for set in list.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                    let set = match SetInfo::named(set) {
+                        Some(info) => info.id,
+                        None if set == "map" => set,
+                        None => bail!(
+                            "unknown page set {set:?}; there are: map, {}",
+                            SETS.iter().map(|s| s.id).collect::<Vec<_>>().join(", ")
+                        ),
+                    };
+                    sets.push(set.to_string());
+                }
+                SetUpdates::Only(sets)
+            }
+        })
     }
 }
 
@@ -489,13 +734,25 @@ impl Wanted {
     /// The sets of `data_dir` to keep under `sets` and a storage limit of
     /// `storage_limit_mb`; sets with no file yet are left out.
     pub fn new(data_dir: &Path, sets: &PageSets, storage_limit_mb: u64) -> Self {
+        let staged = SetInfo::find(plumb_index::pages::REFERENCE2_SET).unwrap();
+        let use_staged = staged.kept(sets, storage_limit_mb) > 0 && reference_stage_ready(data_dir);
         Wanted {
             sets: SETS
                 .iter()
                 .filter(|set| set.id != plumb_index::places::PLACES_SET)
+                .filter(|set| {
+                    if set.id == plumb_index::pages::REFERENCE2_SET {
+                        use_staged
+                    } else if set.id == plumb_index::pages::REFERENCE_SET {
+                        !use_staged
+                    } else {
+                        true
+                    }
+                })
                 .filter_map(|set| {
                     let pages = set.kept(sets, storage_limit_mb);
                     let file = set.file(data_dir);
+                    let file = plumb_net::pages::generation_file(&file).unwrap_or(file);
                     (pages > 0 && file.is_file()).then_some((set, file, pages))
                 })
                 .collect(),
@@ -508,8 +765,9 @@ impl Wanted {
         if self.sets.is_empty() {
             return None;
         }
-        // v2: pages keep their Wikidata item.
-        let mut text = String::from("v2");
+        // Keep schema generations separate; the indexed scope fields used
+        // by typed docs retrieval require a fresh index, not a new crawl.
+        let mut text = String::from(plumb_index::pages::PAGE_INDEX_VERSION);
         for (set, file, pages) in &self.sets {
             let meta = std::fs::metadata(file).ok();
             let modified = meta
@@ -519,11 +777,33 @@ impl Wanted {
                 .map_or(0, |d| d.as_secs());
             let len = meta.map_or(0, |m| m.len());
             text.push_str(&format!("|{}:{len}:{modified}:{pages}", set.id));
+            if let Some(quality) = plumb_net::pages::read_quality(file, modified, len) {
+                text.push_str(&format!(":generation={}", quality.generation));
+            }
         }
         use sha2::{Digest, Sha256};
         let digest = Sha256::digest(text.as_bytes());
         Some(digest[..8].iter().map(|b| format!("{b:02x}")).collect())
     }
+}
+
+/// A staged reference generation must have explicit complete/count notes.
+/// Unknown legacy counts cannot establish preserved coverage. A completed
+/// stage may lose at most the existing peer transfer coverage allowance
+/// (10%) before replacing the legacy generation in this reader. Removing
+/// or disabling the stage falls back to the retained legacy file.
+fn reference_stage_ready(data_dir: &Path) -> bool {
+    let staged = SetInfo::find(plumb_index::pages::REFERENCE2_SET).unwrap();
+    let Some(notes) = staged.file_notes(data_dir) else {
+        return false;
+    };
+    if !notes.complete || notes.lines == 0 || notes.lines == u64::MAX {
+        return false;
+    }
+    let legacy = SetInfo::find(plumb_index::pages::REFERENCE_SET).unwrap();
+    legacy.file_notes(data_dir).is_none_or(|old| {
+        old.lines != u64::MAX && notes.lines.saturating_mul(100) >= old.lines.saturating_mul(90)
+    })
 }
 
 /// The directory of the page index named `key`.
@@ -576,7 +856,37 @@ pub fn remove_other_indexes(data_dir: &Path, keep: Option<&str>) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn spanish_and_german_editions_are_explicitly_selectable_and_not_implicitly_downloaded() {
+        for id in ["wikipedia-es", "wikipedia-de"] {
+            let set = super::SetInfo::find(id).unwrap();
+            assert_eq!(set.kept(&super::PageSets::default(), 0), 0);
+            let chosen = super::PageSets::parse(&format!("{id}=25000")).unwrap();
+            assert_eq!(set.kept(&chosen, 0), 25_000);
+        }
+    }
     use super::*;
+
+    #[test]
+    fn a_cutter_can_keep_chosen_lines_past_its_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("cut.tsv.gz");
+        let mut cutter = SetFileCutter::create(&out, 2)
+            .unwrap()
+            .keep_past(Box::new(|line: &[u8]| line.starts_with(b"keep")));
+        // In pieces that split lines.
+        let text = b"header\na\nb\ndrop 1\nkeep 2\ndrop 3\nkeep 4";
+        for piece in text.chunks(3) {
+            std::io::Write::write_all(&mut cutter, piece).unwrap();
+        }
+        assert!(!cutter.full());
+        cutter.finish().unwrap();
+        assert_eq!((cutter.pages(), cutter.cut()), (4, true));
+        let mut kept = String::new();
+        std::io::Read::read_to_string(&mut plumb_ingest::open_maybe_gz(&out).unwrap(), &mut kept)
+            .unwrap();
+        assert_eq!(kept, "header\na\nb\nkeep 2\nkeep 4");
+    }
     use plumb_core::article::{write_article, Article, ARTICLES_HEADER};
 
     fn write_set(data_dir: &Path, titles: &[(&str, u64)]) {
@@ -608,6 +918,69 @@ mod tests {
     }
 
     #[test]
+    fn reference2_is_opt_in_and_preserves_legacy_coverage_until_ready() {
+        use plumb_index::pages::{REFERENCE2_SET, REFERENCE_SET};
+        let dir = tempfile::tempdir().unwrap();
+        let legacy = SetInfo::find(REFERENCE_SET).unwrap();
+        let staged = SetInfo::find(REFERENCE2_SET).unwrap();
+        std::fs::create_dir_all(sets_dir(dir.path())).unwrap();
+        std::fs::write(legacy.file(dir.path()), b"legacy").unwrap();
+        std::fs::write(staged.file(dir.path()), b"staged").unwrap();
+        let defaults = PageSets::default();
+        assert_eq!(defaults.size(REFERENCE2_SET), PageSetSize::Off);
+        assert_eq!(defaults.size(REFERENCE_SET), PageSetSize::Auto);
+        let mut automatic = PageSets::default();
+        automatic.set(REFERENCE2_SET, PageSetSize::Auto);
+        assert_eq!(automatic.size(REFERENCE2_SET), PageSetSize::Auto);
+        let old_settings: PageSets = serde_json::from_str(r#"{"reference":"all"}"#).unwrap();
+        assert_eq!(old_settings.size(REFERENCE_SET), PageSetSize::All);
+        assert_eq!(old_settings.size(REFERENCE2_SET), PageSetSize::Off);
+        assert_eq!(SetInfo::named("reference").unwrap().id, REFERENCE_SET);
+        assert_eq!(SetInfo::named("reference2").unwrap().id, REFERENCE2_SET);
+        let mut settings = old_settings;
+        settings.set(REFERENCE2_SET, PageSetSize::All);
+        let selected = || {
+            Wanted::new(dir.path(), &settings, 0)
+                .sets
+                .into_iter()
+                .map(|(set, _, _)| set.id)
+                .collect::<Vec<_>>()
+        };
+        let notes = |set: &SetInfo, lines: u64, complete: bool| {
+            std::fs::write(
+                notes_path(&set.file(dir.path())),
+                serde_json::to_vec(&SetFileNotes {
+                    lines,
+                    complete,
+                    source_modified: 0,
+                    fetched_at: 0,
+                    near: 0,
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        };
+        // A bare renamed file does not establish completion or coverage.
+        assert_eq!(selected(), [REFERENCE_SET]);
+        assert!(staged.servable_file(dir.path()).is_none());
+        assert!(legacy.servable_file(dir.path()).is_some());
+        notes(legacy, 1_000, true);
+        notes(staged, 1_000, false);
+        assert_eq!(selected(), [REFERENCE_SET]);
+        notes(staged, 899, true);
+        assert_eq!(selected(), [REFERENCE_SET]);
+        assert!(staged.servable_file(dir.path()).is_none());
+        notes(staged, 900, true);
+        assert_eq!(selected(), [REFERENCE2_SET]);
+        assert!(staged.servable_file(dir.path()).is_some());
+        // New name is served separately; legacy bytes remain available to
+        // older readers and rollback. Never index both generations.
+        assert!(legacy.file(dir.path()).is_file());
+        std::fs::remove_file(staged.file(dir.path())).unwrap();
+        assert_eq!(selected(), [REFERENCE_SET]);
+    }
+
+    #[test]
     fn cutting_keeps_the_top_pages() {
         use std::io::Write;
         let dir = tempfile::tempdir().unwrap();
@@ -625,6 +998,14 @@ mod tests {
                     item: Some(format!("Q{views}")),
                     views,
                     profiles,
+                    sections: vec![format!("Section {title}")],
+                    search: Some(plumb_core::article::SearchContent {
+                        symbols: vec![plumb_core::article::SearchSymbol {
+                            identifier: format!("symbol_{title}"),
+                            anchor: Some(format!("anchor-{title}")),
+                        }],
+                        ..plumb_core::article::SearchContent::default()
+                    }),
                     ..Article::default()
                 },
             )
@@ -652,6 +1033,87 @@ mod tests {
         assert_eq!(back.len(), 2);
         assert_eq!(back[1].title, "B");
         assert_eq!(back[0].profiles[0].id, "accountA");
+        assert_eq!(back[1].profiles[0].id, "accountB");
+        assert_eq!(back[1].sections, ["Section B"]);
+        assert_eq!(
+            back[1].search.as_ref().unwrap().symbols[0].identifier,
+            "symbol_B"
+        );
+    }
+
+    #[test]
+    fn cutoff_metadata_stays_with_its_parent_at_every_byte_boundary() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let text = b"views\ttitle\tdescription\titem\tsite\taliases\n1\tA\t\turlA\t\t\nprofiles\turlA\tsection=Methods|search={\"version\":1,\"symbols\":[{\"identifier\":\"exact_symbol\"}]}\n1\tB\t\turlB\t\t\nprofiles\turlB\tsection=Excluded\n";
+        for size in [1, 2, 7, 9, 64, text.len()] {
+            let out = dir.path().join(format!("cut-{size}.tsv.gz"));
+            let mut cutter = SetFileCutter::create(&out, 1).unwrap();
+            for piece in text.chunks(size) {
+                cutter.write_all(piece).unwrap();
+                if cutter.full() {
+                    break;
+                }
+            }
+            cutter.finish().unwrap();
+            let back =
+                plumb_core::article::read_articles(plumb_ingest::open_maybe_gz(&out).unwrap(), 10)
+                    .unwrap();
+            assert_eq!(back.len(), 1, "chunks of {size}");
+            assert_eq!(back[0].sections, ["Methods"]);
+            assert_eq!(
+                back[0].search.as_ref().unwrap().symbols[0].identifier,
+                "exact_symbol"
+            );
+        }
+    }
+
+    #[test]
+    fn selective_cutters_keep_metadata_only_with_selected_parents() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("selected.tsv.gz");
+        let mut text = ARTICLES_HEADER.as_bytes().to_vec();
+        for (title, views) in [("A", 3), ("B", 1), ("C", 2)] {
+            write_article(
+                &mut text,
+                &Article {
+                    title: title.into(),
+                    item: Some(format!("url{title}")),
+                    views,
+                    sections: vec![format!("Section {title}")],
+                    search: Some(plumb_core::article::SearchContent {
+                        symbols: vec![plumb_core::article::SearchSymbol {
+                            identifier: format!("symbol_{title}"),
+                            anchor: None,
+                        }],
+                        ..plumb_core::article::SearchContent::default()
+                    }),
+                    ..Article::default()
+                },
+            )
+            .unwrap();
+        }
+        let mut cutter = SetFileCutter::create(&out, 1)
+            .unwrap()
+            .keep_past(Box::new(|line| line.starts_with(b"2\t")));
+        for piece in text.chunks(3) {
+            cutter.write_all(piece).unwrap();
+        }
+        cutter.finish().unwrap();
+        assert_eq!(cutter.pages(), 2);
+        let back =
+            plumb_core::article::read_articles(plumb_ingest::open_maybe_gz(&out).unwrap(), 10)
+                .unwrap();
+        assert_eq!(
+            back.iter().map(|a| a.title.as_str()).collect::<Vec<_>>(),
+            ["A", "C"]
+        );
+        assert_eq!(back[1].sections, ["Section C"]);
+        assert_eq!(
+            back[1].search.as_ref().unwrap().symbols[0].identifier,
+            "symbol_C"
+        );
     }
 
     #[test]
@@ -675,6 +1137,20 @@ mod tests {
         let sets = PageSets::parse("wikipedia-en=off").unwrap();
         assert_eq!(sets.size("wikipedia-en"), PageSetSize::Off);
         assert!(PageSets::parse("nope=all").is_err());
+        // The subpages set's old name still names it, and a size saved
+        // under it still holds.
+        let subpages = plumb_index::pages::SUBPAGES_SET;
+        let old = PageSets::parse("subpages=off").unwrap();
+        assert_eq!(old.size(subpages), PageSetSize::Off);
+        let saved: PageSets = serde_json::from_str(r#"{"subpages":"off"}"#).unwrap();
+        assert_eq!(saved.size(subpages), PageSetSize::Off);
+        assert_eq!(
+            "subpages".parse::<SetUpdates>().unwrap(),
+            SetUpdates::Only(vec![subpages.to_string()])
+        );
+        // Never under the old name otherwise.
+        assert!(SetInfo::find("subpages").is_none());
+        assert_eq!(SetInfo::named("subpages").unwrap().id, subpages);
         let json = serde_json::to_string(&sets).unwrap();
         assert_eq!(json, r#"{"wikipedia-en":"off"}"#);
         assert_eq!(serde_json::from_str::<PageSets>(&json).unwrap(), sets);
@@ -785,6 +1261,52 @@ mod tests {
         );
         assert_eq!(question.page.set_name(), "Stack Overflow");
         assert_eq!(question.page.set_domain(), "stackoverflow.com");
+    }
+
+    #[test]
+    fn other_stack_exchange_questions_are_searched_by_their_words() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path();
+        write_set(data, &[("Drain", 5_000)]);
+        let file = SetInfo::find("stackexchange").unwrap().file(data);
+        let mut text = ARTICLES_HEADER.as_bytes().to_vec();
+        for (title, item) in [
+            (
+                "How can I unclog a bathroom sink drain?",
+                "diy.stackexchange.com/2142",
+            ),
+            // A site Plumb doesn't know is left out.
+            ("How can I unclog a drain fast?", "evil.example/1"),
+        ] {
+            write_article(
+                &mut text,
+                &Article {
+                    title: title.to_string(),
+                    description: Some("plumbing, drain, clog".to_string()),
+                    item: Some(item.to_string()),
+                    views: 400_000,
+                    ..Article::default()
+                },
+            )
+            .unwrap();
+        }
+        std::fs::write(&file, text).unwrap();
+        let wanted = Wanted::new(data, &PageSets::default(), 0);
+        let (_, searcher) = open_or_build(data, &wanted).unwrap().unwrap();
+        let hits = searcher.search("how to unclog a drain", 5).unwrap();
+        let questions: Vec<_> = hits
+            .iter()
+            .filter(|h| h.page.set == "stackexchange")
+            .collect();
+        assert_eq!(questions.len(), 1, "{hits:#?}");
+        let question = questions[0];
+        assert_eq!(
+            question.page.url,
+            "https://diy.stackexchange.com/questions/2142"
+        );
+        assert_eq!(question.page.set_name(), "Home Improvement");
+        assert_eq!(question.page.set_domain(), "diy.stackexchange.com");
+        assert_eq!(question.page.language(), Some("en"));
     }
 
     #[test]

@@ -23,8 +23,8 @@ use anyhow::{Context, Result};
 use osmpbf::{Element, ElementReader, RelMemberType};
 use plumb_core::normalize_country;
 use plumb_core::place::{
-    distance_km, normalize_region, place_rank, Place, MAX_PLACE_ALIASES, MAX_PLACE_NAME_CHARS,
-    MAX_WEBSITE_CHARS,
+    brews_where_served, distance_km, normalize_region, place_rank, Place, BREWERY_TAG,
+    MAX_PLACE_ALIASES, MAX_PLACE_NAME_CHARS, MAX_WEBSITE_CHARS,
 };
 use tracing::info;
 
@@ -192,6 +192,23 @@ fn place_of(tags: &[(&str, &str)], osm: String, node: bool) -> Option<Place> {
         }
     }
     place_tags.truncate(4);
+    // A pub that brews its own ("brewery in denver"), and what a sports
+    // centre is for ("climbing gym").
+    if brews_where_served(&kind)
+        && (get("craft") == Some("brewery") || get("microbrewery") == Some("yes"))
+    {
+        place_tags.push(BREWERY_TAG.to_string());
+    }
+    if let Some(sports) = get("sport") {
+        for sport in sports
+            .split(';')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .take(2)
+        {
+            place_tags.push(format!("sport={}", sport.to_lowercase()));
+        }
+    }
     let website = ["website", "contact:website", "url", "brand:website"]
         .iter()
         .find_map(|key| get(key).and_then(clean_website));
@@ -685,6 +702,30 @@ mod tests {
             true
         )
         .is_none());
+        // A pub that brews, and a climbing gym, are found by those words.
+        let pub_ = place_of(
+            &tags(&[
+                ("name", "Wynkoop"),
+                ("amenity", "pub"),
+                ("microbrewery", "yes"),
+            ]),
+            "n6".into(),
+            true,
+        )
+        .unwrap();
+        assert!(pub_.tags.contains(&"craft=brewery".to_string()));
+        assert!(pub_.kind_words().to_lowercase().contains("brewery"));
+        let gym = place_of(
+            &tags(&[
+                ("name", "Vertical World"),
+                ("leisure", "sports_centre"),
+                ("sport", "climbing;fitness"),
+            ]),
+            "n7".into(),
+            true,
+        )
+        .unwrap();
+        assert!(gym.kind_words().contains("climbing"));
         // Towns come from nodes only.
         let town = tags(&[
             ("name", "New York"),

@@ -8,7 +8,9 @@ Information Retrieval or an unconditional anonymity guarantee. The
 browser looks up the results itself:
 
 1. It works out the query's **keys**: the whole query joined and its words
-   (`us bank` -> `usbank`, `bank`, `us`), as in `plumb_core::keys`.
+   (`us bank` -> `usbank`, `bank`, `us`), as in `plumb_core::keys`. Small
+   joining words are left out of a longer query (`weather in denver` ->
+   `weatherindenver`, `weather`, `denver`).
 2. Each key falls in one of 16,384 **buckets** by its hash. The browser
    picks the buckets of the first keys and pads them with random buckets,
    so it always asks for 4.
@@ -87,7 +89,8 @@ frequencies), and accents are not folded (`nestle` does not find
 agrees with the index on a set of queries.
 
 The home country comes from the node, as for normal search: from the
-browser's language unless the node was started with `--country`.
+browser's language unless the node was started with `--country`, else the
+United States.
 
 Kind searches ("banks") only find sites that also carry the word in their
 names, since buckets hold sites by their names, not their kinds.

@@ -21,21 +21,34 @@ use flate2::read::MultiGzDecoder;
 pub mod articles;
 pub mod builder;
 pub mod ccranks;
+pub mod core_ac;
+pub mod docs;
 pub mod download;
 pub mod facts;
+pub mod films;
 pub mod github;
 pub mod intros;
+pub mod item_facts;
 pub mod kind_sites;
+pub mod leads;
+pub mod musicbrainz;
 pub mod openalex;
 pub mod openlibrary;
 pub mod osm;
 pub mod packages;
+pub mod paper_names;
+pub mod paper_validation;
 pub mod podcasts;
 pub mod profiles;
+pub mod recent_papers;
+pub mod reference;
 pub mod stackexchange;
+pub mod subpages;
 pub mod tranco;
 pub mod wat;
+pub mod wet;
 pub mod wikidata;
+pub mod wiktionary;
 
 pub use builder::Builder;
 pub use ccranks::{load_cc_domain_ranks, CcRank, DEFAULT_CC_RANKS_LIMIT};
@@ -45,7 +58,7 @@ pub use tranco::{load_tranco, TrancoEntry};
 pub use wat::{
     parse_wat, HomepageMeta, WarcReader, WarcRecord, WatExtract, WatPage, WatStats, WatWriter,
 };
-pub use wikidata::{load_wikidata_official_sites, OfficialSite};
+pub use wikidata::{load_misread_official_sites, load_wikidata_official_sites, OfficialSite};
 
 /// Opens a file for buffered reading, gunzipping it when it starts with the
 /// gzip magic bytes. Multi-member gzip files (one member per record, as

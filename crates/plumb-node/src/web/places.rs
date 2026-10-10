@@ -1,12 +1,15 @@
 //! The places part of a results page: "pizza in denver" lists pizza places
-//! in Denver above the sites, with a small map drawn here as SVG (no map
-//! tiles: the page loads nothing from anywhere else), and links to
-//! OpenStreetMap, whose data it is.
+//! in Denver above the sites, with a small map drawn here as SVG, on the
+//! streets of the node's own map file when it has one (see [`crate::map`]:
+//! the page loads nothing from anywhere else), and links to OpenStreetMap,
+//! whose data it is.
 
 use std::fmt::Write as _;
 
 use plumb_core::place::{Place, OSM_COPYRIGHT_URL};
-use plumb_index::places::{PlaceHit, PlaceResults};
+use plumb_index::places::{LocationStatus, PlaceHit, PlaceResults};
+#[cfg(test)]
+use plumb_index::Hit;
 
 use super::{escape_html, http_url, Icons};
 
@@ -23,10 +26,24 @@ pub(super) const STYLE: &str = "\
 .pl{margin:1rem 0 .5rem;padding:.9rem 1rem;border:1px solid var(--line);border-radius:.75rem}\
 .pl h2{margin:0 0 .6rem;font-size:1.05rem}\
 .pl .map{display:block;width:100%;height:auto;margin:0 0 .4rem;border-radius:.5rem}\
+.pl .map{overflow:hidden;--m-land:#f4f2ee;--m-sea:#b3d4e6;--m-green:#d3e8c4;--m-minor:#dcd8cf;\
+--m-major:#c9c3b8;--m-hw:#e7b766;--m-rail:#aaa49a;--m-name:#5f6368}\
+@media (prefers-color-scheme:dark){.pl .map{--m-land:#2b2c2f;--m-sea:#1d3442;--m-green:#25362b;\
+--m-minor:#3e4045;--m-major:#55575d;--m-hw:#8a6a33;--m-rail:#5a5d63;--m-name:#a8adb3}}\
 .map .bg{fill:var(--net)}.map .grid{stroke:var(--line);stroke-width:1}\
-.map .pin{fill:var(--accent)}.map .pn{fill:var(--bg);font:600 12px system-ui,sans-serif}\
+.map .sea,.map .water{fill:var(--m-sea)}.map .land,.map .earth{fill:var(--m-land)}\
+.map .green{fill:var(--m-green)}.map path.river{fill:none;stroke:var(--m-sea);stroke-width:3}\
+.map path.rail{fill:none;stroke:var(--m-rail);stroke-width:2;stroke-dasharray:6 4}\
+.map path.minor,.map path.major,.map path.highway{fill:none;stroke-linecap:round;stroke-linejoin:round}\
+.map .minor{stroke:var(--m-minor);stroke-width:2}.map .major{stroke:var(--m-major);stroke-width:4}\
+.map .highway{stroke:var(--m-hw);stroke-width:5}\
+.map .nm{fill:var(--m-name);font:11px system-ui,sans-serif;paint-order:stroke;stroke:var(--m-land);\
+stroke-width:3px;stroke-linejoin:round}.map .nm.tn{font-weight:600}\
+.map .pin{fill:var(--accent);stroke:var(--bg);stroke-width:1.5}\
+.map .pn{fill:var(--bg);font:600 12px system-ui,sans-serif}\
 .map .ctr{fill:none;stroke:var(--fg);stroke-width:2}\
-.map .lbl{fill:var(--fg);font:12px system-ui,sans-serif}\
+.map .lbl{fill:var(--fg);font:12px system-ui,sans-serif;paint-order:stroke;stroke:var(--bg);\
+stroke-width:3px;stroke-linejoin:round}\
 .map .bar{stroke:var(--fg);stroke-width:2}\
 .pl ol{margin:0}.pl li{display:flex;gap:.6rem;padding:.45rem 0;margin:0}\
 .pl .no{flex:none;display:grid;place-items:center;width:1.5rem;height:1.5rem;border-radius:50%;\
@@ -35,7 +52,9 @@ background:var(--accent);color:var(--bg);font-size:.8rem;font-weight:600}\
 .pl .pt a{color:var(--link)}.pl .pt>a{font-weight:600}\
 .pl .pa{font-size:.85rem;color:var(--muted)}\
 .pl .ic{display:inline-grid;width:1.1rem;height:1.1rem;vertical-align:-.2rem;margin-right:.25rem}\
-.pl .ic img{width:12px;height:12px}";
+.pl .ic img{width:12px;height:12px}\
+.plf{margin:1rem 0 .5rem}.plf>summary{cursor:pointer;color:var(--muted);font-size:.95rem}\
+.plf>summary .m{font-size:.85rem}.plf[open] .pl{margin-top:.5rem}";
 
 /// Whether distances are in miles for a searcher in `country`.
 fn in_miles(country: Option<&str>) -> bool {
@@ -78,17 +97,40 @@ fn capitalized(what: &str) -> String {
     }
 }
 
-/// The places part of a results page. `about` is whether this node has an
+/// The places part of a results page, its map drawn on `base_map` when
+/// there is one. `about` is whether this node has an
 /// About page where the searcher can give their town; `country` the
-/// searcher's country, for miles or km.
+/// searcher's country, for miles or km. `link` gives the address a place's
+/// link goes to, from the place's own (a `/go` link that notes the box was
+/// used, or the address itself).
 pub(super) fn render_places(
     found: &PlaceResults,
+    base_map: Option<&crate::map::BaseMap>,
     about: bool,
     country: Option<&str>,
     icons: &Icons,
+    link: &dyn Fn(&str) -> String,
 ) -> String {
     let what = escape_html(&found.what);
     let Some(center) = &found.center else {
+        if let Some(location) = &found.location {
+            let requested = escape_html(&location.requested);
+            let message = match location.status {
+                LocationStatus::AmbiguousLocation => {
+                    let alternatives = location.candidates.iter()
+                        .map(|place| escape_html(&place_name(place)))
+                        .collect::<Vec<_>>().join("; ");
+                    format!("Several indexed places match <strong>{requested}</strong>: {alternatives}. Add a region or country.")
+                }
+                LocationStatus::UnknownLocation => format!("The places index cannot locate <strong>{requested}</strong>. Add a city, region or country; this does not establish that the place has no businesses."),
+                LocationStatus::MissingLocation if !location.requested.is_empty() => format!("Add a city or region within <strong>{requested}</strong> to search indexed places."),
+                LocationStatus::ConflictingConstraints => format!("<strong>{requested}</strong> conflicts with the requested country. Keep a matching city and country to search places."),
+                _ => String::new(),
+            };
+            if !message.is_empty() {
+                return format!("<section class=\"pl\" aria-label=\"Places\"><p class=\"m\">{message}</p></section>\n");
+            }
+        }
         // "Near me", and no town to go by.
         let how = if about {
             "To list places near you, tell Plumb your town on \
@@ -116,14 +158,14 @@ pub(super) fn render_places(
     if found.hits.is_empty() {
         let _ = writeln!(
             out,
-            "<p class=\"m\">No places found for <strong>{what}</strong> within {}.</p>",
+            "<p class=\"m\">No indexed places found for <strong>{what}</strong> within {}. The indexed collection may be incomplete.</p>",
             distance_words(found.radius_km, miles)
         );
     } else {
-        out.push_str(&render_map(center, &found.hits, miles));
+        out.push_str(&render_map(center, &found.hits, miles, base_map));
         out.push_str("<ol>\n");
         for (n, hit) in found.hits.iter().enumerate() {
-            render_place(&mut out, n + 1, hit, miles, icons);
+            render_place(&mut out, n + 1, hit, miles, icons, link);
         }
         out.push_str("</ol>\n");
     }
@@ -137,13 +179,54 @@ pub(super) fn render_places(
     out
 }
 
-/// One place of the list.
-fn render_place(out: &mut String, n: usize, hit: &PlaceHit, miles: bool, icons: &Icons) {
+/// The places part folded behind a one-line summary, for a searcher who
+/// seldom opens places for searches like this one (see [`crate::learn`]).
+pub(super) fn fold_places(found: &PlaceResults, html: &str, chosen: bool) -> String {
+    let where_ = found
+        .center
+        .as_ref()
+        .map(|center| format!(" near {}", escape_html(&place_name(center))))
+        .unwrap_or_default();
+    format!(
+        "<details class=\"plf\"><summary>{}{where_} <span class=\"m\">{}</span></summary>\n\
+         {html}</details>\n",
+        escape_html(&capitalized(&found.what)),
+        if chosen {
+            "folded, as you asked"
+        } else {
+            "folded: you seldom open places for searches like this"
+        },
+    )
+}
+
+/// The addresses a place's links go to: its website, if any, and its
+/// OpenStreetMap page.
+pub(super) fn place_links(hit: &PlaceHit) -> Vec<String> {
     let place = &hit.place;
-    let osm = escape_html(&place.osm_url());
+    let mut links = Vec::new();
+    if let Some(website) = place.website.as_deref().and_then(http_url) {
+        links.push(website);
+    }
+    links.push(place.osm_url());
+    links
+}
+
+/// One place of the list.
+fn render_place(
+    out: &mut String,
+    n: usize,
+    hit: &PlaceHit,
+    miles: bool,
+    icons: &Icons,
+    link: &dyn Fn(&str) -> String,
+) {
+    let place = &hit.place;
+    let osm_url = place.osm_url();
+    let osm = escape_html(&link(&osm_url));
     let website = place.website.as_deref().and_then(http_url);
     let name = escape_html(&place.name);
-    let link = website.as_deref().map_or(osm.clone(), escape_html);
+    let site_link = website.as_deref().map(|w| escape_html(&link(w)));
+    let link = site_link.clone().unwrap_or_else(|| osm.clone());
     let _ = write!(
         out,
         "<li><span class=\"no\" aria-hidden=\"true\">{n}</span><div class=\"pt\">\
@@ -172,7 +255,7 @@ fn render_place(out: &mut String, n: usize, hit: &PlaceHit, miles: bool, icons: 
                 .unwrap_or_default();
             parts.push(format!(
                 "{icon}<a href=\"{}\" rel=\"noreferrer\">{}</a>",
-                escape_html(website.as_deref().unwrap_or_default()),
+                site_link.as_deref().unwrap_or_default(),
                 escape_html(host)
             ));
         }
@@ -196,6 +279,13 @@ pub(super) fn website_domains(found: &PlaceResults) -> Vec<String> {
         .collect()
 }
 
+#[cfg(test)]
+use crate::assembly::word_root;
+
+pub(super) use crate::assembly::local_first;
+#[cfg(test)]
+use crate::assembly::site_named_for;
+
 /// openstreetmap.org around `center`, zoomed to show `km` around it.
 fn area_url(center: &Place, km: f64) -> String {
     let zoom = match km {
@@ -212,8 +302,13 @@ fn area_url(center: &Place, km: f64) -> String {
 }
 
 /// A map of the places as numbered pins around the centre, with a scale
-/// bar. Drawn from coordinates alone: no streets.
-fn render_map(center: &Place, hits: &[PlaceHit], miles: bool) -> String {
+/// bar, on the streets of `base_map` when it has them there.
+fn render_map(
+    center: &Place,
+    hits: &[PlaceHit],
+    miles: bool,
+    base_map: Option<&crate::map::BaseMap>,
+) -> String {
     // Kilometres east and north of the centre.
     let km_per_lon = 111.32 * center.lat.to_radians().cos().max(0.01);
     let at = |lat: f64, lon: f64| {
@@ -247,9 +342,40 @@ fn render_map(center: &Place, hits: &[PlaceHit], miles: bool) -> String {
     };
     let mut svg = format!(
         "<svg class=\"map\" viewBox=\"0 0 {MAP_WIDTH} {MAP_HEIGHT}\" role=\"img\" \
-         aria-label=\"Map of the places listed, numbered as in the list\">\
-         <rect class=\"bg\" width=\"{MAP_WIDTH}\" height=\"{MAP_HEIGHT}\" rx=\"8\"/>"
+         aria-label=\"Map of the places listed, numbered as in the list\">"
     );
+    let pins: Vec<(f64, f64)> = points.iter().map(|p| to_svg(*p)).collect();
+    let streets = base_map.and_then(|map| {
+        // The map's corners, back from SVG units to degrees.
+        let lat_at = |sy: f64| center.lat + (mid_y - (sy - MAP_HEIGHT / 2.0) / scale) / 110.57;
+        let lon_at = |sx: f64| center.lon + (mid_x + (sx - MAP_WIDTH / 2.0) / scale) / km_per_lon;
+        let place_to_svg = |lat: f64, lon: f64| to_svg(at(lat, lon));
+        let mut keep_clear = pins.clone();
+        keep_clear.push(to_svg((0.0, 0.0)));
+        map.draw(&crate::map::draw::Frame {
+            bounds: (
+                lat_at(MAP_HEIGHT),
+                lon_at(0.0),
+                lat_at(0.0),
+                lon_at(MAP_WIDTH),
+            ),
+            width: MAP_WIDTH,
+            height: MAP_HEIGHT,
+            metres_per_unit: 1000.0 / scale,
+            to_svg: &place_to_svg,
+            keep_clear: &keep_clear,
+            skip: &center.name,
+        })
+    });
+    match streets {
+        Some(streets) => svg.push_str(&streets),
+        None => {
+            let _ = write!(
+                svg,
+                "<rect class=\"bg\" width=\"{MAP_WIDTH}\" height=\"{MAP_HEIGHT}\" rx=\"8\"/>"
+            );
+        }
+    }
     // A scale bar of a round distance, about a fifth of the map across.
     let unit_km = if miles { 1.609_344 } else { 1.0 };
     let want = MAP_WIDTH / 5.0 / scale / unit_km;
@@ -281,8 +407,7 @@ fn render_map(center: &Place, hits: &[PlaceHit], miles: bool) -> String {
         );
     }
     // The farthest first, so the nearest are drawn on top.
-    for (n, point) in points.iter().enumerate().rev() {
-        let (x, y) = to_svg(*point);
+    for (n, &(x, y)) in pins.iter().enumerate().rev() {
         let _ = write!(
             svg,
             "<circle class=\"pin\" cx=\"{x:.1}\" cy=\"{y:.1}\" r=\"11\"/>\
@@ -297,6 +422,16 @@ fn render_map(center: &Place, hits: &[PlaceHit], miles: bool) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn words_match_their_other_forms() {
+        assert_eq!(word_root("brewery").as_deref(), Some("brewer"));
+        assert_eq!(word_root("breweries").as_deref(), Some("brewer"));
+        assert_eq!(word_root("hotels").as_deref(), Some("hotel"));
+        assert_eq!(word_root("pizza").as_deref(), Some("pizza"));
+        assert_eq!(word_root("bars").as_deref(), Some("bar"));
+        assert_eq!(word_root("ny"), None);
+    }
+
     use super::*;
 
     fn place(name: &str, kind: &str, lat: f64, lon: f64) -> Place {
@@ -312,11 +447,123 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_place_without_a_website_finds_its_site_by_name() {
+        let site = |domain: &str, description: &str, link_score: f32| Hit {
+            domain: domain.into(),
+            url: format!("https://{domain}/"),
+            title: None,
+            description: Some(description.into()),
+            score: 1.0,
+            text_score: 1.0,
+            link_score,
+            placing_text_score: None,
+            country: None,
+            named: true,
+            official: false,
+            key_pages: Vec::new(),
+            demand: None,
+            missing_words: false,
+            query_evidence: None,
+        };
+        let mut shop = place("Elliott Bay Book Company", "shop=books", 47.6, -122.3);
+        shop.town = Some("Seattle".into());
+        let found = site_named_for(
+            &shop,
+            vec![
+                site("elliott.com", "Elliott in Seattle", 0.1),
+                site(
+                    "elliottbaybook.com",
+                    "An independent bookstore in Seattle.",
+                    0.1,
+                ),
+            ],
+        );
+        assert_eq!(found.unwrap().domain, "elliottbaybook.com");
+        // Another town's shop of the same name is not this one; a chain
+        // known everywhere is.
+        let mut pizza = place("Joe's Pizza", "amenity=restaurant", 39.7, -105.0);
+        pizza.town = Some("Denver".into());
+        assert!(site_named_for(
+            &pizza,
+            vec![site("joespizza.com", "Pizza in New York", 0.1)]
+        )
+        .is_none());
+        let mut cafe = place("Starbucks", "amenity=cafe", 39.7, -105.0);
+        cafe.town = Some("Denver".into());
+        assert_eq!(
+            site_named_for(&cafe, vec![site("starbucks.com", "Coffee", 0.8)])
+                .unwrap()
+                .domain,
+            "starbucks.com"
+        );
+    }
+
+    fn same(href: &str) -> String {
+        href.to_owned()
+    }
+
+    #[test]
+    fn town_sites_go_last_when_the_places_have_no_sites() {
+        let site = |domain: &str, title: &str| Hit {
+            domain: domain.into(),
+            url: format!("https://{domain}/"),
+            title: Some(title.into()),
+            description: None,
+            score: 1.0,
+            text_score: 1.0,
+            link_score: 0.5,
+            placing_text_score: None,
+            country: None,
+            named: false,
+            official: false,
+            key_pages: Vec::new(),
+            demand: None,
+            missing_words: false,
+            query_evidence: None,
+        };
+        let mut hits = vec![
+            site("denvergov.org", "City and County of Denver"),
+            site("slicelife.com", "Order food online"),
+        ];
+        local_first(&found(), &mut hits, Vec::new(), 10);
+        let domains: Vec<&str> = hits.iter().map(|h| h.domain.as_str()).collect();
+        assert_eq!(domains, ["slicelife.com", "denvergov.org"]);
+    }
+
+    #[test]
+    fn place_links_can_go_through_go_and_fold() {
+        let found = found();
+        let html = render_places(&found, None, true, Some("US"), &Icons::default(), &|href| {
+            format!("/go?u={href}")
+        });
+        assert!(
+            html.contains("href=\"/go?u=https://www.bluepan.com/menu\""),
+            "{html}"
+        );
+        assert!(
+            html.contains("href=\"/go?u=https://www.openstreetmap.org/"),
+            "{html}"
+        );
+        assert_eq!(
+            place_links(&found.hits[0])[0],
+            "https://www.bluepan.com/menu"
+        );
+        let folded = fold_places(&found, &html, false);
+        assert!(
+            folded.starts_with("<details class=\"plf\"><summary>Pizza near Denver"),
+            "{folded}"
+        );
+        assert!(!folded.contains("<details class=\"plf\" open"));
+    }
+
     fn found() -> PlaceResults {
         PlaceResults {
+            location: None,
             what: "pizza".into(),
             center: Some(place("Denver", "place=city", 39.7392, -104.9903)),
             near_me: false,
+            guessed: false,
             radius_km: 12.0,
             hits: vec![
                 PlaceHit {
@@ -337,8 +584,27 @@ mod tests {
     }
 
     #[test]
+    fn the_map_is_drawn_on_streets_when_the_node_has_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let map = crate::map::BaseMap::open(&crate::map::tests::sample_map(dir.path())).unwrap();
+        let html = render_places(
+            &found(),
+            Some(&map),
+            true,
+            Some("US"),
+            &Icons::default(),
+            &same,
+        );
+        let svg = &html[html.find("<svg").unwrap()..html.find("</svg>").unwrap()];
+        assert!(svg.contains("<rect class=\"sea\""), "{svg}");
+        assert!(!svg.contains("class=\"bg\""), "{svg}");
+        // The pins are still on top.
+        assert!(svg.rfind("class=\"pin\"").unwrap() > svg.find("<path").unwrap());
+    }
+
+    #[test]
     fn places_are_listed_with_a_map_and_credit() {
-        let html = render_places(&found(), true, Some("US"), &Icons::default());
+        let html = render_places(&found(), None, true, Some("US"), &Icons::default(), &same);
         assert!(html.contains("<h2>Pizza in Denver, CO</h2>"));
         assert!(html.contains("Blue &lt;Pan&gt;"));
         assert!(html.contains("1 Main &lt;St&gt;"));
@@ -353,7 +619,7 @@ mod tests {
         assert!(!map.contains("http"));
         assert_eq!(map.matches("class=\"pin\"").count(), 2);
         // Kilometres elsewhere.
-        let html = render_places(&found(), true, Some("DE"), &Icons::default());
+        let html = render_places(&found(), None, true, Some("DE"), &Icons::default(), &same);
         assert!(html.contains("1.4 km"));
     }
 
@@ -363,10 +629,30 @@ mod tests {
         found.center = None;
         found.near_me = true;
         found.hits.clear();
-        let html = render_places(&found, true, None, &Icons::default());
+        let html = render_places(&found, None, true, None, &Icons::default(), &same);
         assert!(html.contains("href=\"/about\""));
-        let html = render_places(&found, false, None, &Icons::default());
+        let html = render_places(&found, None, false, None, &Icons::default(), &same);
         assert!(html.contains("pizza in Denver"));
+    }
+
+    #[test]
+    fn unknown_and_ambiguous_locations_do_not_claim_to_be_near_me() {
+        let mut found = found();
+        found.center = None;
+        found.hits.clear();
+        found.location = Some(plumb_index::places::LocationResolution {
+            requested: "Portland <unknown>".into(),
+            status: LocationStatus::AmbiguousLocation,
+            candidates: vec![place("Portland", "place=city", 45.5, -122.6)],
+        });
+        let html = render_places(&found, None, true, None, &Icons::default(), &same);
+        assert!(html.contains("Several indexed places"));
+        assert!(html.contains("Portland &lt;unknown&gt;"));
+        assert!(!html.contains("About you"));
+        found.location.as_mut().unwrap().status = LocationStatus::UnknownLocation;
+        let html = render_places(&found, None, true, None, &Icons::default(), &same);
+        assert!(html.contains("cannot locate"));
+        assert!(!html.contains("About you"));
     }
 
     /// Finds pizza in Denver and nothing else.
@@ -411,7 +697,9 @@ mod tests {
         let places = body
             .find("<section class=\"pl\"")
             .expect("places are listed");
-        assert!(places < body.find("No sites match").unwrap());
+        // The place's own site is listed among the sites, below.
+        assert!(!body.contains("No sites match"), "{body}");
+        assert!(places < body.rfind("https://www.bluepan.com/menu").unwrap());
         assert!(body.contains("<h2>Pizza in Denver, CO</h2>"));
         let request = axum::http::Request::builder()
             .uri("/api/search?q=pizza+in+denver&full=1")
@@ -423,13 +711,15 @@ mod tests {
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["places"]["hits"][0]["place"]["name"], "Blue <Pan>");
+        assert_eq!(json["hits"][0]["domain"], "bluepan.com");
+        assert_eq!(json["hits"][0]["title"], "Blue <Pan>");
     }
 
     #[test]
     fn one_place_still_makes_a_map() {
         let mut found = found();
         found.hits.truncate(1);
-        let html = render_places(&found, false, None, &Icons::default());
+        let html = render_places(&found, None, false, None, &Icons::default(), &same);
         assert!(html.contains("class=\"pin\""));
         assert!(!html.contains("NaN") && !html.contains("inf"));
     }

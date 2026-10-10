@@ -109,6 +109,49 @@ The search address the page offers is made from the address the browser
 reached Plumb at. Behind a reverse proxy, pass on the original `Host` header,
 and set `X-Forwarded-Proto: https` when the proxy serves HTTPS.
 
+## Behind a reverse proxy or tunnel
+
+A few things are kept to the computer Plumb runs on: changing settings on
+the panel, plugin buttons, and the MCP tools that fetch pages for your AI
+apps (`read_page`, findings, and sharing findings with other nodes on a
+node run with `--share-findings`, signed with its key). Plumb counts a request as local only when all
+three hold:
+
+* it connects from the machine itself (`127.0.0.1` or `::1`),
+* it was sent to a local name (`localhost`, `127.0.0.1` or `[::1]`), and
+* it has no `Forwarded`, `X-Forwarded-For` or `X-Real-IP` header.
+
+A proxy or tunnel on the same machine passes the first test for everyone it
+lets in, so it must fail one of the other two:
+
+* **Caddy and Traefik** add `X-Forwarded-For` and keep the original `Host`
+  by themselves. Nothing to do.
+* **nginx** does neither by default: `proxy_pass http://127.0.0.1:8080;`
+  sends `Host: 127.0.0.1:8080` and no forwarding header, so every visitor
+  looks like you. Add both lines (they are needed for the browser search
+  address anyway):
+
+  ```nginx
+  location / {
+      proxy_pass http://127.0.0.1:8080;
+      proxy_set_header Host $host;
+      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      proxy_set_header X-Forwarded-Proto $scheme;
+  }
+  ```
+
+  Nginx Proxy Manager sets these for you.
+* **Tunnels** (Cloudflare Tunnel, Tailscale Funnel, ngrok) need no port
+  forwarded on the router, but they still put the node on the internet, and
+  they run on the machine itself. Cloudflare Tunnel passes on the original
+  `Host` and adds `X-Forwarded-For`, so it is safe as it comes, unless set to
+  rewrite `Host` to `localhost` (its `httpHostHeader` setting). For others,
+  run the check below.
+
+To check, open `https://<your domain>/app` from another network, such as a
+phone off Wi-Fi: the settings must show as read-only. A node that only your
+own computers reach, at home or over a VPN, is fine either way.
+
 ## Where the data lives
 
 Everything is in the named volume `plumb-data`, mounted at `/data`:
@@ -171,7 +214,7 @@ configure the node on the host with the startup flags below, or place
 ```json
 {
   "network": true,
-  "search_by_meaning": false,
+  "search_by_meaning": true,
   "share_popularity": false,
   "bootstrap": [
     "/dns4/plumbsearch.org/tcp/4001/p2p/12D3KooWJ2UWUBsxmPfXTfHa8cBBmzifa6kj5pFZKfJXYNQyJ69a",
@@ -185,13 +228,20 @@ node's crawled sites, every page set in full, all crawl batches), add
 `--blackhole` to its `command:` line; [network.md](network.md) says what it
 does.
 
+For a small server that only crawls for the network (nobody searches it),
+add `--crawl-only` instead: it builds no search index and keeps memory to a
+few hundred megabytes even with millions of sites.
+
 Feature choices in this file override startup feature flags and take effect
 on the next start (`docker compose restart`). Network transport, public
 addresses, relay, UPnP, and discovery flags are preserved. The two bootstrap
 addresses above are the network's own first nodes on plumbsearch.org; with no
 bootstrap addresses at all, the node finds only nodes on its own local
 network. Remove `features.json` while stopped to
-use only startup flags again. Resource limits stay in `settings.json` and
+use only startup flags again. The node writes down which data directory the
+file was saved in; a copy of another node's data directory keeps the network
+off (with a warning in the log) unless started with `--network`, so a test
+node made from a live one does not join the network as that node. Resource limits stay in `settings.json` and
 apply immediately when saved through a local panel.
 
 ### Control it from the desktop app
@@ -233,14 +283,16 @@ take effect at once.
 
 
 Settings are flags of `plumb run`. The image's default command is
-`run --data /data --bind 0.0.0.0:8080 --network`, and a command you set
-replaces all of it, so keep those three flags (leave out `--network` to keep
-the node to itself). In `docker-compose.yml`:
+`run --data /data --bind 0.0.0.0:8080 --network --search-by-meaning`, and a
+command you set replaces all of it, so keep those flags (leave out `--network`
+to keep the node to itself, and `--search-by-meaning` to skip the 130 MB
+model and the site vectors, at the cost of described searches such as
+"electric car maker"). In `docker-compose.yml`:
 
 ```yaml
 services:
   plumb:
-    command: ["run", "--data", "/data", "--bind", "0.0.0.0:8080", "--network", "--sites", "250000"]
+    command: ["run", "--data", "/data", "--bind", "0.0.0.0:8080", "--network", "--search-by-meaning", "--sites", "250000"]
 ```
 
 Then apply it with `docker compose up -d`. With `docker run`, put the command
@@ -249,7 +301,7 @@ after the image name:
 ```sh
 docker run -d --name plumb --init --restart unless-stopped --stop-timeout 300 \
   -p 8080:8080 -v plumb-data:/data ghcr.io/sueheir/plumb-search:latest \
-  run --data /data --bind 0.0.0.0:8080 --network --sites 250000
+  run --data /data --bind 0.0.0.0:8080 --network --search-by-meaning --sites 250000
 ```
 
 | Flag | Default | What it does |
@@ -298,7 +350,7 @@ to the command:
 ```yaml
 services:
   plumb:
-    command: ["run", "--data", "/data", "--bind", "0.0.0.0:8080", "--network", "--use-system-proxy"]
+    command: ["run", "--data", "/data", "--bind", "0.0.0.0:8080", "--network", "--search-by-meaning", "--use-system-proxy"]
     environment:
       HTTPS_PROXY: http://proxy.example.com:3128
       HTTP_PROXY: http://proxy.example.com:3128

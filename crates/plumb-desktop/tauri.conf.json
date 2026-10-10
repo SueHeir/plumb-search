@@ -20,7 +20,7 @@
     "homepage": "https://github.com/SueHeir/plumb-search",
     "category": "Utility",
     "shortDescription": "A search engine that runs on your computer",
-    "longDescription": "Plumb Search is a free, open-source search engine that runs on your computer. It builds its own index of websites from public lists of popular sites and its own homepage crawls, and you search it from your web browser. The app shows what the node is doing and lets you set its download and storage limits.",
+    "longDescription": "Plumb Search is a free, open-source search engine that runs on your computer. It builds its own index from public data and its own crawls. Search in the app or your web browser, open results in your usual browser, and manage your node's storage, downloads and network settings in the app.",
     "icon": [
       "icons/128x128.png",
       "icons/32x32.png",

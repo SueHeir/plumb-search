@@ -1,0 +1,32 @@
+# official_site names the round-2 projects will need, not in any eval file.
+# name<TAB>answer[,another], same rules as eval/official_site/queries.tsv.
+IANA time zone database	iana.org,data.iana.org
+tz database	iana.org,data.iana.org
+SIX Group	six-group.com
+ISO	iso.org
+NIST Atomic Spectra Database	physics.nist.gov
+NIST physical constants	physics.nist.gov
+CODATA	codata.org
+US Naval Observatory Astronomical Applications	aa.usno.navy.mil
+USNO	usno.navy.mil,aa.usno.navy.mil
+timeanddate	timeanddate.com
+OEIS	oeis.org
+On-Line Encyclopedia of Integer Sequences	oeis.org
+Wolfram Science	wolframscience.com
+TOML	toml.io
+toml-test	github.com
+Speedsolving wiki	speedsolving.com
+Cube20	cube20.org
+World Cube Association	worldcubeassociation.org
+Open Library	openlibrary.org
+International ISBN Agency	isbn-international.org
+Nobel Prize	nobelprize.org
+Nobel Prize API	nobelprize.org,api.nobelprize.org
+Peakbagger	peakbagger.com
+Skyfield	rhodesmill.org
+Astropy	astropy.org
+Python zoneinfo docs	docs.python.org
+European Central Bank	ecb.europa.eu
+Royal Swedish Academy of Sciences	kva.se
+Sagarmatha National Park	sagarmathanationalpark.gov.np,dnpwc.gov.np
+Kosciuszko National Park	nationalparks.nsw.gov.au

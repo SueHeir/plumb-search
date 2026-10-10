@@ -1,0 +1,202 @@
+[
+  {
+    "id": "retail-menu",
+    "url": "https://example.com/",
+    "html": "<div><a href=\"/a\">Appliances</a> <a href=\"/b\">Bath</a> <a href=\"/c\">Building Materials</a></div><p>Everything you need to build and improve your home.</p><div>We use cookies to improve your experience.</div>",
+    "must_keep": [
+      "Everything you need"
+    ],
+    "must_drop": [
+      "Appliances",
+      "use cookies"
+    ]
+  },
+  {
+    "id": "repeated-promo",
+    "url": "https://example.com/",
+    "html": "<p>Free delivery on every order over fifty dollars.</p><p>Free delivery on every order over fifty dollars.</p><p>Free delivery on every order over fifty dollars.</p>",
+    "must_keep": [
+      "Free delivery"
+    ],
+    "must_drop": []
+  },
+  {
+    "id": "short-business",
+    "url": "https://example.com/",
+    "html": "<div>Joe’s Pizza</div><div>Open daily</div><div>555-0100</div><p>Fresh wood fired pizza made with local ingredients.</p>",
+    "must_keep": [
+      "Joe’s Pizza",
+      "Open daily",
+      "555-0100",
+      "Fresh wood"
+    ],
+    "must_drop": []
+  },
+  {
+    "id": "privacy-product",
+    "url": "https://example.com/",
+    "html": "<p>We help businesses write a privacy policy that customers understand.</p>",
+    "must_keep": [
+      "privacy policy"
+    ],
+    "must_drop": []
+  },
+  {
+    "id": "javascript-product",
+    "url": "https://example.com/",
+    "html": "<p>Our JavaScript tools support browser applications with accessible user interfaces.</p>",
+    "must_keep": [
+      "JavaScript tools"
+    ],
+    "must_drop": []
+  },
+  {
+    "id": "javascript-warning",
+    "url": "https://example.com/",
+    "html": "<div>You need to enable JavaScript to run this app.</div><p>Our platform helps teams manage their projects every day.</p>",
+    "must_keep": [
+      "platform helps"
+    ],
+    "must_drop": [
+      "enable JavaScript"
+    ]
+  },
+  {
+    "id": "math-product",
+    "url": "https://example.com/",
+    "html": "<p>Explore sets {a, b, c} using interactive mathematics lessons.</p>",
+    "must_keep": [
+      "mathematics lessons"
+    ],
+    "must_drop": []
+  },
+  {
+    "id": "copyright-product",
+    "url": "https://example.com/",
+    "html": "<p>Learn how copyright © protects the art you create.</p>",
+    "must_keep": [
+      "art you create"
+    ],
+    "must_drop": []
+  },
+  {
+    "id": "policy-notice",
+    "url": "https://example.com/",
+    "html": "<p>By continuing you agree to our Terms of Use and Privacy Policy.</p><p>Find science lessons for curious children and their families.</p>",
+    "must_keep": [
+      "science lessons"
+    ],
+    "must_drop": [
+      "By continuing"
+    ]
+  },
+  {
+    "id": "cjk",
+    "url": "https://example.com/",
+    "html": "<p>我们为全世界的用户提供安全可靠的搜索服务。</p>",
+    "must_keep": [
+      "我们为全世界"
+    ],
+    "must_drop": []
+  },
+  {
+    "id": "thai",
+    "url": "https://example.com/",
+    "html": "<p>ค้นหาข้อมูลและข่าวสารสำหรับทุกคนทั่วโลก</p>",
+    "must_keep": [
+      "ค้นหา"
+    ],
+    "must_drop": []
+  },
+  {
+    "id": "arabic",
+    "url": "https://example.com/",
+    "html": "<p>نقدم خدمات البحث والمعلومات لجميع المستخدمين حول العالم</p>",
+    "must_keep": [
+      "نقدم"
+    ],
+    "must_drop": []
+  },
+  {
+    "id": "link-article",
+    "url": "https://example.com/",
+    "html": "<p><a href=\"/a\">Learn how to plant tomatoes</a>, <a href=\"/b\">grow peppers</a> and <a href=\"/c\">care for herbs</a> in a small garden with expert guidance.</p>",
+    "must_keep": [
+      "expert guidance"
+    ],
+    "must_drop": []
+  },
+  {
+    "id": "section-heading",
+    "url": "https://example.com/",
+    "html": "<h2>Getting started</h2><p>Install our package and follow the guide to configure your project.</p>",
+    "must_keep": [
+      "Install our package"
+    ],
+    "must_drop": []
+  },
+  {
+    "id": "inline-format",
+    "url": "https://example.com/",
+    "html": "<p>Build <strong>reliable</strong> software with our tools and helpful tutorials.</p>",
+    "must_keep": [
+      "Build reliable software"
+    ],
+    "must_drop": []
+  },
+  {
+    "id": "semantic-nav",
+    "url": "https://example.com/",
+    "html": "<nav>Products Support Contact</nav><p>Our services help you compare insurance and find affordable cover.</p>",
+    "must_keep": [
+      "compare insurance"
+    ],
+    "must_drop": [
+      "Products Support Contact"
+    ]
+  },
+  {
+    "id": "structured-name",
+    "url": "https://example.com/",
+    "html": "<script type=\"application/ld+json\">{\"@type\":\"Organization\",\"name\":\"Example Bank\",\"url\":\"https://example.com\"}</script><p>We offer savings accounts for people and small businesses.</p>",
+    "must_keep": [
+      "savings accounts"
+    ],
+    "must_drop": []
+  },
+  {
+    "id": "cta-only",
+    "url": "https://example.com/",
+    "html": "<div>Learn more</div><div>Shop now</div>",
+    "must_keep": [],
+    "must_drop": []
+  },
+  {
+    "id": "policy-product-heading",
+    "url": "https://example.com/",
+    "html": "<p>Privacy policy generator for small businesses and growing teams.</p>",
+    "must_keep": [
+      "Privacy policy generator"
+    ],
+    "must_drop": []
+  },
+  {
+    "id": "copyright-subject",
+    "url": "https://example.com/",
+    "html": "<p>Copyright law explained with practical examples for artists.</p>",
+    "must_keep": [
+      "Copyright law explained"
+    ],
+    "must_drop": []
+  },
+  {
+    "id": "business-statistic",
+    "url": "https://example.com/",
+    "html": "<div>1800+</div><p>Trusted businesses use our products and services every day.</p>",
+    "must_keep": [
+      "1800+",
+      "Trusted businesses"
+    ],
+    "must_drop": []
+  }
+]

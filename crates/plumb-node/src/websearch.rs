@@ -2,7 +2,7 @@
 //! query to a web search engine (off unless the node is set to show one),
 //! and "bangs" like `!g` that send a query straight to another search.
 //!
-//! Plumb finds sites by their names; "how long to boil an egg" is a question
+//! Plumb finds sites and pages by name and topic; "how long to boil an egg" is a question
 //! for a full-text engine. Both only ever link out: Plumb never fetches
 //! another engine's results.
 
@@ -104,12 +104,24 @@ pub fn parse_web_search(text: &str) -> Result<WebSearch, String> {
 pub struct WebSettings {
     /// The home country of searches that do not name one.
     pub home: HomeCountry,
+    /// Whether the search pages start with "Only this country" on.
+    pub only_country: bool,
+    /// The language filter of searches that name none; `None` takes the
+    /// browser's first language when the settings gear offers it, else
+    /// English.
+    pub language: Option<String>,
     /// The engine the results page offers to hand each query to; `None`
     /// shows no such link.
     pub web_search: Option<Engine>,
     /// Whether every client of `/mcp` may use its `read_page` tool. When
     /// false, only AI apps on this computer may (see [`crate::web`]).
     pub read_pages_for_all: bool,
+    /// Whether every client of `/mcp` may use `report_finding` and see
+    /// findings with search results. When false, only AI apps on this
+    /// computer may.
+    pub findings_for_all: bool,
+    /// How `read_page` fetches pages.
+    pub page_reader: plumb_crawl::ReadConfig,
     /// The plugins whose results show with the node's own.
     pub plugins: crate::plugins::Plugins,
 }
@@ -118,8 +130,12 @@ impl Default for WebSettings {
     fn default() -> Self {
         WebSettings {
             home: HomeCountry::Auto,
+            only_country: false,
+            language: None,
             web_search: None,
             read_pages_for_all: false,
+            findings_for_all: false,
+            page_reader: plumb_crawl::ReadConfig::default(),
             plugins: crate::plugins::Plugins::default(),
         }
     }

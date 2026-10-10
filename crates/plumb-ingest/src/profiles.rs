@@ -74,7 +74,7 @@ fn entity_id(uri: &str) -> &str {
 }
 
 /// The query for the formatter URLs of every service's property.
-fn formatters_query() -> String {
+pub(crate) fn formatters_query() -> String {
     let values: Vec<String> = SERVICES
         .iter()
         .map(|s| format!("wd:{}", s.property))
@@ -96,7 +96,7 @@ fn other_hosts(service: &Service) -> &'static [&'static str] {
 /// The services whose property's formatter URL, in the answer to
 /// [`formatters_query`], points at the service's site. Mastodon's
 /// addresses name the user's own server, so its property is taken as it is.
-fn checked_services(json: &[u8]) -> Result<Vec<&'static Service>> {
+pub(crate) fn checked_services(json: &[u8]) -> Result<Vec<&'static Service>> {
     let mut formatters: HashMap<String, Vec<String>> = HashMap::new();
     for row in bindings(json)? {
         if let (Some(p), Some(f)) = (row.get("p"), row.get("f")) {
@@ -383,6 +383,13 @@ fn profile_items(
                 item: Some(item),
                 website: None,
                 package: None,
+                facts: Vec::new(),
+                lead: None,
+                names: Vec::new(),
+                sections: Vec::new(),
+                search: None,
+                language: None,
+                paper: None,
             })
         })
         .collect();
@@ -398,6 +405,23 @@ pub fn items_in_file(path: &Path) -> Result<HashSet<String>> {
     for (_, article) in articles_of(lines) {
         if let Some(item) = article.ok().and_then(|article| article.item) {
             items.insert(item);
+        }
+    }
+    Ok(items)
+}
+
+/// The Wikidata items of the articles in the file at `path`, in the
+/// file's order (most read first), each once.
+pub fn items_in_order(path: &Path) -> Result<Vec<String>> {
+    let reader = open_maybe_gz(path)?;
+    let mut seen = HashSet::new();
+    let mut items = Vec::new();
+    let lines = std::io::BufRead::lines(reader).map_while(Result::ok);
+    for (_, article) in articles_of(lines) {
+        if let Some(item) = article.ok().and_then(|article| article.item) {
+            if seen.insert(item.clone()) {
+                items.push(item);
+            }
         }
     }
     Ok(items)

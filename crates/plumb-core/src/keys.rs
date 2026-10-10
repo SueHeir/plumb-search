@@ -21,7 +21,7 @@ use std::collections::BTreeSet;
 
 use sha2::{Digest, Sha256};
 
-use crate::{domain_label, joined, normalize_text, SiteRecord};
+use crate::{domain_label, is_function_word, joined, normalize_text, SiteRecord};
 
 /// Buckets keys are spread over.
 pub const BUCKETS: u32 = 16_384;
@@ -107,7 +107,11 @@ pub fn record_keys(record: &SiteRecord) -> BTreeSet<String> {
 }
 
 /// The keys of a query, the whole query joined first, then its words,
-/// longest first (they pick out the fewest sites).
+/// longest first (they pick out the fewest sites). In a query with other
+/// words, [`crate::FUNCTION_WORDS`] are not keys: the bucket of "in" holds
+/// sites such as "Social Security in Spain", which "weather in denver" is
+/// not looking for. The whole query joined still has them
+/// ("bankofamerica").
 pub fn query_keys(query: &str) -> Vec<String> {
     let mut keys = Vec::new();
     let whole = joined(query);
@@ -119,6 +123,9 @@ pub fn query_keys(query: &str) -> Vec<String> {
         .split(' ')
         .filter(|w| w.chars().count() >= MIN_KEY_CHARS)
         .collect();
+    if words.iter().any(|w| !is_function_word(w)) {
+        words.retain(|w| !is_function_word(w));
+    }
     words.sort_by(|a, b| b.len().cmp(&a.len()).then(a.cmp(b)));
     for word in words {
         if !keys.iter().any(|k| k == word) {
@@ -180,6 +187,7 @@ pub fn slim_record(mut record: SiteRecord) -> SiteRecord {
     record.crawled_at = None;
     record.crawl_attempted_at = None;
     record.crawl_failures = 0;
+    record.gone_at = None;
     record.icon = None;
     record.news = Vec::new();
     record.key_pages.clear();
@@ -198,6 +206,7 @@ pub const LEAN_DESCRIPTION_CHARS: usize = 200;
 pub fn lean_record(record: SiteRecord) -> SiteRecord {
     let mut record = slim_record(record);
     record.body_text = None;
+    record.terms.clear();
     record.headings.clear();
     record.intro = None;
     record.key_pages.clear();
@@ -244,6 +253,23 @@ mod tests {
     /// `piece_of(..) % PIECES_PER_BUCKET` of `usbank`, `bank`, `us` and
     /// `chase`, as first shipped.
     const KNOWN_PIECES: [u32; 4] = [1, 1, 3, 2];
+
+    #[test]
+    fn function_words_are_keys_only_on_their_own() {
+        assert_eq!(
+            query_keys("weather in denver"),
+            vec!["weatherindenver", "weather", "denver"]
+        );
+        assert_eq!(
+            query_keys("bank of america"),
+            vec!["bankofamerica", "america", "bank"]
+        );
+        assert_eq!(query_keys("in the"), vec!["inthe", "the", "in"]);
+        let mut spain = SiteRecord::new("seg-social.es");
+        spain.title = Some("Social Security in Spain".into());
+        assert!(record_keys(&spain).contains("in"));
+        assert!(!matches(&spain, &query_keys("weather in denver")));
+    }
 
     #[test]
     fn padding_comes_from_the_random_source() {

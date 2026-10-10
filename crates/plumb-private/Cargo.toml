@@ -13,8 +13,8 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 idna = "1.1.0"
 # Without the time zones, which would add about a third to the download.
-plumb-answer = { version = "0.1.0", path = "../plumb-answer", default-features = false }
-plumb-core = { version = "0.1.0", path = "../plumb-core", features = ["oblivious"] }
+plumb-answer = { version = "0.2.1", path = "../plumb-answer", default-features = false }
+plumb-core = { version = "0.2.1", path = "../plumb-core", features = ["oblivious"] }
 libp2p-identity = { version = "0.3", default-features = false, features = ["peerid"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
@@ -41,6 +41,7 @@ web-sys = { version = "0.3", features = [
     "HtmlButtonElement",
     "HtmlElement",
     "HtmlInputElement",
+    "HtmlSelectElement",
     "Location",
     "Navigator",
     "Node",
@@ -56,5 +57,5 @@ web-sys = { version = "0.3", features = [
 ] }
 
 [dev-dependencies]
-plumb-index = { version = "0.1.0", path = "../plumb-index" }
+plumb-index = { version = "0.2.1", path = "../plumb-index" }
 tempfile = "3.27.0"

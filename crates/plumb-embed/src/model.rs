@@ -9,6 +9,11 @@ use candle_transformers::models::bert::{BertModel, Config};
 use sha2::{Digest, Sha256};
 use tokenizers::{Tokenizer, TruncationParams};
 
+use crate::gemma::{
+    gemma_id, is_gemma_dir, Gemma, GEMMA_DIM, GEMMA_QUERY_PREFIX, GEMMA_TEXT_PREFIX,
+};
+use crate::server::Server;
+
 /// The model: BAAI's small English embedding model, 384 values per text.
 pub const MODEL_NAME: &str = "BAAI/bge-small-en-v1.5";
 /// Where the model's files are downloaded from: each of [`MODEL_FILES`]
@@ -44,15 +49,46 @@ pub fn quantize(values: &[f32]) -> Vec<i8> {
 
 /// Turns texts into vectors with the model.
 pub struct Embedder {
-    model: BertModel,
-    tokenizer: Tokenizer,
+    runner: Runner,
     id: ModelId,
     dim: usize,
 }
 
+/// What runs the model. One per process, so its size does not matter.
+#[allow(clippy::large_enum_variant)]
+enum Runner {
+    /// Plumb itself: the pinned model.
+    Bert {
+        model: BertModel,
+        tokenizer: Tokenizer,
+    },
+    /// An embedding server ([`crate::SERVER_FILE`]), for trying other models.
+    Server(Server),
+    /// EmbeddingGemma 2, from its GGUF file ([`crate::GEMMA_FILE`]).
+    Gemma(Gemma),
+}
+
 impl Embedder {
-    /// Loads the model whose [`MODEL_FILES`] are in `dir`.
+    /// Loads the model whose [`MODEL_FILES`] are in `dir`, or the
+    /// embedding server `dir`'s [`crate::SERVER_FILE`] names.
     pub fn load(dir: &Path) -> Result<Self> {
+        if is_gemma_dir(dir) {
+            let id = gemma_id(dir)?;
+            let gemma = Gemma::load(dir)?;
+            let dim = GEMMA_DIM.min(gemma.dim());
+            return Ok(Embedder {
+                runner: Runner::Gemma(gemma),
+                id,
+                dim,
+            });
+        }
+        if let Some((server, id, dim)) = Server::load(dir)? {
+            return Ok(Embedder {
+                runner: Runner::Server(server),
+                id,
+                dim,
+            });
+        }
         let id = model_id(dir)?;
         let read = |name: &str| {
             let path = dir.join(name);
@@ -86,8 +122,7 @@ impl Embedder {
         let dim = config.hidden_size;
         let model = BertModel::load(vb, &config).context("loading the model")?;
         Ok(Embedder {
-            model,
-            tokenizer,
+            runner: Runner::Bert { model, tokenizer },
             id,
             dim,
         })
@@ -103,23 +138,40 @@ impl Embedder {
         self.dim
     }
 
-    /// The vector of `text`: the model's output for its first token (how
-    /// BAAI's models are meant to be used), scaled to length 1 and
-    /// [`quantize`]d. An empty text gives the vector of no words.
+    /// Most words of a site's text the model is given.
+    pub fn text_words(&self) -> usize {
+        match &self.runner {
+            Runner::Server(server) => server.text_words(),
+            _ => crate::MAX_TEXT_WORDS,
+        }
+    }
+
+    /// The text of `record` this model embeds ([`crate::site_text_words`]).
+    pub fn site_text(&self, record: &plumb_core::SiteRecord) -> String {
+        crate::site_text_words(record, self.text_words())
+    }
+
+    /// The vector of a site's `text`: the model's output for its first
+    /// token (how BAAI's models are meant to be used), scaled to length 1
+    /// and [`quantize`]d. An empty text gives the vector of no words.
     pub fn embed(&self, text: &str) -> Result<Vec<i8>> {
-        let encoding = self
-            .tokenizer
+        let (model, tokenizer) = match &self.runner {
+            Runner::Bert { model, tokenizer } => (model, tokenizer),
+            Runner::Server(server) => return server.embed_text(text),
+            Runner::Gemma(gemma) => return gemma.embed(GEMMA_TEXT_PREFIX, text),
+        };
+        let encoding = tokenizer
             .encode(text, true)
             .map_err(|err| anyhow!("splitting text into tokens: {err}"))?;
         let ids = encoding.get_ids();
         if ids.is_empty() {
             bail!("the tokenizer gave no tokens");
         }
-        let device = &self.model.device;
+        let device = &model.device;
         let input = Tensor::new(ids, device)?.unsqueeze(0)?;
         let types = input.zeros_like()?;
         let mask = input.ones_like()?;
-        let output = self.model.forward(&input, &types, Some(&mask))?;
+        let output = model.forward(&input, &types, Some(&mask))?;
         let first: Vec<f32> = output.get(0)?.get(0)?.to_vec1()?;
         // Summed in order on one thread, so the length is the same anywhere.
         let length = first.iter().map(|x| x * x).sum::<f32>().sqrt();
@@ -128,6 +180,23 @@ impl Embedder {
         }
         let unit: Vec<f32> = first.iter().map(|x| x / length).collect();
         Ok(quantize(&unit))
+    }
+
+    /// Whether searches may be embedded after BGE's instruction for search
+    /// queries: only the pinned model was trained with it; other models
+    /// have their own query prefix ([`Embedder::embed_query`]).
+    pub fn takes_query_instruction(&self) -> bool {
+        matches!(self.runner, Runner::Bert { .. })
+    }
+
+    /// The vector of a search `query`: as [`Embedder::embed`] for the
+    /// pinned model; after the server's query prefix for a server.
+    pub fn embed_query(&self, query: &str) -> Result<Vec<i8>> {
+        match &self.runner {
+            Runner::Bert { .. } => self.embed(query),
+            Runner::Server(server) => server.embed_query(query),
+            Runner::Gemma(gemma) => gemma.embed(GEMMA_QUERY_PREFIX, query),
+        }
     }
 }
 
@@ -139,7 +208,7 @@ const TEST_WORDS: &[&str] = &[
 
 /// The `config.json` and `tokenizer.json` of a tiny BERT model with a
 /// word-level vocabulary of [`TEST_WORDS`].
-fn tiny_config_and_tokenizer() -> (String, String) {
+pub(crate) fn tiny_config_and_tokenizer() -> (String, String) {
     let config = serde_json::json!({
         "vocab_size": TEST_WORDS.len() + 5,
         "hidden_size": 32,

@@ -7,6 +7,7 @@ use std::time::Duration;
 use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 
 use crate::country::HomeCountry;
+pub use crate::meaning::MeaningModel;
 use crate::websearch::{parse_web_search, WebSearch};
 
 /// Plumb Search: a self-hostable search engine.
@@ -23,6 +24,8 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Print the embedded version, Git revision and cleanliness as JSON.
+    BuildInfo,
     /// Run a node: set up an index from public seed data on first start,
     /// serve the search page, and keep crawling homepages to refresh the index.
     Run(RunArgs),
@@ -32,10 +35,23 @@ pub enum Command {
     /// Make a page set file (Wikipedia articles) from Wikimedia's dumps,
     /// for a node to list single pages with its sites.
     FetchPages(FetchPagesArgs),
+    /// Make the map file the places' maps are drawn from: streets, water,
+    /// parks and town names (OpenStreetMap, via the Protomaps basemap) for
+    /// the whole world at low zooms and in detail around chosen points.
+    FetchMap(crate::map::fetch::FetchMapArgs),
     /// Add official profiles (YouTube, Twitch, X, app stores, ...) from
     /// Wikidata to a Wikipedia articles file made by fetch-pages, and write
     /// the items with profiles but no article as the wikidata set beside it.
     FetchProfiles(FetchProfilesArgs),
+    /// Add facts from Wikidata (a country's capital, a person's birth date,
+    /// a company's CEO) to a Wikipedia articles file made by fetch-pages,
+    /// for searches that ask one ("capital of australia").
+    FetchFacts(FetchFactsArgs),
+    /// Add each article's lead (its first sentences) and other names (the
+    /// titles that lead to it, to one of its sections too: "Manubrium" to
+    /// Sternum) to a Wikipedia articles file made by fetch-pages, from
+    /// Wikimedia's weekly dump of its search index.
+    FetchLeads(FetchLeadsArgs),
     /// Fold seed data and earlier records into one records file.
     Ingest(IngestArgs),
     /// Fetch the homepages of the best-scored records and merge what they say.
@@ -44,18 +60,65 @@ pub enum Command {
     Index(IndexArgs),
     /// Search the index from the command line.
     Search(SearchArgs),
+    /// Show what an index's spelling model learned from its words: the
+    /// commonest slips, how likely given typos are, and completions.
+    Spelling(SpellingArgs),
     /// Serve the search page and a JSON API over HTTP.
     Serve(ServeArgs),
     /// Check how often the official site ranks first for a list of queries.
     Eval(EvalArgs),
+    /// Check that the pages a queries file expects are in the page sets.
+    CheckLabels(crate::eval_labels::CheckLabelsArgs),
+    /// Train the learned ranking on the test searches `eval
+    /// --features-out` wrote, and measure it on the half it did not see.
+    TrainRank(crate::train_rank::TrainRankArgs),
     /// Make a vector of each site's text with a small embedding model
     /// (downloaded on first use), so searches can find sites by meaning.
     Embed(EmbedArgs),
+    /// Fetch homepages and keep their visible text, for `plumb terms`
+    /// (an experiment).
+    FetchText(crate::terms::FetchTextArgs),
+    /// Pick each site's search terms from its homepage text, made by
+    /// `plumb fetch-text`, into the records (an experiment).
+    Terms(crate::terms::TermsArgs),
+    /// One sentence about each well-known site with no text, written by a
+    /// language model: `pick` the sites, then `apply` the sentences.
+    Summaries(crate::summaries::SummariesArgs),
     /// Let the Plumb Search app on another computer change this node's
     /// settings: `on` makes a new token (shown once), `off` stops it.
     RemoteControl(RemoteControlArgs),
     /// Measure node storage and private-search bucket sizes without changing data.
     Storage(StorageArgs),
+    /// Count the sites in a node's records that look dead, the ones
+    /// `plumb run --drop-dead-sites` takes out of its index, without
+    /// changing anything. Reads the whole records file into memory.
+    DeadSites(DeadSitesArgs),
+    /// How a node's ranking experiments (its `experiments.json`) are
+    /// doing: each against its layer's control, with 95% confidence
+    /// intervals. Reads the results; changes nothing.
+    Experiments(ExperimentsArgs),
+    /// Write out the searches and the sites opened for them that browsers
+    /// chose to have kept as training examples (the settings gear's "Use
+    /// my searches to train Plumb's ranking"), with how much each site is
+    /// wanted once corrected for its place on the page.
+    ClickLabels(ClickLabelsArgs),
+    /// Rank the sites in a records file by the links their homepages make
+    /// to each other (a PageRank of our own crawls), without changing
+    /// anything. A look at the link graph; nothing uses the ranks yet.
+    LinkRank(LinkRankArgs),
+    /// How often each site's pages state Wikidata's facts right, from
+    /// Common Crawl's page text (Knowledge-Based Trust), and optionally a
+    /// copy of a records file with each site's counts, which its link
+    /// score counts in.
+    FactTrust(crate::fact_trust::FactTrustArgs),
+    /// Learn each kind of Wikidata fact (capital, founder, CEO...) as a
+    /// map between the vectors of Wikipedia articles, and measure how well
+    /// the maps find facts they were not shown (an experiment).
+    Relations(crate::relations::RelationsArgs),
+    /// How much of a records file the best sites take (by link score), by
+    /// kind and at 100k, 250k, 500k... sites, and optionally a copy cut
+    /// down to the best of them. The records file is left as it is.
+    TopSites(TopSitesArgs),
     /// Let AI apps on this computer (Claude Desktop, Claude Code, ...) ask
     /// Plumb for official sites and look-alikes: an MCP server over stdin
     /// and stdout.
@@ -84,9 +147,19 @@ pub struct TryPluginArgs {
     /// config.json.
     #[arg(long, value_name = "DIR")]
     pub plugin: PathBuf,
-    /// What to search for, keyword included or not.
-    #[arg(required = true, num_args = 1..)]
+    /// What to search for, keyword included or not, or the address of a
+    /// page for a plugin with `pages`.
+    #[arg(required_unless_present_any = ["act", "annotate"], num_args = 1..)]
     pub query: Vec<String>,
+    /// Press one of its buttons instead: the button's data, as JSON (the
+    /// `data` of an action in its results), and print what it did.
+    #[arg(long, value_name = "JSON")]
+    pub act: Option<String>,
+    /// Have it mark up results instead: a JSON file of results as a
+    /// node shows them to plugins (a list of `{"id", "url", "title",
+    /// "site", "about"}`), and print its notes.
+    #[arg(long, value_name = "FILE", conflicts_with = "act")]
+    pub annotate: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -101,6 +174,19 @@ pub struct McpArgs {
     /// [default: none].
     #[arg(long, value_name = "CODE", value_parser = parse_country, requires = "index")]
     pub country: Option<String>,
+    /// Also offer the tool `relate`, from the relation maps `plumb
+    /// relations` wrote to this directory (an experiment).
+    #[arg(long, value_name = "DIR")]
+    pub relations: Option<PathBuf>,
+    /// The model that made the maps' vectors, so names that are not among
+    /// the maps' articles can be embedded.
+    #[arg(long, value_name = "DIR", requires = "relations")]
+    pub relations_model: Option<PathBuf>,
+    /// Answer tool calls with the short text alone, leaving out the same
+    /// answer as JSON (`structuredContent`), for AI apps that give the
+    /// model the JSON.
+    #[arg(long)]
+    pub text_answers: bool,
 }
 
 #[derive(Debug, Args)]
@@ -111,6 +197,100 @@ pub struct StorageArgs {
     /// Print aggregate measurements as JSON.
     #[arg(long)]
     pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct TopSitesArgs {
+    /// Records file (JSON lines). A journal next to it is read too, from
+    /// a copy: the file is left as it is.
+    #[arg(long, value_name = "PATH")]
+    pub records: PathBuf,
+    /// Write the best sites here, as a records file to index and evaluate.
+    /// Sites a dead-site cut left only ranks are never written.
+    #[arg(long, value_name = "PATH")]
+    pub out: Option<PathBuf>,
+    /// With --out, how many sites to write [default: all].
+    #[arg(long, value_name = "N", requires = "out")]
+    pub top: Option<usize>,
+    /// With --out, write only sites with a name: a homepage title, or a
+    /// name from Wikidata or an About page.
+    #[arg(long, requires = "out")]
+    pub named_only: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct LinkRankArgs {
+    /// Records file (JSON lines). A journal next to it is read too, from
+    /// a copy: the file is left as it is.
+    #[arg(long, value_name = "PATH")]
+    pub records: PathBuf,
+    /// Also write every site's rank here, best first, as tab-separated
+    /// lines.
+    #[arg(long, value_name = "PATH")]
+    pub out: Option<PathBuf>,
+    /// Also write a copy of the records here in which each site's
+    /// `pagerank_rank` is its place by links when that is better, to index
+    /// and evaluate a node that ranks by links. The records file is left
+    /// as it is.
+    #[arg(long, value_name = "PATH")]
+    pub apply: Option<PathBuf>,
+    /// With --apply, only the best this many sites by links get their
+    /// place; the rest keep their ranks as they were. 0 changes no rank.
+    #[arg(long, value_name = "N", default_value_t = 50_000, requires = "apply")]
+    pub apply_top: u32,
+    /// With --apply, also take the links a site got from unranked sites
+    /// (link farms: sites no trusted site links to) off its count of
+    /// linking sites.
+    #[arg(long, requires = "apply")]
+    pub demote: bool,
+    /// Name the sites most often linked from the same trusted sites as
+    /// this one (may be given more than once).
+    #[arg(long, value_name = "DOMAIN")]
+    pub similar: Vec<String>,
+    /// How many of the best sites to name.
+    #[arg(long, value_name = "N", default_value_t = 30)]
+    pub show: usize,
+    /// Most rounds to run before stopping.
+    #[arg(long, value_name = "N", default_value_t = 50, value_parser = parse_positive)]
+    pub rounds: usize,
+}
+
+#[derive(Debug, Args)]
+pub struct DeadSitesArgs {
+    /// The node's data directory, as given to `plumb run --data`.
+    #[arg(long, value_name = "DIR")]
+    pub data: PathBuf,
+    /// How many of the best-known dead sites to name.
+    #[arg(long, value_name = "N", default_value_t = 20)]
+    pub show: usize,
+}
+
+#[derive(Debug, Args)]
+pub struct ClickLabelsArgs {
+    /// The node's data directory, as given to `plumb run --data`.
+    #[arg(long, value_name = "DIR")]
+    pub data: PathBuf,
+    /// Write every search and site here, as JSON lines: `query`,
+    /// `domain`, `shown`, `opened` and `wanted` (clicks per time shown,
+    /// each counted for how far down the page it was, at most 1).
+    #[arg(long, value_name = "JSONL")]
+    pub out: PathBuf,
+    /// Also write the searches whose clicks clearly pick one site as a
+    /// queries file (`query<TAB>domain`), for `plumb eval --features-out`
+    /// and then `plumb train-rank`.
+    #[arg(long, value_name = "TSV")]
+    pub queries: Option<PathBuf>,
+    /// Times the site must have been opened for the search to go in the
+    /// queries file.
+    #[arg(long, value_name = "N", default_value_t = 2)]
+    pub min_opened: u32,
+}
+
+#[derive(Debug, Args)]
+pub struct ExperimentsArgs {
+    /// The node's data directory, as given to `plumb run --data`.
+    #[arg(long, value_name = "DIR")]
+    pub data: PathBuf,
 }
 
 #[derive(Debug, Args)]
@@ -166,6 +346,33 @@ pub struct MeaningArgs {
     /// Directory of the model that made the vectors.
     #[arg(long, value_name = "DIR", requires = "vectors")]
     pub model: Option<PathBuf>,
+    /// Whether searches are embedded after the model's instruction for
+    /// search queries ([`QueryInstruction`]); for trying the others out.
+    #[arg(long, value_enum, default_value_t = QueryInstruction::Split, hide = true)]
+    pub query_instruction: QueryInstruction,
+}
+
+/// How a search is embedded: as it is, or after the instruction the model
+/// was trained to read before a search ("Represent this sentence for
+/// searching relevant passages: "), which sites' texts are not.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
+pub enum QueryInstruction {
+    /// As it is, for the nearest sites and their closeness.
+    Off,
+    /// After the instruction, for both.
+    On,
+    /// Both ways, closeness being the mean of the two.
+    Mix,
+    /// Both ways, closeness being the lower of the two.
+    Min,
+    /// After the instruction for ranking sites; as it is for deciding
+    /// whether a page goes before them. What nodes do: searches that
+    /// describe a site find it more often this way (described 25% to 31%
+    /// first by the hand-made order; with the learned ranking retrained
+    /// on it, 47% to 50% on the held-out half, all searches 76.1% to
+    /// 76.6%).
+    #[default]
+    Split,
 }
 
 #[derive(Debug, Args)]
@@ -203,6 +410,29 @@ pub struct RunArgs {
     /// Homepages crawled per refresh [default: from --profile].
     #[arg(long, value_name = "N", value_parser = parse_positive)]
     pub crawl_per_refresh: Option<usize>,
+    /// Take sites that look dead out of the index: homepages no crawl has
+    /// reached for 60 days, after 6 tries in a row over a month or more
+    /// that got no answer at all (see `plumb dead-sites`, which counts them
+    /// without changing anything). Never the best 10,000 sites, official
+    /// websites, sites about this node's topics, or ones an About page puts
+    /// first or a searcher opened. A dead site keeps a small record and
+    /// comes back when a crawl reaches it again.
+    #[arg(long)]
+    pub drop_dead_sites: bool,
+    /// Add sites the records do not hold yet: domains crawls find linked
+    /// from the sites held, and new sites in other nodes' shared crawls.
+    /// Off by default while the network holds its list of sites steady:
+    /// crawls only refresh the sites held.
+    #[arg(long)]
+    pub take_new_sites: bool,
+    /// Only crawl, for a small server that supports the network and that
+    /// nobody searches: crawl rounds go on and publish their batches, but
+    /// no search index is built, no page sets, places or feeds are kept,
+    /// and other nodes' crawls are not folded in, so millions of sites fit
+    /// in well under a gigabyte of memory. Search by meaning and private
+    /// search are off. Without it again, the node builds its index.
+    #[arg(long, conflicts_with_all = ["search_by_meaning", "private_search", "blackhole"])]
+    pub crawl_only: bool,
     /// Homepages fetched at once while crawling [default: 16]. The panel's
     /// workload presets (light, balanced, full) set their own.
     #[arg(long, value_name = "N", value_parser = parse_positive)]
@@ -233,10 +463,20 @@ pub struct RunArgs {
     /// Home country, whose sites rank a little higher and other countries'
     /// a little lower: a two-letter code such as US or DE, `any` for none,
     /// or `auto` to take it from each browser's language setting
-    /// (`en-US` -> US), falling back to this computer's region settings.
-    /// A search can pick another with `country=` in its address.
+    /// (`en-US` -> US), falling back to this computer's region settings,
+    /// then the United States. A search can pick another with `country=` in its address.
     #[arg(long, value_name = "CODE", default_value = "auto", value_parser = HomeCountry::parse)]
     pub country: HomeCountry,
+    /// Start the search pages with "Only this country" on, leaving out
+    /// other countries' sites until the settings gear turns it off. The
+    /// JSON API and `/mcp` still need `only=1`.
+    #[arg(long)]
+    pub only_country: bool,
+    /// Language of the sites searches show when they do not pick one, a
+    /// code such as en [default: the browser's first language when the
+    /// settings gear offers it, else en].
+    #[arg(long, value_name = "CODE", value_parser = parse_language)]
+    pub lang: Option<String>,
     /// Show "Search the web with ..." above the results, a link that hands
     /// the query to this engine: duckduckgo, google, bing, brave or
     /// startpage, or `off` for none. Plumb never fetches its results.
@@ -249,12 +489,25 @@ pub struct RunArgs {
     /// on a node the whole internet can reach.
     #[arg(long)]
     pub mcp_read_pages: bool,
+    /// Let every client of `/mcp`, not only AI apps on this computer, keep
+    /// findings with its `report_finding` tool and see them listed with
+    /// search results. Findings hold what agents searched for, so only for
+    /// a node whose address you give to people you trust. Sharing findings
+    /// with other nodes stays with this computer's apps.
+    #[arg(long)]
+    pub mcp_findings: bool,
     /// Also find sites by meaning for searches that name no site ("electric
     /// car maker"). Downloads a small embedding model (about 130 MB) into
     /// DIR/model and embeds each site's text in the background after every
     /// index build, best-ranked sites first, into DIR/vectors.bin.
     #[arg(long)]
     pub search_by_meaning: bool,
+    /// The model search by meaning runs: `small` (bge-small-en-v1.5, about
+    /// 130 MB, English) or `gemma` (EmbeddingGemma 2, about 310 MB, many
+    /// languages) into DIR/model-gemma. Switching makes the vectors again,
+    /// or takes them from trusted nodes running the same model.
+    #[arg(long, value_name = "MODEL", value_enum, default_value_t = MeaningModel::Small, requires = "search_by_meaning")]
+    pub meaning_model: MeaningModel,
     /// Threads that embed sites for search by meaning [default: half the
     /// CPUs this node may use]. A server with CPUs to spare catches up
     /// faster with more.
@@ -344,6 +597,13 @@ pub struct RunArgs {
     /// many nodes report the same pick.
     #[arg(long, requires = "network")]
     pub share_popularity: bool,
+    /// Let AI apps on this computer share a finding with other Plumb nodes
+    /// when they ask to (report_finding with share: true): the page, why it
+    /// helped and the search's words as numbers, signed with this node's
+    /// key. Never the search or the task, unless the app shares the search
+    /// too.
+    #[arg(long, requires = "network")]
+    pub share_findings: bool,
     /// Also share the homepages crawled into this records file, such as one
     /// `plumb crawl` is filling (its journal included), and add them to this
     /// node's own records: every half hour, those crawled since the last
@@ -402,6 +662,15 @@ pub struct RunArgs {
     /// the network needs filling (no --no-fill) and a trusted node.
     #[arg(long)]
     pub seed_from_outside: bool,
+    /// Which page set files to replace by themselves when a node this one
+    /// trusts has a newer one: `all` (the default; each may grow at most a
+    /// quarter past this node's own at a time, so a much bigger set is not
+    /// loaded unasked), `off`, or the sets to update with no limit on
+    /// growth, separated by commas (`films,stackoverflow,map`; `map` is the
+    /// map file). A set the node has no file of is taken only if this
+    /// allows it; the map file is taken either way.
+    #[arg(long, value_name = "all|off|SETS")]
+    pub set_updates: Option<crate::pages::SetUpdates>,
 }
 
 /// Starting points for `plumb run`.
@@ -434,9 +703,19 @@ pub struct FetchDataArgs {
     #[arg(long)]
     pub skip_wikidata: bool,
     /// Only fetch Wikidata items with at least this many Wikipedia sitelinks
-    /// (a notability filter that keeps the query small enough to finish).
-    #[arg(long, value_name = "N", default_value_t = 25)]
+    /// (a notability filter). Wikidata's own endpoint can only list them
+    /// from 25 up, so that is where it starts when --wikidata-mirror fails.
+    #[arg(long, value_name = "N", default_value_t = plumb_ingest::download::DEFAULT_MIN_SITELINKS)]
     pub wikidata_min_sitelinks: u32,
+    /// A copy of Wikidata to ask first for the official websites and their
+    /// facts: QLever's lists them all in seconds, while Wikidata's own
+    /// endpoint needs many queries, each close to its 60-second limit. When
+    /// it fails, Wikidata's own endpoint is asked.
+    #[arg(long, value_name = "URL", default_value = plumb_ingest::download::QLEVER_WIKIDATA_URL)]
+    pub wikidata_mirror: String,
+    /// Ask only Wikidata's own endpoint, not --wikidata-mirror.
+    #[arg(long)]
+    pub no_wikidata_mirror: bool,
     /// Keep each file an earlier run saved in --dir within this many days
     /// instead of fetching it again, so a rerun only fetches what is missing,
     /// stale or failed. A file copied in from another run's folder counts
@@ -457,17 +736,90 @@ pub struct FetchProfilesArgs {
 }
 
 #[derive(Debug, Args)]
+pub struct FetchLeadsArgs {
+    /// A node's data directory whose English Wikipedia set gets the leads;
+    /// the node picks the new file up within seconds.
+    #[arg(long, value_name = "DIR", required_unless_present = "articles")]
+    pub data: Option<PathBuf>,
+    /// The articles file to add them to instead.
+    #[arg(long, value_name = "PATH")]
+    pub articles: Option<PathBuf>,
+    /// Directory for the dump's files (about 66 of 600 MB for English, a
+    /// few at a time, each deleted once read) and what was read of them,
+    /// so a stopped run carries on.
+    #[arg(long, value_name = "DIR")]
+    pub work: PathBuf,
+    /// How many of the most read articles get a lead.
+    #[arg(long, value_name = "N", default_value_t = 2_000_000)]
+    pub top: usize,
+    /// Keep the dump's files once read.
+    #[arg(long)]
+    pub keep_dumps: bool,
+    /// Read these files of the dump instead of downloading it.
+    #[arg(long, value_name = "PATH", num_args = 1..)]
+    pub dumps: Vec<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub struct FetchFactsArgs {
+    /// A node's data directory whose English Wikipedia set gets the
+    /// facts; the node picks the new file up within seconds.
+    #[arg(long, value_name = "DIR", required_unless_present = "articles")]
+    pub data: Option<PathBuf>,
+    /// The articles file to add them to instead.
+    #[arg(long, value_name = "PATH")]
+    pub articles: Option<PathBuf>,
+    /// Repair just these Wikidata IDs, without scanning worldwide facts.
+    #[arg(long, value_name = "QID", num_args = 1.., conflicts_with = "retry_facts")]
+    pub items: Vec<String>,
+    /// Property keys for --items (default: every supported property).
+    #[arg(long, value_name = "KEY", num_args = 1.., requires = "items")]
+    pub properties: Vec<String>,
+    /// Retry the failed item/property pairs of a previous completion JSON.
+    #[arg(long, value_name = "PATH", conflicts_with = "items")]
+    pub retry_facts: Option<PathBuf>,
+    /// Save completion/provenance and retry pairs here (default: next to
+    /// the articles file, with .facts.json appended).
+    #[arg(long, value_name = "PATH")]
+    pub report: Option<PathBuf>,
+    /// Where to read on when Wikidata's query service stops answering a
+    /// kind's deep pages (it times out on them): by default QLever's copy
+    /// of Wikidata.
+    #[arg(long, value_name = "URL", default_value = plumb_ingest::item_facts::DEEP_SPARQL_URL)]
+    pub deep_endpoint: String,
+    /// Ask only Wikidata's query service, never --deep-endpoint.
+    #[arg(long)]
+    pub wikidata_only: bool,
+}
+
+#[derive(Debug, Args)]
 pub struct FetchPagesArgs {
     /// The page set to make: wikipedia-en (English Wikipedia's articles),
     /// github (GitHub repositories, from GitHub's search API; set
     /// GITHUB_TOKEN to search three times as fast), stackoverflow (Stack
     /// Overflow's most viewed questions, from Stack Exchange's data dump),
+    /// stackexchange (the most viewed questions of Super User, Ask Ubuntu,
+    /// Home Improvement and 30 more Stack Exchange sites, from the same
+    /// dump),
     /// books (Open Library's most shelved works, from its dumps), podcasts
-    /// (Podcast Index's most popular podcasts, from its database), papers
+    /// (Podcast Index's most popular podcasts, from its database), music
+    /// (the songs and albums most listened to, from MusicBrainz's dump and
+    /// ListenBrainz's listener counts), films (films and TV shows, with
+    /// their year, director, cast and listings, from Wikidata), papers
     /// (the most cited works, from OpenAlex's API; set OPENALEX_API_KEY if
     /// it asks for one), packages (the most used packages of eight
-    /// registries, from ecosyste.ms) or places (named shops, restaurants,
-    /// parks and towns from OpenStreetMap).
+    /// registries, from ecosyste.ms), docs (pages of MDN, Python's docs and
+    /// 36 more software docs sites, from their sitemaps; --work keeps each
+    /// site's pages so a stopped run carries on), reference (pages of
+    /// about 150 well-known reference sites: health, dictionaries, recipes,
+    /// how-tos and government, from their sitemaps; --work as for docs),
+    /// subpages (pages of about 250 universities and labs, big companies,
+    /// government agencies, entertainment sites and museums, from their
+    /// sitemaps and the pages their homepages link to; --work as for docs),
+    /// places (named shops, restaurants, parks and towns from
+    /// OpenStreetMap) or wiktionary (English words and what they mean,
+    /// from kaikki.org's reading of Wiktionary, about 3.3 GB, for "define"
+    /// searches).
     #[arg(long, value_name = "SET", default_value = "wikipedia-en")]
     pub set: String,
     /// Directory to download Wikipedia's dumps into (created if missing).
@@ -489,6 +841,35 @@ pub struct FetchPagesArgs {
     /// kept).
     #[arg(long, value_name = "DAYS", default_value_t = 20)]
     pub keep_days: u64,
+    /// Docs/reference/subpages: reuse compatible completed caches younger
+    /// than this many days (0 always refreshes).
+    #[arg(long, value_name = "DAYS", default_value_t = 7)]
+    pub cache_max_age_days: u64,
+    /// Docs/reference/subpages: fetch again even when a cache is fresh.
+    #[arg(long)]
+    pub force_refresh: bool,
+    /// Docs/reference/subpages: discard existing hosts intentionally.
+    /// By default successful selected hosts are merged into the old set.
+    #[arg(long)]
+    pub replace_set: bool,
+    /// Docs/reference/subpages: fewest useful pages needed to replace a host.
+    #[arg(long, value_name = "N", default_value_t = 3)]
+    pub min_useful_pages: usize,
+    /// Docs/reference/subpages/papers: write an immutable generation for evaluation
+    /// without publishing the set file.
+    #[arg(long, conflicts_with = "promote_generation")]
+    pub stage_only: bool,
+    /// Promote a previously staged generation after its canaries pass.
+    #[arg(long, value_name = "DIR")]
+    pub promote_generation: Option<PathBuf>,
+    /// Docs/reference/subpages/papers: explicitly permit growth beyond 125% of the
+    /// current compressed set (normally left staged for review).
+    #[arg(long)]
+    pub allow_set_growth: bool,
+    /// Docs/reference/subpages/papers: maximum compressed bytes in a candidate set;
+    /// 0 leaves the limit unset. Includes retained hosts in a targeted refresh.
+    #[arg(long, value_name = "BYTES", default_value_t = 0)]
+    pub max_set_bytes: u64,
     /// Wikidata's official websites (wikidata-official-sites.tsv from
     /// fetch-data), so an article about a site's organization is shown
     /// under that site.
@@ -507,7 +888,8 @@ pub struct FetchPagesArgs {
     /// Stack Overflow: read this Posts .7z instead of downloading it.
     #[arg(long, value_name = "PATH")]
     pub posts: Option<PathBuf>,
-    /// Stack Overflow: lowest score of a question kept.
+    /// Stack Overflow and other Stack Exchange sites: lowest score of a
+    /// question kept.
     #[arg(
         long,
         value_name = "SCORE",
@@ -518,6 +900,14 @@ pub struct FetchPagesArgs {
     /// Stack Overflow: most questions kept, the most viewed.
     #[arg(long, value_name = "N", default_value_t = 2_000_000)]
     pub max_questions: usize,
+    /// Other Stack Exchange sites: most questions kept of each site, the
+    /// most viewed.
+    #[arg(long, value_name = "N", default_value_t = 100_000)]
+    pub max_per_site: usize,
+    /// Other Stack Exchange sites: delete each site's dump once it is read,
+    /// rather than keeping it for --keep-days.
+    #[arg(long)]
+    pub drop_dumps: bool,
     /// Books: fewest reading log entries and ratings of a book kept.
     #[arg(long, value_name = "N", default_value_t = 3)]
     pub min_shelvings: u32,
@@ -530,6 +920,30 @@ pub struct FetchPagesArgs {
     /// Papers: most papers kept, the most cited.
     #[arg(long, value_name = "N", default_value_t = 2_000_000)]
     pub max_papers: usize,
+    /// Papers: opt in to bounded recent publication ingestion ending on this
+    /// inclusive ISO date (YYYY-MM-DD). Requires --work for resumable progress.
+    /// The recent lane stays off unless this option is supplied.
+    #[arg(long, value_name = "DATE", requires = "work")]
+    pub recent_papers_end: Option<String>,
+    /// Papers: inclusive recent publication window, 1..366 days.
+    #[arg(long, value_name = "DAYS", default_value_t = plumb_ingest::recent_papers::DEFAULT_WINDOW_DAYS, requires = "recent_papers_end")]
+    pub recent_papers_days: usize,
+    /// Papers: recent records reserved across date/domain partitions, 1..50000.
+    #[arg(long, value_name = "N", default_value_t = plumb_ingest::recent_papers::DEFAULT_RECORD_BUDGET, requires = "recent_papers_end")]
+    pub recent_papers_records: usize,
+    /// Papers: most recent-provider requests this invocation, 1..1000. A
+    /// refused or unfinished run retains progress and keeps the previous set.
+    #[arg(
+        long,
+        value_name = "N",
+        default_value_t = 1000,
+        requires = "recent_papers_end"
+    )]
+    pub recent_papers_requests: usize,
+    /// Papers: most requests to CORE for free copies (fifty papers each),
+    /// when CORE_API_KEY is set.
+    #[arg(long, value_name = "N", default_value_t = plumb_ingest::core_ac::DEFAULT_MAX_REQUESTS)]
+    pub max_core_requests: usize,
     /// Podcasts: fewest Podcast Index popularity points (0 to 9) of a
     /// podcast kept.
     #[arg(long, value_name = "N", default_value_t = plumb_ingest::podcasts::DEFAULT_MIN_SCORE)]
@@ -541,6 +955,37 @@ pub struct FetchPagesArgs {
     /// instead of downloading it into --work.
     #[arg(long, value_name = "PATH")]
     pub podcast_db: Option<PathBuf>,
+    /// Music: read this MusicBrainz core dump (mbdump.tar.bz2, or a
+    /// directory of its tables) instead of downloading it into --work.
+    #[arg(long, value_name = "PATH")]
+    pub musicbrainz_dump: Option<PathBuf>,
+    /// Music: ListenBrainz's canonical data dump (`.tar.zst`, or its
+    /// canonical_recording_redirect.csv) instead of downloading it into
+    /// --work.
+    #[arg(long, value_name = "PATH")]
+    pub listenbrainz_canonical: Option<PathBuf>,
+    /// Music: most songs kept, the most listened to.
+    #[arg(long, value_name = "N", default_value_t = plumb_ingest::musicbrainz::DEFAULT_MAX_SONGS)]
+    pub max_songs: usize,
+    /// Music: most albums kept, the most listened to.
+    #[arg(long, value_name = "N", default_value_t = plumb_ingest::musicbrainz::DEFAULT_MAX_ALBUMS)]
+    pub max_albums: usize,
+    /// Music: fewest release groups (albums, singles, compilations) a song
+    /// is on for ListenBrainz to be asked about it, unless it is on an
+    /// album kept.
+    #[arg(long, value_name = "N", default_value_t = plumb_ingest::musicbrainz::DEFAULT_MIN_SONG_RELEASES)]
+    pub min_song_releases: u32,
+    /// Music: fewest ListenBrainz listeners of a song or album kept.
+    #[arg(long, value_name = "N", default_value_t = plumb_ingest::musicbrainz::DEFAULT_MIN_LISTENERS)]
+    pub min_listeners: u64,
+    /// Films: most films and shows kept, the most linked from Wikipedias
+    /// and other wikis.
+    #[arg(long, value_name = "N", default_value_t = plumb_ingest::films::DEFAULT_MAX_FILMS)]
+    pub max_films: usize,
+    /// Films: fewest sitelinks (Wikipedias and other wikis with a page on
+    /// it) of a film or show kept.
+    #[arg(long, value_name = "N", default_value_t = plumb_ingest::films::DEFAULT_MIN_SITELINKS)]
+    pub min_film_sitelinks: u64,
     /// Packages: the registries to list (npm, pypi, crates, go, gem,
     /// composer, nuget, maven), comma-separated; all when left out.
     #[arg(long, value_name = "KEYS", value_delimiter = ',')]
@@ -552,6 +997,35 @@ pub struct FetchPagesArgs {
     /// downloading the whole planet (about 90 GB) into --work.
     #[arg(long, value_name = "PATH")]
     pub osm: Option<PathBuf>,
+    /// Docs: the docs sites to fetch (mdn, python, rust and others; see
+    /// plumb_core::docs), comma-separated; all when left out.
+    #[arg(long, value_name = "KEYS", value_delimiter = ',')]
+    pub docs_sites: Vec<String>,
+    /// Docs: most pages fetched of each site, the shallowest first.
+    #[arg(long, value_name = "N", default_value_t = plumb_ingest::docs::DEFAULT_MAX_PER_SITE)]
+    pub max_docs_per_site: usize,
+    /// Reference: the reference sites to fetch, by host without `www.`
+    /// (healthline.com, merriam-webster.com and others; see
+    /// plumb_core::reference), comma-separated; all when left out.
+    #[arg(long, value_name = "HOSTS", value_delimiter = ',')]
+    pub reference_sites: Vec<String>,
+    /// Reference: limit pages fetched per host, including hosts with their
+    /// own larger cap. When omitted, use the source cap or 5,000 pages.
+    #[arg(long, value_name = "N")]
+    pub max_reference_per_site: Option<usize>,
+    /// Subpages: limit pages fetched per host, including source-specific caps.
+    #[arg(long, value_name = "N")]
+    pub max_subpages_per_site: Option<usize>,
+    /// Subpages: the subpage sites to fetch, by host without `www.`
+    /// (nist.gov, chessprogramming.org and others; see
+    /// plumb_core::subpages), comma-separated; all when left out.
+    #[arg(long, value_name = "HOSTS", value_delimiter = ',')]
+    pub subpage_sites: Vec<String>,
+    /// Subpages: only the sites of these kinds (university, company,
+    /// government, entertainment, museum), comma-separated; all when left
+    /// out.
+    #[arg(long, value_name = "KINDS", value_delimiter = ',')]
+    pub subpage_kinds: Vec<String>,
 }
 
 #[derive(Debug, Args)]
@@ -673,8 +1147,22 @@ pub struct IndexArgs {
 }
 
 #[derive(Debug, Args)]
-pub struct SearchArgs {
+pub struct SpellingArgs {
     /// Index directory.
+    #[arg(long, value_name = "DIR")]
+    pub index: PathBuf,
+    /// How many of the learned slips to list, likeliest first.
+    #[arg(long, value_name = "N", default_value_t = 40)]
+    pub rules: usize,
+    /// A typo and the word meant, as `typed:meant` (`amtrack:amtrak`): how
+    /// likely the slip is and how common each word is. May be repeated.
+    #[arg(long, value_name = "TYPED:MEANT")]
+    pub pair: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct SearchArgs {
+    /// Site index directory, or a page index with --paper.
     #[arg(long, value_name = "DIR")]
     pub index: PathBuf,
     /// Number of results.
@@ -687,6 +1175,18 @@ pub struct SearchArgs {
     /// Print the hits as JSON.
     #[arg(long)]
     pub json: bool,
+    /// Search only papers in a locally built page index.
+    #[arg(long)]
+    pub paper: bool,
+    /// Inclusive publication lower bound, YYYY or YYYY-MM-DD.
+    #[arg(long, requires = "paper")]
+    pub after: Option<String>,
+    /// Inclusive publication upper bound, YYYY or YYYY-MM-DD.
+    #[arg(long, requires = "paper")]
+    pub before: Option<String>,
+    /// Paper ordering; newest preserves relevance tiers.
+    #[arg(long, requires = "paper", value_parser = ["relevance", "newest"])]
+    pub order: Option<String>,
     /// Home country, a two-letter code such as US or DE: its sites rank a
     /// little higher, other countries' a little lower [default: none].
     #[arg(long, value_name = "CODE", value_parser = parse_country)]
@@ -726,10 +1226,20 @@ pub struct ServeArgs {
     /// Home country, whose sites rank a little higher and other countries'
     /// a little lower: a two-letter code such as US or DE, `any` for none,
     /// or `auto` to take it from each browser's language setting
-    /// (`en-US` -> US), falling back to this computer's region settings.
-    /// A search can pick another with `country=` in its address.
+    /// (`en-US` -> US), falling back to this computer's region settings,
+    /// then the United States. A search can pick another with `country=` in its address.
     #[arg(long, value_name = "CODE", default_value = "auto", value_parser = HomeCountry::parse)]
     pub country: HomeCountry,
+    /// Start the search pages with "Only this country" on, leaving out
+    /// other countries' sites until the settings gear turns it off. The
+    /// JSON API and `/mcp` still need `only=1`.
+    #[arg(long)]
+    pub only_country: bool,
+    /// Language of the sites searches show when they do not pick one, a
+    /// code such as en [default: the browser's first language when the
+    /// settings gear offers it, else en].
+    #[arg(long, value_name = "CODE", value_parser = parse_language)]
+    pub lang: Option<String>,
     /// Show "Search the web with ..." above the results, a link that hands
     /// the query to this engine: duckduckgo, google, bing, brave or
     /// startpage, or `off` for none. Plumb never fetches its results.
@@ -742,10 +1252,21 @@ pub struct ServeArgs {
     /// on a node the whole internet can reach.
     #[arg(long)]
     pub mcp_read_pages: bool,
+    /// Let every client of `/mcp`, not only AI apps on this computer, keep
+    /// findings with its `report_finding` tool and see them listed with
+    /// search results. Findings hold what agents searched for, so only for
+    /// a node whose address you give to people you trust. Sharing findings
+    /// with other nodes stays with this computer's apps.
+    #[arg(long)]
+    pub mcp_findings: bool,
     /// A places file (places.tsv.gz from `fetch-pages --set places`), so
     /// "pizza in denver" lists places. Indexed next to it on first use.
     #[arg(long, value_name = "PATH")]
     pub places: Option<PathBuf>,
+    /// A map file (map.pmtiles from `fetch-map`), so the places' map shows
+    /// streets, water and parks under the pins.
+    #[arg(long, value_name = "PATH", requires = "places")]
+    pub map: Option<PathBuf>,
     /// A folder of plugins, one folder each, whose results show with the
     /// node's own (see docs/plugins.md). A node started with `run` uses
     /// DIR/plugins.
@@ -761,9 +1282,41 @@ pub struct EvalArgs {
     #[arg(long, value_name = "DIR")]
     pub index: PathBuf,
     /// Queries file: `query<TAB>expected_domain[,another_ok_domain]` per line;
-    /// blank lines and lines starting with `#` are skipped.
+    /// blank lines and lines starting with `#` are skipped. Can be given
+    /// more than once; each file is measured on its own.
+    #[arg(long, value_name = "TSV", required_unless_present = "acceptance")]
+    pub queries: Vec<PathBuf>,
+    /// Family-based JSONL contracts, separate from training features.
+    #[arg(long, value_name = "JSONL", requires = "report")]
+    pub acceptance: Vec<PathBuf>,
+    /// Machine-readable manifest, complete responses, stages and summary.
+    /// Core offline mode: findings, personalization, plugins and peers are off.
+    #[arg(long, value_name = "JSONL", requires = "eval_time", conflicts_with_all = ["sweep", "features_out", "facts", "profiles", "follow_suggestions", "rerank_model"])]
+    pub report: Option<PathBuf>,
+    /// Fixed evaluation clock, Unix seconds. Required for reproducible reports.
+    #[arg(long, value_name = "UNIX", value_parser = clap::value_parser!(u64).range(0..=i64::MAX as u64))]
+    pub eval_time: Option<u64>,
+    /// Try several rankings in one run: a file of `name<TAB>{"knob": value}`
+    /// lines, each changing knobs of the ranking --rank gives. Prints one
+    /// table of every queries file under every ranking, and which queries
+    /// each one moved, against the ranking unchanged ("base").
     #[arg(long, value_name = "TSV")]
-    pub queries: PathBuf,
+    pub sweep: Option<PathBuf>,
+    /// With --sweep, also write every query's rank under every ranking to
+    /// this TSV file (`variant suite line query rank`, 0 when not found).
+    #[arg(long, value_name = "PATH", requires = "sweep")]
+    pub ranks_out: Option<PathBuf>,
+    /// Write each query's listed results, with the scores and signals that
+    /// ranked them and which one was expected, to this JSON-lines file:
+    /// what a learned ranking is trained on. Not with --sweep or --facts.
+    #[arg(long, value_name = "PATH", conflicts_with_all = ["sweep", "facts"])]
+    pub features_out: Option<PathBuf>,
+    /// With --features-out, also score the first 20 results of each query
+    /// with this cross-encoder model (a folder with its config.json,
+    /// tokenizer.json and model.safetensors), and time it. Can be given
+    /// more than once.
+    #[arg(long, value_name = "DIR", requires = "features_out")]
+    pub rerank_model: Vec<PathBuf>,
     /// Results fetched per query; an expected site further down counts as not found.
     #[arg(long, value_name = "N", default_value_t = 10, value_parser = parse_positive)]
     pub limit: usize,
@@ -779,6 +1332,10 @@ pub struct EvalArgs {
     /// [default: none].
     #[arg(long, value_name = "CODE", value_parser = parse_country)]
     pub country: Option<String>,
+    /// Only sites in this language, a code such as en, as the search
+    /// page's language setting does [default: any].
+    #[arg(long, value_name = "CODE", value_parser = parse_language)]
+    pub lang: Option<String>,
     /// Search for each query without suggesting a spelling.
     #[arg(long, conflicts_with = "follow_suggestions")]
     pub exact: bool,
@@ -787,6 +1344,11 @@ pub struct EvalArgs {
     /// (eval/typo_queries.tsv).
     #[arg(long)]
     pub follow_suggestions: bool,
+    /// Print every "Did you mean" suggestion a query gets, to see how many
+    /// right spellings get one (eval/brand_queries.tsv) and what typos are
+    /// taken for.
+    #[arg(long, conflicts_with = "exact")]
+    pub show_suggestions: bool,
     /// Ranking knobs to change, as JSON, e.g. '{"exact_label_bonus": 0.1}'.
     /// The other knobs keep their defaults; --alpha wins over an alpha here.
     #[arg(long, value_name = "JSON", value_parser = parse_rank_config)]
@@ -795,6 +1357,30 @@ pub struct EvalArgs {
     /// scored: final score, text match, link score and closeness in meaning.
     #[arg(long)]
     pub explain: bool,
+    /// Measure where each query's answer is lost before ranking instead:
+    /// whether it is in the index or a page set at all, how far down the
+    /// sites matching the query's words (first 50, 100, 1,000, 10,000) or
+    /// nearest in meaning it is, or the pages found, and whether the
+    /// ranking looked at it. Prints one line per query not answered in the
+    /// first --limit and a table per file.
+    #[arg(long, conflicts_with_all = ["sweep", "facts", "features_out"])]
+    pub recall: bool,
+    /// Print the first N results of every query, hit or miss: each site's
+    /// domain (with the pages shown under it) or page's address.
+    #[arg(long, value_name = "N", default_value_t = 0)]
+    pub show: usize,
+    /// Check the instant answers to fact searches instead of the ranks
+    /// (eval/fact_queries.tsv, with --pages and a Wikipedia set made with
+    /// fetch-facts): a query counts as found when its answer has one of
+    /// the expected texts.
+    #[arg(long)]
+    pub facts: bool,
+    /// Count the profile or listing a node shows above the results for a
+    /// query ending in a service ("bohemian rhapsody lyrics", "mrbeast
+    /// youtube") as the first result (eval/lyrics_queries.tsv, with
+    /// --pages).
+    #[arg(long)]
+    pub profiles: bool,
     /// Page set files (wikipedia-en.tsv.gz, github.tsv.gz from fetch-pages)
     /// whose pages are listed among the sites, as a node lists them. Can be
     /// given more than once.
@@ -803,19 +1389,44 @@ pub struct EvalArgs {
     /// How many of each page set's most read pages to keep.
     #[arg(long, value_name = "N", default_value_t = usize::MAX, hide_default_value = true)]
     pub pages_top: usize,
+    /// Keep the index built from --pages in this folder and reuse it on
+    /// later runs with the same page set files and the same `plumb`
+    /// binary, instead of rebuilding it every run. Runs at once share one
+    /// build; only the few most recently used indexes are kept.
+    #[arg(long, value_name = "DIR", env = "PLUMB_EVAL_PAGES_CACHE")]
+    pub pages_cache: Option<PathBuf>,
+    /// Measure only one half of the queries: `tune` to try ranking changes
+    /// on, `held-out` to check them on afterwards. Which half a query is in
+    /// depends on its words alone (see eval/README.md) [default: both].
+    #[arg(long, value_name = "HALF")]
+    pub half: Option<Half>,
     #[command(flatten)]
     pub meaning: MeaningArgs,
+}
+
+/// A half of a queries file, for `plumb eval --half`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum Half {
+    /// The queries ranking changes are tried and tuned on.
+    Tune,
+    /// The queries kept back to check a tuned ranking on.
+    HeldOut,
 }
 
 fn parse_rank_config(s: &str) -> Result<plumb_index::RankConfig, String> {
     serde_json::from_str(s).map_err(|err| format!("expected ranking knobs as JSON: {err}"))
 }
 
-fn parse_positive(s: &str) -> Result<usize, String> {
+pub(crate) fn parse_positive(s: &str) -> Result<usize, String> {
     match s.trim().parse::<usize>() {
         Ok(n) if n > 0 => Ok(n),
         _ => Err(format!("expected a whole number above 0, got `{s}`")),
     }
+}
+
+fn parse_language(text: &str) -> Result<String, String> {
+    plumb_core::language_code(text)
+        .ok_or_else(|| format!("expected a language code such as en or de, got {text:?}"))
 }
 
 fn parse_country(text: &str) -> Result<String, String> {
@@ -866,6 +1477,107 @@ mod tests {
 
     fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
         Cli::try_parse_from(std::iter::once("plumb").chain(args.iter().copied()))
+    }
+
+    #[test]
+    fn inner_page_refreshes_have_explicit_cache_stage_and_budget_controls() {
+        let cli = parse(&[
+            "fetch-pages",
+            "--set",
+            "reference",
+            "--out",
+            "scratch/reference.tsv.gz",
+            "--reference-sites",
+            "irs.gov,ssa.gov",
+            "--max-reference-per-site",
+            "12",
+            "--cache-max-age-days",
+            "1",
+            "--force-refresh",
+            "--stage-only",
+            "--max-set-bytes",
+            "1000000",
+        ])
+        .unwrap();
+        let Command::FetchPages(args) = cli.command else {
+            panic!("not fetch-pages")
+        };
+        assert_eq!(args.cache_max_age_days, 1);
+        assert!(args.force_refresh && args.stage_only);
+        assert_eq!(args.max_reference_per_site, Some(12));
+        assert_eq!(args.max_set_bytes, 1000000);
+        assert!(!args.replace_set);
+        assert!(parse(&[
+            "fetch-pages",
+            "--set",
+            "docs",
+            "--out",
+            "docs.tsv.gz",
+            "--stage-only",
+            "--promote-generation",
+            "generation"
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn recent_paper_ingestion_is_explicit_and_requires_resumable_work() {
+        let Command::FetchPages(defaults) =
+            parse(&["fetch-pages", "--set", "papers", "--out", "papers.tsv.gz"])
+                .unwrap()
+                .command
+        else {
+            panic!("not fetch-pages")
+        };
+        assert!(defaults.recent_papers_end.is_none());
+        assert!(parse(&[
+            "fetch-pages",
+            "--set",
+            "papers",
+            "--out",
+            "papers.tsv.gz",
+            "--recent-papers-end",
+            "2026-10-09",
+        ])
+        .is_err());
+        assert!(parse(&[
+            "fetch-pages",
+            "--set",
+            "papers",
+            "--out",
+            "papers.tsv.gz",
+            "--recent-papers-requests",
+            "5",
+        ])
+        .is_err());
+        let Command::FetchPages(args) = parse(&[
+            "fetch-pages",
+            "--set",
+            "papers",
+            "--out",
+            "papers.tsv.gz",
+            "--work",
+            "scratch",
+            "--recent-papers-end",
+            "2026-10-09",
+            "--recent-papers-days",
+            "30",
+            "--recent-papers-records",
+            "100",
+            "--recent-papers-requests",
+            "4",
+            "--stage-only",
+        ])
+        .unwrap()
+        .command
+        else {
+            panic!("not fetch-pages")
+        };
+        assert_eq!(args.recent_papers_end.as_deref(), Some("2026-10-09"));
+        assert_eq!(args.recent_papers_days, 30);
+        assert_eq!(args.recent_papers_records, 100);
+        assert_eq!(args.recent_papers_requests, 4);
+        assert!(args.stage_only);
     }
 
     #[test]
@@ -942,6 +1654,107 @@ mod tests {
     }
 
     #[test]
+    fn paper_search_cli_takes_typed_dates_and_order() {
+        let cli = parse(&[
+            "search",
+            "--index",
+            "pages",
+            "--paper",
+            "--after",
+            "2025",
+            "--before",
+            "2026-09-30",
+            "--order",
+            "newest",
+            "transformer",
+        ])
+        .unwrap();
+        let Command::Search(args) = cli.command else {
+            panic!("not search");
+        };
+        assert!(args.paper);
+        let query = plumb_core::paper_query::PaperQuery::with_options(
+            &args.query.join(" "),
+            args.after.as_deref(),
+            args.before.as_deref(),
+            args.order.as_deref(),
+        )
+        .unwrap();
+        assert!(query.newest);
+        assert_eq!(query.before.unwrap().day, Some(20260930));
+        assert!(parse(&[
+            "search",
+            "--index",
+            "pages",
+            "--after",
+            "2025",
+            "transformer"
+        ])
+        .is_err());
+        assert!(parse(&[
+            "search",
+            "--index",
+            "pages",
+            "--paper",
+            "--order",
+            "bad",
+            "transformer"
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn facts_targeted_flags_require_an_explicit_item_list() {
+        let cli = parse(&[
+            "fetch-facts",
+            "--articles",
+            "staged.tsv.gz",
+            "--items",
+            "Q17",
+            "Q408",
+            "--properties",
+            "population",
+            "capital",
+        ])
+        .unwrap();
+        let Command::FetchFacts(args) = cli.command else {
+            panic!("expected fetch-facts");
+        };
+        assert_eq!(args.items, ["Q17", "Q408"]);
+        assert_eq!(args.properties, ["population", "capital"]);
+        assert!(parse(&[
+            "fetch-facts",
+            "--articles",
+            "staged.tsv.gz",
+            "--properties",
+            "population"
+        ])
+        .is_err());
+        assert!(parse(&[
+            "fetch-facts",
+            "--articles",
+            "staged.tsv.gz",
+            "--items",
+            "Q17",
+            "--retry-facts",
+            "report.json"
+        ])
+        .is_err());
+        let cli = parse(&[
+            "fetch-facts",
+            "--articles",
+            "staged.tsv.gz",
+            "--retry-facts",
+            "report.json",
+        ])
+        .unwrap();
+        let Command::FetchFacts(args) = cli.command else {
+            panic!("expected fetch-facts");
+        };
+        assert_eq!(args.retry_facts, Some(PathBuf::from("report.json")));
+    }
+
+    #[test]
     fn fetch_data_release_and_url_conflict() {
         let err = parse(&[
             "fetch-data",
@@ -958,7 +1771,7 @@ mod tests {
         let Command::FetchData(args) = cli.command else {
             panic!("not fetch-data");
         };
-        assert_eq!(args.wikidata_min_sitelinks, 25);
+        assert_eq!(args.wikidata_min_sitelinks, 3);
         assert!(!args.skip_tranco && !args.skip_wikidata);
     }
 

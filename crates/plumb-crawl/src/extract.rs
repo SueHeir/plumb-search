@@ -26,9 +26,29 @@ use plumb_core::{
     MAX_HEADING_WORDS, MAX_TEXT_CHARS, SEARCH_TERMS,
 };
 use tracing::debug;
+
+use crate::boilerplate::{self, Verdict};
+use crate::structured;
 use url::Url;
 
+use crate::terms::{pick_terms, TERM_WORDS};
 use crate::{OutLink, PageMeta};
+
+mod rich;
+use rich::RichText;
+
+/// Changes to rich extraction invalidate docs caches independently of
+/// homepage metadata. Include this and the configuration in cache identity.
+pub const DOCS_EXTRACTOR_VERSION: u32 = 2;
+
+/// Rich content is explicitly enabled for inner docs pages. Homepage
+/// callers retain their compact text and heading budgets.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum InnerPageExtraction {
+    #[default]
+    Compact,
+    Docs,
+}
 
 /// Most icon links [`extract_page_meta`] keeps from one page.
 pub const MAX_ICONS: usize = 3;
@@ -58,15 +78,25 @@ pub(crate) const READ_CHUNK_BYTES: usize = 4096;
 /// Most words of the page's visible text [`extract_page_meta`] keeps.
 pub const MAX_BODY_WORDS: usize = 100;
 
-/// Bytes of visible text read before [`MAX_BODY_WORDS`] are surely in hand
-/// (words average under ten bytes); the rest of the page's text is skipped.
-const BODY_TEXT_BYTES: usize = MAX_BODY_WORDS * 16;
+/// Most words of the page's visible text kept as [`PageMeta::page_text`],
+/// for picking search terms from the whole page.
+pub const MAX_PAGE_TEXT_WORDS: usize = 1000;
+
+/// Bytes of visible text read before [`MAX_PAGE_TEXT_WORDS`] are surely in
+/// hand (words average under ten bytes); the rest of the page's text is
+/// skipped.
+const BODY_TEXT_BYTES: usize = MAX_PAGE_TEXT_WORDS * 16;
 
 /// Elements that hold a site's furniture (menus, banners, footers, forms)
 /// rather than what the page is about; their text stays out of the body text.
 const CHROME_ELEMENTS: &[&str] = &[
     "aside", "button", "dialog", "footer", "form", "header", "nav", "select",
 ];
+
+/// Most section headings ([`PageMeta::sections`]) kept per page.
+pub const MAX_SECTIONS: usize = 64;
+/// Most words kept of each section heading.
+pub const MAX_SECTION_WORDS: usize = 8;
 
 /// Elements whose text never shows on the page.
 pub(crate) const HIDDEN_ELEMENTS: &[&str] = &["script", "style", "noscript", "template", "iframe"];
@@ -138,13 +168,55 @@ const WORD_BREAK_ELEMENTS: &[&str] = &[
 ///   and is read the way it shows on screen: script and style contents are
 ///   skipped, and block elements separate words, so
 ///   `<div>Acme</div><div>Bank</div>` gives `acme bank`.
+/// - The visible text is read a block at a time (the text between two
+///   elements that start a new line on screen), and blocks that are
+///   boilerplate are left out (`boilerplate.rs`): notices, menus of links,
+///   and generic action labels unless the page has no substantive text.
+///   Brief factual text stays. A block repeated on the page is kept once.
+/// - The search terms ([`PageMeta::terms`]) are picked from the title,
+///   description, headings and page text with [`pick_terms`].
 pub fn extract_page_meta(base_url: &Url, html: &str) -> PageMeta {
-    read_page(base_url, html, READ_TIME_LIMIT)
+    extract_inner_page_meta(base_url, html, InnerPageExtraction::Compact)
+}
+
+/// Reads an inner page with the same tokenizer/time limit as homepages,
+/// optionally retaining bounded symbols and passages from later sections.
+pub fn extract_inner_page_meta(
+    base_url: &Url,
+    html: &str,
+    extraction: InnerPageExtraction,
+) -> PageMeta {
+    let mut meta = read_page_with_extraction(base_url, html, READ_TIME_LIMIT, extraction);
+    let text: Vec<&str> = meta
+        .title
+        .iter()
+        .chain(&meta.description)
+        .chain(&meta.headings)
+        .chain(std::iter::once(&meta.page_text))
+        .map(|part| part.trim())
+        .filter(|part| !part.is_empty())
+        .collect();
+    meta.terms = pick_terms(&text.join(". "), TERM_WORDS);
+    meta
 }
 
 /// [`extract_page_meta`], reading for at most `time_limit`.
+#[cfg(test)]
 fn read_page(base_url: &Url, html: &str, time_limit: Duration) -> PageMeta {
-    let page = RefCell::new(Page::new(base_url));
+    read_page_with_extraction(base_url, html, time_limit, InnerPageExtraction::Compact)
+}
+
+fn read_page_with_extraction(
+    base_url: &Url,
+    html: &str,
+    time_limit: Duration,
+    extraction: InnerPageExtraction,
+) -> PageMeta {
+    let mut page = Page::new(base_url);
+    if extraction == InnerPageExtraction::Docs {
+        page.rich = Some(RichText::default());
+    }
+    let page = RefCell::new(page);
     let tokenizer = Tokenizer::new(Reader(&page), TokenizerOpts::default());
     let input = BufferQueue::default();
     let started = Instant::now();
@@ -211,6 +283,8 @@ struct Page<'a> {
     search_url: Option<String>,
     /// The `<html lang>` of the page, once its `<html>` is read.
     language: Option<String>,
+    meta_language: Option<String>,
+    og_language: Option<String>,
     html_seen: bool,
     /// `<link rel="icon">` and the like, with their [`icon_rank`].
     icons: Vec<(u32, String)>,
@@ -221,9 +295,31 @@ struct Page<'a> {
     headings: Vec<String>,
     /// Words in `headings`.
     heading_words: usize,
+    /// The text of the `<h2>` or `<h3>` being read, when it is visible and
+    /// outside [`CHROME_ELEMENTS`].
+    section_text: Option<String>,
+    sections: Vec<String>,
     /// Visible text outside [`CHROME_ELEMENTS`] and headings, up to
     /// [`BODY_TEXT_BYTES`].
     body: String,
+    /// The text since the last word break that would go in the body text,
+    /// kept or dropped as a whole by [`boilerplate`] at the next break.
+    block: String,
+    /// Bytes of `block` read inside links, whitespace aside.
+    block_link_bytes: usize,
+    /// Links begun in `block`.
+    block_links: usize,
+    /// A link (`<a href>`) is open.
+    in_link: bool,
+    /// Short blocks ([`Verdict::Short`]), the body text of a page that has
+    /// no longer block.
+    short_blocks: String,
+    /// The lowercased blocks kept so far, so a repeat is kept once.
+    kept_blocks: HashSet<String>,
+    /// The text of the `<script type="application/ld+json">` being read.
+    json_ld: Option<String>,
+    /// JSON-LD blocks read so far, at most [`structured::MAX_BLOCKS`].
+    json_ld_blocks: Vec<String>,
     /// The GET form being read, while no search address has been found.
     form: Option<SearchForm>,
     /// The link being read, when it is one to keep.
@@ -245,6 +341,7 @@ struct Page<'a> {
     /// Whether a link to a spot on this page (`href="#..."`, such as "Skip
     /// to content") is open; its text stays out of the body text.
     in_page_link: bool,
+    rich: Option<RichText>,
 }
 
 /// A GET form on the page, between its `<form>` and its `</form>`.
@@ -314,13 +411,25 @@ impl<'a> Page<'a> {
             site_name: None,
             search_url: None,
             language: None,
+            meta_language: None,
+            og_language: None,
             html_seen: false,
             icons: Vec::new(),
             feed: None,
             heading_text: None,
             headings: Vec::new(),
             heading_words: 0,
+            section_text: None,
+            sections: Vec::new(),
             body: String::new(),
+            block: String::new(),
+            block_link_bytes: 0,
+            block_links: 0,
+            in_link: false,
+            short_blocks: String::new(),
+            kept_blocks: HashSet::new(),
+            json_ld: None,
+            json_ld_blocks: Vec::new(),
             form: None,
             anchor: None,
             links: Vec::new(),
@@ -332,6 +441,7 @@ impl<'a> Page<'a> {
             foreign: 0,
             chrome: 0,
             in_page_link: false,
+            rich: None,
         }
     }
 
@@ -352,11 +462,18 @@ impl<'a> Page<'a> {
 
     /// Handles a start tag, and tells the tokenizer how to read what follows.
     fn start_tag(&mut self, tag: &Tag) -> TokenSinkResult<()> {
+        if let Some(rich) = &mut self.rich {
+            rich.start(tag);
+        }
         let name: &str = &tag.name;
         match name {
             "a" => {
                 self.close_anchor();
                 self.in_page_link = attr(tag, "href").is_some_and(|h| h.trim().starts_with('#'));
+                self.in_link = attr(tag, "href").is_some();
+                if self.in_link && self.body_open() {
+                    self.block_links += 1;
+                }
                 self.open_anchor(tag);
             }
             "html" if !self.html_seen => {
@@ -374,13 +491,31 @@ impl<'a> Page<'a> {
                 self.input(tag);
             }
             "svg" | "math" if !tag.self_closing => self.foreign += 1,
-            "h1" | "h2" => {
-                self.close_heading();
-                let shown = attr(tag, "hidden").is_none()
+            "h1" | "h2" | "h3" => {
+                let shown = self.hidden == 0
+                    && self.foreign == 0
+                    && attr(tag, "hidden").is_none()
                     && !attr(tag, "aria-hidden").is_some_and(|v| v.eq_ignore_ascii_case("true"));
-                if self.hidden == 0 && self.foreign == 0 && shown {
-                    self.heading_text = Some(String::new());
+                if name != "h3" {
+                    self.close_heading();
+                    if shown {
+                        self.heading_text = Some(String::new());
+                    }
                 }
+                if name != "h1" {
+                    self.close_section();
+                    if shown && self.chrome == 0 {
+                        self.section_text = Some(String::new());
+                    }
+                }
+            }
+            "script"
+                if self.json_ld_blocks.len() < structured::MAX_BLOCKS
+                    && attr(tag, "type").is_some_and(|kind| {
+                        kind.trim().eq_ignore_ascii_case("application/ld+json")
+                    }) =>
+            {
+                self.json_ld = Some(String::new());
             }
             "title" if self.foreign == 0 && !self.title_seen => {
                 self.title_seen = true;
@@ -408,15 +543,25 @@ impl<'a> Page<'a> {
     }
 
     fn end_tag(&mut self, tag: &Tag) {
+        if let Some(rich) = &mut self.rich {
+            rich.end(tag);
+        }
         let name: &str = &tag.name;
         match name {
             "a" => {
                 self.close_anchor();
                 self.in_page_link = false;
+                self.in_link = false;
             }
             "title" => self.close_title(),
             "form" => self.close_form(),
-            "h1" | "h2" => self.close_heading(),
+            "script" => self.close_json_ld(),
+            "h1" => self.close_heading(),
+            "h2" => {
+                self.close_heading();
+                self.close_section();
+            }
+            "h3" => self.close_section(),
             "svg" | "math" => self.foreign = self.foreign.saturating_sub(1),
             _ => {}
         }
@@ -435,6 +580,9 @@ impl<'a> Page<'a> {
     }
 
     fn text(&mut self, text: &str) {
+        if let Some(rich) = &mut self.rich {
+            rich.text(text);
+        }
         if let Some(title) = &mut self.title_text {
             title.push_str(text);
         }
@@ -444,17 +592,58 @@ impl<'a> Page<'a> {
                     heading.push_str(text);
                 }
             }
+            if let Some(section) = &mut self.section_text {
+                if section.len() < MAX_TEXT_CHARS {
+                    section.push_str(text);
+                }
+            }
         }
         if let Some(anchor) = self.visible_anchor() {
             anchor.text.push_str(text);
         }
-        if self.body_open() {
-            let room = BODY_TEXT_BYTES - self.body.len();
+        if let Some(json) = &mut self.json_ld {
+            // One byte past the limit marks the block as too long to read.
+            let room = (structured::MAX_BLOCK_BYTES + 1).saturating_sub(json.len());
             let mut end = room.min(text.len());
             while !text.is_char_boundary(end) {
                 end -= 1;
             }
-            self.body.push_str(&text[..end]);
+            json.push_str(&text[..end]);
+        }
+        if self.body_open() {
+            let room = BODY_TEXT_BYTES.saturating_sub(self.body.len() + self.block.len());
+            let mut end = room.min(text.len());
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            self.block.push_str(&text[..end]);
+            if self.in_link {
+                self.block_link_bytes += visible_bytes(&text[..end]);
+            }
+        }
+    }
+
+    /// Ends the block of body text being read: it goes in the body text
+    /// unless [`boilerplate::judge`] finds it boilerplate or it repeats a
+    /// block already kept; a short generic action label is put aside, for a page with no
+    /// substantive block.
+    fn close_block(&mut self) {
+        let block = collapse_whitespace(&self.block);
+        let all_links = self.block_link_bytes * 10 >= visible_bytes(&self.block) * 9;
+        let links = std::mem::take(&mut self.block_links);
+        self.block.clear();
+        self.block_link_bytes = 0;
+        if block.is_empty() {
+            return;
+        }
+        let kept = match boilerplate::judge(&block, links, all_links) {
+            Verdict::Keep => &mut self.body,
+            Verdict::Short => &mut self.short_blocks,
+            Verdict::Drop => return,
+        };
+        if kept.len() < BODY_TEXT_BYTES && self.kept_blocks.insert(block.to_lowercase()) {
+            kept.push_str(&block);
+            kept.push(' ');
         }
     }
 
@@ -465,9 +654,10 @@ impl<'a> Page<'a> {
         if let Some(heading) = &mut self.heading_text {
             heading.push(' ');
         }
-        if self.body_open() {
-            self.body.push(' ');
+        if let Some(section) = &mut self.section_text {
+            section.push(' ');
         }
+        self.close_block();
     }
 
     /// Whether text read now belongs to the body text: it shows on the
@@ -480,7 +670,7 @@ impl<'a> Page<'a> {
             && !self.in_page_link
             && self.title_text.is_none()
             && self.heading_text.is_none()
-            && self.body.len() < BODY_TEXT_BYTES
+            && self.body.len() + self.block.len() < BODY_TEXT_BYTES
     }
 
     /// Keeps the heading just read, unless it repeats one or the headings
@@ -502,6 +692,24 @@ impl<'a> Page<'a> {
         }
         self.heading_words += words.len();
         self.headings.push(heading);
+    }
+
+    /// Keeps the section heading just read, cut to [`MAX_SECTION_WORDS`]
+    /// words, unless it repeats one or the sections are full.
+    fn close_section(&mut self) {
+        let Some(text) = self.section_text.take() else {
+            return;
+        };
+        if self.sections.len() >= MAX_SECTIONS {
+            return;
+        }
+        let words: Vec<&str> = text.split_whitespace().take(MAX_SECTION_WORDS).collect();
+        let Some(section) = clean_text(&words.join(" ")) else {
+            return;
+        };
+        if !self.sections.contains(&section) {
+            self.sections.push(section);
+        }
     }
 
     /// The open link, unless a hidden element has opened inside it.
@@ -592,6 +800,12 @@ impl<'a> Page<'a> {
         }
     }
 
+    fn close_json_ld(&mut self) {
+        if let Some(json) = self.json_ld.take() {
+            self.json_ld_blocks.push(json);
+        }
+    }
+
     fn close_title(&mut self) {
         if let Some(text) = self.title_text.take() {
             self.title = clean_text(&text);
@@ -609,6 +823,16 @@ impl<'a> Page<'a> {
         // Open Graph belongs in `property`, but `name` is a common mistake.
         let is_og =
             |key: &str| name.eq_ignore_ascii_case(key) || property.eq_ignore_ascii_case(key);
+        if self.foreign == 0
+            && self.meta_language.is_none()
+            && attr(tag, "http-equiv")
+                .is_some_and(|key| key.eq_ignore_ascii_case("content-language"))
+        {
+            self.meta_language = plumb_core::language_code(content);
+        }
+        if self.foreign == 0 && self.og_language.is_none() && is_og("og:locale") {
+            self.og_language = plumb_core::language_code(content);
+        }
         if self.description.is_none() && name.eq_ignore_ascii_case("description") {
             self.description = clean_text(content);
         }
@@ -726,15 +950,32 @@ impl<'a> Page<'a> {
         self.close_anchor();
         self.close_title();
         self.close_heading();
+        self.close_section();
         self.close_form();
-        let body: Vec<&str> = self.body.split_whitespace().take(MAX_BODY_WORDS).collect();
+        self.close_json_ld();
+        self.close_block();
+        if self.body.is_empty() {
+            self.body = std::mem::take(&mut self.short_blocks);
+        }
+        let words: Vec<&str> = self
+            .body
+            .split_whitespace()
+            .take(MAX_PAGE_TEXT_WORDS)
+            .collect();
+        let body = &words[..words.len().min(MAX_BODY_WORDS)];
         PageMeta {
             body_text: (!body.is_empty()).then(|| body.join(" ")),
+            page_text: words.join(" "),
+            terms: Vec::new(),
             title: self.title,
             description: self.description.or(self.og_description),
             site_name: self.site_name,
+            structured_names: structured::site_names(
+                &self.json_ld_blocks,
+                self.own_domain.as_deref(),
+            ),
             search_url: self.search_url,
-            language: self.language,
+            language: self.language.or(self.meta_language).or(self.og_language),
             icons: best_icons(self.icons),
             key_pages: match &self.own_domain {
                 Some(domain) => pick_key_pages(
@@ -746,6 +987,8 @@ impl<'a> Page<'a> {
                 None => Vec::new(),
             },
             headings: self.headings,
+            sections: self.sections,
+            search: self.rich.and_then(RichText::finish),
             feed: self.feed,
             links: self.links,
         }
@@ -890,6 +1133,14 @@ fn link_text(anchor: &Anchor) -> String {
         .unwrap_or_default()
 }
 
+/// Bytes of `text` that are not whitespace.
+fn visible_bytes(text: &str) -> usize {
+    text.chars()
+        .filter(|c| !c.is_whitespace())
+        .map(char::len_utf8)
+        .sum()
+}
+
 /// Collapses whitespace and cuts to [`MAX_TEXT_CHARS`]; `None` if nothing is left.
 fn clean_text(text: &str) -> Option<String> {
     let text = truncate_chars(&collapse_whitespace(text), MAX_TEXT_CHARS);
@@ -918,6 +1169,228 @@ mod tests {
     }
 
     #[test]
+    fn rich_docs_keep_late_exact_symbols_and_source_anchors() {
+        let intro = "ordinary introduction ".repeat(150);
+        let html = format!(
+            r##"<title>Node</title><main><p>{intro}</p>
+            <h2 id="method-overview">Methods</h2><table><tr><td><a href="#class-node-method-set-multiplayer-authority">set_multiplayer_authority</a></td></tr></table>
+            <h2 id="methods">Method descriptions</h2>
+            <p class="classref-method" id="class-node-method-set-multiplayer-authority">void <strong>set_multiplayer_authority</strong>(id: int, recursive: bool = true)</p>
+            <p>Sets this node's multiplayer authority to the peer with the given peer ID.</p>
+            <h3 id="sort">Sorting</h3><pre><code>Array.prototype.sort() std::vector</code></pre></main>"##
+        );
+        let base =
+            Url::parse("https://docs.godotengine.org/en/stable/classes/class_node.html").unwrap();
+        let compact = extract_page_meta(&base, &html);
+        let rich = extract_inner_page_meta(&base, &html, InnerPageExtraction::Docs);
+        assert!(compact.search.is_none());
+        assert_eq!(compact.body_text, rich.body_text);
+        assert_eq!(compact.sections, rich.sections);
+        assert!(!rich
+            .body_text
+            .as_deref()
+            .unwrap()
+            .contains("set_multiplayer_authority"));
+        let search = rich.search.unwrap();
+        for identifier in [
+            "set_multiplayer_authority",
+            "Array.prototype.sort",
+            "std::vector",
+        ] {
+            assert!(
+                search.symbols.iter().any(|s| s.identifier == identifier),
+                "{identifier}: {search:?}"
+            );
+        }
+        let authority = search
+            .symbols
+            .iter()
+            .find(|s| s.identifier == "set_multiplayer_authority")
+            .unwrap();
+        assert_eq!(
+            search
+                .symbols
+                .iter()
+                .filter(|s| s.identifier == "set_multiplayer_authority")
+                .count(),
+            1
+        );
+        assert_eq!(
+            authority.anchor.as_deref(),
+            Some("class-node-method-set-multiplayer-authority")
+        );
+        assert!(search.text().contains("set multiplayer authority"));
+        let definition = search
+            .passages
+            .iter()
+            .find(|p| p.text.contains("given peer ID"))
+            .unwrap();
+        assert_eq!(
+            definition.anchor.as_deref(),
+            Some("class-node-method-set-multiplayer-authority")
+        );
+    }
+
+    #[test]
+    fn rich_docs_favor_definitions_over_repeated_long_references() {
+        let mut html = String::new();
+        // Incidental long names and repeated cross-references must not use
+        // the budget needed by distinct definitions later on the page.
+        for section in 0..20 {
+            html.push_str(&format!("<h2 id='part-{section}'>Part {section}</h2><p>"));
+            for reference in 0..80 {
+                html.push_str(&format!(
+                    "<code>ExternalObject.REPEATED_EXTREMELY_LONG_REFERENCE_{reference}</code> "
+                ));
+            }
+            html.push_str("<a href='#mention'>update_peer</a></p>");
+        }
+        html.push_str("<h2 id='methods'>Methods</h2>");
+        for method in 0..32 {
+            html.push_str(&format!(
+                "<p class='classref-method' id='method-{method}'><strong>method_{method}</strong>(value: int)</p><p>Updates the associated state.</p>"
+            ));
+        }
+        html.push_str(
+            "<dt class='sig' id='update-peer'><span class='sig-name descname'>update_peer</span>(value)</dt><dd>Updates the owning peer.</dd>"
+        );
+        let base = Url::parse("https://example.com/api").unwrap();
+        let search = extract_inner_page_meta(&base, &html, InnerPageExtraction::Docs)
+            .search
+            .unwrap();
+        for method in 0..32 {
+            let symbol = search
+                .symbols
+                .iter()
+                .find(|s| s.identifier == format!("method_{method}"))
+                .unwrap();
+            assert_eq!(symbol.anchor, Some(format!("method-{method}")));
+        }
+        let update: Vec<_> = search
+            .symbols
+            .iter()
+            .filter(|s| s.identifier == "update_peer")
+            .collect();
+        assert_eq!(update.len(), 1);
+        assert_eq!(update[0].anchor.as_deref(), Some("update-peer"));
+        let identifiers: std::collections::HashSet<_> =
+            search.symbols.iter().map(|s| &s.identifier).collect();
+        assert_eq!(identifiers.len(), search.symbols.len());
+    }
+
+    #[test]
+    fn rich_docs_keep_troubleshooting_prose_beyond_the_body_limit() {
+        let html = format!(
+            r#"<title>Pod lifecycle</title><p>{}</p>
+            <h2 id="container-restarts">Container restarts</h2>
+            <p>The CrashLoopBackOff state indicates repeated container failures. Kubernetes applies an exponential backoff delay before restarting the container.</p>"#,
+            "intro ".repeat(150)
+        );
+        let base = Url::parse("https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/")
+            .unwrap();
+        let meta = extract_inner_page_meta(&base, &html, InnerPageExtraction::Docs);
+        assert!(!meta.body_text.unwrap().contains("CrashLoopBackOff"));
+        let search = meta.search.unwrap();
+        let passage = search
+            .passages
+            .iter()
+            .find(|p| p.text.contains("exponential backoff"))
+            .unwrap();
+        assert_eq!(passage.heading, "Container restarts");
+        assert_eq!(passage.anchor.as_deref(), Some("container-restarts"));
+        assert!(search
+            .symbols
+            .iter()
+            .any(|s| s.identifier == "CrashLoopBackOff"));
+    }
+
+    #[test]
+    fn rich_docs_exclude_chrome_and_hidden_subtrees_even_with_bad_markup() {
+        let html = r#"<nav><code>menu_symbol</code></nav><footer><h2>Footer</h2></footer>
+            <div role="navigation"><code>role_symbol</code></div>
+            <div hidden><pre>hidden_symbol</pre></div>
+            <div aria-hidden="true"><code>aria_symbol</code></div>
+            <div style="display: NONE !important"><code>style_symbol</code></div>
+            <script>script_symbol</script><svg><text>svg_symbol</text></svg><svg/><math/>
+            <h2 id="visible">Visible</h2><p><code>visible_symbol</code> explains the supported API.
+            <div hidden><span></nonsense>malformed_secret</div>"#;
+        let base = Url::parse("https://example.com/docs").unwrap();
+        let search = extract_inner_page_meta(&base, html, InnerPageExtraction::Docs)
+            .search
+            .unwrap();
+        assert!(search.text().contains("visible_symbol"));
+        for hidden in [
+            "menu_symbol",
+            "role_symbol",
+            "hidden_symbol",
+            "aria_symbol",
+            "style_symbol",
+            "script_symbol",
+            "svg_symbol",
+            "malformed_secret",
+        ] {
+            assert!(!search.text().contains(hidden), "{hidden}: {search:?}");
+        }
+    }
+
+    #[test]
+    fn rich_docs_bounds_hold_on_huge_and_deep_markup() {
+        use plumb_core::article::{MAX_SEARCH_BYTES, MAX_SEARCH_PASSAGES, MAX_SEARCH_SYMBOLS};
+        let base = Url::parse("https://example.com/docs").unwrap();
+        let html: String = (0..2000)
+            .map(|i| {
+                format!(
+                    "<h2 id='section{i}'>Topic {i}</h2><p><code>api_symbol_{i}</code> {}</p>",
+                    "原因 ".repeat(150)
+                )
+            })
+            .collect();
+        let (meta, peak) = peak_bytes(|| {
+            read_page_with_extraction(&base, &html, Duration::MAX, InnerPageExtraction::Docs)
+        });
+        let search = meta.search.unwrap();
+        assert!(search.symbols.len() <= MAX_SEARCH_SYMBOLS);
+        assert!(search.passages.len() <= MAX_SEARCH_PASSAGES);
+        assert!(serde_json::to_string(&search).unwrap().len() <= MAX_SEARCH_BYTES);
+        assert!(peak < 4 << 20, "{peak} bytes at peak");
+        assert!(search
+            .symbols
+            .iter()
+            .any(|s| s.identifier != "api_symbol_0" && s.identifier != "api_symbol_1"));
+        let deep = format!(
+            "<p>Useful initial text.</p>{}<code>excluded_symbol</code>{}",
+            "<span>".repeat(100_000),
+            "</span>".repeat(100_000)
+        );
+        let (_, peak) = peak_bytes(|| {
+            read_page_with_extraction(&base, &deep, Duration::MAX, InnerPageExtraction::Docs)
+        });
+        assert!(peak < 4 << 20, "{peak} bytes at peak");
+    }
+
+    #[test]
+    fn rich_extraction_is_independent_of_tokenizer_chunk_boundaries() {
+        let html = r#"<h2 id="std::vector">Vectors</h2><p><code>std::vector</code> and <strong>set_multiplayer_authority</strong> have exact identifiers.</p>"#;
+        let base = Url::parse("https://example.com/docs").unwrap();
+        let whole =
+            read_page_with_extraction(&base, html, READ_TIME_LIMIT, InnerPageExtraction::Docs);
+        for size in 1..html.len() {
+            let mut page = Page::new(&base);
+            page.rich = Some(RichText::default());
+            let page = RefCell::new(page);
+            let tokenizer = Tokenizer::new(Reader(&page), TokenizerOpts::default());
+            let input = BufferQueue::default();
+            for chunk in chunks(html, size) {
+                input.push_back(StrTendril::from_slice(chunk));
+                let _ = tokenizer.feed(&input);
+            }
+            tokenizer.end();
+            drop(tokenizer);
+            assert_eq!(page.into_inner().into_meta(), whole, "pieces of {size}");
+        }
+    }
+
+    #[test]
     fn reads_the_language_of_the_page() {
         let lang = |html: &str| extract("https://www.example.com/", html).language;
         assert_eq!(
@@ -930,6 +1403,23 @@ mod tests {
         );
         assert_eq!(lang("<html><title>x</title>"), None);
         assert_eq!(lang("<html lang=\"x-default\">"), None);
+        assert_eq!(
+            lang("<html><meta http-equiv=\"Content-Language\" content=\"es-ES\">").as_deref(),
+            Some("es")
+        );
+        assert_eq!(
+            lang("<html><meta property=\"og:locale\" content=\"de_DE\">").as_deref(),
+            Some("de")
+        );
+        assert_eq!(
+            lang("<html lang=\"es\"><meta property=\"og:locale\" content=\"en_US\">").as_deref(),
+            Some("es")
+        );
+        assert_eq!(lang("<html><meta property=\"og:locale\" content=\"en_US\"><meta http-equiv=\"Content-Language\" content=\"es\">").as_deref(), Some("es"));
+        assert_eq!(
+            lang("<html><meta http-equiv=\"Content-Language\" content=\"es,de\">"),
+            None
+        );
         // Only the page's own <html>.
         assert_eq!(lang("<html><svg><html lang=\"fr\"></svg>"), None);
     }
@@ -979,6 +1469,71 @@ mod tests {
             meta.body_text.as_deref(),
             Some("Checking accounts, savings and loans. Open an account today.")
         );
+    }
+
+    #[test]
+    fn body_text_leaves_out_boilerplate_blocks() {
+        let meta = extract(
+            "https://www.example-hardware.com/",
+            r#"<html><body>
+                <div class="cookies">We use cookies to give you the best experience.</div>
+                <div class="menu"><a href="/tools">Tools</a> <a href="/paint">Paint</a>
+                    <a href="/garden">Garden Center</a> <a href="/lumber">Lumber</a></div>
+                <p>Everything you need to build, fix and grow your home.</p>
+                <div><a href="/deals">Shop now</a></div><div>3 min read</div>
+                <p>Free delivery on every order over fifty dollars, every day.</p>
+                <div><a href="/deals">Shop now</a></div>
+                <p>Everything you need to build, fix and grow your home.</p>
+                <div>&copy; 2026 Example Hardware</div>
+            </body></html>"#,
+        );
+        assert_eq!(
+            meta.body_text.as_deref(),
+            Some(
+                "Everything you need to build, fix and grow your home. \
+                 Free delivery on every order over fifty dollars, every day."
+            )
+        );
+    }
+
+    #[test]
+    fn a_page_of_short_blocks_keeps_them() {
+        let meta = extract(
+            "https://joes-pizza.example/",
+            r#"<html><body><div>Joe's Pizza</div><div>Open daily</div>
+                <div>Joe's Pizza</div><div>&copy; 2026</div></body></html>"#,
+        );
+        assert_eq!(meta.body_text.as_deref(), Some("Joe's Pizza Open daily"));
+    }
+
+    #[test]
+    fn boilerplate_fixtures_preserve_useful_text_and_remove_notices() {
+        let fixtures: Vec<serde_json::Value> =
+            serde_json::from_str(include_str!("../../../eval/boilerplate/fixtures.json")).unwrap();
+        for fixture in fixtures {
+            let meta = extract(
+                fixture["url"].as_str().unwrap(),
+                fixture["html"].as_str().unwrap(),
+            );
+            for phrase in fixture["must_keep"].as_array().unwrap() {
+                assert!(
+                    meta.page_text.contains(phrase.as_str().unwrap()),
+                    "{} lost {}: {}",
+                    fixture["id"],
+                    phrase,
+                    meta.page_text
+                );
+            }
+            for phrase in fixture["must_drop"].as_array().unwrap() {
+                assert!(
+                    !meta.page_text.contains(phrase.as_str().unwrap()),
+                    "{} retained {}: {}",
+                    fixture["id"],
+                    phrase,
+                    meta.page_text
+                );
+            }
+        }
     }
 
     #[test]
@@ -1050,6 +1605,30 @@ mod tests {
             "<html><head><title>T</title></head><body><nav>Menu</nav></body></html>",
         );
         assert_eq!(menu_only.body_text, None);
+    }
+
+    #[test]
+    fn reads_section_headings() {
+        let meta = extract(
+            "https://docs.python.org/3/tutorial/datastructures.html",
+            r#"<header><h3>Navigation</h3></header>
+                <h1>5. Data Structures</h1>
+                <h2>5.1. More on <em>Lists</em></h2><p>Lists have methods.</p>
+                <h3>5.1.3. List Comprehensions</h3><p>A concise way.</p>
+                <h3 hidden>Not shown</h3>
+                <h4>Too deep</h4>
+                <h3>5.1.3. List Comprehensions</h3>"#,
+        );
+        assert_eq!(
+            meta.sections,
+            ["5.1. More on Lists", "5.1.3. List Comprehensions"]
+        );
+        assert_eq!(meta.headings, ["5. Data Structures", "5.1. More on Lists"]);
+        let many: String = (0..100).map(|i| format!("<h3>Part {i}</h3>")).collect();
+        assert_eq!(
+            extract("https://example.com/", &many).sections.len(),
+            MAX_SECTIONS
+        );
     }
 
     #[test]
@@ -1167,9 +1746,30 @@ mod tests {
             nothing,
             PageMeta {
                 body_text: Some("No head at all".into()),
+                page_text: "No head at all".into(),
+                terms: pick_terms("No head at all", TERM_WORDS),
                 ..PageMeta::default()
             }
         );
+    }
+
+    #[test]
+    fn reads_the_site_names_in_json_ld() {
+        let meta = extract(
+            "https://www.example.com/",
+            r#"<head>
+            <script type="application/ld+json">
+              {"@context": "https://schema.org", "@type": "Organization",
+               "name": "Example Bank", "alternateName": "EXB",
+               "url": "https://www.example.com/"}
+            </script>
+            <script type="Application/LD+JSON">[{"@type": "WebSite", "name": "Example"}]</script>
+            <script>var notThis = {"@type": "WebSite", "name": "Script"};</script>
+            </head><body><p>Hello</p></body>"#,
+        );
+        assert_eq!(meta.structured_names, ["Example Bank", "EXB", "Example"]);
+        // The JSON stays out of the page's text.
+        assert_eq!(meta.body_text.as_deref(), Some("Hello"));
     }
 
     #[test]
@@ -1583,7 +2183,7 @@ mod tests {
         let html =
             r#"<title>Caf&eacute; &amp; Co</title><a href="https://x.org/">X &copy; Org</a>"#;
         let base = Url::parse("https://example.com/").unwrap();
-        let whole = extract_page_meta(&base, html);
+        let whole = read_page(&base, html, READ_TIME_LIMIT);
         assert_eq!(whole.title.as_deref(), Some("Café & Co"));
         assert_eq!(whole.links[0].text, "x org");
         for size in 1..html.len() {

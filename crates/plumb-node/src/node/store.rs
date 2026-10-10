@@ -6,10 +6,12 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
+use plumb_core::SITES_VERSION;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 use super::NodeSettings;
+use crate::meaning::MeaningModel;
 
 /// Held locked while a node runs.
 const LOCK_FILE: &str = "node.lock";
@@ -124,8 +126,10 @@ pub(super) fn lock(paths: &Paths) -> Result<Option<DirLock>> {
 }
 
 /// Removes what interrupted work left behind, best effort: hidden staging
-/// directories in `indexes/`, temporary records, state and vectors files,
-/// and partial downloads of the seed data and the model. Only call it while holding the [`DirLock`].
+/// directories in `indexes/`, those of the page and place indexes in
+/// `pages/`, temporary records, state and vectors files, and partial
+/// downloads of the seed data and the model. Only call it while holding the
+/// [`DirLock`], before anything starts building.
 pub(super) fn remove_leftovers(paths: &Paths) {
     let temp_prefixes = [
         format!(".{RECORDS_FILE}."),
@@ -133,14 +137,16 @@ pub(super) fn remove_leftovers(paths: &Paths) {
         format!(".{SETTINGS_FILE}."),
     ];
     for name in file_names(&paths.data) {
-        let partial_vectors = name == format!("{}.part", plumb_embed::VECTORS_FILE_NAME);
+        let partial_vectors = name == format!("{}.part", plumb_embed::VECTORS_FILE_NAME)
+            || name == super::shared_vectors::PART_FILE;
         if partial_vectors
             || name.ends_with(".tmp") && temp_prefixes.iter().any(|p| name.starts_with(p))
         {
             remove_leftover(&paths.data.join(name));
         }
     }
-    for dir in [&paths.seed, &paths.data.join(super::embedding::MODEL_DIR)] {
+    let models = [MeaningModel::Small, MeaningModel::Gemma].map(|m| paths.data.join(m.dir_name()));
+    for dir in std::iter::once(&paths.seed).chain(&models) {
         for name in file_names(dir) {
             if name.ends_with(".part") {
                 remove_leftover(&dir.join(name));
@@ -151,6 +157,17 @@ pub(super) fn remove_leftovers(paths: &Paths) {
         if name.starts_with('.') {
             remove_leftover(&paths.indexes.join(name));
         }
+    }
+    // A page or place index whose build was cut short, by a crash or a
+    // restart, is named for sets that may have changed since, so no later
+    // build would come across it.
+    match plumb_index::remove_build_leftovers(&paths.data.join(crate::pages::PAGES_DIR)) {
+        Ok(removed) => {
+            for path in removed {
+                info!("removed {}, left over from an earlier run", path.display());
+            }
+        }
+        Err(err) => warn!("{err:#}"),
     }
 }
 
@@ -215,7 +232,7 @@ pub(super) fn remove_index(dir: &Path) -> io::Result<()> {
 
 /// Progress that survives restarts, kept in `DIR/state.json`. Missing fields
 /// read as their defaults, so older files keep working.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub(super) struct SavedState {
     /// Homepages still to crawl in the round under way: the initial crawl or
@@ -243,6 +260,30 @@ pub(super) struct SavedState {
     pub(super) downloaded_total: u64,
     /// Homepages visited since setup.
     pub(super) homepages_visited: u64,
+    /// The [`SITES_VERSION`] the records were made with. A node whose
+    /// records are older folds its seed data in again, to make records for
+    /// the sites on subdomains that were part of their parent domain. 0 in
+    /// files from before there was one.
+    #[serde(default)]
+    pub(super) sites_version: u32,
+}
+
+impl Default for SavedState {
+    fn default() -> Self {
+        SavedState {
+            crawl_left: 0,
+            index_stale: false,
+            last_refresh: None,
+            wikidata_missing: false,
+            network_pending: 0,
+            quick_start: false,
+            download_day: 0,
+            downloaded_on_day: 0,
+            downloaded_total: 0,
+            homepages_visited: 0,
+            sites_version: SITES_VERSION,
+        }
+    }
 }
 
 const SECONDS_PER_DAY: u64 = 24 * 60 * 60;
@@ -288,6 +329,7 @@ impl SavedState {
             downloaded_on_day: 0,
             downloaded_total: 0,
             homepages_visited: 0,
+            sites_version: SITES_VERSION,
         }
     }
 }
@@ -417,6 +459,20 @@ mod tests {
         fs::create_dir_all(paths.indexes.join(".000003.new-99-0")).unwrap();
         fs::write(paths.indexes.join(".000003.new-99-0/meta.json"), "{}").unwrap();
         fs::create_dir_all(paths.indexes.join("000002")).unwrap();
+        // Page and place indexes cut short, named for sets that changed
+        // since; the current ones and the set files stay.
+        let pages = dir.path().join(crate::pages::PAGES_DIR);
+        for name in [
+            ".index-5de8bfa68fa8dc17.new-7-2",
+            ".index-01f2421460ce3a31.new-6-4",
+            ".places-1d0bc8d3eb4d17ec.new-7-0",
+            "index-50c6c41fb10e4efa",
+            "places-1d0bc8d3eb4d17ec",
+            "sets",
+        ] {
+            fs::create_dir_all(pages.join(name)).unwrap();
+            fs::write(pages.join(name).join("meta.json"), "{}").unwrap();
+        }
         fs::create_dir_all(&paths.seed).unwrap();
         fs::create_dir_all(dir.path().join("model")).unwrap();
         for file in [
@@ -435,6 +491,10 @@ mod tests {
         }
         remove_leftovers(&paths);
         assert_eq!(names(&paths.indexes), ["000002"]);
+        assert_eq!(
+            names(&pages),
+            ["index-50c6c41fb10e4efa", "places-1d0bc8d3eb4d17ec", "sets"]
+        );
         assert_eq!(names(&paths.seed), ["tranco-top-1m.csv.zip"]);
         assert_eq!(names(&dir.path().join("model")), ["config.json"]);
         assert_eq!(
@@ -443,6 +503,7 @@ mod tests {
                 ".hidden-by-the-user",
                 "indexes",
                 "model",
+                "pages",
                 "records.jsonl",
                 "seed",
                 "state.json"
@@ -481,6 +542,7 @@ mod tests {
             downloaded_on_day: 1_234,
             downloaded_total: 5_678,
             homepages_visited: 90,
+            sites_version: SITES_VERSION,
         };
         save_state(&paths, &state).unwrap();
         assert_eq!(load_state(&paths), Some(state));
@@ -491,6 +553,8 @@ mod tests {
             load_state(&paths),
             Some(SavedState {
                 crawl_left: 3,
+                // Records from before the lists of sites on subdomains.
+                sites_version: 0,
                 ..SavedState::default()
             })
         );

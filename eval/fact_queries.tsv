@@ -1,0 +1,179 @@
+# Fact searches, each with text its instant answer should have (commas
+# left out of the answer, any of the texts given). Run with --facts and
+# --pages wikipedia-en.tsv.gz made with fetch-pages and fetch-facts. The
+# first ones are the fact searches of the 2026-10-06 sweep.
+capital of australia	canberra
+how tall is mount everest	8848
+what is the capital of japan	tokyo
+capital of canada	ottawa
+capital of brazil	brasília
+capital of california	sacramento
+capital of texas	austin
+how high is mont blanc	480
+how tall is k2	861
+height of burj khalifa	82
+how tall is the eiffel tower	330,324,300
+elevation of denver	160
+population of japan	12
+population of new york city	8
+when was albert einstein born	1879
+when was barack obama born	1961
+how old is taylor swift	36 years old
+when did freddie mercury die	1991
+when was ibm founded	1911
+when was google founded	1998
+when was the united nations founded	1945
+who founded microsoft	bill gates,paul allen
+who founded apple	steve jobs,steve wozniak
+who founded tesla	eberhard,tarpenning,musk
+ceo of nvidia	jensen huang
+ceo of microsoft	satya nadella
+who is the ceo of apple	john ternus
+where is nike headquartered	beaverton
+amazon headquarters	seattle
+currency of japan	yen
+what currency does switzerland use	franc
+area of france	km²
+
+# Added 2026-10-06 to make the suite bigger.
+# Capitals
+capital of germany	berlin
+capital of france	paris
+capital of italy	rome
+capital of spain	madrid
+capital of china	beijing
+capital of india	new delhi
+capital of russia	moscow
+capital of mexico	mexico city
+capital of argentina	buenos aires
+capital of egypt	cairo
+capital of south africa	pretoria,cape town,bloemfontein
+capital of nigeria	abuja
+capital of kenya	nairobi
+capital of turkey	ankara
+capital of south korea	seoul
+capital of vietnam	hanoi
+capital of thailand	bangkok
+capital of indonesia	jakarta,nusantara
+capital of new zealand	wellington
+capital of switzerland	bern
+capital of the netherlands	amsterdam
+capital of norway	oslo
+capital of poland	warsaw
+capital of ukraine	kyiv,kiev
+capital of portugal	lisbon
+capital of ireland	dublin
+what is the capital of peru	lima
+what's the capital of colombia	bogotá
+capital city of iceland	reykjavík
+pakistan capital	islamabad
+capital of new york	albany
+capital of florida	tallahassee
+capital of illinois	springfield
+capital of pennsylvania	harrisburg
+capital of washington state	olympia
+capital of nevada	carson city
+capital of ontario	toronto
+capital of scotland	edinburgh
+
+# Heights and elevations
+how tall is mount kilimanjaro	5895
+how high is denali	6190
+elevation of mount fuji	3776
+how tall is the empire state building	381,443
+how tall is the statue of liberty	93,46
+height of the cn tower	553
+how tall is big ben	96
+how tall is the space needle	184
+elevation of mount rainier	4392
+how high is matterhorn	4478
+how tall is aconcagua	6961
+elevation of mount whitney	4421
+
+# Dates of birth and death
+when was isaac newton born	1643,1642
+when was charles darwin born	1809
+when was marie curie born	1867
+when was abraham lincoln born	1809
+when was george washington born	1732
+when was william shakespeare born	1564
+when was mozart born	1756
+when was beethoven born	1770
+when was martin luther king jr born	1929
+when was nelson mandela born	1918
+when was steve jobs born	1955
+when was bill gates born	1955
+when was elon musk born	1971
+when was queen elizabeth ii born	1926
+when was taylor swift born	1989
+when did abraham lincoln die	1865
+when did elvis presley die	1977
+when did michael jackson die	2009
+when did steve jobs die	2011
+when did princess diana die	1997
+when did albert einstein die	1955
+when did john lennon die	1980
+when did queen elizabeth ii die	2022
+when did stephen hawking die	2018
+when did kobe bryant die	2020
+einstein birthday	1879
+how old is barack obama	years old
+
+# Companies: founding, founders, leaders, headquarters
+when was apple founded	1976
+when was microsoft founded	1975
+when was amazon founded	1994
+when was facebook founded	2004
+when was netflix founded	1997
+when was nike founded	1964
+when was coca-cola founded	1892,1886
+when was harvard university founded	1636
+when was nasa founded	1958
+when was wikipedia founded	2001
+when was toyota founded	1937
+who founded google	larry page,sergey brin
+who founded amazon	jeff bezos
+who founded facebook	mark zuckerberg
+who founded netflix	reed hastings,marc randolph
+who founded nike	phil knight,bill bowerman
+who founded wikipedia	jimmy wales,larry sanger
+who founded spacex	elon musk
+who founded oracle	larry ellison
+who founded nvidia	jensen huang
+openai founders	sam altman,elon musk,ilya sutskever,greg brockman
+ceo of google	sundar pichai
+ceo of amazon	andy jassy
+ceo of meta	mark zuckerberg
+ceo of tesla	elon musk
+ceo of netflix	ted sarandos,greg peters
+ceo of ibm	arvind krishna
+ceo of intel	lip-bu tan
+ceo of openai	sam altman
+ceo of anthropic	dario amodei
+where is apple headquartered	cupertino
+where is google headquartered	mountain view
+where is microsoft headquartered	redmond
+where is tesla headquartered	austin
+where is coca-cola headquartered	atlanta
+samsung headquarters	suwon,seoul
+
+# Currencies
+currency of india	rupee
+currency of china	renminbi,yuan
+currency of the united kingdom	pound sterling
+currency of mexico	peso
+currency of brazil	real
+currency of russia	ruble
+currency of south africa	rand
+currency of south korea	won
+currency of sweden	krona
+currency of poland	złoty,zloty
+currency of thailand	baht
+currency of turkey	lira
+what currency does germany use	euro
+what currency does australia use	australian dollar
+
+# Areas (any area answered)
+area of texas	km²
+area of australia	km²
+how big is russia	km²

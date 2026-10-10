@@ -7,8 +7,9 @@
 //! - the address it came from, or the relay that passed it on sealed, sent
 //!   fewer than [`FREE_PER_MINUTE`] a minute lately (with a burst of
 //!   [`FREE_BURST`]). Requests come under throwaway identities, so the
-//!   address is all there is to go by; a relay this node trusts is not
-//!   held to a rate;
+//!   address is all there is to go by: an IPv6 address by its /64, which
+//!   one machine usually has whole, and a connection through a relay by
+//!   that relay. A relay this node trusts is not held to a rate;
 //! - fewer than the owner's daily limit (`NetConfig::answer_per_day`, none
 //!   unless set) were answered for free today, by UTC days.
 //!
@@ -19,7 +20,7 @@
 
 use std::collections::HashMap;
 
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv6Addr};
 
 use libp2p::PeerId;
 
@@ -28,7 +29,8 @@ pub const FREE_PER_MINUTE: u32 = 120;
 /// Free requests one node may send in a burst before
 /// [`FREE_PER_MINUTE`] holds it back.
 pub const FREE_BURST: u32 = 240;
-/// Nodes whose rate is remembered; idle ones are forgotten past this.
+/// Nodes whose rate is remembered; idle ones are forgotten past this, then
+/// the longest unheard from.
 const MAX_TRACKED: usize = 10_000;
 
 const DAY_SECS: u64 = 86_400;
@@ -38,8 +40,19 @@ const DAY_SECS: u64 = 86_400;
 pub enum Source {
     /// The address a request came straight from.
     Ip(IpAddr),
-    /// The relay that passed on a sealed request.
+    /// The relay that passed on a sealed request, or that a connection
+    /// came through, when its address is not known.
     Peer(PeerId),
+}
+
+impl Source {
+    /// Requests from `ip`: an IPv6 address counts by its /64.
+    pub fn ip(ip: IpAddr) -> Source {
+        Source::Ip(match ip.to_canonical() {
+            IpAddr::V6(v6) => IpAddr::V6(Ipv6Addr::from(v6.to_bits() & !u128::from(u64::MAX))),
+            v4 => v4,
+        })
+    }
 }
 
 /// One node's free requests: a token bucket, refilled over time.
@@ -129,13 +142,18 @@ impl Allowance {
     }
 
     /// Drops the nodes whose bucket has filled up again: they would start
-    /// over with a full one anyway. If none has, drops them all.
+    /// over with a full one anyway. If too few have, also the tenth longest
+    /// unheard from, never all: forgetting a busy source would give it a
+    /// full bucket again.
     fn forget_idle(&mut self, now_ms: u64) {
         let full_after_ms = u64::from(FREE_BURST) * 60_000 / u64::from(FREE_PER_MINUTE);
         self.rates
             .retain(|_, rate| now_ms.saturating_sub(rate.at_ms) < full_after_ms);
         if self.rates.len() >= MAX_TRACKED {
-            self.rates.clear();
+            let mut heard: Vec<u64> = self.rates.values().map(|r| r.at_ms).collect();
+            let cut = heard.len() / 10;
+            let (_, &mut oldest_kept, _) = heard.select_nth_unstable(cut);
+            self.rates.retain(|_, rate| rate.at_ms > oldest_kept);
         }
     }
 }
@@ -190,5 +208,30 @@ mod tests {
             allowance.take(Some(&Source::Peer(PeerId::random())), NOW + i);
         }
         assert!(allowance.rates.len() <= MAX_TRACKED);
+    }
+
+    #[test]
+    fn a_crowd_of_new_sources_does_not_refill_a_busy_one() {
+        let mut allowance = Allowance::new(None);
+        let heavy = Source::Peer(PeerId::random());
+        for _ in 0..FREE_BURST {
+            assert!(allowance.take(Some(&heavy), NOW));
+        }
+        for i in 0..(MAX_TRACKED as u64 + 10) {
+            allowance.take(Some(&Source::Peer(PeerId::random())), NOW + i / 100);
+            // Still asking, so never the longest unheard from.
+            allowance.take(Some(&heavy), NOW + i / 100);
+        }
+        assert!(allowance.rates.len() <= MAX_TRACKED);
+        assert!(!allowance.take(Some(&heavy), NOW + 100), "not refilled");
+    }
+
+    #[test]
+    fn an_ipv6_address_counts_by_its_64() {
+        let ip = |s: &str| Source::ip(s.parse().unwrap());
+        assert_eq!(ip("2001:db8:1:2::1"), ip("2001:db8:1:2:ffff::9"));
+        assert_ne!(ip("2001:db8:1:2::1"), ip("2001:db8:1:3::1"));
+        assert_eq!(ip("::ffff:10.0.0.1"), ip("10.0.0.1"));
+        assert_ne!(ip("10.0.0.1"), ip("10.0.0.2"));
     }
 }

@@ -28,6 +28,10 @@ impl SearchBackend for Broken {
 
 fn hit(domain: &str, score: f32, link_score: f32, named: bool) -> Hit {
     Hit {
+        demand: None,
+        missing_words: false,
+        query_evidence: None,
+        placing_text_score: None,
         domain: domain.to_string(),
         url: format!("https://www.{domain}/"),
         title: Some(domain.to_string()),
@@ -56,6 +60,262 @@ fn call(mcp: &Mcp, tool: &str, arguments: Value) -> Value {
     .expect("a call gets an answer")
 }
 
+fn rich_source_page() -> Page {
+    use plumb_core::article::{Article, SearchContent, SearchPassage, SearchSymbol};
+    Page::from_docs(Article {
+        title: "Node — Godot documentation".into(),
+        item: Some("https://docs.godotengine.org/en/stable/classes/class_node.html".into()),
+        language: Some("en".into()),
+        search: Some(SearchContent {
+            symbols: vec![SearchSymbol {
+                identifier: "Node.set_multiplayer_authority".into(),
+                anchor: Some("class-node-method-set-multiplayer-authority".into()),
+            }],
+            passages: vec![
+                SearchPassage {
+                    heading: "Scene tree".into(),
+                    text: "Unrelated scene tree overview.".into(),
+                    anchor: Some("scene-tree".into()),
+                },
+                SearchPassage {
+                    heading: "set_multiplayer_authority".into(),
+                    text: "Sets the node's multiplayer authority to the given peer identifier."
+                        .into(),
+                    anchor: Some("class-node-method-set-multiplayer-authority".into()),
+                },
+                SearchPassage {
+                    heading: "Example".into(),
+                    text: "Node.set_multiplayer_authority also appears in an unrelated example."
+                        .into(),
+                    anchor: Some("example".into()),
+                },
+            ],
+            ..SearchContent::default()
+        }),
+        ..Article::default()
+    })
+    .unwrap()
+}
+
+#[test]
+fn rich_source_exact_symbol_selects_its_own_excerpt_and_fragment() {
+    let page = rich_source_page();
+    for query in [
+        "godot Node.set_multiplayer_authority()",
+        "set_multiplayer_authority site:docs.godotengine.org",
+    ] {
+        let entry = page_entry(&page, query, Some("godotengine.org"), 2);
+        assert_eq!(
+            entry["url"],
+            format!("{}#class-node-method-set-multiplayer-authority", page.url)
+        );
+        assert_eq!(entry["page_url"], page.url);
+        assert_eq!(
+            entry["matched_symbol"]["identifier"],
+            "Node.set_multiplayer_authority"
+        );
+        assert_eq!(
+            entry["source_excerpt"]["text"],
+            "Sets the node's multiplayer authority to the given peer identifier."
+        );
+        assert_eq!(entry["source_excerpt"]["url"], entry["url"]);
+        assert_eq!(entry["language"], "en");
+        assert_eq!(entry["position"], 2);
+        assert_eq!(entry["about_site"], "godotengine.org");
+        assert!(entry.get("search").is_none());
+        assert!(!entry.to_string().contains("Unrelated scene tree overview"));
+    }
+    for query in [
+        "godot Other.set_multiplayer_authority",
+        "godot",
+        "unmatched topic",
+    ] {
+        let entry = page_entry(&page, query, None, 1);
+        assert!(entry.get("source_excerpt").is_none(), "{query}: {entry}");
+        assert!(entry.get("matched_symbol").is_none(), "{query}: {entry}");
+        assert_eq!(entry["url"], page.url);
+    }
+}
+
+#[test]
+fn rich_source_prose_match_is_bounded_and_honors_phrases_and_exclusions() {
+    let mut page = rich_source_page();
+    page.search.as_mut().unwrap().symbols.clear();
+    let entry = page_entry(&page, "godot multiplayer authority", None, 1);
+    assert_eq!(
+        entry["source_excerpt"]["heading"],
+        "set_multiplayer_authority"
+    );
+    assert!(entry.get("matched_symbol").is_none());
+    for query in [
+        "godot multiplayer authority -authority",
+        "godot \"multiplayer authority\" \"missing phrase\"",
+    ] {
+        assert!(page_entry(&page, query, None, 1)
+            .get("source_excerpt")
+            .is_none());
+    }
+    let excluded = page_entry(&page, "godot multiplayer authority -peer", None, 1);
+    assert!(!excluded["source_excerpt"]["text"]
+        .as_str()
+        .unwrap()
+        .contains("peer"));
+    page.search.as_mut().unwrap().passages[1].text =
+        format!("Multiplayer authority {}", "é".repeat(800));
+    let entry = page_entry(&page, "multiplayer authority", None, 1);
+    assert!(
+        entry["source_excerpt"]["text"]
+            .as_str()
+            .unwrap()
+            .chars()
+            .count()
+            <= plumb_core::article::MAX_SEARCH_PASSAGE_CHARS
+    );
+    page.search.as_mut().unwrap().version = 99;
+    assert!(page_entry(&page, "multiplayer authority", None, 1)
+        .get("source_excerpt")
+        .is_none());
+    page.search = None;
+    assert!(page_entry(&page, "multiplayer authority", None, 1)
+        .get("source_excerpt")
+        .is_none());
+}
+
+#[test]
+fn rich_source_fragment_links_keep_the_source_and_reject_invalid_ids() {
+    let source = "https://docs.godotengine.org/page?version=4#old";
+    let link = source_fragment_url(source, "method-\"<authority>é").unwrap();
+    let parsed = url::Url::parse(&link).unwrap();
+    assert_eq!(parsed.host_str(), Some("docs.godotengine.org"));
+    assert_eq!(parsed.path(), "/page");
+    assert_eq!(parsed.query(), Some("version=4"));
+    assert!(link.contains("%22%3Cauthority%3E%C3%A9"), "{link}");
+    for anchor in ["", "bad id", "bad\nid"] {
+        assert!(source_fragment_url(source, anchor).is_none());
+    }
+    assert!(source_fragment_url("javascript:alert(1)", "method").is_none());
+    assert!(source_fragment_url("file:///tmp/page", "method").is_none());
+    let mut page = rich_source_page();
+    let search = page.search.as_mut().unwrap();
+    search.symbols[0].anchor = Some("bad id".into());
+    search.passages[1].anchor = Some("bad id".into());
+    let entry = page_entry(&page, "set_multiplayer_authority", None, 1);
+    assert_eq!(entry["url"], page.url);
+    assert_eq!(entry["source_excerpt"]["url"], page.url);
+    assert!(entry.get("page_url").is_none());
+}
+
+#[test]
+fn rich_source_error_query_selects_the_matching_source_passage() {
+    let mut page = rich_source_page();
+    page.url = "https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/".into();
+    page.title = "Pod Lifecycle".into();
+    let search = page.search.as_mut().unwrap();
+    search.symbols.clear();
+    search.passages[1].heading = "Container failures".into();
+    search.passages[1].text =
+        "A container can enter CrashLoopBackOff when it repeatedly fails.".into();
+    search.passages[1].anchor = Some("container-restarts".into());
+    for query in ["k8s CrashLoopBackOff", "crashloopbackoff"] {
+        let entry = page_entry(&page, query, None, 1);
+        assert_eq!(
+            entry["source_excerpt"]["text"],
+            "A container can enter CrashLoopBackOff when it repeatedly fails."
+        );
+        assert_eq!(entry["url"], format!("{}#container-restarts", page.url));
+        assert!(entry.get("matched_symbol").is_none());
+    }
+}
+
+struct RichSource {
+    supporting: bool,
+}
+
+impl SearchBackend for RichSource {
+    fn search(&self, _query: &str, _limit: usize) -> Result<Vec<Hit>> {
+        Ok(Vec::new())
+    }
+    fn num_docs(&self) -> u64 {
+        1
+    }
+    fn search_full(
+        &self,
+        _query: &str,
+        _limit: usize,
+        _options: &SearchOptions,
+    ) -> Result<SearchResults> {
+        let mut page = shelved(rich_source_page());
+        page.named = !self.supporting;
+        page.whole = true;
+        Ok(SearchResults {
+            hits: if self.supporting {
+                vec![hit("godotengine.org", 1.0, 0.5, true)]
+            } else {
+                Vec::new()
+            },
+            pages: vec![PlacedPage {
+                hit: page,
+                under: self.supporting.then(|| "godotengine.org".into()),
+                at: 0,
+            }],
+            site_search: None,
+            spelling: None,
+        })
+    }
+    fn pages_of(
+        &self,
+        _query: &str,
+        limit: usize,
+        _options: &SearchOptions,
+        _docs: bool,
+        keep: &dyn Fn(&Page) -> bool,
+    ) -> Vec<plumb_index::pages::PageHit> {
+        [rich_source_page()]
+            .into_iter()
+            .filter(keep)
+            .take(limit)
+            .map(shelved)
+            .collect()
+    }
+}
+
+#[test]
+fn rich_source_excerpts_reach_ordinary_typed_and_text_only_mcp_search() {
+    for supporting in [false, true] {
+        let mcp = Mcp::new(Arc::new(RichSource { supporting }), None);
+        for kind in [None, Some("docs")] {
+            let mut args = json!({"query": "godot set_multiplayer_authority"});
+            if let Some(kind) = kind {
+                args["kind"] = json!(kind);
+            }
+            let mut reply = call(&mcp, "search", args);
+            let page = &reply["result"]["structuredContent"]["pages"][0];
+            assert_eq!(
+                page["source_excerpt"]["heading"], "set_multiplayer_authority",
+                "{reply}"
+            );
+            if kind.is_none() && !supporting {
+                assert_eq!(
+                    reply["result"]["structuredContent"]["ordered_results"][0]["url"],
+                    page["url"]
+                );
+            }
+            assert!(reply["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains(
+                "Source excerpt (set_multiplayer_authority): Sets the node's multiplayer authority"
+            ));
+            text_only(&mut reply);
+            assert!(reply["result"].get("structuredContent").is_none());
+            assert!(reply["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("#class-node-method-set-multiplayer-authority"));
+        }
+    }
+}
+
 #[test]
 fn initialize_agrees_on_a_protocol_version() {
     let mcp = server(Vec::new());
@@ -69,6 +329,10 @@ fn initialize_agrees_on_a_protocol_version() {
     let reply = answer("2025-03-26");
     assert_eq!(reply["id"], 1);
     assert_eq!(reply["result"]["protocolVersion"], "2025-03-26");
+    assert_eq!(
+        reply["result"]["_meta"]["plumb.build"],
+        serde_json::to_value(crate::build_info::current()).unwrap()
+    );
     assert_eq!(reply["result"]["serverInfo"]["name"], "plumb-search");
     assert!(reply["result"]["capabilities"]["tools"].is_object());
     // An unknown version gets the newest.
@@ -97,7 +361,7 @@ fn notifications_get_no_answer_and_unknown_methods_an_error() {
 }
 
 #[test]
-fn lists_five_read_only_tools_with_schemas() {
+fn lists_six_read_only_tools_with_schemas() {
     let reply = server(Vec::new())
         .handle(&json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }))
         .unwrap();
@@ -110,7 +374,8 @@ fn lists_five_read_only_tools_with_schemas() {
             "check_lookalike",
             "search",
             "package",
-            "site_info"
+            "site_info",
+            "facts"
         ]
     );
     for tool in tools {
@@ -118,6 +383,14 @@ fn lists_five_read_only_tools_with_schemas() {
         assert_eq!(tool["annotations"]["readOnlyHint"], true, "{tool}");
         assert!(tool["description"].as_str().unwrap().len() > 40, "{tool}");
     }
+    // What a v0.2.0 node takes is still all that is required.
+    let search = &tools[2]["inputSchema"];
+    assert_eq!(search["required"], json!(["query"]));
+    assert_eq!(search["properties"]["kind"]["enum"][0], "site");
+    assert_eq!(search["properties"]["site"]["type"], "string");
+    let facts = &tools[5]["inputSchema"];
+    assert_eq!(facts["required"], json!(["subject"]));
+    assert_eq!(facts["properties"]["more_subjects"]["type"], "array");
 }
 
 #[test]
@@ -154,7 +427,7 @@ fn official_site_says_how_sure_it_is_and_why() {
     ]);
     let answer =
         &call(&mcp, "official_site", json!({ "name": "delta" }))["result"]["structuredContent"];
-    assert_eq!(answer["confidence"], "medium");
+    assert_eq!(answer["confidence"], "low");
     assert!(answer["why"].to_string().contains("deltafaucet.com"));
 
     // Only words in common.
@@ -207,7 +480,7 @@ fn search_and_site_info_return_plain_entries() {
     let answer = &call(
         &mcp,
         "site_info",
-        json!({ "domain": "https://docs.python.org/3/" }),
+        json!({ "domain": "https://wiki.python.org/moin/" }),
     )["result"]["structuredContent"];
     assert_eq!(answer["domain"], "python.org");
     assert_eq!(answer["found"], true);
@@ -227,7 +500,7 @@ fn search_lists_what_plugins_found_apart_from_plumbs_results() {
             url: "https://blog.rust-lang.org/x".into(),
             site: "rust-lang.org".into(),
             snippet: Some("120 points".into()),
-            published: None,
+            ..Default::default()
         }],
     };
     let mcp = server(vec![hit("rust-lang.org", 2.0, 0.8, true)]).with_plugin_results(vec![found]);
@@ -295,7 +568,7 @@ fn stdio_answers_line_by_line_and_skips_notifications() {
         "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}\n",
     );
     let mut output = Vec::new();
-    serve_lines(input.as_bytes(), &mut output, |m| Ok(mcp.handle(m))).unwrap();
+    serve_lines(input.as_bytes(), &mut output, false, |m| Ok(mcp.handle(m))).unwrap();
     let lines: Vec<Value> = String::from_utf8(output)
         .unwrap()
         .lines()
@@ -305,6 +578,103 @@ fn stdio_answers_line_by_line_and_skips_notifications() {
     assert_eq!(lines[0]["id"], 1);
     assert_eq!(lines[1]["error"]["code"], PARSE_ERROR);
     assert_eq!(lines[2]["id"], 2);
+}
+
+#[test]
+fn text_answers_leave_out_the_json_and_nothing_else() {
+    let mcp = server(vec![hit("python.org", 2.0, 0.8, true)]);
+    let input = concat!(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",",
+        "\"params\":{\"name\":\"site_info\",\"arguments\":{\"domain\":\"python.org\"}}}\n",
+        "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}\n",
+    );
+    let answers = |text_answers| {
+        let mut output = Vec::new();
+        serve_lines(input.as_bytes(), &mut output, text_answers, |m| {
+            Ok(mcp.handle(m))
+        })
+        .unwrap();
+        String::from_utf8(output)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect::<Vec<Value>>()
+    };
+    let (full, text) = (answers(false), answers(true));
+    assert_eq!(
+        full[0]["result"]["structuredContent"]["domain"],
+        "python.org"
+    );
+    assert!(
+        text[0]["result"].get("structuredContent").is_none(),
+        "{}",
+        text[0]
+    );
+    // The model reads the same text either way.
+    assert_eq!(text[0]["result"]["content"], full[0]["result"]["content"]);
+    assert!(text[0]["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("python.org"));
+    assert_eq!(text[0]["result"]["isError"], false);
+    // The tools are listed as before.
+    assert_eq!(text[1], full[1]);
+}
+
+#[test]
+fn responses_get_no_answer_and_junk_with_an_id_an_error() {
+    let mcp = server(vec![hit("python.org", 2.0, 0.8, true)]);
+    assert_eq!(
+        mcp.handle(&json!({ "jsonrpc": "2.0", "id": 1, "result": {} })),
+        None
+    );
+    assert_eq!(
+        mcp.handle(&json!({ "jsonrpc": "2.0", "id": 1, "error": { "code": 1, "message": "x" } })),
+        None
+    );
+    let junk = mcp.handle(&json!({ "jsonrpc": "2.0", "id": 1 })).unwrap();
+    assert_eq!(junk["error"]["code"], INVALID_REQUEST);
+}
+
+#[test]
+fn long_urls_are_kept_whole_and_numbers_read_as_models_send_them() {
+    let long = format!("https://example.com/a?{}", "x".repeat(300));
+    let args = json!({ "url": format!("  {long} "), "start": 5.0, "max_chars": "1000" });
+    let args = args.as_object().unwrap();
+    assert_eq!(url_arg(args, "url").unwrap(), long);
+    let read = ReadArgs::of(args).unwrap();
+    assert_eq!(read.url, long);
+    assert_eq!(read.start, 5);
+    assert_eq!(read.max_chars, 1000);
+    let too_long = json!({ "url": "x".repeat(MAX_URL_CHARS + 1) });
+    assert!(url_arg(too_long.as_object().unwrap(), "url").is_err());
+    assert!(as_whole(&json!(2.5)).is_none());
+    assert!(as_whole(&json!(-1)).is_none());
+}
+
+#[test]
+fn find_jumps_to_the_first_match_ignoring_case() {
+    let chars: Vec<char> = "Café au lait, CAFÉ noir".chars().collect();
+    assert_eq!(find_from(&chars, "café", 0), Some(0));
+    assert_eq!(find_from(&chars, "café", 1), Some(14));
+    assert_eq!(find_from(&chars, " Noir ", 0), Some(19));
+    assert_eq!(find_from(&chars, "tea", 0), None);
+    assert_eq!(find_from(&chars, "café", 100), None);
+}
+
+#[test]
+fn search_queries_for_plugins_are_cut_like_searches() {
+    let message = |query: &str| {
+        json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": { "name": "search", "arguments": { "query": query } } })
+    };
+    assert_eq!(
+        Mcp::search_query(&message("  rust   lang ")).as_deref(),
+        Some("rust lang")
+    );
+    assert_eq!(Mcp::search_query(&message("   ")), None);
+    let long = Mcp::search_query(&message(&"a".repeat(1000))).unwrap();
+    assert_eq!(long.chars().count(), MAX_QUERY_CHARS);
 }
 
 #[test]
@@ -390,6 +760,15 @@ fn read_page_is_offered_only_with_a_reader() {
     );
     let with = server(Vec::new()).with_reader(Some(reader));
     assert!(list(&with).contains(&"read_page".to_string()));
+    // search sends agents on to read_page only where they have it.
+    let search_says = |read_pages| {
+        tools(read_pages, false, false)[2]["description"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    assert!(!search_says(false).contains("read_page"));
+    assert!(search_says(true).contains("then read a page with read_page."));
     let reply = call(&with, "read_page", json!({ "url": url }));
     assert_eq!(reply["result"]["isError"], false, "{reply}");
     let answer = &reply["result"]["structuredContent"];
@@ -416,6 +795,34 @@ fn read_page_is_offered_only_with_a_reader() {
     assert_eq!(answer["found"], true);
     let reply = call(&with, "read_page", json!({ "url": url, "find": "four" }));
     assert_eq!(reply["result"]["structuredContent"]["found"], false);
+
+    // An outline: each heading, where it starts and its opening words.
+    let long = serve_page(
+        &runtime,
+        "<title>L</title><main><p>Lead.</p><h2>Usage</h2><p>Run it.</p><p>Twice.</p>\
+         <h3>Flags</h3><p>None.</p></main>",
+    );
+    let reply = call(&with, "read_page", json!({ "url": long, "outline": true }));
+    let answer = &reply["result"]["structuredContent"];
+    assert!(answer.get("text").is_none(), "{answer}");
+    let sections = answer["outline"].as_array().unwrap();
+    let headings: Vec<_> = sections.iter().map(|s| s["heading"].clone()).collect();
+    assert_eq!(headings, ["", "Usage", "Flags"]);
+    assert_eq!(sections[1]["level"], 2);
+    assert_eq!(sections[1]["opening"], "Run it. Twice.");
+    let start = sections[2]["start"].as_u64().unwrap();
+    let reply = call(&with, "read_page", json!({ "url": long, "start": start }));
+    assert_eq!(
+        reply["result"]["structuredContent"]["text"],
+        "### Flags\n\nNone."
+    );
+    // Without headings, the text instead.
+    let reply = call(
+        &with,
+        "read_page",
+        json!({ "url": serve_page(&runtime, "<p>Plain.</p>"), "outline": true }),
+    );
+    assert_eq!(reply["result"]["structuredContent"]["text"], "Plain.");
 
     // A bot check is not the page.
     let check = serve_page(
@@ -454,9 +861,16 @@ fn plumb_mcp_node_reads_pages_itself() {
 
     // The node's list gains read_page.
     let mut listed =
-        json!({ "jsonrpc": "2.0", "id": 1, "result": { "tools": [{ "name": "search" }] } });
+        json!({ "jsonrpc": "2.0", "id": 1, "result": { "tools": tools(false, false, false) } });
     offer_read_page(&json!({ "method": "tools/list" }), &mut listed);
-    assert_eq!(listed["result"]["tools"][1]["name"], "read_page");
+    assert_eq!(listed["result"]["tools"][6]["name"], "read_page");
+    let search = listed["result"]["tools"][2]["description"]
+        .as_str()
+        .unwrap();
+    assert!(
+        search.contains("then read a page with read_page."),
+        "{search}"
+    );
 }
 
 /// Finds the crate serde for queries that ask for a package, and no site.
@@ -500,6 +914,7 @@ impl SearchBackend for Packages {
                     named: true,
                     popularity: 1.0,
                     whole: false,
+                    learned: None,
                 },
                 under: None,
                 at: 0,
@@ -541,6 +956,14 @@ fn package_cards_say_version_install_and_docs() {
     );
     // Search carries the same card.
     let reply = call(&mcp, "search", json!({ "query": "serde crate" }));
+    let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.starts_with("1. [crates.io] serde 1.0.228"), "{text}");
+    // So does the command that installs it.
+    let reply = call(
+        &mcp,
+        "search",
+        json!({ "query": "cargo add serde --features derive" }),
+    );
     let text = reply["result"]["content"][0]["text"].as_str().unwrap();
     assert!(text.starts_with("1. [crates.io] serde 1.0.228"), "{text}");
     // Another registry's package of the name is not there.
@@ -628,7 +1051,8 @@ fn official_site_falls_back_on_a_packages_home_page() {
     let mcp = Mcp::new(Arc::new(Packages), None);
     let reply = call(&mcp, "official_site", json!({ "name": "serde" }));
     let answer = &reply["result"]["structuredContent"];
-    assert_eq!(answer["found"], false);
+    assert_eq!(answer["found"], true);
+    assert_eq!(answer["url"], "https://serde.rs");
     assert_eq!(answer["package_home"], "https://serde.rs");
     let text = reply["result"]["content"][0]["text"].as_str().unwrap();
     assert!(
@@ -690,7 +1114,10 @@ fn searches_about_a_well_known_package_get_its_card() {
     let mcp = Mcp::new(Arc::new(Packages), None);
     let reply = call(&mcp, "search", json!({ "query": "serde derive" }));
     let text = reply["result"]["content"][0]["text"].as_str().unwrap();
-    assert!(text.starts_with("1. [crates.io] serde 1.0.228"), "{text}");
+    assert!(
+        text.contains("Related package information:\n[crates.io] serde 1.0.228"),
+        "{text}"
+    );
     let reply = call(
         &mcp,
         "search",
@@ -733,4 +1160,2229 @@ fn official_site_prefers_a_packages_home_page_to_a_guess() {
     assert_eq!(answer["domain"], "serde.rs");
     assert_eq!(answer["confidence"], "medium");
     assert_eq!(answer["alternatives"][0]["domain"], "xapo.com");
+}
+
+#[test]
+fn search_is_in_english_unless_asked() {
+    let language = |args: Value| search_language(args.as_object().unwrap());
+    assert_eq!(language(json!({})), Ok(Some("en".into())));
+    assert_eq!(language(json!({ "language": "any" })), Ok(None));
+    assert_eq!(
+        language(json!({ "language": "de-DE" })),
+        Ok(Some("de".into()))
+    );
+    assert!(language(json!({ "language": "german!" })).is_err());
+}
+
+/// Finds Wikipedia's article on Australia, with its facts, for any query
+/// naming it, and Mount Everest's for any naming that.
+struct Australia;
+
+impl SearchBackend for Australia {
+    fn search(&self, _query: &str, _limit: usize) -> Result<Vec<Hit>> {
+        Ok(Vec::new())
+    }
+
+    fn search_full(
+        &self,
+        query: &str,
+        _limit: usize,
+        _options: &SearchOptions,
+    ) -> Result<SearchResults> {
+        use plumb_core::facts::{Fact, FactKind};
+        let mut pages = Vec::new();
+        let article = match query.to_lowercase() {
+            query if query.contains("australia") => Some(plumb_core::article::Article {
+                title: "Australia".into(),
+                description: Some("country in Oceania".into()),
+                item: Some("Q408".into()),
+                facts: vec![
+                    Fact {
+                        kind: FactKind::Capital,
+                        value: "Canberra".into(),
+                    },
+                    Fact {
+                        kind: FactKind::Population,
+                        value: "27204809;2024".into(),
+                    },
+                ],
+                ..Default::default()
+            }),
+            query if query.contains("everest") => Some(plumb_core::article::Article {
+                title: "Mount Everest".into(),
+                description: Some("highest mountain on Earth".into()),
+                item: Some("Q513".into()),
+                facts: vec![Fact {
+                    kind: FactKind::Elevation,
+                    value: "8848.86".into(),
+                }],
+                ..Default::default()
+            }),
+            _ => None,
+        };
+        if let Some(article) = article {
+            let page = plumb_index::pages::Page::from_article("en", article);
+            pages.push(plumb_index::pages::PlacedPage {
+                hit: plumb_index::pages::PageHit {
+                    page,
+                    score: 0.9,
+                    named: true,
+                    popularity: 1.0,
+                    whole: true,
+                    learned: None,
+                },
+                under: None,
+                at: 0,
+            });
+        }
+        Ok(SearchResults {
+            hits: Vec::new(),
+            pages,
+            site_search: None,
+            spelling: None,
+        })
+    }
+
+    fn entities(
+        &self,
+        query: &str,
+        limit: usize,
+        options: &SearchOptions,
+    ) -> Result<Vec<plumb_index::pages::PageHit>> {
+        Ok(self
+            .search_full(query, limit, options)?
+            .pages
+            .into_iter()
+            .map(|placed| placed.hit)
+            .collect())
+    }
+
+    fn num_docs(&self) -> u64 {
+        0
+    }
+}
+
+#[test]
+fn facts_come_with_the_wikidata_item_and_property_they_are_from() {
+    let mcp = Mcp::new(Arc::new(Australia), None);
+    let answer = call(&mcp, "facts", json!({ "subject": "Australia" }));
+    let result = &answer["result"];
+    assert_eq!(result["isError"], false, "{answer}");
+    let data = &result["structuredContent"];
+    assert_eq!(data["item"], "Q408");
+    assert_eq!(data["facts"][0]["question"], "Capital of Australia");
+    assert_eq!(data["facts"][0]["value"], "Canberra");
+    assert_eq!(
+        data["facts"][0]["source"],
+        "https://www.wikidata.org/wiki/Q408#P36"
+    );
+    let text = result["content"][0]["text"].as_str().unwrap();
+    assert_eq!(
+        text,
+        "Australia, country in Oceania https://en.wikipedia.org/wiki/Australia\n\
+         Capital of Australia: Canberra [Wikidata Q408 P36]\n\
+         Population of Australia: 27,204,809 (Counted in 2024) [Wikidata Q408 P1082]\n\
+         Source: https://www.wikidata.org/wiki/Q408"
+    );
+
+    // One kind, by its key or as people ask it.
+    for about in ["capital", "capital city"] {
+        let answer = call(
+            &mcp,
+            "facts",
+            json!({ "subject": "australia", "about": about }),
+        );
+        let facts = answer["result"]["structuredContent"]["facts"]
+            .as_array()
+            .unwrap();
+        assert_eq!(facts.len(), 1, "{about}: {answer}");
+        assert_eq!(facts[0]["kind"], "capital");
+    }
+    // A mountain's height is its elevation; a country has neither.
+    let answer = call(
+        &mcp,
+        "facts",
+        json!({ "subject": "Mount Everest", "about": "height" }),
+    );
+    let facts = answer["result"]["structuredContent"]["facts"]
+        .as_array()
+        .unwrap();
+    assert_eq!(facts.len(), 1, "{answer}");
+    assert_eq!(facts[0]["kind"], "elevation");
+    assert_eq!(facts[0]["property"], "P2044");
+    let answer = call(
+        &mcp,
+        "facts",
+        json!({ "subject": "australia", "about": "height" }),
+    );
+    assert_eq!(answer["result"]["structuredContent"]["found"], false);
+    // A kind it has no fact of, a kind it never keeps, a subject it lacks.
+    let answer = call(
+        &mcp,
+        "facts",
+        json!({ "subject": "australia", "about": "ceo" }),
+    );
+    assert_eq!(answer["result"]["structuredContent"]["found"], false);
+    let answer = call(
+        &mcp,
+        "facts",
+        json!({ "subject": "australia", "about": "favourite colour" }),
+    );
+    assert_eq!(answer["result"]["isError"], false);
+    assert_eq!(
+        answer["result"]["structuredContent"]["status"],
+        "unsupported_property"
+    );
+    let text = answer["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("capital, population"), "{text}");
+    let answer = call(&mcp, "facts", json!({ "subject": "Atlantis" }));
+    assert_eq!(
+        answer["result"]["content"][0]["text"],
+        "Plumb could not resolve Atlantis to an indexed entity."
+    );
+
+    // Several subjects in one call, each answered as alone.
+    let answer = call(
+        &mcp,
+        "facts",
+        json!({ "subject": "Australia", "about": "capital", "more_subjects": ["Atlantis", "australia"] }),
+    );
+    let data = &answer["result"]["structuredContent"];
+    assert_eq!(data["facts"][0]["value"], "Canberra", "{answer}");
+    assert_eq!(data["more"][0]["found"], false);
+    assert_eq!(data["more"][1]["facts"][0]["value"], "Canberra");
+    assert_eq!(
+        answer["result"]["content"][0]["text"],
+        "Australia, country in Oceania https://en.wikipedia.org/wiki/Australia\n\
+         Capital of Australia: Canberra [Wikidata Q408 P36]\n\
+         Source: https://www.wikidata.org/wiki/Q408\n\
+         Plumb could not resolve Atlantis to an indexed entity.\n\
+         Australia, country in Oceania https://en.wikipedia.org/wiki/Australia\n\
+         Capital of Australia: Canberra [Wikidata Q408 P36]\n\
+         Source: https://www.wikidata.org/wiki/Q408"
+    );
+    // Without more_subjects the answer has no "more".
+    let answer = call(&mcp, "facts", json!({ "subject": "Australia" }));
+    assert!(answer["result"]["structuredContent"].get("more").is_none());
+    let many: Vec<String> = (0..MAX_FACT_SUBJECTS)
+        .map(|n| format!("place {n}"))
+        .collect();
+    for more in [json!(many), json!("Canada")] {
+        let answer = call(
+            &mcp,
+            "facts",
+            json!({ "subject": "Australia", "more_subjects": more }),
+        );
+        assert_eq!(answer["error"]["code"], INVALID_PARAMS, "{answer}");
+    }
+}
+
+/// Keeps an article, a question and a repository about tokio, and notes
+/// each query it is asked.
+#[derive(Default)]
+struct Shelves(std::sync::Mutex<Vec<String>>);
+
+fn shelf() -> Vec<Page> {
+    use plumb_core::article::Article;
+    vec![
+        Page::from_article(
+            "en",
+            Article {
+                title: "Tokio (software)".into(),
+                ..Default::default()
+            },
+        ),
+        Page::from_question(Article {
+            title: "How do I spawn a task in tokio?".into(),
+            item: Some("123".into()),
+            ..Default::default()
+        }),
+        Page::from_repo(Article {
+            title: "tokio-rs/tokio".into(),
+            ..Default::default()
+        }),
+    ]
+}
+
+fn shelved(page: Page) -> plumb_index::pages::PageHit {
+    plumb_index::pages::PageHit {
+        page,
+        score: 0.5,
+        named: false,
+        popularity: 0.5,
+        whole: false,
+        learned: None,
+    }
+}
+
+impl SearchBackend for Shelves {
+    fn search(&self, _query: &str, _limit: usize) -> Result<Vec<Hit>> {
+        Ok(vec![hit("tokio.rs", 1.0, 0.5, false)])
+    }
+
+    fn search_full(
+        &self,
+        query: &str,
+        _limit: usize,
+        _options: &SearchOptions,
+    ) -> Result<SearchResults> {
+        self.0.lock().unwrap().push(query.to_string());
+        let ops = plumb_core::Operators::parse(query);
+        let pages = shelf()
+            .into_iter()
+            .map(|page| PlacedPage {
+                hit: shelved(page),
+                under: None,
+                at: 1,
+            })
+            .collect();
+        Ok(SearchResults {
+            hits: vec![hit("tokio.rs", 1.0, 0.5, false)],
+            pages,
+            site_search: ops.sites.first().map(|site| plumb_index::SiteSearch {
+                domain: site.clone(),
+                terms: ops.site_terms.clone(),
+                url: format!("https://{site}/search?q={}", ops.site_terms),
+            }),
+            spelling: None,
+        })
+    }
+
+    fn pages_of(
+        &self,
+        query: &str,
+        limit: usize,
+        _options: &SearchOptions,
+        docs: bool,
+        keep: &dyn Fn(&Page) -> bool,
+    ) -> Vec<plumb_index::pages::PageHit> {
+        self.0.lock().unwrap().push(query.to_string());
+        if docs {
+            self.0.lock().unwrap().push(format!("docs: {query}"));
+        }
+        shelf()
+            .into_iter()
+            .filter(|page| keep(page))
+            .take(limit)
+            .map(shelved)
+            .collect()
+    }
+
+    fn num_docs(&self) -> u64 {
+        1
+    }
+}
+
+#[test]
+fn search_lists_one_kind_of_result_alone() {
+    let shelves = Arc::new(Shelves::default());
+    let mcp = Mcp::new(Arc::clone(&shelves) as Arc<dyn SearchBackend>, None);
+    let search = |args: Value| call(&mcp, "search", args)["result"].clone();
+
+    let result = search(json!({ "query": "tokio spawn", "kind": "question" }));
+    let data = &result["structuredContent"];
+    assert_eq!(data["kind"], "question", "{result}");
+    assert_eq!(data["results"], json!([]));
+    assert_eq!(data["pages"].as_array().unwrap().len(), 1, "{data}");
+    assert_eq!(data["pages"][0]["set"], "stackoverflow");
+    assert_eq!(
+        result["content"][0]["text"],
+        "1. [Stack Overflow] How do I spawn a task in tokio? https://stackoverflow.com/questions/123"
+    );
+    // As a model may write it.
+    let data = &search(json!({ "query": "tokio", "kind": "Repos" }))["structuredContent"];
+    assert_eq!(data["pages"][0]["url"], "https://github.com/tokio-rs/tokio");
+    let result = search(json!({ "query": "tokio", "kind": "paper" }));
+    assert_eq!(
+        result["content"][0]["text"],
+        "No results of kind paper for \"tokio\"."
+    );
+
+    // Sites alone: no pages among them.
+    let data = &search(json!({ "query": "tokio", "kind": "site" }))["structuredContent"];
+    assert_eq!(data["results"][0]["domain"], "tokio.rs", "{data}");
+    assert_eq!(data["pages"], json!([]));
+    // With neither, as before.
+    let data = &search(json!({ "query": "tokio" }))["structuredContent"];
+    assert!(!data["pages"].as_array().unwrap().is_empty(), "{data}");
+    assert!(data.get("kind").is_none());
+}
+
+#[test]
+fn paper_mcp_dates_are_validated_and_count_types_remain_explicit() {
+    let mcp = Mcp::new(Arc::new(Shelves::default()) as Arc<dyn SearchBackend>, None);
+    for args in [
+        json!({ "query": "transformer", "kind": "paper", "after": "2026-02-29" }),
+        json!({ "query": "transformer", "kind": "docs", "after": "2026" }),
+        json!({ "query": "transformer", "after": 2026 }),
+    ] {
+        let result = call(&mcp, "search", args);
+        assert_eq!(result["error"]["code"], INVALID_PARAMS);
+    }
+    let result = call(
+        &mcp,
+        "search",
+        json!({ "query": "transformer", "kind": "paper", "after": "2026", "order": "newest" }),
+    );
+    assert_eq!(result["result"]["structuredContent"]["kind"], "paper");
+    assert!(result["result"]["structuredContent"]["coverage_message"]
+        .as_str()
+        .unwrap()
+        .contains("indexed corpus"));
+    let page = Page::from_paper(plumb_core::article::Article {
+        title: "Example".into(),
+        item: Some("10.1234/a".into()),
+        paper: Some(plumb_core::papers::PaperMetadata {
+            count: 4,
+            count_kind: plumb_core::papers::PaperCountKind::MethodUses,
+            publication_date: Some("2026-01-02".into()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    });
+    let entry = page_entry(&page, "paper", None, 1);
+    assert_eq!(entry["count"], json!({ "value": 4, "kind": "method_uses" }));
+    assert_eq!(entry["paper"]["publication_date"], "2026-01-02");
+    let rendered = super::text::render(
+        "search",
+        &json!({ "query": "Example", "pages": [entry], "results": [] }),
+    );
+    assert!(rendered.contains("4 method uses"), "{rendered}");
+    assert!(rendered.contains("Published 2026-01-02"), "{rendered}");
+}
+
+#[test]
+fn search_keeps_to_the_site_asked_for() {
+    let shelves = Arc::new(Shelves::default());
+    let mcp = Mcp::new(Arc::clone(&shelves) as Arc<dyn SearchBackend>, None);
+    let search = |args: Value| call(&mcp, "search", args);
+
+    let answer = search(json!({ "query": "spawn", "site": "github.com" }));
+    assert_eq!(
+        answer["result"]["structuredContent"]["query"],
+        "spawn site:github.com"
+    );
+    // A URL names its host; a kind keeps to the site too, with the link
+    // into the site's own search for pages Plumb lacks.
+    let answer =
+        search(json!({ "query": "spawn", "site": "https://docs.rs/tokio", "kind": "docs" }));
+    let data = &answer["result"]["structuredContent"];
+    assert_eq!(data["query"], "spawn site:docs.rs", "{answer}");
+    assert_eq!(data["site_search"]["domain"], "docs.rs");
+    assert!(answer["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("Search docs.rs itself for \"spawn\""));
+    let asked = shelves.0.lock().unwrap().clone();
+    assert!(
+        asked.contains(&"spawn site:docs.rs".to_string()),
+        "{asked:?}"
+    );
+    // Docs pages are searched for as such.
+    assert!(
+        asked.contains(&"docs: spawn site:docs.rs".to_string()),
+        "{asked:?}"
+    );
+
+    for args in [
+        json!({ "query": "tokio", "kind": "video" }),
+        json!({ "query": "tokio", "site": "docs.rs github.com" }),
+        json!({ "query": "tokio", "site": "github" }),
+    ] {
+        let answer = search(args.clone());
+        assert_eq!(answer["error"]["code"], INVALID_PARAMS, "{args}: {answer}");
+    }
+}
+
+#[test]
+fn relate_is_answered_here_and_offered_with_the_tools() {
+    let dir = tempfile::tempdir().unwrap();
+    crate::relations::tests::write_store(dir.path());
+    let store = crate::relations::RelationStore::load(dir.path(), None).unwrap();
+    let call = |args: Value| {
+        relate_here(
+            &store,
+            &json!({ "jsonrpc": "2.0", "id": 7, "method": "tools/call",
+                     "params": { "name": "relate", "arguments": args } }),
+        )
+        .unwrap()
+    };
+    let answer = call(json!({ "subject": "Fiji", "relation": "Capital", "limit": 1 }));
+    let text = answer["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(
+        text.starts_with("capital of Fiji, likeliest first:\nSuva ("),
+        "{text}"
+    );
+    assert!(text.ends_with("a learned guess) [Wikidata K5]"), "{text}");
+    let answer = call(json!({ "subject": "France", "relation": "capital", "object": "Paris" }));
+    let text = answer["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(
+        text.starts_with("capital of France: Paris has probability"),
+        "{text}"
+    );
+    assert!(text.ends_with("(stated in Wikidata)."), "{text}");
+    let answer = call(json!({ "subject": "France", "relation": "spouse" }));
+    assert_eq!(answer["result"]["isError"], true);
+    // Other tools are not answered here.
+    assert!(relate_here(
+        &store,
+        &json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                 "params": { "name": "search", "arguments": { "query": "x" } } }),
+    )
+    .is_none());
+
+    let mut listed = json!({ "jsonrpc": "2.0", "id": 2, "result": { "tools": [] } });
+    offer_relate(
+        &store,
+        &json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }),
+        &mut listed,
+    );
+    assert_eq!(listed["result"]["tools"][0]["name"], "relate");
+    let description = listed["result"]["tools"][0]["description"]
+        .as_str()
+        .unwrap();
+    assert!(
+        description.ends_with("Relations: capital."),
+        "{description}"
+    );
+}
+
+/// Answers each query with what `answer` gives for it.
+struct Scripted(Box<dyn Fn(&str) -> SearchResults + Send + Sync>);
+
+impl SearchBackend for Scripted {
+    fn search(&self, query: &str, _limit: usize) -> Result<Vec<Hit>> {
+        Ok((self.0)(query).hits)
+    }
+
+    fn search_full(
+        &self,
+        query: &str,
+        _limit: usize,
+        _options: &SearchOptions,
+    ) -> Result<SearchResults> {
+        Ok((self.0)(query))
+    }
+
+    fn num_docs(&self) -> u64 {
+        1
+    }
+}
+
+fn scripted(answer: impl Fn(&str) -> SearchResults + Send + Sync + 'static) -> Mcp {
+    Mcp::new(Arc::new(Scripted(Box::new(answer))), None)
+}
+
+fn titled(domain: &str, title: &str, link_score: f32, named: bool) -> Hit {
+    Hit {
+        title: Some(title.to_string()),
+        ..hit(domain, 1.0, link_score, named)
+    }
+}
+
+/// A Wikipedia article named by the query, whose item's official website
+/// is on `site` (at `website` when that is a subdomain or inner page).
+fn article(title: &str, site: Option<&str>, website: Option<&str>) -> PlacedPage {
+    let page = Page::from_article(
+        "en",
+        plumb_core::article::Article {
+            title: title.into(),
+            description: Some(format!("about {title}")),
+            item: Some("Q1".into()),
+            site: site.map(str::to_string),
+            website: website.map(str::to_string),
+            views: 1000,
+            ..Default::default()
+        },
+    );
+    PlacedPage {
+        hit: plumb_index::pages::PageHit {
+            page,
+            score: 0.9,
+            named: true,
+            popularity: 0.5,
+            whole: true,
+            learned: None,
+        },
+        under: None,
+        at: 0,
+    }
+}
+
+fn results(hits: Vec<Hit>, pages: Vec<PlacedPage>) -> SearchResults {
+    SearchResults {
+        hits,
+        pages,
+        site_search: None,
+        spelling: None,
+    }
+}
+
+fn official(mcp: &Mcp, name: &str) -> Value {
+    call(mcp, "official_site", json!({ "name": name }))["result"]["structuredContent"].clone()
+}
+
+#[test]
+fn official_site_takes_the_site_wikidata_gives_the_named_article() {
+    // LifeWiki is conwaylife.com/wiki, not life-wiki.com.
+    let mcp = scripted(|_| {
+        results(
+            vec![titled("life-wiki.com", "Free encyclopedia", 0.1, true)],
+            vec![article(
+                "LifeWiki",
+                Some("conwaylife.com"),
+                Some("https://conwaylife.com/wiki/"),
+            )],
+        )
+    });
+    let answer = official(&mcp, "LifeWiki");
+    assert_eq!(answer["domain"], "conwaylife.com", "{answer}");
+    assert_eq!(answer["url"], "https://conwaylife.com/wiki/");
+    assert_eq!(answer["confidence"], "high");
+    assert!(answer["why"].to_string().contains("LifeWiki"), "{answer}");
+    assert_eq!(answer["alternatives"][0]["domain"], "life-wiki.com");
+
+    // MathWorld is a subdomain of wolfram.com.
+    let mcp = scripted(|_| {
+        results(
+            vec![titled("wolfram.com", "Wolfram", 0.6, false)],
+            vec![article(
+                "MathWorld",
+                Some("wolfram.com"),
+                Some("https://mathworld.wolfram.com/"),
+            )],
+        )
+    });
+    let answer = official(&mcp, "Wolfram MathWorld");
+    assert_eq!(answer["domain"], "mathworld.wolfram.com", "{answer}");
+    assert_eq!(answer["url"], "https://mathworld.wolfram.com/");
+    assert_eq!(answer["confidence"], "high");
+
+    // A well-known site of exactly the name keeps it: "zoom" is zoom.us,
+    // whatever film is called Zoom.
+    let mcp = scripted(|_| {
+        let mut zoom = titled("zoom.us", "Zoom", 0.9, true);
+        zoom.official = true;
+        results(
+            vec![zoom],
+            vec![article("Zoom (film)", Some("zoomfilm.example"), None)],
+        )
+    });
+    assert_eq!(official(&mcp, "zoom")["domain"], "zoom.us");
+}
+
+#[test]
+fn official_site_is_unsure_of_a_namesake_of_an_article_without_a_site() {
+    // Golly is a program whose article names no site; gollo.com is a shop.
+    let mcp = scripted(|_| {
+        results(
+            vec![titled("gollo.com", "Gollo Costa Rica: Compras", 0.2, true)],
+            vec![article("Golly (program)", None, None)],
+        )
+    });
+    let answer = official(&mcp, "Golly");
+    assert_eq!(answer["found"], false);
+    assert_eq!(answer["status"], "unresolved");
+    assert_eq!(answer["alternatives"][0]["domain"], "gollo.com");
+    assert_eq!(answer["confidence"], "low", "{answer}");
+    assert!(answer["why"].to_string().contains("Golly (program)"));
+}
+
+#[test]
+fn official_site_keeps_an_unsupported_title_match_as_a_suggestion() {
+    let mcp = scripted(|_| {
+        let mut chess = titled("chess.com", "Chess.com - Play Chess Online", 0.9, false);
+        chess.official = true;
+        results(
+            vec![
+                chess,
+                titled(
+                    "chessprogramming.org",
+                    "Main Page - Chess Programming Wiki",
+                    0.25,
+                    false,
+                ),
+            ],
+            Vec::new(),
+        )
+    });
+    let answer = official(&mcp, "Chess Programming Wiki");
+    assert_eq!(answer["found"], false, "{answer}");
+    assert_eq!(answer["alternatives"][0]["domain"], "chessprogramming.org");
+    assert_eq!(answer["confidence"], "low");
+}
+
+#[test]
+fn official_site_leaves_out_alternatives_with_nothing_of_the_name() {
+    let mcp = server(vec![
+        titled("norvig.com", "Peter Norvig", 0.3, true),
+        titled("x.com", "X", 0.9, false),
+        titled("norvig-fans.example", "Fans", 0.1, false),
+    ]);
+    let answer = official(&mcp, "norvig.com");
+    assert_eq!(answer["domain"], "norvig.com");
+    let others: Vec<&str> = answer["alternatives"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|alt| alt["domain"].as_str().unwrap())
+        .collect();
+    assert_eq!(others, ["norvig-fans.example"]);
+}
+
+#[test]
+fn official_site_package_docs_need_a_matching_indexed_owner() {
+    // An unrelated official site cannot verify a cached docs host.
+    let mcp = scripted(|query| {
+        if query.ends_with("package") {
+            let page = Page::from_package(plumb_core::article::Article {
+                title: "pillow".into(),
+                item: Some("pypi:pillow".into()),
+                views: 1_000,
+                package: Some(plumb_core::packages::PackageInfo {
+                    registry: "pypi".into(),
+                    name: "pillow".into(),
+                    homepage: Some("https://python-pillow.github.io".into()),
+                    docs: Some("https://pillow.readthedocs.io".into()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+            .unwrap();
+            let mut placed = article("x", None, None);
+            placed.hit.page = page;
+            return results(Vec::new(), vec![placed]);
+        }
+        let mut github = titled("github.com", "GitHub", 0.95, false);
+        github.official = true;
+        results(vec![github], Vec::new())
+    });
+    let answer = official(&mcp, "Pillow docs");
+    assert_eq!(answer["found"], false, "{answer}");
+    assert_eq!(answer["package_home"], "https://pillow.readthedocs.io");
+    assert_eq!(answer["confidence"], "low");
+}
+
+#[test]
+fn official_site_an_abbreviation_owner_does_not_prove_its_requested_api() {
+    let mcp = scripted(|query| match query {
+        "NPS" => {
+            let mut owner = titled("nps.gov", "National Park Service", 0.7, true);
+            owner.official = true;
+            results(vec![owner], Vec::new())
+        }
+        _ => results(vec![titled("npmjs.org", "npm", 0.8, false)], Vec::new()),
+    });
+    let answer = official(&mcp, "NPS API developer");
+    assert_eq!(answer["found"], false, "{answer}");
+    assert_eq!(answer["confidence"], "low");
+    assert!(answer["alternatives"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|alt| alt["domain"] == "nps.gov"));
+}
+
+#[test]
+fn site_info_says_what_it_folds_and_whose_official_site_it_is() {
+    let mcp = scripted(|_| {
+        let mut placed = article("National Park Service", Some("nps.gov"), None);
+        placed.under = Some("nps.gov".into());
+        results(
+            vec![titled("nps.gov", "NPS.gov Homepage", 0.69, true)],
+            vec![placed],
+        )
+    });
+    let reply = call(
+        &mcp,
+        "site_info",
+        json!({ "domain": "https://developer.nps.gov/api/" }),
+    );
+    let answer = &reply["result"]["structuredContent"];
+    assert_eq!(answer["domain"], "nps.gov");
+    assert_eq!(answer["host"], "developer.nps.gov");
+    assert_eq!(answer["part_of"], "nps.gov");
+    assert_eq!(answer["official"], true);
+    assert_eq!(answer["official_for"], "National Park Service");
+    let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(
+        text.starts_with("Plumb keeps no entry of its own for developer.nps.gov"),
+        "{text}"
+    );
+    assert!(
+        text.contains("official website of National Park Service"),
+        "{text}"
+    );
+
+    // www. is the site itself.
+    let answer =
+        &call(&mcp, "site_info", json!({ "domain": "www.nps.gov" }))["result"]["structuredContent"];
+    assert_eq!(answer.get("host"), None);
+}
+
+#[test]
+fn names_separate_navigation_but_keep_technical_qualifiers() {
+    assert_eq!(bare_name("Pillow docs").as_deref(), Some("pillow"));
+    assert_eq!(bare_name("NPS API developer"), None);
+    assert_eq!(bare_name("Orion API docs").as_deref(), Some("orion api"));
+    assert_eq!(bare_name("paypal login").as_deref(), Some("paypal"));
+    assert_eq!(bare_name("Pillow"), None);
+    assert_eq!(bare_name("docs"), None);
+    assert_eq!(
+        asked_page("https://www.nps.gov/yose/index.htm").as_deref(),
+        Some("https://www.nps.gov/yose/index.htm")
+    );
+    assert_eq!(asked_page("nps.gov"), None);
+    assert_eq!(asked_page("https://nps.gov/"), None);
+}
+
+/// A package card of `name` from `registry`, found for "<name> package".
+fn package_page(
+    registry: &str,
+    name: &str,
+    homepage: Option<&str>,
+    docs: Option<&str>,
+) -> PlacedPage {
+    let page = Page::from_package(plumb_core::article::Article {
+        title: name.into(),
+        item: Some(format!("{registry}:{name}")),
+        views: 1_000,
+        package: Some(plumb_core::packages::PackageInfo {
+            registry: registry.into(),
+            name: name.into(),
+            homepage: homepage.map(str::to_string),
+            docs: docs.map(str::to_string),
+            ..Default::default()
+        }),
+        ..Default::default()
+    })
+    .unwrap();
+    let mut placed = article("x", None, None);
+    placed.hit.page = page;
+    placed
+}
+
+#[test]
+fn official_site_takes_the_named_article_over_a_site_that_shows_nothing_of_the_name() {
+    // mo.gov goes by "USNO" somewhere, but shows nothing of it.
+    let mcp = scripted(|_| {
+        let mut mo = titled("mo.gov", "Home | MO.gov", 0.8, true);
+        mo.official = true;
+        let mut navy = titled("navy.mil", "United States Navy", 0.8, false);
+        navy.official = true;
+        results(
+            vec![mo, navy],
+            vec![article(
+                "United States Naval Observatory",
+                Some("navy.mil"),
+                Some("https://www.usno.navy.mil/"),
+            )],
+        )
+    });
+    let answer = official(&mcp, "USNO");
+    assert_eq!(answer["domain"], "usno.navy.mil", "{answer}");
+}
+
+#[test]
+fn official_site_trusts_a_package_over_a_site_named_only_by_its_address() {
+    let mcp = scripted(|query| {
+        if query.ends_with("package") {
+            return results(
+                Vec::new(),
+                vec![package_page(
+                    "pypi",
+                    "skyfield",
+                    Some("https://rhodesmill.org/skyfield/"),
+                    None,
+                )],
+            );
+        }
+        results(
+            vec![titled("skyfield.cloud", "Cloud", 0.1, true)],
+            Vec::new(),
+        )
+    });
+    let answer = official(&mcp, "Skyfield");
+    assert_eq!(
+        answer["url"], "https://rhodesmill.org/skyfield/",
+        "{answer}"
+    );
+
+    // A registry's own pages are no project's home: TOML is not docs.rs.
+    let mcp = scripted(|query| {
+        if query.ends_with("package") {
+            return results(
+                Vec::new(),
+                vec![package_page(
+                    "crates",
+                    "toml",
+                    None,
+                    Some("https://docs.rs/toml"),
+                )],
+            );
+        }
+        results(
+            vec![titled("toml.example", "Tom's", 0.1, false)],
+            Vec::new(),
+        )
+    });
+    let answer = official(&mcp, "TOML");
+    assert_ne!(answer["domain"], "docs.rs", "{answer}");
+}
+
+#[test]
+fn official_site_sends_docs_to_a_docs_site_of_its_own() {
+    let mcp = scripted(|_| {
+        let mut python = titled("python.org", "Welcome to Python.org", 0.9, true);
+        python.official = true;
+        results(vec![python], Vec::new())
+    });
+    let answer = official(&mcp, "Python docs");
+    assert_eq!(answer["domain"], "docs.python.org", "{answer}");
+    assert_eq!(answer["url"], "https://docs.python.org/");
+    assert_eq!(official(&mcp, "Python")["domain"], "python.org");
+}
+
+#[test]
+fn official_site_takes_no_package_docs_for_a_home() {
+    // PyPI gives pandas only docs, pandas.readthedocs.io, which is no home.
+    let mcp = scripted(|query| {
+        if query.ends_with("package") {
+            return results(
+                Vec::new(),
+                vec![package_page(
+                    "pypi",
+                    "pandas",
+                    None,
+                    Some("https://pandas.readthedocs.io/"),
+                )],
+            );
+        }
+        results(vec![titled("pydata.org", "PyData", 0.1, true)], Vec::new())
+    });
+    let answer = official(&mcp, "pandas");
+    assert_eq!(answer["found"], false, "{answer}");
+    assert_eq!(answer["package_home"], "https://pandas.readthedocs.io/");
+
+    // A matching indexed project homepage corroborates the package's docs.
+    let mcp = scripted(|query| {
+        if query.ends_with("package") {
+            return results(
+                Vec::new(),
+                vec![package_page(
+                    "pypi",
+                    "pillow",
+                    Some("https://python-pillow.org/"),
+                    Some("https://pillow.readthedocs.io/"),
+                )],
+            );
+        }
+        let mut pillow = titled("python-pillow.org", "Python Pillow", 0.3, false);
+        pillow.official = true;
+        results(vec![pillow], Vec::new())
+    });
+    let answer = official(&mcp, "Pillow docs");
+    assert_eq!(answer["domain"], "pillow.readthedocs.io", "{answer}");
+    assert_eq!(answer["alternatives"][0]["domain"], "python-pillow.org");
+}
+
+#[test]
+fn official_site_is_unsure_of_a_name_its_site_does_not_show() {
+    // lifewire.com goes by "LifeWiki" somewhere, but shows nothing of it.
+    let mcp = scripted(|_| {
+        let mut lifewire = titled("lifewire.com", "Lifewire: Tech News", 0.8, true);
+        lifewire.official = true;
+        results(vec![lifewire], Vec::new())
+    });
+    assert_ne!(official(&mcp, "LifeWiki")["confidence"], "high");
+
+    // Two official, well-known sites of the name.
+    let mcp = scripted(|_| {
+        let mut europe = titled("elixir-europe.org", "Welcome to ELIXIR", 0.6, true);
+        europe.official = true;
+        let mut lang = titled(
+            "elixir-lang.org",
+            "The Elixir programming language",
+            0.6,
+            true,
+        );
+        lang.official = true;
+        lang.score = 0.5;
+        results(vec![europe, lang], Vec::new())
+    });
+    let answer = official(&mcp, "elixir");
+    assert_eq!(answer["confidence"], "low", "{answer}");
+    assert_eq!(answer["status"], "ambiguous");
+    assert_eq!(answer["found"], false);
+
+    // One alone is sure.
+    let mcp = scripted(|_| {
+        let mut lang = titled(
+            "elixir-lang.org",
+            "The Elixir programming language",
+            0.6,
+            true,
+        );
+        lang.official = true;
+        results(vec![lang], Vec::new())
+    });
+    assert_eq!(official(&mcp, "elixir")["confidence"], "high");
+}
+
+#[test]
+fn official_site_keeps_api_evidence_when_separating_docs_navigation() {
+    // Neither the company's name nor a same-name SDK proves the requested API.
+    let mcp = scripted(|query| {
+        if query.ends_with("package") {
+            return results(
+                Vec::new(),
+                vec![package_page(
+                    "pypi",
+                    "anthropic",
+                    None,
+                    Some("https://anthropic.readthedocs.io/"),
+                )],
+            );
+        }
+        let mut anthropic = titled("anthropic.com", "Home \\ Anthropic", 0.8, false);
+        anthropic.official = true;
+        results(vec![anthropic], Vec::new())
+    });
+    let answer = official(&mcp, "anthropic api docs");
+    assert_eq!(answer["found"], false, "{answer}");
+    assert_eq!(answer["confidence"], "low");
+    assert!(answer["url"].is_null());
+}
+
+#[test]
+fn official_site_does_not_erase_an_email_category_missing_from_the_identity() {
+    let mcp = scripted(|_| {
+        let mut office = titled("office.com", "Office.com", 0.9, false);
+        office.official = true;
+        let mut outlook = titled("outlook.live.com", "Outlook", 0.8, false);
+        outlook.official = true;
+        outlook.score = 0.9;
+        outlook.description = Some("Microsoft free web-based email service".into());
+        results(vec![office, outlook], Vec::new())
+    });
+    let answer = official(&mcp, "outlook email");
+    assert_eq!(answer["found"], false, "{answer}");
+    assert!(answer["alternatives"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|alt| alt["domain"] == "outlook.live.com"));
+}
+
+#[test]
+fn official_site_keeps_a_partial_numeric_address_as_a_suggestion() {
+    let mcp = scripted(|_| {
+        let mut rubiks = titled("rubiks.com", "Rubik's", 0.8, false);
+        rubiks.official = true;
+        let mut cube20 = hit("cube20.org", 0.5, 0.1, false);
+        cube20.title = None;
+        results(vec![rubiks, cube20], Vec::new())
+    });
+    let answer = official(&mcp, "cube20 God's number");
+    assert_eq!(answer["found"], false, "{answer}");
+    assert_eq!(answer["alternatives"][0]["domain"], "cube20.org");
+    assert_eq!(answer["confidence"], "low");
+}
+
+#[test]
+fn official_site_binds_package_docs_to_the_typed_entity_despite_popular_spelling() {
+    for mode in 0..3 {
+        let mcp = scripted(move |query| {
+            if query.ends_with("package") {
+                return results(
+                    Vec::new(),
+                    vec![package_page(
+                        "pypi",
+                        "mypy",
+                        Some("https://mypy-lang.org/"),
+                        Some("https://mypy.readthedocs.io/en/stable/"),
+                    )],
+                );
+            }
+            let mut hits = Vec::new();
+            if mode != 2 {
+                let mut mapy = titled("mapy.com", "Mapy.com", 0.9, true);
+                mapy.official = true;
+                hits.push(mapy);
+            }
+            if mode != 0 {
+                let mut project = titled("mypy-lang.org", "mypy", 0.9, true);
+                project.official = true;
+                project.score = 0.5;
+                hits.push(project);
+            }
+            let mut found = results(hits, vec![article("Mapy", Some("mapy.com"), None)]);
+            found.spelling = Some(plumb_index::Spelling {
+                query: "mapy documentation".into(),
+                site: Some("mapy.com".into()),
+                applied: true,
+            });
+            found
+        });
+        let answer = official(&mcp, "mypy documentation");
+        if mode == 0 {
+            assert_eq!(answer["found"], false, "{answer}");
+            assert_eq!(answer["confidence"], "low");
+            assert_eq!(
+                answer["package_home"],
+                "https://mypy.readthedocs.io/en/stable/"
+            );
+            continue;
+        }
+        assert_eq!(answer["found"], true, "{answer}");
+        assert_eq!(answer["url"], "https://mypy.readthedocs.io/en/stable/");
+        assert_eq!(answer["confidence"], "medium");
+        assert!(answer["did_you_mean"].is_null());
+        let why = answer["why"].to_string();
+        assert!(
+            why.contains("PyPI") && !why.contains("Wikidata") && !why.contains("well-known"),
+            "{why}"
+        );
+    }
+}
+
+#[test]
+fn official_site_task_domains_cannot_displace_the_entity_even_for_short_brands() {
+    for (name, task_domain, task_title, entity_domain, entity_title) in [
+        (
+            "Xe currency converter",
+            "converter.app",
+            "Text converter",
+            "xe.com",
+            "Xe currency converter",
+        ),
+        (
+            "Chroma vector database",
+            "vector.dev",
+            "Vector",
+            "trychroma.com",
+            "Chroma vector database",
+        ),
+    ] {
+        let mut entity = titled(entity_domain, entity_title, 0.5, true);
+        entity.official = true;
+        let mcp = server(vec![titled(task_domain, task_title, 0.9, true), entity]);
+        let answer = official(&mcp, name);
+        assert_eq!(answer["domain"], entity_domain, "{name}: {answer}");
+        assert_eq!(answer["found"], true);
+    }
+    // A short string inside an unrelated word does not identify Xe.
+    let answer = official(
+        &server(vec![titled("example.com", "Text converter", 0.9, true)]),
+        "Xe currency converter",
+    );
+    assert_eq!(answer["found"], false, "{answer}");
+    let mut namesake = titled("chromakey.com", "ChromaKey", 0.9, true);
+    namesake.official = true;
+    let answer = official(&server(vec![namesake]), "Chroma vector database");
+    assert_eq!(answer["found"], false, "{answer}");
+}
+
+#[test]
+fn official_site_categories_need_full_identity_evidence_without_an_ontology_table() {
+    for (name, brand, domain) in [
+        ("Xe currency converter", "Xe", "xe.com"),
+        ("Chroma vector database", "Chroma", "trychroma.com"),
+        ("Outlook email", "Outlook", "outlook.live.com"),
+        ("Orion observability pipeline", "Orion", "orion.example"),
+    ] {
+        assert_eq!(identity::Intent::of(name).entity, name.to_lowercase());
+        let mut bare_owner = titled(domain, brand, 0.9, true);
+        bare_owner.official = true;
+        let answer = official(&server(vec![bare_owner]), name);
+        assert_eq!(answer["found"], false, "{name}: {answer}");
+        assert_eq!(answer["confidence"], "low");
+        assert_eq!(answer["alternatives"][0]["domain"], domain);
+        let mut complete = titled(domain, name, 0.9, true);
+        complete.official = true;
+        let answer = official(&server(vec![complete]), name);
+        assert_eq!(answer["found"], true, "{name}: {answer}");
+        assert_eq!(answer["domain"], domain);
+    }
+}
+
+#[test]
+fn official_site_cannot_validate_another_entity_from_spelling_or_official_status() {
+    let mcp = scripted(|_| {
+        let mut mapy = titled("mapy.com", "Mapy", 0.9, true);
+        mapy.official = true;
+        let mut found = results(vec![mapy], vec![article("Mapy", Some("mapy.com"), None)]);
+        found.spelling = Some(plumb_index::Spelling {
+            query: "mapy".into(),
+            site: Some("mapy.com".into()),
+            applied: true,
+        });
+        found
+    });
+    let answer = official(&mcp, "mypy");
+    assert_eq!(answer["found"], false, "{answer}");
+    assert_eq!(answer["status"], "unresolved");
+    assert_eq!(answer["confidence"], "low");
+    assert!(answer["url"].is_null());
+    assert_eq!(answer["did_you_mean"], "mapy");
+    assert_eq!(answer["alternatives"][0]["domain"], "mapy.com");
+    assert!(!answer["why"].to_string().contains("Wikidata lists"));
+    let mut amazon = titled("amazon.com", "Amazon", 0.9, true);
+    amazon.official = true;
+    let answer = official(
+        &server(vec![titled("river.example", "River", 0.1, false), amazon]),
+        "Amazon River length",
+    );
+    assert_eq!(answer["found"], false, "{answer}");
+}
+
+#[test]
+fn official_site_keeps_matching_brands_that_include_country_names() {
+    for (name, title, domain) in [
+        ("Bank of America", "Bank of America", "bankofamerica.com"),
+        ("Air France", "Air France", "airfrance.com"),
+        ("Mapy", "Mapy", "mapy.com"),
+        ("Vector", "Vector", "vector.dev"),
+        ("X", "X", "x.com"),
+        ("R", "The R Project", "r-project.org"),
+        ("H&M", "H&M", "hm.com"),
+    ] {
+        let mut brand = titled(domain, title, 0.8, true);
+        brand.official = true;
+        let answer = official(&server(vec![brand]), name);
+        assert_eq!(answer["found"], true, "{answer}");
+        assert_eq!(answer["domain"], domain);
+        assert_eq!(answer["confidence"], "high");
+    }
+}
+
+#[test]
+fn official_site_uses_the_query_jurisdiction_and_reports_conflicting_preferences() {
+    struct Countries;
+    impl SearchBackend for Countries {
+        fn search(&self, _: &str, _: usize) -> Result<Vec<Hit>> {
+            unreachable!()
+        }
+        fn num_docs(&self) -> u64 {
+            2
+        }
+        fn search_full(&self, _: &str, _: usize, options: &SearchOptions) -> Result<SearchResults> {
+            assert_eq!(options.country.as_deref(), Some("MX"));
+            let mut gt = titled("sat.gob.gt", "SAT Guatemala", 0.9, true);
+            gt.country = Some("GT".into());
+            gt.official = true;
+            let mut mx = titled("sat.gob.mx", "SAT", 0.6, true);
+            mx.country = Some("MX".into());
+            mx.official = true;
+            // Deliberately keep the default-country result first to exercise
+            // the identity gate independently of the backend's country boost.
+            Ok(results(vec![gt, mx], Vec::new()))
+        }
+    }
+    let mcp = Mcp::new(Arc::new(Countries), Some("GT".into()));
+    for country in [None, Some("MX"), Some("GT"), Some("any")] {
+        let mut args = json!({ "name": "SAT México" });
+        if let Some(country) = country {
+            args["country"] = json!(country);
+        }
+        let reply = call(&mcp, "official_site", args);
+        let answer = &reply["result"]["structuredContent"];
+        assert_eq!(answer["domain"], "sat.gob.mx", "{answer}");
+        assert_eq!(answer["found"], true);
+        if country.is_none() || country == Some("GT") {
+            assert_eq!(answer["country_conflict"]["query"], "MX");
+            assert_eq!(answer["country_conflict"]["preference"], "GT");
+        } else {
+            assert!(answer["country_conflict"].is_null());
+        }
+    }
+}
+
+#[test]
+fn official_site_abstains_on_domain_namesakes_and_copied_owner_titles() {
+    // These reproduce evidence shapes from the combined candidate run.
+    // Even a strong ranking/name/popularity signal is not owner evidence.
+    for (name, domain, title, description) in [
+        (
+            "LifeWiki",
+            "life-wiki.com",
+            Some("Free encyclopedia, created and edited by volunteers around the world"),
+            None,
+        ),
+        ("MathWorld", "mathworld.com", None, None),
+        ("NSSDC", "nssdc.ac.cn", None, None),
+        (
+            "European Central Bank",
+            "zentral-bank.eu",
+            Some("European Central Bank"),
+            Some("The European Central Bank (ECB) is the central bank of the European Union."),
+        ),
+        (
+            "Yosemite National Park",
+            "yosemite.com",
+            Some("Yosemite National Park | Lodging, Camping, Attractions | Yosemite.com"),
+            Some("Plan your vacation to Yosemite today!"),
+        ),
+        // A word normally ignored during search is part of this entity.
+        ("Delta Center", "delta.com", Some("Delta"), None),
+    ] {
+        for link_score in [0.1, 0.9] {
+            let mut candidate = hit(domain, 2.0, link_score, true);
+            candidate.title = title.map(str::to_string);
+            candidate.description = description.map(str::to_string);
+            let answer = official(&server(vec![candidate]), name);
+            assert_eq!(answer["found"], false, "{name}: {answer}");
+            assert_eq!(answer["status"], "unresolved");
+            assert_eq!(answer["confidence"], "low");
+            assert!(answer["url"].is_null());
+            assert_eq!(answer["alternatives"][0]["domain"], domain);
+        }
+    }
+}
+
+#[test]
+fn official_site_abbreviation_cannot_verify_an_unbound_resource() {
+    for (name, acronym, domain, title) in [
+        (
+            "NSSDC planetary fact sheet",
+            "NSSDC",
+            "nssdc.ac.cn",
+            "NSSDC",
+        ),
+        ("NASA Science", "NASA", "nasa.gov", "NASA"),
+        ("NIST Atomic Spectra Database", "NIST", "nist.gov", "NIST"),
+        ("NIST physical constants", "NIST", "nist.gov", "NIST"),
+        (
+            "US Naval Observatory Astronomical Applications",
+            "US",
+            "us.es",
+            "Universidad de Sevilla",
+        ),
+    ] {
+        let mcp = scripted(move |query| {
+            let mut candidate = titled(domain, title, 0.9, true);
+            candidate.official = true;
+            if query == acronym {
+                results(vec![candidate], Vec::new())
+            } else {
+                results(
+                    vec![titled("unrelated.example", "Unrelated", 0.1, false)],
+                    Vec::new(),
+                )
+            }
+        });
+        let answer = official(&mcp, name);
+        assert_eq!(answer["found"], false, "{name}: {answer}");
+        assert_eq!(answer["confidence"], "low");
+        assert!(answer["url"].is_null());
+        assert!(
+            answer["alternatives"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|alt| alt["domain"] == domain),
+            "{answer}"
+        );
+    }
+}
+
+#[test]
+fn official_site_database_qualifier_cannot_select_a_newspaper() {
+    let mut newspaper = titled("tz.de", "tz", 0.9, true);
+    newspaper.description = Some("German daily newspaper published in Munich".into());
+    newspaper.official = true;
+    let mcp = server(vec![newspaper]);
+    let answer = official(&mcp, "tz database");
+    assert_eq!(answer["found"], false, "{answer}");
+    assert_eq!(answer["alternatives"][0]["domain"], "tz.de");
+    assert_eq!(official(&mcp, "tz")["domain"], "tz.de");
+}
+
+#[test]
+fn official_site_an_official_flag_does_not_bind_a_bare_domain_namesake() {
+    for (name, domain) in [("MathWorld", "mathworld.com"), ("NSSDC", "nssdc.ac.cn")] {
+        let mut namesake = hit(domain, 2.0, 0.9, true);
+        namesake.title = None;
+        namesake.official = true;
+        let answer = official(&server(vec![namesake]), name);
+        assert_eq!(answer["found"], false, "{answer}");
+        assert_eq!(answer["alternatives"][0]["domain"], domain);
+    }
+}
+
+#[test]
+fn official_site_package_owner_overrides_generated_framework_docs() {
+    for (title, named, popularity) in [("FastAPI - Swagger UI", false, 0.1), ("FastAPI", true, 0.9)]
+    {
+        let mcp = scripted(move |query| {
+            if query.ends_with("package") {
+                return results(
+                    Vec::new(),
+                    vec![package_page(
+                        "pypi",
+                        "fastapi",
+                        Some("https://fastapi.tiangolo.com/"),
+                        None,
+                    )],
+                );
+            }
+            let mut generated = titled("dalicc.net", title, popularity, named);
+            generated.url = "http://api.dalicc.net/docs".into();
+            let mut unrelated = titled("standards.example", "Other Standards Body", 0.9, true);
+            unrelated.official = true;
+            results(vec![generated, unrelated], Vec::new())
+        });
+        let answer = official(&mcp, "FastAPI");
+        assert_eq!(answer["url"], "https://fastapi.tiangolo.com/", "{answer}");
+        assert_eq!(answer["confidence"], "medium");
+        assert_eq!(answer["alternatives"][0]["domain"], "dalicc.net");
+        assert!(answer["why"].to_string().contains("PyPI"));
+    }
+    let mut generated = titled("dalicc.net", "FastAPI - Swagger UI", 0.9, true);
+    generated.url = "http://api.dalicc.net/docs".into();
+    let answer = official(&server(vec![generated]), "FastAPI");
+    assert_eq!(answer["found"], false, "{answer}");
+    assert_eq!(
+        answer["alternatives"][0]["url"],
+        "http://api.dalicc.net/docs"
+    );
+}
+
+#[test]
+fn official_site_owner_article_overrides_popular_domain_namesake() {
+    let mcp = scripted(|_| {
+        results(
+            vec![titled("life-wiki.com", "LifeWiki", 0.9, true)],
+            vec![article(
+                "LifeWiki",
+                Some("conwaylife.com"),
+                Some("https://conwaylife.com/wiki/"),
+            )],
+        )
+    });
+    let answer = official(&mcp, "LifeWiki");
+    assert_eq!(answer["url"], "https://conwaylife.com/wiki/", "{answer}");
+    assert_eq!(answer["confidence"], "high");
+}
+
+#[test]
+fn official_site_package_namesake_does_not_verify_a_different_known_entity() {
+    let mcp = scripted(|query| {
+        if query.ends_with("package") {
+            return results(
+                Vec::new(),
+                vec![package_page(
+                    "pypi",
+                    "vector",
+                    Some("https://geometry.example/vector/"),
+                    None,
+                )],
+            );
+        }
+        results(vec![titled("vector.dev", "Vector", 0.9, true)], Vec::new())
+    });
+    let answer = official(&mcp, "Vector");
+    assert_eq!(answer["domain"], "vector.dev", "{answer}");
+    assert_eq!(answer["confidence"], "low");
+    assert_eq!(answer["package_home"], "https://geometry.example/vector/");
+}
+
+#[test]
+fn official_site_package_cannot_resolve_an_unverified_organization_namesake() {
+    for (name, domain, title, description, country, registry, home) in [
+        (
+            "ISO",
+            "iso.org",
+            "International Organization for Standardization",
+            "international standards development organization",
+            "CH",
+            "gem",
+            "http://github.com/tigrish/iso",
+        ),
+        (
+            "CNA",
+            "cna.example",
+            "Federation of National Academies",
+            "research coordination organization",
+            "CA",
+            "pypi",
+            "https://code.example/cna/",
+        ),
+    ] {
+        // Exercise an organization ranked first and behind generated docs.
+        // Neither label is derived by simple initials of its supplied title.
+        for org_first in [true, false] {
+            let mcp = scripted(move |query| {
+                if query.ends_with("package") {
+                    return results(
+                        Vec::new(),
+                        vec![package_page(
+                            registry,
+                            &name.to_lowercase(),
+                            Some(home),
+                            None,
+                        )],
+                    );
+                }
+                let mut organization = titled(domain, title, 0.9, true);
+                organization.official = true;
+                organization.description = Some(description.into());
+                organization.country = Some(country.into());
+                organization.url = format!("https://{domain}/");
+                let mut generated = titled("unrelated.example", name, 0.9, true);
+                generated.url = "https://unrelated.example/docs/".into();
+                let hits = if org_first {
+                    vec![organization, generated]
+                } else {
+                    vec![generated, organization]
+                };
+                results(hits, Vec::new())
+            });
+            let reply = call(&mcp, "official_site", json!({ "name": name }));
+            let answer = &reply["result"]["structuredContent"];
+            assert_eq!(answer["found"], false, "{name}: {answer}");
+            assert_eq!(answer["status"], "ambiguous");
+            assert_eq!(answer["confidence"], "low");
+            assert!(answer["url"].is_null());
+            assert_eq!(answer["package_home"], home);
+            let alternatives = answer["alternatives"].as_array().unwrap();
+            assert!(
+                alternatives.iter().any(|alt| alt["domain"] == domain),
+                "{answer}"
+            );
+            assert!(
+                alternatives.iter().any(|alt| alt["url"] == home),
+                "{answer}"
+            );
+            let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+            assert!(text.contains(home) && text.contains(domain), "{text}");
+            assert!(!text.contains("Official site for"), "{text}");
+        }
+    }
+}
+
+#[test]
+fn official_site_known_owner_namesakes_remain_ambiguous_without_a_task() {
+    let mcp = scripted(|query| {
+        if query.ends_with("package") {
+            return results(
+                Vec::new(),
+                vec![package_page(
+                    "pypi",
+                    "vector",
+                    None,
+                    Some("https://vector.readthedocs.io/"),
+                )],
+            );
+        }
+        let mut company = titled(
+            "vector.com",
+            "Vector: Building the Intelligent Foundation | Vector",
+            0.9,
+            true,
+        );
+        company.official = true;
+        company.score = 2.0;
+        let mut pipeline = titled(
+            "vector.dev",
+            "Vector | A lightweight, ultra-fast tool for building observability pipelines",
+            0.1,
+            true,
+        );
+        pipeline.score = 0.5;
+        let mut game = titled(
+            "vector.game",
+            "Vector — Free Online Parkour Runner Game | Nekki",
+            0.1,
+            false,
+        );
+        game.official = true;
+        game.score = 0.3;
+        results(vec![company, pipeline, game], Vec::new())
+    });
+    let answer = official(&mcp, "Vector");
+    // Both company and game have owner metadata for this single name;
+    // popularity cannot resolve which owner was requested.
+    assert_eq!(answer["confidence"], "low", "{answer}");
+    assert_eq!(answer["status"], "ambiguous");
+    assert_eq!(answer["found"], false);
+    assert_ne!(answer["url"], "https://vector.readthedocs.io/");
+    let urls: Vec<_> = answer["alternatives"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|alt| alt["url"].as_str())
+        .collect();
+    for domain in ["vector.com", "vector.dev", "vector.game"] {
+        assert!(urls.iter().any(|url| url.contains(domain)), "{answer}");
+    }
+}
+
+#[test]
+fn official_site_does_not_bind_owner_metadata_through_its_address_alone() {
+    let mcp = scripted(|_| {
+        results(
+            vec![titled("life-wiki.com", "Free encyclopedia", 0.9, true)],
+            vec![article(
+                "Unrelated encyclopedia",
+                Some("life-wiki.com"),
+                Some("https://life-wiki.com/"),
+            )],
+        )
+    });
+    let answer = official(&mcp, "LifeWiki");
+    assert_eq!(answer["found"], false, "{answer}");
+    assert_eq!(answer["confidence"], "low");
+
+    let mut owner = titled("python.org", "Python", 0.9, true);
+    owner.official = true;
+    owner.url = "https://python.example/docs".into();
+    let answer = official(&server(vec![owner]), "Python docs");
+    assert_eq!(answer["found"], false, "{answer}");
+    assert_eq!(
+        answer["alternatives"][0]["url"],
+        "https://python.example/docs"
+    );
+}
+
+#[test]
+fn official_site_text_preserves_unverified_suggestions_without_owner_claims() {
+    let reply = call(
+        &server(vec![titled(
+            "zentral-bank.eu",
+            "European Central Bank",
+            0.9,
+            true,
+        )]),
+        "official_site",
+        json!({ "name": "European Central Bank" }),
+    );
+    let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(
+        text.contains("could not establish an official destination"),
+        "{text}"
+    );
+    assert!(text.contains("Other candidates: zentral-bank.eu"), "{text}");
+    assert!(!text.contains("Official site for"), "{text}");
+
+    let reply = call(
+        &server(vec![titled("trychroma.com", "Chroma", 0.9, true)]),
+        "official_site",
+        json!({ "name": "Chroma" }),
+    );
+    assert_eq!(reply["result"]["structuredContent"]["found"], true);
+    let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.starts_with("Unverified candidate for"), "{text}");
+    assert!(!text.contains("Official site for"), "{text}");
+}
+
+#[test]
+fn check_lookalike_requires_backend_evidence_for_previously_verified_hosts() {
+    let empty = server(Vec::new());
+    let broken = Mcp::new(Arc::new(Broken), None);
+    for host in [
+        "console.hetzner.cloud",
+        "console.hetzner.com",
+        "api.semanticscholar.org",
+    ] {
+        let answer = empty
+            .check_lookalike(host, &SearchOptions::default())
+            .unwrap();
+        assert_eq!(answer["verdict"], "unknown", "{answer}");
+        assert_eq!(answer["lookalike"], false);
+        assert!(answer["affiliation"].is_null());
+        // No embedded owner assertion survives a failed index lookup.
+        assert!(broken
+            .check_lookalike(host, &SearchOptions::default())
+            .is_err());
+    }
+}
+
+#[test]
+fn check_lookalike_uses_indexed_public_owner_evidence_and_abstains_on_alternates() {
+    for (owner, public_host, alternate) in [
+        (
+            "hetzner.com",
+            "console.hetzner.com",
+            "console.hetzner.cloud",
+        ),
+        (
+            "semanticscholar.org",
+            "api.semanticscholar.org",
+            "api.semanticscholar.cloud",
+        ),
+        ("quartz.example", "api.quartz.example", "api.quartz.cloud"),
+    ] {
+        let mut indexed = hit(owner, 2.0, 0.9, true);
+        indexed.official = true;
+        let mcp = server(vec![indexed]);
+        let answer = mcp
+            .check_lookalike(public_host, &SearchOptions::default())
+            .unwrap();
+        assert_eq!(answer["verdict"], "official", "{answer}");
+        assert_eq!(answer["site"]["domain"], owner);
+        assert_eq!(answer["lookalike"], false);
+        let answer = mcp
+            .check_lookalike(alternate, &SearchOptions::default())
+            .unwrap();
+        assert_eq!(answer["verdict"], "suspected", "{answer}");
+        assert_eq!(answer["lookalike"], false);
+        assert!(answer["site"].is_null());
+        assert!(answer["affiliation"].is_null());
+    }
+}
+
+#[test]
+fn check_lookalike_preserves_impersonation_and_unverified_tenant_controls() {
+    let mcp = scripted(|query| {
+        let brand = if query.contains("hetzner") {
+            "hetzner.com"
+        } else {
+            "paypal.com"
+        };
+        let mut official = hit(brand, 2.0, 0.9, true);
+        official.official = true;
+        results(vec![official], Vec::new())
+    });
+    for host in [
+        "paypa1.com",
+        "paypal-login.us",
+        "paypal.com.attacker.example",
+        "раypal.com",
+        "console.hetzner.cloud.attacker.example",
+    ] {
+        let answer = mcp
+            .check_lookalike(host, &SearchOptions::default())
+            .unwrap();
+        assert_eq!(answer["verdict"], "lookalike", "{host}: {answer}");
+        assert_eq!(answer["lookalike"], true);
+        assert!(answer["affiliation"].is_null());
+    }
+    // Exact-name alternate namespaces can host legitimate services/docs.
+    // Neither credential words nor private hosting proves who operates them.
+    for host in [
+        "console.hetzner.net",
+        "login.console.hetzner.cloud",
+        "paypal.readthedocs.io",
+    ] {
+        let answer = mcp
+            .check_lookalike(host, &SearchOptions::default())
+            .unwrap();
+        assert_eq!(answer["verdict"], "suspected", "{host}: {answer}");
+        assert_eq!(answer["lookalike"], false);
+        assert_eq!(answer["suspected"], true);
+    }
+}
+
+#[test]
+fn troubleshooting_keeps_related_package_cards_after_main_results() {
+    let mcp = scripted(|query| {
+        if query == "kubernetes package" {
+            let mut card = package_page(
+                "go",
+                "k8s.io/kubernetes",
+                Some("https://kubernetes.io/"),
+                None,
+            );
+            card.hit.popularity = 0.95;
+            results(Vec::new(), vec![card])
+        } else {
+            results(vec![hit("kubernetes.io", 1.0, 0.8, false)], Vec::new())
+        }
+    });
+    let reply = call(
+        &mcp,
+        "search",
+        json!({ "query": "kubernetes CrashLoopBackOff", "limit": 3 }),
+    );
+    let answer = &reply["result"]["structuredContent"];
+    assert_eq!(answer["results"][0]["domain"], "kubernetes.io");
+    assert_eq!(answer["pages"][0]["package"]["name"], "k8s.io/kubernetes");
+    assert!(answer["pages"][0]["position"].as_u64().unwrap() > 1);
+    let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.starts_with("1. kubernetes.io"), "{text}");
+    assert!(!crate::assembly::promote_package(
+        "kubernetes CrashLoopBackOff"
+    ));
+    assert!(!crate::assembly::promote_package("serde derive"));
+    for query in [
+        "cargo add serde",
+        "serde package",
+        "serde latest version",
+        "@types/node npm",
+    ] {
+        assert!(crate::assembly::promote_package(query), "{query}");
+    }
+}
+
+/// Displayed search deliberately loses the entity behind a WHO namesake.
+struct EntityIndex(plumb_index::pages::PageSearcher);
+
+impl SearchBackend for EntityIndex {
+    fn search(&self, _: &str, _: usize) -> Result<Vec<Hit>> {
+        Ok(Vec::new())
+    }
+    fn search_full(&self, _: &str, _: usize, _: &SearchOptions) -> Result<SearchResults> {
+        let page = Page::from_set(
+            plumb_index::pages::SUBPAGES_SET,
+            plumb_core::article::Article {
+                title: "Japan".into(),
+                item: Some("https://www.who.int/countries/jpn".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        Ok(SearchResults {
+            hits: Vec::new(),
+            pages: vec![PlacedPage {
+                hit: shelved(page),
+                under: None,
+                at: 0,
+            }],
+            spelling: None,
+            site_search: None,
+        })
+    }
+    fn entities(
+        &self,
+        query: &str,
+        limit: usize,
+        options: &SearchOptions,
+    ) -> Result<Vec<plumb_index::pages::PageHit>> {
+        Ok(self
+            .0
+            .entities(query, 200)?
+            .into_iter()
+            .filter(|hit| plumb_index::pages::options_allow(options, &hit.page))
+            .take(limit)
+            .collect())
+    }
+    fn num_docs(&self) -> u64 {
+        0
+    }
+}
+
+#[test]
+fn facts_resolve_identity_before_display_and_property_availability() {
+    use plumb_core::article::Article;
+    use plumb_core::facts::{Fact, FactKind};
+    let article = |title: &str, item: &str, description: &str, facts: Vec<Fact>| {
+        Page::from_article(
+            "en",
+            Article {
+                title: title.into(),
+                item: Some(item.into()),
+                description: Some(description.into()),
+                facts,
+                ..Default::default()
+            },
+        )
+    };
+    let mut japan = article(
+        "Japan",
+        "Q17",
+        "country in East Asia",
+        vec![Fact {
+            kind: FactKind::Population,
+            value: "123802000;2024".into(),
+        }],
+    );
+    japan.profiles.push(plumb_core::profiles::Profile {
+        service: "youtube-handle".into(),
+        id: "JapanGov".into(),
+    });
+    let pages = vec![
+        japan,
+        article("Apple", "Q89", "fruit", Vec::new()),
+        article(
+            "Apple Inc.",
+            "Q312",
+            "American technology company",
+            Vec::new(),
+        ),
+        article(
+            "Apple Records",
+            "Q200",
+            "record label",
+            vec![Fact {
+                kind: FactKind::Ceo,
+                value: "Namesake CEO".into(),
+            }],
+        ),
+        article(
+            "Pear Records",
+            "Q881",
+            "record label",
+            vec![Fact {
+                kind: FactKind::Ceo,
+                value: "Namesake CEO".into(),
+            }],
+        ),
+        article("Mercury (planet)", "Q308", "planet", Vec::new()),
+        article(
+            "Mercury (element)",
+            "Q925",
+            "chemical element",
+            vec![Fact {
+                kind: FactKind::AtomicNumber,
+                value: "80".into(),
+            }],
+        ),
+    ];
+    let dir = tempfile::tempdir().unwrap();
+    let index = dir.path().join("pages");
+    plumb_index::pages::build_page_index(&index, pages).unwrap();
+    let mcp = Mcp::new(
+        Arc::new(EntityIndex(
+            plumb_index::pages::PageSearcher::open(&index).unwrap(),
+        )),
+        None,
+    );
+    let facts = mcp
+        .facts("Japan", Some("population"), &SearchOptions::default())
+        .unwrap();
+    assert_eq!(facts["item"], "Q17");
+    assert_eq!(facts["status"], "ok");
+    assert_eq!(facts["facts"][0]["value"], "123,802,000");
+    assert_eq!(facts["facts"][0]["observation_year"], 2024);
+    assert_eq!(facts["facts"][0]["unit"], "people");
+    assert_eq!(facts["facts"][0]["raw_values"][0], "123802000;2024");
+    assert_eq!(facts["freshness"], "unknown");
+    assert!(facts["facts"][0]["retrieved_at"].is_null());
+    let search = mcp
+        .search("Japan population", None, &SearchOptions::default())
+        .unwrap();
+    assert_eq!(search["answer"]["answer"], "123,802,000");
+    let search = mcp
+        .search("Japan youtube", None, &SearchOptions::default())
+        .unwrap();
+    assert_eq!(search["profile"]["of"], "Japan");
+    let missing = mcp
+        .facts("Apple", Some("ceo"), &SearchOptions::default())
+        .unwrap();
+    assert_eq!(missing["item"], "Q312", "{missing}");
+    assert_eq!(missing["status"], "missing_enrichment");
+    assert_eq!(missing["found"], false);
+    for about in ["founder", "founded"] {
+        let ambiguous = mcp
+            .facts("Apple", Some(about), &SearchOptions::default())
+            .unwrap();
+        assert_eq!(ambiguous["status"], "ambiguous_entity", "{ambiguous}");
+    }
+    let partial = mcp
+        .facts("Pear", Some("ceo"), &SearchOptions::default())
+        .unwrap();
+    assert_eq!(partial["status"], "unresolved_entity", "{partial}");
+    let ambiguous = mcp
+        .facts("Mercury", Some("atomic-number"), &SearchOptions::default())
+        .unwrap();
+    assert_eq!(ambiguous["status"], "ambiguous_entity");
+    assert_eq!(ambiguous["candidates"].as_array().unwrap().len(), 2);
+    let specified = mcp
+        .facts(
+            "Mercury (element)",
+            Some("atomic-number"),
+            &SearchOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(specified["item"], "Q925");
+}
+
+#[test]
+fn founding_facts_clarify_shared_names_and_keep_qualified_entity_coverage() {
+    use plumb_core::facts::{
+        Fact,
+        FactKind::{Founded, Founder},
+    };
+    let page = |title: &str, item: &str, description: &str, facts| {
+        Page::from_article(
+            "en",
+            plumb_core::Article {
+                title: title.into(),
+                item: Some(item.into()),
+                description: Some(description.into()),
+                aliases: vec!["Nacrelin".into()],
+                facts,
+                ..Default::default()
+            },
+        )
+    };
+    let pages = vec![
+        page("Nacrelin", "Q910101", "mineral", Vec::new()),
+        page(
+            "Nacrelin Inc.",
+            "Q910102",
+            "company",
+            vec![Fact {
+                kind: Founded,
+                value: "1901".into(),
+            }],
+        ),
+        page(
+            "Nacrelin (city)",
+            "Q910103",
+            "city",
+            vec![
+                Fact {
+                    kind: Founder,
+                    value: "Example founder".into(),
+                },
+                Fact {
+                    kind: Founded,
+                    value: "1801".into(),
+                },
+            ],
+        ),
+    ];
+    let dir = tempfile::tempdir().unwrap();
+    let index = dir.path().join("pages");
+    plumb_index::pages::build_page_index(&index, pages).unwrap();
+    let mcp = Mcp::new(
+        Arc::new(EntityIndex(
+            plumb_index::pages::PageSearcher::open(&index).unwrap(),
+        )),
+        None,
+    );
+    for about in ["founder", "founded"] {
+        let answer = mcp
+            .facts("Nacrelin", Some(about), &SearchOptions::default())
+            .unwrap();
+        assert_eq!(answer["status"], "ambiguous_entity", "{answer}");
+        assert_eq!(answer["candidates"].as_array().unwrap().len(), 3);
+    }
+    let city = mcp
+        .facts(
+            "Nacrelin (city)",
+            Some("founder"),
+            &SearchOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(city["status"], "ok", "{city}");
+    assert_eq!(city["item"], "Q910103");
+    assert_eq!(city["facts"][0]["value"], "Example founder");
+    let company = mcp
+        .facts("Nacrelin Inc.", Some("founded"), &SearchOptions::default())
+        .unwrap();
+    assert_eq!(company["status"], "ok", "{company}");
+    assert_eq!(company["item"], "Q910102");
+    assert_eq!(company["facts"][0]["value"], "1901");
+    let missing = mcp
+        .facts("Nacrelin Inc.", Some("founder"), &SearchOptions::default())
+        .unwrap();
+    assert_eq!(missing["status"], "missing_enrichment", "{missing}");
+    assert_eq!(missing["item"], "Q910102");
+    assert!(!missing["found"].as_bool().unwrap());
+    let search = mcp
+        .search("who founded Nacrelin", None, &SearchOptions::default())
+        .unwrap();
+    assert!(search["answer"].is_null(), "{search}");
+}
+
+#[test]
+fn missing_troubleshooting_results_do_not_promote_a_package_as_the_answer() {
+    let mcp = scripted(|query| {
+        if query == "kubernetes package" {
+            let mut card = package_page(
+                "go",
+                "k8s.io/kubernetes",
+                Some("https://kubernetes.io/"),
+                None,
+            );
+            card.hit.popularity = 0.95;
+            results(Vec::new(), vec![card])
+        } else {
+            results(Vec::new(), Vec::new())
+        }
+    });
+    let reply = call(
+        &mcp,
+        "search",
+        json!({ "query": "kubernetes CrashLoopBackOff" }),
+    );
+    let answer = &reply["result"]["structuredContent"];
+    assert!(answer["pages"].as_array().unwrap().is_empty());
+    assert_eq!(answer["related_packages"][0]["name"], "k8s.io/kubernetes");
+    let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.starts_with("No results for"), "{text}");
+    assert!(text.contains("Related package information:"), "{text}");
+}
+
+struct LyricsWithEntity;
+
+impl SearchBackend for LyricsWithEntity {
+    fn search(&self, _: &str, _: usize) -> Result<Vec<Hit>> {
+        Ok(Vec::new())
+    }
+    fn num_docs(&self) -> u64 {
+        0
+    }
+    fn entities(
+        &self,
+        _: &str,
+        _: usize,
+        _: &SearchOptions,
+    ) -> Result<Vec<plumb_index::pages::PageHit>> {
+        let mut hit = shelved(Page::from_article(
+            "en",
+            plumb_core::article::Article {
+                title: "Hey Jude".into(),
+                description: Some("song by The Beatles".into()),
+                item: Some("Q210179".into()),
+                ..Default::default()
+            },
+        ));
+        hit.named = true;
+        Ok(vec![hit])
+    }
+    fn search_full(&self, query: &str, _: usize, _: &SearchOptions) -> Result<SearchResults> {
+        let pages = if query.ends_with(" song") {
+            let page = Page::from_music(plumb_core::article::Article {
+                title: "Hey Jude".into(),
+                description: Some("Song by The Beatles, 1968".into()),
+                aliases: vec!["Hey Jude The Beatles".into()],
+                item: Some("recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69".into()),
+                ..Default::default()
+            })
+            .unwrap();
+            vec![PlacedPage {
+                hit: plumb_index::pages::PageHit {
+                    named: true,
+                    ..shelved(page)
+                },
+                under: None,
+                at: 0,
+            }]
+        } else {
+            Vec::new()
+        };
+        Ok(SearchResults {
+            hits: Vec::new(),
+            pages,
+            spelling: None,
+            site_search: None,
+        })
+    }
+}
+
+#[test]
+fn facts_entity_profiles_keep_the_existing_music_fallback() {
+    let mcp = Mcp::new(Arc::new(LyricsWithEntity), None);
+    let answer = mcp
+        .search("Hey Jude lyrics", None, &SearchOptions::default())
+        .unwrap();
+    assert_eq!(answer["profile"]["of"], "Hey Jude");
+    assert_eq!(answer["profile"]["source"], "MusicBrainz");
+    assert_eq!(answer["profile"]["search"], true);
+    assert!(answer["profile"]["url"]
+        .as_str()
+        .unwrap()
+        .starts_with("https://genius.com/search?"));
+}
+
+#[test]
+fn official_site_arbitrary_namesakes_require_disambiguation() {
+    for name in ["Brindle", "Velora"] {
+        for reversed in [false, true] {
+            let mut museum = titled("museum.example", &format!("{name} Museum"), 0.9, true);
+            museum.official = true;
+            museum.score = 10.0;
+            let mut laboratory =
+                titled("laboratory.test", &format!("{name} Laboratory"), 0.1, false);
+            laboratory.official = true;
+            laboratory.score = 0.01;
+            let mut hits = vec![museum, laboratory];
+            if reversed {
+                hits.reverse();
+            }
+            let mcp = server(hits);
+            let ambiguous = official(&mcp, name);
+            assert_eq!(ambiguous["status"], "ambiguous", "{ambiguous}");
+            assert_eq!(ambiguous["confidence"], "low");
+            assert_eq!(ambiguous["found"], false);
+            assert!(ambiguous["url"].is_null());
+            assert_eq!(ambiguous["alternatives"].as_array().unwrap().len(), 2);
+            let qualified = official(&mcp, &format!("{name} Museum"));
+            assert_eq!(qualified["found"], true, "{qualified}");
+            assert_eq!(qualified["domain"], "museum.example");
+            assert_ne!(qualified["status"], "ambiguous");
+        }
+    }
+}
+
+#[test]
+fn official_site_technical_qualifiers_distinguish_arbitrary_acronym_owners() {
+    for (acronym, expansion) in [
+        ("QRS", "Quantum Research Society"),
+        ("ABC", "Assembly of Botanical Curators"),
+    ] {
+        for qualifier in [
+            "API developer",
+            "APIs developers",
+            "API reference",
+            "spec",
+            "specification",
+        ] {
+            let name = format!("{acronym} {qualifier}");
+            assert_eq!(identity::Intent::of(&name).entity, name.to_lowercase());
+            let mut namesake = titled("namesake.example", expansion, 0.9, true);
+            namesake.official = true;
+            let answer = official(&server(vec![namesake.clone()]), &name);
+            assert_eq!(answer["found"], false, "{name}: {answer}");
+            assert_eq!(answer["confidence"], "low");
+            assert!(answer["url"].is_null());
+
+            let mut resource = titled("owner.example", &name, 0.1, false);
+            resource.official = true;
+            resource.score = 0.1;
+            let answer = official(&server(vec![namesake, resource]), &name);
+            assert_eq!(answer["found"], true, "{name}: {answer}");
+            assert_eq!(answer["domain"], "owner.example");
+            let typed = official(
+                &server(vec![titled("owner.example", "Owner", 0.1, false)]),
+                "owner.example",
+            );
+            assert_eq!(typed["found"], true, "{typed}");
+        }
+    }
+}
+
+#[test]
+fn official_site_cached_docs_require_indexed_owner_or_complete_destination_evidence() {
+    for indexed in 0..4 {
+        let mcp = scripted(move |query| {
+            if query.ends_with("package") {
+                return results(
+                    Vec::new(),
+                    vec![package_page(
+                        "pypi",
+                        "brindle",
+                        Some("https://brindle.example/"),
+                        Some("https://brindle.docs.test/"),
+                    )],
+                );
+            }
+            let hits = match indexed {
+                0 => Vec::new(),
+                1 => vec![titled("unrelated.example", "Brindle", 0.1, true)],
+                2 => vec![titled("brindle.example", "Brindle", 0.1, true)],
+                _ => {
+                    let mut docs = titled("docs.test", "Brindle", 0.1, true);
+                    docs.url = "https://brindle.docs.test/".into();
+                    docs.official = true;
+                    vec![docs]
+                }
+            };
+            results(hits, Vec::new())
+        });
+        let answer = official(&mcp, "Brindle docs");
+        if indexed < 2 {
+            assert_eq!(answer["found"], false, "{answer}");
+            assert_eq!(answer["confidence"], "low");
+            assert!(answer["url"].is_null());
+            assert_eq!(answer["package_home"], "https://brindle.docs.test/");
+        } else {
+            assert_eq!(answer["found"], true, "{answer}");
+            assert_eq!(answer["url"], "https://brindle.docs.test/");
+        }
+    }
 }

@@ -1,0 +1,203 @@
+# How-to searches that a question of another Stack Exchange site answers
+# (Home Improvement, Seasoned Advice, Super User and more), with any
+# question of the sites expected among the first results. Run with
+# --pages stackexchange.tsv.gz (and the other sets a node keeps). The
+# first ones are the how-to searches of the 2026-10-06 sweep.
+how to unclog a drain	https://diy.stackexchange.com/questions/*
+how to fix a leaky faucet	https://diy.stackexchange.com/questions/*
+how to fix a running toilet	https://diy.stackexchange.com/questions/*
+how to patch a hole in drywall	https://diy.stackexchange.com/questions/*
+how to replace a light switch	https://diy.stackexchange.com/questions/*
+how to remove a stripped screw	https://diy.stackexchange.com/questions/*,https://woodworking.stackexchange.com/questions/*
+how to get rid of mold in the shower	https://diy.stackexchange.com/questions/*
+why does my circuit breaker keep tripping	https://diy.stackexchange.com/questions/*,https://electronics.stackexchange.com/questions/*
+how long to boil an egg	https://cooking.stackexchange.com/questions/*
+how to sharpen a kitchen knife	https://cooking.stackexchange.com/questions/*
+can you freeze cooked rice	https://cooking.stackexchange.com/questions/*
+how to keep avocado from turning brown	https://cooking.stackexchange.com/questions/*
+substitute for buttermilk	https://cooking.stackexchange.com/questions/*
+how to make my laptop battery last longer	https://superuser.com/questions/*
+how to take a screenshot on windows	https://superuser.com/questions/*
+how to show hidden files on windows	https://superuser.com/questions/*
+how to copy files over ssh	https://superuser.com/questions/*,https://unix.stackexchange.com/questions/*,https://serverfault.com/questions/*
+how to check disk space in linux	https://unix.stackexchange.com/questions/*,https://superuser.com/questions/*,https://serverfault.com/questions/*
+how to reset an iphone to factory settings	https://apple.stackexchange.com/questions/*
+how to take a screenshot on a mac	https://apple.stackexchange.com/questions/*
+how to transfer contacts to a new android phone	https://android.stackexchange.com/questions/*
+how to fix a flat bike tire	https://bicycles.stackexchange.com/questions/*
+how to adjust bike brakes	https://bicycles.stackexchange.com/questions/*
+why is my check engine light on	https://mechanics.stackexchange.com/questions/*
+how often should i change my oil	https://mechanics.stackexchange.com/questions/*
+how to jump start a car	https://mechanics.stackexchange.com/questions/*
+how to keep squirrels out of the garden	https://gardening.stackexchange.com/questions/*
+why are my tomato leaves turning yellow	https://gardening.stackexchange.com/questions/*
+do i need a visa for a layover	https://travel.stackexchange.com/questions/*
+how much cash can i carry on a plane	https://travel.stackexchange.com/questions/*
+should i pay off my mortgage early	https://money.stackexchange.com/questions/*
+how does a roth ira work	https://money.stackexchange.com/questions/*
+how to ask for a raise	https://workplace.stackexchange.com/questions/*
+what does the word ubiquitous mean	https://english.stackexchange.com/questions/*,https://ell.stackexchange.com/questions/*
+which vs that	https://english.stackexchange.com/questions/*,https://ell.stackexchange.com/questions/*
+how to undo send in gmail	https://webapps.stackexchange.com/questions/*
+how to share a google calendar	https://webapps.stackexchange.com/questions/*
+how to fix blurry photos	https://photo.stackexchange.com/questions/*
+can my landlord enter without notice	https://law.stackexchange.com/questions/*
+how to get diamonds in minecraft	https://gaming.stackexchange.com/questions/*
+
+# Added 2026-10-06 to make the suite bigger.
+# Home and repairs
+how to fix a squeaky door hinge	https://diy.stackexchange.com/questions/*
+how to fix a squeaky floor	https://diy.stackexchange.com/questions/*
+how to caulk a bathtub	https://diy.stackexchange.com/questions/*
+how to regrout tile	https://diy.stackexchange.com/questions/*
+how to stop a toilet from running constantly	https://diy.stackexchange.com/questions/*
+how to fix low water pressure in the shower	https://diy.stackexchange.com/questions/*
+how to bleed a radiator	https://diy.stackexchange.com/questions/*
+why is my water heater making noise	https://diy.stackexchange.com/questions/*
+how to install a ceiling fan	https://diy.stackexchange.com/questions/*,https://electronics.stackexchange.com/questions/*
+how to wire a three way switch	https://diy.stackexchange.com/questions/*,https://electronics.stackexchange.com/questions/*
+how to find a stud in the wall	https://diy.stackexchange.com/questions/*,https://woodworking.stackexchange.com/questions/*
+how to hang a heavy mirror on drywall	https://diy.stackexchange.com/questions/*
+how to paint over wallpaper	https://diy.stackexchange.com/questions/*
+how to remove paint from wood	https://diy.stackexchange.com/questions/*,https://woodworking.stackexchange.com/questions/*
+how to fix a garbage disposal that hums	https://diy.stackexchange.com/questions/*
+how to insulate an attic	https://diy.stackexchange.com/questions/*
+how to get rid of condensation on windows	https://diy.stackexchange.com/questions/*
+can i use an extension cord for a space heater	https://diy.stackexchange.com/questions/*,https://electronics.stackexchange.com/questions/*
+how deep to bury a gas line	https://diy.stackexchange.com/questions/*
+how to level a washing machine	https://diy.stackexchange.com/questions/*
+
+# Woodworking
+how to stain pine without blotching	https://woodworking.stackexchange.com/questions/*,https://diy.stackexchange.com/questions/*
+how to fill nail holes in wood	https://woodworking.stackexchange.com/questions/*,https://diy.stackexchange.com/questions/*
+best glue for wood joints	https://woodworking.stackexchange.com/questions/*
+how to sharpen a chisel	https://woodworking.stackexchange.com/questions/*
+how to cut a straight line with a circular saw	https://woodworking.stackexchange.com/questions/*,https://diy.stackexchange.com/questions/*
+
+# Cooking
+how to cook rice on the stove	https://cooking.stackexchange.com/questions/*
+how long to rest a steak	https://cooking.stackexchange.com/questions/*
+how to make sourdough starter	https://cooking.stackexchange.com/questions/*
+why is my bread dense	https://cooking.stackexchange.com/questions/*
+how to season a cast iron pan	https://cooking.stackexchange.com/questions/*
+can you put a cast iron pan in the oven	https://cooking.stackexchange.com/questions/*
+how to tell if an egg is bad	https://cooking.stackexchange.com/questions/*
+how long does cooked chicken last in the fridge	https://cooking.stackexchange.com/questions/*
+how to thicken a sauce without flour	https://cooking.stackexchange.com/questions/*
+baking soda vs baking powder	https://cooking.stackexchange.com/questions/*
+how to caramelize onions	https://cooking.stackexchange.com/questions/*
+how to stop pasta from sticking	https://cooking.stackexchange.com/questions/*
+can you freeze milk	https://cooking.stackexchange.com/questions/*
+how to soften butter quickly	https://cooking.stackexchange.com/questions/*
+why did my cake sink in the middle	https://cooking.stackexchange.com/questions/*
+how to cook a turkey	https://cooking.stackexchange.com/questions/*
+how to keep cut apples from browning	https://cooking.stackexchange.com/questions/*
+
+# Computers and phones
+how to clear dns cache on windows	https://superuser.com/questions/*,https://serverfault.com/questions/*
+how to find my ip address	https://superuser.com/questions/*,https://unix.stackexchange.com/questions/*
+how to boot into safe mode windows 11	https://superuser.com/questions/*
+how to make a bootable usb from an iso	https://superuser.com/questions/*,https://unix.stackexchange.com/questions/*
+how to stop windows update from restarting	https://superuser.com/questions/*
+how to see wifi password on windows	https://superuser.com/questions/*
+how to merge pdf files	https://superuser.com/questions/*,https://webapps.stackexchange.com/questions/*,https://apple.stackexchange.com/questions/*
+how to remove a virus from my computer	https://superuser.com/questions/*,https://security.stackexchange.com/questions/*
+how to kill a process on a port in linux	https://unix.stackexchange.com/questions/*,https://serverfault.com/questions/*,https://superuser.com/questions/*
+how to find large files in linux	https://unix.stackexchange.com/questions/*,https://superuser.com/questions/*,https://serverfault.com/questions/*
+how to set up ssh keys	https://unix.stackexchange.com/questions/*,https://superuser.com/questions/*,https://serverfault.com/questions/*,https://security.stackexchange.com/questions/*
+how to change the default shell to zsh	https://unix.stackexchange.com/questions/*,https://superuser.com/questions/*,https://apple.stackexchange.com/questions/*
+how to mount a usb drive in linux	https://unix.stackexchange.com/questions/*,https://superuser.com/questions/*
+how to check which process uses a port	https://unix.stackexchange.com/questions/*,https://serverfault.com/questions/*,https://superuser.com/questions/*
+how to schedule a cron job	https://unix.stackexchange.com/questions/*,https://serverfault.com/questions/*,https://superuser.com/questions/*
+how to renew a lets encrypt certificate	https://serverfault.com/questions/*,https://security.stackexchange.com/questions/*
+how to redirect http to https in nginx	https://serverfault.com/questions/*
+how to increase swap space on linux	https://unix.stackexchange.com/questions/*,https://serverfault.com/questions/*,https://superuser.com/questions/*
+how to reset a forgotten mac password	https://apple.stackexchange.com/questions/*
+how to free up storage on iphone	https://apple.stackexchange.com/questions/*
+how to turn off airdrop	https://apple.stackexchange.com/questions/*
+how to force quit an app on mac	https://apple.stackexchange.com/questions/*
+how to back up an android phone	https://android.stackexchange.com/questions/*
+how to clear app cache on android	https://android.stackexchange.com/questions/*
+how to root an android phone	https://android.stackexchange.com/questions/*
+how to export google sheets to excel	https://webapps.stackexchange.com/questions/*,https://superuser.com/questions/*
+how to delete a facebook account	https://webapps.stackexchange.com/questions/*
+how to recover a deleted gmail	https://webapps.stackexchange.com/questions/*
+
+# Security and privacy
+is it safe to use public wifi	https://security.stackexchange.com/questions/*,https://superuser.com/questions/*
+how to tell if an email is phishing	https://security.stackexchange.com/questions/*,https://webapps.stackexchange.com/questions/*
+should i use a password manager	https://security.stackexchange.com/questions/*
+how does two factor authentication work	https://security.stackexchange.com/questions/*
+
+# Databases and documents
+how to back up a postgres database	https://dba.stackexchange.com/questions/*,https://serverfault.com/questions/*
+how to find duplicate rows in sql	https://dba.stackexchange.com/questions/*
+mysql vs postgresql	https://dba.stackexchange.com/questions/*
+how to make a table in latex	https://tex.stackexchange.com/questions/*
+how to add a bibliography in latex	https://tex.stackexchange.com/questions/*
+how to insert an image in latex	https://tex.stackexchange.com/questions/*
+
+# Electronics and design
+how to solder wires together	https://electronics.stackexchange.com/questions/*,https://diy.stackexchange.com/questions/*
+what resistor do i need for an led	https://electronics.stackexchange.com/questions/*
+how to choose a font for a logo	https://graphicdesign.stackexchange.com/questions/*
+how to convert a jpg to vector	https://graphicdesign.stackexchange.com/questions/*
+
+# Photos and games
+what is aperture in photography	https://photo.stackexchange.com/questions/*
+how to take photos of the night sky	https://photo.stackexchange.com/questions/*
+how to beat the ender dragon	https://gaming.stackexchange.com/questions/*
+how to breed villagers in minecraft	https://gaming.stackexchange.com/questions/*
+how to transfer pokemon to a new game	https://gaming.stackexchange.com/questions/*
+
+# Outdoors, fitness, pets, parenting
+how to purify water while camping	https://outdoors.stackexchange.com/questions/*
+what to do if you see a bear	https://outdoors.stackexchange.com/questions/*
+how to start a campfire without matches	https://outdoors.stackexchange.com/questions/*
+how to keep tent from getting condensation	https://outdoors.stackexchange.com/questions/*
+how many rest days a week	https://fitness.stackexchange.com/questions/*
+how to do a proper push up	https://fitness.stackexchange.com/questions/*
+is it bad to run every day	https://fitness.stackexchange.com/questions/*
+how to build muscle without weights	https://fitness.stackexchange.com/questions/*
+how often should i feed my cat	https://pets.stackexchange.com/questions/*
+how to stop a dog from barking at night	https://pets.stackexchange.com/questions/*
+how to introduce two cats	https://pets.stackexchange.com/questions/*
+how to get a baby to sleep through the night	https://parenting.stackexchange.com/questions/*
+how much screen time for a toddler	https://parenting.stackexchange.com/questions/*
+
+# Bikes and cars
+how to change a bike chain	https://bicycles.stackexchange.com/questions/*
+what tire pressure for a road bike	https://bicycles.stackexchange.com/questions/*
+how to clean a bike chain	https://bicycles.stackexchange.com/questions/*
+how to change a car battery	https://mechanics.stackexchange.com/questions/*
+why does my car shake when braking	https://mechanics.stackexchange.com/questions/*
+how to check transmission fluid	https://mechanics.stackexchange.com/questions/*
+what does a car battery light mean	https://mechanics.stackexchange.com/questions/*,https://electronics.stackexchange.com/questions/*
+
+# Travel and living abroad
+can i bring food on a plane	https://travel.stackexchange.com/questions/*
+how early to arrive at the airport for an international flight	https://travel.stackexchange.com/questions/*
+do i need a passport to go to canada	https://travel.stackexchange.com/questions/*
+what to do if my flight is cancelled	https://travel.stackexchange.com/questions/*
+how to open a bank account abroad	https://expatriates.stackexchange.com/questions/*,https://money.stackexchange.com/questions/*
+do i have to pay taxes in two countries	https://expatriates.stackexchange.com/questions/*,https://money.stackexchange.com/questions/*
+
+# Money, law and work
+how does compound interest work	https://money.stackexchange.com/questions/*
+should i invest in index funds	https://money.stackexchange.com/questions/*
+how to build credit	https://money.stackexchange.com/questions/*
+what happens if i pay my credit card late	https://money.stackexchange.com/questions/*
+how is a 401k different from an ira	https://money.stackexchange.com/questions/*
+can my employer fire me without warning	https://law.stackexchange.com/questions/*,https://workplace.stackexchange.com/questions/*
+do i need a lawyer for small claims court	https://law.stackexchange.com/questions/*
+what is fair use	https://law.stackexchange.com/questions/*
+how to quit a job gracefully	https://workplace.stackexchange.com/questions/*
+how to negotiate salary	https://workplace.stackexchange.com/questions/*
+how to explain a gap in my resume	https://workplace.stackexchange.com/questions/*
+
+# Words
+affect vs effect	https://english.stackexchange.com/questions/*,https://ell.stackexchange.com/questions/*
+who vs whom	https://english.stackexchange.com/questions/*,https://ell.stackexchange.com/questions/*
+when to use a semicolon	https://english.stackexchange.com/questions/*,https://ell.stackexchange.com/questions/*
+is it correct to end a sentence with a preposition	https://english.stackexchange.com/questions/*,https://ell.stackexchange.com/questions/*
+what does the idiom break a leg mean	https://english.stackexchange.com/questions/*,https://ell.stackexchange.com/questions/*

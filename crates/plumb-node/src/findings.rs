@@ -7,7 +7,11 @@
 //! node, in `DIR/findings.jsonl` (one JSON object a line, oldest first),
 //! and only agents on the node's own computer can report them or see them:
 //! the same ones that may read pages (see [`crate::web`]'s `/mcp`).
-//! Nothing of them is sent to other nodes.
+//! Nothing of them is sent to other nodes, unless an agent asks to share
+//! one on a node run with `--share-findings`: then a lead goes out (see
+//! [`plumb_net::leads`]), with the page and why it helped but not the
+//! search, the answer or the task. The search's words go only as
+//! [`lead_keys`], and its text only when the agent shares that too.
 //!
 //! A finding is matched to a search by its words: the same words in any
 //! order, or most of them ("tokio latest version" and "latest version of
@@ -38,6 +42,44 @@ const MATCH_SHARE: f32 = 0.75;
 const STOP_WORDS: &[&str] = &[
     "a", "an", "the", "of", "for", "in", "on", "to", "and", "or", "how", "what", "is", "do",
     "does", "i", "with", "from", "by", "at",
+];
+
+/// Words that say what is wanted about a thing, not which thing: two
+/// searches match only when their other words are the same, so "latest
+/// version of python" does not match a finding for "requests latest
+/// version python".
+const ASKING_WORDS: &[&str] = &[
+    "latest",
+    "current",
+    "newest",
+    "new",
+    "stable",
+    "version",
+    "versions",
+    "release",
+    "releases",
+    "changelog",
+    "install",
+    "installing",
+    "setup",
+    "update",
+    "upgrade",
+    "upgrading",
+    "docs",
+    "documentation",
+    "example",
+    "examples",
+    "tutorial",
+    "guide",
+    "error",
+    "fix",
+    "use",
+    "using",
+    "why",
+    "when",
+    "where",
+    "which",
+    "best",
 ];
 
 /// One finding.
@@ -107,10 +149,35 @@ fn words(text: &str) -> HashSet<String> {
         .collect()
 }
 
+/// A search's words as a lead carries them: those saying what it is
+/// about apart from [`ASKING_WORDS`], each as a number many words share, so
+/// another node can match its own searches to the lead as findings match.
+pub fn lead_keys(query: &str) -> plumb_net::leads::LeadKeys {
+    let words = words(query);
+    let (asks, topic): (Vec<&String>, Vec<&String>) = words
+        .iter()
+        .partition(|w| ASKING_WORDS.contains(&w.as_str()));
+    plumb_net::leads::LeadKeys::new(
+        topic.into_iter().map(String::as_str),
+        asks.into_iter().map(String::as_str),
+    )
+}
+
 /// How well a finding's search `found` matches the search `query`: the
 /// share of the larger one's words they have in common, 0 below
-/// [`MATCH_SHARE`].
+/// [`MATCH_SHARE`] or when they are about different things (their words
+/// besides [`ASKING_WORDS`] differ).
 fn closeness(found: &HashSet<String>, query: &HashSet<String>) -> f32 {
+    let things = |words: &HashSet<String>| -> HashSet<String> {
+        words
+            .iter()
+            .filter(|w| !ASKING_WORDS.contains(&w.as_str()))
+            .cloned()
+            .collect()
+    };
+    if things(found) != things(query) {
+        return 0.0;
+    }
     let shared = found.intersection(query).count();
     let share = shared as f32 / found.len().max(query.len()).max(1) as f32;
     if share >= MATCH_SHARE {
@@ -272,6 +339,20 @@ mod tests {
         assert_eq!(found[0].answer, "1.47.1, released 2025-07-23");
         assert!(findings.for_query("tokio", 5).is_empty());
         assert!(findings.for_query("tokio select macro", 5).is_empty());
+        findings
+            .add(finding(
+                "requests latest version python",
+                "https://pypi.org/project/requests/",
+                4,
+            ))
+            .unwrap();
+        assert!(findings
+            .for_query("what is the latest version of python", 5)
+            .is_empty());
+        assert_eq!(
+            findings.for_query("latest python requests version", 5)[0].at,
+            4
+        );
         // Kept on disk, and the same search and page replaces the old one.
         findings
             .add(finding(
@@ -281,7 +362,7 @@ mod tests {
             ))
             .unwrap();
         let again = Findings::in_dir(dir.path()).unwrap();
-        assert_eq!(again.len(), 2);
+        assert_eq!(again.len(), 3);
         assert_eq!(again.for_query("tokio latest version", 5)[0].at, 3);
     }
 

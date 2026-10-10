@@ -6,15 +6,42 @@ use anyhow::{Context, Result};
 use plumb_core::truncate_chars;
 use plumb_index::{build_index, Hit, SearchOptions, Searcher};
 
-use crate::cli::{IndexArgs, SearchArgs};
+use crate::cli::{IndexArgs, SearchArgs, SpellingArgs};
 use crate::meaning::MeaningIndex;
 use crate::rank_config;
 use crate::records::load_records;
 
 pub fn run_index(args: IndexArgs) -> Result<()> {
-    // Files written by plumb hold one record per domain already; merging
-    // makes hand-made or concatenated files safe to index too. The journal
-    // of a crawl that was cut short is replayed.
+    // Read a record at a time when the file holds each site once, under
+    // its canonical domain, as files written by plumb do: a whole set takes
+    // gigabytes. This never changes the file: a journal next to it, of a
+    // node's crawl, is folded into a copy that is removed when done.
+    let dir = match args.records.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => std::path::Path::new("."),
+    };
+    let copy = tempfile::Builder::new()
+        .prefix(".plumb-index-")
+        .suffix(".jsonl")
+        .tempfile_in(dir)
+        .with_context(|| format!("making a file in {}", dir.display()))?
+        .into_temp_path();
+    let outlines = crate::outline::outline_copy(&args.records, &copy)
+        .with_context(|| format!("reading records {}", args.records.display()))?;
+    if let Some((records, outlines)) = outlines {
+        let built =
+            crate::outline::build_index(records, outlines, &args.index, None, 0, &mut |_| Ok(()))
+                .with_context(|| format!("building the index in {}", args.index.display()))?;
+        println!(
+            "indexed {} sites from {} into {}",
+            built.docs,
+            args.records.display(),
+            args.index.display()
+        );
+        return Ok(());
+    }
+    drop(copy);
+    // Merging makes hand-made or concatenated files safe to index too.
     let records = load_records(&args.records)
         .with_context(|| format!("loading records {}", args.records.display()))?
         .into_sorted_vec();
@@ -29,7 +56,98 @@ pub fn run_index(args: IndexArgs) -> Result<()> {
     Ok(())
 }
 
+/// `plumb spelling`: what the index's spelling model learned.
+pub fn run_spelling(args: &SpellingArgs) -> Result<()> {
+    let searcher = Searcher::open(&args.index)
+        .with_context(|| format!("opening the index in {}", args.index.display()))?;
+    let Some(model) = searcher.spelling_model() else {
+        anyhow::bail!(
+            "the index in {} has no spelling model; build it again with this version",
+            args.index.display()
+        );
+    };
+    let (words, pairs, rules) = model.size();
+    println!(
+        "{} sites, {words} words, {pairs} word pairs, {rules} slips learned",
+        model.sites()
+    );
+    for (meant, typed, p) in model.top_rules(args.rules) {
+        println!("slip  {meant:>3} -> {typed:<3}  {p:.6}");
+    }
+    for pair in &args.pair {
+        let Some((typed, meant)) = pair.split_once(':') else {
+            anyhow::bail!("--pair {pair:?} is not typed:meant");
+        };
+        let (typed, meant) = (typed.trim(), meant.trim());
+        let (typed_count, meant_count) = (searcher.word_sites(typed), searcher.word_sites(meant));
+        let channel = model.ln_channel(typed, meant);
+        let ratio = (meant_count.max(1) as f64 / typed_count.max(1) as f64).ln();
+        println!(
+            "pair  {typed} -> {meant}: ln P(typed|meant) {channel:.2}, \
+             sites {typed_count} vs {meant_count} (ln ratio {ratio:.2}), \
+             weight to correct a known word > {:.2}",
+            if ratio > 0.0 {
+                -channel / ratio
+            } else {
+                f64::INFINITY
+            }
+        );
+    }
+    Ok(())
+}
+
 pub fn run_search(args: SearchArgs) -> Result<()> {
+    if args.paper {
+        let query = plumb_core::paper_query::PaperQuery::with_options(
+            &args.query.join(" "),
+            args.after.as_deref(),
+            args.before.as_deref(),
+            args.order.as_deref(),
+        )?;
+        let searcher = plumb_index::pages::PageSearcher::open(&args.index)?;
+        let hits = searcher.search_papers(&query, args.limit)?;
+        if args.json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(
+                    &serde_json::json!({ "pages": hits, "coverage": searcher.paper_coverage() })
+                )?
+            );
+        } else {
+            if hits.is_empty() {
+                println!(
+                    "No matching papers in this index with the requested publication precision."
+                );
+            }
+            for hit in hits {
+                println!("{}\n  {}", hit.page.title, hit.page.url);
+                if let Some(paper) = &hit.page.paper {
+                    let dates: Vec<_> = paper
+                        .date_labels()
+                        .iter()
+                        .map(|(label, date)| format!("{label} {date}"))
+                        .collect();
+                    println!(
+                        "  {}; {} {}",
+                        dates.join("; "),
+                        paper.count,
+                        paper.count_label()
+                    );
+                } else {
+                    println!(
+                        "  Published unknown; {} popularity (count type unknown)",
+                        hit.page.views
+                    );
+                }
+            }
+            let coverage = searcher.paper_coverage();
+            println!(
+                "Indexed papers: {}; known publication year: {}; known publication day: {}",
+                coverage.total, coverage.publication_year, coverage.publication_day
+            );
+        }
+        return Ok(());
+    }
     let searcher = Searcher::open(&args.index)
         .with_context(|| format!("opening the index in {}", args.index.display()))?;
     let query = args.query.join(" ");
@@ -152,6 +270,10 @@ mod tests {
 
     fn hit(domain: &str, title: Option<&str>) -> Hit {
         Hit {
+            demand: None,
+            missing_words: false,
+            query_evidence: None,
+            placing_text_score: None,
             domain: domain.to_string(),
             url: format!("https://www.{domain}/"),
             title: title.map(str::to_string),

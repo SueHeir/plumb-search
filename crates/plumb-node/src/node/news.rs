@@ -23,6 +23,11 @@ const MAX_PER_ROUND: usize = 500;
 const LOOK_EVERY: Duration = Duration::from_secs(10 * 60);
 #[cfg(test)]
 const LOOK_EVERY: Duration = Duration::from_millis(200);
+/// How often a paused node looks whether it may fetch feeds again.
+#[cfg(not(test))]
+const PAUSED_LOOK: Duration = Duration::from_secs(60);
+#[cfg(test)]
+const PAUSED_LOOK: Duration = Duration::from_millis(200);
 /// Feeds fetched at once.
 const CONCURRENCY: usize = 16;
 
@@ -31,7 +36,8 @@ pub(super) async fn run(inner: Arc<Inner>) {
     loop {
         let now = now_unix();
         inner.news.prune(now);
-        if inner.config.news_feeds > 0 && inner.pause().is_none() {
+        let paused = inner.pause().is_some();
+        if inner.config.news_feeds > 0 && !paused {
             check_due(&inner, now).await;
         }
         if let Err(err) = inner.news.save() {
@@ -44,6 +50,9 @@ pub(super) async fn run(inner: Arc<Inner>) {
             .map(|at| Duration::from_secs(at.saturating_sub(now_unix()).max(1)))
             .unwrap_or(LOOK_EVERY)
             .min(LOOK_EVERY);
+        // Paused, the feeds due stay due: look again in a while, not
+        // every second until the pause ends.
+        let wait = if paused { wait.max(PAUSED_LOOK) } else { wait };
         tokio::select! {
             () = inner.stopped() => break,
             () = tokio::time::sleep(wait) => {}

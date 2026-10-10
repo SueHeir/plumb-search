@@ -11,13 +11,13 @@ use std::time::Instant;
 use anyhow::{bail, Context, Result};
 use plumb_core::RecordSet;
 use plumb_embed::{
-    site_text, text_hash, Embedder, Vectors, MODEL_BASE_URL, MODEL_FILES, MODEL_NAME,
+    site_text_words, text_hash, Embedder, Vectors, MODEL_BASE_URL, MODEL_FILES, MODEL_NAME,
 };
 use plumb_index::Meaning;
 use tracing::{info, warn};
 
 use crate::block_on;
-use crate::cli::{EmbedArgs, MeaningArgs};
+use crate::cli::{EmbedArgs, MeaningArgs, QueryInstruction};
 use crate::records::load_records;
 
 /// Sites nearest a query in meaning: closeness is spread over them, and
@@ -34,7 +34,11 @@ const REPORT_EVERY: usize = 1_000;
 pub struct MeaningIndex {
     embedder: Embedder,
     vectors: RwLock<Vectors>,
+    instruction: QueryInstruction,
 }
+
+/// What the model was trained to read before a search query.
+const QUERY_INSTRUCTION: &str = "Represent this sentence for searching relevant passages: ";
 
 impl MeaningIndex {
     /// Loads the model in `model_dir` and the vectors in `vectors`, which
@@ -56,13 +60,17 @@ impl MeaningIndex {
         MeaningIndex {
             embedder,
             vectors: RwLock::new(vectors),
+            instruction: QueryInstruction::default(),
         }
     }
 
     /// Opens the model and vectors `args` name, if it names them.
     pub fn from_args(args: &MeaningArgs) -> Result<Option<Self>> {
         match (&args.model, &args.vectors) {
-            (Some(model), Some(vectors)) => Self::open(model, vectors).map(Some),
+            (Some(model), Some(vectors)) => Self::open(model, vectors).map(|mut meaning| {
+                meaning.instruction = args.query_instruction;
+                Some(meaning)
+            }),
             _ => Ok(None),
         }
     }
@@ -91,14 +99,38 @@ impl MeaningIndex {
     /// How close `query` is in meaning to each site; `None` when the query
     /// cannot be embedded.
     pub fn query(&self, query: &str) -> Option<QueryMeaning<'_>> {
-        match self.embedder.embed(query) {
-            Ok(vector) => Some(QueryMeaning::new(self.read(), vector)),
+        let embed = |text: &str| match self.embedder.embed(text) {
+            Ok(vector) => Some(vector),
             Err(_) => {
                 // Embedding errors may include input text too.
                 warn!("could not embed a search query; searching by words only");
                 None
             }
+        };
+        let instructed = || embed(&format!("{QUERY_INSTRUCTION}{query}"));
+        let plain = || match self.embedder.embed_query(query) {
+            Ok(vector) => Some(vector),
+            Err(_) => {
+                warn!("could not embed a search query; searching by words only");
+                None
+            }
+        };
+        let vectors = self.read();
+        let instruction = if self.embedder.takes_query_instruction() {
+            self.instruction
+        } else {
+            QueryInstruction::Off
+        };
+        match instruction {
+            QueryInstruction::Off => Some(vec![plain()?]),
+            QueryInstruction::On => Some(vec![instructed()?]),
+            QueryInstruction::Mix | QueryInstruction::Min => {
+                Some(vec![embed(query)?, instructed()?])
+            }
+            // Ranked by the instructed vector; placed by the plain one.
+            QueryInstruction::Split => Some(vec![instructed()?, embed(query)?]),
         }
+        .map(|query| QueryMeaning::new(vectors, query, instruction))
     }
 }
 
@@ -135,32 +167,65 @@ impl SharedMeaning {
 /// query's words, and must still count as close.
 pub struct QueryMeaning<'a> {
     vectors: RwLockReadGuard<'a, Vectors>,
-    vector: Vec<i8>,
     nearest: Vec<String>,
-    /// Cosines of the nearest and of the last of the nearest sites.
+    /// The query's vectors (one, or as it is and after the instruction)
+    /// with the cosines of the nearest and of the last of the nearest sites.
+    spreads: Vec<Spread>,
+    /// How the closeness of several vectors is combined.
+    combine: QueryInstruction,
+}
+
+struct Spread {
+    vector: Vec<i8>,
     best: f32,
     floor: f32,
 }
 
 impl<'a> QueryMeaning<'a> {
-    fn new(vectors: RwLockReadGuard<'a, Vectors>, vector: Vec<i8>) -> Self {
-        let found = vectors.nearest(&vector, NEAREST);
-        let best = found.first().map_or(0.0, |&(_, cosine)| cosine);
-        let floor = match found.last() {
-            // Too few sites to spread: keep the cosines as they are.
-            Some(&(_, cosine)) if found.len() == NEAREST => cosine,
-            _ => 0.0,
-        };
-        let nearest = found
+    /// The nearest sites are those nearest the first of `vectors`.
+    fn new(
+        vectors: RwLockReadGuard<'a, Vectors>,
+        query: Vec<Vec<i8>>,
+        combine: QueryInstruction,
+    ) -> Self {
+        let mut nearest = None;
+        let spreads = query
             .into_iter()
-            .map(|(domain, _)| domain.to_string())
+            .map(|vector| {
+                let found = vectors.nearest(&vector, NEAREST);
+                let best = found.first().map_or(0.0, |&(_, cosine)| cosine);
+                let floor = match found.last() {
+                    // Too few sites to spread: keep the cosines as they are.
+                    Some(&(_, cosine)) if found.len() == NEAREST => cosine,
+                    _ => 0.0,
+                };
+                nearest.get_or_insert_with(|| {
+                    found
+                        .into_iter()
+                        .map(|(domain, _)| domain.to_string())
+                        .collect()
+                });
+                Spread {
+                    vector,
+                    best,
+                    floor,
+                }
+            })
             .collect();
         QueryMeaning {
             vectors,
-            vector,
-            nearest,
-            best,
-            floor,
+            nearest: nearest.unwrap_or_default(),
+            spreads,
+            combine,
+        }
+    }
+
+    fn spread(&self, spread: &Spread, domain: &str) -> Option<f32> {
+        let cosine = self.vectors.closeness(&spread.vector, domain)?;
+        if spread.best > spread.floor {
+            Some(((cosine - spread.floor) / (spread.best - spread.floor)).clamp(0.0, 1.0))
+        } else {
+            Some(cosine.clamp(0.0, 1.0))
         }
     }
 }
@@ -170,12 +235,25 @@ impl Meaning for QueryMeaning<'_> {
         self.nearest.clone()
     }
 
+    fn plain_closeness(&self, domain: &str) -> Option<Option<f32>> {
+        match self.combine {
+            QueryInstruction::Split => Some(self.spread(self.spreads.get(1)?, domain)),
+            _ => None,
+        }
+    }
+
     fn closeness(&self, domain: &str) -> Option<f32> {
-        let cosine = self.vectors.closeness(&self.vector, domain)?;
-        if self.best > self.floor {
-            Some(((cosine - self.floor) / (self.best - self.floor)).clamp(0.0, 1.0))
-        } else {
-            Some(cosine.clamp(0.0, 1.0))
+        if self.combine == QueryInstruction::Split {
+            return self.spread(self.spreads.first()?, domain);
+        }
+        let all = self
+            .spreads
+            .iter()
+            .map(|spread| self.spread(spread, domain))
+            .collect::<Option<Vec<f32>>>()?;
+        match self.combine {
+            QueryInstruction::Min => all.into_iter().reduce(f32::min),
+            _ => Some(all.iter().sum::<f32>() / all.len().max(1) as f32),
         }
     }
 }
@@ -228,10 +306,10 @@ pub(crate) fn embed_records(
     records: RecordSet,
     threads: usize,
     stop: &(dyn Fn() -> bool + Sync),
-    save: &mut dyn FnMut(&Vectors) -> Result<()>,
+    save: &mut dyn FnMut(&RwLock<Vectors>) -> Result<()>,
     progress: &mut dyn FnMut(usize, usize),
 ) -> Result<Embedded> {
-    let todo = sites_to_embed(vectors, records);
+    let todo = sites_to_embed(vectors, records, embedder.text_words());
     embed_sites(embedder, vectors, todo, threads, stop, save, progress)
 }
 
@@ -242,7 +320,11 @@ pub(crate) type ToEmbed = (f32, String, plumb_embed::TextHash, String);
 /// The first half of [`embed_records`]: drops the vectors of sites not in
 /// `records` and returns the sites to embed, best first. The records are
 /// freed by the time it returns.
-pub(crate) fn sites_to_embed(vectors: &RwLock<Vectors>, records: RecordSet) -> Vec<ToEmbed> {
+pub(crate) fn sites_to_embed(
+    vectors: &RwLock<Vectors>,
+    records: RecordSet,
+    words: usize,
+) -> Vec<ToEmbed> {
     let write = || vectors.write().unwrap_or_else(PoisonError::into_inner);
     {
         let domains: HashSet<&str> = records.iter().map(|r| r.domain.as_str()).collect();
@@ -254,7 +336,7 @@ pub(crate) fn sites_to_embed(vectors: &RwLock<Vectors>, records: RecordSet) -> V
     {
         let vectors = vectors.read().unwrap_or_else(PoisonError::into_inner);
         for record in records {
-            let text = site_text(&record);
+            let text = site_text_words(&record, words);
             if text.is_empty() {
                 continue;
             }
@@ -277,6 +359,98 @@ pub(crate) fn sites_to_embed(vectors: &RwLock<Vectors>, records: RecordSet) -> V
     todo
 }
 
+/// [`sites_to_embed`] for a node, reading the records file at `path` a
+/// record at a time (its journal folded in first, see [`crate::outline`])
+/// rather than holding every record: drops the vectors of sites not in the
+/// file and returns the best `max` sites to embed, best first, and whether
+/// more wait for a vector. The text of each site to embed is held until it
+/// is embedded, so a node takes them `max` at a time.
+pub(crate) fn sites_to_embed_from_file(
+    vectors: &RwLock<Vectors>,
+    path: &Path,
+    max: usize,
+    words: usize,
+) -> Result<(Vec<ToEmbed>, bool)> {
+    let max = max.max(1);
+    crate::outline::fold_journal(path)?;
+    let mut domains: HashSet<u64> = HashSet::new();
+    let mut todo: Vec<ToEmbed> = Vec::new();
+    let mut more = false;
+    let mut total = 0usize;
+    let best_first = |a: &ToEmbed, b: &ToEmbed| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(&b.1));
+    {
+        let held = vectors.read().unwrap_or_else(PoisonError::into_inner);
+        crate::outline::for_each_record(path, |record| {
+            total += 1;
+            domains.insert(domain_hash(&record.domain));
+            let text = site_text_words(&record, words);
+            if text.is_empty() {
+                return;
+            }
+            let hash = text_hash(&text);
+            if held.get(&record.domain).map(|(saved, _)| saved) != Some(&hash) {
+                todo.push((record.link_score(), record.domain, hash, text));
+                if todo.len() >= 2 * max {
+                    todo.select_nth_unstable_by(max, best_first);
+                    todo.truncate(max);
+                    more = true;
+                }
+            }
+        })?;
+    }
+    if todo.len() > max {
+        todo.select_nth_unstable_by(max, best_first);
+        todo.truncate(max);
+        more = true;
+    }
+    vectors
+        .write()
+        .unwrap_or_else(PoisonError::into_inner)
+        .retain(|domain| domains.contains(&domain_hash(domain)));
+    // The most popular sites first, as sites_to_embed orders them.
+    todo.sort_by(best_first);
+    todo.shrink_to_fit();
+    info!(
+        "{}{} of {total} sites need a vector ({} have one)",
+        if more { "the best " } else { "" },
+        todo.len(),
+        vectors.read().unwrap_or_else(PoisonError::into_inner).len()
+    );
+    Ok((todo, more))
+}
+
+/// The sites of the records file at `path` whose vector is missing or
+/// made from other text than theirs now, each with the hash of its text:
+/// the vectors another node may give this one.
+pub(crate) fn wanted_texts(
+    vectors: &RwLock<Vectors>,
+    path: &Path,
+    words: usize,
+) -> Result<std::collections::HashMap<String, plumb_embed::TextHash>> {
+    crate::outline::fold_journal(path)?;
+    let mut wanted = std::collections::HashMap::new();
+    let held = vectors.read().unwrap_or_else(PoisonError::into_inner);
+    crate::outline::for_each_record(path, |record| {
+        let text = site_text_words(&record, words);
+        if text.is_empty() {
+            return;
+        }
+        let hash = text_hash(&text);
+        if held.get(&record.domain).map(|(saved, _)| saved) != Some(&hash) {
+            wanted.insert(record.domain, hash);
+        }
+    })?;
+    Ok(wanted)
+}
+
+/// A 64-bit hash of `domain`, the same in every run.
+fn domain_hash(domain: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::hash::DefaultHasher::new();
+    domain.hash(&mut hasher);
+    hasher.finish()
+}
+
 /// The second half of [`embed_records`]: embeds `todo`.
 pub(crate) fn embed_sites(
     embedder: &Embedder,
@@ -284,7 +458,7 @@ pub(crate) fn embed_sites(
     todo: Vec<ToEmbed>,
     threads: usize,
     stop: &(dyn Fn() -> bool + Sync),
-    save: &mut dyn FnMut(&Vectors) -> Result<()>,
+    save: &mut dyn FnMut(&RwLock<Vectors>) -> Result<()>,
     progress: &mut dyn FnMut(usize, usize),
 ) -> Result<Embedded> {
     let write = || vectors.write().unwrap_or_else(PoisonError::into_inner);
@@ -297,29 +471,32 @@ pub(crate) fn embed_sites(
         let next = AtomicUsize::new(0);
         std::thread::scope(|scope| {
             for _ in 0..threads.max(1) {
-                scope.spawn(|| loop {
-                    if stop() {
-                        break;
-                    }
-                    let i = next.fetch_add(1, Ordering::Relaxed);
-                    let Some((_, domain, hash, text)) = chunk.get(i) else {
-                        break;
-                    };
-                    match embedder.embed(text) {
-                        // The vector has the model's length.
-                        Ok(vector) => drop(write().insert(domain, *hash, &vector)),
-                        Err(err) => {
-                            warn!("could not embed the text of {domain}: {err:#}");
-                            failed.fetch_add(1, Ordering::Relaxed);
+                scope.spawn(|| {
+                    crate::lower_thread_priority();
+                    loop {
+                        if stop() {
+                            break;
                         }
+                        let i = next.fetch_add(1, Ordering::Relaxed);
+                        let Some((_, domain, hash, text)) = chunk.get(i) else {
+                            break;
+                        };
+                        match embedder.embed(text) {
+                            // The vector has the model's length.
+                            Ok(vector) => drop(write().insert(domain, *hash, &vector)),
+                            Err(err) => {
+                                warn!("could not embed the text of {domain}: {err:#}");
+                                failed.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                        done.fetch_add(1, Ordering::Relaxed);
                     }
-                    done.fetch_add(1, Ordering::Relaxed);
                 });
             }
         });
         let last = n + 1 == chunks || stop();
         if last || (n + 1) % (SAVE_EVERY / REPORT_EVERY) == 0 {
-            save(&vectors.read().unwrap_or_else(PoisonError::into_inner))?;
+            save(vectors)?;
         }
         let done = done.load(Ordering::Relaxed);
         progress(done, todo.len());
@@ -333,12 +510,61 @@ pub(crate) fn embed_sites(
         }
     }
     if todo.is_empty() {
-        save(&vectors.read().unwrap_or_else(PoisonError::into_inner))?;
+        save(vectors)?;
     }
     Ok(Embedded {
         done: done.into_inner(),
         failed: failed.into_inner(),
     })
+}
+
+/// The model search by meaning runs on a node.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum MeaningModel {
+    /// bge-small-en-v1.5 (about 130 MB, English).
+    #[default]
+    Small,
+    /// EmbeddingGemma 2 at 256 values (about 310 MB, many languages).
+    Gemma,
+}
+
+impl MeaningModel {
+    /// The directory of its files in a node's data directory.
+    pub fn dir_name(self) -> &'static str {
+        match self {
+            MeaningModel::Small => "model",
+            MeaningModel::Gemma => "model-gemma",
+        }
+    }
+
+    /// About how big its files are, in MB.
+    pub fn size_mb(self) -> u64 {
+        match self {
+            MeaningModel::Small => 130,
+            MeaningModel::Gemma => 320,
+        }
+    }
+}
+
+/// Downloads EmbeddingGemma's files into `dir` from `downloads` (each file
+/// name with its address), those not there yet.
+pub(crate) async fn ensure_gemma(dir: &Path, downloads: &[(String, String)]) -> Result<()> {
+    if downloads.iter().all(|(name, _)| dir.join(name).is_file()) {
+        return Ok(());
+    }
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    let client = plumb_ingest::download::http_client()?;
+    info!("downloading the embedding model EmbeddingGemma 2");
+    for (name, url) in downloads {
+        let dest = dir.join(name);
+        if dest.is_file() {
+            continue;
+        }
+        plumb_ingest::download::download_to_file(&client, url, &dest)
+            .await
+            .with_context(|| format!("downloading {url}"))?;
+    }
+    Ok(())
 }
 
 /// `plumb embed`: downloads the model when missing, then makes a vector
@@ -359,7 +585,7 @@ pub fn run_embed(args: EmbedArgs) -> Result<()> {
         records,
         threads,
         &|| false,
-        &mut |vectors| vectors.save(&args.vectors),
+        &mut |vectors| Vectors::save_shared(vectors, &args.vectors),
         &mut |_, _| {},
     )?;
     println!(
@@ -373,9 +599,12 @@ pub fn run_embed(args: EmbedArgs) -> Result<()> {
 }
 
 /// Downloads the model's files into `dir` from `base_url` (each of
-/// [`MODEL_FILES`] appended), those not there yet.
+/// [`MODEL_FILES`] appended), those not there yet; nothing when `dir`
+/// names an embedding server ([`plumb_embed::SERVER_FILE`]).
 pub(crate) async fn ensure_model(dir: &Path, base_url: &str) -> Result<()> {
-    if MODEL_FILES.iter().all(|name| dir.join(name).is_file()) {
+    if MODEL_FILES.iter().all(|name| dir.join(name).is_file())
+        || dir.join(plumb_embed::SERVER_FILE).is_file()
+    {
         return Ok(());
     }
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
@@ -481,7 +710,7 @@ mod tests {
         let embedder = Embedder::load(&model).unwrap();
         assert_eq!(
             embedder
-                .embed(&site_text(&record(
+                .embed(&plumb_embed::site_text(&record(
                     "tesla.com",
                     "Tesla electric cars and solar energy"
                 )))

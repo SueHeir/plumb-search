@@ -1,0 +1,14 @@
+# Search-by-meaning knobs, for fitting them to another embedding model.
+# Run on the tune half with both models' vectors; check the winner on held-out.
+weight-0.5	{"meaning_weight": 0.5}
+weight-0.6	{"meaning_weight": 0.6}
+weight-0.8	{"meaning_weight": 0.8}
+weight-0.9	{"meaning_weight": 0.9}
+described-0.3	{"described_alpha": 0.3}
+described-0.4	{"described_alpha": 0.4}
+described-0.6	{"described_alpha": 0.6}
+described-0.7	{"described_alpha": 0.7}
+only-0.25	{"meaning_only_relevance": 0.25}
+only-0.45	{"meaning_only_relevance": 0.45}
+weight-0.8-described-0.6	{"meaning_weight": 0.8, "described_alpha": 0.6}
+weight-0.6-described-0.4	{"meaning_weight": 0.6, "described_alpha": 0.4}

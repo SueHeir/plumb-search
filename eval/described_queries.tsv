@@ -7,6 +7,7 @@ online encyclopedia	wikipedia.org,britannica.com
 music streaming	spotify.com,apple.com,pandora.com,tidal.com
 online marketplace for handmade goods	etsy.com
 search engine	google.com,bing.com,duckduckgo.com
+search engines	google.com,bing.com,duckduckgo.com
 code hosting	github.com,gitlab.com,bitbucket.org
 professional networking site	linkedin.com
 vacation rentals	airbnb.com,vrbo.com
@@ -40,3 +41,180 @@ japanese electronics company	sony.com,panasonic.com,sony.net
 space agency	nasa.gov,esa.int
 social security benefits	ssa.gov
 open source operating system	linux.org,kernel.org,ubuntu.com,debian.org
+
+# Added 2026-10-06 to make the suite bigger.
+# News
+newspaper in new york	nytimes.com,nypost.com,nydailynews.com,newsday.com
+newspaper in los angeles	latimes.com,dailynews.com
+newspaper in boston	bostonglobe.com,bostonherald.com
+newspaper in london	theguardian.com,thetimes.co.uk,thetimes.com,standard.co.uk,telegraph.co.uk,ft.com
+uk news	bbc.co.uk,bbc.com,theguardian.com,telegraph.co.uk,independent.co.uk,sky.com,dailymail.co.uk,thetimes.co.uk
+german news	spiegel.de,tagesschau.de,zeit.de,faz.net,sueddeutsche.de,bild.de,dw.com
+french newspaper	lemonde.fr,lefigaro.fr,liberation.fr,leparisien.fr
+indian news	indiatimes.com,thehindu.com,hindustantimes.com,ndtv.com,indianexpress.com
+tech news	theverge.com,techcrunch.com,arstechnica.com,wired.com,engadget.com,cnet.com,ycombinator.com
+science news	sciencenews.org,scientificamerican.com,newscientist.com,nature.com,phys.org,science.org,sciencedaily.com
+business news	bloomberg.com,wsj.com,cnbc.com,ft.com,reuters.com,forbes.com,businessinsider.com,economist.com
+fact checking	snopes.com,politifact.com,factcheck.org,apnews.com,reuters.com,fullfact.org
+public radio	npr.org,pbs.org
+sports scores	espn.com,cbssports.com,yahoo.com,theathletic.com,nytimes.com,foxsports.com
+soccer news	espn.com,goal.com,bbc.co.uk,bbc.com,skysports.com,theathletic.com,onefootball.com
+
+# Money
+online bank	ally.com,chime.com,sofi.com,discover.com,capitalone.com
+credit score check	creditkarma.com,experian.com,annualcreditreport.com,equifax.com,transunion.com
+stock trading app	robinhood.com,schwab.com,fidelity.com,etrade.com,webull.com
+cryptocurrency exchange	coinbase.com,binance.com,kraken.com,gemini.com
+send money abroad	wise.com,westernunion.com,remitly.com,xoom.com,paypal.com
+personal finance advice	nerdwallet.com,investopedia.com,bankrate.com
+mortgage rates	bankrate.com,mortgagenewsdaily.com,freddiemac.com,zillow.com
+crowdfunding	kickstarter.com,gofundme.com,indiegogo.com,patreon.com
+car insurance	geico.com,progressive.com,statefarm.com,allstate.com,libertymutual.com,usaa.com
+student loans	studentaid.gov,salliemae.com,nelnet.com,sofi.com
+
+# Health
+online pharmacy	cvs.com,walgreens.com,goodrx.com,amazon.com
+symptom checker	webmd.com,mayoclinic.org,clevelandclinic.org
+medical information	webmd.com,mayoclinic.org,medlineplus.gov,nih.gov,clevelandclinic.org
+drug interactions	drugs.com,webmd.com,medscape.com
+fitness tracker	fitbit.com,garmin.com,apple.com,whoop.com,ouraring.com
+workout app	strava.com,onepeloton.com,nike.com,myfitnesspal.com
+calorie counter	myfitnesspal.com,loseit.com,cronometer.com
+genealogy	ancestry.com,familysearch.org,myheritage.com
+dna test	23andme.com,ancestry.com,myheritage.com
+eyeglasses online	warbyparker.com,zennioptical.com,eyebuydirect.com,glassesusa.com
+
+# Food
+recipe website	allrecipes.com,foodnetwork.com,seriouseats.com,nytimes.com,epicurious.com,bonappetit.com
+meal kit delivery	hellofresh.com,blueapron.com,homechef.com,factor75.com
+pizza delivery	dominos.com,pizzahut.com,papajohns.com
+coffee chain	starbucks.com,dunkindonuts.com,dunkin.com,timhortons.com
+fast food burgers	mcdonalds.com,bk.com,wendys.com,in-n-out.com,fiveguys.com,shakeshack.com
+
+# Shopping
+furniture store	ikea.com,wayfair.com,ashleyfurniture.com,potterybarn.com,westelm.com
+swedish furniture store	ikea.com
+electronics store	bestbuy.com,newegg.com,bhphotovideo.com,microcenter.com
+department store	macys.com,nordstrom.com,kohls.com,jcpenney.com
+pet supplies	chewy.com,petsmart.com,petco.com
+outdoor gear	rei.com,patagonia.com,backcountry.com
+sporting goods store	dickssportinggoods.com,academy.com,rei.com
+auto parts	autozone.com,advanceautoparts.com,oreillyauto.com,rockauto.com,napaonline.com
+secondhand clothes	poshmark.com,thredup.com,depop.com,vinted.com,ebay.com,therealreal.com
+sneaker resale	stockx.com,goat.com
+classified ads	craigslist.org,facebook.com,offerup.com,gumtree.com,kijiji.ca
+used books	abebooks.com,thriftbooks.com,betterworldbooks.com,amazon.com,powells.com
+online bookstore	amazon.com,barnesandnoble.com,bookshop.org,powells.com
+mattress company	casper.com,purple.com,tempurpedic.com,sleepnumber.com,saatva.com,tuftandneedle.com
+home security cameras	ring.com,simplisafe.com,adt.com,arlo.com
+
+# Travel
+car rental	hertz.com,enterprise.com,avis.com,budget.com,nationalcar.com,kayak.com
+train tickets in europe	trainline.com,raileurope.com,bahn.de,sncf-connect.com,eurail.com
+bus tickets	greyhound.com,flixbus.com,megabus.com
+cruise line	carnival.com,royalcaribbean.com,ncl.com,princess.com
+budget airline	spirit.com,ryanair.com,easyjet.com,flyfrontier.com,southwest.com,allegiantair.com
+national parks	nps.gov,recreation.gov
+travel guide	lonelyplanet.com,tripadvisor.com,wikivoyage.org,ricksteves.com,frommers.com
+maps and directions	google.com,openstreetmap.org,apple.com,bing.com,mapquest.com
+apartment rentals	apartments.com,zillow.com,rent.com,trulia.com,hotpads.com,craigslist.org,redfin.com
+
+# Internet and software
+translation service	google.com,deepl.com,bing.com,microsoft.com
+email provider	google.com,gmail.com,outlook.com,yahoo.com,proton.me,live.com
+private email	proton.me,tuta.com,tutanota.com,fastmail.com
+vpn service	nordvpn.com,expressvpn.com,mullvad.net,protonvpn.com,proton.me,surfshark.com
+web browser	google.com,mozilla.org,firefox.com,brave.com,microsoft.com,opera.com,apple.com,vivaldi.com
+privacy search engine	duckduckgo.com,startpage.com,brave.com,mojeek.com,qwant.com
+ai chatbot	chatgpt.com,openai.com,claude.ai,anthropic.com,google.com,perplexity.ai,microsoft.com
+ai image generator	midjourney.com,openai.com,stability.ai,adobe.com,leonardo.ai
+website builder	wix.com,squarespace.com,wordpress.com,shopify.com,webflow.com,godaddy.com
+domain registrar	godaddy.com,namecheap.com,porkbun.com,cloudflare.com,squarespace.com,hover.com
+web hosting	bluehost.com,hostinger.com,godaddy.com,siteground.com,dreamhost.com,digitalocean.com
+cloud computing	amazon.com,microsoft.com,azure.com,google.com,oracle.com,ibm.com
+online store builder	shopify.com,wix.com,squarespace.com,bigcommerce.com,woocommerce.com
+graphic design tool	canva.com,adobe.com,figma.com
+note taking app	notion.so,notion.com,evernote.com,obsidian.md,onenote.com,microsoft.com,apple.com
+project management software	asana.com,atlassian.com,trello.com,monday.com,clickup.com,notion.so,notion.com,basecamp.com
+video editing software	adobe.com,blackmagicdesign.com,apple.com,capcut.com
+free office suite	libreoffice.org,google.com,onlyoffice.com,microsoft.com,openoffice.org
+open source video player	videolan.org,mpv.io
+3d modeling software	blender.org,autodesk.com
+code editor	visualstudio.com,jetbrains.com,sublimetext.com,cursor.com,neovim.io,vim.org,zed.dev
+container platform	docker.com,podman.io,kubernetes.io
+relational database	postgresql.org,mysql.com,sqlite.org,mariadb.org,oracle.com,microsoft.com
+online ide	replit.com,codesandbox.io,codepen.io,jsfiddle.net,github.com
+pdf editor	adobe.com,smallpdf.com,ilovepdf.com,sejda.com,pdfescape.com
+file converter	cloudconvert.com,convertio.co,zamzar.com,adobe.com,ilovepdf.com,smallpdf.com
+url shortener	bitly.com,bit.ly,tinyurl.com
+send large files	wetransfer.com,dropbox.com,google.com,box.com
+video sharing	youtube.com,vimeo.com,dailymotion.com,tiktok.com
+microblogging	x.com,twitter.com,threads.net,threads.com,bsky.app,mastodon.social,tumblr.com
+encrypted messaging	signal.org,whatsapp.com,telegram.org,element.io,threema.ch
+ad blocker	ublockorigin.com,adblockplus.org,getadblock.com,pi-hole.net,adguard.com,github.com
+open source password manager	bitwarden.com,keepassxc.org,keepass.info,proton.me
+self hosted media server	jellyfin.org,plex.tv,emby.media
+home automation	home-assistant.io,smartthings.com,samsung.com,hubitat.com,openhab.org
+linux for beginners	ubuntu.com,linuxmint.com,fedoraproject.org,zorin.com,elementary.io
+anonymous browsing	torproject.org,brave.com,mullvad.net
+open source licenses	opensource.org,choosealicense.com,spdx.org,gnu.org
+
+# Learning and reference
+programming tutorials	w3schools.com,freecodecamp.org,geeksforgeeks.org,codecademy.com,mozilla.org
+learn to code	freecodecamp.org,codecademy.com,theodinproject.com,khanacademy.org,w3schools.com
+coding interview practice	leetcode.com,hackerrank.com,neetcode.io
+math help	khanacademy.org,wolframalpha.com,mathway.com,symbolab.com,desmos.com
+homework help	chegg.com,khanacademy.org,quizlet.com,brainly.com,coursehero.com
+flashcards	quizlet.com,ankiweb.net,brainscape.com
+college search	collegeboard.org,niche.com,usnews.com,princetonreview.com,commonapp.org
+graphing calculator	desmos.com,geogebra.org
+thesaurus	thesaurus.com,merriam-webster.com,collinsdictionary.com,powerthesaurus.org
+grammar checker	grammarly.com,languagetool.org,quillbot.com
+free ebooks	gutenberg.org,archive.org,standardebooks.org,openlibrary.org
+audiobooks	audible.com,libro.fm,librivox.org,spotify.com
+book reviews	goodreads.com,thestorygraph.com,kirkusreviews.com,nytimes.com
+academic paper search	google.com,semanticscholar.org,arxiv.org,openalex.org,nih.gov,jstor.org,researchgate.net,core.ac.uk
+preprint server	arxiv.org,biorxiv.org,medrxiv.org,ssrn.com,osf.io
+reference manager	zotero.org,mendeley.com,endnote.com
+online latex editor	overleaf.com
+world statistics	ourworldindata.org,data.gov,statista.com,worldbank.org,census.gov,bls.gov
+earthquake information	usgs.gov,emsc-csem.org
+weather radar	weather.gov,weather.com,accuweather.com,wunderground.com,windy.com
+weather data api	open-meteo.com,openweathermap.org,weatherapi.com,weather.gov,tomorrow.io,visualcrossing.com
+time zone converter	timeanddate.com,worldtimebuddy.com
+currency converter	xe.com,google.com,oanda.com,wise.com
+
+# Fun
+pc game store	steampowered.com,epicgames.com,gog.com,ea.com,ubisoft.com
+video game reviews	ign.com,gamespot.com,metacritic.com,polygon.com,pcgamer.com
+movie reviews	rottentomatoes.com,metacritic.com,imdb.com,letterboxd.com,rogerebert.com
+movie tickets	fandango.com,amctheatres.com,atomtickets.com,regmovies.com
+concert tickets	ticketmaster.com,livenation.com,stubhub.com,seatgeek.com,axs.com
+song lyrics	genius.com,azlyrics.com,musixmatch.com,lyrics.com
+guitar tabs	ultimate-guitar.com,songsterr.com
+live streaming games	twitch.tv,youtube.com,kick.com
+podcast app	spotify.com,apple.com,pocketcasts.com,overcast.fm,podcastindex.org
+internet radio	iheart.com,tunein.com,radio.garden,pandora.com,somafm.com
+play chess online	chess.com,lichess.org
+crossword puzzle	nytimes.com,washingtonpost.com,theguardian.com,usatoday.com
+dating app	tinder.com,bumble.com,hinge.co,match.com,okcupid.com
+freelance marketplace	upwork.com,fiverr.com,freelancer.com,toptal.com
+
+# Makers and companies by kind
+japanese car maker	toyota.com,honda.com,nissanusa.com,nissan-global.com,subaru.com,mazdausa.com,mazda.com,toyota-global.com,mitsubishicars.com,lexus.com
+korean electronics company	samsung.com,lg.com
+american chip maker	intel.com,nvidia.com,amd.com,qualcomm.com,micron.com,ti.com,broadcom.com
+smartphone maker	apple.com,samsung.com,google.com,oneplus.com,motorola.com,mi.com
+laptop maker	dell.com,hp.com,lenovo.com,apple.com,asus.com,acer.com,microsoft.com,frame.work
+gaming console	playstation.com,xbox.com,nintendo.com,sony.com,microsoft.com
+streaming device	roku.com,amazon.com,apple.com,google.com
+e-reader	amazon.com,kobo.com,barnesandnoble.com,remarkable.com,boox.com
+action camera	gopro.com,dji.com,insta360.com
+drone maker	dji.com,skydio.com,parrot.com
+
+# Government help
+government benefits	usa.gov,benefits.gov,ssa.gov
+apply for a us passport	state.gov
+immigration forms	uscis.gov
+health insurance marketplace	healthcare.gov
+uk weather	metoffice.gov.uk,bbc.co.uk,bbc.com

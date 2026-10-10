@@ -1,0 +1,6 @@
+[env]
+# Candle's quantized matrix products (Gemma, for search by meaning) wait for
+# a pool of one thread per core by spinning, once per row: on a busy machine
+# (the tests on a shared server) each text then takes seconds instead of
+# milliseconds and the Gemma tests run for hours. Tests run without the pool.
+CANDLE_NUM_THREADS = "1"

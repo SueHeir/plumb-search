@@ -20,6 +20,8 @@ use anyhow::{Context, Result};
 use plumb_core::collapse_whitespace;
 use serde::{Deserialize, Serialize};
 
+use crate::learn::Learned;
+
 /// Most past searches kept per profile.
 pub const MAX_SEARCHES: usize = 200;
 /// Most opened sites kept per profile, one per search and site.
@@ -32,8 +34,17 @@ const PROFILE_ID_CHARS: usize = 32;
 /// Score added to a site opened before for the same search. Most of a
 /// result's score, so the site you went to last time comes back first.
 pub const OPENED_FOR_QUERY_BONUS: f32 = 0.3;
-/// Score added to a site opened before for another search.
+/// Score added to a site opened before for another search. A search that
+/// shares words with it gets up to [`OPENED_FOR_QUERY_BONUS`] times the
+/// share of words in common: "us bank login" lifts the site opened for
+/// "us bank" more than "pizza" does.
 pub const OPENED_BONUS: f32 = 0.05;
+/// Most that being opened from far down the page multiplies the bonus for
+/// searches sharing words by ([`Opened::depth_lift`]): the searcher read
+/// past the results above it to pick it, so it says more about what they
+/// want than a pick of the first result, which is opened largely for being
+/// first (see [`crate::clicks`]).
+pub const MAX_DEPTH_LIFT: f32 = 2.0;
 
 /// One write at a time, for every profile: history files are small.
 static WRITING: Mutex<()> = Mutex::new(());
@@ -55,14 +66,39 @@ pub struct Opened {
     pub at: u64,
     /// How many times it was opened for the query.
     pub times: u32,
+    /// The same openings, each counted by how far down the page it was
+    /// ([`crate::clicks::PositionBias::weight`]), in hundredths. 0 in
+    /// history files from before it was kept, and for openings whose place
+    /// is not known, which count as from the top.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub weighted: u32,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
+}
+
+impl Opened {
+    /// How much more the site counts for searches sharing words with this
+    /// one for having been opened from far down the page: 1 for openings
+    /// from the top, up to [`MAX_DEPTH_LIFT`].
+    pub fn depth_lift(&self) -> f32 {
+        if self.times == 0 {
+            return 1.0;
+        }
+        let mean = self.weighted as f32 / (100.0 * self.times as f32);
+        mean.sqrt().clamp(1.0, MAX_DEPTH_LIFT)
+    }
 }
 
 /// One profile's history, newest first.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct History {
     pub searches: Vec<PastSearch>,
     pub opened: Vec<Opened>,
+    /// What the browser's clicks taught the node.
+    pub learned: Learned,
 }
 
 impl History {
@@ -79,17 +115,30 @@ impl History {
 
     /// Notes that `domain` was opened for `query`.
     pub fn add_opened(&mut self, query: &str, domain: &str, at: u64) {
+        self.add_opened_weighted(query, domain, at, None);
+    }
+
+    /// Notes that `domain` was opened for `query`, from a place on the
+    /// page whose click counts `weight` times, if known.
+    pub fn add_opened_weighted(&mut self, query: &str, domain: &str, at: u64, weight: Option<f32>) {
         let Some(query) = clean(query) else {
             return;
         };
         let wanted = key(&query);
-        let times = match self
+        let (times, weighted) = match self
             .opened
             .iter()
             .position(|o| o.domain == domain && key(&o.query) == wanted)
         {
-            Some(i) => self.opened.remove(i).times.saturating_add(1),
-            None => 1,
+            Some(i) => {
+                let old = self.opened.remove(i);
+                (old.times.saturating_add(1), old.weighted)
+            }
+            None => (1, 0),
+        };
+        let weighted = match weight {
+            Some(weight) => weighted.saturating_add((weight * 100.0).round() as u32),
+            None => weighted,
         };
         self.opened.insert(
             0,
@@ -98,6 +147,7 @@ impl History {
                 domain: domain.to_owned(),
                 at,
                 times,
+                weighted,
             },
         );
         self.opened.truncate(MAX_OPENED);
@@ -109,15 +159,26 @@ impl History {
     }
 
     /// The score a site gets for having been opened before: more for the
-    /// same search than for another one.
+    /// same search than for another one, and more for a search sharing
+    /// words with this one.
     pub fn bonus(&self, query: &str, domain: &str) -> f32 {
         let wanted = key(query);
+        let words = word_set(query);
         let mut bonus = 0.0f32;
         for opened in self.opened.iter().filter(|o| o.domain == domain) {
             let this = if key(&opened.query) == wanted {
                 OPENED_FOR_QUERY_BONUS
             } else {
-                OPENED_BONUS
+                let theirs = word_set(&opened.query);
+                let shared = words.intersection(&theirs).count();
+                let all = words.union(&theirs).count();
+                let alike = if all == 0 {
+                    0.0
+                } else {
+                    shared as f32 / all as f32
+                };
+                (OPENED_BONUS.max(OPENED_FOR_QUERY_BONUS * alike) * opened.depth_lift())
+                    .min(OPENED_FOR_QUERY_BONUS)
             };
             bonus = bonus.max(this);
         }
@@ -133,8 +194,18 @@ fn clean(query: &str) -> Option<String> {
 }
 
 /// What makes two searches the same: case and spacing do not count.
-fn key(query: &str) -> String {
+pub(crate) fn key(query: &str) -> String {
     collapse_whitespace(query).trim().to_lowercase()
+}
+
+/// The distinct words of a query, as [`crate::learn::query_key`] spells
+/// them.
+fn word_set(query: &str) -> std::collections::HashSet<String> {
+    crate::learn::query_key(query)
+        .split(' ')
+        .filter(|w| !w.is_empty())
+        .map(str::to_owned)
+        .collect()
 }
 
 /// Whether `id` looks like a profile id this module made.
@@ -272,6 +343,35 @@ mod tests {
         assert_eq!(history.bonus("bank", "wellsfargo.com"), 0.0);
         assert!(history.was_opened("chase.com"));
         assert!(!history.was_opened("wellsfargo.com"));
+        // A search sharing words lifts it more than another search does.
+        history.add_opened("us bank", "usbank.com", 4);
+        let alike = history.bonus("us bank login", "usbank.com");
+        assert!(
+            alike > OPENED_BONUS && alike < OPENED_FOR_QUERY_BONUS,
+            "{alike}"
+        );
+    }
+
+    #[test]
+    fn a_site_opened_from_far_down_counts_more_for_searches_alike() {
+        let mut history = History::default();
+        // Opened from the top, and from the fifth place.
+        history.add_opened_weighted("us bank", "usbank.com", 1, Some(1.0));
+        history.add_opened_weighted("credit union", "becu.org", 2, Some(5.0));
+        let top = history.bonus("bank mortgage rates today", "usbank.com");
+        let deep = history.bonus("union mortgage rates today", "becu.org");
+        assert!(deep > top * 1.5, "{deep} vs {top}");
+        assert!(deep <= OPENED_FOR_QUERY_BONUS);
+        // The same search is put first either way.
+        assert_eq!(
+            history.bonus("us bank", "usbank.com"),
+            OPENED_FOR_QUERY_BONUS
+        );
+        // Openings whose place is not known count as from the top.
+        history.add_opened("credit union", "becu.org", 3);
+        assert_eq!(history.opened[0].times, 2);
+        assert_eq!(history.opened[0].weighted, 500);
+        assert!((history.opened[0].depth_lift() - 2.5f32.sqrt().min(MAX_DEPTH_LIFT)).abs() < 1e-6);
     }
 
     #[test]

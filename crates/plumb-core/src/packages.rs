@@ -195,6 +195,63 @@ pub const FILLER_WORDS: &[&str] = &[
     "downloads",
 ];
 
+/// Install commands besides each registry's own (see
+/// [`Registry::install`]), with the registry they install from.
+const OTHER_INSTALLS: &[(&str, &str)] = &[
+    ("npm i", "npm"),
+    ("npm add", "npm"),
+    ("yarn add", "npm"),
+    ("pnpm add", "npm"),
+    ("bun add", "npm"),
+    ("pip3 install", "pypi"),
+    ("python -m pip install", "pypi"),
+    ("python3 -m pip install", "pypi"),
+    ("uv add", "pypi"),
+    ("uv pip install", "pypi"),
+    ("poetry add", "pypi"),
+    ("cargo install", "crates"),
+    ("go install", "go"),
+    ("bundle add", "gem"),
+];
+
+/// The package and registry a query that is an install command asks for:
+/// "cargo add serde", "pip install requests==2.32", "npm i -D vitest".
+/// Flags are skipped and a version written after the name dropped.
+pub fn install_command(query: &str) -> Option<(&'static Registry, String)> {
+    let query = query.split_whitespace().collect::<Vec<_>>().join(" ");
+    let lower = query.to_lowercase();
+    let own = REGISTRIES.iter().filter_map(|r| {
+        let command = r.install.split("{}").next()?.trim_end();
+        (!command.is_empty()).then_some((command, r))
+    });
+    let others = OTHER_INSTALLS
+        .iter()
+        .filter_map(|&(command, key)| Some((command, registry(key)?)));
+    for (command, registry) in own.chain(others) {
+        let Some(rest) = lower
+            .strip_prefix(command)
+            .filter(|rest| rest.starts_with(' '))
+        else {
+            continue;
+        };
+        let word = rest
+            .split_whitespace()
+            .find(|word| !word.starts_with('-'))?;
+        // A version after the name: serde@1, requests==2.32, "@scope/name@2".
+        let name = match word.strip_prefix('@') {
+            Some(scoped) => &word[..1 + scoped.find('@').unwrap_or(scoped.len())],
+            None => word
+                .split(['@', '=', '<', '>', '~', '[', '!'])
+                .next()
+                .unwrap_or(word),
+        };
+        if registry.accepts(name) {
+            return Some((registry, name.to_string()));
+        }
+    }
+    None
+}
+
 /// The registry kept as `key`.
 pub fn registry(key: &str) -> Option<&'static Registry> {
     REGISTRIES.iter().find(|r| r.key == key)
@@ -602,5 +659,29 @@ mod tests {
         for query in ["react", "react docs", "python", "latest version", "crate"] {
             assert_eq!(package_query(query), None, "{query}");
         }
+    }
+
+    #[test]
+    fn install_commands_name_the_package() {
+        let asked =
+            |query: &str| install_command(query).map(|(registry, name)| (registry.key, name));
+        assert_eq!(asked("cargo add serde"), Some(("crates", "serde".into())));
+        assert_eq!(
+            asked("cargo add serde --features derive"),
+            Some(("crates", "serde".into()))
+        );
+        assert_eq!(
+            asked("pip install requests==2.32"),
+            Some(("pypi", "requests".into()))
+        );
+        assert_eq!(asked("npm i -D vitest"), Some(("npm", "vitest".into())));
+        assert_eq!(
+            asked("npm install @types/node@20"),
+            Some(("npm", "@types/node".into()))
+        );
+        assert_eq!(asked("yarn add react"), Some(("npm", "react".into())));
+        assert_eq!(asked("cargo add"), None);
+        assert_eq!(asked("pip install"), None);
+        assert_eq!(asked("how to install serde"), None);
     }
 }

@@ -68,6 +68,9 @@ fn node_config(args: RunArgs) -> NodeConfig {
     if args.crawl_concurrency.is_some() {
         config.crawl_concurrency = args.crawl_concurrency;
     }
+    config.drop_dead_sites = args.drop_dead_sites;
+    config.take_new_sites = args.take_new_sites;
+    config.crawl_only = args.crawl_only;
     if let Some(feeds) = args.news_feeds {
         config.news_feeds = feeds;
     }
@@ -78,9 +81,14 @@ fn node_config(args: RunArgs) -> NodeConfig {
         config.alpha = args.alpha;
     }
     config.country = args.country;
+    config.only_country = args.only_country;
+    config.lang = args.lang;
     config.web_search = args.web_search.0;
     config.mcp_read_pages = args.mcp_read_pages;
-    config.search_by_meaning = args.search_by_meaning;
+    config.mcp_findings = args.mcp_findings;
+    // On for the desktop profile already.
+    config.search_by_meaning |= args.search_by_meaning;
+    config.meaning_model = args.meaning_model;
     config.embed_threads = args.embed_threads.map(usize::from);
     if args.use_system_proxy {
         config.use_system_proxy = true;
@@ -90,6 +98,9 @@ fn node_config(args: RunArgs) -> NodeConfig {
     config.search_history |= args.search_history;
     config.focus_topics = args.focus;
     config.seed_from_network = !args.seed_from_outside;
+    if let Some(updates) = args.set_updates {
+        config.set_updates = updates;
+    }
     if args.network {
         let mut net = NetConfig::new(config.data_dir.join("net"));
         let port = args.p2p_port;
@@ -138,6 +149,7 @@ fn node_config(args: RunArgs) -> NodeConfig {
         }
         config.network = Some(net);
         config.share_popularity = args.share_popularity;
+        config.share_findings = args.share_findings;
         config.publish_records = args.publish_records;
         config.crawl_any_site = args.crawl_any_site;
         config.crawl_with = args.crawl_with;
@@ -257,6 +269,20 @@ mod tests {
         expected.bind = "127.0.0.1:8080".parse().unwrap();
         assert_eq!(desktop, expected);
 
+        let updates = |args: &[&str]| config(args).set_updates;
+        use crate::pages::SetUpdates;
+        assert_eq!(updates(&["--data", "d"]), SetUpdates::All);
+        assert_eq!(
+            updates(&["--data", "d", "--set-updates", "off"]),
+            SetUpdates::Off
+        );
+        let only = updates(&["--data", "d", "--set-updates", "films,map"]);
+        assert_eq!(only, SetUpdates::Only(vec!["films".into(), "map".into()]));
+        assert_eq!(only.allows("map"), Some(true));
+        assert_eq!(only.allows("wikipedia-en"), None);
+        let bad = ["plumb", "run", "--data", "d", "--set-updates", "films,nope"];
+        assert!(Cli::try_parse_from(bad).is_err());
+
         let threads = |args: &[&str]| config(args).embed_threads;
         assert_eq!(threads(&["--data", "d"]), None);
         assert_eq!(threads(&["--data", "d", "--embed-threads", "3"]), Some(3));
@@ -357,6 +383,8 @@ mod tests {
         assert!(net.relay_server && net.upnp);
         assert!(!node.share_popularity);
         assert!(config(&["--data", "d", "--network", "--share-popularity"]).share_popularity);
+        assert!(!node.share_findings);
+        assert!(config(&["--data", "d", "--network", "--share-findings"]).share_findings);
         let parse = |args: &[&str]| Cli::try_parse_from(["plumb", "run"].iter().chain(args));
         assert!(
             parse(&["--data", "d", "--relay"]).is_err(),
@@ -412,6 +440,14 @@ mod tests {
             "--blackhole needs --network"
         );
         assert!(parse(&["--data", "d", "--network", "--blackhole", "--no-fill"]).is_err());
+        assert!(!node.crawl_only);
+        assert!(config(&["--data", "d", "--network", "--crawl-only"]).crawl_only);
+        for other in ["--blackhole", "--search-by-meaning", "--private-search"] {
+            assert!(
+                parse(&["--data", "d", "--network", "--crawl-only", other]).is_err(),
+                "--crawl-only with {other}"
+            );
+        }
         assert_eq!(net.round_every, Some(plumb_net::rounds::ROUND_EVERY));
         let rounds = |minutes: &str| {
             config(&["--data", "d", "--network", "--round-minutes", minutes])

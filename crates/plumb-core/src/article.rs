@@ -32,13 +32,28 @@
 //! the front page of a site of its own: `website=https://music.youtube.com/`
 //! for YouTube Music, whose site is youtube.com. Readers made before it
 //! leave it out as a service they do not know.
+//!
+//! So do the article's lead, the first sentences of its text
+//! (`lead=The sternum or breastbone is a long flat bone ...`), and its
+//! other names: the titles that lead to it that are not among its aliases,
+//! such as those that lead to one of its sections (`name=Manubrium`). Both
+//! come from Wikipedia's search dump (`plumb fetch-leads`).
+//!
+//! A docs page's line carries the headings of its sections the same way
+//! (`section=List Comprehensions`), from `plumb fetch-pages --set docs`.
+//! Rich docs optionally add `search={"version":1,...}` to that same line.
+//! Its bounded JSON preserves exact API identifiers, fragment anchors and
+//! source passages; pipes are JSON-escaped so legacy readers ignore the
+//! extension without misreading its content as profiles or extra sections.
 
 use std::io::{BufRead, Write};
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::facts::{parse_facts, write_facts, Fact};
 use crate::packages::{PackageInfo, PACKAGE_LINE};
+use crate::papers::PaperMetadata;
 use crate::profiles::{parse_profiles, write_profiles, Profile};
 
 /// The articles file's first line.
@@ -49,6 +64,210 @@ pub const MAX_ALIASES: usize = 5;
 
 /// Longest description kept, in characters.
 pub const MAX_ARTICLE_DESCRIPTION_CHARS: usize = 160;
+
+/// Longest lead kept, in characters: whole sentences up to this many, or
+/// the first sentence cut to it.
+pub const MAX_LEAD_CHARS: usize = 300;
+
+/// Most other names ([`Article::names`]) kept per article.
+pub const MAX_OTHER_NAMES: usize = 10;
+
+/// Most sections ([`Article::sections`]) kept per page.
+pub const MAX_SECTIONS: usize = 64;
+
+/// Most characters of a page's sections, all together.
+pub const MAX_SECTIONS_CHARS: usize = 1_000;
+
+/// Current optional docs search extension. Old readers ignore its key.
+pub const SEARCH_VERSION: u8 = 1;
+pub const SEARCH_KEY: &str = "search";
+/// Encoded JSON bytes, excluding the `search=` key, per page.
+pub const MAX_SEARCH_BYTES: usize = 8 * 1024;
+pub const MAX_SEARCH_SYMBOLS: usize = 64;
+pub const MAX_SEARCH_SYMBOL_BYTES: usize = 4 * 1024;
+pub const MAX_SEARCH_IDENTIFIER_BYTES: usize = 192;
+pub const MAX_SEARCH_ANCHOR_BYTES: usize = 256;
+pub const MAX_SEARCH_PASSAGES: usize = 8;
+pub const MAX_SEARCH_PASSAGE_CHARS: usize = 512;
+pub const MAX_SEARCH_HEADING_CHARS: usize = 160;
+
+/// Exact, case-preserving API name and the HTML fragment that owns it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchSymbol {
+    pub identifier: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<String>,
+}
+
+/// Source text, not a generated answer. Anchors are HTML IDs (without `#`),
+/// not token offsets or character positions in the original HTML.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchPassage {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub heading: String,
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<String>,
+}
+
+/// Optional rich content on the existing profiles line. Missing content
+/// means a compact/legacy record; it is not evidence of a rich rebuild.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchContent {
+    pub version: u8,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub symbols: Vec<SearchSymbol>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub passages: Vec<SearchPassage>,
+}
+
+impl Default for SearchContent {
+    fn default() -> Self {
+        Self {
+            version: SEARCH_VERSION,
+            symbols: Vec::new(),
+            passages: Vec::new(),
+        }
+    }
+}
+
+impl SearchContent {
+    /// Validate and bound producer data before caching/indexing/writing.
+    /// Overlong identifiers/anchors are discarded rather than cut into a
+    /// different identifier or a broken fragment. Producer priority order
+    /// determines which content survives the byte budgets.
+    pub fn bounded(&self) -> Option<Self> {
+        if self.version != SEARCH_VERSION {
+            return None;
+        }
+        let mut result = Self::default();
+        let mut bytes = 0;
+        for symbol in &self.symbols {
+            if result.symbols.len() == MAX_SEARCH_SYMBOLS {
+                break;
+            }
+            if !valid_identifier(&symbol.identifier)
+                || result
+                    .symbols
+                    .iter()
+                    .any(|s| s.identifier == symbol.identifier && s.anchor == symbol.anchor)
+            {
+                continue;
+            }
+            let symbol = SearchSymbol {
+                identifier: symbol.identifier.clone(),
+                anchor: symbol.anchor.as_deref().and_then(search_anchor),
+            };
+            let size = search_json(&symbol).len();
+            if bytes + size > MAX_SEARCH_SYMBOL_BYTES {
+                continue;
+            }
+            bytes += size;
+            result.symbols.push(symbol);
+        }
+        for passage in &self.passages {
+            if result.passages.len() == MAX_SEARCH_PASSAGES {
+                break;
+            }
+            let text = crate::truncate_chars(
+                &crate::collapse_whitespace(&passage.text),
+                MAX_SEARCH_PASSAGE_CHARS,
+            );
+            if text.is_empty() {
+                continue;
+            }
+            let passage = SearchPassage {
+                heading: crate::truncate_chars(
+                    &crate::collapse_whitespace(&passage.heading),
+                    MAX_SEARCH_HEADING_CHARS,
+                ),
+                text,
+                anchor: passage.anchor.as_deref().and_then(search_anchor),
+            };
+            if !result.passages.contains(&passage) {
+                result.passages.push(passage);
+            }
+        }
+        // Unicode and JSON escaping also count toward the wire budget.
+        while search_json(&result).len() > MAX_SEARCH_BYTES {
+            if result.passages.pop().is_none() {
+                result.symbols.pop()?;
+            }
+        }
+        (!result.symbols.is_empty() || !result.passages.is_empty()).then_some(result)
+    }
+
+    /// Lexical input for retrieval: exact identifiers remain alongside
+    /// their punctuation-separated words. Index exact symbols separately
+    /// when the index supports them; passages retain their own provenance.
+    pub fn text(&self) -> String {
+        let mut text = String::new();
+        for symbol in &self.symbols {
+            text.push_str(&symbol.identifier);
+            text.push(' ');
+            for word in symbol
+                .identifier
+                .split(|c: char| !c.is_alphanumeric())
+                .filter(|s| !s.is_empty())
+            {
+                let letters: Vec<char> = word.chars().collect();
+                for (at, &letter) in letters.iter().enumerate() {
+                    if at > 0
+                        && letter.is_ascii_uppercase()
+                        && (letters[at - 1].is_ascii_lowercase()
+                            || letters[at - 1].is_ascii_digit()
+                            || letters
+                                .get(at + 1)
+                                .is_some_and(|next| next.is_ascii_lowercase()))
+                    {
+                        text.push(' ');
+                    }
+                    text.push(letter);
+                }
+                text.push(' ');
+            }
+        }
+        for passage in &self.passages {
+            text.push_str(&passage.heading);
+            text.push(' ');
+            text.push_str(&passage.text);
+            text.push(' ');
+        }
+        text
+    }
+}
+
+pub fn valid_identifier(identifier: &str) -> bool {
+    !identifier.is_empty()
+        && identifier.len() <= MAX_SEARCH_IDENTIFIER_BYTES
+        && identifier.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+        && identifier
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | ':'))
+}
+
+/// A fragment ID, preserved exactly; never truncate a destination.
+pub fn search_anchor(anchor: &str) -> Option<String> {
+    (!anchor.is_empty()
+        && anchor.len() <= MAX_SEARCH_ANCHOR_BYTES
+        && !anchor.chars().any(|c| c.is_control() || c.is_whitespace()))
+    .then(|| anchor.to_string())
+}
+
+fn search_json(value: &impl Serialize) -> String {
+    // JSON already escapes tabs and newlines. Escape the remaining TSV
+    // metadata separator as JSON, so embedded pipes survive round trips.
+    serde_json::to_string(value)
+        .expect("search content is serializable")
+        .replace('|', "\\u007c")
+}
+
+fn parse_search(value: &str) -> Option<SearchContent> {
+    if value.len() > MAX_SEARCH_BYTES {
+        return None;
+    }
+    serde_json::from_str::<SearchContent>(value).ok()?.bounded()
+}
 
 /// The articles file of Wikipedia in `lang` (`en`): `wikipedia-en.tsv.gz`.
 pub fn articles_file_name(lang: &str) -> String {
@@ -90,10 +309,49 @@ pub struct Article {
     /// after it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub package: Option<PackageInfo>,
+    /// Facts about the item from Wikidata ([`crate::facts`]), on its line
+    /// of profiles.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub facts: Vec<Fact>,
+    /// The first sentences of the article ([`lead_of`]), on its line of
+    /// profiles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lead: Option<String>,
+    /// Other titles that lead to the article than its aliases, at most
+    /// [`MAX_OTHER_NAMES`]: less read ones, and ones that lead to one of
+    /// its sections ("Manubrium" to Sternum), on its line of profiles.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub names: Vec<String>,
+    /// The headings of a docs page's sections, at most [`MAX_SECTIONS`]
+    /// and [`MAX_SECTIONS_CHARS`] characters in all
+    /// ("List Comprehensions" in Python's "Data Structures"), on its line
+    /// of profiles.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sections: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Optional inner-page search metadata; independent of display text.
+    pub search: Option<SearchContent>,
+    /// Declared content language, as a primary code (`es`, `de`). Unknown
+    /// stays absent; a host's country is not evidence of content language.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    /// Structured scholarly identity, version dates and correction evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paper: Option<PaperMetadata>,
 }
 
 /// The key of an official website on a line of profiles.
 pub const WEBSITE_KEY: &str = "website";
+/// The key of an article's lead on a line of profiles.
+pub const LEAD_KEY: &str = "lead";
+/// The key of one of an article's other names on a line of profiles.
+pub const NAME_KEY: &str = "name";
+/// The key of one of a docs page's sections on a line of profiles.
+pub const SECTION_KEY: &str = "section";
+/// The declared page language on the existing optional extension line.
+pub const LANGUAGE_KEY: &str = "language";
+/// Optional scholarly JSON, percent encoded to fit the profiles line.
+pub const PAPER_KEY: &str = "paper";
 
 /// What starts a line of profiles in an articles file.
 pub const PROFILES_LINE: &str = "profiles\t";
@@ -104,9 +362,24 @@ pub fn is_profiles_line(line: &[u8]) -> bool {
     line.starts_with(PROFILES_LINE.as_bytes())
 }
 
-/// The item, profiles and official website of a line of profiles, `None`
-/// for another line.
-pub fn parse_profiles_line(line: &str) -> Option<(&str, Vec<Profile>, Option<String>)> {
+/// What a line of profiles says about an article's item.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProfilesLine<'a> {
+    pub item: &'a str,
+    pub profiles: Vec<Profile>,
+    pub website: Option<String>,
+    pub facts: Vec<Fact>,
+    pub lead: Option<String>,
+    pub names: Vec<String>,
+    pub sections: Vec<String>,
+    pub search: Option<SearchContent>,
+    pub language: Option<String>,
+    pub paper: Option<PaperMetadata>,
+}
+
+/// The item, profiles, official website and facts of a line of profiles,
+/// `None` for another line.
+pub fn parse_profiles_line(line: &str) -> Option<ProfilesLine<'_>> {
     let rest = line
         .trim_end_matches(['\n', '\r'])
         .strip_prefix(PROFILES_LINE)?;
@@ -116,7 +389,40 @@ pub fn parse_profiles_line(line: &str) -> Option<(&str, Vec<Profile>, Option<Str
         let url = url.trim();
         (key.trim() == WEBSITE_KEY && is_web_address(url)).then(|| url.to_string())
     });
-    Some((item.trim(), parse_profiles(profiles), website))
+    let values = |wanted: &'static str| {
+        profiles.split('|').filter_map(move |pair| {
+            let (key, value) = pair.split_once('=')?;
+            let value = value.trim();
+            (key.trim() == wanted && !value.is_empty()).then(|| value.to_string())
+        })
+    };
+    Some(ProfilesLine {
+        item: item.trim(),
+        profiles: parse_profiles(profiles),
+        website,
+        facts: parse_facts(profiles),
+        lead: values(LEAD_KEY).next(),
+        names: values(NAME_KEY).take(MAX_OTHER_NAMES).collect(),
+        sections: values(SECTION_KEY).take(MAX_SECTIONS).collect(),
+        search: profiles.split('|').find_map(|pair| {
+            let (key, value) = pair.split_once('=')?;
+            (key.trim() == SEARCH_KEY)
+                .then(|| parse_search(value.trim()))
+                .flatten()
+        }),
+        language: profiles.split('|').find_map(|pair| {
+            let (key, tag) = pair.split_once('=')?;
+            (key.trim() == LANGUAGE_KEY)
+                .then(|| crate::language_code(tag))
+                .flatten()
+        }),
+        paper: profiles.split('|').find_map(|pair| {
+            let (key, value) = pair.split_once('=')?;
+            (key == PAPER_KEY)
+                .then(|| PaperMetadata::parse(value))
+                .flatten()
+        }),
+    })
 }
 
 /// Whether `url` is an `http` or `https` address that fits a field.
@@ -166,6 +472,18 @@ fn field(text: &str) -> String {
 
 /// Writes `article` as one line of an articles file.
 pub fn write_article(out: &mut impl Write, article: &Article) -> std::io::Result<()> {
+    let paper_extension = article
+        .paper
+        .as_ref()
+        .map(|metadata| {
+            metadata.write().ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "invalid or oversized scholarly metadata",
+                )
+            })
+        })
+        .transpose()?;
     let aliases: Vec<String> = article.aliases.iter().map(|a| field(a)).collect();
     writeln!(
         out,
@@ -178,6 +496,14 @@ pub fn write_article(out: &mut impl Write, article: &Article) -> std::io::Result
         aliases.join("|"),
     )?;
     let mut profiles = write_profiles(&article.profiles);
+    if let Some(paper) = paper_extension {
+        if !profiles.is_empty() {
+            profiles.push('|');
+        }
+        profiles.push_str(PAPER_KEY);
+        profiles.push('=');
+        profiles.push_str(&paper);
+    }
     if let Some(website) = article.website.as_deref().filter(|url| is_web_address(url)) {
         if !profiles.is_empty() {
             profiles.push('|');
@@ -185,6 +511,40 @@ pub fn write_article(out: &mut impl Write, article: &Article) -> std::io::Result
         profiles.push_str(WEBSITE_KEY);
         profiles.push('=');
         profiles.push_str(website);
+    }
+    let facts = write_facts(&article.facts);
+    if !facts.is_empty() {
+        if !profiles.is_empty() {
+            profiles.push('|');
+        }
+        profiles.push_str(&facts);
+    }
+    let lead = article.lead.as_deref().map(field);
+    let names = article.names.iter().map(|name| field(name));
+    let sections = article.sections.iter().map(|section| field(section));
+    let language = article.language.as_deref().and_then(crate::language_code);
+    for (key, value) in lead
+        .into_iter()
+        .map(|lead| (LEAD_KEY, lead))
+        .chain(names.map(|name| (NAME_KEY, name)))
+        .chain(sections.map(|section| (SECTION_KEY, section)))
+        .chain(language.map(|language| (LANGUAGE_KEY, language)))
+        .filter(|(_, value)| !value.is_empty())
+    {
+        if !profiles.is_empty() {
+            profiles.push('|');
+        }
+        profiles.push_str(key);
+        profiles.push('=');
+        profiles.push_str(&value);
+    }
+    if let Some(search) = article.search.as_ref().and_then(SearchContent::bounded) {
+        if !profiles.is_empty() {
+            profiles.push('|');
+        }
+        profiles.push_str(SEARCH_KEY);
+        profiles.push('=');
+        profiles.push_str(&search_json(&search));
     }
     if !profiles.is_empty() {
         write!(out, "{PROFILES_LINE}")?;
@@ -241,11 +601,18 @@ impl<I: Iterator<Item = String>> Iterator for ArticleLines<I> {
             if (self.number == 1 && line.starts_with("views\t")) || line.trim().is_empty() {
                 continue;
             }
-            if let Some((item, profiles, website)) = parse_profiles_line(&line) {
+            if let Some(found) = parse_profiles_line(&line) {
                 if let Some((_, article)) = &mut self.pending {
-                    if article.item.as_deref() == Some(item) {
-                        article.profiles = profiles;
-                        article.website = website;
+                    if article.item.as_deref() == Some(found.item) {
+                        article.profiles = found.profiles;
+                        article.website = found.website;
+                        article.facts = found.facts;
+                        article.lead = found.lead;
+                        article.names = found.names;
+                        article.sections = found.sections;
+                        article.search = found.search;
+                        article.language = found.language;
+                        article.paper = found.paper;
                     }
                 }
                 continue;
@@ -313,6 +680,94 @@ pub fn parse_article(line: &str) -> Result<Article> {
         profiles: Vec::new(),
         website: None,
         package: None,
+        facts: Vec::new(),
+        lead: None,
+        names: Vec::new(),
+        sections: Vec::new(),
+        search: None,
+        language: None,
+        paper: None,
+    })
+}
+
+/// The first sentences of `text` (an article's opening paragraph), as
+/// many whole ones as fit in [`MAX_LEAD_CHARS`], or the first cut there
+/// at a word: what [`Article::lead`] keeps.
+pub fn lead_of(text: &str) -> Option<String> {
+    let text = crate::collapse_whitespace(text);
+    if text.is_empty() {
+        return None;
+    }
+    if text.chars().count() <= MAX_LEAD_CHARS {
+        return Some(text);
+    }
+    let mut end = 0;
+    for stop in sentence_ends(&text) {
+        if text[..stop].chars().count() > MAX_LEAD_CHARS {
+            break;
+        }
+        end = stop;
+    }
+    if end > 0 {
+        return Some(text[..end].to_string());
+    }
+    let cut = crate::truncate_chars(&text, MAX_LEAD_CHARS);
+    let cut = match cut.rfind(' ') {
+        Some(space) if space > 0 => cut[..space].trim_end_matches([',', ';', ':']),
+        _ => &cut,
+    };
+    Some(format!("{cut}…"))
+}
+
+/// The first sentence of an article's lead (see [`lead_of`]).
+pub fn first_sentence(lead: &str) -> &str {
+    match sentence_ends(lead).next() {
+        Some(end) => &lead[..end],
+        None => lead,
+    }
+}
+
+/// Short words that end in a full stop without ending a sentence.
+const ABBREVIATIONS: &[&str] = &[
+    "mr", "mrs", "ms", "dr", "st", "jr", "sr", "mt", "ft", "no", "vs", "inc", "ltd", "co", "corp",
+    "ca", "c", "approx", "est", "gen", "col", "lt", "sgt", "capt", "rev", "prof", "sen", "rep",
+    "gov", "pres", "fr", "op", "vol", "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep",
+    "sept", "oct", "nov", "dec", "e.g", "i.e", "etc", "al", "bros",
+];
+
+/// The byte offsets just past each sentence's full stop (or `?`, `!`) in
+/// `text`: a stop followed by a space and a capital letter, a digit or a
+/// quote, after a word that is not an abbreviation or an initial.
+fn sentence_ends(text: &str) -> impl Iterator<Item = usize> + '_ {
+    text.char_indices().filter_map(move |(at, c)| {
+        if !matches!(c, '.' | '?' | '!') {
+            return None;
+        }
+        let end = at + c.len_utf8();
+        let mut after = text[end..].chars();
+        if after.next() != Some(' ') {
+            return None;
+        }
+        let next = after.next()?;
+        if !(next.is_uppercase() || next.is_ascii_digit() || matches!(next, '"' | '“' | '(')) {
+            return None;
+        }
+        if c == '.' {
+            let word = text[..at]
+                .rsplit(|c: char| c.is_whitespace() || c == '(')
+                .next()
+                .unwrap_or("");
+            let letters = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '.');
+            // An initial ("John F. Kennedy", "U.S."), an abbreviation.
+            if letters.chars().filter(|c| c.is_alphabetic()).count() <= 1
+                && letters.chars().all(|c| c.is_alphabetic() || c == '.')
+                || letters.contains('.')
+                || ABBREVIATIONS.contains(&letters.to_lowercase().as_str())
+            {
+                return None;
+            }
+        }
+        Some(end)
     })
 }
 
@@ -345,6 +800,43 @@ mod tests {
     use super::*;
 
     #[test]
+    fn paper_extension_keeps_six_columns_and_rejects_invalid_metadata() {
+        let paper = Article {
+            title: "Attention Is All You Need".into(),
+            item: Some("10.48550/arxiv.1706.03762".into()),
+            paper: Some(PaperMetadata {
+                doi: Some("10.48550/arxiv.1706.03762".into()),
+                authors: vec!["Ashish Vaswani".into()],
+                publication_date: Some("2017-06-12".into()),
+                ..PaperMetadata::default()
+            }),
+            ..Article::default()
+        };
+        let mut bytes = Vec::new();
+        write_article(&mut bytes, &paper).unwrap();
+        assert_eq!(
+            read_articles(&bytes[..], 1).unwrap().as_slice(),
+            std::slice::from_ref(&paper)
+        );
+        let text = String::from_utf8(bytes).unwrap();
+        let primary = parse_article(text.lines().next().unwrap()).unwrap();
+        assert_eq!(text.lines().next().unwrap().split('\t').count(), 6);
+        assert_eq!(primary.paper, None); // reader with only the original row
+        let old = format!("{}\n", text.lines().next().unwrap());
+        assert_eq!(read_articles(old.as_bytes(), 1).unwrap(), [primary]);
+        let malformed = format!("{old}profiles\t10.48550/arxiv.1706.03762\tpaper=%XX\n");
+        assert_eq!(
+            read_articles(malformed.as_bytes(), 1).unwrap()[0].paper,
+            None
+        );
+        let mut invalid = paper;
+        invalid.paper.as_mut().unwrap().publication_date = Some("2025-02-29".into());
+        let mut bytes = Vec::new();
+        assert!(write_article(&mut bytes, &invalid).is_err());
+        assert!(bytes.is_empty());
+    }
+
+    #[test]
     fn urls_match_wikipedia_links() {
         assert_eq!(
             article_url("en", "Python (programming language)"),
@@ -372,6 +864,13 @@ mod tests {
             profiles: Vec::new(),
             website: None,
             package: None,
+            facts: Vec::new(),
+            lead: None,
+            names: Vec::new(),
+            sections: Vec::new(),
+            search: None,
+            language: None,
+            paper: None,
         };
         let mut out = Vec::new();
         out.extend_from_slice(ARTICLES_HEADER.as_bytes());
@@ -442,6 +941,297 @@ mod tests {
         assert_eq!(read_articles(&out[..], 10).unwrap(), [music]);
         // Readers made before websites see no profile in it.
         assert!(parse_profiles("website=https://music.youtube.com/").is_empty());
+    }
+
+    #[test]
+    fn facts_ride_on_the_line_of_profiles() {
+        use crate::facts::FactKind;
+        let australia = Article {
+            title: "Australia".into(),
+            item: Some("Q408".into()),
+            views: 9_000,
+            profiles: vec![Profile {
+                service: "x".into(),
+                id: "Australia".into(),
+            }],
+            facts: vec![
+                Fact {
+                    kind: FactKind::Capital,
+                    value: "Canberra".into(),
+                },
+                Fact {
+                    kind: FactKind::Population,
+                    value: "27204809;2024".into(),
+                },
+            ],
+            ..Article::default()
+        };
+        let mut out = Vec::new();
+        out.extend_from_slice(ARTICLES_HEADER.as_bytes());
+        write_article(&mut out, &australia).unwrap();
+        let text = String::from_utf8(out.clone()).unwrap();
+        assert!(text.contains(
+            "\nprofiles\tQ408\tx=Australia|f-capital=Canberra|f-population=27204809;2024\n"
+        ));
+        assert_eq!(read_articles(&out[..], 10).unwrap(), [australia]);
+        // Readers made before facts see only the profile.
+        assert_eq!(
+            parse_profiles("x=Australia|f-capital=Canberra|f-population=27204809;2024").len(),
+            1
+        );
+    }
+
+    #[test]
+    fn leads_and_other_names_ride_on_the_line_of_profiles() {
+        let sternum = Article {
+            title: "Sternum".into(),
+            item: Some("Q4590598".into()),
+            views: 9_000,
+            lead: Some("The sternum or breastbone is a long flat bone | of the chest.".into()),
+            names: vec!["Manubrium".into(), "Xiphisternum".into()],
+            ..Article::default()
+        };
+        let mut out = Vec::new();
+        out.extend_from_slice(ARTICLES_HEADER.as_bytes());
+        write_article(&mut out, &sternum).unwrap();
+        let text = String::from_utf8(out.clone()).unwrap();
+        assert!(text.contains(
+            "\nprofiles\tQ4590598\tlead=The sternum or breastbone is a long flat bone of the chest.|name=Manubrium|name=Xiphisternum\n"
+        ));
+        let back = read_articles(&out[..], 10).unwrap();
+        assert_eq!(
+            back[0].lead.as_deref(),
+            Some("The sternum or breastbone is a long flat bone of the chest.")
+        );
+        assert_eq!(back[0].names, sternum.names);
+        // Readers made before leads see no profile or fact in it.
+        assert!(parse_profiles("lead=A b.|name=C").is_empty());
+        assert!(parse_facts("lead=A b.|name=C").is_empty());
+    }
+
+    #[test]
+    fn a_docs_pages_sections_ride_on_the_line_of_profiles() {
+        let page = Article {
+            title: "Data Structures".into(),
+            item: Some("https://docs.python.org/3/tutorial/datastructures.html".into()),
+            views: 1_000,
+            sections: vec!["More on Lists".into(), "List Comprehensions".into()],
+            ..Article::default()
+        };
+        let mut out = Vec::new();
+        out.extend_from_slice(ARTICLES_HEADER.as_bytes());
+        write_article(&mut out, &page).unwrap();
+        let text = String::from_utf8(out.clone()).unwrap();
+        assert!(text.contains("\tsection=More on Lists|section=List Comprehensions\n"));
+        let back = read_articles(&out[..], 10).unwrap();
+        assert_eq!(back[0].sections, page.sections);
+        assert!(back[0].names.is_empty());
+        assert!(parse_profiles("section=More on Lists").is_empty());
+    }
+
+    #[test]
+    fn rich_docs_round_trip_without_changing_legacy_columns_or_headings() {
+        let search = SearchContent {
+            symbols: vec![SearchSymbol {
+                identifier: "set_multiplayer_authority".into(),
+                anchor: Some("class-node-method-set-multiplayer-authority".into()),
+            }],
+            passages: vec![SearchPassage {
+                heading: "CrashLoopBackOff".into(),
+                text: "Source says a | b = c; tabs\tand\nnewlines survive as whitespace.".into(),
+                anchor: Some("backoff|原因".into()),
+            }],
+            ..SearchContent::default()
+        }
+        .bounded()
+        .unwrap();
+        let page = Article {
+            title: "Node".into(),
+            item: Some("https://docs.godotengine.org/en/stable/classes/class_node.html".into()),
+            sections: vec!["Method Descriptions".into()],
+            search: Some(search.clone()),
+            language: Some("es".into()),
+            paper: Some(PaperMetadata {
+                doi: Some("10.48550/arxiv.1706.03762".into()),
+                authors: vec!["Ashish Vaswani".into()],
+                publication_date: Some("2017-06-12".into()),
+                ..PaperMetadata::default()
+            }),
+            ..Article::default()
+        };
+        let mut out = Vec::new();
+        write_article(&mut out, &page).unwrap();
+        let text = String::from_utf8(out.clone()).unwrap();
+        let lines: Vec<_> = text.lines().collect();
+        let compact = parse_article(lines[0]).unwrap();
+        assert_eq!(compact.title, page.title);
+        assert_eq!(compact.search, None);
+        assert!(
+            crate::profiles::parse_profiles(lines[1].splitn(3, '\t').nth(2).unwrap()).is_empty()
+        );
+        assert!(text.contains("\\u007c"));
+        assert_eq!(lines[1].split('\t').count(), 3);
+        let back = read_articles(&out[..], 1).unwrap();
+        assert_eq!(back[0], page);
+        assert!(back[0]
+            .search
+            .as_ref()
+            .unwrap()
+            .text()
+            .contains("set multiplayer authority"));
+        let legacy: Article = serde_json::from_str(r#"{"title":"Node","views":1}"#).unwrap();
+        assert!(legacy.search.is_none());
+    }
+
+    #[test]
+    fn malformed_or_future_search_extensions_leave_the_parent_and_sections_readable() {
+        for value in [
+            "{",
+            r#"{"version":2,"symbols":[]}"#,
+            r#"{"version":1,"symbols":"bad"}"#,
+            &"x".repeat(MAX_SEARCH_BYTES + 1),
+        ] {
+            let line = format!("profiles\turl\tsection=Methods|search={value}|section=Errors");
+            let parsed = parse_profiles_line(&line).unwrap();
+            assert_eq!(parsed.sections, ["Methods", "Errors"]);
+            assert!(parsed.search.is_none());
+            let file = format!("1\tNode\t\turl\t\t\n{line}\n");
+            assert_eq!(read_articles(file.as_bytes(), 1).unwrap()[0].title, "Node");
+        }
+    }
+
+    #[test]
+    fn rich_content_enforces_byte_character_and_identity_bounds() {
+        let search = SearchContent {
+            symbols: (0..200)
+                .map(|i| SearchSymbol {
+                    identifier: format!("long_identifier_{i}"),
+                    anchor: Some("a".repeat(MAX_SEARCH_ANCHOR_BYTES + 1)),
+                })
+                .chain([SearchSymbol {
+                    identifier: "x".repeat(MAX_SEARCH_IDENTIFIER_BYTES + 1),
+                    anchor: None,
+                }])
+                .collect(),
+            passages: (0..30)
+                .map(|i| SearchPassage {
+                    heading: format!("Section {i}"),
+                    text: "原因|".repeat(600),
+                    anchor: None,
+                })
+                .collect(),
+            ..SearchContent::default()
+        };
+        let bounded = search.bounded().unwrap();
+        assert!(bounded.symbols.len() <= MAX_SEARCH_SYMBOLS);
+        assert!(bounded
+            .symbols
+            .iter()
+            .all(|s| s.anchor.is_none() && s.identifier.len() <= MAX_SEARCH_IDENTIFIER_BYTES));
+        assert!(bounded.passages.len() <= MAX_SEARCH_PASSAGES);
+        assert!(bounded
+            .passages
+            .iter()
+            .all(|p| p.text.chars().count() <= MAX_SEARCH_PASSAGE_CHARS));
+        let encoded = search_json(&bounded);
+        assert!(encoded.len() <= MAX_SEARCH_BYTES);
+        assert_eq!(parse_search(&encoded), Some(bounded));
+    }
+
+    #[test]
+    fn declared_language_uses_the_optional_extension_without_changing_six_columns() {
+        let article = Article {
+            title: "Introducción".into(),
+            item: Some("https://docs.python.org/es/3/tutorial/".into()),
+            language: Some("es-ES".into()),
+            sections: vec!["Listas".into()],
+            ..Article::default()
+        };
+        let mut out = Vec::new();
+        write_article(&mut out, &article).unwrap();
+        let text = String::from_utf8(out.clone()).unwrap();
+        let base = text.lines().next().unwrap();
+        assert_eq!(base.split('\t').count(), 6);
+        assert_eq!(parse_article(base).unwrap().language, None);
+        assert!(text.contains("|language=es\n"));
+        let back = read_articles(&out[..], 10).unwrap();
+        assert_eq!(back[0].language.as_deref(), Some("es"));
+        assert_eq!(back[0].sections, ["Listas"]);
+        assert!(parse_profiles("language=es").is_empty());
+        assert!(parse_facts("language=es").is_empty());
+        assert_eq!(
+            parse_profiles_line("profiles\tQ1\tlanguage=und")
+                .unwrap()
+                .language,
+            None
+        );
+        assert_eq!(
+            parse_profiles_line("profiles\tQ1\tlanguage=en-@@")
+                .unwrap()
+                .language,
+            None
+        );
+        let mismatched = format!("{base}\nprofiles\tQ1\tlanguage=de\n");
+        assert_eq!(
+            read_articles(mismatched.as_bytes(), 1).unwrap()[0].language,
+            None
+        );
+    }
+
+    #[test]
+    fn lexical_search_text_preserves_exact_names_and_splits_qualified_and_camel_symbols() {
+        let search = SearchContent {
+            symbols: [
+                "set_multiplayer_authority",
+                "Array.prototype.sort",
+                "std::vector",
+                "CrashLoopBackOff",
+                "HTTPResponse",
+            ]
+            .into_iter()
+            .map(|identifier| SearchSymbol {
+                identifier: identifier.into(),
+                anchor: None,
+            })
+            .collect(),
+            ..SearchContent::default()
+        };
+        let text = search.text();
+        for identifier in &search.symbols {
+            assert!(text.contains(&identifier.identifier));
+        }
+        for words in [
+            "set multiplayer authority",
+            "Array prototype sort",
+            "std vector",
+            "Crash Loop Back Off",
+            "HTTP Response",
+        ] {
+            assert!(text.contains(words), "{words}: {text}");
+        }
+    }
+
+    #[test]
+    fn leads_are_whole_sentences() {
+        let text = "The sternum or breastbone is a long flat bone located in the central part of the chest. It connects to the ribs via cartilage and forms the front of the rib cage, thus helping to protect the heart, lungs, and major blood vessels from injury. Shaped roughly like a necktie, it is one of the largest and longest flat bones of the body.";
+        let lead = lead_of(text).unwrap();
+        assert!(lead.ends_with("from injury."), "{lead}");
+        assert_eq!(
+            first_sentence(&lead),
+            "The sternum or breastbone is a long flat bone located in the central part of the chest."
+        );
+        assert_eq!(
+            first_sentence("John F. Kennedy was the 35th president of the U.S. He was born in Brookline, Mass. in 1917."),
+            "John F. Kennedy was the 35th president of the U.S. He was born in Brookline, Mass. in 1917."
+        );
+        assert_eq!(
+            first_sentence("St. Louis is a city in Missouri. It lies on the Mississippi."),
+            "St. Louis is a city in Missouri."
+        );
+        let long = "word ".repeat(100);
+        let cut = lead_of(&long).unwrap();
+        assert!(cut.ends_with("word…") && cut.chars().count() <= MAX_LEAD_CHARS + 1);
+        assert_eq!(lead_of("  "), None);
     }
 
     #[test]

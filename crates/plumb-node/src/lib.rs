@@ -27,11 +27,17 @@ use plumb_index::RankConfig;
 use tracing_subscriber::EnvFilter;
 
 pub mod about;
+pub mod build_info;
 pub mod cli;
+pub mod clicks;
 pub mod country;
 pub mod eval;
+pub mod eval_labels;
+pub mod experiments;
 pub mod findings;
 pub mod history;
+pub mod learn;
+pub mod map;
 pub mod mcp;
 pub mod meaning;
 pub mod node;
@@ -39,19 +45,31 @@ pub mod pages;
 pub mod places;
 pub mod plugins;
 pub mod storage;
+pub mod sync;
 pub mod tls;
+pub mod train_rank;
 pub mod web;
 pub mod websearch;
 
+mod assembly;
 mod crawl;
+mod dead;
+mod fact_trust;
 mod fetch;
 mod icons;
 mod ingest;
 mod limits;
+mod link_rank;
 pub mod news;
+mod outline;
 mod records;
+mod relations;
 mod run;
 mod search;
+pub mod sources;
+mod summaries;
+mod terms;
+mod top_sites;
 
 use cli::{Cli, Command};
 
@@ -84,23 +102,49 @@ pub fn init_logging() {
 
 /// Runs one `plumb` subcommand.
 pub fn run(cli: Cli) -> Result<()> {
+    set_up_allocator();
     limits::raise_open_file_limit();
     match cli.command {
+        Command::BuildInfo => {
+            println!("{}", serde_json::to_string(&build_info::current())?);
+            Ok(())
+        }
         Command::Run(args) => run::run(args),
         Command::FetchData(args) => fetch::run(args),
         Command::FetchPages(args) => fetch::run_pages(args),
+        Command::FetchMap(args) => map::fetch::run(args),
         Command::FetchProfiles(args) => fetch::run_profiles(args),
+        Command::FetchFacts(args) => fetch::run_facts(args),
+        Command::FetchLeads(args) => fetch::run_leads(args),
         Command::Ingest(args) => ingest::run(args),
         Command::Crawl(args) => crawl::run(args),
         Command::Index(args) => search::run_index(args),
         Command::Search(args) => search::run_search(args),
+        Command::Spelling(args) => search::run_spelling(&args),
         Command::Serve(args) => web::run(args),
         Command::Eval(args) => eval::run(args),
+        Command::CheckLabels(args) => eval_labels::run(args),
+        Command::TrainRank(args) => train_rank::run(args),
         Command::Embed(args) => meaning::run_embed(args),
+        Command::FetchText(args) => terms::run_fetch_text(args),
+        Command::Terms(args) => terms::run_terms(args),
+        Command::Summaries(args) => summaries::run(args),
         Command::RemoteControl(args) => run::remote_control(args),
         Command::Storage(args) => storage::run(args),
+        Command::DeadSites(args) => dead::run(&args),
+        Command::Experiments(args) => experiments::run(&args),
+        Command::ClickLabels(args) => clicks::run(&args),
+        Command::LinkRank(args) => link_rank::run(&args),
+        Command::FactTrust(args) => fact_trust::run(&args),
+        Command::Relations(args) => relations::run(&args),
+        Command::TopSites(args) => top_sites::run(&args),
         Command::Mcp(args) => mcp::run(args),
-        Command::TryPlugin(args) => plugins::try_plugin(&args.plugin, &args.query.join(" ")),
+        Command::TryPlugin(args) => plugins::try_plugin(
+            &args.plugin,
+            &args.query.join(" "),
+            args.act.as_deref(),
+            args.annotate.as_deref(),
+        ),
         Command::Healthcheck(args) => healthcheck(&args),
     }
 }
@@ -226,32 +270,141 @@ pub(crate) fn sync_parent_dir(path: &Path) {
     }
 }
 
+/// Arenas glibc's allocator keeps at most, unless `MALLOC_ARENA_MAX` or
+/// `GLIBC_TUNABLES` says otherwise. By default a thread may get an arena of
+/// its own, up to eight per CPU, and what a thread frees stays in its arena
+/// for that arena's threads: half an hour after starting, plumbsearch.org
+/// (2.8 million sites, 8 GB of memory) held about 3.5 GB in 75 arena heaps,
+/// and the system was swapping.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+const MAX_ARENAS: std::os::raw::c_int = 4;
+
+/// Allocations at least this big get memory of their own from the system,
+/// which goes back as soon as they are freed, unless
+/// `MALLOC_MMAP_THRESHOLD_` or `GLIBC_TUNABLES` says otherwise. glibc
+/// starts at 128 KiB but raises it to the size of each such allocation
+/// freed, up to 32 MiB, after which big buffers stay in the arenas when
+/// freed.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+const MMAP_THRESHOLD: std::os::raw::c_int = 4 << 20;
+
+/// Sets glibc's allocator up for a node that runs for weeks: at most
+/// [`MAX_ARENAS`] arenas and a fixed [`MMAP_THRESHOLD`]. Building an index
+/// of 2.8 million sites then peaks at 1.17 GB instead of 1.31 GB, takes no
+/// longer, and leaves 5 MB behind instead of 140 MB once freed memory is
+/// handed back. Runs before the node starts its threads. Does nothing on
+/// other systems.
+pub(crate) fn set_up_allocator() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        use std::os::raw::c_int;
+        const M_MMAP_THRESHOLD: c_int = -3;
+        const M_ARENA_MAX: c_int = -8;
+        extern "C" {
+            fn mallopt(param: c_int, value: c_int) -> c_int;
+        }
+        let tunables = std::env::var("GLIBC_TUNABLES").unwrap_or_default();
+        let set = |variable: &str, tunable: &str, param: c_int, value: c_int| {
+            if std::env::var_os(variable).is_none() && !tunables.contains(tunable) {
+                // SAFETY: mallopt only changes the allocator's settings,
+                // and glibc lets any thread call it at any time.
+                unsafe {
+                    mallopt(param, value);
+                }
+            }
+        };
+        set("MALLOC_ARENA_MAX", "arena_max", M_ARENA_MAX, MAX_ARENAS);
+        set(
+            "MALLOC_MMAP_THRESHOLD_",
+            "mmap_threshold",
+            M_MMAP_THRESHOLD,
+            MMAP_THRESHOLD,
+        );
+    }
+}
+
 /// Hands memory that big jobs (loading records, building an index) freed
 /// back to the system. glibc keeps freed memory in its arenas for reuse, so
 /// a long-running node would otherwise sit on it between refreshes: idle
 /// after indexing 300,000 sites, a node held about 390 MB without this and
-/// 60 to 90 MB with it. Does nothing on other systems.
+/// 60 to 90 MB with it. Logs how much went back when it is 100 MB or more.
+/// Does nothing on other systems.
 pub(crate) fn release_freed_memory() {
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     {
         extern "C" {
             fn malloc_trim(pad: usize) -> std::os::raw::c_int;
         }
+        let before = resident_anonymous_mb();
         // SAFETY: malloc_trim only gives free memory back to the system, and
         // glibc lets any thread call it at any time.
         unsafe {
             malloc_trim(0);
         }
+        if let (Some(before), Some(after)) = (before, resident_anonymous_mb()) {
+            let released = before.saturating_sub(after);
+            if released >= RELEASED_WORTH_LOGGING_MB {
+                tracing::info!(
+                    "handed {released} MB of freed memory back to the system ({after} MB still resident)"
+                );
+            }
+        }
     }
 }
 
-/// `dir/records.jsonl` -> `dir/.records.jsonl.<pid>.tmp`.
-fn temp_path_for(path: &Path) -> PathBuf {
+/// Memory handed back that [`release_freed_memory`] logs: after an index
+/// build, not after every small job.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+const RELEASED_WORTH_LOGGING_MB: u64 = 100;
+
+/// The process's resident anonymous memory (`RssAnon`) in MB: what it
+/// allocated and has not handed back, less what is swapped out.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn resident_anonymous_mb() -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let line = status.lines().find(|line| line.starts_with("RssAnon:"))?;
+    let kb: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
+    Some(kb / 1024)
+}
+
+/// Has the calling thread, and the threads it starts from now on, yield
+/// the CPU to the node's other threads: index builds and embedding run this
+/// way, so searches answer at once on a busy server. On Linux the priority
+/// (nice value) belongs to the thread; elsewhere this does nothing.
+pub(crate) fn lower_thread_priority() {
+    #[cfg(target_os = "linux")]
+    {
+        extern "C" {
+            fn setpriority(
+                which: std::os::raw::c_int,
+                who: std::os::raw::c_uint,
+                prio: std::os::raw::c_int,
+            ) -> std::os::raw::c_int;
+        }
+        const PRIO_PROCESS: std::os::raw::c_int = 0;
+        // SAFETY: setpriority only changes the scheduling priority; with
+        // `who` 0 Linux applies it to the calling thread alone.
+        unsafe {
+            setpriority(PRIO_PROCESS, 0, BACKGROUND_NICE);
+        }
+    }
+}
+
+/// The nice value of [`lower_thread_priority`]'s threads (0 is normal, 19
+/// the lowest).
+#[cfg(target_os = "linux")]
+const BACKGROUND_NICE: std::os::raw::c_int = 10;
+
+/// `dir/records.jsonl` -> `dir/.records.jsonl.<pid>-<n>.tmp`: `n` counts
+/// up, so two threads writing the same file never share a temporary one.
+pub(crate) fn temp_path_for(path: &Path) -> PathBuf {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "records".to_string());
-    path.with_file_name(format!(".{name}.{}.tmp", std::process::id()))
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    path.with_file_name(format!(".{name}.{}-{n}.tmp", std::process::id()))
 }
 
 #[cfg(test)]
@@ -294,5 +447,6 @@ mod tests {
             .unwrap()
             .to_string_lossy()
             .starts_with(".records.jsonl."));
+        assert_ne!(tmp, temp_path_for(Path::new("data/records.jsonl")));
     }
 }

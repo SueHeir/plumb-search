@@ -32,17 +32,28 @@ plumbsearch.org {
 		-Server
 	}
 
-	# The node's public pages: search, its JSON API, private search (the
-	# browser fetches buckets and ranks them itself), network search and the
-	# MCP server for AI assistants.
+	# The node's public pages: search, its JSON API, About you and its
+	# first-run version /welcome (kept in the visitor's own cookie), private
+	# search (the browser fetches buckets and ranks them itself), network
+	# search and the MCP server for AI assistants.
 	# Its dashboard (/app) stays private to the server.
-	@node path /search /api/search /mcp /api/status /opensearch.xml /private /private/* /api/buckets /api/buckets/* /network /api/network/search /api/oblivious/targets /api/oblivious/forward/*
+	@node path /search /api/search /api/recent /mcp /api/status /about /welcome /welcome/* /private /private/* /api/buckets /api/buckets/* /network /api/network/search /api/oblivious/targets /api/oblivious/forward/*
+	handle /opensearch.xml {
+		root * /site/public
+		file_server
+	}
+
 	handle @node {
 		reverse_proxy 127.0.0.1:8080
 	}
 
+	# Routes kept only on this server, outside git, such as one to another
+	# node of the owner's. A glob, so with no such file there is nothing to
+	# import.
+	import /site/local/*.caddy
+
 	handle {
-		header Content-Security-Policy "default-src 'none'; style-src 'self'; img-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
+		header Content-Security-Policy "default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'self'; img-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
 		root * /site/public
 		# /privacy serves privacy.html, and so on.
 		try_files {path} {path}.html

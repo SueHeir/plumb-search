@@ -14,6 +14,12 @@
 //! tower", "github". It shows the article's short description, the
 //! official site with the country this node knows it for, and links to
 //! Wikipedia and Wikidata. Nothing in it is loaded from elsewhere.
+//!
+//! When the article's lead is held (`plumb fetch-leads`), the box shows
+//! its first sentences too, and a query that asks what something is
+//! ("what is a manatee", "define photosynthesis", "who was ada lovelace")
+//! is answered above the results with the first sentence of the article
+//! the query names ([`definition_answer`]).
 
 use std::fmt::Write as _;
 use std::time::{Duration, Instant};
@@ -21,7 +27,7 @@ use std::time::{Duration, Instant};
 use plumb_answer::{Answer, Rates, ECB_RATES_URL};
 use plumb_core::profiles::{services_asked, shown_profiles};
 use plumb_core::truncate_chars;
-use plumb_index::pages::{Page, PlacedPage, WIKIDATA_SET};
+use plumb_index::pages::{Page, PlacedPage, FILMS_SET, MUSIC_SET, WIKIDATA_SET};
 use plumb_index::Hit;
 use serde::Serialize;
 use tokio::sync::Mutex;
@@ -117,6 +123,9 @@ pub(crate) struct InfoBox {
     pub title: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// The first sentences of the Wikipedia article.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lead: Option<String>,
     /// The Wikipedia article, if it is about one (an item of the
     /// `wikidata` set has none).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -153,6 +162,12 @@ pub(crate) struct ProfileAnswer {
     pub url: String,
     /// Its own account, rather than a listing (a film on IMDb).
     pub official: bool,
+    /// Where the link comes from: "Wikidata", "MusicBrainz".
+    pub source: &'static str,
+    /// A search of the service for it, as no page of it is known: a
+    /// song's lyrics searched on Genius.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub search: bool,
     /// The article, for the info box beside it.
     #[serde(skip)]
     pub page: Page,
@@ -165,11 +180,18 @@ pub(crate) struct Extras {
     pub profile: Option<ProfileAnswer>,
     /// What the node's plugins found.
     pub plugins: Vec<crate::plugins::PluginResults>,
+    /// What the node's plugins say about its own results, by address.
+    pub plugin_notes: crate::plugins::ResultNotes,
+    /// The token for the forms of the plugins' buttons, when the page is
+    /// for the node's owner and some plugin has buttons.
+    pub plugin_token: Option<String>,
+    /// Links to the plugins this search fits but did not run.
+    pub plugin_offers: Vec<crate::plugins::Offer>,
 }
 
 /// Whether a Wikipedia article lists the pages a name could mean rather
 /// than being about one thing.
-fn is_disambiguation(title: &str, description: Option<&str>) -> bool {
+pub(super) fn is_disambiguation(title: &str, description: Option<&str>) -> bool {
     title.ends_with("(disambiguation)")
         || description.is_some_and(|d| {
             let d = d.to_lowercase();
@@ -177,27 +199,79 @@ fn is_disambiguation(title: &str, description: Option<&str>) -> bool {
         })
 }
 
-/// Whether an info box can be about `page`: a Wikipedia article, or a
-/// Wikidata item with profiles and no article.
+/// Whether an info box can be about `page`: a Wikipedia article, a
+/// Wikidata item with profiles and no article, or a film or show.
 fn is_about_one_thing(page: &Page) -> bool {
-    page.set.starts_with("wikipedia-") || page.set == WIKIDATA_SET
+    page.set.starts_with("wikipedia-") || page.set == WIKIDATA_SET || page.set == FILMS_SET
 }
 
 /// The info box for results `sites` and `pages` (as placed among them),
 /// if one article is clearly what the query is about.
+///
+/// When the first result is a well-known or official site the query names
+/// in full, and no article named by the query is listed above it, the box is about that site's article or none: "zoom" is
+/// zoom.us, not the 2006 film called Zoom, and "tesla" is tesla.com, not
+/// the band. The article about the site is listed under it, named by the
+/// query or not ("Zoom Video Communications").
 pub(crate) fn info_box(sites: &[Hit], pages: &[PlacedPage]) -> Option<InfoBox> {
-    let top_site = sites.first().map(|hit| hit.domain.as_str());
-    let placed = pages.iter().find(|placed| {
+    info_from_page(page_about(sites, pages)?, sites)
+}
+
+/// The Wikipedia article or Wikidata item that results `sites` and
+/// `pages` (as placed among them) are clearly about, as [`info_box`]
+/// picks it.
+pub(crate) fn page_about<'a>(sites: &[Hit], pages: &'a [PlacedPage]) -> Option<&'a Page> {
+    let top = sites.first();
+    let top_site = top.map(|hit| hit.domain.as_str());
+    // Unless an article named by the query is listed first, above every
+    // site: then it is what the query is about ("marie curie").
+    let page_leads = pages
+        .iter()
+        .any(|placed| placed.hit.named && placed.under.is_none() && placed.at == 0);
+    let site_wins = !page_leads
+        && top.is_some_and(|hit| {
+            hit.named && (hit.official || hit.link_score >= plumb_index::WELL_KNOWN_LINK_SCORE)
+        });
+    let about_one_thing = |placed: &&PlacedPage| {
         let page = &placed.hit.page;
-        placed.hit.named
-            && is_about_one_thing(page)
+        is_about_one_thing(page)
+            // A film or show only when asked for as one: "dune 2021".
+            && (page.set != FILMS_SET || placed.hit.whole)
             && !is_disambiguation(&page.title, page.description.as_deref())
-            && match &placed.under {
-                Some(under) => Some(under.as_str()) == top_site,
-                None => placed.at <= 1,
-            }
-    })?;
-    info_from_page(&placed.hit.page, sites)
+    };
+    let under_top =
+        |placed: &PlacedPage| placed.under.is_some() && placed.under.as_deref() == top_site;
+    let placed = if site_wins {
+        pages
+            .iter()
+            .filter(about_one_thing)
+            .find(|placed| under_top(placed))?
+    } else {
+        // The best named article, wherever it is listed: a namesake never
+        // stands in for it ("tim cook" is not the historian, "better call
+        // saul" not the episode). It gets the box only when listed near
+        // the top, alone or under the first site.
+        let best = pages
+            .iter()
+            .filter(|placed| placed.hit.named)
+            .filter(about_one_thing)
+            .reduce(|best, placed| {
+                if placed.hit.score > best.hit.score {
+                    placed
+                } else {
+                    best
+                }
+            })?;
+        let listed_high = match &best.under {
+            Some(_) => under_top(best),
+            None => best.at <= 1,
+        };
+        if !listed_high {
+            return None;
+        }
+        best
+    };
+    Some(&placed.hit.page)
 }
 
 /// The info box about the Wikipedia article or Wikidata item `page`.
@@ -205,11 +279,12 @@ pub(crate) fn info_from_page(page: &Page, sites: &[Hit]) -> Option<InfoBox> {
     if !is_about_one_thing(page) {
         return None;
     }
-    let article = if page.set == WIKIDATA_SET {
-        None
-    } else {
-        Some(http_url(&page.url)?)
-    };
+    let article =
+        if page.set == WIKIDATA_SET || (page.set == FILMS_SET && !page.is_film_with_article()) {
+            None
+        } else {
+            Some(http_url(&page.url)?)
+        };
     let site = page
         .site
         .clone()
@@ -225,6 +300,10 @@ pub(crate) fn info_from_page(page: &Page, sites: &[Hit]) -> Option<InfoBox> {
     Some(InfoBox {
         title: page.title.clone(),
         description: page.description.clone().filter(|d| !d.trim().is_empty()),
+        lead: article
+            .as_ref()
+            .and(page.lead.clone())
+            .filter(|lead| !lead.trim().is_empty()),
         article,
         wikidata: page
             .item
@@ -248,31 +327,78 @@ pub(crate) fn info_from_page(page: &Page, sites: &[Hit]) -> Option<InfoBox> {
     })
 }
 
+/// What to search for to find whose profile `query` asks for: the words
+/// before the service ("mrbeast" of "mrbeast youtube"), and for lyrics
+/// those words as a song too, since a song is only found when asked for
+/// as one ("bohemian rhapsody song" for "bohemian rhapsody lyrics").
+pub(crate) fn profile_lookups(query: &str) -> Vec<String> {
+    let Some((services, name)) = services_asked(query) else {
+        return Vec::new();
+    };
+    let mut lookups = vec![name.clone()];
+    if services.iter().any(|s| s.key == "genius-song") {
+        lookups.push(format!("{name} song"));
+    }
+    lookups
+}
+
 /// The official profile `query` asks for ("mrbeast youtube", "valve
-/// steam"), when the words before the service name a Wikipedia article in
-/// `pages` (found for those words) whose item has a profile there.
+/// steam", "bohemian rhapsody lyrics"), when the words before the service
+/// name a Wikipedia article or a song or album in `pages` (found for those
+/// words) that has a profile there. A song with no page on Genius has its
+/// lyrics searched for there, by its title and artist.
 pub(crate) fn profile_answer(query: &str, pages: &[PlacedPage]) -> Option<ProfileAnswer> {
-    let (services, _) = services_asked(query)?;
     pages
         .iter()
-        .filter(|placed| placed.hit.named && is_about_one_thing(&placed.hit.page))
-        .find_map(|placed| {
-            let page = &placed.hit.page;
-            // A handle before a channel id: services come in that order.
-            let (service, url) = services.iter().find_map(|service| {
-                page.profiles
-                    .iter()
-                    .filter(|p| p.service == service.key)
-                    .find_map(|p| Some((*service, service.url(&p.id)?)))
-            })?;
-            Some(ProfileAnswer {
-                of: page.title.clone(),
-                service: service.name,
-                url,
-                official: service.official,
-                page: page.clone(),
-            })
+        .filter(|placed| {
+            placed.hit.named
+                && (is_about_one_thing(&placed.hit.page) || placed.hit.page.set == MUSIC_SET)
         })
+        .find_map(|placed| profile_answer_from_page(query, &placed.hit.page))
+}
+
+/// Renders a profile only after the caller has resolved its entity.
+pub(crate) fn profile_answer_from_page(query: &str, page: &Page) -> Option<ProfileAnswer> {
+    let (services, _) = services_asked(query)?;
+    let source = if page.set == MUSIC_SET {
+        "MusicBrainz"
+    } else {
+        "Wikidata"
+    };
+    // A handle before a channel id: services come in that order.
+    let found = services.iter().find_map(|service| {
+        page.profiles
+            .iter()
+            .filter(|p| p.service == service.key)
+            .find_map(|p| Some((*service, service.url(&p.id)?)))
+    });
+    if let Some((service, url)) = found {
+        return Some(ProfileAnswer {
+            of: page.title.clone(),
+            service: service.name,
+            url,
+            official: service.official,
+            source,
+            search: false,
+            page: page.clone(),
+        });
+    }
+    let genius = services.iter().find(|s| s.key == "genius-song")?;
+    if !page.is_song() {
+        return None;
+    }
+    // "Hey Jude The Beatles", the song's title and artist.
+    let words = page.aliases.first().unwrap_or(&page.title);
+    let words: String = url::form_urlencoded::byte_serialize(words.as_bytes()).collect();
+    Some(ProfileAnswer {
+        of: page.title.clone(),
+        service: genius.name,
+        url: format!("https://genius.com/search?q={words}"),
+        official: false,
+        source,
+        search: true,
+        page: page.clone(),
+    })
 }
 
 /// The profile asked for, as the first thing on the page.
@@ -284,17 +410,32 @@ pub(crate) fn render_profile(out: &mut String, profile: &ProfileAnswer, icon: Op
         "<section class=\"pf\" aria-label=\"{kind}\"><a class=\"r\" href=\"{}\" \
          rel=\"noreferrer\"><span class=\"site\">{}<span class=\"sn\"><span class=\"dn\">{}</span>\
          <span class=\"u\">{}</span></span></span><span class=\"t\">{} on {}</span></a>\
-         <p class=\"m\">{kind}, from Wikidata</p></section>",
+         <p class=\"m\">{note}</p></section>",
         escape_html(&profile.url),
         super::site_badge(&domain, icon),
         escape_html(profile.service),
         escape_html(&shown),
         escape_html(&truncate_chars(&profile.of, 120)),
         escape_html(profile.service),
-        kind = if profile.official {
+        kind = if profile.search {
+            "Search"
+        } else if profile.official {
             "Official profile"
         } else {
             "Listing"
+        },
+        note = if profile.search {
+            format!("Searched for on {}", escape_html(profile.service))
+        } else {
+            format!(
+                "{}, from {}",
+                if profile.official {
+                    "Official profile"
+                } else {
+                    "Listing"
+                },
+                profile.source
+            )
         },
     );
 }
@@ -311,6 +452,9 @@ pub(crate) fn render_info_box(out: &mut String, info: &InfoBox) {
     );
     if let Some(description) = &info.description {
         let _ = write!(out, "<p class=\"ibd\">{}</p>", escape_html(description));
+    }
+    if let Some(lead) = &info.lead {
+        let _ = write!(out, "<p class=\"ibx\">{}</p>", escape_html(lead));
     }
     let mut facts = String::new();
     if let Some(site) = &info.site {
@@ -352,8 +496,8 @@ pub(crate) fn render_info_box(out: &mut String, info: &InfoBox) {
     }
     // A description from a Wikipedia article is under its licence, which
     // asks for credit; Wikidata's are CC0.
-    let licence =
-        (info.article.is_some() && info.description.is_some()).then_some(WIKIPEDIA_LICENCE);
+    let licence = (info.article.is_some() && (info.description.is_some() || info.lead.is_some()))
+        .then_some(WIKIPEDIA_LICENCE);
     let links: Vec<String> = [
         (info.article.as_deref(), "Wikipedia"),
         (licence, "CC BY-SA"),
@@ -373,6 +517,494 @@ pub(crate) fn render_info_box(out: &mut String, info: &InfoBox) {
     out.push_str("</aside>\n");
 }
 
+/// The pages of `pages` (found for a subject's words) whose facts are the
+/// subject's, in the order to try them: the pages it names, those with a
+/// plain title first (Wikipedia's main sense of a name: "Australia", the
+/// country, before "Australia (continent)"), then those listed under the
+/// site it names, each about one thing and none a disambiguation page.
+pub(crate) fn fact_pages(pages: &[PlacedPage]) -> impl Iterator<Item = &PlacedPage> {
+    let qualified = |placed: &&PlacedPage| placed.hit.page.title.trim_end().ends_with(')');
+    let named = pages
+        .iter()
+        .filter(|placed| placed.hit.named)
+        .filter(move |placed| !qualified(placed))
+        .chain(
+            pages
+                .iter()
+                .filter(|placed| placed.hit.named)
+                .filter(move |placed| qualified(placed)),
+        );
+    let of_sites = pages
+        .iter()
+        .filter(|placed| !placed.hit.named && placed.under.is_some());
+    named
+        .chain(of_sites)
+        .filter(|placed| is_about_one_thing(&placed.hit.page))
+        .filter(|placed| {
+            !is_disambiguation(
+                &placed.hit.page.title,
+                placed.hit.page.description.as_deref(),
+            )
+        })
+}
+
+/// Resolving an entity does not inspect whether it has the requested
+/// fact. A missing fact must never select a namesake instead.
+pub(crate) enum EntityResolution<'a> {
+    Resolved(&'a Page),
+    Ambiguous(Vec<&'a Page>),
+    Unresolved,
+}
+
+pub(crate) fn resolve_entity<'a>(
+    subject: &str,
+    candidates: &'a [plumb_index::pages::PageHit],
+    kinds: Option<&[plumb_core::facts::FactKind]>,
+) -> EntityResolution<'a> {
+    use plumb_core::facts::FactKind;
+    let key = |text: &str| plumb_core::collapse_whitespace(text).to_lowercase();
+    let subject = key(subject);
+    let mut seen = std::collections::HashSet::new();
+    let mut candidates: Vec<_> = candidates
+        .iter()
+        .filter(|hit| {
+            is_about_one_thing(&hit.page)
+                && !is_disambiguation(&hit.page.title, hit.page.description.as_deref())
+                && hit.page.item.as_deref().is_some_and(|id| {
+                    id.starts_with('Q')
+                        && id.len() > 1
+                        && id[1..].bytes().all(|b| b.is_ascii_digit())
+                })
+                && seen.insert(hit.page.item.as_deref())
+        })
+        .collect();
+    // CEO/headquarters requests supply an organization type, independently
+    // of imported property availability. Founding properties do not:
+    // settlements and other entities can have a founder or inception too.
+    let company = kinds.is_some_and(|kinds| {
+        kinds
+            .iter()
+            .any(|kind| matches!(kind, FactKind::Ceo | FactKind::Headquarters))
+    });
+    if company {
+        let organizations: Vec<_> = candidates
+            .iter()
+            .copied()
+            .filter(|hit| {
+                let description = key(hit.page.description.as_deref().unwrap_or(""));
+                let words: Vec<_> = description.split(|c: char| !c.is_alphabetic()).collect();
+                description.contains("record label")
+                    || [
+                        "company",
+                        "corporation",
+                        "organization",
+                        "organisation",
+                        "business",
+                        "bank",
+                        "university",
+                        "nonprofit",
+                    ]
+                    .iter()
+                    .any(|word| words.contains(word))
+            })
+            .collect();
+        if !organizations.is_empty() {
+            candidates = organizations;
+        }
+    }
+    if candidates.is_empty() {
+        return EntityResolution::Unresolved;
+    }
+    let legal_name = |title: &str| {
+        let title = key(title);
+        for suffix in [
+            ", inc.",
+            " inc.",
+            ", inc",
+            " inc",
+            " corporation",
+            " corp.",
+            " ltd.",
+            " limited",
+        ] {
+            if let Some(bare) = title.strip_suffix(suffix) {
+                return bare.to_string();
+            }
+        }
+        title
+    };
+    if kinds.is_some_and(|kinds| {
+        kinds
+            .iter()
+            .any(|kind| matches!(kind, FactKind::Founder | FactKind::Founded))
+    }) {
+        // Compact records lack structured entity types. A founding
+        // question cannot prefer the plain title or a legal company name
+        // over another entity known by the same name. Ask for clarification
+        // rather than infer a type from a special-case description word.
+        let named: Vec<_> = candidates
+            .iter()
+            .copied()
+            .filter(|hit| {
+                key(&hit.page.title) == subject
+                    || legal_name(&hit.page.title) == subject
+                    || hit.named
+                    || hit.whole
+            })
+            .collect();
+        if named.len() > 1 {
+            return EntityResolution::Ambiguous(named.iter().map(|hit| &hit.page).collect());
+        }
+    }
+    let exact: Vec<_> = candidates
+        .iter()
+        .copied()
+        .filter(|hit| key(&hit.page.title) == subject)
+        .collect();
+    if exact.len() == 1 {
+        return EntityResolution::Resolved(&exact[0].page);
+    }
+    let named: Vec<_> = candidates
+        .iter()
+        .copied()
+        .filter(|hit| legal_name(&hit.page.title) == subject)
+        .collect();
+    if named.len() == 1 {
+        return EntityResolution::Resolved(&named[0].page);
+    }
+
+    let named: Vec<_> = candidates.iter().copied().filter(|hit| hit.named).collect();
+    if !named.is_empty() {
+        candidates = named;
+    } else {
+        // A type hint cannot validate a partial namesake: "Pear" is
+        // not "Pear Records" just because it is the only company found.
+        candidates.retain(|hit| hit.whole);
+    }
+    match candidates.as_slice() {
+        [] => EntityResolution::Unresolved,
+        [hit] => EntityResolution::Resolved(&hit.page),
+        _ => EntityResolution::Ambiguous(candidates.iter().map(|hit| &hit.page).collect()),
+    }
+}
+
+/// Legacy displayed-page selection retained for evaluator compatibility.
+/// User-facing adapters resolve entities before rendering their facts.
+pub(crate) fn fact_answer(
+    asked: &plumb_core::facts::FactQuestion,
+    pages: &[PlacedPage],
+    now: u64,
+) -> Option<plumb_answer::Answer> {
+    fact_pages(pages).find_map(|placed| fact_answer_from_page(asked, &placed.hit.page, now))
+}
+
+/// Renders facts only after the caller has resolved an entity.
+pub(crate) fn fact_answer_from_page(
+    asked: &plumb_core::facts::FactQuestion,
+    page: &Page,
+    now: u64,
+) -> Option<plumb_answer::Answer> {
+    use plumb_core::facts::FactKind;
+    let kind = asked
+        .kinds
+        .iter()
+        .copied()
+        .find(|kind| page.facts.iter().any(|fact| fact.kind == *kind))?;
+    let values: Vec<&str> = page
+        .facts
+        .iter()
+        .filter(|fact| fact.kind == kind)
+        .map(|fact| fact.value.as_str())
+        .collect();
+    let date_of = |kind: FactKind| {
+        page.facts
+            .iter()
+            .find(|fact| fact.kind == kind)
+            .and_then(|fact| plumb_core::facts::Date::parse(&fact.value))
+    };
+    let (question, answer, note) = if asked.age && kind == FactKind::Born {
+        let born = date_of(FactKind::Born)?;
+        match date_of(FactKind::Died) {
+            Some(died) => (
+                format!("Age of {}", page.title),
+                format!("Died at {}", born.years_until(&died)?),
+                Some(format!("{} to {}", born.display(), died.display())),
+            ),
+            None => (
+                format!("Age of {}", page.title),
+                format!("{} years old", born.years_until(&date_from_unix(now))?),
+                Some(format!("Born {}", born.display())),
+            ),
+        }
+    } else {
+        let (answer, note) = fact_text(kind, &values)?;
+        (kind.question(&page.title), answer, note)
+    };
+    let from = "from Wikidata";
+    Some(plumb_answer::Answer {
+        kind: plumb_answer::Kind::Fact,
+        question,
+        answer,
+        note: Some(match note {
+            Some(note) => format!("{note}, {from}"),
+            None => "From Wikidata".to_string(),
+        }),
+    })
+}
+
+/// Words before a name that ask what it is: "what is a" of "what is a
+/// manatee".
+const DEFINITION_LEADS: &[&str] = &[
+    "what is a ",
+    "what is an ",
+    "what is the ",
+    "what is ",
+    "what are ",
+    "what was ",
+    "what were ",
+    "who is ",
+    "who was ",
+    "who were ",
+    "define ",
+    "definition of ",
+    "meaning of ",
+    "tell me about ",
+];
+
+/// Words after a name that ask what it is: " definition" of
+/// "photosynthesis definition".
+const DEFINITION_TAILS: &[&str] = &[" definition", " meaning", " defined", " explained"];
+
+/// The name `query` asks what it is: "manatee" of "what is a manatee?",
+/// "photosynthesis" of "define photosynthesis". `None` for a query that
+/// asks nothing so, or more than that ("what is the capital of france"
+/// asks a fact, "what is my ip" about the searcher).
+pub(crate) fn definition_asked(query: &str) -> Option<String> {
+    let q = plumb_core::collapse_whitespace(query.trim().trim_end_matches(['?', '.', '!']))
+        .to_lowercase();
+    let name = DEFINITION_LEADS
+        .iter()
+        .find_map(|lead| q.strip_prefix(lead))
+        .or_else(|| {
+            DEFINITION_TAILS
+                .iter()
+                .find_map(|tail| q.strip_suffix(tail))
+        })?
+        .trim();
+    let words: Vec<&str> = name.split_whitespace().collect();
+    // A name, not a question of its own.
+    if words.is_empty()
+        || words.len() > 6
+        || words.iter().any(|word| {
+            matches!(
+                *word,
+                "my" | "your"
+                    | "i"
+                    | "you"
+                    | "we"
+                    | "of"
+                    | "in"
+                    | "for"
+                    | "to"
+                    | "best"
+                    | "difference"
+            )
+        })
+    {
+        return None;
+    }
+    Some(name.to_string())
+}
+
+/// The first sentence of the article that `pages` (found for the name a
+/// query asks about, [`definition_asked`]) name, when its lead is held:
+/// "The West Indian manatee is the largest surviving member of the order
+/// Sirenia." Only a page the name names in full, about one thing and not
+/// a disambiguation page, answers.
+pub(crate) fn definition_answer(pages: &[PlacedPage]) -> Option<plumb_answer::Answer> {
+    let placed = fact_pages(pages).find(|placed| placed.hit.named)?;
+    let page = &placed.hit.page;
+    if !page.is_article() {
+        return None;
+    }
+    let lead = page.lead.as_deref()?;
+    let sentence = plumb_core::article::first_sentence(lead).trim();
+    if sentence.is_empty() {
+        return None;
+    }
+    Some(plumb_answer::Answer {
+        kind: plumb_answer::Kind::Definition,
+        question: page.title.clone(),
+        answer: sentence.to_string(),
+        note: Some("From Wikipedia, CC BY-SA".to_string()),
+    })
+}
+
+/// Whether `query` asks what a word means rather than what a thing is:
+/// "define anadromous", "prioritize meaning". Such a query is answered
+/// from Wiktionary first, others from Wikipedia first.
+pub(crate) fn asks_word(query: &str) -> bool {
+    let q = query.to_lowercase();
+    q.split_whitespace()
+        .any(|word| matches!(word, "define" | "definition" | "meaning" | "means" | "mean"))
+}
+
+/// What the Wiktionary word `page` means, as an answer: "(adjective) Of
+/// fish, migrating up rivers from the sea to breed in fresh water."
+pub(crate) fn word_answer(page: &Page) -> Option<plumb_answer::Answer> {
+    let meaning = page.description.as_deref()?.trim();
+    (!meaning.is_empty()).then(|| plumb_answer::Answer {
+        kind: plumb_answer::Kind::Definition,
+        question: page.title.clone(),
+        answer: meaning.to_string(),
+        note: Some("From Wiktionary, CC BY-SA".to_string()),
+    })
+}
+
+/// A fact's values as shown, and a note: "27,204,809" and "counted in
+/// 2024".
+pub(crate) fn fact_text(
+    kind: plumb_core::facts::FactKind,
+    values: &[&str],
+) -> Option<(String, Option<String>)> {
+    use plumb_core::facts::{Date, ValueType};
+    let first = *values.first()?;
+    Some(match kind.value_type() {
+        ValueType::Item => (join_names(values), None),
+        ValueType::Time => (Date::parse(first)?.display(), None),
+        ValueType::Coordinates => {
+            let (lat, lon) = plumb_core::facts::coordinates(first)?;
+            let (ns, ew) = (
+                if lat < 0.0 { 'S' } else { 'N' },
+                if lon < 0.0 { 'W' } else { 'E' },
+            );
+            (
+                format!(
+                    "{}° {ns}, {}° {ew}",
+                    group_digits(lat.abs(), 4),
+                    group_digits(lon.abs(), 4)
+                ),
+                None,
+            )
+        }
+        ValueType::Quantity => {
+            let (number, year) = first.split_once(';').unwrap_or((first, ""));
+            let amount: f64 = number.parse().ok()?;
+            match kind {
+                plumb_core::facts::FactKind::Population => (
+                    group_digits(amount.round(), 0),
+                    (!year.is_empty()).then(|| format!("Counted in {year}")),
+                ),
+                plumb_core::facts::FactKind::AtomicNumber => (group_digits(amount, 0), None),
+                plumb_core::facts::FactKind::OrbitalPeriod => {
+                    let days = amount / 86_400.0;
+                    let years = days / 365.25;
+                    let text = if days < 1.0 {
+                        format!("{} hours", group_digits(amount / 3600.0, 2))
+                    } else if years < 2.0 {
+                        format!("{} days", group_digits(days, 2))
+                    } else {
+                        format!(
+                            "{} years ({} days)",
+                            group_digits(years, 2),
+                            group_digits(days, 0)
+                        )
+                    };
+                    (text, None)
+                }
+                plumb_core::facts::FactKind::Radius if amount >= 1000.0 => {
+                    let km = amount / 1000.0;
+                    let digits = if km >= 100.0 { 0 } else { 2 };
+                    (
+                        format!(
+                            "{} km ({} mi)",
+                            group_digits(km, digits),
+                            group_digits(km / 1.609_344, digits)
+                        ),
+                        None,
+                    )
+                }
+                plumb_core::facts::FactKind::Area => {
+                    let km2 = amount / 1e6;
+                    let digits = if km2 >= 100.0 { 0 } else { 2 };
+                    (
+                        format!(
+                            "{} km² ({} sq mi)",
+                            group_digits(km2, digits),
+                            group_digits(km2 * 0.386_102, digits)
+                        ),
+                        None,
+                    )
+                }
+                _ => {
+                    let digits = if amount >= 100.0 {
+                        usize::from(amount.fract() != 0.0) * 2
+                    } else {
+                        2
+                    };
+                    (
+                        format!(
+                            "{} m ({} ft)",
+                            group_digits(amount, digits),
+                            group_digits(amount * 3.280_84, 0)
+                        ),
+                        None,
+                    )
+                }
+            }
+        }
+    })
+}
+
+/// "A", "A and B", "A, B and C".
+fn join_names(names: &[&str]) -> String {
+    match names {
+        [] => String::new(),
+        [one] => (*one).to_string(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
+/// `x` with `digits` decimals (trailing zeros dropped) and its whole part
+/// in groups of three: "8,848.86", "27,204,809".
+fn group_digits(x: f64, digits: usize) -> String {
+    let text = format!("{:.*}", digits, x.abs());
+    let (whole, fraction) = text.split_once('.').unwrap_or((&text, ""));
+    let mut grouped = String::new();
+    for (i, c) in whole.chars().enumerate() {
+        if i > 0 && (whole.len() - i) % 3 == 0 {
+            grouped.push(',');
+        }
+        grouped.push(c);
+    }
+    let fraction = fraction.trim_end_matches('0');
+    let sign = if x < 0.0 { "-" } else { "" };
+    if fraction.is_empty() {
+        format!("{sign}{grouped}")
+    } else {
+        format!("{sign}{grouped}.{fraction}")
+    }
+}
+
+/// The UTC date of Unix time `secs`.
+fn date_from_unix(secs: u64) -> plumb_core::facts::Date {
+    // Howard Hinnant's days-to-civil.
+    let z = i64::try_from(secs / 86_400).unwrap_or(0) + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    plumb_core::facts::Date {
+        year: i32::try_from(year).unwrap_or(i32::MAX),
+        month: u8::try_from(month).ok(),
+        day: u8::try_from(day).ok(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use plumb_index::pages::{Page, PageHit};
@@ -382,6 +1014,7 @@ mod tests {
     fn article(title: &str, description: &str, site: Option<&str>) -> PageHit {
         PageHit {
             page: Page {
+                paper: None,
                 set: "wikipedia-en".to_string(),
                 url: format!("https://en.wikipedia.org/wiki/{}", title.replace(' ', "_")),
                 title: title.to_string(),
@@ -393,16 +1026,27 @@ mod tests {
                 profiles: Vec::new(),
                 website: None,
                 package: None,
+                facts: Vec::new(),
+                lead: None,
+                names: Vec::new(),
+                sections: Vec::new(),
+                content_language: None,
+                search: None,
             },
             score: 1.0,
             named: true,
             popularity: 0.9,
             whole: false,
+            learned: None,
         }
     }
 
     fn site(domain: &str, country: Option<&str>) -> Hit {
         Hit {
+            demand: None,
+            missing_words: false,
+            query_evidence: None,
+            placing_text_score: None,
             domain: domain.to_string(),
             url: format!("https://{domain}/"),
             title: None,
@@ -423,6 +1067,376 @@ mod tests {
             under: under.map(str::to_string),
             at,
         }
+    }
+
+    fn with_facts(mut hit: PageHit, facts: &[(plumb_core::facts::FactKind, &str)]) -> PageHit {
+        hit.page.facts = facts
+            .iter()
+            .map(|(kind, value)| plumb_core::facts::Fact {
+                kind: *kind,
+                value: value.to_string(),
+            })
+            .collect();
+        hit
+    }
+
+    #[test]
+    fn definitions_answer_what_something_is() {
+        assert_eq!(
+            definition_asked("What is a manatee?").as_deref(),
+            Some("manatee")
+        );
+        assert_eq!(
+            definition_asked("define photosynthesis").as_deref(),
+            Some("photosynthesis")
+        );
+        assert_eq!(
+            definition_asked("entropy definition").as_deref(),
+            Some("entropy")
+        );
+        assert_eq!(
+            definition_asked("who was ada lovelace").as_deref(),
+            Some("ada lovelace")
+        );
+        assert_eq!(definition_asked("what is my ip"), None);
+        assert_eq!(definition_asked("what is the capital of france"), None);
+        assert_eq!(definition_asked("manatee"), None);
+        let mut manatee = article("West Indian manatee", "species of mammal", None);
+        manatee.page.lead = Some(
+            "The West Indian manatee is the largest surviving member of the order Sirenia. It lives in shallow waters."
+                .into(),
+        );
+        let answer = definition_answer(&[placed(manatee.clone(), None, 1)]).unwrap();
+        assert_eq!(answer.question, "West Indian manatee");
+        assert_eq!(
+            answer.answer,
+            "The West Indian manatee is the largest surviving member of the order Sirenia."
+        );
+        // Only an article the name names in full answers.
+        let mut partly = manatee.clone();
+        partly.named = false;
+        assert_eq!(definition_answer(&[placed(partly, None, 3)]), None);
+        // Nor one without a lead.
+        assert_eq!(
+            definition_answer(&[placed(article("Manatee", "genus", None), None, 1)]),
+            None
+        );
+        // The info box shows the lead, under Wikipedia's licence.
+        let info = info_from_page(&manatee.page, &[]).unwrap();
+        let mut html = String::new();
+        render_info_box(&mut html, &info);
+        assert!(html.contains("<p class=\"ibx\">The West Indian manatee is"));
+        assert!(html.contains("CC BY-SA"));
+    }
+
+    #[test]
+    fn words_answer_what_they_mean() {
+        assert!(asks_word("define anadromous"));
+        assert!(asks_word("prioritize meaning"));
+        assert!(!asks_word("what is a manatee"));
+        let word = Page::from_word(plumb_core::Article {
+            title: "anadromous".into(),
+            description: Some(
+                "(adjective) Of fish, migrating up rivers from the sea to breed in fresh water."
+                    .into(),
+            ),
+            views: 3,
+            ..Default::default()
+        });
+        let answer = word_answer(&word).unwrap();
+        assert_eq!(answer.question, "anadromous");
+        assert!(answer.answer.starts_with("(adjective) Of fish"));
+        assert_eq!(answer.note.as_deref(), Some("From Wiktionary, CC BY-SA"));
+    }
+
+    #[test]
+    fn founding_questions_leave_shared_names_ambiguous_without_type_evidence() {
+        use plumb_core::facts::FactKind::{Founded, Founder};
+        for (subject, description) in [
+            ("Teral", "mineral"),
+            ("Vesrin", "city"),
+            ("Ordel", "organization"),
+            ("Navren", ""),
+        ] {
+            let mut main = article(subject, description, None);
+            main.page.item = Some("Q910001".into());
+            let mut namesake = with_facts(
+                article(&format!("{subject} Inc."), "company", None),
+                &[(Founder, "Example founder"), (Founded, "1901")],
+            );
+            namesake.page.item = Some("Q910002".into());
+            namesake.named = false;
+            for kind in [Founder, Founded] {
+                for candidates in [
+                    [main.clone(), namesake.clone()],
+                    [namesake.clone(), main.clone()],
+                ] {
+                    let EntityResolution::Ambiguous(found) =
+                        resolve_entity(subject, &candidates, Some(&[kind]))
+                    else {
+                        panic!("{subject} must remain ambiguous for {kind:?}");
+                    };
+                    assert_eq!(found.len(), 2);
+                }
+                // Removing all enrichment cannot change identity resolution.
+                let mut empty = namesake.clone();
+                empty.page.facts.clear();
+                assert!(matches!(
+                    resolve_entity(subject, &[main.clone(), empty], Some(&[kind])),
+                    EntityResolution::Ambiguous(_)
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn founding_questions_resolve_unique_and_qualified_settlements_and_organizations() {
+        use plumb_core::facts::{fact_asked, FactKind::Founded};
+        let mut city = with_facts(article("Ravelin", "city", None), &[(Founded, "1801")]);
+        city.page.item = Some("Q910011".into());
+        let mut company = article("Ravelin Inc.", "company", None);
+        company.page.item = Some("Q910012".into());
+        company.named = false;
+        let asked = fact_asked("when was ravelin founded").unwrap();
+        let sole = [city.clone()];
+        let EntityResolution::Resolved(page) =
+            resolve_entity(&asked.subject, &sole, Some(&asked.kinds))
+        else {
+            panic!("a unique settlement must resolve");
+        };
+        assert_eq!(
+            fact_answer_from_page(&asked, page, 0).unwrap().answer,
+            "1801"
+        );
+
+        let only_company = [company.clone()];
+        let EntityResolution::Resolved(page) =
+            resolve_entity(&asked.subject, &only_company, Some(&asked.kinds))
+        else {
+            panic!("a unique legal organization name must resolve");
+        };
+        assert_eq!(fact_answer_from_page(&asked, page, 0), None);
+
+        // An explicit organization name must keep its missing fact even
+        // when the settlement has the requested founding date.
+        city.named = false;
+        let both = [city, company];
+        let asked = fact_asked("when was ravelin inc. founded").unwrap();
+        let EntityResolution::Resolved(page) =
+            resolve_entity(&asked.subject, &both, Some(&asked.kinds))
+        else {
+            panic!("a qualified organization must resolve");
+        };
+        assert_eq!(page.item.as_deref(), Some("Q910012"));
+        assert_eq!(fact_answer_from_page(&asked, page, 0), None);
+    }
+
+    #[test]
+    fn facts_answer_the_questions_that_ask_them() {
+        use plumb_core::facts::{fact_asked, FactKind::*};
+        let pages = [
+            placed(
+                article("Australia (disambiguation)", "may refer to", None),
+                None,
+                0,
+            ),
+            placed(
+                with_facts(
+                    article("Australia", "country in Oceania", None),
+                    &[
+                        (Capital, "Canberra"),
+                        (Population, "27204809;2024"),
+                        (Area, "7688287000000"),
+                    ],
+                ),
+                None,
+                1,
+            ),
+        ];
+        let ask = |q: &str, pages: &[PlacedPage]| {
+            let asked = fact_asked(q).unwrap();
+            let candidates: Vec<_> = pages
+                .iter()
+                .enumerate()
+                .map(|(index, placed)| {
+                    let mut hit = placed.hit.clone();
+                    hit.page.item = Some(format!("Q{}", index + 1));
+                    hit
+                })
+                .collect();
+            match resolve_entity(&asked.subject, &candidates, Some(&asked.kinds)) {
+                EntityResolution::Resolved(page) => {
+                    fact_answer_from_page(&asked, page, 1_791_244_800)
+                }
+                _ => None,
+            }
+        };
+        let capital = ask("capital of australia", &pages).unwrap();
+        assert_eq!(capital.question, "Capital of Australia");
+        assert_eq!(capital.answer, "Canberra");
+        assert_eq!(capital.note.as_deref(), Some("From Wikidata"));
+        let people = ask("australia population", &pages).unwrap();
+        assert_eq!(people.answer, "27,204,809");
+        assert_eq!(
+            people.note.as_deref(),
+            Some("Counted in 2024, from Wikidata")
+        );
+        assert_eq!(
+            ask("how big is australia", &pages).unwrap().answer,
+            "7,688,287 km² (2,968,463 sq mi)"
+        );
+        // A kind it has no fact of: no answer.
+        assert_eq!(ask("australia currency", &pages), None);
+
+        // The continent, found first, gives way to the country, the
+        // plain title.
+        let both = [
+            placed(
+                with_facts(
+                    article("Australia (continent)", "continent", None),
+                    &[(Area, "8600000000000")],
+                ),
+                None,
+                0,
+            ),
+            placed(
+                with_facts(
+                    article("Australia", "country in Oceania", None),
+                    &[(Area, "7688287000000")],
+                ),
+                None,
+                1,
+            ),
+        ];
+        let first: Vec<&str> = fact_pages(&both)
+            .map(|placed| placed.hit.page.title.as_str())
+            .collect();
+        assert_eq!(first, ["Australia", "Australia (continent)"]);
+        assert_eq!(
+            ask("how big is australia", &both).unwrap().answer,
+            "7,688,287 km² (2,968,463 sq mi)"
+        );
+
+        // The article named "Apple" is the fruit; Apple Inc. is listed
+        // under apple.com.
+        let unnamed = |mut hit: PageHit| {
+            hit.named = false;
+            hit
+        };
+        let apple = [
+            placed(article("Apple", "fruit", None), None, 1),
+            placed(
+                unnamed(with_facts(
+                    article("Apple Inc.", "American technology company", None),
+                    &[(Ceo, "Tim Cook")],
+                )),
+                Some("apple.com"),
+                0,
+            ),
+            placed(
+                unnamed(with_facts(
+                    article("Apple Records", "record label", None),
+                    &[(Ceo, "Someone")],
+                )),
+                None,
+                2,
+            ),
+        ];
+        let ceo = ask("who is the ceo of apple", &apple).unwrap();
+        assert_eq!(
+            (ceo.question.as_str(), ceo.answer.as_str()),
+            ("CEO of Apple Inc.", "Tim Cook")
+        );
+
+        let everest = [placed(
+            with_facts(
+                article("Mount Everest", "mountain", None),
+                &[(Elevation, "8848.86")],
+            ),
+            None,
+            0,
+        )];
+        assert_eq!(
+            ask("how tall is mount everest", &everest).unwrap().answer,
+            "8,848.86 m (29,032 ft)"
+        );
+
+        let einstein = [placed(
+            with_facts(
+                article("Albert Einstein", "physicist", None),
+                &[(Born, "1879-03-14"), (Died, "1955-04-18")],
+            ),
+            None,
+            0,
+        )];
+        assert_eq!(
+            ask("when was albert einstein born", &einstein)
+                .unwrap()
+                .answer,
+            "March 14, 1879"
+        );
+        let age = ask("how old is albert einstein", &einstein).unwrap();
+        assert_eq!(age.answer, "Died at 76");
+        // 2026-10-06 is when the test's "now" is.
+        let musk = [placed(
+            with_facts(
+                article("Elon Musk", "businessman", None),
+                &[(Born, "1971-06-28")],
+            ),
+            None,
+            0,
+        )];
+        assert_eq!(
+            ask("how old is elon musk", &musk).unwrap().answer,
+            "55 years old"
+        );
+
+        let tesla = [placed(
+            with_facts(
+                article("Tesla, Inc.", "carmaker", None),
+                &[
+                    (Founder, "Martin Eberhard"),
+                    (Founder, "Marc Tarpenning"),
+                    (Founder, "Elon Musk"),
+                ],
+            ),
+            None,
+            0,
+        )];
+        assert_eq!(
+            ask("who founded tesla", &tesla).unwrap().answer,
+            "Martin Eberhard, Marc Tarpenning and Elon Musk"
+        );
+        // A partial company name is no answer.
+        let mut unnamed = tesla.clone();
+        unnamed[0].hit.named = false;
+        assert_eq!(ask("who founded tesla energy", &unnamed), None);
+    }
+
+    #[test]
+    fn new_kinds_read_as_people_write_them() {
+        use plumb_core::facts::FactKind;
+        let text = |kind, value| fact_text(kind, &[value]).unwrap().0;
+        assert_eq!(
+            text(FactKind::Coordinates, "-35.293056,149.126944"),
+            "35.2931° S, 149.1269° E"
+        );
+        assert_eq!(text(FactKind::AtomicNumber, "79"), "79");
+        // Earth's 365.256363 days, Jupiter's 4,332.59, the Moon's 27.32.
+        assert_eq!(text(FactKind::OrbitalPeriod, "31558149.763"), "365.26 days");
+        assert_eq!(
+            text(FactKind::OrbitalPeriod, "374335776"),
+            "11.86 years (4,333 days)"
+        );
+        assert_eq!(text(FactKind::Radius, "6371000"), "6,371 km (3,959 mi)");
+        assert_eq!(text(FactKind::Radius, "250"), "250 m (820 ft)");
+    }
+
+    #[test]
+    fn dates_of_unix_times() {
+        assert_eq!(date_from_unix(0).write(), "1970-01-01");
+        assert_eq!(date_from_unix(1_791_244_800).write(), "2026-10-06");
+        assert_eq!(date_from_unix(951_782_400).write(), "2000-02-29");
     }
 
     #[test]
@@ -466,6 +1480,48 @@ mod tests {
         let mut html = String::new();
         render_info_box(&mut html, &info);
         assert!(html.contains("<dt>Official site</dt><dd><a href=\"https://github.com/\""));
+    }
+
+    #[test]
+    fn a_named_well_known_site_takes_the_box_from_its_namesakes() {
+        let mut zoom = site("zoom.us", Some("US"));
+        zoom.named = true;
+        zoom.official = true;
+        let film = placed(article("Zoom (2006 film)", "Film", None), None, 1);
+        let mut company = article(
+            "Zoom Video Communications",
+            "Video conferencing company",
+            Some("zoom.us"),
+        );
+        company.named = false;
+        let company = placed(company, Some("zoom.us"), 0);
+        let info = info_box(&[zoom.clone()], &[film.clone(), company]).unwrap();
+        assert_eq!(info.title, "Zoom Video Communications");
+        // Better no box than the film.
+        assert_eq!(info_box(&[zoom.clone()], &[film]), None);
+        // An article listed above every site is still what was searched.
+        let curie = placed(article("Zoom", "Physicist", None), None, 0);
+        assert_eq!(info_box(&[zoom], &[curie]).unwrap().title, "Zoom");
+    }
+
+    #[test]
+    fn namesakes_never_stand_in_for_the_best_named_article() {
+        let sites = [site("amc.com", None), site("apple.com", Some("US"))];
+        let mut episode = article("Better Call Saul (Breaking Bad)", "Episode", None);
+        episode.score = 0.8;
+        let series = article("Better Call Saul", "Television series", Some("amc.com"));
+        let pages = [placed(episode, None, 0), placed(series, Some("amc.com"), 0)];
+        assert_eq!(info_box(&sites, &pages).unwrap().title, "Better Call Saul");
+        // The best article is about a site further down: no box, rather
+        // than the historian.
+        let mut historian = article("Tim Cook (historian)", "Canadian historian", None);
+        historian.score = 0.8;
+        let ceo = article("Tim Cook", "Chief executive of Apple", Some("apple.com"));
+        let pages = [
+            placed(historian, None, 0),
+            placed(ceo, Some("apple.com"), 0),
+        ];
+        assert_eq!(info_box(&sites, &pages), None);
     }
 
     #[test]
@@ -570,6 +1626,109 @@ mod tests {
         let mut html = String::new();
         render_profile(&mut html, &found, None);
         assert!(html.contains("Listing, from Wikidata"), "{html}");
+    }
+
+    #[test]
+    fn boxes_and_links_a_film_asked_for() {
+        let film = |item: &str, whole: bool| PageHit {
+            page: Page::from_film(plumb_core::article::Article {
+                title: "Les Dents de la nuit".into(),
+                description: Some("Film by Stephen Cafiero, 2008".into()),
+                item: Some(item.into()),
+                views: 4,
+                profiles: vec![profile("imdb", "tt1103275")],
+                ..Default::default()
+            })
+            .unwrap(),
+            named: true,
+            whole,
+            ..article("x", "x", None)
+        };
+        // With no English article, it links its IMDb page from Wikidata.
+        let pages = [placed(film("Q3230000", false), None, 1)];
+        let found = profile_answer("les dents de la nuit imdb", &pages).unwrap();
+        assert_eq!(found.url, "https://www.imdb.com/title/tt1103275/");
+        assert_eq!(found.source, "Wikidata");
+        // Named by its title alone, it gets no info box; asked for, it does,
+        // with no article.
+        assert!(info_box(&[], &pages).is_none());
+        let pages = [placed(film("Q3230000", true), None, 0)];
+        let info = info_box(&[], &pages).unwrap();
+        assert_eq!(info.article, None);
+        assert_eq!(
+            info.wikidata.as_deref(),
+            Some("https://www.wikidata.org/wiki/Q3230000")
+        );
+        assert_eq!(info.profiles.len(), 1);
+        // With one, the box links the article.
+        let pages = [placed(film("Q3230000/Les_Dents_de_la_nuit", true), None, 0)];
+        let info = info_box(&[], &pages).unwrap();
+        assert_eq!(
+            info.article.as_deref(),
+            Some("https://en.wikipedia.org/wiki/Les_Dents_de_la_nuit")
+        );
+    }
+
+    #[test]
+    fn links_a_songs_lyrics() {
+        let song = |title: &str, by: &str, profiles: Vec<plumb_core::profiles::Profile>| PageHit {
+            page: Page::from_music(plumb_core::article::Article {
+                title: title.into(),
+                description: Some(format!("Song by {by}, 1975")),
+                item: Some("recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69".into()),
+                views: 211_087,
+                aliases: vec![format!("{title} {by}")],
+                profiles,
+                ..Default::default()
+            })
+            .unwrap(),
+            named: true,
+            ..article("x", "x", None)
+        };
+        // The article on the song has no Genius page; the song has.
+        let mut rhapsody = article("Bohemian Rhapsody", "1975 single by Queen", None);
+        rhapsody.named = true;
+        let pages = [
+            placed(rhapsody, None, 0),
+            placed(
+                song(
+                    "Bohemian Rhapsody",
+                    "Queen",
+                    vec![profile("genius-song", "Queen-bohemian-rhapsody-lyrics")],
+                ),
+                None,
+                1,
+            ),
+        ];
+        let found = profile_answer("bohemian rhapsody lyrics", &pages).unwrap();
+        assert_eq!(
+            found.url,
+            "https://genius.com/Queen-bohemian-rhapsody-lyrics"
+        );
+        assert!(!found.search);
+        let mut html = String::new();
+        render_profile(&mut html, &found, None);
+        assert!(html.contains("Listing, from MusicBrainz"), "{html}");
+
+        // A song with no Genius page has its lyrics searched for there.
+        let pages = [placed(song("Hey Jude", "The Beatles", Vec::new()), None, 0)];
+        let found = profile_answer("hey jude lyrics", &pages).unwrap();
+        assert_eq!(
+            found.url,
+            "https://genius.com/search?q=Hey+Jude+The+Beatles"
+        );
+        assert!(found.search);
+        let mut html = String::new();
+        render_profile(&mut html, &found, None);
+        assert!(html.contains("Searched for on Genius"), "{html}");
+        // Never another service.
+        assert_eq!(profile_answer("hey jude spotify", &pages), None);
+        assert_eq!(
+            profile_lookups("hey jude lyrics"),
+            ["hey jude", "hey jude song"]
+        );
+        assert_eq!(profile_lookups("mrbeast youtube"), ["mrbeast"]);
+        assert!(profile_lookups("hey jude").is_empty());
     }
 
     #[test]

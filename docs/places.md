@@ -2,9 +2,11 @@
 
 A search that says where, such as "pizza in denver", "coffee shop in boulder", "hotels near red rocks amphitheatre", "denver brewery" or "coffee near me", lists matching places above the sites: their name, kind, distance, street address, website and a link to them on OpenStreetMap, with a small map of where they are.
 
-The map is drawn by Plumb from the places' coordinates as numbered pins with a scale bar. It has no streets: the search page loads nothing from any other server, and map tiles would tell a tile server where every searcher is looking. "Open this area in OpenStreetMap" links to the full map.
+The map is drawn by the node as numbered pins with a scale bar, on streets, water, parks and a few town and neighbourhood names from a map file the node keeps (see "The map" below). The search page loads nothing from any other server: map tiles fetched by the browser would tell a tile server where every searcher is looking. A node without a map file draws the pins alone. "Open this area in OpenStreetMap" links to the full map.
 
 Places are © [OpenStreetMap contributors](https://www.openstreetmap.org/copyright), under the Open Database License; every list of places says so.
+
+When a query only might say where ("denver brewery", with no "in" or "near") and is also the name of a site, such as "us bank", the site wins and no places are listed. On a node that keeps search history, places you seldom open for searches like the one you make are folded to one line; opening one brings them back (see the README's search history part).
 
 ## How a query is read
 
@@ -20,7 +22,7 @@ Places are listed within a town's size of its centre (12 km for a city, 6 for a 
 
 ## Near me
 
-"Near me" is the town you give on the **About you** page, kept on the node for your browser only. Plumb never works out where you are from your address or anything else. Without a town, a "near me" search says how to give one.
+"Near me" is the town you give on the **About you** page or the welcome page, kept on the node for your browser only (on a public server, in your browser). Plumb never works out where you are from your address or anything else. Without a town, a "near me" search says how to give one.
 
 ## What is kept
 
@@ -43,12 +45,24 @@ Colorado's extract (366 MB) gives 66,102 places in 2 seconds: a 2.7 MB file and 
 | Automatic, by storage limit | Places kept | About |
 | --- | --- | --- |
 | under 1 GB | none | 0 |
-| 1 GB or more | the first 1,000,000: every city and town and the places with a Wikidata item (museums, sights, stations, stadiums), plus every place within 100 km of a town given on one of the node's About pages | 140 MB, plus the places near you and the whole file (950 MB) to pick them from |
+| 1 GB or more | the first 1,000,000: every city and town and the places with a Wikidata item (museums, sights, stations, stadiums), plus every place within 100 km of a town given on one of the node's About pages | 140 MB, plus the places near you (about 80,000 around a big town) |
 | no limit | all of them, every café and shop | 4.2 GB with the file |
 
-Until 2026-10-05, 8 GB or more kept all of them, which put an 8 GB node over its limit with 4.2 GB of places, most of them far from its owner.
+The places file keeps only those places too: it is cut as it is downloaded, and taken again only when the towns change. Until 2026-10-05, 8 GB or more kept all of them, which put an 8 GB node over its limit with 4.2 GB of places, most of them far from its owner.
 
 The **Page sets** part of the panel can also turn places off or keep a number of them (`places` in `page_sets`, for example `{"places": "off"}`).
+
+## The map
+
+The node draws each map as SVG from `DIR/pages/sets/map.pmtiles` (`plumb serve --map FILE` without a node), a slim cut of the [Protomaps basemap](https://docs.protomaps.com/basemaps/downloads) of OpenStreetMap: land, water, parks and woods, roads and railways (no tunnels, driveways or footpaths) and the names of towns and neighbourhoods, nothing else. It picks the zoom whose detail suits the map's size, from the whole city down to every street, and where the file has no tiles that deep it uses the deepest it has. A map adds 10 to 80 KB to the page, the most in old city centres.
+
+```sh
+plumb fetch-map --data /path/to/node-data --world-zoom 8 --zoom 14 --near 39.74,-104.99 --near 40.02,-105.27
+```
+
+`fetch-map` reads the basemap over HTTP with range requests, so only the tiles kept are downloaded: every tile of the world up to `--world-zoom`, and up to `--zoom` within `--km` (50) of each `--near` point. `--from` takes a downloaded `.pmtiles` file or another address instead of yesterday's daily build, and `--dry-run` says how much it would read, zoom by zoom, without downloading tiles. Slimming leaves about a fifth of each tile (Florence's centre: 3.9 MB of tiles to 0.7 MB). Each zoom is about twice the size of the one before; the whole basemap to zoom 15 is about 120 GB.
+
+Nodes hand the map file on like the page sets: a node with no storage limit, or with a map file already, takes a trusted node's newer map file whole, keeping its own as `map.pmtiles.prev` (see "Nodes in the network" in docs/pages.md). A desktop with a storage limit and no map file takes none; it runs `fetch-map` to get one.
 
 ## Nodes
 

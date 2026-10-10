@@ -6,7 +6,10 @@
 //! A backup is one JSON file, kept in `DIR/backups/` (readable by its owner
 //! only, on Unix, since it holds keys) and downloadable from the panel.
 //! Restoring writes back only the files named in [`FILES`], whatever else a
-//! backup file says, after backing up the files it replaces.
+//! backup file says, after backing up the files it replaces. It writes them
+//! again as the node next starts ([`apply_pending`]): the running network
+//! keeps its keys and credits in memory, and saves them over the restored
+//! files until it stops.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -21,6 +24,11 @@ use super::control::{hex_decode, hex_encode};
 pub const DIR_NAME: &str = "backups";
 /// Backups kept; older ones are deleted as new ones are made.
 pub const KEEP: usize = 10;
+/// A restore waiting for the next start, in the data directory.
+pub const PENDING_FILE: &str = "restore-pending.json";
+/// Where a pending restore that failed is moved, so it is not tried at
+/// every start.
+const FAILED_FILE: &str = "restore-failed.json";
 /// What a backup file starts its format name with.
 const FORMAT: &str = "plumb-backup/1";
 
@@ -126,6 +134,33 @@ impl Backup {
     }
 }
 
+impl Backup {
+    /// Keeps the backup in `data` to be restored again as the node next
+    /// starts, before anything reads the files ([`apply_pending`]).
+    pub fn stage(&self, data: &Path) -> Result<()> {
+        write_private(&data.join(PENDING_FILE), &serde_json::to_vec(self)?)
+    }
+}
+
+/// Restores the backup [`Backup::stage`] kept in `data`, if any, and
+/// removes it: `true` when one was restored. One that cannot be restored
+/// is moved aside, not tried again.
+pub fn apply_pending(data: &Path) -> Result<bool> {
+    let path = data.join(PENDING_FILE);
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => return Err(err).with_context(|| format!("reading {}", path.display())),
+    };
+    let restored = Backup::parse(&bytes).and_then(|backup| backup.restore(data));
+    if let Err(err) = restored {
+        let _ = std::fs::rename(&path, data.join(FAILED_FILE));
+        return Err(err.context("finishing the restore of a backup"));
+    }
+    std::fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
+    Ok(true)
+}
+
 /// Makes a backup of the node in `data` and saves it in `DIR/backups/`,
 /// deleting the oldest beyond [`KEEP`]. `label` is put in the file name,
 /// such as `before-restore`.
@@ -156,11 +191,11 @@ pub fn save(data: &Path, label: Option<&str>) -> Result<BackupInfo> {
             let _ = std::fs::remove_file(dir.join(oldest.name));
         }
     }
-    Ok(BackupInfo {
-        name: file,
-        created_at: backup.created_at,
-        bytes: bytes.len() as u64,
-    })
+    // As list() describes it: the file's time can be a second past the
+    // backup's own.
+    let (_, info) =
+        info_of(&dir.join(&file), file).with_context(|| format!("reading {}", dir.display()))?;
+    Ok(info)
 }
 
 /// The backups in `DIR/backups/`, newest first.
@@ -168,29 +203,39 @@ pub fn list(data: &Path) -> Vec<BackupInfo> {
     let Ok(entries) = std::fs::read_dir(data.join(DIR_NAME)) else {
         return Vec::new();
     };
-    let mut backups: Vec<BackupInfo> = entries
+    let mut backups: Vec<(std::time::SystemTime, BackupInfo)> = entries
         .filter_map(|entry| entry.ok())
         .filter_map(|entry| {
             let name = entry.file_name().into_string().ok()?;
             if !is_backup_name(&name) {
                 return None;
             }
-            let meta = entry.metadata().ok()?;
-            let created_at = meta
-                .modified()
-                .ok()?
-                .duration_since(std::time::UNIX_EPOCH)
-                .ok()?
-                .as_secs();
-            Some(BackupInfo {
-                name,
-                created_at,
-                bytes: meta.len(),
-            })
+            info_of(&entry.path(), name)
         })
         .collect();
-    backups.sort_by(|a, b| (b.created_at, &b.name).cmp(&(a.created_at, &a.name)));
-    backups
+    // By the full modification time, as backups made in the same second
+    // have names that do not sort by age (`-10` before `-2`, `-2` before
+    // none).
+    backups.sort_by(|(a_time, a), (b_time, b)| (b_time, &b.name).cmp(&(a_time, &a.name)));
+    backups.into_iter().map(|(_, info)| info).collect()
+}
+
+/// When the backup file at `path` was written, and what the panel shows of it.
+fn info_of(path: &Path, name: String) -> Option<(std::time::SystemTime, BackupInfo)> {
+    let meta = std::fs::metadata(path).ok()?;
+    let modified = meta.modified().ok()?;
+    let created_at = modified
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    Some((
+        modified,
+        BackupInfo {
+            name,
+            created_at,
+            bytes: meta.len(),
+        },
+    ))
 }
 
 /// The path of the backup named `name`, when that is a backup's name: no
@@ -274,6 +319,34 @@ mod tests {
     }
 
     #[test]
+    fn a_staged_backup_is_restored_once_at_the_next_start() {
+        let from = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(from.path().join("net/credits")).unwrap();
+        std::fs::write(from.path().join("net/credits/wallet.json"), b"old").unwrap();
+        let backup = Backup::make(from.path()).unwrap();
+
+        let to = tempfile::tempdir().unwrap();
+        assert!(!apply_pending(to.path()).unwrap());
+        backup.stage(to.path()).unwrap();
+        backup.restore(to.path()).unwrap();
+        // The running network saves its own wallet over it.
+        std::fs::write(to.path().join("net/credits/wallet.json"), b"new").unwrap();
+        assert!(apply_pending(to.path()).unwrap());
+        assert_eq!(
+            std::fs::read(to.path().join("net/credits/wallet.json")).unwrap(),
+            b"old"
+        );
+        assert!(!to.path().join(PENDING_FILE).exists());
+        assert!(!apply_pending(to.path()).unwrap());
+
+        // A damaged one is moved aside, not tried at every start.
+        std::fs::write(to.path().join(PENDING_FILE), b"not a backup").unwrap();
+        assert!(apply_pending(to.path()).is_err());
+        assert!(!to.path().join(PENDING_FILE).exists());
+        assert!(to.path().join(FAILED_FILE).exists());
+    }
+
+    #[test]
     fn a_backup_naming_other_files_is_refused() {
         let mut backup = Backup::make(tempfile::tempdir().unwrap().path()).unwrap();
         backup
@@ -285,6 +358,16 @@ mod tests {
         assert!(path_of(Path::new("/d"), "../settings.json").is_none());
         assert!(path_of(Path::new("/d"), "plumb-backup-x/../../a.json").is_none());
         assert!(path_of(Path::new("/d"), "plumb-backup-2026-10-03-120000.json").is_some());
+    }
+
+    #[test]
+    fn the_newest_backup_lists_first_and_as_saved() {
+        let dir = tempfile::tempdir().unwrap();
+        // Within a second or two, so some share a time stamp in their names.
+        for _ in 0..12 {
+            let saved = save(dir.path(), None).unwrap();
+            assert_eq!(list(dir.path())[0], saved);
+        }
     }
 
     #[test]

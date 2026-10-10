@@ -10,11 +10,29 @@ use url::Url;
 
 use crate::{CrawlOutcome, CrawlResult};
 
+/// What this crawler reads from a homepage, stamped on every record it
+/// crawls as [`SiteRecord::crawl_version`]. Raise it when a change to what
+/// crawls read makes the sites read before worth reading again: a better
+/// way to pick a homepage's words (the terms that go with its body text),
+/// say. Nodes then crawl the sites last read by an older version again,
+/// best link score first, in the share of each round that goes to sites due
+/// again (see `plumb_node::crawl`), so the whole web of a node is read anew
+/// most-known sites first, without waiting the month its sites are
+/// otherwise due after.
+///
+/// 0 is how crawlers read homepages up to 2026-10-06 (title, description,
+/// headings, the first 100 words of visible text, key pages, links); 1
+/// adds the search terms picked from the whole page
+/// ([`crate::pick_terms`]); 2 leaves boilerplate (cookie notices, menus
+/// made of links, "Learn more" buttons) out of the visible text
+/// (`boilerplate.rs`).
+pub const CRAWL_VERSION: u32 = 2;
+
 /// Turns crawl results into records to merge into a
 /// [`plumb_core::RecordSet`]: one record per fetched homepage (url, title,
-/// description, `site_name` as an alias, `crawled_at`, the first
-/// [`plumb_core::MAX_LINKS_TO`] other sites it links to), plus one record per
-/// linked domain carrying the texts of links to its front page and
+/// description, `site_name` and the JSON-LD names as aliases, `crawled_at`,
+/// the first [`plumb_core::MAX_LINKS_TO`] other sites it links to), plus one
+/// record per linked domain carrying the texts of links to its front page and
 /// `signals.linking_domains` = the number of distinct crawled domains
 /// linking to it. Domains seen only as link targets are new discoveries.
 ///
@@ -53,10 +71,14 @@ pub fn to_records(results: &[CrawlResult]) -> Vec<SiteRecord> {
                 if let Some(site_name) = &page.meta.site_name {
                     record.add_alias(site_name);
                 }
+                for name in &page.meta.structured_names {
+                    record.add_alias(name);
+                }
                 record.search_url = page.meta.search_url.clone();
                 record.language = page.meta.language.clone();
                 record.headings = page.meta.headings.clone();
                 record.body_text = page.meta.body_text.clone();
+                record.terms = page.meta.terms.clone();
                 record.key_pages = page.meta.key_pages.clone();
                 record.links_to = valid_links_to(
                     page.meta
@@ -67,6 +89,7 @@ pub fn to_records(results: &[CrawlResult]) -> Vec<SiteRecord> {
                     &page.domain,
                 );
                 record.crawled_at = Some(page.fetched_at);
+                record.crawl_version = CRAWL_VERSION;
                 upsert(&mut records, record);
 
                 for link in &page.meta.links {
@@ -160,12 +183,17 @@ mod tests {
                     title: Some(format!("{domain} home")),
                     description: Some("About us".into()),
                     site_name: Some(format!("{domain} site")),
+                    structured_names: vec![format!("{domain} Corporation")],
                     search_url: None,
                     language: Some("en".into()),
                     icons: Vec::new(),
                     key_pages: Vec::new(),
                     headings: Vec::new(),
+                    sections: Vec::new(),
+                    search: None,
                     body_text: None,
+                    page_text: String::new(),
+                    terms: Vec::new(),
                     feed: None,
                     links: links
                         .iter()
@@ -205,7 +233,10 @@ mod tests {
         assert_eq!(record.url.as_deref(), Some("https://www.usbank.com/"));
         assert_eq!(record.title.as_deref(), Some("usbank.com home"));
         assert_eq!(record.description.as_deref(), Some("About us"));
-        assert_eq!(record.aliases, ["usbank.com site"]);
+        assert_eq!(
+            record.aliases,
+            ["usbank.com site", "usbank.com Corporation"]
+        );
         assert_eq!(record.crawled_at, Some(1_700_000_000));
         assert!(record.link_texts.is_empty());
         assert_eq!(record.signals.linking_domains, 0);

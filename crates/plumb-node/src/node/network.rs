@@ -9,7 +9,7 @@
 //!   work ([`absorb_inbox`]). Rebuilding the index for every batch would
 //!   keep a node busy, so the index is rebuilt once
 //!   [`REBUILD_AFTER_RECORDS`] records have come in, at most once every
-//!   [`NETWORK_REBUILD_GAP`], or at the next refresh.
+//!   [`NETWORK_REBUILD_GAP`] (longer after a slow build), or at the next refresh.
 //! * Other nodes search by bucket (see `plumb_net::bucket`), never sending
 //!   their query. Each index build also writes the index's buckets into
 //!   `indexes/NNNNNN/buckets/` ([`build_buckets`]), and bucket requests are
@@ -61,9 +61,9 @@ use plumb_net::popularity::report_epoch;
 use plumb_net::{BucketSource, BucketTable, NetHandle, PickLog, PopularityTable, Report};
 use tracing::{debug, info, warn};
 
-use super::Inner;
+use super::{Inner, MB};
 use crate::icons::{self, IconStore};
-use crate::records::{load_records, Change, RecordStore};
+use crate::records::{Change, RecordStore};
 
 /// Records from other nodes that make a node rebuild its index before the
 /// next refresh.
@@ -76,6 +76,9 @@ pub(crate) const NETWORK_REBUILD_GAP: std::time::Duration = std::time::Duration:
 
 /// Records from the inbox saved to the records journal at a time.
 const ABSORB_CHUNK: usize = 1_000;
+/// The share of a storage limit, in percent, other crawlers' batches may
+/// take. About two days of the network's crawls on an 8 GB limit.
+const BATCHES_PERCENT: u64 = 20;
 
 /// Where an index keeps its buckets, inside its directory.
 pub(super) const BUCKETS_DIR: &str = "buckets";
@@ -150,8 +153,40 @@ impl BucketSource for ServedIndex {
     }
 
     fn page_set_file(&self, set: &str) -> Option<PathBuf> {
+        if let Some(file) = super::shared_vectors::servable(&self.0.paths.data, set) {
+            return Some(file);
+        }
+        if set == super::adult::SHARED_NAME {
+            return super::adult::shared_file(&self.0.paths.data);
+        }
+        if set == super::pages::MAP_SET {
+            let file = crate::map::file(&self.0.paths.data);
+            return file.is_file().then_some(file);
+        }
         crate::pages::SetInfo::find(set)?.servable_file(&self.0.paths.data)
     }
+
+    fn profile(
+        &self,
+        peer: plumb_net::PeerId,
+        request: plumb_net::proto::ProfileRequest,
+    ) -> plumb_net::proto::ProfileResponse {
+        match profiles_dir(&self.0) {
+            Some(dir) => crate::sync::answer(&dir, peer, request),
+            None => plumb_net::proto::ProfileResponse::Refused(
+                "this node keeps no search profiles".into(),
+            ),
+        }
+    }
+}
+
+/// Where the node keeps its searchers' profiles, when it keeps them (see
+/// [`crate::history`]).
+fn profiles_dir(inner: &Inner) -> Option<PathBuf> {
+    inner
+        .config
+        .search_history
+        .then(|| inner.paths.data.join("history"))
 }
 
 /// Whether this node's indexes need buckets: it answers other nodes'
@@ -205,11 +240,16 @@ pub(super) async fn start(inner: &Arc<Inner>) -> Result<()> {
     // A node with a storage limit keeps the batches it holds for as long as
     // crawls are checked against each other, not the default five weeks:
     // other nodes take none older than a week, and the rest takes room
-    // (see super::trim).
-    if inner.settings().storage_limit_mb > 0
-        && config.keep_batches_days == plumb_net::store::RETAIN_EPOCHS
-    {
-        config.keep_batches_days = plumb_net::agree::WINDOW_EPOCHS;
+    // (see super::trim). Other crawlers' batches come at a gigabyte a day
+    // or more, so they also get a share of the limit, oldest out first.
+    let limit = inner.settings().storage_limit_mb.saturating_mul(MB);
+    if limit > 0 {
+        if config.keep_batches_days == plumb_net::store::RETAIN_EPOCHS {
+            config.keep_batches_days = plumb_net::agree::WINDOW_EPOCHS;
+        }
+        if config.keep_batches_bytes.is_none() {
+            config.keep_batches_bytes = Some(limit / 100 * BATCHES_PERCENT);
+        }
     }
     let (handle, mut records) = plumb_net::start(config, Arc::new(ServedIndex(inner.clone())))
         .await
@@ -219,7 +259,11 @@ pub(super) async fn start(inner: &Arc<Inner>) -> Result<()> {
         "Joined the Plumb network as node {}",
         handle.peer_id()
     ));
-    let _ = inner.net.set(Arc::new(handle));
+    let handle = Arc::new(handle);
+    let _ = inner.net.set(handle.clone());
+    if let Some(dir) = profiles_dir(inner) {
+        tokio::spawn(crate::sync::run(dir, handle));
+    }
     if inner.config.share_popularity {
         let picks = PickLog::open(&inner.paths.net.join(PICKS_FILE));
         *inner
@@ -238,12 +282,23 @@ pub(super) async fn start(inner: &Arc<Inner>) -> Result<()> {
     let receiver = inner.clone();
     tokio::spawn(async move {
         while let Some(mut batch) = records.recv().await {
+            // Crawling only, other nodes' crawls are not kept: they would
+            // only grow the records this node crawls from.
+            if receiver.config.crawl_only {
+                continue;
+            }
             // Trusted nodes' feed checks go to the headline store, not the
             // records (see plumb_net::start).
             if batch.iter().any(|record| !record.news.is_empty()) {
                 let (news, rest) = batch.into_iter().partition(|r| !r.news.is_empty());
                 receiver.news.put_shared(news, now_unix());
                 batch = rest;
+                if batch.is_empty() {
+                    continue;
+                }
+            }
+            if !receiver.config.take_new_sites {
+                held_only(&receiver, &mut batch);
                 if batch.is_empty() {
                     continue;
                 }
@@ -419,13 +474,18 @@ pub(super) async fn publish_new_records(inner: &Arc<Inner>, path: &Path) -> Resu
             } else {
                 0
             };
+            // Read a record at a time, the journal folded in first.
             let _records = inner.hold_records();
-            let set = load_records(&path)?;
-            let mut crawled: Vec<SiteRecord> = set
-                .iter()
-                .filter(|r| r.crawled_at.is_some_and(|at| at > after && at >= oldest))
-                .map(crawl_facts)
-                .collect();
+            crate::outline::fold_journal(&path)?;
+            let mut crawled: Vec<SiteRecord> = Vec::new();
+            crate::outline::for_each_record(&path, |record| {
+                if record
+                    .crawled_at
+                    .is_some_and(|at| at > after && at >= oldest)
+                {
+                    crawled.push(crawl_facts(&record));
+                }
+            })?;
             crawled.sort_by_key(|r| r.crawled_at);
             anyhow::Ok(crawled)
         })
@@ -474,6 +534,7 @@ fn crawl_facts(record: &SiteRecord) -> SiteRecord {
     facts.aliases = record.aliases.clone();
     facts.headings = record.headings.clone();
     facts.body_text = record.body_text.clone();
+    facts.terms = record.terms.clone();
     facts.key_pages = record.key_pages.clone();
     facts.crawled_at = record.crawled_at;
     facts
@@ -554,9 +615,10 @@ pub(super) fn absorb_inbox(inner: &Inner) -> Result<u64> {
     n += changes.len() as u64;
     drop(changes);
     if store.wants_compaction() {
+        // Folded a record at a time; a file only a whole set can fold
+        // (a site on two lines) keeps its journal for the next build.
         let _records = inner.hold_records();
-        let set = load_records(&paths.records)?;
-        store.compact(&set)?;
+        store.fold()?;
     }
     fs::remove_file(&paths.absorbing)
         .with_context(|| format!("deleting {}", paths.absorbing.display()))?;
@@ -593,6 +655,16 @@ fn read_inbox(
     Ok(())
 }
 
+/// Leaves out of `batch`, crawls other nodes published, the sites the
+/// index being served does not hold, for a node holding back new sites
+/// ([`super::NodeConfig::take_new_sites`] off): they only refresh the sites
+/// it has. Filling free space still adds sites (see super::fill).
+fn held_only(inner: &Inner, batch: &mut Vec<SiteRecord>) {
+    let index = inner.current();
+    let backend = index.as_ref().and_then(|index| index.backend.as_ref());
+    batch.retain(|record| backend.is_some_and(|backend| backend.has_domain(&record.domain)));
+}
+
 /// Most sites [`Inner::kept_found`] remembers before it starts over.
 const MAX_KEPT_FOUND: usize = 10_000;
 
@@ -600,8 +672,9 @@ const MAX_KEPT_FOUND: usize = 10_000;
 /// served holds: they go to the inbox like crawls other nodes publish, so
 /// a site this node has without text gets the network's text in its next
 /// index, and is then embedded for search by meaning. Only what
-/// [`plumb_net::FoundSite::shared`] carries is kept, so the trust rules of
-/// published batches apply (text only from trusted crawlers). Sites this
+/// [`plumb_net::FoundSite::keeps`] gives is passed here, so the trust rules
+/// of published batches apply (a crawl is kept only from a trusted crawler
+/// or once confirmed, text only from trusted crawlers). Sites this
 /// node does not hold are left out: searching never fills its storage.
 pub(super) fn keep_found(inner: &Inner, records: Vec<SiteRecord>) {
     let Some(index) = inner.current() else {
@@ -724,6 +797,10 @@ mod tests {
 
     fn hit(domain: &str, score: f32) -> Hit {
         Hit {
+            demand: None,
+            missing_words: false,
+            query_evidence: None,
+            placing_text_score: None,
             domain: domain.to_string(),
             url: format!("https://{domain}/"),
             title: None,

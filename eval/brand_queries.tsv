@@ -174,3 +174,270 @@ tesla	tesla.com
 mayo clinic	mayoclinic.org
 american red cross	redcross.org
 craigslist	craigslist.org
+
+# Added 2026-10-06 to make the suite bigger.
+# More banks and finance
+citizens bank	citizensbank.com
+td bank	td.com
+hsbc	hsbc.com
+barclays	barclays.co.uk,barclays.com
+regions bank	regions.com
+fifth third bank	53.com
+huntington bank	huntington.com
+morgan stanley	morganstanley.com
+jpmorgan	jpmorgan.com,jpmorganchase.com
+visa	visa.com
+sofi	sofi.com
+chime	chime.com
+western union	westernunion.com
+wise	wise.com
+cash app	cash.app
+zelle	zellepay.com
+klarna	klarna.com
+nerdwallet	nerdwallet.com
+credit karma	creditkarma.com
+experian	experian.com
+equifax	equifax.com
+transunion	transunion.com
+
+# More shops
+trader joes	traderjoes.com
+whole foods	wholefoodsmarket.com
+safeway	safeway.com
+publix	publix.com
+heb	heb.com
+sams club	samsclub.com
+dollar general	dollargeneral.com
+nordstrom	nordstrom.com
+kohls	kohls.com
+old navy	oldnavy.com,gap.com
+h&m	hm.com
+zara	zara.com
+uniqlo	uniqlo.com
+adidas	adidas.com
+sephora	sephora.com
+ulta beauty	ulta.com
+petsmart	petsmart.com
+chewy	chewy.com
+staples	staples.com
+newegg	newegg.com
+b&h photo	bhphotovideo.com
+temu	temu.com
+shein	shein.com
+rei	rei.com
+dicks sporting goods	dickssportinggoods.com
+autozone	autozone.com
+
+# More restaurants
+subway	subway.com
+burger king	bk.com
+wendys	wendys.com
+pizza hut	pizzahut.com
+kfc	kfc.com
+dunkin	dunkindonuts.com,dunkin.com
+panera bread	panerabread.com
+olive garden	olivegarden.com
+papa johns	papajohns.com
+five guys	fiveguys.com
+popeyes	popeyes.com
+in-n-out burger	in-n-out.com
+shake shack	shakeshack.com
+
+# More travel
+spirit airlines	spirit.com
+frontier airlines	flyfrontier.com
+hawaiian airlines	hawaiianairlines.com
+air france	airfrance.com,airfrance.us,airfrance.fr
+klm	klm.com
+qantas	qantas.com
+ryanair	ryanair.com
+easyjet	easyjet.com
+singapore airlines	singaporeair.com
+turkish airlines	turkishairlines.com
+qatar airways	qatarairways.com
+hyatt	hyatt.com
+ihg hotels	ihg.com
+hertz	hertz.com
+enterprise rent-a-car	enterprise.com
+avis	avis.com
+greyhound	greyhound.com
+vrbo	vrbo.com
+kayak	kayak.com
+priceline	priceline.com
+royal caribbean	royalcaribbean.com
+carnival cruise line	carnival.com
+national park service	nps.gov
+
+# More government and organizations
+department of education	ed.gov
+department of labor	dol.gov
+department of justice	justice.gov
+homeland security	dhs.gov
+tsa	tsa.gov
+epa	epa.gov
+noaa	noaa.gov
+usgs	usgs.gov
+ftc	ftc.gov
+fcc	fcc.gov
+consumer financial protection bureau	consumerfinance.gov
+library of congress	loc.gov
+national archives	archives.gov
+supreme court	supremecourt.gov
+us senate	senate.gov
+house of representatives	house.gov
+usa.gov	usa.gov
+nato	nato.int
+unicef	unicef.org
+unesco	unesco.org
+world trade organization	wto.org
+interpol	interpol.int
+international committee of the red cross	icrc.org
+amnesty international	amnesty.org
+doctors without borders	doctorswithoutborders.org,msf.org
+wikimedia foundation	wikimediafoundation.org
+electronic frontier foundation	eff.org
+
+# More news and magazines
+le monde	lemonde.fr
+der spiegel	spiegel.de
+al jazeera	aljazeera.com
+the economist	economist.com
+the atlantic	theatlantic.com
+the new yorker	newyorker.com
+politico	politico.com
+axios	axios.com
+cnbc	cnbc.com
+nbc news	nbcnews.com
+cbs news	cbsnews.com
+los angeles times	latimes.com
+the verge	theverge.com
+wired	wired.com
+techcrunch	techcrunch.com
+ars technica	arstechnica.com
+time magazine	time.com
+rolling stone	rollingstone.com
+people magazine	people.com
+daily mail	dailymail.co.uk
+the telegraph	telegraph.co.uk
+the independent	independent.co.uk
+cbc	cbc.ca
+abc australia	abc.net.au
+
+# More entertainment and social
+hulu	hulu.com
+disney plus	disneyplus.com
+hbo max	max.com,hbomax.com
+paramount plus	paramountplus.com
+peacock	peacocktv.com
+twitch	twitch.tv
+discord	discord.com
+pinterest	pinterest.com
+tiktok	tiktok.com
+snapchat	snapchat.com
+whatsapp	whatsapp.com
+telegram	telegram.org
+signal	signal.org
+tumblr	tumblr.com
+quora	quora.com
+medium	medium.com
+substack	substack.com
+soundcloud	soundcloud.com
+bandcamp	bandcamp.com
+steam	steampowered.com
+epic games	epicgames.com
+playstation	playstation.com
+xbox	xbox.com
+nintendo	nintendo.com
+roblox	roblox.com
+minecraft	minecraft.net
+imdb	imdb.com
+rotten tomatoes	rottentomatoes.com
+goodreads	goodreads.com
+audible	audible.com
+
+# More tech
+intel	intel.com
+amd	amd.com
+dell	dell.com
+hp	hp.com
+lenovo	lenovo.com
+asus	asus.com
+logitech	logitech.com
+sony	sony.com
+lg	lg.com
+oracle	oracle.com
+salesforce	salesforce.com
+cisco	cisco.com
+qualcomm	qualcomm.com
+shopify	shopify.com
+squarespace	squarespace.com
+wix	wix.com
+wordpress	wordpress.com,wordpress.org
+godaddy	godaddy.com
+namecheap	namecheap.com
+canva	canva.com
+figma	figma.com
+notion	notion.so,notion.com
+trello	trello.com
+atlassian	atlassian.com
+asana	asana.com
+proton mail	proton.me
+firefox	mozilla.org,firefox.com
+brave browser	brave.com
+vlc media player	videolan.org
+raspberry pi	raspberrypi.com,raspberrypi.org
+
+# Cars
+ford	ford.com
+chevrolet	chevrolet.com
+honda	honda.com
+hyundai	hyundaiusa.com,hyundai.com
+kia	kia.com
+subaru	subaru.com
+bmw	bmw.com,bmwusa.com
+mercedes-benz	mercedes-benz.com,mbusa.com
+volkswagen	vw.com,volkswagen.com,volkswagen.de
+jeep	jeep.com
+
+# Health and insurance
+kaiser permanente	kp.org
+unitedhealthcare	uhc.com
+aetna	aetna.com
+cigna	cigna.com
+blue cross blue shield	bcbs.com
+progressive	progressive.com
+allstate	allstate.com
+johns hopkins medicine	hopkinsmedicine.org
+goodrx	goodrx.com
+
+# More universities and schools
+khan academy	khanacademy.org
+columbia university	columbia.edu
+university of chicago	uchicago.edu
+cornell	cornell.edu
+university of pennsylvania	upenn.edu
+duke university	duke.edu
+georgia tech	gatech.edu
+ut austin	utexas.edu
+university of washington	washington.edu,uw.edu
+eth zurich	ethz.ch
+university of toronto	utoronto.ca
+imperial college london	imperial.ac.uk
+college board	collegeboard.org
+common app	commonapp.org
+
+# Phone, internet and shipping
+dhl	dhl.com
+xfinity	xfinity.com
+spectrum	spectrum.com,spectrum.net
+
+# Sports
+nfl	nfl.com
+nba	nba.com
+mlb	mlb.com
+nhl	nhl.com
+fifa	fifa.com
+olympics	olympics.com
+premier league	premierleague.com
+ufc	ufc.com
+nascar	nascar.com

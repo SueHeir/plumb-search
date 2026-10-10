@@ -58,12 +58,19 @@ jobs:
           platforms: linux/amd64
           load: true
           tags: plumb-search:ci
+          build-args: |
+            PLUMB_BUILD_REVISION=${{ github.sha }}
+            PLUMB_BUILD_DIRTY=false
           cache-from: type=gha,scope=linux-amd64
           cache-to: type=gha,scope=linux-amd64,mode=max
 
       - name: Smoke test
+        env:
+          EXPECTED_BUILD_REVISION: ${{ github.sha }}
         run: |
           docker run --rm plumb-search:ci --version
+          docker run --rm plumb-search:ci build-info | python3 -c \
+            'import json, os, sys; info = json.load(sys.stdin); assert info["revision"] == os.environ["EXPECTED_BUILD_REVISION"] and info["dirty"] is False, info'
           # The flags of the image's default command must exist in this build.
           read -ra cmd < <(docker image inspect --format '{{join .Config.Cmd " "}}' plumb-search:ci)
           docker run --rm plumb-search:ci "${cmd[@]}" --help > /dev/null
@@ -142,6 +149,9 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           tags: ${{ env.IMAGE }}
           outputs: type=image,push-by-digest=true,name-canonical=true,push=true
+          build-args: |
+            PLUMB_BUILD_REVISION=${{ github.sha }}
+            PLUMB_BUILD_DIRTY=false
           cache-from: type=gha,scope=${{ env.PLATFORM_PAIR }}
           cache-to: type=gha,scope=${{ env.PLATFORM_PAIR }},mode=max
 

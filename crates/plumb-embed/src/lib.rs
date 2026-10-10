@@ -16,13 +16,24 @@
 //! The model runs one text at a time, never in padded batches, so a site's
 //! vector does not depend on which other sites were embedded with it.
 
+mod gemma;
 mod model;
+pub mod relations;
+mod rerank;
+mod server;
 mod text;
 mod vectors;
 
+pub use gemma::{
+    gemma_id, is_gemma_dir, write_test_gemma, GEMMA_DIM, GEMMA_DOWNLOADS, GEMMA_FILE,
+    GEMMA_MAX_TOKENS, GEMMA_QUERY_PREFIX, GEMMA_TEXT_PREFIX, GEMMA_TOKENIZER_FILE,
+};
 pub use model::{
     model_id, quantize, write_test_model, Embedder, ModelId, MAX_TOKENS, MODEL_BASE_URL,
     MODEL_FILES, MODEL_NAME,
 };
-pub use text::{site_text, text_hash, TextHash, MAX_LINK_TEXTS, MAX_TEXT_WORDS};
+pub use relations::{Relation, Relations, RELATIONS_FILE_NAME};
+pub use rerank::{Reranker, RERANK_MAX_TOKENS};
+pub use server::SERVER_FILE;
+pub use text::{site_text, site_text_words, text_hash, TextHash, MAX_LINK_TEXTS, MAX_TEXT_WORDS};
 pub use vectors::{cosine, Vectors, VECTORS_FILE_NAME};
