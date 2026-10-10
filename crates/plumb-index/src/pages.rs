@@ -1854,7 +1854,7 @@ impl PageSearcher {
                 .collect();
             let searcher = self.reader.searcher();
             let found = searcher.search(
-                &BooleanQuery::new(clauses),
+                self.language_query(&BooleanQuery::new(clauses)).as_ref(),
                 &TopDocs::with_limit(CANDIDATES)
                     .order_by_fast_field::<u64>("popularity", tantivy::Order::Desc),
             )?;
@@ -4214,6 +4214,50 @@ mod tests {
         }
         assert!(index.entities("unrelated country", 5).unwrap().is_empty());
         assert!(index.entities("Japan", 0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn entity_language_is_filtered_before_name_and_description_caps() {
+        for by_description in [false, true] {
+            let entity = |language: &str, number: usize, views: u64| {
+                let mut page = Page::from_article(
+                    language,
+                    Article {
+                        title: if by_description {
+                            format!("Language entity {number}")
+                        } else {
+                            "Language control".into()
+                        },
+                        description: by_description.then(|| "Language control".into()),
+                        item: Some(format!("Q{}", 100_000 + number)),
+                        views,
+                        ..Article::default()
+                    },
+                );
+                page.url = format!("https://{language}.wikipedia.org/wiki/Entity_{number}");
+                page
+            };
+            let mut pages: Vec<_> = (0..CANDIDATES + 25)
+                .map(|number| entity("en", number, 100_000))
+                .collect();
+            let spanish = entity("es", CANDIDATES + 25, 1);
+            let german = entity("de", CANDIDATES + 26, 1);
+            pages.extend([spanish.clone(), german.clone()]);
+            let (_dir, index) = searcher(&pages);
+            // A post-cap filter would lose both requested-language entities.
+            let unscoped = index.entities("language control", CANDIDATES).unwrap();
+            assert_eq!(unscoped.len(), CANDIDATES);
+            assert!(unscoped.iter().all(|hit| hit.page.language() == Some("en")));
+            for (language, expected) in [("es", spanish), ("de", german)] {
+                let found = index
+                    .in_language(Some(language))
+                    .entities("language control", CANDIDATES)
+                    .unwrap();
+                assert_eq!(found.len(), 1, "{language}, description={by_description}");
+                assert_eq!(found[0].page.url, expected.url);
+                assert_eq!(found[0].named, !by_description);
+            }
+        }
     }
 
     #[test]

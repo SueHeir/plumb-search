@@ -964,6 +964,7 @@ pub(super) fn entities(
     };
     let ops = Operators::parse(query);
     let words = if ops.any() { ops.words.as_str() } else { query };
+    let searcher = searcher.in_language(options.language.as_deref());
     Ok(searcher
         .entities(words, KIND_PAGES)?
         .into_iter()
