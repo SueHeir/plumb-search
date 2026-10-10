@@ -948,7 +948,7 @@ fn run_places(args: &FetchPagesArgs, dest: &std::path::Path) -> Result<()> {
 
 /// `plumb fetch-pages`: makes a page set file.
 pub fn run_pages(args: FetchPagesArgs) -> Result<()> {
-    let Some(set) = crate::pages::SetInfo::find(&args.set) else {
+    let Some(set) = crate::pages::SetInfo::named(&args.set) else {
         bail!(
             "unknown page set {:?}; there are: {}",
             args.set,
