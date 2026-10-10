@@ -1192,6 +1192,7 @@ mod tests {
     #[test]
     fn rich_docs_exclude_chrome_and_hidden_subtrees_even_with_bad_markup() {
         let html = r#"<nav><code>menu_symbol</code></nav><footer><h2>Footer</h2></footer>
+            <div role="navigation"><code>role_symbol</code></div>
             <div hidden><pre>hidden_symbol</pre></div>
             <div aria-hidden="true"><code>aria_symbol</code></div>
             <div style="display: NONE !important"><code>style_symbol</code></div>
@@ -1205,6 +1206,7 @@ mod tests {
         assert!(search.text().contains("visible_symbol"));
         for hidden in [
             "menu_symbol",
+            "role_symbol",
             "hidden_symbol",
             "aria_symbol",
             "style_symbol",

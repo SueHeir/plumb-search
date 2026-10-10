@@ -96,6 +96,21 @@ impl RichText {
             || matches!(name, "head" | "title" | "svg" | "math")
             || attr(tag, "hidden").is_some()
             || attr(tag, "aria-hidden").is_some_and(|v| v.trim().eq_ignore_ascii_case("true"))
+            || attr(tag, "role").is_some_and(|roles| {
+                roles.split_whitespace().any(|role| {
+                    [
+                        "navigation",
+                        "menu",
+                        "menubar",
+                        "banner",
+                        "complementary",
+                        "contentinfo",
+                        "search",
+                    ]
+                    .iter()
+                    .any(|wanted| role.eq_ignore_ascii_case(wanted))
+                })
+            })
             || attr(tag, "style").is_some_and(hidden_style);
         let anchor = (!hidden)
             .then(|| {
