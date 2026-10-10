@@ -211,7 +211,7 @@ fn task_navigation_yields_to_strong_retrieved_pages_and_preserves_row_budget() {
         assert!(site_destination(query, &original, &pages).1.is_none());
     }
     let sites = [original];
-    let rows = crate::assembly::ordered_rows(query, &sites, &pages, 1);
+    let rows = crate::assembly::ordered_rows(query, &sites, &pages, &pages, 1);
     assert_eq!(rows.len(), 1);
     assert!(matches!(rows[0], crate::assembly::Row::Page { .. }));
     pages[0].under = Some(sites[0].domain.clone());
@@ -225,7 +225,8 @@ fn task_navigation_frozen_pg10_regression_preserves_provenance_and_site_metadata
         serde_json::from_str(include_str!("fixtures/frozen-pg10-navigation.json")).unwrap();
     let site: Hit = serde_json::from_value(fixture["site"].clone()).unwrap();
     let sites = [site];
-    let rows = crate::assembly::ordered_rows(fixture["query"].as_str().unwrap(), &sites, &[], 10);
+    let rows =
+        crate::assembly::ordered_rows(fixture["query"].as_str().unwrap(), &sites, &[], &[], 10);
     let output = serde_json::to_value(rows).unwrap();
     assert_eq!(output[0]["site"]["url"], fixture["candidate_url"]);
     assert_eq!(output[0]["navigation"]["homepage_url"], sites[0].url);

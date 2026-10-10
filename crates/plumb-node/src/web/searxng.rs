@@ -293,7 +293,7 @@ async fn collect(
         });
     }
     let assembled = crate::assembly::Assembled {
-        rows: crate::assembly::ordered_rows(query, &results.hits, &placed, limit),
+        rows: crate::assembly::ordered_rows(query, &results.hits, &placed, &results.pages, limit),
         places,
         recent: recent.clone(),
         answer: extras.answer.as_ref(),
@@ -564,7 +564,7 @@ mod tests {
     fn task_navigation_searxng_keeps_site_metadata_and_link_provenance() {
         let (query, site, selected_url) = crate::assembly::task_navigation_fixture();
         let sites = [site.clone()];
-        let rows = crate::assembly::ordered_rows(&query, &sites, &[], 10);
+        let rows = crate::assembly::ordered_rows(&query, &sites, &[], &[], 10);
         let crate::assembly::Row::Site {
             site: selected,
             navigation,

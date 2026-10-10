@@ -25,6 +25,48 @@ pub(crate) fn task_navigation_fixture() -> (String, Hit, String) {
     )
 }
 
+#[cfg(test)]
+pub(crate) fn task_navigation_filtered_page_fixture() -> (String, plumb_index::SearchResults) {
+    let (query, site, _) = task_navigation_fixture();
+    let mut hits = Vec::new();
+    for domain in ["first.example", "second.example", "third.example"] {
+        let mut other = site.clone();
+        other.domain = domain.into();
+        other.url = format!("https://{domain}/");
+        other.title = Some("Unrelated site".into());
+        other.key_pages.clear();
+        hits.push(other);
+    }
+    let mut page = plumb_index::pages::Page::from_reference(plumb_core::Article {
+        title: "Unrelated board meeting agenda".into(),
+        item: Some(format!("{}events/board-minutes/", site.url)),
+        ..Default::default()
+    })
+    .unwrap();
+    page.set = plumb_index::pages::SUBPAGES_SET.into();
+    hits.push(site);
+    let pages = vec![PlacedPage {
+        hit: plumb_index::pages::PageHit {
+            page,
+            score: 0.8,
+            popularity: 0.0,
+            named: false,
+            whole: false,
+            learned: None,
+        },
+        under: None,
+        at: 0,
+    }];
+    (
+        query,
+        plumb_index::SearchResults {
+            hits,
+            pages,
+            ..Default::default()
+        },
+    )
+}
+
 pub(crate) const MAX_PLACES: usize = 8;
 
 /// A guessed town must not turn a named non-place into local businesses.
@@ -158,6 +200,8 @@ pub(crate) fn ordered_rows<'a>(
     query: &str,
     hits: &'a [Hit],
     pages: &'a [PlacedPage],
+    // Retrieval evidence stays independent of placement/display filtering.
+    navigation_pages: &[PlacedPage],
     limit: usize,
 ) -> Vec<Row<'a>> {
     let mut rows = Vec::new();
@@ -172,7 +216,7 @@ pub(crate) fn ordered_rows<'a>(
             .iter()
             .filter(|p| p.under.as_deref() == Some(site.domain.as_str()))
             .collect();
-        let (site, navigation) = site_destination(query, site, pages);
+        let (site, navigation) = site_destination(query, site, navigation_pages);
         rows.push(Row::Site {
             site,
             pages: supporting,

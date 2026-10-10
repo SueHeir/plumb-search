@@ -1724,6 +1724,7 @@ impl Mcp {
                 if sites_only { "" } else { query },
                 &results.hits,
                 &placed,
+                &results.pages,
                 cap,
             ),
             places,

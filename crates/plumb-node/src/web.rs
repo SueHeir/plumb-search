@@ -1956,7 +1956,13 @@ async fn api_search(
                 )
             };
             let assembled = crate::assembly::Assembled {
-                rows: crate::assembly::ordered_rows(&query, &results.hits, &placed, params.limit()),
+                rows: crate::assembly::ordered_rows(
+                    &query,
+                    &results.hits,
+                    &placed,
+                    &results.pages,
+                    params.limit(),
+                ),
                 places: places.clone(),
                 recent: recent.clone(),
                 answer: extras.answer.as_ref(),
@@ -5180,6 +5186,85 @@ mod tests {
                 shown[0].url
             );
         }
+
+        // Real page placement can discard raw evidence too. The same raw
+        // veto must apply to each adapter without displaying the rejected page.
+        let (query, results) = crate::assembly::task_navigation_filtered_page_fixture();
+        let site = &results.hits[3];
+        let placed = place_pages(
+            &query,
+            &results.hits,
+            results.pages.iter().map(|p| p.hit.clone()).collect(),
+        );
+        assert!(
+            placed.is_empty(),
+            "the unrelated rank-four subpage is rejected"
+        );
+        let selected = shown_results(&query, &results, 10);
+        assert_eq!(selected[3].url, site.url);
+        let mut extras = answers::Extras::default();
+        extras.plugin_notes.insert(
+            selected[3].url.clone(),
+            vec![crate::plugins::ResultNote {
+                name: "Shelf".into(),
+                badge: Some("Raw evidence badge".into()),
+                ..Default::default()
+            }],
+        );
+        let html = render_results(
+            &query,
+            &results,
+            Some(&extras),
+            &NetOutcome::NotAsked,
+            &no_settings(),
+            None,
+            10,
+            true,
+            &Icons::default(),
+        );
+        assert!(!html.contains("Site navigation:"), "{html}");
+        assert!(!html.contains("Unrelated board meeting agenda"), "{html}");
+        assert!(html.contains("Shelf: Raw evidence badge"), "{html}");
+        let backend = Arc::new(SongBackend {
+            hits: results.hits.clone(),
+            pages: results.pages.clone(),
+        });
+        let app = router(backend.clone());
+        let encoded: String = url::form_urlencoded::byte_serialize(query.as_bytes()).collect();
+        let (_, _, body) = send(
+            app.clone(),
+            &format!("/api/search?q={encoded}&full=1&limit=10"),
+        )
+        .await;
+        let output: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(output["assembled"]["rows"][3]["site"]["url"], site.url);
+        assert!(output["assembled"]["rows"][3].get("navigation").is_none());
+        assert!(output["pages"].as_array().unwrap().is_empty());
+        let mcp = crate::mcp::Mcp::new(backend, None);
+        let output = mcp
+            .search(&query, Some(10), &SearchOptions::default())
+            .unwrap();
+        assert_eq!(output["results"][3]["url"], site.url);
+        assert!(output["results"][3].get("navigation").is_none());
+        assert!(output["pages"].as_array().unwrap().is_empty());
+        let (_, _, body) = send(
+            app.clone(),
+            &format!("/search?q={encoded}&format=json&limit=10"),
+        )
+        .await;
+        let output: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(output["results"][3]["url"], site.url);
+        assert_eq!(output["results"].as_array().unwrap().len(), 4);
+        let go = go_link(&query, &SearchOptions::default(), &site.domain);
+        assert!(
+            html.contains(&format!("href=\"{}\"", escape_html(&go))),
+            "{html}"
+        );
+        let (_, headers, _) = send(app, &go).await;
+        assert_eq!(
+            headers.get(header::LOCATION).unwrap().to_str().unwrap(),
+            site.url
+        );
     }
 
     #[tokio::test]
