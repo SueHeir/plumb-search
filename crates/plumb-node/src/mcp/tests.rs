@@ -1540,7 +1540,7 @@ fn paper_mcp_dates_are_validated_and_count_types_remain_explicit() {
         }),
         ..Default::default()
     });
-    let entry = page_entry(&page, None, 1);
+    let entry = page_entry(&page, "paper", None, 1);
     assert_eq!(entry["count"], json!({ "value": 4, "kind": "method_uses" }));
     assert_eq!(entry["paper"]["publication_date"], "2026-01-02");
     let rendered = super::text::render(

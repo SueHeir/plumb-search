@@ -257,6 +257,26 @@ impl SearchBackend for FrozenBackend {
             .take(limit.min(TYPED_CANDIDATES))
             .collect()
     }
+
+    fn papers(
+        &self,
+        query: &plumb_core::paper_query::PaperQuery,
+        limit: usize,
+        options: &SearchOptions,
+    ) -> Result<Vec<PageHit>> {
+        Ok(self
+            .pages
+            .in_language(options.language.as_deref())
+            .search_papers(query, TYPED_CANDIDATES)?
+            .into_iter()
+            .filter(|hit| options_allow(options, &hit.page))
+            .take(limit.min(TYPED_CANDIDATES))
+            .collect())
+    }
+
+    fn paper_coverage(&self) -> Option<plumb_index::pages::PaperCoverage> {
+        Some(self.pages.paper_coverage().clone())
+    }
 }
 
 fn scratch_path(root: &Path, path: &Path) -> Result<PathBuf> {

@@ -492,10 +492,17 @@ fn observe(
     let mut found = setup
         .searcher
         .search_meaning(&query, args.limit, cfg, &options, semantic)?;
-    let typed = case.options.kind.as_deref();
+    let paper = plumb_core::paper_query::PaperQuery::parse(&query)?;
+    let typed = case
+        .options
+        .kind
+        .as_deref()
+        .or(paper.constrained.then_some("paper"));
     let mut raw_pages = if let Some(pages) = &scoped_pages {
         if typed == Some("site") {
             Vec::new()
+        } else if typed == Some("paper") {
+            pages.search_papers(&paper, 200)?
         } else if typed.is_some() || ops.any() {
             pages.search_naming_docs(words, &ops, typed == Some("docs"), 200)?
         } else {
@@ -605,7 +612,13 @@ fn observe(
     let expected: Vec<_> = case.relevant.iter().map(|r| r.identity.clone()).collect();
     let diagnostic_pages = scoped_pages
         .as_ref()
-        .map(|pages| pages.search_naming_docs(words, &ops, typed == Some("docs"), 100))
+        .map(|pages| {
+            if typed == Some("paper") {
+                pages.search_papers(&paper, 100)
+            } else {
+                pages.search_naming_docs(words, &ops, typed == Some("docs"), 100)
+            }
+        })
         .transpose()?
         .unwrap_or_default();
     let pool = setup
