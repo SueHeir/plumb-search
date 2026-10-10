@@ -81,6 +81,16 @@ pub struct SitePagesResult {
 /// roots, a repeat, a bot check or a page that is not HTML is skipped.
 /// Must run inside a Tokio runtime.
 pub async fn fetch_site_pages(target: &SitePagesTarget, cfg: &CrawlConfig) -> SitePagesResult {
+    fetch_site_pages_with_extraction(target, cfg, crate::InnerPageExtraction::Compact).await
+}
+
+/// Opt-in inner-page content; request, body, robots and redirect bounds
+/// are identical to [`fetch_site_pages`].
+pub async fn fetch_site_pages_with_extraction(
+    target: &SitePagesTarget,
+    cfg: &CrawlConfig,
+    extraction: crate::InnerPageExtraction,
+) -> SitePagesResult {
     let mut result = SitePagesResult {
         domain: target.domain.clone(),
         ..SitePagesResult::default()
@@ -106,6 +116,7 @@ pub async fn fetch_site_pages(target: &SitePagesTarget, cfg: &CrawlConfig) -> Si
         return result;
     }
     let mut visit = Visit::new(&client, &cfg);
+    visit.set_inner_page_extraction(extraction);
     let mut indexes = Vec::new();
     for index in &target.index_pages {
         let Ok(url) = http_url(index) else { continue };
@@ -733,6 +744,7 @@ mod tests {
         // and moved is a page already fetched.
         assert_eq!(result.found, 5);
         assert_eq!(result.skipped, 2);
+        assert!(result.pages.iter().all(|page| page.meta.search.is_none()));
 
         let few = fetch_site_pages(
             &SitePagesTarget {
@@ -743,6 +755,48 @@ mod tests {
         )
         .await;
         assert_eq!(few.pages.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn rich_fetch_keeps_robots_and_body_bounds() {
+        use axum::{response::Html, routing::get, Router};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let sitemap = format!("<urlset><url><loc>{base}/docs/allowed</loc></url><url><loc>{base}/docs/secret</loc></url></urlset>");
+        let html = format!("<title>Allowed</title><h2 id='early'>API</h2><pre>early_symbol</pre><p>{}</p><pre>late_symbol</pre>", "filler ".repeat(200));
+        let app = Router::new()
+            .route(
+                "/robots.txt",
+                get(|| async { "User-agent: *\nDisallow: /docs/secret\n" }),
+            )
+            .route("/sitemap.xml", get(move || async { sitemap }))
+            .route("/docs/allowed", get(move || async { Html(html) }))
+            .route(
+                "/docs/secret",
+                get(|| async { Html("<pre>secret_symbol</pre>") }),
+            );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let cfg = CrawlConfig {
+            max_bytes: 256,
+            per_host_delay: Duration::ZERO,
+            allow_private_addresses: true,
+            ..CrawlConfig::default()
+        };
+        let target = SitePagesTarget {
+            domain: "example.test".into(),
+            roots: vec![format!("{base}/docs/")],
+            max_pages: 10,
+            ..SitePagesTarget::default()
+        };
+        let result =
+            fetch_site_pages_with_extraction(&target, &cfg, crate::InnerPageExtraction::Docs).await;
+        assert_eq!(result.pages.len(), 1);
+        assert_eq!(result.skipped, 1);
+        let search = result.pages[0].meta.search.as_ref().unwrap();
+        assert!(search.text().contains("early_symbol"));
+        assert!(!search.text().contains("late_symbol"));
+        assert!(!search.text().contains("secret_symbol"));
+        server.abort();
     }
 
     #[test]

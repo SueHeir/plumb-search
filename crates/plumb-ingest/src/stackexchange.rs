@@ -75,6 +75,7 @@ impl Question {
             lead: None,
             names: Vec::new(),
             sections: Vec::new(),
+            search: None,
         }
     }
 }

@@ -39,14 +39,17 @@ pub use crawl::{
     FeedTarget, HomepageCrawler,
 };
 pub use extract::{
-    extract_page_meta, MAX_BODY_WORDS, MAX_ICONS, MAX_OUT_LINKS, MAX_PAGE_TEXT_WORDS, MAX_SECTIONS,
-    MAX_SECTION_WORDS,
+    extract_inner_page_meta, extract_page_meta, InnerPageExtraction, DOCS_EXTRACTOR_VERSION,
+    MAX_BODY_WORDS, MAX_ICONS, MAX_OUT_LINKS, MAX_PAGE_TEXT_WORDS, MAX_SECTIONS, MAX_SECTION_WORDS,
 };
 pub use feed::{parse_date, read_feed};
 pub use icon::{normalize_icon, ICON_SIZE};
 pub use read::{page_text, PageReader, ReadConfig, ReadError, ReadPage, MAX_READ_LINKS};
 pub use records::{to_records, CRAWL_VERSION};
-pub use site_pages::{fetch_site_pages, SitePage, SitePagesResult, SitePagesTarget, MAX_SITEMAPS};
+pub use site_pages::{
+    fetch_site_pages, fetch_site_pages_with_extraction, SitePage, SitePagesResult, SitePagesTarget,
+    MAX_SITEMAPS,
+};
 pub use terms::{pick_terms, words_of, TERM_WORDS};
 
 /// Sent with every request so site owners can see who is crawling and why.
@@ -222,6 +225,9 @@ pub struct PageMeta {
     /// Python's "Data Structures"). Left out of the JSON form.
     #[serde(skip)]
     pub sections: Vec<String>,
+    /// Bounded rich inner-page content. Absent on homepage/legacy records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search: Option<plumb_core::article::SearchContent>,
     /// The page's visible text in reading order, without scripts, menus,
     /// headers, footers, forms and headings, cut to [`MAX_BODY_WORDS`]
     /// words.

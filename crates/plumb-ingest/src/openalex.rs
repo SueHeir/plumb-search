@@ -271,6 +271,7 @@ impl Work {
             lead: None,
             names: Vec::new(),
             sections: Vec::new(),
+            search: None,
         })
     }
 }

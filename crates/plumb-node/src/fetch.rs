@@ -353,7 +353,7 @@ const DOCS_SITES_AT_ONCE: usize = 16;
 
 /// Makes the docs set file `dest` from the docs sites' pages (see
 /// [`plumb_core::docs`]). With --work, each site's pages are kept there as
-/// `docs-KEY.json` when fetched, and a site already kept is not fetched
+/// `docs-rich-VERSION-KEY.json` when fetched, and a site already kept is not fetched
 /// again.
 fn run_docs(args: &FetchPagesArgs, dest: &std::path::Path) -> Result<()> {
     use plumb_core::docs::{DocsSite, DOCS_SITES};
@@ -386,9 +386,13 @@ fn run_docs(args: &FetchPagesArgs, dest: &std::path::Path) -> Result<()> {
             while running.len() < DOCS_SITES_AT_ONCE {
                 let Some(site) = queue.next() else { break };
                 let cfg = cfg.clone();
-                let kept = work
-                    .as_ref()
-                    .map(|work| work.join(format!("docs-{}.json", site.key)));
+                let kept = work.as_ref().map(|work| {
+                    work.join(format!(
+                        "docs-rich-{}-{}.json",
+                        plumb_crawl::DOCS_EXTRACTOR_VERSION,
+                        site.key
+                    ))
+                });
                 running.spawn(async move {
                     if let Some(docs) = kept.as_deref().and_then(read_kept_docs) {
                         info!(
@@ -405,7 +409,12 @@ fn run_docs(args: &FetchPagesArgs, dest: &std::path::Path) -> Result<()> {
                         index_pages: site.index_pages.iter().map(|r| r.to_string()).collect(),
                         max_pages,
                     };
-                    let result = plumb_crawl::fetch_site_pages(&target, &cfg).await;
+                    let result = plumb_crawl::fetch_site_pages_with_extraction(
+                        &target,
+                        &cfg,
+                        plumb_crawl::InnerPageExtraction::Docs,
+                    )
+                    .await;
                     let docs: Vec<FetchedDoc> = result
                         .pages
                         .into_iter()
@@ -415,6 +424,7 @@ fn run_docs(args: &FetchPagesArgs, dest: &std::path::Path) -> Result<()> {
                             description: page.meta.description,
                             text: page.meta.body_text,
                             sections: page.meta.sections,
+                            search: page.meta.search,
                         })
                         .collect();
                     if let Some(kept) = &kept {
@@ -618,6 +628,7 @@ fn fetch_sites<S: Copy + Send + 'static>(
                             description: page.meta.description,
                             text: page.meta.body_text,
                             sections: page.meta.sections,
+                            search: page.meta.search,
                         })
                         .collect();
                     if let Some(kept) = &kept {

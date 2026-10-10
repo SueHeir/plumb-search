@@ -33,6 +33,22 @@ use url::Url;
 use crate::terms::{pick_terms, TERM_WORDS};
 use crate::{OutLink, PageMeta};
 
+mod rich;
+use rich::RichText;
+
+/// Changes to rich extraction invalidate docs caches independently of
+/// homepage metadata. Include this and the configuration in cache identity.
+pub const DOCS_EXTRACTOR_VERSION: u32 = 1;
+
+/// Rich content is explicitly enabled for inner docs pages. Homepage
+/// callers retain their compact text and heading budgets.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum InnerPageExtraction {
+    #[default]
+    Compact,
+    Docs,
+}
+
 /// Most icon links [`extract_page_meta`] keeps from one page.
 pub const MAX_ICONS: usize = 3;
 
@@ -154,7 +170,17 @@ const WORD_BREAK_ELEMENTS: &[&str] = &[
 /// - The search terms ([`PageMeta::terms`]) are picked from the title,
 ///   description, headings and page text with [`pick_terms`].
 pub fn extract_page_meta(base_url: &Url, html: &str) -> PageMeta {
-    let mut meta = read_page(base_url, html, READ_TIME_LIMIT);
+    extract_inner_page_meta(base_url, html, InnerPageExtraction::Compact)
+}
+
+/// Reads an inner page with the same tokenizer/time limit as homepages,
+/// optionally retaining bounded symbols and passages from later sections.
+pub fn extract_inner_page_meta(
+    base_url: &Url,
+    html: &str,
+    extraction: InnerPageExtraction,
+) -> PageMeta {
+    let mut meta = read_page_with_extraction(base_url, html, READ_TIME_LIMIT, extraction);
     let text: Vec<&str> = meta
         .title
         .iter()
@@ -169,8 +195,22 @@ pub fn extract_page_meta(base_url: &Url, html: &str) -> PageMeta {
 }
 
 /// [`extract_page_meta`], reading for at most `time_limit`.
+#[cfg(test)]
 fn read_page(base_url: &Url, html: &str, time_limit: Duration) -> PageMeta {
-    let page = RefCell::new(Page::new(base_url));
+    read_page_with_extraction(base_url, html, time_limit, InnerPageExtraction::Compact)
+}
+
+fn read_page_with_extraction(
+    base_url: &Url,
+    html: &str,
+    time_limit: Duration,
+    extraction: InnerPageExtraction,
+) -> PageMeta {
+    let mut page = Page::new(base_url);
+    if extraction == InnerPageExtraction::Docs {
+        page.rich = Some(RichText::default());
+    }
+    let page = RefCell::new(page);
     let tokenizer = Tokenizer::new(Reader(&page), TokenizerOpts::default());
     let input = BufferQueue::default();
     let started = Instant::now();
@@ -279,6 +319,7 @@ struct Page<'a> {
     /// Whether a link to a spot on this page (`href="#..."`, such as "Skip
     /// to content") is open; its text stays out of the body text.
     in_page_link: bool,
+    rich: Option<RichText>,
 }
 
 /// A GET form on the page, between its `<form>` and its `</form>`.
@@ -370,6 +411,7 @@ impl<'a> Page<'a> {
             foreign: 0,
             chrome: 0,
             in_page_link: false,
+            rich: None,
         }
     }
 
@@ -390,6 +432,9 @@ impl<'a> Page<'a> {
 
     /// Handles a start tag, and tells the tokenizer how to read what follows.
     fn start_tag(&mut self, tag: &Tag) -> TokenSinkResult<()> {
+        if let Some(rich) = &mut self.rich {
+            rich.start(tag);
+        }
         let name: &str = &tag.name;
         match name {
             "a" => {
@@ -464,6 +509,9 @@ impl<'a> Page<'a> {
     }
 
     fn end_tag(&mut self, tag: &Tag) {
+        if let Some(rich) = &mut self.rich {
+            rich.end(tag);
+        }
         let name: &str = &tag.name;
         match name {
             "a" => {
@@ -497,6 +545,9 @@ impl<'a> Page<'a> {
     }
 
     fn text(&mut self, text: &str) {
+        if let Some(rich) = &mut self.rich {
+            rich.text(text);
+        }
         if let Some(title) = &mut self.title_text {
             title.push_str(text);
         }
@@ -863,6 +914,7 @@ impl<'a> Page<'a> {
             },
             headings: self.headings,
             sections: self.sections,
+            search: self.rich.and_then(RichText::finish),
             feed: self.feed,
             links: self.links,
         }
@@ -1031,6 +1083,179 @@ mod tests {
             url: url.into(),
             target_domain: target_domain.into(),
             text: text.into(),
+        }
+    }
+
+    #[test]
+    fn rich_docs_keep_late_exact_symbols_and_source_anchors() {
+        let intro = "ordinary introduction ".repeat(150);
+        let html = format!(
+            r##"<title>Node</title><main><p>{intro}</p>
+            <h2 id="method-overview">Methods</h2><table><tr><td><a href="#class-node-method-set-multiplayer-authority">set_multiplayer_authority</a></td></tr></table>
+            <h2 id="methods">Method descriptions</h2>
+            <p class="classref-method" id="class-node-method-set-multiplayer-authority">void <strong>set_multiplayer_authority</strong>(id: int, recursive: bool = true)</p>
+            <p>Sets this node's multiplayer authority to the peer with the given peer ID.</p>
+            <h3 id="sort">Sorting</h3><pre><code>Array.prototype.sort() std::vector</code></pre></main>"##
+        );
+        let base =
+            Url::parse("https://docs.godotengine.org/en/stable/classes/class_node.html").unwrap();
+        let compact = extract_page_meta(&base, &html);
+        let rich = extract_inner_page_meta(&base, &html, InnerPageExtraction::Docs);
+        assert!(compact.search.is_none());
+        assert_eq!(compact.body_text, rich.body_text);
+        assert_eq!(compact.sections, rich.sections);
+        assert!(!rich
+            .body_text
+            .as_deref()
+            .unwrap()
+            .contains("set_multiplayer_authority"));
+        let search = rich.search.unwrap();
+        for identifier in [
+            "set_multiplayer_authority",
+            "Array.prototype.sort",
+            "std::vector",
+        ] {
+            assert!(
+                search.symbols.iter().any(|s| s.identifier == identifier),
+                "{identifier}: {search:?}"
+            );
+        }
+        let authority = search
+            .symbols
+            .iter()
+            .find(|s| s.identifier == "set_multiplayer_authority")
+            .unwrap();
+        assert_eq!(
+            search
+                .symbols
+                .iter()
+                .filter(|s| s.identifier == "set_multiplayer_authority")
+                .count(),
+            1
+        );
+        assert_eq!(
+            authority.anchor.as_deref(),
+            Some("class-node-method-set-multiplayer-authority")
+        );
+        assert!(search.text().contains("set multiplayer authority"));
+        let definition = search
+            .passages
+            .iter()
+            .find(|p| p.text.contains("given peer ID"))
+            .unwrap();
+        assert_eq!(
+            definition.anchor.as_deref(),
+            Some("class-node-method-set-multiplayer-authority")
+        );
+    }
+
+    #[test]
+    fn rich_docs_keep_troubleshooting_prose_beyond_the_body_limit() {
+        let html = format!(
+            r#"<title>Pod lifecycle</title><p>{}</p>
+            <h2 id="container-restarts">Container restarts</h2>
+            <p>The CrashLoopBackOff state indicates repeated container failures. Kubernetes applies an exponential backoff delay before restarting the container.</p>"#,
+            "intro ".repeat(150)
+        );
+        let base = Url::parse("https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/")
+            .unwrap();
+        let meta = extract_inner_page_meta(&base, &html, InnerPageExtraction::Docs);
+        assert!(!meta.body_text.unwrap().contains("CrashLoopBackOff"));
+        let search = meta.search.unwrap();
+        let passage = search
+            .passages
+            .iter()
+            .find(|p| p.text.contains("exponential backoff"))
+            .unwrap();
+        assert_eq!(passage.heading, "Container restarts");
+        assert_eq!(passage.anchor.as_deref(), Some("container-restarts"));
+        assert!(search
+            .symbols
+            .iter()
+            .any(|s| s.identifier == "CrashLoopBackOff"));
+    }
+
+    #[test]
+    fn rich_docs_exclude_chrome_and_hidden_subtrees_even_with_bad_markup() {
+        let html = r#"<nav><code>menu_symbol</code></nav><footer><h2>Footer</h2></footer>
+            <div hidden><pre>hidden_symbol</pre></div>
+            <div aria-hidden="true"><code>aria_symbol</code></div>
+            <div style="display: NONE !important"><code>style_symbol</code></div>
+            <script>script_symbol</script><svg><text>svg_symbol</text></svg>
+            <h2 id="visible">Visible</h2><p><code>visible_symbol</code> explains the supported API.
+            <div hidden><span></nonsense>malformed_secret</div>"#;
+        let base = Url::parse("https://example.com/docs").unwrap();
+        let search = extract_inner_page_meta(&base, html, InnerPageExtraction::Docs)
+            .search
+            .unwrap();
+        assert!(search.text().contains("visible_symbol"));
+        for hidden in [
+            "menu_symbol",
+            "hidden_symbol",
+            "aria_symbol",
+            "style_symbol",
+            "script_symbol",
+            "svg_symbol",
+            "malformed_secret",
+        ] {
+            assert!(!search.text().contains(hidden), "{hidden}: {search:?}");
+        }
+    }
+
+    #[test]
+    fn rich_docs_bounds_hold_on_huge_and_deep_markup() {
+        use plumb_core::article::{MAX_SEARCH_BYTES, MAX_SEARCH_PASSAGES, MAX_SEARCH_SYMBOLS};
+        let base = Url::parse("https://example.com/docs").unwrap();
+        let html: String = (0..2000)
+            .map(|i| {
+                format!(
+                    "<h2 id='section{i}'>Topic {i}</h2><p><code>api_symbol_{i}</code> {}</p>",
+                    "原因 ".repeat(150)
+                )
+            })
+            .collect();
+        let (meta, peak) = peak_bytes(|| {
+            read_page_with_extraction(&base, &html, Duration::MAX, InnerPageExtraction::Docs)
+        });
+        let search = meta.search.unwrap();
+        assert!(search.symbols.len() <= MAX_SEARCH_SYMBOLS);
+        assert!(search.passages.len() <= MAX_SEARCH_PASSAGES);
+        assert!(serde_json::to_string(&search).unwrap().len() <= MAX_SEARCH_BYTES);
+        assert!(peak < 4 << 20, "{peak} bytes at peak");
+        assert!(search
+            .symbols
+            .iter()
+            .any(|s| s.identifier != "api_symbol_0" && s.identifier != "api_symbol_1"));
+        let deep = format!(
+            "<p>Useful initial text.</p>{}<code>excluded_symbol</code>{}",
+            "<span>".repeat(100_000),
+            "</span>".repeat(100_000)
+        );
+        let (_, peak) = peak_bytes(|| {
+            read_page_with_extraction(&base, &deep, Duration::MAX, InnerPageExtraction::Docs)
+        });
+        assert!(peak < 4 << 20, "{peak} bytes at peak");
+    }
+
+    #[test]
+    fn rich_extraction_is_independent_of_tokenizer_chunk_boundaries() {
+        let html = r#"<h2 id="std::vector">Vectors</h2><p><code>std::vector</code> and <strong>set_multiplayer_authority</strong> have exact identifiers.</p>"#;
+        let base = Url::parse("https://example.com/docs").unwrap();
+        let whole =
+            read_page_with_extraction(&base, html, READ_TIME_LIMIT, InnerPageExtraction::Docs);
+        for size in 1..html.len() {
+            let mut page = Page::new(&base);
+            page.rich = Some(RichText::default());
+            let page = RefCell::new(page);
+            let tokenizer = Tokenizer::new(Reader(&page), TokenizerOpts::default());
+            let input = BufferQueue::default();
+            for chunk in chunks(html, size) {
+                input.push_back(StrTendril::from_slice(chunk));
+                let _ = tokenizer.feed(&input);
+            }
+            tokenizer.end();
+            drop(tokenizer);
+            assert_eq!(page.into_inner().into_meta(), whole, "pieces of {size}");
         }
     }
 

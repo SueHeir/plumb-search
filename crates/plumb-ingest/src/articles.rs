@@ -471,6 +471,7 @@ pub fn build_articles(lang: &str, dumps: &ArticleDumps) -> Result<Vec<Article>> 
                 lead: None,
                 names: Vec::new(),
                 sections: Vec::new(),
+                search: None,
             }
         })
         .collect();

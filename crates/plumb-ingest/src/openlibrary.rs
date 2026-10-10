@@ -232,6 +232,7 @@ impl Book {
             lead: None,
             names: Vec::new(),
             sections: Vec::new(),
+            search: None,
         }
     }
 }

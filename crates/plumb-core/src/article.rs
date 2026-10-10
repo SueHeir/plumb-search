@@ -41,6 +41,10 @@
 //!
 //! A docs page's line carries the headings of its sections the same way
 //! (`section=List Comprehensions`), from `plumb fetch-pages --set docs`.
+//! Rich docs optionally add `search={"version":1,...}` to that same line.
+//! Its bounded JSON preserves exact API identifiers, fragment anchors and
+//! source passages; pipes are JSON-escaped so legacy readers ignore the
+//! extension without misreading its content as profiles or extra sections.
 
 use std::io::{BufRead, Write};
 
@@ -72,6 +76,184 @@ pub const MAX_SECTIONS: usize = 64;
 
 /// Most characters of a page's sections, all together.
 pub const MAX_SECTIONS_CHARS: usize = 1_000;
+
+/// Current optional docs search extension. Old readers ignore its key.
+pub const SEARCH_VERSION: u8 = 1;
+pub const SEARCH_KEY: &str = "search";
+/// Encoded JSON bytes, excluding the `search=` key, per page.
+pub const MAX_SEARCH_BYTES: usize = 8 * 1024;
+pub const MAX_SEARCH_SYMBOLS: usize = 64;
+pub const MAX_SEARCH_SYMBOL_BYTES: usize = 4 * 1024;
+pub const MAX_SEARCH_IDENTIFIER_BYTES: usize = 192;
+pub const MAX_SEARCH_ANCHOR_BYTES: usize = 256;
+pub const MAX_SEARCH_PASSAGES: usize = 8;
+pub const MAX_SEARCH_PASSAGE_CHARS: usize = 512;
+pub const MAX_SEARCH_HEADING_CHARS: usize = 160;
+
+/// Exact, case-preserving API name and the HTML fragment that owns it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchSymbol {
+    pub identifier: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<String>,
+}
+
+/// Source text, not a generated answer. Anchors are HTML IDs (without `#`),
+/// not token offsets or character positions in the original HTML.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchPassage {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub heading: String,
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<String>,
+}
+
+/// Optional rich content on the existing profiles line. Missing content
+/// means a compact/legacy record; it is not evidence of a rich rebuild.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchContent {
+    pub version: u8,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub symbols: Vec<SearchSymbol>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub passages: Vec<SearchPassage>,
+}
+
+impl Default for SearchContent {
+    fn default() -> Self {
+        Self {
+            version: SEARCH_VERSION,
+            symbols: Vec::new(),
+            passages: Vec::new(),
+        }
+    }
+}
+
+impl SearchContent {
+    /// Validate and bound producer data before caching/indexing/writing.
+    /// Overlong identifiers/anchors are discarded rather than cut into a
+    /// different identifier or a broken fragment. Producer priority order
+    /// determines which content survives the byte budgets.
+    pub fn bounded(&self) -> Option<Self> {
+        if self.version != SEARCH_VERSION {
+            return None;
+        }
+        let mut result = Self::default();
+        let mut bytes = 0;
+        for symbol in &self.symbols {
+            if result.symbols.len() == MAX_SEARCH_SYMBOLS {
+                break;
+            }
+            if !valid_identifier(&symbol.identifier)
+                || result
+                    .symbols
+                    .iter()
+                    .any(|s| s.identifier == symbol.identifier && s.anchor == symbol.anchor)
+            {
+                continue;
+            }
+            let symbol = SearchSymbol {
+                identifier: symbol.identifier.clone(),
+                anchor: symbol.anchor.as_deref().and_then(search_anchor),
+            };
+            let size = search_json(&symbol).len();
+            if bytes + size > MAX_SEARCH_SYMBOL_BYTES {
+                continue;
+            }
+            bytes += size;
+            result.symbols.push(symbol);
+        }
+        for passage in &self.passages {
+            if result.passages.len() == MAX_SEARCH_PASSAGES {
+                break;
+            }
+            let text = crate::truncate_chars(
+                &crate::collapse_whitespace(&passage.text),
+                MAX_SEARCH_PASSAGE_CHARS,
+            );
+            if text.is_empty() {
+                continue;
+            }
+            let passage = SearchPassage {
+                heading: crate::truncate_chars(
+                    &crate::collapse_whitespace(&passage.heading),
+                    MAX_SEARCH_HEADING_CHARS,
+                ),
+                text,
+                anchor: passage.anchor.as_deref().and_then(search_anchor),
+            };
+            if !result.passages.contains(&passage) {
+                result.passages.push(passage);
+            }
+        }
+        // Unicode and JSON escaping also count toward the wire budget.
+        while search_json(&result).len() > MAX_SEARCH_BYTES {
+            if result.passages.pop().is_none() {
+                result.symbols.pop()?;
+            }
+        }
+        (!result.symbols.is_empty() || !result.passages.is_empty()).then_some(result)
+    }
+
+    /// Lexical input for retrieval: exact identifiers remain alongside
+    /// their punctuation-separated words. Index exact symbols separately
+    /// when the index supports them; passages retain their own provenance.
+    pub fn text(&self) -> String {
+        let mut text = String::new();
+        for symbol in &self.symbols {
+            text.push_str(&symbol.identifier);
+            text.push(' ');
+            for word in symbol
+                .identifier
+                .split(|c: char| !c.is_alphanumeric())
+                .filter(|s| !s.is_empty())
+            {
+                text.push_str(word);
+                text.push(' ');
+            }
+        }
+        for passage in &self.passages {
+            text.push_str(&passage.heading);
+            text.push(' ');
+            text.push_str(&passage.text);
+            text.push(' ');
+        }
+        text
+    }
+}
+
+pub fn valid_identifier(identifier: &str) -> bool {
+    !identifier.is_empty()
+        && identifier.len() <= MAX_SEARCH_IDENTIFIER_BYTES
+        && identifier.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+        && identifier
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | ':'))
+}
+
+/// A fragment ID, preserved exactly; never truncate a destination.
+pub fn search_anchor(anchor: &str) -> Option<String> {
+    (!anchor.is_empty()
+        && anchor.len() <= MAX_SEARCH_ANCHOR_BYTES
+        && !anchor.chars().any(|c| c.is_control() || c.is_whitespace()))
+    .then(|| anchor.to_string())
+}
+
+fn search_json(value: &impl Serialize) -> String {
+    // JSON already escapes tabs and newlines. Escape the remaining TSV
+    // metadata separator as JSON, so embedded pipes survive round trips.
+    serde_json::to_string(value)
+        .expect("search content is serializable")
+        .replace('|', "\\u007c")
+}
+
+fn parse_search(value: &str) -> Option<SearchContent> {
+    if value.len() > MAX_SEARCH_BYTES {
+        return None;
+    }
+    serde_json::from_str::<SearchContent>(value).ok()?.bounded()
+}
 
 /// The articles file of Wikipedia in `lang` (`en`): `wikipedia-en.tsv.gz`.
 pub fn articles_file_name(lang: &str) -> String {
@@ -132,6 +314,9 @@ pub struct Article {
     /// of profiles.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sections: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Optional inner-page search metadata; independent of display text.
+    pub search: Option<SearchContent>,
 }
 
 /// The key of an official website on a line of profiles.
@@ -162,6 +347,7 @@ pub struct ProfilesLine<'a> {
     pub lead: Option<String>,
     pub names: Vec<String>,
     pub sections: Vec<String>,
+    pub search: Option<SearchContent>,
 }
 
 /// The item, profiles, official website and facts of a line of profiles,
@@ -191,6 +377,12 @@ pub fn parse_profiles_line(line: &str) -> Option<ProfilesLine<'_>> {
         lead: values(LEAD_KEY).next(),
         names: values(NAME_KEY).take(MAX_OTHER_NAMES).collect(),
         sections: values(SECTION_KEY).take(MAX_SECTIONS).collect(),
+        search: profiles.split('|').find_map(|pair| {
+            let (key, value) = pair.split_once('=')?;
+            (key.trim() == SEARCH_KEY)
+                .then(|| parse_search(value.trim()))
+                .flatten()
+        }),
     })
 }
 
@@ -285,6 +477,14 @@ pub fn write_article(out: &mut impl Write, article: &Article) -> std::io::Result
         profiles.push('=');
         profiles.push_str(&value);
     }
+    if let Some(search) = article.search.as_ref().and_then(SearchContent::bounded) {
+        if !profiles.is_empty() {
+            profiles.push('|');
+        }
+        profiles.push_str(SEARCH_KEY);
+        profiles.push('=');
+        profiles.push_str(&search_json(&search));
+    }
     if !profiles.is_empty() {
         write!(out, "{PROFILES_LINE}")?;
         writeln!(
@@ -349,6 +549,7 @@ impl<I: Iterator<Item = String>> Iterator for ArticleLines<I> {
                         article.lead = found.lead;
                         article.names = found.names;
                         article.sections = found.sections;
+                        article.search = found.search;
                     }
                 }
                 continue;
@@ -420,6 +621,7 @@ pub fn parse_article(line: &str) -> Result<Article> {
         lead: None,
         names: Vec::new(),
         sections: Vec::new(),
+        search: None,
     })
 }
 
@@ -564,6 +766,7 @@ mod tests {
             lead: None,
             names: Vec::new(),
             sections: Vec::new(),
+            search: None,
         };
         let mut out = Vec::new();
         out.extend_from_slice(ARTICLES_HEADER.as_bytes());
@@ -720,6 +923,108 @@ mod tests {
         assert_eq!(back[0].sections, page.sections);
         assert!(back[0].names.is_empty());
         assert!(parse_profiles("section=More on Lists").is_empty());
+    }
+
+    #[test]
+    fn rich_docs_round_trip_without_changing_legacy_columns_or_headings() {
+        let search = SearchContent {
+            symbols: vec![SearchSymbol {
+                identifier: "set_multiplayer_authority".into(),
+                anchor: Some("class-node-method-set-multiplayer-authority".into()),
+            }],
+            passages: vec![SearchPassage {
+                heading: "CrashLoopBackOff".into(),
+                text: "Source says a | b = c; tabs\tand\nnewlines survive as whitespace.".into(),
+                anchor: Some("backoff|原因".into()),
+            }],
+            ..SearchContent::default()
+        }
+        .bounded()
+        .unwrap();
+        let page = Article {
+            title: "Node".into(),
+            item: Some("https://docs.godotengine.org/en/stable/classes/class_node.html".into()),
+            sections: vec!["Method Descriptions".into()],
+            search: Some(search.clone()),
+            ..Article::default()
+        };
+        let mut out = Vec::new();
+        write_article(&mut out, &page).unwrap();
+        let text = String::from_utf8(out.clone()).unwrap();
+        let lines: Vec<_> = text.lines().collect();
+        let compact = parse_article(lines[0]).unwrap();
+        assert_eq!(compact.title, page.title);
+        assert_eq!(compact.search, None);
+        assert!(
+            crate::profiles::parse_profiles(lines[1].splitn(3, '\t').nth(2).unwrap()).is_empty()
+        );
+        assert!(text.contains("\\u007c"));
+        assert_eq!(lines[1].split('\t').count(), 3);
+        let back = read_articles(&out[..], 1).unwrap();
+        assert_eq!(back[0], page);
+        assert!(back[0]
+            .search
+            .as_ref()
+            .unwrap()
+            .text()
+            .contains("set multiplayer authority"));
+        let legacy: Article = serde_json::from_str(r#"{"title":"Node","views":1}"#).unwrap();
+        assert!(legacy.search.is_none());
+    }
+
+    #[test]
+    fn malformed_or_future_search_extensions_leave_the_parent_and_sections_readable() {
+        for value in [
+            "{",
+            r#"{"version":2,"symbols":[]}"#,
+            r#"{"version":1,"symbols":"bad"}"#,
+            &"x".repeat(MAX_SEARCH_BYTES + 1),
+        ] {
+            let line = format!("profiles\turl\tsection=Methods|search={value}|section=Errors");
+            let parsed = parse_profiles_line(&line).unwrap();
+            assert_eq!(parsed.sections, ["Methods", "Errors"]);
+            assert!(parsed.search.is_none());
+            let file = format!("1\tNode\t\turl\t\t\n{line}\n");
+            assert_eq!(read_articles(file.as_bytes(), 1).unwrap()[0].title, "Node");
+        }
+    }
+
+    #[test]
+    fn rich_content_enforces_byte_character_and_identity_bounds() {
+        let search = SearchContent {
+            symbols: (0..200)
+                .map(|i| SearchSymbol {
+                    identifier: format!("long_identifier_{i}"),
+                    anchor: Some("a".repeat(MAX_SEARCH_ANCHOR_BYTES + 1)),
+                })
+                .chain([SearchSymbol {
+                    identifier: "x".repeat(MAX_SEARCH_IDENTIFIER_BYTES + 1),
+                    anchor: None,
+                }])
+                .collect(),
+            passages: (0..30)
+                .map(|i| SearchPassage {
+                    heading: format!("Section {i}"),
+                    text: "原因|".repeat(600),
+                    anchor: None,
+                })
+                .collect(),
+            ..SearchContent::default()
+        };
+        let bounded = search.bounded().unwrap();
+        assert!(bounded.symbols.len() <= MAX_SEARCH_SYMBOLS);
+        assert!(bounded
+            .symbols
+            .iter()
+            .all(|s| s.anchor.is_none() && s.identifier.len() <= MAX_SEARCH_IDENTIFIER_BYTES));
+        assert!(bounded.passages.len() <= MAX_SEARCH_PASSAGES);
+        assert!(bounded
+            .passages
+            .iter()
+            .all(|p| p.text.chars().count() <= MAX_SEARCH_PASSAGE_CHARS));
+        let encoded = search_json(&bounded);
+        assert!(encoded.len() <= MAX_SEARCH_BYTES);
+        assert_eq!(parse_search(&encoded), Some(bounded));
     }
 
     #[test]

@@ -15,10 +15,12 @@
 use std::collections::{HashMap, HashSet};
 
 use plumb_core::article::{
-    Article, MAX_ALIASES, MAX_ARTICLE_DESCRIPTION_CHARS, MAX_SECTIONS, MAX_SECTIONS_CHARS,
+    Article, SearchContent, MAX_ALIASES, MAX_ARTICLE_DESCRIPTION_CHARS, MAX_SECTIONS,
+    MAX_SECTIONS_CHARS,
 };
 use plumb_core::docs::{page_title, DocsSite};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 /// Views of a page right at the root of a site of weight 1.
 pub const VIEWS_PER_WEIGHT: u64 = 1_000;
@@ -72,11 +74,15 @@ pub struct FetchedDoc {
     /// ([`plumb_crawl::PageMeta::sections`]).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sections: Vec<String>,
+    /// Optional rich content; absent in old caches and compact fetches.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search: Option<SearchContent>,
 }
 
 /// The articles of `site`'s pages `docs`, in the order given, leaving out
-/// pages with no title of their own and a title the site has used before
-/// (the first, shallowest, page keeps it).
+/// pages with no title of their own and repeated canonical URLs. Repeated
+/// cleaned titles are legitimate (different topics or versions). Mirrors
+/// collapse only with substantial identical rich content and version paths.
 /// A description shared by [`SHARED_BY`] or more of them, the site's own
 /// or its menu's rather than a page's, is left out for the page's text, or
 /// for none.
@@ -87,10 +93,66 @@ pub fn docs_articles(site: &DocsSite, docs: &[FetchedDoc]) -> Vec<Article> {
         sections: shared_sections(docs),
     };
     let mut seen = HashSet::new();
+    let mut content = HashSet::new();
     docs.iter()
-        .filter_map(|doc| article_of(site, doc, &shared))
-        .filter(|article| seen.insert(article.title.to_lowercase()))
+        .filter_map(|doc| {
+            let mut article = article_of(site, doc, &shared)?;
+            let url = canonical_url(&doc.url)?;
+            if !seen.insert(url.clone()) {
+                return None;
+            }
+            if let Some(key) = content_key(doc, &article, &url) {
+                if !content.insert(key) {
+                    return None;
+                }
+            }
+            article.item = Some(url);
+            Some(article)
+        })
         .collect()
+}
+
+fn canonical_url(address: &str) -> Option<String> {
+    let mut url = url::Url::parse(address).ok()?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        return None;
+    }
+    url.set_fragment(None);
+    Some(url.into())
+}
+
+/// Compact opening text alone is insufficient evidence of a mirror.
+fn content_key(doc: &FetchedDoc, article: &Article, address: &str) -> Option<[u8; 32]> {
+    let search = article.search.as_ref()?;
+    if search.passages.len() < 2
+        || search.passages.iter().map(|p| p.text.len()).sum::<usize>() < 512
+    {
+        return None;
+    }
+    let url = url::Url::parse(address).ok()?;
+    // Preserve named/numeric version paths even when two versions currently
+    // share content. Never erase their separately addressable identities.
+    let versions: Vec<&str> = url
+        .path()
+        .split('/')
+        .filter(|part| {
+            let numeric = part.strip_prefix('v').unwrap_or(part);
+            matches!(*part, "stable" | "latest" | "main" | "master" | "next")
+                || (!numeric.is_empty()
+                    && numeric.chars().any(|c| c.is_ascii_digit())
+                    && numeric.chars().all(|c| c.is_ascii_digit() || c == '.'))
+        })
+        .collect();
+    let evidence = serde_json::to_vec(&(
+        &article.title,
+        versions,
+        &doc.description,
+        &doc.text,
+        &doc.sections,
+        search,
+    ))
+    .ok()?;
+    Some(Sha256::digest(evidence).into())
 }
 
 /// Descriptions and texts many pages of a site share.
@@ -209,6 +271,7 @@ fn article_of(site: &DocsSite, doc: &FetchedDoc, shared: &Shared) -> Option<Arti
     Some(Article {
         aliases: aliases(site, &title),
         sections: sections_of(&title, doc, shared),
+        search: doc.search.as_ref().and_then(SearchContent::bounded),
         title,
         description,
         item: Some(doc.url.clone()),
@@ -334,6 +397,7 @@ mod tests {
             description: description.map(Into::into),
             text: Some("Python lists have a built-in list.sort() method.".into()),
             sections: Vec::new(),
+            search: None,
         }
     }
 
@@ -461,7 +525,7 @@ mod tests {
     }
 
     #[test]
-    fn keeps_a_title_once_and_sorts_by_views() {
+    fn keeps_distinct_urls_with_shared_titles_and_sorts_by_views() {
         let python = site("python").unwrap();
         let mut articles = docs_articles(
             python,
@@ -483,7 +547,7 @@ mod tests {
                 ),
             ],
         );
-        assert_eq!(articles.len(), 2);
+        assert_eq!(articles.len(), 3);
         sort_docs(&mut articles);
         assert_eq!(articles[0].title, "Glossary");
         assert_eq!(articles[1].title, "Built-in Functions");
@@ -498,6 +562,7 @@ mod tests {
             description: Some("The library for web and native user interfaces".into()),
             text: Some(text.into()),
             sections: Vec::new(),
+            search: None,
         };
         let articles = docs_articles(
             react,
@@ -546,6 +611,7 @@ mod tests {
             description: None,
             text: Some(format!("About {title}")),
             sections: sections.iter().map(|s| s.to_string()).collect(),
+            search: None,
         };
         let docs = [
             page(
@@ -581,5 +647,75 @@ mod tests {
                 vec![],
             ]
         );
+    }
+
+    #[test]
+    fn legacy_docs_cache_is_readable_and_rich_content_reaches_article_metadata() {
+        let legacy: FetchedDoc = serde_json::from_str(r#"{"url":"https://docs.python.org/3/library/tomllib.html","title":"tomllib — Python 3.14 documentation","description":null,"text":"TOML parser"}"#).unwrap();
+        assert!(legacy.search.is_none());
+        assert!(legacy.sections.is_empty());
+        let mut doc = legacy;
+        doc.search = Some(SearchContent {
+            symbols: vec![plumb_core::article::SearchSymbol {
+                identifier: "tomllib.loads".into(),
+                anchor: Some("tomllib.loads".into()),
+            }],
+            passages: vec![plumb_core::article::SearchPassage {
+                heading: "Exceptions".into(),
+                text: "TOMLDecodeError is raised for an invalid TOML document.".into(),
+                anchor: Some("tomllib.TOMLDecodeError".into()),
+            }],
+            ..SearchContent::default()
+        });
+        let article = doc_article(site("python").unwrap(), &doc).unwrap();
+        let mut bytes = Vec::new();
+        plumb_core::article::write_article(&mut bytes, &article).unwrap();
+        let restored = plumb_core::article::read_articles(bytes.as_slice(), 1).unwrap();
+        assert_eq!(restored[0].search, doc.search);
+    }
+
+    #[test]
+    fn deduplication_requires_url_or_substantial_same_version_content() {
+        let python = site("python").unwrap();
+        let mut first = doc(
+            "https://docs.python.org/3/tutorial/a.html",
+            "Introduction — Python 3.14 documentation",
+            None,
+        );
+        let mut second = first.clone();
+        second.url = "https://docs.python.org/3/tutorial/b.html".into();
+        let mut fragment = first.clone();
+        fragment.url.push_str("#section");
+        assert_eq!(
+            docs_articles(python, &[first.clone(), second.clone(), fragment]).len(),
+            2
+        );
+        let rich = SearchContent {
+            passages: (0..2)
+                .map(|i| plumb_core::article::SearchPassage {
+                    heading: format!("Section {i}"),
+                    text: "substantive source text ".repeat(20),
+                    anchor: Some(format!("section-{i}")),
+                })
+                .collect(),
+            ..SearchContent::default()
+        };
+        first.search = Some(rich.clone());
+        second.search = Some(rich);
+        let mut next_version = second.clone();
+        next_version.url = "https://docs.python.org/4/tutorial/b.html".into();
+        let mut different_content = second.clone();
+        different_content.url = "https://docs.python.org/3/tutorial/c.html".into();
+        different_content.search.as_mut().unwrap().passages[0]
+            .text
+            .push_str(" Different subject.");
+        let articles = docs_articles(python, &[first, second, next_version, different_content]);
+        assert_eq!(articles.len(), 3);
+        assert!(articles
+            .iter()
+            .any(|a| a.item.as_ref().unwrap().contains("/4/")));
+        assert!(articles
+            .iter()
+            .any(|a| a.item.as_ref().unwrap().ends_with("c.html")));
     }
 }

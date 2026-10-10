@@ -1154,6 +1154,7 @@ fn into_article(kept: Kept, artist: Option<&str>) -> Article {
         lead: None,
         names: Vec::new(),
         sections: Vec::new(),
+        search: None,
     }
 }
 

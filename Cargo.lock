@@ -6035,6 +6035,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sevenz-rust2",
+ "sha2 0.10.9",
  "tar",
  "tempfile",
  "tokio",
