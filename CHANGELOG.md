@@ -31,6 +31,7 @@ Downloads are on [GitHub Releases](https://github.com/SueHeir/plumb-search/relea
 - `facts` with `about` set to `height` gives a mountain's elevation when it has no height, as search already did for "height of mount everest".
 - `official_site` keeps a project's own site when its package gives only docs (pandas is pandas.pydata.org, not pandas.readthedocs.io), gives the docs when asked for them ("Pillow docs" is pillow.readthedocs.io), and keeps a well-known site's own docs ("Anthropic API docs" is anthropic.com).
 - `official_site` is less often sure of a wrong answer: a site named by a name it shows nothing of, or one of two official sites of a name ("Elixir"), is no longer high confidence. A low-confidence guess gives way to a site that shows the whole name ("outlook email" is outlook.live.com, not office.com) or whose address is a word of it ("cube20 God's number" is cube20.org).
+- `--mcp-findings` lets every client of a node's `/mcp` keep findings with `report_finding` and see them with search results, not only AI apps on the node's own computer. It is off by default and meant for a node whose address only trusted people have; `read_page` and sharing findings with other nodes are unchanged.
 
 ### Running a node
 

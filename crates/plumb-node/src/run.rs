@@ -85,6 +85,7 @@ fn node_config(args: RunArgs) -> NodeConfig {
     config.lang = args.lang;
     config.web_search = args.web_search.0;
     config.mcp_read_pages = args.mcp_read_pages;
+    config.mcp_findings = args.mcp_findings;
     // On for the desktop profile already.
     config.search_by_meaning |= args.search_by_meaning;
     config.meaning_model = args.meaning_model;

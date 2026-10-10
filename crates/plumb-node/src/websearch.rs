@@ -116,6 +116,10 @@ pub struct WebSettings {
     /// Whether every client of `/mcp` may use its `read_page` tool. When
     /// false, only AI apps on this computer may (see [`crate::web`]).
     pub read_pages_for_all: bool,
+    /// Whether every client of `/mcp` may use `report_finding` and see
+    /// findings with search results. When false, only AI apps on this
+    /// computer may.
+    pub findings_for_all: bool,
     /// How `read_page` fetches pages.
     pub page_reader: plumb_crawl::ReadConfig,
     /// The plugins whose results show with the node's own.
@@ -130,6 +134,7 @@ impl Default for WebSettings {
             language: None,
             web_search: None,
             read_pages_for_all: false,
+            findings_for_all: false,
             page_reader: plumb_crawl::ReadConfig::default(),
             plugins: crate::plugins::Plugins::default(),
         }
