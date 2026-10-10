@@ -321,19 +321,44 @@ pub(crate) fn set_up_allocator() {
 /// back to the system. glibc keeps freed memory in its arenas for reuse, so
 /// a long-running node would otherwise sit on it between refreshes: idle
 /// after indexing 300,000 sites, a node held about 390 MB without this and
-/// 60 to 90 MB with it. Does nothing on other systems.
+/// 60 to 90 MB with it. Logs how much went back when it is 100 MB or more.
+/// Does nothing on other systems.
 pub(crate) fn release_freed_memory() {
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     {
         extern "C" {
             fn malloc_trim(pad: usize) -> std::os::raw::c_int;
         }
+        let before = resident_anonymous_mb();
         // SAFETY: malloc_trim only gives free memory back to the system, and
         // glibc lets any thread call it at any time.
         unsafe {
             malloc_trim(0);
         }
+        if let (Some(before), Some(after)) = (before, resident_anonymous_mb()) {
+            let released = before.saturating_sub(after);
+            if released >= RELEASED_WORTH_LOGGING_MB {
+                tracing::info!(
+                    "handed {released} MB of freed memory back to the system ({after} MB still resident)"
+                );
+            }
+        }
     }
+}
+
+/// Memory handed back that [`release_freed_memory`] logs: after an index
+/// build, not after every small job.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+const RELEASED_WORTH_LOGGING_MB: u64 = 100;
+
+/// The process's resident anonymous memory (`RssAnon`) in MB: what it
+/// allocated and has not handed back, less what is swapped out.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn resident_anonymous_mb() -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let line = status.lines().find(|line| line.starts_with("RssAnon:"))?;
+    let kb: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
+    Some(kb / 1024)
 }
 
 /// Has the calling thread, and the threads it starts from now on, yield
