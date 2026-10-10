@@ -99,8 +99,22 @@ fn site_line(out: &mut String, site: &Value, indent: &str) {
         let _ = write!(out, " {url}");
     }
     out.push('\n');
+    let navigation = site.get("navigation").filter(|value| value.is_object());
+    if let Some(navigation) = navigation {
+        let _ = writeln!(
+            out,
+            "{indent}Site navigation: {}. Homepage: {}",
+            text(navigation, "label").unwrap_or(""),
+            text(navigation, "homepage_url").unwrap_or("")
+        );
+    }
     if let Some(description) = text(site, "description") {
-        let _ = writeln!(out, "{indent}{description}");
+        let prefix = if navigation.is_some() {
+            "Site description: "
+        } else {
+            ""
+        };
+        let _ = writeln!(out, "{indent}{prefix}{description}");
     }
 }
 
