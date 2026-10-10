@@ -393,14 +393,58 @@ impl IndexBackend {
         rank: Option<&RankConfig>,
     ) -> Result<SearchResults> {
         let query_meaning = meaning.and_then(|meaning| meaning.query(query));
+        self.search_full_impl(
+            query,
+            limit,
+            options,
+            query_meaning
+                .as_ref()
+                .map(|m| m as &dyn plumb_index::Meaning),
+            rank,
+        )
+    }
+
+    /// Same production retrieval, but an enabled model's failed embedding is
+    /// an error instead of a silent words-only fallback for offline comparisons.
+    #[doc(hidden)]
+    pub fn search_full_checked(
+        &self,
+        query: &str,
+        limit: usize,
+        options: &SearchOptions,
+        rank: Option<&RankConfig>,
+    ) -> Result<SearchResults> {
+        let meaning = self.meaning.get();
+        let query_meaning = meaning.as_ref().and_then(|meaning| meaning.query(query));
+        anyhow::ensure!(
+            meaning.is_none() || query_meaning.is_some(),
+            "enabled meaning model could not embed query"
+        );
+        self.search_full_impl(
+            query,
+            limit,
+            options,
+            query_meaning
+                .as_ref()
+                .map(|m| m as &dyn plumb_index::Meaning),
+            rank,
+        )
+    }
+
+    fn search_full_impl(
+        &self,
+        query: &str,
+        limit: usize,
+        options: &SearchOptions,
+        query_meaning: Option<&dyn plumb_index::Meaning>,
+        rank: Option<&RankConfig>,
+    ) -> Result<SearchResults> {
         self.searcher.search_meaning(
             query,
             limit,
             rank.unwrap_or(&self.rank),
             options,
-            query_meaning
-                .as_ref()
-                .map(|m| m as &dyn plumb_index::Meaning),
+            query_meaning,
         )
     }
 }
