@@ -2746,6 +2746,8 @@ const SUBPAGE_SITES: usize = 3;
 /// Least share of a subpage's title words a query found it by must have,
 /// when it does not name the page's site.
 const SUBPAGE_TITLE_SHARE: f32 = 0.75;
+/// The same share when the title holds every word of the query.
+const SUBPAGE_HELD_SHARE: f32 = 0.5;
 /// Words a title shares with anything, left out of [`SUBPAGE_TITLE_SHARE`].
 const TITLE_STOP_WORDS: &[&str] = &[
     "a", "an", "and", "at", "by", "for", "from", "in", "of", "on", "or", "the", "to", "with",
@@ -2795,16 +2797,26 @@ fn subpage_asked(query: &str, sites: &[crate::Hit], hit: &PageHit) -> bool {
     let has_most = |title: &str| {
         let title = words(title);
         let shared = title.intersection(&asked).count();
-        shared >= 2 && shared as f32 >= SUBPAGE_TITLE_SHARE * title.len() as f32
+        // A query the title holds whole needs only half of it: "john
+        // martinis" for "John Martinis - CHM".
+        let share = if asked.is_subset(&title) {
+            SUBPAGE_HELD_SHARE
+        } else {
+            SUBPAGE_TITLE_SHARE
+        };
+        shared >= 2 && shared as f32 >= share * title.len() as f32
     };
-    // Or of its title before a subtitle: "Declaration of Independence" in
-    // "Declaration of Independence: A Transcription".
-    has_most(&hit.page.title)
-        || hit
-            .page
-            .title
-            .split_once(':')
-            .is_some_and(|(head, _)| has_most(head))
+    // Or of its title before a subtitle, "Declaration of Independence" in
+    // "Declaration of Independence: A Transcription", or before the site's
+    // name, "Rule 30" in "Rule 30 -- from Wolfram MathWorld". Not before a
+    // dash: "The Great Gatsby - On Broadway" is the show.
+    let title = hit.page.title.as_str();
+    has_most(title)
+        || [":", " -- "].iter().any(|mark| {
+            title
+                .split_once(mark)
+                .is_some_and(|(head, _)| has_most(head))
+        })
 }
 
 /// Languages a site's pages in another language than English are under
@@ -3689,6 +3701,36 @@ mod tests {
             &["wikipedia.org"],
             transcript()
         ));
+        // The site's name after " -- " is left out.
+        let rule30 = || {
+            hit(
+                "https://mathworld.wolfram.com/Rule30.html",
+                "Rule 30 -- from Wolfram MathWorld",
+                false,
+            )
+        };
+        assert!(listed(
+            "rule 30 cellular automaton",
+            &["automattic.com"],
+            rule30()
+        ));
+        // A query the title holds whole needs only half of the title.
+        let martinis = || {
+            hit(
+                "https://computerhistory.org/profile/john-martinis/",
+                "John Martinis - CHM",
+                false,
+            )
+        };
+        assert!(listed("john martinis", &["martinis.com"], martinis()));
+        let climate = || {
+            hit(
+                "https://www.who.int/news/item/climate-change-and-health-statement",
+                "WHO statement on climate change and health at the summit",
+                false,
+            )
+        };
+        assert!(!listed("climate change", &["climate.gov"], climate()));
         // Named by its whole title, or on a subdomain of a best site.
         assert!(listed(
             "perft results",
