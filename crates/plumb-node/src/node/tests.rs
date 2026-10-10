@@ -3975,6 +3975,142 @@ async fn raw_replacements_and_implicit_folds_admit_peak_room_before_mutation() {
     node.shutdown().await.unwrap();
 }
 
+#[test]
+fn two_inbox_absorptions_cross_the_real_fold_threshold_under_receiving_contention() {
+    use std::io::Write;
+    use std::sync::atomic::{AtomicBool, AtomicU64};
+
+    const RECORDS: usize = 16_384;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("records.jsonl");
+    let record = |i: usize, at: u64| {
+        let mut record = SiteRecord::new(format!("site-{i}.example"));
+        record.description = Some("x".repeat(4 * 1024));
+        record.title = Some(format!("Received site {i}"));
+        record.crawled_at = Some(at);
+        record
+    };
+    let mut raw = std::io::BufWriter::new(std::fs::File::create(&path).unwrap());
+    for i in 0..RECORDS {
+        serde_json::to_writer(&mut raw, &record(i, 1)).unwrap();
+        raw.write_all(b"\n").unwrap();
+    }
+    raw.into_inner().unwrap().sync_all().unwrap();
+    assert!(std::fs::metadata(&path).unwrap().len() > crate::records::MIN_COMPACT_BYTES);
+    let mut config = test_config(dir.path());
+    config.take_new_sites = true;
+    let rank = RankConfig::default();
+    let opened = open_data_dir(&config, rank).unwrap();
+    let budget = plumb_core::storage::StorageBudget::open(dir.path(), u64::MAX).unwrap();
+    let (_stop, stopped) = tokio::sync::watch::channel(false);
+    let inner = Inner::new(config, rank, opened, stopped, Some(budget.clone()));
+    plumb_core::storage::create_directory(&inner.paths.net, Some(&budget)).unwrap();
+    let old = {
+        let _mutation = budget.mutation();
+        (
+            std::fs::File::open(&path).unwrap(),
+            budget.read_lease(&path),
+        )
+    };
+    let mut old = Some(old);
+    let old_bytes = plumb_core::storage::file_bytes(&path).unwrap();
+    let append = |at| {
+        for first in (0..RECORDS).step_by(512) {
+            let records: Vec<_> = (first..first + 512).map(|i| record(i, at)).collect();
+            super::network::append_inbox(&inner, &records).unwrap();
+        }
+    };
+    append(2);
+    let limit = budget.status().used_bytes + 192 * 1024 * 1024;
+    budget.set_limit(limit);
+    let queued = budget.reserve(16 * 1024 * 1024, false).unwrap();
+    let sampling_done = Arc::new(AtomicBool::new(false));
+    struct StopSampling(Arc<AtomicBool>);
+    impl Drop for StopSampling {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+    let stop_sampling = StopSampling(sampling_done.clone());
+    let ledger_peak = Arc::new(AtomicU64::new(0));
+    let disk_peak = Arc::new(AtomicU64::new(0));
+    let sampler = {
+        let budget = budget.clone();
+        let done = sampling_done.clone();
+        let ledger_peak = ledger_peak.clone();
+        let disk_peak = disk_peak.clone();
+        std::thread::spawn(move || {
+            while !done.load(Ordering::SeqCst) {
+                let status = budget.status();
+                ledger_peak.fetch_max(status.used_bytes + status.reserved_bytes, Ordering::SeqCst);
+                if let Ok(linked) = plumb_core::storage::directory_bytes(budget.root()) {
+                    disk_peak.fetch_max(linked + status.reader_held_bytes, Ordering::SeqCst);
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        })
+    };
+    for at in [2, 3] {
+        if at == 3 {
+            append(at);
+        }
+        let denied_before = budget.status().rejected_writes;
+        assert_eq!(
+            super::network::absorb_inbox(&inner).unwrap(),
+            RECORDS as u64
+        );
+        assert!(
+            budget.status().rejected_writes > denied_before,
+            "must exercise the exact fallback"
+        );
+        assert!(!crate::records::journal_path(&path).exists());
+        assert!(!inner.paths.inbox.exists());
+        assert!(!inner.paths.absorbing.exists());
+        let mut count = 0;
+        crate::outline::for_each_record(&path, |record| {
+            assert_eq!(record.crawled_at, Some(at));
+            count += 1;
+        })
+        .unwrap();
+        assert_eq!(count, RECORDS);
+        let status = budget.status();
+        assert_eq!(status.reserved_bytes, 16 * 1024 * 1024);
+        assert_eq!(
+            status.used_bytes,
+            plumb_core::storage::directory_bytes(dir.path()).unwrap() + status.reader_held_bytes
+        );
+        assert!(status.used_bytes + status.reserved_bytes <= limit);
+        if at == 2 {
+            assert_eq!(status.reader_held_bytes, old_bytes);
+            assert_eq!(
+                old.as_ref().unwrap().0.metadata().unwrap().len(),
+                std::fs::metadata(&path).unwrap().len()
+            );
+            // Let the retired generation go before the next absorption.
+            // Keeping it would legitimately consume the next output's room.
+            drop(old.take());
+        } else {
+            assert_eq!(status.reader_held_bytes, 0);
+        }
+    }
+    drop(stop_sampling);
+    sampler.join().unwrap();
+    assert!(ledger_peak.load(Ordering::SeqCst) <= limit);
+    assert!(disk_peak.load(Ordering::SeqCst) <= limit);
+    eprintln!(
+        "two absorption peaks: ledger={}, linked+reader-held={}, cap={limit}",
+        ledger_peak.load(Ordering::SeqCst),
+        disk_peak.load(Ordering::SeqCst)
+    );
+    drop(queued);
+    assert_eq!(budget.status().reserved_bytes, 0);
+    assert_eq!(budget.status().reader_held_bytes, 0);
+    assert_eq!(
+        budget.status().used_bytes,
+        plumb_core::storage::directory_bytes(dir.path()).unwrap()
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_failed_quota_cut_cleans_staging_and_retries_without_restart() {
     let dir = seeded_dir();
@@ -4042,6 +4178,560 @@ async fn a_failed_quota_cut_cleans_staging_and_retries_without_restart() {
     node.shutdown().await.unwrap();
 }
 
+#[test]
+fn counted_raw_output_stays_inside_actual_allocation_room_at_the_quota_boundary() {
+    use sha2::Digest;
+    use std::io::Write;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("records.jsonl");
+    let record = |i: usize, at: u64| {
+        let mut r = SiteRecord::new(format!("site-{i}.example"));
+        r.url = Some(format!("https://site-{i}.example/"));
+        r.title = Some(format!("Retained crawl {i}"));
+        r.description = Some("x".repeat(4 * 1024));
+        r.crawled_at = Some(at);
+        r
+    };
+    let mut raw = std::io::BufWriter::new(std::fs::File::create(&path).unwrap());
+    for i in 0..32_768 {
+        serde_json::to_writer(&mut raw, &record(i, 1)).unwrap();
+        raw.write_all(b"\n").unwrap();
+    }
+    raw.into_inner().unwrap().sync_all().unwrap();
+    let journal = crate::records::journal_path(&path);
+    write_jsonl(
+        &journal,
+        &[crate::records::Change::MergeShared {
+            record: record(0, 2),
+        }],
+    )
+    .unwrap();
+    let absorbing = dir.path().join("inbox.absorbing");
+    std::fs::write(&absorbing, [1; 384 * 1024]).unwrap();
+    let logical = std::fs::metadata(&path).unwrap().len();
+    let raw_before = sha2::Sha256::digest(std::fs::read(&path).unwrap());
+    let journal_before = std::fs::read(&journal).unwrap();
+    let budget = plumb_core::storage::StorageBudget::open(dir.path(), u64::MAX).unwrap();
+    let other = budget.reserve(64 * 1024, false).unwrap();
+    // Fixed to the meaningful failing source-resource reproducer, including
+    // the held old generation and separate receive allowance.
+    let cap = 291_287_040;
+    budget.set_limit(cap);
+    // An actual descriptor plus its registered lease keeps the previous raw
+    // generation charged if the bounded rewrite succeeds.
+    let (reader, lease) = {
+        let _mutation = budget.mutation();
+        (
+            std::fs::File::open(&path).unwrap(),
+            budget.read_lease(&path),
+        )
+    };
+    let mut peak = 0;
+    let mut peak_charged = 0;
+    let mut stage_allocated = 0;
+    let mut initial_sparse_stage = None;
+    let mut store = crate::records::RecordStore::open(&path).with_budget(Some(budget.clone()));
+    let result = store.fold_with_check(|| {
+        let status = budget.status();
+        let actual = plumb_core::storage::directory_bytes(dir.path()).unwrap()
+            + status.reader_held_bytes
+            + other.bytes();
+        peak = peak.max(actual);
+        peak_charged = peak_charged.max(status.used_bytes + status.reserved_bytes);
+        for e in std::fs::read_dir(dir.path()).unwrap() {
+            let p = e.unwrap().path();
+            if p.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with(".records.jsonl.")
+            {
+                initial_sparse_stage.get_or_insert((
+                    std::fs::metadata(&p).unwrap().len(),
+                    plumb_core::storage::file_bytes(&p).unwrap(),
+                ));
+                stage_allocated = stage_allocated.max(plumb_core::storage::file_bytes(&p).unwrap());
+            }
+        }
+        anyhow::ensure!(
+            actual <= cap,
+            "actual allocation crossed quota before installation"
+        );
+        Ok(())
+    });
+    eprintln!("raw allocation boundary logical={logical} admitted={} actual_stage={stage_allocated} actual_plus_queued_peak={peak} charged_plus_reserved_peak={peak_charged} cap={cap} result={result:?}", plumb_core::storage::allocation_for(logical));
+    assert_eq!(std::fs::read(&absorbing).unwrap(), [1; 384 * 1024]);
+    if result.is_err() {
+        assert_eq!(
+            sha2::Sha256::digest(std::fs::read(&path).unwrap()),
+            raw_before
+        );
+        assert_eq!(std::fs::read(&journal).unwrap(), journal_before);
+        assert_eq!(budget.status().reader_held_bytes, 0);
+    } else {
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), logical);
+        assert!(!journal.exists());
+        assert!(budget.status().reader_held_bytes > 0);
+    }
+    assert!(
+        std::fs::read_dir(dir.path()).unwrap().all(|e| !e
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".records.jsonl.")),
+        "failure left an uncharged staging file"
+    );
+    assert_eq!(budget.status().reserved_bytes, other.bytes());
+    let status = budget.status();
+    peak = peak.max(
+        plumb_core::storage::directory_bytes(dir.path()).unwrap()
+            + status.reader_held_bytes
+            + other.bytes(),
+    );
+    peak_charged = peak_charged.max(status.used_bytes + status.reserved_bytes);
+    eprintln!("raw allocation retained-reader phase actual={peak} charged={peak_charged} held={} sparse_initial={initial_sparse_stage:?}", status.reader_held_bytes);
+    if result.is_ok() {
+        use std::io::BufRead;
+        let mut line = String::new();
+        std::io::BufReader::new(reader.try_clone().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let old: SiteRecord = serde_json::from_str(&line).unwrap();
+        assert_eq!(old.crawled_at, Some(1));
+        line.clear();
+        std::io::BufReader::new(std::fs::File::open(&path).unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let new: SiteRecord = serde_json::from_str(&line).unwrap();
+        assert_eq!(new.crawled_at, Some(2));
+    }
+    assert!(
+        stage_allocated <= plumb_core::storage::allocation_for(logical),
+        "the staged file exceeded its own admitted allocation"
+    );
+    // A cleaned-up final count cannot excuse an earlier staging overshoot.
+    assert!(
+        peak <= cap,
+        "allocated output exceeded its admitted room during writing"
+    );
+    assert!(peak_charged <= cap);
+    drop(reader);
+    drop(lease);
+    drop(other);
+    assert_eq!(budget.status().reserved_bytes, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_full_retained_replay_queue_leaves_room_for_raw_progress_and_normal_acknowledgment() {
+    use plumb_net::assign::{epoch_of, MAX_SHARE_PPM};
+    use plumb_net::batch::{Batch, MAX_RECORD_BYTES};
+    use plumb_net::store::BatchStore;
+    use sha2::Digest;
+    use std::io::Write;
+
+    const RECORDS: usize = 32_768;
+    const PER_BATCH: usize = 512;
+    const BATCHES: usize = RECORDS / PER_BATCH;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("records.jsonl");
+    let journal = crate::records::journal_path(&path);
+    let record = |i: usize, at: u64| {
+        let mut record = SiteRecord::new(format!("site-{i}.example"));
+        record.url = Some(format!("https://site-{i}.example/"));
+        record.title = Some(format!("Retained crawl {i}"));
+        record.description = Some("x".repeat(4 * 1024));
+        record.crawled_at = Some(at);
+        record
+    };
+    let mut raw = std::io::BufWriter::new(std::fs::File::create(&path).unwrap());
+    let mut pending = std::io::BufWriter::new(std::fs::File::create(&journal).unwrap());
+    for i in 0..RECORDS {
+        serde_json::to_writer(&mut raw, &record(i, 1)).unwrap();
+        raw.write_all(b"\n").unwrap();
+        serde_json::to_writer(
+            &mut pending,
+            &crate::records::Change::MergeShared {
+                record: record(i, 2),
+            },
+        )
+        .unwrap();
+        pending.write_all(b"\n").unwrap();
+    }
+    raw.into_inner().unwrap().sync_all().unwrap();
+    pending.into_inner().unwrap().sync_all().unwrap();
+    assert!(std::fs::metadata(&journal).unwrap().len() > crate::records::MIN_COMPACT_BYTES);
+    let raw_digest = sha2::Sha256::digest(std::fs::read(&path).unwrap());
+    let key_dir = tempfile::tempdir().unwrap();
+    let key = plumb_net::load_or_create_key(&key_dir.path().join("source.key")).unwrap();
+    let crawler = key.public().to_peer_id();
+    let batches = dir.path().join("net/batches");
+    std::fs::create_dir(dir.path().join("net")).unwrap();
+    let mut legacy = BatchStore::open(&batches).unwrap();
+    let now = now_unix();
+    let mut signed = Vec::new();
+    for n in 0..BATCHES {
+        let made = now - (BATCHES - n) as u64;
+        let records: Vec<_> = (n * PER_BATCH..(n + 1) * PER_BATCH)
+            .map(|i| record(i, made))
+            .collect();
+        let batch = Batch::sign(&key, &records, epoch_of(made), MAX_SHARE_PPM, made)
+            .unwrap()
+            .unwrap();
+        assert_eq!(batch.records.len(), PER_BATCH);
+        legacy.insert(&batch).unwrap();
+        let file = batches.join(format!("{}.json", batch.id()));
+        signed.push((
+            batch.id(),
+            sha2::Sha256::digest(std::fs::read(file).unwrap()),
+        ));
+    }
+    drop(legacy);
+    std::fs::write(dir.path().join("net/trusted-applied"), crawler.to_string()).unwrap();
+    let mut config = test_config(dir.path());
+    config.take_new_sites = true;
+    let rank = RankConfig::default();
+    let opened = open_data_dir(&config, rank).unwrap();
+    let budget = plumb_core::storage::StorageBudget::open(dir.path(), u64::MAX).unwrap();
+    fn allocation_snapshot(
+        root: &Path,
+    ) -> std::collections::BTreeMap<PathBuf, (u64, u64, Option<std::time::SystemTime>)> {
+        fn walk(
+            path: &Path,
+            root: &Path,
+            snapshot: &mut std::collections::BTreeMap<
+                PathBuf,
+                (u64, u64, Option<std::time::SystemTime>),
+            >,
+        ) {
+            let m = std::fs::symlink_metadata(path).unwrap();
+            snapshot.insert(
+                path.strip_prefix(root).unwrap().to_path_buf(),
+                (
+                    m.len(),
+                    plumb_core::storage::file_bytes(path).unwrap(),
+                    m.modified().ok(),
+                ),
+            );
+            if m.is_dir() {
+                for e in std::fs::read_dir(path).unwrap() {
+                    walk(&e.unwrap().path(), root, snapshot);
+                }
+            }
+        }
+        let mut snapshot = std::collections::BTreeMap::new();
+        walk(root, root, &mut snapshot);
+        snapshot
+    }
+    let allocation_history = Mutex::new(allocation_snapshot(dir.path()));
+    let ledger_checkpoint = |label: &str| {
+        let _mutation = budget.mutation();
+        let status = budget.status();
+        let disk = plumb_core::storage::directory_bytes(dir.path()).unwrap();
+        let current = allocation_snapshot(dir.path());
+        let mut previous = allocation_history.lock().unwrap();
+        for (path, now) in &current {
+            if let Some(before) = previous.get(path) {
+                if before != now {
+                    eprintln!(
+                        "allocation {label} {}: before={before:?} after={now:?}",
+                        path.display()
+                    );
+                }
+            } else {
+                eprintln!("allocation {label} {}: added={now:?}", path.display());
+            }
+        }
+        for (path, before) in previous.iter() {
+            if !current.contains_key(path) {
+                eprintln!("allocation {label} {}: removed={before:?}", path.display());
+            }
+        }
+        *previous = current;
+        eprintln!(
+            "replay ledger {label}: used={}, linked={disk}, held={}, reserved={}, delta={}",
+            status.used_bytes,
+            status.reader_held_bytes,
+            status.reserved_bytes,
+            i128::from(status.used_bytes) - i128::from(disk + status.reader_held_bytes)
+        );
+    };
+    ledger_checkpoint("initial-closed-fixture");
+    let initial_inputs = [
+        crate::records::FoldInputAllocation::read(&path),
+        crate::records::FoldInputAllocation::read(&journal),
+    ];
+    crate::records::start_fold_allocation_evidence(&path);
+    let (stop, stopped) = tokio::sync::watch::channel(false);
+    let inner = Arc::new(Inner::new(
+        config,
+        rank,
+        opened,
+        stopped,
+        Some(budget.clone()),
+    ));
+    super::network::append_inbox(&inner, &[record(RECORDS - 1, 3)]).unwrap();
+    std::fs::rename(&inner.paths.inbox, &inner.paths.absorbing).unwrap();
+    let absorbing = std::fs::read(&inner.paths.absorbing).unwrap();
+    let source = Arc::new(
+        plumb_net::BucketTable::build::<SiteRecord>(&dir.path().join("net/buckets"), &[]).unwrap(),
+    );
+    let mut net_config = plumb_net::NetConfig::new(dir.path().join("net"));
+    net_config.listen.clear();
+    net_config.bootstrap.clear();
+    net_config.upnp = false;
+    net_config.local_discovery = false;
+    net_config.round_every = None;
+    net_config.fill = false;
+    net_config.trusted_peers = vec![crawler];
+    net_config.storage_budget = Some(budget.clone());
+    ledger_checkpoint("before-network-start");
+    let (net, mut records) = plumb_net::start(net_config.clone(), source.clone())
+        .await
+        .unwrap();
+    let credits = plumb_net::credits::Ledger::open(&dir.path().join("net/credits"))
+        .unwrap()
+        .account(&crawler);
+    // Fixed across the failing old-allowance run and the repaired run.
+    let limit = 663_711_744;
+    budget.set_limit(limit);
+    ledger_checkpoint("startup");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while records.len() != 4 {
+        assert!(
+            Instant::now() < deadline,
+            "replay did not fill the real four-slot channel"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let first = records.recv().await.unwrap();
+    assert_eq!(first.records.len(), PER_BATCH);
+    // Hold actual receiver I/O, while its owned reservation and the producer's
+    // fifth pending batch remain live. The raw worker resumes an absorbing file.
+    let (locked, ready) = tokio::sync::oneshot::channel();
+    let (release_lock, released) = std::sync::mpsc::channel();
+    let locked_inner = inner.clone();
+    let inbox_holder = std::thread::spawn(move || {
+        let _guard = locked_inner.inbox_lock.lock().unwrap();
+        locked.send(()).unwrap();
+        let _ = released.recv();
+    });
+    ready.await.unwrap();
+    let first_writer = inner.clone();
+    let first_consumer = tokio::spawn(async move {
+        super::network::persist_delivery(
+            first_writer,
+            first.records,
+            Vec::new(),
+            first.reservation,
+            Some(first.acknowledgment),
+        )
+        .await;
+    });
+    while records.len() != 4 {
+        assert!(Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    // Let the producer get its next bounded batch and encounter the full queue.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let full_queue_bytes = budget.status().reserved_bytes;
+    let old_one =
+        plumb_core::storage::allocation_for((PER_BATCH * 2 * (MAX_RECORD_BYTES + 4096)) as u64);
+    assert!(
+        limit - budget.status().used_bytes - old_one * 6
+            < plumb_core::storage::allocation_for(std::fs::metadata(&path).unwrap().len())
+    );
+    let (old_reader, old_lease) = {
+        let _mutation = budget.mutation();
+        (
+            std::fs::File::open(&path).unwrap(),
+            budget.read_lease(&path),
+        )
+    };
+    let worker = inner.clone();
+    let first_fold = tokio::task::spawn_blocking(move || super::network::absorb_inbox(&worker))
+        .await
+        .unwrap();
+    if let Err(error) = first_fold {
+        assert_eq!(
+            sha2::Sha256::digest(std::fs::read(&path).unwrap()),
+            raw_digest
+        );
+        assert_eq!(std::fs::read(&inner.paths.absorbing).unwrap(), absorbing);
+        assert!(journal.exists());
+        release_lock.send(()).unwrap();
+        inbox_holder.join().unwrap();
+        stop.send(true).unwrap();
+        net.shutdown().await;
+        first_consumer.await.unwrap();
+        drop(records);
+        panic!("full replay queue prevents raw progress at fixed cap {limit}, held {full_queue_bytes}: {error:#}");
+    }
+    assert_eq!(first_fold.unwrap(), 1);
+    assert_eq!(
+        budget.status().reserved_bytes,
+        full_queue_bytes,
+        "the full receive queue must remain charged during the fold"
+    );
+    assert!(!journal.exists());
+    assert!(!inner.paths.absorbing.exists());
+    ledger_checkpoint("first-fold");
+    // Use the real bounded maintenance path while the receive queue and an
+    // unlinked old raw reader still own their room. Preserve prior peaks and
+    // residual evidence; reconciliation cannot excuse a staging overshoot.
+    let before_checkpoint = budget.status();
+    assert!(before_checkpoint.reader_held_bytes > 0);
+    assert_eq!(before_checkpoint.reserved_bytes, full_queue_bytes);
+    let at = Instant::now();
+    super::worker::sweep_at(&inner, at + Duration::from_secs(301)).await;
+    let after_checkpoint = budget.status();
+    assert_eq!(
+        after_checkpoint.reader_held_bytes,
+        before_checkpoint.reader_held_bytes
+    );
+    assert_eq!(after_checkpoint.reserved_bytes, full_queue_bytes);
+    assert_eq!(after_checkpoint.limit_bytes, limit);
+    assert_eq!(
+        after_checkpoint.used_bytes,
+        plumb_core::storage::directory_bytes(dir.path()).unwrap()
+            + after_checkpoint.reader_held_bytes
+    );
+    eprintln!(
+        "bounded maintenance preserved queue={} reader={} corrected conservative used={} to={}",
+        full_queue_bytes,
+        after_checkpoint.reader_held_bytes,
+        before_checkpoint.used_bytes,
+        after_checkpoint.used_bytes
+    );
+    {
+        use std::io::BufRead;
+        let mut line = String::new();
+        std::io::BufReader::new(old_reader.try_clone().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<SiteRecord>(&line)
+                .unwrap()
+                .crawled_at,
+            Some(1)
+        );
+    }
+    drop(old_reader);
+    drop(old_lease);
+    assert_eq!(budget.status().reader_held_bytes, 0);
+    assert_eq!(budget.status().reserved_bytes, full_queue_bytes);
+    ledger_checkpoint("after-bounded-maintenance-and-reader-release");
+    release_lock.send(()).unwrap();
+    inbox_holder.join().unwrap();
+    first_consumer.await.unwrap();
+    let delivered = Arc::new(std::sync::atomic::AtomicU64::new(1));
+    let count = delivered.clone();
+    let receiver = inner.clone();
+    let consumer = tokio::spawn(async move {
+        for _ in 1..BATCHES {
+            let delivery = records.recv().await.unwrap();
+            assert_eq!(delivery.records.len(), PER_BATCH);
+            super::network::persist_delivery(
+                receiver.clone(),
+                delivery.records,
+                Vec::new(),
+                delivery.reservation,
+                Some(delivery.acknowledgment),
+            )
+            .await;
+            count.fetch_add(1, Ordering::SeqCst);
+        }
+    });
+    let deadline = Instant::now() + Duration::from_secs(180);
+    let outcome = async {
+        let mut absorbed = 0;
+        let mut during_backlog = false;
+        let mut peak = budget.status().used_bytes + budget.status().reserved_bytes;
+        while delivered.load(Ordering::SeqCst) < BATCHES as u64 || inner.paths.inbox.exists() || inner.paths.absorbing.exists() {
+            anyhow::ensure!(Instant::now() < deadline, "receive/raw progress stalled: delivered {}, budget {:?}", delivered.load(Ordering::SeqCst), budget.status());
+            if inner.paths.absorbing.exists() || inner.inbox_records.load(Ordering::SeqCst) >= super::network::REBUILD_AFTER_RECORDS || delivered.load(Ordering::SeqCst) == BATCHES as u64 {
+                let worker = inner.clone();
+                let result = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), tokio::task::spawn_blocking(move || super::network::absorb_inbox(&worker))).await??;
+                if let Ok(n) = result {
+                    absorbed += n;
+                    during_backlog |= n > 0 && delivered.load(Ordering::SeqCst) < BATCHES as u64;
+                }
+            }
+            let status = budget.status();
+            peak = peak.max(status.used_bytes + status.reserved_bytes);
+            anyhow::ensure!(peak <= limit, "admission exceeded the fixed cap");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        consumer.await?;
+        ledger_checkpoint("backlog-drained");
+        anyhow::ensure!(absorbed == RECORDS as u64 && during_backlog, "raw worker did not absorb the live backlog");
+        let worker = inner.clone();
+        tokio::task::spawn_blocking(move || crate::records::RecordStore::open(&worker.paths.records).with_budget(worker.storage.clone()).fold()).await??;
+        ledger_checkpoint("final-fold");
+        let mut sites = 0;
+        crate::outline::for_each_record(&path, |record| {
+            assert!(record.crawled_at.unwrap() >= now - BATCHES as u64);
+            sites += 1;
+        })?;
+        anyhow::ensure!(sites == RECORDS, "raw records were lost");
+        for (id, digest) in &signed {
+            anyhow::ensure!(sha2::Sha256::digest(std::fs::read(batches.join(format!("{id}.json")))?) == *digest, "signed bytes changed");
+            anyhow::ensure!(batches.join(format!("{id}.delivered-trusted")).is_file(), "delivery was not durably acknowledged");
+        }
+        anyhow::ensure!(plumb_net::credits::Ledger::open(&dir.path().join("net/credits"))?.account(&crawler) == credits, "replay awarded credits");
+        eprintln!("full replay progress: deliveries={BATCHES}, records={RECORDS}, queued={full_queue_bytes}, old-six-allowances={}, observed ledger peak={peak}, cap={limit}", old_one * 6);
+        Ok::<_, anyhow::Error>(())
+    }.await;
+    stop.send(true).unwrap();
+    ledger_checkpoint("before-shutdown");
+    net.shutdown().await;
+    ledger_checkpoint("after-shutdown");
+    outcome.unwrap();
+    assert_eq!(budget.status().reserved_bytes, 0);
+    let evidence = crate::records::take_fold_allocation_evidence(&path);
+    let mut before = None;
+    let mut residual_bound: u64 = initial_inputs.iter().map(|s| s.dense_slack()).sum();
+    for phase in &evidence.phases {
+        eprintln!("fold allocation phase {}: {:?}", phase.phase, phase.inputs);
+        if phase.phase == "before-close" {
+            before = Some(&phase.inputs);
+        }
+        if phase.phase == "before-write" {
+            if let Some(before) = before.take() {
+                for i in 0..2 {
+                    assert!(
+                        before[i].same_generation(&phase.inputs[i]),
+                        "allocation comparison changed source generation"
+                    );
+                    assert!(
+                        phase.inputs[i].allocated <= before[i].allocated,
+                        "a closed input grew outside the measured filesystem envelope"
+                    );
+                    if !before[i].same_generation(&initial_inputs[i]) {
+                        residual_bound += before[i].allocated - phase.inputs[i].allocated;
+                    }
+                }
+            }
+        }
+    }
+    let status = budget.status();
+    let actual =
+        plumb_core::storage::directory_bytes(dir.path()).unwrap() + status.reader_held_bytes;
+    eprintln!("bounded replay accounting residual={} bound={residual_bound} physical+queued peak={} charged+reserved peak={} uncovered peak={}", status.used_bytes.saturating_sub(actual), evidence.physical_plus_queued_peak, evidence.charged_plus_reserved_peak, evidence.uncovered_peak);
+    // Keep demonstrated conservative shrinkage visible. Reject undercharge or
+    // an unexplained residual; do not force equality with a final recount.
+    assert!(status.used_bytes >= actual);
+    assert!(status.used_bytes - actual <= residual_bound);
+    assert!(evidence.physical_plus_queued_peak <= limit);
+    assert!(evidence.charged_plus_reserved_peak <= limit);
+    assert_eq!(evidence.uncovered_peak, 0);
+    let (restarted, mut replayed) = plumb_net::start(net_config, source).await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), replayed.recv())
+            .await
+            .is_err()
+    );
+    restarted.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn idle_maintenance_reconciles_owner_bytes_only_at_the_bounded_checkpoint() {
     let dir = seeded_dir();
@@ -4072,6 +4762,489 @@ async fn idle_maintenance_reconciles_owner_bytes_only_at_the_bounded_checkpoint(
     assert_eq!(std::fs::read(&node.inner.paths.records).unwrap(), raw);
     assert!(!search(node.addr(), "chase").await.is_empty());
     node.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn genuine_oversized_replay_reaches_the_receiver_and_does_not_block_later_batches() {
+    use plumb_net::assign::{epoch_of, is_assigned, MAX_SHARE_PPM};
+    use plumb_net::batch::Batch;
+    use plumb_net::store::BatchStore;
+    use sha2::{Digest, Sha256};
+
+    const SITES: usize = plumb_net::batch::MAX_BATCH_RECORDS;
+    let dir = seeded_dir();
+    let now = now_unix();
+    let epoch = epoch_of(now);
+    let batches = dir.path().join("net/batches");
+    std::fs::create_dir_all(&batches).unwrap();
+    let mut store = BatchStore::open(&batches).unwrap();
+    let mut signed = Vec::new();
+    let mut made = now;
+    let own_key = plumb_net::node::load_or_create_key(&dir.path().join("net/node.key")).unwrap();
+    let good_key = plumb_net::node::load_or_create_key(&dir.path().join("following.key")).unwrap();
+    let trigger_key = plumb_net::node::load_or_create_key(&dir.path().join("trigger.key")).unwrap();
+    let trigger_peer = trigger_key.public().to_peer_id();
+    let domains: Vec<_> = (0u64..)
+        .map(|n| format!("oversized-facts-{n}.example"))
+        .filter(|domain| is_assigned(epoch, &trigger_peer, domain, MAX_SHARE_PPM))
+        .take(SITES)
+        .collect();
+    // Each earlier fact is exactly the protocol's 16 KiB record limit,
+    // spread over eight legal 16 MiB batches. Punctuation does not change
+    // agreement's normalized description. The later thin crawl agrees with
+    // the earlier, newer own/trusted facts and releases those actual facts:
+    // 4096 * 16384 bytes plus the receiver's 4096 newlines exceeds 64 MiB.
+    for (key, own) in [(&own_key, true), (&good_key, false)] {
+        let peer = key.public().to_peer_id();
+        for chunk in domains.chunks(1024) {
+            let records: Vec<_> = chunk
+                .iter()
+                .map(|domain| {
+                    let mut record = SiteRecord::new(domain);
+                    record.crawled_at = Some(now + 1);
+                    record.description = Some("same".into());
+                    let extra = plumb_net::batch::MAX_RECORD_BYTES
+                        - serde_json::to_vec(&record).unwrap().len();
+                    record
+                        .description
+                        .as_mut()
+                        .unwrap()
+                        .extend(std::iter::repeat_n('.', extra));
+                    assert_eq!(
+                        serde_json::to_vec(&record).unwrap().len(),
+                        plumb_net::batch::MAX_RECORD_BYTES
+                    );
+                    record
+                })
+                .collect();
+            let batch = Batch::sign(key, &records, epoch, MAX_SHARE_PPM, made)
+                .unwrap()
+                .unwrap();
+            assert_eq!(batch.records.len(), records.len());
+            assert_eq!(batch.check(made).unwrap(), peer);
+            assert!(batch
+                .records
+                .iter()
+                .all(|line| line.len() <= plumb_net::batch::MAX_RECORD_BYTES));
+            store.insert(&batch).unwrap();
+            if !own {
+                std::fs::write(
+                    batches.join(format!("{}.delivered-trusted", batch.id())),
+                    b"persisted\n",
+                )
+                .unwrap();
+            }
+            signed.push((
+                batch.id(),
+                Sha256::digest(
+                    std::fs::read(batches.join(format!("{}.json", batch.id()))).unwrap(),
+                ),
+            ));
+            made += 1;
+        }
+    }
+    let thin: Vec<_> = domains
+        .iter()
+        .map(|domain| {
+            let mut record = SiteRecord::new(domain);
+            record.crawled_at = Some(now);
+            record.description = Some("same".into());
+            record
+        })
+        .collect();
+    let trigger = Batch::sign(&trigger_key, &thin, epoch, MAX_SHARE_PPM, made)
+        .unwrap()
+        .unwrap();
+    assert_eq!(trigger.records.len(), thin.len());
+    trigger.check(made).unwrap();
+    let trigger_id = trigger.id();
+    store.insert(&trigger).unwrap();
+    let trigger_signed = std::fs::read(batches.join(format!("{trigger_id}.json"))).unwrap();
+
+    let good_peer = good_key.public().to_peer_id();
+    let mut good = SiteRecord::new("following-replay.example");
+    good.title = Some("Smaller batch after unsupported output".into());
+    good.crawled_at = Some(now);
+    good.news = vec![plumb_core::Headline::checked(
+        &good.domain,
+        "Following headline",
+        "https://following-replay.example/news",
+        now,
+        now,
+    )
+    .unwrap()];
+    let following = Batch::sign(&good_key, &[good], epoch, MAX_SHARE_PPM, made + 1)
+        .unwrap()
+        .unwrap();
+    let following_id = following.id();
+    store.insert(&following).unwrap();
+    let following_signed = std::fs::read(batches.join(format!("{following_id}.json"))).unwrap();
+    drop(store);
+
+    let credits = dir.path().join("net/credits");
+    let mut ledger = plumb_net::credits::Ledger::open(&credits).unwrap();
+    ledger.record(&[plumb_net::agree::Verdict {
+        crawler: good_peer,
+        crawled_at: now,
+        agreed: true,
+        witnesses: 0,
+        trusted: true,
+    }]);
+    ledger.save().unwrap();
+    let credit_bytes = std::fs::read(credits.join("ledger.json")).unwrap();
+    let mut config = test_config(dir.path());
+    config.take_new_sites = true;
+    let rank = RankConfig::default();
+    let opened = open_data_dir(&config, rank).unwrap();
+    let budget = plumb_core::storage::StorageBudget::open(dir.path(), u64::MAX).unwrap();
+    let (_stop, stopped) = tokio::sync::watch::channel(false);
+    let inner = Arc::new(Inner::new(
+        config,
+        rank,
+        opened,
+        stopped,
+        Some(budget.clone()),
+    ));
+    let raw = std::fs::read(&inner.paths.records).unwrap();
+    let table = Arc::new(
+        plumb_net::BucketTable::build::<SiteRecord>(&inner.paths.net.join("buckets"), &[]).unwrap(),
+    );
+    let mut net_config = plumb_net::NetConfig::new(inner.paths.net.clone());
+    net_config.listen.clear();
+    net_config.bootstrap.clear();
+    net_config.upnp = false;
+    net_config.local_discovery = false;
+    net_config.round_every = None;
+    net_config.fill = false;
+    net_config.trusted_peers = vec![good_peer];
+    net_config.storage_budget = Some(budget.clone());
+    let mut cap = None;
+    for restart in [false, true] {
+        eprintln!("starting genuine signed replay restart={restart}");
+        let (net, mut received) = tokio::time::timeout(
+            Duration::from_secs(300),
+            plumb_net::start(net_config.clone(), table.clone()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        if cap.is_none() {
+            let limit = budget.status().used_bytes + 128 * 1024;
+            budget.set_limit(limit);
+            cap = Some(limit);
+        }
+        let oversized = tokio::time::timeout(Duration::from_secs(900), received.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            oversized.reservation.is_none(),
+            "oversized replay waited for an impossible token"
+        );
+        assert!(!batches
+            .join(format!("{trigger_id}.delivered-agreed"))
+            .exists());
+        let (news, records): (Vec<_>, Vec<_>) = oversized
+            .records
+            .into_iter()
+            .partition(|r| !r.news.is_empty());
+        let mut count = plumb_core::storage::ByteCount {
+            bytes: 0,
+            limit: u64::MAX,
+        };
+        for record in &records {
+            serde_json::to_writer(&mut count, record).unwrap();
+            std::io::Write::write_all(&mut count, b"\n").unwrap();
+        }
+        assert_eq!(records.len(), SITES);
+        assert_eq!(
+            count.bytes,
+            plumb_net::node::MAX_RECORD_DELIVERY_BYTES + SITES as u64
+        );
+        eprintln!("genuine signed replay restart={restart}: input={} final={} receiver_limit={} quota_room=131072", trigger.records.iter().map(String::len).sum::<usize>(), count.bytes, plumb_net::node::MAX_RECORD_DELIVERY_BYTES);
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            super::network::persist_delivery(
+                inner.clone(),
+                records,
+                news,
+                oversized.reservation,
+                Some(oversized.acknowledgment),
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(!batches
+            .join(format!("{trigger_id}.delivered-agreed"))
+            .exists());
+        if !restart {
+            let delivery = tokio::time::timeout(Duration::from_secs(10), received.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(delivery.reservation.is_some());
+            let (news, records): (Vec<_>, Vec<_>) = delivery
+                .records
+                .into_iter()
+                .partition(|r| !r.news.is_empty());
+            assert_eq!(news.len(), 1);
+            assert_eq!(records.len(), 1);
+            tokio::time::timeout(
+                Duration::from_secs(10),
+                super::network::persist_delivery(
+                    inner.clone(),
+                    records,
+                    news,
+                    delivery.reservation,
+                    Some(delivery.acknowledgment),
+                ),
+            )
+            .await
+            .unwrap();
+            assert!(batches
+                .join(format!("{following_id}.delivered-trusted"))
+                .exists());
+            assert_eq!(
+                read_jsonl::<SiteRecord>(&inner.paths.inbox).unwrap().len(),
+                1
+            );
+            assert_eq!(inner.news.headline_count(), 1);
+        } else {
+            assert!(
+                tokio::time::timeout(Duration::from_millis(300), received.recv())
+                    .await
+                    .is_err(),
+                "acknowledged following delivery replayed twice"
+            );
+        }
+        assert_eq!(budget.status().limit_bytes, cap.unwrap());
+        assert_eq!(std::fs::read(&inner.paths.records).unwrap(), raw);
+        assert_eq!(
+            std::fs::read(batches.join(format!("{trigger_id}.json"))).unwrap(),
+            trigger_signed
+        );
+        assert_eq!(
+            std::fs::read(batches.join(format!("{following_id}.json"))).unwrap(),
+            following_signed
+        );
+        for (id, hash) in &signed {
+            assert_eq!(
+                Sha256::digest(std::fs::read(batches.join(format!("{id}.json"))).unwrap()),
+                *hash
+            );
+        }
+        net.shutdown().await;
+        drop(received);
+        assert_eq!(
+            std::fs::read(credits.join("ledger.json")).unwrap(),
+            credit_bytes
+        );
+    }
+    assert_eq!(budget.status().reserved_bytes, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn final_owned_deliveries_retry_growth_offline_and_leave_unsupported_payloads_pending() {
+    for unsupported in [false, true] {
+        let source_dir = tempfile::tempdir().unwrap();
+        let mut source_config = plumb_net::NetConfig::new(source_dir.path().to_owned());
+        source_config.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+        source_config.bootstrap.clear();
+        source_config.upnp = false;
+        source_config.local_discovery = false;
+        source_config.round_every = None;
+        source_config.fill = false;
+        let source_table = Arc::new(
+            plumb_net::BucketTable::build::<SiteRecord>(&source_dir.path().join("buckets"), &[])
+                .unwrap(),
+        );
+        let (source, _source_records) =
+            plumb_net::start(source_config, source_table).await.unwrap();
+        let source_id = source.peer_id();
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let source_addr: plumb_net::Multiaddr = loop {
+            if let Some(addr) = source.status().listening.first() {
+                break addr.parse().unwrap();
+            }
+            assert!(Instant::now() < deadline);
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        let dir = seeded_dir();
+        let expendable = dir.path().join("expendable-cache");
+        std::fs::write(&expendable, [1; 64 * 1024]).unwrap();
+        let mut config = test_config(dir.path());
+        config.take_new_sites = true;
+        let rank = RankConfig::default();
+        let opened = open_data_dir(&config, rank).unwrap();
+        let budget = plumb_core::storage::StorageBudget::open(dir.path(), u64::MAX).unwrap();
+        let (stop, stopped) = tokio::sync::watch::channel(false);
+        let inner = Arc::new(Inner::new(
+            config,
+            rank,
+            opened,
+            stopped,
+            Some(budget.clone()),
+        ));
+        let raw = std::fs::read(&inner.paths.records).unwrap();
+        let table = Arc::new(
+            plumb_net::BucketTable::build::<SiteRecord>(&inner.paths.net.join("buckets"), &[])
+                .unwrap(),
+        );
+        let mut net_config = plumb_net::NetConfig::new(inner.paths.net.clone());
+        net_config.listen = vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()];
+        net_config.bootstrap = vec![source_addr.with_p2p(source_id).unwrap()];
+        net_config.upnp = false;
+        net_config.local_discovery = false;
+        net_config.round_every = None;
+        net_config.fill = false;
+        net_config.trusted_peers = vec![source_id];
+        net_config.storage_budget = Some(budget.clone());
+        let (net, mut received) = plumb_net::start(net_config.clone(), table.clone())
+            .await
+            .unwrap();
+        let mut record = SiteRecord::new("owned-growth.example");
+        record.url = Some("https://owned-growth.example/".into());
+        record.title = Some("Confirmed output survives admission failure".into());
+        record.description = Some("x".repeat(12 * 1024));
+        record.crawled_at = Some(now_unix());
+        let id = source.publish(vec![record]).await.unwrap().unwrap();
+        let mut delivery = tokio::time::timeout(Duration::from_secs(20), received.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let credit_dir = inner.paths.net.join("credits");
+        // Stop both transports after live confirmation, flushing the credit
+        // ledger. The same process retains this receiver's final owned payload;
+        // quota recovery below never restarts or reobserves agreement.
+        source.shutdown().await;
+        net.shutdown().await;
+        let credited = plumb_net::credits::Ledger::open(&credit_dir)
+            .unwrap()
+            .account(&source_id);
+        assert_eq!(credited.confirmed, 1);
+        assert!(credited.earned > 0);
+        let batches = inner.paths.net.join("batches");
+        let signed_path = batches.join(format!("{id}.json"));
+        let signed = std::fs::read(&signed_path).unwrap();
+        let marker = batches.join(format!("{id}.delivered-trusted"));
+        // Fault injection models a final output larger than its owned token.
+        // No agreement, batch storage or credit operation is repeated.
+        let owned = delivery.reservation.as_mut().unwrap();
+        assert!(owned.bytes() > 8192);
+        owned.commit(owned.bytes() - 8192, 0, 0);
+        let cap = budget.status().used_bytes + budget.status().reserved_bytes;
+        budget.set_limit(cap);
+        if unsupported {
+            delivery.records[0].description = Some("x".repeat(65 * 1024 * 1024));
+        }
+        let rejected = budget.status().rejected_writes;
+        let pending = tokio::spawn(super::network::persist_delivery(
+            inner.clone(),
+            delivery.records,
+            Vec::new(),
+            delivery.reservation,
+            Some(delivery.acknowledgment),
+        ));
+        if unsupported {
+            // Permanent encoding failures return promptly, allowing the next
+            // delivery to proceed, while the signed source remains pending.
+            tokio::time::timeout(Duration::from_secs(10), pending)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(budget.status().reserved_bytes, 0);
+        } else {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while budget.status().rejected_writes == rejected {
+                assert!(
+                    Instant::now() < deadline,
+                    "receiver did not try to grow its owned admission"
+                );
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            assert!(!pending.is_finished());
+            assert_eq!(budget.status().reserved_bytes, 8192);
+            assert!(
+                !inner.paths.inbox.exists(),
+                "quota failure must precede every inbox write"
+            );
+            assert!(!marker.exists());
+            assert_eq!(std::fs::read(&signed_path).unwrap(), signed);
+            assert_eq!(
+                plumb_net::credits::Ledger::open(&credit_dir)
+                    .unwrap()
+                    .account(&source_id),
+                credited
+            );
+            plumb_core::storage::remove_file(&expendable, Some(&budget)).unwrap();
+            tokio::time::timeout(Duration::from_secs(10), pending)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                read_jsonl::<SiteRecord>(&inner.paths.inbox).unwrap().len(),
+                1
+            );
+            assert_eq!(inner.inbox_records.load(Ordering::SeqCst), 1);
+            assert!(marker.is_file());
+        }
+        assert_eq!(budget.status().limit_bytes, cap);
+        assert_eq!(std::fs::read(&inner.paths.records).unwrap(), raw);
+        assert_eq!(std::fs::read(&signed_path).unwrap(), signed);
+        assert_eq!(
+            plumb_net::credits::Ledger::open(&credit_dir)
+                .unwrap()
+                .account(&source_id),
+            credited
+        );
+        net.shutdown().await;
+        drop(received);
+        if unsupported {
+            assert!(!marker.exists());
+            assert!(!inner.paths.inbox.exists());
+            plumb_core::storage::remove_file(&expendable, Some(&budget)).unwrap();
+        }
+        // With the source offline, restart recovers an unacknowledged signed
+        // payload; an acknowledged retry never enqueues a duplicate.
+        net_config.bootstrap.clear();
+        let (restarted, mut replayed) = plumb_net::start(net_config, table).await.unwrap();
+        if unsupported {
+            let delivery = tokio::time::timeout(Duration::from_secs(10), replayed.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            super::network::persist_delivery(
+                inner.clone(),
+                delivery.records,
+                Vec::new(),
+                delivery.reservation,
+                Some(delivery.acknowledgment),
+            )
+            .await;
+            assert!(marker.is_file());
+            assert_eq!(
+                read_jsonl::<SiteRecord>(&inner.paths.inbox).unwrap().len(),
+                1
+            );
+        } else {
+            assert!(
+                tokio::time::timeout(Duration::from_millis(300), replayed.recv())
+                    .await
+                    .is_err()
+            );
+        }
+        restarted.shutdown().await;
+        drop(replayed);
+        assert_eq!(budget.status().reserved_bytes, 0);
+        assert_eq!(std::fs::read(&signed_path).unwrap(), signed);
+        assert_eq!(
+            plumb_net::credits::Ledger::open(&credit_dir)
+                .unwrap()
+                .account(&source_id),
+            credited
+        );
+        stop.send(true).unwrap();
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

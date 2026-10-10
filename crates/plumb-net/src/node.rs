@@ -1056,12 +1056,67 @@ pub struct RecordDelivery {
     pub acknowledgment: crate::store::DeliveryAck,
 }
 
-fn delivery_bytes(records: usize) -> u64 {
+/// The receiver's bounded raw encoding envelope. A recovered output above
+/// this size reaches the receiver without a storage token: only the receiver
+/// can partition headlines and filter sites before deciding what to persist.
+pub const MAX_RECORD_DELIVERY_BYTES: u64 = 64 * 1024 * 1024;
+
+fn max_delivery_bytes(records: usize) -> u64 {
     // Agreement can release a crawl and a mention per input record. Leave
     // room for merged metadata as well as a full protocol-sized record.
     allocation_for(
         (records as u64).saturating_mul(2 * (crate::batch::MAX_RECORD_BYTES as u64 + 4096)),
     )
+}
+
+/// Queue only the serialized payload's allocation, including the append's
+/// possible recovery newline. News admits its complete rewrite separately.
+fn delivery_bytes(records: &[SiteRecord]) -> Result<u64> {
+    delivery_bytes_up_to(records, u64::MAX)
+}
+
+fn delivery_bytes_up_to(records: &[SiteRecord], limit: u64) -> Result<u64> {
+    use std::io::Write;
+    let mut size = plumb_core::storage::ByteCount { bytes: 0, limit };
+    for record in records {
+        serde_json::to_writer(&mut size, record)?;
+        size.write_all(b"\n")?;
+    }
+    Ok(allocation_for(size.bytes.saturating_add(1)))
+}
+
+/// Keep the final confirmed output even when sizing fails. The receiver
+/// admits actual growth before writing and retries without observing agreement
+/// or crediting this stored batch again.
+fn queue_confirmed_delivery(
+    permit: mpsc::OwnedPermit<RecordDelivery>,
+    mut delivery: RecordDelivery,
+    measured: impl FnOnce(&[SiteRecord]) -> Result<u64>,
+) {
+    if let Err(err) =
+        release_delivery_slack_with(&mut delivery.reservation, || measured(&delivery.records))
+    {
+        warn!(
+            "cannot reduce confirmed delivery, retaining its admission for receiver retry: {err:#}"
+        );
+    }
+    permit.send(delivery);
+}
+
+fn release_delivery_slack_with(
+    reservation: &mut Option<Reservation>,
+    measured: impl FnOnce() -> Result<u64>,
+) -> Result<()> {
+    let Some(reserved) = reservation else {
+        return Ok(());
+    };
+    let bytes = measured()?;
+    anyhow::ensure!(
+        bytes <= reserved.bytes(),
+        "confirmed delivery exceeds its admitted size bound"
+    );
+    reserved.commit(reserved.bytes() - bytes, 0, 0);
+    Ok(())
 }
 
 pub async fn start(
@@ -1307,7 +1362,13 @@ pub async fn start(
             );
             cache.clear();
         }
-        if let Err(err) = std::fs::write(&scope_file, config.search_scope.as_str()) {
+        if let Err(err) = plumb_core::storage::write_atomic(
+            &scope_file,
+            &scope_file.with_extension("tmp"),
+            config.search_scope.as_str().as_bytes(),
+            storage.as_ref(),
+            None,
+        ) {
             warn!("writing {}: {err}", scope_file.display());
         }
     }
@@ -2388,14 +2449,18 @@ impl Task {
                             self.count_credits();
                             confirmed.extend(news);
                             if let Some(permit) = permit.filter(|_| !confirmed.is_empty()) {
-                                permit.send(RecordDelivery {
-                                    records: confirmed,
-                                    reservation,
-                                    acknowledgment: self.lock_store().delivery_ack(
-                                        &id,
-                                        self.config.trusted_peers.contains(&crawler),
-                                    ),
-                                });
+                                queue_confirmed_delivery(
+                                    permit,
+                                    RecordDelivery {
+                                        records: confirmed,
+                                        reservation,
+                                        acknowledgment: self.lock_store().delivery_ack(
+                                            &id,
+                                            self.config.trusted_peers.contains(&crawler),
+                                        ),
+                                    },
+                                    delivery_bytes,
+                                );
                             }
                         }
                         let agreement = self.agreement.status();
@@ -2597,6 +2662,7 @@ impl Task {
         let reports = self.reports.clone();
         let popularity = self.popularity.clone();
         let path = self.config.dir.join(POPULARITY_FILE);
+        let storage = self.lock_store().storage().cloned();
         let tx = self.answers_tx.clone();
         tokio::task::spawn_blocking(move || {
             // Counted with the store let go: STAR counting takes a while.
@@ -2605,7 +2671,19 @@ impl Task {
                 .unwrap_or_else(PoisonError::into_inner)
                 .snapshots(now_unix());
             let table = crate::reports::count(held);
-            if let Err(err) = table.save(&path) {
+            let saved = serde_json::to_vec_pretty(&table)
+                .context("encoding the popularity table")
+                .and_then(|bytes| {
+                    plumb_core::storage::write_atomic(
+                        &path,
+                        &path.with_extension("tmp"),
+                        &bytes,
+                        storage.as_ref(),
+                        None,
+                    )
+                    .context("saving the popularity table")
+                });
+            if let Err(err) = saved {
                 warn!("cannot save the popularity table: {err:#}");
             }
             let picks = table.picks.len();
@@ -3551,7 +3629,7 @@ impl Task {
             return;
         }
         let delivery = if permit.is_some() {
-            delivery_bytes(accepted.len() + news.len())
+            max_delivery_bytes(accepted.len() + news.len())
         } else {
             0
         };
@@ -4737,16 +4815,32 @@ fn resend_pending(
         if confirmed.is_empty() || acknowledgment.acknowledged() {
             continue;
         }
+        let bytes = if budget.is_some() {
+            match delivery_bytes_up_to(&confirmed, MAX_RECORD_DELIVERY_BYTES) {
+                Ok(bytes) => Some(bytes),
+                Err(err) => {
+                    // Agreement can merge observations from many signed
+                    // batches. Their individual bounds do not bound this
+                    // final output. Never wait for an impossible full-output
+                    // admission before the receiver can classify it; its
+                    // headline partition and site filter may also make the
+                    // actual raw payload smaller than this envelope.
+                    warn!("pending delivery exceeds sizing envelope; receiver will classify and admit it: {err:#}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
         let mut delay = std::time::Duration::from_millis(100);
         let reservation = loop {
             if stopping() {
                 return;
             }
-            match budget
-                .as_ref()
-                .map(|b| b.reserve(delivery_bytes(confirmed.len()), false))
-                .transpose()
-            {
+            let Some(bytes) = bytes else {
+                break None;
+            };
+            match budget.as_ref().map(|b| b.reserve(bytes, false)).transpose() {
                 Ok(reservation) => break reservation,
                 Err(err) => {
                     debug!("pending delivery waits for storage: {err:#}");
@@ -5040,6 +5134,276 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn cold_network_startup_accounts_its_directories_before_replay() {
+        for limit in [None, Some(u64::MAX), Some(1024 * 1024)] {
+            let dir = tempfile::tempdir().unwrap();
+            let net_dir = dir.path().join("net");
+            std::fs::create_dir(&net_dir).unwrap();
+            let source = Arc::new(
+                crate::BucketTable::build::<SiteRecord>(&net_dir.join("buckets"), &[]).unwrap(),
+            );
+            let budget = limit.map(|limit| StorageBudget::open(dir.path(), limit).unwrap());
+            let mut config = NetConfig::new(net_dir.clone());
+            config.listen.clear();
+            config.bootstrap.clear();
+            config.upnp = false;
+            config.local_discovery = false;
+            config.round_every = None;
+            config.fill = false;
+            config.storage_budget = budget.clone();
+            let (handle, records) = start(config.clone(), source.clone()).await.unwrap();
+            handle.recount().await.unwrap(); // Wait for the actual async table save.
+            assert_eq!(
+                std::fs::read_to_string(net_dir.join(SCOPE_FILE)).unwrap(),
+                config.search_scope.as_str()
+            );
+            if let Some(budget) = &budget {
+                let _mutation = budget.mutation();
+                let used = budget.status().used_bytes;
+                let disk = crate::storage::directory_bytes(dir.path()).unwrap();
+                eprintln!("cold startup ledger limit={limit:?} used={used} disk={disk}");
+                assert_eq!(used, disk);
+                assert_eq!(budget.status().reserved_bytes, 0);
+            }
+            handle.cache.put(123, vec![Vec::new()], now_unix());
+            assert_eq!(handle.cache.len(), 1);
+            handle.shutdown().await;
+            drop(records);
+            // Same scope retains its cache; a changed scope clears it and
+            // atomically replaces the marker using the shared admission.
+            let (handle, records) = start(config.clone(), source.clone()).await.unwrap();
+            assert_eq!(handle.cache.len(), 1);
+            handle.shutdown().await;
+            drop(records);
+            config.search_scope = SearchScope::Trusted;
+            let (handle, records) = start(config, source).await.unwrap();
+            assert_eq!(handle.cache.len(), 0);
+            assert_eq!(
+                std::fs::read_to_string(net_dir.join(SCOPE_FILE)).unwrap(),
+                "trusted"
+            );
+            handle.shutdown().await;
+            drop(records);
+            if let Some(budget) = &budget {
+                let _mutation = budget.mutation();
+                assert_eq!(
+                    budget.status().used_bytes,
+                    crate::storage::directory_bytes(dir.path()).unwrap()
+                );
+                assert_eq!(budget.status().reserved_bytes, 0);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_scope_change_refused_by_quota_keeps_the_previous_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = Arc::new(
+            crate::BucketTable::build::<SiteRecord>(&dir.path().join("buckets"), &[]).unwrap(),
+        );
+        let budget = StorageBudget::open(dir.path(), u64::MAX).unwrap();
+        let mut config = NetConfig::new(dir.path().to_owned());
+        config.listen.clear();
+        config.bootstrap.clear();
+        config.upnp = false;
+        config.local_discovery = false;
+        config.round_every = None;
+        config.fill = false;
+        config.storage_budget = Some(budget.clone());
+        let (handle, records) = start(config.clone(), source.clone()).await.unwrap();
+        handle.recount().await.unwrap();
+        let table_path = dir.path().join(POPULARITY_FILE);
+        let old_table =
+            serde_json::to_vec_pretty(&PopularityTable::new(vec![123], Vec::new())).unwrap();
+        plumb_core::storage::write_atomic(
+            &table_path,
+            &table_path.with_extension("tmp"),
+            &old_table,
+            Some(&budget),
+            None,
+        )
+        .unwrap();
+        handle.shutdown().await;
+        drop(records);
+        let old = std::fs::read(dir.path().join(SCOPE_FILE)).unwrap();
+        let used = budget.status().used_bytes;
+        budget.set_limit(used);
+        config.search_scope = SearchScope::Trusted;
+        let (handle, records) = start(config.clone(), source.clone()).await.unwrap();
+        let recounted = handle.recount().await.unwrap();
+        assert!(recounted.epochs.is_empty());
+        assert_eq!(std::fs::read(&table_path).unwrap(), old_table);
+        assert!(!table_path.with_extension("tmp").exists());
+        assert_eq!(std::fs::read(dir.path().join(SCOPE_FILE)).unwrap(), old);
+        assert!(budget.status().rejected_writes > 0);
+        assert_eq!(budget.status().reserved_bytes, 0);
+        assert_eq!(
+            budget.status().used_bytes,
+            crate::storage::directory_bytes(dir.path()).unwrap()
+        );
+        handle.shutdown().await;
+        drop(records);
+        // A later configuration with room can retry the preserved marker.
+        budget.set_limit(u64::MAX);
+        let (handle, records) = start(config, source).await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(SCOPE_FILE)).unwrap(),
+            "trusted"
+        );
+        handle.shutdown().await;
+        drop(records);
+    }
+
+    #[tokio::test]
+    async fn a_count_failure_still_enqueues_the_final_owned_delivery_and_acknowledgment() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = Keypair::generate_ed25519();
+        let now = now_unix();
+        let mut record = SiteRecord::new("confirmed-count-fault.example");
+        record.title = Some("Final confirmed output".into());
+        record.crawled_at = Some(now);
+        let batch = Batch::sign(&key, &[record.clone()], epoch_of(now), MAX_SHARE_PPM, now)
+            .unwrap()
+            .unwrap();
+        let mut store = BatchStore::open(dir.path()).unwrap();
+        store.insert(&batch).unwrap();
+        let signed_path = dir.path().join(format!("{}.json", batch.id()));
+        let signed = std::fs::read(&signed_path).unwrap();
+        let marker = dir.path().join(format!("{}.delivered-trusted", batch.id()));
+        let budget = StorageBudget::open(dir.path(), u64::MAX).unwrap();
+        let reservation = budget.reserve(max_delivery_bytes(1), false).unwrap();
+        let allowance = reservation.bytes();
+        let (tx, mut rx) = mpsc::channel(1);
+        queue_confirmed_delivery(
+            tx.reserve_owned().await.unwrap(),
+            RecordDelivery {
+                records: vec![record.clone()],
+                reservation: Some(reservation),
+                acknowledgment: store.delivery_ack(&batch.id(), true),
+            },
+            |_| anyhow::bail!("injected count failure after confirmation"),
+        );
+        let queued = rx.recv().await.unwrap();
+        assert_eq!(queued.records, vec![record]);
+        assert_eq!(queued.reservation.as_ref().unwrap().bytes(), allowance);
+        assert_eq!(budget.status().reserved_bytes, allowance);
+        assert!(!marker.exists());
+        assert_eq!(std::fs::read(&signed_path).unwrap(), signed);
+        drop(queued.reservation);
+        queued.acknowledgment.acknowledge().unwrap();
+        assert!(marker.is_file());
+        assert_eq!(std::fs::read(&signed_path).unwrap(), signed);
+        assert_eq!(budget.status().reserved_bytes, 0);
+    }
+
+    #[test]
+    fn confirmed_delivery_sizing_releases_only_its_owned_surplus() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("protected-raw"), [1; 32 * 1024]).unwrap();
+        let budget = StorageBudget::open(dir.path(), u64::MAX).unwrap();
+        let used = budget.status().used_bytes;
+        let other = budget.reserve(64 * 1024, false).unwrap();
+        let mut record = SiteRecord::new("counted.example");
+        record.description = Some("quoted \" text\n".repeat(100));
+        let records = vec![record];
+        let mut owned = Some(budget.reserve(max_delivery_bytes(1), false).unwrap());
+        let encoded = serde_json::to_vec(&records[0]).unwrap();
+        // One line break plus a possible recovery line break on append.
+        let expected = allocation_for(encoded.len() as u64 + 2);
+        release_delivery_slack_with(&mut owned, || delivery_bytes(&records)).unwrap();
+        assert_eq!(owned.as_ref().unwrap().bytes(), expected);
+        assert_eq!(budget.status().reserved_bytes, expected + other.bytes());
+        assert_eq!(budget.status().used_bytes, used);
+        drop(owned);
+        assert_eq!(budget.status().reserved_bytes, other.bytes());
+        drop(other);
+        assert_eq!(budget.status().reserved_bytes, 0);
+    }
+
+    #[test]
+    fn a_delivery_sizing_error_or_oversize_does_not_release_any_owned_admission() {
+        let dir = tempfile::tempdir().unwrap();
+        let budget = StorageBudget::open(dir.path(), 128 * 1024).unwrap();
+        let other = budget.reserve(16 * 1024, false).unwrap();
+        let mut owned = Some(budget.reserve(64 * 1024, false).unwrap());
+        let before = budget.status();
+        assert!(
+            release_delivery_slack_with(&mut owned, || anyhow::bail!("injected count error"))
+                .is_err()
+        );
+        assert_eq!(budget.status(), before);
+        assert!(release_delivery_slack_with(&mut owned, || Ok(64 * 1024 + 1)).is_err());
+        assert_eq!(budget.status(), before);
+        assert_eq!(owned.as_ref().unwrap().bytes(), 64 * 1024);
+        let mut uncapped = None;
+        release_delivery_slack_with(&mut uncapped, || panic!("uncapped delivery must not count"))
+            .unwrap();
+        drop(owned);
+        assert_eq!(budget.status().reserved_bytes, other.bytes());
+    }
+
+    #[test]
+    fn replay_waits_when_its_actual_serialized_delivery_cannot_fit() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = Keypair::generate_ed25519();
+        let crawler = key.public().to_peer_id();
+        let me = PeerId::random();
+        let now = now_unix();
+        let batches = dir.path().join("batches");
+        let mut record = SiteRecord::new("insufficient-replay.example");
+        record.description = Some("x".repeat(8 * 1024));
+        record.crawled_at = Some(now);
+        let batch = Batch::sign(&key, &[record], epoch_of(now), MAX_SHARE_PPM, now)
+            .unwrap()
+            .unwrap();
+        BatchStore::open(&batches).unwrap().insert(&batch).unwrap();
+        let path = batches.join(format!("{}.json", batch.id()));
+        let signed = std::fs::read(&path).unwrap();
+        let budget = StorageBudget::open(dir.path(), u64::MAX).unwrap();
+        let store = Mutex::new(
+            BatchStore::open_retained(
+                &batches,
+                true,
+                StoreLimits {
+                    own: Vec::new(),
+                    bytes: None,
+                    now,
+                    epochs: crate::store::RETAIN_EPOCHS,
+                    storage: Some(budget.clone()),
+                },
+            )
+            .unwrap(),
+        );
+        let mut agreement = Agreement::new(me, [crawler]);
+        let confirmed =
+            agreement.observe(crawler, accept_trusted_batch(&batch, &crawler, now), now);
+        let bytes = delivery_bytes(&confirmed).unwrap();
+        budget.set_limit(budget.status().used_bytes + bytes - 1);
+        let (tx, mut rx) = mpsc::channel(RECORD_DELIVERIES);
+        let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cancelled = stopped.clone();
+        let id = batch.id();
+        let producer = std::thread::spawn(move || {
+            resend_pending(&store, &[id], &tx, me, &[crawler], &cancelled);
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while budget.status().rejected_writes == 0 {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(rx.try_recv().is_err());
+        assert_eq!(budget.status().reserved_bytes, 0);
+        stopped.store(true, std::sync::atomic::Ordering::SeqCst);
+        producer.join().unwrap();
+        assert_eq!(std::fs::read(path).unwrap(), signed);
+        assert!(!batches.join(format!("{id}.delivered-trusted")).exists());
+        assert_eq!(
+            budget.status().used_bytes,
+            crate::storage::directory_bytes(dir.path()).unwrap()
+        );
+    }
+
     #[test]
     fn legacy_no_ack_replay_is_bounded_and_preserves_signed_batch_bytes() {
         let dir = tempfile::tempdir().unwrap();
@@ -5102,7 +5466,8 @@ mod tests {
         assert!(!producer.is_finished());
         // Four channel slots plus the producer's single bounded batch.
         assert!(
-            budget.status().reserved_bytes <= delivery_bytes(1) * (RECORD_DELIVERIES as u64 + 1)
+            budget.status().reserved_bytes
+                <= max_delivery_bytes(1) * (RECORD_DELIVERIES as u64 + 1)
         );
         let mut received = HashSet::new();
         while let Some(delivery) = rx.blocking_recv() {

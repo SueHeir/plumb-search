@@ -579,6 +579,14 @@ pub(super) async fn persist_delivery(
         let acknowledgment = acknowledgment.clone();
         let mut admitted = reservation.take();
         let saved = tokio::task::spawn_blocking(move || {
+            // Classify permanent raw encoding failures before either destination
+            // can wait for quota. Filtering and headline partitioning already ran.
+            // Ordinary worker failures retain the delivery through the retry path.
+            if !persisted {
+                if let Err(err) = check_inbox_payload(&payload) {
+                    return (news_persisted, false, admitted, Err(err));
+                }
+            }
             let mut news_durable = news_persisted;
             if !news_durable {
                 // Headline persistence rewrites its complete store. It admits
@@ -631,6 +639,10 @@ pub(super) async fn persist_delivery(
             }
             Err(err) => anyhow::anyhow!("keeping records from the network failed: {err}"),
         };
+        if failure.downcast_ref::<UnsupportedInboxPayload>().is_some() {
+            warn!("cannot persist unsupported network payload; leaving signed source unacknowledged: {failure:#}");
+            return;
+        }
         if !warned {
             warn!(
                 "cannot keep records from the network, retaining delivery for retry: {failure:#}"
@@ -645,6 +657,18 @@ pub(super) async fn persist_delivery(
     }
 }
 
+fn check_inbox_payload(records: &[SiteRecord]) -> Result<()> {
+    let mut size = plumb_core::storage::ByteCount {
+        bytes: 0,
+        limit: MAX_INBOX_PAYLOAD as u64,
+    };
+    for record in records {
+        serde_json::to_writer(&mut size, record).context(UnsupportedInboxPayload)?;
+        size.write_all(b"\n").context(UnsupportedInboxPayload)?;
+    }
+    Ok(())
+}
+
 fn append_inbox_reserved(
     inner: &Inner,
     records: &[SiteRecord],
@@ -652,19 +676,13 @@ fn append_inbox_reserved(
 ) -> Result<()> {
     use plumb_net::storage::{allocation_for, file_bytes, LimitedBytes};
     let path = &inner.paths.inbox;
-    let payload_limit = reservation
-        .as_ref()
-        .filter(|reserved| reserved.bytes() > 0)
-        .map_or(64 * 1024 * 1024, |reserved| {
-            reserved.bytes().min(64 * 1024 * 1024) as usize
-        });
     let mut lines = LimitedBytes {
         bytes: Vec::new(),
-        limit: payload_limit,
+        limit: MAX_INBOX_PAYLOAD,
     };
     for record in records {
-        serde_json::to_writer(&mut lines, record).context("encoding a bounded inbox record")?;
-        lines.write_all(b"\n")?;
+        serde_json::to_writer(&mut lines, record).context(UnsupportedInboxPayload)?;
+        lines.write_all(b"\n").context(UnsupportedInboxPayload)?;
     }
     let _guard = inner
         .inbox_lock
@@ -722,6 +740,21 @@ fn append_inbox_reserved(
     }
     written.with_context(|| format!("writing {}", path.display()))
 }
+
+const MAX_INBOX_PAYLOAD: usize = plumb_net::node::MAX_RECORD_DELIVERY_BYTES as usize;
+
+/// This final payload cannot be encoded within the receiver's bounded memory.
+/// Retrying quota or filesystem I/O cannot change that payload's size.
+#[derive(Debug)]
+struct UnsupportedInboxPayload;
+
+impl std::fmt::Display for UnsupportedInboxPayload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("network payload is unencodable or exceeds the 64 MiB inbox limit")
+    }
+}
+
+impl std::error::Error for UnsupportedInboxPayload {}
 
 // A failed write/sync restores the exact prior length, including a crash-cut
 // last line. Even a failed rollback is measured by the caller before releasing
@@ -800,7 +833,7 @@ pub(super) fn absorb_inbox(inner: &Inner) -> Result<u64> {
         // Folded a record at a time; a file only a whole set can fold
         // (a site on two lines) keeps its journal for the next build.
         let _records = inner.hold_records();
-        store.fold()?;
+        store.fold_with_check(|| inner.check_stop())?;
     }
     plumb_core::storage::remove_file(&paths.absorbing, inner.storage.as_deref())
         .with_context(|| format!("deleting {}", paths.absorbing.display()))?;

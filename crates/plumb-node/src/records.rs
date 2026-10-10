@@ -353,6 +353,8 @@ impl RecordStore {
                 _ => old.saturating_add(reserved.bytes()),
             };
             reserved.commit(reserved.bytes(), old, new);
+            #[cfg(test)]
+            note_fold_peak(&self.path, &budget);
             written?;
             self.journal_bytes = file_len(&self.journal_path);
             return Ok(());
@@ -408,22 +410,90 @@ impl RecordStore {
     /// Folds the journal into the file a record at a time, without the set
     /// ([`crate::outline::fold_journal`]).
     pub(crate) fn fold(&mut self) -> Result<crate::outline::Folded> {
+        self.fold_with_check(|| Ok(()))
+    }
+
+    pub(crate) fn fold_with_check(
+        &mut self,
+        mut check: impl FnMut() -> Result<()>,
+    ) -> Result<crate::outline::Folded> {
+        check()?;
         // Closed first: Windows cannot delete a file that is open.
+        #[cfg(test)]
+        if let Some(budget) = &self.budget {
+            if fold_evidence().lock().unwrap().contains_key(&self.path) {
+                let _mutation = budget.mutation();
+                note_fold_phase(&self.path, budget, "before-close", 0);
+            }
+        }
         self.journal = None;
         if file_len(&self.journal_path) == 0 {
             return Ok(crate::outline::Folded::Nothing);
         }
         let written = if let Some(budget) = self.budget.clone() {
-            let max = file_len(&self.path)
-                .saturating_add(file_len(&self.journal_path))
-                .saturating_mul(2);
-            self.admitted_rewrite(&budget, max, || crate::outline::fold_journal(&self.path))?
+            self.admitted_fold(&budget, &mut check)?
         } else {
-            crate::outline::fold_journal(&self.path)?
+            crate::outline::fold_journal(&self.path, u64::MAX, || {}, &mut check)?
         };
         self.journal_bytes = file_len(&self.journal_path);
         self.file_bytes = file_len(&self.path);
         Ok(written)
+    }
+
+    fn admitted_fold(
+        &self,
+        budget: &std::sync::Arc<plumb_core::storage::StorageBudget>,
+        check: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<crate::outline::Folded> {
+        use crate::outline::{FoldMeasure, Folded};
+        anyhow::ensure!(
+            records_budget(&self.path, Some(budget))?.is_some(),
+            "records are outside the node storage root"
+        );
+        let _mutation = budget.mutation();
+        #[cfg(test)]
+        note_fold_phase(&self.path, budget, "before-count", 0);
+        let raw = FoldInput::read(&self.path)?;
+        let journal = FoldInput::read(&self.journal_path)?;
+        let mut checked = || {
+            #[cfg(test)]
+            note_fold_peak(&self.path, budget);
+            check()?;
+            anyhow::ensure!(
+                raw == FoldInput::read(&self.path)?
+                    && journal == FoldInput::read(&self.journal_path)?,
+                "records or journal changed during the admitted fold"
+            );
+            Ok(())
+        };
+        let max = file_len(&self.path)
+            .saturating_add(file_len(&self.journal_path))
+            .saturating_mul(2);
+        let (reserved, limit) = match budget
+            .reserve(plumb_core::storage::allocation_for(max), false)
+        {
+            Ok(reserved) => (reserved, max),
+            Err(_) => {
+                // The merge can preserve most of a large raw file. Only an
+                // admission refusal pays for the second traversal, using the
+                // writer's serializer rather than a smaller guessed bound.
+                let bytes = match crate::outline::measure_fold_journal(&self.path, &mut checked)? {
+                    FoldMeasure::Nothing => return Ok(Folded::Nothing),
+                    FoldMeasure::NeedsSet => return Ok(Folded::NeedsSet),
+                    FoldMeasure::Bytes(bytes) => bytes,
+                };
+                (
+                    budget.reserve(plumb_core::storage::allocation_for(bytes), false)?,
+                    bytes,
+                )
+            }
+        };
+        #[cfg(test)]
+        note_fold_phase(&self.path, budget, "before-write", reserved.bytes());
+        let installed = std::cell::Cell::new(false);
+        self.rewrite_reserved(budget, reserved, Some(&installed), || {
+            crate::outline::fold_journal(&self.path, limit, || installed.set(true), &mut checked)
+        })
     }
 
     fn admitted_rewrite<T>(
@@ -437,7 +507,18 @@ impl RecordStore {
             "records are outside the node storage root"
         );
         let _mutation = budget.mutation();
-        let mut reserved = budget.reserve(plumb_core::storage::allocation_for(max), false)?;
+        let reserved = budget.reserve(plumb_core::storage::allocation_for(max), false)?;
+        self.rewrite_reserved(budget, reserved, None, rewrite)
+    }
+
+    /// The caller holds mutation across measuring, admission and replacement.
+    fn rewrite_reserved<T>(
+        &self,
+        budget: &std::sync::Arc<plumb_core::storage::StorageBudget>,
+        mut reserved: plumb_core::storage::Reservation,
+        installed: Option<&std::cell::Cell<bool>>,
+        rewrite: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
         // Raw compaction uses one temporary file beside records, not a corpus
         // tree walk. Include failure leftovers before releasing the reservation.
         let parent = fs::canonicalize(
@@ -447,16 +528,177 @@ impl RecordStore {
                 .unwrap_or(Path::new(".")),
         )?;
         let before = shallow_bytes(&parent)?;
+        let old_raw = plumb_core::storage::existing_file_bytes(&self.path)?;
         let result = rewrite();
         let after =
             shallow_bytes(&parent).unwrap_or_else(|_| before.saturating_add(reserved.bytes()));
+        let before = if installed.is_some_and(std::cell::Cell::get) && old_raw > 0 {
+            // Retire while output room is still reserved. A held reader keeps
+            // its charge throughout; admission must never see a credit for
+            // the old pathname between committing output and retiring it.
+            budget.retire_file(&self.path, old_raw);
+            before.saturating_sub(old_raw)
+        } else {
+            before
+        };
         reserved.commit(reserved.bytes(), before, after);
+        #[cfg(test)]
+        note_fold_phase(&self.path, budget, "after-write", 0);
         result
     }
 
     #[cfg(test)]
     pub(crate) fn set_min_compact_bytes(&mut self, bytes: u64) {
         self.min_compact_bytes = bytes;
+    }
+}
+
+// Test-only evidence for physical peaks and same-generation allocation
+// shrinkage. Enabled by the bounded queue fixture; no production polling.
+#[cfg(test)]
+#[derive(Debug, Clone)]
+pub(crate) struct FoldInputAllocation {
+    pub logical: u64,
+    pub allocated: u64,
+    generation: Option<FoldInput>,
+}
+#[cfg(test)]
+impl FoldInputAllocation {
+    pub fn read(path: &Path) -> Self {
+        Self {
+            logical: file_len(path),
+            allocated: plumb_core::storage::existing_file_bytes(path).unwrap(),
+            generation: FoldInput::read(path).unwrap(),
+        }
+    }
+    pub fn same_generation(&self, other: &Self) -> bool {
+        self.generation == other.generation
+    }
+    pub fn dense_slack(&self) -> u64 {
+        // This fixture writes dense JSON. file_bytes includes 4 KiB per-file
+        // metadata; physical block rounding makes this a conservative floor.
+        self.allocated
+            .saturating_sub(self.logical.saturating_add(4096))
+    }
+}
+#[cfg(test)]
+#[derive(Debug)]
+pub(crate) struct FoldAllocationPhase {
+    pub phase: &'static str,
+    pub inputs: [FoldInputAllocation; 2],
+}
+#[cfg(test)]
+#[derive(Debug, Default)]
+pub(crate) struct FoldAllocationEvidence {
+    pub phases: Vec<FoldAllocationPhase>,
+    pub physical_plus_queued_peak: u64,
+    pub charged_plus_reserved_peak: u64,
+    pub uncovered_peak: u64,
+    stage_room: u64,
+    samples: usize,
+}
+#[cfg(test)]
+fn fold_evidence(
+) -> &'static std::sync::Mutex<std::collections::HashMap<PathBuf, FoldAllocationEvidence>> {
+    static TRACE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<PathBuf, FoldAllocationEvidence>>,
+    > = std::sync::OnceLock::new();
+    TRACE.get_or_init(Default::default)
+}
+#[cfg(test)]
+pub(crate) fn start_fold_allocation_evidence(path: &Path) {
+    fold_evidence()
+        .lock()
+        .unwrap()
+        .insert(path.to_path_buf(), FoldAllocationEvidence::default());
+}
+#[cfg(test)]
+pub(crate) fn take_fold_allocation_evidence(path: &Path) -> FoldAllocationEvidence {
+    fold_evidence().lock().unwrap().remove(path).unwrap()
+}
+#[cfg(test)]
+fn sample_fold_peak(
+    evidence: &mut FoldAllocationEvidence,
+    budget: &plumb_core::storage::StorageBudget,
+) {
+    let linked = plumb_core::storage::directory_bytes(budget.root()).unwrap();
+    let status = budget.status();
+    let physical = linked.saturating_add(status.reader_held_bytes);
+    let queued = status.reserved_bytes.saturating_sub(evidence.stage_room);
+    evidence.physical_plus_queued_peak = evidence
+        .physical_plus_queued_peak
+        .max(physical.saturating_add(queued));
+    evidence.charged_plus_reserved_peak = evidence
+        .charged_plus_reserved_peak
+        .max(status.used_bytes.saturating_add(status.reserved_bytes));
+    evidence.uncovered_peak = evidence
+        .uncovered_peak
+        .max(physical.saturating_sub(status.used_bytes.saturating_add(evidence.stage_room)));
+}
+#[cfg(test)]
+fn note_fold_phase(
+    path: &Path,
+    budget: &plumb_core::storage::StorageBudget,
+    phase: &'static str,
+    stage_room: u64,
+) {
+    let mut traces = fold_evidence().lock().unwrap();
+    if let Some(evidence) = traces.get_mut(path) {
+        evidence.stage_room = stage_room;
+        evidence.phases.push(FoldAllocationPhase {
+            phase,
+            inputs: [
+                FoldInputAllocation::read(path),
+                FoldInputAllocation::read(&journal_path(path)),
+            ],
+        });
+        sample_fold_peak(evidence, budget);
+    }
+}
+#[cfg(test)]
+fn note_fold_peak(path: &Path, budget: &plumb_core::storage::StorageBudget) {
+    let mut traces = fold_evidence().lock().unwrap();
+    if let Some(evidence) = traces.get_mut(path) {
+        evidence.samples += 1;
+        if evidence.samples.is_multiple_of(128) {
+            sample_fold_peak(evidence, budget);
+        }
+    }
+}
+
+/// Mutation keeps managed writers out; refuse to overwrite an input changed
+/// by an outside owner during either pass without claiming admission for it.
+#[cfg_attr(test, derive(Debug, Clone))]
+#[derive(PartialEq, Eq)]
+struct FoldInput {
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+    created: Option<std::time::SystemTime>,
+    #[cfg(unix)]
+    identity: (u64, u64, i64, i64),
+}
+
+impl FoldInput {
+    fn read(path: &Path) -> Result<Option<Self>> {
+        let metadata = match fs::metadata(path) {
+            Ok(metadata) => metadata,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => return Err(err).context("reading fold input generation"),
+        };
+        #[cfg(unix)]
+        use std::os::unix::fs::MetadataExt;
+        Ok(Some(Self {
+            len: metadata.len(),
+            modified: metadata.modified().ok(),
+            created: metadata.created().ok(),
+            #[cfg(unix)]
+            identity: (
+                metadata.dev(),
+                metadata.ino(),
+                metadata.ctime(),
+                metadata.ctime_nsec(),
+            ),
+        }))
     }
 }
 
@@ -638,6 +880,382 @@ mod tests {
 
     fn sorted(set: RecordSet) -> Vec<SiteRecord> {
         set.into_sorted_vec()
+    }
+
+    #[test]
+    fn a_fold_that_fits_actual_output_makes_progress_with_inbox_and_queued_reservations() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("records.jsonl");
+        let mut record = SiteRecord::new("held.example");
+        record.description = Some("x".repeat(96 * 1024));
+        write_jsonl(&path, &[record]).unwrap();
+        let mut store = RecordStore::open(&path);
+        store.save(&[mark("held.example", Some(100), 1)]).unwrap();
+        let expected = sorted(load_records(&path).unwrap());
+        let inbox = dir.path().join("inbox.jsonl");
+        write_jsonl(&inbox, &[SiteRecord::new("pending.example")]).unwrap();
+        let protected_inbox = fs::read(&inbox).unwrap();
+        let used = plumb_core::storage::directory_bytes(dir.path()).unwrap();
+        let budget =
+            plumb_core::storage::StorageBudget::open(dir.path(), used + 192 * 1024).unwrap();
+        let queued = budget.reserve(64 * 1024, false).unwrap();
+        let mut store = store.with_budget(Some(budget.clone()));
+
+        assert!(matches!(
+            store
+                .fold()
+                .expect("the complete folded output fits alongside receiving reservations"),
+            crate::outline::Folded::Records(1)
+        ));
+        assert_eq!(sorted(load_records(&path).unwrap()), expected);
+        assert!(!journal_path(&path).exists());
+        assert_eq!(fs::read(&inbox).unwrap(), protected_inbox);
+        assert_eq!(budget.status().reserved_bytes, 64 * 1024);
+        assert!(budget.status().used_bytes + budget.status().reserved_bytes <= used + 192 * 1024);
+        assert_eq!(
+            budget.status().used_bytes,
+            plumb_core::storage::directory_bytes(dir.path()).unwrap()
+        );
+        drop(queued);
+        assert_eq!(budget.status().reserved_bytes, 0);
+    }
+
+    fn pressured_fold() -> (
+        tempfile::TempDir,
+        RecordStore,
+        std::sync::Arc<plumb_core::storage::StorageBudget>,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("records.jsonl");
+        let mut record = SiteRecord::new("held.example");
+        record.description = Some("x".repeat(96 * 1024));
+        write_jsonl(&path, &[record]).unwrap();
+        let mut store = RecordStore::open(&path);
+        store.save(&[mark("held.example", Some(100), 1)]).unwrap();
+        write_jsonl(
+            &dir.path().join("inbox.absorbing"),
+            &[SiteRecord::new("pending.example")],
+        )
+        .unwrap();
+        let used = plumb_core::storage::directory_bytes(dir.path()).unwrap();
+        let budget =
+            plumb_core::storage::StorageBudget::open(dir.path(), used + 128 * 1024).unwrap();
+        (dir, store.with_budget(Some(budget.clone())), budget)
+    }
+
+    fn assert_fold_ledger(budget: &plumb_core::storage::StorageBudget) {
+        let status = budget.status();
+        assert_eq!(status.reserved_bytes, 0);
+        assert_eq!(
+            status.used_bytes,
+            plumb_core::storage::directory_bytes(budget.root()).unwrap() + status.reader_held_bytes
+        );
+        assert!(status.used_bytes <= status.limit_bytes);
+    }
+
+    fn folded_temp(dir: &Path) -> Option<PathBuf> {
+        fs::read_dir(dir).unwrap().find_map(|entry| {
+            let path = entry.unwrap().path();
+            let name = path.file_name()?.to_str()?;
+            (name.starts_with(".records.jsonl.") && name.ends_with(".tmp")).then_some(path)
+        })
+    }
+
+    #[test]
+    fn queued_receiving_can_block_the_exact_output_until_its_reservation_is_released() {
+        let (dir, mut store, budget) = pressured_fold();
+        let raw = fs::read(&store.path).unwrap();
+        let journal = fs::read(&store.journal_path).unwrap();
+        let inbox = fs::read(dir.path().join("inbox.absorbing")).unwrap();
+        let initial = names(dir.path());
+        let queued = budget.reserve(64 * 1024, false).unwrap();
+        assert!(store
+            .fold()
+            .unwrap_err()
+            .to_string()
+            .contains("backpressure"));
+        assert_eq!(fs::read(&store.path).unwrap(), raw);
+        assert_eq!(fs::read(&store.journal_path).unwrap(), journal);
+        assert_eq!(fs::read(dir.path().join("inbox.absorbing")).unwrap(), inbox);
+        assert_eq!(names(dir.path()), initial);
+        assert_eq!(budget.status().reserved_bytes, 64 * 1024);
+        drop(queued);
+        assert_fold_ledger(&budget);
+        // Retry at the same cap, after the receiving owner releases its token.
+        assert_eq!(store.fold().unwrap(), crate::outline::Folded::Records(1));
+        assert_fold_ledger(&budget);
+    }
+
+    #[test]
+    fn genuinely_insufficient_exact_output_preserves_every_input_for_restart() {
+        let (dir, mut store, budget) = pressured_fold();
+        budget.set_limit(budget.status().used_bytes + 64 * 1024);
+        let raw = fs::read(&store.path).unwrap();
+        let journal = fs::read(&store.journal_path).unwrap();
+        let initial = names(dir.path());
+        for _ in 0..2 {
+            let mut restarted = RecordStore::open(&store.path).with_budget(Some(budget.clone()));
+            assert!(restarted.fold().is_err());
+            assert_eq!(fs::read(&store.path).unwrap(), raw);
+            assert_eq!(fs::read(&store.journal_path).unwrap(), journal);
+            assert_eq!(names(dir.path()), initial);
+            assert_fold_ledger(&budget);
+        }
+        // Even an uncapped owner still uses the ordinary journal semantics.
+        store.budget = None;
+        assert_eq!(store.fold().unwrap(), crate::outline::Folded::Records(1));
+        assert_eq!(load_records(&store.path).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn exact_fold_keeps_the_retired_raw_reader_charged_until_its_lease_drops() {
+        let (_dir, mut store, budget) = pressured_fold();
+        let (mut old_reader, lease) = {
+            let _mutation = budget.mutation();
+            (
+                File::open(&store.path).unwrap(),
+                budget.read_lease(&store.path),
+            )
+        };
+        let old_bytes = plumb_core::storage::file_bytes(&store.path).unwrap();
+        let old_text = fs::read(&store.path).unwrap();
+        assert_eq!(store.fold().unwrap(), crate::outline::Folded::Records(1));
+        assert_eq!(budget.status().reader_held_bytes, old_bytes);
+        assert_fold_ledger(&budget);
+        budget.recount(budget.root()).unwrap();
+        assert_fold_ledger(&budget);
+        let mut retained = Vec::new();
+        old_reader.read_to_end(&mut retained).unwrap();
+        assert_eq!(retained, old_text);
+        drop(old_reader);
+        drop(lease);
+        assert_eq!(budget.status().reader_held_bytes, 0);
+        assert_fold_ledger(&budget);
+    }
+
+    #[test]
+    fn cancelled_exact_fold_cleans_output_and_retries_from_unchanged_inputs() {
+        for cancel_after_writing in [false, true] {
+            let (dir, mut store, budget) = pressured_fold();
+            let raw = fs::read(&store.path).unwrap();
+            let journal = fs::read(&store.journal_path).unwrap();
+            let initial = names(dir.path());
+            let mut checks = 0;
+            let error = store
+                .fold_with_check(|| {
+                    checks += 1;
+                    let written = folded_temp(dir.path()).is_some_and(|temp| {
+                        fs::read(temp)
+                            .is_ok_and(|bytes| serde_json::from_slice::<SiteRecord>(&bytes).is_ok())
+                    });
+                    if (cancel_after_writing && written) || (!cancel_after_writing && checks == 4) {
+                        anyhow::bail!("injected stop request");
+                    }
+                    Ok(())
+                })
+                .unwrap_err();
+            assert!(format!("{error:#}").contains("injected stop request"));
+            assert_eq!(fs::read(&store.path).unwrap(), raw);
+            assert_eq!(fs::read(&store.journal_path).unwrap(), journal);
+            assert_eq!(names(dir.path()), initial);
+            assert_fold_ledger(&budget);
+            assert_eq!(store.fold().unwrap(), crate::outline::Folded::Records(1));
+            assert_fold_ledger(&budget);
+        }
+    }
+
+    #[test]
+    fn an_outside_raw_replacement_during_count_is_not_overwritten() {
+        let (dir, mut store, budget) = pressured_fold();
+        let path = store.path.clone();
+        let journal = fs::read(&store.journal_path).unwrap();
+        let mut checks = 0;
+        let error = store
+            .fold_with_check(|| {
+                checks += 1;
+                if checks == 4 {
+                    let next = dir.path().join("outside-generation");
+                    write_jsonl(&next, &[SiteRecord::new("outside.example")])?;
+                    fs::rename(next, &path)?;
+                }
+                Ok(())
+            })
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("changed during the admitted fold"));
+        assert_eq!(
+            load_records(&path).unwrap().into_sorted_vec()[0].domain,
+            "outside.example"
+        );
+        assert_eq!(fs::read(&store.journal_path).unwrap(), journal);
+        assert!(folded_temp(dir.path()).is_none());
+        assert_eq!(budget.status().reserved_bytes, 0);
+        // The external writer did not participate in this owner's accounting.
+        budget.recount(dir.path()).unwrap();
+        assert_fold_ledger(&budget);
+    }
+
+    #[test]
+    fn unexpected_stage_allocation_refuses_installation_and_keeps_the_reader_for_retry() {
+        use std::io::Read;
+        let (dir, mut store, budget) = pressured_fold();
+        let raw = fs::read(&store.path).unwrap();
+        let journal = fs::read(&store.journal_path).unwrap();
+        let (mut reader, lease) = {
+            let _mutation = budget.mutation();
+            (
+                File::open(&store.path).unwrap(),
+                budget.read_lease(&store.path),
+            )
+        };
+        let mut injected = false;
+        let error = store
+            .fold_with_check(|| {
+                if !injected {
+                    if let Some(temp) = folded_temp(dir.path()) {
+                        // An outside writer can escape the filesystem envelope.
+                        // Inject real allocated bytes, not a mocked counter result.
+                        let mut file = OpenOptions::new().append(true).open(temp)?;
+                        file.write_all(&[1; 256 * 1024])?;
+                        file.sync_all()?;
+                        injected = true;
+                    }
+                }
+                Ok(())
+            })
+            .unwrap_err();
+        assert!(injected);
+        assert!(format!("{error:#}").contains("exceeds its admitted allocation"));
+        assert_eq!(fs::read(&store.path).unwrap(), raw);
+        assert_eq!(fs::read(&store.journal_path).unwrap(), journal);
+        assert!(folded_temp(dir.path()).is_none());
+        assert_eq!(budget.status().reader_held_bytes, 0);
+        assert_fold_ledger(&budget);
+        store.fold().unwrap();
+        assert!(budget.status().reader_held_bytes > 0);
+        let mut old = Vec::new();
+        reader.read_to_end(&mut old).unwrap();
+        assert_eq!(old, raw);
+        drop(reader);
+        drop(lease);
+        assert_fold_ledger(&budget);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exact_fold_rename_failure_preserves_inputs_and_charges_leftover_output() {
+        use std::os::unix::fs::PermissionsExt;
+        let (dir, mut store, budget) = pressured_fold();
+        let raw = fs::read(&store.path).unwrap();
+        let journal = fs::read(&store.journal_path).unwrap();
+        let permissions = fs::metadata(dir.path()).unwrap().permissions();
+        let mut blocked = false;
+        let result = store.fold_with_check(|| {
+            if !blocked && folded_temp(dir.path()).is_some() {
+                // The stage already exists and its fd can finish writing, but
+                // rename and cleanup cannot mutate the read-only directory.
+                fs::set_permissions(
+                    dir.path(),
+                    fs::Permissions::from_mode(permissions.mode() & !0o222),
+                )?;
+                blocked = true;
+            }
+            Ok(())
+        });
+        fs::set_permissions(dir.path(), permissions).unwrap();
+        let error = result.unwrap_err();
+        assert!(blocked);
+        assert!(error.to_string().contains("moving"));
+        assert_eq!(fs::read(&store.path).unwrap(), raw);
+        assert_eq!(fs::read(&store.journal_path).unwrap(), journal);
+        let leftover = folded_temp(dir.path()).unwrap();
+        assert!(leftover.is_file());
+        assert_fold_ledger(&budget);
+        plumb_core::storage::remove_file(&leftover, Some(&budget)).unwrap();
+        store.fold().unwrap();
+        assert_fold_ledger(&budget);
+    }
+
+    #[test]
+    fn a_journal_delete_failure_after_install_keeps_the_old_reader_charged_and_replays_safely() {
+        let (dir, store, budget) = pressured_fold();
+        let fault_dir = dir.path().join("journal-delete-fault");
+        fs::create_dir(&fault_dir).unwrap();
+        budget.recount(dir.path()).unwrap();
+        let expected = sorted(load_records(&store.path).unwrap());
+        let saved_journal = dir.path().join("saved-journal");
+        let (old_reader, lease) = {
+            let _mutation = budget.mutation();
+            (
+                File::open(&store.path).unwrap(),
+                budget.read_lease(&store.path),
+            )
+        };
+        let old_bytes = plumb_core::storage::file_bytes(&store.path).unwrap();
+        let installed = std::cell::Cell::new(false);
+        let error = {
+            let _mutation = budget.mutation();
+            let crate::outline::FoldMeasure::Bytes(bytes) =
+                crate::outline::measure_fold_journal(&store.path, &mut || Ok(())).unwrap()
+            else {
+                panic!("expected a measurable fold")
+            };
+            let reserved = budget
+                .reserve(plumb_core::storage::allocation_for(bytes), false)
+                .unwrap();
+            store
+                .rewrite_reserved(&budget, reserved, Some(&installed), || {
+                    crate::outline::fold_journal(
+                        &store.path,
+                        bytes,
+                        || {
+                            installed.set(true);
+                            // Preserve the journal's bytes, but make its unlink fail.
+                            fs::rename(&store.journal_path, &saved_journal).unwrap();
+                            fs::rename(&fault_dir, &store.journal_path).unwrap();
+                        },
+                        &mut || Ok(()),
+                    )
+                })
+                .unwrap_err()
+        };
+        assert!(error.to_string().contains("deleting"));
+        assert!(installed.get());
+        assert_eq!(budget.status().reader_held_bytes, old_bytes);
+        assert_fold_ledger(&budget);
+        assert_eq!(read_jsonl::<SiteRecord>(&store.path).unwrap(), expected);
+        drop(old_reader);
+        drop(lease);
+        assert_fold_ledger(&budget);
+        fs::rename(&store.journal_path, &fault_dir).unwrap();
+        fs::rename(&saved_journal, &store.journal_path).unwrap();
+        let mut restarted = RecordStore::open(&store.path).with_budget(Some(budget.clone()));
+        assert_eq!(
+            restarted.fold().unwrap(),
+            crate::outline::Folded::Records(1)
+        );
+        assert_eq!(sorted(load_records(&store.path).unwrap()), expected);
+        assert!(!store.journal_path.exists());
+        assert_fold_ledger(&budget);
+    }
+
+    #[test]
+    fn exact_admission_keeps_duplicates_for_the_whole_set_without_creating_output() {
+        let (dir, mut store, budget) = pressured_fold();
+        let raw = fs::read(&store.path).unwrap();
+        let mut doubled = raw.clone();
+        doubled.extend_from_slice(&raw);
+        fs::write(&store.path, &doubled).unwrap();
+        budget.recount(dir.path()).unwrap();
+        budget.set_limit(budget.status().used_bytes + 128 * 1024);
+        let journal = fs::read(&store.journal_path).unwrap();
+        let initial = names(dir.path());
+        assert_eq!(store.fold().unwrap(), crate::outline::Folded::NeedsSet);
+        assert_eq!(fs::read(&store.path).unwrap(), doubled);
+        assert_eq!(fs::read(&store.journal_path).unwrap(), journal);
+        assert_eq!(names(dir.path()), initial);
+        assert_fold_ledger(&budget);
     }
 
     #[test]

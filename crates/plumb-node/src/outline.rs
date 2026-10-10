@@ -118,6 +118,11 @@ struct Pending {
 
 impl Pending {
     fn read(path: &Path) -> Result<Option<Pending>> {
+        Self::read_checked(path, &mut || Ok(()))
+    }
+
+    fn read_checked(path: &Path, check: &mut dyn FnMut() -> Result<()>) -> Result<Option<Pending>> {
+        check()?;
         let file = match File::open(path) {
             Ok(file) => file,
             Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -126,7 +131,7 @@ impl Pending {
         let mut pending = Pending::default();
         let mut reader = BufReader::with_capacity(1 << 20, file);
         let mut line = Vec::new();
-        let (mut damaged, mut changes) = (0usize, 0usize);
+        let (mut damaged, mut changes, mut lines) = (0usize, 0usize, 0usize);
         loop {
             line.clear();
             if reader
@@ -135,6 +140,10 @@ impl Pending {
                 == 0
             {
                 break;
+            }
+            lines += 1;
+            if lines.is_multiple_of(1_000) {
+                check()?;
             }
             if line.iter().all(u8::is_ascii_whitespace) {
                 continue;
@@ -148,6 +157,7 @@ impl Pending {
                 Err(_) => damaged += 1,
             }
         }
+        check()?;
         if damaged > 0 {
             warn!("{}: skipped {damaged} damaged lines", path.display());
         }
@@ -225,13 +235,22 @@ impl Pending {
 
     /// The ranks of each parent site an [`Op::Subsite`] takes them from,
     /// with every change of the journal made to it but the splits.
-    fn parent_ranks(&self, path: &Path) -> Result<HashMap<String, Signals>> {
+    fn parent_ranks(
+        &self,
+        path: &Path,
+        check: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<HashMap<String, Signals>> {
         let mut ranks = HashMap::new();
         if self.parents.is_empty() {
             return Ok(ranks);
         }
         let mut lines = Lines::open(path)?;
+        let mut line_no = 0usize;
         while let Some((_, line)) = lines.next()? {
+            line_no += 1;
+            if line_no.is_multiple_of(1_000) {
+                check()?;
+            }
             let Ok(head) = serde_json::from_slice::<Head>(line) else {
                 continue;
             };
@@ -244,7 +263,10 @@ impl Pending {
                 ranks.insert(head.domain, signals);
             }
         }
-        for parent in &self.parents {
+        for (i, parent) in self.parents.iter().enumerate() {
+            if i.is_multiple_of(1_000) {
+                check()?;
+            }
             if !ranks.contains_key(parent) {
                 if let Some(signals) = self.parent_signals(parent, None) {
                     ranks.insert(parent.clone(), signals);
@@ -322,7 +344,12 @@ pub(crate) fn outline(path: &Path) -> Result<Option<Vec<Outline>>> {
     let journal = journal_path(path);
     match Pending::read(&journal)? {
         None => scan(path),
-        Some(pending) => Ok(fold(path, &journal, pending, true)?.map(|(_, outlines)| outlines)),
+        Some(pending) => Ok(
+            fold(path, &journal, pending, true, u64::MAX, || {}, &mut || {
+                Ok(())
+            })?
+            .map(|(_, outlines)| outlines),
+        ),
     }
 }
 
@@ -354,16 +381,55 @@ pub(crate) enum Folded {
 }
 
 /// Folds the journal next to the records file at `path` into it, as
-/// [`outline`] does, without outlining the sites.
-pub(crate) fn fold_journal(path: &Path) -> Result<Folded> {
+/// [`outline`] does, without outlining the sites. Notify the admitted caller
+/// once the old raw generation has been replaced, including when deleting the
+/// journal afterwards fails. `check` can stop the fold before installation.
+pub(crate) fn fold_journal(
+    path: &Path,
+    limit: u64,
+    installed: impl FnOnce(),
+    check: &mut dyn FnMut() -> Result<()>,
+) -> Result<Folded> {
     let journal = journal_path(path);
-    let Some(pending) = Pending::read(&journal)? else {
+    let Some(pending) = Pending::read_checked(&journal, check)? else {
         return Ok(Folded::Nothing);
     };
-    Ok(match fold(path, &journal, pending, false)? {
-        Some((count, _)) => Folded::Records(count),
-        None => Folded::NeedsSet,
-    })
+    Ok(
+        match fold(path, &journal, pending, false, limit, installed, check)? {
+            Some((count, _)) => Folded::Records(count),
+            None => Folded::NeedsSet,
+        },
+    )
+}
+
+pub(crate) enum FoldMeasure {
+    Nothing,
+    NeedsSet,
+    Bytes(u64),
+}
+
+/// Count the identical traversal and serializer without creating an output.
+/// The caller keeps the managed raw and journal generation stable until the
+/// measured output has been admitted and written.
+pub(crate) fn measure_fold_journal(
+    path: &Path,
+    check: &mut dyn FnMut() -> Result<()>,
+) -> Result<FoldMeasure> {
+    let Some(pending) = Pending::read_checked(&journal_path(path), check)? else {
+        return Ok(FoldMeasure::Nothing);
+    };
+    let mut written = Written::new(
+        plumb_core::storage::ByteCount {
+            bytes: 0,
+            limit: u64::MAX,
+        },
+        false,
+    );
+    if !write_folded_into(path, pending, &mut written, check)? {
+        return Ok(FoldMeasure::NeedsSet);
+    }
+    let (counter, _, _) = written.finish()?;
+    Ok(FoldMeasure::Bytes(counter.bytes))
 }
 
 /// Calls `each` with every record of the records file at `path`, in file
@@ -421,9 +487,12 @@ fn fold(
     journal: &Path,
     pending: Pending,
     outlines: bool,
+    limit: u64,
+    installed: impl FnOnce(),
+    check: &mut dyn FnMut() -> Result<()>,
 ) -> Result<Option<(usize, Vec<Outline>)>> {
     let tmp = temp_path_for(path);
-    let written = write_folded(path, pending, &tmp, outlines);
+    let written = write_folded_checked(path, pending, &tmp, outlines, limit, check);
     let (count, outlines) = match written {
         Ok(Some(written)) => written,
         Ok(None) => {
@@ -435,10 +504,15 @@ fn fold(
             return Err(err.context(format!("writing {}", tmp.display())));
         }
     };
+    if let Err(err) = check() {
+        let _ = fs::remove_file(&tmp);
+        return Err(err);
+    }
     if let Err(err) = fs::rename(&tmp, path) {
         let _ = fs::remove_file(&tmp);
         return Err(err).with_context(|| format!("moving {} to {}", tmp.display(), path.display()));
     }
+    installed();
     sync_parent_dir(path);
     match fs::remove_file(journal) {
         Ok(()) => sync_parent_dir(journal),
@@ -458,24 +532,117 @@ fn fold(
 /// the changes (see the module docs).
 fn write_folded(
     path: &Path,
-    mut pending: Pending,
+    pending: Pending,
     out: &Path,
     outlines: bool,
 ) -> Result<Option<(usize, Vec<Outline>)>> {
-    let ranks = pending.parent_ranks(path)?;
-    let mut written = Written::create(out, outlines)?;
+    write_folded_checked(path, pending, out, outlines, u64::MAX, &mut || Ok(()))
+}
+
+fn write_folded_checked(
+    path: &Path,
+    pending: Pending,
+    out: &Path,
+    outlines: bool,
+    limit: u64,
+    check: &mut dyn FnMut() -> Result<()>,
+) -> Result<Option<(usize, Vec<Outline>)>> {
+    let file = File::create(out).with_context(|| format!("creating {}", out.display()))?;
+    if limit != u64::MAX {
+        // Declare the admitted EOF before writing. Sequential append into an
+        // empty file can allocate a speculative tail larger than the payload.
+        // Unwritten space remains sparse on filesystems that support holes.
+        file.set_len(limit)?;
+        check()?;
+        anyhow::ensure!(
+            plumb_core::storage::file_bytes(out)? <= plumb_core::storage::allocation_for(limit),
+            "folded output exceeds its admitted allocation"
+        );
+    }
+    #[cfg(test)]
+    let checks = std::cell::RefCell::new(check);
+    #[cfg(test)]
+    let file = ObservedFoldFile {
+        file,
+        check: &checks,
+    };
+    #[cfg(test)]
+    let mut checked = || (checks.borrow_mut())();
+    #[cfg(not(test))]
+    let mut checked = check;
+    let mut written = Written::new(file, outlines);
+    written.limit = limit;
+    if !write_folded_into(path, pending, &mut written, &mut checked)? {
+        return Ok(None);
+    }
+    let bytes = written.at;
+    let (file, count, outlines) = written.finish()?;
+    #[cfg(test)]
+    let file = file.file;
+    if limit != u64::MAX {
+        // A conservative admission can exceed the actual serialized length.
+        // Publish only the completed records, never the sparse trailing range.
+        file.set_len(bytes)?;
+    }
+    checked()?;
+    file.sync_all()?;
+    checked()?;
+    if limit != u64::MAX {
+        anyhow::ensure!(
+            plumb_core::storage::file_bytes(out)? <= plumb_core::storage::allocation_for(limit),
+            "folded output exceeds its admitted allocation"
+        );
+    }
+    drop(file);
+    checked()?;
+    Ok(Some((count, outlines)))
+}
+
+/// Resource regressions observe every underlying write/buffer flush, as well
+/// as pre-sizing, truncation, sync and closure. Production retains its bounded
+/// traversal checks without adding a filesystem census to each write.
+#[cfg(test)]
+struct ObservedFoldFile<'a, 'b> {
+    file: File,
+    check: &'a std::cell::RefCell<&'b mut dyn FnMut() -> Result<()>>,
+}
+
+#[cfg(test)]
+impl Write for ObservedFoldFile<'_, '_> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let n = self.file.write(bytes)?;
+        (self.check.borrow_mut())().map_err(io::Error::other)?;
+        Ok(n)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        self.file.flush()?;
+        (self.check.borrow_mut())().map_err(io::Error::other)
+    }
+}
+
+fn write_folded_into<W: Write>(
+    path: &Path,
+    mut pending: Pending,
+    written: &mut Written<W>,
+    check: &mut dyn FnMut() -> Result<()>,
+) -> Result<bool> {
+    check()?;
+    let ranks = pending.parent_ranks(path, check)?;
     let mut lines = Lines::open(path)?;
     let mut seen = HashSet::new();
     let mut line_no = 0usize;
     while let Some((_, line)) = lines.next()? {
         line_no += 1;
+        if line_no.is_multiple_of(1_000) {
+            check()?;
+        }
         let record: SiteRecord = serde_json::from_slice(line)
             .with_context(|| format!("{}:{line_no}: invalid JSON line", path.display()))?;
         let Some(domain) = canonical_domain(&record.domain) else {
             continue;
         };
         if domain != record.domain || !seen.insert(domain.clone()) {
-            return Ok(None);
+            return Ok(false);
         }
         if let Some(record) = pending.apply(&domain, Some(record), &ranks) {
             written.write(&record)?;
@@ -484,7 +651,10 @@ fn write_folded(
     // Sites the file does not hold yet, in a fixed order.
     let mut rest: Vec<String> = pending.ops.keys().cloned().collect();
     rest.sort_unstable();
-    for site in rest {
+    for (i, site) in rest.into_iter().enumerate() {
+        if i.is_multiple_of(1_000) {
+            check()?;
+        }
         if let Some(record) = pending.apply(&site, None, &ranks) {
             // A change may name a site the file holds under its canonical
             // domain only through another change.
@@ -493,7 +663,8 @@ fn write_folded(
             }
         }
     }
-    written.finish().map(Some)
+    check()?;
+    Ok(true)
 }
 
 /// [`outline`] for a reader that must not change the records file at
@@ -651,32 +822,37 @@ pub(crate) fn feed_of(record: &SiteRecord) -> (String, String) {
 
 /// A records file being written, with an outline of each record when
 /// asked for.
-struct Written {
-    out: BufWriter<File>,
+struct Written<W: Write> {
+    out: BufWriter<W>,
     at: u64,
     line: Vec<u8>,
     outlines: Vec<Outline>,
     outline: bool,
     count: usize,
+    limit: u64,
 }
 
-impl Written {
-    fn create(path: &Path, outline: bool) -> Result<Written> {
-        let file = File::create(path).with_context(|| format!("creating {}", path.display()))?;
-        Ok(Written {
-            out: BufWriter::with_capacity(1 << 20, file),
+impl<W: Write> Written<W> {
+    fn new(out: W, outline: bool) -> Self {
+        Self {
+            out: BufWriter::with_capacity(1 << 20, out),
             at: 0,
             line: Vec::new(),
             outlines: Vec::new(),
             outline,
             count: 0,
-        })
+            limit: u64::MAX,
+        }
     }
 
     fn write(&mut self, record: &SiteRecord) -> Result<()> {
         self.line.clear();
         serde_json::to_writer(&mut self.line, record)?;
         let len = u32::try_from(self.line.len()).context("a record line is too long")?;
+        anyhow::ensure!(
+            (self.line.len() as u64) < self.limit.saturating_sub(self.at),
+            "folded records exceed their admitted output bound"
+        );
         self.count += 1;
         if self.outline {
             self.outlines.push(Outline::of(record, self.at, len));
@@ -687,10 +863,9 @@ impl Written {
         Ok(())
     }
 
-    fn finish(self) -> Result<(usize, Vec<Outline>)> {
-        let file = self.out.into_inner().map_err(|err| err.into_error())?;
-        file.sync_all()?;
-        Ok((self.count, self.outlines))
+    fn finish(self) -> Result<(W, usize, Vec<Outline>)> {
+        let out = self.out.into_inner().map_err(|err| err.into_error())?;
+        Ok((out, self.count, self.outlines))
     }
 }
 
@@ -867,6 +1042,63 @@ mod tests {
         // Read again with no journal: the same outlines, from the file.
         assert_eq!(outline(&path).unwrap().unwrap(), outlines);
         assert_eq!(load_records(&path).unwrap().into_sorted_vec(), loaded);
+    }
+
+    #[test]
+    fn exact_admission_preserves_every_merge_kind_and_outline_offsets() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("records.jsonl");
+        let changes = file_and_journal(&path);
+        let mut held = SiteRecord::new("held.example");
+        held.description = Some("x".repeat(96 * 1024));
+        let mut raw = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        serde_json::to_writer(&mut raw, &held).unwrap();
+        raw.write_all(b"\n").unwrap();
+        drop(raw);
+        RecordStore::open(&path).save(&changes).unwrap();
+        let loaded = load_records(&path).unwrap().into_sorted_vec();
+        let FoldMeasure::Bytes(bytes) = measure_fold_journal(&path, &mut || Ok(())).unwrap() else {
+            panic!("expected a measurable fold")
+        };
+        let conservative =
+            fs::metadata(&path).unwrap().len() + fs::metadata(journal_path(&path)).unwrap().len();
+        let room = plumb_core::storage::allocation_for(bytes);
+        assert!(room < plumb_core::storage::allocation_for(conservative * 2));
+        let used = plumb_core::storage::directory_bytes(dir.path()).unwrap();
+        let budget = plumb_core::storage::StorageBudget::open(dir.path(), used + room).unwrap();
+        let outlines = outline_with_budget(&path, Some(budget.clone()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(fs::metadata(&path).unwrap().len(), bytes);
+        assert_eq!(read_all(&path, &outlines), loaded);
+        assert!(!journal_path(&path).exists());
+        assert_eq!(budget.status().reserved_bytes, 0);
+        assert_eq!(
+            budget.status().used_bytes,
+            plumb_core::storage::directory_bytes(dir.path()).unwrap()
+        );
+    }
+
+    #[test]
+    fn a_fold_write_failure_leaves_the_input_and_journal_for_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("records.jsonl");
+        let changes = file_and_journal(&path);
+        RecordStore::open(&path).save(&changes).unwrap();
+        let raw = fs::read(&path).unwrap();
+        let journal = fs::read(journal_path(&path)).unwrap();
+        let pending = Pending::read(&journal_path(&path)).unwrap().unwrap();
+        // File::create cannot create an output over an existing directory.
+        assert!(write_folded(&path, pending, dir.path(), false).is_err());
+        assert!(fold_journal(&path, 1, || panic!("must not install"), &mut || Ok(())).is_err());
+        assert_eq!(fs::read(&path).unwrap(), raw);
+        assert_eq!(fs::read(journal_path(&path)).unwrap(), journal);
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 2);
+        fold_journal(&path, u64::MAX, || {}, &mut || Ok(())).unwrap();
+        assert!(!journal_path(&path).exists());
     }
 
     #[test]
