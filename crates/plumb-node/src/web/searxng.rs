@@ -173,12 +173,25 @@ impl Wanted {
     }
 }
 
+fn time_since(range: Option<&str>, now: u64) -> Option<u64> {
+    let days = match range? {
+        "day" => 1,
+        "week" => 7,
+        "month" => 31,
+        "year" => 366,
+        _ => return None,
+    };
+    Some(now.saturating_sub(days * 24 * 60 * 60))
+}
+
 /// Everything a search shows, in order.
 struct Collected {
     entries: Vec<Entry>,
     answer: Option<Answer>,
     info: Option<InfoBox>,
     spelling: Option<plumb_index::Spelling>,
+    recent: Option<crate::news::Recent>,
+    places: Option<crate::assembly::Places>,
 }
 
 async fn collect(
@@ -187,9 +200,44 @@ async fn collect(
     limit: usize,
     options: &plumb_index::SearchOptions,
     wanted: Wanted,
+    since: Option<u64>,
 ) -> anyhow::Result<Collected> {
-    let results = run_search(state, query, limit, options).await?;
+    let mut results = run_search(state, query, limit, options).await?;
+    let places = crate::assembly::places(
+        query,
+        super::run_places(state, query, None, options.country.as_deref()).await,
+        &results.hits,
+        options,
+        |domain| {
+            state
+                .node
+                .as_ref()
+                .is_some_and(|node| node.blocks_adult(domain))
+        },
+    );
+    if let Some(places) = &places {
+        let local = super::place_sites(state, &places.found)
+            .await
+            .into_iter()
+            .filter(|hit| {
+                options.safe == SafeSearch::Off
+                    || !state
+                        .node
+                        .as_ref()
+                        .is_some_and(|node| node.blocks_adult(&hit.domain))
+            })
+            .collect();
+        crate::assembly::local_first(&places.found, &mut results.hits, local, limit);
+    }
     let extras = extras(state, query, &results, options, None).await;
+    super::route_sources(
+        state,
+        query,
+        extras.answer.as_ref().map(|a| a.kind),
+        options.country.as_deref(),
+        &mut results,
+        limit,
+    );
     let about = super::search_about(query, &results, &extras);
     let plugins = state
         .plugin_results(query, options, about.as_ref(), None)
@@ -206,8 +254,25 @@ async fn collect(
         None if operators.any() => None,
         None => answers::info_box(&results.hits, &placed),
     };
-    let recent = state.recent(query, &results);
+    let mut recent = crate::assembly::recent(
+        query,
+        state.recent(query, &results),
+        options,
+        limit,
+        |domain| {
+            state
+                .node
+                .as_ref()
+                .is_some_and(|node| node.blocks_adult(domain))
+        },
+    );
 
+    if let (Some(since), Some(recent)) = (since, &mut recent) {
+        recent.headlines.retain(|h| h.at >= since);
+        if recent.headlines.is_empty() && recent.status == "available" {
+            recent.status = "filtered".into();
+        }
+    }
     let mut entries = Vec::new();
     if let Some(profile) = &extras.profile {
         entries.push(Entry {
@@ -219,24 +284,21 @@ async fn collect(
             engine: "plumb".into(),
         });
     }
-    let hits = &results.hits;
-    for (i, hit) in hits.iter().enumerate() {
-        for page in placed.iter().filter(|p| p.under.is_none() && p.at == i) {
-            entries.push(Entry::page(page));
+    let assembled = crate::assembly::Assembled {
+        rows: crate::assembly::ordered_rows(&results.hits, &placed, limit),
+        places,
+        recent: recent.clone(),
+        answer: extras.answer.as_ref(),
+        profile: extras.profile.as_ref(),
+    };
+    for row in &assembled.rows {
+        match row {
+            crate::assembly::Row::Page { page } => entries.push(Entry::page(page)),
+            crate::assembly::Row::Site { site, pages } => {
+                entries.push(Entry::site(site));
+                entries.extend(pages.iter().map(|page| Entry::page(page)));
+            }
         }
-        entries.push(Entry::site(hit));
-        for page in placed
-            .iter()
-            .filter(|p| p.under.as_deref() == Some(hit.domain.as_str()))
-        {
-            entries.push(Entry::page(page));
-        }
-    }
-    for page in placed
-        .iter()
-        .filter(|p| p.under.is_none() && p.at >= hits.len())
-    {
-        entries.push(Entry::page(page));
     }
     let now = plumb_core::now_unix();
     let headlines: Vec<Entry> = recent
@@ -286,7 +348,11 @@ async fn collect(
             format!("Answer: {line}. {}", first.content)
         };
     }
+    let places = assembled.places.clone();
+    drop(assembled);
     Ok(Collected {
+        recent,
+        places,
         entries,
         answer: extras.answer,
         info,
@@ -349,6 +415,7 @@ pub(super) async fn search(state: AppState, headers: HeaderMap, params: SearchPa
         per_page * pageno,
         &options,
         Wanted::of(&params),
+        time_since(params.time_range.as_deref(), plumb_core::now_unix()),
     )
     .await
     {
@@ -371,6 +438,12 @@ pub(super) async fn search(state: AppState, headers: HeaderMap, params: SearchPa
         .map(|(i, entry)| entry.to_json(i + 1))
         .collect();
     let fields = body.as_object_mut().expect("an object");
+    if let Some(recent) = &collected.recent {
+        fields.insert("recent".into(), json!(recent));
+    }
+    if let Some(places) = &collected.places {
+        fields.insert("places".into(), json!(places));
+    }
     fields.insert("number_of_results".into(), json!(total));
     fields.insert("results".into(), json!(shown));
     if let Some(answer) = &collected.answer {
@@ -451,7 +524,7 @@ pub(super) async fn external(
         .clamp(1, MAX_LIMIT);
     let params = SearchParams::default();
     let options = params.options(&state.settings, &headers);
-    match collect(&state, &query, count, &options, Wanted::Everything).await {
+    match collect(&state, &query, count, &options, Wanted::Everything, None).await {
         Ok(collected) => {
             let results: Vec<Value> = collected
                 .entries

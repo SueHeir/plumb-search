@@ -2106,3 +2106,45 @@ fn check_lookalike_preserves_impersonation_and_unverified_tenant_controls() {
     assert_eq!(answer["lookalike"], false);
     assert_eq!(answer["suspected"], true);
 }
+
+#[test]
+fn troubleshooting_keeps_related_package_cards_after_main_results() {
+    let mcp = scripted(|query| {
+        if query == "kubernetes package" {
+            results(
+                Vec::new(),
+                vec![package_page(
+                    "go",
+                    "k8s.io/kubernetes",
+                    Some("https://kubernetes.io/"),
+                    None,
+                )],
+            )
+        } else {
+            results(vec![hit("kubernetes.io", 1.0, 0.8, false)], Vec::new())
+        }
+    });
+    let reply = call(
+        &mcp,
+        "search",
+        json!({ "query": "kubernetes CrashLoopBackOff", "limit": 3 }),
+    );
+    let answer = &reply["result"]["structuredContent"];
+    assert_eq!(answer["results"][0]["domain"], "kubernetes.io");
+    assert_eq!(answer["pages"][0]["package"]["name"], "k8s.io/kubernetes");
+    assert!(answer["pages"][0]["position"].as_u64().unwrap() > 1);
+    let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.starts_with("1. kubernetes.io"), "{text}");
+    assert!(!crate::assembly::promote_package(
+        "kubernetes CrashLoopBackOff"
+    ));
+    assert!(!crate::assembly::promote_package("serde derive"));
+    for query in [
+        "cargo add serde",
+        "serde package",
+        "serde latest version",
+        "@types/node npm",
+    ] {
+        assert!(crate::assembly::promote_package(query), "{query}");
+    }
+}

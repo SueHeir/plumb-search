@@ -15,7 +15,7 @@
 //!
 //! A search shows them in one of two ways ([`NewsStore::recent`]): the
 //! latest posts of the site a query names, or the newest headlines that
-//! have every word of the query in their title.
+//! match the substantive topic terms in their title.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -23,7 +23,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{PoisonError, RwLock};
 
-use plumb_core::news::{merge_headlines, NEWS_WINDOW_SECS};
+use plumb_core::news::{merge_headlines, NEWS_PUBLISHERS as PUBLISHERS, NEWS_WINDOW_SECS};
 use plumb_core::Headline;
 use plumb_crawl::{CrawlOutcome, CrawlResult, CrawlTarget, FeedCheck, FeedOutcome, FeedTarget};
 use serde::{Deserialize, Serialize};
@@ -67,8 +67,8 @@ const NEWS_WORDS: &[&str] = &[
 ];
 /// Words too common to match a headline by.
 const STOP_WORDS: &[&str] = &[
-    "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "how", "in", "is", "it", "of",
-    "on", "or", "the", "to", "was", "what", "when", "who", "why", "with",
+    "a", "an", "and", "about", "are", "as", "at", "be", "by", "for", "from", "how", "in", "is",
+    "it", "of", "on", "or", "the", "to", "was", "what", "when", "who", "why", "with",
 ];
 
 /// One site whose feed is watched.
@@ -89,6 +89,11 @@ pub struct Watched {
     /// The wait after the last check, which grows while the feed is quiet.
     #[serde(default)]
     pub gap: u64,
+    /// Last local feed check, not the publication date of its articles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checked_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check_status: Option<String>,
 }
 
 /// What a "Recent" block shows.
@@ -99,6 +104,21 @@ pub struct Recent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub site: Option<String>,
     pub headlines: Vec<RecentHeadline>,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sources: Vec<NewsSource>,
+}
+
+/// Feed provenance is local observation metadata; peer headlines have no invented fetch date.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NewsSource {
+    pub domain: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub feed: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checked_at: Option<u64>,
+    pub status: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -193,7 +213,9 @@ impl NewsStore {
             .iter()
             .filter_map(|r| match &r.outcome {
                 CrawlOutcome::Fetched(page) => {
-                    Some((r.domain.as_str(), page.meta.feed.as_deref()?))
+                    let feed = page.meta.feed.as_deref()?;
+                    plumb_core::news::publisher_feed_allows(&r.domain, feed)
+                        .then_some((r.domain.as_str(), feed))
                 }
                 _ => None,
             })
@@ -254,6 +276,16 @@ impl NewsStore {
             let Some(watched) = state.watched.iter_mut().find(|w| w.domain == check.domain) else {
                 continue;
             };
+            watched.checked_at = Some(now);
+            watched.check_status = Some(
+                match &check.outcome {
+                    FeedOutcome::Read { .. } => "read",
+                    FeedOutcome::NotModified => "not_modified",
+                    FeedOutcome::NoFeed => "no_feed",
+                    FeedOutcome::Failed(_) => "failed",
+                }
+                .into(),
+            );
             let quieter = (watched.gap * 2).clamp(MIN_CHECK_GAP_SECS, MAX_CHECK_GAP_SECS);
             match check.outcome {
                 FeedOutcome::Read {
@@ -262,6 +294,12 @@ impl NewsStore {
                     etag,
                     last_modified,
                 } => {
+                    if !plumb_core::news::publisher_feed_allows(&watched.domain, &feed) {
+                        watched.check_status = Some("unpermitted_feed".into());
+                        watched.gap = quieter;
+                        watched.next_at = now + watched.gap;
+                        continue;
+                    }
                     watched.feed = Some(feed);
                     watched.etag = etag;
                     watched.last_modified = last_modified;
@@ -353,39 +391,103 @@ impl NewsStore {
         Ok(())
     }
 
-    /// The "Recent" block for `query` at `now`, whose best result is
-    /// `top` (its domain, and whether the query names it): the latest
-    /// posts of that site when the query names it (or asks for news and
-    /// no headline is about its words), else the newest headlines with
-    /// every word of the query in their title, when they come from at
-    /// least two sites in the last three days or the query asks for news.
+    /// Source requests stay publisher-bound even when its feeds are unavailable.
+    /// Other queries match substantive topic terms within the existing time windows.
     pub fn recent(&self, query: &str, top: Option<(&str, bool)>, now: u64) -> Option<Recent> {
-        let words = fold_words(query);
+        let operators = plumb_core::Operators::parse(query);
+        let words = fold_words(&operators.words);
         let wants_news = words.iter().any(|w| is_one_of(w, NEWS_WORDS));
         let topic: Vec<String> = words
             .into_iter()
             .filter(|w| !is_one_of(w, NEWS_WORDS) && !is_one_of(w, STOP_WORDS))
             .collect();
-        let site_block = |state: &State, domain: &str| {
-            let kept = state.headlines.get(domain)?;
-            let headlines: Vec<RecentHeadline> = kept
+        let state = self.read();
+        if let Some((publisher, domains, source_topic)) =
+            requested_source(&operators.words, &topic, wants_news, &state)
+        {
+            let had_current_source = domains.iter().any(|domain| {
+                state.headlines.get(domain).is_some_and(|headlines| {
+                    headlines.iter().any(|h| {
+                        fresh(h.at, NEWS_WINDOW_SECS, now)
+                            && plumb_core::host_of(&h.url).is_some_and(|host| {
+                                domains
+                                    .iter()
+                                    .any(|d| host == *d || host.ends_with(&format!(".{d}")))
+                            })
+                    })
+                })
+            });
+            let mut headlines: Vec<RecentHeadline> = domains
                 .iter()
-                .filter(|h| h.at + NEWS_WINDOW_SECS >= now)
+                .flat_map(|domain| {
+                    state
+                        .headlines
+                        .get(domain)
+                        .into_iter()
+                        .flatten()
+                        .filter(|h| {
+                            fresh(h.at, NEWS_WINDOW_SECS, now) && allows_headline(&operators, h)
+                        })
+                        .filter(|h| {
+                            source_topic.is_empty() || topic_matches(&source_topic, &h.title, query)
+                        })
+                        // Feed discovery permits alternate feed hosts; article URLs must still belong to the publisher.
+                        .filter(|h| {
+                            plumb_core::host_of(&h.url).is_some_and(|host| {
+                                domains
+                                    .iter()
+                                    .any(|d| host == *d || host.ends_with(&format!(".{d}")))
+                            })
+                        })
+                        .map(|h| shown(domain, h))
+                })
+                .collect();
+            headlines.sort_by(|a, b| b.at.cmp(&a.at).then_with(|| a.url.cmp(&b.url)));
+            drop_copies(&mut headlines);
+            headlines.truncate(MAX_SHOWN - 1);
+            let sources = domains
+                .iter()
+                .map(|domain| source_status(&state, domain))
+                .collect();
+            return Some(Recent {
+                site: Some(publisher),
+                status: if headlines.is_empty() {
+                    if had_current_source {
+                        "no_matching_headlines"
+                    } else {
+                        "source_unavailable"
+                    }
+                } else {
+                    "available"
+                }
+                .into(),
+                headlines,
+                sources,
+            });
+        }
+        // Ordinary named navigation may show that site's posts, but never invent a source request.
+        if let Some((domain, true)) = top.filter(|_| !wants_news || topic.is_empty()) {
+            let headlines: Vec<_> = state
+                .headlines
+                .get(domain)
+                .into_iter()
+                .flatten()
+                .filter(|h| fresh(h.at, NEWS_WINDOW_SECS, now) && allows_headline(&operators, h))
                 .take(MAX_SHOWN - 1)
                 .map(|h| shown(domain, h))
                 .collect();
-            (!headlines.is_empty()).then(|| Recent {
-                site: Some(domain.to_string()),
-                headlines,
-            })
-        };
-        if let Some((domain, true)) = top {
-            if let Some(block) = site_block(&self.read(), domain) {
-                return Some(block);
+            if !headlines.is_empty() {
+                return Some(Recent {
+                    site: Some(domain.into()),
+                    headlines,
+                    status: "available".into(),
+                    sources: vec![source_status(&state, domain)],
+                });
             }
         }
+        drop(state);
         let mut topical = (!topic.is_empty() && topic.len() <= MAX_TOPIC_WORDS)
-            .then(|| self.topic_block(&topic, wants_news, now))
+            .then(|| self.topic_block(&topic, query, wants_news, now))
             .flatten();
         if !wants_news && top.is_some_and(|(_, named)| named) {
             if let Some(block) = &mut topical {
@@ -395,22 +497,26 @@ impl NewsStore {
         if topical.is_some() || !wants_news {
             return topical;
         }
-        if let Some(block) = top.and_then(|(domain, _)| site_block(&self.read(), domain)) {
-            return Some(block);
-        }
-        // Only news words ("news", "latest news"): the newest headlines,
-        // one per site.
-        topic.is_empty().then(|| self.latest_block(now)).flatten()
+        topic
+            .is_empty()
+            .then(|| self.latest_block(query, now))
+            .flatten()
     }
 
-    fn latest_block(&self, now: u64) -> Option<Recent> {
+    fn latest_block(&self, query: &str, now: u64) -> Option<Recent> {
+        let operators = plumb_core::Operators::parse(query);
         let state = self.read();
         let mut found: Vec<RecentHeadline> = state
             .headlines
             .iter()
             .filter_map(|(domain, kept)| {
-                let newest = kept.iter().max_by_key(|h| h.at)?;
-                (newest.at + TOPIC_WINDOW_SECS >= now).then(|| shown(domain, newest))
+                let newest = kept
+                    .iter()
+                    .filter(|h| {
+                        fresh(h.at, TOPIC_WINDOW_SECS, now) && allows_headline(&operators, h)
+                    })
+                    .max_by_key(|h| h.at)?;
+                fresh(newest.at, TOPIC_WINDOW_SECS, now).then(|| shown(domain, newest))
             })
             .collect();
         if found.is_empty() {
@@ -421,11 +527,23 @@ impl NewsStore {
         found.truncate(MAX_SHOWN);
         Some(Recent {
             site: None,
+            sources: found
+                .iter()
+                .map(|h| source_status(&state, &h.domain))
+                .collect(),
             headlines: found,
+            status: "available".into(),
         })
     }
 
-    fn topic_block(&self, topic: &[String], wants_news: bool, now: u64) -> Option<Recent> {
+    fn topic_block(
+        &self,
+        topic: &[String],
+        query: &str,
+        wants_news: bool,
+        now: u64,
+    ) -> Option<Recent> {
+        let operators = plumb_core::Operators::parse(query);
         if self.read().words.is_none() {
             let mut state = self.write();
             if state.words.is_none() {
@@ -434,21 +552,16 @@ impl NewsStore {
         }
         let state = self.read();
         let words = state.words.as_ref()?;
-        // Sites with every word in some headline, then their headlines
-        // that hold every word.
-        let mut sites: Option<HashSet<&str>> = None;
-        for word in topic {
-            let with: HashSet<&str> = words
-                .get(word)
-                .map(|sites| sites.iter().map(String::as_str).collect())
-                .unwrap_or_default();
-            sites = Some(match sites {
-                None => with,
-                Some(had) => had.intersection(&with).copied().collect(),
-            });
-        }
+        // Union retrieval preserves candidates with optional task modifiers; subject/event constraints
+        // are checked together on each title below, before diversity and output caps.
+        let sites: HashSet<&str> = topic
+            .iter()
+            .filter_map(|word| words.get(word))
+            .flatten()
+            .map(String::as_str)
+            .collect();
         let mut found: Vec<RecentHeadline> = Vec::new();
-        for domain in sites.unwrap_or_default() {
+        for domain in sites {
             let Some(kept) = state.headlines.get(domain) else {
                 continue;
             };
@@ -459,11 +572,8 @@ impl NewsStore {
             };
             found.extend(
                 kept.iter()
-                    .filter(|h| h.at + window >= now)
-                    .filter(|h| {
-                        let title = fold_words(&h.title);
-                        topic.iter().all(|w| title.contains(w))
-                    })
+                    .filter(|h| fresh(h.at, window, now) && allows_headline(&operators, h))
+                    .filter(|h| topic_matches(topic, &h.title, query))
                     .take(MAX_SHOWN_PER_SITE)
                     .map(|h| shown(domain, h)),
             );
@@ -482,16 +592,136 @@ impl NewsStore {
         found.truncate(MAX_SHOWN);
         Some(Recent {
             site: None,
+            sources: found
+                .iter()
+                .map(|h| source_status(&state, &h.domain))
+                .collect(),
             headlines: found,
+            status: "available".into(),
         })
     }
+}
+
+fn requested_source(
+    query: &str,
+    topic: &[String],
+    wants_news: bool,
+    state: &State,
+) -> Option<(String, Vec<String>, Vec<String>)> {
+    if !wants_news {
+        return None;
+    }
+    let normalized = plumb_core::normalize_text(query);
+    let about = normalized.contains("about ");
+    let mut candidates: Vec<(String, Vec<String>, Vec<String>)> = PUBLISHERS
+        .iter()
+        .map(|(domain, domains, aliases)| {
+            (
+                domain.to_string(),
+                domains.iter().map(|d| d.to_string()).collect(),
+                aliases.iter().map(|a| a.to_string()).collect(),
+            )
+        })
+        .collect();
+    let domains: Vec<&str> = state
+        .watched
+        .iter()
+        .map(|w| w.domain.as_str())
+        .chain(state.headlines.keys().map(String::as_str))
+        .collect();
+    let mut known: HashSet<String> = candidates
+        .iter()
+        .flat_map(|(_, domains, _)| domains.iter().cloned())
+        .collect();
+    for domain in domains {
+        if !known.insert(domain.to_string()) {
+            continue;
+        }
+        let label = domain.split('.').next().unwrap_or("");
+        candidates.push((
+            domain.into(),
+            vec![domain.into()],
+            vec![label.into(), domain.into()],
+        ));
+    }
+    candidates
+        .into_iter()
+        .find_map(|(publisher, domains, aliases)| {
+            for alias in aliases {
+                let folded = fold_words(&alias);
+                if !about && topic == folded {
+                    return Some((publisher, domains, Vec::new()));
+                }
+                for marker in [" from ", " by "] {
+                    let suffix = format!("{marker}{alias}");
+                    if let Some(before) = normalized.strip_suffix(&suffix) {
+                        let source_topic = fold_words(before)
+                            .into_iter()
+                            .filter(|w| !is_one_of(w, NEWS_WORDS) && !is_one_of(w, STOP_WORDS))
+                            .collect();
+                        return Some((publisher, domains, source_topic));
+                    }
+                }
+            }
+            None
+        })
+}
+
+fn source_status(state: &State, domain: &str) -> NewsSource {
+    let watched = state.watched.iter().find(|w| w.domain == domain);
+    NewsSource {
+        domain: domain.into(),
+        feed: watched.and_then(|w| w.feed.clone()),
+        checked_at: watched.and_then(|w| w.checked_at),
+        status: watched
+            .and_then(|w| w.check_status.clone())
+            .unwrap_or_else(|| {
+                if state.headlines.contains_key(domain) {
+                    "shared_or_saved"
+                } else {
+                    "not_watched"
+                }
+                .into()
+            }),
+    }
+}
+
+fn allows_headline(operators: &plumb_core::Operators, h: &Headline) -> bool {
+    plumb_core::host_of(&h.url).is_some_and(|host| operators.allows(&host, [h.title.as_str()]))
+}
+
+fn fresh(at: u64, window: u64, now: u64) -> bool {
+    at <= now && at.saturating_add(window) >= now
+}
+
+fn topic_matches(topic: &[String], title: &str, query: &str) -> bool {
+    let title_words = fold_words(title);
+    // Remove only bounded presentation modifiers; the subject and event remain required.
+    let substantive: Vec<_> = topic
+        .iter()
+        .filter(|word| {
+            !["coverage", "report", "reports", "story", "stories"]
+                .iter()
+                .any(|modifier| is_one_of(word, std::slice::from_ref(modifier)))
+        })
+        .collect();
+    if substantive.is_empty() || !substantive.iter().all(|w| title_words.contains(w)) {
+        return false;
+    }
+    let title = plumb_core::normalize_text(title);
+    query
+        .split('"')
+        .enumerate()
+        .filter(|(i, _)| i % 2 == 1)
+        .all(|(_, phrase)| title.contains(&plumb_core::normalize_text(phrase)))
 }
 
 /// Keeps the first of headlines with the same words: one story that
 /// papers of a group (smh.com.au, theage.com.au) all run.
 fn drop_copies(found: &mut Vec<RecentHeadline>) {
     let mut seen = HashSet::new();
-    found.retain(|h| seen.insert(fold_words(&h.title)));
+    let mut urls = HashSet::new();
+    found.retain(|h| urls.insert(h.url.clone()) && seen.insert(fold_words(&h.title)));
 }
 
 fn shown(domain: &str, h: &Headline) -> RecentHeadline {
@@ -731,6 +961,86 @@ mod tests {
     }
 
     #[test]
+    fn publisher_requests_do_not_fall_back_to_mentions_and_accept_bbc_article_hosts() {
+        let (_dir, store) = store();
+        store.put_shared(
+            vec![shared(
+                "other.com",
+                vec![headline(
+                    "other.com",
+                    "BBC latest headlines controversy",
+                    HOUR,
+                )],
+            )],
+            NOW,
+        );
+        let unavailable = store
+            .recent("BBC latest news", Some(("other.com", false)), NOW)
+            .unwrap();
+        assert_eq!(unavailable.site.as_deref(), Some("bbc.com"));
+        assert_eq!(unavailable.status, "source_unavailable");
+        assert!(unavailable.headlines.is_empty());
+        store.put_shared(
+            vec![shared(
+                "bbc.co.uk",
+                vec![
+                    Headline {
+                        title: "NVIDIA earnings beat forecasts".into(),
+                        url: "https://www.bbc.com/news/business/1".into(),
+                        at: NOW - HOUR,
+                    },
+                    Headline {
+                        title: "Spoofed publisher article".into(),
+                        url: "https://bbc.com.attacker.test/news/2".into(),
+                        at: NOW - HOUR,
+                    },
+                ],
+            )],
+            NOW,
+        );
+        let bbc = store.recent("latest news from BBC", None, NOW).unwrap();
+        assert_eq!(bbc.status, "available");
+        assert_eq!(titles(&bbc), ["NVIDIA earnings beat forecasts"]);
+        assert_eq!(bbc.headlines[0].domain, "bbc.co.uk");
+        assert_eq!(bbc.sources[1].checked_at, None);
+        let subject = store.recent("news about BBC", None, NOW).unwrap();
+        assert_eq!(subject.site, None);
+        assert_eq!(subject.headlines[0].domain, "other.com");
+    }
+
+    #[test]
+    fn topics_keep_subject_event_phrases_dates_and_diversity() {
+        let (_dir, store) = store();
+        store.put_shared(
+            vec![shared(
+                "events.com",
+                vec![
+                    headline("events.com", "NVIDIA earnings beat forecasts", HOUR),
+                    headline("events.com", "NVIDIA unveils new GPU", HOUR),
+                    headline("events.com", "AMD earnings beat forecasts", HOUR),
+                    headline("events.com", "Earnings predictions for NVIDIA", HOUR),
+                ],
+            )],
+            NOW,
+        );
+        let report = store
+            .recent("NVIDIA earnings news coverage", None, NOW)
+            .unwrap();
+        assert_eq!(report.headlines.len(), 2);
+        assert!(report
+            .headlines
+            .iter()
+            .all(|h| h.title.contains("NVIDIA") && h.title.to_lowercase().contains("earnings")));
+        let phrase = store.recent("\"NVIDIA earnings\" news", None, NOW).unwrap();
+        assert_eq!(titles(&phrase), ["NVIDIA earnings beat forecasts"]);
+        assert_eq!(
+            store.recent("NVIDIA earnings news", None, NOW + NEWS_WINDOW_SECS + HOUR),
+            None
+        );
+        assert!(!fresh(NOW + 1, NEWS_WINDOW_SECS, NOW));
+    }
+
+    #[test]
     fn feed_checks_set_when_each_feed_is_due() {
         let dir = tempfile::tempdir().unwrap();
         let store = NewsStore::open(dir.path());
@@ -765,6 +1075,13 @@ mod tests {
         assert_eq!(shared.len(), 1);
         assert_eq!(shared[0].domain, "a.com");
         assert_eq!(shared[0].news.len(), 1);
+        let checked = store.recent("news from a", None, NOW).unwrap();
+        assert_eq!(checked.sources[0].checked_at, Some(NOW));
+        assert_eq!(checked.sources[0].status, "read");
+        assert_eq!(
+            checked.sources[0].feed.as_deref(),
+            Some("https://a.com/rss")
+        );
         assert!(store.due(NOW + HOUR - 1, 10).is_empty());
         let due: Vec<String> = store
             .due(NOW + HOUR, 10)
@@ -793,4 +1110,10 @@ mod tests {
         again.prune(NOW + 8 * 24 * HOUR);
         assert_eq!(again.headline_count(), 0);
     }
+}
+
+/// Absolute UTC publication time alongside Unix seconds and relative display age.
+pub(crate) fn published_date(at: u64) -> Option<String> {
+    chrono::DateTime::from_timestamp(i64::try_from(at).ok()?, 0)
+        .map(|date| date.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
 }

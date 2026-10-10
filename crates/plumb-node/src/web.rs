@@ -154,6 +154,10 @@ async fn run_places(
     home: Option<&str>,
     country: Option<&str>,
 ) -> Option<plumb_index::places::PlaceResults> {
+    if plumb_core::Operators::parse(query).any() {
+        return None;
+    }
+    plumb_index::places::parse_place_query(query)?;
     let backend = Arc::clone(&state.backend);
     let (query, home, country) = (
         query.to_string(),
@@ -176,32 +180,14 @@ async fn run_places(
 /// ([`places::site_named_for`]). They come after the places that give
 /// one.
 async fn place_sites(state: &AppState, found: &plumb_index::places::PlaceResults) -> Vec<Hit> {
-    let sites = places::local_sites(found);
-    let unsited = places::places_without_sites(found);
-    if sites.is_empty() && unsited.is_empty() {
-        return Vec::new();
-    }
     let backend = Arc::clone(&state.backend);
+    let found = found.clone();
     tokio::task::spawn_blocking(move || {
-        let mut sites: Vec<Hit> = sites
-            .into_iter()
-            .map(|site| backend.site(&site.domain).unwrap_or(site))
-            .collect();
-        for place in unsited {
-            let Ok(hits) = backend.search(&place.name, 5) else {
-                continue;
-            };
-            if let Some(mut site) = places::site_named_for(&place, hits) {
-                if !sites.iter().any(|s| s.domain == site.domain) {
-                    site.score = 0.0;
-                    site.text_score = 0.0;
-                    site.placing_text_score = None;
-                    site.named = false;
-                    sites.push(site);
-                }
-            }
-        }
-        sites
+        crate::assembly::linked_sites(
+            &found,
+            |domain| backend.site(domain),
+            |name| backend.search(name, 5).unwrap_or_default(),
+        )
     })
     .await
     .unwrap_or_default()
@@ -211,14 +197,7 @@ async fn place_sites(state: &AppState, found: &plumb_index::places::PlaceResults
 /// the top.
 const PLACES_MARK: &str = "<!--places-->\n";
 
-/// `found`, unless its town was guessed from a query that is the name of
-/// a site: "us bank" is the bank, not banks in Us, France.
-fn not_a_name(
-    found: Option<plumb_index::places::PlaceResults>,
-    hits: &[Hit],
-) -> Option<plumb_index::places::PlaceResults> {
-    found.filter(|found| !(found.guessed && hits.iter().any(|hit| hit.named)))
-}
+use crate::assembly::not_a_name;
 
 /// Answers queries for the web handlers. [`IndexBackend`] is the real one;
 /// tests can plug in their own.
@@ -1359,7 +1338,19 @@ async fn search_page(
                 &mut results,
                 limit,
             );
-            let found_places = not_a_name(found_places, &results.hits);
+            let found_places = crate::assembly::places(
+                &query,
+                found_places,
+                &results.hits,
+                &settings.options,
+                |domain| {
+                    state
+                        .node
+                        .as_ref()
+                        .is_some_and(|node| node.blocks_adult(domain))
+                },
+            )
+            .map(|places| places.found);
             if let Some(found) = &found_places {
                 let local = place_sites(&state, found).await;
                 places::local_first(found, &mut results.hits, local, limit);
@@ -1429,7 +1420,18 @@ async fn search_page(
                 domains.extend(places::website_domains(found));
             }
             let icons = state.icons(domains).await;
-            let recent = state.recent(&query, &results);
+            let recent = crate::assembly::recent(
+                &query,
+                state.recent(&query, &results),
+                &settings.options,
+                limit,
+                |domain| {
+                    state
+                        .node
+                        .as_ref()
+                        .is_some_and(|node| node.blocks_adult(domain))
+                },
+            );
             // What the searcher's clicks taught this node: places they
             // seldom open for searches like this are folded, headlines they
             // read come unfolded.
@@ -1590,18 +1592,32 @@ async fn api_search(
     let found = run_search(&state, &query, params.limit(), &options).await;
     match found {
         Ok(mut results) if full => {
-            // No town is given here, so "near me" finds no places: an
-            // empty list around nowhere says nothing.
-            let places = not_a_name(
+            let places = crate::assembly::places(
+                &query,
                 run_places(&state, &query, None, options.country.as_deref()).await,
                 &results.hits,
-            )
-            .filter(|found| found.center.is_some());
+                &options,
+                |domain| {
+                    state
+                        .node
+                        .as_ref()
+                        .is_some_and(|node| node.blocks_adult(domain))
+                },
+            );
             if let Some(found) = &places {
-                let local = place_sites(&state, found).await;
-                places::local_first(found, &mut results.hits, local, params.limit());
+                let local = place_sites(&state, &found.found)
+                    .await
+                    .into_iter()
+                    .filter(|hit| {
+                        options.safe == SafeSearch::Off
+                            || !state
+                                .node
+                                .as_ref()
+                                .is_some_and(|node| node.blocks_adult(&hit.domain))
+                    })
+                    .collect();
+                places::local_first(&found.found, &mut results.hits, local, params.limit());
             }
-            let places = places.filter(|found| !found.hits.is_empty());
             let extras = extras(&state, &query, &results, &options, None).await;
             route_sources(
                 &state,
@@ -1637,10 +1653,58 @@ async fn api_search(
                     answers::info_box(&results.hits, &placed)
                 }
             };
+            let recent = crate::assembly::recent(
+                &query,
+                state.recent(&query, &results),
+                &options,
+                params.limit(),
+                |domain| {
+                    state
+                        .node
+                        .as_ref()
+                        .is_some_and(|node| node.blocks_adult(domain))
+                },
+            );
+            let placed = if plumb_core::Operators::parse(&query).any() {
+                place_operator_pages(
+                    &plumb_core::Operators::parse(&query),
+                    &results.hits,
+                    results.pages.iter().map(|p| p.hit.clone()).collect(),
+                )
+            } else {
+                place_pages(
+                    &query,
+                    &results.hits,
+                    results.pages.iter().map(|p| p.hit.clone()).collect(),
+                )
+            };
+            let assembled = crate::assembly::Assembled {
+                rows: crate::assembly::ordered_rows(&results.hits, &placed, params.limit()),
+                places: places.clone(),
+                recent: recent.clone(),
+                answer: extras.answer.as_ref(),
+                profile: extras.profile.as_ref(),
+            };
+            let mut limited = SearchResults {
+                site_search: results.site_search.clone(),
+                spelling: results.spelling.clone(),
+                ..Default::default()
+            };
+            for row in &assembled.rows {
+                match row {
+                    crate::assembly::Row::Site { site, pages } => {
+                        limited.hits.push((*site).clone());
+                        limited.pages.extend(pages.iter().map(|p| (**p).clone()));
+                    }
+                    crate::assembly::Row::Page { page } => limited.pages.push((*page).clone()),
+                }
+            }
             let body = FullResults {
-                results: &results,
-                answer: extras.answer,
-                profile: extras.profile,
+                assembled,
+                recent,
+                results: &limited,
+                answer: extras.answer.clone(),
+                profile: extras.profile.clone(),
                 info,
                 places,
                 plugins,
@@ -1676,7 +1740,18 @@ async fn api_recent(
     } else {
         let options = params.options(&state.settings, &headers);
         match run_search(&state, &query, params.limit(), &options).await {
-            Ok(results) => state.recent(&query, &results),
+            Ok(results) => crate::assembly::recent(
+                &query,
+                state.recent(&query, &results),
+                &options,
+                params.limit(),
+                |domain| {
+                    state
+                        .node
+                        .as_ref()
+                        .is_some_and(|node| node.blocks_adult(domain))
+                },
+            ),
             Err(_) => None,
         }
     };
@@ -1692,6 +1767,9 @@ async fn api_recent(
 /// the results page shows with them.
 #[derive(Serialize)]
 struct FullResults<'a> {
+    assembled: crate::assembly::Assembled<'a>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recent: Option<Recent>,
     #[serde(flatten)]
     results: &'a SearchResults,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1701,7 +1779,7 @@ struct FullResults<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     info: Option<answers::InfoBox>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    places: Option<plumb_index::places::PlaceResults>,
+    places: Option<crate::assembly::Places>,
     /// What the node's plugins found; never from other nodes.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     plugins: Vec<PluginResults>,
@@ -1795,14 +1873,9 @@ fn route_sources(
     results: &mut SearchResults,
     limit: usize,
 ) {
-    let Some(route) = crate::sources::route(query, answer, country) else {
-        return;
-    };
-    let keep = results.hits.len().max(limit);
-    crate::sources::lead_with(&mut results.hits, &mut results.pages, &route, |domain| {
+    crate::assembly::route_sources(query, answer, country, results, limit, |domain| {
         state.backend.site(domain)
     });
-    results.hits.truncate(keep);
 }
 
 /// Results asked for when looking up whose profile a query asks for.
@@ -2602,7 +2675,7 @@ fn safe_href(hit: &Hit) -> Option<String> {
 }
 
 /// `raw` re-serialized, when it is an absolute `http` or `https` URL with a host.
-fn http_url(raw: &str) -> Option<String> {
+pub(crate) fn http_url(raw: &str) -> Option<String> {
     let url = Url::parse(raw.trim()).ok()?;
     let ok = matches!(url.scheme(), "http" | "https") && url.host_str().is_some();
     ok.then(|| url.to_string())
@@ -3914,6 +3987,17 @@ fn render_recent(
         Some(site) => format!("Latest from {}", escape_html(site)),
         None => "Recent".to_string(),
     };
+    if recent.headlines.is_empty() {
+        let message = if recent.status == "source_unavailable" {
+            "No current indexed headlines available from this publisher's feeds."
+        } else {
+            "No indexed headlines match the requested constraints."
+        };
+        return format!(
+            "<li class=\"news\"><span class=\"nh\">{heading}</span> \
+            <span class=\"m\">{message}</span></li>\n"
+        );
+    }
     let mut items = String::new();
     let mut shown = 0;
     for headline in &recent.headlines {
@@ -6898,6 +6982,8 @@ mod tests {
             at: now - 2 * 3600,
         };
         let recent = Recent {
+            status: "available".into(),
+            sources: Vec::new(),
             site: Some("news.com".into()),
             headlines: vec![
                 headline(
@@ -7241,7 +7327,7 @@ mod tests {
             domains,
             ["westword.com", "denvergov.org", "denverbroncos.com"]
         );
-        assert!(json.get("places").is_none(), "{body}");
+        assert_eq!(json["places"]["status"], "no_indexed_matches", "{body}");
         let (_, _, page) = send(
             router(Arc::new(BreweryPlaces)),
             "/search?q=brewery+in+aurora",
@@ -7251,14 +7337,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_api_lists_no_places_around_nowhere() {
+    async fn the_api_reports_missing_location_around_nowhere() {
         let (_, _, body) = send(
             router(Arc::new(BreweryPlaces)),
             "/api/search?q=brewery+near+me&full=1",
         )
         .await;
         let json: serde_json::Value = serde_json::from_str(&body).unwrap();
-        assert!(json.get("places").is_none(), "{body}");
+        assert_eq!(json["places"]["status"], "missing_location", "{body}");
+        assert!(json["places"]["hits"].as_array().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -7298,6 +7385,150 @@ mod tests {
             assert!(page.contains("<section class=\"pl\""), "{page}");
             assert!(at("www.westword.com") > 0, "{page}");
             assert!(!page.contains("denverbroncos.com"), "{page}");
+        }
+    }
+
+    #[tokio::test]
+    async fn mcp_json_and_searxng_share_bounded_places_and_navigation_controls() {
+        let query = "brewery in denver";
+        let mcp = crate::mcp::Mcp::new(Arc::new(BreweryPlaces), None);
+        let answer = mcp
+            .search(query, Some(2), &SearchOptions::default())
+            .unwrap();
+        let (_, _, body) = send(
+            router(Arc::new(BreweryPlaces)),
+            "/api/search?q=brewery+in+denver&full=1&limit=2",
+        )
+        .await;
+        let api: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let (_, _, body) = send(
+            router(Arc::new(BreweryPlaces)),
+            "/search?q=brewery+in+denver&format=json&limit=2",
+        )
+        .await;
+        let searx: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(answer["places"], api["places"]);
+        assert_eq!(answer["places"], searx["places"]);
+        assert_eq!(answer["places"]["hits"][0]["place"]["osm"], "n2");
+        assert_eq!(answer["places"]["hits"][0]["km"], 1.0);
+        assert_eq!(answer["places"]["license"], "ODbL");
+        assert_eq!(answer["results"][0]["domain"], api["hits"][0]["domain"]);
+        assert_eq!(searx["results"].as_array().unwrap().len(), 2);
+        assert!(mcp
+            .search_sites(query, Some(2), &SearchOptions::default())
+            .unwrap()
+            .get("places")
+            .is_none());
+        assert!(mcp
+            .search(
+                "brewery in denver site:greatdivide.com",
+                Some(2),
+                &SearchOptions::default()
+            )
+            .unwrap()
+            .get("places")
+            .is_none());
+        let near = mcp
+            .search(
+                "brewery near me",
+                Some(2),
+                &SearchOptions {
+                    country: Some("US".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(near["places"]["status"], "missing_location");
+        let named = crate::mcp::Mcp::new(Arc::new(BankPlaces), None)
+            .search("us bank", None, &SearchOptions::default())
+            .unwrap();
+        assert!(named.get("places").is_none());
+    }
+
+    struct FeedNews(crate::news::NewsStore);
+
+    impl StatusSource for FeedNews {
+        fn status(&self) -> Status {
+            node_status(Phase::Ready, Step::Idle)
+        }
+        fn recent(&self, query: &str, top: Option<(&str, bool)>) -> Option<Recent> {
+            self.0.recent(query, top, now_unix())
+        }
+    }
+
+    #[tokio::test]
+    async fn publisher_headlines_share_dates_sources_and_unavailable_status() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::news::NewsStore::open(dir.path());
+        let now = now_unix();
+        store.watch(vec![("bbc.co.uk".into(), "https://www.bbc.co.uk/".into())]);
+        store.apply(
+            vec![plumb_crawl::FeedCheck {
+                domain: "bbc.co.uk".into(),
+                outcome: plumb_crawl::FeedOutcome::Read {
+                    feed: "https://feeds.bbci.co.uk/news/rss.xml".into(),
+                    etag: None,
+                    last_modified: None,
+                    headlines: vec![plumb_core::Headline {
+                        title: "NVIDIA earnings rise".into(),
+                        url: "https://www.bbc.com/news/business/1".into(),
+                        at: now - 60,
+                    }],
+                },
+            }],
+            now,
+        );
+        let node = Arc::new(FeedNews(store));
+        let backend = backend(bank_hits());
+        let mcp = crate::mcp::Mcp::new(backend.clone(), None).with_node(Some(node.clone()));
+        let answer = mcp
+            .search("BBC latest news", Some(2), &SearchOptions::default())
+            .unwrap();
+        let app = node_router(backend, node);
+        let (_, _, body) = send(app.clone(), "/api/search?q=BBC+latest+news&full=1&limit=2").await;
+        let api: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let (_, _, body) = send(app.clone(), "/api/recent?q=BBC+latest+news&limit=2").await;
+        let recent: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let (_, _, body) = send(
+            app.clone(),
+            "/search?q=BBC+latest+news&format=json&categories=news&limit=2",
+        )
+        .await;
+        let searx: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(api["recent"], recent);
+        assert_eq!(searx["recent"], recent);
+        assert_eq!(
+            answer["recent"][0]["published_at"],
+            recent["headlines"][0]["at"]
+        );
+        assert_eq!(
+            answer["recent"][0]["site"],
+            recent["headlines"][0]["domain"]
+        );
+        assert_eq!(answer["news_status"]["sources"], recent["sources"]);
+        assert_eq!(recent["sources"][1]["checked_at"], now);
+        assert!(answer["recent"][0]["published_date"]
+            .as_str()
+            .unwrap()
+            .ends_with('Z'));
+        assert_eq!(searx["results"][0]["url"], answer["recent"][0]["url"]);
+        let (_, _, body) = send(app, "/api/recent?q=Reuters+latest+news").await;
+        let unavailable: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(unavailable["status"], "source_unavailable");
+        assert!(unavailable["headlines"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn caddy_exposes_recent_without_management_routes() {
+        let config = include_str!("../../../site/Caddyfile");
+        let paths = config
+            .lines()
+            .find(|line| line.trim_start().starts_with("@node path "))
+            .unwrap();
+        let allowed: Vec<_> = paths.split_whitespace().skip(2).collect();
+        assert!(allowed.contains(&"/api/recent"));
+        for private in ["/app", "/api/control", "/api/recent/*", "/api/*"] {
+            assert!(!allowed.contains(&private), "{private}");
         }
     }
 

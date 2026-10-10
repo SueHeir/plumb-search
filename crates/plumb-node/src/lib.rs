@@ -51,6 +51,7 @@ pub mod train_rank;
 pub mod web;
 pub mod websearch;
 
+mod assembly;
 mod crawl;
 mod dead;
 mod fact_trust;

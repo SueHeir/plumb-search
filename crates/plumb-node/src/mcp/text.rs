@@ -312,7 +312,12 @@ fn search(out: &mut String, answer: &Value) {
         numbered(out);
         page_line(out, page);
     }
-    if sites.is_empty() && pages.is_empty() {
+    if sites.is_empty()
+        && pages.is_empty()
+        && answer
+            .get("places")
+            .is_none_or(|places| list(places, "hits").is_empty())
+    {
         let query = text(answer, "query").unwrap_or("");
         match text(answer, "kind") {
             Some(kind) => {
@@ -330,6 +335,40 @@ fn search(out: &mut String, answer: &Value) {
             text(site_search, "domain").unwrap_or(""),
             text(site_search, "terms").unwrap_or(""),
             text(site_search, "url").unwrap_or("")
+        );
+    }
+    if let Some(places) = answer.get("places") {
+        match text(places, "status") {
+            Some("missing_location") => out.push_str("Places: supply a town in the query (for example coffee in Denver); country alone cannot locate near me.\n"),
+            Some("location_unavailable") => out.push_str("Places: the requested location is unavailable in this index.\n"),
+            _ => {
+                let center = places.get("center").and_then(|p| text(p, "name")).unwrap_or("");
+                let _ = writeln!(out, "Places near {center} (distance in km):");
+                if list(places, "hits").is_empty() { out.push_str("No indexed matches within the searched radius.\n"); }
+                for hit in list(places, "hits") {
+                    let place = &hit["place"];
+                    let _ = writeln!(out, "- {}: {}; {} km; OSM {}{}",
+                        text(place, "name").unwrap_or(""), text(place, "address").unwrap_or(""),
+                        hit["km"], text(place, "osm").unwrap_or(""),
+                        text(place, "website").map(|url| format!("; {url}")).unwrap_or_default());
+                }
+            }
+        }
+        let _ = writeln!(
+            out,
+            "Places © OpenStreetMap contributors, ODbL: {}",
+            text(places, "attribution_url").unwrap_or("")
+        );
+    }
+    if answer
+        .get("news_status")
+        .is_some_and(|status| text(status, "status") == Some("source_unavailable"))
+    {
+        let status = &answer["news_status"];
+        let _ = writeln!(
+            out,
+            "No current indexed headlines available from {}'s feeds.",
+            text(status, "site").unwrap_or("the requested publisher")
         );
     }
     let recent = list(answer, "recent");

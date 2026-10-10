@@ -1351,14 +1351,46 @@ impl Mcp {
             // "fastapi docs" is not "fastai docs".
             results.spelling = None;
         }
-        // Placed as the results page places them, which the info box needs.
-        let found_pages = results.pages.iter().map(|p| p.hit.clone()).collect();
-        let operators = plumb_core::Operators::parse(query);
-        let placed = if operators.any() {
-            place_operator_pages(&operators, &results.hits, found_pages)
+        let places = if sites_only
+            || plumb_core::Operators::parse(query).any()
+            || plumb_index::places::parse_place_query(query).is_none()
+        {
+            None
         } else {
-            place_pages(query, &results.hits, found_pages)
+            crate::assembly::places(
+                query,
+                self.backend.places(query, None, options.country.as_deref()),
+                &results.hits,
+                options,
+                |domain| {
+                    self.node
+                        .as_ref()
+                        .is_some_and(|node| node.blocks_adult(domain))
+                },
+            )
         };
+        if let Some(places) = &places {
+            let local = crate::assembly::linked_sites(
+                &places.found,
+                |domain| self.backend.site(domain),
+                |name| self.backend.search(name, 5).unwrap_or_default(),
+            )
+            .into_iter()
+            .filter(|site| {
+                options.safe == plumb_core::SafeSearch::Off
+                    || !self
+                        .node
+                        .as_ref()
+                        .is_some_and(|node| node.blocks_adult(&site.domain))
+            })
+            .collect();
+            crate::assembly::local_first(
+                &places.found,
+                &mut results.hits,
+                local,
+                limit.unwrap_or(DEFAULT_SEARCH_LIMIT),
+            );
+        }
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs());
@@ -1367,6 +1399,70 @@ impl Mcp {
             i64::try_from(now).unwrap_or(i64::MAX),
             self.rates.as_ref(),
         );
+        crate::assembly::route_sources(
+            query,
+            answer.as_ref().map(|a| a.kind),
+            options.country.as_deref(),
+            &mut results,
+            limit.unwrap_or(DEFAULT_SEARCH_LIMIT),
+            |domain| self.backend.site(domain),
+        );
+        // Placed as the results page places them, which the info box needs.
+        let found_pages = results.pages.iter().map(|p| p.hit.clone()).collect();
+        let operators = plumb_core::Operators::parse(query);
+        let mut placed = if operators.any() {
+            place_operator_pages(&operators, &results.hits, found_pages)
+        } else {
+            place_pages(query, &results.hits, found_pages)
+        };
+        let promote_package = crate::assembly::promote_package(query);
+        if !promote_package {
+            let mut supplementary = Vec::new();
+            placed.retain(|page| {
+                if page.hit.page.package.is_some() {
+                    supplementary.push(page.clone());
+                    false
+                } else {
+                    true
+                }
+            });
+            let after = results
+                .hits
+                .len()
+                .max(placed.iter().map(|p| p.at + 1).max().unwrap_or(0));
+            for mut page in supplementary {
+                page.at = after;
+                page.under = None;
+                placed.push(page);
+            }
+        }
+        if let Some(page) = &guessed {
+            placed.retain(|p| p.hit.page.url != page.url);
+            let card = PlacedPage {
+                hit: plumb_index::pages::PageHit {
+                    page: page.clone(),
+                    score: 0.0,
+                    named: false,
+                    popularity: 0.0,
+                    whole: false,
+                    learned: None,
+                },
+                under: None,
+                at: if promote_package {
+                    0
+                } else {
+                    results
+                        .hits
+                        .len()
+                        .max(placed.iter().map(|p| p.at + 1).max().unwrap_or(0))
+                },
+            };
+            if promote_package {
+                placed.insert(0, card);
+            } else {
+                placed.push(card);
+            }
+        }
         // A fact the query asks about something ("capital of australia").
         let answer = match (answer, plumb_core::facts::fact_asked(query)) {
             (None, Some(asked)) => self
@@ -1408,13 +1504,22 @@ impl Mcp {
             None if operators.any() => None,
             None => answers::info_box(&results.hits, &placed),
         };
-        let recent = self.node.as_ref().and_then(|node| {
-            let top = results
-                .hits
-                .first()
-                .map(|hit| (hit.domain.as_str(), hit.named));
-            node.recent(query, top)
-        });
+        let recent = (!sites_only)
+            .then_some(self.node.as_ref())
+            .flatten()
+            .and_then(|node| {
+                let top = results
+                    .hits
+                    .first()
+                    .map(|hit| (hit.domain.as_str(), hit.named));
+                crate::assembly::recent(
+                    query,
+                    node.recent(query, top),
+                    options,
+                    limit.unwrap_or(DEFAULT_SEARCH_LIMIT),
+                    |domain| node.blocks_adult(domain),
+                )
+            });
         let headlines: Vec<Value> = recent
             .iter()
             .flat_map(|recent| recent.headlines.iter().take(MAX_HEADLINES))
@@ -1424,22 +1529,11 @@ impl Mcp {
                     "url": headline.url,
                     "site": headline.domain,
                     "published": crate::web::time_ago(headline.at, now),
+                    "published_at": headline.at,
+                    "published_date": crate::news::published_date(headline.at),
+                    "source": "publisher_feed",
                 })
             })
-            .collect();
-        let mut pages: Vec<Value> = guessed
-            .iter()
-            .map(|page| page_entry(page, None, 1))
-            .collect();
-        pages.extend(
-            placed
-                .iter()
-                .map(|placed| page_entry(&placed.hit.page, placed.under.as_deref(), placed.at + 1)),
-        );
-        let mut sites: Vec<Value> = results
-            .hits
-            .iter()
-            .map(|hit| brief_with(hit, &results.pages))
             .collect();
         let found_before: Vec<Value> = self
             .findings
@@ -1453,6 +1547,8 @@ impl Mcp {
                     "answer": finding.answer,
                     "task": finding.task,
                     "reported": crate::web::time_ago(finding.at, now),
+                    "reported_at": finding.at,
+                    "source": "user_reported_finding",
                 })
             })
             .collect();
@@ -1463,7 +1559,7 @@ impl Mcp {
         let leads = self.leads_for(query, &known, now, options);
         let direct = !found_before.is_empty()
             || answer.is_some()
-            || pages.iter().any(|page| page.get("package").is_some())
+            || (promote_package && placed.iter().any(|page| page.hit.page.package.is_some()))
             || names_a_page
             || results.hits.iter().any(|hit| hit.named);
         let cap = match limit {
@@ -1471,7 +1567,33 @@ impl Mcp {
             None if direct => DIRECT_SEARCH_LIMIT,
             None => DEFAULT_SEARCH_LIMIT,
         };
-        cap_results(&mut sites, &mut pages, cap);
+        let assembled = crate::assembly::Assembled {
+            rows: crate::assembly::ordered_rows(&results.hits, &placed, cap),
+            places,
+            recent: recent.clone(),
+            answer: answer.as_ref(),
+            profile: profile.as_ref(),
+        };
+        let mut sites = Vec::new();
+        let mut pages = Vec::new();
+        for row in &assembled.rows {
+            match row {
+                crate::assembly::Row::Site {
+                    site,
+                    pages: supporting,
+                } => {
+                    sites.push(brief_with(site, &results.pages));
+                    pages.extend(supporting.iter().map(|page| {
+                        page_entry(&page.hit.page, page.under.as_deref(), page.at + 1)
+                    }));
+                }
+                crate::assembly::Row::Page { page } => pages.push(page_entry(
+                    &page.hit.page,
+                    page.under.as_deref(),
+                    page.at + 1,
+                )),
+            }
+        }
         let mut answer_json = json!({
             "query": query,
             "results": sites,
@@ -1480,6 +1602,30 @@ impl Mcp {
             "spelling": results.spelling,
         });
         let fields = answer_json.as_object_mut().expect("an object");
+        fields.insert(
+            "ordered_results".into(),
+            json!(assembled
+                .rows
+                .iter()
+                .map(|row| match row {
+                    crate::assembly::Row::Site { site, .. } =>
+                        json!({ "kind": "site", "url": site.url }),
+                    crate::assembly::Row::Page { page } =>
+                        json!({ "kind": "page", "url": page.hit.page.url }),
+                })
+                .collect::<Vec<_>>()),
+        );
+        if let Some(places) = &assembled.places {
+            fields.insert("places".into(), json!(places));
+        }
+        if let Some(recent) = &recent {
+            fields.insert(
+                "news_status".into(),
+                json!({ "site": recent.site,
+                "status": recent.status, "sources": recent.sources }),
+            );
+        }
+        drop(assembled);
         if let Some(answer) = answer {
             fields.insert("answer".into(), json!(answer));
         }
@@ -1491,7 +1637,9 @@ impl Mcp {
         }
         // Headlines with a package's name are rarely about the package:
         // "react latest" is not footballers' kids reacting to a new kit.
-        if !headlines.is_empty() && !pages.iter().any(|page| page.get("package").is_some()) {
+        if !headlines.is_empty()
+            && (!promote_package || !pages.iter().any(|page| page.get("package").is_some()))
+        {
             fields.insert("recent".into(), json!(headlines));
         }
         let from_plugins: Vec<Value> = self
@@ -1549,7 +1697,15 @@ impl Mcp {
             .pages
             .into_iter()
             .map(|placed| placed.hit)
-            .find(|hit| hit.page.package.is_some() && hit.popularity >= GUESSED_PACKAGE)
+            .find(|hit| {
+                hit.popularity >= GUESSED_PACKAGE
+                    && hit.page.package.as_ref().is_some_and(|p| {
+                        p.name.eq_ignore_ascii_case(name)
+                            || p.registry()
+                                .and_then(|r| r.short_name(&p.name))
+                                .is_some_and(|short| short.eq_ignore_ascii_case(name))
+                    })
+            })
             .map(|hit| hit.page)
     }
 
@@ -2289,7 +2445,9 @@ pub fn tools(read_pages: bool, findings: bool, share: bool) -> Value {
                  best first, plus Wikipedia articles, Stack Overflow questions, books and other pages \
                  placed among them, package cards (version, install command, docs) when the query \
                  says npm, crate, pip, python or another registry or language, a direct answer for sums, unit and currency conversions and \
-                 the time somewhere, facts about what the query names, and recent headlines. \
+                 the time somewhere, facts about what the query names, recent headlines, and local places \
+                 when the query includes a town (restaurants in Denver). Near me requires an actual location; \
+                 country alone is not a location. Package cards supplement troubleshooting results. \
                  Plumb indexes homepages and page sets, not the full text of the web, so search \
                  for names and topics, then open the page you need.",
             "inputSchema": {
@@ -2678,6 +2836,7 @@ fn package_card(page: &plumb_index::pages::Page) -> Value {
 /// them: the `sites` in order, each after the `pages` placed before it
 /// (`position`), and the pages placed after the last site at the end.
 /// Pages listed under a site (`about_site`) go with it.
+#[cfg(test)]
 fn cap_results(sites: &mut Vec<Value>, pages: &mut Vec<Value>, cap: usize) {
     let alone = |page: &Value| page.get("about_site").is_none_or(Value::is_null);
     let position = |page: &Value| {
