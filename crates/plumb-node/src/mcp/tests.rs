@@ -983,6 +983,20 @@ impl SearchBackend for Australia {
         })
     }
 
+    fn entities(
+        &self,
+        query: &str,
+        limit: usize,
+        options: &SearchOptions,
+    ) -> Result<Vec<plumb_index::pages::PageHit>> {
+        Ok(self
+            .search_full(query, limit, options)?
+            .pages
+            .into_iter()
+            .map(|placed| placed.hit)
+            .collect())
+    }
+
     fn num_docs(&self) -> u64 {
         0
     }
@@ -1054,13 +1068,17 @@ fn facts_come_with_the_wikidata_item_and_property_they_are_from() {
         "facts",
         json!({ "subject": "australia", "about": "favourite colour" }),
     );
-    assert_eq!(answer["result"]["isError"], true);
+    assert_eq!(answer["result"]["isError"], false);
+    assert_eq!(
+        answer["result"]["structuredContent"]["status"],
+        "unsupported_property"
+    );
     let text = answer["result"]["content"][0]["text"].as_str().unwrap();
     assert!(text.contains("capital, population"), "{text}");
     let answer = call(&mcp, "facts", json!({ "subject": "Atlantis" }));
     assert_eq!(
         answer["result"]["content"][0]["text"],
-        "Plumb has no facts about Atlantis."
+        "Plumb could not resolve Atlantis to an indexed entity."
     );
 
     // Several subjects in one call, each answered as alone.
@@ -1078,7 +1096,7 @@ fn facts_come_with_the_wikidata_item_and_property_they_are_from() {
         "Australia, country in Oceania https://en.wikipedia.org/wiki/Australia\n\
          Capital of Australia: Canberra [Wikidata Q408 P36]\n\
          Source: https://www.wikidata.org/wiki/Q408\n\
-         Plumb has no facts about Atlantis.\n\
+         Plumb could not resolve Atlantis to an indexed entity.\n\
          Australia, country in Oceania https://en.wikipedia.org/wiki/Australia\n\
          Capital of Australia: Canberra [Wikidata Q408 P36]\n\
          Source: https://www.wikidata.org/wiki/Q408"
@@ -2147,4 +2165,160 @@ fn troubleshooting_keeps_related_package_cards_after_main_results() {
     ] {
         assert!(crate::assembly::promote_package(query), "{query}");
     }
+}
+
+/// Displayed search deliberately loses the entity behind a WHO namesake.
+struct EntityIndex(plumb_index::pages::PageSearcher);
+
+impl SearchBackend for EntityIndex {
+    fn search(&self, _: &str, _: usize) -> Result<Vec<Hit>> {
+        Ok(Vec::new())
+    }
+    fn search_full(&self, _: &str, _: usize, _: &SearchOptions) -> Result<SearchResults> {
+        let page = Page::from_set(
+            plumb_index::pages::SUBPAGES_SET,
+            plumb_core::article::Article {
+                title: "Japan".into(),
+                item: Some("https://www.who.int/countries/jpn".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        Ok(SearchResults {
+            hits: Vec::new(),
+            pages: vec![PlacedPage {
+                hit: shelved(page),
+                under: None,
+                at: 0,
+            }],
+            spelling: None,
+            site_search: None,
+        })
+    }
+    fn entities(
+        &self,
+        query: &str,
+        limit: usize,
+        options: &SearchOptions,
+    ) -> Result<Vec<plumb_index::pages::PageHit>> {
+        Ok(self
+            .0
+            .entities(query, 200)?
+            .into_iter()
+            .filter(|hit| plumb_index::pages::options_allow(options, &hit.page))
+            .take(limit)
+            .collect())
+    }
+    fn num_docs(&self) -> u64 {
+        0
+    }
+}
+
+#[test]
+fn facts_resolve_identity_before_display_and_property_availability() {
+    use plumb_core::article::Article;
+    use plumb_core::facts::{Fact, FactKind};
+    let article = |title: &str, item: &str, description: &str, facts: Vec<Fact>| {
+        Page::from_article(
+            "en",
+            Article {
+                title: title.into(),
+                item: Some(item.into()),
+                description: Some(description.into()),
+                facts,
+                ..Default::default()
+            },
+        )
+    };
+    let mut japan = article(
+        "Japan",
+        "Q17",
+        "country in East Asia",
+        vec![Fact {
+            kind: FactKind::Population,
+            value: "123802000;2024".into(),
+        }],
+    );
+    japan.profiles.push(plumb_core::profiles::Profile {
+        service: "youtube-handle".into(),
+        id: "JapanGov".into(),
+    });
+    let pages = vec![
+        japan,
+        article("Apple", "Q89", "fruit", Vec::new()),
+        article(
+            "Apple Inc.",
+            "Q312",
+            "American technology company",
+            Vec::new(),
+        ),
+        article(
+            "Apple Records",
+            "Q200",
+            "record label",
+            vec![Fact {
+                kind: FactKind::Ceo,
+                value: "Namesake CEO".into(),
+            }],
+        ),
+        article("Mercury (planet)", "Q308", "planet", Vec::new()),
+        article(
+            "Mercury (element)",
+            "Q925",
+            "chemical element",
+            vec![Fact {
+                kind: FactKind::AtomicNumber,
+                value: "80".into(),
+            }],
+        ),
+    ];
+    let dir = tempfile::tempdir().unwrap();
+    let index = dir.path().join("pages");
+    plumb_index::pages::build_page_index(&index, pages).unwrap();
+    let mcp = Mcp::new(
+        Arc::new(EntityIndex(
+            plumb_index::pages::PageSearcher::open(&index).unwrap(),
+        )),
+        None,
+    );
+    let facts = mcp
+        .facts("Japan", Some("population"), &SearchOptions::default())
+        .unwrap();
+    assert_eq!(facts["item"], "Q17");
+    assert_eq!(facts["status"], "ok");
+    assert_eq!(facts["facts"][0]["value"], "123,802,000");
+    assert_eq!(facts["facts"][0]["observation_year"], 2024);
+    assert_eq!(facts["facts"][0]["unit"], "people");
+    assert_eq!(facts["facts"][0]["raw_values"][0], "123802000;2024");
+    assert_eq!(facts["freshness"], "unknown");
+    assert!(facts["facts"][0]["retrieved_at"].is_null());
+    let search = mcp
+        .search("Japan population", None, &SearchOptions::default())
+        .unwrap();
+    assert_eq!(search["answer"]["answer"], "123,802,000");
+    let search = mcp
+        .search("Japan youtube", None, &SearchOptions::default())
+        .unwrap();
+    assert_eq!(search["profile"]["of"], "Japan");
+    for about in ["ceo", "founder", "founded"] {
+        let missing = mcp
+            .facts("Apple", Some(about), &SearchOptions::default())
+            .unwrap();
+        assert_eq!(missing["item"], "Q312", "{missing}");
+        assert_eq!(missing["status"], "missing_enrichment");
+        assert_eq!(missing["found"], false);
+    }
+    let ambiguous = mcp
+        .facts("Mercury", Some("atomic-number"), &SearchOptions::default())
+        .unwrap();
+    assert_eq!(ambiguous["status"], "ambiguous_entity");
+    assert_eq!(ambiguous["candidates"].as_array().unwrap().len(), 2);
+    let specified = mcp
+        .facts(
+            "Mercury (element)",
+            Some("atomic-number"),
+            &SearchOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(specified["item"], "Q925");
 }

@@ -2098,6 +2098,15 @@ impl SearchBackend for Inner {
         pages::definition(self, name)
     }
 
+    fn entities(
+        &self,
+        query: &str,
+        limit: usize,
+        options: &SearchOptions,
+    ) -> Result<Vec<plumb_index::pages::PageHit>> {
+        pages::entities(self, query, limit, options)
+    }
+
     fn pages_of(
         &self,
         query: &str,

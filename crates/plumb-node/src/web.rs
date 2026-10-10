@@ -281,6 +281,18 @@ pub trait SearchBackend: Send + Sync {
         None
     }
 
+    /// Bounded named-entity candidates with stable Wikidata IDs, before
+    /// display blending. Backends without a page index return none.
+    fn entities(
+        &self,
+        query: &str,
+        limit: usize,
+        options: &SearchOptions,
+    ) -> Result<Vec<plumb_index::pages::PageHit>> {
+        let _ = (query, limit, options);
+        Ok(Vec::new())
+    }
+
     /// The best `limit` pages for `query` that `keep` keeps, best first,
     /// when the node keeps page sets: for a search that asks for one kind
     /// of page (`kind` of MCP's `search`), docs pages when `docs`. Search

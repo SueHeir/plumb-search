@@ -1466,9 +1466,17 @@ impl Mcp {
         // A fact the query asks about something ("capital of australia").
         let answer = match (answer, plumb_core::facts::fact_asked(query)) {
             (None, Some(asked)) => self
-                .lookup(&asked.subject, PROFILE_SEARCH_LIMIT, options)
+                .backend
+                .entities(&asked.subject, 20, options)
                 .ok()
-                .and_then(|found| answers::fact_answer(&asked, &found.pages, now)),
+                .and_then(|found| {
+                    match answers::resolve_entity(&asked.subject, &found, Some(&asked.kinds)) {
+                        answers::EntityResolution::Resolved(page) => {
+                            answers::fact_answer_from_page(&asked, page, now)
+                        }
+                        _ => None,
+                    }
+                }),
             (answer, _) => answer,
         };
         // What something is ("what is a manatee").
@@ -1490,15 +1498,38 @@ impl Mcp {
             (answer, _) => answer,
         };
         let names_a_page = placed.iter().any(|placed| placed.hit.named);
-        let profile = if names_a_page {
-            None
-        } else {
-            answers::profile_lookups(query).iter().find_map(|name| {
-                self.lookup(name, PROFILE_SEARCH_LIMIT, options)
+        let profile = answers::profile_lookups(query).iter().find_map(|name| {
+            let entities = self.backend.entities(name, 20, options).ok()?;
+            match answers::resolve_entity(name, &entities, None) {
+                answers::EntityResolution::Resolved(page) => {
+                    let hit = entities
+                        .iter()
+                        .find(|hit| hit.page.item == page.item)?
+                        .clone();
+                    answers::profile_answer(
+                        query,
+                        &[plumb_index::pages::PlacedPage {
+                            hit: plumb_index::pages::PageHit { named: true, ..hit },
+                            under: None,
+                            at: 0,
+                        }],
+                    )
+                }
+                answers::EntityResolution::Ambiguous(_) => None,
+                answers::EntityResolution::Unresolved => self
+                    .lookup(name, PROFILE_SEARCH_LIMIT, options)
                     .ok()
-                    .and_then(|found| answers::profile_answer(query, &found.pages))
-            })
-        };
+                    .and_then(|found| {
+                        // MusicBrainz songs are outside the Wikidata entity lane.
+                        let songs: Vec<_> = found
+                            .pages
+                            .into_iter()
+                            .filter(|placed| placed.hit.page.set == plumb_index::pages::MUSIC_SET)
+                            .collect();
+                        answers::profile_answer(query, &songs)
+                    }),
+            }
+        });
         let info = match &profile {
             Some(profile) => answers::info_from_page(&profile.page, &results.hits),
             None if operators.any() => None,
@@ -2004,26 +2035,31 @@ impl Mcp {
                         .map(|kinds| (kinds, false)),
                 };
                 let Some((kinds, first_only)) = kinds else {
-                    bail!(
-                        "Plumb keeps no facts of the kind {about:?}; it knows {}",
-                        KINDS.iter().map(|k| k.key()).collect::<Vec<_>>().join(", ")
-                    );
+                    return Ok(json!({
+                        "subject": subject, "found": false, "status": "unsupported_property",
+                        "about": about, "supported": KINDS.iter().map(|k| k.key()).collect::<Vec<_>>(),
+                    }));
                 };
                 (Some(kinds), first_only)
             }
         };
-        let found = self.lookup(subject, PROFILE_SEARCH_LIMIT, options)?;
-        let page = answers::fact_pages(&found.pages)
-            .map(|placed| &placed.hit.page)
-            .find(|page| {
-                page.facts.iter().any(|fact| {
-                    kinds
-                        .as_ref()
-                        .is_none_or(|kinds| kinds.contains(&fact.kind))
-                })
-            });
-        let Some(page) = page else {
-            return Ok(json!({ "subject": subject, "found": false }));
+        let found = self.backend.entities(subject, 20, options)?;
+        let page = match answers::resolve_entity(subject, &found, kinds.as_deref()) {
+            answers::EntityResolution::Resolved(page) => page,
+            answers::EntityResolution::Unresolved => {
+                return Ok(json!({
+                    "subject": subject, "found": false, "status": "unresolved_entity",
+                }))
+            }
+            answers::EntityResolution::Ambiguous(candidates) => {
+                return Ok(json!({
+                    "subject": subject, "found": false, "status": "ambiguous_entity",
+                    "candidates": candidates.iter().take(5).map(|page| json!({
+                        "item": page.item, "title": page.title,
+                        "description": page.description.as_deref().map(short), "url": page.url,
+                    })).collect::<Vec<_>>(),
+                }))
+            }
         };
         let kinds = kinds.map(|kinds| {
             match kinds
@@ -2057,11 +2093,31 @@ impl Mcp {
                 "note": note,
                 "property": kind.property(),
                 "source": item_url.as_ref().map(|url| format!("{url}#{}", kind.property())),
+                "raw_values": values,
+                "unit": kind.unit(),
+                "valid_from": Value::Null,
+                "valid_to": Value::Null,
+                "observation_year": page.facts.iter().find(|fact| fact.kind == kind).and_then(|fact| fact.observation_year()),
+                "retrieved_at": Value::Null,
+                "statement": Value::Null,
+                "freshness": "unknown",
+
             }));
         }
+        let missing: Vec<_> = kinds
+            .as_ref()
+            .into_iter()
+            .flatten()
+            .filter(|kind| !page.facts.iter().any(|fact| fact.kind == **kind))
+            .map(|kind| kind.key())
+            .collect();
         Ok(json!({
             "subject": subject,
-            "found": true,
+            "found": !facts.is_empty(),
+            "status": if facts.is_empty() { "missing_enrichment" } else { "ok" },
+            "coverage": if facts.is_empty() || !missing.is_empty() { "partial" } else { "available" },
+            "missing_properties": missing,
+            "freshness": "unknown",
             "title": page.title,
             "description": page.description.as_deref().map(short),
             "url": page.url,

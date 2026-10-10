@@ -558,7 +558,45 @@ fn facts(out: &mut String, answer: &Value) {
 fn subject_facts(out: &mut String, answer: &Value) {
     if !flag(answer, "found") {
         let subject = text(answer, "subject").unwrap_or("");
-        let _ = writeln!(out, "Plumb has no facts about {subject}.");
+        match text(answer, "status") {
+            Some("unsupported_property") => {
+                let about = text(answer, "about").unwrap_or("");
+                let supported: Vec<_> = list(answer, "supported")
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect();
+                let _ = writeln!(
+                    out,
+                    "Plumb keeps no facts of the kind {about:?}; it knows {}.",
+                    supported.join(", ")
+                );
+            }
+            Some("ambiguous_entity") => {
+                let _ = writeln!(out, "{subject} names several entities; specify one:");
+                for candidate in list(answer, "candidates") {
+                    let _ = writeln!(
+                        out,
+                        "{} [{}] {}",
+                        text(candidate, "title").unwrap_or(""),
+                        text(candidate, "item").unwrap_or(""),
+                        text(candidate, "url").unwrap_or("")
+                    );
+                }
+            }
+            Some("missing_enrichment") => {
+                let title = text(answer, "title").unwrap_or(subject);
+                let _ = writeln!(out, "Plumb resolved {subject} to {title}, but lacks the requested indexed facts. Freshness is unknown.");
+            }
+            Some("unresolved_entity") => {
+                let _ = writeln!(
+                    out,
+                    "Plumb could not resolve {subject} to an indexed entity."
+                );
+            }
+            _ => {
+                let _ = writeln!(out, "Plumb has no facts about {subject}.");
+            }
+        }
         return;
     }
     let title = text(answer, "title").unwrap_or("");

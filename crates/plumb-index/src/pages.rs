@@ -1630,6 +1630,93 @@ impl PageSearcher {
         }))
     }
 
+    /// Named entity candidates before site blending or learned placement.
+    /// Wikipedia's `about` field is searched separately: reference pages
+    /// with the same title cannot consume its bounded candidate window.
+    /// Uses existing index fields, so an installed index needs no rebuild.
+    pub fn entities(&self, query: &str, limit: usize) -> Result<Vec<PageHit>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let stems = self.described_words(query);
+        let words = analysis::tokens(&self.words, query);
+        let Some(joined) = analysis::tokens(&self.joined, query).pop() else {
+            return Ok(Vec::new());
+        };
+        let query_words: HashSet<&str> = words.iter().map(String::as_str).collect();
+        let mut hits = Vec::new();
+        if !stems.is_empty() {
+            let clauses = stems
+                .iter()
+                .map(|stem| {
+                    (
+                        Occur::Must,
+                        Box::new(TermQuery::new(
+                            Term::from_field_text(self.fields.about, stem),
+                            IndexRecordOption::Basic,
+                        )) as Box<dyn Query>,
+                    )
+                })
+                .collect();
+            let searcher = self.reader.searcher();
+            let found = searcher.search(
+                &BooleanQuery::new(clauses),
+                &TopDocs::with_limit(CANDIDATES)
+                    .order_by_fast_field::<u64>("popularity", tantivy::Order::Desc),
+            )?;
+            for (_, address) in found {
+                let document: TantivyDocument = searcher.doc(address)?;
+                let Some(stored) = document
+                    .get_first(self.fields.page)
+                    .and_then(|v| v.as_str())
+                else {
+                    continue;
+                };
+                let page: Page = serde_json::from_str(stored)?;
+                if !page.is_article() || !page.item.as_deref().is_some_and(is_item_id) {
+                    continue;
+                }
+                let (name, named) = self.name_match(&page, query, &joined, &query_words);
+                let described = self.described_match(&page, &stems);
+                if name <= 0.0 && described <= 0.0 {
+                    continue;
+                }
+                let popularity = document
+                    .get_first(self.fields.popularity)
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as f32
+                    / POPULARITY_SCALE;
+                hits.push(PageHit {
+                    page,
+                    named,
+                    whole: described > 0.0,
+                    score: name.max(described)
+                        * (1.0 - POPULARITY_SHARE + POPULARITY_SHARE * popularity),
+                    popularity,
+                    learned: None,
+                });
+            }
+        }
+        // Keep exact stop-word names ("The Who"), films and Wikidata profiles.
+        for hit in self.search_once(query, CANDIDATES)? {
+            if (matches!(hit.page.set.as_str(), WIKIDATA_SET | FILMS_SET)
+                || hit.page.is_article() && hit.named)
+                && hit.page.item.as_deref().is_some_and(is_item_id)
+                && (hit.named || hit.whole)
+                && !hits.iter().any(|kept| kept.page.url == hit.page.url)
+            {
+                hits.push(hit);
+            }
+        }
+        hits.sort_by(|a, b| {
+            b.named
+                .cmp(&a.named)
+                .then_with(|| b.score.total_cmp(&a.score))
+        });
+        hits.truncate(limit.min(CANDIDATES));
+        Ok(hits)
+    }
+
     /// The best `limit` pages for `query`, best first.
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<PageHit>> {
         let mut hits = self.search_once(query, limit)?;
@@ -3438,6 +3525,67 @@ mod tests {
         build_page_index(&path, pages.to_vec()).unwrap();
         let searcher = PageSearcher::open(&path).unwrap();
         (dir, searcher)
+    }
+
+    #[test]
+    fn entity_lookup_survives_competing_pages_and_keeps_item_identity() {
+        let japan = Page::from_article(
+            "en",
+            Article {
+                title: "Japan".into(),
+                item: Some("Q17".into()),
+                description: Some("country in East Asia".into()),
+                views: 1,
+                aliases: vec!["Nippon".into()],
+                facts: vec![plumb_core::facts::Fact {
+                    kind: plumb_core::facts::FactKind::Population,
+                    value: "123802000;2024".into(),
+                }],
+                ..Default::default()
+            },
+        );
+        let mut pages: Vec<_> = (0..250)
+            .map(|n| {
+                Page::from_set(
+                    SUBPAGES_SET,
+                    Article {
+                        title: "Japan".into(),
+                        item: Some(format!("https://www.who.int/japan/{n}")),
+                        views: 100_000,
+                        ..Default::default()
+                    },
+                )
+                .unwrap()
+            })
+            .collect();
+        pages.push(japan);
+        let (_dir, index) = searcher(&pages);
+        for name in ["Japan", "Nippon"] {
+            let found = index.entities(name, 5).unwrap();
+            assert_eq!(found.len(), 1, "{name}: {found:?}");
+            assert_eq!(found[0].page.item.as_deref(), Some("Q17"));
+            assert_eq!(found[0].page.facts[0].observation_year(), Some(2024));
+            assert!(found[0].named);
+            assert!(found[0].learned.is_none());
+        }
+        assert!(index.entities("unrelated country", 5).unwrap().is_empty());
+        assert!(index.entities("Japan", 0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn entities_keep_exact_stop_word_names() {
+        let who = Page::from_article(
+            "en",
+            Article {
+                title: "The Who".into(),
+                item: Some("Q93332".into()),
+                ..Default::default()
+            },
+        );
+        let (_dir, index) = searcher(&[who]);
+        let hits = index.entities("The Who", 5).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].page.item.as_deref(), Some("Q93332"));
     }
 
     fn titles(hits: &[PageHit]) -> Vec<&str> {

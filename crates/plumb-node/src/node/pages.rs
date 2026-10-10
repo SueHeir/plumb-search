@@ -866,6 +866,32 @@ pub(super) fn definition(inner: &Inner, name: &str) -> Option<plumb_index::pages
     }
 }
 
+/// Entity lookup never passes through site or learned placement.
+pub(super) fn entities(
+    inner: &Inner,
+    query: &str,
+    limit: usize,
+    options: &SearchOptions,
+) -> Result<Vec<PageHit>> {
+    let Some(searcher) = inner
+        .pages
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .as_ref()
+        .map(|(_, s)| s.clone())
+    else {
+        return Ok(Vec::new());
+    };
+    let ops = Operators::parse(query);
+    let words = if ops.any() { ops.words.as_str() } else { query };
+    Ok(searcher
+        .entities(words, KIND_PAGES)?
+        .into_iter()
+        .filter(|hit| options_allow(options, &hit.page) && operators_allow(&ops, &hit.page))
+        .take(limit.min(KIND_PAGES))
+        .collect())
+}
+
 /// The best `limit` pages for `query` that `keep` keeps, best first; see
 /// [`crate::web::SearchBackend::pages_of`]. Of the first [`KIND_PAGES`]
 /// found, as a `site:` search looks at more pages than others, with the

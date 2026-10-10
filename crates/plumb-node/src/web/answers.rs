@@ -546,6 +546,127 @@ pub(crate) fn fact_pages(pages: &[PlacedPage]) -> impl Iterator<Item = &PlacedPa
         })
 }
 
+/// Resolving an entity does not inspect whether it has the requested
+/// fact. A missing fact must never select a namesake instead.
+pub(crate) enum EntityResolution<'a> {
+    Resolved(&'a Page),
+    Ambiguous(Vec<&'a Page>),
+    Unresolved,
+}
+
+pub(crate) fn resolve_entity<'a>(
+    subject: &str,
+    candidates: &'a [plumb_index::pages::PageHit],
+    kinds: Option<&[plumb_core::facts::FactKind]>,
+) -> EntityResolution<'a> {
+    use plumb_core::facts::FactKind;
+    let key = |text: &str| plumb_core::collapse_whitespace(text).to_lowercase();
+    let subject = key(subject);
+    let mut seen = std::collections::HashSet::new();
+    let mut candidates: Vec<_> = candidates
+        .iter()
+        .filter(|hit| {
+            is_about_one_thing(&hit.page)
+                && !is_disambiguation(&hit.page.title, hit.page.description.as_deref())
+                && hit.page.item.as_deref().is_some_and(|id| {
+                    id.starts_with('Q')
+                        && id.len() > 1
+                        && id[1..].bytes().all(|b| b.is_ascii_digit())
+                })
+                && seen.insert(hit.page.item.as_deref())
+        })
+        .collect();
+    // CEO/headquarters requests supply a type, independently of imported
+    // property availability. This preserves Apple the company/fruit.
+    let company = kinds.is_some_and(|kinds| {
+        kinds.iter().any(|kind| {
+            matches!(kind, FactKind::Ceo | FactKind::Headquarters)
+                || matches!(kind, FactKind::Founder | FactKind::Founded)
+                    && candidates.iter().any(|hit| {
+                        key(&hit.page.title) == subject
+                            && key(hit.page.description.as_deref().unwrap_or(""))
+                                .split_whitespace()
+                                .any(|word| word == "fruit")
+                    })
+        })
+    });
+    if company {
+        let organizations: Vec<_> = candidates
+            .iter()
+            .copied()
+            .filter(|hit| {
+                let description = key(hit.page.description.as_deref().unwrap_or(""));
+                let words: Vec<_> = description.split(|c: char| !c.is_alphabetic()).collect();
+                description.contains("record label")
+                    || [
+                        "company",
+                        "corporation",
+                        "organization",
+                        "organisation",
+                        "business",
+                        "bank",
+                        "university",
+                        "nonprofit",
+                    ]
+                    .iter()
+                    .any(|word| words.contains(word))
+            })
+            .collect();
+        if !organizations.is_empty() {
+            candidates = organizations;
+        }
+    }
+    if candidates.is_empty() {
+        return EntityResolution::Unresolved;
+    }
+    let exact: Vec<_> = candidates
+        .iter()
+        .copied()
+        .filter(|hit| key(&hit.page.title) == subject)
+        .collect();
+    if exact.len() == 1 {
+        return EntityResolution::Resolved(&exact[0].page);
+    }
+    let legal_name = |title: &str| {
+        let title = key(title);
+        for suffix in [
+            ", inc.",
+            " inc.",
+            ", inc",
+            " inc",
+            " corporation",
+            " corp.",
+            " ltd.",
+            " limited",
+        ] {
+            if let Some(bare) = title.strip_suffix(suffix) {
+                return bare.to_string();
+            }
+        }
+        title
+    };
+    let named: Vec<_> = candidates
+        .iter()
+        .copied()
+        .filter(|hit| legal_name(&hit.page.title) == subject)
+        .collect();
+    if named.len() == 1 {
+        return EntityResolution::Resolved(&named[0].page);
+    }
+
+    let named: Vec<_> = candidates.iter().copied().filter(|hit| hit.named).collect();
+    if !named.is_empty() {
+        candidates = named;
+    } else {
+        candidates.retain(|hit| hit.whole || company);
+    }
+    match candidates.as_slice() {
+        [] => EntityResolution::Unresolved,
+        [hit] => EntityResolution::Resolved(&hit.page),
+        _ => EntityResolution::Ambiguous(candidates.iter().map(|hit| &hit.page).collect()),
+    }
+}
+
 /// The fact `asked` asks for, when the first page named by its subject
 /// (in `pages`, found for the subject's words) that has one of its kinds
 /// has it: "Canberra" for "capital of australia". Failing that, the
@@ -557,54 +678,60 @@ pub(crate) fn fact_answer(
     pages: &[PlacedPage],
     now: u64,
 ) -> Option<plumb_answer::Answer> {
+    fact_pages(pages).find_map(|placed| fact_answer_from_page(asked, &placed.hit.page, now))
+}
+
+/// Renders facts only after the caller has resolved an entity.
+pub(crate) fn fact_answer_from_page(
+    asked: &plumb_core::facts::FactQuestion,
+    page: &Page,
+    now: u64,
+) -> Option<plumb_answer::Answer> {
     use plumb_core::facts::FactKind;
-    fact_pages(pages).find_map(|placed| {
-        let page = &placed.hit.page;
-        let kind = asked
-            .kinds
+    let kind = asked
+        .kinds
+        .iter()
+        .copied()
+        .find(|kind| page.facts.iter().any(|fact| fact.kind == *kind))?;
+    let values: Vec<&str> = page
+        .facts
+        .iter()
+        .filter(|fact| fact.kind == kind)
+        .map(|fact| fact.value.as_str())
+        .collect();
+    let date_of = |kind: FactKind| {
+        page.facts
             .iter()
-            .copied()
-            .find(|kind| page.facts.iter().any(|fact| fact.kind == *kind))?;
-        let values: Vec<&str> = page
-            .facts
-            .iter()
-            .filter(|fact| fact.kind == kind)
-            .map(|fact| fact.value.as_str())
-            .collect();
-        let date_of = |kind: FactKind| {
-            page.facts
-                .iter()
-                .find(|fact| fact.kind == kind)
-                .and_then(|fact| plumb_core::facts::Date::parse(&fact.value))
-        };
-        let (question, answer, note) = if asked.age && kind == FactKind::Born {
-            let born = date_of(FactKind::Born)?;
-            match date_of(FactKind::Died) {
-                Some(died) => (
-                    format!("Age of {}", page.title),
-                    format!("Died at {}", born.years_until(&died)?),
-                    Some(format!("{} to {}", born.display(), died.display())),
-                ),
-                None => (
-                    format!("Age of {}", page.title),
-                    format!("{} years old", born.years_until(&date_from_unix(now))?),
-                    Some(format!("Born {}", born.display())),
-                ),
-            }
-        } else {
-            let (answer, note) = fact_text(kind, &values)?;
-            (kind.question(&page.title), answer, note)
-        };
-        let from = "from Wikidata";
-        Some(plumb_answer::Answer {
-            kind: plumb_answer::Kind::Fact,
-            question,
-            answer,
-            note: Some(match note {
-                Some(note) => format!("{note}, {from}"),
-                None => "From Wikidata".to_string(),
-            }),
-        })
+            .find(|fact| fact.kind == kind)
+            .and_then(|fact| plumb_core::facts::Date::parse(&fact.value))
+    };
+    let (question, answer, note) = if asked.age && kind == FactKind::Born {
+        let born = date_of(FactKind::Born)?;
+        match date_of(FactKind::Died) {
+            Some(died) => (
+                format!("Age of {}", page.title),
+                format!("Died at {}", born.years_until(&died)?),
+                Some(format!("{} to {}", born.display(), died.display())),
+            ),
+            None => (
+                format!("Age of {}", page.title),
+                format!("{} years old", born.years_until(&date_from_unix(now))?),
+                Some(format!("Born {}", born.display())),
+            ),
+        }
+    } else {
+        let (answer, note) = fact_text(kind, &values)?;
+        (kind.question(&page.title), answer, note)
+    };
+    let from = "from Wikidata";
+    Some(plumb_answer::Answer {
+        kind: plumb_answer::Kind::Fact,
+        question,
+        answer,
+        note: Some(match note {
+            Some(note) => format!("{note}, {from}"),
+            None => "From Wikidata".to_string(),
+        }),
     })
 }
 

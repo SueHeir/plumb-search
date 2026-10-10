@@ -101,6 +101,19 @@ pub const MAX_VALUES: usize = 3;
 pub const FACT_PREFIX: &str = "f-";
 
 impl FactKind {
+    /// Unit of the compact imported value; quantities use normalized SI.
+    pub fn unit(self) -> Option<&'static str> {
+        match self {
+            Self::Population => Some("people"),
+            Self::Elevation | Self::Height | Self::Radius => Some("m"),
+            Self::Area => Some("m2"),
+            Self::OrbitalPeriod => Some("s"),
+            Self::Coordinates => Some("degrees"),
+            Self::AtomicNumber => Some("1"),
+            _ => None,
+        }
+    }
+
     /// The kind's key on a line of profiles, after [`FACT_PREFIX`].
     pub fn key(self) -> &'static str {
         match self {
@@ -279,6 +292,14 @@ pub struct Fact {
     pub kind: FactKind,
     /// The value, in the kind's form (see the module docs).
     pub value: String,
+}
+
+impl Fact {
+    /// The source observation year, never a retrieval timestamp.
+    pub fn observation_year(&self) -> Option<i32> {
+        (self.kind == FactKind::Population).then_some(())?;
+        self.value.split_once(';')?.1.parse().ok()
+    }
 }
 
 /// `text` made to fit a value on a line of profiles: no tabs, line
@@ -723,6 +744,25 @@ mod tests {
         assert_eq!(parsed, vec![fact(FactKind::Elevation, "8848.86")]);
         // A name with a | in it can't break the line.
         assert_eq!(write_facts(&[fact(FactKind::Ceo, "A|B")]), "f-ceo=A B");
+    }
+
+    #[test]
+    fn population_observation_is_not_a_retrieval_date() {
+        assert_eq!(FactKind::Population.unit(), Some("people"));
+        assert_eq!(FactKind::Elevation.unit(), Some("m"));
+        assert_eq!(FactKind::Capital.unit(), None);
+        assert_eq!(
+            fact(FactKind::Population, "123802000;2024").observation_year(),
+            Some(2024)
+        );
+        assert_eq!(
+            fact(FactKind::Population, "123802000").observation_year(),
+            None
+        );
+        assert_eq!(
+            fact(FactKind::Elevation, "123;2024").observation_year(),
+            None
+        );
     }
 
     #[test]
