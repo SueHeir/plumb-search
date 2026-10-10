@@ -50,6 +50,34 @@ fn server(hits: Vec<Hit>) -> Mcp {
     Mcp::new(Arc::new(Fixed(hits)), None)
 }
 
+#[test]
+fn task_navigation_mcp_exposes_selected_url_and_navigation_provenance() {
+    let (query, site, selected_url) = crate::assembly::task_navigation_fixture();
+    let mcp = server(vec![site.clone()]);
+    let output = mcp
+        .search(&query, Some(10), &SearchOptions::default())
+        .unwrap();
+    assert_eq!(output["results"][0]["url"], selected_url);
+    assert_eq!(output["ordered_results"][0]["url"], selected_url);
+    assert_eq!(output["results"][0]["title"], site.title.unwrap());
+    assert_eq!(output["results"][0]["navigation"]["homepage_url"], site.url);
+    assert_eq!(
+        output["results"][0]["navigation"]["source"],
+        "site_navigation"
+    );
+    assert_eq!(output["results"][0]["navigation"]["label"], "Dine & Shop");
+    assert!(output["pages"].as_array().unwrap().is_empty());
+    let rendered = text::render("search", &output);
+    assert!(rendered.contains("Site navigation: Dine & Shop."));
+    assert!(rendered.contains(&format!("Homepage: {}", site.url)));
+    assert!(rendered.contains("Site description: "));
+    let navigation = mcp
+        .search_sites(&query, Some(10), &SearchOptions::default())
+        .unwrap();
+    assert_eq!(navigation["results"][0]["url"], site.url);
+    assert!(navigation["results"][0].get("navigation").is_none());
+}
+
 fn call(mcp: &Mcp, tool: &str, arguments: Value) -> Value {
     mcp.handle(&json!({
         "jsonrpc": "2.0",
