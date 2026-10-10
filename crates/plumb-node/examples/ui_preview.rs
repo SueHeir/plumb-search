@@ -55,6 +55,20 @@ struct PreviewNode {
     features: Mutex<FeatureSettings>,
 }
 
+impl PreviewNode {
+    fn save_state(&self) -> Result<()> {
+        std::fs::write(
+            self.dir.path().join("settings.json"),
+            serde_json::to_vec(&*self.settings.lock().unwrap())?,
+        )?;
+        std::fs::write(
+            self.dir.path().join("features.json"),
+            serde_json::to_vec(&*self.features.lock().unwrap())?,
+        )?;
+        Ok(())
+    }
+}
+
 impl StatusSource for PreviewNode {
     fn status(&self) -> Status {
         let settings = self.settings.lock().unwrap();
@@ -104,6 +118,31 @@ impl StatusSource for PreviewNode {
 
     fn change_features(&self, features: FeatureSettings) -> Result<()> {
         *self.features.lock().unwrap() = features;
+        Ok(())
+    }
+
+    fn bucket_table(&self) -> Option<String> {
+        Some("ui-preview-empty".into())
+    }
+
+    fn bucket(&self, table: &str, _: u32) -> Option<Result<Vec<String>>> {
+        (table == "ui-preview-empty").then(|| Ok(Vec::new()))
+    }
+
+    fn make_backup(&self) -> Result<plumb_node::node::backup::BackupInfo> {
+        self.save_state()?;
+        plumb_node::node::backup::save(self.dir.path(), None)
+    }
+
+    fn restore_backup(&self, backup: &plumb_node::node::backup::Backup) -> Result<()> {
+        // Only disposable preview settings are present here; no real keys.
+        self.save_state()?;
+        plumb_node::node::backup::save(self.dir.path(), Some("before-restore"))?;
+        backup.restore(self.dir.path())?;
+        *self.settings.lock().unwrap() =
+            serde_json::from_slice(&std::fs::read(self.dir.path().join("settings.json"))?)?;
+        *self.features.lock().unwrap() =
+            serde_json::from_slice(&std::fs::read(self.dir.path().join("features.json"))?)?;
         Ok(())
     }
 
