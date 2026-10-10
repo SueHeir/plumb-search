@@ -121,6 +121,14 @@ impl StatusSource for PreviewNode {
         Ok(())
     }
 
+    fn bucket_table(&self) -> Option<String> {
+        Some("ui-preview-empty".into())
+    }
+
+    fn bucket(&self, table: &str, _: u32) -> Option<Result<Vec<String>>> {
+        (table == "ui-preview-empty").then(|| Ok(Vec::new()))
+    }
+
     fn make_backup(&self) -> Result<plumb_node::node::backup::BackupInfo> {
         self.save_state()?;
         plumb_node::node::backup::save(self.dir.path(), None)
