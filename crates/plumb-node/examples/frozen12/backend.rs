@@ -5,6 +5,19 @@ use plumb_index::{Hit, RankConfig, SearchOptions, SearchResults};
 use plumb_node::web::{IndexBackend, SearchBackend};
 const TYPED_CANDIDATES: usize = 200;
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub(super) struct PrimaryRequest {
+    query: String,
+    limit: usize,
+    options: SearchOptions,
+}
+
+impl PrimaryRequest {
+    fn matches(&self, query: &str, limit: usize, options: &SearchOptions) -> bool {
+        self.query == query && self.limit == limit && self.options == *options
+    }
+}
+
 /// Uses the same page retrieval/placement helper as the production node.
 pub(super) struct FrozenBackend {
     pub(super) sites: IndexBackend,
@@ -12,10 +25,22 @@ pub(super) struct FrozenBackend {
     pub(super) rank: RankConfig,
     pub(super) places: Option<plumb_index::places::PlaceSearcher>,
     pub(super) raw: std::sync::Mutex<Option<SearchResults>>,
+    pub(super) primary: std::sync::Mutex<Option<PrimaryRequest>>,
     pub(super) errors: std::sync::Mutex<Vec<String>>,
+    #[cfg(test)]
+    pub(super) injected_auxiliary_error: std::sync::Mutex<Option<String>>,
 }
 
 impl FrozenBackend {
+    pub(super) fn begin_primary(&self, query: &str, limit: usize, options: SearchOptions) {
+        *self.primary.lock().unwrap() = Some(PrimaryRequest {
+            query: query.into(),
+            limit,
+            options,
+        });
+        *self.raw.lock().unwrap() = None;
+        self.errors.lock().unwrap().clear();
+    }
     fn add_pages(
         &self,
         query: &str,
@@ -34,6 +59,75 @@ impl FrozenBackend {
         ensure!(errors.is_empty(), "page retrieval: {}", errors.join("; "));
         Ok(())
     }
+    fn retrieve(
+        &self,
+        query: &str,
+        limit: usize,
+        options: &SearchOptions,
+        rank: Option<&RankConfig>,
+    ) -> Result<SearchResults> {
+        let mut results = self
+            .sites
+            .search_full_checked(query, limit, options, rank)?;
+        if let Some(spelling) = results.spelling.as_ref().filter(|s| s.applied) {
+            if self
+                .pages
+                .check_spelling(query, spelling.clone())?
+                .is_none_or(|checked| checked.query != spelling.query)
+            {
+                results = self.sites.search_full_checked(
+                    query,
+                    limit,
+                    &SearchOptions {
+                        exact: true,
+                        ..options.clone()
+                    },
+                    rank,
+                )?;
+            }
+        }
+        self.add_pages(query, options, rank.unwrap_or(&self.rank), &mut results)?;
+        Ok(results)
+    }
+
+    fn observed_retrieval(
+        &self,
+        query: &str,
+        limit: usize,
+        options: &SearchOptions,
+        rank: Option<&RankConfig>,
+    ) -> Result<SearchResults> {
+        let primary = self
+            .primary
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|request| request.matches(query, limit, options));
+        let retrieve = || self.retrieve(query, limit, options, rank);
+        #[cfg(test)]
+        let result = if !primary {
+            match self.injected_auxiliary_error.lock().unwrap().take() {
+                Some(error) => Err(anyhow::anyhow!(error)),
+                None => retrieve(),
+            }
+        } else {
+            retrieve()
+        };
+        #[cfg(not(test))]
+        let result = retrieve();
+        match &result {
+            Ok(results) => {
+                if primary {
+                    let mut raw = self.raw.lock().unwrap();
+                    if raw.is_none() {
+                        *raw = Some(results.clone());
+                    }
+                }
+            }
+            Err(error) => self.errors.lock().unwrap().push(format!("{error:#}")),
+        }
+        result
+    }
 }
 
 impl SearchBackend for FrozenBackend {
@@ -49,29 +143,7 @@ impl SearchBackend for FrozenBackend {
         limit: usize,
         options: &SearchOptions,
     ) -> Result<SearchResults> {
-        let mut results = self
-            .sites
-            .search_full_checked(query, limit, options, None)?;
-        if let Some(spelling) = results.spelling.as_ref().filter(|s| s.applied) {
-            if self
-                .pages
-                .check_spelling(query, spelling.clone())?
-                .is_none_or(|checked| checked.query != spelling.query)
-            {
-                results = self.sites.search_full_checked(
-                    query,
-                    limit,
-                    &SearchOptions {
-                        exact: true,
-                        ..options.clone()
-                    },
-                    None,
-                )?;
-            }
-        }
-        self.add_pages(query, options, &self.rank, &mut results)?;
-        *self.raw.lock().unwrap() = Some(results.clone());
-        Ok(results)
+        self.observed_retrieval(query, limit, options, None)
     }
 
     fn search_ranked(
@@ -81,11 +153,7 @@ impl SearchBackend for FrozenBackend {
         options: &SearchOptions,
         rank: &RankConfig,
     ) -> Result<SearchResults> {
-        let mut results = self
-            .sites
-            .search_full_checked(query, limit, options, Some(rank))?;
-        self.add_pages(query, options, rank, &mut results)?;
-        Ok(results)
+        self.observed_retrieval(query, limit, options, Some(rank))
     }
 
     fn num_docs(&self) -> u64 {

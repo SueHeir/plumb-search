@@ -15,7 +15,7 @@ use axum::body::{to_bytes, Body};
 use axum::http::Request;
 use clap::Parser;
 use plumb_index::retained::{FileBinding, GenerationBinding, RetainedGeneration};
-use plumb_index::{RankConfig, Searcher};
+use plumb_index::{RankConfig, SearchOptions, Searcher};
 use plumb_node::cli::{MeaningArgs, QueryInstruction};
 use plumb_node::meaning::{MeaningIndex, SharedMeaning};
 use plumb_node::web::{self, IndexBackend};
@@ -191,6 +191,16 @@ fn request_uri(query: &str) -> String {
     format!("/api/search?{q}&{OPTIONS}")
 }
 
+fn frozen_options() -> SearchOptions {
+    SearchOptions {
+        country: Some("US".into()),
+        language: Some("en".into()),
+        safe: plumb_core::SafeSearch::Off,
+        recent: plumb_core::RecentNews::Off,
+        ..Default::default()
+    }
+}
+
 async fn observe(app: axum::Router, query: &str) -> Result<Value> {
     ensure!(
         !plumb_answer::may_need_rates(query)
@@ -351,7 +361,10 @@ fn run(args: Args) -> Result<()> {
             rank: manifest.rank,
             places: place_searcher,
             raw: Default::default(),
+            primary: Default::default(),
             errors: Default::default(),
+            #[cfg(test)]
+            injected_auxiliary_error: Default::default(),
         });
         let app = web::router_with(
             backend.clone(),
@@ -378,7 +391,7 @@ fn run(args: Args) -> Result<()> {
                 if let Some(meaning) = &manifest.meaning {
                     meaning.verify()?;
                 }
-                *backend.raw.lock().unwrap() = None;
+                backend.begin_primary(query, 10, frozen_options());
                 let before = Instant::now();
                 let body =
                     tokio::time::timeout(Duration::from_secs(30), observe(app.clone(), query))
@@ -401,6 +414,7 @@ fn run(args: Args) -> Result<()> {
                     .context("missing raw retrieval observation")?;
                 observations.push(json!({ "id": format!("PG{:02}", i + 1), "query": query,
                     "request": request_uri(query), "elapsed_ms": before.elapsed().as_millis(),
+                    "raw_request": backend.primary.lock().unwrap().as_ref(),
                     "raw_retrieval": raw, "body": body }));
             }
             Ok::<(), anyhow::Error>(())

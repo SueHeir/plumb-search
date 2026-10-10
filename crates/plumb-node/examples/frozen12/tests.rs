@@ -71,7 +71,9 @@ fn synthetic_backend(root: &Path) -> Arc<backend::FrozenBackend> {
         rank: RankConfig::default(),
         places: None,
         raw: Default::default(),
+        primary: Default::default(),
         errors: Default::default(),
+        injected_auxiliary_error: Default::default(),
     })
 }
 
@@ -79,12 +81,8 @@ fn synthetic_backend(root: &Path) -> Arc<backend::FrozenBackend> {
 async fn frozen12_router_uses_real_retrieval_and_keeps_unknown_observations() {
     let temp = tempfile::tempdir().unwrap();
     let backend = synthetic_backend(temp.path());
-    let options = SearchOptions {
-        country: Some("US".into()),
-        language: Some("en".into()),
-        safe: plumb_index::SafeSearch::Off,
-        ..Default::default()
-    };
+    let options = frozen_options();
+    backend.begin_primary(QUERIES[0], 10, options.clone());
     let mut expected = backend.sites.search_full(QUERIES[0], 10, &options).unwrap();
     assert!(plumb_node::page_retrieval::add_pages(
         &backend.pages,
@@ -148,6 +146,127 @@ fn frozen12_failure_clears_all_observations_and_retains_unknown_status() {
         &mut report,
         &["generation changed after final query".into()],
     );
+    assert_eq!(report["status"], "incomplete");
+    assert_eq!(report["observations"], json!([]));
+    assert_eq!(report["judgments"], "unknown");
+}
+
+struct SecondaryRouterBackend {
+    inner: Arc<backend::FrozenBackend>,
+    name_lookups: std::sync::atomic::AtomicUsize,
+}
+
+impl SearchBackend for SecondaryRouterBackend {
+    fn search(&self, query: &str, limit: usize) -> Result<Vec<Hit>> {
+        self.name_lookups
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.inner.search(query, limit)
+    }
+    fn search_full(
+        &self,
+        query: &str,
+        limit: usize,
+        options: &SearchOptions,
+    ) -> Result<SearchResults> {
+        self.inner.search_full(query, limit, options)
+    }
+    fn num_docs(&self) -> u64 {
+        self.inner.num_docs()
+    }
+    fn site(&self, domain: &str) -> Option<Hit> {
+        self.inner.site(domain)
+    }
+    fn places(
+        &self,
+        _: &str,
+        _: Option<&str>,
+        _: Option<&str>,
+    ) -> Option<plumb_index::places::PlaceResults> {
+        // A tiny synthetic native place without a website causes the actual
+        // production router to call backend.search(place.name, 5).
+        Some(serde_json::from_value(json!({ "what": "restaurants", "radius_km": 2.0,
+            "center": { "rank": 10, "name": "Denver", "kind": "place=city",
+                "lat": 39.75, "lon": -104.99, "osm": "r1" },
+            "hits": [{ "km": 0.1, "place": { "rank": 1,
+                "name": "Rust programming language", "kind": "amenity=restaurant",
+                "lat": 39.75, "lon": -104.99, "town": "Denver", "country": "US", "osm": "n1" } }]
+        })).unwrap())
+    }
+}
+
+#[tokio::test]
+async fn frozen12_router_secondary_place_lookup_preserves_bound_primary_raw() {
+    let temp = tempfile::tempdir().unwrap();
+    let inner = synthetic_backend(temp.path());
+    let query = "restaurants in Denver";
+    let options = frozen_options();
+    inner.begin_primary(query, 10, options.clone());
+    let mut expected = inner.sites.search_full(query, 10, &options).unwrap();
+    assert!(plumb_node::page_retrieval::add_pages(
+        &inner.pages,
+        Some(&inner.sites),
+        &inner.rank,
+        query,
+        &options,
+        &mut expected
+    )
+    .is_empty());
+    assert!(expected.hits.is_empty());
+    inner.search_full(query, 5, &options).unwrap();
+    inner.search_full(query, 10, &SearchOptions::default()).unwrap();
+    assert!(inner.raw.lock().unwrap().is_none());
+    assert!(!inner
+        .sites
+        .search_full("Rust programming language", 5, &SearchOptions::default())
+        .unwrap()
+        .hits
+        .is_empty());
+    let backend = Arc::new(SecondaryRouterBackend {
+        inner: inner.clone(),
+        name_lookups: Default::default(),
+    });
+    observe(web::router(backend.clone()), query).await.unwrap();
+    assert!(
+        backend
+            .name_lookups
+            .load(std::sync::atomic::Ordering::Relaxed)
+            > 0
+    );
+    assert_eq!(inner.raw.lock().unwrap().as_ref().unwrap(), &expected);
+    let primary = serde_json::to_value(inner.primary.lock().unwrap().as_ref()).unwrap();
+    assert_eq!(primary["query"], query);
+    assert_eq!(primary["limit"], 10);
+    assert_eq!(primary["options"], serde_json::to_value(options).unwrap());
+    assert!(inner.errors.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn frozen12_router_swallowed_secondary_failure_marks_report_incomplete() {
+    let temp = tempfile::tempdir().unwrap();
+    let inner = synthetic_backend(temp.path());
+    let query = "restaurants in Denver";
+    inner.begin_primary(query, 10, frozen_options());
+    *inner.injected_auxiliary_error.lock().unwrap() =
+        Some("synthetic secondary native lookup failure".into());
+    let backend = Arc::new(SecondaryRouterBackend {
+        inner: inner.clone(),
+        name_lookups: Default::default(),
+    });
+    // The public router swallows the auxiliary Err and still returns 200.
+    let body = observe(web::router(backend.clone()), query).await.unwrap();
+    assert!(
+        backend
+            .name_lookups
+            .load(std::sync::atomic::Ordering::Relaxed)
+            > 0
+    );
+    let errors = inner.errors.lock().unwrap().clone();
+    assert!(errors
+        .iter()
+        .any(|error| error.contains("synthetic secondary native lookup failure")));
+    let mut report =
+        json!({ "status": "complete", "observations": [{ "body": body }], "judgments": "unknown" });
+    finish_report(&mut report, &errors);
     assert_eq!(report["status"], "incomplete");
     assert_eq!(report["observations"], json!([]));
     assert_eq!(report["judgments"], "unknown");

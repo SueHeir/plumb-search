@@ -114,11 +114,16 @@ retained before the router's display row budget, so stronger retrieved pages are
 not inferred absent from a limited response.
 Enabled-model embedding failures and place/auxiliary lookup failures are also
 recorded as incomplete; production's default fallback behavior stays unchanged.
+The runner explicitly binds the primary query, options and limit before entering
+the router. Secondary place-name/profile searches cannot replace its raw snapshot;
+every search entry point records errors before the router can swallow them.
+Synthetic router fixtures exercise both an actual secondary place-name search
+and an injected failure in that search.
 
 ## Observations and scoring boundary
 
 A complete report contains twelve ordered `PG01`–`PG12` observations with their
-request, raw retrieval results, unmodified production full-response body and
+request, bound raw-request options/limit, raw retrieval results, unmodified production full-response body and
 latency. Organic main rows and navigation provenance come from `assembled.rows`;
 places, answers and other native blocks remain separate in the body. The report
 labels judgments unknown and supplies no grades, URL-result maps or metric code.
