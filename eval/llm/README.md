@@ -3,8 +3,8 @@
 Does a small local model answer more questions right when it can look things
 up in Plumb, and how much context does that cost?
 
-1. `python3 eval/llm/prepare.py --out-dir eval/llm/data` downloads SimpleQA
-   and HotpotQA and keeps 500 questions of each.
+1. `python3 eval/llm/prepare.py --out-dir eval/llm/data` downloads SimpleQA,
+   HotpotQA and Bamboogle (all 125) and keeps up to 500 questions of each.
 2. Start a model with an OpenAI-compatible server that can call tools, for
    example `llama-server -m Qwen3-4B-Q4_K_M.gguf --jinja -c 32768 --port 8090`.
 3. Ask each set three ways:
