@@ -49,6 +49,7 @@ def main():
     ap.add_argument("--pages-top", type=int, default=200000, help="bounded records per input set; same for baseline/candidate")
     ap.add_argument("--queries", type=Path, action="append", default=[])
     ap.add_argument("--acceptance", type=Path, action="append", default=[])
+    ap.add_argument("--pages-cache", type=Path, help="derived scratch page index cache")
     ap.add_argument("--rank", default="{}")
     ap.add_argument("--model", type=Path)
     ap.add_argument("--vectors", type=Path)
@@ -99,6 +100,8 @@ def main():
         for flag, paths in (("--pages", args.pages), ("--queries", args.queries), ("--acceptance", args.acceptance)):
             for path in paths:
                 core.extend([flag, path.resolve()])
+        if args.pages_cache:
+            core.extend(["--pages-cache", args.pages_cache.resolve()])
         if args.model:
             core.extend(["--model", args.model.resolve(), "--vectors", args.vectors.resolve(),
                          "--query-instruction", args.query_instruction])
